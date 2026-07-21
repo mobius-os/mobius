@@ -234,6 +234,34 @@ test('messageCoversAssistantStream prefers a richer DB partial over a stale one-
   assert.equal(messageCoversAssistantStream(msg, items), true)
 })
 
+test('thinking identity still compares deferred revision freshness', () => {
+  const message = {
+    role: 'assistant',
+    blocks: [{
+      type: 'thinking', thinking_id: 'think-1', thinking_deferred: true,
+      thinking_revision: 20,
+    }],
+  }
+  const staleItems = [{
+    type: 'thinking', thinking_id: 'think-1', thinking_deferred: true,
+    thinking_revision: 10, content: '',
+  }]
+  assert.equal(assistantStreamCoversMessage(message, staleItems), false)
+  assert.equal(messageCoversAssistantStream(message, staleItems), true)
+})
+
+test('thinking identity still compares inline prefix freshness', () => {
+  const message = {
+    role: 'assistant',
+    blocks: [{ type: 'thinking', thinking_id: 'think-2', content: 'richer trace' }],
+  }
+  const staleItems = [{
+    type: 'thinking', thinking_id: 'think-2', content: 'r',
+  }]
+  assert.equal(assistantStreamCoversMessage(message, staleItems), false)
+  assert.equal(messageCoversAssistantStream(message, staleItems), true)
+})
+
 test('chooseActiveAssistantSurface hides DB partial when live replay is same turn but block metadata drifted', () => {
   const msg = {
     role: 'assistant',

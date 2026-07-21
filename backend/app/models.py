@@ -578,3 +578,25 @@ class ToolOutput(Base):
   tool_use_id = Column(String(128), primary_key=True)
   output = Column(Text, nullable=False, default="")
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class ThinkingTrace(Base):
+  """Full reasoning text stored outside the bounded chat transcript.
+
+  Thinking blocks at or below the inline threshold remain self-contained.
+  Larger runs keep only identity, revision, duration, and completion metadata
+  in ``Chat.messages`` / ``live_assistant`` and are fetched when that exact
+  nested thought is opened.  A revision is the server-side Python character
+  count; it lets a live client ask for at least the version it has observed.
+  """
+
+  __tablename__ = "thinking_traces"
+
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), primary_key=True, index=True
+  )
+  thinking_id = Column(String(128), primary_key=True)
+  content = Column(Text, nullable=False, default="")
+  revision = Column(Integer, nullable=False, default=0)
+  complete = Column(Boolean, nullable=False, default=False)
+  created_at = Column(DateTime, default=lambda: datetime.now(UTC))

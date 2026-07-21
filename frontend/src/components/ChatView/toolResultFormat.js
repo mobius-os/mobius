@@ -193,6 +193,59 @@ export function formatToolResult(output, { terminal = false } = {}) {
   }
 }
 
+function terminalCopyText(value) {
+  const stdout = pickString(value, 'stdout')
+  const stderr = pickString(value, 'stderr')
+  const rawExit = value.exit_code ?? value.exitCode
+  return [
+    stdout,
+    stderr,
+    typeof rawExit === 'number' && rawExit !== 0 ? `exit ${rawExit}` : '',
+  ].filter(Boolean).join('\n')
+}
+
+/** Plain text matching the readable Result/Output presentation, without the
+ * render-only 20k field cap. Called only on an explicit copy action so a large
+ * structured result is not parsed or duplicated during ordinary rendering. */
+export function toolResultCopyText(output, { terminal = false } = {}) {
+  if (output == null) return ''
+  if (typeof output !== 'string') return displayValue(output)
+  const failure = output.match(EXIT_PREFIX)
+  if (failure && Number(failure[1]) !== 0) {
+    return [failure[2], `exit ${Number(failure[1])}`].filter(Boolean).join('\n')
+  }
+  const parsed = tryParse(output)
+  if (terminal) {
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const keys = Object.keys(parsed)
+      if (hasAny(parsed, TERMINAL_KEYS)
+          && keys.every(k => TERMINAL_KEYS.includes(k))) {
+        return terminalCopyText(parsed)
+      }
+    }
+    return output
+  }
+  let value = parsed === undefined ? output : parsed
+  for (let depth = 0; depth < 4; depth++) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) break
+    const keys = Object.keys(value)
+    if (hasAny(value, TERMINAL_KEYS)
+        && keys.every(k => TERMINAL_KEYS.includes(k))) {
+      return terminalCopyText(value)
+    }
+    if (keys.length !== 1 || !COMMON_KEYS.includes(keys[0])) break
+    const inner = value[keys[0]]
+    const reparsed = typeof inner === 'string' ? tryParse(inner) : inner
+    value = reparsed === undefined ? String(inner ?? '') : reparsed
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return Object.entries(value)
+      .map(([key, entry]) => `${key}: ${displayValue(entry)}`)
+      .join('\n')
+  }
+  return displayValue(value)
+}
+
 // Did this tool result report a failure? True only when the output parses to a
 // terminal envelope with a nonzero exit code. This is the ONLY failure signal a
 // tool block carries — the stream contract never sets a tool `status` beyond

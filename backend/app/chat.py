@@ -54,6 +54,7 @@ from app.chat_writer import (
   QuestionCommit,
   ResolvePark,
   RollbackAutoResume,
+  StashThinkingTrace,
   StashToolOutput,
   alloc_run_token,
   await_ack as _await_ack,
@@ -64,6 +65,7 @@ from app.chat_writer import (
 from app.config import get_settings
 from app.events import (
   TOOL_OUTPUT_INLINE_THRESHOLD,
+  THINKING_INLINE_THRESHOLD,
   blocks_have_renderable_content,
   build_assistant_message,
   capture_question_scrub,
@@ -282,6 +284,60 @@ class _ChatEventSink:
     # a fresh assistant message.
     self._steering = False
 
+  def _prepare_thinking_event(self, event: ChatEvent) -> None:
+    """Give a reasoning run stable identity before reducer + broadcast."""
+    if event.get("type") != "thinking":
+      return
+    last = self.assistant_blocks[-1] if self.assistant_blocks else None
+    if (
+      last
+      and last.get("type") == "thinking"
+      and not last.get("_thinking_closed")
+      and last.get("thinking_id")
+    ):
+      event["thinking_id"] = last["thinking_id"]
+    else:
+      event["thinking_id"] = event.get("thinking_id") or (
+        f"think-{uuid.uuid4().hex}"
+      )
+
+  def _deferred_snapshot(
+    self, blocks: list, *, complete_all: bool = False,
+  ) -> tuple[dict, list[StashThinkingTrace]]:
+    """Build a bounded transcript snapshot plus its full-text sidecars."""
+    snapshot = copy.deepcopy(build_assistant_message(blocks))
+    stashes: list[StashThinkingTrace] = []
+    for source, persisted in zip(
+      [b for b in blocks if b.get("type") != "text_boundary"],
+      snapshot.get("blocks") or [],
+    ):
+      if source.get("type") != "thinking":
+        continue
+      content = str(source.get("content") or "")
+      if len(content) <= THINKING_INLINE_THRESHOLD:
+        continue
+      thinking_id = source.get("thinking_id") or f"think-{uuid.uuid4().hex}"
+      source["thinking_id"] = thinking_id
+      revision = len(content)
+      complete = bool(complete_all or source.get("_thinking_closed"))
+      persisted.clear()
+      persisted.update({
+        "type": "thinking",
+        "thinking_id": thinking_id,
+        "thinking_deferred": True,
+        "thinking_revision": revision,
+        "thinking_complete": complete,
+        "duration_ms": source.get("duration_ms", 0),
+      })
+      stashes.append(StashThinkingTrace(
+        chat_id=self.chat_id,
+        thinking_id=thinking_id,
+        content=content,
+        revision=revision,
+        complete=complete,
+      ))
+    return snapshot, stashes
+
   def _submit_fire_and_forget(self, cmd) -> None:
     """Submit a fire-and-forget transcript write; log a failed ack.
 
@@ -385,11 +441,24 @@ class _ChatEventSink:
     # source feeding the persisted block, the live wire, and the catch-up log.
     if event_type == "tool_output":
       self._reduce_tool_output(event)
+    if event_type == "thinking":
+      self._prepare_thinking_event(event)
 
     # Accumulate the event into assistant_blocks and decide whether a
     # save is due (immediate for save-triggering types, throttled
     # otherwise).
     accumulated = process_event(event, self.assistant_blocks)
+    if event_type == "thinking" and self.assistant_blocks:
+      thought = self.assistant_blocks[-1]
+      content = str(thought.get("content") or "")
+      if len(content) > THINKING_INLINE_THRESHOLD:
+        # The reducer keeps the full run privately for persistence. The public
+        # event log/SSE gets only stable identity + version after the cutoff;
+        # this crossing event tells the client to discard its <=1KB prefix.
+        event["content"] = ""
+        event["thinking_deferred"] = True
+        event["thinking_revision"] = len(content)
+        event["duration_ms"] = thought.get("duration_ms", 0)
     # `not self._steering`: a snapshot submitted mid-split would replace the
     # still-trailing pre-steer assistant message (A1) with continuation text
     # before A1 is sealed and the steered user row is appended. The split's
@@ -429,17 +498,19 @@ class _ChatEventSink:
     # tiny next to a commit, so the copy is free.
     if needs_save:
       self._last_save = time.monotonic()
-      snapshot = copy.deepcopy(build_assistant_message(self.assistant_blocks))
+      snapshot, stashes = self._deferred_snapshot(self.assistant_blocks)
       if event_type == "error":
         self._submit_fire_and_forget(
           PersistError(
             chat_id=self.chat_id, run_token=self.run_token, snapshot=snapshot,
+            thinking_stashes=stashes,
           )
         )
       else:
         self._submit_fire_and_forget(
           PersistTranscript(
             chat_id=self.chat_id, run_token=self.run_token, snapshot=snapshot,
+            thinking_stashes=stashes,
           )
         )
     return True
@@ -488,10 +559,11 @@ class _ChatEventSink:
         return
     else:
       blocks = self.assistant_blocks
-    snapshot = build_assistant_message(blocks)
+    snapshot, stashes = self._deferred_snapshot(blocks, complete_all=True)
     ack = get_writer().submit(
       Finalize(
         chat_id=self.chat_id, run_token=self.run_token, snapshot=snapshot,
+        thinking_stashes=stashes,
       )
     )
     await _await_ack(ack)
@@ -560,11 +632,15 @@ class _ChatEventSink:
         and self.run_token
         and blocks_have_renderable_content(sealed_blocks)
       ):
+        snapshot, stashes = self._deferred_snapshot(
+          sealed_blocks, complete_all=True,
+        )
         ack = get_writer().submit(
           Finalize(
             chat_id=self.chat_id,
             run_token=self.run_token,
-            snapshot=build_assistant_message(sealed_blocks),
+            snapshot=snapshot,
+            thinking_stashes=stashes,
           )
         )
         try:
@@ -628,10 +704,11 @@ class _ChatEventSink:
     receipt = capture_question_scrub(event, self.assistant_blocks)
     process_event(event, self.assistant_blocks)
     commit_question_scrub(receipt, self.assistant_blocks)
-    snapshot = copy.deepcopy(build_assistant_message(self.assistant_blocks))
+    snapshot, stashes = self._deferred_snapshot(self.assistant_blocks)
     ack = get_writer().submit(
       QuestionCommit(
         chat_id=self.chat_id, run_token=self.run_token or "", snapshot=snapshot,
+        thinking_stashes=stashes,
       )
     )
     try:

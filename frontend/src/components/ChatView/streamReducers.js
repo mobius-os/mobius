@@ -225,11 +225,15 @@ export function appendThinkingChunk(
   at = Date.now(),
   ts = null,
   segmentId = null,
+  metadata = null,
 ) {
-  if (!chunk) return prev
+  const deferred = !!metadata?.thinking_deferred
+  if (!chunk && !deferred) return prev
   const last = prev[prev.length - 1]
   const eventTs = Number.isFinite(ts) ? ts : null
-  if (last && last.type === 'thinking') {
+  const thinkingId = metadata?.thinking_id || null
+  if (last && last.type === 'thinking'
+      && (!thinkingId || !last.thinking_id || thinkingId === last.thinking_id)) {
     const startedAt = Number.isFinite(last.startedAt) ? last.startedAt : at
     const firstTs = Number.isFinite(last.firstTs) ? last.firstTs : eventTs
     const updated = [...prev]
@@ -247,7 +251,14 @@ export function appendThinkingChunk(
       // Token deltas inside one provider segment concatenate verbatim. A new
       // summary/content index is a semantic paragraph, not another token.
       // Legacy events have no identity and keep the old raw-concat behavior.
-      content: last.content + (segmentChanged ? '\n\n' : '') + chunk,
+      content: deferred
+        ? ''
+        : (last.content || '') + (segmentChanged ? '\n\n' : '') + chunk,
+      ...(thinkingId ? { thinking_id: thinkingId } : {}),
+      ...(deferred ? {
+        thinking_deferred: true,
+        thinking_revision: metadata.thinking_revision,
+      } : {}),
       ...(segmentId != null ? { segmentId } : {}),
       duration_ms: Number.isFinite(firstTs) && Number.isFinite(eventTs)
         ? Math.max(0, eventTs - firstTs)
@@ -257,11 +268,16 @@ export function appendThinkingChunk(
   }
   return [...prev, {
     type: 'thinking',
-    content: chunk,
+    content: deferred ? '' : chunk,
     startedAt: at,
     firstTs: eventTs,
     lastAt: at,
     duration_ms: 0,
+    ...(thinkingId ? { thinking_id: thinkingId } : {}),
+    ...(deferred ? {
+      thinking_deferred: true,
+      thinking_revision: metadata.thinking_revision,
+    } : {}),
     ...(segmentId != null ? { segmentId } : {}),
   }]
 }

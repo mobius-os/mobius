@@ -223,6 +223,33 @@ def test_migrate_writes_backfill_extract_and_round_trips(db):
     assert len(blk["output"]) < len(full)
 
 
+def test_migrate_coalesces_and_extracts_large_legacy_thinking(db):
+    first = "α" * 700
+    second = "β" * 700
+    _make_chat(db, "thinking-old", [{
+        "role": "assistant", "ts": 8, "blocks": [
+            {"type": "thinking", "content": first, "duration_ms": 100},
+            {"type": "thinking", "content": second, "duration_ms": 250},
+        ],
+    }])
+    res = _migrate("thinking-old")
+    assert res["status"] == "migrated"
+    assert res["thinking_extracted"] == 1
+    block = _reread(db, "thinking-old").messages[0]["blocks"][0]
+    assert block == {
+        "type": "thinking",
+        "thinking_id": "legacy-thinking-8-0",
+        "thinking_deferred": True,
+        "thinking_revision": 1400,
+        "thinking_complete": True,
+        "duration_ms": 350,
+    }
+    row = db.query(models.ThinkingTrace).filter_by(
+        chat_id="thinking-old", thinking_id="legacy-thinking-8-0",
+    ).one()
+    assert row.content == first + second
+    assert row.complete is True
+
 def test_migrate_dry_run_reports_without_writing(db):
     _make_chat(db, "c2", [
         {"role": "user", "ts": 1},

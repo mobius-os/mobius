@@ -238,6 +238,11 @@ TOOL_OUTPUT_TAIL = 1024
 # and the full valid text is one expand away. Generous enough that a realistic
 # terminal envelope (stdout+stderr+exit_code) stays valid JSON.
 TOOL_OUTPUT_EXCERPT_MAX = 16384
+# Reasoning is normally tiny. Once a continuous run crosses this cap its full
+# text moves to ``thinking_traces`` and every public/persisted surface carries
+# metadata only. This is deliberately lower than tool output's cap: reasoning
+# is collapsed by default and seldom needs to occupy the initial chat payload.
+THINKING_INLINE_THRESHOLD = 1024
 # Claude bash reports a failure as a start-anchored "Exit code N\n<stderr>"
 # (a success is plain stdout with no prefix). Mirror toolResultFormat.js:27.
 _TOOL_OUTPUT_EXIT_RE = re.compile(r"^Exit code (\d+)\r?\n")
@@ -354,6 +359,7 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       return False
     ts = _event_ts_ms(event)
     segment_id = event.get("segment_id") or None
+    thinking_id = event.get("thinking_id") or None
     last = assistant_blocks[-1] if assistant_blocks else None
     if (
       last
@@ -375,6 +381,8 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         last["content"] += content
       if segment_id is not None:
         last["_thinking_segment_id"] = segment_id
+      if thinking_id is not None:
+        last["thinking_id"] = thinking_id
       if start_ts is not None and ts is not None:
         last["duration_ms"] = max(0, ts - int(start_ts))
     else:
@@ -387,6 +395,8 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
         block["_thinking_start_ts"] = ts
       if segment_id is not None:
         block["_thinking_segment_id"] = segment_id
+      if thinking_id is not None:
+        block["thinking_id"] = thinking_id
       assistant_blocks.append(block)
     return True
 

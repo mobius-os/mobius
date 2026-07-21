@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import Check from 'lucide-react/dist/esm/icons/check.mjs'
+import Copy from 'lucide-react/dist/esm/icons/copy.mjs'
 import { apiFetch } from '../../api/client.js'
-import { formatToolResult } from './toolResultFormat.js'
+import { formatToolResult, toolResultCopyText } from './toolResultFormat.js'
+import { copyPlainText } from './messageCopy.js'
 import {
   toolActivityIcon,
   toolCallLabel,
@@ -80,14 +83,17 @@ export default function ToolBlock({ t, chatId }) {
   // a chat load ships only a bounded excerpt plus an output_truncated marker
   // (the write funnel reduced it and stashed the full text in tool_outputs), so
   // a Read of a huge file or a long bash run doesn't bloat the payload for
-  // blocks the user never opens. Cached here so re-collapsing doesn't refetch.
+  // blocks the user never opens. Released again on collapse so inspecting a
+  // series of large results cannot retain all of them for the chat lifetime.
   const [fullOutput, setFullOutput] = useState(null)
   const [loadingFull, setLoadingFull] = useState(false)
-  // A fetch that failed (offline, or a 404 when no stash row exists) is
-  // TERMINAL: without this, loadingFull flips false and the effect re-fires on
-  // the same deps, retrying the fetch forever. A 404 is a designed outcome
-  // (contract rule 6: keep the inline excerpt), so try once and stop.
-  const [loadFailed, setLoadFailed] = useState(false)
+  // A true 404 is terminal and explicitly degrades copying to the excerpt. A
+  // network/5xx failure is retryable on the next close→open instead of being
+  // permanently mistaken for a missing stash.
+  const [missingFull, setMissingFull] = useState(false)
+  const [loadError, setLoadError] = useState(false)
+  const [copyState, setCopyState] = useState('idle')
+  const copyTimerRef = useRef(null)
   const effectiveName = effectiveToolName(t)
   const isShell = effectiveName === 'Bash' || effectiveName === 'shell'
   const label = toolCallLabel(t)
@@ -108,7 +114,7 @@ export default function ToolBlock({ t, chatId }) {
       setLoadingFull(false)
       return
     }
-    if (!t.output_truncated || fullOutput !== null || loadFailed) return
+    if (!t.output_truncated || fullOutput !== null || missingFull) return
     if (!chatId) return
     // Contract rule 6: a reduced block carries a stable tool_use_id and fetches
     // its full text from the side-table endpoint. Every large block is tagged
@@ -118,13 +124,30 @@ export default function ToolBlock({ t, chatId }) {
     const url = `/chats/${chatId}/tool-output/${encodeURIComponent(t.tool_use_id)}`
     let cancelled = false
     setLoadingFull(true)
+    setLoadError(false)
     apiFetch(url)
-      .then(res => (res.ok ? res.text() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then(res => {
+        if (res.ok) return res.text()
+        const error = new Error(`HTTP ${res.status}`)
+        error.status = res.status
+        return Promise.reject(error)
+      })
       .then(text => { if (!cancelled) setFullOutput(text) })
-      .catch(() => { if (!cancelled) setLoadFailed(true) })
+      .catch(error => {
+        if (cancelled) return
+        if (error?.status === 404) setMissingFull(true)
+        else setLoadError(true)
+      })
       .finally(() => { if (!cancelled) setLoadingFull(false) })
     return () => { cancelled = true }
-  }, [open, t.output_truncated, t.tool_use_id, fullOutput, loadFailed, chatId])
+  }, [open, t.output_truncated, t.tool_use_id, fullOutput, missingFull, chatId])
+
+  useEffect(() => {
+    if (!open) {
+      setFullOutput(null)
+      setLoadError(false)
+    }
+  }, [open])
 
   // Show the fetched full output once it lands; until then the inline preview.
   const shownOutput = t.output_truncated && fullOutput !== null ? fullOutput : t.output
@@ -156,6 +179,20 @@ export default function ToolBlock({ t, chatId }) {
     ? t.output_exit_code
     : (r && r.kind === 'terminal' ? r.exitCode : null)
   const failed = exitCode != null && exitCode !== 0
+  const copyingExcerpt = !!t.output_truncated && fullOutput === null
+  const copyLabel = copyingExcerpt ? 'Copy excerpt' : 'Copy output'
+
+  useEffect(() => () => clearTimeout(copyTimerRef.current), [])
+
+  async function copyOutput() {
+    if (loadingFull || !r) return
+    const copied = await copyPlainText(
+      toolResultCopyText(shownOutput ?? '', { terminal: isShell }),
+    )
+    setCopyState(copied ? 'copied' : 'failed')
+    clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => setCopyState('idle'), 1800)
+  }
 
   // The header content is shared by both shells below so the visual row is
   // identical whether or not it is interactive.
@@ -226,16 +263,41 @@ export default function ToolBlock({ t, chatId }) {
           )}
           {(r || t.output_truncated) && (
             <div className="chat__tool-section">
-              <span className="chat__tool-section-label">
-                {isShell ? 'Output' : 'Result'}
-              </span>
+              <div className="chat__tool-section-head">
+                <span className="chat__tool-section-label">
+                  {isShell ? 'Output' : 'Result'}
+                </span>
+                {r && (
+                  <button
+                    type="button"
+                    className={`chat__tool-copy chat__tool-copy--${copyState}`}
+                    onClick={copyOutput}
+                    disabled={loadingFull}
+                    aria-label={
+                      copyState === 'copied'
+                        ? (copyingExcerpt ? 'Excerpt copied' : 'Output copied')
+                        : copyState === 'failed'
+                          ? 'Could not copy output'
+                          : copyLabel
+                    }
+                    title={copyLabel}
+                  >
+                    {copyState === 'copied'
+                      ? <Check size={13} strokeWidth={2.3} aria-hidden="true" />
+                      : <Copy size={13} strokeWidth={2} aria-hidden="true" />}
+                    <span>{copyState === 'copied' ? 'Copied' : copyLabel}</span>
+                  </button>
+                )}
+              </div>
               {r && <ToolResult r={r} />}
               {t.output_truncated && fullOutput === null && (
                 <span className="chat__tool-output-more">
                   {loadingFull
                     ? '… loading full output …'
-                    : loadFailed
+                    : missingFull
                       ? '… full output unavailable; showing excerpt'
+                      : loadError
+                        ? '… couldn’t load full output; reopen to retry'
                       : `… showing excerpt${t.output_full_len ? ` of ${t.output_full_len} characters` : ''}`}
                 </span>
               )}

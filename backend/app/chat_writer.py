@@ -141,6 +141,7 @@ class PersistTranscript(_Command):
   chat_id: str = ""
   run_token: str = ""
   snapshot: dict = field(default_factory=dict)
+  thinking_stashes: list = field(default_factory=list)
   _generation: int = 0
 
 
@@ -151,6 +152,7 @@ class Finalize(_Command):
   chat_id: str = ""
   run_token: str = ""
   snapshot: dict = field(default_factory=dict)
+  thinking_stashes: list = field(default_factory=list)
 
 
 @dataclass
@@ -160,6 +162,7 @@ class PersistError(_Command):
   chat_id: str = ""
   run_token: str = ""
   snapshot: dict = field(default_factory=dict)
+  thinking_stashes: list = field(default_factory=list)
 
 
 @dataclass
@@ -178,6 +181,7 @@ class QuestionCommit(_Command):
   chat_id: str = ""
   run_token: str = ""
   snapshot: dict = field(default_factory=dict)
+  thinking_stashes: list = field(default_factory=list)
 
 
 @dataclass
@@ -231,6 +235,17 @@ class StashToolOutput(_Command):
   chat_id: str = ""
   tool_use_id: str = ""
   output: str = ""
+
+
+@dataclass
+class StashThinkingTrace(_Command):
+  """Upsert one deferred reasoning run without rewriting transcript JSON."""
+
+  chat_id: str = ""
+  thinking_id: str = ""
+  content: str = ""
+  revision: int = 0
+  complete: bool = False
 
 
 @dataclass
@@ -1253,7 +1268,7 @@ class ChatWriterActor:
       # its ack succeed.
       self._inflight_ack = pending.ack
       result = self._persist_live_message(
-        db, pending.chat_id, pending.snapshot,
+        db, pending.chat_id, pending.snapshot, pending.thinking_stashes,
       )
       _safe_set_result(pending.ack, result)
       self._inflight_ack = None
@@ -1268,18 +1283,24 @@ class ChatWriterActor:
     if isinstance(cmd, PersistError):
       # Fire-and-forget like PersistTranscript: an unwritten error state is
       # repaired by a later Finalize/snapshot; never raises.
-      return self._persist_live_message(db, cmd.chat_id, cmd.snapshot)
+      return self._persist_live_message(
+        db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
+      )
     if isinstance(cmd, PersistTranscript):
       # Defensive: a directly-enqueued PersistTranscript (no current path
       # does this) still commits its own snapshot.
-      return self._persist_live_message(db, cmd.chat_id, cmd.snapshot)
+      return self._persist_live_message(
+        db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
+      )
     if isinstance(cmd, QuestionCommit):
       # Save-before-broadcast: the commit MUST land before the ack resolves
       # so the runner only broadcasts the card after the question_id
       # persisted.  Anything but APPLIED (a NOOP on a missing row / empty
       # transcript, or a DROPPED commit) raises so the caller does NOT
       # broadcast a card whose question was never written.
-      outcome = self._persist_message_required(db, cmd.chat_id, cmd.snapshot)
+      outcome = self._persist_message_required(
+        db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
+      )
       if outcome is not _WriteOutcome.APPLIED:
         raise _PersistFailed(f"QuestionCommit did not persist ({outcome.value})")
       return True
@@ -1288,7 +1309,9 @@ class ChatWriterActor:
       # no blocks) is a silent loss, not a success — raise so the caller does
       # not promote the queue / schedule a continuation on a write that never
       # landed.
-      outcome = self._finalize_required(db, cmd.chat_id, cmd.snapshot)
+      outcome = self._finalize_required(
+        db, cmd.chat_id, cmd.snapshot, cmd.thinking_stashes,
+      )
       if outcome is not _WriteOutcome.APPLIED:
         raise _PersistFailed(f"Finalize did not persist ({outcome.value})")
       return True
@@ -1298,6 +1321,8 @@ class ChatWriterActor:
       return self._persist_session_id(db, cmd)
     if isinstance(cmd, StashToolOutput):
       return self._stash_tool_output(db, cmd)
+    if isinstance(cmd, StashThinkingTrace):
+      return self._stash_thinking_trace(db, cmd)
     if isinstance(cmd, MigrateChat):
       return self._migrate_chat(db, cmd)
     if isinstance(cmd, StartTurn):
@@ -1347,13 +1372,33 @@ class ChatWriterActor:
       return self._commit_snapshot(db, snapshot)
     return update_last_assistant_message(db, chat_id, snapshot)
 
-  def _persist_live_message(self, db, chat_id: str, snapshot: dict) -> bool:
+  def _persist_live_message(
+    self, db, chat_id: str, snapshot: dict, thinking_stashes: list | None = None,
+  ) -> bool:
     """Replace only the bounded in-flight assistant snapshot."""
     if hasattr(db, "record_commit"):
       return self._commit_snapshot(db, snapshot)
-    return update_live_assistant(db, chat_id, snapshot)
+    if thinking_stashes:
+      if _active_chat(db, chat_id) is None:
+        return True
+      self._stage_thinking_stashes(db, thinking_stashes)
+    # Preserve the long-standing three-argument seam for ordinary snapshots
+    # (tests and diagnostic spies patch it directly). Only sidecar-bearing
+    # snapshots need the guarded tri-state return.
+    if thinking_stashes:
+      result = update_live_assistant(db, chat_id, snapshot, require_row=True)
+    else:
+      result = update_live_assistant(db, chat_id, snapshot)
+    if result is None:
+      # A cross-process delete won after the active-row precheck. Do not leave
+      # staged sidecars in this long-lived actor session for a later commit.
+      db.rollback()
+      return True
+    return result
 
-  def _persist_message_required(self, db, chat_id: str, snapshot: dict):
+  def _persist_message_required(
+    self, db, chat_id: str, snapshot: dict, thinking_stashes: list | None = None,
+  ):
     """Must-persist variant of `_persist_message`, returning a `_WriteOutcome`.
 
     Backs `QuestionCommit`: the dispatch raises unless this is APPLIED, so a
@@ -1364,9 +1409,16 @@ class ChatWriterActor:
     if hasattr(db, "record_commit"):
       self._commit_snapshot(db, snapshot)
       return _WriteOutcome.APPLIED
-    return _apply_last_assistant_message(db, chat_id, snapshot)
+    if thinking_stashes:
+      self._stage_thinking_stashes(db, thinking_stashes)
+    outcome = _apply_last_assistant_message(db, chat_id, snapshot)
+    if outcome is not _WriteOutcome.APPLIED:
+      db.rollback()
+    return outcome
 
-  def _finalize_required(self, db, chat_id: str, snapshot: dict):
+  def _finalize_required(
+    self, db, chat_id: str, snapshot: dict, thinking_stashes: list | None = None,
+  ):
     """Force-complete tool blocks and write the terminal assistant message.
 
     Backs `Finalize` and returns a `_WriteOutcome`: the dispatch raises
@@ -1379,6 +1431,8 @@ class ChatWriterActor:
     if hasattr(db, "record_commit"):
       self._commit_snapshot(db, snapshot)
       return _WriteOutcome.APPLIED
+    if thinking_stashes:
+      self._stage_thinking_stashes(db, thinking_stashes)
     outcome = finalize_response_outcome(
       db, chat_id, snapshot.get("blocks") or []
     )
@@ -1397,7 +1451,10 @@ class ChatWriterActor:
         Chat.deleted_at.is_(None),
       ).first()
       if still_exists is not None:
+        db.rollback()
         return _WriteOutcome.APPLIED
+    if outcome is not _WriteOutcome.APPLIED:
+      db.rollback()
     return outcome
 
   def _answer_question(self, db, cmd: AnswerQuestion) -> bool:
@@ -1478,6 +1535,44 @@ class ChatWriterActor:
       raise _PersistFailed("StashToolOutput did not persist")
     return True
 
+  def _stash_thinking_trace(self, db, cmd: "StashThinkingTrace") -> bool:
+    """Monotonic upsert for a deferred reasoning run.
+
+    A delayed/coalesced snapshot may submit an older revision after a newer
+    one. Never regress content, revision, or completion in that case.
+    """
+    if not cmd.chat_id or not cmd.thinking_id:
+      return False
+    self._stage_thinking_stashes(db, [cmd])
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("StashThinkingTrace did not persist")
+    return True
+
+  def _stage_thinking_stashes(self, db, stashes: list) -> None:
+    """Stage monotonic sidecar upserts; the caller owns the transaction."""
+    from app.models import ThinkingTrace
+
+    for stash in stashes:
+      row = db.query(ThinkingTrace).filter(
+        ThinkingTrace.chat_id == stash.chat_id,
+        ThinkingTrace.thinking_id == stash.thinking_id,
+      ).first()
+      revision = max(0, int(stash.revision or len(stash.content or "")))
+      if row is None:
+        db.add(ThinkingTrace(
+          chat_id=stash.chat_id,
+          thinking_id=stash.thinking_id,
+          content=stash.content or "",
+          revision=revision,
+          complete=bool(stash.complete),
+        ))
+      elif revision >= int(row.revision or 0):
+        row.content = stash.content or ""
+        row.revision = revision
+        row.complete = bool(row.complete or stash.complete)
+      elif stash.complete and not row.complete:
+        row.complete = True
+
   def _migrate_chat(self, db, cmd: "MigrateChat") -> dict:
     """Forward-migrate one chat (card-221 B1+B2). See `MigrateChat`.
 
@@ -1512,6 +1607,7 @@ class ChatWriterActor:
       "chat_id": cid,
       "backfilled": plan.backfilled,
       "extracted": plan.extracted,
+      "thinking_extracted": plan.thinking_extracted,
       "bytes_moved": plan.bytes_moved,
       "unfixable": plan.unfixable,
     }
@@ -1537,6 +1633,7 @@ class ChatWriterActor:
     # the OperationalError propagate as a hard failure (exit 1). A round-trip
     # mismatch still raises _PersistFailed — only lock contention is caught here.
     try:
+      from app.models import ThinkingTrace
       for tool_use_id, full in plan.stashes:
         existing = db.query(ToolOutput).filter(
           ToolOutput.chat_id == cid,
@@ -1546,8 +1643,23 @@ class ChatWriterActor:
           db.add(ToolOutput(chat_id=cid, tool_use_id=tool_use_id, output=full))
         else:
           existing.output = full
+      for thinking_id, full, revision, complete in plan.thinking_stashes:
+        existing = db.query(ThinkingTrace).filter(
+          ThinkingTrace.chat_id == cid,
+          ThinkingTrace.thinking_id == thinking_id,
+        ).first()
+        if existing is None:
+          db.add(ThinkingTrace(
+            chat_id=cid, thinking_id=thinking_id, content=full,
+            revision=revision, complete=complete,
+          ))
+        else:
+          existing.content = full
+          existing.revision = revision
+          existing.complete = complete
       db.flush()
       self._verify_round_trip(db, cid, plan.stashes)
+      self._verify_thinking_round_trip(db, cid, plan.thinking_stashes)
 
       # Optimistic CAS: commit the rewritten blobs only while the chat is still
       # idle AND unchanged since the snapshot. A concurrent live turn (another
@@ -1599,6 +1711,30 @@ class ChatWriterActor:
         raise _PersistFailed(
           f"tool-output round-trip verify failed chat={chat_id} "
           f"tool_use_id={tool_use_id}"
+        )
+
+  def _verify_thinking_round_trip(
+    self, db, chat_id: str, stashes: list,
+  ) -> None:
+    from app.models import ThinkingTrace
+
+    for thinking_id, full, revision, _complete in stashes:
+      got = db.execute(
+        select(ThinkingTrace.content, ThinkingTrace.revision).where(
+          ThinkingTrace.chat_id == chat_id,
+          ThinkingTrace.thinking_id == thinking_id,
+        )
+      ).first()
+      if (
+        got is None
+        or got[1] != revision
+        or len(got[0]) != len(full)
+        or hashlib.sha256(got[0].encode("utf-8")).digest()
+        != hashlib.sha256(full.encode("utf-8")).digest()
+      ):
+        raise _PersistFailed(
+          f"thinking-trace round-trip verify failed chat={chat_id} "
+          f"thinking_id={thinking_id}"
         )
 
   def _start_turn(self, db, cmd: StartTurn) -> dict:
@@ -2636,8 +2772,10 @@ class _MigrationPlan:
   new_messages: list
   new_pending: list
   stashes: list  # list[tuple[str, str]]
+  thinking_stashes: list  # list[tuple[str, str, int, bool]]
   backfilled: int
   extracted: int
+  thinking_extracted: int
   bytes_moved: int
   unfixable: list  # list[dict]
   changed: bool
@@ -2657,6 +2795,18 @@ def _collect_existing_tool_ids(*blob_lists) -> set[str]:
       for blk in m.get("blocks") or []:
         if isinstance(blk, dict) and blk.get("tool_use_id"):
           ids.add(blk["tool_use_id"])
+  return ids
+
+
+def _collect_existing_thinking_ids(*blob_lists) -> set[str]:
+  ids: set[str] = set()
+  for blob in blob_lists:
+    for message in blob:
+      if not isinstance(message, dict):
+        continue
+      for block in message.get("blocks") or []:
+        if isinstance(block, dict) and block.get("thinking_id"):
+          ids.add(block["thinking_id"])
   return ids
 
 
@@ -2748,6 +2898,80 @@ def _extract_tool_outputs(
   return extracted, bytes_moved, stashes
 
 
+def _extract_thinking_traces(
+  msg_list: list, used_ids: set[str],
+) -> tuple[int, int, list]:
+  """Move large legacy adjacent reasoning runs into ``thinking_traces``.
+
+  Old transcripts may contain fragmented adjacent blocks from provider
+  bookkeeping. The frontend historically concatenated those verbatim and
+  summed durations, so migration applies that exact repair before deciding
+  whether the run crosses the threshold. Small runs stay byte-for-byte intact.
+  """
+  from app.events import THINKING_INLINE_THRESHOLD
+
+  extracted = 0
+  bytes_moved = 0
+  stashes = []
+  for mi, message in enumerate(msg_list):
+    if not isinstance(message, dict) or not isinstance(message.get("blocks"), list):
+      continue
+    blocks = message["blocks"]
+    rewritten = []
+    i = 0
+    while i < len(blocks):
+      block = blocks[i]
+      if (
+        not isinstance(block, dict)
+        or block.get("type") != "thinking"
+        or block.get("thinking_id")
+        or block.get("thinking_deferred")
+      ):
+        rewritten.append(block)
+        i += 1
+        continue
+      run = [block]
+      j = i + 1
+      while j < len(blocks):
+        nxt = blocks[j]
+        if (
+          not isinstance(nxt, dict)
+          or nxt.get("type") != "thinking"
+          or nxt.get("thinking_id")
+          or nxt.get("thinking_deferred")
+        ):
+          break
+        run.append(nxt)
+        j += 1
+      content = "".join(str(part.get("content") or "") for part in run)
+      if len(content) <= THINKING_INLINE_THRESHOLD:
+        rewritten.extend(run)
+        i = j
+        continue
+      ts = message.get("ts")
+      base = (
+        f"legacy-thinking-{ts}-{i}"
+        if ts is not None else f"legacy-thinking-m{mi}-{i}"
+      )
+      thinking_id = _mint_unique_tool_id(base, used_ids)
+      duration = sum(int(part.get("duration_ms") or 0) for part in run)
+      revision = len(content)
+      rewritten.append({
+        "type": "thinking",
+        "thinking_id": thinking_id,
+        "thinking_deferred": True,
+        "thinking_revision": revision,
+        "thinking_complete": True,
+        "duration_ms": duration,
+      })
+      stashes.append((thinking_id, content, revision, True))
+      extracted += 1
+      bytes_moved += revision
+      i = j
+    message["blocks"] = rewritten
+  return extracted, bytes_moved, stashes
+
+
 def plan_chat_migration(messages: list, pending_messages: list) -> _MigrationPlan:
   """Compute the forward-migration for one chat (card-221 B1+B2), purely.
 
@@ -2770,15 +2994,28 @@ def plan_chat_migration(messages: list, pending_messages: list) -> _MigrationPla
   extracted += p_extracted
   bytes_moved += p_bytes
   stashes.extend(p_stashes)
+  used_thinking_ids = _collect_existing_thinking_ids(new_messages, new_pending)
+  thinking_extracted, thinking_bytes, thinking_stashes = (
+    _extract_thinking_traces(new_messages, used_thinking_ids)
+  )
+  p_thinking_extracted, p_thinking_bytes, p_thinking_stashes = (
+    _extract_thinking_traces(new_pending, used_thinking_ids)
+  )
+  thinking_extracted += p_thinking_extracted
+  thinking_bytes += p_thinking_bytes
+  thinking_stashes.extend(p_thinking_stashes)
+  bytes_moved += thinking_bytes
   return _MigrationPlan(
     new_messages=new_messages,
     new_pending=new_pending,
     stashes=stashes,
+    thinking_stashes=thinking_stashes,
     backfilled=backfilled,
     extracted=extracted,
+    thinking_extracted=thinking_extracted,
     bytes_moved=bytes_moved,
     unfixable=unfixable,
-    changed=bool(backfilled or extracted),
+    changed=bool(backfilled or extracted or thinking_extracted),
   )
 
 
@@ -3057,7 +3294,9 @@ def update_last_assistant_message(db, chat_id: str, message: dict) -> bool:
   )
 
 
-def update_live_assistant(db, chat_id: str, message: dict) -> bool:
+def update_live_assistant(
+  db, chat_id: str, message: dict, *, require_row: bool = False,
+) -> bool | None:
   """Persist the current assistant snapshot without rewriting history."""
   if not chat_id:
     return True
@@ -3071,7 +3310,7 @@ def update_live_assistant(db, chat_id: str, message: dict) -> bool:
     )
   ).first()
   if row is None:
-    return True
+    return None if require_row else True
   existing = row[0] if isinstance(row[0], dict) else None
   snapshot = copy.deepcopy(message)
   state = None

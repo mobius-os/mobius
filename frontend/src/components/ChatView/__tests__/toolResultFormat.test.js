@@ -2,10 +2,23 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   formatToolResult,
+  toolResultCopyText,
   toolResultFailed,
   toolBlockFailed,
   toolBlockExitCode,
 } from '../toolResultFormat.js'
+
+test('copy text matches readable terminal and structured presentation', () => {
+  assert.equal(
+    toolResultCopyText(JSON.stringify({ stdout: 'ok', stderr: 'warn', exit_code: 2 })),
+    'ok\nwarn\nexit 2',
+  )
+  assert.equal(
+    toolResultCopyText(JSON.stringify({ path: '/tmp/x', bytes: 12 })),
+    'path: /tmp/x\nbytes: 12',
+  )
+  assert.equal(toolResultCopyText('{"a":1}', { terminal: true }), '{"a":1}')
+})
 
 test('plain text passes through unchanged', () => {
   const r = formatToolResult('hello world\nsecond line')

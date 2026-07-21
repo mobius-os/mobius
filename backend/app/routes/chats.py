@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -245,6 +245,9 @@ def list_chats(
     # outputs); at hard-purge time the chat is gone for good, so are they.
     db.query(models.ToolOutput).filter(
       models.ToolOutput.chat_id == c.id
+    ).delete(synchronize_session=False)
+    db.query(models.ThinkingTrace).filter(
+      models.ThinkingTrace.chat_id == c.id
     ).delete(synchronize_session=False)
     # Drop the chat's session->chat link rows (subagent observability) with it —
     # same no-FK-cascade lifecycle as chat_runs. A link records every provider
@@ -862,6 +865,40 @@ def get_tool_output_by_id(
   if row is None:
     raise HTTPException(status_code=404, detail="tool output not found")
   return PlainTextResponse(row.output or "")
+
+
+@router.get(
+  "/{chat_id}/thinking-trace/{thinking_id}",
+  response_class=PlainTextResponse,
+)
+def get_thinking_trace_by_id(
+  chat_id: str,
+  thinking_id: str,
+  revision: int = 0,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+) -> Response:
+  """Return one deferred reasoning run when its nested row is expanded."""
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
+  row = db.query(models.ThinkingTrace).filter(
+    models.ThinkingTrace.chat_id == chat_id,
+    models.ThinkingTrace.thinking_id == thinking_id,
+  ).first()
+  requested = max(0, revision)
+  if row is None or int(row.revision or 0) < requested:
+    if is_chat_running(chat_id):
+      return Response(status_code=202, headers={"Retry-After": "1"})
+    raise HTTPException(status_code=404, detail="thinking trace not found")
+  return PlainTextResponse(
+    row.content or "",
+    headers={
+      "X-Thinking-Revision": str(row.revision or 0),
+      "X-Thinking-Complete": "1" if row.complete else "0",
+    },
+  )
 
 
 @router.get("/{chat_id}/agent-context")

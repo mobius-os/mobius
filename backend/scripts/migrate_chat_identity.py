@@ -13,6 +13,9 @@ Walks every chat's transcript once and does BOTH:
   and its block rewritten to a bounded excerpt. This is the write-side twin of
   the live funnel's `_reduce_tool_output`; migrating every chat is what let the
   legacy dual-read shims be deleted.
+- B3 (thinking extraction): adjacent legacy reasoning fragments are coalesced
+  exactly as the renderer displayed them; runs over 1KB move to the
+  `thinking_traces` table and leave only lazy-fetch metadata in the transcript.
 
 Both mutations run through the single-writer `chat_writer` actor's `MigrateChat`
 command — the whole per-chat read-modify-write happens on the actor thread under
@@ -112,6 +115,7 @@ def run(
         f"  {res['status']:18} {cid}  "
         f"backfilled={res.get('backfilled', 0)} "
         f"extracted={res.get('extracted', 0)}"
+        f" thinking={res.get('thinking_extracted', 0)}"
       )
 
   # Re-check the deferred (active-at-first-pass) chats once. A real run only:
@@ -141,6 +145,7 @@ def summarize(results: list[dict], dry_run: bool) -> int:
   counts = Counter(r["status"] for r in results)
   backfilled = sum(r.get("backfilled", 0) for r in results)
   extracted = sum(r.get("extracted", 0) for r in results)
+  thinking_extracted = sum(r.get("thinking_extracted", 0) for r in results)
   bytes_moved = sum(r.get("bytes_moved", 0) for r in results)
   unfixable = [
     (r["chat_id"], u) for r in results for u in r.get("unfixable", [])
@@ -158,6 +163,7 @@ def summarize(results: list[dict], dry_run: bool) -> int:
     print(f"  {status:18} {counts[status]}")
   print(f"rows backfilled:   {backfilled}")
   print(f"blocks extracted:  {extracted}")
+  print(f"thoughts extracted:{thinking_extracted:>5}")
   print(f"bytes moved:       {bytes_moved} ({bytes_moved / 1e6:.1f} MB)")
 
   if deferred:

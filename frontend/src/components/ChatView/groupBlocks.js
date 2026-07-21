@@ -83,7 +83,8 @@ export function coalesceThinkingEntries(entries) {
   const out = []
   for (const entry of entries) {
     const prev = out[out.length - 1]
-    if (prev?.item?.type === 'thinking' && entry?.item?.type === 'thinking') {
+    if (prev?.item?.type === 'thinking' && entry?.item?.type === 'thinking'
+        && !prev.item.thinking_id && !entry.item.thinking_id) {
       out[out.length - 1] = {
         ...prev,
         item: {

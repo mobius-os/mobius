@@ -16,6 +16,11 @@ export function streamItemToBlock(item, { finalize = true } = {}) {
     return {
       type: 'thinking',
       content: item.content,
+      ...(item.thinking_id ? { thinking_id: item.thinking_id } : {}),
+      ...(item.thinking_deferred ? {
+        thinking_deferred: true,
+        thinking_revision: item.thinking_revision,
+      } : {}),
       ...(Number.isFinite(item.duration_ms)
         ? { duration_ms: item.duration_ms }
         : {}),
@@ -53,6 +58,7 @@ export function streamItemToBlock(item, { finalize = true } = {}) {
 // ToolBlock state and markdown/image DOM across the source switch.
 export function assistantBlockKey(block, index) {
   if (block?.type === 'tool') return block.tool_use_id ?? `t-${index}`
+  if (block?.type === 'thinking') return block.thinking_id ?? index
   return index
 }
 
@@ -85,6 +91,20 @@ function sameToolBlock(a, b) {
   return true
 }
 
+function thinkingBlockCovers(candidate, baseline) {
+  if (candidate?.thinking_id && baseline?.thinking_id
+      && candidate.thinking_id !== baseline.thinking_id) return false
+  if (candidate?.thinking_deferred || baseline?.thinking_deferred) {
+    const candidateRevision = Number(candidate?.thinking_revision)
+      || String(candidate?.content || '').length
+    const baselineRevision = Number(baseline?.thinking_revision)
+      || String(baseline?.content || '').length
+    return candidateRevision >= baselineRevision
+  }
+  return normalizeMirrorText(candidate?.content)
+    .startsWith(normalizeMirrorText(baseline?.content))
+}
+
 function streamBlocksCoverMessageBlocks(msgBlocks, streamBlocks) {
   if (!Array.isArray(msgBlocks) || msgBlocks.length === 0) return true
   if (!Array.isArray(streamBlocks) || streamBlocks.length < msgBlocks.length) return false
@@ -101,9 +121,7 @@ function streamBlocksCoverMessageBlocks(msgBlocks, streamBlocks) {
     } else if (msgBlock.type === 'question') {
       if (questionKey(msgBlock) !== questionKey(streamBlock)) return false
     } else if (msgBlock.type === 'thinking') {
-      const msgText = normalizeMirrorText(msgBlock.content)
-      const streamText = normalizeMirrorText(streamBlock.content)
-      if (msgText && !streamText.startsWith(msgText)) return false
+      if (!thinkingBlockCovers(streamBlock, msgBlock)) return false
     } else if (msgBlock.type === 'error') {
       if ((msgBlock.message || '') !== (streamBlock.message || '')) return false
     } else {
@@ -116,7 +134,9 @@ function streamBlocksCoverMessageBlocks(msgBlocks, streamBlocks) {
 function blockWeight(block) {
   if (!block) return 0
   if (block.type === 'text' || block.type === 'thinking') {
-    return normalizeMirrorText(block.content).length
+    return block.thinking_deferred
+      ? 40
+      : normalizeMirrorText(block.content).length
   }
   if (block.type === 'tool') {
     return 40
@@ -147,6 +167,7 @@ function firstMeaningfulBlock(blocks) {
   return blocks.find(block => {
     if (!block) return false
     if (block.type === 'text' || block.type === 'thinking') {
+      if (block.type === 'thinking' && block.thinking_deferred) return true
       return !!normalizeMirrorText(block.content)
     }
     return true
@@ -217,7 +238,9 @@ export function messageCoversAssistantStream(msg, items) {
     const msgBlock = msgBlocks[i]
     if (!msgBlock || msgBlock.type !== block.type) return false
     if (block.type === 'text') return normalizeMirrorText(msgBlock.content).startsWith(normalizeMirrorText(block.content))
-    if (block.type === 'thinking') return normalizeMirrorText(msgBlock.content).startsWith(normalizeMirrorText(block.content))
+    if (block.type === 'thinking') {
+      return thinkingBlockCovers(msgBlock, block)
+    }
     if (block.type === 'tool') return sameToolBlock(msgBlock, block)
     if (block.type === 'question') return questionKey(msgBlock) === questionKey(block)
     if (block.type === 'error') return (msgBlock.message || '') === (block.message || '')

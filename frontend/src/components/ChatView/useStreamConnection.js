@@ -824,7 +824,7 @@ export default function useStreamConnection(chatId, {
             // so the thinking block lands in emit-order, not after text
             // that was buffered before it.
             const content = event.content || ''
-            if (content) {
+            if (content || event.thinking_deferred) {
               flushBuffer()
               applyStreamItems(prev => appendThinkingChunk(
                 prev,
@@ -832,6 +832,7 @@ export default function useStreamConnection(chatId, {
                 Date.now(),
                 event.ts,
                 event.segment_id,
+                event,
               ))
             }
           } else if (event.type === 'tool_start') {

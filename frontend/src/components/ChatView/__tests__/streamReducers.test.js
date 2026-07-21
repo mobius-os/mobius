@@ -594,6 +594,24 @@ test('appendThinkingChunk is a no-op on empty content', () => {
   assert.equal(appendThinkingChunk(items, ''), items, 'empty chunk returns the same array')
 })
 
+test('deferred thinking metadata clears the inline prefix and keeps identity', () => {
+  let items = appendThinkingChunk(
+    [], 'prefix', 1000, 10000, 'summary:0', { thinking_id: 'think-1' },
+  )
+  items = appendThinkingChunk(
+    items, '', 1100, 10100, 'summary:0', {
+      thinking_id: 'think-1',
+      thinking_deferred: true,
+      thinking_revision: 1200,
+    },
+  )
+  assert.equal(items.length, 1)
+  assert.equal(items[0].content, '')
+  assert.equal(items[0].thinking_id, 'think-1')
+  assert.equal(items[0].thinking_revision, 1200)
+  assert.equal(items[0].thinking_deferred, true)
+})
+
 // ---------------------------------------------------------------------------
 // reconcileStreamItems — the catch-up commit "return without redraw" merge
 // (contract v2 item 2, lever 2c). The core assertion is OBJECT IDENTITY: an

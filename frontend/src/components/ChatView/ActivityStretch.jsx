@@ -15,6 +15,7 @@ import { assistantBlockKey } from './streamPromotion.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import ActivityLineHeader, { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import SubagentChips from './SubagentChips.jsx'
+import { useThinkingTrace } from './useThinkingTrace.js'
 
 // One collapsible activity line standing in for a contiguous stretch of thinking
 // AND tool blocks, so a build turn's pre-prose burst reads as one quiet ~32px
@@ -45,9 +46,18 @@ import SubagentChips from './SubagentChips.jsx'
 // shimmer plus the running-first activity summary already say what is
 // executing. So the sole open/close signal is `userOpen`, and no effect or
 // prop derives it.
-function TimelineThought({ label, content }) {
+function TimelineThought({ label, thought, chatId }) {
   const [open, setOpen] = useState(false)
   const headerRef = useRef(null)
+  const trace = useThinkingTrace({ open, thought, chatId })
+  const content = thinkingContentForDisplay(trace.content)
+  const loadState = trace.loadState
+  let body = <StandardMarkdown text={content} />
+  if (loadState === 'loading') {
+    body = <span className="chat__reasoning-load">Loading thought…</span>
+  } else if (loadState === 'failed') {
+    body = <span className="chat__reasoning-load">Thought unavailable.</span>
+  }
 
   return (
     <div className={
@@ -71,7 +81,7 @@ function TimelineThought({ label, content }) {
       </button>
       {open && (
         <div className="chat__reasoning-body">
-          <StandardMarkdown text={content} />
+          {body}
         </div>
       )}
     </div>
@@ -215,12 +225,12 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
           {entries.map(({ item, idx }) => {
             if (item.type === 'thinking') {
               const key = assistantBlockKey(item, idx)
-              const reasoning = thinkingContentForDisplay(item.content)
               return (
                 <TimelineThought
                   key={key}
                   label={thoughtDurationLabel(item.duration_ms)}
-                  content={reasoning}
+                  thought={item}
+                  chatId={chatId}
                 />
               )
             }
