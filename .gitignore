@@ -21,6 +21,7 @@ dist/
 .dist-old/
 # Legacy/ad-hoc frontend publish backups are generated artifacts too.
 dist.old/
+.dist-prev/
 .dist-staging/
 .dist-rebuild/
 .assets-attic/
