@@ -122,24 +122,36 @@ export default function ToolBlock({ t, chatId }) {
     // full text — leave the inline excerpt.
     if (!t.tool_use_id) return
     const url = `/chats/${chatId}/tool-output/${encodeURIComponent(t.tool_use_id)}`
+    const controller = new AbortController()
     let cancelled = false
     setLoadingFull(true)
     setLoadError(false)
-    apiFetch(url)
+    apiFetch(url, { signal: controller.signal })
       .then(res => {
         if (res.ok) return res.text()
         const error = new Error(`HTTP ${res.status}`)
         error.status = res.status
         return Promise.reject(error)
       })
-      .then(text => { if (!cancelled) setFullOutput(text) })
+      .then(text => {
+        if (!cancelled) {
+          setFullOutput(text)
+          // "Copied" referred to the excerpt; once the copy target changes to
+          // the full result, restore the honest action label.
+          clearTimeout(copyTimerRef.current)
+          setCopyState('idle')
+        }
+      })
       .catch(error => {
         if (cancelled) return
         if (error?.status === 404) setMissingFull(true)
-        else setLoadError(true)
+        else if (error?.name !== 'AbortError') setLoadError(true)
       })
       .finally(() => { if (!cancelled) setLoadingFull(false) })
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
   }, [open, t.output_truncated, t.tool_use_id, fullOutput, missingFull, chatId])
 
   useEffect(() => {
@@ -181,11 +193,20 @@ export default function ToolBlock({ t, chatId }) {
   const failed = exitCode != null && exitCode !== 0
   const copyingExcerpt = !!t.output_truncated && fullOutput === null
   const copyLabel = copyingExcerpt ? 'Copy excerpt' : 'Copy output'
+  const copyVisibleLabel = copyState === 'copied'
+    ? 'Copied'
+    : copyState === 'failed'
+      ? 'Copy failed'
+      : copyLabel
 
   useEffect(() => () => clearTimeout(copyTimerRef.current), [])
 
   async function copyOutput() {
-    if (loadingFull || !r) return
+    // The inline excerpt is already useful while the full output is loading.
+    // Keep its copy action available rather than turning a slow network request
+    // into a disabled control; the label changes to "Copy output" when the full
+    // text arrives.
+    if (!r) return
     const copied = await copyPlainText(
       toolResultCopyText(shownOutput ?? '', { terminal: isShell }),
     )
@@ -272,7 +293,6 @@ export default function ToolBlock({ t, chatId }) {
                     type="button"
                     className={`chat__tool-copy chat__tool-copy--${copyState}`}
                     onClick={copyOutput}
-                    disabled={loadingFull}
                     aria-label={
                       copyState === 'copied'
                         ? (copyingExcerpt ? 'Excerpt copied' : 'Output copied')
@@ -280,12 +300,12 @@ export default function ToolBlock({ t, chatId }) {
                           ? 'Could not copy output'
                           : copyLabel
                     }
-                    title={copyLabel}
+                    title={copyState === 'failed' ? 'Try copying again' : copyLabel}
                   >
                     {copyState === 'copied'
                       ? <Check size={13} strokeWidth={2.3} aria-hidden="true" />
                       : <Copy size={13} strokeWidth={2} aria-hidden="true" />}
-                    <span>{copyState === 'copied' ? 'Copied' : copyLabel}</span>
+                    <span>{copyVisibleLabel}</span>
                   </button>
                 )}
               </div>

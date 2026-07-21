@@ -97,6 +97,29 @@ async function sendMessage(page, text) {
     requestAnimationFrame(() => requestAnimationFrame(r))))
 }
 
+/** The POST route above deliberately avoids starting an agent, but a 202 means
+ * the user's message was durably accepted. Serve that accepted transcript on
+ * a later remount so this mock preserves the backend protocol instead of
+ * turning the chat into an impossible empty record under CI load. */
+async function persistMockedMessageOnReload(page, chat, text) {
+  await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const messages = [{ role: 'user', content: text, ts: 1700000000000 }]
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ...chat,
+        messages,
+        total: messages.length,
+        offset: 0,
+        running: false,
+        pending_messages: [],
+      }),
+    })
+  })
+}
+
 async function measure(page) {
   return page.evaluate(() => {
     const content = document.querySelector('.shell__content')
@@ -226,7 +249,9 @@ test.describe('Tabs', () => {
 
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
     await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
-    await sendMessage(page, 'build me a thing')
+    const prompt = 'build me a thing'
+    await sendMessage(page, prompt)
+    await persistMockedMessageOnReload(page, chat, prompt)
 
     // Strip renders both tabs; exactly one (the current chat) is active.
     await expect(page.locator('.shell__tabstrip')).toHaveCount(1)

@@ -15,6 +15,23 @@ test('starting a lazy full-output request cannot cancel itself', () => {
   const dependencies = effect.match(/\}, \[([^\]]+)\]\)/)?.[1] || ''
   assert.doesNotMatch(dependencies, /\bloadingFull\b/,
     'setting loading state cannot clean up and cancel the active request')
+  assert.match(effect, /const controller = new AbortController\(\)/,
+    'each disclosure owns one cancellable request')
+  assert.match(effect, /apiFetch\(url, \{ signal: controller\.signal \}\)/,
+    'the request receives the disclosure abort signal')
+  assert.match(effect, /return \(\) => \{[\s\S]*controller\.abort\(\)[\s\S]*\}/,
+    'collapsing or unmounting aborts network work instead of only ignoring it')
+})
+
+test('the bounded excerpt stays copyable while the full output loads', () => {
+  const src = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
+  const copyStart = src.indexOf('async function copyOutput()')
+  const copyEnd = src.indexOf('// The header content', copyStart)
+  const copyHandler = src.slice(copyStart, copyEnd)
+  assert.doesNotMatch(copyHandler, /loadingFull/,
+    'a slow lazy request cannot disable copying the already-rendered excerpt')
+  assert.doesNotMatch(src, /disabled=\{loadingFull\}/,
+    'the visible Copy excerpt control remains operable during loading')
 })
 
 test('the live stream forwards reduction metadata into its tool item', () => {

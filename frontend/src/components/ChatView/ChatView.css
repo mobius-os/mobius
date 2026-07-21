@@ -864,6 +864,7 @@
 }
 
 .chat__tool-copy--copied { color: var(--accent); }
+.chat__tool-copy--failed { color: var(--danger); }
 .chat__tool-copy:disabled { cursor: default; opacity: 0.45; }
 .chat__tool-copy:focus-visible {
   outline: 2px solid var(--accent);
@@ -893,7 +894,8 @@
   font: inherit;
   color: inherit;
   white-space: pre-wrap;
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .chat__source-chip {
@@ -1434,6 +1436,24 @@
 .chat__activity-timeline .chat__tool-detail {
   margin-inline-start: 20px;
   padding: 2px 0 calc(var(--activity-row-gap, 4px) * 2);
+}
+
+/* Preserve the compact desktop timeline while giving touch users a dependable
+   target. These rows carry their disclosure state without a trailing chevron,
+   so the whole labeled line must be comfortably tappable. */
+@media (pointer: coarse) {
+  .chat__activity-header:not(.chat__activity-header--static),
+  .chat__activity-think-toggle,
+  .chat__tool-header:not(.chat__tool-header--static),
+  .chat__activity-timeline .chat__tool-header:not(.chat__tool-header--static),
+  .chat__tool-copy {
+    min-height: 44px;
+  }
+
+  .chat__tool-copy {
+    padding-inline: 10px;
+    font-size: 12px;
+  }
 }
 
 /* ── Marker card (compaction + future system markers) ── */
