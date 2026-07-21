@@ -116,9 +116,42 @@ def read_json_file(file_path: Path, cap: int = MAX_ARTIFACT_READ_BYTES):
     raw = os.read(fd, cap + 1)
     if len(raw) != info.st_size or len(raw) > cap:
       raise ArtifactDataError("Artifact value not found.")
+  except OSError as exc:
+    # An fstat/read fault (EIO, EINTR) must fail closed as "not found" like
+    # every other unreadable value, not escape as an unhandled 500.
+    raise ArtifactDataError("Artifact value not found.") from exc
   finally:
-    os.close(fd)
+    try:
+      os.close(fd)
+    except OSError:
+      pass
   return parse_json(raw)
+
+
+def _iter_artifact_entries(artifact_root: Path):
+  """Yield ``(name, stat_result)`` for the artifact directory, no symlinks.
+
+  The single scan mechanics both readers of this tree need: reject a symlinked
+  or non-directory root, wrap scandir/stat errors as ArtifactDataError, and
+  lstat each entry once. Callers apply their own policy — the lenient/bounded
+  listing vs. the strict/exact usage accounting — on top.
+  """
+  if not artifact_root.exists():
+    return
+  if artifact_root.is_symlink() or not artifact_root.is_dir():
+    raise ArtifactDataError("Invalid artifact storage directory.")
+  try:
+    with os.scandir(artifact_root) as entries:
+      for entry in entries:
+        try:
+          info = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+          raise ArtifactDataError(
+            "Artifact storage changed while scanning."
+          ) from exc
+        yield entry.name, info
+  except OSError as exc:
+    raise ArtifactDataError("Artifact storage is unreadable.") from exc
 
 
 def list_artifact_keys(artifact_root: Path) -> list[str]:
@@ -130,76 +163,41 @@ def list_artifact_keys(artifact_root: Path) -> list[str]:
   value that exists but cannot be discovered. The directory is the only thing
   that cannot disagree with itself.
 
-  Applies the same no-symlink rule as every other read of this tree, and hides
-  anything that is not a validly-named ``.json`` value (including any legacy
-  index file an older app version left behind, which callers filter by name).
+  Lenient and BOUNDED: this is reachable UNAUTHENTICATED through a published
+  site, and the per-artifact key cap is only enforced by the artifact-data
+  route — the generic app-storage API can drop arbitrarily many .json files
+  into the same directory. Stop after a fixed entry budget so no published page
+  can force an unbounded scan, skip anything that is not a validly-named .json
+  value, and skip a value larger than the read cap (the per-key read would 404
+  on it, so listing it would advertise a key that cannot be fetched).
   """
-  if not artifact_root.exists():
-    return []
-  if artifact_root.is_symlink() or not artifact_root.is_dir():
-    raise ArtifactDataError("Invalid artifact storage directory.")
   keys = []
   examined = 0
-  try:
-    # Iterate lazily and stop early: this is reachable UNAUTHENTICATED through a
-    # published site, and the per-artifact key cap is only enforced by the
-    # artifact-data route — the generic app-storage API can drop arbitrarily
-    # many .json files into this same directory. Materializing the whole scandir
-    # (and the response) would hand any published page an unbounded scan.
-    with os.scandir(artifact_root) as entries:
-      for entry in entries:
-        examined += 1
-        if examined > MAX_ARTIFACT_SCAN_ENTRIES:
-          break
-        if len(keys) >= MAX_ARTIFACT_KEYS:
-          break
-        try:
-          if entry.is_symlink():
-            continue
-          info = entry.stat(follow_symlinks=False)
-        except OSError as exc:
-          # Do NOT skip silently: returning 200 with a quietly incomplete list
-          # is the same "stored but unlistable" failure this enumeration exists
-          # to remove. Surface it and let the caller fail closed.
-          raise ArtifactDataError("Artifact storage changed while scanning.") from exc
-        if not stat.S_ISREG(info.st_mode):
-          continue
-        # A value larger than the read cap cannot be served by the per-key read,
-        # so listing it would advertise a key that always 404s.
-        if info.st_size > MAX_ARTIFACT_READ_BYTES:
-          continue
-        if not entry.name.endswith(".json"):
-          continue
-        name = entry.name[:-5]
-        if validate_artifact_key(name):
-          keys.append(name)
-  except OSError as exc:
-    raise ArtifactDataError("Artifact storage is unreadable.") from exc
+  for name, info in _iter_artifact_entries(artifact_root):
+    examined += 1
+    if examined > MAX_ARTIFACT_SCAN_ENTRIES or len(keys) >= MAX_ARTIFACT_KEYS:
+      break
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_ARTIFACT_READ_BYTES:
+      continue
+    if name.endswith(".json") and validate_artifact_key(name[:-5]):
+      keys.append(name[:-5])
   return sorted(keys)
 
 
 def artifact_usage(artifact_root: Path) -> tuple[int, int]:
-  """Return regular-file bytes and JSON-key count without following links."""
-  if not artifact_root.exists():
-    return 0, 0
-  if artifact_root.is_symlink() or not artifact_root.is_dir():
-    raise ArtifactDataError("Invalid artifact storage directory.")
+  """Return regular-file bytes and JSON-key count.
+
+  Strict and EXACT: this feeds the write path's quota check under the app lock,
+  so an unexpected entry (symlink, subdir, device) is an error rather than a
+  silently-skipped row. The tree it accounts for is owner-capped, so exhausting
+  the scan is fine.
+  """
   total = 0
   keys = 0
-  try:
-    entries = list(os.scandir(artifact_root))
-  except OSError as exc:
-    raise ArtifactDataError("Artifact storage is unreadable.") from exc
-  for entry in entries:
-    try:
-      if entry.is_symlink():
-        raise ArtifactDataError("Symlinks are not allowed in artifact storage.")
-      info = entry.stat(follow_symlinks=False)
-    except OSError as exc:
-      raise ArtifactDataError("Artifact storage changed while scanning.") from exc
+  for name, info in _iter_artifact_entries(artifact_root):
     if not stat.S_ISREG(info.st_mode):
       raise ArtifactDataError("Artifact storage contains a non-file entry.")
     total += info.st_size
-    if entry.name.endswith(".json") and validate_artifact_key(entry.name[:-5]):
+    if name.endswith(".json") and validate_artifact_key(name[:-5]):
       keys += 1
   return total, keys

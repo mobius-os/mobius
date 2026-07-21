@@ -1106,3 +1106,53 @@ def test_public_listing_and_value_reads_share_one_throttle_budget():
   source = Path(published_mod.__file__).read_text(encoding="utf-8")
   assert "shared_limit(" in source
   assert source.count("@_public_data_limit\n") == 2
+
+
+def test_a_read_fault_fails_closed_as_404_not_500(client, auth, monkeypatch):
+  """An EIO reading a stored value must 404, not escape as a 500.
+
+  read_json_file opens the file, then fstat/read can still fault (EIO, EINTR);
+  those must collapse to the same "not found" as any other unreadable value.
+  """
+  from app import artifact_data
+
+  app_id = _create_app(client, auth)
+  assert _write_value(client, auth, app_id, "deck", "score", {"v": 1}).status_code == 204
+
+  real_fstat = os.fstat
+
+  def _boom(fd):
+    raise OSError("simulated EIO")
+
+  monkeypatch.setattr(artifact_data.os, "fstat", _boom)
+  response = client.get(
+    f"/api/apps/{app_id}/artifact-data/deck/score", headers=auth,
+  )
+  monkeypatch.setattr(artifact_data.os, "fstat", real_fstat)
+  assert response.status_code == 404, response.text
+
+
+def test_usage_and_listing_still_agree_after_the_shared_scan(client, auth):
+  """The shared entry iterator keeps list (lenient) and usage (strict) aligned."""
+  from app.artifact_data import artifact_usage, list_artifact_keys
+
+  app_id = _create_app(client, auth)
+  for key in ("a", "b", "c"):
+    assert _write_value(client, auth, app_id, "deck", key, {"k": key}).status_code == 204
+  root = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "artifact-data" / "deck"
+  )
+  assert list_artifact_keys(root) == ["a", "b", "c"]
+  total, count = artifact_usage(root)
+  assert count == 3 and total > 0
+
+  # usage stays STRICT: a non-regular entry is an error, not a skipped row.
+  (root / "sub").mkdir()
+  try:
+    artifact_usage(root)
+    assert False, "usage must reject a non-file entry"
+  except Exception as exc:
+    assert "non-file" in str(exc)
+  # listing stays LENIENT: the same directory just omits it.
+  assert list_artifact_keys(root) == ["a", "b", "c"]

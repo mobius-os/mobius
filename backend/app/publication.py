@@ -192,16 +192,23 @@ def read_publication_record(settings, token: str) -> PublicationRecord | None:
     raw = os.read(fd, _REGISTRY_READ_MAX + 1)
     if len(raw) != info.st_size or len(raw) > _REGISTRY_READ_MAX:
       raise InvalidPublicationRegistry("registry record changed while reading")
+  except OSError as exc:
+    # A read fault means the record is not trustworthy right now: fail closed
+    # (it stays a reservation) rather than escaping as an unhandled 500.
+    raise InvalidPublicationRegistry("registry record is unreadable") from exc
   finally:
-    os.close(fd)
+    try:
+      os.close(fd)
+    except OSError:
+      pass
   return _decode_record(token, raw)
 
 
 def _record_bytes(record: PublicationRecord) -> bytes:
-  if record.state not in _REGISTRY_STATES:
-    raise InvalidPublicationRegistry("invalid registry state")
   # Round-trip through the strict decoder before a security record becomes
   # durable; callers cannot accidentally persist a coercive/partial schema.
+  # (The decoder validates state, id, gen, project, and timestamp, so no
+  # separate pre-check is needed here.)
   raw = json.dumps(
     record.as_json(), ensure_ascii=False, sort_keys=True, separators=(",", ":"),
   ).encode("utf-8")
