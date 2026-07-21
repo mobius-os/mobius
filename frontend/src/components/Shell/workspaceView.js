@@ -15,6 +15,7 @@
 // clearing it re-derives the ordinary multi-pane view with no remount.
 
 import * as paneModel from './paneModel.js'
+import * as tabModel from './tabModel.js'
 
 // ── Mode-transition motion (exit-presentation v2) ────────────────────────────
 // The presentation module owns the timing + the pure plan builders; the state
@@ -120,12 +121,36 @@ function byVisualOrder(a, b) {
 //     every painted leaf out over the mounted destination (underlayKey = target;
 //     null = the opaque home background). Never promote the focused pane to
 //     manufacture a correspondence single mode will not paint.
-export function deriveExitPlan({ workspace, projection, contentRect }) {
+export function deriveExitPlan({
+  workspace, projection, contentRect,
+  settingsDestination = false, immersiveHolderId = null,
+}) {
   const leaves = visibleLeafDescriptors(workspace, projection)
   if (leaves.length === 0) return null // empty tree → instant flip, no descriptor
-  const target = exitTargetKey(workspace)
+  // The concrete slot the single world seeds — the DEFAULT destination.
+  const slotTarget = exitTargetKey(workspace)
+  // HONEST DESTINATION (M2): classify against what the single world will ACTUALLY
+  // paint on completion, not the slot the tree seeds beneath a takeover/immersive-
+  // solo — else the takeover/immersive pops over the promoted-or-revealed slot when
+  // the beat ends, breaking the v2 "visually identical completion" contract.
+  //   - A retained immersive holder solos over the WHOLE viewport (header gone), a
+  //     rect the beat cannot honestly latch while the header is still painted and
+  //     the mode is still 'panes'. An honest INSTANT beats a false animation that
+  //     jumps at completion, so classify it instant (return null).
+  if (!settingsDestination
+      && immersiveHolderId != null
+      && slotTarget === `app:${immersiveHolderId}`) {
+    return null
+  }
+  //   - A suspended Settings takeover paints full-bleed OVER the slot → world reveal
+  //     to the mounted-hidden Settings surface (part-2 F3), never the slot the
+  //     takeover then covers. modeMachine stays ignorant of what Settings means; the
+  //     underlayKey just names the destination wrapper the renderer paints beneath.
+  const target = settingsDestination ? tabModel.SETTINGS_TAB_KEY : slotTarget
   const dest = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
-  const promoteLeaf = target ? leaves.find(l => l.activeKey === target) : null
+  // A Settings destination is always a world reveal (never a promote), even if a
+  // builder Settings tab happens to be a visible leaf.
+  const promoteLeaf = (target && !settingsDestination) ? leaves.find(l => l.activeKey === target) : null
 
   const participants = []
   const completionNames = new Set()
@@ -156,7 +181,14 @@ export function deriveExitPlan({ workspace, projection, contentRect }) {
     // the last card put away.
     underlayKey = target // null = home reveal (opaque --bg background)
     const focusedId = workspace.focusedPaneId
-    const ordered = leaves.slice().sort(byVisualOrder)
+    // The underlay is the stationary DESTINATION, so a visible leaf that IS the
+    // underlay (a builder Settings tab equal to the takeover destination) never
+    // also deals out. For an ordinary tree-absent chat/app slot this filters
+    // nothing — it was not a visible leaf, or the promote branch would have claimed
+    // it. If it leaves nothing to deal out (destination is the sole surface), the
+    // beat has no honest motion → instant flip.
+    const ordered = leaves.filter(l => l.activeKey !== target).sort(byVisualOrder)
+    if (ordered.length === 0) return null
     const focusedIdx = ordered.findIndex(l => l.paneId === focusedId)
     if (focusedIdx !== -1) ordered.push(ordered.splice(focusedIdx, 1)[0])
     ordered.forEach((l, i) => {

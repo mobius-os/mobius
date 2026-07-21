@@ -357,6 +357,17 @@ export default function Shell() {
     const drawer = document.getElementById('navigation-drawer')
     if (drawer?.contains(document.activeElement)) immersiveExitRef.current?.focus()
   }, [immersiveActive])
+  // HONEST EXIT DESTINATION (M2): the exit-plan classifier needs to know what the
+  // SINGLE world will actually paint on completion, not just the slot the tree
+  // seeds. A suspended single-world takeover (settingsOpenRaw) paints Settings over
+  // the slot; a retained immersive request (immersiveAppId) solos the holder over
+  // the viewport. Mirrored into refs so the toggle callback (stable identity, no
+  // dep churn) and the undo keydown handler (deps [dispatchWorkspace, mode]) both
+  // read the LIVE values without a stale closure or re-registering their listeners.
+  const settingsDestinationRef = useRef(settingsOpenRaw)
+  settingsDestinationRef.current = settingsOpenRaw
+  const immersiveHolderRef = useRef(immersiveAppId)
+  immersiveHolderRef.current = immersiveAppId
 
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
@@ -1297,7 +1308,13 @@ export default function Shell() {
     // null plan (empty tree) is an instant flip. Settings needs no conversion — its
     // tab SURVIVES the flip and single mode paints its own slot (never Settings).
     const presentation = leavingBuilder
-      ? deriveExitPlan({ workspace: ws, projection, contentRect })
+      ? deriveExitPlan({
+        workspace: ws, projection, contentRect,
+        // M2: reveal to Settings / classify immersive instant, not the slot the
+        // takeover or immersive-solo covers at completion.
+        settingsDestination: settingsDestinationRef.current,
+        immersiveHolderId: immersiveHolderRef.current,
+      })
       : deriveEnterPlan({ workspace: ws, projection })
     // The controller owns the beat + supersession; the workspace owns the durable
     // flip + the seed-once slot. Both dispatch here so they batch as ONE transaction
@@ -1395,6 +1412,10 @@ export default function Shell() {
             })
             : deriveExitPlan({
               workspace: wsState.ws, projection: scene.projection, contentRect: scene.contentRect,
+              // M2: same honest-destination classification for an undo that exits
+              // builder — Settings/immersive still own the single world it lands in.
+              settingsDestination: settingsDestinationRef.current,
+              immersiveHolderId: immersiveHolderRef.current,
             })
           mode.undo({ restoredMode, presentation })
         }
@@ -3088,23 +3109,31 @@ export default function Shell() {
             regardless of the sibling app/chat arrays' lengths, preserving
             SettingsView identity across the tab<->overlay conversion. */}
         {settingsMounted && (() => {
-          // Settings never occupies the slot (target/underlay), so it is only ever a
-          // DEAL-OUT participant — a builder Settings tab dealing out on exit.
-          const settingsMotion = wrapperMotion(SETTINGS_KEY)
-          const settingsPos = settingsPaned
+          // Settings plays TWO possible exit-beat roles. As a builder Settings TAB
+          // it is a DEAL-OUT participant (settingsMotion). As the honest destination
+          // of a suspended single-world takeover (M2) it is the world-reveal
+          // UNDERLAY: the mounted-hidden surface painted full-bleed BENEATH the
+          // dealing tree, so the takeover no longer snaps over a revealed slot at
+          // completion. The classifier excludes the settings leaf from participants
+          // when it is the underlay, so these two roles never coincide.
+          const settingsUnderlay = isUnderlay(SETTINGS_KEY)
+          const settingsMotion = settingsUnderlay ? null : wrapperMotion(SETTINGS_KEY)
+          const settingsPos = (!settingsUnderlay && settingsPaned)
             ? { top: settingsPaned.y, left: settingsPaned.x, width: settingsPaned.w, height: settingsPaned.h }
             : null
           return (
           <div
             key="settings"
-            data-tab-key={settingsPaned ? SETTINGS_KEY : undefined}
+            data-tab-key={(!settingsUnderlay && settingsPaned) ? SETTINGS_KEY : undefined}
             data-mode-motion={settingsMotion ? settingsMotion.motion : undefined}
-            className={settingsPaned
-              ? 'shell__view shell__view--paned shell__settings-view'
-              : `shell__view shell__settings-view ${settingsFullBleed ? 'shell__view--active' : ''}`}
+            className={settingsUnderlay
+              ? 'shell__view shell__view--exit-underlay shell__settings-view'
+              : (settingsPaned
+                ? 'shell__view shell__view--paned shell__settings-view'
+                : `shell__view shell__settings-view ${settingsFullBleed ? 'shell__view--active' : ''}`)}
             style={settingsMotion ? { ...(settingsPos || {}), ...settingsMotion.vars } : (settingsPos || undefined)}
-            inert={(exitBeatActive && !!settingsMotion) || undefined}
-            onPointerDownCapture={settingsPaned && !exitBeatActive
+            inert={(exitBeatActive && (!!settingsMotion || settingsUnderlay)) || undefined}
+            onPointerDownCapture={settingsPaned && !settingsUnderlay && !exitBeatActive
               ? () => dispatchWorkspace({ type: 'FOCUS', paneId: settingsPaned.paneId })
               : undefined}
           >

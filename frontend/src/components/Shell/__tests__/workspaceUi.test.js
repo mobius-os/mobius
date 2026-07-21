@@ -538,7 +538,12 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   // reveal the single world underneath), the 20ms stagger, and the FLIP rects — the
   // handler no longer computes settlePaneId / leavingPaneIds / dealMultiPane itself.
   assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
-  assert.match(handler, /deriveExitPlan\(\{ workspace: ws, projection, contentRect \}\)/)
+  assert.match(handler, /deriveExitPlan\(\{\s*\n\s*workspace: ws, projection, contentRect,/)
+  // M2: the exit plan is fed the honest single-world destination state (a suspended
+  // Settings takeover / a retained immersive holder), so it reveals to Settings or
+  // classifies immersive instant instead of promoting/revealing the covered slot.
+  assert.match(handler, /settingsDestination: settingsDestinationRef\.current/)
+  assert.match(handler, /immersiveHolderId: immersiveHolderRef\.current/)
   assert.doesNotMatch(handler, /settlePaneId|leavingPaneIds|dealMultiPane|multiPaneRef/)
   // Held tiled while the beat runs — from the ONE descriptor (INV 4).
   assert.match(shell, /const effectiveViewMode = modeMachine\.effectiveViewMode\(modeState/)
@@ -549,6 +554,10 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   assert.match(shell, /data-mode-motion=\{motion \? motion\.motion : undefined\}/)
   // The world-reveal underlay paints full-bleed beneath the deal (INV 5).
   assert.match(shell, /shell__view--exit-underlay/)
+  // M2: the Settings surface itself can be that underlay (a suspended takeover is the
+  // honest destination), painted full-bleed beneath the deal via its mounted-hidden
+  // wrapper rather than snapping over a revealed slot at completion.
+  assert.match(shell, /const settingsUnderlay = isUnderlay\(SETTINGS_KEY\)/)
   // CSS v2: promote FLIPs to full-bleed; deal-out drifts + fades. Both compositor-only.
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="promote"\] \{[\s\S]*?shell-mode-promote/)
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="deal-out"\] \{[\s\S]*?shell-mode-deal-out/)

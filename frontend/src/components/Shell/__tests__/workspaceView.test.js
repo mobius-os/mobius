@@ -475,6 +475,73 @@ test('deriveExitPlan: siblings deal out on a 20ms visual-order stagger', () => {
   assert.equal(plan.totalMs, MODE_MOTION.staggerMs + MODE_MOTION.exitItemMs)
 })
 
+// ── M2: exit plans must describe takeover / immersive destinations ────────────
+test('deriveExitPlan: M2 a suspended Settings takeover reveals to the Settings underlay, not the slot', () => {
+  // The single world paints Settings OVER the slot on completion, so the exit must
+  // reveal to the mounted-hidden Settings surface — never promote/reveal the slot
+  // the takeover then covers (the M2 honest-destination break).
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '42' } }
+  const plan = deriveExitPlan({
+    workspace: ws, projection: project(ws), contentRect: CONTENT,
+    settingsDestination: true,
+  })
+  assert.equal(plan.target, tabModel.SETTINGS_TAB_KEY)
+  assert.equal(plan.underlayKey, tabModel.SETTINGS_TAB_KEY, 'reveal to the Settings surface, not the slot')
+  assert.equal(plan.participants.some(p => p.motion === 'promote'), false, 'never a promote of the covered slot')
+  assert.ok(plan.participants.length >= 1 && plan.participants.every(p => p.motion === 'deal-out'))
+})
+
+test('deriveExitPlan: M2 an immersive-holder destination is an honest instant (null plan), not a false FLIP', () => {
+  // The single world will solo app 42 over the WHOLE viewport (header gone) — a
+  // rect the beat cannot honestly latch — so classify instant rather than FLIP to
+  // the content box and jump at completion.
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '42' } }
+  const plan = deriveExitPlan({
+    workspace: ws, projection: project(ws), contentRect: CONTENT,
+    immersiveHolderId: 42,
+  })
+  assert.equal(plan, null)
+})
+
+test('deriveExitPlan: M2 an immersive holder that is NOT the exit slot animates normally', () => {
+  // app 42 holds an immersive REQUEST, but the exit lands on chat 5 (the slot), so
+  // immersive will not apply — the plan is the ordinary promote, not a false instant.
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '5' } }
+  const plan = deriveExitPlan({
+    workspace: ws, projection: project(ws), contentRect: CONTENT,
+    immersiveHolderId: 42,
+  })
+  assert.ok(plan, 'a non-slot immersive request does not suppress the beat')
+  assert.equal(plan.target, 'chat:5')
+  assert.ok(plan.participants.some(p => p.motion === 'promote' && p.key === 'chat:5'))
+})
+
+test('deriveExitPlan: M2 Settings takes precedence over an immersive holder', () => {
+  // Both flags set: the takeover paints over everything (Settings wins), so classify
+  // as the Settings world reveal, NOT the immersive instant.
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '42' } }
+  const plan = deriveExitPlan({
+    workspace: ws, projection: project(ws), contentRect: CONTENT,
+    settingsDestination: true, immersiveHolderId: 42,
+  })
+  assert.ok(plan, 'Settings destination still animates (it is representable as an underlay)')
+  assert.equal(plan.underlayKey, tabModel.SETTINGS_TAB_KEY)
+})
+
+test('deriveExitPlan: M2 a builder Settings tab that IS the destination does not also deal out', () => {
+  // A visible Settings pane equals the takeover destination — it is the stationary
+  // underlay, so it is excluded from the dealing-out participants (never two roles).
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  ws = paneModel.splitPaneWithTab(ws, tabModel.settingsTab(), { paneId: ws.focusedPaneId, edge: 'right' })
+  const plan = deriveExitPlan({
+    workspace: ws, projection: project(ws), contentRect: CONTENT,
+    settingsDestination: true,
+  })
+  assert.equal(plan.underlayKey, tabModel.SETTINGS_TAB_KEY)
+  assert.equal(plan.participants.some(p => p.key === tabModel.SETTINGS_TAB_KEY), false, 'the underlay surface never deals out')
+  assert.ok(plan.participants.some(p => p.key === 'chat:5'), 'the sibling pane still deals out')
+})
+
 test('deriveEnterPlan: each visible leaf deals in, 20ms stagger, single-leaf longer', () => {
   const two = twoPaneChatAndApp()
   const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two) })
