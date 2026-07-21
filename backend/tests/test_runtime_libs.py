@@ -19,6 +19,7 @@ from app.app_compile_contract import (
   esbuild_command,
   esbuild_environment,
   mobius_runtime_path,
+  runtime_library_aliases,
   runtime_inject_path,
 )
 
@@ -71,8 +72,53 @@ def test_compile_command_bundles_the_complete_runtime_graph():
   assert not any(arg.startswith("--node-path") for arg in command)
   assert esbuild_environment()["NODE_PATH"]
   assert f"--alias:mobius-runtime={mobius_runtime_path()}" in command
+  for specifier, path in runtime_library_aliases():
+    assert f"--alias:{specifier}={path}" in command
   assert runtime_inject_path().is_file()
   assert mobius_runtime_path().is_file()
+
+
+def test_app_local_or_transitive_react_cannot_shadow_platform_runtime(tmp_path):
+  """App-local dependencies must not create a second React dispatcher."""
+  local_react = tmp_path / "node_modules" / "react"
+  local_react.mkdir(parents=True)
+  (local_react / "package.json").write_text(
+    json.dumps({"name": "react", "version": "0.0.0-shadow", "main": "index.js"})
+  )
+  (local_react / "index.js").write_text(
+    'export function useState() { throw new Error("shadow-react-copy") }\n'
+  )
+  local_widget = tmp_path / "node_modules" / "shadow-widget"
+  local_widget.mkdir()
+  (local_widget / "package.json").write_text(
+    json.dumps({"name": "shadow-widget", "version": "1.0.0", "main": "index.js"})
+  )
+  (local_widget / "index.js").write_text(
+    "import { useState } from 'react'\n"
+    "export function useWidget() { return useState('platform-react') }\n"
+  )
+  entry = tmp_path / "entry.jsx"
+  output = tmp_path / "app.js"
+  entry.write_text(
+    """import { useWidget } from 'shadow-widget'
+
+export default function Fixture() {
+  const [value] = useWidget()
+  return <div>{value}</div>
+}
+"""
+  )
+
+  completed = subprocess.run(
+    esbuild_command(entry, output),
+    capture_output=True,
+    check=False,
+    env=esbuild_environment(),
+    text=True,
+    timeout=ESBUILD_TIMEOUT_SECS,
+  )
+  assert completed.returncode == 0, completed.stderr
+  assert "shadow-react-copy" not in output.read_text()
 
 
 def test_app_hosts_have_no_runtime_import_map_or_static_module_imports():
