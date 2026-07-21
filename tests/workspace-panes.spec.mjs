@@ -1098,12 +1098,13 @@ test.describe('Builder-mode Settings', () => {
 
     // Entering single: the Settings tab STAYS in the preserved tree (identity
     // pinned to its original pane). The slot seed skips a Settings-focused pane
-    // (Settings never occupies the slot), so the single world opens on its home
-    // surface — no Settings takeover.
+    // (Settings never occupies the slot); the flip-site home resolution then
+    // seeds the freshest CHAT so the single world never paints the blank home —
+    // and never a Settings takeover.
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
     const single = await readWs(page)
     expect(whichPaneHas(single, 'settings:settings'), 'Settings tab survives entering single').toBe(settingsPane)
-    expect(single.singleScreen, 'Settings never seeds the single slot').toBe(null)
+    expect(single.singleScreen?.kind, 'the slot resolves to a chat home, never Settings').toBe('chat')
     await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(0)
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
 
