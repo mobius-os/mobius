@@ -1316,22 +1316,31 @@ export default function Shell() {
     // it opaquely; the controller drops it under reduced motion (commit directly). A
     // null plan (empty tree) is an instant flip. Settings needs no conversion — its
     // tab SURVIVES the flip and single mode paints its own slot (never Settings).
+    // Durable flip FIRST (the synchronous reducer-preview ref advances with it),
+    // then resolve a null/never-seeded slot to the freshest chat (e.g. a
+    // Settings-focused builder seeds no slot — without this the single world
+    // paints the blank home), THEN derive the plan from the post-resolution
+    // state so the beat animates toward the surface single mode will actually
+    // paint. Everything dispatches inside this one handler, so the workspace
+    // flip, the slot write, and the descriptor beat batch as ONE transaction
+    // (INV 2/3).
+    dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
+    if (leavingBuilder) resolveEmptySingleHome()
+    const settled = workspaceStateRef.current.ws
     const presentation = leavingBuilder
       ? deriveExitPlan({
-        workspace: ws, projection, contentRect,
+        // The tree is identical across the flip; only viewMode/slot advanced.
+        workspace: settled, projection, contentRect,
         // M2: reveal to Settings / classify immersive instant, not the slot the
         // takeover or immersive-solo covers at completion.
         settingsDestination: settingsDestinationRef.current,
         immersiveHolderId: immersiveHolderRef.current,
       })
-      : deriveEnterPlan({ workspace: ws, projection })
-    // The controller owns the beat + supersession; the workspace owns the durable
-    // flip + the seed-once slot. Both dispatch here so they batch as ONE transaction
-    // (INV 2/3). The honest `cause` ('hold'|'swipe'|'keyboard') threads from the
-    // gesture/keyboard caller (F13); an omitted cause falls back to 'toggle'.
+      : deriveEnterPlan({ workspace: settled, projection })
+    // The honest `cause` ('hold'|'swipe'|'keyboard') threads from the gesture/
+    // keyboard caller (F13); an omitted cause falls back to 'toggle'.
     mode.toggle({ cause, presentation })
-    dispatchWorkspace({ type: 'SET_VIEW_MODE', mode: 'toggle' })
-  }, [dispatchWorkspace, mode, projection, contentRect])
+  }, [dispatchWorkspace, mode, projection, contentRect, resolveEmptySingleHome])
   // The single-tap navigation toggle passed to ShellBrand (which now owns the logo
   // gesture + living halo). The HOLD / swipe / Shift+Enter mode toggle is
   // handleToggleViewMode above, passed to ShellBrand as onToggleMode.

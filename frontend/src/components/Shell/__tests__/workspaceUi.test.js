@@ -521,7 +521,10 @@ test('builder single-leaf: the strip deals with its pane, entry through the ONE 
   // v2: the handler builds the latched plan (deriveEnter/ExitPlan from the
   // projection) and dispatches the controller beat + the durable flip in the SAME
   // handler (INV 2/3). No Shell timer, no per-pane role plumbing.
-  assert.match(handler, /deriveEnterPlan\(\{ workspace: ws, projection \}\)/)
+  // The plan derives from the SETTLED post-flip state (the synchronous reducer
+  // preview): the durable flip and the null-slot home resolution land first, so
+  // the beat animates toward the surface single mode will actually paint.
+  assert.match(handler, /deriveEnterPlan\(\{ workspace: settled, projection \}\)/)
   assert.match(handler, /mode\.toggle\(\{ cause, presentation \}\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   assert.match(shell, /modeMachine\.transitionRootClass\(modeState/)
@@ -544,7 +547,10 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   // reveal the single world underneath), the 20ms stagger, and the FLIP rects — the
   // handler no longer computes settlePaneId / leavingPaneIds / dealMultiPane itself.
   assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
-  assert.match(handler, /deriveExitPlan\(\{\s*\n\s*workspace: ws, projection, contentRect,/)
+  assert.match(handler, /deriveExitPlan\(\{[\s\S]*?workspace: settled, projection, contentRect,/)
+  // A flip to single resolves a null/never-seeded slot to the freshest chat
+  // BEFORE the plan derives (no blank home, no dishonest beat target).
+  assert.match(handler, /if \(leavingBuilder\) resolveEmptySingleHome\(\)/)
   // M2: the exit plan is fed the honest single-world destination state (a suspended
   // Settings takeover / a retained immersive holder), so it reveals to Settings or
   // classifies immersive instant instead of promoting/revealing the covered slot.
