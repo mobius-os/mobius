@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
 import { api, setToken, BASE } from '../../api/client.js'
 import * as setupSession from '../../lib/setupSession.js'
-import { authQueries, settingsQueries } from '../../hooks/queries.js'
+import { authQueries } from '../../hooks/queries.js'
 import { resolveProviderAvailability } from '../../lib/providerAvailability.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
@@ -178,9 +177,7 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
  * provider connecting advances the wizard.
  */
 function ProviderStep({ onSkip, onContinue, configuredProviders }) {
-  const queryClient = useQueryClient()
   const [expanded, setExpanded] = useState('codex')
-  const settingsQuery = settingsQueries.owner.useQuery()
   const codexConnected = configuredProviders.has('codex')
   const claudeConnected = configuredProviders.has('claude')
   const connectedAny = codexConnected || claudeConnected
@@ -219,7 +216,6 @@ function ProviderStep({ onSkip, onContinue, configuredProviders }) {
         try { detail = (await res.json()).detail || '' } catch {}
         throw new Error(detail || 'Could not save agent defaults.')
       }
-      settingsQueries.owner.invalidate(queryClient)
       setAgentSaved(true)
       setTimeout(() => setAgentSaved(false), 1600)
       return true
@@ -229,7 +225,7 @@ function ProviderStep({ onSkip, onContinue, configuredProviders }) {
     } finally {
       setAgentSaving(false)
     }
-  }, [queryClient])
+  }, [])
 
   async function handleConnected(provider) {
     const preferred = firstConnectedProvider(provider) || provider
