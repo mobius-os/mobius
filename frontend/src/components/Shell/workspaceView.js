@@ -243,9 +243,17 @@ export function deriveExitPlan(input) {
 // when there is nothing to deal in. Entry is the reverse grammar: each visible
 // leaf (and its strip) deals in from a small offset with a 0/28/56/84 visual-order
 // stagger. Single-leaf entry uses the slightly longer paired gesture.
+//
+// FOCAL PANE FIRST (polish item 6): the user's focused builder pane deals in FIRST
+// (delay 0), even when it is not top-left, so entry's first impression restores the
+// surface the user cares about rather than reading as a generic top-left layout
+// reveal. Exit already keeps the focused pane LAST during world reveal — "focus first
+// entering, focus last leaving" is a strong, understandable asymmetry.
 export function deriveEnterPlan({ workspace, projection }) {
   const leaves = visibleLeafDescriptors(workspace, projection).sort(byVisualOrder)
   if (leaves.length === 0) return null
+  const focusedIndex = leaves.findIndex(leaf => leaf.paneId === workspace.focusedPaneId)
+  if (focusedIndex > 0) leaves.unshift(leaves.splice(focusedIndex, 1)[0])
   const single = leaves.length === 1
   const duration = single ? MODE_MOTION.enterSingleMs : MODE_MOTION.enterItemMs
   const participants = leaves.map((l, i) => ({

@@ -398,14 +398,25 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   // The 180° twist is a var flip in builder mode (not a transform override).
   assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?--logo-twist:\s*180deg/)
   assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?color:\s*var\(--accent\)/)
-  // Completion: spring (enter) overshoots 0.84→1 on a springy cubic; snap (exit) settles fast.
-  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-ignite 480ms cubic-bezier\(0\.22, 1\.6, 0\.36, 1\)/)
-  assert.match(shellCss, /\.shell__brand\.is-snapping \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-snap 150ms ease/)
+  // Completion: spring (enter) overshoots 0.84→1; snap (exit) settles fast. Polish
+  // item 5 puts these on the SAME beat as the panes (280ms ignite, not 480ms).
+  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-ignite 280ms cubic-bezier\(0\.16, 1, 0\.3, 1\)/)
+  assert.match(shellCss, /\.shell__brand\.is-snapping \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-snap 140ms cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
   assert.match(shellCss, /@keyframes shell-logo-ignite\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
   assert.match(shellCss, /@keyframes shell-logo-snap\s*\{[\s\S]*?scale:\s*0\.84/)
+  // Item 5: logo rotate, halo bloom, and wordmark tint ride the SAME beat classes as
+  // the panes (.shell--builder-entering/-exiting) instead of trailing them.
+  assert.match(shellCss, /\.shell--builder-entering \.shell__logo\s*\{[\s\S]*?rotate 260ms cubic-bezier\(0\.2, 1\.1, 0\.32, 1\)/)
+  assert.match(shellCss, /\.shell--builder-exiting \.shell__logo\s*\{[\s\S]*?rotate 220ms cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
+  assert.match(shellCss, /\.shell--builder-entering \.shell__logo-halo\s*\{\s*transition: opacity 160ms var\(--ease-mode-arrive\) 60ms/)
+  assert.match(shellCss, /\.shell--builder-exiting \.shell__logo-halo\s*\{\s*transition: opacity 100ms var\(--ease-mode-chrome\)/)
+  assert.match(shellCss, /\.shell--builder-entering \.shell__wordmark \{ transition-duration: 220ms; \}/)
+  assert.match(shellCss, /\.shell--builder-exiting \.shell__wordmark \{ transition-duration: 140ms; \}/)
   // The LIVING HALO: a radial-gradient element behind the mark, driven by the rAF
   // vars, lit only in builder mode, per-theme base alpha via --halo-alpha.
-  const halo = shellCss.match(/\.shell__logo-halo\s*\{[\s\S]*?\}/)?.[0] || ''
+  // Anchor to the BASE rule (newline-prefixed), not the beat-scoped
+  // `.shell--builder-* .shell__logo-halo` overrides added by polish item 5.
+  const halo = shellCss.match(/\n\.shell__logo-halo\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(halo, /radial-gradient/)
   assert.match(halo, /var\(--halo-alpha, 0\.5\)/)
   assert.match(halo, /translate:\s*0 0/)
@@ -583,6 +594,22 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   // Reduced motion drops any beat.
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell \[data-mode-motion\] \{ animation: none !important; \}/)
+})
+
+test('polish item 4: the world-reveal underlay breathes in 1.2%, atmospheric-only', () => {
+  // The destination starts very slightly enlarged and settles to rest — a 1.2% breathe
+  // instead of standing statically.
+  assert.match(css, /\.shell--builder-exiting \.shell__view--exit-underlay \{[\s\S]*?animation:\s*\n?\s*shell-mode-underlay-settle/)
+  const settle = css.match(/@keyframes shell-mode-underlay-settle\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(settle, /from \{ transform: scale\(1\.012\); opacity: 0\.96; \}/)
+  assert.match(settle, /to \{ transform: scale\(1\); opacity: 1; \}/)
+  // ATMOSPHERIC only: the breathe must NEVER gate completion, so workspaceView never
+  // names it (its completionNames are only promote/deal-out/deal-in).
+  const workspaceView = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(workspaceView, /underlay-settle/)
+  // Defensive reduced-motion rule (the doc's rule): drop the breathe under reduce.
+  const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(reduced, /\.shell--builder-exiting \.shell__view--exit-underlay \{ animation: none; \}/)
 })
 
 test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {

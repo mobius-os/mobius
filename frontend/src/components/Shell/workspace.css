@@ -42,14 +42,30 @@
 
 /* The revealed destination in a WORLD-REVEAL exit: the already-mounted target
    wrapper sits full-bleed BENEATH the dealing-out tree from the first exit frame.
-   It does not fade or scale — stable destination pixels make the outgoing cards
-   feel physical (exit-design v2 §Exit choreography). z:0 keeps it under both the
-   promote (z:2) and deal-out (z:4) layers; pointer-inert while covered. */
+   z:0 keeps it under both the promote (z:2) and deal-out (z:4) layers; pointer-inert
+   while covered. */
 .shell__view--exit-underlay {
   inset: 0;
   visibility: visible;
   pointer-events: none;
   z-index: 0;
+}
+/* Polish item 4: the destination BREATHES in by 1.2% instead of standing statically —
+   it starts very slightly enlarged (so the clipped content box never exposes a border
+   around it) and settles to rest as the cards deal away, so the reveal feels alive.
+   Purely ATMOSPHERIC: shell-mode-underlay-settle is deliberately absent from the
+   plan's completionNames, so it can NEVER gate the beat's completion. */
+.shell--builder-exiting .shell__view--exit-underlay {
+  transform-origin: 50% 50%;
+  animation:
+    shell-mode-underlay-settle
+    180ms
+    cubic-bezier(0.2, 0.7, 0.2, 1)
+    both;
+}
+@keyframes shell-mode-underlay-settle {
+  from { transform: scale(1.012); opacity: 0.96; }
+  to { transform: scale(1); opacity: 1; }
 }
 
 /* Promote: the survivor pane keeps its tiled content rect and FLIPs to cover the
@@ -619,4 +635,7 @@
   .shell--builder-exiting .workspace__pane-chip,
   .shell--builder-entering .workspace__divider,
   .shell--builder-entering .workspace__pane-chip { animation: none; }
+  /* The atmospheric underlay breathe is motion — drop it under reduced motion
+     (defensive parity; the controller never arms a beat here anyway). */
+  .shell--builder-exiting .shell__view--exit-underlay { animation: none; }
 }
