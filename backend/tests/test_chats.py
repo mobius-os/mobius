@@ -110,6 +110,11 @@ def test_create_chat_returns_canonical_owner_drawer_summary(client, auth):
   assert {key: body[key] for key in row} == row
   assert body["messages"] == []
 
+  detail = client.get(f"/api/chats/{body['id']}", headers=auth)
+  assert detail.status_code == 200
+  detail_body = detail.json()
+  assert body["detail"] == detail_body
+
 
 def test_update_chat_rejects_cross_site_request(client, auth, chat):
   cross = client.put(

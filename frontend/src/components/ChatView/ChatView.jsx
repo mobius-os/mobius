@@ -386,9 +386,10 @@ export default function ChatView({
   // Per-chat agent runtime config (provider, agent_settings_json,
   // effective_agent_settings, has_assistant_turns). Resolved by the
   // initial /chats/{id} fetch and used to drive ChatSettingsPanel
-  // (the model + effort picker inside the `+` popover). Stays null
-  // until the fetch lands; the picker simply hides until then.
-  const [chatInfo, setChatInfo] = useState(null)
+  // (the model + effort picker inside the `+` popover). A canonical create or
+  // earlier detail cache can provide it immediately; otherwise the picker
+  // stays hidden until the fetch lands.
+  const [chatInfo, setChatInfo] = useState(() => cached?.chatInfo ?? null)
   const [autoResumeSaving, setAutoResumeSaving] = useState(false)
   const [autoResumeError, setAutoResumeError] = useState('')
   const [autoResumeErrorSource, setAutoResumeErrorSource] = useState('')
@@ -1742,14 +1743,22 @@ export default function ChatView({
         // `+` popover's model picker silently vanished, leaving only Attach +
         // "What the agent knows". Setting it here keeps the picker present
         // regardless of the messages fast-path.
-        setChatInfo({
+        const nextChatInfo = {
           provider: data.provider || 'claude',
           created_by_app_id: data.created_by_app_id ?? null,
           agent_settings_json: data.agent_settings_json || null,
           effective: data.effective_agent_settings || {},
           has_assistant_turns: !!data.has_assistant_turns,
           auto_resume_on_limit: !!data.auto_resume_on_limit,
-        })
+        }
+        setChatInfo(nextChatInfo)
+        queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
+          ...(existing || {}),
+          running: !!data.running,
+          pending_messages: data.pending_messages || [],
+          pending_question_id: data.pending_question_id || null,
+          chatInfo: nextChatInfo,
+        }))
         if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
           setInitialEntryPhase(data.running ? 'catch-up' : 'ready')
           setLoading(false)
@@ -1784,12 +1793,6 @@ export default function ChatView({
         setServerRunningState(!!data.running)
         hadMessagesRef.current = refreshed.messages.length > 0
         setLiveQuestionId(data.pending_question_id || null)
-        queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
-          ...(existing || {}),
-          running: !!data.running,
-          pending_messages: data.pending_messages || [],
-          pending_question_id: data.pending_question_id || null,
-        }))
         // (chatInfo — the model/effort picker config — is snapshotted above,
         // before the behind-local guard, so the picker survives interactions.)
         // Feed the bridge gate with the data.running + last-msg

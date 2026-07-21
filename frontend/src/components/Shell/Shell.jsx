@@ -17,7 +17,13 @@ import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
-import { appQueries, chatQueries, modelQueries, ownerQueries } from '../../hooks/queries.js'
+import {
+  appQueries,
+  chatMessagesQueryKey,
+  chatQueries,
+  modelQueries,
+  ownerQueries,
+} from '../../hooks/queries.js'
 import { appVersionKey } from '../../lib/appVersion.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal } from '../../lib/chatRunSignal.js'
@@ -46,6 +52,7 @@ import {
 import { shouldDeferShellReload } from './shellReloadPolicy.js'
 import {
   addCreatedChatToList,
+  createdChatDetailCache,
   currentReusableEmptyChat,
   detailIsUntouchedEmptyChat,
 } from './newChatPolicy.js'
@@ -2562,14 +2569,17 @@ export default function Shell() {
         const res = await api.chats.create({ title: 'New chat' })
         const chat = await jsonOrThrow(res, 'Chat creation failed')
         chatId = chat.id
+        const detailCache = createdChatDetailCache(chat)
+        if (detailCache) {
+          queryClient.setQueryData(chatMessagesQueryKey(chatId), detailCache)
+        }
         queryClient.setQueryData(chatQueries.keys.all, current => {
           const next = addCreatedChatToList(current, chat)
           chatsRef.current = next
           return next
         })
-        // Navigation can start from the authoritative create response. Refresh
-        // the wider list beside ChatView's detail fetch instead of serializing
-        // both requests on the opening path.
+        // Navigation and first paint can start from the authoritative create
+        // response. Both wider caches revalidate off the opening path.
         void refreshChats()
       } catch {
         // Don’t leave a dead, drawer-still-open tap on a failed create.

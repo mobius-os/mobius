@@ -58,7 +58,11 @@ test.use({ serviceWorkers: 'block' })
  *   - /messages, /stream, /stop → benign stubs so a follow-on send
  *     (not exercised here) can't 500 and pollute the run
  *  Returns the `created` accumulator so the test can assert on it. */
-async function routeShell(page, { createStatus = 200, gatePostCreateList = false } = {}) {
+async function routeShell(page, {
+  createStatus = 200,
+  gatePostCreateList = false,
+  gateDetail = false,
+} = {}) {
   await page.setViewportSize({ width: 412, height: 915 })
 
   const created = []
@@ -68,6 +72,11 @@ async function routeShell(page, { createStatus = 200, gatePostCreateList = false
     ? new Promise(resolve => { releasePostCreateList = resolve })
     : null
   created.releasePostCreateList = releasePostCreateList
+  let releaseDetail = () => {}
+  const detailGate = gateDetail
+    ? new Promise(resolve => { releaseDetail = resolve })
+    : null
+  created.releaseDetail = releaseDetail
   await page.route(/\/api\/chats$/, async route => {
     const req = route.request()
     if (req.method() === 'GET') {
@@ -82,7 +91,7 @@ async function routeShell(page, { createStatus = 200, gatePostCreateList = false
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(created),
+        body: JSON.stringify(created.map(({ messages, detail, ...row }) => row)),
       })
     }
     if (req.method() === 'POST') {
@@ -96,13 +105,38 @@ async function routeShell(page, { createStatus = 200, gatePostCreateList = false
       }
       let body = {}
       try { body = JSON.parse(req.postData() || '{}') } catch { /* ignore */ }
+      const id = `bootstrap-${created.length}-${Date.now()}`
+      const title = body.title || 'New chat'
+      const detail = {
+        id,
+        title,
+        messages: [],
+        pending_messages: [],
+        total: 0,
+        offset: 0,
+        running: false,
+        pending_question_id: null,
+        session_id: null,
+        provider: 'claude',
+        created_by_app_id: null,
+        auto_resume_on_limit: true,
+        agent_settings_json: null,
+        effective_agent_settings: { model: 'claude-current', effort: 'medium' },
+        has_assistant_turns: false,
+      }
       const chat = {
-        id: `bootstrap-${created.length}-${Date.now()}`,
-        title: body.title || 'New chat',
+        id,
+        title,
         has_messages: false,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
-        pending_messages: [],
+        activity_at: null,
+        pinned_at: null,
+        created_by_app_id: null,
+        run_status: null,
+        running: false,
+        messages: [],
+        detail,
       }
       created.push(chat)
       return route.fulfill({
@@ -117,16 +151,20 @@ async function routeShell(page, { createStatus = 200, gatePostCreateList = false
   // A just-created chat's detail fetch (ChatView mounts on it and
   // fetches /chats/{id}?limit=20). Echo the requested id back and
   // return an empty message list — the chat is brand new.
-  await page.route(/\/api\/chats\/[^/?]+(\?.*)?$/, route => {
+  await page.route(/\/api\/chats\/[^/?]+(\?.*)?$/, async route => {
     if (route.request().method() !== 'GET') return route.fallback()
+    if (detailGate) await detailGate
     const m = route.request().url().match(/\/api\/chats\/([^/?]+)/)
     const id = m ? decodeURIComponent(m[1]) : 'bootstrap'
+    const detail = created.find(chat => chat.id === id)?.detail
     route.fulfill({
       status: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify(detail || {
         id, title: 'New chat', messages: [],
-        pending_messages: [], has_messages: false,
+        pending_messages: [], total: 0, offset: 0, running: false,
+        pending_question_id: null, session_id: null, provider: 'claude',
+        effective_agent_settings: {}, has_assistant_turns: false,
       }),
     })
   })
@@ -233,8 +271,11 @@ test.describe('Bootstrap seam: empty-chat auto-create', () => {
     expect(active).toBe(created[0].id)
   })
 
-  test('opens the created chat before the background list refresh resolves', async ({ page }) => {
-    const created = await routeShell(page, { gatePostCreateList: true })
+  test('paints the created chat before background detail and list refreshes resolve', async ({ page }) => {
+    const created = await routeShell(page, {
+      gatePostCreateList: true,
+      gateDetail: true,
+    })
     await cleanSession(page)
 
     try {
@@ -244,8 +285,10 @@ test.describe('Bootstrap seam: empty-chat auto-create', () => {
         () => page.evaluate(() => localStorage.getItem('moebius_active_chat')),
         { timeout: 2000 },
       ).toBe(created[0].id)
+      await expect(page.locator('.chat__empty-wrap')).toBeVisible()
     } finally {
       created.releasePostCreateList()
+      created.releaseDetail()
     }
 
     await waitForShell(page)

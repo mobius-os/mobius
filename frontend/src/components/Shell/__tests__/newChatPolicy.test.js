@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   addCreatedChatToList,
+  createdChatDetailCache,
   currentReusableEmptyChat,
   detailIsUntouchedEmptyChat,
 } from '../newChatPolicy.js'
@@ -88,6 +89,43 @@ test('fresh detail fails closed on partial or malformed responses', () => {
   assert.equal(detailIsUntouchedEmptyChat(untouchedDetail({ total: '0' })), false)
 })
 
+test('a canonical create response becomes an authoritative empty detail cache', () => {
+  const cache = createdChatDetailCache({
+    id: 'new',
+    detail: untouchedDetail({
+      id: 'new',
+      provider: 'codex',
+      created_by_app_id: null,
+      agent_settings_json: null,
+      effective_agent_settings: { model: 'gpt-current', effort: 'medium' },
+      has_assistant_turns: false,
+      auto_resume_on_limit: true,
+      offset: 0,
+    }),
+  })
+
+  assert.deepEqual(cache, {
+    messages: [],
+    pending_messages: [],
+    pending_question_id: null,
+    total: 0,
+    offset: 0,
+    running: false,
+    chatInfo: {
+      provider: 'codex',
+      created_by_app_id: null,
+      agent_settings_json: null,
+      effective: { model: 'gpt-current', effort: 'medium' },
+      has_assistant_turns: false,
+      auto_resume_on_limit: true,
+    },
+  })
+})
+
+test('an older partial create response leaves the detail fetch path intact', () => {
+  assert.equal(createdChatDetailCache({ id: 'old', messages: [] }), null)
+})
+
 test('a created chat enters the cache without displacing pinned chats', () => {
   const updatedAt = '2026-07-20T12:00:00.000Z'
   const result = addCreatedChatToList([
@@ -104,12 +142,14 @@ test('a created chat enters the cache without displacing pinned chats', () => {
     run_status: null,
     running: false,
     messages: [],
+    detail: untouchedDetail(),
   })
 
   assert.deepEqual(result.map(chat => chat.id), ['pinned', 'new', 'older'])
   assert.equal(result[1].updated_at, updatedAt)
   assert.equal(result[1].has_messages, false)
   assert.equal('messages' in result[1], false)
+  assert.equal('detail' in result[1], false)
 })
 
 test('a created chat replaces a duplicate cache row', () => {

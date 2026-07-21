@@ -231,6 +231,58 @@ def _owner_chat_summary(chat: models.Chat) -> dict:
   }
 
 
+def _chat_detail_response(
+  chat: models.Chat,
+  *,
+  limit: int = 20,
+  before: int | None = None,
+  expose_session: bool = True,
+) -> dict:
+  """Canonical paginated chat payload shared by create and detail reads."""
+  from app.chat_transcript import materialized_messages
+  from app.providers import effective_agent_settings
+
+  all_msgs = materialized_messages(chat)
+  total = len(all_msgs)
+  if before is not None:
+    start = max(0, before - limit)
+    page = all_msgs[start:before]
+  else:
+    start = max(0, total - limit)
+    page = all_msgs[start:]
+
+  provider = chat.provider or "claude"
+  pending_question = questions.get(chat.id)
+  settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
+  return {
+    "id": chat.id,
+    "title": chat.title,
+    # Persisted blocks are already bounded at the write funnel; the detail
+    # serializer returns them as stored instead of doing work on every read.
+    "messages": page,
+    "pending_messages": list(chat.pending_messages or []),
+    "total": total,
+    "offset": start,
+    "running": is_chat_running(chat.id),
+    "pending_question_id": (
+      pending_question.question_id if pending_question is not None else None
+    ),
+    "session_id": chat.session_id if expose_session else None,
+    "provider": provider,
+    "created_by_app_id": chat.created_by_app_id,
+    "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
+    "agent_settings_json": settings_obj,
+    "effective_agent_settings": effective_agent_settings(
+      get_settings().data_dir,
+      settings_obj,
+      provider=provider,
+    ),
+    "has_assistant_turns": any(
+      message.get("role") == "assistant" for message in all_msgs
+    ),
+  }
+
+
 @router.get("")
 def list_chats(
   include_app_chats: bool = False,
@@ -440,10 +492,14 @@ def create_chat(
   db.commit()
   db.refresh(chat)
   activity.log_event("chat_created", chat_id=chat.id)
-  # Keep messages for existing create callers while returning the exact drawer
-  # row shape so clients can navigate immediately without fabricating metadata
-  # or waiting for a second list request.
-  return {**_owner_chat_summary(chat), "messages": chat.messages}
+  # Preserve the flat summary + messages fields existing callers consume while
+  # carrying the exact detail contract under its own forward-compatible key.
+  detail = _chat_detail_response(chat)
+  return {
+    **_owner_chat_summary(chat),
+    "messages": detail["messages"],
+    "detail": detail,
+  }
 
 
 @router.put("/{chat_id}", dependencies=[Depends(reject_cross_site)])
@@ -794,58 +850,14 @@ def get_chat(
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:read")
   chat = get_active_chat_for_principal(db, chat_id, principal)
-  from app.chat_transcript import materialized_messages
-  all_msgs = materialized_messages(chat)
-  total = len(all_msgs)
-  if before is not None:
-    start = max(0, before - limit)
-    page = all_msgs[start:before]
-  else:
-    start = max(0, total - limit)
-    page = all_msgs[start:]
-  # Compute the effective per-turn agent settings — provider-aware
-  # so the picker always has a real model + effort to show, even for
-  # legacy chats that never got a create_chat snapshot.
-  from app.config import get_settings as get_app_settings
-  from app.providers import effective_agent_settings
-  data_dir = get_app_settings().data_dir
-  has_assistant_turns = any(
-    m.get("role") == "assistant" for m in all_msgs
-  )
-  provider = chat.provider or "claude"
-  pending_question = questions.get(chat_id)
-  return {
-    "id": chat.id,
-    "title": chat.title,
-    # The read path ships persisted blocks as-is: every large tool output is
-    # reduced to a bounded excerpt at the write funnel (chat.py
-    # _ChatEventSink._reduce_tool_output) and its full text stashed in
-    # tool_outputs, so there is no fat inline block left to trim on read. An
-    # instance carrying pre-card-221 transcripts must run
-    # scripts/migrate_chat_identity once to extract any remaining inline fat
-    # blocks (the old GET-boundary reducer was retired fix-forward).
-    "messages": page,
-    "pending_messages": list(chat.pending_messages or []),
-    "total": total,
-    "offset": start,
-    "running": is_chat_running(chat_id),
-    "pending_question_id": (
-      pending_question.question_id if pending_question is not None else None
-    ),
+  return _chat_detail_response(
+    chat,
+    limit=limit,
+    before=before,
     # Provider thread ids are backend continuity state, not part of the
     # embedded participant surface.
-    "session_id": None if principal.scope == "chat_embed" else chat.session_id,
-    "provider": provider,
-    "created_by_app_id": chat.created_by_app_id,
-    "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
-    "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
-    "effective_agent_settings": effective_agent_settings(
-      data_dir,
-      _coerce_agent_settings(chat.agent_settings_json) or None,
-      provider=provider,
-    ),
-    "has_assistant_turns": has_assistant_turns,
-  }
+    expose_session=principal.scope != "chat_embed",
+  )
 
 
 @router.get("/{chat_id}/tool-output/{tool_use_id}", response_class=PlainTextResponse)

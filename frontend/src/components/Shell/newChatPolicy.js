@@ -52,6 +52,35 @@ export function detailIsUntouchedEmptyChat(detail) {
   return true
 }
 
+/** Convert a complete create response into ChatView's persisted cache shape.
+ * Older/local backends that return only the historical summary fail closed and
+ * keep the existing detail fetch path. */
+export function createdChatDetailCache(created) {
+  const detail = created?.detail
+  if (!detailIsUntouchedEmptyChat(detail)) return null
+  if (typeof detail.provider !== 'string') return null
+  if (!detail.effective_agent_settings
+      || typeof detail.effective_agent_settings !== 'object') return null
+  if (typeof detail.has_assistant_turns !== 'boolean') return null
+
+  return {
+    messages: detail.messages,
+    pending_messages: detail.pending_messages,
+    pending_question_id: detail.pending_question_id,
+    total: detail.total,
+    offset: detail.offset,
+    running: detail.running,
+    chatInfo: {
+      provider: detail.provider,
+      created_by_app_id: detail.created_by_app_id ?? null,
+      agent_settings_json: detail.agent_settings_json || null,
+      effective: detail.effective_agent_settings,
+      has_assistant_turns: detail.has_assistant_turns,
+      auto_resume_on_limit: !!detail.auto_resume_on_limit,
+    },
+  }
+}
+
 /** Publish the narrow POST /chats response into the list cache immediately.
  * The authoritative list still revalidates in the background; this row exists
  * so navigation and cross-tab guards do not wait for a second request. */
@@ -66,7 +95,7 @@ export function addCreatedChatToList(
     : []
   const firstUnpinned = existing.findIndex(chat => !chat.pinned_at)
   const insertAt = firstUnpinned === -1 ? existing.length : firstUnpinned
-  const { messages, ...serverRow } = created
+  const { messages, detail, ...serverRow } = created
   const row = {
     ...serverRow,
     has_messages: typeof created.has_messages === 'boolean'
