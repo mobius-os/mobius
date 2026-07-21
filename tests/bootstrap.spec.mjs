@@ -338,7 +338,7 @@ test.describe('Unauthenticated startup', () => {
 
     await page.getByRole('button', { name: 'Try again' }).click()
     await expect.poll(() => checks).toBe(2)
-    await expect(page.getByRole('heading', { name: 'Create your account' }))
+    await expect(page.getByRole('heading', { name: 'Create your home key' }))
       .toBeVisible({ timeout: 10000 })
   })
 })

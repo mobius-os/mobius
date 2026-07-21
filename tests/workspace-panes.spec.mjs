@@ -1062,7 +1062,7 @@ test.describe('Builder-mode Settings', () => {
     expect(Object.keys(ws.panes).length).toBe(2)
   })
 
-  test('mode flip preserves the builder Settings tab behind the single takeover', async ({ page }) => {
+  test('mode flip preserves the builder Settings tab while single stays independent', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'stConvA')
     const b = await createTaggedChat(page, 'stConvB')
@@ -1083,11 +1083,13 @@ test.describe('Builder-mode Settings', () => {
     await page.keyboard.press('Shift+Enter')
 
     // The two navigation worlds retain their own state: entering single hides
-    // (but does not destroy) the builder Settings tab and paints the takeover.
+    // (but does not destroy) the builder Settings tab. It does not synthesize
+    // a single-mode Settings takeover from builder-only focus.
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
     expect(whichPaneHas(await readWs(page), 'settings:settings'), 'builder tab is preserved')
       .toBe(settingsPane)
-    await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(1)
+    await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(0)
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
 
     // Flip back to builder: the same Settings tab becomes visible again.
     await page.getByRole('button', { name: 'Toggle navigation' }).focus()
