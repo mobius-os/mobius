@@ -19,6 +19,8 @@ dist/
 .vite-tmp-rebuild/
 .dist-next/
 .dist-old/
+# Legacy/ad-hoc frontend publish backups are generated artifacts too.
+dist.old/
 .dist-staging/
 .dist-rebuild/
 .assets-attic/

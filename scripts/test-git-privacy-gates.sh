@@ -40,6 +40,11 @@ ln -s "$TMP/private-docs" "$repo/docs"
 git -C "$repo" check-ignore -q docs || fail ".gitignore missed docs symlink"
 rm "$repo/docs"
 
+# A legacy frontend publish-backup spelling once entered production as a
+# 100-file local reconciliation commit. It is generated output, not source.
+git -C "$repo" check-ignore -q frontend/dist.old/assets/app.js \
+  || fail ".gitignore missed frontend/dist.old build backup"
+
 git -C "$repo" add .gitignore scripts
 git -C "$repo" commit -qm baseline
 
