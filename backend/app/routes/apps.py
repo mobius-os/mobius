@@ -2675,11 +2675,16 @@ def get_frame(
   # worker can intercept and serve a cached frame offline. Apply the equivalent
   # sandbox on the RESPONSE: the loaded app still receives an opaque origin,
   # including when this backend is reached without the edge proxy. Caddy adds
-  # the full resource policy while preserving this sandbox contract.
+  # the full resource policy while preserving this sandbox contract. Popups
+  # opened by an explicit app link must escape the opaque-origin sandbox:
+  # otherwise the destination inherits Origin: null and sites such as GitHub
+  # load their document but fail same-origin API/storage requests. This does
+  # not relax the app frame itself or let it navigate the owner shell.
   headers = {
     "Cache-Control": "no-cache",
     "Content-Security-Policy": (
       "sandbox allow-scripts allow-forms allow-popups "
+      "allow-popups-to-escape-sandbox "
       "allow-top-navigation-by-user-activation"
     ),
   }

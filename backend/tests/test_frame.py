@@ -83,6 +83,10 @@ def test_frame_returns_etag_and_cache_control(client, owner_token):
   assert "no-cache" in r.headers.get("cache-control", "")
   sandbox = r.headers.get("content-security-policy", "")
   assert "sandbox allow-scripts" in sandbox
+  # A target=_blank link must open as a normal destination page rather than
+  # inheriting this frame's opaque origin (which breaks same-origin fetches and
+  # signed-in storage on sites such as GitHub).
+  assert "allow-popups-to-escape-sandbox" in sandbox
   assert "allow-same-origin" not in sandbox
 
 
