@@ -89,24 +89,34 @@ test('fresh detail fails closed on partial or malformed responses', () => {
 })
 
 test('a created chat enters the cache without displacing pinned chats', () => {
-  const now = '2026-07-20T12:00:00.000Z'
+  const updatedAt = '2026-07-20T12:00:00.000Z'
   const result = addCreatedChatToList([
     { id: 'pinned', pinned_at: '2026-07-19T10:00:00.000Z' },
     { id: 'older', pinned_at: null },
   ], {
-    id: 'new', title: 'New chat', messages: [],
-  }, now)
+    id: 'new',
+    title: 'New chat',
+    updated_at: updatedAt,
+    activity_at: null,
+    pinned_at: null,
+    has_messages: false,
+    created_by_app_id: null,
+    run_status: null,
+    running: false,
+    messages: [],
+  })
 
   assert.deepEqual(result.map(chat => chat.id), ['pinned', 'new', 'older'])
-  assert.equal(result[1].updated_at, now)
+  assert.equal(result[1].updated_at, updatedAt)
   assert.equal(result[1].has_messages, false)
+  assert.equal('messages' in result[1], false)
 })
 
 test('a created chat replaces a duplicate cache row', () => {
   const result = addCreatedChatToList([
     { id: 'same', title: 'stale', pinned_at: null },
   ], {
-    id: 'same', title: 'Fresh', messages: [{ role: 'user' }],
+    id: 'same', title: 'Fresh', has_messages: true, messages: [{ role: 'user' }],
   })
 
   assert.equal(result.length, 1)

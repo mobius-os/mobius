@@ -58,7 +58,6 @@ export function detailIsUntouchedEmptyChat(detail) {
 export function addCreatedChatToList(
   current,
   created,
-  now = new Date().toISOString(),
 ) {
   if (!created?.id) throw new Error('Created chat is missing an id')
 
@@ -67,16 +66,12 @@ export function addCreatedChatToList(
     : []
   const firstUnpinned = existing.findIndex(chat => !chat.pinned_at)
   const insertAt = firstUnpinned === -1 ? existing.length : firstUnpinned
+  const { messages, ...serverRow } = created
   const row = {
-    id: created.id,
-    title: created.title || 'New chat',
-    updated_at: created.updated_at || now,
-    activity_at: created.activity_at || now,
-    pinned_at: null,
-    has_messages: Array.isArray(created.messages) && created.messages.length > 0,
-    created_by_app_id: created.created_by_app_id ?? null,
-    run_status: null,
-    running: false,
+    ...serverRow,
+    has_messages: typeof created.has_messages === 'boolean'
+      ? created.has_messages
+      : Array.isArray(messages) && messages.length > 0,
   }
 
   return [

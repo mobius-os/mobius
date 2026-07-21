@@ -33,16 +33,16 @@ const SOURCE = readFileSync(
 test('ProviderAuth does NOT call useQuery internally', () => {
   // After 036 commit 3b, the `authenticated` fact comes in via
   // props from SettingsView and SetupWizard's ProviderStep. The
-  // canonical useQuery for claude-status lives at the parent
+  // canonical all-provider query lives at the parent
   // level so the same render tree never reads the same fact
   // twice. A regression that reinstates useQuery would silently
   // bring back the duplication.
   assert.ok(!/\buseQuery\b/.test(SOURCE),
-    `ProviderAuth.jsx must not call useQuery. After ticket 036 commit 3b, the parent (SettingsView or SetupWizard) owns the claude-status query and passes \`authenticated\` as a prop.`)
+    `ProviderAuth.jsx must not call useQuery. The parent owns the canonical provider-status query and passes \`authenticated\` as a prop.`)
 })
 
 test('ProviderAuth does NOT call any *.useQuery() factory either', () => {
-  // The queries.js wrappers (e.g. `authQueries.provider.claudeStatus.useQuery`)
+  // The queries.js wrappers (e.g. `authQueries.provider.statuses.useQuery`)
   // are how the rest of the app calls useQuery indirectly. Match
   // these too — a regression that goes through the factory has the
   // same observable effect as direct useQuery.
@@ -64,6 +64,8 @@ test('ProviderAuth treats a successful code exchange as authoritative', () => {
   // committed state, then revalidate it in the background.
   assert.ok(/setQueryData\(/.test(SOURCE),
     'ProviderAuth must publish successful authentication to the shared cache.')
+  assert.ok(/authQueries\.provider\.statuses\.key/.test(SOURCE),
+    'ProviderAuth must publish into the canonical all-provider cache.')
   assert.ok(/invalidate\(queryClient\)/.test(SOURCE),
     'ProviderAuth must revalidate the authoritative cache update in the background.')
   assert.ok(!/fetchQuery\(/.test(SOURCE),

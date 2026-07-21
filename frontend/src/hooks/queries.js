@@ -17,7 +17,6 @@ const setupStatusKey = ['auth', 'setup', 'status']
 const settingsKey = ['settings']
 const appsKey = ['apps']
 const chatsKey = ['chats']
-const providerClaudeStatusKey = ['auth', 'provider', 'claude-status']
 const providersStatusKey = ['auth', 'providers', 'status']
 const modelRegistryKey = ['models', 'registry']
 const modelPrefsKey = ['owner', 'model-prefs']
@@ -138,28 +137,6 @@ function useAppTokenQuery(appId) {
   })
 }
 
-async function fetchClaudeProviderStatus() {
-  const res = await api.auth.provider.statuses()
-  const data = await jsonOrThrow(res, 'provider status fetch failed:')
-  return data?.claude || { authenticated: false }
-}
-
-function useClaudeProviderStatusQuery({ enabled = true } = {}) {
-  return useQuery({
-    queryKey: providerClaudeStatusKey,
-    queryFn: fetchClaudeProviderStatus,
-    // Persisted alongside ['settings'] so the Settings panel's Claude
-    // row paints its connected state from disk the instant it opens. We
-    // Override the client's 30-second default so instant paint is followed
-    // by a background refetch (stale-while-revalidate); explicit
-    // invalidation (onClaudeAuthDone) still flips it after a re-auth.
-    // `enabled` lets callers (SetupWizard) defer this until a token
-    // exists — see call site for why.
-    enabled,
-    staleTime: 0,
-  })
-}
-
 async function fetchProvidersStatus() {
   const res = await api.auth.provider.statuses()
   return jsonOrThrow(res, 'provider statuses fetch failed:')
@@ -171,7 +148,7 @@ function useProvidersStatusQuery({ enabled = true } = {}) {
     queryFn: fetchProvidersStatus,
     enabled,
     // Cheap query whose data rarely changes within a session — refresh
-    // tokens only flip after explicit re-auth or expiry on wake. The
+    // credentials only flip after explicit re-auth or a change on disk. The
     // useProviderAuthStatus hook invalidates on visibilitychange so a
     // wake-from-background triggers exactly one refetch; everything in
     // between rides this 5-minute cache.
@@ -349,17 +326,16 @@ export const chatQueries = {
 
 export const authQueries = {
   provider: {
-    claudeStatus: {
-      key: providerClaudeStatusKey,
-      fetch: fetchClaudeProviderStatus,
-      useQuery: useClaudeProviderStatusQuery,
-      invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: providerClaudeStatusKey }),
-    },
     statuses: {
       key: providersStatusKey,
       fetch: fetchProvidersStatus,
       useQuery: useProvidersStatusQuery,
       invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: providersStatusKey }),
+      refresh: (queryClient) => queryClient.fetchQuery({
+        queryKey: providersStatusKey,
+        queryFn: fetchProvidersStatus,
+        staleTime: 0,
+      }),
     },
   },
 }

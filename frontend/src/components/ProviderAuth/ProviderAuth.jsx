@@ -10,7 +10,7 @@ import './ProviderAuth.css'
  *
  * Props:
  *   authenticated — current auth state, owned by the parent and read
- *                   from the same `authQueries.provider.claudeStatus`
+ *                   from the canonical `authQueries.provider.statuses`
  *                   query both consumers already use. Passing it down
  *                   instead of re-running the query here keeps the
  *                   "is Claude connected?" fact in one place per
@@ -90,10 +90,16 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
       // still-fresh persisted "not connected" value cannot reject a valid,
       // one-shot authorization code. Revalidate in the background afterward.
       queryClient.setQueryData(
-        authQueries.provider.claudeStatus.key,
-        current => ({ ...(current || {}), configured: true, authenticated: true }),
+        authQueries.provider.statuses.key,
+        current => ({
+          ...(current || {}),
+          claude: {
+            ...(current?.claude || {}),
+            configured: true,
+            authenticated: true,
+          },
+        }),
       )
-      void authQueries.provider.claudeStatus.invalidate(queryClient)
       void authQueries.provider.statuses.invalidate(queryClient)
       setAuthUrl('')
       setAuthCode('')

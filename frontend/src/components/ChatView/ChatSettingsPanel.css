@@ -216,11 +216,16 @@
 .csp__availability-warning button {
   flex-shrink: 0;
   border: 0;
-  padding: 3px 0;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px 4px;
   background: transparent;
   color: var(--accent);
   font: inherit;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .csp__availability-warning button:focus-visible {

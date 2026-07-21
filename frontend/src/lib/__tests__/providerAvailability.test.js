@@ -2,9 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   PROVIDER_AVAILABILITY_PHASE,
-  connectedProviderSet,
+  configuredProviderSet,
+  providerAvailabilityNeedsAttention,
   resolveProviderAvailability,
-  shouldShowProvider,
+  visibleProviderModels,
 } from '../providerAvailability.js'
 
 test('availability has explicit loading, ready, and error phases', () => {
@@ -23,7 +24,7 @@ test('availability has explicit loading, ready, and error phases', () => {
 })
 
 test('configured is authoritative with authenticated as a legacy fallback', () => {
-  const connected = connectedProviderSet({
+  const configured = configuredProviderSet({
     codex: { configured: true, authenticated: true },
     claude: { authenticated: false },
     legacy: { authenticated: true },
@@ -31,14 +32,32 @@ test('configured is authoritative with authenticated as a legacy fallback', () =
     future: {},
   })
 
-  assert.deepEqual([...connected], ['codex', 'legacy'])
+  assert.deepEqual([...configured], ['codex', 'legacy'])
 })
 
-test('provider filtering is fail-closed and supports a retained selection', () => {
-  const connected = new Set(['codex', 'future'])
+test('an unavailable retained provider exposes only its selected model', () => {
+  const models = [{ id: 'one' }, { id: 'two' }]
+  const configured = new Set(['codex'])
 
-  assert.equal(shouldShowProvider('codex', connected), true)
-  assert.equal(shouldShowProvider('future', connected), true)
-  assert.equal(shouldShowProvider('claude', connected), false)
-  assert.equal(shouldShowProvider('claude', connected, 'claude'), true)
+  assert.deepEqual(visibleProviderModels('codex', models, configured), models)
+  assert.deepEqual(
+    visibleProviderModels('claude', models, configured, 'claude', 'two'),
+    [{ id: 'two' }],
+  )
+  assert.deepEqual(visibleProviderModels('future', models, configured, 'claude', 'two'), [])
+})
+
+test('attention means status failure or no configured provider, not optional disconnects', () => {
+  assert.equal(providerAvailabilityNeedsAttention({
+    phase: PROVIDER_AVAILABILITY_PHASE.ERROR,
+    configuredProviders: new Set(),
+  }), true)
+  assert.equal(providerAvailabilityNeedsAttention({
+    phase: PROVIDER_AVAILABILITY_PHASE.READY,
+    configuredProviders: new Set(),
+  }), true)
+  assert.equal(providerAvailabilityNeedsAttention({
+    phase: PROVIDER_AVAILABILITY_PHASE.READY,
+    configuredProviders: new Set(['codex']),
+  }), false)
 })

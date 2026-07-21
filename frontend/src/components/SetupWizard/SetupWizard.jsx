@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api, setToken, BASE } from '../../api/client.js'
 import * as setupSession from '../../lib/setupSession.js'
 import { authQueries, settingsQueries } from '../../hooks/queries.js'
+import { resolveProviderAvailability } from '../../lib/providerAvailability.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
@@ -25,10 +26,10 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
   // creation, so an eager fetch here 401s, and apiFetch's global
   // 401 handler (client.js) treats that as an expired session and
   // reloads the page — an infinite reload loop on first load.
-  const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery({
+  const providerStatusQuery = authQueries.provider.statuses.useQuery({
     enabled: step !== 'account',
   })
-  const claudeAuthenticated = !!claudeStatusQuery.data?.authenticated
+  const configuredProviders = resolveProviderAvailability(providerStatusQuery).configuredProviders
 
   // Persists step synchronously alongside setStep so a refresh in
   // the microsecond gap between setStep and a useEffect flush can't
@@ -89,7 +90,7 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
       <ProviderStep
         onSkip={onDone}
         onContinue={onDone}
-        claudeAuthenticated={claudeAuthenticated}
+        configuredProviders={configuredProviders}
       />
     )
   }
@@ -176,12 +177,12 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
  * ChatGPT-account device-auth toggle lives inside CodexAuth. Either
  * provider connecting advances the wizard.
  */
-function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
+function ProviderStep({ onSkip, onContinue, configuredProviders }) {
   const queryClient = useQueryClient()
   const [expanded, setExpanded] = useState('codex')
   const settingsQuery = settingsQueries.owner.useQuery()
-  const codexConnected = !!settingsQuery.data?.codex_authenticated
-  const claudeConnected = !!claudeAuthenticated
+  const codexConnected = configuredProviders.has('codex')
+  const claudeConnected = configuredProviders.has('claude')
   const connectedAny = codexConnected || claudeConnected
   const [agentSaving, setAgentSaving] = useState(false)
   const [agentSaved, setAgentSaved] = useState(false)
@@ -233,9 +234,6 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
   async function handleConnected(provider) {
     const preferred = firstConnectedProvider(provider) || provider
     setAgentProvider(preferred)
-    settingsQueries.owner.invalidate(queryClient)
-    authQueries.provider.claudeStatus.invalidate(queryClient)
-    authQueries.provider.statuses.invalidate(queryClient)
     if (await saveConnectedProvider(preferred)) setExpanded(null)
   }
 
@@ -275,7 +273,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
             onToggleExpand={() => toggle('claude')}
           >
             <ProviderAuth
-              authenticated={claudeAuthenticated}
+              authenticated={claudeConnected}
               compact
               onDone={() => handleConnected('claude')}
             />

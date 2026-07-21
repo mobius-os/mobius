@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { authQueries } from './queries.js'
 import {
-  PROVIDER_AVAILABILITY_PHASE,
+  providerAvailabilityNeedsAttention,
   resolveProviderAvailability,
 } from '../lib/providerAvailability.js'
 
@@ -25,17 +25,10 @@ import {
  *
  * Returns:
  *   {
- *     statuses: { [providerId]: 'connected' | 'disconnected' },
- *     anyDisconnected: boolean,
  *     phase: 'loading' | 'ready' | 'error',
- *     connectedProviders: Set<string>,
+ *     configuredProviders: Set<string>,
  *     needsAttention: boolean,
- *     isError: boolean,
  *   }
- *
- * Callers can read `statuses.claude` etc directly, or use
- * `needsAttention` to drive a single "something needs attention"
- * indicator (the drawer Settings warning dot).
  */
 export default function useProviderAuthStatus() {
   const queryClient = useQueryClient()
@@ -61,27 +54,9 @@ export default function useProviderAuthStatus() {
 
   const availability = resolveProviderAvailability(query)
 
-  // Normalize the backend shape into the friendlier id→status map.
-  // The endpoint returns `{claude: {configured: bool, ...}, codex: {...}}`;
-  // we collapse to `{claude: 'connected'|'disconnected', codex: ...}`.
-  const raw = query.data || {}
-  const statuses = {}
-  let anyDisconnected = false
-  for (const pid of Object.keys(raw)) {
-    const connected = availability.connectedProviders.has(pid)
-    statuses[pid] = connected ? 'connected' : 'disconnected'
-    if (!connected) anyDisconnected = true
-  }
-
   return {
     ...availability,
-    statuses,
-    anyDisconnected,
-    needsAttention:
-      availability.phase === PROVIDER_AVAILABILITY_PHASE.ERROR
-      || anyDisconnected,
-    isLoading: query.isLoading,
-    isError: query.isError,
+    needsAttention: providerAvailabilityNeedsAttention(availability),
     refetch: query.refetch,
   }
 }

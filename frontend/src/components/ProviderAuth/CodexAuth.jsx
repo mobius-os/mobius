@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
-import { authQueries, settingsQueries } from '../../hooks/queries.js'
+import { authQueries } from '../../hooks/queries.js'
 import { closeAuthWindow, navigateAuthWindow, reserveAuthWindow } from '../../utils/authWindow.js'
 
 /**
@@ -115,8 +115,11 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
       setStatus('complete')
       setUrl('')
       setCode('')
-      settingsQueries.owner.invalidate(queryClient)
-      authQueries.provider.statuses.invalidate(queryClient)
+      try {
+        await authQueries.provider.statuses.refresh(queryClient)
+      } catch {
+        authQueries.provider.statuses.invalidate(queryClient)
+      }
       onConnected?.()
       return 'complete'
     }

@@ -36,7 +36,7 @@ export default function ModelSheet({
   groups,
   provider,
   model,
-  connectedProviders,
+  configuredProviders,
   onPick,
   allowNone = false,
   noneLabel = 'No fallback',
@@ -107,7 +107,7 @@ export default function ModelSheet({
             <div className="model-sheet__empty">No models available.</div>
           )}
           {groups && groups.map((group) => {
-            const connected = !connectedProviders || connectedProviders.has(group.key)
+            const connected = !configuredProviders || configuredProviders.has(group.key)
             const Logo = group.Logo
             return (
               <div key={group.key} className="model-sheet__group">
@@ -144,6 +144,7 @@ export default function ModelSheet({
                             efforts={rowEfforts}
                             value={effort}
                             onChange={onEffortChange}
+                            disabled={!connected}
                             ariaLabel="Reasoning effort"
                           />
                         </div>

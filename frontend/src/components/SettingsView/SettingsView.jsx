@@ -7,6 +7,10 @@ import Sun from 'lucide-react/dist/esm/icons/sun.mjs'
 import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
+import {
+  PROVIDER_AVAILABILITY_PHASE,
+  resolveProviderAvailability,
+} from '../../lib/providerAvailability.js'
 import { restartCanReload } from '../../lib/restartReadiness.js'
 import { updateCheckOutcome, updateCheckLabel } from '../../lib/updateCheckPhase.js'
 import * as themeService from '../../lib/themeService.js'
@@ -117,6 +121,7 @@ function BackgroundProviderRow({
   onEffortChange,
   onMove,
   onReorderStart,
+  configuredProviders,
 }) {
   const info = PROVIDER_INFO[row.provider]
   const Logo = info?.Logo
@@ -232,6 +237,7 @@ function BackgroundProviderRow({
         model={selectedModel}
         efforts={efforts}
         effort={row.effort}
+        configuredProviders={configuredProviders}
         onEffortChange={onEffortChange}
         onPick={(pid, id, pickedModel) => {
           const nextEfforts = modelEfforts(efforts, pickedModel)
@@ -290,7 +296,7 @@ async function shellDocumentReady() {
 export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = null }) {
   const queryClient = useQueryClient()
   const settingsQuery = settingsQueries.owner.useQuery()
-  const claudeStatusQuery = authQueries.provider.claudeStatus.useQuery()
+  const providerStatusQuery = authQueries.provider.statuses.useQuery()
   const themeModeQuery = themeQueries.mode.useQuery()
   const versionQuery = versionQueries.current.useQuery()
   const [themeMode, setThemeMode] = useState(() => (
@@ -345,12 +351,14 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     setThemeMode(themeModeQuery.data === 'light' ? 'light' : 'dark')
   }, [themeModeQuery.data])
 
-  const codexAuthenticated = !!settingsQuery.data?.codex_authenticated
+  const providerAvailability = resolveProviderAvailability(providerStatusQuery)
+  const configuredProviders = providerAvailability.configuredProviders
+  const codexAuthenticated = configuredProviders.has('codex')
   // Live-probed CLI versions (null when the CLI isn't installed or
   // didn't respond). Read-only — updates happen via the agent, not here.
   const claudeVersion = settingsQuery.data?.claude_version
   const codexVersion = settingsQuery.data?.codex_version
-  const claudeAuthenticated = !!claudeStatusQuery.data?.authenticated
+  const claudeAuthenticated = configuredProviders.has('claude')
   // Three-state gate for the AI-providers section, in priority order:
   //
   //   READY   — at least the cached data is present (data !== undefined).
@@ -366,17 +374,20 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   //             with no persisted cache that errors must say so, not
   //             render the section blank with no indication.
   //   LOADING — no data yet and no error: the initial in-flight fetch.
-  const providerReady = settingsQuery.data !== undefined && claudeStatusQuery.data !== undefined
-  const modelRegistryQuery = modelQueries.registry.useQuery({ enabled: providerReady })
+  const providerReady = settingsQuery.data !== undefined
+    && providerAvailability.phase === PROVIDER_AVAILABILITY_PHASE.READY
+  // Registry and provider/settings probes are independent. Starting them
+  // together avoids an unnecessary request waterfall on a first open.
+  const modelRegistryQuery = modelQueries.registry.useQuery()
   const providerError =
-    !providerReady && (settingsQuery.isError || claudeStatusQuery.isError)
+    !providerReady && (settingsQuery.isError || providerStatusQuery.isError)
   const providerErrorMsg =
-    settingsQuery.error?.message || claudeStatusQuery.error?.message ||
+    settingsQuery.error?.message || providerStatusQuery.error?.message ||
     'Could not load provider settings.'
   const retryProviders = useCallback(() => {
     settingsQuery.refetch()
-    claudeStatusQuery.refetch()
-  }, [settingsQuery, claudeStatusQuery])
+    providerStatusQuery.refetch()
+  }, [settingsQuery, providerStatusQuery])
   const [backgroundDraft, setBackgroundDraft] = useState(null)
   const backgroundDraftRef = useRef(null)
   const [backgroundError, setBackgroundError] = useState('')
@@ -689,13 +700,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     [],
   )
   const onClaudeAuthDone = useCallback(() => {
-    authQueries.provider.claudeStatus.invalidate(queryClient)
-    authQueries.provider.statuses.invalidate(queryClient)
     setExpandedAuth(null)
-  }, [queryClient])
+  }, [])
   const onCodexAuthDone = useCallback(() => {
     settingsQueries.owner.invalidate(queryClient)
-    authQueries.provider.statuses.invalidate(queryClient)
     setExpandedAuth(null)
   }, [queryClient])
 
@@ -1230,6 +1238,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                         if (backgroundDrag) return
                         moveBackgroundProvider(index, index + delta)
                       }}
+                      configuredProviders={configuredProviders}
                       onReorderStart={startBackgroundReorder}
                     />
                   ))}

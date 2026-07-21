@@ -6,8 +6,8 @@
  *   cd frontend && npm run test:lib
  *
  * The Settings view's offline-first behavior hinges on this: the
- * provider config + CLI versions (['settings']) and the connected-state
- * queries must persist so the panel paints from disk on open instead of
+ * provider config + CLI versions (['settings']) and the canonical status
+ * query must persist so the panel paints from disk on open instead of
  * flashing an empty providers list. The short-lived setup-status query
  * (['auth','setup','status']) must NOT persist — it shares the 'auth'
  * head with the provider-status keys, so the match has to be by full
@@ -36,7 +36,7 @@ test('settings + provider/status queries persist by full key', () => {
   assert.equal(shouldPersistQueryKey(['settings']), true)
   assert.equal(
     shouldPersistQueryKey(['auth', 'provider', 'claude-status']),
-    true,
+    false,
   )
   assert.equal(
     shouldPersistQueryKey(['auth', 'providers', 'status']),

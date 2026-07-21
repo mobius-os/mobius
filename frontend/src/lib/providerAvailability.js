@@ -12,13 +12,15 @@ export const PROVIDER_AVAILABILITY_PHASE = Object.freeze({
   ERROR: 'error',
 })
 
-export function connectedProviderSet(statusByProvider) {
+export function providerIsConfigured(info) {
+  return info?.configured === true
+    || (info?.configured === undefined && info?.authenticated === true)
+}
+
+export function configuredProviderSet(statusByProvider) {
   return new Set(
     Object.entries(statusByProvider || {})
-      .filter(([, info]) => (
-        info?.configured === true
-        || (info?.configured === undefined && info?.authenticated === true)
-      ))
+      .filter(([, info]) => providerIsConfigured(info))
       .map(([providerId]) => providerId),
   )
 }
@@ -27,26 +29,39 @@ export function resolveProviderAvailability(statusQuery) {
   if (statusQuery?.data !== undefined) {
     return {
       phase: PROVIDER_AVAILABILITY_PHASE.READY,
-      connectedProviders: connectedProviderSet(statusQuery.data),
+      configuredProviders: configuredProviderSet(statusQuery.data),
     }
   }
   return {
     phase: statusQuery?.isError
       ? PROVIDER_AVAILABILITY_PHASE.ERROR
       : PROVIDER_AVAILABILITY_PHASE.LOADING,
-    connectedProviders: new Set(),
+    configuredProviders: new Set(),
   }
 }
 
+export function providerAvailabilityNeedsAttention(availability) {
+  return availability.phase === PROVIDER_AVAILABILITY_PHASE.ERROR
+    || (
+      availability.phase === PROVIDER_AVAILABILITY_PHASE.READY
+      && availability.configuredProviders.size === 0
+    )
+}
+
 /**
- * Retaining one already-saved provider is intentional: hiding the active value
- * would make stale configuration impossible to understand or switch away from.
- * New choices omit `retainedProvider` and remain strictly fail-closed.
+ * A disconnected active provider keeps only its selected row for context. The
+ * rest of that provider's registry is not actionable and must not look like a
+ * list of available choices.
  */
-export function shouldShowProvider(
+export function visibleProviderModels(
   providerId,
-  connectedProviders,
+  models,
+  configuredProviders,
   retainedProvider = '',
+  retainedModel = '',
 ) {
-  return providerId === retainedProvider || connectedProviders.has(providerId)
+  const rows = Array.isArray(models) ? models : []
+  if (configuredProviders.has(providerId)) return rows
+  if (providerId !== retainedProvider) return []
+  return rows.filter(model => model?.id === retainedModel)
 }

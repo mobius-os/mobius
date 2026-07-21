@@ -65,13 +65,11 @@ export const persistOptions = {
 // are persisted too so the panel paints from disk on open instead of
 // flashing an empty providers list while the live probe revalidates:
 //   - ['settings']                          → provider config + CLI versions
-//   - ['auth','provider','claude-status']   → Claude connected state
-//   - ['auth','providers','status']         → all-providers connected state
+//   - ['auth','providers','status']         → canonical provider state
 // Matched by full key, not by ['auth'] alone, so the short-lived
 // setup-status query (['auth','setup','status']) is NOT persisted.
 const PERSISTED_FULL_KEYS = new Set([
   JSON.stringify(['settings']),
-  JSON.stringify(['auth', 'provider', 'claude-status']),
   JSON.stringify(['auth', 'providers', 'status']),
 ])
 

@@ -99,7 +99,7 @@ import {
 import {
   PROVIDER_AVAILABILITY_PHASE,
   resolveProviderAvailability,
-  shouldShowProvider,
+  visibleProviderModels,
 } from '../../lib/providerAvailability.js'
 import './ChatSettingsPanel.css'
 
@@ -668,25 +668,41 @@ export default function ChatSettingsPanel({
         : PROVIDER_INFO[pid].fallbackModels.map(m => (
           { id: m.value, label: m.label, provider: pid, available: true }
         ))
-      const selectedHere = selectedProvider === pid ? selectedModel : null
+      const selectedHere = selectedProvider === pid
+        ? selectedModel
+        : (draftProvider === pid ? draftModel : null)
       out[pid] = resolveDisplayedModels(source, hiddenIds, selectedHere)
     }
     return out
-  }, [registry, hiddenIds, selectedModel, selectedProvider])
+  }, [registry, hiddenIds, selectedModel, selectedProvider, draftModel, draftProvider])
+
+  const currentProviderConfigured = availability.configuredProviders.has(draftProvider)
+  const currentProviderLabel = PROVIDER_INFO[draftProvider]?.label || draftProvider
 
   return (
     <div className="csp">
       <div className="csp__label">Model</div>
       {!dataReady && (
         <>
-          <div className="csp__loading" role="status" aria-live="polite">
-            {loadingModels && <span className="csp__loading-spinner" aria-hidden="true" />}
-            <span>
-              {modelLoadError
-                ? 'Could not load models. Reopen this menu to retry.'
-                : 'Loading models…'}
-            </span>
-          </div>
+          {modelLoadError ? (
+            <div className="csp__availability-warning" role="alert">
+              <span>Could not load models.</span>
+              <button
+                type="button"
+                onClick={() => {
+                  registryQuery.refetch()
+                  prefsQuery.refetch()
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          ) : (
+            <div className="csp__loading" role="status" aria-live="polite">
+              {loadingModels && <span className="csp__loading-spinner" aria-hidden="true" />}
+              <span>Loading models…</span>
+            </div>
+          )}
           {!modelLoadError && (
             // Skeleton placeholder while registry + prefs resolve. Two
             // rows mirror the typical visible count without committing
@@ -700,31 +716,40 @@ export default function ChatSettingsPanel({
         </>
       )}
       {dataReady && availability.phase === PROVIDER_AVAILABILITY_PHASE.ERROR && (
-        <div className="csp__availability-warning" role="status" aria-live="polite">
-          <span>Could not verify providers. Showing the current provider only.</span>
+        <div className="csp__availability-warning" role="alert">
+          <span>Could not verify providers. Showing the current model only.</span>
           <button type="button" onClick={() => providerStatusQuery.refetch()}>
             Retry
           </button>
         </div>
       )}
+      {dataReady
+        && availability.phase === PROVIDER_AVAILABILITY_PHASE.READY
+        && !currentProviderConfigured && (
+          <div className="csp__availability-warning" role="status">
+            <span>
+              {availability.configuredProviders.size > 0
+                ? `${currentProviderLabel} isn’t connected. Choose a connected provider or reconnect it in Settings.`
+                : `${currentProviderLabel} isn’t connected. Connect a provider in Settings.`}
+            </span>
+          </div>
+      )}
       {dataReady && PROVIDER_ORDER.map(pid => {
         const info = PROVIDER_INFO[pid]
-        // Hide providers without configured credentials, EXCEPT the
-        // chat's currently-selected provider (so the user can always
-        // see what's active and switch away from it).
-        if (!shouldShowProvider(
+        const providerConfigured = availability.configuredProviders.has(pid)
+        const models = visibleProviderModels(
           pid,
-          availability.connectedProviders,
+          displayedByProvider[pid] || [],
+          availability.configuredProviders,
           draftProvider,
-        )) {
-          return null
-        }
+          draftModel,
+        )
+        if (!models.length) return null
         const isCrossProvider = hasAssistantTurns && pid !== draftProvider
         const appCrossProvider = (
           appProviderLocked
           && pid !== (provider || 'claude')
         )
-        const models = displayedByProvider[pid] || []
         return models.map(m => {
           const rowEfforts = modelEfforts(info.efforts, m)
           const isPendingRow = pendingSwitch?.model === m.id && pendingSwitch?.provider === pid
@@ -738,7 +763,7 @@ export default function ChatSettingsPanel({
                 onClick={() => {
                   if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
                 }}
-                disabled={saving || switchBusy || appCrossProvider}
+                disabled={saving || switchBusy || appCrossProvider || !providerConfigured}
                 aria-pressed={isSelected}
                 title={appCrossProvider
                   ? 'App chats keep their original provider. Create a new app chat to use this provider.'
@@ -749,7 +774,9 @@ export default function ChatSettingsPanel({
                   <span className="csp-row__title">
                     <span>{m.label}</span>
                   </span>
-                  <span className="csp-row__sub">{info.label}</span>
+                  <span className="csp-row__sub">
+                    {providerConfigured ? info.label : `${info.label} · Not connected`}
+                  </span>
                 </span>
                 <span className="csp-row__dot" />
               </button>
@@ -763,7 +790,7 @@ export default function ChatSettingsPanel({
                     efforts={rowEfforts}
                     value={draftEffort}
                     onChange={handleEffortChange}
-                    disabled={saving || switchBusy}
+                    disabled={saving || switchBusy || !providerConfigured}
                     onStopPointerDown={preserveFocusUnlessTouch}
                   />
                 </div>
