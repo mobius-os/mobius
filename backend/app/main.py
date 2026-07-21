@@ -40,7 +40,7 @@ from app.database import (
   set_database_request_label,
 )
 from app.http_caching import strip_range
-from app import models
+from app import activity, models
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
 # uvicorn boot (and thereby kill the recovery surface). See the
@@ -609,6 +609,9 @@ async def lifespan(app):
   try:
     yield
   finally:
+    # Preserve the final partial request-error windows across graceful restarts.
+    # This is one bounded batch append, not one write per response.
+    activity.flush_request_errors()
     # Stop the liveness watchdog before the writer drains.
     if _wedged_sweep_task is not None:
       _wedged_sweep_task.cancel()
@@ -926,6 +929,49 @@ class _DatabaseRequestContextMiddleware:
       reset_database_request_label(token)
 
 
+class _RequestErrorTelemetryMiddleware:
+  """Aggregate failed responses by matched route without retaining raw URLs.
+
+  Successful requests do no logging or aggregation. For failures, the activity
+  module keeps bounded in-memory minute counters and writes compact summaries,
+  so a retry loop remains observable without amplifying its CPU or disk cost.
+  FastAPI leaves the matched route template and path params in the ASGI scope;
+  those templates contain no user paths or query values.
+  """
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    if scope["type"] != "http":
+      return await self.app(scope, receive, send)
+    status = None
+
+    async def _send(message):
+      nonlocal status
+      if message["type"] == "http.response.start":
+        status = int(message.get("status", 500))
+      await send(message)
+
+    try:
+      return await self.app(scope, receive, _send)
+    except Exception:
+      status = status or 500
+      raise
+    finally:
+      if status is not None and status >= 400:
+        matched = scope.get("route")
+        route = getattr(matched, "path", None) or "<unmatched>"
+        raw_app_id = (scope.get("path_params") or {}).get("app_id")
+        try:
+          app_id = int(raw_app_id) if raw_app_id is not None else None
+        except (TypeError, ValueError):
+          app_id = None
+        activity.record_request_error(
+          scope.get("method", "?"), route, status, app_id,
+        )
+
+
 class _ServiceSurfaceHostMiddleware:
   """Prevent the service gateway host from becoming another Möbius origin."""
 
@@ -983,6 +1029,7 @@ app.add_middleware(
 app.add_middleware(_ServiceSurfaceHostMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_DatabaseRequestContextMiddleware)
+app.add_middleware(_RequestErrorTelemetryMiddleware)
 
 # -- API routes --------------------------------------------------------
 app.include_router(auth_router)

@@ -133,6 +133,49 @@ def test_storage_write_debounce_per_key():
   assert activity.should_emit_storage_write(1, "a.json", now=now) is False
 
 
+def test_request_error_storm_appends_only_one_summary_per_window():
+  start = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+  for offset_ms in range(1000):
+    activity.record_request_error(
+      "GET", "/api/storage/apps/{app_id}/{path:path}", 404, 66,
+      now=start + timedelta(milliseconds=offset_ms),
+    )
+  assert _read_lines() == []
+
+  activity.record_request_error(
+    "GET", "/api/storage/apps/{app_id}/{path:path}", 404, 66,
+    now=start + timedelta(seconds=61),
+  )
+  assert _read_lines()[0]["count"] == 1000
+  assert activity.flush_request_errors() == 1
+  assert [event["count"] for event in _read_lines()] == [1000, 1]
+
+
+def test_request_errors_aggregate_by_safe_route_template(client, auth):
+  raw_path = "/api/storage/apps/66/private-token-shaped-name.json"
+  for _ in range(3):
+    response = client.get(
+      raw_path, params={"token": "must-not-be-logged"}, headers=auth,
+    )
+    assert response.status_code == 404
+
+  assert activity.flush_request_errors() == 1
+  request_errors = [
+    event for event in _read_lines() if event["ev"] == "request_error"
+  ]
+  assert len(request_errors) == 1
+  event = request_errors[0]
+  assert event["app_id"] == 66
+  assert event["method"] == "GET"
+  assert event["route"] == "/api/storage/apps/{app_id}/{path:path}"
+  assert event["status"] == 404
+  assert event["count"] == 3
+  assert event["duration_ms"] >= 0
+  serialized = json.dumps(event)
+  assert "private-token-shaped-name" not in serialized
+  assert "must-not-be-logged" not in serialized
+
+
 # --- Rotation + retention ---------------------------------------------
 
 

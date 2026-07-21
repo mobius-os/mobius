@@ -86,6 +86,12 @@ def read_activity(
   if until_dt < since_dt:
     raise HTTPException(400, "until must be >= since")
 
+  # Finish the current bounded in-memory windows before snapshotting the JSONL
+  # sources. Reflection gets isolated errors as well as sustained loops, without
+  # requiring a timer or per-response disk writes. Validate first so an invalid
+  # read does not itself mutate the activity stream.
+  activity.flush_request_errors()
+
   def _iter():
     for ev in activity.read_events(since_dt, until_dt, app_id=app_id):
       yield json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n"

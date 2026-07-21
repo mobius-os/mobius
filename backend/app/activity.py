@@ -16,6 +16,8 @@ read both):
   {"ev":"skill_loaded",   "ts", "chat_id", "skill"}
   {"ev":"memory_load",    "ts", "source", "paths", "mode"}
   {"ev":"app_error",      "ts", "app_id"?, "message", "where"?, "stack"?, "url"?}
+  {"ev":"request_error",  "ts", "app_id"?, "method", "route", "status", "count",
+                           "first_ts", "last_ts", "duration_ms"}
   {"ev":"app_signal",     "ts", "app_id", "id", "occurred_at", "name", "payload"}
   {"ev":"chat_sent",      "ts", "chat_id", "provider", "app_id"?}  # one per user turn
   {"ev":"chat_created",   "ts", "chat_id"}
@@ -87,6 +89,18 @@ _debounce: dict[tuple[int, str], str] = {}
 # per (app_id, message) so one broken app can't flood the 90-day log file.
 _ERROR_DEBOUNCE_WINDOW_SEC = 60
 _error_debounce: dict[tuple[int | None, str], str] = {}
+
+# Repeated HTTP failures need their frequency preserved, but emitting one
+# activity row per response would turn the observer into the resource problem.
+# Keep one tiny counter per normalized route/status/app and append at most one
+# summary per minute. The cap bounds adversarial app-id cardinality; evicted
+# counters are flushed rather than discarded. The admin activity read flushes
+# the current partial window, so Reflection sees isolated failures too without
+# a timer or background task.
+_REQUEST_ERROR_WINDOW_SEC = 60
+_REQUEST_ERROR_BUCKET_CAP = 512
+_request_error_buckets: dict[tuple[str, str, int, int | None], dict[str, Any]] = {}
+_request_error_lock = threading.Lock()
 
 # Per-process write serialization. Holds the lock while we (a) check
 # rotation, (b) write the line, (c) flush. Critical section is small
@@ -316,12 +330,90 @@ def should_emit_app_error(
   return True
 
 
+def _request_error_event(
+  key: tuple[str, str, int, int | None], bucket: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+  method, route, status, app_id = key
+  first = bucket["first_at"]
+  last = bucket["last_at"]
+  fields: dict[str, Any] = {
+    "ts": last.isoformat(timespec="seconds"),
+    "method": method,
+    "route": route,
+    "status": status,
+    "count": bucket["count"],
+    "first_ts": first.isoformat(timespec="seconds"),
+    "last_ts": last.isoformat(timespec="seconds"),
+    "duration_ms": max(0, int((last - first).total_seconds() * 1000)),
+  }
+  if app_id is not None:
+    fields["app_id"] = app_id
+  return "request_error", fields
+
+
+def record_request_error(
+  method: str,
+  route: str,
+  status: int,
+  app_id: int | None = None,
+  *,
+  now: datetime | None = None,
+) -> None:
+  """Count one failed HTTP response in a bounded, normalized minute bucket.
+
+  ``route`` must be a route template (never a raw URL), so paths, query values,
+  document names, and tokens cannot enter the activity log. This function is a
+  cheap sidecar: failures in its eventual JSONL append never affect requests.
+  """
+  if status < 400:
+    return
+  now = now or datetime.now(timezone.utc)
+  method = str(method or "?").upper()[:16]
+  route = str(route or "<unmatched>")[:240]
+  key = (method, route, int(status), app_id)
+  completed: list[tuple[str, dict[str, Any]]] = []
+  with _request_error_lock:
+    bucket = _request_error_buckets.get(key)
+    if bucket is not None:
+      if (now - bucket["first_at"]).total_seconds() < _REQUEST_ERROR_WINDOW_SEC:
+        bucket["count"] += 1
+        bucket["last_at"] = now
+        return
+      completed.append(_request_error_event(key, bucket))
+    elif len(_request_error_buckets) >= _REQUEST_ERROR_BUCKET_CAP:
+      oldest_key = next(iter(_request_error_buckets))
+      oldest = _request_error_buckets.pop(oldest_key)
+      completed.append(_request_error_event(oldest_key, oldest))
+    _request_error_buckets[key] = {
+      "count": 1,
+      "first_at": now,
+      "last_at": now,
+    }
+  if completed:
+    log_events(completed)
+
+
+def flush_request_errors() -> int:
+  """Append and clear every current request-error bucket; return its count."""
+  with _request_error_lock:
+    completed = [
+      _request_error_event(key, bucket)
+      for key, bucket in _request_error_buckets.items()
+    ]
+    _request_error_buckets.clear()
+  if completed:
+    log_events(completed)
+  return len(completed)
+
+
 def _reset_for_tests() -> None:
   """Clears the debounce cache. Called from conftest's fresh_db
   fixture so a debounce entry from a prior test can't suppress a
   later test's emit. Underscore-prefixed: not a public API."""
   _debounce.clear()
   _error_debounce.clear()
+  with _request_error_lock:
+    _request_error_buckets.clear()
 
 
 def _candidate_files(active: Path) -> list[Path]:
