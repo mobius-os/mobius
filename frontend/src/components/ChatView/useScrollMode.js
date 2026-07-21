@@ -566,12 +566,29 @@ export function readerInputActivatesDisclosure(
 }
 
 
-/** Wheel and keyboard input have no pointer/touch release event. Their first
- * rendering frame is the deterministic no-scroll release: a real scroll is
- * dispatched before rAF and cancels it; an edge/no-op gesture resumes layout
- * immediately instead of holding a live chat for the two-second dead-man. */
-export function readerInputNeedsFrameRelease(type) {
-  return type === 'wheel' || type === 'keydown'
+/** Wheel and keyboard input have no pointer/touch release event. Keyboard
+ * input keeps the next-frame no-scroll release. A wheel gets that fast release
+ * only when its requested direction is already clamped at the corresponding
+ * edge (or has no vertical delta). For a wheel that can move, the compositor's
+ * actual scroll event owns the release; under load it can arrive after rAF.
+ * Releasing every wheel after one frame lost that event and left the viewport
+ * physically at the bottom while its durable mode still said ANCHOR_AT. */
+export function readerInputNeedsFrameRelease(
+  type,
+  {
+    deltaY = 0,
+    scrollTop = 0,
+    scrollHeight = 0,
+    clientHeight = 0,
+  } = {},
+) {
+  if (type === 'keydown') return true
+  if (type !== 'wheel') return false
+  if (!Number.isFinite(deltaY) || deltaY === 0) return true
+
+  const maxScrollTop = Math.max(0, scrollHeight - clientHeight)
+  if (deltaY < 0) return scrollTop <= PHYSICAL_BOTTOM_EPSILON_PX
+  return scrollTop >= maxScrollTop - PHYSICAL_BOTTOM_EPSILON_PX
 }
 
 
@@ -1495,7 +1512,12 @@ export default function useScrollMode({
       pendingGestureTimerRef.current = setTimeout(() => {
         releasePendingGesture(sequence)
       }, PENDING_GESTURE_CAP_MS)
-      if (readerInputNeedsFrameRelease(event?.type)) {
+      if (readerInputNeedsFrameRelease(event?.type, {
+        deltaY: event?.deltaY,
+        scrollTop: scrollEl.scrollTop,
+        scrollHeight: scrollEl.scrollHeight,
+        clientHeight: scrollEl.clientHeight,
+      })) {
         scheduleNoScrollRelease()
       }
     }

@@ -210,8 +210,34 @@ test('disclosure activation is recognized as an anchor-latching reading action',
   'a non-interactive status row must not stop live follow')
 })
 
-test('inputs without an end event get a next-frame no-scroll release', () => {
-  assert.equal(readerInputNeedsFrameRelease('wheel'), true)
+test('only provably clamped wheel input gets a next-frame no-scroll release', () => {
+  const middle = {
+    scrollTop: 500,
+    scrollHeight: 2000,
+    clientHeight: 800,
+  }
+  assert.equal(readerInputNeedsFrameRelease('wheel', {
+    ...middle,
+    deltaY: 300,
+  }), false, 'a downward wheel waits for its actual compositor scroll')
+  assert.equal(readerInputNeedsFrameRelease('wheel', {
+    ...middle,
+    deltaY: -300,
+  }), false, 'an upward wheel waits for its actual compositor scroll')
+  assert.equal(readerInputNeedsFrameRelease('wheel', {
+    ...middle,
+    scrollTop: 1200,
+    deltaY: 300,
+  }), true, 'a downward wheel already at the bottom is a no-op')
+  assert.equal(readerInputNeedsFrameRelease('wheel', {
+    ...middle,
+    scrollTop: 0,
+    deltaY: -300,
+  }), true, 'an upward wheel already at the top is a no-op')
+  assert.equal(readerInputNeedsFrameRelease('wheel', {
+    ...middle,
+    deltaY: 0,
+  }), true, 'a horizontal-only wheel cannot move this vertical controller')
   assert.equal(readerInputNeedsFrameRelease('keydown'), true)
   assert.equal(readerInputNeedsFrameRelease('pointerdown'), false)
   assert.equal(readerInputNeedsFrameRelease('touchmove'), false)
