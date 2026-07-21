@@ -48,8 +48,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g esbuild@0.28.1 \
-    && npm install -g @anthropic-ai/claude-code@2.1.212 \
-    && npm install -g @openai/codex@0.145.0-alpha.23 \
+    && npm install -g @anthropic-ai/claude-code@2.1.216 \
+    && npm install -g @openai/codex@0.145.0-alpha.29 \
     && npm install -g agent-browser@0.31.1 \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
@@ -117,8 +117,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # upstream pyproject pins a specific openai-codex-cli-bin. Install
 # --no-deps so Docker keeps the exact runtime pin below explicit.
 # Pinned to commit SHA (not tag) for full reproducibility — tags are
-# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.145.0-alpha.23
-# as of 2026-07-18, and is kept in lockstep with the npm @openai/codex
+# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.145.0-alpha.29
+# as of 2026-07-21, and is kept in lockstep with the npm @openai/codex
 # binary above (the SDK spawns it via codex_bin=shutil.which("codex")).
 # We moved from rust-v0.144.5 to this tag because the 0.144.x generated
 # ReasoningEffort enum was strict (none/minimal/low/medium/high/xhigh)
@@ -126,14 +126,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # codex.models() and ThreadResumeResponse validation failed and broke a
 # real chat resume. alpha.13 turned ReasoningEffort into a forgiving
 # `str, Enum` with a `_missing_` hook that accepts any effort string;
-# alpha.23 is the newest tag published to BOTH the git repo and npm, so
+# alpha.29 is the newest tag published to BOTH the git repo and npm, so
 # binary and schema stay matched. The SDK exposes the request bridge as a
 # public `approval_handler` constructor argument on
 # `openai_codex.client.CodexClient`; `AsyncCodex` still does not forward
 # it, so codex_sdk_runner.py installs the handler on the wrapped sync
 # client's `_approval_handler`.
 RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@655224ffae098a85efeddf8289171ff3bd2624d1#subdirectory=sdk/python' \
+      'openai-codex @ git+https://github.com/openai/codex.git@5d724b1bc65073572298c78b031e3b7e4dc2724e#subdirectory=sdk/python' \
     && pip install --no-cache-dir 'openai-codex-cli-bin==0.144.4'
 
 # Capture each installed agent CLI's npm publish date into a small JSON the
