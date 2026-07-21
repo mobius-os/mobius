@@ -617,6 +617,17 @@ export function modeForChatExit(scrollEl) {
 }
 
 
+/** Submitting an in-message question answer resumes output inside the same
+ * assistant row and may replace the card's controls immediately. It is not a
+ * request to follow the live tail. Freeze the exact visible row/offset before
+ * that card-to-stream handoff so neither the control reflow nor resumed output
+ * moves the reader. */
+export function modeForQuestionSubmission(scrollEl, currentMode) {
+  if (!scrollEl) return currentMode
+  return anchorModeFromScroll(scrollEl) || currentMode
+}
+
+
 /** A queued send changes composer/footer layout but does not add a transcript
  * row. Freeze the visible anchor before that reflow; its separately-captured
  * submit intent still decides what happens when the row is later promoted. */
@@ -749,6 +760,7 @@ export function mountMediaSettled(scrollEl) {
  *   closePreSendGestureWindow: () => void,
  *   freezeChatExit: () => void,
  *   freezeForegroundReturn: () => void,
+ *   freezeQuestionSubmission: () => void,
  *   freezeQueuedSubmission: () => void,
  *   revealConversationTail: () => void,
  *   settleNonPin: (event?: object) => void,
@@ -967,6 +979,14 @@ export default function useScrollMode({
     return transitionMode(
       modeForQueuedSubmission(scrollRef.current, modeRef.current),
       'send:queue-freeze',
+    )
+  }, [scrollRef, transitionMode])
+
+  const freezeQuestionSubmission = useCallback(() => {
+    readerLocationExplicitRef.current = true
+    return transitionMode(
+      modeForQuestionSubmission(scrollRef.current, modeRef.current),
+      'send:question-freeze',
     )
   }, [scrollRef, transitionMode])
 
@@ -1800,6 +1820,7 @@ export default function useScrollMode({
     closePreSendGestureWindow,
     freezeChatExit,
     freezeForegroundReturn,
+    freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
     reapplyActiveMode,

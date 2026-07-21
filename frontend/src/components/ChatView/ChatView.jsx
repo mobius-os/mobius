@@ -831,6 +831,7 @@ export default function ChatView({
     closePreSendGestureWindow,
     freezeChatExit,
     freezeForegroundReturn,
+    freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
     reapplyActiveMode,
@@ -2486,6 +2487,12 @@ export default function ChatView({
       sendSilentInFlightRef.current = false
       return false
     }
+    // A question-card answer resumes the SAME assistant row. Freeze the
+    // currently visible message and its exact viewport offset synchronously,
+    // before QuestionCard's pending state commits or the POST can resume live
+    // output. Staying in FOLLOW_BOTTOM here caused the card-to-stream handoff
+    // to drag the screen upward after Submit.
+    if (resolvedAnswers) freezeQuestionSubmission()
     // Block a simultaneous composer send synchronously, but do not paint the
     // whole chat as a new active turn until the answer POST commits. On a
     // parked/durable question that premature parent transition swaps the
@@ -2587,7 +2594,7 @@ export default function ChatView({
     } finally {
       sendSilentInFlightRef.current = false
     }
-  }, [streamSend, commitMessages, fetchMessages])
+  }, [streamSend, commitMessages, fetchMessages, freezeQuestionSubmission])
 
   function handleSubmit(e) {
     e.preventDefault()
