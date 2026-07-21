@@ -31,6 +31,7 @@ export const TURN_DONE = NS + 'turn-done' // the agent turn finished streaming
 export const ERROR = NS + 'error' // the embed hit a load/stream error
 export const HEIGHT = NS + 'height' // optional content height (see note below)
 export const AUTH_EXPIRING = NS + 'auth-expiring' // parent should mint a new grant
+export const BOOTSTRAP_READY = NS + 'bootstrap-ready' // child listener is installed
 
 // Parent (app frame) → child (embed frame).
 export const INIT = NS + 'init' // hand the embed its config + correlation id

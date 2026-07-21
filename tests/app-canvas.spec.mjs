@@ -644,6 +644,11 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await page.goto(`${BASE}/shell/?chat=open-app-chat`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(() => window.location.pathname === '/shell/')
 
+    // A real app frame cannot post before the lazy Shell has mounted it and
+    // installed its receiver. Mirror that topology before adding our synthetic
+    // opaque sender.
+    await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeVisible()
+
     await postFromOpaqueCanvasFrame(page, {
       type: 'moebius:open-app', appId,
     })
