@@ -218,7 +218,9 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert 'git clone --quiet --no-local "$ROOT" "$snapshot_dir"' in runner
   assert '--project-directory "$snapshot_dir"' in runner
   assert 'cd "$snapshot_dir"' in runner
-  assert '"$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers=1' in runner
+  assert 'MOBIUS_LOCAL_E2E_WORKERS:-1' in runner
+  assert 'MOBIUS_LOCAL_E2E_WORKERS must be a positive integer' in runner
+  assert '"$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers="$e2e_workers"' in runner
   assert "Local E2E artifacts retained at:" in runner
   assert 'compose logs --no-color app caddy recoveryd fake-tandoor' in runner
   assert 'MOBIUS_LOCAL_E2E_KEEP_CACHE' in runner

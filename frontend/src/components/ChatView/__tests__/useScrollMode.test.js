@@ -236,6 +236,16 @@ test('only provably clamped wheel input gets a next-frame no-scroll release', ()
   }), true, 'an upward wheel already at the top is a no-op')
   assert.equal(readerInputNeedsFrameRelease('wheel', {
     ...middle,
+    scrollTop: 1199,
+    deltaY: 300,
+  }), false, 'a wheel one pixel from the bottom can still move')
+  assert.equal(readerInputNeedsFrameRelease('wheel', {
+    ...middle,
+    scrollTop: 1,
+    deltaY: -300,
+  }), false, 'a wheel one pixel from the top can still move')
+  assert.equal(readerInputNeedsFrameRelease('wheel', {
+    ...middle,
     deltaY: 0,
   }), true, 'a horizontal-only wheel cannot move this vertical controller')
   assert.equal(readerInputNeedsFrameRelease('keydown'), true)
