@@ -65,6 +65,7 @@ import { cidOf } from '../chatRuntimeState.js'
  *   promoteAll: (cid?: string) => PendingMsg | null,
  *   promoteManyByCid: (cidList: string[]) => PendingMsg | null,
  *   cancelByCid: (cid: string) => void,
+ *   restoreByCid: (msg: PendingMsg, index: number) => void,
  *   hydrate: (serverList: Array<{ts: number, content: string, cid?: string, role?: string, attachments?: Array, position?: number}>, opts?: {preserveMissing?: boolean}) => void,
  *   markInFlight: (cid: string) => void,
  *   clearInFlight: (cid: string) => void,
@@ -235,6 +236,23 @@ export default function usePendingQueue(initialServerList = []) {
     apply(prev => prev.filter(m => cidOf(m) !== cid))
   }, [apply])
 
+  // Restore one optimistically-cancelled row after both the DELETE and its
+  // authoritative fallback read fail. Reinsert into the CURRENT queue rather
+  // than hydrating a stale full snapshot: other rows may have been promoted,
+  // cancelled, or appended while those network requests were pending.
+  const restoreByCid = useCallback((msg, index) => {
+    if (!msg) return
+    const cid = cidOf(msg)
+    if (cid == null || pendingMessagesRef.current.some(row => cidOf(row) === cid)) return
+    if (msg.serverTs !== true) inFlightCidsRef.current.add(cid)
+    apply(current => {
+      const next = [...current]
+      const insertionIndex = Math.max(0, Math.min(Number(index) || 0, next.length))
+      next.splice(insertionIndex, 0, msg)
+      return next
+    })
+  }, [apply])
+
   // Reconcile the queue against authoritative server state WITHOUT clobbering
   // an optimistic entry whose own POST is still in flight.
   //
@@ -314,6 +332,7 @@ export default function usePendingQueue(initialServerList = []) {
     promoteAll,
     promoteManyByCid,
     cancelByCid,
+    restoreByCid,
     hydrate,
     clear,
     markInFlight,

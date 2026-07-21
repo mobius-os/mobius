@@ -129,12 +129,18 @@ function AppRoot() {
       setStatus(setupStatusQuery.data.configured ? 'login' : 'setup')
       removeSplash()
     } else if (setupStatusQuery.isError) {
-      setStatus('login')
+      setStatus('setup-error')
       removeSplash()
     }
   }, [hasToken, setupStatusQuery.isError, setupStatusQuery.isSuccess, setupStatusQuery.data])
 
   if (status === 'loading' || isRestoring) return null
+  if (status === 'setup-error') return (
+    <SetupStatusError
+      retrying={setupStatusQuery.isFetching}
+      onRetry={() => setupStatusQuery.refetch()}
+    />
+  )
   if (status === 'setup') return (
     <SetupWizard
       initialStep={initialSetupStep}
@@ -156,6 +162,29 @@ function AppRoot() {
     setStatus('shell')
   }} />
   return <Shell />
+}
+
+function SetupStatusError({ retrying, onRetry }) {
+  return (
+    <div className="errbound" role="alert">
+      <div className="errbound__card">
+        <h1 className="errbound__title">Couldn’t reach Möbius</h1>
+        <p className="errbound__body">
+          The server didn’t answer the startup check. Your account status is unknown, so sign-in is paused until the connection recovers.
+        </p>
+        <div className="errbound__actions">
+          <button
+            type="button"
+            className="errbound__btn errbound__btn--primary"
+            onClick={onRetry}
+            disabled={retrying}
+          >
+            {retrying ? 'Trying again…' : 'Try again'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function removeSplash() {

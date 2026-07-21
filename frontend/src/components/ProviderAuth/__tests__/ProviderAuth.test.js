@@ -57,14 +57,15 @@ test('ProviderAuth exports a component that accepts an `authenticated` prop', ()
     `ProviderAuth must take an \`authenticated\` prop (per 036 commit 3b prop-drilling contract).`)
 })
 
-test('ProviderAuth uses queryClient.fetchQuery for the post-submit check', () => {
-  // After submitCode, ProviderAuth needs to know whether auth
-  // succeeded *synchronously* (to set the local "failed" error
-  // vs onDone()). It used to call statusQuery.refetch(); after
-  // 036 it uses queryClient.fetchQuery so the local query is
-  // gone but the post-submit check still works. Lock in the
-  // pattern so a future "simplify" pass that removes fetchQuery
-  // doesn't silently break the "Authentication failed" branch.
-  assert.ok(/fetchQuery\(/.test(SOURCE),
-    `ProviderAuth's submitCode flow must use queryClient.fetchQuery to check the new auth status synchronously after the code submit. See ticket 036 commit 3b.`)
+test('ProviderAuth treats a successful code exchange as authoritative', () => {
+  // /provider/code returns success only after credentials are durable. A
+  // synchronous fetchQuery can reuse a fresh cached `false` value (or an
+  // in-flight stale request) and reject a valid one-shot code. Publish the
+  // committed state, then revalidate it in the background.
+  assert.ok(/setQueryData\(/.test(SOURCE),
+    'ProviderAuth must publish successful authentication to the shared cache.')
+  assert.ok(/invalidate\(queryClient\)/.test(SOURCE),
+    'ProviderAuth must revalidate the authoritative cache update in the background.')
+  assert.ok(!/fetchQuery\(/.test(SOURCE),
+    'ProviderAuth must not synchronously gate a successful code exchange on cached status.')
 })

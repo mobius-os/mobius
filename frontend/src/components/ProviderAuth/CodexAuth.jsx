@@ -265,7 +265,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
             </span>
           </div>
           {copyState === 'failed' && (
-            <p className="pa__error codex-auth__copy-error">
+            <p className="pa__error codex-auth__copy-error" role="alert">
               Could not copy. Select the code above.
             </p>
           )}
@@ -296,7 +296,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   if (status === 'complete') {
     return (
       <div className="codex-auth">
-        <span className="pa__success">Connected to Codex</span>
+        <span className="pa__success" role="status">Connected to Codex</span>
       </div>
     )
   }
@@ -319,7 +319,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
       >
         {status === 'connecting' ? 'Starting…' : 'Connect to Codex'}
       </button>
-      {error && <p className="pa__error">{error}</p>}
+      {error && <p className="pa__error" role="alert">{error}</p>}
     </div>
   )
 }

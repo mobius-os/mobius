@@ -301,21 +301,22 @@ def update_settings(
     or body.agent_settings is not None
   ):
     data_dir = get_app_settings().data_dir
-    current = providers._load_agent_settings(data_dir)
-    if body.skills_enabled is not None:
-      current["skills_enabled"] = bool(body.skills_enabled)
-    if body.agent_settings is not None:
-      current.update(_agent_settings_payload(body.agent_settings))
-    if body.background_agents is not None:
-      provider = providers.resolve_default_provider(data_dir, owner.provider)
-      existing = providers.background_agent_settings(
-        data_dir, provider
-      )
-      current["background_agents"] = _background_agents_payload(
-        body.background_agents,
-        existing,
-      )
-    if not providers.write_agent_settings(data_dir, current):
+
+    def merge_settings(current: dict) -> dict:
+      if body.skills_enabled is not None:
+        current["skills_enabled"] = bool(body.skills_enabled)
+      if body.agent_settings is not None:
+        current.update(_agent_settings_payload(body.agent_settings))
+      if body.background_agents is not None:
+        provider = providers.resolve_default_provider(data_dir, owner.provider)
+        existing = providers.background_agent_settings(data_dir, provider)
+        current["background_agents"] = _background_agents_payload(
+          body.background_agents,
+          existing,
+        )
+      return current
+
+    if not providers.update_agent_settings(data_dir, merge_settings):
       db.rollback()
       raise HTTPException(
         status_code=500,

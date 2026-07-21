@@ -6,7 +6,7 @@ import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
-import { api, apiFetch, BASE, clearAppRuntimeData } from '../../api/client.js'
+import { api, apiFetch, jsonOrThrow, BASE, clearAppRuntimeData } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, {
   coldRestoredCanvasAppId,
@@ -701,8 +701,8 @@ export default function Shell() {
   // Always-current apps, read by the STABLE handleAppError callback (below) so
   // it can stay `useCallback([])` — required to keep AppCanvas's message
   // listener registered once per appId mount (it lists onAppError in its deps).
-  // `apps` itself is `appsQuery.data ?? []`, a fresh array every render, so a
-  // ref mirror is the only way a []-dep callback can see the live list.
+  // The ref mirror lets a []-dep callback see later query results without
+  // re-registering every mounted AppCanvas message listener.
   const appsRef = useRef(apps)
   useEffect(() => { appsRef.current = apps }, [apps])
   // Latest-`newChat` ref so the stable handleAppError can start a fresh chat
@@ -2418,8 +2418,7 @@ export default function Shell() {
       creatingChatRef.current = true
       try {
         const res = await api.chats.create({ title: 'New chat' })
-        if (!res.ok) throw new Error(`chat create failed: ${res.status}`)
-        const chat = await res.json()
+        const chat = await jsonOrThrow(res, 'Chat creation failed')
         chatId = chat.id
         queryClient.setQueryData(chatQueries.keys.all, current => {
           const next = addCreatedChatToList(current, chat)
@@ -2502,8 +2501,11 @@ export default function Shell() {
         showToast('Agent is still working in this chat — stop it first.', { duration: 6000 })
         return
       }
-      // Other non-2xx (404 = already gone, etc.) — fall through to
-      // local cleanup so a 404 doesn't leave a phantom in the UI.
+      if (res.status !== 404) {
+        showToast("Couldn't delete this chat — please try again.", { variant: 'error' })
+        return
+      }
+      // A 404 means the server row is already gone; remove the local phantom.
     }
     try { sessionStorage.removeItem(`draft:${id}`) } catch {}
     // Evict the cached messages so a future chat-ID collision (e.g.
@@ -2547,7 +2549,8 @@ export default function Shell() {
         label: 'Undo',
         onAction: async () => {
           try {
-            await api.chats.recover(id)
+            const recoverRes = await api.chats.recover(id)
+            await jsonOrThrow(recoverRes, 'Chat recovery failed')
             // Guard against the newChat() reuse scan picking up this
             // recovered chat before its has_messages=true propagates from
             // the server. The guard is cleared once ChatView fires
@@ -2580,8 +2583,11 @@ export default function Shell() {
         showToast('Agent is still working in this app — stop it first.', { duration: 6000 })
         return
       }
-      // Other non-2xx (e.g. 404 = already gone) — fall through to local
-      // cleanup so the app doesn't linger as a phantom in the UI.
+      if (res.status !== 404) {
+        showToast("Couldn't delete this app — please try again.", { variant: 'error' })
+        return
+      }
+      // A 404 means the server row is already gone; remove the local phantom.
     }
     // Retire this app's physical history + evict any warm frame before unmount
     // (contract §4.1.5), tombstone its route so Back can't recreate the tab
@@ -2611,7 +2617,8 @@ export default function Shell() {
         label: 'Undo',
         onAction: async () => {
           try {
-            await api.apps.recover(id)
+            const recoverRes = await api.apps.recover(id)
+            await jsonOrThrow(recoverRes, 'App recovery failed')
             await refreshApps()
           } catch {
             showToast("Couldn't undo — app may be gone.", { variant: 'error' })

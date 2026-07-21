@@ -58,10 +58,11 @@ test.use({ serviceWorkers: 'block' })
  *   - /messages, /stream, /stop → benign stubs so a follow-on send
  *     (not exercised here) can't 500 and pollute the run
  *  Returns the `created` accumulator so the test can assert on it. */
-async function routeShell(page, { gatePostCreateList = false } = {}) {
+async function routeShell(page, { createStatus = 200, gatePostCreateList = false } = {}) {
   await page.setViewportSize({ width: 412, height: 915 })
 
   const created = []
+  created.attempts = 0
   let releasePostCreateList = () => {}
   const postCreateListGate = gatePostCreateList
     ? new Promise(resolve => { releasePostCreateList = resolve })
@@ -85,6 +86,14 @@ async function routeShell(page, { gatePostCreateList = false } = {}) {
       })
     }
     if (req.method() === 'POST') {
+      created.attempts += 1
+      if (createStatus !== 200) {
+        return route.fulfill({
+          status: createStatus,
+          headers: { 'Content-Type': 'application/json' },
+          body: '{"detail":"create unavailable"}',
+        })
+      }
       let body = {}
       try { body = JSON.parse(req.postData() || '{}') } catch { /* ignore */ }
       const chat = {
@@ -241,14 +250,137 @@ test.describe('Bootstrap seam: empty-chat auto-create', () => {
 
     await waitForShell(page)
   })
+
+  test('failed starter-chat creation never navigates to an undefined chat', async ({ page }) => {
+    const created = await routeShell(page, { createStatus: 503 })
+    await cleanSession(page)
+
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await expect.poll(() => created.attempts, { timeout: 8000 }).toBeGreaterThan(0)
+    await expect(page.getByText(/couldn't start a new chat/i)).toBeVisible()
+
+    expect(created).toHaveLength(0)
+    expect(await page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBeNull()
+    expect(await page.evaluate(() => sessionStorage.getItem('draft:undefined')))
+      .toBeNull()
+  })
+})
+
+test.describe('Unauthenticated startup', () => {
+
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.removeItem('token')
+      sessionStorage.removeItem('auth_expired')
+    })
+  })
+
+  test('invalid credentials stay on the short-height login form', async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 420 })
+    await page.route(/\/api\/auth\/setup\/status$/, route =>
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ configured: true, claim_required: false }),
+      })
+    )
+    await page.route(/\/api\/auth\/token$/, route =>
+      route.fulfill({
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"detail":"Incorrect username or password"}',
+      })
+    )
+
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    const username = page.getByLabel('Username')
+    const password = page.getByLabel('Password')
+    await expect(username).toBeVisible({ timeout: 10000 })
+
+    // Safe top alignment keeps the beginning of an overflowing card reachable
+    // when a short viewport or software keyboard reduces the visual height.
+    expect(await page.locator('.login__card').evaluate(el => el.getBoundingClientRect().top))
+      .toBeGreaterThanOrEqual(0)
+
+    await username.fill('owner')
+    await password.fill('wrong password')
+    await page.getByRole('button', { name: 'Sign in' }).click()
+
+    await expect(page.getByRole('alert')).toHaveText('Incorrect username or password.')
+    await expect(page.getByText(/session expired/i)).toHaveCount(0)
+    await expect(username).toHaveValue('owner')
+    expect(await page.evaluate(() => sessionStorage.getItem('auth_expired'))).toBeNull()
+  })
+
+  test('setup-status failure pauses startup until a successful retry', async ({ page }) => {
+    let checks = 0
+    await page.route(/\/api\/auth\/setup\/status$/, route => {
+      checks += 1
+      if (checks === 1) {
+        return route.fulfill({
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+          body: '{"detail":"starting"}',
+        })
+      }
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ configured: false, claim_required: false }),
+      })
+    })
+
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('heading', { name: 'Couldn’t reach Möbius' }))
+      .toBeVisible({ timeout: 10000 })
+    await expect(page.locator('.login')).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Try again' }).click()
+    await expect.poll(() => checks).toBe(2)
+    await expect(page.getByRole('heading', { name: 'Create your account' }))
+      .toBeVisible({ timeout: 10000 })
+  })
 })
 
 test.describe('Logout cache wipe', () => {
 
+  test('Settings sign-out clears local owner state without an expired-session banner', async ({ page }) => {
+    await page.setViewportSize({ width: 412, height: 915 })
+    await page.route(/\/api\/chats\/[^/]+\/stream$/, route =>
+      route.fulfill({ status: 204, body: '' })
+    )
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await waitForShell(page)
+
+    await page.evaluate(async () => {
+      sessionStorage.setItem('draft:sign-out-test', 'private draft')
+      await caches.open('mobius-sign-out-test')
+      await caches.open('unrelated-cache-keep-me')
+    })
+
+    const nav = page.getByRole('button', { name: 'Toggle navigation' })
+    if (await nav.getAttribute('aria-expanded') !== 'true') await nav.click()
+    await page.getByRole('button', { name: 'Settings' }).click()
+    await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
+
+    await page.getByRole('button', { name: 'Sign out', exact: true }).click()
+    await expect(page.getByText(/clears chats, drafts, and app sessions/i)).toBeVisible()
+    await page.getByRole('button', { name: 'Sign out', exact: true }).click()
+
+    await expect(page.locator('.login')).toBeVisible({ timeout: 10000 })
+    await expect(page.getByText(/session expired/i)).toHaveCount(0)
+    expect(await page.evaluate(() => localStorage.getItem('token'))).toBeNull()
+    expect(await page.evaluate(() => sessionStorage.getItem('draft:sign-out-test'))).toBeNull()
+    const cachesAfter = await page.evaluate(() => caches.keys())
+    expect(cachesAfter).not.toContain('mobius-sign-out-test')
+    expect(cachesAfter).toContain('unrelated-cache-keep-me')
+  })
+
   test('clears BOTH mobius-* and workbox-* Cache Storage entries (fix c)', async ({ page }) => {
     // The real wipe runs inside api/client.js's 401 handler
     // (clearQueryCache → wipeSwCaches), which is the only production
-    // path that fires it (single-owner app, no logout button). We
+    // path that fires it automatically when an authenticated request expires. We
     // drive that genuine path: seed both cache prefixes, force a 401
     // on an authenticated API call, and assert both prefixes are gone.
     await page.setViewportSize({ width: 412, height: 915 })

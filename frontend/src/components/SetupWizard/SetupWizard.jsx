@@ -186,6 +186,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
   const [agentSaving, setAgentSaving] = useState(false)
   const [agentSaved, setAgentSaved] = useState(false)
   const [agentError, setAgentError] = useState('')
+  const [agentProvider, setAgentProvider] = useState('')
 
   function toggle(id) {
     setExpanded(prev => prev === id ? null : id)
@@ -204,7 +205,7 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
   }
 
   const saveConnectedProvider = useCallback(async (provider) => {
-    if (!provider) return
+    if (!provider) return false
     setAgentSaving(true)
     setAgentSaved(false)
     setAgentError('')
@@ -220,20 +221,27 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
       settingsQueries.owner.invalidate(queryClient)
       setAgentSaved(true)
       setTimeout(() => setAgentSaved(false), 1600)
+      return true
     } catch (err) {
       setAgentError(err.message || 'Could not save agent defaults.')
+      return false
     } finally {
       setAgentSaving(false)
     }
   }, [queryClient])
 
-  function handleConnected(provider) {
+  async function handleConnected(provider) {
     const preferred = firstConnectedProvider(provider) || provider
-    saveConnectedProvider(preferred)
+    setAgentProvider(preferred)
     settingsQueries.owner.invalidate(queryClient)
     authQueries.provider.claudeStatus.invalidate(queryClient)
     authQueries.provider.statuses.invalidate(queryClient)
-    setExpanded(null)
+    if (await saveConnectedProvider(preferred)) setExpanded(null)
+  }
+
+  async function retryProviderSave() {
+    const preferred = agentProvider || firstConnectedProvider()
+    if (await saveConnectedProvider(preferred)) setExpanded(null)
   }
 
   const readyToContinue = connectedAny && !agentSaving && !agentError
@@ -251,11 +259,9 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
 
         <div className="settings__providers">
           <ProviderRow
-            id="codex"
             name="OpenAI Codex"
             badge="Free ChatGPT account"
             connected={codexConnected}
-            showRadio={false}
             expanded={expanded === 'codex'}
             onToggleExpand={() => toggle('codex')}
           >
@@ -263,10 +269,8 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
           </ProviderRow>
 
           <ProviderRow
-            id="claude"
             name="Claude Code"
             connected={claudeConnected}
-            showRadio={false}
             expanded={expanded === 'claude'}
             onToggleExpand={() => toggle('claude')}
           >
@@ -278,8 +282,18 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
           </ProviderRow>
         </div>
 
-        {agentSaved && <p className="setup__success">Provider connected. Ready when you are.</p>}
+        {agentSaved && <p className="setup__success" role="status">Provider connected. Ready when you are.</p>}
         {agentError && <p className="setup__error" role="alert">{agentError}</p>}
+        {agentError && (
+          <button
+            className="setup__btn setup__btn--full"
+            type="button"
+            onClick={retryProviderSave}
+            disabled={agentSaving || !agentProvider}
+          >
+            {agentSaving ? 'Saving…' : 'Try saving again'}
+          </button>
+        )}
 
         {!connectedAny && (
           <p className="setup__skip-warn">
@@ -292,9 +306,9 @@ function ProviderStep({ onSkip, onContinue, claudeAuthenticated }) {
           onClick={onContinue}
           disabled={!readyToContinue}
         >
-          {agentSaving ? 'Saving...' : 'Enter Möbius'}
+          {agentSaving ? 'Saving…' : 'Enter Möbius'}
         </button>
-        <button className="setup__skip" type="button" onClick={onSkip}>
+        <button className="setup__skip" type="button" onClick={onSkip} disabled={agentSaving}>
           Explore without AI
         </button>
       </div>

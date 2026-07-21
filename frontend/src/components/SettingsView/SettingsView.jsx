@@ -4,7 +4,7 @@ import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import Moon from 'lucide-react/dist/esm/icons/moon.mjs'
 import Sun from 'lucide-react/dist/esm/icons/sun.mjs'
-import { api } from '../../api/client.js'
+import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
 import { restartCanReload } from '../../lib/restartReadiness.js'
@@ -311,6 +311,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // A manual restart interrupts any live chat, so it's a deliberate two-step:
   // the first tap arms the confirm, the second actually restarts.
   const [restartConfirm, setRestartConfirm] = useState(false)
+  const [signOutConfirm, setSignOutConfirm] = useState(false)
+  const [signingOut, setSigningOut] = useState(false)
   // Platform self-update (backend/frontend/libraries/recovery as one release).
   // 'idle' | 'applying' | 'resolving' | 'restarting'.
   const [platform, setPlatform] = useState(null)
@@ -376,8 +378,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     claudeStatusQuery.refetch()
   }, [settingsQuery, claudeStatusQuery])
   const [backgroundDraft, setBackgroundDraft] = useState(null)
+  const backgroundDraftRef = useRef(null)
   const [backgroundError, setBackgroundError] = useState('')
   const backgroundSaveReqRef = useRef(0)
+  const backgroundSaveChainRef = useRef(Promise.resolve())
   const [backgroundDrag, setBackgroundDrag] = useState(null)
   const [backgroundCommitting, setBackgroundCommitting] = useState(false)
   const backgroundDragRef = useRef(null)
@@ -397,12 +401,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
 
   useEffect(() => {
     if (!settingsQuery.data) return
-    setBackgroundDraft(
-      normalizeBackgroundAgents(
-        settingsQuery.data.background_agents,
-        providerFromSettings(settingsQuery.data),
-      ),
+    const next = normalizeBackgroundAgents(
+      settingsQuery.data.background_agents,
+      providerFromSettings(settingsQuery.data),
     )
+    backgroundDraftRef.current = next
+    setBackgroundDraft(next)
   }, [settingsQuery.data])
 
   useEffect(() => {
@@ -443,56 +447,61 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     return FALLBACK_MODEL_ROWS[provider] || []
   }, [modelRegistryQuery.data])
 
-  const persistBackgroundAgents = useCallback(async (draft) => {
+  const persistBackgroundAgents = useCallback((draft) => {
     const rows = Array.isArray(draft) ? draft : []
     const enabled = rows.filter(row => row.enabled !== false)
     if (!enabled.length) {
       setBackgroundError('Choose at least one background model.')
-      return
+      return Promise.resolve()
     }
     const reqId = ++backgroundSaveReqRef.current
     setBackgroundError('')
-    try {
-      const toChoice = (row, includeEnabled = false) => {
-        const isEnabled = row.enabled !== false
-        const choice = {
-          provider: row.provider,
-          model: isEnabled ? (row.model || null) : null,
-          effort: isEnabled ? (row.effort || null) : null,
+    const save = backgroundSaveChainRef.current.catch(() => {}).then(async () => {
+      try {
+        const toChoice = (row, includeEnabled = false) => {
+          const isEnabled = row.enabled !== false
+          const choice = {
+            provider: row.provider,
+            model: isEnabled ? (row.model || null) : null,
+            effort: isEnabled ? (row.effort || null) : null,
+          }
+          if (includeEnabled) choice.enabled = isEnabled
+          return choice
         }
-        if (includeEnabled) choice.enabled = isEnabled
-        return choice
+        const payload = {
+          providers: rows.map(row => toChoice(row, true)),
+          primary: toChoice(enabled[0]),
+          fallback: enabled[1] ? toChoice(enabled[1]) : null,
+        }
+        const res = await api.settings.save({ background_agents: payload })
+        if (reqId !== backgroundSaveReqRef.current) return
+        if (!res.ok) {
+          let detail = ''
+          try { detail = (await res.json()).detail || '' } catch {}
+          throw new Error(detail || 'Could not save background agents.')
+        }
+        settingsQueries.owner.invalidate(queryClient)
+      } catch (err) {
+        if (reqId === backgroundSaveReqRef.current) {
+          setBackgroundError(err.message || 'Could not save background agents.')
+        }
       }
-      const payload = {
-        providers: rows.map(row => toChoice(row, true)),
-        primary: toChoice(enabled[0]),
-        fallback: enabled[1] ? toChoice(enabled[1]) : null,
-      }
-      const res = await api.settings.save({ background_agents: payload })
-      if (reqId !== backgroundSaveReqRef.current) return
-      if (!res.ok) {
-        let detail = ''
-        try { detail = (await res.json()).detail || '' } catch {}
-        throw new Error(detail || 'Could not save background agents.')
-      }
-      settingsQueries.owner.invalidate(queryClient)
-    } catch (err) {
-      if (reqId === backgroundSaveReqRef.current) {
-        setBackgroundError(err.message || 'Could not save background agents.')
-      }
-    }
+    })
+    backgroundSaveChainRef.current = save
+    return save
   }, [queryClient])
 
   const updateBackgroundDraft = useCallback((updater) => {
-    const current = backgroundDraft ||
+    const current = backgroundDraftRef.current ||
       normalizeBackgroundAgents(
         settingsQuery.data?.background_agents,
         providerFromSettings(settingsQuery.data),
       )
     const next = typeof updater === 'function' ? updater(current) : updater
+    backgroundDraftRef.current = next
     setBackgroundDraft(next)
     persistBackgroundAgents(next)
-  }, [backgroundDraft, persistBackgroundAgents, settingsQuery.data])
+  }, [persistBackgroundAgents, settingsQuery.data])
 
   const setBackgroundProviderChoice = useCallback((provider, patch) => {
     updateBackgroundDraft((current) => current.map((row) => {
@@ -502,7 +511,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   }, [updateBackgroundDraft])
 
   const moveBackgroundProvider = useCallback((fromIndex, toIndex) => {
-    const total = (backgroundDraft ||
+    const total = (backgroundDraftRef.current ||
       normalizeBackgroundAgents(
         settingsQuery.data?.background_agents,
         providerFromSettings(settingsQuery.data),
@@ -514,7 +523,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       next.splice(toIndex, 0, row)
       return next
     })
-  }, [backgroundDraft, settingsQuery.data, updateBackgroundDraft])
+  }, [settingsQuery.data, updateBackgroundDraft])
 
   useEffect(() => {
     backgroundDragRef.current = backgroundDrag
@@ -781,6 +790,14 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       setRestartConfirm(false)
       setRestartError(err.message || 'Restart request failed.')
     }
+  }
+
+  async function signOut() {
+    if (signingOut) return
+    setSigningOut(true)
+    clearToken()
+    await clearQueryCache()
+    window.location.reload()
   }
 
   // Refresh both Möbius update signals on demand: the service worker cache and
@@ -1125,9 +1142,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
             <>
               <div className="settings__providers">
                 <ProviderRow
-                  id="codex"
                   name="OpenAI Codex"
-                  showRadio={false}
                   connected={codexAuthenticated}
                   version={codexVersion}
                   expanded={expandedAuth === 'codex'}
@@ -1137,9 +1152,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 </ProviderRow>
 
                 <ProviderRow
-                  id="claude"
                   name="Claude Code"
-                  showRadio={false}
                   connected={claudeAuthenticated}
                   version={claudeVersion}
                   expanded={expandedAuth === 'claude'}
@@ -1153,9 +1166,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 </ProviderRow>
 
                 <ProviderRow
-                  id="chat-model"
                   name="Chat model"
-                  showRadio={false}
                   connected
                   subtitle="Which models appear in chat pickers."
                   statusNode={
@@ -1466,6 +1477,42 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               Open
             </a>
           </div>
+          <div className="settings__row">
+            <span className="settings__label">Session</span>
+            {signOutConfirm ? (
+              <div className="settings__confirm">
+                <button
+                  className="settings__btn settings__btn--outline settings__btn--sm"
+                  type="button"
+                  onClick={() => setSignOutConfirm(false)}
+                  disabled={signingOut}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="settings__btn settings__btn--sm settings__btn--nowrap"
+                  type="button"
+                  onClick={signOut}
+                  disabled={signingOut}
+                >
+                  {signingOut ? 'Signing out…' : 'Sign out'}
+                </button>
+              </div>
+            ) : (
+              <button
+                className="settings__btn settings__btn--outline settings__btn--sm"
+                type="button"
+                onClick={() => setSignOutConfirm(true)}
+              >
+                Sign out
+              </button>
+            )}
+          </div>
+          {signOutConfirm && !signingOut && (
+            <p className="settings__subtext settings__subtext--tight">
+              This clears chats, drafts, and app sessions cached on this device.
+            </p>
+          )}
         </section>
       </div>
     </div>

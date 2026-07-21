@@ -279,7 +279,6 @@ React + Vite. Entry is `main.jsx` → `App.jsx`. `App.jsx` checks setup status a
 | `LoginForm/` | Subsequent logins |
 | `ProviderAuth/` | Provider-auth UI: `ProviderAuth.jsx` (Claude OAuth), `CodexAuth.jsx` (Codex device-auth), `ProviderRow.jsx` (shared per-provider row) |
 | `ProviderModelPicker/` | `CLAUDE_MODELS`/`CODEX_MODELS` constants shared with `ChatSettingsPanel` (the old radio-list picker was superseded by the composer popover and is no longer rendered) |
-| `MenuButton/` | Hamburger icon |
 | `ErrorBoundary/` | Top-level React error boundary |
 | `Walkthrough/` | First-run walkthrough |
 | `ui/` | Shared primitive UI components |

@@ -140,6 +140,62 @@ test.describe('Bug 1: AskUserQuestion', () => {
   })
 
 
+  test('a failed answer keeps the question and choice retryable', async ({ page }) => {
+    const questionStream = [
+      `data: ${JSON.stringify({
+        type: 'question',
+        question_id: 'q-retry-answer',
+        questions: [{
+          question: 'Choose a launch lane',
+          header: 'Launch',
+          multiSelect: false,
+          options: [{ label: 'Careful' }, { label: 'Fast' }],
+        }],
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    let streamCount = 0
+    let answerAttempts = 0
+    await setupWithStreamMock(page, () => (
+      streamCount++ === 0 ? questionStream : 'data: {"type":"done"}\n\n'
+    ))
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      if (route.request().method() !== 'POST') return route.continue()
+      const body = route.request().postDataJSON()
+      if (!body.answers) return fulfillStartedPost(route)
+      answerAttempts += 1
+      if (answerAttempts === 1) {
+        return route.fulfill({
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+          body: '{"detail":"temporary failure"}',
+        })
+      }
+      return fulfillStartedPost(route)
+    })
+
+    await newChat(page)
+    await sendMessage(page, 'Ask for a launch lane')
+
+    const card = page.locator('.qcard')
+    const careful = page.getByRole('radio', { name: 'Careful' })
+    const submit = page.getByRole('button', { name: 'Submit' })
+    await expect(card).toBeVisible({ timeout: 5000 })
+    await careful.click()
+    await submit.click()
+
+    await expect(card.getByText(/answer didn’t save/i)).toBeVisible()
+    await expect(careful).toHaveAttribute('aria-checked', 'true')
+    await expect(careful).toBeEnabled()
+    await expect(submit).toBeEnabled()
+    expect(answerAttempts).toBe(1)
+
+    await submit.click()
+    await expect.poll(() => answerAttempts).toBe(2)
+    await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
+  })
+
+
   test('submitting a choice keeps every question-card row in place', async ({ page }) => {
     const streamBody = [
       `data: ${JSON.stringify({

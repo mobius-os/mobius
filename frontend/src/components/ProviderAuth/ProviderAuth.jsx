@@ -85,25 +85,21 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
         setError(data.detail || 'Failed to submit code.')
         return
       }
-      // Force a refetch via fetchQuery so we can check the new
-      // status synchronously here, then invalidate so every other
-      // consumer (SettingsView, SetupWizard's ProviderStep) picks
-      // up the new state on its next render.
-      const next = await queryClient.fetchQuery({
-        queryKey: authQueries.provider.claudeStatus.key,
-        queryFn: authQueries.provider.claudeStatus.fetch,
-      })
-      authQueries.provider.claudeStatus.invalidate(queryClient)
-      authQueries.provider.statuses.invalidate(queryClient)
-      if (!next?.authenticated) {
-        setError('Authentication failed. Try again.')
-      } else {
-        setAuthUrl('')
-        setAuthCode('')
-        setJustConnected(true)
-        setTimeout(() => setJustConnected(false), 3000)
-        onDone?.()
-      }
+      // A 200 from /provider/code is authoritative: the backend only returns
+      // after credentials have been written. Update the shared cache now so a
+      // still-fresh persisted "not connected" value cannot reject a valid,
+      // one-shot authorization code. Revalidate in the background afterward.
+      queryClient.setQueryData(
+        authQueries.provider.claudeStatus.key,
+        current => ({ ...(current || {}), configured: true, authenticated: true }),
+      )
+      void authQueries.provider.claudeStatus.invalidate(queryClient)
+      void authQueries.provider.statuses.invalidate(queryClient)
+      setAuthUrl('')
+      setAuthCode('')
+      setJustConnected(true)
+      setTimeout(() => setJustConnected(false), 3000)
+      onDone?.()
     } catch {
       setError('Network error.')
     } finally {
@@ -146,7 +142,7 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
             {submitting ? 'Connecting…' : 'Connect'}
           </button>
         </form>
-        {error && <p className="pa__error">{error}</p>}
+        {error && <p className="pa__error" role="alert">{error}</p>}
       </div>
     )
   }
@@ -157,7 +153,7 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
       return (
         <div className={`pa__row ${className}`}>
           <span className="pa__label">
-            {justConnected ? <span className="pa__success">Connected</span> : 'Connected'}
+            {justConnected ? <span className="pa__success" role="status">Connected</span> : 'Connected'}
           </span>
           <button className="pa__btn pa__btn--sm" onClick={startAuth} disabled={starting}>
             Reconnect
@@ -168,9 +164,9 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
     return (
       <div className={`pa__done ${className}`}>
         <p className="pa__label">
-          {justConnected ? <span className="pa__success">Connected</span> : 'Connected'}
+          {justConnected ? <span className="pa__success" role="status">Connected</span> : 'Connected'}
         </p>
-        {error && <p className="pa__error">{error}</p>}
+        {error && <p className="pa__error" role="alert">{error}</p>}
       </div>
     )
   }
@@ -184,7 +180,7 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
       <button className="pa__btn" onClick={startAuth} disabled={starting}>
         {starting ? 'Starting…' : 'Sign in with Claude'}
       </button>
-      {error && <p className="pa__error">{error}</p>}
+      {error && <p className="pa__error" role="alert">{error}</p>}
     </div>
   )
 }

@@ -515,13 +515,6 @@ textarea:focus-visible {
   -webkit-user-select: none;
 }
 
-/* ── Active-state press feedback ─────────────────────────
-   Drawer items already get scale(0.96) from .drawer__item:active
-   (defined in index.css above).  The send button (.chat__send) gets it
-   too.  Ensure the shell-bar menu button also has a press scale so it
-   reads as tappable on mobile. */
-.menu-btn:active { transform: scale(0.93); }
-
 /* ── @media (hover:hover) guard audit ─────────────────────
    Hover rules on shell-bar buttons are already gated via the
    .shell__bar button rule above using transition-only — no bare

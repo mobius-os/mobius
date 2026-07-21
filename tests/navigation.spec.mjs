@@ -846,27 +846,32 @@ test.describe('Drawer state machine — extended invariants', () => {
   })
 })
 
-// Note on the chat-delete + back-nav guarantee:
-//
-// `Shell.jsx`'s `deleteChat` scrubs `navStackRef` of entries pointing
-// at the deleted chat ID. Without that scrub, back-gesture after
-// delete navigates into a 404'd chat with no error UX. We don't have
-// an end-to-end test for this because:
-//
-//   1. The drawer only shows chats with `has_messages=true` (per
-//      Drawer.jsx). The delete button (X) lives inside chat-list
-//      rows, so empty chats can't be deleted from the UI.
-//   2. Seeding a chat with `has_messages=true` requires running the
-//      agent (POST /chats/{id}/messages spawns the CLI). The
-//      Playwright test setup mocks that endpoint to a no-op 202, so
-//      the chat's `messages` field stays empty and the chat stays
-//      hidden from the drawer.
-//
-// The contract is enforced by the simple line in
-// `Shell.deleteChat`:
-//   navStackRef.current = navStackRef.current.filter(e => e.chatId !== id)
-// If you change that, also delete this comment + write the test
-// using direct DB manipulation or a real agent integration.
+test.describe('Delete response boundaries', () => {
+  test('a chat delete 500 keeps the live row and route intact', async ({ page }) => {
+    await setup(page)
+    const target = NAV_CHATS[0]
+    let deleteAttempts = 0
+    await page.route(new RegExp(`/api/chats/${target.id}$`), route => {
+      if (route.request().method() !== 'DELETE') return route.fallback()
+      deleteAttempts += 1
+      return route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: '{"detail":"delete failed"}',
+      })
+    })
+
+    await openDrawer(page)
+    await page.getByRole('button', { name: `More actions for ${target.title}` }).click()
+    await page.getByRole('menuitem', { name: 'Delete' }).click()
+
+    await expect.poll(() => deleteAttempts).toBe(1)
+    await expect(page.getByText("Couldn't delete this chat — please try again."))
+      .toBeVisible()
+    await expect(page.getByText(target.title)).toBeVisible()
+    expect((await getNavState(page)).activeChatId).toBe(target.id)
+  })
+})
 
 test.describe('BFCache snapshot contract', () => {
   // The fa605f6 nav model fixes the Chrome Android swipe-back "two
