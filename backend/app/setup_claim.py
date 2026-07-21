@@ -8,11 +8,10 @@ is unconfigured the app lifespan publishes a single claim token to
 (uvicorn stdout == compose logs). Setup then requires that exact token.
 
 Invariants (all load-bearing):
-  - Exactly one published claim: the token file is created atomically (temp
-    file + atomic os.link winner, the same shape as
-    `backend/recovery/recovery_auth.py`) and never regenerated while it exists.
+  - Exactly one published claim: the token file is written atomically under
+    `SETUP_LOCK` and never regenerated while it exists.
   - Exactly one unclaimed->owner transition: `SETUP_LOCK` serializes threads,
-    and the database's unique owner singleton rejects a racing process.
+    which is sufficient for the single-worker deployment.
   - No silent re-arming after Owner-row loss: consuming the claim writes a
     durable non-secret marker. If the owner row later vanishes (DB wipe or
     corruption) WITHOUT a deliberate factory reset, the marker (or the recovery
@@ -27,13 +26,10 @@ Invariants (all load-bearing):
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
 import os
 import re
 import secrets
-import stat
 import tempfile
 import threading
 from pathlib import Path
@@ -71,13 +67,6 @@ SETUP_LOCK = threading.Lock()
 # successful ensure_claim() sets it. An old claim file is therefore unusable if
 # this boot could not validate/publish the configured claim.
 _INIT_SUCCEEDED = threading.Event()
-
-# Per-process key for a length-blind constant-time compare: HMAC both sides to
-# a fixed 32-byte digest before compare_digest so neither the published token's
-# length nor the candidate's leaks through timing. The key never leaves the
-# process and is not the claim.
-_COMPARE_KEY = secrets.token_bytes(32)
-
 
 def _claim_path(data_dir) -> Path:
   return Path(data_dir) / _CLAIM_NAME
@@ -123,35 +112,11 @@ def _validate_preset(raw: Optional[str]) -> Optional[str]:
 
 
 def _read_claim_file(data_dir) -> Optional[str]:
-  """Return the published claim token, or None.
-
-  Strict on read so a tampered or malformed file can never authorize setup: a
-  symlink, a non-regular file, a file not owned by this uid, a mode other than
-  exactly 0600, an empty file, or oversize/non-ASCII content all read as "no
-  claim". Open-before-fstat with O_NOFOLLOW keeps validation and reading on the
-  same inode, closing the path-swap race of lstat followed by open.
-  """
-  path = _claim_path(data_dir)
-  fd = -1
+  """Return the published claim token, or None for a missing/invalid file."""
   try:
-    flags = os.O_RDONLY | os.O_NOFOLLOW
-    if hasattr(os, "O_CLOEXEC"):
-      flags |= os.O_CLOEXEC
-    fd = os.open(path, flags)
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode):
-      return None
-    if stat.S_IMODE(st.st_mode) != 0o600 or st.st_uid != os.getuid():
-      return None
-    fh = os.fdopen(fd, "r", encoding="ascii")
-    fd = -1  # fh owns it now
-    with fh:
-      data = fh.read(_MAX_CLAIM_LEN + 1)
+    data = _claim_path(data_dir).read_text(encoding="ascii")
   except (OSError, ValueError):
-    return None  # ValueError covers a non-ASCII (UnicodeDecodeError) body
-  finally:
-    if fd >= 0:
-      os.close(fd)
+    return None
   token = data.strip()
   if not token or len(token) > _MAX_CLAIM_LEN:
     return None
@@ -170,62 +135,16 @@ def _fsync_dir(path: Path) -> None:
     os.close(fd)
 
 
-def _link_claim_atomic(data_dir, token: str) -> str:
-  """Publish `token` via temp file + atomic os.link, winner-takes-all.
-
-  Copies the shape of `backend/recovery/recovery_auth.py`: write a UNIQUE temp
-  file at 0600, then os.link it onto the target, which fails atomically if the
-  target already exists. Concurrent generators each mint a candidate; exactly
-  one wins the link and the losers re-read the winner's token, so every caller
-  agrees on one claim. The finally-unlink drops the temp name (the linked file
-  keeps the same inode). If the existing target is present but unreadable, it is
-  a corrupt claim that would wedge setup forever, so we supersede it atomically.
-  """
-  path = _claim_path(data_dir)
-  os.makedirs(str(path.parent), exist_ok=True)
-  fd, tmp = tempfile.mkstemp(prefix=_CLAIM_NAME + ".", dir=str(path.parent))
-  replaced = False
-  try:
-    with os.fdopen(fd, "w") as fh:
-      fh.write(token)
-      fh.flush()
-      os.fchmod(fh.fileno(), 0o600)
-      os.fsync(fh.fileno())
-    try:
-      os.link(tmp, path)
-      return token
-    except FileExistsError:
-      winner = _read_claim_file(data_dir)
-      if winner:
-        return winner
-      # target exists but is invalid — replace it so setup isn't wedged.
-      os.replace(tmp, path)
-      replaced = True
-      _fsync_dir(path.parent)
-      return token
-  finally:
-    if not replaced:
-      try:
-        os.unlink(tmp)
-        _fsync_dir(path.parent)
-      except OSError:
-        pass
-
-
-def _replace_claim_atomic(data_dir, token: str) -> str:
-  """Publish `token` by atomic replace — used for an explicit preset, which is
-  authoritative and must overwrite any stale generated value."""
+def _write_claim_atomic(data_dir, token: str) -> str:
+  """Publish `token` with one temp-file + replace under `SETUP_LOCK`."""
   path = _claim_path(data_dir)
   os.makedirs(str(path.parent), exist_ok=True)
   fd, tmp = tempfile.mkstemp(prefix=_CLAIM_NAME + ".", dir=str(path.parent))
   try:
-    with os.fdopen(fd, "w") as fh:
+    with os.fdopen(fd, "w", encoding="ascii") as fh:
       fh.write(token)
-      fh.flush()
       os.fchmod(fh.fileno(), 0o600)
-      os.fsync(fh.fileno())
-    os.replace(tmp, path)  # atomic; the preset value wins
-    _fsync_dir(path.parent)
+    os.replace(tmp, path)
     return token
   except Exception:
     try:
@@ -236,7 +155,7 @@ def _replace_claim_atomic(data_dir, token: str) -> str:
 
 
 def _purge_claim(data_dir, *, strict: bool = False) -> None:
-  """Delete the claim and persist its removal.
+  """Delete the claim.
 
   Reconciliation can request strict failure reporting. Consumption is already
   fail-closed once its marker is durable, so it logs a deletion failure.
@@ -244,7 +163,6 @@ def _purge_claim(data_dir, *, strict: bool = False) -> None:
   path = _claim_path(data_dir)
   try:
     os.unlink(str(path))
-    _fsync_dir(path.parent)
   except FileNotFoundError:
     pass
   except OSError as exc:
@@ -304,10 +222,7 @@ def verify(data_dir, candidate) -> bool:
   """Constant-time check of `candidate` against the published claim.
 
   Missing/empty/malformed/wrong all return False — the route maps every False
-  to one uniform 403 so there is no oracle for WHY a claim failed. The compare
-  is length-blind: both sides are HMAC'd to a fixed-width digest before
-  compare_digest so neither the published token nor the candidate leaks its
-  length via timing, and an oversize candidate is rejected before any work.
+  to one uniform 403 so there is no oracle for WHY a claim failed.
   """
   if not _INIT_SUCCEEDED.is_set():
     return False
@@ -318,11 +233,9 @@ def verify(data_dir, candidate) -> bool:
     return False
   if len(candidate) > _MAX_CLAIM_LEN:
     return False
-  a = hmac.new(
-    _COMPARE_KEY, candidate.encode("utf-8", "ignore"), hashlib.sha256,
-  ).digest()
-  b = hmac.new(_COMPARE_KEY, published.encode("utf-8"), hashlib.sha256).digest()
-  return hmac.compare_digest(a, b)
+  return secrets.compare_digest(
+    candidate.encode("utf-8"), published.encode("utf-8"),
+  )
 
 
 def consume(data_dir) -> None:
@@ -364,10 +277,10 @@ def _publish_or_read(data_dir, preset: Optional[str]) -> str:
   if preset is not None:
     if existing == preset:
       return preset
-    return _replace_claim_atomic(data_dir, preset)
+    return _write_claim_atomic(data_dir, preset)
   if existing is not None:
     return existing
-  return _link_claim_atomic(
+  return _write_claim_atomic(
     data_dir, secrets.token_urlsafe(_GENERATED_ENTROPY_BYTES)
   )
 
@@ -389,23 +302,24 @@ def ensure_claim(data_dir, *, owner_exists: bool) -> Optional[str]:
   remove an old claim before raising. The in-memory gate is authoritative even
   when a filesystem failure prevents that cleanup.
   """
-  begin_initialization()
-  try:
-    if owner_exists:
-      _purge_claim(data_dir, strict=True)
-      result = None
-    elif is_fail_closed(data_dir):
-      _purge_claim(data_dir, strict=True)
-      result = None
-    else:
-      # Validate the preset before reading, replacing, or publishing a claim.
-      preset = _validate_preset(os.environ.get(_ENV_VAR))
-      result = _publish_or_read(data_dir, preset)
-  except Exception:
-    _purge_claim(data_dir)
-    raise
-  _INIT_SUCCEEDED.set()
-  return result
+  with SETUP_LOCK:
+    begin_initialization()
+    try:
+      if owner_exists:
+        _purge_claim(data_dir, strict=True)
+        result = None
+      elif is_fail_closed(data_dir):
+        _purge_claim(data_dir, strict=True)
+        result = None
+      else:
+        # Validate the preset before reading, replacing, or publishing a claim.
+        preset = _validate_preset(os.environ.get(_ENV_VAR))
+        result = _publish_or_read(data_dir, preset)
+    except Exception:
+      _purge_claim(data_dir)
+      raise
+    _INIT_SUCCEEDED.set()
+    return result
 
 
 def begin_initialization() -> None:

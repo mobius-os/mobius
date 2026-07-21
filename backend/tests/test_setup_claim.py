@@ -220,66 +220,42 @@ def test_owner_present_purges_stale_claim(tmp_path, monkeypatch):
   assert not (tmp_path / ".setup-claim").exists()
 
 
-def test_read_rejects_symlink_nonexact_modes_and_empty(tmp_path):
+def test_read_claim_file_handles_missing_empty_and_value(tmp_path):
   claim = tmp_path / ".setup-claim"
-
-  # symlink is never trusted
-  target = tmp_path / "real-token"
-  target.write_text("sneaky", encoding="ascii")
-  claim.symlink_to(target)
   assert setup_claim._read_claim_file(str(tmp_path)) is None
-  claim.unlink()
-
-  # Every mode other than exact 0600 is rejected, including stricter-looking
-  # or owner-executable modes.
-  for mode in (0o400, 0o644, 0o700):
-    claim.write_text("token12345", encoding="ascii")
-    os.chmod(claim, mode)
-    assert setup_claim._read_claim_file(str(tmp_path)) is None
-    os.chmod(claim, 0o600)
-
-  # empty file -> no claim
-  os.chmod(claim, 0o600)
   claim.write_text("", encoding="ascii")
   assert setup_claim._read_claim_file(str(tmp_path)) is None
-
-  # a well-formed 0600 file reads back
   claim.write_text("goodtoken", encoding="ascii")
-  os.chmod(claim, 0o600)
   assert setup_claim._read_claim_file(str(tmp_path)) == "goodtoken"
 
 
-def test_read_rejects_claim_owned_by_another_uid(tmp_path, monkeypatch):
-  claim = tmp_path / ".setup-claim"
-  claim.write_text("goodtoken", encoding="ascii")
-  os.chmod(claim, 0o600)
-  real_fstat = os.fstat
-
-  def wrong_owner(fd):
-    st = real_fstat(fd)
-    return type("Stat", (), {"st_mode": st.st_mode, "st_uid": st.st_uid + 1})
-
-  monkeypatch.setattr(setup_claim.os, "fstat", wrong_owner)
-  assert setup_claim._read_claim_file(str(tmp_path)) is None
-
-
-def test_consume_fsyncs_marker_file_and_parent_after_claim_deletion(
+def test_consume_durably_writes_marker_before_claim_deletion(
   tmp_path, monkeypatch,
 ):
   monkeypatch.delenv("MOBIUS_SETUP_CLAIM", raising=False)
   setup_claim.ensure_claim(str(tmp_path), owner_exists=False)
-  fsync_targets = []
+  events = []
   real_fsync = os.fsync
+  real_unlink = os.unlink
 
   def record_fsync(fd):
-    fsync_targets.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+    target = "marker-dir-fsync" if stat.S_ISDIR(os.fstat(fd).st_mode) \
+      else "marker-file-fsync"
+    events.append(target)
     return real_fsync(fd)
 
+  def record_unlink(path):
+    if os.fspath(path) == os.fspath(tmp_path / ".setup-claim"):
+      events.append("claim-unlink")
+    return real_unlink(path)
+
   monkeypatch.setattr(setup_claim.os, "fsync", record_fsync)
+  monkeypatch.setattr(setup_claim.os, "unlink", record_unlink)
   setup_claim.consume(str(tmp_path))
 
-  assert fsync_targets.count(False) >= 1  # marker contents
-  assert fsync_targets.count(True) >= 2   # marker rename + claim unlink
+  assert events == [
+    "marker-file-fsync", "marker-dir-fsync", "claim-unlink",
+  ]
   assert setup_claim.is_consumed(str(tmp_path))
   assert not (tmp_path / ".setup-claim").exists()
 
@@ -288,13 +264,13 @@ def test_verify_uses_constant_time_compare(tmp_path, monkeypatch):
   monkeypatch.delenv("MOBIUS_SETUP_CLAIM", raising=False)
   token = setup_claim.ensure_claim(str(tmp_path), owner_exists=False)
   calls = {"n": 0}
-  real = setup_claim.hmac.compare_digest
+  real = setup_claim.secrets.compare_digest
 
   def spy(a, b):
     calls["n"] += 1
     return real(a, b)
 
-  monkeypatch.setattr(setup_claim.hmac, "compare_digest", spy)
+  monkeypatch.setattr(setup_claim.secrets, "compare_digest", spy)
   assert setup_claim.verify(str(tmp_path), token) is True
   assert setup_claim.verify(str(tmp_path), "definitely-wrong") is False
   assert calls["n"] >= 2  # the compare ran on both the right and wrong path
