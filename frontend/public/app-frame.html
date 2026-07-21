@@ -478,7 +478,22 @@
     // createRoot().render(), because render() only schedules the first
     // render and a component that throws during it reports the error
     // asynchronously, after render() returns.
-    function handleFrameError(title, detail) {
+    // Browser extensions (MetaMask, password managers, ad blockers, etc.)
+    // inject scripts into every frame — including this one — and some of
+    // those scripts throw or reject on their own, for reasons that have
+    // nothing to do with the app. Left unfiltered, that error lands in the
+    // SAME global 'error'/'unhandledrejection' listeners as a genuine app
+    // load failure and (pre-mount) blanks a perfectly working app behind
+    // the "Something went wrong" panel. Recognize the extension's own
+    // script/stack origin (chrome-extension:/moz-extension:/safari-web-
+    // extension:/ms-browser-extension: URLs) and treat it as noise: log it
+    // to devtools for anyone debugging, but never let it stand in for an
+    // app error.
+    var EXTENSION_ORIGIN_RE = /\b(chrome|moz|safari-web|ms-browser)-extension:\/\//i
+    window.__isExtensionError = function (source, stack) {
+      return EXTENSION_ORIGIN_RE.test(String(source || '')) || EXTENSION_ORIGIN_RE.test(String(stack || ''))
+    }
+    function handleFrameError(title, detail, source) {
       if (window.__frameMounted) {
         // The browser also logs the uncaught error natively; this line
         // records why no error panel replaced the working UI.
@@ -486,10 +501,14 @@
           ' (app left on screen): ' + detail)
         return
       }
+      if (window.__isExtensionError(source, detail)) {
+        console.warn('[moebius-frame] ignored browser-extension error (not this app): ' + detail)
+        return
+      }
       showErr(title, detail)
     }
     window.addEventListener('error', function(e) {
-      handleFrameError('Runtime error', e.error ? e.error.stack || e.message : e.message)
+      handleFrameError('Runtime error', e.error ? e.error.stack || e.message : e.message, e.filename)
     })
     window.addEventListener('unhandledrejection', function(e) {
       handleFrameError('Unhandled error', e.reason ? (e.reason.stack || String(e.reason)) : String(e))
@@ -999,10 +1018,12 @@
     }
     window.addEventListener('error', function (e) {
       if (!e.error && !e.message) return;
+      if (window.__isExtensionError && window.__isExtensionError(e.filename, e.error && e.error.stack)) return;
       reportAppError('app:window.onerror', e.message, e.error && e.error.stack);
     });
     window.addEventListener('unhandledrejection', function (e) {
       const r = e.reason;
+      if (window.__isExtensionError && window.__isExtensionError('', r && r.stack)) return;
       reportAppError('app:unhandledrejection', (r && r.message) || String(r), r && r.stack);
     });
 
