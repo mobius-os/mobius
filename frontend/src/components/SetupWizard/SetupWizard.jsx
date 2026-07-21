@@ -2,7 +2,10 @@ import { useState, useEffect, useCallback } from 'react'
 import { api, setToken, BASE } from '../../api/client.js'
 import * as setupSession from '../../lib/setupSession.js'
 import { authQueries } from '../../hooks/queries.js'
-import { resolveProviderAvailability } from '../../lib/providerAvailability.js'
+import {
+  PROVIDER_AVAILABILITY_PHASE,
+  resolveProviderAvailability,
+} from '../../lib/providerAvailability.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
@@ -27,8 +30,21 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
   // reloads the page — an infinite reload loop on first load.
   const providerStatusQuery = authQueries.provider.statuses.useQuery({
     enabled: step !== 'account',
+    // Credentials are the action this screen is responsible for. Re-probe on
+    // entry even when IndexedDB restored a still-fresh disconnected snapshot.
+    refetchOnMount: 'always',
   })
-  const configuredProviders = resolveProviderAvailability(providerStatusQuery).configuredProviders
+  const providerAvailability = resolveProviderAvailability(providerStatusQuery)
+  // Setup is the one place where a persisted disconnected value should not
+  // present as final while its live credential probe is running or failed.
+  // Keep any positively-connected rows usable, but make unknown negative state
+  // explicit so a stale local cache cannot masquerade as server truth.
+  const providerPhase = providerStatusQuery.isError
+    ? PROVIDER_AVAILABILITY_PHASE.ERROR
+    : (providerStatusQuery.isFetching
+        && providerAvailability.configuredProviders.size === 0
+      ? PROVIDER_AVAILABILITY_PHASE.LOADING
+      : providerAvailability.phase)
 
   // Persists step synchronously alongside setStep so a refresh in
   // the microsecond gap between setStep and a useEffect flush can't
@@ -89,7 +105,9 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
       <ProviderStep
         onSkip={onDone}
         onContinue={onDone}
-        configuredProviders={configuredProviders}
+        configuredProviders={providerAvailability.configuredProviders}
+        providerPhase={providerPhase}
+        onRetryProviders={() => providerStatusQuery.refetch()}
       />
     )
   }
@@ -176,7 +194,13 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
  * ChatGPT-account device-auth toggle lives inside CodexAuth. Either
  * provider connecting advances the wizard.
  */
-function ProviderStep({ onSkip, onContinue, configuredProviders }) {
+function ProviderStep({
+  onSkip,
+  onContinue,
+  configuredProviders,
+  providerPhase,
+  onRetryProviders,
+}) {
   const [expanded, setExpanded] = useState('codex')
   const codexConnected = configuredProviders.has('codex')
   const claudeConnected = configuredProviders.has('claude')
@@ -239,6 +263,15 @@ function ProviderStep({ onSkip, onContinue, configuredProviders }) {
   }
 
   const readyToContinue = connectedAny && !agentSaving && !agentError
+  const providerStatusNode = providerPhase === PROVIDER_AVAILABILITY_PHASE.READY
+    ? undefined
+    : (
+        <span className="setup__provider-status">
+          {providerPhase === PROVIDER_AVAILABILITY_PHASE.ERROR
+            ? 'Status unavailable'
+            : 'Checking…'}
+        </span>
+      )
 
   return (
     <div className="setup">
@@ -256,6 +289,7 @@ function ProviderStep({ onSkip, onContinue, configuredProviders }) {
             name="OpenAI Codex"
             badge="Free ChatGPT account"
             connected={codexConnected}
+            statusNode={providerStatusNode}
             expanded={expanded === 'codex'}
             onToggleExpand={() => toggle('codex')}
           >
@@ -265,16 +299,24 @@ function ProviderStep({ onSkip, onContinue, configuredProviders }) {
           <ProviderRow
             name="Claude Code"
             connected={claudeConnected}
+            statusNode={providerStatusNode}
             expanded={expanded === 'claude'}
             onToggleExpand={() => toggle('claude')}
           >
             <ProviderAuth
               authenticated={claudeConnected}
-              compact
+              compact={providerPhase === PROVIDER_AVAILABILITY_PHASE.READY}
               onDone={() => handleConnected('claude')}
             />
           </ProviderRow>
         </div>
+
+        {providerPhase === PROVIDER_AVAILABILITY_PHASE.ERROR && (
+          <div className="setup__provider-error" role="alert">
+            <span>Could not verify provider status.</span>
+            <button type="button" onClick={onRetryProviders}>Retry</button>
+          </div>
+        )}
 
         {agentSaved && <p className="setup__success" role="status">Provider connected. Ready when you are.</p>}
         {agentError && <p className="setup__error" role="alert">{agentError}</p>}

@@ -29,6 +29,10 @@ const SOURCE = readFileSync(
   resolve(HERE, '..', 'ProviderAuth.jsx'),
   'utf8',
 )
+const CODEX_SOURCE = readFileSync(
+  resolve(HERE, '..', 'CodexAuth.jsx'),
+  'utf8',
+)
 
 test('ProviderAuth does NOT call useQuery internally', () => {
   // After 036 commit 3b, the `authenticated` fact comes in via
@@ -62,12 +66,15 @@ test('ProviderAuth treats a successful code exchange as authoritative', () => {
   // synchronous fetchQuery can reuse a fresh cached `false` value (or an
   // in-flight stale request) and reject a valid one-shot code. Publish the
   // committed state, then revalidate it in the background.
-  assert.ok(/setQueryData\(/.test(SOURCE),
-    'ProviderAuth must publish successful authentication to the shared cache.')
-  assert.ok(/authQueries\.provider\.statuses\.key/.test(SOURCE),
-    'ProviderAuth must publish into the canonical all-provider cache.')
-  assert.ok(/invalidate\(queryClient\)/.test(SOURCE),
-    'ProviderAuth must revalidate the authoritative cache update in the background.')
+  assert.ok(/statuses\.markConnected\(queryClient, 'claude'\)/.test(SOURCE),
+    'ProviderAuth must publish successful Claude authentication through the shared cache transition.')
   assert.ok(!/fetchQuery\(/.test(SOURCE),
     'ProviderAuth must not synchronously gate a successful code exchange on cached status.')
+})
+
+test('CodexAuth uses the same authoritative cache transition', () => {
+  assert.ok(/statuses\.markConnected\(queryClient, 'codex'\)/.test(CODEX_SOURCE),
+    'CodexAuth must publish successful Codex authentication through the shared cache transition.')
+  assert.ok(!/await authQueries\.provider\.statuses\.refresh/.test(CODEX_SOURCE),
+    'CodexAuth must not block successful device auth on an aggregate status refresh.')
 })

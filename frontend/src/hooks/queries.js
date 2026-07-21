@@ -142,11 +142,12 @@ async function fetchProvidersStatus() {
   return jsonOrThrow(res, 'provider statuses fetch failed:')
 }
 
-function useProvidersStatusQuery({ enabled = true } = {}) {
+function useProvidersStatusQuery({ enabled = true, refetchOnMount } = {}) {
   return useQuery({
     queryKey: providersStatusKey,
     queryFn: fetchProvidersStatus,
     enabled,
+    ...(refetchOnMount === undefined ? {} : { refetchOnMount }),
     // Cheap query whose data rarely changes within a session — refresh
     // credentials only flip after explicit re-auth or a change on disk. The
     // useProviderAuthStatus hook invalidates on visibilitychange so a
@@ -154,6 +155,22 @@ function useProvidersStatusQuery({ enabled = true } = {}) {
     // between rides this 5-minute cache.
     staleTime: 5 * 60_000,
   })
+}
+
+function markProviderConnected(queryClient, providerId) {
+  if (!providerId) return
+  queryClient.setQueryData(providersStatusKey, current => ({
+    ...(current || {}),
+    [providerId]: {
+      ...(current?.[providerId] || {}),
+      configured: true,
+      authenticated: true,
+    },
+  }))
+  // Authentication endpoints only return success after credentials are
+  // durable. Publish that committed fact synchronously, then let the cheap
+  // aggregate probe reconcile any additional provider metadata off-path.
+  void queryClient.invalidateQueries({ queryKey: providersStatusKey })
 }
 
 async function fetchModelRegistry() {
@@ -336,6 +353,7 @@ export const authQueries = {
         queryFn: fetchProvidersStatus,
         staleTime: 0,
       }),
+      markConnected: markProviderConnected,
     },
   },
 }

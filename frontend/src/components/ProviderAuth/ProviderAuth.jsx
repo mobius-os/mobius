@@ -89,18 +89,7 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
       // after credentials have been written. Update the shared cache now so a
       // still-fresh persisted "not connected" value cannot reject a valid,
       // one-shot authorization code. Revalidate in the background afterward.
-      queryClient.setQueryData(
-        authQueries.provider.statuses.key,
-        current => ({
-          ...(current || {}),
-          claude: {
-            ...(current?.claude || {}),
-            configured: true,
-            authenticated: true,
-          },
-        }),
-      )
-      void authQueries.provider.statuses.invalidate(queryClient)
+      authQueries.provider.statuses.markConnected(queryClient, 'claude')
       setAuthUrl('')
       setAuthCode('')
       setJustConnected(true)

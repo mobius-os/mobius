@@ -115,11 +115,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
       setStatus('complete')
       setUrl('')
       setCode('')
-      try {
-        await authQueries.provider.statuses.refresh(queryClient)
-      } catch {
-        authQueries.provider.statuses.invalidate(queryClient)
-      }
+      authQueries.provider.statuses.markConnected(queryClient, 'codex')
       onConnected?.()
       return 'complete'
     }
