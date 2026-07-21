@@ -73,6 +73,29 @@ async function sendMessage(page, text) {
   ))
 }
 
+async function waitForChatMode(page, chatId, kind, timeout = 3000) {
+  await expect.poll(
+    () => page.evaluate(id => {
+      let mode = null
+      try {
+        mode = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id] || null
+      } catch {}
+      return {
+        kind: mode?.kind || null,
+        // The controller trace contains only event names, coarse geometry, and
+        // redacted mode shapes. Returning it here makes a future ownership race
+        // diagnosable from the assertion artifact without exposing chat text or
+        // stable message identities.
+        diagnostics: window.__mobiusChatScrollTrace || null,
+      }
+    }, chatId),
+    {
+      timeout,
+      message: `chat ${chatId} should persist scroll mode ${kind}`,
+    },
+  ).toMatchObject({ kind })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -653,18 +676,7 @@ test.describe('Scroll position', () => {
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
     await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
-    await page.waitForFunction(
-      id => {
-        try {
-          const modes = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
-          return modes[id]?.kind === 'ANCHOR_AT'
-        } catch {
-          return false
-        }
-      },
-      chatId,
-      { timeout: 3000 }
-    )
+    await waitForChatMode(page, chatId, 'ANCHOR_AT')
 
     // Return through the app navigation stack so ChatView remounts and consumes
     // the saved mode for the same chat.
@@ -696,7 +708,12 @@ test.describe('Scroll position', () => {
     expect(chatId).toBeTruthy()
 
     let messages = [
-      { role: 'user', content: 'Follow restore prompt', ts: 1700000100000 },
+      {
+        cid: 'follow-restore-cid',
+        role: 'user',
+        content: 'Follow restore prompt',
+        ts: 1700000100000,
+      },
       {
         role: 'assistant',
         ts: 1700000100001,
@@ -755,18 +772,7 @@ test.describe('Scroll position', () => {
       const el = document.querySelector('.chat__scroll')
       return !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 50
     }, { timeout: 3000 })
-    await page.waitForFunction(
-      id => {
-        try {
-          return JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.kind
-            === 'FOLLOW_BOTTOM'
-        } catch {
-          return false
-        }
-      },
-      chatId,
-      { timeout: 3000 },
-    )
+    await waitForChatMode(page, chatId, 'FOLLOW_BOTTOM')
     const scrollBefore = await page.evaluate(
       () => document.querySelector('.chat__scroll')?.scrollTop ?? null,
     )
@@ -776,18 +782,7 @@ test.describe('Scroll position', () => {
     await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
     await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await expect(page.locator('.settings')).toBeVisible({ timeout: 5000 })
-    await page.waitForFunction(
-      id => {
-        try {
-          return JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[id]?.kind
-            === 'ANCHOR_AT'
-        } catch {
-          return false
-        }
-      },
-      chatId,
-      { timeout: 3000 },
-    )
+    await waitForChatMode(page, chatId, 'ANCHOR_AT')
 
     // Grow the same assistant row while the chat is inactive. A restored
     // FOLLOW_BOTTOM would jump to this new tail; the saved anchor must not.

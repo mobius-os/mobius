@@ -572,9 +572,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   rendering load the browser may deliver that scroll later. Ownership begins only for
   inputs whose default action can scroll the transcript; ordinary typing, Enter, and
   control activation are not reader scroll intent. Pointer/touch release handles taps,
-  while wheel/scrolling-key input that produces no scroll releases on the next frame;
-  only after a real scroll lands does the short momentum window begin. A bounded
-  dead-man remains the final escape hatch for an interrupted gesture.
+  while scrolling-key input that produces no scroll releases on the next frame. Wheel
+  input gets that early release only when its direction is exactly clamped at the
+  matching scroll edge. An elapsed frame is not evidence that an in-range wheel was a
+  no-op: renderer/compositor load can update geometry before the main-thread `scroll`
+  handler runs. Only after a real scroll lands does the short momentum window begin. A
+  bounded dead-man remains the final escape hatch for any interrupted gesture.
 - **R5a — Attention nudges reveal the usable tail.** Tapping an offscreen question
   or paused-turn nudge is an explicit one-shot reading action: it lands at the
   physical tail, including the list's composer-clearance padding, so the card's

@@ -31,8 +31,10 @@
  * User-gesture detection: pointerdown/wheel/touchstart/touchmove/keydown hold
  * reader ownership until the first scroll event actually arrives, then keep a
  * 250ms momentum window in which scroll events are user-driven and can
- * transition the mode. Outside that handoff/window, scrolls come from our
- * applyMode or browser clamps and are ignored.
+ * transition the mode. Wheel input is released early only when its direction
+ * is exactly clamped at the matching edge; elapsed frames cannot prove that an
+ * in-range gesture was a no-op under renderer load. Outside that handoff/window,
+ * scrolls come from our applyMode or browser clamps and are ignored.
  *
  * See ARCHITECTURE.md "Chat scroll + steer contract" for the full design.
  */
@@ -100,9 +102,10 @@ function _appendScrollTrace(bucket, entry) {
   const existing = window.__mobiusChatScrollTrace
   const trace = existing?.version === 1
     ? existing
-    : { version: 1, transitions: [], writes: [] }
-  const rows = trace[bucket]
-  if (!Array.isArray(rows)) return
+    : { version: 1, transitions: [], writes: [], events: [] }
+  const rows = Array.isArray(trace[bucket])
+    ? trace[bucket]
+    : (trace[bucket] = [])
   rows.push(entry)
   if (rows.length > SCROLL_TRACE_LIMIT) {
     rows.splice(0, rows.length - SCROLL_TRACE_LIMIT)
@@ -568,11 +571,11 @@ export function readerInputActivatesDisclosure(
 
 /** Wheel and keyboard input have no pointer/touch release event. Keyboard
  * input keeps the next-frame no-scroll release. A wheel gets that fast release
- * only when its requested direction is already clamped at the corresponding
- * edge (or has no vertical delta). For a wheel that can move, the compositor's
- * actual scroll event owns the release; under load it can arrive after rAF.
- * Releasing every wheel after one frame lost that event and left the viewport
- * physically at the bottom while its durable mode still said ANCHOR_AT. */
+ * only when its requested direction is exactly clamped at the corresponding
+ * edge (or has no vertical delta). A proximity epsilon is not sufficient: a
+ * wheel can still move through that final gap, and its compositor scroll can
+ * arrive after rAF. For a wheel that can move, the actual scroll event owns the
+ * release. */
 export function readerInputNeedsFrameRelease(
   type,
   {
@@ -587,8 +590,8 @@ export function readerInputNeedsFrameRelease(
   if (!Number.isFinite(deltaY) || deltaY === 0) return true
 
   const maxScrollTop = Math.max(0, scrollHeight - clientHeight)
-  if (deltaY < 0) return scrollTop <= PHYSICAL_BOTTOM_EPSILON_PX
-  return scrollTop >= maxScrollTop - PHYSICAL_BOTTOM_EPSILON_PX
+  if (deltaY < 0) return scrollTop <= 0
+  return scrollTop >= maxScrollTop
 }
 
 
@@ -1462,13 +1465,14 @@ export default function useScrollMode({
       gestureWindowUntilRef.current = 0
       clearTimeout(pendingGestureTimerRef.current)
       pendingGestureTimerRef.current = 0
+      recordTrace('events', 'reader:no-scroll-release', { scrollEl })
       resumeLayoutAfterGestureRef.current?.()
     }
     const scheduleNoScrollRelease = () => {
       if (gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
-      // Scroll events are delivered in the rendering step before rAF. Yield
-      // one frame so a scroll already caused by this gesture can claim the
-      // viewport before an input that changed nothing releases it.
+      // Geometry has already proved this input is clamped at its matching edge
+      // (or it is an unknown focus-navigation key). Yield one frame so any
+      // synchronous scroll can still claim the viewport before release.
       const sequence = gestureSequenceRef.current
       cancelAnimationFrame(pendingGestureReleaseRafRef.current)
       pendingGestureReleaseRafRef.current = requestAnimationFrame(() => {
@@ -1485,6 +1489,9 @@ export default function useScrollMode({
       )
       if (!activatesDisclosure
           && !readerInputMayScroll(event?.type, event?.key)) return
+      recordTrace('events', `reader:input-${event?.type || 'unknown'}`, {
+        scrollEl,
+      })
       if (activatesDisclosure) {
         // A disclosure tap says "hold what I am reading", not "keep following
         // the conversation tail". Latch that intent BEFORE React changes the
@@ -1539,7 +1546,11 @@ export default function useScrollMode({
     const onScroll = () => {
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
       const userDriven = performance.now() < gestureWindowUntilRef.current
-      if (!userDriven) return
+      if (!userDriven) {
+        recordTrace('events', 'scroll:unowned', { scrollEl })
+        return
+      }
+      recordTrace('events', 'scroll:owned', { scrollEl })
       if (gestureWindowUntilRef.current === Number.POSITIVE_INFINITY) {
         clearTimeout(pendingGestureTimerRef.current)
         pendingGestureTimerRef.current = 0
