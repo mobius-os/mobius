@@ -41,8 +41,11 @@ import {
   workspaceRequestsForBuiltApps,
   ACTIVATE_FOREGROUND,
 } from './workspacePlacement.js'
-import { appBuildFailureMessage } from '../../lib/appBuildFailure.js'
-import { appUpdateStaleMessage } from '../../lib/appUpdateRecovery.js'
+import {
+  appBuildFailureMessage,
+  appUpdateStaleMessage,
+  findAppStoreApp,
+} from '../../lib/appRecovery.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import {
   freshChatBuiltApps,
@@ -2379,9 +2382,7 @@ export default function Shell() {
       // The reviewed candidate changed while a conflict was being resolved.
       // Keep the prior live version explicit and take the owner back to the
       // canonical review surface when the bootstrapped store is available.
-      const appStore = appsRef.current.find(app => (
-        String(app.manifest_url || '').includes('githubusercontent.com/mobius-os/app-store/')
-      )) || appsRef.current.find(app => app.name === 'App Store')
+      const appStore = findAppStoreApp(appsRef.current)
       showToast(appUpdateStaleMessage(ev), {
         variant: 'error',
         duration: 12000,

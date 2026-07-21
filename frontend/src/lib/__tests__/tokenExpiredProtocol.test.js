@@ -20,6 +20,10 @@ const frameSource = readFileSync(
   new URL('../../../public/app-frame.html', import.meta.url),
   'utf8',
 )
+const canvasSource = readFileSync(
+  new URL('../../components/AppCanvas/AppCanvas.jsx', import.meta.url),
+  'utf8',
+)
 
 function shouldRenegotiate(code) {
   return code === 'token-expired'
@@ -46,19 +50,16 @@ test('network and ordinary HTTP module failures do not rotate credentials', () =
 // as documentation-as-tests.
 
 test('protocol: frame must reset initialized before posting token-expired', () => {
-  // Simulates the frame side of the protocol.
-  let initialized = true
-  let messagePosted = null
-
-  // Mirror the branch in app-frame.html loadModule:
-  const code = 'token-expired'
-  if (shouldRenegotiate(code)) {
-    initialized = false  // reset so follow-up frame-init is accepted
-    messagePosted = { type: 'moebius:token-expired', appId: 'test-app' }
-  }
-
-  assert.equal(initialized, false, 'initialized must be reset before posting')
-  assert.equal(messagePosted?.type, 'moebius:token-expired')
+  const start = frameSource.indexOf('function renegotiateExpiredModuleToken(error)')
+  const end = frameSource.indexOf('function acceptModuleAck', start)
+  assert.ok(start >= 0 && end > start, 'token renegotiation helper must exist')
+  const helper = frameSource.slice(start, end)
+  const reset = helper.indexOf('initialized = false')
+  const post = helper.indexOf("type: 'moebius:token-expired'")
+  assert.ok(reset >= 0 && post > reset, 'the init latch resets before the post')
+  assert.match(helper, /error\.code !== 'token-expired'/)
+  assert.match(frameSource, /renegotiateExpiredModuleToken\(importErr\)/)
+  assert.match(frameSource, /renegotiateExpiredModuleToken\(retryErr\)/)
 })
 
 test('protocol: frame must NOT post token-expired for an offline broker failure', () => {
@@ -97,8 +98,11 @@ test('protocol: token expiry recovery preserves offline-latch semantics', () => 
   //     newLiveToken under the same appId:version key, overwriting the expired
   //     one. The latch for a different appId or different version is untouched.
   //
-  // No code logic here — this is a contract assertion.
-  assert.ok(true, 'latch semantics preserved: see appToken.js resolveLatchedToken')
+  assert.match(canvasSource, /resolveLatchedToken\(appId, version, liveToken, appToken\)/)
+  assert.match(
+    canvasSource,
+    /msg\.type === 'moebius:token-expired'[\s\S]{0,180}?appQueries\.token\.invalidate\(queryClient, appId\)/,
+  )
 })
 
 test('protocol: an already-mounted frame accepts refreshed credentials', () => {

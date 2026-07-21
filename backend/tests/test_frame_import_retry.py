@@ -76,7 +76,10 @@ def test_retry_marker_reaches_the_parent_broker():
 def test_retry_runs_after_token_renegotiation_branch():
   html = _frame_html()
   retry_delay = html.find("IMPORT_RETRY_DELAY_MS = ")
-  first_token_expired = html.find("importErr.code === 'token-expired'", retry_delay)
+  first_token_expired = html.find(
+    "renegotiateExpiredModuleToken(importErr)", retry_delay,
+  )
   retry_use = html.find("IMPORT_RETRY_DELAY_MS", retry_delay + 1)
   assert retry_delay != -1 and first_token_expired != -1 and retry_use != -1
   assert first_token_expired < retry_use
+  assert html.count("renegotiateExpiredModuleToken(retryErr)") == 1

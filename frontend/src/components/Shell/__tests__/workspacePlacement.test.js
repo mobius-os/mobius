@@ -537,6 +537,7 @@ test('stale pending updates offer the canonical review surface', () => {
   const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
   assert.match(shellSource, /ev\.type === 'app_update_stale'/)
   assert.match(shellSource, /appUpdateStaleMessage\(ev\)/)
+  assert.match(shellSource, /findAppStoreApp\(appsRef\.current\)/)
   assert.match(shellSource, /label: 'Open App Store'/)
   assert.match(shellSource, /navToRef\.current\('canvas', \{ appId: appStore\.id \}\)/)
 })
