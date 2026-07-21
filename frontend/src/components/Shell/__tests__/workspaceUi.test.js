@@ -54,10 +54,11 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   // single mode); the engaged latch is the kill-switch world's legacy rule.
   assert.match(shell, /const tabStripVisible = \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
   assert.match(shell, /tabStripEngaged[\s\S]*?paneModel\.flattenRollbackPriority\(workspace\)[\s\S]*?: \[\]/)
-  // The sole-tab "unpin" shortcut is KILL-SWITCH-world only (with splits ON
-  // the sole-tab close is a real CLOSE_TAB so auto-return can fire), and even
-  // there a sole Settings tab must genuinely close (review §11).
-  assert.match(shell, /if \(!SPLITS && openTabs\.length === 1 && kind !== 'settings'\) \{[\s\S]*?setTabStripEngaged\(false\)[\s\S]*?tabModel\.writeOpenTabs\(\[\]\)/)
+  // v2 DELETED the legacy sole-tab "unpin" shortcut (deletion list): the sole-tab
+  // close is always a real CLOSE_TAB now, so an emptied builder auto-returns to
+  // single. The ONE unified close takes a tab object + opts (INV 13).
+  assert.doesNotMatch(shell, /openTabs\.length === 1 && kind !== 'settings'/)
+  assert.match(shell, /const closeTab = useCallback\(\(tab, \{ reason \} = \{\}\)/)
 })
 
 test('the pane switcher uses the shared modal focus and dismissal contract', () => {
@@ -173,18 +174,18 @@ test('the divider and drag paths coalesce their per-move work into a rAF', () =>
   assert.match(dragBinding, /moveRAF = requestAnimationFrame\(doMoveWork\)/)
 })
 
-test('a layout commit blooms the paned wrappers, suppressed while resizing', () => {
+test('paned wrappers carry NO layout-property transition and NO resize guard (v2)', () => {
+  // v2 (exit-presentation): the 180ms geometry bloom, BOTH guard classes
+  // (workspace--container-resizing / workspace--divider-dragging), and the 200ms
+  // ResizeObserver timer are DELETED. A mode beat animates transform only, and a
+  // divider drag writes rects imperatively — there is no layout interpolation to
+  // suppress, so discrete commits simply snap.
   const rule = css.match(/\.shell__view--paned\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(rule, /transition:\s*top 180ms ease-out/)
-  assert.match(css, /\.workspace--container-resizing \.shell__view--paned[\s\S]*?transition: none/)
-  assert.match(css, /\.workspace--divider-dragging \.shell__view--paned[\s\S]*?transition: none/)
-  assert.match(shell, /el\.classList\.add\('workspace--container-resizing'\)/)
-  assert.match(shell, /el\.classList\.remove\('workspace--container-resizing'\)/)
-  assert.match(chrome, /contentEl\.classList\.add\('workspace--divider-dragging'\)/)
-  assert.doesNotMatch(shell, /workspace--divider-dragging/,
-    'the ResizeObserver must not own the divider guard')
-  assert.doesNotMatch(chrome, /workspace--container-resizing/,
-    'the divider drag must not own the ResizeObserver guard')
+  assert.doesNotMatch(rule, /transition:/)
+  assert.doesNotMatch(css, /workspace--container-resizing/)
+  assert.doesNotMatch(css, /workspace--divider-dragging/)
+  assert.doesNotMatch(shell, /workspace--container-resizing/)
+  assert.doesNotMatch(chrome, /workspace--divider-dragging/)
 })
 
 test('strips sit above dividers so the 44px grab never occludes a tab', () => {
@@ -356,7 +357,10 @@ test('completion feedback (SINGLE PULSE): one completion haptic, NO mid-hold ram
 
 test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  assert.match(handler, /convertSettingsForModeTransition\(\)/)
+  // v2: the toggle builds the latched plan + flips the durable mode in one handler;
+  // there is no Settings conversion call anymore (the tab survives the flip).
+  assert.doesNotMatch(handler, /convertSettingsForModeTransition/)
+  assert.match(handler, /mode\.toggle\(\{ cause, presentation \}\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   assert.doesNotMatch(handler, /openDrawer|closeDrawer/)
   // The gesture hook receives the toggle + the brand ref (for the ring var). The
@@ -472,94 +476,88 @@ test('the living halo lifecycle: lit only in builder mode, one allocation-free r
   assert.match(livingHaloSrc, /cancelAnimationFrame\(raf\)/)
   // Cleanup kills the loop instantly (the snap) + drops the visibility listener.
   assert.match(livingHaloSrc, /return \(\) => \{[\s\S]*?cancelAnimationFrame\(raf\)[\s\S]*?removeEventListener\('visibilitychange'/)
-  // The isolated brand lights a leaf ref only in builder mode and cleans inline styles.
-  assert.match(shellBrand, /useLivingHalo\(\{ haloRef, active: splitsEnabled && builderModeActive \}\)/)
+  // The isolated brand lights a leaf ref only in builder mode AND when no beat is
+  // live (haloActive = builderModeActive && !modeState.transition), so the halo's
+  // rAF never competes with the deal animation (exit-design v2 §Background isolation).
+  assert.match(shellBrand, /useLivingHalo\(\{ haloRef, active: splitsEnabled && haloActive \}\)/)
+  assert.match(shell, /haloActive=\{builderModeActive && !modeState\.transition\}/)
   assert.match(shellBrand, /<span ref=\{haloRef\} className="shell__logo-halo" aria-hidden/)
   assert.match(livingHaloSrc, /clearHaloStyles\(el\)/)
 })
 
-test('the room flourish (CHARGE): panes DEAL in on the KEYED beat class, suppressed while resizing, instant under reduced motion', () => {
-  // The divider-DRAW is gone; the entry flourish is the card-DEAL on the pane wrapper.
-  assert.doesNotMatch(css, /workspace-divider-draw/)
-  // INV 11: the deal is owned by the transient .shell--builder-entering beat
-  // class, NOT the permanent .shell__view--paned (which used to replay it on every
-  // resize). The base paned block carries the geometry transition but no animation.
+test('entry deals in on the keyed beat class, compositor-only, instant under reduced motion (v2)', () => {
+  // v2: entry is a transform/opacity DEAL-IN keyed to the transient
+  // .shell--builder-entering class, applied per-wrapper via data-mode-motion (never
+  // the permanent .shell__view--paned). No animated layout property, shadow, or radius.
   const panedBase = css.match(/\.shell__view--paned \{[\s\S]*?\n\}/)?.[0] || ''
-  assert.doesNotMatch(panedBase, /animation:\s*shell-pane-deal/)
-  assert.match(css, /\.shell--builder-entering \.shell__view--paned \{[\s\S]*?animation:\s*shell-pane-deal 400ms cubic-bezier\(0\.22, 1, 0\.36, 1\)/)
-  assert.match(css, /@keyframes shell-pane-deal\s*\{[\s\S]*?translateX\(18px\)[\s\S]*?translateX\(0\)/)
-  // A live resize / divider-drag during the enter beat must not re-deal every frame
-  // (finding F14): the REAL operation classes on .shell__content, in the REAL DOM
-  // order (root .shell--builder-entering → content op-class → pane). The old
-  // `.workspace--resizing` selector matched nothing and had an inverted ancestor order.
-  assert.match(css, /\.shell--builder-entering \.workspace--container-resizing \.shell__view--paned,\s*\n\s*\.shell--builder-entering \.workspace--divider-dragging \.shell__view--paned \{ animation: none; \}/)
-  assert.doesNotMatch(css, /\.workspace--resizing \.shell--builder-entering/)
-  // Reduced motion drops the deal (and the layout-commit transition).
+  assert.doesNotMatch(panedBase, /animation:/)
+  assert.doesNotMatch(panedBase, /transition:/)
+  assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="deal-in"\] \{[\s\S]*?animation:\s*\n?\s*shell-mode-deal-in/)
+  // The deal-in keyframe touches ONLY transform + opacity (no shadow/radius/filter).
+  const dealIn = css.match(/@keyframes shell-mode-deal-in\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(dealIn, /translate3d\(32px, -4px, 0\) scale\(0\.985\)/)
+  assert.match(dealIn, /opacity: 0/)
+  assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
+  // The old dead .workspace--resizing selector is gone entirely.
+  assert.doesNotMatch(css, /workspace--resizing/)
+  assert.doesNotMatch(css, /shell-pane-deal|shell-strip-deal-in|shell-pane-settle/)
+  // Reduced motion: any data-mode-motion element gets no beat (defensive parity —
+  // the controller never even arms one).
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(reduced, /\.shell__view--paned \{ transition: none; animation: none; \}/)
+  assert.match(reduced, /\.shell \[data-mode-motion\] \{ animation: none !important; \}/)
 })
 
-test('builder single-leaf shows the strip, and entering it has its deal moment (item 3)', () => {
+test('builder single-leaf: the strip deals with its pane, entry through the ONE controller (item 3)', () => {
   // The strip is the builder surface: visible in the effective builder world even
   // at one leaf, and never in single mode.
   assert.match(shell, /const tabStripVisible = \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
-  // Entering builder routes through the ONE mode controller (INV 2), batched in
-  // the SAME handler as the durable flip (INV 7) so no un-dealt frame paints. The
-  // beat + reduced-motion collapse live in the machine now, not a Shell timer.
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  // The honest cause threads through into the descriptor (finding F13).
-  assert.match(handler, /mode\.toggle\(\{ cause, focusedPaneId, leavingPaneIds, multiPane: dealMultiPane \}\)/)
+  // v2: the handler builds the latched plan (deriveEnter/ExitPlan from the
+  // projection) and dispatches the controller beat + the durable flip in the SAME
+  // handler (INV 2/3). No Shell timer, no per-pane role plumbing.
+  assert.match(handler, /deriveEnterPlan\(\{ workspace: ws, projection \}\)/)
+  assert.match(handler, /mode\.toggle\(\{ cause, presentation \}\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
-  // The transient root class comes from the descriptor (exactly one beat class).
   assert.match(shell, /modeMachine\.transitionRootClass\(modeState/)
-  // CSS: the single-pane strip DEALS in and the single full-bleed pane LIFT-SETTLES;
-  // the multi-pane enter deal is now keyed to the transient class (INV 11), never
-  // the permanent .shell__view--paned.
-  assert.match(css, /\.shell--builder-entering \.shell__tabstrip \{[\s\S]*?animation:\s*shell-strip-deal-in 320ms/)
-  assert.match(css, /@keyframes shell-strip-deal-in\s*\{[\s\S]*?translateY\(-100%\)[\s\S]*?translateY\(0\)/)
-  assert.match(css, /\.shell--builder-entering \.shell__view--active \{[\s\S]*?animation:\s*shell-pane-settle 320ms/)
-  assert.match(css, /\.shell--builder-entering \.shell__view--paned \{[\s\S]*?animation:\s*shell-pane-deal 400ms/)
-  assert.match(css, /@keyframes shell-pane-settle\s*\{[\s\S]*?translateY\(8px\) scale\(0\.992\)[\s\S]*?scale\(1\)/)
-  // INV 11 (P1 fix): the PERMANENT .shell__view--paned carries NO one-shot deal —
-  // it used to replay the 400ms entrance after every resize / dock / divider drag.
-  const panedBase = css.match(/\.shell__view--paned \{[\s\S]*?\n\}/)?.[0] || ''
-  assert.doesNotMatch(panedBase, /animation:\s*shell-pane-deal/)
-  // Reduced motion drops the entry deal.
+  // The single-pane nav strip carries the beat motion so it deals WITH its pane.
+  assert.match(shell, /data-mode-motion=\{navMotion \? navMotion\.motion : undefined\}/)
+  // CSS: a strip deals in with its pane on enter (shared with the WorkspaceChrome
+  // strips via .shell__tabstrip[data-mode-motion]).
+  assert.match(css, /\.shell--builder-entering \.shell__tabstrip\[data-mode-motion="deal-in"\] \{[\s\S]*?shell-mode-deal-in/)
+  // Reduced motion drops any beat.
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(reduced, /\.shell--builder-entering \.shell__tabstrip,\s*\n\s*\.shell--builder-entering \.shell__view--active \{ animation: none; \}/)
+  assert.match(reduced, /\.shell \[data-mode-motion\] \{ animation: none !important; \}/)
 })
 
-test('leaving builder plays the INVERSE card-deal: deal-out + settle, decisive (item 1)', () => {
+test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, decisive (item 1)', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
-  // The exit deal is earned only for a genuine MULTI-PANE exit with a non-Settings
-  // focused surface; multiPane=false makes the machine collapse instantly (the
-  // beat + duration + Zippo asymmetry live in modeMachine.js: MODE_EXIT_MS < MODE_ENTER_MS).
+  // v2: the latched plan owns classification (promote a genuinely-shared pane vs
+  // reveal the single world underneath), the 20ms stagger, and the FLIP rects — the
+  // handler no longer computes settlePaneId / leavingPaneIds / dealMultiPane itself.
   assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
-  assert.match(handler, /multiPaneRef\.current && !settingsFocused/)
-  // The leaving panes are LATCHED into the descriptor (INV 9): a mid-beat focus
-  // change cannot re-target which pane deals out. The SETTLING pane is the slot's
-  // pane (animation honesty), not necessarily the focused one.
-  assert.match(handler, /const leavingPaneIds = leavingBuilder/)
-  assert.match(handler, /visibleLeavesRef\.current\.filter\(id => id !== settlePaneId\)/)
-  assert.match(handler, /const settlePaneId = \(slotPane && visibleLeavesRef\.current\.includes\(slotPane\.id\)\)/)
-  // Held tiled while the beat runs — from the ONE descriptor (INV 4), not a boolean pair.
+  assert.match(handler, /deriveExitPlan\(\{ workspace: ws, projection, contentRect \}\)/)
+  assert.doesNotMatch(handler, /settlePaneId|leavingPaneIds|dealMultiPane|multiPaneRef/)
+  // Held tiled while the beat runs — from the ONE descriptor (INV 4).
   assert.match(shell, /const effectiveViewMode = modeMachine\.effectiveViewMode\(modeState/)
-  // The settling pane grows to the FULL content box during the beat.
-  assert.match(shell, /if \(!exitGeometryActive\) return visibleTabRects/)
-  assert.match(shell, /next\.set\(settleKey, \{ \.\.\.rect, x: 0, y: 0, w: contentRect\.w, h: contentRect\.h \}\)/)
-  // Wrappers carry the LATCHED data-pane-role so CSS tells settling from leaving.
-  assert.match(shell, /data-pane-role=\{paneRoleFor\(/)
-  // The transient root class comes from the descriptor (exactly one beat class, INV 1).
-  assert.match(shell, /modeMachine\.transitionRootClass\(modeState/)
-  // CSS: leaving pane DEALS out to the right + fades; chrome fades AND — INV 9 —
-  // the leaving surfaces + chrome children go POINTER-INERT (not merely invisible).
-  assert.match(css, /\.shell--builder-exiting \.shell__view--paned\[data-pane-role="leaving"\] \{[\s\S]*?animation:\s*shell-pane-deal-out 240ms[\s\S]*?forwards/)
-  assert.match(css, /@keyframes shell-pane-deal-out\s*\{[\s\S]*?translateX\(0\)[\s\S]*?translateX\(44px\)[\s\S]*?opacity: 0/)
-  assert.match(css, /\.shell--builder-exiting \.workspace__chrome \{[\s\S]*?opacity: 0/)
-  assert.match(css, /\.shell--builder-exiting[\s\S]*?\.workspace__strip,[\s\S]*?pointer-events: none/)
-  // Reduced motion drops the exit deal.
+  // The old data-pane-role + renderTabRects wrapper-widen are GONE: panes hold their
+  // tiled rect and animate transform (data-mode-motion + inline --flip/--mode vars).
+  assert.doesNotMatch(shell, /data-pane-role/)
+  assert.doesNotMatch(shell, /renderTabRects/)
+  assert.match(shell, /data-mode-motion=\{motion \? motion\.motion : undefined\}/)
+  // The world-reveal underlay paints full-bleed beneath the deal (INV 5).
+  assert.match(shell, /shell__view--exit-underlay/)
+  // CSS v2: promote FLIPs to full-bleed; deal-out drifts + fades. Both compositor-only.
+  assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="promote"\] \{[\s\S]*?shell-mode-promote/)
+  assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="deal-out"\] \{[\s\S]*?shell-mode-deal-out/)
+  const dealOut = css.match(/@keyframes shell-mode-deal-out\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(dealOut, /translate3d\(32px, -4px, 0\) scale\(0\.985\)/)
+  assert.match(dealOut, /opacity: 0/)
+  assert.doesNotMatch(dealOut, /box-shadow|border-radius|filter|clip/)
+  // The parent-chrome opacity fade is DELETED (strips deal with their panes now).
+  assert.doesNotMatch(css, /\.shell--builder-exiting \.workspace__chrome \{[\s\S]*?opacity: 0/)
+  // Reduced motion drops any beat.
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(reduced, /\.shell--builder-exiting \.shell__view--paned\[data-pane-role="leaving"\] \{ animation: none; \}/)
+  assert.match(reduced, /\.shell \[data-mode-motion\] \{ animation: none !important; \}/)
 })
 
 test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {
@@ -665,8 +663,9 @@ test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any dro
   assert.match(dragBinding, /const flipToPanes = before\.viewMode === 'single'/)
   assert.match(dragBinding, /flipViewMode: flipToPanes \? 'panes' : null/)
   assert.doesNotMatch(dragBinding, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE'/)
-  // BLOCKER §1: the drag-commit flip routes through the SAME centralized conversion.
-  assert.match(dragBinding, /if \(flipToPanes\) \{[\s\S]*?convertSettingsForModeTransition\?\.\(\)/)
+  // v2 deleted the Settings mode-conversion: a builder Settings tab survives the
+  // flip, so a drop-into-builder no longer routes any overlay<->tab conversion.
+  assert.doesNotMatch(dragBinding, /convertSettingsForModeTransition/)
   // §8: "committed" is the ACTUAL workspace change, not a stale lit-zone flag.
   assert.match(dragBinding, /return workspaceStateRef\.current\.ws !== before/)
   assert.match(dragBinding, /if \(moveRAF\) \{[\s\S]*?cancelAnimationFrame\(moveRAF\)[\s\S]*?doMoveWork\(\)/)

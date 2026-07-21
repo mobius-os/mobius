@@ -104,6 +104,12 @@ export default function WorkspaceChrome({
   navTo,
   labelForTab,
   onTabContextMenu,
+  // The ONE shared user-close action (INV 13) — Shell owns it, this layer no longer
+  // dispatches CLOSE_TAB itself. Called with a tab object.
+  onCloseTab,
+  // key → { motion, vars } for the live mode beat, so each strip deals WITH its pane
+  // (Shell's wrapperMotion). Null/absent when no beat is live.
+  stripMotion = null,
   streamingChatIds = EMPTY_SET,
   attentionChatIds = EMPTY_SET,
   newAppIds = EMPTY_SET,
@@ -141,10 +147,6 @@ export default function WorkspaceChrome({
     navTo(view, { ...opts, paneId })
   }, [navTo, workspace, dispatchWorkspace])
 
-  const closeTab = useCallback((tab) => {
-    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tab) })
-  }, [dispatchWorkspace])
-
   // ── Divider drag (imperative, React-free per frame) ──────────────────────
   const beginDrag = useCallback((e, divider) => {
     if (e.button != null && e.button !== 0) return
@@ -155,9 +157,10 @@ export default function WorkspaceChrome({
     try { handle.setPointerCapture(e.pointerId) } catch { /* not captured */ }
     const prevUserSelect = document.body.style.userSelect
     document.body.style.userSelect = 'none'
-    // Suppress the layout-bloom transition while the divider is dragged: rects are
-    // written imperatively per frame and a transition would lag them.
-    contentEl.classList.add('workspace--divider-dragging')
+    // No guard class needed anymore (v2 deleted the paned/strip layout transition):
+    // the rects are written imperatively per frame and there is no interpolation to
+    // suppress. A divider drag also cannot overlap a mode beat — the chrome is inert
+    // during one.
     const box = contentEl.getBoundingClientRect()
     const { dir, splitId } = divider
 
@@ -233,7 +236,6 @@ export default function WorkspaceChrome({
       window.removeEventListener('blur', end)
       try { handle.releasePointerCapture(e.pointerId) } catch { /* released */ }
       document.body.style.userSelect = prevUserSelect
-      contentEl.classList.remove('workspace--divider-dragging')
       dispatchWorkspace({ type: 'SET_RATIO', splitId, ratio: committed })
     }
     window.addEventListener('pointermove', onMove)
@@ -309,9 +311,11 @@ export default function WorkspaceChrome({
             focused={paneId === workspace.focusedPaneId}
             labelForTab={labelForTab}
             onActivate={activateTab}
-            onClose={closeTab}
+            onClose={onCloseTab}
             onFocus={focusPane}
             onTabContextMenu={onTabContextMenu}
+            // The strip deals WITH its pane this beat (motion keyed by its active tab).
+            motion={stripMotion ? stripMotion(pane.activeTabKey) : null}
           />
         )
       })}

@@ -817,18 +817,15 @@ export default function useNavigation({
     dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab, activate: true })
   }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
 
-  // Settings is context-independent across a world toggle (two-worlds design,
-  // finding 2 / INV 6-7): the SINGLE world owns the takeover overlay (`settingsOpen`,
-  // painted only in single mode), the BUILDER world owns its own Settings TAB in the
-  // pane tree. Toggling worlds changes which is VISIBLE — it must NOT destructively
-  // convert the overlay into a tab or CLOSE a builder Settings tab. The old
-  // conversion permanently destroyed an unfocused Settings-only pane on exit (it
-  // closed the tab globally, the pane collapsed, and re-entry could not reconstruct
-  // it) and could restore a `single + Settings-tab` snapshot; leaving each world's
-  // Settings state intact removes both. A stray Settings tab in single mode is
-  // simply hidden (single paints the slot), so it is no longer a forbidden state.
-  // Kept as a no-op the toggle can still call, so the call site stays uniform.
-  const convertSettingsForModeTransition = useCallback(() => {}, [])
+  // Settings is context-independent across a world toggle (two-worlds design):
+  // the SINGLE world owns the takeover overlay (`settingsOpen`, painted only in
+  // single mode), the BUILDER world owns its own Settings TAB in the pane tree.
+  // Toggling worlds changes which is VISIBLE — it does NOT destructively convert one
+  // into the other or CLOSE a builder Settings tab (the old conversion permanently
+  // destroyed an unfocused Settings-only pane on exit). A stray Settings tab in
+  // single mode is simply hidden (single paints the slot). There is nothing to
+  // convert, so the former no-op mode-conversion hook (v1) is gone — the toggle no
+  // longer calls it, and no reducer branch removes a Settings tab on entry.
 
   function navTo(view, opts = {}) {
     // App-sentinels from other apps stay in browser history — each is still a
@@ -1539,7 +1536,6 @@ export default function useNavigation({
     closeDrawer,
     navTo,
     applyModeDestination,
-    convertSettingsForModeTransition,
     backFiredRef,
     drawerPushedRef,
     drawerOpenRef,

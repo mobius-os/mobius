@@ -83,12 +83,8 @@ export default function useWorkspaceDrag({
   // commits 'panes', so ONE undo reverts both the tree AND the mode. The leave
   // call carries the outcome — committed:true means the drop's OPEN_TAB_AT
   // flipped the tree, so the descriptor must drag-commit (not cancel) in the
-  // same batch.
-  convertSettingsForModeTransition, // () => void — the ONE centralized overlay<->tab
-  // conversion every mode transition uses (review BLOCKER §1). A drop that commits
-  // 'panes' runs it so a Settings TAKEOVER open at commit time converts to a tab
-  // instead of lingering full-bleed over the committed builder workspace. A no-op
-  // when no overlay is open, preserving the one-undo fold for the common drop.
+  // same batch. (Settings needs no conversion across the flip — its tab survives;
+  // single mode paints its own slot, never a forced takeover.)
 }) {
   useEffect(() => {
     if (!enabled) return undefined
@@ -425,13 +421,9 @@ export default function useWorkspaceDrag({
         // the former single-leaf split-drop flip as the no-parked-layout case.
         const before = workspaceStateRef.current.ws
         const flipToPanes = before.viewMode === 'single'
-        if (flipToPanes) {
-          // BLOCKER §1: route the mode transition through the SAME centralized
-          // conversion every toggle uses, BEFORE the drop, so a Settings takeover
-          // open at commit time converts to a tab (it reads viewMode 'single' here
-          // → "entering builder"). A no-op when no overlay is open.
-          convertSettingsForModeTransition?.()
-        }
+        // Settings needs no conversion across the flip: a builder Settings tab
+        // survives, and single mode paints its own slot rather than a takeover, so a
+        // drop-into-builder no longer routes any overlay<->tab conversion.
         dispatchWorkspace({
           type: 'OPEN_TAB_AT', tab, target, label: `Moved ${label}`,
           flipViewMode: flipToPanes ? 'panes' : null,

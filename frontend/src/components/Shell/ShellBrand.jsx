@@ -13,6 +13,12 @@ const ShellBrand = memo(function ShellBrand({
   splitsEnabled,
   navigationOpen,
   builderModeActive,
+  // The halo gate — builder mode active AND no live mode beat. Distinct from
+  // builderModeActive (the logo twist), which flips synchronously with the toggle;
+  // the halo waits for the beat to settle so it never competes for frames with the
+  // deal animation (exit-design v2 §Background isolation). Defaults to
+  // builderModeActive for callers that do not thread it.
+  haloActive = builderModeActive,
   backFiredRef,
   onToggleMode,
   onToggleNavigation,
@@ -27,7 +33,7 @@ const ShellBrand = memo(function ShellBrand({
     drawerOpen: navigationOpen,
     builderModeActive,
   })
-  useLivingHalo({ haloRef, active: splitsEnabled && builderModeActive })
+  useLivingHalo({ haloRef, active: splitsEnabled && haloActive })
 
   return (
     <>

@@ -3,164 +3,173 @@
    presentation — a single-pane workspace renders today's DOM verbatim (Shell's
    parity branch) and never touches any class here. */
 
+/* ── Mode-transition motion (exit-presentation v2) ───────────────────────────
+   The mode beat is COMPOSITOR-ONLY: every keyframe touches transform + opacity
+   and NOTHING that forces layout on the live iframe/ChatView surfaces (no
+   box-shadow, border-radius, filter, clip, or animated top/left/width/height).
+   Panes hold their tiled content rect through the beat; a promote grows via a
+   FLIP transform, departures deal out via transform + fade, and the descriptor
+   clears in one commit that snaps the destination to ordinary full-bleed at
+   visually identical bounds. Timing constants + the per-beat plan live in
+   workspaceView.js (MODE_MOTION / deriveExit·EnterPlan); Shell writes each
+   participant's --mode-duration/--mode-delay (+ --flip-* for a promote) inline. */
+.shell {
+  --ease-mode-arrive: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-mode-leave: cubic-bezier(0.4, 0, 0.7, 0.2);
+  --ease-mode-chrome: cubic-bezier(0.25, 1, 0.5, 1);
+}
+
 /* A content wrapper (app iframe or PaneChatView) that is the active tab of a
    VISIBLE pane. Shell writes its rect inline (top/left/width/height from the
    pane's content rect); this clears the base `.shell__view` inset:0 so the
    inline width/height win, and makes it visible + interactive. Everything else
-   keeps the full-bleed hidden pattern. */
+   keeps the full-bleed hidden pattern. NO geometry transition lives here (v2
+   deletes the 180ms bloom): a divider drag writes rects imperatively per frame
+   and mode beats animate transform only, so an interpolated layout property would
+   only race those and resize live iframes. Discrete layout commits snap. */
 .shell__view--paned {
   right: auto;
   bottom: auto;
   visibility: visible;
   pointer-events: auto;
-  /* 180ms geometry bloom on a layout commit (drop / auto-split / pane close),
-     design §3.4 / §6.2. Suppressed during a CONTINUOUS operation — a live
-     divider drag or a window resize write rects every frame and must stay crisp
-     — via the operation-specific root classes owned by Shell and
-     WorkspaceChrome. Separate ownership matters: a debounced container resize
-     must never clear the divider drag's transition guard (or vice versa). */
-  transition: top 180ms ease-out, left 180ms ease-out,
-    width 180ms ease-out, height 180ms ease-out;
-  /* INV 11 (review §3): NO one-shot `animation` on this PERMANENT class. The P1
-     finding was that `.shell__view--paned` permanently declared the 400ms deal, so
-     removing `.workspace--resizing` (which set `animation:none`) recomputed the
-     name back to `shell-pane-deal` and REPLAYED the entrance after every resize,
-     dock/undock, and divider-drag release — a deal with no semantic entry. A
-     sibling crispness fix addressed the same P1 by no longer OVERRIDING the
-     animation during live geometry ops; this rebuild instead moves the deal off
-     the permanent class entirely (the review's prescription), so the entry deal
-     lives ONLY on the transient `.shell--builder-entering` beat class below and
-     plays exactly once per genuine mode-enter, never on a resize. */
-}
-@keyframes shell-pane-deal {
-  from {
-    transform: translateX(18px);
-    opacity: 0.5;
-    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
-    border-radius: 10px;
-  }
-  60% { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14); }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-    box-shadow: 0 0 0 rgba(0, 0, 0, 0);
-    border-radius: 0;
-  }
-}
-.workspace--container-resizing .shell__view--paned,
-.workspace--container-resizing .workspace__strip,
-.workspace--container-resizing .workspace__divider,
-.workspace--divider-dragging .shell__view--paned,
-.workspace--divider-dragging .workspace__strip,
-.workspace--divider-dragging .workspace__divider {
-  transition: none;
 }
 
-/* --- Builder mode-ENTER deal, single-leaf (design: entry always has its moment) -
-   Entering builder with ONE leaf has no second pane to card-deal in, so the
-   moment is carried here: the single-pane .shell__tabstrip DEALS in from the top
-   while the single full-bleed pane LIFT-SETTLES beneath it. Scoped to the
-   transient .shell--builder-entering root class (Shell holds it one beat on a
-   logo/keyboard ENTER), so it fires only on a genuine mode-enter -- never on load,
-   a chat switch, or the multi-pane path (whose panes deal via .shell__view--paned
-   above). Reduced motion drops it (below). */
-.shell--builder-entering .shell__tabstrip {
-  animation: shell-strip-deal-in 320ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-@keyframes shell-strip-deal-in {
-  from { transform: translateY(-100%); opacity: 0; }
-  60% { opacity: 1; }
-  to { transform: translateY(0); opacity: 1; }
-}
-.shell--builder-entering .shell__view--active {
-  animation: shell-pane-settle 320ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-@keyframes shell-pane-settle {
-  from {
-    transform: translateY(8px) scale(0.992);
-    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.18);
-    border-radius: 10px;
-  }
-  60% { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1); }
-  to {
-    transform: translateY(0) scale(1);
-    box-shadow: 0 0 0 rgba(0, 0, 0, 0);
-    border-radius: 0;
-  }
-}
-
-/* Multi-pane builder ENTER card-deal — keyed to the transient beat class (INV
-   11), NOT the permanent .shell__view--paned. Each pane deals in from the right
-   with a brief lift and settles flush; the rects settle on the 180ms transition
-   so deal + settle read as one gesture. Because it lives on the transient class,
-   it plays exactly once per genuine mode-enter and never on a resize / dock /
-   divider-drag release. The keyed animationend on the shell root (useModeController)
-   completes the beat (INV 12). Reduced motion drops it (below). */
-.shell--builder-entering .shell__view--paned {
-  animation: shell-pane-deal 400ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-/* A live resize / divider-drag DURING the enter beat must not re-deal each frame.
-   The suppression uses the REAL operation classes Shell + WorkspaceChrome install
-   (`workspace--container-resizing` / `workspace--divider-dragging`, both on
-   `main.shell__content`) and the REAL DOM order: `.shell--builder-entering` is worn
-   by the `.shell` ROOT — the PARENT of `.shell__content` — so the ancestor chain is
-   root → content → pane. The earlier `.workspace--resizing` selector was doubly
-   dead: no JS ever installed that class, and its ancestor order was inverted. It
-   never competed with the base operation rule above either — that one sets
-   `transition: none`, not `animation`, so there was no specificity contest to win. */
-.shell--builder-entering .workspace--container-resizing .shell__view--paned,
-.shell--builder-entering .workspace--divider-dragging .shell__view--paned { animation: none; }
-
-/* --- Builder mode-EXIT reverse card-deal (design: inverse deal on close) -----
-   Leaving builder with a TILED workspace holds the tiled render for one decisive
-   beat (~240ms, FASTER than the 400ms entry -- the Zippo asymmetry, in the deal
-   vocabulary): the LEAVING pane(s) lift (radius + shadow) and DEAL back out to the
-   right + fade, while the REMAINING (focused) pane SETTLES to full width via the
-   180ms rect transition above (Shell widens its wrapper rect to the full box while
-   the beat is held). The chrome fades so its 2-pane strips/dividers don't linger
-   over the settling pane. Then Shell collapses to single -- the pixels already
-   match, so there is no jump. data-pane-role (set by Shell) tells the two apart.
-   Reduced motion skips the whole beat (Shell never arms it; the guard below is
-   parity). */
-.shell--builder-exiting .workspace__chrome {
-  opacity: 0;
-  transition: opacity 160ms ease-out;
-}
-/* INV 9 (review §3, P1 "chrome invisible, not inert"): the exit beat makes the
-   leaving surfaces + all chrome children POINTER-INERT, not merely transparent.
-   The old CSS only set opacity:0, so a tap on a nearly-invisible leaving pane
-   could still dispatch FOCUS and swap the settling role mid-animation, or an
-   invisible strip/divider could still navigate/resize. Shell also sets the `inert`
-   attribute on leaving wrappers; this is the pointer/keyboard half for the chrome
-   the attribute doesn't cover. */
-.shell--builder-exiting .workspace__strip,
-.shell--builder-exiting .workspace__divider,
-.shell--builder-exiting .workspace__pane-chip,
-.shell--builder-exiting .shell__view--paned[data-pane-role="leaving"] {
+/* The revealed destination in a WORLD-REVEAL exit: the already-mounted target
+   wrapper sits full-bleed BENEATH the dealing-out tree from the first exit frame.
+   It does not fade or scale — stable destination pixels make the outgoing cards
+   feel physical (exit-design v2 §Exit choreography). z:0 keeps it under both the
+   promote (z:2) and deal-out (z:4) layers; pointer-inert while covered. */
+.shell__view--exit-underlay {
+  inset: 0;
+  visibility: visible;
   pointer-events: none;
+  z-index: 0;
 }
-.shell--builder-exiting .shell__view--paned[data-pane-role="leaving"] {
-  z-index: 4; /* deal OUT over the settling pane growing beneath it */
-  animation: shell-pane-deal-out 240ms cubic-bezier(0.4, 0, 1, 1) forwards;
+
+/* Promote: the survivor pane keeps its tiled content rect and FLIPs to cover the
+   full destination (transform-origin at its own top-left; Shell latches --flip-*
+   from the projection, never a DOM read). One critically-damped curve, no
+   overshoot. */
+.shell--builder-exiting
+.shell__view[data-mode-motion="promote"] {
+  z-index: 2;
+  transform-origin: 0 0;
+  animation:
+    shell-mode-promote
+    var(--mode-duration)
+    var(--ease-mode-arrive)
+    both;
 }
-@keyframes shell-pane-deal-out {
+
+/* Deal-out: a departing pane lifts, drifts right, and fades over its 20ms-stagger
+   delay. Pointer-inert (INV 9 inert beat) so a tap on the nearly-gone card cannot
+   re-target the transition. */
+.shell--builder-exiting
+.shell__view[data-mode-motion="deal-out"] {
+  z-index: 4;
+  pointer-events: none;
+  animation:
+    shell-mode-deal-out
+    var(--mode-duration)
+    var(--ease-mode-leave)
+    var(--mode-delay, 0ms)
+    both;
+}
+
+/* Deal-in: entry's reverse grammar — each pane deals in from the same small
+   offset with a 0/20/40/60 visual-order stagger. */
+.shell--builder-entering
+.shell__view[data-mode-motion="deal-in"] {
+  animation:
+    shell-mode-deal-in
+    var(--mode-duration)
+    var(--ease-mode-arrive)
+    var(--mode-delay, 0ms)
+    both;
+}
+
+@keyframes shell-mode-promote {
   from {
-    transform: translateX(0);
-    opacity: 1;
-    box-shadow: 0 0 0 rgba(0, 0, 0, 0);
-    border-radius: 0;
-  }
-  30% {
-    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
-    border-radius: 10px;
+    transform: translate3d(0, 0, 0) scale(1, 1);
   }
   to {
-    transform: translateX(44px);
-    opacity: 0;
-    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
-    border-radius: 10px;
+    transform:
+      translate3d(var(--flip-x), var(--flip-y), 0)
+      scale(var(--flip-sx), var(--flip-sy));
   }
 }
+
+@keyframes shell-mode-deal-out {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 1;
+  }
+  18% {
+    transform: translate3d(0, -2px, 0) scale(1.004);
+    opacity: 1;
+  }
+  42% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(32px, -4px, 0) scale(0.985);
+    opacity: 0;
+  }
+}
+
+@keyframes shell-mode-deal-in {
+  from {
+    transform: translate3d(32px, -4px, 0) scale(0.985);
+    opacity: 0;
+  }
+  48% {
+    opacity: 1;
+  }
+  to {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 1;
+  }
+}
+
+/* Strips move WITH their pane, replacing the deleted parent-chrome opacity fade.
+   A sibling (deal-out) strip uses the exact motion + delay of its pane; a survivor
+   (promote) strip clears upward over 120ms; an entering strip shares its pane's
+   deal-in. `.shell__tabstrip` matches BOTH the single-pane top nav and the
+   per-pane WorkspaceChrome strips — they never coexist, so the one selector is
+   correct for either surface. */
+.shell--builder-exiting .shell__tabstrip[data-mode-motion="deal-out"] {
+  animation:
+    shell-mode-deal-out var(--mode-duration) var(--ease-mode-leave)
+    var(--mode-delay, 0ms) both;
+}
+.shell--builder-exiting .shell__tabstrip[data-mode-motion="promote"] {
+  animation: shell-mode-strip-clear 120ms var(--ease-mode-leave) both;
+}
+.shell--builder-entering .shell__tabstrip[data-mode-motion="deal-in"] {
+  animation:
+    shell-mode-deal-in var(--mode-duration) var(--ease-mode-arrive)
+    var(--mode-delay, 0ms) both;
+}
+@keyframes shell-mode-strip-clear {
+  from { transform: translate3d(0, 0, 0); opacity: 1; }
+  to { transform: translate3d(0, -8px, 0); opacity: 0; }
+}
+
+/* Dividers + the overflow chip fade together over 120ms — on exit they leave, on
+   enter they appear 60ms after the first pane (opacity-only; small elements). The
+   chip selector is listed FIRST (before the divider) so it is followed by a comma,
+   never a brace — a css-shape test that greps the base chip rule still finds it. */
+.shell--builder-exiting .workspace__pane-chip,
+.shell--builder-exiting .workspace__divider {
+  pointer-events: none;
+  animation: shell-mode-chrome-out 120ms var(--ease-mode-leave) both;
+}
+.shell--builder-entering .workspace__pane-chip,
+.shell--builder-entering .workspace__divider {
+  animation: shell-mode-chrome-in 120ms var(--ease-mode-arrive) 60ms both;
+}
+@keyframes shell-mode-chrome-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes shell-mode-chrome-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* The chrome layer — sibling after the content wrappers, over the whole content
    box, transparent to pointers except its own interactive children. */
@@ -178,11 +187,9 @@
   position: absolute;
   pointer-events: auto;
   border-radius: 8px 8px 0 0;
-  /* Match the paned wrappers' 180ms geometry bloom on a layout commit, so a
-     strip glides with its pane. Suppressed during a continuous resize via
-     the live-geometry guards above. */
-  transition: top 180ms ease-out, left 180ms ease-out,
-    width 180ms ease-out, height 180ms ease-out;
+  /* No geometry transition (v2): a divider drag writes strip rects imperatively
+     per frame and a mode beat animates the strip's transform, so an interpolated
+     top/left would only race those. Discrete layout commits snap with the pane. */
   /* Strips sit ABOVE dividers (z:4): a horizontal divider's 44px hit target
      overlaps the top of the strip in the pane below it, and a divider above the
      strip stole the top half of those tabs. The divider's VISUAL bar lives in
@@ -585,14 +592,12 @@
   .workspace__drop-preview { transition: none; }
   .workspace__drop-preglow { transition: none; }
   .workspace__coachmark { animation: none; }
-  /* No layout-commit bloom and no card-deal under reduced motion. */
-  .shell__view--paned { transition: none; animation: none; }
-  .workspace__strip { transition: none; }
-  /* The builder mode-enter deal is instant too (the transient class also never
-     engages under reduced motion, but keep the guard for parity). */
-  .shell--builder-entering .shell__tabstrip,
-  .shell--builder-entering .shell__view--active { animation: none; }
-  /* Same for the mode-exit reverse deal. */
-  .shell--builder-exiting .shell__view--paned[data-pane-role="leaving"] { animation: none; }
-  .shell--builder-exiting .workspace__chrome { transition: none; }
+  /* Reduced motion never arms a mode descriptor (the controller commits directly),
+     so nothing carries data-mode-motion; this is defensive parity — any element
+     that somehow did gets no beat. Covers wrappers, strips, dividers, and chip. */
+  .shell [data-mode-motion] { animation: none !important; }
+  .shell--builder-exiting .workspace__divider,
+  .shell--builder-exiting .workspace__pane-chip,
+  .shell--builder-entering .workspace__divider,
+  .shell--builder-entering .workspace__pane-chip { animation: none; }
 }

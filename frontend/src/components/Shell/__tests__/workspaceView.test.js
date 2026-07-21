@@ -2,7 +2,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import * as paneModel from '../paneModel.js'
 import * as tabModel from '../tabModel.js'
-import { deriveContentVisibility } from '../workspaceView.js'
+import {
+  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, exitSignature, MODE_MOTION,
+} from '../workspaceView.js'
 
 const { makeTab, tabKey } = tabModel
 const CONTENT = { x: 0, y: 0, w: 1400, h: 900 }
@@ -405,4 +407,109 @@ test('builder mode ignores the slot entirely (tree drives the render)', () => {
   assert.equal(v.chromeActive, true, 'tiled builder chrome')
   assert.equal(v.visibleAppIds.has('99'), false, 'the slot app does not leak into builder')
   assert.equal(v.visibleAppIds.has('42'), true, 'the tree app is what paints')
+})
+
+// ── Exit-presentation v2: the latched plan (deriveExitPlan / deriveEnterPlan) ──
+
+test('deriveExitPlan: PROMOTE when the target is a visible pane active key (INV 3 honest destination)', () => {
+  // twoPaneChatAndApp: chat 5 left (unfocused), app 42 right (focused). Legacy
+  // absent-slot → target seeds from the focused item = app:42, which IS the active
+  // key of the right pane → promote it, deal the left sibling out, no underlay.
+  const ws = twoPaneChatAndApp()
+  const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  assert.equal(plan.target, 'app:42')
+  assert.equal(plan.underlayKey, null, 'physical continuity — no world reveal')
+  const promote = plan.participants.find(p => p.motion === 'promote')
+  assert.equal(promote.key, 'app:42')
+  assert.ok(plan.completionNames.includes('shell-mode-promote'))
+  // The FLIP grows the promote pane's content rect to the full destination.
+  assert.equal(promote.flip.sx > 1, true, 'a half-width pane scales up to full width')
+  const dealOut = plan.participants.filter(p => p.motion === 'deal-out')
+  assert.equal(dealOut.length, 1)
+  assert.equal(dealOut[0].key, 'chat:5')
+})
+
+test('deriveExitPlan: WORLD-REVEAL when the slot is tree-absent (underlay + all deal out)', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
+  const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  assert.equal(plan.target, 'chat:99')
+  assert.equal(plan.underlayKey, 'chat:99', 'the mounted destination is revealed beneath')
+  assert.equal(plan.participants.every(p => p.motion === 'deal-out'), true, 'no false promotion')
+  assert.deepEqual(plan.completionNames, ['shell-mode-deal-out'])
+  // The FOCUSED pane (app 42) is the LAST card put away (world-reveal focus-last).
+  const last = plan.participants.reduce((a, b) => (b.delayMs > a.delayMs ? b : a))
+  assert.equal(last.key, 'app:42')
+})
+
+test('deriveExitPlan: WORLD-REVEAL when the slot tab is INACTIVE in a pane (never promote it)', () => {
+  // app 42 active in the right pane; put chat 5 as the slot but make chat 5 an
+  // INACTIVE tab of the left pane (its active is chat 5 though — so instead use a
+  // genuinely inactive case): the slot points at an item that is not any pane's
+  // active key.
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  ws = paneModel.openTab(ws, makeTab('chat', '7'), { paneId: ws.focusedPaneId, activate: false })
+  ws = paneModel.splitPaneWithTab(ws, makeTab('app', '42'), { paneId: ws.focusedPaneId, edge: 'right' })
+  ws = { ...ws, singleScreen: { kind: 'chat', id: '7' } } // 7 is an inactive tab
+  const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  assert.equal(plan.underlayKey, 'chat:7', 'an inactive-tab slot world-reveals, never promotes')
+  assert.equal(plan.participants.some(p => p.motion === 'promote'), false)
+})
+
+test('deriveExitPlan: NULL slot reveals home (underlayKey null), empty tree is instant (null plan)', () => {
+  const home = { ...twoPaneChatAndApp(), singleScreen: null }
+  const homePlan = deriveExitPlan({ workspace: home, projection: project(home), contentRect: CONTENT })
+  assert.equal(homePlan.target, null)
+  assert.equal(homePlan.underlayKey, null, 'home reveal uses the opaque background, no underlay wrapper')
+  assert.ok(homePlan.participants.length >= 1)
+  // Empty tree → no participants → null plan → an INSTANT flip (no descriptor).
+  const empty = paneModel.seedFromFlatTabs([])
+  assert.equal(deriveExitPlan({ workspace: empty, projection: project(empty), contentRect: CONTENT }), null)
+})
+
+test('deriveExitPlan: siblings deal out on a 20ms visual-order stagger', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
+  const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  const delays = plan.participants.map(p => p.delayMs).sort((a, b) => a - b)
+  assert.deepEqual(delays, [0, MODE_MOTION.staggerMs])
+  assert.ok(plan.participants.every(p => p.durationMs === MODE_MOTION.exitItemMs))
+  assert.equal(plan.totalMs, MODE_MOTION.staggerMs + MODE_MOTION.exitItemMs)
+})
+
+test('deriveEnterPlan: each visible leaf deals in, 20ms stagger, single-leaf longer', () => {
+  const two = twoPaneChatAndApp()
+  const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two) })
+  assert.deepEqual(twoPlan.completionNames, ['shell-mode-deal-in'])
+  assert.equal(twoPlan.participants.length, 2)
+  assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.enterItemMs))
+  assert.deepEqual(twoPlan.participants.map(p => p.delayMs).sort((a, b) => a - b), [0, MODE_MOTION.staggerMs])
+  const one = paneModel.seedFromFlatTabs([makeTab('app', '42')])
+  const onePlan = deriveEnterPlan({ workspace: one, projection: project(one) })
+  assert.equal(onePlan.participants.length, 1)
+  assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.enterSingleMs, 'the sole leaf uses the paired gesture duration')
+})
+
+test('exitSignature is stable for the same tree and drifts on a topology/geometry change (INV 10)', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
+  const base = exitSignature({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  assert.equal(base, exitSignature({ workspace: ws, projection: project(ws), contentRect: CONTENT }))
+  // A content-box resize drifts the signature → the beat cancels.
+  const resized = exitSignature({ workspace: ws, projection: project(ws), contentRect: { x: 0, y: 0, w: 800, h: 600 } })
+  assert.notEqual(base, resized)
+  // A different slot target drifts it too.
+  const retargeted = exitSignature({ workspace: { ...ws, singleScreen: { kind: 'chat', id: '5' } }, projection: project(ws), contentRect: CONTENT })
+  assert.notEqual(base, retargeted)
+})
+
+test('deriveContentVisibility augments visibleAppIds with an app underlay (exit reveal)', () => {
+  // During a world-reveal exit the effective mode is still 'panes'; the underlay app
+  // is not a visible tree pane, so it must be unioned in or it paints a blank frame.
+  const ws = twoPaneChatAndApp()
+  const v = deriveContentVisibility({
+    workspace: ws, projection: project(ws),
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'panes', exitUnderlayKey: 'app:99',
+  })
+  assert.equal(v.exitUnderlayKey, 'app:99')
+  assert.equal(v.visibleAppIds.has('99'), true, 'the underlay app is painted beneath the deal')
+  assert.equal(v.visibleAppIds.has('42'), true, 'the tree apps still paint')
 })

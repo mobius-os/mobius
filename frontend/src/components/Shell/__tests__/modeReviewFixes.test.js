@@ -18,6 +18,16 @@ const controller = readFileSync(new URL('../useModeController.js', import.meta.u
 const gesture = readFileSync(new URL('../useLogoModeGesture.js', import.meta.url), 'utf8')
 const brand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
 const halo = readFileSync(new URL('../useLivingHalo.js', import.meta.url), 'utf8')
+const paneSrc = readFileSync(new URL('../paneModel.js', import.meta.url), 'utf8')
+
+// A minimal v2 exit plan for the reducer's behavioral cases (a plan arms a beat).
+function planFor(name = 'shell-mode-deal-out', totalMs = 180) {
+  return {
+    kind: name === 'shell-mode-deal-in' ? 'enter' : 'exit',
+    participants: [{ key: 'chat:2', paneId: 'p2', motion: name === 'shell-mode-deal-in' ? 'deal-in' : 'deal-out', delayMs: 0, durationMs: totalMs }],
+    completionNames: [name], totalMs, underlayKey: null, target: null, snapshotSignature: 'sig',
+  }
+}
 
 const { makeTab } = tabModel
 function reduce(state, action) { return paneModel.workspaceReducer(state, action) }
@@ -40,9 +50,13 @@ test('finding 1: dragArm returns the epoch it WILL assign, computed before dispa
 })
 
 // -- Finding 2 (BLOCKER): Settings is non-destructive across a world toggle -----
-test('finding 2: convertSettingsForModeTransition is a NO-OP (no destructive close/reopen)', () => {
-  assert.match(nav, /const convertSettingsForModeTransition = useCallback\(\(\) => \{\}, \[\]\)/)
-  assert.doesNotMatch(nav, /convertSettingsForModeTransition[\s\S]*?CLOSE_TAB[\s\S]*?mode-convert/)
+test('finding 2: the Settings mode-conversion hook is DELETED (nothing converts on flip)', () => {
+  // v2 deleted the former no-op convertSettingsForModeTransition entirely: a builder
+  // Settings tab SURVIVES the flip and single mode paints its own slot, so there is
+  // nothing to convert. No caller, no export, and no mode-convert reducer branch.
+  assert.doesNotMatch(nav, /convertSettingsForModeTransition/)
+  assert.doesNotMatch(shell, /convertSettingsForModeTransition/)
+  assert.doesNotMatch(paneSrc, /reason === 'mode-convert'/)
 })
 
 test('finding 2: a mode toggle PRESERVES a Settings-only pane (tree untouched)', () => {
@@ -109,26 +123,33 @@ test('finding 5: completion captures the originating epoch, not the current tran
   assert.match(controller, /dispatch\(\{ type: 'complete', id: epoch \}\)/)
   assert.match(controller, /Promise\.allSettled\(anims\.map\(a => a\.finished\)\)/)
   assert.doesNotMatch(controller, /addEventListener\('animationend'/)
+  // The completion contract is computed from the COMMITTED render closure, not the
+  // render-written ref (W3): the collection effect reads completionContract(state).
+  assert.match(controller, /const contract = completionContract\(state\)/)
+  // One rAF collection (v2), not two chained frames.
+  assert.match(controller, /raf = requestAnimationFrame\(collect\)/)
   // The reducer's id guard rejects a superseded epoch's completion (enter1 -> exit2
   // -> enter3: a delayed complete{enter1} cannot clear enter3).
   let s = { committedMode: 'single', transition: null, nextId: 1 }
-  s = modeReducer(s, { type: 'toggle', to: 'panes', multiPane: false, now: 0 }) // enter, id 1
+  s = modeReducer(s, { type: 'toggle', to: 'panes', presentation: planFor('shell-mode-deal-in'), now: 0 }) // enter, id 1
   const e1 = s.transition.id
-  s = modeReducer(s, { type: 'toggle', to: 'single', multiPane: true, leavingPaneIds: ['p2'], now: 1 }) // exit, id 2
-  s = modeReducer(s, { type: 'toggle', to: 'panes', multiPane: false, now: 2 }) // enter, id 3
+  s = modeReducer(s, { type: 'toggle', to: 'single', presentation: planFor('shell-mode-deal-out'), now: 1 }) // exit, id 2
+  s = modeReducer(s, { type: 'toggle', to: 'panes', presentation: planFor('shell-mode-deal-in'), now: 2 }) // enter, id 3
   const e3 = s.transition.id
   assert.notEqual(e1, e3)
   assert.equal(modeReducer(s, { type: 'complete', id: e1 }).transition.id, e3, 'stale epoch rejected')
 })
 
-// -- Finding 6: cancelBeat is actually wired to topology mutation --------------
-test('finding 6: a topology mutation during an exit beat cancels it (cancelBeat has a caller)', () => {
+// -- Finding 6 / INV 10: cancelBeat is wired to a plan-signature drift ----------
+test('finding 6: a topology/geometry change during an exit beat cancels it (INV 10)', () => {
   assert.match(shell, /mode\.cancelBeat\(\)/)
-  assert.match(shell, /const settleGone = t\.focusedPaneId != null && !workspace\.panes\[t\.focusedPaneId\]/)
-  assert.match(shell, /const leavingGone = t\.leavingPaneIds\.some\(id => !workspace\.panes\[id\]\)/)
+  // v2: the cancel watcher recomputes the exit signature from the same projection
+  // authority and compares it to the latched snapshotSignature — any drift snaps.
+  assert.match(shell, /const live = exitSignature\(\{ workspace, projection, contentRect \}\)/)
+  assert.match(shell, /if \(live !== t\.presentation\.snapshotSignature\) mode\.cancelBeat\(\)/)
   // The reducer's cancel-beat clears the descriptor without touching committedMode.
   let s = modeReducer({ committedMode: 'panes', transition: null, nextId: 1 },
-    { type: 'toggle', to: 'single', multiPane: true, leavingPaneIds: ['p2'], now: 0 })
+    { type: 'toggle', to: 'single', presentation: planFor('shell-mode-deal-out'), now: 0 })
   s = modeReducer(s, { type: 'cancel-beat' })
   assert.equal(s.transition, null)
   assert.equal(s.committedMode, 'single')
@@ -136,8 +157,10 @@ test('finding 6: a topology mutation during an exit beat cancels it (cancelBeat 
 
 // -- Finding 7: mode-restoring Undo routes through the controller --------------
 test('finding 7: undo routes the mode restoration through mode.undo before UNDO_LAST', () => {
-  assert.match(shell, /mode\.undo\(\{\s*\n\s*restoredMode,/)
+  assert.match(shell, /mode\.undo\(\{ restoredMode, presentation \}\)/)
   assert.match(shell, /const restoredMode = undoSlot\.restoreViewMode\s*\n\s*\? undoSlot\.ws\.viewMode : wsState\.ws\.viewMode/)
+  // The undo presentation is derived from the tree the beat animates (v2).
+  assert.match(shell, /const presentation = restoredMode === 'panes'\s*\n\s*\? deriveEnterPlan/)
 })
 
 // -- Finding 8: slot-only app gets a synthetic history owner -------------------
@@ -172,7 +195,7 @@ test('finding F5: handleBack restores the hidden app through applyModeDestinatio
 
 // -- Finding 10: exit chrome is keyboard-inert during the latched deal ---------
 test('finding 10: WorkspaceChrome is inert during the exit beat, not just pointer-blocked', () => {
-  assert.match(shell, /<WorkspaceChrome[\s\S]*?inert=\{modalDrawerOpen \|\| exitGeometryActive\}/)
+  assert.match(shell, /<WorkspaceChrome[\s\S]*?inert=\{modalDrawerOpen \|\| exitBeatActive\}/)
 })
 
 // -- Finding 11: a live hold cancels on hide/blur/pagehide/lostpointercapture --
@@ -193,11 +216,11 @@ test('finding 12: Shift+Enter ignores auto-repeat and clears its click-suppressi
 // -- Finding F13 (expanding review): the beat carries an HONEST cause -----------
 test('finding F13: cause threads from the gesture/keyboard, never a hardcoded hold', () => {
   // The controller forwards the caller's cause instead of hardcoding 'hold'.
-  assert.match(controller, /const toggle = useCallback\(\(\{ cause, focusedPaneId/)
-  assert.match(controller, /type: 'toggle', cause, to, from,/)
+  assert.match(controller, /const toggle = useCallback\(\(\{ cause, to, presentation \} = \{\}\)/)
+  assert.match(controller, /type: 'toggle', cause, to: dest, from, presentation: plan/)
   assert.doesNotMatch(controller, /type: 'toggle', cause: 'hold'/)
-  // Shell forwards the caller's cause into mode.toggle.
-  assert.match(shell, /mode\.toggle\(\{ cause, focusedPaneId, leavingPaneIds, multiPane: dealMultiPane \}\)/)
+  // Shell forwards the caller's cause into mode.toggle alongside the latched plan.
+  assert.match(shell, /mode\.toggle\(\{ cause, presentation \}\)/)
   // Each source layer names its own beat honestly.
   assert.match(gesture, /onToggleMode\?\.\('hold'\)/)
   assert.match(gesture, /onToggleMode\?\.\('swipe'\)/)

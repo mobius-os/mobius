@@ -93,15 +93,23 @@ export function PaneTab({
 // before navTo snapshots the source route (see WorkspaceChrome.activateTab).
 export function PaneStrip({
   pane, paneRect, focused, labelForTab,
-  onActivate, onClose, onFocus, onTabContextMenu,
+  onActivate, onClose, onFocus, onTabContextMenu, motion = null,
 }) {
+  // The strip deals WITH its pane during a mode beat (exit-design v2): the same
+  // compositor-only data-mode-motion + --mode-duration/--mode-delay the pane wrapper
+  // carries, merged into the strip's absolute-position style. A promote (survivor)
+  // strip clears upward; a deal-out/deal-in strip moves with its pane.
+  const style = motion
+    ? { left: paneRect.x, top: paneRect.y, width: paneRect.w, height: STRIP_H, ...motion.vars }
+    : { left: paneRect.x, top: paneRect.y, width: paneRect.w, height: STRIP_H }
   return (
     <div
       className={`workspace__strip shell__tabstrip${focused ? ' workspace__strip--focused' : ''}`}
       data-pane-strip={pane.id}
+      data-mode-motion={motion ? motion.motion : undefined}
       role="tablist"
       aria-label="Pane tabs"
-      style={{ left: paneRect.x, top: paneRect.y, width: paneRect.w, height: STRIP_H }}
+      style={style}
       onKeyDown={(e) => stripKeyDown(e, pane.tabs, onClose)}
       onPointerDown={(e) => { if (!e.target.closest('.shell__tab')) onFocus(pane.id) }}
     >

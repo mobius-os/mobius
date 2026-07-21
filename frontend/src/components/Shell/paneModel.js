@@ -1607,11 +1607,9 @@ export function initialWorkspaceState(ws) {
 //                               with reason:'deleted'.
 //   Preserves the slot:         SET_VIEW_MODE — a pure view flip is ORTHOGONAL to
 //                               the tree, so it neither creates nor clears an undo
-//                               target (a pending tab-move stays undoable); and a
-//                               CLOSE_TAB with reason:'mode-convert' (the builder-
-//                               only Settings tab being removed as single mode is
-//                               entered) — a mode artifact, equally orthogonal, so
-//                               it must not clobber a pending undo (review §10).
+//                               target (a pending tab-move stays undoable). (There is
+//                               no longer a 'mode-convert' close: Settings tabs
+//                               survive the flip, so nothing is removed on entry.)
 //
 // View-mode + undo: UNDO_LAST carries the CURRENT view-mode forward by default, so
 // undoing a tree edit made across a standalone toggle reverts the edit, never the
@@ -1658,13 +1656,6 @@ export function workspaceReducer(state, action) {
           : next
         if (withSlot === ws && undo == null) return state
         return { ws: withSlot, undo: null }
-      }
-      if (action.reason === 'mode-convert') {
-        // Removing the builder-only Settings tab as single mode is entered — a mode
-        // artifact, ORTHOGONAL to the undo slot like SET_VIEW_MODE. Preserve the
-        // existing slot (a pending tab-move stays undoable); the flip back re-creates
-        // the tab, so this removal is not itself undoable (review §10).
-        return next === ws ? state : { ws: next, undo }
       }
       // User close (the strip ✕): reversible. If this close empties the builder,
       // AUTO-RETURN to single (owner semantic) and mark the undo restoreViewMode so

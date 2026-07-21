@@ -3,29 +3,66 @@ import assert from 'node:assert/strict'
 import {
   initialModeState, modeReducer,
   effectiveViewMode, transitionRootClass, builderModeActive,
-  exitGeometryActive, dragPreviewActive, paneExitRole, leavingSurfacesInert,
-  completionContract, needsSyncCompletion, reconcileVisibleEvent,
-  MODE_ENTER_MS, MODE_EXIT_MS, RECONCILE_SLACK_MS,
+  exitBeatActive, dragPreviewActive,
+  transitionPresentation, exitPresentation,
+  completionContract, reconcileVisibleEvent,
+  RECONCILE_SLACK_MS, MODE_MOTION,
 } from '../modeMachine.js'
 
-// The mandatory fix test matrix (codex-mode-machinery-review.md §4) over the pure
-// transition machine. Every wedge sequence the review catalogs (§1-2) has a case
-// here. After each step we assert the review's checklist facts: committed mode,
-// effective/presented mode, exactly one-or-zero transition phase/class, latched
-// exit roles, completion contract, and eventual idle with no residue.
+// The exit-presentation v2 invariant lock (the "Single invariant list for tests").
+// Every transition latches ONE opaque presentation plan; the machine holds the
+// outgoing world, rejects stale epochs, and exposes the plan's completion contract.
+// It has NO role plumbing, no `animated` boolean, and no fixed per-phase animation
+// sets — a plan arms a beat iff it names a completion animation. INV numbers follow
+// modeMachine.js.
 
-const KEEP = { multiPane: true } // a tiled workspace (an exit earns the deal)
-const FLAT = { multiPane: false } // a single leaf (an exit is instant)
+// A minimal enter plan (one deal-in participant).
+function enterPlan({ totalMs = MODE_MOTION.enterItemMs } = {}) {
+  return {
+    kind: 'enter',
+    participants: [{ key: 'chat:1', paneId: 'p1', motion: 'deal-in', delayMs: 0, durationMs: totalMs }],
+    completionNames: ['shell-mode-deal-in'],
+    totalMs,
+  }
+}
+// A minimal exit plan (one deal-out participant, a chat underlay).
+function exitPlan({ underlayKey = 'chat:5', target = 'chat:5', sig = 'sigA', totalMs = MODE_MOTION.exitItemMs } = {}) {
+  return {
+    kind: 'exit',
+    target,
+    destinationRect: { x: 0, y: 0, w: 100, h: 200 },
+    participants: [{ key: 'chat:2', paneId: 'p2', motion: 'deal-out', delayMs: 0, durationMs: totalMs }],
+    underlayKey,
+    completionNames: ['shell-mode-deal-out'],
+    totalMs,
+    snapshotSignature: sig,
+  }
+}
+// A promote exit plan (physical continuity — no underlay).
+function promotePlan({ sig = 'sigP' } = {}) {
+  return {
+    kind: 'exit',
+    target: 'app:9',
+    destinationRect: { x: 0, y: 0, w: 100, h: 200 },
+    participants: [{ key: 'app:9', paneId: 'p1', motion: 'promote', delayMs: 0, durationMs: MODE_MOTION.promoteMs, flip: { x: 0, y: 0, sx: 1, sy: 1 } }],
+    underlayKey: null,
+    completionNames: ['shell-mode-promote'],
+    totalMs: MODE_MOTION.promoteMs,
+    snapshotSignature: sig,
+  }
+}
 
 function single() { return { ...initialModeState('single'), nextId: 1 } }
 function panes() { return { ...initialModeState('panes'), nextId: 1 } }
 
-// Assert the descriptor is idle: no transition, no root class, geometry settled.
 function assertIdle(state, mode) {
   assert.equal(state.transition, null, 'no live transition')
   assert.equal(transitionRootClass(state), '', 'no transient root class')
-  assert.equal(exitGeometryActive(state), false)
+  assert.equal(exitBeatActive(state), false)
   assert.equal(dragPreviewActive(state), false)
+  assert.equal(transitionPresentation(state), null)
+  assert.equal(exitPresentation(state), null)
+  assert.equal(completionContract(state), null)
   assert.equal(effectiveViewMode(state), mode)
   assert.equal(state.committedMode, mode)
 }
@@ -44,230 +81,202 @@ test('stable panes: idle, presents panes, builder on', () => {
   assert.equal(builderModeActive(s), true)
 })
 
-// ── Enter (single → panes) ──────────────────────────────────────────────────
+// ── INV 2 (opaque latch) + Enter ────────────────────────────────────────────
 
-test('enter: committed flips to panes synchronously, entering class, one epoch', () => {
-  const s = modeReducer(single(), { type: 'toggle', cause: 'hold', ...FLAT, now: 100 })
+test('enter: committed flips to panes synchronously, entering class, one epoch, plan latched', () => {
+  const plan = enterPlan()
+  const s = modeReducer(single(), { type: 'toggle', cause: 'hold', presentation: plan, now: 100 })
   assert.equal(s.committedMode, 'panes', 'durable mode flips at once (no deferred flip)')
   assert.equal(s.transition.phase, 'entering')
   assert.equal(s.transition.id, 1)
+  assert.equal(s.transition.presentation, plan, 'the EXACT plan reference is latched, opaquely')
   assert.equal(effectiveViewMode(s), 'panes')
   assert.equal(transitionRootClass(s), 'shell--builder-entering')
   assert.equal(builderModeActive(s), true)
-  // enter completes on an entry animation.
+  assert.equal(transitionPresentation(s), plan)
+  // Completion contract is taken STRAIGHT from the plan (INV 7): names + totalMs.
   const c = completionContract(s)
-  assert.equal(c.maxMs, MODE_ENTER_MS)
-  assert.ok(c.animationNames.has('shell-strip-deal-in'))
+  assert.equal(c.maxMs, plan.totalMs)
+  assert.ok(c.animationNames.has('shell-mode-deal-in'))
 })
 
 test('enter then complete: settles to stable panes, no residue', () => {
-  let s = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 })
+  let s = modeReducer(single(), { type: 'toggle', presentation: enterPlan(), now: 0 })
   s = modeReducer(s, { type: 'complete', id: s.transition.id })
   assertIdle(s, 'panes')
 })
 
-test('enter under reduced motion: instant, no beat', () => {
-  const s = modeReducer(single(), { type: 'toggle', reducedMotion: true, ...FLAT })
+test('a null presentation is an instant flip — reduced motion / empty tree never arms (INV 11)', () => {
+  const s = modeReducer(single(), { type: 'toggle', presentation: null })
   assert.equal(s.committedMode, 'panes')
   assert.equal(s.transition, null)
-  assert.equal(needsSyncCompletion(s), false) // nothing pending — it never armed
 })
 
-// ── Exit (panes → single) ───────────────────────────────────────────────────
+test('a plan with NO completion names does not arm (INV 11)', () => {
+  const empty = { kind: 'exit', participants: [], completionNames: [], totalMs: 0, underlayKey: null, target: null, snapshotSignature: 's' }
+  const s = modeReducer(panes(), { type: 'toggle', presentation: empty })
+  assert.equal(s.transition, null, 'no participants → instant flip')
+  assert.equal(s.committedMode, 'single')
+})
 
-test('exit tiled: committed flips to single, render holds panes for the deal', () => {
-  const s = modeReducer(panes(), {
-    type: 'toggle', cause: 'hold', ...KEEP, focusedPaneId: 'p1', leavingPaneIds: ['p2'], now: 50,
-  })
+// ── Exit (panes → single): world reveal + promote ───────────────────────────
+
+test('exit reveal: committed flips to single, render holds panes, underlay + target exposed', () => {
+  const plan = exitPlan({ underlayKey: 'chat:5', target: 'chat:5' })
+  const s = modeReducer(panes(), { type: 'toggle', cause: 'hold', presentation: plan, now: 50 })
   assert.equal(s.committedMode, 'single', 'durable mode is already single')
   assert.equal(effectiveViewMode(s), 'panes', 'but the render holds the tiled world')
   assert.equal(transitionRootClass(s), 'shell--builder-exiting')
-  assert.equal(exitGeometryActive(s), true)
-  assert.equal(leavingSurfacesInert(s), true)
-  // Latched roles (INV 9).
-  assert.equal(paneExitRole(s, 'p2'), 'leaving')
-  assert.equal(paneExitRole(s, 'p1'), 'staying')
-  assert.equal(s.transition.focusedPaneId, 'p1')
+  assert.equal(exitBeatActive(s), true)
+  assert.equal(exitPresentation(s), plan)
+  assert.equal(exitPresentation(s).underlayKey, 'chat:5')
   const c = completionContract(s)
-  assert.equal(c.maxMs, MODE_EXIT_MS)
-  assert.ok(c.animationNames.has('shell-pane-deal-out'))
+  assert.equal(c.maxMs, plan.totalMs)
+  assert.ok(c.animationNames.has('shell-mode-deal-out'))
 })
 
-test('exit single leaf: instant collapse, no deal', () => {
-  const s = modeReducer(panes(), { type: 'toggle', ...FLAT })
-  assert.equal(s.committedMode, 'single')
-  assert.equal(s.transition, null)
-  assertIdle(s, 'single')
+test('exit promote: physical continuity, no underlay, promote completion name', () => {
+  const plan = promotePlan()
+  const s = modeReducer(panes(), { type: 'toggle', presentation: plan, now: 0 })
+  assert.equal(exitPresentation(s).underlayKey, null)
+  assert.ok(completionContract(s).animationNames.has('shell-mode-promote'))
 })
 
 test('exit then complete: settles to single, no residue', () => {
-  let s = modeReducer(panes(), { type: 'toggle', ...KEEP, leavingPaneIds: ['p2'], now: 0 })
+  let s = modeReducer(panes(), { type: 'toggle', presentation: exitPlan(), now: 0 })
   s = modeReducer(s, { type: 'complete', id: s.transition.id })
   assertIdle(s, 'single')
 })
 
-// ── P0: rapid re-entry invalidates only effectiveViewMode — REGRESSION GUARD ──
-// The exact wedge the review opened with: exit armed, then re-enter before the
-// beat completes. Old code left builderExiting latched so geometry/CSS disagreed.
+// ── INV 3 (supersession) — rapid re-entry ───────────────────────────────────
 
-test('rapid exit→enter before completion: exit epoch fully superseded', () => {
-  let s = modeReducer(panes(), {
-    type: 'toggle', ...KEEP, focusedPaneId: 'p1', leavingPaneIds: ['p2'], now: 0,
-  })
+test('rapid exit→enter before completion: exit epoch fully superseded (INV 3/7)', () => {
+  let s = modeReducer(panes(), { type: 'toggle', presentation: exitPlan(), now: 0 })
   const exitId = s.transition.id
-  // Re-enter within the beat.
-  s = modeReducer(s, { type: 'toggle', ...FLAT, now: 120 })
+  s = modeReducer(s, { type: 'toggle', presentation: enterPlan(), now: 120 })
   assert.equal(s.committedMode, 'panes')
   assert.equal(s.transition.phase, 'entering', 'now an entry, not a stranded exit')
   assert.notEqual(s.transition.id, exitId, 'new epoch')
-  // Every derivation agrees: no exit geometry, no exit class survives.
-  assert.equal(exitGeometryActive(s), false)
+  assert.equal(exitBeatActive(s), false)
   assert.equal(effectiveViewMode(s), 'panes')
   assert.equal(transitionRootClass(s), 'shell--builder-entering')
-  assert.equal(paneExitRole(s, 'p2'), null, 'no stale leaving role')
-  // The stale exit completion can no longer clear the live entry (INV 15).
+  // The stale exit completion can no longer clear the live entry (INV 7).
   const after = modeReducer(s, { type: 'complete', id: exitId })
   assert.equal(after.transition.phase, 'entering', 'stale completion ignored')
 })
 
 test('rapid enter→exit before completion: entry epoch fully superseded', () => {
-  let s = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 })
+  let s = modeReducer(single(), { type: 'toggle', presentation: enterPlan(), now: 0 })
   const enterId = s.transition.id
-  s = modeReducer(s, { type: 'toggle', ...KEEP, leavingPaneIds: ['p2'], now: 100 })
+  s = modeReducer(s, { type: 'toggle', presentation: exitPlan(), now: 100 })
   assert.equal(s.committedMode, 'single')
   assert.equal(s.transition.phase, 'exiting')
   assert.notEqual(s.transition.id, enterId)
-  // Final single surface must NOT run an entry settle animation.
-  assert.equal(transitionRootClass(s), 'shell--builder-exiting')
   const after = modeReducer(s, { type: 'complete', id: enterId })
   assert.equal(after.transition.phase, 'exiting', 'stale enter completion ignored')
 })
 
-// ── Toggle overlaps at every offset (matrix §Toggle overlaps) ────────────────
-
-test('enter→exit→enter: each accepted transition gets a new epoch', () => {
+test('enter→exit→enter: each accepted transition gets a new monotonic epoch', () => {
   let s = single()
   const ids = []
-  s = modeReducer(s, { type: 'toggle', ...FLAT, now: 0 }); ids.push(s.transition.id)
-  s = modeReducer(s, { type: 'toggle', ...KEEP, leavingPaneIds: ['p2'], now: 10 }); ids.push(s.transition.id)
-  s = modeReducer(s, { type: 'toggle', ...FLAT, now: 20 }); ids.push(s.transition.id)
+  s = modeReducer(s, { type: 'toggle', presentation: enterPlan(), now: 0 }); ids.push(s.transition.id)
+  s = modeReducer(s, { type: 'toggle', presentation: exitPlan(), now: 10 }); ids.push(s.transition.id)
+  s = modeReducer(s, { type: 'toggle', presentation: enterPlan(), now: 20 }); ids.push(s.transition.id)
   assert.deepEqual(ids, [1, 2, 3], 'monotonic epochs, one per accepted input')
   assert.equal(s.committedMode, 'panes')
   assert.equal(s.transition.phase, 'entering')
-  // At most one transition ever exists (INV 1).
-  assert.ok(s.transition && typeof s.transition === 'object')
 })
 
-test('repeated enter request while entering: re-arms with a fresh epoch (not a no-op latch)', () => {
-  let s = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 })
+test('repeated enter request while entering: re-arms with a fresh epoch', () => {
+  let s = modeReducer(single(), { type: 'toggle', presentation: enterPlan(), now: 0 })
   const first = s.transition.id
-  // A second enter while already entering (committed already panes) — the old
-  // code no-opped setBuilderEntering(true) and the animation never restarted.
-  s = modeReducer(s, { type: 'toggle', to: 'panes', ...FLAT, now: 50 })
+  s = modeReducer(s, { type: 'toggle', to: 'panes', presentation: enterPlan(), now: 50 })
   assert.equal(s.committedMode, 'panes')
   assert.equal(s.transition.phase, 'entering')
   assert.notEqual(s.transition.id, first, 'entry animation restarts under a new epoch')
 })
 
-test('toggle threads an explicit cause; omitting it falls back to the generic label (F13)', () => {
-  assert.equal(modeReducer(single(), { type: 'toggle', cause: 'hold', ...FLAT, now: 0 }).transition.cause, 'hold')
-  assert.equal(modeReducer(single(), { type: 'toggle', cause: 'swipe', ...FLAT, now: 0 }).transition.cause, 'swipe')
-  assert.equal(modeReducer(single(), { type: 'toggle', cause: 'keyboard', ...FLAT, now: 0 }).transition.cause, 'keyboard')
-  // An omitted cause is the honest generic 'toggle', NOT a mislabeled 'hold'.
-  assert.equal(modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 }).transition.cause, 'toggle')
+test('cause threads through; omitting it falls back to the generic label', () => {
+  const p = enterPlan()
+  assert.equal(modeReducer(single(), { type: 'toggle', cause: 'hold', presentation: p, now: 0 }).transition.cause, 'hold')
+  assert.equal(modeReducer(single(), { type: 'toggle', cause: 'swipe', presentation: p, now: 0 }).transition.cause, 'swipe')
+  assert.equal(modeReducer(single(), { type: 'toggle', cause: 'keyboard', presentation: p, now: 0 }).transition.cause, 'keyboard')
+  assert.equal(modeReducer(panes(), { type: 'toggle', cause: 'auto', to: 'single', presentation: exitPlan(), now: 0 }).transition.cause, 'auto')
+  assert.equal(modeReducer(single(), { type: 'toggle', presentation: p, now: 0 }).transition.cause, 'toggle')
 })
 
 test('idempotent toggle to the committed mode with no beat is a no-op reference', () => {
   const s = panes()
-  const after = modeReducer(s, { type: 'toggle', to: 'panes', ...FLAT })
+  const after = modeReducer(s, { type: 'toggle', to: 'panes', presentation: null })
   assert.equal(after, s, 'same reference — React can bail')
 })
 
-// ── Drag-preview overlaps (matrix §Drag-preview overlaps) ────────────────────
+// ── INV 5: Drag-preview overlaps ────────────────────────────────────────────
 
-test('drag arm from single: drag-preview phase, committed stays single', () => {
+test('drag arm from single: drag-preview phase, committed stays single, no plan', () => {
   const s = modeReducer(single(), { type: 'drag-arm', now: 0 })
   assert.equal(s.committedMode, 'single')
   assert.equal(s.transition.phase, 'drag-preview')
   assert.equal(dragPreviewActive(s), true)
   assert.equal(effectiveViewMode(s), 'panes', 'preview paints the tiled world')
   assert.equal(transitionRootClass(s), '', 'a preview wears no enter/exit deal class')
+  assert.equal(transitionPresentation(s), null, 'a preview has no plan')
   assert.equal(completionContract(s), null, 'a preview has no self-completing beat')
 })
 
 test('drag arm→cancel with matching id: back to idle single', () => {
   let s = modeReducer(single(), { type: 'drag-arm', now: 0 })
-  const id = s.transition.id
-  s = modeReducer(s, { type: 'drag-cancel', id })
+  s = modeReducer(s, { type: 'drag-cancel', id: s.transition.id })
   assertIdle(s, 'single')
 })
 
-test('drag arm→cancel with STALE id: ignored (INV 5/15)', () => {
+test('drag arm→cancel with STALE id: ignored (INV 5)', () => {
   let s = modeReducer(single(), { type: 'drag-arm', now: 0 })
-  const live = s.transition.id
-  s = modeReducer(s, { type: 'drag-cancel', id: live + 99 })
-  assert.equal(s.transition.phase, 'drag-preview', 'stale cancel did not end the live preview')
+  s = modeReducer(s, { type: 'drag-cancel', id: s.transition.id + 99 })
+  assert.equal(s.transition.phase, 'drag-preview')
 })
 
 test('drag arm→commit: mode flips to panes, preview cleared, one transaction', () => {
   let s = modeReducer(single(), { type: 'drag-arm', now: 0 })
-  const id = s.transition.id
-  s = modeReducer(s, { type: 'drag-commit', id })
+  s = modeReducer(s, { type: 'drag-commit', id: s.transition.id })
   assert.equal(s.committedMode, 'panes')
   assert.equal(s.transition, null, 'no lingering preview or fabricated entry beat')
   assertIdle(s, 'panes')
 })
 
-test('drag commit with STALE id: ignored — no fabricated mode change', () => {
+test('drag commit with STALE id: ignored — no fabricated mode change (P1 finding)', () => {
   let s = modeReducer(single(), { type: 'drag-arm', now: 0 })
   s = modeReducer(s, { type: 'drag-commit', id: s.transition.id + 5 })
-  assert.equal(s.committedMode, 'single', 'a stale/no-op drop mutates nothing (P1 finding)')
+  assert.equal(s.committedMode, 'single')
   assert.equal(s.transition.phase, 'drag-preview')
 })
 
 test('drag arm in BUILDER is not a preview (already tiled)', () => {
   const s = modeReducer(panes(), { type: 'drag-arm', now: 0 })
-  assert.equal(s.transition, null, 'no preview transition in builder')
-  assert.equal(s.committedMode, 'panes')
-})
-
-test('arm during entry: drag preview supersedes the entry beat', () => {
-  let s = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 })
-  const enterId = s.transition.id
-  s = modeReducer(s, { type: 'drag-arm', now: 30 })
-  // committed went single→panes on enter; arm requires single, so from panes this
-  // is the builder branch: no preview, entry beat dropped.
-  assert.equal(s.committedMode, 'panes')
   assert.equal(s.transition, null)
-  const after = modeReducer(s, { type: 'complete', id: enterId })
-  assert.equal(after.transition, null, 'stale entry completion cannot revive a beat')
+  assert.equal(s.committedMode, 'panes')
 })
 
 test('arm during exit: exit committed single, so the arm previews builder', () => {
-  let s = modeReducer(panes(), { type: 'toggle', ...KEEP, leavingPaneIds: ['p2'], now: 0 })
+  let s = modeReducer(panes(), { type: 'toggle', presentation: exitPlan(), now: 0 })
   const exitId = s.transition.id
   s = modeReducer(s, { type: 'drag-arm', now: 30 })
   assert.equal(s.committedMode, 'single')
-  assert.equal(s.transition.phase, 'drag-preview', 'the exit beat is superseded by the preview')
+  assert.equal(s.transition.phase, 'drag-preview')
   assert.notEqual(s.transition.id, exitId)
-  assert.equal(exitGeometryActive(s), false, 'no stranded exit geometry')
+  assert.equal(exitBeatActive(s), false, 'no stranded exit beat')
 })
 
-// ── Single-mode auto-flip and Undo (matrix §Single-mode auto-flip and Undo) ──
+// ── Auto-return and Undo ────────────────────────────────────────────────────
 
-test('auto-flip to single (last-tab-close) with a tiled tree: exit deal', () => {
-  const s = modeReducer(panes(), {
-    type: 'auto-flip', to: 'single', ...KEEP, focusedPaneId: 'p1', leavingPaneIds: ['p2'], now: 0,
-  })
+test('auto-return toggle (last-tab close) with no plan: instant flip to single', () => {
+  const s = modeReducer(panes(), { type: 'toggle', cause: 'auto', to: 'single', presentation: null })
   assert.equal(s.committedMode, 'single')
-  assert.equal(s.transition.phase, 'exiting')
-  assert.equal(s.transition.cause, 'auto-flip')
+  assert.equal(s.transition, null, 'an emptied tree has no pane to deal — instant')
 })
 
 test('undo restoring panes from single: re-enters builder with the entry deal', () => {
-  const s = modeReducer(single(), {
-    type: 'undo', restoredMode: 'panes', ...FLAT, now: 0,
-  })
+  const s = modeReducer(single(), { type: 'undo', restoredMode: 'panes', presentation: enterPlan(), now: 0 })
   assert.equal(s.committedMode, 'panes')
   assert.equal(s.transition.phase, 'entering')
   assert.equal(s.transition.cause, 'undo')
@@ -275,139 +284,95 @@ test('undo restoring panes from single: re-enters builder with the entry deal', 
 
 test('ordinary tree undo (mode unchanged): no beat, same committed mode', () => {
   const base = panes()
-  const s = modeReducer(base, { type: 'undo', restoredMode: 'panes', ...FLAT })
+  const s = modeReducer(base, { type: 'undo', restoredMode: 'panes', presentation: null })
   assert.equal(s, base, 'no-op reference — undo carried the current mode forward')
 })
 
-test('undo restoring single from panes tiled: exit deal', () => {
-  const s = modeReducer(panes(), {
-    type: 'undo', restoredMode: 'single', ...KEEP, leavingPaneIds: ['p2'], now: 0,
-  })
+test('undo restoring single from panes: exit deal', () => {
+  const s = modeReducer(panes(), { type: 'undo', restoredMode: 'single', presentation: exitPlan(), now: 0 })
   assert.equal(s.committedMode, 'single')
   assert.equal(s.transition.phase, 'exiting')
 })
 
-test('later explicit toggle supersedes a coupled undo beat (INV 8 spirit)', () => {
-  // auto-flip → later toggle: the newer explicit intent owns the descriptor.
-  let s = modeReducer(panes(), { type: 'auto-flip', to: 'single', ...KEEP, leavingPaneIds: ['p2'], now: 0 })
-  s = modeReducer(s, { type: 'toggle', ...FLAT, now: 40 }) // back to panes
+test('later explicit toggle supersedes a coupled undo/auto beat', () => {
+  let s = modeReducer(panes(), { type: 'toggle', cause: 'auto', to: 'single', presentation: exitPlan(), now: 0 })
+  s = modeReducer(s, { type: 'toggle', presentation: enterPlan(), now: 40 })
   assert.equal(s.committedMode, 'panes')
   assert.equal(s.transition.phase, 'entering')
 })
 
-// ── Exit interaction and topology (matrix §Exit interaction and topology) ────
+// ── INV 10: invalidation snaps ──────────────────────────────────────────────
 
-test('topology mutation during exit cancels the beat (INV 10)', () => {
-  let s = modeReducer(panes(), {
-    type: 'toggle', ...KEEP, focusedPaneId: 'p1', leavingPaneIds: ['p2'], now: 0,
-  })
-  // A leaving pane gets deleted mid-beat → controller dispatches cancel-beat.
+test('cancel-beat clears the descriptor without touching committedMode (INV 10)', () => {
+  let s = modeReducer(panes(), { type: 'toggle', presentation: exitPlan(), now: 0 })
   s = modeReducer(s, { type: 'cancel-beat' })
   assert.equal(s.transition, null, 'beat cancelled, animation ownership not silently changed')
   assert.equal(s.committedMode, 'single', 'durable mode is unaffected')
   assertIdle(s, 'single')
 })
 
-test('exit latches its OWN copy of leavingPaneIds (INV 9)', () => {
-  const caller = ['p2', 'p3']
-  const s = modeReducer(panes(), {
-    type: 'toggle', ...KEEP, focusedPaneId: 'p1', leavingPaneIds: caller, now: 0,
-  })
-  // Mutating the caller's array after the fact must not change the latched roles —
-  // a topology change to the live pane list cannot silently rewrite who is leaving.
-  caller.push('p4')
-  assert.deepEqual(s.transition.leavingPaneIds, ['p2', 'p3'])
-  assert.equal(paneExitRole(s, 'p4'), 'staying', 'a pane added after latch is not leaving')
-  assert.equal(paneExitRole(s, 'p2'), 'leaving')
-})
-
-// ── Page lifecycle and motion (matrix §Page lifecycle and motion) ────────────
-
-test('reduced motion collapses both directions to instant flips', () => {
-  let s = modeReducer(single(), { type: 'toggle', reducedMotion: true, ...KEEP })
-  assert.equal(s.transition, null)
-  assert.equal(s.committedMode, 'panes')
-  s = modeReducer(s, { type: 'toggle', reducedMotion: true, ...KEEP, leavingPaneIds: ['p2'] })
-  assert.equal(s.transition, null)
-  assert.equal(s.committedMode, 'single')
-})
+// ── Page lifecycle ──────────────────────────────────────────────────────────
 
 test('sync-committed reconciles an external durable change with no beat (reload policy)', () => {
-  let s = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 }) // entering, committed panes
-  // Reload hydrates a persisted single blob → controller syncs.
+  let s = modeReducer(single(), { type: 'toggle', presentation: enterPlan(), now: 0 })
   s = modeReducer(s, { type: 'sync-committed', committedMode: 'single' })
   assert.equal(s.committedMode, 'single')
   assert.equal(s.transition, null, 'reload starts in the durable mode with no beat')
 })
 
-test('visibility reconcile force-completes a beat that outlived its duration (INV 14)', () => {
-  const s = modeReducer(panes(), { type: 'toggle', ...KEEP, leavingPaneIds: ['p2'], now: 1000 })
-  // Return to the tab well after the exit could have finished.
-  const late = 1000 + MODE_EXIT_MS + RECONCILE_SLACK_MS + 5
+test('visibility reconcile force-completes a beat that outlived its plan totalMs (INV 14)', () => {
+  const plan = exitPlan({ totalMs: 180 })
+  const s = modeReducer(panes(), { type: 'toggle', presentation: plan, now: 1000 })
+  const late = 1000 + plan.totalMs + RECONCILE_SLACK_MS + 5
   const ev = reconcileVisibleEvent(s, late)
   assert.ok(ev, 'an overdue beat yields a completion event')
   assert.equal(ev.type, 'complete')
   assert.equal(ev.id, s.transition.id)
-  const done = modeReducer(s, ev)
-  assertIdle(done, 'single')
+  assertIdle(modeReducer(s, ev), 'single')
 })
 
 test('visibility reconcile leaves a still-fresh beat running', () => {
-  const s = modeReducer(panes(), { type: 'toggle', ...KEEP, leavingPaneIds: ['p2'], now: 1000 })
-  const ev = reconcileVisibleEvent(s, 1000 + 10) // barely started
-  assert.equal(ev, null, 'a fresh beat is not force-completed')
+  const s = modeReducer(panes(), { type: 'toggle', presentation: exitPlan(), now: 1000 })
+  assert.equal(reconcileVisibleEvent(s, 1000 + 10), null, 'a fresh beat is not force-completed')
 })
 
-// ── Animation lifecycle (matrix §Animation lifecycle) ────────────────────────
-
-// The completion CONTRACT (which animation names + max duration end the beat) is
-// the live surface (INV 12); the epoch-keyed completion itself is driven by the
-// controller's getAnimations + finished promises, not a name-matching predicate
-// here — see completionContract's tests above and the controller finding-5 lock.
+// ── INV 7: completion + supersession ────────────────────────────────────────
 
 test('duplicate completion is harmless', () => {
-  let s = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 })
+  let s = modeReducer(single(), { type: 'toggle', presentation: enterPlan(), now: 0 })
   const id = s.transition.id
   s = modeReducer(s, { type: 'complete', id })
-  const again = modeReducer(s, { type: 'complete', id })
-  assert.equal(again, s, 'a second completion is a no-op reference')
+  assert.equal(modeReducer(s, { type: 'complete', id }), s, 'a second completion is a no-op reference')
 })
 
-test('completion from a superseded epoch never clears a newer transition (INV 15)', () => {
-  let s = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 })
+test('completion from a superseded epoch never clears a newer transition (INV 7)', () => {
+  let s = modeReducer(single(), { type: 'toggle', presentation: enterPlan(), now: 0 })
   const oldId = s.transition.id
-  s = modeReducer(s, { type: 'toggle', ...KEEP, leavingPaneIds: ['p2'], now: 50 })
+  s = modeReducer(s, { type: 'toggle', presentation: exitPlan(), now: 50 })
   const newId = s.transition.id
   const after = modeReducer(s, { type: 'complete', id: oldId })
   assert.equal(after.transition.id, newId, 'live transition untouched by the old completion')
 })
 
-test('needsSyncCompletion is false for animated beats and drag previews', () => {
-  const enter = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 })
-  assert.equal(needsSyncCompletion(enter), false)
-  const preview = modeReducer(single(), { type: 'drag-arm', now: 0 })
-  assert.equal(needsSyncCompletion(preview), false)
-})
-
-// ── Kill-switch clamp (matrix §Baseline: splits flag on/off; INV 16) ─────────
+// ── INV 16: kill-switch clamp ───────────────────────────────────────────────
 
 test('kill switch clamps presentation to single before any derivation', () => {
-  const s = panes() // durable panes, but splits disabled
+  const s = panes()
   const opts = { splitsEnabled: false }
   assert.equal(effectiveViewMode(s, opts), 'single', 'a persisted panes blob never reaches tiled render')
   assert.equal(builderModeActive(s, opts), false)
   assert.equal(transitionRootClass(s, opts), '')
-  assert.equal(exitGeometryActive(s, opts), false)
+  assert.equal(exitBeatActive(s, opts), false)
   assert.equal(dragPreviewActive(s, opts), false)
 })
 
 test('kill switch clamps even a live entering transition', () => {
-  const s = modeReducer(single(), { type: 'toggle', ...FLAT, now: 0 })
+  const s = modeReducer(single(), { type: 'toggle', presentation: enterPlan(), now: 0 })
   assert.equal(effectiveViewMode(s, { splitsEnabled: false }), 'single')
   assert.equal(transitionRootClass(s, { splitsEnabled: false }), '')
 })
 
-// ── Every-input sanity: unknown events are no-ops ────────────────────────────
+// ── Unknown events are no-ops ────────────────────────────────────────────────
 
 test('an unknown event is a no-op reference', () => {
   const s = panes()

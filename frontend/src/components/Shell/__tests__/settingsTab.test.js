@@ -163,8 +163,11 @@ test('workspace-splits OFF also disables the Settings tab and scrubs it (review 
   }
 })
 
-test('CLOSE_TAB mode-convert removes Settings but PRESERVES a pending undo (review §10)', () => {
-  // Two panes so a MOVE_TAB can set an undo slot; then Settings enters p1.
+test('a mode flip (SET_VIEW_MODE) PRESERVES a builder Settings tab AND a pending undo', () => {
+  // v2 deleted the 'mode-convert' close: a builder Settings tab SURVIVES entering
+  // single (single paints its own slot, never Settings), and the pure SET_VIEW_MODE
+  // flip is orthogonal to the tree, so it neither removes the tab nor clobbers a
+  // pending undo. Two panes so a MOVE_TAB can set an undo slot; then Settings enters p1.
   let state = paneModel.initialWorkspaceState(twoPanes())
   state = paneModel.workspaceReducer(state, {
     type: 'OPEN_TAB', paneId: 'p1', tab: settingsTab(), activate: true,
@@ -176,14 +179,12 @@ test('CLOSE_TAB mode-convert removes Settings but PRESERVES a pending undo (revi
   const pendingUndo = state.undo
   assert.ok(pendingUndo, 'the move is undoable')
 
-  // Entering single mode removes the builder-only Settings tab via mode-convert.
-  state = paneModel.workspaceReducer(state, {
-    type: 'CLOSE_TAB', tabKey: SETTINGS_TAB_KEY, reason: 'mode-convert',
-  })
-  assert.equal(paneModel.paneOf(state.ws, SETTINGS_TAB_KEY), null, 'settings removed')
+  // Entering single mode is a pure view flip — the Settings tab is NOT removed.
+  state = paneModel.workspaceReducer(state, { type: 'SET_VIEW_MODE', mode: 'single' })
+  assert.ok(paneModel.paneOf(state.ws, SETTINGS_TAB_KEY), 'settings tab survives the flip')
   assert.equal(state.undo, pendingUndo, 'the pending move undo is PRESERVED, not clobbered')
 
-  // And the preserved slot still undoes the move (not the settings removal).
+  // And the preserved slot still undoes the move.
   state = paneModel.workspaceReducer(state, { type: 'UNDO_LAST' })
   assert.equal(paneModel.paneOf(state.ws, 'chat:c').id, 'p0', 'undo reverted the move')
 })

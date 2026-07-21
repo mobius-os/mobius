@@ -6,7 +6,10 @@ import { prefersReducedMotion } from './useLogoModeGesture.js'
 // element behind the mark whose scale/offset/opacity drift on two summed sines at
 // irrational frequencies (never a visible loop). One single rAF, ONE reused frame
 // object → zero per-frame allocation. Pauses on a hidden tab and is killed
-// instantly when builder mode deactivates (the effect cleanup). Under reduced
+// instantly when `active` goes false (the effect cleanup). Caller (ShellBrand)
+// passes active = builderModeActive AND no live mode beat, so the halo's rAF never
+// runs DURING an entry/exit/drag beat (exit-design v2 §Background isolation) — it
+// starts only once entry settles and is already off throughout exit. Under reduced
 // motion it settles to a static low halo with NO rAF at all. The animated values
 // are written directly to the halo element so each frame invalidates only that
 // leaf, rather than a brand ancestor and all of its descendants. Per-theme base
