@@ -258,12 +258,16 @@ export default function Drawer({
           : c,
       ),
     )
-    const res = await apiFetch(`/chats/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ pinned }),
-    })
-    if (res.ok) refreshChats()
-    else queryClient.setQueryData(key, prev)
+    try {
+      const res = await apiFetch(`/chats/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ pinned }),
+      })
+      if (res.ok) refreshChats()
+      else queryClient.setQueryData(key, prev)
+    } catch {
+      queryClient.setQueryData(key, prev)
+    }
   }
 
   async function pinApp(id, pinned) {
@@ -276,12 +280,16 @@ export default function Drawer({
           : a,
       ),
     )
-    const res = await apiFetch(`/apps/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ pinned }),
-    })
-    if (res.ok) refreshApps()
-    else queryClient.setQueryData(key, prev)
+    try {
+      const res = await apiFetch(`/apps/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ pinned }),
+      })
+      if (res.ok) refreshApps()
+      else queryClient.setQueryData(key, prev)
+    } catch {
+      queryClient.setQueryData(key, prev)
+    }
   }
 
   // deleteApp is handled by Shell (where showToast lives) — the local

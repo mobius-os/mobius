@@ -164,6 +164,24 @@ test('cancelByCid removes the matching entry', () => {
   assert.equal(result.current.pendingMessagesRef.current[0].cid, 'y')
 })
 
+test('restoreByCid restores only the cancelled row into the current queue', () => {
+  const { result } = renderHook(() => usePendingQueue([
+    { cid: 'a', content: 'A', ts: 1 },
+    { cid: 'b', content: 'B', ts: 2 },
+  ]))
+
+  const cancelled = result.current.pendingMessagesRef.current[0]
+  result.current.cancelByCid('a')
+  result.current.add({ cid: 'c', content: 'C', ts: 3, serverTs: true })
+  result.current.cancelByCid('b')
+  result.current.restoreByCid(cancelled, 0)
+
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(row => row.cid),
+    ['a', 'c'],
+  )
+})
+
 test('cancelByCid removes a row by its explicit (backfilled legacy) cid', () => {
   const { result } = renderHook(usePendingQueue, [
     { role: 'user', content: 'legacy', ts: 55, cid: 'legacy-55' },

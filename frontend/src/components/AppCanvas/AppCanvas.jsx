@@ -264,7 +264,12 @@ export default function AppCanvas({
   // Fresh app tokens are persisted for their remaining short lifetime so a
   // fully cached app can cold-boot offline. The cache is app-id scoped and JWT
   // claims are checked on read; the long-lived owner token never enters a frame.
-  const { data: appToken } = appQueries.token.useQuery(appId)
+  const {
+    data: appToken,
+    error: appTokenError,
+    isFetching: appTokenFetching,
+    refetch: refetchAppToken,
+  } = appQueries.token.useQuery(appId)
   // Real reachability (probes /api/health), NOT navigator.onLine — which reads
   // a stale "true" on a COLD offline reopen (close the PWA offline, reopen,
   // open an app from the drawer): the SW serves the shell from cache so the
@@ -1144,11 +1149,40 @@ export default function AppCanvas({
   }
 
   if (!token) {
-    // No token yet. With the token logic above this only happens while
-    // ONLINE and the app-scoped token is still fetching (offline always has
-    // the owner-JWT fallback). Render the loading spinner rather than null so
-    // there is never a blank frame — a cold reopen shows a spinner that
-    // resolves into the app, not a black screen.
+    if (!online || appTokenError) {
+      const title = online
+        ? `Couldn’t open ${appName || 'this app'}`
+        : 'Open this app once you’re online'
+      const detail = online
+        ? 'Möbius couldn’t create the app’s secure session. Your app data is safe.'
+        : 'This app needs a cached, app-specific session before it can open offline.'
+      return (
+        <div className="canvas-wrap">
+          <div className="canvas-loading" aria-live="polite">
+            <div className="canvas-loading__offline">
+              {!online && <WifiOff className="canvas-loading__offline-icon" aria-hidden="true" />}
+              <div className="canvas-loading__offline-title">{title}</div>
+              <div className="canvas-loading__offline-detail">{detail}</div>
+              {online && (
+                <div className="canvas-loading__offline-actions">
+                  <button
+                    type="button"
+                    className="canvas-loading__offline-button canvas-loading__offline-button--primary"
+                    onClick={() => refetchAppToken()}
+                    disabled={appTokenFetching}
+                  >
+                    {appTokenFetching ? 'Trying again…' : 'Try again'}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )
+    }
+
+    // The secure app-scoped token is still loading. Keep a branded placeholder
+    // visible so the canvas never flashes black during a cold start.
     return (
       <div className="canvas-wrap">
         <div className="canvas-loading" aria-live="polite">

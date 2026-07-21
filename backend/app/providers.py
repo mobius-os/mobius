@@ -27,9 +27,12 @@ import logging
 import os
 import shutil
 import stat
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+
+from app.storage_io import atomic_write
 
 if TYPE_CHECKING:
   from app.schemas import AgentSettingsOverride
@@ -118,6 +121,7 @@ DEFAULT_EFFORT = "medium"
 # policy; retaining a true value on disk would reactivate the removed global
 # behavior if a deployment rolled back to an older binary.
 _LEGACY_GLOBAL_AUTO_RESUME_KEY = "auto_resume_on_limit"
+_AGENT_SETTINGS_LOCK = threading.RLock()
 
 
 def remove_legacy_global_auto_resume_setting(data_dir: str) -> bool:
@@ -127,20 +131,21 @@ def remove_legacy_global_auto_resume_setting(data_dir: str) -> bool:
   file could not be persisted. Missing, malformed, and already-clean files
   need no migration and return True.
   """
-  path = Path(data_dir) / "shared" / "agent-settings.json"
-  if not path.exists():
-    return True
-  try:
-    settings = json.loads(path.read_text())
-  except (json.JSONDecodeError, OSError):
-    return True
-  if (
-    not isinstance(settings, dict)
-    or _LEGACY_GLOBAL_AUTO_RESUME_KEY not in settings
-  ):
-    return True
-  settings.pop(_LEGACY_GLOBAL_AUTO_RESUME_KEY)
-  return write_agent_settings(data_dir, settings)
+  with _AGENT_SETTINGS_LOCK:
+    path = Path(data_dir) / "shared" / "agent-settings.json"
+    if not path.exists():
+      return True
+    try:
+      settings = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+      return True
+    if (
+      not isinstance(settings, dict)
+      or _LEGACY_GLOBAL_AUTO_RESUME_KEY not in settings
+    ):
+      return True
+    settings.pop(_LEGACY_GLOBAL_AUTO_RESUME_KEY)
+    return write_agent_settings(data_dir, settings)
 
 
 def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
@@ -157,14 +162,15 @@ def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
 
 def _load_agent_settings(data_dir: str) -> dict:
   """Loads agent settings from /data/shared/agent-settings.json."""
-  path = Path(data_dir) / "shared" / "agent-settings.json"
-  if path.exists():
-    try:
-      settings = json.loads(path.read_text())
-      return settings if isinstance(settings, dict) else {}
-    except (json.JSONDecodeError, OSError):
-      pass
-  return {}
+  with _AGENT_SETTINGS_LOCK:
+    path = Path(data_dir) / "shared" / "agent-settings.json"
+    if path.exists():
+      try:
+        settings = json.loads(path.read_text())
+        return settings if isinstance(settings, dict) else {}
+      except (json.JSONDecodeError, OSError):
+        pass
+    return {}
 
 
 def skills_enabled(data_dir: str) -> bool:
@@ -193,12 +199,28 @@ def write_agent_settings(data_dir: str, settings: dict) -> bool:
   so the mirror isn't silently lost.
   """
   path = Path(data_dir) / "shared" / "agent-settings.json"
-  try:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2))
-    return True
-  except OSError:
-    return False
+  with _AGENT_SETTINGS_LOCK:
+    try:
+      atomic_write(path, json.dumps(settings, indent=2) + "\n")
+      return True
+    except OSError:
+      return False
+
+
+def update_agent_settings(data_dir: str, updater) -> bool:
+  """Atomically read, mutate, and replace the shared agent settings.
+
+  ``write_agent_settings`` is safe for a full-document replacement, but a
+  caller performing its own read followed by a write can still lose a racing
+  update. Merge-style callers use this helper so their read and atomic replace
+  happen under one process-wide lock.
+  """
+  with _AGENT_SETTINGS_LOCK:
+    current = _load_agent_settings(data_dir)
+    updated = updater(dict(current))
+    if updated is None:
+      updated = current
+    return write_agent_settings(data_dir, updated)
 
 
 def effective_agent_settings(

@@ -2,6 +2,8 @@ import asyncio
 import json
 import re
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -574,8 +576,8 @@ def test_settings_reports_agent_settings_disk_write_failure(client, auth, monkey
 
   monkeypatch.setattr(
     settings_route.providers,
-    "write_agent_settings",
-    lambda _data_dir, _settings: False,
+    "update_agent_settings",
+    lambda _data_dir, _updater: False,
   )
   r = client.post(
     "/api/settings",
@@ -585,6 +587,57 @@ def test_settings_reports_agent_settings_disk_write_failure(client, auth, monkey
   assert r.status_code == 500
   assert "Could not save agent settings" in r.json()["detail"]
   assert client.get("/api/settings", headers=auth).json()["provider"] == "claude"
+
+
+def test_concurrent_agent_settings_merges_preserve_both_updates(tmp_path):
+  """A racing merge starts from the latest committed full document."""
+  from app import providers
+
+  data_dir = str(tmp_path)
+  first_entered = threading.Event()
+  release_first = threading.Event()
+
+  def first_update(current):
+    first_entered.set()
+    assert release_first.wait(timeout=2)
+    current["skills_enabled"] = True
+    return current
+
+  def second_update(current):
+    current["model"] = "gpt-5.5"
+    return current
+
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    first = pool.submit(providers.update_agent_settings, data_dir, first_update)
+    assert first_entered.wait(timeout=2)
+    second = pool.submit(providers.update_agent_settings, data_dir, second_update)
+    release_first.set()
+    assert first.result(timeout=2) is True
+    assert second.result(timeout=2) is True
+
+  assert providers._load_agent_settings(data_dir) == {
+    "skills_enabled": True,
+    "model": "gpt-5.5",
+  }
+
+
+def test_agent_settings_atomic_write_failure_preserves_previous_file(
+  tmp_path, monkeypatch,
+):
+  """A failed replacement cannot truncate the last good settings document."""
+  from app import providers
+
+  data_dir = str(tmp_path)
+  assert providers.write_agent_settings(data_dir, {"model": "gpt-5.4"})
+  path = tmp_path / "shared" / "agent-settings.json"
+  previous = path.read_bytes()
+
+  def fail_replace(_path, _content):
+    raise OSError("disk full")
+
+  monkeypatch.setattr(providers, "atomic_write", fail_replace)
+  assert providers.write_agent_settings(data_dir, {"model": "gpt-5.5"}) is False
+  assert path.read_bytes() == previous
 
 
 def test_background_agent_settings_drops_cross_provider_models(tmp_path):

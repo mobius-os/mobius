@@ -45,7 +45,7 @@ export default function LoginForm({ onLogin }) {
         <h1 className="login__title">Möbius</h1>
         <p className="login__tagline">Your AI. Your apps. Your server.</p>
         {expired && (
-          <p className="login__expired">Your session expired — please log in again.</p>
+          <p className="login__expired" role="alert">Your session expired — please log in again.</p>
         )}
         <form className="login__form" onSubmit={handleSubmit}>
           <label className="login__label">
@@ -70,7 +70,7 @@ export default function LoginForm({ onLogin }) {
               autoComplete="current-password"
             />
           </label>
-          {error && <p className="login__error">{error}</p>}
+          {error && <p className="login__error" role="alert">{error}</p>}
           <button
             className="login__btn"
             type="submit"

@@ -372,6 +372,41 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 6000 })
   })
 
+  test('app-token failure shows a retry that opens the app', async ({ page }) => {
+    const appId = 98
+    let tokenAttempts = 0
+    await setupAppRoutes(page, appId, mockFrameHTML(appId))
+    // Registered after the baseline route so this failure contract wins.
+    // React Query retries once automatically; both automatic attempts fail,
+    // then the explicit button succeeds on the third request.
+    await page.route(/\/api\/auth\/app-token$/, route => {
+      tokenAttempts += 1
+      if (tokenAttempts <= 2) {
+        return route.fulfill({
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+          body: '{"detail":"token service unavailable"}',
+        })
+      }
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: 'mock-app-token' }),
+      })
+    })
+
+    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+
+    await expect(page.getByText('Couldn’t open mock-app')).toBeVisible({ timeout: 10000 })
+    const retry = page.getByRole('button', { name: 'Try again' })
+    await expect(retry).toBeVisible()
+    await retry.click()
+
+    await expect.poll(() => tokenAttempts).toBe(3)
+    await expect(page.locator('iframe.canvas')).toBeVisible({ timeout: 10000 })
+    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
+  })
+
   test('an app nav-pop consumes one sentinel without echoing nav-back', async ({ page }) => {
     const appId = 99
     await setupAppRoutes(page, appId, mockFrameHTML(appId))
