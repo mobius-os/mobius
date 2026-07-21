@@ -11,6 +11,9 @@ Möbius stack and can take several minutes. Prefer the GitHub PR checks.
 Run this on a Docker-capable host, not inside the Möbius app container:
   scripts/playwright-local.sh --allow-local-e2e <spec or --grep arguments>
 
+Focused checks use one browser worker by default. Set
+MOBIUS_LOCAL_E2E_WORKERS=2 to reproduce hosted-CI concurrency.
+
 The runner deletes its test image by default. Set
 MOBIUS_LOCAL_E2E_KEEP_CACHE=1 only for an intentionally retained per-checkout
 image; BuildKit already owns the ordinary build cache.
@@ -67,6 +70,11 @@ cache_image="${MOBIUS_LOCAL_E2E_CACHE_IMAGE:-mobius-local-e2e-cache-${checkout_i
 keep_cache="${MOBIUS_LOCAL_E2E_KEEP_CACHE:-0}"
 if [[ "$keep_cache" != "0" && "$keep_cache" != "1" ]]; then
   echo "error: MOBIUS_LOCAL_E2E_KEEP_CACHE must be 0 or 1" >&2
+  exit 2
+fi
+e2e_workers="${MOBIUS_LOCAL_E2E_WORKERS:-1}"
+if [[ ! "$e2e_workers" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: MOBIUS_LOCAL_E2E_WORKERS must be a positive integer" >&2
   exit 2
 fi
 min_free_gb="${MOBIUS_LOCAL_E2E_MIN_FREE_GB:-20}"
@@ -235,7 +243,7 @@ if errors:
     raise SystemExit("refusing browser run: " + "; ".join(errors))
 ' "$version" "$head_sha"
 
-echo "Running focused Playwright checks with one worker..."
+echo "Running focused Playwright checks with ${e2e_workers} worker(s)..."
 cd "$snapshot_dir"
 if CI= \
    MOBIUS_LOCAL_E2E=1 \
@@ -245,7 +253,7 @@ if CI= \
    MOBIUS_TEST_INTERNAL_API="http://127.0.0.1:${internal_test_port}" \
    MOBIUS_USER=admin \
    MOBIUS_PASS=admin \
-     "$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers=1; then
+     "$snapshot_dir/node_modules/.bin/playwright" test "$@" --workers="$e2e_workers"; then
   exit 0
 else
   test_rc=$?
