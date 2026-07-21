@@ -868,7 +868,10 @@ test.describe('Delete response boundaries', () => {
     await expect.poll(() => deleteAttempts).toBe(1)
     await expect(page.getByText("Couldn't delete this chat — please try again."))
       .toBeVisible()
-    await expect(page.getByText(target.title)).toBeVisible()
+    await expect(
+      page.getByLabel('Primary navigation')
+        .getByRole('button', { name: target.title, exact: true }),
+    ).toBeVisible()
     expect((await getNavState(page)).activeChatId).toBe(target.id)
   })
 })
