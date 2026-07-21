@@ -88,6 +88,20 @@ test('live payload conversion preserves running tools and thinking clock anchors
   assert.equal(payload.blocks[1].lastAt, 200, 'the unified live renderer keeps its timer anchor')
 })
 
+test('final promotion marks a deferred thought complete without changing live state', () => {
+  const thought = {
+    type: 'thinking', content: '', thinking_id: 'think-1',
+    thinking_deferred: true, thinking_revision: 24000,
+  }
+
+  const live = streamItemToBlock(thought, { finalize: false })
+  const final = streamItemToBlock(thought)
+
+  assert.equal(live.thinking_complete, undefined)
+  assert.equal(final.thinking_complete, true,
+    'completion metadata lets an open lazy disclosure offer full loading without polling')
+})
+
 test('promoteAssistantStream appends when there is no bridge partial', () => {
   const messages = [{ role: 'user', ts: 1, content: 'hi' }]
   const next = promoteAssistantStream(messages, {

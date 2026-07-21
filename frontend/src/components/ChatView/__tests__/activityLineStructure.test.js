@@ -66,6 +66,8 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
     'the nested toggle exposes its state')
   assert.match(activityStretch, /aria-controls=\{bodyId\}/,
     'the nested toggle names the thought body it controls')
+  assert.match(activityStretch, /id=\{bodyId\}[^>]*hidden=\{!open\}/,
+    'the controlled thought shell remains addressable while its payload is unmounted')
   assert.match(activityStretch, /role="status" aria-live="polite"/,
     'deferred thought state changes should be announced')
   assert.match(activityStretch, /className="chat__lazy-retry" onClick=\{trace\.retry\}/,
@@ -85,6 +87,8 @@ test('lazy tool details and touch targets keep their accessibility contract', ()
     .join('\n')
 
   assert.match(toolBlock, /aria-controls=\{detailId\}/)
+  assert.match(toolBlock, /id=\{detailId\}[\s\S]*hidden=\{!open\}/,
+    'the controlled detail shell remains addressable while its payload is unmounted')
   assert.match(toolBlock, /role="region"/)
   assert.match(toolBlock, /aria-labelledby=\{headerId\}/)
   assert.match(toolBlock, /className="chat__lazy-retry"/)

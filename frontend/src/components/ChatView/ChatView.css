@@ -1338,6 +1338,21 @@
   border-inline-start: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 
+/* Shared screen-reader status utility for transcript-local interactions such
+   as clipboard confirmation. Keep it in ChatView rather than borrowing the
+   Shell brand's scoped helper. */
+.chat__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Every reasoning entry keeps the same nested row throughout streaming. This
    avoids replacing a visible body when the first tool joins a thinking-only
    stretch, and keeps reasoning collapsed until explicitly opened. */
