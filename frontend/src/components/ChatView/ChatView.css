@@ -771,8 +771,12 @@
 }
 
 .chat__tool--compact .chat__tool-detail {
+  margin-block-start: var(--activity-row-gap, 4px);
   margin-inline-start: 20px;
-  padding-inline: 0;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background: var(--surface);
 }
 
 /* The header is a real <button> when there's detail to disclose (keyboard

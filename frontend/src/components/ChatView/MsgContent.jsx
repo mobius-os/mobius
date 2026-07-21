@@ -293,7 +293,9 @@ function MsgContentInner({
         {/* The turn's web sources, collected from its tool blocks and shown
             once after the answer. Renders nothing when the turn did no web
             search, so an ordinary reply is unchanged. */}
-        {msg.role === 'assistant' && <MessageSources blocks={msg.blocks} />}
+        {msg.role === 'assistant' && !isStreaming && (
+          <MessageSources blocks={msg.blocks} />
+        )}
       </>
     )
   }

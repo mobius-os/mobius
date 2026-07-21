@@ -352,7 +352,9 @@ export function _validateSavedMode(saved, messages, scrollEl) {
 
 
 /** Spacer height needed so the latest user message can sit near the
- *  top of the viewport, with the PIN_OFFSET breathing room above it.
+ *  top of the viewport, with the PIN_OFFSET breathing room above it. While an
+ *  ANCHOR_AT hold is active, also reserve enough room to keep that exact target
+ *  reachable if a mobile viewport grows before new response content arrives.
  *  The spacer's only job is reserving bottom room — it does NOT touch
  *  scrollTop and it does NOT decide whether a send pins.
  *
@@ -370,20 +372,34 @@ export function _validateSavedMode(saved, messages, scrollEl) {
  *  the pre-cushion behavior; a >0 value re-adds breathing room if the exact
  *  end-of-scroll rest ever feels cramped.)
  *
- *  Reservation is intentionally independent from pinning and component
- *  lifetime. This function always reserves enough bottom room for the latest
- *  visible user message, so leaving/reopening a chat, keyboard open/close, and
- *  later manual scrolls never make that message lose its reachable "top of
- *  screen" position.
+ *  The permanent pin reservation is intentionally independent from pin mode
+ *  and component lifetime. The anchor addition exists only while ANCHOR_AT
+ *  needs more room than that permanent baseline, and disappears as soon as
+ *  real content makes the anchor naturally reachable.
  */
 const PIN_OFFSET = 4
 const PIN_BOTTOM_ROOM = 0
-export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
+export function _computeSpacerH(
+  scrollEl,
+  listEl,
+  lastUserMsgEl,
+  fullViewH,
+  mode = null,
+) {
   if (!scrollEl || !listEl) return 0
-  if (!lastUserMsgEl) return 0
   const viewH = fullViewH || scrollEl.clientHeight
-  const pinTarget = Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
-  return Math.max(0, viewH + pinTarget - listEl.offsetHeight + PIN_BOTTOM_ROOM)
+  const pinTarget = lastUserMsgEl
+    ? Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
+    : 0
+  let target = pinTarget
+  if (mode?.kind === 'ANCHOR_AT') {
+    const anchorEl = _anchorEl(scrollEl, mode.key)
+    if (anchorEl) {
+      target = Math.max(target, Math.max(0, anchorEl.offsetTop - mode.offset))
+    }
+  }
+  if (!lastUserMsgEl && target === 0) return 0
+  return Math.max(0, viewH + target - listEl.offsetHeight + PIN_BOTTOM_ROOM)
 }
 
 
@@ -500,9 +516,16 @@ export function modeAfterTerminalLayout(mode, spacerH, layoutStable) {
 export function modeAfterReaderReachesBottom({
   mode,
   spacerH,
+  anchorReservation = false,
   turnRunning,
   lastUserCid,
 }) {
+  // An ANCHOR_AT reservation makes that exact reader-owned position the
+  // physical bottom while the viewport is temporarily taller than the content
+  // beneath it. Reaching this synthetic edge is not a request to reinterpret
+  // the position as the latest-user pin; keep the anchor until real content
+  // makes its target naturally reachable and the extra reservation disappears.
+  if (anchorReservation && mode?.kind === 'ANCHOR_AT') return mode
   if (spacerH > 1 && lastUserCid != null) {
     if (mode?.kind === 'PIN_USER_MSG'
         && mode.cid === lastUserCid
@@ -1232,7 +1255,7 @@ export default function useScrollMode({
       // exists. Null only when there is genuinely no user message → spacer 0.
       const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
       const h = _computeSpacerH(
-        scrollEl, listEl, lastUserEl, fullViewHRef.current,
+        scrollEl, listEl, lastUserEl, fullViewHRef.current, modeRef.current,
       )
       if (!layoutOwnsScroll()) {
         // Spacer height is itself scroll geometry: shrinking it can make the
@@ -1623,11 +1646,18 @@ export default function useScrollMode({
 
       if (atBottom) {
         const spacerH = spacerEl.offsetHeight || 0
-        const lastUserCid = _lastUserRowEl(scrollEl)?.dataset?.cid ?? null
+        const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
+        const lastUserCid = lastUserEl?.dataset?.cid ?? null
+        const pinSpacerH = _computeSpacerH(
+          scrollEl, listEl, lastUserEl, fullViewHRef.current,
+        )
+        const anchorReservation = modeRef.current?.kind === 'ANCHOR_AT'
+          && spacerH > pinSpacerH + 1
         transitionMode(
           modeAfterReaderReachesBottom({
             mode: modeRef.current,
             spacerH,
+            anchorReservation,
             turnRunning: turnRunningRef.current,
             lastUserCid,
           }),

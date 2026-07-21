@@ -596,8 +596,11 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   card enters its pending state or output resumes, the controller snapshots the
   currently visible message and its exact viewport offset as `ANCHOR_AT`. Resumed
   output grows without dragging the reader, even when the chat had been following
-  the tail before Submit. A failed answer keeps that settled reading anchor for the
-  retryable card rather than manufacturing follow intent again.
+  the tail before Submit. If a mobile viewport grows before that output arrives,
+  the dynamic spacer temporarily reserves enough room to keep the anchor target
+  reachable; the reservation disappears as real content replaces it. A failed
+  answer keeps that settled reading anchor for the retryable card rather than
+  manufacturing follow intent again.
   The source handoff
   preserves the question, its answer, and every pre/post-answer thinking, tool, and
   text block in event order, without hiding, duplicating, or reordering them. Only a

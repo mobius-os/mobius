@@ -610,6 +610,17 @@ test('idle reserved bottom is a settled pin and cannot manufacture follow', () =
   }), { kind: 'PIN_USER_MSG', cid: 'c-123' })
 })
 
+test('a bottom edge created by anchor reservation keeps the reader anchor', () => {
+  const anchor = { kind: 'ANCHOR_AT', key: 'assistant-question', offset: 60 }
+  assert.equal(modeAfterReaderReachesBottom({
+    mode: anchor,
+    spacerH: 180,
+    anchorReservation: true,
+    turnRunning: true,
+    lastUserCid: 'c-123',
+  }), anchor)
+})
+
 test('a short settled pin retires automatic follow but keeps its identity', () => {
   const livePin = {
     kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
@@ -904,6 +915,48 @@ test('spacer reservation returns zero before there is a user message', () => {
   const listEl = { offsetHeight: 200 }
 
   assert.equal(_computeSpacerH(scrollEl, listEl, null, 600), 0)
+})
+
+test('viewport growth keeps a question-answer anchor reachable before output resumes', () => {
+  const anchor = { offsetTop: 1320 }
+  const scrollEl = {
+    clientHeight: 960,
+    querySelector(selector) {
+      return selector === '[data-key="assistant-question"]' ? anchor : null
+    },
+  }
+  const listEl = { offsetHeight: 1500 }
+  const lastUserMsgEl = { offsetTop: 900 }
+  const mode = {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: 60,
+  }
+
+  const spacerH = _computeSpacerH(
+    scrollEl, listEl, lastUserMsgEl, 960, mode,
+  )
+  const target = anchor.offsetTop - mode.offset
+  const maxScrollTop = listEl.offsetHeight + spacerH - scrollEl.clientHeight
+
+  assert.equal(maxScrollTop, target,
+    'the frozen card position is reachable in the first grown-viewport frame')
+})
+
+test('anchor reservation disappears once real content makes the target reachable', () => {
+  const anchor = { offsetTop: 1320 }
+  const scrollEl = {
+    clientHeight: 960,
+    querySelector(selector) {
+      return selector === '[data-key="assistant-question"]' ? anchor : null
+    },
+  }
+  const mode = { kind: 'ANCHOR_AT', key: 'assistant-question', offset: 60 }
+
+  assert.equal(
+    _computeSpacerH(scrollEl, { offsetHeight: 2300 }, { offsetTop: 900 }, 960, mode),
+    0,
+  )
 })
 
 test('queued tray does not shorten spacer reservation', () => {

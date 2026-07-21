@@ -562,6 +562,102 @@ test.describe('Q&A atomic write', () => {
     expect(questionFreeze).toBeTruthy()
     expect(questionFreeze.to?.kind).toBe('ANCHOR_AT')
   })
+
+  test('an Android viewport growth cannot clamp a submitted question anchor', async ({ page }) => {
+    const longLead = 'Context before the question. '.repeat(180)
+    const streamBody = [
+      `data: ${JSON.stringify({ type: 'text', content: longLead })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'question',
+        question_id: 'q-viewport-anchor',
+        questions: [{
+          question: 'Keep this card still?',
+          header: 'Position',
+          multiSelect: false,
+          options: [{ label: 'Yes' }],
+        }],
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    let streamCount = 0
+    let releaseAnswer
+    let markAnswerStarted
+    const answerStarted = new Promise(resolve => { markAnswerStarted = resolve })
+
+    await page.setViewportSize({ width: 426, height: 860 })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
+      if (route.request().method() !== 'POST') return route.continue()
+      const body = route.request().postDataJSON()
+      if (!body.answers) return fulfillStartedPost(route)
+      markAnswerStarted()
+      await new Promise(resolve => { releaseAnswer = resolve })
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'answer_delivered', answer_turn: 'same' }),
+      })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route => {
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: streamCount++ === 0 ? streamBody : 'data: {"type":"done"}\n\n',
+      })
+    })
+    await page.route('**/api/chat/stop', route =>
+      route.fulfill({ status: 200, body: '{}' })
+    )
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => !!(document.querySelector('.chat__empty-wrap')
+            || document.querySelector('.chat__form')),
+      { timeout: 10000 },
+    )
+    await newChat(page)
+    await sendMessage(page, 'Ask the anchored question')
+
+    const card = page.locator('.qcard')
+    await expect(card).toBeVisible({ timeout: 5000 })
+    await page.evaluate(() => {
+      const scroll = document.querySelector('.chat__scroll')
+      if (scroll) scroll.scrollTop = scroll.scrollHeight
+    })
+    await page.locator('.qcard__opt', { hasText: 'Yes' }).click()
+
+    const submit = page.locator('.qcard__submit')
+    const submitClick = submit.click()
+    await answerStarted
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+
+    const geometry = () => page.evaluate(() => {
+      const scroll = document.querySelector('.chat__scroll')
+      const question = document.querySelector('.qcard')
+      const spacer = document.querySelector('.spacer-dynamic')
+      const sr = scroll?.getBoundingClientRect()
+      const qr = question?.getBoundingClientRect()
+      return {
+        scrollTop: scroll?.scrollTop ?? null,
+        cardTop: sr && qr ? qr.top - sr.top : null,
+        viewport: scroll?.clientHeight ?? null,
+        spacer: spacer?.offsetHeight ?? null,
+      }
+    })
+
+    const before = await geometry()
+    await page.setViewportSize({ width: 426, height: 960 })
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    const after = await geometry()
+    releaseAnswer()
+    await submitClick
+
+    expect(after.viewport).toBeGreaterThan(before.viewport)
+    expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThanOrEqual(2)
+    expect(Math.abs(after.cardTop - before.cardTop)).toBeLessThanOrEqual(2)
+  })
 })
 
 
