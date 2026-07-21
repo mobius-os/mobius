@@ -16,6 +16,13 @@
 .shell {
   --ease-mode-arrive: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-mode-leave: cubic-bezier(0.4, 0, 0.7, 0.2);
+  /* Chrome (dividers + strips) leads the panes with a faster, front-loaded curve so
+     structure simplifies first (exit) / resolves after the focused card (entry). */
+  --ease-mode-chrome: cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* The promote FLIP reads with more MASS than the light deal-out cards: a slower
+     middle and a clean, non-overshooting landing, so a half-pane grows to full-bleed
+     without racing ahead of its still-opaque siblings. */
+  --ease-mode-promote: cubic-bezier(0.2, 0.82, 0.2, 1);
 }
 
 /* A content wrapper (app iframe or PaneChatView) that is the active tab of a
@@ -47,8 +54,9 @@
 
 /* Promote: the survivor pane keeps its tiled content rect and FLIPs to cover the
    full destination (transform-origin at its own top-left; Shell latches --flip-*
-   from the projection, never a DOM read). One critically-damped curve, no
-   overshoot. */
+   from the projection, never a DOM read). Its OWN curve (--ease-mode-promote) gives
+   it more mass than the deal-out cards — a slower middle, no overshoot — so it does
+   not consume the screen before the siblings have visibly departed. */
 .shell--builder-exiting
 .shell__view[data-mode-motion="promote"] {
   z-index: 2;
@@ -56,11 +64,11 @@
   animation:
     shell-mode-promote
     var(--mode-duration)
-    var(--ease-mode-arrive)
+    var(--ease-mode-promote)
     both;
 }
 
-/* Deal-out: a departing pane lifts, drifts right, and fades over its 20ms-stagger
+/* Deal-out: a departing pane lifts, drifts right, and fades over its 28ms-stagger
    delay. Pointer-inert (INV 9 inert beat) so a tap on the nearly-gone card cannot
    re-target the transition. */
 .shell--builder-exiting
@@ -76,7 +84,7 @@
 }
 
 /* Deal-in: entry's reverse grammar — each pane deals in from the same small
-   offset with a 0/20/40/60 visual-order stagger. */
+   offset with a 0/28/56/84 visual-order stagger. */
 .shell--builder-entering
 .shell__view[data-mode-motion="deal-in"] {
   animation:
@@ -103,25 +111,26 @@
     transform: translate3d(0, 0, 0) scale(1);
     opacity: 1;
   }
-  18% {
-    transform: translate3d(0, -2px, 0) scale(1.004);
+  16% {
+    transform: translate3d(0, -2px, 0) scale(1.003);
     opacity: 1;
   }
-  42% {
-    opacity: 1;
+  38% {
+    transform: translate3d(4px, -3px, 0) scale(0.999);
+    opacity: 0.96;
   }
   100% {
-    transform: translate3d(32px, -4px, 0) scale(0.985);
+    transform: translate3d(28px, -6px, 0) scale(0.982);
     opacity: 0;
   }
 }
 
 @keyframes shell-mode-deal-in {
   from {
-    transform: translate3d(32px, -4px, 0) scale(0.985);
+    transform: translate3d(28px, -6px, 0) scale(0.982);
     opacity: 0;
   }
-  48% {
+  42% {
     opacity: 1;
   }
   to {
@@ -132,17 +141,17 @@
 
 /* Strips move WITH their pane, replacing the deleted parent-chrome opacity fade.
    A sibling (deal-out) strip uses the exact motion + delay of its pane; a survivor
-   (promote) strip clears upward over 120ms; an entering strip shares its pane's
-   deal-in. `.shell__tabstrip` matches BOTH the single-pane top nav and the
-   per-pane WorkspaceChrome strips — they never coexist, so the one selector is
-   correct for either surface. */
+   (promote) strip clears upward over a fast 100ms chrome curve; an entering strip
+   shares its pane's deal-in. `.shell__tabstrip` matches BOTH the single-pane top nav
+   and the per-pane WorkspaceChrome strips — they never coexist, so the one selector
+   is correct for either surface. */
 .shell--builder-exiting .shell__tabstrip[data-mode-motion="deal-out"] {
   animation:
     shell-mode-deal-out var(--mode-duration) var(--ease-mode-leave)
     var(--mode-delay, 0ms) both;
 }
 .shell--builder-exiting .shell__tabstrip[data-mode-motion="promote"] {
-  animation: shell-mode-strip-clear 120ms var(--ease-mode-leave) both;
+  animation: shell-mode-strip-clear 100ms var(--ease-mode-chrome) both;
 }
 .shell--builder-entering .shell__tabstrip[data-mode-motion="deal-in"] {
   animation:
@@ -151,21 +160,23 @@
 }
 @keyframes shell-mode-strip-clear {
   from { transform: translate3d(0, 0, 0); opacity: 1; }
-  to { transform: translate3d(0, -8px, 0); opacity: 0; }
+  to { transform: translate3d(0, -6px, 0); opacity: 0; }
 }
 
-/* Dividers + the overflow chip fade together over 120ms — on exit they leave, on
-   enter they appear 60ms after the first pane (opacity-only; small elements). The
-   chip selector is listed FIRST (before the divider) so it is followed by a comma,
-   never a brace — a css-shape test that greps the base chip rule still finds it. */
+/* Dividers + the overflow chip lead the panes on the faster front-loaded chrome
+   curve, so structure simplifies FIRST on exit (dividers dissolve before the cards
+   depart, 90ms) and RESOLVES AFTER the focused card on entry (110ms, delayed 84ms so
+   it follows the first pane). Opacity-only; small elements. The chip selector is
+   listed FIRST (before the divider) so it is followed by a comma, never a brace — a
+   css-shape test that greps the base chip rule still finds it. */
 .shell--builder-exiting .workspace__pane-chip,
 .shell--builder-exiting .workspace__divider {
   pointer-events: none;
-  animation: shell-mode-chrome-out 120ms var(--ease-mode-leave) both;
+  animation: shell-mode-chrome-out 90ms var(--ease-mode-chrome) both;
 }
 .shell--builder-entering .workspace__pane-chip,
 .shell--builder-entering .workspace__divider {
-  animation: shell-mode-chrome-in 120ms var(--ease-mode-arrive) 60ms both;
+  animation: shell-mode-chrome-in 110ms var(--ease-mode-chrome) 84ms both;
 }
 @keyframes shell-mode-chrome-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes shell-mode-chrome-in { from { opacity: 0; } to { opacity: 1; } }

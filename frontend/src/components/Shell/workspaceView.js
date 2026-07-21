@@ -26,14 +26,16 @@ import * as tabModel from './tabModel.js'
 //
 // Timing (ms). Constants live here, NOT in the machine, so the reconcile clock
 // (INV 14) and the missing-target fallback (INV 13) reason about the plan's own
-// totalMs rather than a fixed per-phase maximum. The 20ms visual-order stagger and
-// the critically-damped curves make the deal read as cards, never a generic fade.
+// totalMs rather than a fixed per-phase maximum. The 28ms visual-order stagger — long
+// enough that the second card only begins as the first clears its lift waypoint, so
+// two panes visibly deal rather than launching together — plus the critically-damped
+// curves make the deal read as cards, never a generic fade.
 export const MODE_MOTION = Object.freeze({
-  staggerMs: 20,
-  enterItemMs: 220, // one pane's deal-in (multi-pane entry)
-  enterSingleMs: 240, // the sole leaf's deal-in (single-leaf entry)
+  staggerMs: 28,
+  enterItemMs: 210, // one pane's deal-in (multi-pane entry)
+  enterSingleMs: 230, // the sole leaf's deal-in (single-leaf entry)
   exitItemMs: 180, // one pane's deal-out (world reveal)
-  promoteMs: 240, // the survivor pane's FLIP grow-to-full-bleed
+  promoteMs: 250, // the survivor pane's FLIP grow-to-full-bleed (slower, more mass)
 })
 
 // The slack a visibility-return reconcile allows past the plan's totalMs before it
@@ -239,7 +241,7 @@ export function deriveExitPlan(input) {
 
 // deriveEnterPlan({ workspace, projection }) → the latched entry plan, or null
 // when there is nothing to deal in. Entry is the reverse grammar: each visible
-// leaf (and its strip) deals in from a small offset with a 0/20/40/60 visual-order
+// leaf (and its strip) deals in from a small offset with a 0/28/56/84 visual-order
 // stagger. Single-leaf entry uses the slightly longer paired gesture.
 export function deriveEnterPlan({ workspace, projection }) {
   const leaves = visibleLeafDescriptors(workspace, projection).sort(byVisualOrder)

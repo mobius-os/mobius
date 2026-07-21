@@ -502,7 +502,7 @@ test('entry deals in on the keyed beat class, compositor-only, instant under red
   assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="deal-in"\] \{[\s\S]*?animation:\s*\n?\s*shell-mode-deal-in/)
   // The deal-in keyframe touches ONLY transform + opacity (no shadow/radius/filter).
   const dealIn = css.match(/@keyframes shell-mode-deal-in\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(dealIn, /translate3d\(32px, -4px, 0\) scale\(0\.985\)/)
+  assert.match(dealIn, /translate3d\(28px, -6px, 0\) scale\(0\.982\)/)
   assert.match(dealIn, /opacity: 0/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
   // The old dead .workspace--resizing selector is gone entirely.
@@ -575,7 +575,7 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="promote"\] \{[\s\S]*?shell-mode-promote/)
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="deal-out"\] \{[\s\S]*?shell-mode-deal-out/)
   const dealOut = css.match(/@keyframes shell-mode-deal-out\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(dealOut, /translate3d\(32px, -4px, 0\) scale\(0\.985\)/)
+  assert.match(dealOut, /translate3d\(28px, -6px, 0\) scale\(0\.982\)/)
   assert.match(dealOut, /opacity: 0/)
   assert.doesNotMatch(dealOut, /box-shadow|border-radius|filter|clip/)
   // The parent-chrome opacity fade is DELETED (strips deal with their panes now).
@@ -813,8 +813,16 @@ test('N1: dead exit-presentation plumbing is removed', () => {
   assert.doesNotMatch(controller, /dragArm = useCallback\(\(focusedPaneId\)/)
   assert.doesNotMatch(controller, /drag-arm', focusedPaneId/)
   assert.match(shell, /mode\.dragArm\(\)/)
-  // The unused --ease-mode-chrome token is gone (only arrive/leave remain).
-  assert.doesNotMatch(css, /--ease-mode-chrome/)
+  // Polish item 2/3: --ease-mode-chrome + --ease-mode-promote are (re)introduced as
+  // USED tokens — the chrome fades + strip-clear ride the chrome curve, the promote
+  // FLIP rides the promote curve — so they are no longer the dead plumbing this
+  // originally removed.
+  assert.match(css, /--ease-mode-chrome: cubic-bezier/)
+  assert.match(css, /--ease-mode-promote: cubic-bezier/)
+  assert.match(css, /shell-mode-chrome-out 90ms var\(--ease-mode-chrome\)/)
+  assert.match(css, /shell-mode-chrome-in 110ms var\(--ease-mode-chrome\) 84ms/)
+  assert.match(css, /shell-mode-strip-clear 100ms var\(--ease-mode-chrome\)/)
+  assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)/)
   // The unused excludeChatId param on resolveEmptySingleHome is gone.
   assert.doesNotMatch(shell, /excludeChatId/)
   assert.match(shell, /const resolveEmptySingleHome = useCallback\(\(\) =>/)
