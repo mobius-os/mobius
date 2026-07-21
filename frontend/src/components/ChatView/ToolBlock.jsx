@@ -72,7 +72,7 @@ function ToolResult({ r }) {
   )
 }
 
-export default function ToolBlock({ t, chatId }) {
+export default function ToolBlock({ t, chatId, compact = false }) {
   // Collapsed until tapped — nothing produces a pre-opened tool block anymore
   // (the last producer, the legacy compaction path, renders as CompactionCard;
   // a legacy persisted `defaultOpen` field is ignored and renders collapsed
@@ -327,6 +327,7 @@ export default function ToolBlock({ t, chatId }) {
   return (
     <div className={
       `chat__tool chat__tool--${t.status || 'done'}${failed ? ' chat__tool--failed' : ''}`
+      + (compact ? ' chat__tool--compact' : '')
     }>
       {hasDetail ? (
         // A real <button> so the disclosure is keyboard-operable (the old
