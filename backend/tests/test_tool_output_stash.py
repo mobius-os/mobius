@@ -1,10 +1,12 @@
 """Server-side stash of large tool outputs (contract rule 6): the StashToolOutput
 actor command writes the `tool_outputs` side table keyed by (chat_id,
 tool_use_id); the sink reduces the wire event and submits the stash; the
-GET /tool-output/{tool_use_id} endpoint serves the full text on expand and 404s
-when absent (so the frontend keeps the inline excerpt). Also covers the reducer
+GET /tool-output/{tool_use_id} endpoint serves a bounded expansion preview and
+the exact text on explicit copy. Also covers the reducer
 carrying tool identity + truncation metadata onto the persisted block."""
 import uuid
+
+from sqlalchemy import event as sqlalchemy_event
 
 from app import models
 from app.chat_writer import Barrier, StashToolOutput, get_writer
@@ -12,6 +14,7 @@ from app.events import (
     TOOL_OUTPUT_INLINE_THRESHOLD,
     process_event,
 )
+from app.routes.chats import TOOL_OUTPUT_PREVIEW_CHARS
 
 
 def _flush_writer():
@@ -67,6 +70,70 @@ def test_tool_output_by_id_endpoint_serves_full_text(client, auth, db):
     r = client.get(f"/api/chats/{chat_id}/tool-output/tu_x", headers=auth)
     assert r.status_code == 200
     assert r.text == big
+    assert r.headers["cache-control"] == "private, no-store"
+
+
+def test_tool_output_preview_is_sliced_in_database(client, auth, db):
+    chat_id = str(uuid.uuid4())
+    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.commit()
+    big = "0123456789" * (TOOL_OUTPUT_PREVIEW_CHARS // 10 + 1000)
+    get_writer().submit(
+        StashToolOutput(chat_id=chat_id, tool_use_id="tu_preview", output=big)
+    ).result(timeout=5)
+
+    statements = []
+    engine = db.get_bind()
+
+    def capture_sql(_, __, statement, *args):
+        statements.append(statement.lower())
+
+    sqlalchemy_event.listen(engine, "before_cursor_execute", capture_sql)
+    try:
+        r = client.get(
+            f"/api/chats/{chat_id}/tool-output/tu_preview?preview=1",
+            headers=auth,
+        )
+    finally:
+        sqlalchemy_event.remove(engine, "before_cursor_execute", capture_sql)
+
+    assert r.status_code == 200
+    assert r.text == big[:TOOL_OUTPUT_PREVIEW_CHARS]
+    assert r.headers["x-tool-output-complete"] == "0"
+    assert r.headers["cache-control"] == "private, no-store"
+    preview_sql = next(
+        statement for statement in statements
+        if "from tool_outputs" in statement
+    )
+    assert "substr(" in preview_sql
+    assert "length(" not in preview_sql
+
+
+def test_tool_output_barrier_observes_latest_queued_stash(client, auth, db):
+    chat_id = str(uuid.uuid4())
+    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.add(models.ToolOutput(
+        chat_id=chat_id,
+        tool_use_id="tu_latest",
+        output="intermediate",
+    ))
+    db.commit()
+
+    # Do not await this write. The endpoint's own Barrier must queue behind it
+    # and prevent the already-committed intermediate row from winning the read.
+    get_writer().submit(StashToolOutput(
+        chat_id=chat_id,
+        tool_use_id="tu_latest",
+        output="final",
+    ))
+    r = client.get(
+        f"/api/chats/{chat_id}/tool-output/tu_latest?preview=1",
+        headers=auth,
+    )
+
+    assert r.status_code == 200
+    assert r.text == "final"
+    assert r.headers["x-tool-output-complete"] == "1"
 
 
 def test_tool_output_by_id_endpoint_404_when_absent(client, auth, db):
@@ -75,6 +142,23 @@ def test_tool_output_by_id_endpoint_404_when_absent(client, auth, db):
     db.commit()
     r = client.get(f"/api/chats/{chat_id}/tool-output/missing", headers=auth)
     assert r.status_code == 404
+
+
+def test_tool_output_by_id_endpoint_202_while_chat_is_running(
+    client, auth, db, monkeypatch,
+):
+    chat_id = str(uuid.uuid4())
+    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.commit()
+    monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: True)
+
+    r = client.get(
+        f"/api/chats/{chat_id}/tool-output/missing?preview=1",
+        headers=auth,
+    )
+
+    assert r.status_code == 202
+    assert r.headers["retry-after"] == "1"
 
 
 def test_tool_output_by_id_endpoint_requires_owner(client, db):

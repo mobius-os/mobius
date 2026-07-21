@@ -15,7 +15,7 @@ const src = readFileSync(new URL('../ActivityStretch.jsx', import.meta.url), 'ut
 // Scan the function body only — the header comment deliberately QUOTES the old
 // `open = running || userOpen` force-open expression to document why it was
 // removed, and that history must not trip the code-level guard below.
-const body = src.slice(src.indexOf('export default function ActivityStretch'))
+const body = src.slice(src.indexOf('function GroupedActivityStretch'))
 
 test('the stretch starts collapsed and open is exactly userOpen', () => {
   assert.match(body, /const \[userOpen, setUserOpen\] = useState\(false\)/,
