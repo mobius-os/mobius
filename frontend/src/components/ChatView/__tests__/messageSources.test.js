@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  MAX_MESSAGE_SOURCES,
+  MAX_SOURCE_SNIPPET_CHARS,
+  MAX_SOURCE_TITLE_CHARS,
+  boundedMessageSource,
   messageSources,
   safeSourceUrl,
   sourceHost,
@@ -8,6 +12,11 @@ import {
 } from '../messageSources.js'
 
 const tool = sources => ({ type: 'tool', tool: 'WebSearch', sources })
+
+test('already-normalized live sources keep object identity', () => {
+  const source = { title: 'A', url: 'https://a.example/1', snippet: 'context' }
+  assert.equal(boundedMessageSource(source), source)
+})
 
 test('collects sources across every tool block in the message', () => {
   const blocks = [
@@ -28,6 +37,33 @@ test('dedupes across searches, first occurrence wins so search order is kept', (
     ]),
   ]
   assert.deepEqual(messageSources(blocks).map(s => s.title), ['First', 'Second'])
+})
+
+test('a later duplicate enriches missing metadata without moving the source', () => {
+  const url = 'https://x.example/p'
+  const sources = messageSources([
+    tool([{ title: url, url }]),
+    tool([{ title: 'Useful title', url, snippet: 'Useful context' }]),
+    tool([{ title: 'Second', url: 'https://y.example/q' }]),
+  ])
+  assert.deepEqual(sources, [
+    { title: 'Useful title', url, snippet: 'Useful context' },
+    { title: 'Second', url: 'https://y.example/q' },
+  ])
+})
+
+test('historical source blocks are bounded before they reach the DOM', () => {
+  const sources = messageSources([tool(Array.from(
+    { length: MAX_MESSAGE_SOURCES + 50 },
+    (_, i) => ({
+      title: 't'.repeat(MAX_SOURCE_TITLE_CHARS + 50),
+      url: `https://example.com/${i}`,
+      snippet: 's'.repeat(MAX_SOURCE_SNIPPET_CHARS + 50),
+    }),
+  ))])
+  assert.equal(sources.length, MAX_MESSAGE_SOURCES)
+  assert.ok(sources.every(source => source.title.length <= MAX_SOURCE_TITLE_CHARS))
+  assert.ok(sources.every(source => source.snippet.length <= MAX_SOURCE_SNIPPET_CHARS))
 })
 
 test('a turn with no web search yields nothing (ordinary replies unchanged)', () => {

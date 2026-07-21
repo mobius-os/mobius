@@ -853,11 +853,9 @@ export default function useStreamConnection(chatId, {
               tool_use_id: event.tool_use_id,
             }])
           } else if (event.type === 'tool_input') {
-            // Backfill the input summary. Prefer an exact tool_use_id match
-            // (Codex backfills a WebSearch query at completion, when several
-            // searches may be in flight); fall back to the earliest input-less
-            // tool for the Claude assistant-event path, which carries no id and
-            // lists tools in creation order.
+            // Backfill by stable identity. Older id-less events retain their
+            // earliest-input-less fallback; a late id may be adopted only when
+            // there is one unambiguous id-less candidate.
             applyStreamItems(prev => {
               const updated = [...prev]
               let i = event.tool_use_id
@@ -865,22 +863,46 @@ export default function useStreamConnection(chatId, {
                     b => b.type === 'tool' && b.tool_use_id === event.tool_use_id,
                   )
                 : -1
-              if (i < 0) i = updated.findIndex(b => b.type === 'tool' && !b.input)
-              if (i !== -1) updated[i] = { ...updated[i], input: event.input }
+              if (i < 0 && event.tool_use_id) {
+                let candidate = -1
+                for (let idx = 0; idx < updated.length; idx++) {
+                  const block = updated[idx]
+                  if (block.type !== 'tool' || block.status === 'done'
+                      || block.tool_use_id || block.input) continue
+                  if (candidate !== -1) {
+                    candidate = -1
+                    break
+                  }
+                  candidate = idx
+                }
+                i = candidate
+              } else if (i < 0) {
+                i = updated.findIndex(b => b.type === 'tool' && !b.input)
+              }
+              if (i !== -1) {
+                updated[i] = {
+                  ...updated[i],
+                  input: event.input,
+                  ...(event.tool_use_id && !updated[i].tool_use_id
+                    ? { tool_use_id: event.tool_use_id }
+                    : {}),
+                }
+              }
               return updated
             })
           } else if (event.type === 'tool_output') {
-            // Targets the open tool lifecycle — the last running tool
-            // item, or a question card that absorbed its tool block
-            // (the post-answer "answers echo" output is swallowed
-            // there; see streamReducers.js).
+            // Targets the tool's stable identity; legacy id-less events use the
+            // last open lifecycle. An absorbed question still swallows its
+            // post-answer echo (see streamReducers.js).
             applyStreamItems(prev => attachToolOutput(prev, event.content, event))
           } else if (event.type === 'tool_sources') {
             applyStreamItems(
               prev => attachToolSources(prev, event.sources, event.tool_use_id),
             )
           } else if (event.type === 'tool_end') {
-            applyStreamItems(prev => closeToolLifecycle(prev))
+            applyStreamItems(
+              prev => closeToolLifecycle(prev, event.tool_use_id),
+            )
           } else if (event.type === 'skill_loaded') {
             // Skill observability: stamp the loaded skill's name onto
             // the most recent Skill tool block so ToolBlock renders a

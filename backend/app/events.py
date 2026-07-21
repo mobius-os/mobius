@@ -4,9 +4,9 @@ Pure data transforms that accumulate streaming events into the
 assistant message structure.  No I/O — extracted from chat.py for
 testability and clarity.
 
-Tool events for a single tool MUST arrive in the order tool_start,
-optional tool_input, tool_output, tool_end, with no events for other
-tools interleaved between them.
+Events for one tool retain start/input/output/end order, but providers may
+batch or interleave several tools. Stable ``tool_use_id`` is authoritative;
+position is only the compatibility path for older id-less events.
 """
 
 import copy
@@ -14,6 +14,12 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Literal
+
+from app.tool_sources import (
+  MAX_TOOL_SOURCES,
+  enrich_tool_source,
+  normalize_tool_sources,
+)
 
 
 # The canonical terminal subagent statuses the persisted block stores, matching
@@ -155,26 +161,58 @@ def _tool_block_for_sources(assistant_blocks: list, tool_use_id) -> dict | None:
 
 
 def _merge_sources(existing, incoming) -> list:
-  """Union of a block's sources, first occurrence winning, deduped by url.
+  """Bounded source union, preserving order and enriching weak duplicates.
 
   Merging (rather than replacing) keeps a block correct when one search
   reports its results across more than one event, and stays idempotent under
   the catch-up burst, which replays every event from the start of the turn.
   """
-  merged = list(existing or [])
-  seen = {
-    src.get("url") for src in merged
+  merged = [
+    src for src in (existing or [])
     if isinstance(src, dict) and src.get("url")
-  }
+  ][:MAX_TOOL_SOURCES]
+  by_url = {src["url"]: src for src in merged}
   for src in incoming:
     if not isinstance(src, dict):
       continue
     url = src.get("url")
-    if not url or url in seen:
+    if not url:
       continue
-    seen.add(url)
+    current = by_url.get(url)
+    if current is not None:
+      enrich_tool_source(current, src)
+      continue
+    if len(merged) >= MAX_TOOL_SOURCES:
+      continue
     merged.append(src)
+    by_url[url] = src
   return merged
+
+
+def _tool_block_for_event(assistant_blocks: list, tool_use_id) -> dict | None:
+  """Resolve a tool event by stable id, with a safe legacy fallback."""
+  if tool_use_id:
+    for blk in reversed(assistant_blocks):
+      if (blk.get("type") == "tool"
+          and blk.get("tool_use_id") == tool_use_id):
+        return blk
+    # A legacy start may lack the id that a later output carries. Adopt it only
+    # when there is exactly one possible open block; guessing among a batch
+    # would corrupt a different tool's state.
+    candidates = [
+      blk for blk in assistant_blocks
+      if (blk.get("type") == "tool"
+          and blk.get("status") != "done"
+          and not blk.get("tool_use_id"))
+    ]
+    if len(candidates) == 1:
+      candidates[0]["tool_use_id"] = tool_use_id
+      return candidates[0]
+    return None
+  for blk in reversed(assistant_blocks):
+    if blk.get("type") == "tool" and blk.get("status") != "done":
+      return blk
+  return None
 
 
 def _persisted_block(block: dict) -> dict:
@@ -463,9 +501,7 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
   if event_type == "tool_input":
     # Backfill the input summary. Prefer an exact tool_use_id match (Codex
     # backfills a WebSearch query at completion, when several searches may be
-    # in flight); fall back to the earliest input-less block for the Claude
-    # assistant-event path, which carries no id and lists tools in creation
-    # order.
+    # in flight); older id-less events retain the earliest input-less fallback.
     tool_use_id = event.get("tool_use_id")
     if tool_use_id:
       for blk in assistant_blocks:
@@ -473,6 +509,17 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
             and blk.get("tool_use_id") == tool_use_id):
           blk["input"] = event.get("input", "")
           return True
+      candidates = [
+        blk for blk in assistant_blocks
+        if (blk.get("type") == "tool"
+            and blk.get("status") != "done"
+            and not blk.get("tool_use_id") and not blk.get("input"))
+      ]
+      if len(candidates) == 1:
+        candidates[0]["tool_use_id"] = tool_use_id
+        candidates[0]["input"] = event.get("input", "")
+        return True
+      return False
     for blk in assistant_blocks:
       if blk.get("type") == "tool" and not blk.get("input"):
         blk["input"] = event.get("input", "")
@@ -480,31 +527,31 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     return True
 
   if event_type == "tool_output":
-    for blk in reversed(assistant_blocks):
-      if (blk.get("type") == "tool"
-          and blk.get("status") != "done"):
-        blk["output"] = event.get("content", "")
-        # A tool_output the sink reduced (contract rule 6) carries a bounded
-        # excerpt as `content` plus the metadata below; carry it onto the block
-        # so the persisted transcript + wire agree and the frontend can fetch
-        # the full text and read a failure exit code from a field, not a parse
-        # of the possibly-carved excerpt. Absent fields leave the block shape
-        # unchanged (a small, un-reduced output).
-        tool_use_id = event.get("tool_use_id")
-        if tool_use_id and not blk.get("tool_use_id"):
-          blk["tool_use_id"] = tool_use_id
-        if event.get("output_truncated"):
-          blk["output_truncated"] = True
-          blk["output_full_len"] = event.get("output_full_len")
-          exit_code = event.get("output_exit_code")
-          if exit_code is not None:
-            blk["output_exit_code"] = exit_code
-        break
-    return True
+    blk = _tool_block_for_event(assistant_blocks, event.get("tool_use_id"))
+    if blk is not None:
+      blk["output"] = event.get("content", "")
+      # A tool_output the sink reduced (contract rule 6) carries a bounded
+      # excerpt as `content` plus the metadata below; carry it onto the block
+      # so the persisted transcript + wire agree and the frontend can fetch
+      # the full text and read a failure exit code from a field, not a parse
+      # of the possibly-carved excerpt. Absent fields leave the block shape
+      # unchanged (a small, un-reduced output).
+      if event.get("output_truncated"):
+        blk["output_truncated"] = True
+        blk["output_full_len"] = event.get("output_full_len")
+        exit_code = event.get("output_exit_code")
+        if exit_code is not None:
+          blk["output_exit_code"] = exit_code
+      return True
+    return False
 
   if event_type == "tool_sources":
-    sources = event.get("sources") or []
-    if not isinstance(sources, list) or not sources:
+    # This is the single event funnel feeding persistence, catch-up replay, and
+    # live SSE. Normalize here even though both runners already do so, keeping a
+    # future producer from bypassing the resource and URL-safety contract.
+    sources = normalize_tool_sources(event.get("sources"))
+    event["sources"] = sources
+    if not sources:
       return False
     # Bind the result to the search that produced it, by id. A turn can run
     # several WebSearch calls in ONE batch, and their results then arrive back
@@ -517,11 +564,10 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     return True
 
   if event_type == "tool_end":
-    for blk in reversed(assistant_blocks):
-      if (blk.get("type") == "tool"
-          and blk.get("status") != "done"):
-        blk["status"] = "done"
-        break
+    blk = _tool_block_for_event(assistant_blocks, event.get("tool_use_id"))
+    if blk is None:
+      return False
+    blk["status"] = "done"
     return True
 
   if event_type == "skill_loaded":

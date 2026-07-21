@@ -145,6 +145,32 @@ test('tool_output still attaches to a running ordinary tool (non-regression)', (
   assert.equal(next[0].status, 'running', 'output does not close the lifecycle')
 })
 
+test('batched tool output and end resolve by id, not trailing position', () => {
+  const prev = [
+    toolItem('WebSearch', { tool_use_id: 'first' }),
+    toolItem('WebSearch', { tool_use_id: 'second' }),
+  ]
+  const withOutput = attachToolOutput(prev, 'first result', {
+    tool_use_id: 'first',
+  })
+  const closed = closeToolLifecycle(withOutput, 'first')
+  assert.equal(closed[0].output, 'first result')
+  assert.equal(closed[0].status, 'done')
+  assert.equal(closed[1].output, '')
+  assert.equal(closed[1].status, 'running')
+})
+
+test('an unknown explicit tool id never corrupts another open tool', () => {
+  const prev = [
+    toolItem('Bash', { tool_use_id: 'a' }),
+    toolItem('Bash', { tool_use_id: 'b' }),
+  ]
+  assert.equal(attachToolOutput(prev, 'wrong', {
+    tool_use_id: 'missing',
+  }), prev)
+  assert.equal(closeToolLifecycle(prev, 'missing'), prev)
+})
+
 test('large live tool output keeps the metadata needed for lazy full fetch', () => {
   const prev = [toolItem('Bash', { input: 'cat big.log' })]
   const next = attachToolOutput(prev, 'bounded excerpt', {
@@ -211,6 +237,16 @@ test('replaying the same tool_sources event does not duplicate (catch-up safe)',
   assert.deepEqual(twice[0].sources, sources)
 })
 
+test('a later source event enriches a URL-only result in place', () => {
+  const url = 'https://a.example/1'
+  const prev = [toolItem('WebSearch', { tool_use_id: 'toolu_a' })]
+  const weak = attachToolSources(prev, [{ title: url, url }], 'toolu_a')
+  const rich = attachToolSources(weak, [{
+    title: 'A', url, snippet: 'context',
+  }], 'toolu_a')
+  assert.deepEqual(rich[0].sources, [{ title: 'A', url, snippet: 'context' }])
+})
+
 test('an explicit id with no matching item never misattributes sources', () => {
   const prev = [toolItem('WebSearch', { input: 'only' })]
   const sources = [{ title: 'A', url: 'https://a.example/1' }]
@@ -262,6 +298,20 @@ test('tool_end closes the absorbed lifecycle by dropping absorbedTool', () => {
   assert.equal(next.length, 1)
   assert.equal(next[0].type, 'question')
   assert.equal('absorbedTool' in next[0], false, 'lifecycle marker removed')
+})
+
+test('an absorbed question keeps its tool id for exact output/end routing', () => {
+  const items = upsertQuestionItem(
+    [toolItem('AskUserQuestion', { tool_use_id: 'question-tool' })],
+    questionEvent('q1', 'Pick a color'),
+  )
+  assert.equal(items[0].absorbedToolUseId, 'question-tool')
+  const afterOutput = attachToolOutput(items, 'answered', {
+    tool_use_id: 'question-tool',
+  })
+  const closed = closeToolLifecycle(afterOutput, 'question-tool')
+  assert.equal('absorbedTool' in closed[0], false)
+  assert.equal('absorbedToolUseId' in closed[0], false)
 })
 
 test('tool_end after absorption does not flip an earlier running tool to done', () => {

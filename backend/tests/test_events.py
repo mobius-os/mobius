@@ -10,6 +10,7 @@ from app.events import (
   finalize_blocks,
   process_event,
 )
+from app.tool_sources import MAX_TOOL_SOURCES
 
 
 def test_text_event_creates_block():
@@ -102,6 +103,46 @@ def test_tool_end_marks_done():
              "output": "", "status": "running"}]
   process_event({"type": "tool_end"}, blocks)
   assert blocks[0]["status"] == "done"
+
+
+def test_tool_output_and_end_match_batched_tools_by_id():
+  blocks = [
+    {"type": "tool", "tool": "WebSearch", "input": "first",
+     "output": "", "status": "running", "tool_use_id": "first"},
+    {"type": "tool", "tool": "WebSearch", "input": "second",
+     "output": "", "status": "running", "tool_use_id": "second"},
+  ]
+
+  assert process_event({
+    "type": "tool_output", "content": "first result",
+    "tool_use_id": "first",
+  }, blocks)
+  assert process_event({
+    "type": "tool_end", "tool_use_id": "first",
+  }, blocks)
+
+  assert blocks[0]["output"] == "first result"
+  assert blocks[0]["status"] == "done"
+  assert blocks[1]["output"] == ""
+  assert blocks[1]["status"] == "running"
+
+
+def test_explicit_unknown_tool_id_never_corrupts_a_batch():
+  blocks = [
+    {"type": "tool", "tool": "Bash", "output": "", "status": "running",
+     "tool_use_id": "a"},
+    {"type": "tool", "tool": "Bash", "output": "", "status": "running",
+     "tool_use_id": "b"},
+  ]
+
+  assert process_event({
+    "type": "tool_output", "content": "wrong", "tool_use_id": "missing",
+  }, blocks) is False
+  assert process_event({
+    "type": "tool_end", "tool_use_id": "missing",
+  }, blocks) is False
+  assert [block["output"] for block in blocks] == ["", ""]
+  assert [block["status"] for block in blocks] == ["running", "running"]
 
 
 def test_skill_loaded_stamps_skill_onto_skill_tool_block():
@@ -370,6 +411,19 @@ def test_tool_input_without_id_uses_earliest_inputless_block():
   assert blocks[1]["input"] == "path.py"
 
 
+def test_late_tool_input_id_does_not_adopt_a_completed_legacy_block():
+  blocks = [{
+    "type": "tool", "tool": "WebSearch", "input": "", "output": "",
+    "status": "done",
+  }]
+
+  assert process_event({
+    "type": "tool_input", "input": "wrong", "tool_use_id": "missing",
+  }, blocks) is False
+  assert blocks[0]["input"] == ""
+  assert "tool_use_id" not in blocks[0]
+
+
 def test_batched_websearch_keeps_each_search_own_sources():
   """A turn can run several WebSearch calls in ONE batch, so every
   tool_sources event arrives while the LAST search block is trailing.
@@ -412,6 +466,43 @@ def test_tool_sources_merges_and_dedupes_on_replay():
   process_event(event, blocks)
 
   assert blocks[0]["sources"] == [{"title": "A", "url": "https://a.example/1"}]
+
+
+def test_tool_sources_keep_order_and_enrich_a_weak_duplicate():
+  url = "https://a.example/1"
+  blocks = [{"type": "tool", "tool": "WebSearch", "input": "q",
+             "output": "", "status": "running", "tool_use_id": "toolu_a"}]
+  process_event({
+    "type": "tool_sources", "tool_use_id": "toolu_a",
+    "sources": [{"url": url}],
+  }, blocks)
+  process_event({
+    "type": "tool_sources", "tool_use_id": "toolu_a",
+    "sources": [{"title": "A", "url": url, "snippet": "context"}],
+  }, blocks)
+
+  assert blocks[0]["sources"] == [{
+    "title": "A", "url": url, "snippet": "context",
+  }]
+
+
+def test_tool_sources_are_bounded_on_wire_and_in_persisted_blocks():
+  blocks: list[dict] = []
+  process_event({
+    "type": "tool_start", "tool": "WebSearch", "tool_use_id": "search",
+  }, blocks)
+  event = {
+    "type": "tool_sources", "tool_use_id": "search",
+    "sources": [{
+      "title": f"Source {i}", "url": f"https://example.com/{i}",
+    } for i in range(MAX_TOOL_SOURCES + 50)],
+  }
+
+  assert process_event(event, blocks)
+  persisted = build_assistant_message(blocks)
+
+  assert len(event["sources"]) == MAX_TOOL_SOURCES
+  assert persisted["blocks"][0]["sources"] == event["sources"]
 
 
 def test_tool_sources_without_id_keeps_last_websearch_fallback():

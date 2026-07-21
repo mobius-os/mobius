@@ -119,7 +119,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `runner_registry.py` | Runner lifecycle registry shared across chat backends |
 | `pending_questions.py` | Shared `PendingQuestion` dataclass for AskUserQuestion interception (split out to break the `questions`↔runner import cycle; the registry itself lives in `questions.py`) |
 | `tool_summaries.py` | Tool-input summary strings (shared by SDK + subprocess paths) |
-| `tool_sources.py` | `normalize_tool_sources()` — normalizes provider web-search results into `{title, url, snippet}` metadata stored on WebSearch blocks and rendered once in the message-level Sources row; drops incomplete and non-`http(s)` URLs so unsafe or unusable values never reach an `<a href>` |
+| `tool_sources.py` | `normalize_tool_sources()` — normalizes provider web-search results into bounded `{title, url, snippet}` metadata stored on WebSearch blocks and rendered once in the message-level Sources row; an iterative count/depth budget and HTTP(S)-only URL gate keep provider payload cost fixed before SSE or persistence |
 | `sdk_emit.py` | Helpers for emitting "unknown" SDK events on the SSE wire |
 | `restart_util.py` | `restart_this_worker()` — arms a daemon SIGKILL fallback, then SIGTERMs its own pid; shared by `/api/admin/restart` and `/api/platform/restart` so the two restart paths can't drift. Pairs with uvicorn's `--timeout-graceful-shutdown 10` (entrypoint.sh) — without a bound, an open chat SSE stream held graceful shutdown open forever and the container never cycled (6ac51b0) |
 

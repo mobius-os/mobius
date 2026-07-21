@@ -812,6 +812,7 @@ def dispatch_sdk_message(
             "type": "tool_input",
             "tool": block.name,
             "input": summary,
+            "tool_use_id": block.id,
           })
         # Skill observability: when the agent loads a skill, surface it
         # as its own `skill_loaded` event (the frontend stamps a chip

@@ -11,13 +11,21 @@
 // from it would fragment one continuous reasoning pass into many one-second
 // "Thought" blocks.
 
+export const MAX_MESSAGE_SOURCES = 24
+export const MAX_SOURCE_URL_CHARS = 2048
+export const MAX_SOURCE_TITLE_CHARS = 300
+export const MAX_SOURCE_SNIPPET_CHARS = 700
+const MAX_SOURCE_ROWS_SCANNED = 512
+
 // Only complete http(s) URLs may reach an href. URL() rejects superficially
 // plausible but unusable values such as `https://` and hosts with whitespace;
 // checking the parsed protocol rejects javascript:/data:/mailto:.
 export function safeSourceUrl(value) {
   if (typeof value !== 'string') return ''
+  // Avoid allocating a second huge string just to reject malformed metadata.
+  if (value.length > MAX_SOURCE_URL_CHARS + 64) return ''
   const candidate = value.trim()
-  if (!candidate) return ''
+  if (!candidate || candidate.length > MAX_SOURCE_URL_CHARS) return ''
   try {
     const parsed = new URL(candidate)
     return ['http:', 'https:'].includes(parsed.protocol) && parsed.host
@@ -25,6 +33,44 @@ export function safeSourceUrl(value) {
       : ''
   } catch {
     return ''
+  }
+}
+
+export function boundedMessageSource(source) {
+  const url = safeSourceUrl(source?.url)
+  if (!url) return null
+  const title = typeof source?.title === 'string'
+    ? source.title.slice(0, MAX_SOURCE_TITLE_CHARS).trim()
+    : ''
+  const snippet = typeof source?.snippet === 'string'
+    ? source.snippet.slice(0, MAX_SOURCE_SNIPPET_CHARS).trim()
+    : ''
+  // The normal live path is already normalized by the backend. Preserve that
+  // object identity so streaming text ticks do not allocate replacement source
+  // objects; only legacy/malformed values pay for a bounded copy.
+  if (url === source.url
+      && (source.title == null || title === source.title)
+      && (source.snippet == null || snippet === source.snippet)) {
+    return source
+  }
+  return {
+    ...(title ? { title } : {}),
+    url,
+    ...(snippet ? { snippet } : {}),
+  }
+}
+
+export function enrichMessageSource(existing, incoming) {
+  const currentTitle = existing.title || ''
+  const incomingTitle = incoming.title || ''
+  const betterTitle = (!currentTitle || currentTitle === existing.url)
+    && incomingTitle && incomingTitle !== incoming.url
+  const betterSnippet = !existing.snippet && incoming.snippet
+  if (!betterTitle && !betterSnippet) return existing
+  return {
+    ...existing,
+    ...(betterTitle ? { title: incomingTitle } : {}),
+    ...(betterSnippet ? { snippet: incoming.snippet } : {}),
   }
 }
 
@@ -50,25 +96,35 @@ export function sourceLabel(source) {
   return sourceHost(source?.url) || source?.url || ''
 }
 
-// First occurrence wins, so the order the agent actually searched in is kept.
-// The backend normalizer already dedupes within one tool result; this dedupes
-// ACROSS the several searches a turn usually makes.
+// First occurrence owns the position, so search order is kept. A later copy may
+// fill missing title/snippet metadata without moving or duplicating the card.
 export function messageSources(blocks) {
   if (!Array.isArray(blocks)) return []
-  const seen = new Set()
+  const indexByUrl = new Map()
   const sources = []
+  let scannedRows = 0
+  outer:
   for (const block of blocks) {
     if (block?.type !== 'tool' || !Array.isArray(block.sources)) continue
-    for (const source of block.sources) {
-      const url = safeSourceUrl(source?.url)
+    for (const rawSource of block.sources) {
+      scannedRows += 1
+      if (scannedRows > MAX_SOURCE_ROWS_SCANNED) break outer
+      const source = boundedMessageSource(rawSource)
       // The backend enforces http(s) (tool_sources.py `_safe_http_url`), but
       // this value ends up in an <a href> that now renders unconditionally
       // rather than behind a disclosure, so re-check the scheme here instead
       // of trusting two upstream call sites to stay correct forever.
-      if (!url) continue
-      if (seen.has(url)) continue
-      seen.add(url)
-      sources.push(url === source.url ? source : { ...source, url })
+      if (!source) continue
+      const existingIndex = indexByUrl.get(source.url)
+      if (existingIndex != null) {
+        sources[existingIndex] = enrichMessageSource(
+          sources[existingIndex], source,
+        )
+        continue
+      }
+      if (sources.length >= MAX_MESSAGE_SOURCES) continue
+      indexByUrl.set(source.url, sources.length)
+      sources.push(source)
     }
   }
   return sources

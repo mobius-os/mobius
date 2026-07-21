@@ -27,6 +27,11 @@
  * duplicating it.
  */
 import { questionKey } from './questionKey.js'
+import {
+  MAX_MESSAGE_SOURCES,
+  boundedMessageSource,
+  enrichMessageSource,
+} from './messageSources.js'
 
 // Tool names whose tool events describe an AskUserQuestion-style
 // call: Claude's AskUserQuestion and Codex's request_user_input.
@@ -104,6 +109,9 @@ export function upsertQuestionItem(prev, incoming) {
     const merged = { ...incoming }
     if (existing.answers && !merged.answers) merged.answers = existing.answers
     if (existing.absorbedTool) merged.absorbedTool = existing.absorbedTool
+    if (existing.absorbedToolUseId) {
+      merged.absorbedToolUseId = existing.absorbedToolUseId
+    }
     const updated = [...prev]
     updated[idx] = merged
     return updated
@@ -112,7 +120,11 @@ export function upsertQuestionItem(prev, incoming) {
     const it = prev[i]
     if (it.type === 'tool' && it.status === 'running' && isQuestionTool(it.tool)) {
       const updated = [...prev]
-      updated[i] = { ...incoming, absorbedTool: it.tool }
+      updated[i] = {
+        ...incoming,
+        absorbedTool: it.tool,
+        ...(it.tool_use_id ? { absorbedToolUseId: it.tool_use_id } : {}),
+      }
       return updated
     }
   }
@@ -120,13 +132,33 @@ export function upsertQuestionItem(prev, incoming) {
 }
 
 /**
- * Index of the OPEN tool lifecycle: the last running tool item, or a
- * question item that absorbed its tool block (whose tool_output/
- * tool_end are still inbound). The runner guarantees tool events for
- * one tool are never interleaved with another tool's, so the latest
- * open lifecycle is always the right target.
+ * Index of an open tool lifecycle. Stable identity is authoritative when the
+ * event carries it; positional matching remains only for legacy id-less wire
+ * events. A lone id-less block can safely adopt a late id, but a batch is never
+ * guessed at.
  */
-function openToolLifecycleIndex(items) {
+function openToolLifecycleIndex(items, toolUseId = null) {
+  if (toolUseId) {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i]
+      if (it.type === 'tool' && it.tool_use_id === toolUseId) return i
+      if (it.type === 'question' && it.absorbedTool
+          && it.absorbedToolUseId === toolUseId) return i
+    }
+    let candidate = -1
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i]
+      if (it.type === 'tool' && it.status === 'running' && !it.tool_use_id) {
+        if (candidate !== -1) return -1
+        candidate = i
+      } else if (it.type === 'question' && it.absorbedTool
+          && !it.absorbedToolUseId) {
+        if (candidate !== -1) return -1
+        candidate = i
+      }
+    }
+    return candidate
+  }
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i]
     if (it.type === 'tool' && it.status === 'running') return i
@@ -145,7 +177,7 @@ function openToolLifecycleIndex(items) {
  * "Your questions have been answered" echo.
  */
 export function attachToolOutput(prev, content, event = null) {
-  const i = openToolLifecycleIndex(prev)
+  const i = openToolLifecycleIndex(prev, event?.tool_use_id)
   if (i === -1 || prev[i].type === 'question') return prev
   const updated = [...prev]
   const block = { ...updated[i], output: content }
@@ -198,15 +230,25 @@ export function attachToolSources(prev, sources, toolUseId) {
   // Merge rather than replace: keeps a block correct when one search reports
   // across several events, and stays idempotent under the catch-up burst,
   // which replays every event from the start of the turn.
-  const existing = updated[idx].sources || []
-  const seen = new Set(existing.map(s => s?.url).filter(Boolean))
-  const merged = [...existing]
-  for (const source of sources) {
-    const url = source?.url
-    if (!url || seen.has(url)) continue
-    seen.add(url)
-    merged.push(source)
+  const merged = []
+  const indexByUrl = new Map()
+  const addSources = collection => {
+    const limit = Math.min(collection.length, MAX_MESSAGE_SOURCES)
+    for (let i = 0; i < limit; i++) {
+      const source = boundedMessageSource(collection[i])
+      if (!source) continue
+      const existingIndex = indexByUrl.get(source.url)
+      if (existingIndex != null) {
+        merged[existingIndex] = enrichMessageSource(merged[existingIndex], source)
+        continue
+      }
+      if (merged.length >= MAX_MESSAGE_SOURCES) continue
+      indexByUrl.set(source.url, merged.length)
+      merged.push(source)
+    }
   }
+  addSources(updated[idx].sources || [])
+  addSources(sources)
   updated[idx] = { ...updated[idx], sources: merged }
   return updated
 }
@@ -350,12 +392,16 @@ export function anchorReplayedThinking(items, replayTs, at = Date.now()) {
  * (the card itself has no status), so a later tool_output can never
  * resolve to it.
  */
-export function closeToolLifecycle(prev) {
-  const i = openToolLifecycleIndex(prev)
+export function closeToolLifecycle(prev, toolUseId = null) {
+  const i = openToolLifecycleIndex(prev, toolUseId)
   if (i === -1) return prev
   const updated = [...prev]
   if (updated[i].type === 'question') {
-    const { absorbedTool: _absorbed, ...rest } = updated[i]
+    const {
+      absorbedTool: _absorbed,
+      absorbedToolUseId: _absorbedId,
+      ...rest
+    } = updated[i]
     updated[i] = rest
   } else {
     updated[i] = { ...updated[i], status: 'done' }
@@ -374,7 +420,11 @@ export function closeAllToolLifecycles(prev) {
       return { ...b, status: 'done' }
     }
     if (b.type === 'question' && b.absorbedTool) {
-      const { absorbedTool: _absorbed, ...rest } = b
+      const {
+        absorbedTool: _absorbed,
+        absorbedToolUseId: _absorbedId,
+        ...rest
+      } = b
       return rest
     }
     return b
