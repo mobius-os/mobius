@@ -149,15 +149,21 @@ export default function useWorkspaceDrag({
 
     function positionChip(clientX, clientY, isTouch, key) {
       if (!chipEl) return
-      const { left, top } = chipOffset({ x: clientX, y: clientY }, isTouch)
-      chipEl.style.left = `${left}px`
-      chipEl.style.top = `${top}px`
+      // Set the label + reveal FIRST so offsetWidth is accurate before we clamp.
       if (chipEl.hidden) {
         const tab = tabFromKey(key)
         const label = (labelForTabRef.current && tab) ? labelForTabRef.current(tab) : ''
         chipEl.textContent = label
         chipEl.hidden = false
       }
+      const { left, top } = chipOffset({ x: clientX, y: clientY }, isTouch)
+      // V5 (vizreview): clamp the chip within the viewport so its label never clips
+      // at the right edge (the +12 offset pushed a right-edge drag off-screen).
+      const margin = 8
+      const w = chipEl.offsetWidth || 0
+      const maxLeft = Math.max(margin, window.innerWidth - w - margin)
+      chipEl.style.left = `${Math.max(margin, Math.min(left, maxLeft))}px`
+      chipEl.style.top = `${top}px`
     }
 
     // Render (or clear) the drop preview for a zone. Geometry is written inline
@@ -544,6 +550,10 @@ export default function useWorkspaceDrag({
         // The compat click fires after the shield is already gone; swallow it so
         // a committed drop is exactly one action, not a drop + a tab/row click.
         if (suppressClick) suppressNextSourceClick(srcEl)
+        // V6 (vizreview): a CANCELLED drag (Escape / blur / lost-capture) must not
+        // leave the drag-origin row wearing its focus ring — blur it so the ring
+        // clears with the drag. A committed drop keeps focus (the tab moved).
+        if (suppressClick && !committed) srcEl.blur?.()
         if (activeCleanup === cleanup) {
           activeCleanup = null
           activePointerId = null

@@ -212,6 +212,10 @@
        they read as secondary without any content-area chrome. */
 .workspace__strip--focused .shell__tab--active {
   box-shadow: inset 0 -2px 0 0 var(--accent);
+  /* V4 (vizreview): soften the base full-accent border on the FOCUSED pane's active
+     pill so the 2px underline above is what carries focus — a full accent border
+     framed the pill and masked the underline. The tint (Shell.css) is kept. */
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-light));
 }
 .workspace__strip:not(.workspace__strip--focused) .shell__tab--active {
   border-color: color-mix(in srgb, var(--accent) 38%, var(--border-light));
@@ -536,7 +540,11 @@
    gesture once. Anchored to the strip region; dismisses on drag / ✕ / 12s. */
 .workspace__coachmark {
   position: fixed;
-  top: 60px;
+  /* V3 (vizreview): anchor BELOW the strip row, never over it — a top:60px pill sat
+     across the tab strip and covered the third tab's label. This clears the bar
+     (58px + safe-area) + the strip (STRIP_H 34px) + an 8px gap, so it floats over
+     content and no tab label is occluded. */
+  top: calc(58px + env(safe-area-inset-top) + 42px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 120;

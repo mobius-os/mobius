@@ -719,3 +719,23 @@ test('the splits kill-switch forces the single-pane fallback so a rolled-back pa
   // (the tree is preserved; re-enabling splits restores the panes).
   assert.match(paneModelSrc, /function coerceViewMode\(mode\) \{\s*\n\s*if \(!WORKSPACE_SPLITS_ENABLED\) return 'single'/)
 })
+
+test('visual nits V3-V6: coachmark clears the strip, focus underline reads, chip clamps, cancel blurs', () => {
+  // V3: the first-use coachmark anchors BELOW the strip (bar 58px + safe-area + strip
+  // 34px + 8px gap), so its pill never covers a tab label.
+  const coach = css.match(/\.workspace__coachmark \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(coach, /top: calc\(58px \+ env\(safe-area-inset-top\) \+ 42px\)/)
+  assert.doesNotMatch(coach, /top: 60px/)
+  // V4: the FOCUSED pane's active pill softens the base full-accent border so the 2px
+  // underline is what carries focus (the border used to mask it).
+  const focused = css.match(/\.workspace__strip--focused \.shell__tab--active \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(focused, /box-shadow: inset 0 -2px 0 0 var\(--accent\)/)
+  assert.match(focused, /border-color: color-mix\(in srgb, var\(--accent\) 45%, var\(--border-light\)\)/)
+  // V5: the drag chip clamps within the viewport so its label never clips at the
+  // right edge (measured offsetWidth + an 8px margin).
+  assert.match(dragBinding, /const maxLeft = Math\.max\(margin, window\.innerWidth - w - margin\)/)
+  assert.match(dragBinding, /Math\.max\(margin, Math\.min\(left, maxLeft\)\)/)
+  // V6: a CANCELLED drag blurs the drag-origin row so its focus ring clears; a
+  // committed drop keeps focus (the tab moved).
+  assert.match(dragBinding, /if \(suppressClick && !committed\) srcEl\.blur\?\.\(\)/)
+})
