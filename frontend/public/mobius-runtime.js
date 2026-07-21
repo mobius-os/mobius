@@ -1840,6 +1840,12 @@ export function createUseDocument(storage, reactProvider = null) {
       throw new Error('useDocument needs React — bind it via window.mobius.createUseDocument(React)')
     }
     const initialOpt = Object.prototype.hasOwnProperty.call(opts, 'initial') ? opts.initial : null
+    // A hook cannot be called conditionally, so apps need a first-class way to
+    // represent "there is no document right now" (for example, an editor with
+    // no open item). Null/empty paths and enabled:false are idle controllers:
+    // they perform no read, subscription, or write. This keeps that state out of
+    // the storage namespace instead of making each app invent a sentinel file.
+    const enabled = opts.enabled !== false && typeof path === 'string' && path.length > 0
     // Every path owns an isolated document controller. A hook instance survives
     // prop changes, so keeping value/base/version refs outside this boundary lets
     // document B inherit document A while B's refresh is still in flight. Late A
@@ -1855,24 +1861,30 @@ export function createUseDocument(storage, reactProvider = null) {
       const initialValue = typeof initialOpt === 'function' ? initialOpt() : initialOpt
       return {
         path,
+        enabled,
         initialValue,
         value: initialValue,
         base: null,
         version: null,
         chain: Promise.resolve(),
       }
-      // `path` is deliberately the sole dependency. A changing initializer must
-      // not reset a live document, while returning to another path creates a new
-      // isolated controller for that navigation.
+      // The path/enable pair deliberately owns controller identity. A changing
+      // initializer must not reset a live document, while navigation or an
+      // explicit enable transition creates a new isolated controller.
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [path])
+    }, [path, enabled])
     const initialValue = controller.initialValue
     const identity = opts.identity || defaultIdentity
     const merge = opts.merge || ((base, mine, theirs) => defaultDocumentMerge(base, mine, theirs, identity))
     const mode = opts.mode || 'cas'
     const maxRetries = opts.maxRetries == null ? 3 : opts.maxRetries
     const onError = opts.onError
-    const [state, setState] = React.useState(() => ({ controller, value: initialValue, status: 'loading', lastError: null }))
+    const [state, setState] = React.useState(() => ({
+      controller,
+      value: initialValue,
+      status: enabled ? 'loading' : 'idle',
+      lastError: null,
+    }))
 
     const setValue = React.useCallback((owner, value, status = 'ready', lastError = null) => {
       owner.value = value
@@ -1882,6 +1894,7 @@ export function createUseDocument(storage, reactProvider = null) {
     }, [])
 
     const refresh = React.useCallback(async () => {
+      if (!enabled) return controller.value
       try {
         const loaded = storage.getWithVersion
           ? await storage.getWithVersion(path, 'json')
@@ -1901,16 +1914,20 @@ export function createUseDocument(storage, reactProvider = null) {
         }
         throw e
       }
-    }, [path, initialValue, identity, controller, onError, setValue])
+    }, [path, initialValue, identity, controller, enabled, onError, setValue])
 
     React.useEffect(() => {
       let alive = true
       // Commit ownership before any synchronous subscription callback can land.
       // Until this effect runs, visibleState below already presents the new
       // controller's initial value rather than the previous path's React state.
-      setState((previous) => previous.controller === controller
-        ? previous
-        : { controller, value: controller.value, status: 'loading', lastError: null })
+      const status = enabled ? 'loading' : 'idle'
+      setState((previous) => (
+        previous.controller === controller && previous.status === status && previous.lastError == null
+          ? previous
+          : { controller, value: controller.value, status, lastError: null }
+      ))
+      if (!enabled) return undefined
       refresh().catch(() => {})
       const unsub = storage.subscribe(path, (next) => {
         if (!alive) return
@@ -1919,9 +1936,12 @@ export function createUseDocument(storage, reactProvider = null) {
         setValue(controller, value, 'ready', null)
       })
       return () => { alive = false; if (unsub) unsub() }
-    }, [path, initialValue, identity, controller, refresh, setValue])
+    }, [path, initialValue, identity, controller, enabled, refresh, setValue])
 
     const update = React.useCallback((fn) => {
+      if (!enabled) {
+        return Promise.reject(new Error('useDocument is idle; provide a document path before updating'))
+      }
       const run = async () => {
         let attempt = 0
         const previous = controller.value
@@ -1968,7 +1988,7 @@ export function createUseDocument(storage, reactProvider = null) {
       const next = controller.chain.then(run, run)
       controller.chain = next.then(() => {}, () => {})
       return next
-    }, [path, initialValue, identity, merge, mode, maxRetries, controller, onError, setValue])
+    }, [path, initialValue, identity, merge, mode, maxRetries, controller, enabled, onError, setValue])
 
     const setDoc = React.useCallback((next) => update(() => next), [update])
 
@@ -1977,7 +1997,7 @@ export function createUseDocument(storage, reactProvider = null) {
     // refresh effect is being scheduled.
     const visibleState = state.controller === controller
       ? state
-      : { value: controller.value, status: 'loading', lastError: null }
+      : { value: controller.value, status: enabled ? 'loading' : 'idle', lastError: null }
 
     return {
       value: visibleState.value,
