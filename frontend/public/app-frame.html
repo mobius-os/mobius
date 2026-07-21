@@ -628,6 +628,16 @@
       }
     }
 
+    function isBlobModuleLoadFailure(error) {
+      // Chromium and Firefox surface a transient failure to consume an
+      // object URL as a TypeError. Match the browser's dynamic-import wording
+      // and the blob: target together so an app's own TypeError is never
+      // mistaken for a transport failure and evaluated a second time.
+      if (!error || error.name !== 'TypeError') return false;
+      return /(?:failed to fetch|error loading) dynamically imported module:\s*blob:/i
+        .test(String(error.message || ''));
+    }
+
     function acceptModuleAck(msg) {
       const pending = pendingModuleRequests.get(msg.requestId);
       if (!pending) return;
@@ -1028,13 +1038,14 @@
             );
             return;  // do NOT show the error panel — the re-init will retry
           }
-          // Mobile networks routinely drop the first fetch after wake. Retry a
-          // broker network failure once; the self-contained blob has no module
-          // graph to fetch, so evaluation errors are deterministic and go
-          // straight to the error surface. The retry marker reaches the
-          // parent's versioned fetch and is stripped from the service-worker
-          // cache key.
-          const retryable = Boolean(importErr && importErr.code === 'network');
+          // Mobile networks routinely drop the first fetch after wake. Browsers
+          // can also transiently reject the fresh blob URL while consuming the
+          // transferred bytes. Retry only those two transport-shaped failures;
+          // all app evaluation errors remain deterministic and go straight to
+          // the error surface. The retry marker reaches the parent's versioned
+          // fetch and is stripped from the service-worker cache key.
+          const retryable = Boolean(importErr && importErr.code === 'network')
+            || isBlobModuleLoadFailure(importErr);
           if (!retryable || window.__frameMounted) {
             throw importErr;
           }

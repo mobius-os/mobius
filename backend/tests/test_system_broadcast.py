@@ -436,6 +436,7 @@ def test_notify_rejects_cross_site_request(client, auth):
 def test_notify_body_type_validator_rejects_unknown():
   """NotifyBody rejects unknown system-event types."""
   assert NotifyBody(type="app_build_failed").type == "app_build_failed"
+  assert NotifyBody(type="app_update_stale").type == "app_update_stale"
   try:
     NotifyBody(type="bogus")
   except ValidationError:
@@ -478,25 +479,28 @@ async def test_notify_app_updated_fans_out_to_live_chat_broadcast(client, auth):
 
 
 @pytest.mark.asyncio
-async def test_notify_shell_rebuilt_is_system_bus_only(client, auth):
-  """A catch-up-UNSAFE event (shell_rebuilt) rides the system broadcast ALONE
+@pytest.mark.parametrize("event_type", ["shell_rebuilt", "app_update_stale"])
+async def test_notify_catch_up_unsafe_event_is_system_bus_only(
+  client, auth, event_type,
+):
+  """A catch-up-UNSAFE event rides the system broadcast ALONE
   — never a per-chat broadcast — so a chat reconnect can't replay a stale
-  rebuilt from its event log and fire a spurious apply. SystemBroadcast has no
-  replay, so one delivery per client and no frontend dedup."""
+  action from its event log. SystemBroadcast has no replay, so one delivery per
+  client and no frontend dedup."""
   chat = bc_mod.create_broadcast("live-chat-2")
   q_chat = chat.subscribe()[1]
   sb = get_system_broadcast()
   q_sys = sb.subscribe()
   try:
     r = client.post(
-      "/api/notify", headers=auth, json={"type": "shell_rebuilt"},
+      "/api/notify", headers=auth, json={"type": event_type},
     )
     assert r.status_code == 204, r.text
     ev_sys = await asyncio.wait_for(q_sys.get(), timeout=1.0)
-    assert ev_sys["type"] == "shell_rebuilt"
+    assert ev_sys["type"] == event_type
     # The per-chat broadcast must NOT have received it (no fan-out, no replay).
     assert all(
-      e.get("type") != "shell_rebuilt" for e in chat.event_log
+      e.get("type") != event_type for e in chat.event_log
     ), chat.event_log
     with pytest.raises(asyncio.TimeoutError):
       await asyncio.wait_for(q_chat.get(), timeout=0.2)

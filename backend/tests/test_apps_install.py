@@ -3256,6 +3256,46 @@ def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
   assert row["version"] == "1.0.0"
 
 
+def test_deferred_replay_reports_changed_candidate_as_structured_recovery(
+  db, bypass_url_validation,
+):
+  """The watcher can distinguish a stale receipt from a compile failure."""
+  from fastapi import HTTPException
+  from app import install
+
+  base = "https://pending-candidate.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "pending-candidate"}
+  responses = {
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b"#!/bin/sh\n"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), pytest.raises(HTTPException) as caught:
+    asyncio.run(install.install_from_manifest(
+      db,
+      manifest_url=None,
+      manifest=manifest,
+      raw_base=base,
+      source="store",
+      expected_app_id=42,
+      expected_upstream_commit="upstream-sha",
+      expected_candidate_digest="0" * 64,
+    ))
+
+  assert caught.value.status_code == 409
+  assert caught.value.detail == {
+    "code": "pending_update_changed",
+    "message": (
+      "The pending update changed upstream. "
+      "Review the latest update and start again."
+    ),
+  }
+
+
 def test_update_preview_accepts_app_token_with_manage_apps_for_other_app(
   client, db, auth, bypass_url_validation,
 ):

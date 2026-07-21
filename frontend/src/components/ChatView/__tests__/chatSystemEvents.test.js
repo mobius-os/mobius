@@ -22,6 +22,7 @@ test('catch-up-unsafe events never ride the chat stream (system-bus-only)', () =
     'shell_apply_now',
     'shell_rebuild_failed',
     'app_build_failed',
+    'app_update_stale',
     'app_built',
   ]) {
     assert.equal(isChatStreamSystemEvent(type), false, `${type} is system-bus-only`)

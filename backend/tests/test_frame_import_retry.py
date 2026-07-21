@@ -1,10 +1,10 @@
 """The opaque frame's parent-broker retry stays bounded and intentional.
 
-The compiled blob is dependency-complete, so an evaluation TypeError is a
-deterministic app failure and must not be replayed. Only a typed network failure
-from the controlled parent fetch gets one delayed, pre-mount retry. Retry ``1``
-is forwarded to the parent so its versioned module request can bypass a cached
-transient response without changing the service-worker cache identity.
+The compiled blob is dependency-complete, so app evaluation failures must not
+be replayed. A typed parent-fetch failure or the browser's specific failure to
+consume a dynamic ``blob:`` import gets one delayed, pre-mount retry. Retry
+``1`` is forwarded to the parent so its versioned module request can bypass a
+cached transient response without changing the service-worker cache identity.
 """
 
 import re
@@ -32,11 +32,22 @@ def _frame_html() -> str:
   return frame.read_text()
 
 
-def test_retry_gates_on_typed_network_failure_and_premount():
+def test_retry_gates_on_transport_failure_and_premount():
   html = _frame_html()
   assert re.search(
-    r"retryable = Boolean\(importErr && importErr\.code === 'network'\);"
+    r"retryable = Boolean\(importErr && importErr\.code === 'network'\)"
+    r"\s*\|\| isBlobModuleLoadFailure\(importErr\);"
     r"[\s\S]{0,180}?if \(!retryable \|\| window\.__frameMounted\)",
+    html,
+  )
+
+
+def test_blob_retry_classifier_is_specific_to_dynamic_blob_imports():
+  html = _frame_html()
+  assert "error.name !== 'TypeError'" in html
+  assert re.search(
+    r"\(\?:failed to fetch\|error loading\) dynamically imported "
+    r"module:\\s\*blob:",
     html,
   )
   assert "importErr instanceof TypeError" not in html
