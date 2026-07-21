@@ -1176,7 +1176,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 <ProviderRow
                   name="Chat model"
                   connected
-                  subtitle="Which models appear in chat pickers."
+                  subtitle="Choose which models appear. New chats use your last pick."
                   statusNode={
                     <span className="provider-row__status-text settings__last-model">
                       {lastModelLabel ? (

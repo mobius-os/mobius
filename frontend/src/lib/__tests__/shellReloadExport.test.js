@@ -1,73 +1,60 @@
-/**
- * Unit tests for the shellReload export from hooks/useNavigation.js.
- *
- * Run with:
- *   cd frontend && node --test src/lib/__tests__/shellReloadExport.test.js
- *
- * The module-level IIFE in useNavigation.js consumes and removes the
- * 'shell-reload' sessionStorage key exactly once at import time. App.jsx
- * must import and use the exported `shellReload` value rather than calling
- * sessionStorage.getItem('shell-reload') again (dead branch — the key was
- * already removed). This test locks in two properties:
- *
- *   1. The exported value is truthy when the key was present at import time.
- *   2. The key is removed from sessionStorage after the module loads, so a
- *      second consumer would read null (validating the dead-branch claim).
- *
- * We can't actually import useNavigation in a plain Node environment (it
- * uses browser APIs), so we test the IIFE logic directly as a pure function.
- */
+/** Unit tests for the shared, one-shot shell-reload state reader. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { consumeShellReload } from '../shellReloadState.js'
 
-// Replicate the IIFE logic as a pure function for unit testing.
-// This mirrors the exact code in hooks/useNavigation.js.
-function parseShellReload(storage) {
-  try {
-    const raw = storage.get('shell-reload')
-    if (!raw) return null
-    storage.delete('shell-reload')
-    try { return JSON.parse(raw) } catch { return null }
-  } catch {
-    return null
+const APP_SOURCE = readFileSync(new URL('../../App.jsx', import.meta.url), 'utf8')
+const NAV_SOURCE = readFileSync(
+  new URL('../../hooks/useNavigation.js', import.meta.url),
+  'utf8',
+)
+
+function fakeStorage(entries = []) {
+  const values = new Map(entries)
+  return {
+    getItem(key) { return values.get(key) ?? null },
+    removeItem(key) { values.delete(key) },
+    has(key) { return values.has(key) },
   }
 }
 
 test('shellReload: returns null when key is absent', () => {
-  const storage = new Map()
-  assert.equal(parseShellReload(storage), null)
+  assert.equal(consumeShellReload(fakeStorage()), null)
 })
 
 test('shellReload: returns parsed value when key is present', () => {
-  const storage = new Map([['shell-reload', JSON.stringify({ activeView: 'canvas', activeAppId: 42 })]])
-  const result = parseShellReload(storage)
+  const storage = fakeStorage([['shell-reload', JSON.stringify({ activeView: 'canvas', activeAppId: 42 })]])
+  const result = consumeShellReload(storage)
   assert.deepEqual(result, { activeView: 'canvas', activeAppId: 42 })
 })
 
 test('shellReload: removes the key after parsing (second reader sees null)', () => {
-  const storage = new Map([['shell-reload', JSON.stringify({ activeView: 'chat' })]])
-  parseShellReload(storage)
-  // A second call (simulating App.jsx re-reading sessionStorage) must get null.
-  assert.equal(parseShellReload(storage), null,
+  const storage = fakeStorage([['shell-reload', JSON.stringify({ activeView: 'chat' })]])
+  consumeShellReload(storage)
+  assert.equal(consumeShellReload(storage), null,
     'second consumer must see null — the IIFE already consumed the key')
 })
 
 test('shellReload: returns null on malformed JSON', () => {
-  const storage = new Map([['shell-reload', 'not-valid-json{{']])
-  assert.equal(parseShellReload(storage), null)
-  // Key should still be removed even on parse failure.
+  const storage = fakeStorage([['shell-reload', 'not-valid-json{{']])
+  assert.equal(consumeShellReload(storage), null)
   assert.equal(storage.has('shell-reload'), false, 'key must be removed even on parse error')
 })
 
 test('shellReload: returns null on empty string value', () => {
-  const storage = new Map([['shell-reload', '']])
-  // Empty raw → falsy check returns null before even trying JSON.parse.
-  assert.equal(parseShellReload(storage), null)
+  assert.equal(consumeShellReload(fakeStorage([['shell-reload', '']])), null)
 })
 
 test('shellReload: returns null when sandbox storage is unavailable', () => {
   const storage = {
-    get() { throw new DOMException('Blocked by opaque sandbox', 'SecurityError') },
+    getItem() { throw new DOMException('Blocked by opaque sandbox', 'SecurityError') },
   }
-  assert.equal(parseShellReload(storage), null)
+  assert.equal(consumeShellReload(storage), null)
+})
+
+test('startup and navigation share the lightweight shell-reload reader', () => {
+  assert.match(APP_SOURCE, /from '\.\/lib\/shellReloadState\.js'/)
+  assert.match(NAV_SOURCE, /from '\.\.\/lib\/shellReloadState\.js'/)
+  assert.doesNotMatch(APP_SOURCE, /from '\.\/hooks\/useNavigation\.js'/)
 })

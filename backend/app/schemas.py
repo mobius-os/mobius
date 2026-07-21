@@ -11,14 +11,30 @@ from app.providers import PROVIDER_NAMES, _model_belongs_to_other_provider
 
 
 class SetupRequest(BaseModel):
-  username: str
-  password: str
+  username: str = Field(min_length=1, max_length=64)
+  # Generous enough for long passphrases while bounding accidental or hostile
+  # setup payloads before password hashing work. bcrypt receives a fixed-width
+  # digest, so every character remains significant.
+  password: str = Field(min_length=1, max_length=1024)
   # First-boot claim gate: the one-time possession proof from the deploy logs
   # / MOBIUS_SETUP_CLAIM. Optional-with-default on purpose — a missing field
   # must NOT become a Pydantic 422 (an oracle exposing the mechanism); the
   # route funnels missing/empty/malformed/wrong to one uniform 403. See
   # app.setup_claim.
   claim: str = ""
+
+  @field_validator("username", mode="before")
+  @classmethod
+  def normalize_username(cls, value):
+    """Store the visible username, not accidental surrounding whitespace."""
+    return value.strip() if isinstance(value, str) else value
+
+  @field_validator("password")
+  @classmethod
+  def reject_blank_password(cls, value: str) -> str:
+    if not value.strip():
+      raise ValueError("Password cannot be blank.")
+    return value
 
   @field_validator("claim", mode="before")
   @classmethod

@@ -77,16 +77,40 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
   async function handleAccountSubmit(e) {
     e.preventDefault()
     setError('')
+    const normalizedUsername = username.trim()
+    if (!normalizedUsername) {
+      setError('Enter a username.')
+      return
+    }
+    if (normalizedUsername.length > 64) {
+      setError('Username must be 64 characters or fewer.')
+      return
+    }
+    if (!password.trim()) {
+      setError('Password cannot be blank.')
+      return
+    }
+    if (password.length > 1024) {
+      setError('Password must be 1,024 characters or fewer.')
+      return
+    }
     if (password !== confirmPassword) {
       setError('Passwords do not match.')
       return
     }
     setLoading(true)
     try {
-      const res = await api.auth.setup.create({ username, password, claim })
+      const res = await api.auth.setup.create({ username: normalizedUsername, password, claim })
       if (!res.ok) {
         const data = await res.json()
-        setError(data.detail || 'Setup failed.')
+        const detail = Array.isArray(data.detail)
+          ? data.detail.find((item) => typeof item?.msg === 'string')?.msg
+          : data.detail
+        setError(
+          typeof detail === 'string'
+            ? detail.replace(/^Value error,\s*/, '')
+            : 'Setup failed.'
+        )
         return
       }
       const data = await res.json()
@@ -129,6 +153,8 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
               className="setup__input"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              name="username"
+              maxLength={64}
               required
               autoFocus
               autoComplete="username"
@@ -141,9 +167,15 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              name="password"
+              maxLength={1024}
               required
               autoComplete="new-password"
+              aria-describedby="setup-password-hint"
             />
+            <span className="setup__hint" id="setup-password-hint">
+              Use a strong password. Long passphrases are supported.
+            </span>
           </label>
           <label className="setup__label">
             Confirm password
@@ -152,6 +184,8 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
               type="password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
+              name="confirm-password"
+              maxLength={1024}
               required
               autoComplete="new-password"
             />
@@ -163,6 +197,7 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
                 className="setup__input"
                 value={claim}
                 onChange={(e) => setClaim(e.target.value)}
+                name="setup-code"
                 required
                 autoComplete="off"
                 spellCheck={false}

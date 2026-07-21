@@ -1,5 +1,9 @@
 """Tests for authentication flow."""
 
+import json
+
+import bcrypt
+
 from tests.conftest import SETUP_CLAIM
 
 
@@ -54,6 +58,34 @@ def test_login_wrong_password(client):
     "password": "wrongpassword",
   })
   assert r.status_code == 401
+
+
+def test_login_upgrades_legacy_hash_and_recovery_seed(client, db):
+  """A successful legacy login migrates both durable credential copies."""
+  from app import auth, models, recovery_seed
+
+  password = "a" * 100
+  legacy_hash = bcrypt.hashpw(
+    password.encode()[:72], bcrypt.gensalt(rounds=4)
+  ).decode()
+  db.add(models.Owner(username="legacy", hashed_password=legacy_hash))
+  db.commit()
+
+  response = client.post("/api/auth/token", data={
+    "username": "legacy",
+    "password": password,
+  })
+
+  assert response.status_code == 200
+  db.expire_all()
+  stored = db.query(models.Owner).filter_by(username="legacy").one()
+  assert stored.hashed_password.startswith(auth.PASSWORD_HASH_PREFIX)
+  assert auth.verify_password(password, stored.hashed_password) is True
+  seed = json.loads(recovery_seed.OWNER_SEED_PATH.read_text())
+  assert seed == {
+    "username": "legacy",
+    "hashed_password": stored.hashed_password,
+  }
 
 
 def test_provider_login_rejects_cross_site_request(client, auth):

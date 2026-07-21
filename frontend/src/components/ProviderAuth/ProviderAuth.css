@@ -27,6 +27,18 @@
   width: 100%;
 }
 
+.pa__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.pa__input-label {
+  color: var(--muted, #52525b);
+  font-size: 13px;
+}
+
 .pa__input {
   background: var(--bg, #0d0d0d);
   border: 1px solid var(--border, #252b36);

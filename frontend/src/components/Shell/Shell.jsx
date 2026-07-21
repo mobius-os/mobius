@@ -6,7 +6,7 @@ import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
-import { api, apiFetch, jsonOrThrow, BASE, clearAppRuntimeData } from '../../api/client.js'
+import { api, apiFetch, jsonOrThrow, probeDeletion, BASE, clearAppRuntimeData } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, {
   coldRestoredCanvasAppId,
@@ -323,19 +323,6 @@ export default function Shell() {
     (key) => exitBeatActive && exitUnderlayKey != null && key === exitUnderlayKey,
     [exitBeatActive, exitUnderlayKey],
   )
-  // INV 10: a topology or geometry change DURING an exit beat (a participant pane
-  // closes, its active tab changes, the target moves, the content box resizes)
-  // makes the latched plan no longer describe the tree. Cancel rather than retarget
-  // a live transform: recompute the exit signature from the same projection
-  // authority and compare it to the latched one. This is the ONLY caller of
-  // cancelBeat, firing precisely when the animated target could drift.
-  useEffect(() => {
-    const t = modeState.transition
-    if (!t || t.phase !== 'exiting' || !t.presentation) return
-    const live = exitSignature({ workspace, projection, contentRect })
-    if (live !== t.presentation.snapshotSignature) mode.cancelBeat()
-  }, [workspace, projection, contentRect, modeState, mode])
-
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
   // full-viewport — only while that app is the active canvas of the FOCUSED
@@ -375,6 +362,27 @@ export default function Shell() {
   settingsDestinationRef.current = settingsOpenRaw
   const immersiveHolderRef = useRef(immersiveAppId)
   immersiveHolderRef.current = immersiveAppId
+
+  // INV 10 / H2: a topology, geometry, OR DESTINATION change DURING an exit beat makes
+  // the latched plan no longer describe what single mode will paint — a participant
+  // pane closes, its active tab changes, the slot moves, the box resizes, OR a Settings
+  // takeover / immersive request suspends or lands over the slot mid-beat. Cancel
+  // rather than retarget a live transform: recompute the exit signature from the same
+  // projection authority AND the live overlay classification, and compare to the
+  // latched one. Because the signature folds the destination through the SAME
+  // classifier the plan used, every input the plan derives from also drifts this key —
+  // so the live overlay state (settingsOpenRaw / immersiveAppId) is both read here and
+  // in the deps, letting a mid-beat destination flip fire this. Only caller of cancelBeat.
+  useEffect(() => {
+    const t = modeState.transition
+    if (!t || t.phase !== 'exiting' || !t.presentation) return
+    const live = exitSignature({
+      workspace, projection, contentRect,
+      settingsDestination: settingsOpenRaw,
+      immersiveHolderId: immersiveAppId,
+    })
+    if (live !== t.presentation.snapshotSignature) mode.cancelBeat()
+  }, [workspace, projection, contentRect, settingsOpenRaw, immersiveAppId, modeState, mode])
 
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
@@ -1686,31 +1694,12 @@ export default function Shell() {
     // Record everything the live list currently shows, so a later
     // disappearance reads as a real uninstall rather than a never-seen id.
     for (const id of liveIds) seenAppIdsRef.current.add(id)
-    // PRE-UPGRADE BLOB (M5): the single-world slot app is pinned even while builder
-    // paints, so the present->absent eviction below — gated on seenAppIds — never
-    // fires for a slot app uninstalled while the browser was CLOSED (it was never
-    // "seen present" this session). Validate the persisted slot app against the FIRST
-    // authoritative live list exactly once (like the cold-restore probe): absent →
-    // CLOSE_TAB reason:'deleted' (the reducer clears the slot + scrubs history),
-    // retire its physical nav history, drop its warm frame, then resolve the empty
-    // single world to home so it lands on a chat, not a blank/broken frame. This is
-    // the narrow live dispatcher for the documented PRUNE gap — NOT a general pruner.
-    if (!initialSlotReconciledRef.current) {
-      initialSlotReconciledRef.current = true
-      const slot = workspaceStateRef.current.ws.singleScreen
-      if (slot && slot.kind === 'app' && !liveIds.has(Number(slot.id))) {
-        const sid = String(slot.id)
-        retireAppHistory(sid, 'uninstalled')
-        tombstoneRoute('app', sid)
-        dispatchWorkspace({
-          type: 'CLOSE_TAB',
-          tabKey: tabModel.tabKey(tabModel.makeTab('app', sid)),
-          reason: 'deleted',
-        })
-        dropFromWarmLru(id => String(id) === sid)
-        resolveEmptySingleHome()
-      }
-    }
+    // NOTE (H1): the single-world SLOT app is pinned even while builder paints and is
+    // never "seen present" when it was uninstalled while the browser was CLOSED, so
+    // this present->absent eviction can't cover it. Its one-shot validation lives in
+    // the dedicated 404-probe effect below — an AUTHORITATIVE per-app check, never a
+    // trust of this NetworkFirst list's absence (a stale SW cache fallback would else
+    // delete a still-installed slot app's tab/slot/history on a slow/offline launch).
     // Candidates: every mounted app frame (rendered set) plus every app tab.
     const candidates = new Set(renderedAppIds.map(String))
     for (const tab of openTabs) if (tab.kind === 'app') candidates.add(String(tab.id))
@@ -1754,6 +1743,53 @@ export default function Shell() {
     resolveEmptySingleHome()
   }, [apps, appsLiveFetched, openTabs, renderedAppIds, visibleAppIds,
       navStackRef, retireAppHistory, dispatchWorkspace, resolveEmptySingleHome])
+
+  // One-shot slot-app reconcile (H1). A slot app uninstalled while the browser was
+  // CLOSED is never "seen present" this session, so the eviction above can't reach
+  // it. But its absence from the FIRST live list is only a HINT, never deletion
+  // evidence: /api/apps/ is NetworkFirst (sw.js), so a slow or offline cold launch
+  // can resolve the list from a stale SW cache fallback that TanStack cannot
+  // distinguish from a live response. Per the platform DELETION-EVIDENCE CONTRACT
+  // (probeDeletion), only a real per-app GET /api/apps/{id} 404 (live_app_or_404
+  // tombstone) proves the slot app is gone. This deliberately RHYMES with the chat
+  // cold-restore probe below: list absence hints, the authoritative per-resource 404
+  // decides. A 'deleted' verdict triggers CLOSE_TAB reason:'deleted' (the reducer
+  // clears the slot + scrubs history), retires its physical nav history, drops its
+  // warm frame, and resolves the empty single world to home; anything else (present,
+  // offline, timeout) leaves the still-installed slot app pinned.
+  useEffect(() => {
+    if (!appsLiveFetched || initialSlotReconciledRef.current) return
+    initialSlotReconciledRef.current = true
+    const slot = workspaceStateRef.current.ws.singleScreen
+    if (!slot || slot.kind !== 'app') return
+    // The live list already vouches for the slot app → installed, no probe needed.
+    if (apps.some(a => Number(a.id) === Number(slot.id))) return
+    const slotId = slot.id
+    let cancelled = false
+    ;(async () => {
+      const verdict = await probeDeletion(`/apps/${encodeURIComponent(slotId)}`)
+      // Stale-guard: the single-world slot can change while the probe is in flight,
+      // so a verdict for an old slot must never delete the new one.
+      const current = workspaceStateRef.current.ws.singleScreen
+      if (cancelled || !current || current.kind !== 'app'
+          || Number(current.id) !== Number(slotId)) return
+      // Only authoritative deletion evidence tears the slot down; 'exists'/'unknown'
+      // (present, offline, timeout, non-404) leave the slot/tab/history untouched.
+      if (verdict !== 'deleted') return
+      const sid = String(slotId)
+      retireAppHistory(sid, 'uninstalled')
+      tombstoneRoute('app', sid)
+      dispatchWorkspace({
+        type: 'CLOSE_TAB',
+        tabKey: tabModel.tabKey(tabModel.makeTab('app', sid)),
+        reason: 'deleted',
+      })
+      dropFromWarmLru(id => String(id) === sid)
+      resolveEmptySingleHome()
+    })()
+    return () => { cancelled = true }
+  }, [appsLiveFetched, apps, retireAppHistory, tombstoneRoute, dispatchWorkspace,
+      dropFromWarmLru, resolveEmptySingleHome, workspaceStateRef])
 
   // New-app dot detection (state + open-clear live up beside the chat
   // attention machinery). First live list = the session baseline; anything
@@ -2050,57 +2086,53 @@ export default function Shell() {
       return
     }
 
-    // Drawer-list absence is not deletion evidence because /api/chats is a
-    // filtered view that hides app-attributed chats and can lag a new chat.
-    // Only a direct /api/chats/{id} 404 proves that the restored target should
-    // be demoted.
+    // Drawer-list absence is not deletion evidence: /api/chats is a filtered view
+    // that hides app-attributed chats and can lag a new chat, and (like every list
+    // route) is NetworkFirst, so a stale SW cache fallback reads like live data. Per
+    // the platform DELETION-EVIDENCE CONTRACT (probeDeletion), only a direct
+    // /api/chats/{id} 404 proves the restored target should be demoted — the same
+    // contract the slot-app reconcile above uses, applied to chats.
     let cancelled = false
     const probedChatId = prev
     ;(async () => {
-      try {
-        const res = await apiFetch(`/chats/${encodeURIComponent(probedChatId)}?limit=1`, { timeoutMs: 15000 })
-        // Stale-guard: the active chat can change while the probe is in
-        // flight, so a verdict for an old restore target must never navigate.
-        if (cancelled || activeChatIdRef.current !== probedChatId) return
-        if (res.status === 404) {
-          knownExistingOffListChatIdsRef.current.delete(probedChatId)
-          // The restored chat is genuinely gone: close its tab in its pane. If
-          // that leaves the sole empty root and a live chat remains, seed the
-          // fallback into it (contract §1.4.9).
-          dispatchWorkspace({
-            type: 'CLOSE_TAB',
-            tabKey: tabModel.tabKey(tabModel.makeTab('chat', probedChatId)),
-            reason: 'deleted',
-          })
-          const ws = workspaceStateRef.current.ws
-          // Same world-aware seed as the boot path (finding F9): route the
-          // fallback through the ONE decision point so single sets the visible
-          // SLOT and builder the pane tab — never a raw OPEN_TAB into the hidden
-          // tree, which single mode would never paint.
-          const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
-          const visibleWorldEmpty = single
-            ? ws.singleScreen == null
-            : !ws.panes[ws.focusedPaneId]?.activeTabKey
-          const fallback = chats.find(c => c.id !== probedChatId)
-          if (visibleWorldEmpty && fallback) {
-            // R1: a background 404-repair preserves an open Settings takeover — it seeds
-        // the visible slot beneath it rather than dismissing the owner's Settings view.
-        applyModeDestination({ view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId }, { preserveSettings: true })
-          }
-        } else if (res.ok) {
-          // Exists but is unlisted because it is app-attributed or the drawer
-          // list is lagging a fresh chat. Memoize only the positive off-list
-          // result so future list refetches do not repeatedly probe it.
-          knownExistingOffListChatIdsRef.current.add(probedChatId)
+      const verdict = await probeDeletion(`/chats/${encodeURIComponent(probedChatId)}?limit=1`)
+      // Stale-guard: the active chat can change while the probe is in flight, so a
+      // verdict for an old restore target must never navigate.
+      if (cancelled || activeChatIdRef.current !== probedChatId) return
+      if (verdict === 'deleted') {
+        knownExistingOffListChatIdsRef.current.delete(probedChatId)
+        // The restored chat is genuinely gone: close its tab in its pane. If that
+        // leaves the sole empty root and a live chat remains, seed the fallback into
+        // it (contract §1.4.9).
+        dispatchWorkspace({
+          type: 'CLOSE_TAB',
+          tabKey: tabModel.tabKey(tabModel.makeTab('chat', probedChatId)),
+          reason: 'deleted',
+        })
+        const ws = workspaceStateRef.current.ws
+        // Same world-aware seed as the boot path (finding F9): route the fallback
+        // through the ONE decision point so single sets the visible SLOT and builder
+        // the pane tab — never a raw OPEN_TAB into the hidden tree, which single mode
+        // would never paint.
+        const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+        const visibleWorldEmpty = single
+          ? ws.singleScreen == null
+          : !ws.panes[ws.focusedPaneId]?.activeTabKey
+        const fallback = chats.find(c => c.id !== probedChatId)
+        if (visibleWorldEmpty && fallback) {
+          // R1: a background 404-repair preserves an open Settings takeover — it seeds
+          // the visible slot beneath it rather than dismissing the owner's Settings view.
+          applyModeDestination({ view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId }, { preserveSettings: true })
         }
-        // Any other status is not deletion evidence, so the restored target
-        // stays mounted until a later list refetch retries the probe.
-      } catch {
-        // Offline, network, timeout, and auth-expiry paths are not deletion
-        // evidence, so the restored target stays mounted.
-      } finally {
-        if (!cancelled && activeChatIdRef.current === probedChatId) chatsLoadedRef.current = true
+      } else if (verdict === 'exists') {
+        // Present but unlisted because it is app-attributed or the drawer list is
+        // lagging a fresh chat. Memoize only the positive off-list result so future
+        // list refetches do not repeatedly probe it.
+        knownExistingOffListChatIdsRef.current.add(probedChatId)
       }
+      // 'unknown' (offline / timeout / non-404) is not deletion evidence, so the
+      // restored target stays mounted until a later list refetch retries the probe.
+      chatsLoadedRef.current = true
     })()
     return () => { cancelled = true }
   }, [chats, chatsQuery.isFetched, chatsQuery.isSuccess,

@@ -107,7 +107,7 @@ _DENY_RELPATHS = (
 # Defense in depth: a secret-shaped filename anywhere in the tree is denied,
 # in case one is copied outside its canonical home. `.recovery-secret` is the
 # HMAC key that signs recovery session cookies (forging it grants the recovery
-# surface); `.recovery-owner.json` holds the owner's bcrypt hash for the
+# surface); `.recovery-owner.json` holds the owner's password hash for the
 # DB-independent recovery fallback.
 _SECRET_NAMES = {
   ".env", ".secret-key", ".recovery-secret", ".recovery-owner.json",

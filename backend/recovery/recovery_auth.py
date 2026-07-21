@@ -1,11 +1,9 @@
 """Isolated auth for the FROZEN recovery container (recoveryd).
 
-Verbatim lift of `backend/app/recover_auth.py` — kept as a SEPARATE
-copy inside the frozen `/app/recovery/` bundle so the recovery
-container shares ZERO code with the agent-editable platform tree
-(`/data/platform/app`). The platform's own `recover_auth.py` may be
-broken or corrupted; this copy is baked root-owned + chmod a-w and
-cannot be touched by the agent.
+Kept self-contained inside the frozen `/app/recovery/` bundle so the
+recovery container shares ZERO code with the agent-editable platform tree
+(`/data/platform/app`). This copy is baked root-owned + chmod a-w and cannot
+be touched by the agent.
 
 Imports ONLY stdlib + bcrypt (a hard backend dependency that lives in
 root-owned site-packages, off the agent's write surface). It must NOT
@@ -48,6 +46,7 @@ import bcrypt
 COOKIE_NAME = "moebius_recover"
 SESSION_TTL_SECONDS = 1800  # 30 min — shorter than the platform's 1h
 # recover surface (the destructive floor warrants a tighter window).
+PASSWORD_HASH_PREFIX = "bcrypt-sha256$v1$"
 
 # Recovery secret file lives on the recoveryd-ONLY volume, off the
 # shared /data volume the platform can read (see the module docstring).
@@ -60,15 +59,19 @@ _RECOVERY_SECRET_PATH = Path(
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-  """Bcrypt password check. Returns False on any error rather than
-  raising — recovery surfaces shouldn't 500 on a bad cookie."""
+  """Checks current and legacy password hashes without importing the app."""
   try:
-    # bcrypt>=5 raises on >72-byte inputs (caught below -> silent False),
-    # so truncate to the first 72 bytes to match the platform
-    # hash_password contract — otherwise a >72-byte password can't log in
-    # on the recovery surface.
-    return bcrypt.checkpw(plain.encode("utf-8")[:72], hashed.encode("utf-8"))
-  except Exception:
+    if hashed.startswith(PASSWORD_HASH_PREFIX):
+      bcrypt_hash = hashed[len(PASSWORD_HASH_PREFIX):]
+      candidate = hashlib.sha256(
+        plain.encode("utf-8")
+      ).hexdigest().encode("ascii")
+    else:
+      # Raw bcrypt is the format written by older platform releases.
+      bcrypt_hash = hashed
+      candidate = plain.encode("utf-8")[:72]
+    return bcrypt.checkpw(candidate, bcrypt_hash.encode("ascii"))
+  except (AttributeError, TypeError, ValueError):
     return False
 
 

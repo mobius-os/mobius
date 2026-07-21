@@ -8,6 +8,7 @@ must not depend on the platform either.
 """
 
 import importlib
+import hashlib
 import os
 import sqlite3
 import sys
@@ -88,6 +89,19 @@ def test_password_verify(recovery_env):
   assert auth.verify_password("hunter2", h) is True
   assert auth.verify_password("wrong", h) is False
   assert auth.verify_password("anything", "not-a-hash") is False
+
+
+def test_password_verify_supports_versioned_long_password(recovery_env):
+  auth = recovery_env["auth"]
+  password = "🔒" * 30
+  digest = hashlib.sha256(password.encode("utf-8")).hexdigest().encode("ascii")
+  current_hash = (
+    auth.PASSWORD_HASH_PREFIX
+    + bcrypt.hashpw(digest, bcrypt.gensalt(rounds=4)).decode("ascii")
+  )
+
+  assert auth.verify_password(password, current_hash) is True
+  assert auth.verify_password(password[:-1], current_hash) is False
 
 
 def test_owner_db_lookup(recovery_env):

@@ -575,13 +575,18 @@ test('deriveExitPlan: M2 a builder Settings tab that IS the destination does not
   assert.ok(plan.participants.some(p => p.key === 'chat:5'), 'the sibling pane still deals out')
 })
 
-test('deriveEnterPlan: each visible leaf deals in, 20ms stagger, single-leaf longer', () => {
-  const two = twoPaneChatAndApp()
+test('deriveEnterPlan: each visible leaf deals in, 28ms stagger, focal pane first, single-leaf longer', () => {
+  const two = twoPaneChatAndApp() // the app:42 pane is focused
   const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two) })
   assert.deepEqual(twoPlan.completionNames, ['shell-mode-deal-in'])
   assert.equal(twoPlan.participants.length, 2)
   assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.enterItemMs))
-  assert.deepEqual(twoPlan.participants.map(p => p.delayMs).sort((a, b) => a - b), [0, MODE_MOTION.staggerMs])
+  // Focal pane first (item 6): the focused app pane deals in at delay 0 even though
+  // chat:5 is the top-left leaf; the other follows one stagger later.
+  assert.equal(twoPlan.participants[0].key, 'app:42')
+  assert.equal(twoPlan.participants[0].delayMs, 0)
+  assert.equal(twoPlan.participants[1].key, 'chat:5')
+  assert.equal(twoPlan.participants[1].delayMs, MODE_MOTION.staggerMs)
   const one = paneModel.seedFromFlatTabs([makeTab('app', '42')])
   const onePlan = deriveEnterPlan({ workspace: one, projection: project(one) })
   assert.equal(onePlan.participants.length, 1)
@@ -598,6 +603,30 @@ test('exitSignature is stable for the same tree and drifts on a topology/geometr
   // A different slot target drifts it too.
   const retargeted = exitSignature({ workspace: { ...ws, singleScreen: { kind: 'chat', id: '5' } }, projection: project(ws), contentRect: CONTENT })
   assert.notEqual(base, retargeted)
+})
+
+test('exitSignature folds the destination so a mid-beat destination change cancels (H2)', () => {
+  // The audit case: a live exit plan built toward the chat slot must cancel the moment
+  // a Settings takeover suspends over the slot mid-beat — the two signatures differ.
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '5' } }
+  const proj = project(ws)
+  const toChat = exitSignature({ workspace: ws, projection: proj, contentRect: CONTENT })
+  const toSettings = exitSignature({ workspace: ws, projection: proj, contentRect: CONTENT, settingsDestination: true })
+  assert.notEqual(toChat, toSettings, 'chat-target vs settings:settings destinations must differ')
+  // And the PLAN's stored snapshot equals a live recompute at the SAME destination, so
+  // the watcher never false-cancels while the destination holds (structural coupling:
+  // deriveExitPlan feeds its own input object to exitSignature).
+  const settingsPlan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT, settingsDestination: true })
+  assert.equal(settingsPlan.snapshotSignature, toSettings)
+  const chatPlan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT })
+  assert.equal(chatPlan.snapshotSignature, toChat)
+  // An immersive holder that solos the exit slot is an INSTANT destination — its
+  // signature differs from the ordinary reveal, so a mid-beat immersive request cancels.
+  const app42 = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '42' } }
+  const projApp = project(app42)
+  const reveal = exitSignature({ workspace: app42, projection: projApp, contentRect: CONTENT })
+  const immersive = exitSignature({ workspace: app42, projection: projApp, contentRect: CONTENT, immersiveHolderId: 42 })
+  assert.notEqual(reveal, immersive, 'an immersive-instant destination must drift the signature')
 })
 
 test('deriveContentVisibility augments visibleAppIds with an app underlay (exit reveal)', () => {

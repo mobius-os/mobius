@@ -1,41 +1,43 @@
 /**
- * Highlight.js wrapper with eager loading.
+ * Highlight.js wrapper loaded on the first code block.
  *
- * Starts loading immediately on import (not on first code block).
- * highlightSync() returns highlighted HTML if the library is ready,
- * null if still loading — the CodeBlock component renders plain text
- * and upgrades when ready.  This eliminates reflow for most cases
- * since highlight.js loads during the splash/auth screen.
+ * highlightSync() returns highlighted HTML if the library is already ready,
+ * otherwise the CodeBlock renders plain text and upgrades after highlightCode
+ * resolves. Empty chats never download the parser or language modules.
  */
 
 let hljs = null
+let ready = null
 
-// Start loading immediately.
-const ready = (async () => {
-  try {
-    const mod = await import('highlight.js/lib/core')
-    hljs = mod.default
+function loadHighlighter() {
+  if (ready) return ready
+  ready = (async () => {
+    try {
+      const mod = await import('highlight.js/lib/core')
+      hljs = mod.default
 
-    const langs = await Promise.all([
-      import('highlight.js/lib/languages/javascript'),
-      import('highlight.js/lib/languages/python'),
-      import('highlight.js/lib/languages/bash'),
-      import('highlight.js/lib/languages/json'),
-      import('highlight.js/lib/languages/css'),
-      import('highlight.js/lib/languages/xml'),
-      import('highlight.js/lib/languages/typescript'),
-      import('highlight.js/lib/languages/sql'),
-    ])
-    const names = [
-      'javascript', 'python', 'bash', 'json',
-      'css', 'xml', 'typescript', 'sql',
-    ]
-    langs.forEach((lang, i) => hljs.registerLanguage(names[i], lang.default))
-    return hljs
-  } catch {
-    return null
-  }
-})()
+      const langs = await Promise.all([
+        import('highlight.js/lib/languages/javascript'),
+        import('highlight.js/lib/languages/python'),
+        import('highlight.js/lib/languages/bash'),
+        import('highlight.js/lib/languages/json'),
+        import('highlight.js/lib/languages/css'),
+        import('highlight.js/lib/languages/xml'),
+        import('highlight.js/lib/languages/typescript'),
+        import('highlight.js/lib/languages/sql'),
+      ])
+      const names = [
+        'javascript', 'python', 'bash', 'json',
+        'css', 'xml', 'typescript', 'sql',
+      ]
+      langs.forEach((lang, i) => hljs.registerLanguage(names[i], lang.default))
+      return hljs
+    } catch {
+      return null
+    }
+  })()
+  return ready
+}
 
 /**
  * Synchronous highlight — returns HTML string or null.
@@ -58,7 +60,7 @@ export function highlightSync(code, language) {
  * Used during streaming where we can afford to wait.
  */
 export async function highlightCode(code, language) {
-  const h = await ready
+  const h = await loadHighlighter()
   if (!h) return null
   try {
     if (language && h.getLanguage(language)) {

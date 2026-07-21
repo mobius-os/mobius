@@ -405,15 +405,39 @@
 .shell__brand--builder .shell__wordmark {
   color: var(--accent);
 }
-/* Completion spring (entering builder): the compressed mark overshoots back to
-   full size. Snap (exiting to single): a quick settle. Both override `scale`; the
-   rotate rides its own transition. Cleared on animationend (JS drops the class). */
+/* Same-beat timing (polish item 5): the logo, wordmark, and halo settle on the SAME
+   beat as the panes instead of trailing them (the logo used to rotate 300ms and the
+   ignite hold ran 480ms, well past most pane entries). Entering keeps a tiny signature
+   settle (the 1.1 control point) without the old conspicuous spring; exiting is a
+   quick, springless settle. The hold-only ignite/snap keyframes override `scale`; the
+   rotate, halo, and wordmark ride their own transitions. Cleared on animationend (JS
+   drops the class). */
+.shell--builder-entering .shell__logo {
+  transition:
+    rotate 260ms cubic-bezier(0.2, 1.1, 0.32, 1),
+    scale 160ms ease;
+}
+.shell--builder-exiting .shell__logo {
+  transition:
+    rotate 220ms cubic-bezier(0.25, 0.8, 0.25, 1),
+    scale 140ms ease-out;
+}
 .shell__brand.is-igniting .shell__logo {
-  animation: shell-logo-ignite 480ms cubic-bezier(0.22, 1.6, 0.36, 1);
+  animation: shell-logo-ignite 280ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .shell__brand.is-snapping .shell__logo {
-  animation: shell-logo-snap 150ms ease;
+  animation: shell-logo-snap 140ms cubic-bezier(0.25, 0.8, 0.25, 1);
 }
+/* The halo blooms with the entry (60-220ms) then its living drift resumes after
+   settlement; on exit it clears fast on the chrome curve. Wordmark tint keeps pace. */
+.shell--builder-entering .shell__logo-halo {
+  transition: opacity 160ms var(--ease-mode-arrive) 60ms;
+}
+.shell--builder-exiting .shell__logo-halo {
+  transition: opacity 100ms var(--ease-mode-chrome);
+}
+.shell--builder-entering .shell__wordmark { transition-duration: 220ms; }
+.shell--builder-exiting .shell__wordmark { transition-duration: 140ms; }
 @keyframes shell-logo-ignite {
   from { scale: 0.84; }
   to { scale: 1; }

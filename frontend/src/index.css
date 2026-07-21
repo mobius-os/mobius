@@ -237,6 +237,20 @@ html, body, #root {
   width: 100%;
 }
 
+/* Lightweight fallback while a top-level flow's code chunk loads. It mirrors
+   the static pre-React splash so route splitting never creates a blank frame. */
+.app-route-loading {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg, #0d0d0d);
+}
+
+.app-route-loading img {
+  opacity: 0.4;
+}
+
 /* Paint the ROOT element with the theme background so it propagates to the
    canvas — the full window backdrop, including the strip behind the transparent
    Android gesture/navigation bar in edge-to-edge mode (viewport-fit=cover,

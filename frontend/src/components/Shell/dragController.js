@@ -45,12 +45,13 @@ export const RELEASE_IN_PLACE_PX = 5
 
 // ── Zone geometry (design §3.2 / §3.3) ───────────────────────────────────────
 
-// Edge band: clamp(pane×0.22, 40px, cap). The horizontal cap is wider than the
-// vertical one because side splits read from a taller, narrower band.
+// Edge band: an uncapped proportional quarter, max(pane×0.25, 40px). Fixed pixel caps
+// were the actual ergonomics problem — on a wide pane they turned an edge into a
+// narrow precision target the owner had to "move the tab quite a bit toward" — so the
+// fraction is now its own proportional cap, leaving exactly 50% of each axis as the
+// center join corridor.
 export const EDGE_BAND_MIN = 40
-export const EDGE_BAND_CAP_W = 110
-export const EDGE_BAND_CAP_H = 96
-export const EDGE_BAND_FRACTION = 0.22
+export const EDGE_BAND_FRACTION = 0.25
 // A thumb on a phone cannot comfortably reach a 96px edge band on a tall
 // pane (the owner had to "drag too far"), so coarse phone panes use a
 // proportional third per edge — upper third splits up, lower third splits
@@ -142,10 +143,6 @@ export function crossedDrawerExit(pointX, edgeX, gap = DRAWER_EXIT_PX) {
 
 // ── Small geometry helpers ───────────────────────────────────────────────────
 
-function clamp(v, lo, hi) {
-  return Math.min(hi, Math.max(lo, v))
-}
-
 function contains(rect, point) {
   return point.x >= rect.x && point.x <= rect.x + rect.w
     && point.y >= rect.y && point.y <= rect.y + rect.h
@@ -155,8 +152,9 @@ function insetRect(rect, m) {
   return { x: rect.x + m, y: rect.y + m, w: Math.max(0, rect.w - 2 * m), h: Math.max(0, rect.h - 2 * m) }
 }
 
-// The band widths for a pane (design §3.2). Horizontal and vertical bands clamp
-// against different caps.
+// The band widths for a pane (design §3.2). Both axes are an uncapped proportional
+// quarter above the 40px floor — the same proportional shape phone uses, just a
+// smaller fraction (desktop 0.25 vs phone 0.34).
 export function edgeBands(rect, mode) {
   if (mode === 'phone') {
     return {
@@ -165,8 +163,8 @@ export function edgeBands(rect, mode) {
     }
   }
   return {
-    w: clamp(rect.w * EDGE_BAND_FRACTION, EDGE_BAND_MIN, EDGE_BAND_CAP_W),
-    h: clamp(rect.h * EDGE_BAND_FRACTION, EDGE_BAND_MIN, EDGE_BAND_CAP_H),
+    w: Math.max(rect.w * EDGE_BAND_FRACTION, EDGE_BAND_MIN),
+    h: Math.max(rect.h * EDGE_BAND_FRACTION, EDGE_BAND_MIN),
   }
 }
 

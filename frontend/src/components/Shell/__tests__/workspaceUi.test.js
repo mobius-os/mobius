@@ -73,9 +73,10 @@ test('the drop preview reads as an 18% accent fill with a 2px border and morph',
   assert.match(rule, /border:\s*2px solid var\(--accent\)/)
   assert.match(rule, /var\(--accent\)\s*18%/)
   assert.match(rule, /border-radius:\s*10px/)
-  // First-appear fade (80ms) + zone-to-zone morph (120ms cubic-bezier).
-  assert.match(rule, /opacity 80ms/)
-  assert.match(rule, /120ms cubic-bezier\(0\.2, 0, 0, 1\)/)
+  // First-appear fade (60ms) + zone-to-zone morph (90ms cubic-bezier) — the faster
+  // morph makes the larger uncapped bands feel even more responsive.
+  assert.match(rule, /opacity 60ms/)
+  assert.match(rule, /90ms cubic-bezier\(0\.2, 0, 0, 1\)/)
 })
 
 test('the strip caret variant drops the fill and border for a solid bar', () => {
@@ -397,14 +398,25 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   // The 180° twist is a var flip in builder mode (not a transform override).
   assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?--logo-twist:\s*180deg/)
   assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?color:\s*var\(--accent\)/)
-  // Completion: spring (enter) overshoots 0.84→1 on a springy cubic; snap (exit) settles fast.
-  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-ignite 480ms cubic-bezier\(0\.22, 1\.6, 0\.36, 1\)/)
-  assert.match(shellCss, /\.shell__brand\.is-snapping \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-snap 150ms ease/)
+  // Completion: spring (enter) overshoots 0.84→1; snap (exit) settles fast. Polish
+  // item 5 puts these on the SAME beat as the panes (280ms ignite, not 480ms).
+  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-ignite 280ms cubic-bezier\(0\.16, 1, 0\.3, 1\)/)
+  assert.match(shellCss, /\.shell__brand\.is-snapping \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-snap 140ms cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
   assert.match(shellCss, /@keyframes shell-logo-ignite\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
   assert.match(shellCss, /@keyframes shell-logo-snap\s*\{[\s\S]*?scale:\s*0\.84/)
+  // Item 5: logo rotate, halo bloom, and wordmark tint ride the SAME beat classes as
+  // the panes (.shell--builder-entering/-exiting) instead of trailing them.
+  assert.match(shellCss, /\.shell--builder-entering \.shell__logo\s*\{[\s\S]*?rotate 260ms cubic-bezier\(0\.2, 1\.1, 0\.32, 1\)/)
+  assert.match(shellCss, /\.shell--builder-exiting \.shell__logo\s*\{[\s\S]*?rotate 220ms cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
+  assert.match(shellCss, /\.shell--builder-entering \.shell__logo-halo\s*\{\s*transition: opacity 160ms var\(--ease-mode-arrive\) 60ms/)
+  assert.match(shellCss, /\.shell--builder-exiting \.shell__logo-halo\s*\{\s*transition: opacity 100ms var\(--ease-mode-chrome\)/)
+  assert.match(shellCss, /\.shell--builder-entering \.shell__wordmark \{ transition-duration: 220ms; \}/)
+  assert.match(shellCss, /\.shell--builder-exiting \.shell__wordmark \{ transition-duration: 140ms; \}/)
   // The LIVING HALO: a radial-gradient element behind the mark, driven by the rAF
   // vars, lit only in builder mode, per-theme base alpha via --halo-alpha.
-  const halo = shellCss.match(/\.shell__logo-halo\s*\{[\s\S]*?\}/)?.[0] || ''
+  // Anchor to the BASE rule (newline-prefixed), not the beat-scoped
+  // `.shell--builder-* .shell__logo-halo` overrides added by polish item 5.
+  const halo = shellCss.match(/\n\.shell__logo-halo\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(halo, /radial-gradient/)
   assert.match(halo, /var\(--halo-alpha, 0\.5\)/)
   assert.match(halo, /translate:\s*0 0/)
@@ -501,7 +513,7 @@ test('entry deals in on the keyed beat class, compositor-only, instant under red
   assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="deal-in"\] \{[\s\S]*?animation:\s*\n?\s*shell-mode-deal-in/)
   // The deal-in keyframe touches ONLY transform + opacity (no shadow/radius/filter).
   const dealIn = css.match(/@keyframes shell-mode-deal-in\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(dealIn, /translate3d\(32px, -4px, 0\) scale\(0\.985\)/)
+  assert.match(dealIn, /translate3d\(28px, -6px, 0\) scale\(0\.982\)/)
   assert.match(dealIn, /opacity: 0/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
   // The old dead .workspace--resizing selector is gone entirely.
@@ -574,7 +586,7 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="promote"\] \{[\s\S]*?shell-mode-promote/)
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="deal-out"\] \{[\s\S]*?shell-mode-deal-out/)
   const dealOut = css.match(/@keyframes shell-mode-deal-out\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(dealOut, /translate3d\(32px, -4px, 0\) scale\(0\.985\)/)
+  assert.match(dealOut, /translate3d\(28px, -6px, 0\) scale\(0\.982\)/)
   assert.match(dealOut, /opacity: 0/)
   assert.doesNotMatch(dealOut, /box-shadow|border-radius|filter|clip/)
   // The parent-chrome opacity fade is DELETED (strips deal with their panes now).
@@ -582,6 +594,22 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   // Reduced motion drops any beat.
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell \[data-mode-motion\] \{ animation: none !important; \}/)
+})
+
+test('polish item 4: the world-reveal underlay breathes in 1.2%, atmospheric-only', () => {
+  // The destination starts very slightly enlarged and settles to rest — a 1.2% breathe
+  // instead of standing statically.
+  assert.match(css, /\.shell--builder-exiting \.shell__view--exit-underlay \{[\s\S]*?animation:\s*\n?\s*shell-mode-underlay-settle/)
+  const settle = css.match(/@keyframes shell-mode-underlay-settle\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(settle, /from \{ transform: scale\(1\.012\); opacity: 0\.96; \}/)
+  assert.match(settle, /to \{ transform: scale\(1\); opacity: 1; \}/)
+  // ATMOSPHERIC only: the breathe must NEVER gate completion, so workspaceView never
+  // names it (its completionNames are only promote/deal-out/deal-in).
+  const workspaceView = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(workspaceView, /underlay-settle/)
+  // Defensive reduced-motion rule (the doc's rule): drop the breathe under reduce.
+  const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(reduced, /\.shell--builder-exiting \.shell__view--exit-underlay \{ animation: none; \}/)
 })
 
 test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {
@@ -761,21 +789,48 @@ test('visual nits V3-V6: coachmark clears the strip, focus underline reads, chip
   assert.match(dragBinding, /if \(suppressClick && !committed\) srcEl\.blur\?\.\(\)/)
 })
 
-// ── M5: a slot app uninstalled while closed must not survive the first reconcile ─
-test('M5: the initial live reconcile validates the pinned single-world slot app', () => {
+// ── H1 (was M5): a slot app uninstalled while closed must not survive the first
+// reconcile — BUT absence from the NetworkFirst list is not deletion evidence ─────
+test('H1: the initial slot-app reconcile confirms absence with an authoritative 404 probe', () => {
   // The single-world slot app is pinned even while builder paints, so the present->
   // absent eviction (gated on seenAppIds) never fires for a slot app uninstalled
-  // while the browser was CLOSED — it was never "seen present" this session. A
-  // one-shot first-authoritative-fetch check closes it, mirroring the cold-restore
-  // probe, so it can't later paint a broken single world.
-  const effect = shell.match(/for \(const id of liveIds\) seenAppIdsRef\.current\.add\(id\)[\s\S]*?\/\/ Candidates:/)?.[0] || ''
-  assert.ok(effect.length > 0, 'found the initial reconcile body')
-  assert.match(effect, /if \(!initialSlotReconciledRef\.current\)/)
+  // while the browser was CLOSED — it was never "seen present" this session. Its
+  // one-shot check must NOT trust the /api/apps/ list's absence (NetworkFirst → a
+  // stale SW cache fallback is indistinguishable from a live response); it probes the
+  // AUTHORITATIVE per-app endpoint and deletes ONLY on a real 404, mirroring the chat
+  // 404-probe (cancelled + stale guards).
+  const effect = shell.match(/One-shot slot-app reconcile \(H1\)[\s\S]*?workspaceStateRef\]\)/)?.[0] || ''
+  assert.ok(effect.length > 0, 'found the slot-app probe effect')
+  assert.match(effect, /if \(!appsLiveFetched \|\| initialSlotReconciledRef\.current\) return/)
   assert.match(effect, /const slot = workspaceStateRef\.current\.ws\.singleScreen/)
-  assert.match(effect, /slot && slot\.kind === 'app' && !liveIds\.has\(Number\(slot\.id\)\)/)
+  // Fast path: a slot app the live list already vouches for is skipped, no probe.
+  assert.match(effect, /if \(apps\.some\(a => Number\(a\.id\) === Number\(slot\.id\)\)\) return/)
+  // The authoritative per-app probe via the shared deletion-evidence contract, and
+  // teardown ONLY on a 'deleted' verdict (a real 404).
+  assert.match(effect, /probeDeletion\(`\/apps\/\$\{encodeURIComponent\(slotId\)\}`\)/)
+  assert.match(effect, /if \(verdict !== 'deleted'\) return/)
+  // Stale-guard: a slot change mid-probe must never delete the new slot.
+  assert.match(effect, /const current = workspaceStateRef\.current\.ws\.singleScreen/)
+  assert.match(effect, /Number\(current\.id\) !== Number\(slotId\)\) return/)
+  // Cancelled-guard cleanup, like the chat cold-restore probe.
+  assert.match(effect, /let cancelled = false/)
+  assert.match(effect, /return \(\) => \{ cancelled = true \}/)
   // Close as deleted (reducer clears the slot), then resolve home instead of blank.
   assert.match(effect, /reason: 'deleted'/)
   assert.match(effect, /resolveEmptySingleHome\(\)/)
+})
+
+// The shared deletion-evidence contract both cold-restore probes route through: list
+// absence is a HINT, an authoritative per-resource 404 is the only proof of deletion.
+test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unknown', () => {
+  const client = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
+  assert.match(client, /export async function probeDeletion\(path\)/)
+  assert.match(client, /if \(res\.status === 404\) return 'deleted'/)
+  assert.match(client, /if \(res\.ok\) return 'exists'/)
+  assert.match(client, /return 'unknown'/)
+  // Both cold-restore probes read the SAME contract (rhyme, not two copies).
+  assert.match(shell, /probeDeletion\(`\/apps\//)
+  assert.match(shell, /probeDeletion\(`\/chats\//)
 })
 
 // ── N1: retired v2 plumbing is gone ───────────────────────────────────────────
@@ -785,8 +840,16 @@ test('N1: dead exit-presentation plumbing is removed', () => {
   assert.doesNotMatch(controller, /dragArm = useCallback\(\(focusedPaneId\)/)
   assert.doesNotMatch(controller, /drag-arm', focusedPaneId/)
   assert.match(shell, /mode\.dragArm\(\)/)
-  // The unused --ease-mode-chrome token is gone (only arrive/leave remain).
-  assert.doesNotMatch(css, /--ease-mode-chrome/)
+  // Polish item 2/3: --ease-mode-chrome + --ease-mode-promote are (re)introduced as
+  // USED tokens — the chrome fades + strip-clear ride the chrome curve, the promote
+  // FLIP rides the promote curve — so they are no longer the dead plumbing this
+  // originally removed.
+  assert.match(css, /--ease-mode-chrome: cubic-bezier/)
+  assert.match(css, /--ease-mode-promote: cubic-bezier/)
+  assert.match(css, /shell-mode-chrome-out 90ms var\(--ease-mode-chrome\)/)
+  assert.match(css, /shell-mode-chrome-in 110ms var\(--ease-mode-chrome\) 84ms/)
+  assert.match(css, /shell-mode-strip-clear 100ms var\(--ease-mode-chrome\)/)
+  assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)/)
   // The unused excludeChatId param on resolveEmptySingleHome is gone.
   assert.doesNotMatch(shell, /excludeChatId/)
   assert.match(shell, /const resolveEmptySingleHome = useCallback\(\(\) =>/)
