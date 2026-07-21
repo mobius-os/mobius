@@ -35,9 +35,15 @@ BUNDLED_RUNTIME_LIBS: tuple[str, ...] = (
 )
 
 COMPILED_RUNTIME_ABI = 1
+# Bump this when every installed bundle must be rebuilt for an additive
+# compiled-runtime change that remains host-compatible. Keep ABI for actual
+# host/runtime incompatibilities: a revision-only rollout is safe while the
+# live checkout and backend process briefly run different generations.
+COMPILED_RUNTIME_ARTIFACT_REVISION = 2
 COMPILED_RUNTIME_GLOBAL = "__mobiusCompiledRuntime"
 COMPILED_RUNTIME_BANNER = (
-  f"/* mobius-compiled-runtime-abi:{COMPILED_RUNTIME_ABI} */"
+  f"/* mobius-compiled-runtime-abi:{COMPILED_RUNTIME_ABI};"
+  f"artifact-revision:{COMPILED_RUNTIME_ARTIFACT_REVISION} */"
 )
 
 

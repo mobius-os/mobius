@@ -6,6 +6,7 @@ of minting a fresh empty app. Recovery is agent-driven and consistent with
 chats: POST /api/apps/{id}/recover, plus reinstall-reattach for store apps.
 """
 
+import hashlib
 import io
 import json
 from datetime import datetime, timedelta, UTC
@@ -187,6 +188,41 @@ def test_recover_endpoint_restores_app(client, auth, db, bypass_url_validation):
   assert row.deleted_at is None
   assert data_file.read_text() == "recover-me"
   assert app_id in [a["id"] for a in client.get("/api/apps/", headers=auth).json()]
+
+
+def test_recover_refreshes_tombstoned_old_runtime_bundle(
+  client, auth, db, bypass_url_validation,
+):
+  from app.app_compile_contract import COMPILED_RUNTIME_BANNER
+
+  app = _install(client, auth)
+  app_id = app["id"]
+  row = db.query(models.App).filter(models.App.id == app_id).one()
+  current = Path(row.compiled_path)
+  current_bytes = current.read_bytes()
+  current_banner = COMPILED_RUNTIME_BANNER.encode("ascii")
+  assert current_bytes.startswith(current_banner)
+
+  old_banner = b"/* mobius-compiled-runtime-abi:1 */"
+  old_bytes = old_banner + current_bytes[len(current_banner):]
+  old_digest = hashlib.sha256(old_bytes).hexdigest()
+  old_bundle = current.parent / f"app-{app_id}-{old_digest}.js"
+  old_bundle.write_bytes(old_bytes)
+  row.compiled_path = str(old_bundle)
+  db.commit()
+  current.unlink()
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  response = client.post(f"/api/apps/{app_id}/recover", headers=auth)
+
+  assert response.status_code == 200, response.text
+  db.expire_all()
+  recovered = db.query(models.App).filter(models.App.id == app_id).one()
+  recovered_bundle = Path(recovered.compiled_path)
+  assert recovered.deleted_at is None
+  assert recovered_bundle.read_bytes().startswith(current_banner)
+  assert recovered_bundle != old_bundle
+  assert not old_bundle.exists()
 
 
 def test_recover_never_reactivates_pre_uninstall_app_token(
