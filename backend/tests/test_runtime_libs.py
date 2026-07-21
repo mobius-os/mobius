@@ -13,6 +13,7 @@ from pathlib import Path
 from app.app_compile_contract import (
   BUNDLED_RUNTIME_LIBS,
   COMPILED_RUNTIME_ABI,
+  COMPILED_RUNTIME_ARTIFACT_REVISION,
   COMPILED_RUNTIME_BANNER,
   ESBUILD_TIMEOUT_SECS,
   esbuild_command,
@@ -110,6 +111,10 @@ def test_compiler_and_both_hosts_agree_on_runtime_abi():
   assert f"abi: {COMPILED_RUNTIME_ABI}" in inject
   assert f"COMPILED_RUNTIME_ABI = {COMPILED_RUNTIME_ABI}" in frame
   assert f"compiledRuntime.abi !== {COMPILED_RUNTIME_ABI}" in standalone
+  assert (
+    f"artifact-revision:{COMPILED_RUNTIME_ARTIFACT_REVISION}"
+    in COMPILED_RUNTIME_BANNER
+  )
 
 
 def test_codemirror_direct_imports_remain_supported():

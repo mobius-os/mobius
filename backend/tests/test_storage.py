@@ -1,5 +1,6 @@
 """Storage API: tests for both envelope and inner-object PUT forms."""
 
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -1169,6 +1170,43 @@ async def test_reconcile_outdated_bundles_recompiles_legacy_bundle(
   assert "ABI_MIGRATED" in rebuilt
   assert rebuilt_path != legacy
   assert not legacy.exists()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_outdated_bundles_recompiles_old_artifact_revision(
+  client, owner_token, db,
+):
+  import app.models as models
+  from app.app_compile_contract import COMPILED_RUNTIME_BANNER
+  from app.compiler import reconcile_outdated_bundles
+
+  app_id = _make_app(client, owner_token)
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  current = Path(row.compiled_path)
+  current_bytes = current.read_bytes()
+  current_banner = COMPILED_RUNTIME_BANNER.encode("ascii")
+  old_banner = b"/* mobius-compiled-runtime-abi:1 */"
+  assert current_bytes.startswith(current_banner)
+  old_bytes = old_banner + current_bytes[len(current_banner):]
+  old_digest = hashlib.sha256(old_bytes).hexdigest()
+  old_bundle = current.parent / f"app-{app_id}-{old_digest}.js"
+  current.unlink()
+  old_bundle.write_bytes(old_bytes)
+  row.compiled_path = str(old_bundle)
+  row.jsx_source = (
+    "export default function App(){ return <div>REVISION_MIGRATED</div> }"
+  )
+  db.commit()
+
+  migrated = await reconcile_outdated_bundles(db)
+
+  rebuilt_path = _bundle_path(db, app_id)
+  rebuilt = rebuilt_path.read_text(encoding="utf-8")
+  assert app_id in migrated
+  assert rebuilt.startswith(COMPILED_RUNTIME_BANNER)
+  assert "REVISION_MIGRATED" in rebuilt
+  assert rebuilt_path != old_bundle
+  assert not old_bundle.exists()
 
 
 @pytest.mark.asyncio
