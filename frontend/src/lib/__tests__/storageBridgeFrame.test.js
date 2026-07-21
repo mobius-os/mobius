@@ -88,6 +88,7 @@ test('AppCanvas routes storage only after exact frame-source attribution', () =>
     line => line.includes('header @appFrame >Content-Security-Policy'),
   ) || ''
   assert.match(frameCsp, /sandbox allow-scripts/)
+  assert.match(frameCsp, /allow-popups-to-escape-sandbox/)
   assert.doesNotMatch(frameCsp, /\ballow-same-origin\b/)
 })
 

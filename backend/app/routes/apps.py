@@ -2513,7 +2513,10 @@ def _etag_for_app(app: models.App) -> str | None:
 
 
 def _not_modified_if_match(
-  request: Request, etag: str, offline: bool = False
+  request: Request,
+  etag: str,
+  offline: bool = False,
+  response_headers: dict[str, str] | None = None,
 ) -> Response | None:
   """Returns a 304 Response if the request's If-None-Match matches
   `etag`, else None. The 304 keeps the ETag header so a browser
@@ -2521,14 +2524,24 @@ def _not_modified_if_match(
   mirrors the X-Mobius-Offline marker so the 304 carries the same
   cache metadata as the 200 it stands in for. The SW's
   appCodeStoreAction policy keys on that header for the gated
-  standalone-navigation cache."""
+  standalone-navigation cache. Callers whose representation metadata changes
+  independently of the body (notably the frame CSP) pass it through so a 304
+  freshens the cached policy instead of preserving obsolete headers."""
   match = request.headers.get("if-none-match")
   if match and etag in [v.strip() for v in match.split(",")]:
-    headers = {"ETag": etag}
+    headers = dict(response_headers or {})
+    headers["ETag"] = etag
     if offline:
       headers["X-Mobius-Offline"] = "1"
     return Response(status_code=304, headers=headers)
   return None
+
+
+_APP_FRAME_CSP = (
+  "sandbox allow-scripts allow-forms allow-popups "
+  "allow-popups-to-escape-sandbox "
+  "allow-top-navigation-by-user-activation"
+)
 
 
 def _frame_etag(
@@ -2646,8 +2659,17 @@ def get_frame(
   # validator on it plus app.updated_at.
   frame_rev = theme.frame_content_rev(get_settings().data_dir)
   etag = _frame_etag(app, frame_path, frame_rev=frame_rev)
+  frame_cache_headers = {
+    "Cache-Control": "no-cache",
+    "Content-Security-Policy": _APP_FRAME_CSP,
+  }
   if etag:
-    not_modified = _not_modified_if_match(request, etag, app.offline_capable)
+    not_modified = _not_modified_if_match(
+      request,
+      etag,
+      app.offline_capable,
+      response_headers=frame_cache_headers,
+    )
     if not_modified is not None:
       return not_modified
 
@@ -2675,14 +2697,12 @@ def get_frame(
   # worker can intercept and serve a cached frame offline. Apply the equivalent
   # sandbox on the RESPONSE: the loaded app still receives an opaque origin,
   # including when this backend is reached without the edge proxy. Caddy adds
-  # the full resource policy while preserving this sandbox contract.
-  headers = {
-    "Cache-Control": "no-cache",
-    "Content-Security-Policy": (
-      "sandbox allow-scripts allow-forms allow-popups "
-      "allow-top-navigation-by-user-activation"
-    ),
-  }
+  # the full resource policy while preserving this sandbox contract. Popups
+  # opened by an explicit app link must escape the opaque-origin sandbox:
+  # otherwise the destination inherits Origin: null and sites such as GitHub
+  # load their document but fail same-origin API/storage requests. This does
+  # not relax the app frame itself or let it navigate the owner shell.
+  headers = dict(frame_cache_headers)
   if etag:
     headers["ETag"] = etag
   # The X-Mobius-Offline header does not gate frame/module caching: the SW
