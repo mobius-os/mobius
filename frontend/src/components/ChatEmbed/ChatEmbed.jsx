@@ -7,8 +7,10 @@ import {
   setEphemeralAuthSession,
 } from '../../api/client.js'
 import { applyThemeToDom } from '../../lib/themeService.js'
+import { handoffEmbedBootstrap } from '../../lib/chatEmbedBootstrap.js'
 import {
   INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, AUTH_EXPIRING,
+  BOOTSTRAP_READY,
   CONTEXT_REQUEST, CONTEXT_RESPONSE, CONTEXT_RESPONSE_TIMEOUT_MS,
   isEmbedMessage, retainEmbedSessionAfterExchangeFailure,
 } from '../../lib/chatEmbed.js'
@@ -218,6 +220,14 @@ export default function ChatEmbed() {
 
     window.addEventListener('message', onMessage)
     window.addEventListener('mobius:chat-embed-auth-expired', onAuthExpired)
+    handoffEmbedBootstrap(onMessage)
+    // This route is lazy-loaded, so the iframe's document load may finish
+    // before this effect installs its INIT listener. Tell the exact parent
+    // WindowProxy when the receiver is live; no grant or identifier is sent
+    // until then.
+    if (parentRef.current && parentRef.current !== window) {
+      parentRef.current.postMessage({ type: BOOTSTRAP_READY }, '*')
+    }
     return () => {
       window.removeEventListener('message', onMessage)
       window.removeEventListener('mobius:chat-embed-auth-expired', onAuthExpired)

@@ -2232,6 +2232,7 @@ const EMBED_MESSAGE_SENT = EMBED_NS + 'message-sent'
 const EMBED_TURN_DONE = EMBED_NS + 'turn-done'
 const EMBED_ERROR = EMBED_NS + 'error'
 const EMBED_AUTH_EXPIRING = EMBED_NS + 'auth-expiring'
+const EMBED_BOOTSTRAP_READY = EMBED_NS + 'bootstrap-ready'
 // Context protocol — mirrored from src/lib/chatEmbed.js; keep in sync.
 const EMBED_CONTEXT_REQUEST = EMBED_NS + 'context-request'
 const EMBED_CONTEXT_RESPONSE = EMBED_NS + 'context-response'
@@ -2886,20 +2887,14 @@ function makeChat({ appId, getToken, storage }) {
       })
     }
 
-    function sendInit() {
-      authorizationHandoff?.start()
-    }
-
     function replaceEmbedFrame() {
       const previous = iframe
-      previous.removeEventListener('load', sendInit)
       authorizationHandoff?.destroy()
       frameReveal?.destroy()
       iframe = createEmbedFrame()
       frameReveal = makeFrameRevealController(iframe)
       hasAuthorizedOnce = false
       authorizationHandoff = createAuthorizationHandoff()
-      iframe.addEventListener('load', sendInit)
       if (previous.parentNode) previous.parentNode.replaceChild(iframe, previous)
     }
 
@@ -2909,6 +2904,13 @@ function makeChat({ appId, getToken, storage }) {
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
       if (typeof msg.type !== 'string' || !msg.type.startsWith(EMBED_NS)) return
+      // A lazy route can finish document loading before its React effect has
+      // installed the INIT listener. Mint the one-use grant only after the
+      // exact child WindowProxy says that receiver is ready.
+      if (msg.type === EMBED_BOOTSTRAP_READY) {
+        authorizationHandoff?.start()
+        return
+      }
       if (msg.instanceId !== instanceId) return
       if (msg.type === EMBED_READY) {
         if (!authorizationHandoff?.ready(msg.authorizationId)) return
@@ -2963,15 +2965,10 @@ function makeChat({ appId, getToken, storage }) {
       }
     }
 
-    // Register the message listener BEFORE appending the iframe, so it's
-    // live before the embed can post its mount-time READY. INIT is sent
-    // on the iframe's load event, which (per the HTML spec) fires after
-    // the embed document's scripts have run and its own message listener
-    // is registered — so the single INIT reaches it without a race, the
-    // same handshake AppCanvas ↔ app-frame.html rely on.
+    // Register before append so the child's bootstrap-ready message cannot be
+    // lost. The child sends it only after installing its INIT listener.
     authorizationHandoff = createAuthorizationHandoff()
     window.addEventListener('message', onMessage)
-    iframe.addEventListener('load', sendInit)
     frameMount.appendChild(iframe)
     if (controlsShell) {
       mount.appendChild(controlsShell)
@@ -2990,7 +2987,6 @@ function makeChat({ appId, getToken, storage }) {
       },
       destroy() {
         window.removeEventListener('message', onMessage)
-        iframe.removeEventListener('load', sendInit)
         authorizationHandoff?.destroy()
         frameReveal?.destroy()
         revokeEmbed(chatId, instanceId)

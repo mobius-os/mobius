@@ -12,7 +12,7 @@ const APP_SOURCE = readFileSync(new URL('../../App.jsx', import.meta.url), 'utf8
 test('ChatEmbed does not load owner theme/storage before authorization', () => {
   assert.doesNotMatch(SOURCE, /\buseTheme\s*\(/)
   assert.doesNotMatch(SOURCE, /localStorage\s*\./)
-  assert.match(APP_SOURCE, /if \(EMBED_ROUTE\) beginEphemeralAuth\(\)/)
+  assert.match(APP_SOURCE, /if \(EMBED_ROUTE\) \{[\s\S]*beginEphemeralAuth\(\)/)
 })
 
 test('ChatEmbed applies theme returned by the verified session exchange', () => {

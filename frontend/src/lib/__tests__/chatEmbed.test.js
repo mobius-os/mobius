@@ -19,6 +19,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   NS, INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT, AUTH_EXPIRING,
+  BOOTSTRAP_READY,
   CONTEXT_RESPONSE_TIMEOUT_MS,
   isEmbedMessage, embedUrl, makeEmitter, retainEmbedSessionAfterExchangeFailure,
 } from '../chatEmbed.js'
@@ -31,7 +32,10 @@ function evt({ origin = ORIGIN, source = SRC, type, instanceId, chatId } = {}) {
 }
 
 test('all message types share the moebius:chat-embed: namespace', () => {
-  for (const t of [INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT, AUTH_EXPIRING]) {
+  for (const t of [
+    INIT, READY, MESSAGE_SENT, TURN_DONE, ERROR, HEIGHT, AUTH_EXPIRING,
+    BOOTSTRAP_READY,
+  ]) {
     assert.ok(t.startsWith(NS), `${t} must start with ${NS}`)
   }
   // Distinct from the app-frame protocol so a stray frame message can
