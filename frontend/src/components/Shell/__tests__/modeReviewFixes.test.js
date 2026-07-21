@@ -163,6 +163,22 @@ test('finding 7: undo routes the mode restoration through mode.undo before UNDO_
   assert.match(shell, /const presentation = restoredMode === 'panes'\s*\n\s*\? deriveEnterPlan/)
 })
 
+// -- Finding R3: the last-tab-close auto-return arms the descriptor same-batch ---
+test('finding R3: an emptying close arms the auto-return flip in the SAME batch, no autoFlip API', () => {
+  // The auto-return no longer lags a frame: closeTab detects the close will empty
+  // the builder tree and dispatches an INSTANT mode flip (cause 'auto') alongside
+  // CLOSE_TAB, so committedMode flips to single WITH the tree — not a render later
+  // via the passive sync-committed reconcile. It is a normal planned exit, not a
+  // separate autoFlip event (that orphaned API was deleted).
+  assert.match(shell, /paneModel\.isEmptyTree\(paneModel\.closeTab\(ws, key\)\)\) \{\s*\n\s*mode\.toggle\(\{ cause: 'auto', to: 'single' \}\)/)
+  assert.doesNotMatch(controller, /autoFlip/)
+  // An emptied-tree flip carries no plan → the machine flips instantly (no beat).
+  const flipped = modeReducer({ committedMode: 'panes', transition: null, nextId: 1 },
+    { type: 'toggle', cause: 'auto', to: 'single', presentation: null })
+  assert.equal(flipped.committedMode, 'single')
+  assert.equal(flipped.transition, null)
+})
+
 // -- Finding 8: slot-only app gets a synthetic history owner -------------------
 test('finding 8: appOwnerPaneId returns the synthetic single-world owner for a slot app', () => {
   assert.match(nav, /const appOwnerPaneId = useCallback/)

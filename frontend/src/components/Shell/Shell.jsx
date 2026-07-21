@@ -793,8 +793,23 @@ export default function Shell() {
   // deletion differs only by reason:'deleted'. Takes a tab object + opts so the
   // WorkspaceChrome strips no longer own a private CLOSE_TAB dispatcher.
   const closeTab = useCallback((tab, { reason } = {}) => {
-    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: tabModel.tabKey(tab), reason })
-  }, [dispatchWorkspace])
+    const key = tabModel.tabKey(tab)
+    const ws = workspaceStateRef.current.ws
+    // R3 (auto-return through the descriptor): a user close that EMPTIES the builder
+    // tree auto-returns to single (the reducer's autoReturnIfEmptied). Arm the SAME
+    // flip on the mode descriptor in the SAME batch (cause 'auto') so committedMode
+    // flips to single NOW — not a frame later via the passive sync-committed
+    // reconcile, which left the logo twisted for one intermediate frame. An emptied
+    // tree has no pane to deal out, so the exit is instant (null presentation); the
+    // tree's coupled undo re-enters builder as one gesture. A sole Settings tab is
+    // no exception — closing it empties the tree the same way. reason:'deleted' does
+    // not auto-return (the reducer skips it), so it is excluded here too.
+    if (SPLITS && reason !== 'deleted' && ws.viewMode === 'panes'
+        && !paneModel.isEmptyTree(ws) && paneModel.isEmptyTree(paneModel.closeTab(ws, key))) {
+      mode.toggle({ cause: 'auto', to: 'single' })
+    }
+    dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: key, reason })
+  }, [dispatchWorkspace, mode, workspaceStateRef])
   const placeInWorkspace = useCallback((requestOrRequests) => {
     const requests = Array.isArray(requestOrRequests)
       ? requestOrRequests
