@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState } from 'react'
+import { useId, useMemo, useRef } from 'react'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
 import {
@@ -16,6 +16,7 @@ import { preserveTogglePosition } from './preserveTogglePosition.js'
 import ActivityLineHeader, { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import SubagentChips from './SubagentChips.jsx'
 import { useThinkingTrace } from './useThinkingTrace.js'
+import { useDisclosureState } from './disclosureState.js'
 
 // One collapsible activity line standing in for a MULTI-STEP contiguous stretch
 // of thinking and tool blocks, so a build turn's pre-prose burst reads as one
@@ -32,8 +33,9 @@ import { useThinkingTrace } from './useThinkingTrace.js'
 // the transcript. A thought keeps this same child component as tools arrive,
 // avoiding an automatic height/state change in the middle of a live run.
 //
-// COLLAPSED BY DEFAULT, ALWAYS — the line never auto-opens; the user's tap is
-// the only thing that opens or closes it, mid-run included. An earlier version
+// COLLAPSED ON FIRST ENCOUNTER, then restored from this chat's session screen
+// state — the line never auto-opens; the user's tap is the only thing that
+// changes its saved open/closed value, mid-run included. An earlier version
 // of the tool-group card this replaces force-opened while any child was running
 // (`open = running || userOpen`), on the theory that the live tool should stay
 // visible mid-stream. That was wrong on two counts:
@@ -48,9 +50,10 @@ import { useThinkingTrace } from './useThinkingTrace.js'
 // shimmer plus the running-first activity summary already say what is
 // executing. So the sole open/close signal is `userOpen`, and no effect or
 // prop derives it.
-function TimelineThought({ label, thought, chatId }) {
-  const [open, setOpen] = useState(false)
+function TimelineThought({ label, thought, chatId, disclosureKey }) {
+  const [open, setOpen] = useDisclosureState(chatId, disclosureKey)
   const headerRef = useRef(null)
+  const bodyRef = useRef(null)
   const bodyId = useId()
   const trace = useThinkingTrace({ open, thought, chatId })
   const content = thinkingContentForDisplay(trace.content)
@@ -85,7 +88,7 @@ function TimelineThought({ label, thought, chatId }) {
         type="button"
         className="chat__activity-think-toggle"
         onClick={() => {
-          preserveTogglePosition(headerRef.current)
+          preserveTogglePosition(headerRef.current, bodyRef.current)
           setOpen(o => !o)
         }}
         aria-expanded={open}
@@ -96,7 +99,7 @@ function TimelineThought({ label, thought, chatId }) {
         </span>
         <span className="chat__activity-think-label">{label}</span>
       </button>
-      <div id={bodyId} className="chat__reasoning-body" hidden={!open}>
+      <div ref={bodyRef} id={bodyId} className="chat__reasoning-body" hidden={!open}>
         {open && body}
         {open && loadState === 'ready' && !trace.previewComplete && (
           <div className="chat__lazy-status chat__reasoning-preview-status">
@@ -121,8 +124,9 @@ function TimelineThought({ label, thought, chatId }) {
   )
 }
 
-function SingleActivity({ entry, chatId, live }) {
+function SingleActivity({ entry, chatId, live, surfaceKey }) {
   const { item, idx } = entry
+  const blockKey = assistantBlockKey(item, idx)
   if (item.type === 'thinking') {
     return (
       <TimelineThought
@@ -130,6 +134,7 @@ function SingleActivity({ entry, chatId, live }) {
         label={live ? 'Thinking' : thoughtDurationLabel(item.duration_ms)}
         thought={item}
         chatId={chatId}
+        disclosureKey={`${surfaceKey}:thought:${blockKey}`}
       />
     )
   }
@@ -143,15 +148,21 @@ function SingleActivity({ entry, chatId, live }) {
         t={item}
         chatId={chatId}
         compact
+        disclosureKey={`${surfaceKey}:tool:${blockKey}`}
       />
       {hasHelpers && <SubagentChips subagent={item.subagent} />}
     </>
   )
 }
 
-function GroupedActivityStretch({ entries, chatId, live = false }) {
-  const [userOpen, setUserOpen] = useState(false)
+function GroupedActivityStretch({ entries, chatId, live = false, surfaceKey }) {
+  const stretchKey = assistantBlockKey(entries[0]?.item, entries[0]?.idx)
+  const [userOpen, setUserOpen] = useDisclosureState(
+    chatId,
+    `${surfaceKey}:activity:${stretchKey}`,
+  )
   const headerRef = useRef(null)
+  const timelineRef = useRef(null)
   const timelineId = useId()
 
   const lastItem = entries[entries.length - 1]?.item
@@ -267,7 +278,7 @@ function GroupedActivityStretch({ entries, chatId, live = false }) {
         // no forced-open state for a tap to fight, so the user can peek into a
         // live run and close it again.
         onToggle={() => {
-          preserveTogglePosition(headerRef.current)
+          preserveTogglePosition(headerRef.current, timelineRef.current)
           setUserOpen(o => !o)
         }}
         // A delegating turn's helper rollup ("2 running · 1 done"); the header
@@ -284,7 +295,7 @@ function GroupedActivityStretch({ entries, chatId, live = false }) {
           subagent={tool.subagent}
         />
       ))}
-      <div id={timelineId} className="chat__activity-timeline" hidden={!open}>
+      <div ref={timelineRef} id={timelineId} className="chat__activity-timeline" hidden={!open}>
         {open && entries.map(({ item, idx }) => {
           if (item.type === 'thinking') {
             const key = assistantBlockKey(item, idx)
@@ -294,13 +305,19 @@ function GroupedActivityStretch({ entries, chatId, live = false }) {
                 label={thoughtDurationLabel(item.duration_ms)}
                 thought={item}
                 chatId={chatId}
+                disclosureKey={`${surfaceKey}:thought:${key}`}
               />
             )
           }
           // chatId + the block's tool_use_id let ToolBlock lazily fetch a
           // truncated large output on expand (GET /tool-output/{tool_use_id}).
           return (
-            <ToolBlock key={assistantBlockKey(item, idx)} t={item} chatId={chatId} />
+            <ToolBlock
+              key={assistantBlockKey(item, idx)}
+              t={item}
+              chatId={chatId}
+              disclosureKey={`${surfaceKey}:tool:${assistantBlockKey(item, idx)}`}
+            />
           )
         })}
       </div>
@@ -308,9 +325,23 @@ function GroupedActivityStretch({ entries, chatId, live = false }) {
   )
 }
 
-export default function ActivityStretch({ entries, chatId, live = false }) {
+export default function ActivityStretch({ entries, chatId, live = false, surfaceKey }) {
   if (entries.length === 1) {
-    return <SingleActivity entry={entries[0]} chatId={chatId} live={live} />
+    return (
+      <SingleActivity
+        entry={entries[0]}
+        chatId={chatId}
+        live={live}
+        surfaceKey={surfaceKey}
+      />
+    )
   }
-  return <GroupedActivityStretch entries={entries} chatId={chatId} live={live} />
+  return (
+    <GroupedActivityStretch
+      entries={entries}
+      chatId={chatId}
+      live={live}
+      surfaceKey={surfaceKey}
+    />
+  )
 }

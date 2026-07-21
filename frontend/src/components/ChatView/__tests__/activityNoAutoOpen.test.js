@@ -17,9 +17,9 @@ const src = readFileSync(new URL('../ActivityStretch.jsx', import.meta.url), 'ut
 // removed, and that history must not trip the code-level guard below.
 const body = src.slice(src.indexOf('function GroupedActivityStretch'))
 
-test('the stretch starts collapsed and open is exactly userOpen', () => {
-  assert.match(body, /const \[userOpen, setUserOpen\] = useState\(false\)/,
-    'userOpen initializes to false (collapsed by default)')
+test('the stretch restores saved user state and open is exactly userOpen', () => {
+  assert.match(body, /const \[userOpen, setUserOpen\] = useDisclosureState\(/,
+    'userOpen restores only the user-authored per-chat state')
   assert.match(body, /\n\s*const open = userOpen\n/,
     'open derives from userOpen alone — no force-open expression')
   // No `open = running || userOpen` / `userOpen || live` style force-open.
@@ -34,7 +34,7 @@ test('the only open-state write is the user toggle, guarded by preserveTogglePos
     'setUserOpen is called from exactly one place')
   // preserveTogglePosition runs BEFORE the state mutation on every toggle path —
   // the scroll anchor is captured before the height changes.
-  assert.match(src, /preserveTogglePosition\(headerRef\.current\)\s*setUserOpen\(o => !o\)/,
+  assert.match(src, /preserveTogglePosition\(headerRef\.current, timelineRef\.current\)\s*setUserOpen\(o => !o\)/,
     'the toggle preserves the anchor before flipping open state')
 })
 

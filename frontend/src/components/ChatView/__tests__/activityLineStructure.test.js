@@ -57,8 +57,8 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
     'thinking is an activity type, not an empty icon column')
   assert.match(activityStretch, /function TimelineThought/,
     'a mixed thought owns its disclosure state')
-  assert.match(activityStretch, /const \[open, setOpen\] = useState\(false\)/,
-    'nested thinking starts collapsed')
+  assert.match(activityStretch, /const \[open, setOpen\] = useDisclosureState\(chatId, disclosureKey\)/,
+    'nested thinking restores its per-chat disclosure state')
   assert.match(activityStretch, /className="chat__activity-think-toggle"/)
   assert.doesNotMatch(activityStretch, /chat__activity-think-chevron/,
     'nested reasoning uses its icon and row affordance without a chevron')
@@ -72,7 +72,7 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
     'deferred thought state changes should be announced')
   assert.match(activityStretch, /className="chat__lazy-retry" onClick=\{trace\.retry\}/,
     'a failed thought should retry without a close/reopen ritual')
-  assert.match(activityStretch, /preserveTogglePosition\(headerRef\.current\)\s*setOpen\(o => !o\)/,
+  assert.match(activityStretch, /preserveTogglePosition\(headerRef\.current, bodyRef\.current\)\s*setOpen\(o => !o\)/,
     'opening a long trace preserves the reader anchor')
   assert.doesNotMatch(activityStretch, /if \(thinkingOnly\) \{/,
     'a thinking-only entry must not swap component type when the first tool arrives')
@@ -82,10 +82,10 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
 
 test('a single activity discloses directly without a redundant parent row', () => {
   assert.match(activityStretch, /if \(entries\.length === 1\)/)
-  assert.match(activityStretch, /return <SingleActivity entry=\{entries\[0\]\}/)
+  assert.match(activityStretch, /<SingleActivity[\s\S]*entry=\{entries\[0\]\}/)
   assert.match(activityStretch,
     /item\.type === 'thinking'[\s\S]*<TimelineThought[\s\S]*key=\{assistantBlockKey\(item, idx\)\}/)
-  assert.match(activityStretch, /<ToolBlock key=\{assistantBlockKey\(item, idx\)\}/)
+  assert.match(activityStretch, /<ToolBlock[\s\S]*key=\{assistantBlockKey\(item, idx\)\}/)
 })
 
 test('lazy tool details and touch targets keep their accessibility contract', () => {
