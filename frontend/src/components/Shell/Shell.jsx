@@ -1134,7 +1134,9 @@ export default function Shell() {
     if (visibleWorldEmpty) {
       const fallback = chatsRef.current.find(c => String(c.id) !== String(missingId))
       if (fallback) {
-        applyModeDestination({ view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId })
+        // R1: a background 404-repair preserves an open Settings takeover — it seeds
+        // the visible slot beneath it rather than dismissing the owner's Settings view.
+        applyModeDestination({ view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId }, { preserveSettings: true })
       }
     }
   }, [applyModeDestination, dispatchWorkspace, workspaceStateRef])
@@ -1903,7 +1905,10 @@ export default function Shell() {
         ? ws.singleScreen == null
         : !ws.panes[ws.focusedPaneId]?.activeTabKey
       if (visibleWorldEmpty && chats[0]) {
-        applyModeDestination({ view: 'chat', chatId: chats[0].id, appId: null, paneId: ws.focusedPaneId })
+        // R1: the boot chat-list seed preserves an open Settings takeover (it seeds
+        // the empty slot beneath it), so a single-mode reload into Settings is not
+        // dismissed by the background seed.
+        applyModeDestination({ view: 'chat', chatId: chats[0].id, appId: null, paneId: ws.focusedPaneId }, { preserveSettings: true })
       }
       chatsLoadedRef.current = true
       return
@@ -1959,7 +1964,9 @@ export default function Shell() {
             : !ws.panes[ws.focusedPaneId]?.activeTabKey
           const fallback = chats.find(c => c.id !== probedChatId)
           if (visibleWorldEmpty && fallback) {
-            applyModeDestination({ view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId })
+            // R1: a background 404-repair preserves an open Settings takeover — it seeds
+        // the visible slot beneath it rather than dismissing the owner's Settings view.
+        applyModeDestination({ view: 'chat', chatId: fallback.id, appId: null, paneId: ws.focusedPaneId }, { preserveSettings: true })
           }
         } else if (res.ok) {
           // Exists but is unlisted because it is app-attributed or the drawer

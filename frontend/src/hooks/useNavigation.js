@@ -788,7 +788,7 @@ export default function useNavigation({
   //     single  → SET_SINGLE_SCREEN (the pane tree is NEVER touched; slot only).
   //     builder → OPEN_TAB in the hinted/focused pane (today's behavior).
   // `item` null/absent in single mode sets the empty/home screen. Returns nothing.
-  const applyModeDestination = useCallback((route) => {
+  const applyModeDestination = useCallback((route, { preserveSettings = false } = {}) => {
     if (!route || route.view === 'settings') {
       applySettingsDestination(route?.paneId)
       return
@@ -798,9 +798,15 @@ export default function useNavigation({
     // disabled the presentation is single, so a chat/app nav must set the SLOT,
     // never OPEN_TAB into the hidden pane tree.
     const mode = paneModel.WORKSPACE_SPLITS_ENABLED ? ws.viewMode : 'single'
-    // A chat/app destination always leaves any Settings takeover overlay.
-    setSettingsOpen(false)
-    settingsOpenRef.current = false
+    // A USER-initiated chat/app open leaves any Settings takeover (they chose to go
+    // elsewhere). A BACKGROUND repair/seed passes preserveSettings (R1): it writes
+    // the destination BENEATH an open takeover without dismissing it, so a boot-seed
+    // or async 404-repair never yanks the owner out of the Settings view they are
+    // reading — the repaired surface is simply there when they close Settings.
+    if (!preserveSettings) {
+      setSettingsOpen(false)
+      settingsOpenRef.current = false
+    }
     if (mode === 'single') {
       const item = route.view === 'canvas'
         ? (route.appId != null ? { kind: 'app', id: route.appId } : null)

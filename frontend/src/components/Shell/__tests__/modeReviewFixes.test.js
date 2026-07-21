@@ -107,8 +107,11 @@ test('finding F9: mounted-chat + boot chat repair route through applyModeDestina
   // chat 404) must set the fallback via the ONE decision point, not a raw OPEN_TAB
   // into the hidden pane tree — else single mode paints an empty screen while the
   // "repaired" chat sits invisible in the tree (INV 2/4).
-  assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: fallback\.id, appId: null, paneId: ws\.focusedPaneId \}\)/)
-  assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: chats\[0\]\.id, appId: null, paneId: ws\.focusedPaneId \}\)/)
+  // R1: the repair/seed sites preserve an open Settings takeover (they seed the slot
+  // BENEATH it), so they pass { preserveSettings: true }; the user-nav newChat path
+  // (finding 4) does NOT — it dismisses Settings.
+  assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: fallback\.id, appId: null, paneId: ws\.focusedPaneId \}, \{ preserveSettings: true \}\)/)
+  assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: chats\[0\]\.id, appId: null, paneId: ws\.focusedPaneId \}, \{ preserveSettings: true \}\)/)
   // The "visible world is empty" guard is mode-aware: single checks a null slot.
   assert.match(shell, /const single = !paneModel\.WORKSPACE_SPLITS_ENABLED \|\| ws\.viewMode === 'single'/)
   assert.match(shell, /\? ws\.singleScreen == null/)
@@ -177,6 +180,15 @@ test('finding R3: an emptying close arms the auto-return flip in the SAME batch,
     { type: 'toggle', cause: 'auto', to: 'single', presentation: null })
   assert.equal(flipped.committedMode, 'single')
   assert.equal(flipped.transition, null)
+})
+
+// -- Finding R1: repair/seed preserve an OPEN Settings takeover -----------------
+test('finding R1: applyModeDestination only dismisses Settings when NOT preserving it', () => {
+  // The setSettingsOpen(false) is gated on !preserveSettings, so a background
+  // repair/seed (preserveSettings:true) writes the slot beneath an open takeover
+  // without dismissing the owner's Settings view; a user-initiated open still leaves.
+  assert.match(nav, /const applyModeDestination = useCallback\(\(route, \{ preserveSettings = false \} = \{\}\)/)
+  assert.match(nav, /if \(!preserveSettings\) \{\s*\n\s*setSettingsOpen\(false\)/)
 })
 
 // -- Finding W1: an epoch-keyed completion watchdog bounds a stuck beat ---------
