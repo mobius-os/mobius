@@ -494,15 +494,15 @@
       return EXTENSION_ORIGIN_RE.test(String(source || '')) || EXTENSION_ORIGIN_RE.test(String(stack || ''))
     }
     function handleFrameError(title, detail, source) {
-      if (window.__isExtensionError(source, detail)) {
-        console.warn('[moebius-frame] ignored browser-extension error (not this app): ' + detail)
-        return
-      }
       if (window.__frameMounted) {
         // The browser also logs the uncaught error natively; this line
         // records why no error panel replaced the working UI.
         console.error('[moebius-frame] post-mount ' + title +
           ' (app left on screen): ' + detail)
+        return
+      }
+      if (window.__isExtensionError(source, detail)) {
+        console.warn('[moebius-frame] ignored browser-extension error (not this app): ' + detail)
         return
       }
       showErr(title, detail)
