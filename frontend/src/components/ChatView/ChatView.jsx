@@ -2591,8 +2591,9 @@ export default function ChatView({
     doSend(input.trim())
   }
 
-  // Cancel a queued message via DELETE. Optimistic remove; reconcile
-  // by re-fetching authoritative state on success or on error.
+  // Cancel one queued message via DELETE. Keep reconciliation scoped to that
+  // CID: full queue snapshots can arrive out of order when two rows are
+  // cancelled quickly and would otherwise resurrect a sibling cancellation.
   const handleCancelPending = useCallback(async (cid) => {
     const currentQueue = pendingQueue.pendingMessagesRef.current
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
@@ -2604,14 +2605,25 @@ export default function ChatView({
         method: 'DELETE',
         timeoutMs: 15000,
       })
-      const data = await jsonOrThrow(res, 'Queued-message cancellation failed')
-      pendingQueue.hydrate(data.pending_messages || [])
+      await jsonOrThrow(res, 'Queued-message cancellation failed')
     } catch {
-      // Refetch authoritative state.
+      // A failed response is ambiguous: the DELETE may still have committed.
+      // Read server truth, but restore only this operation's row so an older
+      // response cannot overwrite unrelated queue mutations.
       try {
         const res = await apiFetch(`/chats/${chatId}?limit=1`, { timeoutMs: 15000 })
         const data = await jsonOrThrow(res, 'Queue refresh failed')
-        pendingQueue.hydrate(data.pending_messages || [])
+        const serverQueue = Array.isArray(data.pending_messages) ? data.pending_messages : []
+        const serverIndex = serverQueue.findIndex(row => cidOf(row) === cid)
+        if (serverIndex >= 0) {
+          const serverRow = serverQueue[serverIndex]
+          pendingQueue.restoreByCid({
+            ...serverRow,
+            cid: cidOf(serverRow),
+            queued: true,
+            serverTs: true,
+          }, serverIndex)
+        }
       } catch {
         // Both the mutation and its authoritative read are inconclusive. Put
         // back only this row, preserving any newer queue changes made while
@@ -2635,7 +2647,7 @@ export default function ChatView({
       // otherwise miss, and Stop's clear() would suppress the steer's
       // restore guard — the not_steered path would then lose those rows
       // everywhere (see steerInFlightRef). Bounded so a hung POST can't
-      // wedge Stop; on timeout we proceed with today's (pre-fix) behavior.
+      // wedge Stop; on timeout we continue with the current queue snapshot.
       const steerInFlight = steerInFlightRef.current
       if (steerInFlight) {
         await Promise.race([

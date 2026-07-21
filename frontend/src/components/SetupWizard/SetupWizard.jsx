@@ -170,8 +170,8 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
 
 /**
  * Connect-AI step: mirrors the Settings page's provider list but
- * with no default-selection radio. Each provider is a row that
- * expands to its auth panel on tap. Codex is listed first because
+ * with no default-selection radio. Each provider has one explicit
+ * action that expands its auth panel. Codex is listed first because
  * it works on a free ChatGPT account; an inline hint about the
  * ChatGPT-account device-auth toggle lives inside CodexAuth. Either
  * provider connecting advances the wizard.
