@@ -256,6 +256,92 @@ async def test_resolved_conflict_keeps_old_live_state_until_full_replay(
   assert (src / "static" / "runtime.js").read_bytes().endswith(b"'v2'\n")
 
 
+@pytest.mark.asyncio
+async def test_changed_pending_candidate_requests_review_without_build_failure(
+  client, owner_token, monkeypatch,
+):
+  """A stale deferred candidate remains gated and is not a compile error."""
+  import asyncio
+  from fastapi import HTTPException
+  import app.models as models
+  from app.app_watcher import _JsxHandler
+  from app.broadcast import get_system_broadcast
+  from app.database import SessionLocal
+
+  data_dir = Path(get_settings().data_dir)
+  src = data_dir / "apps" / "watch-stale-update"
+  src.mkdir(parents=True, exist_ok=True)
+  base_jsx = "export default function App(){ return <div>V0</div> }"
+  created = client.post("/api/apps/", json={
+    "name": "Reflection",
+    "description": "x",
+    "jsx_source": base_jsx,
+    "source_dir": str(src),
+  }, headers={"Authorization": f"Bearer {owner_token}"})
+  assert created.status_code == 201, created.text
+  app_id = created.json()["id"]
+
+  app_git.ensure_repo(src)
+  upstream = app_git.record_upstream(
+    src,
+    {"index.jsx": base_jsx.encode()},
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+  app_git.align_local_to_upstream(src)
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    row.upstream_commit = upstream
+    old_bundle = row.compiled_path
+    old_source = row.jsx_source
+    db.commit()
+  finally:
+    db.close()
+  install.stage_pending_conflict_update(
+    src,
+    app_id=app_id,
+    upstream_commit=upstream,
+    manifest={"id": "reflection", "version": "2.0.0"},
+    raw_base="https://example.invalid/app/",
+    capability_digest="a" * 64,
+    candidate_digest="b" * 64,
+  )
+
+  async def changed_reapply(db, **kwargs):
+    del db
+    assert kwargs["expected_candidate_digest"] == "b" * 64
+    raise HTTPException(409, {
+      "code": "pending_update_changed",
+      "message": "Review the latest update and start again.",
+    })
+
+  monkeypatch.setattr(install, "install_from_manifest", changed_reapply)
+  system_bus = get_system_broadcast()
+  queue = system_bus.subscribe()
+  try:
+    await _JsxHandler(asyncio.get_running_loop())._recompile(
+      str(src / "index.jsx"), force_rebuild=True,
+    )
+    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+  finally:
+    system_bus.unsubscribe(queue)
+
+  assert event == {
+    "type": "app_update_stale",
+    "appId": str(app_id),
+    "appName": "Reflection",
+  }
+  assert queue.empty(), "must not also emit app_build_failed"
+  assert (src / ".git" / install._PENDING_UPDATE_DIR).exists()
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app_id).first()
+    assert row.compiled_path == old_bundle
+    assert row.jsx_source == old_source
+  finally:
+    db.close()
+
 
 @pytest.mark.asyncio
 async def test_watcher_gate_blocks_replay_until_whole_tree_resolved(
@@ -481,4 +567,3 @@ async def test_watcher_replay_conflict_mode_is_info_waitstate_not_error(
   assert calls == ["conflict", "update"]
   assert not (src / ".git" / install._PENDING_UPDATE_DIR).exists()
   assert not any(r.levelno >= logging.ERROR for r in caplog.records)
-

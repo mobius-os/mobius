@@ -907,20 +907,18 @@
   display: inline-flex;
   box-sizing: border-box;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
-  min-height: 42px;
-  width: 100%;
-  max-width: 290px;
-  padding: 6px 8px 6px 7px;
-  border-radius: 10px;
+  min-height: 32px;
+  width: auto;
+  max-width: 260px;
+  padding: 4px 9px 4px 5px;
+  border-radius: 999px;
   color: var(--text); /* CONTRACT: readable source text on opaque fill */
-  background: color-mix(in srgb, var(--surface2) 72%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border-light));
-  box-shadow: 0 1px 1px color-mix(in srgb, var(--bg) 18%, transparent);
+  background: color-mix(in srgb, var(--surface2) 58%, var(--surface));
+  border: 1px solid var(--border-light);
   text-decoration: none;
-  transition: background-color 120ms ease, border-color 120ms ease,
-    transform 120ms ease;
+  transition: background-color 120ms ease, border-color 120ms ease;
 }
 
 .chat__source-chip:focus-visible {
@@ -932,39 +930,36 @@
   .chat__source-chip:hover {
     background: color-mix(in srgb, var(--accent-dim) 42%, var(--surface2));
     border-color: color-mix(in srgb, var(--accent) 42%, var(--border-light));
-    transform: translateY(-1px);
   }
 }
 
 .chat__source-chip:active {
   background: var(--accent-dim);
-  transform: translateY(0);
 }
 
 .chat__source-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 26px;
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
   color: color-mix(in srgb, var(--accent) 88%, var(--text));
   background: color-mix(in srgb, var(--accent-dim) 82%, var(--surface));
   border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
-}
-
-.chat__source-icon svg {
-  width: 15px;
-  height: 15px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .chat__source-copy {
   display: flex;
+  align-items: baseline;
   min-width: 0;
   flex: 1 1 auto;
-  flex-direction: column;
-  gap: 1px;
+  gap: 5px;
+  white-space: nowrap;
 }
 
 .chat__source-title {
@@ -972,31 +967,23 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 590;
-  line-height: 1.25;
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 1.2;
 }
 
 .chat__source-host {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--muted); /* CONTRACT: lower emphasis source domain */
   font-size: 11px;
-  line-height: 1.2;
+  line-height: 1;
 }
 
-.chat__source-open {
-  display: inline-flex;
-  flex: 0 0 auto;
-  color: var(--muted);
-  opacity: 0.72;
-}
-
-.chat__source-open svg {
-  width: 13px;
-  height: 13px;
+.chat__source-host::before {
+  content: '·';
+  padding-inline-end: 5px;
 }
 
 /* The turn's sources, after the answer (MessageSources). */
@@ -1007,12 +994,12 @@
   flex-wrap: wrap;
   width: 100%;
   max-width: 100%;
-  gap: 6px 8px;
-  padding: 2px 32px 2px 8px;
+  gap: 5px 8px;
+  padding: 2px 8px;
 }
 
 .chat__sources-label {
-  padding-top: 3px;
+  padding-top: 7px;
   color: var(--muted); /* CONTRACT: lower emphasis section label */
   font-size: 12.5px;
   font-weight: 600;
@@ -1023,7 +1010,7 @@
   box-sizing: border-box;
   min-width: 0;
   max-width: 100%;
-  flex: 1 1 240px;
+  flex: 1 1 220px;
   flex-wrap: wrap;
   gap: 5px;
   margin: 0;
@@ -1033,19 +1020,9 @@
 
 .chat__source-item {
   display: flex;
-  flex: 0 1 290px;
+  flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;
-}
-
-/* Narrow viewports stack the label above the chips so a long source title
-   keeps its width instead of being squeezed into a sliver. */
-@media (max-width: 480px) {
-  .chat__sources { display: block; }
-  .chat__sources-label { display: block; padding: 0 0 6px; }
-  .chat__source-item { flex-basis: 100%; width: 100%; }
-  .chat__source-item,
-  .chat__source-chip { max-width: none; }
 }
 
 @media (pointer: coarse) {
@@ -1173,12 +1150,12 @@
 
 /* ── Activity stretch (thinking + tools, unified) ───── */
 
-/* A contiguous run of thinking AND tool blocks collapses to ONE borderless dim
-   line — the calm ChatGPT/Codex activity line, not a bordered card — so a build
-   turn's pre-prose burst stops burying the answer (~136px of stacked chrome →
-   one ~32px line). Structure is neutral; the only hue is --danger for a failed
-   step and --accent for keyboard focus. Collapsed by default; the header status
-   (spinner / pulse dot / triangle + exit chip) reads WITHOUT expanding. See
+/* A MULTI-STEP contiguous run of thinking and tool blocks collapses to one
+   borderless dim line, so a build turn's pre-prose burst stops burying the
+   answer. A lone thought or tool uses its own disclosure directly: hierarchy
+   is added only when there is something to group. Structure is neutral; the
+   only hue is --danger for a failed step and --accent for keyboard focus.
+   Collapsed by default; status remains readable without expanding. See
    ActivityStretch.jsx + groupBlocks.js. */
 .chat__activity {
   margin: 0;
@@ -1336,6 +1313,21 @@
   margin-inline-start: 20px;
   padding-inline-start: 11px;
   border-inline-start: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+/* Shared screen-reader status utility for transcript-local interactions such
+   as clipboard confirmation. Keep it in ChatView rather than borrowing the
+   Shell brand's scoped helper. */
+.chat__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* Every reasoning entry keeps the same nested row throughout streaming. This

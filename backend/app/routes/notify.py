@@ -52,17 +52,17 @@ _LABEL_MAX = 80
 # fanned out to per-chat broadcasts, because a chat reconnect replaying an old
 # copy from its event log would fire a spurious shell apply (or a stale
 # failure signal). SystemBroadcast has no replay, so one delivery per client —
-# no frontend dedup needed. app_build_failed's live producer
-# (app_watcher._publish_app_build_failed) already publishes system-bus-only and
-# never hits this route, but it is listed here so a hypothetical POST stays
-# consistent with that classification (the frontend also no longer recognizes
-# it on a chat stream).
+# no frontend dedup needed. The app watcher's live failure/review producers
+# already publish system-bus-only and never hit this route, but both are listed
+# here so a hypothetical POST stays consistent with that classification (the
+# frontend also never recognizes them on a chat stream).
 _SYSTEM_BUS_ONLY_EVENTS = frozenset({
   "shell_rebuilding",
   "shell_rebuilt",
   "shell_apply_now",
   "shell_rebuild_failed",
   "app_build_failed",
+  "app_update_stale",
   "app_created",
   # open_item is an ACTION event (open this now); a chat reconnect replaying it
   # would re-open the item a second time, so it rides the replay-free system bus.

@@ -7,10 +7,10 @@
 //
 // This set is deliberately catch-up-SAFE only. The shell-rebuild lifecycle
 // events (shell_rebuilding/rebuilt/apply_now/rebuild_failed) and
-// app_build_failed are catch-up-UNSAFE — a chat reconnect replaying an old
-// copy would fire a spurious shell apply or a stale failure toast — so the
-// backend keeps them on the system broadcast alone (no per-chat fan-out, no
-// replay) and they never reach a chat stream at all.
+// app_build_failed/app_update_stale are catch-up-UNSAFE — a chat reconnect
+// replaying an old copy would fire a spurious shell apply or a stale recovery
+// toast — so the backend keeps them on the system broadcast alone (no per-chat
+// fan-out, no replay) and they never reach a chat stream at all.
 export const CHAT_STREAM_SYSTEM_EVENTS = new Set([
   'theme_updated',
   'app_updated',

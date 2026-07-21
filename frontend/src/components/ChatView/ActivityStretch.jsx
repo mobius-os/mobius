@@ -17,10 +17,12 @@ import ActivityLineHeader, { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import SubagentChips from './SubagentChips.jsx'
 import { useThinkingTrace } from './useThinkingTrace.js'
 
-// One collapsible activity line standing in for a contiguous stretch of thinking
-// AND tool blocks, so a build turn's pre-prose burst reads as one quiet ~32px
-// line instead of alternating "> Thought" lines and bordered tool cards — the
-// answer keeps the screen. Collapsed, the borderless dim header carries live
+// One collapsible activity line standing in for a MULTI-STEP contiguous stretch
+// of thinking and tool blocks, so a build turn's pre-prose burst reads as one
+// quiet ~32px line instead of alternating rows — the answer keeps the screen.
+// A lone thought/tool renders as its own disclosure (see SingleActivity below):
+// wrapping one row in an identical parent adds hierarchy without information.
+// Collapsed, the borderless dim header carries live
 // status (a periodic shimmer over the label — bare "Thinking", or the muted
 // type glyph + progressive activities while tools run) and a FAILED step's
 // danger triangle + exit chip, all readable
@@ -94,15 +96,55 @@ function TimelineThought({ label, thought, chatId }) {
         </span>
         <span className="chat__activity-think-label">{label}</span>
       </button>
-      {open && (
-        <div id={bodyId} className="chat__reasoning-body">
-          {body}
-        </div>
-      )}
+      <div id={bodyId} className="chat__reasoning-body" hidden={!open}>
+        {open && body}
+        {open && loadState === 'ready' && !trace.previewComplete && (
+          <div className="chat__lazy-status chat__reasoning-preview-status">
+            <span>
+              {trace.traceComplete
+                ? 'Showing a bounded preview to keep this chat responsive.'
+                : 'Showing a bounded preview while this thought is in progress.'}
+            </span>
+            {trace.traceComplete && (
+              <button
+                type="button"
+                className="chat__lazy-retry"
+                onClick={trace.loadFull}
+              >
+                Load full thought
+              </button>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
-export default function ActivityStretch({ entries, chatId, live = false }) {
+
+function SingleActivity({ entry, chatId, live }) {
+  const { item, idx } = entry
+  if (item.type === 'thinking') {
+    return (
+      <TimelineThought
+        key={assistantBlockKey(item, idx)}
+        label={live ? 'Thinking' : thoughtDurationLabel(item.duration_ms)}
+        thought={item}
+        chatId={chatId}
+      />
+    )
+  }
+  const hasHelpers = item.subagent
+    && typeof item.subagent === 'object'
+    && Object.keys(item.subagent).length > 0
+  return (
+    <>
+      <ToolBlock key={assistantBlockKey(item, idx)} t={item} chatId={chatId} />
+      {hasHelpers && <SubagentChips subagent={item.subagent} />}
+    </>
+  )
+}
+
+function GroupedActivityStretch({ entries, chatId, live = false }) {
   const [userOpen, setUserOpen] = useState(false)
   const headerRef = useRef(null)
   const timelineId = useId()
@@ -237,28 +279,33 @@ export default function ActivityStretch({ entries, chatId, live = false }) {
           subagent={tool.subagent}
         />
       ))}
-      {open && (
-        <div id={timelineId} className="chat__activity-timeline">
-          {entries.map(({ item, idx }) => {
-            if (item.type === 'thinking') {
-              const key = assistantBlockKey(item, idx)
-              return (
-                <TimelineThought
-                  key={key}
-                  label={thoughtDurationLabel(item.duration_ms)}
-                  thought={item}
-                  chatId={chatId}
-                />
-              )
-            }
-            // chatId + the block's tool_use_id let ToolBlock lazily fetch a
-            // truncated large output on expand (GET /tool-output/{tool_use_id}).
+      <div id={timelineId} className="chat__activity-timeline" hidden={!open}>
+        {open && entries.map(({ item, idx }) => {
+          if (item.type === 'thinking') {
+            const key = assistantBlockKey(item, idx)
             return (
-              <ToolBlock key={assistantBlockKey(item, idx)} t={item} chatId={chatId} />
+              <TimelineThought
+                key={key}
+                label={thoughtDurationLabel(item.duration_ms)}
+                thought={item}
+                chatId={chatId}
+              />
             )
-          })}
-        </div>
-      )}
+          }
+          // chatId + the block's tool_use_id let ToolBlock lazily fetch a
+          // truncated large output on expand (GET /tool-output/{tool_use_id}).
+          return (
+            <ToolBlock key={assistantBlockKey(item, idx)} t={item} chatId={chatId} />
+          )
+        })}
+      </div>
     </div>
   )
+}
+
+export default function ActivityStretch({ entries, chatId, live = false }) {
+  if (entries.length === 1) {
+    return <SingleActivity entry={entries[0]} chatId={chatId} live={live} />
+  }
+  return <GroupedActivityStretch entries={entries} chatId={chatId} live={live} />
 }

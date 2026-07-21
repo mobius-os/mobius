@@ -647,6 +647,28 @@
       }
     }
 
+    function isBlobModuleLoadFailure(error) {
+      // Chromium and Firefox surface a transient failure to consume an
+      // object URL as a TypeError. Match the browser's dynamic-import wording
+      // and the blob: target together so an app's own TypeError is never
+      // mistaken for a transport failure and evaluated a second time.
+      if (!error || error.name !== 'TypeError') return false;
+      return /(?:failed to fetch|error loading) dynamically imported module:\s*blob:/i
+        .test(String(error.message || ''));
+    }
+
+    function renegotiateExpiredModuleToken(error) {
+      if (!error || error.code !== 'token-expired') return false;
+      // Accept the parent's next frame-init even if this document completed its
+      // first handshake. AppCanvas refreshes the shared app token in response.
+      initialized = false;
+      window.parent.postMessage(
+        { type: 'moebius:token-expired', appId: _FRAME_APP_ID },
+        window.location.origin
+      );
+      return true;
+    }
+
     function acceptModuleAck(msg) {
       const pending = pendingModuleRequests.get(msg.requestId);
       if (!pending) return;
@@ -1037,25 +1059,17 @@
         try {
           mod = await importBrokeredModule(0);
         } catch (importErr) {
-          if (importErr && importErr.code === 'token-expired') {
-            // Tell the parent shell the token is expired. AppCanvas listens
-            // for this, invalidates the app-token query, waits for a fresh token,
-            // and re-sends moebius:frame-init with the new value. The initialized
-            // flag is reset here so the listener will accept the re-init.
-            initialized = false;
-            window.parent.postMessage(
-              { type: 'moebius:token-expired', appId: _FRAME_APP_ID },
-              window.location.origin
-            );
-            return;  // do NOT show the error panel — the re-init will retry
-          }
-          // Mobile networks routinely drop the first fetch after wake. Retry a
-          // broker network failure once; the self-contained blob has no module
-          // graph to fetch, so evaluation errors are deterministic and go
-          // straight to the error surface. The retry marker reaches the
-          // parent's versioned fetch and is stripped from the service-worker
-          // cache key.
-          const retryable = Boolean(importErr && importErr.code === 'network');
+          // Do not show the error panel while credential refresh is in flight;
+          // the next frame-init retries the load with the fresh token.
+          if (renegotiateExpiredModuleToken(importErr)) return;
+          // Mobile networks routinely drop the first fetch after wake. Browsers
+          // can also transiently reject the fresh blob URL while consuming the
+          // transferred bytes. Retry only those two transport-shaped failures;
+          // all app evaluation errors remain deterministic and go straight to
+          // the error surface. The retry marker reaches the parent's versioned
+          // fetch and is stripped from the service-worker cache key.
+          const retryable = Boolean(importErr && importErr.code === 'network')
+            || isBlobModuleLoadFailure(importErr);
           if (!retryable || window.__frameMounted) {
             throw importErr;
           }
@@ -1063,14 +1077,7 @@
           try {
             mod = await importBrokeredModule(1);
           } catch (retryErr) {
-            if (retryErr && retryErr.code === 'token-expired') {
-              initialized = false;
-              window.parent.postMessage(
-                { type: 'moebius:token-expired', appId: _FRAME_APP_ID },
-                window.location.origin
-              );
-              return;
-            }
+            if (renegotiateExpiredModuleToken(retryErr)) return;
             throw retryErr;
           }
         }

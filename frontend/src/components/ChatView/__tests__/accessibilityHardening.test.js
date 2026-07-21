@@ -63,7 +63,11 @@ test('message sources expose list semantics, keyboard focus, and touch targets',
   assert.match(source, /<li key=\{source\.url\} className="chat__source-item">/)
   assert.match(source, /aria-label=\{`\$\{label\}.*opens in a new tab/)
   assert.match(source, /className="chat__source-icon" aria-hidden="true"/)
-  assert.match(source, /className="chat__source-open" aria-hidden="true"/)
+  assert.match(source, /sourceMark\(host\)/,
+    'source recognition stays local instead of loading third-party favicons')
+  assert.doesNotMatch(source, /<img|src=\{?[^\n]*favicon/i,
+    'viewing an answer must not contact every cited site')
   assert.match(css, /\.chat__source-chip:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/s)
+  assert.match(css, /\.chat__source-chip\s*\{[^}]*border-radius:\s*999px/s)
   assert.match(css, /@media\s*\(pointer:\s*coarse\)\s*\{\s*\.chat__source-chip\s*\{\s*min-height:\s*44px/s)
 })

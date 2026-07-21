@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   HOLD_MS, decidePointerMove, isSwipeRight, swipeAllowed, movedBeyondSlop, holdComplete,
   runHoldCompletion,
@@ -44,11 +44,25 @@ export function prefersReducedMotion() {
 
 export function useLogoModeGesture({
   onToggleMode, brandRef, enabled = true, drawerOpen = false, builderModeActive = false,
+  // The live mode descriptor (modeMachine transition) or null. The hold hands its
+  // compression off to this descriptor: while an animated enter/exit beat owns the
+  // logo, the mark holds .84 and springs back at the beat's completion instead of
+  // flashing its own ignite/snap (round 4 item 1). The gesture only READS it — to
+  // know when the animated beat has settled so the hold's ownership latch can clear.
+  transition = null,
 }) {
   const [holding, setHolding] = useState(false)
   // '' | 'igniting' (spring into builder) | 'snapping' (snap back to single) — the
-  // one-shot completion animation class, cleared on animationend.
+  // one-shot completion animation class for an INSTANT flip (reduced motion, an empty
+  // tree). An ANIMATED beat suppresses it: the descriptor owns the spring instead.
   const [flourish, setFlourish] = useState('')
+  // True once a completed HOLD started an animated beat, so the logo's compression is
+  // handed to the descriptor's release rather than an immediate ignite/snap. It
+  // persists across epoch SUPERSESSION (a keyboard/swipe retoggle during a hold-owned
+  // beat inherits the compression against the newest epoch) and is cleared only when
+  // no animated enter/exit descriptor remains — never merely because the epoch
+  // changed. ShellBrand reads it to emit the is-beat-held classes.
+  const [holdOwnsBeat, setHoldOwnsBeat] = useState(false)
   // { t, x, y, pointerId, pointerType } while a press is active; null between
   // presses. pointerType is retained so onContextMenu can suppress the native
   // long-press menu for touch/pen even after the press ended (see below).
@@ -115,18 +129,26 @@ export function useLogoModeGesture({
     // 12; snapping back to single snaps + buzzes 8. The card-deal / pane-out are
     // CSS driven by the mode class change, not here.
     const entering = !builderModeActive
+    // Thread the HONEST cause (finding F13): a completed hold is 'hold'. Toggle FIRST
+    // and inspect the receipt so the flourish decision knows whether an animated beat
+    // armed. The mode flip is synchronous, so the descriptor class takes over the
+    // logo's scale in the SAME batched paint (endPress resets --hold-progress to 0,
+    // but the is-beat-held animation's backwards fill holds .84 through the delay).
+    const receipt = onToggleMode?.('hold')
+    const animated = !!(receipt && receipt.animated)
+    if (animated) setHoldOwnsBeat(true)
     runHoldCompletion({
       vibrate: vibrateFn,
       reducedMotion: prefersReducedMotion(),
       entering,
-      // Restart the one-shot spring/snap (clear-then-set); cleared on animationend.
-      startFlourish: (isEntering) => {
+      // An INSTANT flip (empty tree / reduced motion) keeps the immediate ignite/snap;
+      // an ANIMATED beat hands the spring to the descriptor, so no flourish here (the
+      // haptic always fires — motion is what the beat owns, feedback is not).
+      startFlourish: animated ? undefined : (isEntering) => {
         setFlourish('')
         requestAnimationFrame(() => setFlourish(isEntering ? 'igniting' : 'snapping'))
       },
     })
-    // Thread the HONEST cause (finding F13): a completed hold is 'hold'.
-    onToggleMode?.('hold')
     endPress({ suppressClick: true })
   }, [writeProgress, onToggleMode, endPress, builderModeActive, vibrateFn])
 
@@ -292,8 +314,19 @@ export function useLogoModeGesture({
   // Cancel a live rAF on unmount so a hold in flight can't tick a dead component.
   useEffect(() => () => { stopRaf() }, [stopRaf])
 
+  // Clear the hold-owns-beat latch the moment no animated enter/exit descriptor
+  // remains — the beat completed, was cancelled, or degraded to a drag preview. Keyed
+  // on the descriptor's PHASE, never its epoch: a keyboard/swipe supersession keeps an
+  // animated beat live under a new id, so the compression rides through to the newest
+  // beat rather than clearing on the id change (round 4 item 1 interaction decisions).
+  useLayoutEffect(() => {
+    const animatedBeat = !!transition
+      && (transition.phase === 'entering' || transition.phase === 'exiting')
+    if (!animatedBeat && holdOwnsBeat) setHoldOwnsBeat(false)
+  }, [transition, holdOwnsBeat])
+
   return {
-    holding, flourish,
+    holding, flourish, holdOwnsBeat,
     onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onContextMenu,
     onKeyDown, onLostPointerCapture,
     consumeSuppressedClick, onAnimationEnd,

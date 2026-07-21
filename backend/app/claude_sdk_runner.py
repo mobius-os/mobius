@@ -67,8 +67,6 @@ from collections import deque
 from typing import Any
 from uuid import uuid4
 
-log = logging.getLogger(__name__)
-
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 from claude_agent_sdk.types import (
   AssistantMessage,
@@ -112,6 +110,14 @@ from app.runtime_types import RunnerResult
 from app.sdk_emit import emit_unknown_enabled, unknown_event
 from app.tool_summaries import summarize_tool_input
 from app.tool_sources import normalize_tool_sources, sources_from_websearch_text
+
+log = logging.getLogger(__name__)
+
+# The SDK's 1 MiB default is smaller than a single base64-encoded screenshot
+# tool result, so the subprocess transport can reject an otherwise healthy
+# turn before Möbius sees the message. This is a per-record ceiling, not a
+# preallocation: keep it bounded while leaving enough room for image tools.
+_CLAUDE_SDK_MAX_BUFFER_SIZE = 10 * 1024 * 1024
 
 
 # Bounds for the subagent task_* text fields. Unlike ordinary tool output these
@@ -1234,6 +1240,7 @@ async def run_claude_sdk_turn(
         ["user", "project"] if skills_enabled else None
       ),
       "include_partial_messages": True,
+      "max_buffer_size": _CLAUDE_SDK_MAX_BUFFER_SIZE,
       "can_use_tool": can_use_tool,
       "cli_path": "/usr/local/bin/claude",
       "stderr": _capture_stderr,

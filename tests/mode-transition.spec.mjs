@@ -316,6 +316,193 @@ test('v2 world-reveal exit paints the mounted destination underlay beneath the d
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
 })
 
+// ── Round 4 item 2: the two-phase world reveal (destination arrival) ──────────
+// Frame-sample the underlay opacity across a world reveal: it must stay veiled (~.60)
+// while the cards are still present, then rise to full only AFTER the last card clears
+// — the destination ARRIVES as phase 2, it does not read as already-present.
+async function sampleUnderlayArrival(page) {
+  return page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let started = false
+    let maxOpacityWithCards = 0
+    let roseAfterCards = false
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        const exiting = root.className.includes('shell--builder-exiting')
+        const underlay = document.querySelector('.shell__view--exit-underlay')
+        if (exiting && underlay) {
+          started = true
+          const op = parseFloat(getComputedStyle(underlay).opacity)
+          const cards = [...document.querySelectorAll('.shell__view[data-mode-motion="deal-out"]')]
+          const cardsPresent = cards.some(c => parseFloat(getComputedStyle(c).opacity) > 0.05)
+          if (cardsPresent) maxOpacityWithCards = Math.max(maxOpacityWithCards, op)
+          else if (op > 0.9) roseAfterCards = true
+        }
+        frames += 1
+        if ((started && !exiting && frames > 4) || frames > 240) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return { started, maxOpacityWithCards, roseAfterCards }
+  })
+}
+
+test('round4-2: the world-reveal destination stays veiled while cards are present, then arrives', async ({ page }) => {
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleUnderlayArrival(page)
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+  expect(r.started, 'a world-reveal exit ran').toBe(true)
+  // Phase 1: the destination sits veiled beneath the departing cards (the `both` fill
+  // holds the .60 from-frame through the arrival delay).
+  expect(r.maxOpacityWithCards, 'the destination stays veiled while cards are present')
+    .toBeLessThanOrEqual(0.8)
+  // Phase 2: opacity rises to full only after the last card clears.
+  expect(r.roseAfterCards, 'the destination arrives (rises to full) after the cards clear').toBe(true)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(false)
+})
+
+test('round4-2: reduced motion has no intermediate exit phase (instant world flip)', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  // Watch for ANY exiting beat class or reveal underlay across the flip.
+  const sampler = page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let sawExitPhase = false
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        if (root.className.includes('shell--builder-exiting')
+          || document.querySelector('.shell__view--exit-underlay')) sawExitPhase = true
+        frames += 1
+        if (frames > 60) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return sawExitPhase
+  })
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const sawExitPhase = await sampler
+  expect(sawExitPhase, 'reduced motion discards the whole exit presentation (no phase)').toBe(false)
+  await expect.poll(() => builderActive(page)).toBe(false)
+})
+
+// ── Round 4 item 3: the null slot is a first-class New Chat landing ────────────
+test('round4-3: exiting a NULL-slot builder reveals the New Chat landing, not a blank main, no composer focus', async ({ page }) => {
+  // A materialize POST /chats (when there is no reusable empty) returns a fresh empty
+  // row so the swap to a real empty ChatView is seamless.
+  await page.route(/\/api\/chats$/, r => {
+    if (r.request().method() !== 'POST') return r.fallback()
+    return r.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ id: 'freshnew', title: 'New chat', has_messages: false }),
+    })
+  })
+  // Two-pane builder with an EXPLICIT null slot → exit reveals home:new-chat.
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  // The first-class New Chat empty surface renders (What's on your mind?), never a
+  // blank <main> and never the freshest transcript. Scope to the VISIBLE full-bleed
+  // surface — the preserved builder chat panes sit mounted-but-hidden and also carry
+  // an empty title, so an unscoped selector would strict-mode-match several.
+  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible({ timeout: 3000 })
+  // The automatic landing must NOT summon the mobile keyboard — the composer is not
+  // auto-focused by a mode toggle.
+  const composerFocused = await page.evaluate(() => document.activeElement?.tagName === 'TEXTAREA')
+  expect(composerFocused, 'a mode toggle must not auto-focus the composer').toBe(false)
+})
+
+test('round4-3: a persisted NULL single slot stays New Chat even with historical chats', async ({ page }) => {
+  let createCount = 0
+  await page.route(/\/api\/chats(?:\?.*)?$/, (route) => {
+    const method = route.request().method()
+    if (method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          { id: 'historical', title: 'Historical transcript', has_messages: true },
+        ]),
+      })
+    }
+    if (method === 'POST') {
+      createCount += 1
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ id: 'freshboot', title: 'New chat', has_messages: false }),
+      })
+    }
+    return route.fallback()
+  })
+  const ws = paneModel.setViewMode(twoPaneBuilder(null), 'single')
+  await bootSeededWorkspace(page, WIDE, ws)
+
+  await expect.poll(() => page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key))?.singleScreen?.id || null,
+    paneModel.STORAGE_KEY,
+  ), { timeout: 3000 }).toBe('freshboot')
+  expect(createCount, 'boot materializes one new row instead of selecting chats[0]').toBe(1)
+  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible()
+})
+
+test('round4-3: a superseding NULL-slot request drains after the older POST without duplicating it', async ({ page }) => {
+  let createCount = 0
+  let releaseFirstCreate
+  const firstCreateGate = new Promise(resolve => { releaseFirstCreate = resolve })
+  await page.route(/\/api\/chats(?:\?.*)?$/, async (route) => {
+    const method = route.request().method()
+    if (method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          { id: 'aaa', title: 'Left', has_messages: true },
+          { id: 'bbb', title: 'Right', has_messages: true },
+        ]),
+      })
+    }
+    if (method === 'POST') {
+      const ordinal = ++createCount
+      if (ordinal === 1) await firstCreateGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ id: `fresh-race-${ordinal}`, title: 'New chat', has_messages: false }),
+      })
+    }
+    return route.fallback()
+  })
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
+  await toggleMode(page) // builder -> null single; token 1 starts after the exit beat
+  await expect.poll(() => createCount, { timeout: 3000 }).toBe(1)
+
+  // Supersede token 1 while its POST is held: enter builder, then exit to the same
+  // null single destination again. The latest token must run once the old await ends.
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  releaseFirstCreate()
+
+  await expect.poll(() => page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key))?.singleScreen?.id || null,
+    paneModel.STORAGE_KEY,
+  ), { timeout: 4000 }).toBe('fresh-race-1')
+  expect(createCount, 'the newer request reuses the already-created untouched row').toBe(1)
+  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible()
+})
+
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab
 // builder is exited by closing its sole tab; a frame-sampler proves the descriptor
 // (logo/builder class) and the emptied tree flip in the SAME commit — never an
@@ -354,4 +541,168 @@ test('v2 auto-return flips the descriptor and the tree atomically (no lagging fr
   await expect.poll(() => page.evaluate(
     key => JSON.parse(sessionStorage.getItem(key))?.viewMode, paneModel.STORAGE_KEY,
   ), { timeout: 3000 }).toBe('single')
+})
+
+// ── Round 4 item 1: the logo holds its breath until completion ────────────────
+// The hold hands its compression to the descriptor: while an animated beat owns the
+// logo it stays compressed (~.84) and springs back so its first full-size frame lands
+// at completion. A standalone keyboard/swipe flip never synthesizes compression.
+
+// Press-and-hold the brand past the ~450ms threshold, then release. A completed hold
+// consumes its trailing click, so this never also opens the drawer.
+async function pressHoldLogo(page, holdMs = 650) {
+  const box = await page.getByLabel('Toggle navigation').boundingBox()
+  const cx = box.x + box.width / 2
+  const cy = box.y + box.height / 2
+  await page.mouse.move(cx, cy)
+  await page.mouse.down()
+  await page.waitForTimeout(holdMs)
+  await page.mouse.up()
+}
+
+// Sample the logo across a beat: install BEFORE the trigger. Records, on every frame,
+// whether .shell__brand carried is-beat-held, the min computed logo `scale`, and
+// whether data-logo-beat-epoch ever disagreed with the root data-mode-epoch while both
+// were present. Resolves once a beat started then settled (or a generous frame budget).
+async function sampleLogoBeat(page) {
+  return page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    const brand = document.querySelector('.shell__brand')
+    const logo = document.querySelector('.shell__logo')
+    let beatHeldSeen = false
+    let minScale = 1
+    let epochMismatch = false
+    let sawBeatClass = false
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        const cls = root.className
+        const beatClass = cls.includes('shell--builder-entering') || cls.includes('shell--builder-exiting')
+        if (beatClass) sawBeatClass = true
+        if (brand.classList.contains('is-beat-held')) {
+          beatHeldSeen = true
+          const s = parseFloat(getComputedStyle(logo).scale)
+          if (Number.isFinite(s)) minScale = Math.min(minScale, s)
+          const logoEpoch = brand.getAttribute('data-logo-beat-epoch')
+          const modeEpoch = root.getAttribute('data-mode-epoch')
+          if (logoEpoch != null && modeEpoch != null && logoEpoch !== modeEpoch) epochMismatch = true
+        }
+        frames += 1
+        if ((sawBeatClass && !beatClass && frames > 4) || frames > 320) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    const settledScale = parseFloat(getComputedStyle(logo).scale)
+    return { beatHeldSeen, minScale, epochMismatch, sawBeatClass, settledScale }
+  })
+}
+
+// Whether is-beat-held is on the brand RIGHT NOW (for the instant/no-compression checks).
+async function beatHeldNow(page) {
+  return page.evaluate(() => !!document.querySelector('.shell__brand.is-beat-held'))
+}
+
+test('round4-1: a completed HOLD keeps the logo compressed then springs back at completion', async ({ page }) => {
+  await bootShell(page, WIDE)
+  // Fresh boot = builder; a hold EXITS to single with an animated beat.
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleLogoBeat(page)
+  await page.waitForTimeout(30)
+  await pressHoldLogo(page)
+  const r = await sampler
+  expect(r.sawBeatClass, 'an animated beat ran').toBe(true)
+  expect(r.beatHeldSeen, 'the hold emitted the is-beat-held compression class').toBe(true)
+  // The mark stayed compressed at ~.84 through the beat (pointer release did NOT
+  // spring it) and reaches full size only at completion.
+  expect(r.minScale, 'the logo held its .84 compression during the beat').toBeLessThanOrEqual(0.88)
+  expect(r.epochMismatch, 'the logo release always tracks the live beat epoch').toBe(false)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  // Settled: no compression class lingers, the mark is full size.
+  await expect.poll(() => beatHeldNow(page)).toBe(false)
+  const finalScale = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.shell__logo')).scale))
+  expect(Math.abs(finalScale - 1)).toBeLessThan(0.02)
+})
+
+test('round4-1: a standalone Shift+Enter flip never emits a compression class', async ({ page }) => {
+  await bootShell(page, WIDE)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleLogoBeat(page)
+  await page.waitForTimeout(30)
+  await toggleMode(page) // keyboard path — the standalone announcement is enough
+  const r = await sampler
+  expect(r.sawBeatClass, 'the keyboard flip still ran an animated beat').toBe(true)
+  expect(r.beatHeldSeen, 'no synthetic compression on a standalone keyboard flip').toBe(false)
+  // The logo never dipped toward .84 — it was not compressed.
+  expect(r.minScale, 'the logo stayed full size (no compression)').toBeGreaterThan(0.95)
+  await expect.poll(() => builderActive(page)).toBe(false)
+})
+
+test('round4-1: an EARLY logo release is a tap — mode unchanged, no compression class', async ({ page }) => {
+  await bootShell(page, WIDE)
+  const before = await builderActive(page)
+  // A press well under the ~450ms threshold releases as a tap (opens the drawer),
+  // never a mode flip, and never emits is-beat-held.
+  await pressHoldLogo(page, 150)
+  await page.waitForTimeout(200)
+  expect(await beatHeldNow(page)).toBe(false)
+  expect(await builderActive(page)).toBe(before)
+})
+
+test('round4-1: rapid hold → keyboard retoggle keeps the logo epoch equal to the mode epoch', async ({ page }) => {
+  await bootShell(page, WIDE)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleLogoBeat(page)
+  await page.waitForTimeout(30)
+  // Complete a hold (holdOwnsBeat latches), then immediately retoggle by keyboard —
+  // the compression rides through to the newest epoch, whose id the logo release must
+  // track (data-logo-beat-epoch === data-mode-epoch on every sampled frame).
+  await pressHoldLogo(page)
+  await toggleMode(page)
+  const r = await sampler
+  expect(r.beatHeldSeen, 'the hold-owned compression rode through the retoggle').toBe(true)
+  expect(r.epochMismatch, 'the logo release never lagged behind the newest beat epoch').toBe(false)
+  await expect.poll(() => modePhase(page), { timeout: 3000 }).toBe('idle')
+})
+
+test('round4-1: reduced motion keeps direct hold feedback but releases without animation', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await bootShell(page, WIDE)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  await page.evaluate(() => {
+    const root = document.querySelector('.shell')
+    window.__reducedMotionBeatSeen = false
+    window.__reducedMotionObserver = new MutationObserver(() => {
+      const cls = root.className
+      if (cls.includes('shell--builder-entering') || cls.includes('shell--builder-exiting')) {
+        window.__reducedMotionBeatSeen = true
+      }
+    })
+    window.__reducedMotionObserver.observe(root, { attributes: true, attributeFilter: ['class'] })
+  })
+  const box = await page.getByLabel('Toggle navigation').boundingBox()
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.waitForTimeout(325)
+  const heldScale = await page.evaluate(() => parseFloat(
+    getComputedStyle(document.querySelector('.shell__logo')).scale,
+  ))
+  expect(heldScale, 'the user-controlled hold still gives immediate compression feedback').toBeLessThan(0.96)
+  // Cross the 450ms completion threshold. Under reduced motion the mode commits and
+  // the scale returns to 1 in that same frame; the old 160ms release failed here.
+  await page.waitForTimeout(150)
+  const result = await page.evaluate(() => {
+    window.__reducedMotionObserver?.disconnect()
+    return {
+      builder: !!document.querySelector('.shell__brand--builder'),
+      beatHeld: !!document.querySelector('.shell__brand.is-beat-held'),
+      beatSeen: !!window.__reducedMotionBeatSeen,
+      scale: parseFloat(getComputedStyle(document.querySelector('.shell__logo')).scale),
+    }
+  })
+  await page.mouse.up()
+  expect(result.builder, 'the hold still flips the mode').toBe(false)
+  expect(result.beatSeen, 'reduced motion arms no transition descriptor').toBe(false)
+  expect(result.beatHeld, 'reduced motion never hands compression to a beat').toBe(false)
+  expect(Math.abs(result.scale - 1), 'release is immediate under reduced motion').toBeLessThan(0.02)
 })

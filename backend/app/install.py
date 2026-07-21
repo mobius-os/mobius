@@ -1974,7 +1974,13 @@ async def install_from_manifest(
   ):
     raise HTTPException(
       409,
-      "The pending update's fetched artifacts changed; start the update again.",
+      {
+        "code": "pending_update_changed",
+        "message": (
+          "The pending update changed upstream. "
+          "Review the latest update and start again."
+        ),
+      },
     )
 
   # --- Phase 3: decide install vs update -------------------------------

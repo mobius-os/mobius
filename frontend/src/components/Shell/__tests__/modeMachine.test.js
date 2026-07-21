@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  initialModeState, modeReducer,
+  initialModeState, modeReducer, planArms,
   effectiveViewMode, transitionRootClass, builderModeActive,
   exitBeatActive, dragPreviewActive,
   transitionPresentation, exitPresentation,
@@ -117,6 +117,18 @@ test('a plan with NO completion names does not arm (INV 11)', () => {
   const s = modeReducer(panes(), { type: 'toggle', presentation: empty })
   assert.equal(s.transition, null, 'no participants → instant flip')
   assert.equal(s.committedMode, 'single')
+})
+
+test('planArms is the ONE exported predicate (round 4 item 1: the toggle receipt reuses it)', () => {
+  // Exported so the controller can tell an animated beat from an instant flip when it
+  // builds the toggle receipt, rather than re-deriving the rule (which strands the
+  // is-beat-held handoff if the two ever drift).
+  assert.equal(planArms(enterPlan()), true, 'a plan that names a completion animation arms')
+  assert.equal(planArms(exitPlan()), true)
+  assert.equal(planArms(null), false, 'reduced motion / empty tree → instant flip')
+  assert.equal(planArms(undefined), false)
+  assert.equal(planArms({ completionNames: [] }), false, 'no completion names → no arm')
+  assert.equal(planArms({ completionNames: 'nope' }), false, 'non-array names never arm')
 })
 
 // ── Exit (panes → single): world reveal + promote ───────────────────────────

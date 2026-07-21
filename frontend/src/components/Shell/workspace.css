@@ -50,21 +50,25 @@
   pointer-events: none;
   z-index: 0;
 }
-/* Polish item 4: the destination BREATHES in by 1.2% instead of standing statically —
-   it starts very slightly enlarged (so the clipped content box never exposes a border
-   around it) and settles to rest as the cards deal away, so the reveal feels alive.
-   Purely ATMOSPHERIC: shell-mode-underlay-settle is deliberately absent from the
-   plan's completionNames, so it can NEVER gate the beat's completion. */
+/* Round 4 item 2 — TWO-PHASE world reveal. Phase 1 clears the cards + chrome over a
+   veiled destination (opacity .60, scale 1.012, inert); phase 2 is the destination
+   ARRIVAL — it settles in only after the last card clears, over --mode-arrive-duration
+   delayed by --mode-arrive-delay (both written by Shell from the plan's
+   destinationMotion). Unlike the old atmospheric underlay-settle this is GATING: its
+   name is in the plan's completionNames, so the descriptor (and the logo spring + halo
+   resume) end at the ARRIVAL, not the last deal-out. `both` holds the .60 veil through
+   the delay. Compositor-only — transform + opacity, nothing that forces layout. */
 .shell--builder-exiting .shell__view--exit-underlay {
   transform-origin: 50% 50%;
   animation:
-    shell-mode-underlay-settle
-    180ms
-    cubic-bezier(0.2, 0.7, 0.2, 1)
+    shell-mode-destination-arrive
+    var(--mode-arrive-duration)
+    cubic-bezier(0.16, 1, 0.3, 1)
+    var(--mode-arrive-delay)
     both;
 }
-@keyframes shell-mode-underlay-settle {
-  from { transform: scale(1.012); opacity: 0.96; }
+@keyframes shell-mode-destination-arrive {
+  from { transform: scale(1.012); opacity: 0.60; }
   to { transform: scale(1); opacity: 1; }
 }
 
@@ -635,7 +639,7 @@
   .shell--builder-exiting .workspace__pane-chip,
   .shell--builder-entering .workspace__divider,
   .shell--builder-entering .workspace__pane-chip { animation: none; }
-  /* The atmospheric underlay breathe is motion — drop it under reduced motion
+  /* The two-phase destination arrival is motion — drop it under reduced motion
      (defensive parity; the controller never arms a beat here anyway). */
   .shell--builder-exiting .shell__view--exit-underlay { animation: none; }
 }

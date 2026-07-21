@@ -19,6 +19,11 @@ const ShellBrand = memo(function ShellBrand({
   // deal animation (exit-design v2 §Background isolation). Defaults to
   // builderModeActive for callers that do not thread it.
   haloActive = builderModeActive,
+  // The live mode descriptor (modeMachine transition) or null. The logo's hold hands
+  // its compression to this descriptor so the spring-back lands at the beat's
+  // completion (round 4 item 1); ShellBrand reads its phase/id to emit the
+  // is-beat-held classes + data-logo-beat-epoch.
+  transition = null,
   backFiredRef,
   onToggleMode,
   onToggleNavigation,
@@ -32,8 +37,17 @@ const ShellBrand = memo(function ShellBrand({
     // Cancel a live hold if navigation opens by any other path.
     drawerOpen: navigationOpen,
     builderModeActive,
+    transition,
   })
   useLivingHalo({ haloRef, active: splitsEnabled && haloActive })
+  // The logo compresses-and-releases only for a HOLD-owned animated beat: a standalone
+  // keyboard/swipe never latches, so it never synthesizes compression. Alternate two
+  // identical release keyframes by epoch parity — changing the animation NAME restarts
+  // the delay against the newest beat when a retoggle supersedes, with no remount.
+  const animatedBeat = !!transition
+    && (transition.phase === 'entering' || transition.phase === 'exiting')
+  const beatHeld = splitsEnabled && logoGesture.holdOwnsBeat && animatedBeat
+  const beatParity = beatHeld ? (transition.id % 2 === 0 ? 'b' : 'a') : ''
 
   return (
     <>
@@ -42,7 +56,11 @@ const ShellBrand = memo(function ShellBrand({
         type="button"
         className={`shell__brand${logoGesture.holding ? ' is-holding' : ''}`
           + `${logoGesture.flourish ? ` is-${logoGesture.flourish}` : ''}`
+          + `${beatHeld ? ` is-beat-held is-beat-held-${beatParity}` : ''}`
           + `${builderModeActive ? ' shell__brand--builder' : ''}`}
+        // The epoch the logo release is scheduled against — always the live beat's id
+        // so a rapid hold→retoggle keeps it equal to the root data-mode-epoch.
+        data-logo-beat-epoch={beatHeld ? transition.id : undefined}
         // Navigation remains the primary, stable accessible name. The builder
         // gesture is supplementary and its state is announced below.
         aria-label="Toggle navigation"

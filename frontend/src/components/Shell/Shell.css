@@ -405,23 +405,56 @@
 .shell__brand--builder .shell__wordmark {
   color: var(--accent);
 }
-/* Same-beat timing (polish item 5): the logo, wordmark, and halo settle on the SAME
-   beat as the panes instead of trailing them (the logo used to rotate 300ms and the
-   ignite hold ran 480ms, well past most pane entries). Entering keeps a tiny signature
-   settle (the 1.1 control point) without the old conspicuous spring; exiting is a
-   quick, springless settle. The hold-only ignite/snap keyframes override `scale`; the
-   rotate, halo, and wordmark ride their own transitions. Cleared on animationend (JS
-   drops the class). */
+/* Same-beat timing (polish item 5 + round 4 item 1): the logo, wordmark, and halo
+   settle on the SAME beat as the panes. The twist now rides --mode-total (the plan's
+   own totalMs, written on the shell root by Shell while the beat is live) so rotation
+   reaches its rest exactly when the panes do — for a world reveal that is the end of
+   the destination arrival, not the last deal-out. Entering keeps a tiny signature
+   settle (the 1 control point); exiting is a quick, springless settle. */
 .shell--builder-entering .shell__logo {
   transition:
-    rotate 260ms cubic-bezier(0.2, 1.1, 0.32, 1),
+    rotate var(--mode-total, 260ms) cubic-bezier(0.2, 1, 0.32, 1),
     scale 160ms ease;
 }
 .shell--builder-exiting .shell__logo {
   transition:
-    rotate 220ms cubic-bezier(0.25, 0.8, 0.25, 1),
-    scale 140ms ease-out;
+    rotate var(--mode-total, 220ms) cubic-bezier(0.25, 0.8, 0.25, 1),
+    scale 160ms ease;
 }
+/* HOLD-owned animated beat (round 4 item 1): the mark holds its .84 compression
+   through the beat and SPRINGS back over the terminal --logo-release-ms, so its first
+   full-size frame coincides with the descriptor's completion. `both` is load-bearing —
+   the backwards fill holds .84 through --logo-release-delay; the exponential release
+   gives spring character without overshooting the landing. Two identical keyframes
+   alternate by epoch parity (is-beat-held-a|b) so a rapid retoggle RESTARTS the delay
+   against the newest beat by swapping the animation NAME, never a remount. */
+.shell__brand.is-beat-held-a .shell__logo {
+  animation:
+    shell-logo-beat-release-a
+    var(--logo-release-ms, 120ms)
+    cubic-bezier(0.16, 1, 0.3, 1)
+    var(--logo-release-delay, 0ms)
+    both;
+}
+.shell__brand.is-beat-held-b .shell__logo {
+  animation:
+    shell-logo-beat-release-b
+    var(--logo-release-ms, 120ms)
+    cubic-bezier(0.16, 1, 0.3, 1)
+    var(--logo-release-delay, 0ms)
+    both;
+}
+@keyframes shell-logo-beat-release-a {
+  from { scale: 0.84; }
+  to { scale: 1; }
+}
+@keyframes shell-logo-beat-release-b {
+  from { scale: 0.84; }
+  to { scale: 1; }
+}
+/* The immediate ignite/snap survives ONLY for a NORMAL-motion INSTANT flip (an empty
+   tree — no descriptor to hand the spring to). An animated beat emits is-beat-held
+   instead, so these two never coincide. */
 .shell__brand.is-igniting .shell__logo {
   animation: shell-logo-ignite 280ms cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -501,10 +534,15 @@
   /* The mark flip + tint switch INSTANTLY; the completion spring/snap is skipped
      (the JS still fires the haptics — motion is dropped, feedback is not); and the
      halo settles STATIC (useLivingHalo runs no rAF under reduced motion). The hold
-     COMPRESS stays: it is direct feedback for the user's own press, not autonomous
-     motion. */
-  .shell__logo { transition: rotate 0s, scale 160ms ease; }
+     compression remains as immediate direct feedback, with no animated release. */
+  .shell__logo { transition: none; }
   .shell__wordmark { transition: none; }
+  /* No completion motion under reduced motion — the ignite/snap AND the hold's
+     descriptor-owned release are both skipped (the toggle commits instantly, so
+     is-beat-held is never even emitted; this is the belt-and-braces). The direct
+     press compression and completion haptic remain; release snaps immediately. */
   .shell__brand.is-igniting .shell__logo,
-  .shell__brand.is-snapping .shell__logo { animation: none; }
+  .shell__brand.is-snapping .shell__logo,
+  .shell__brand.is-beat-held-a .shell__logo,
+  .shell__brand.is-beat-held-b .shell__logo { animation: none; }
 }

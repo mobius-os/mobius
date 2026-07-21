@@ -596,13 +596,18 @@ test.describe('SSE streaming (real React path)', () => {
     expect(m.msgCount).toBeGreaterThanOrEqual(2)
     assertSpacerReasonable(m)
 
-    // Once the tool settles, the compact line switches from progressive copy
-    // to the reviewed past-tense label (singular for a lone Read) and exposes the first activity's muted
-    // type glyph. The spinner belongs only to a live tool.
-    const activity = page.locator('.chat__activity').first()
-    await expect(activity.locator('.chat__activity-label')).toHaveText('Read a file')
-    await expect(activity.locator('[data-activity-kind="files"]')).toHaveCount(1)
-    await expect(activity.locator('.chat__tool-spin')).toHaveCount(0)
+    // A lone operation is its own collapsed disclosure: no redundant activity
+    // summary wrapping one identical child row. It keeps the concrete
+    // past-tense label and file glyph; the spinner belongs only to a live tool.
+    const tools = page.locator('.chat__tools').first()
+    await expect(tools.locator('.chat__activity')).toHaveCount(0)
+    const tool = tools.locator(':scope > .chat__tool')
+    await expect(tool.locator('.chat__tool-header')).toHaveAttribute('aria-expanded', 'false')
+    await expect(tool.locator('.chat__tool-name')).toHaveText(
+      'Read /data/apps/test/index.jsx',
+    )
+    await expect(tool.locator('[data-tool-kind="files"]')).toHaveCount(1)
+    await expect(tool.locator('.chat__tool-spin')).toHaveCount(0)
   })
 
   test('16b. Near-foot activity taps hold position while live descendants churn', async ({ page }) => {

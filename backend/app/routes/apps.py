@@ -65,7 +65,11 @@ from app.storage_io import (
 )
 from app.app_capabilities import diff_contracts
 from app.broadcast import get_system_broadcast
-from app.compiler import compile_jsx, recompile_app_bundle
+from app.compiler import (
+  app_bundle_uses_current_compile_contract,
+  compile_jsx,
+  recompile_app_bundle,
+)
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -2218,13 +2222,21 @@ async def recover_app(
   source-dir lock, then its cadence is converged through the common supervised
   runner. Reinstalling a store app also re-registers it. See feature 110.
 
+  Before the row becomes live, a stale compiled artifact is rebuilt from its
+  preserved source. This covers tombstones intentionally skipped by the boot
+  sweep and keeps recovery from reviving an app without the current additive
+  runtime features.
+
   Held under install_uninstall_lock — the same lock the TTL purge takes — so a
   recover near the TTL boundary can't race the purge into reviving a row the
   sweep is hard-deleting (or vice versa). Whoever wins the lock leaves a
   consistent state: a purged row → recover 404s; a recovered row → purge's
   under-lock stale re-query no longer matches it.
   """
-  async with fs_locks.install_uninstall_lock():
+  async with (
+    fs_locks.install_uninstall_lock(),
+    fs_locks.app_storage_lock(app_id),
+  ):
     app = (
       db.query(models.App)
       .filter(models.App.id == app_id, models.App.deleted_at.isnot(None))
@@ -2238,6 +2250,23 @@ async def recover_app(
       now_naive_utc() - app.deleted_at
     ) >= APP_SOFT_DELETE_TTL:
       raise HTTPException(status_code=410, detail="Recovery window has expired.")
+    if not app_bundle_uses_current_compile_contract(app):
+      if not app.jsx_source or not app.jsx_source.strip():
+        raise HTTPException(
+          status_code=409,
+          detail="App source is unavailable; reinstall it to recover.",
+        )
+      try:
+        # recompile_app_bundle commits internally, but the row remains
+        # tombstoned until the separate commit below. A crash or compile error
+        # therefore cannot expose a stale or partially rebuilt app.
+        await recompile_app_bundle(db, app, app.jsx_source)
+      except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(
+          status_code=422,
+          detail=f"Could not rebuild app for recovery: {exc}",
+        )
     app.deleted_at = None
     app_name = app.name
     app_source_dir = app.source_dir
