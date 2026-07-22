@@ -1929,6 +1929,7 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
   create_call = next(call for call in gh_calls if call[:2] == ("pr", "create"))
   assert "--draft" not in create_call
   assert "octocat:fix/demo-polish" in create_call
+  assert create_call[-2:] == ("--base", "main")
   assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
   assert sum(call[:1] == ("fetch",) for call in git_calls) == 1
   assert not any(call[:2] == ("pr", "list") for call in gh_calls)
@@ -2068,8 +2069,10 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
   probes = [call for call in gh_calls if call[:2] == ("pr", "list")]
   assert len(creates) == 1, "an ambiguous response must never trigger a second create"
   assert len(probes) == 1
+  assert creates[0][-2:] == ("--base", "main")
   assert "url,headRefOid" in probes[0]
   assert "octocat:fix/demo-polish" in probes[0]
+  assert probes[0][probes[0].index("--base") + 1] == "main"
   assert ("checkout", "-q", "develop") in git_calls
 
   stored = json.loads(

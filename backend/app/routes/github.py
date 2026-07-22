@@ -1781,6 +1781,14 @@ def _submit_prepared_pr(
       record_patch = _record_patch_with(record_patch, merge_patch)
     except ContributionSubmitError as exc:
       raise _merge_error_patch(exc, record_patch) from exc
+    # The merge preflight proves one exact upstream base. Pin that same branch
+    # into both create and ambiguous-response recovery. Without an explicit
+    # standalone --base, gh may honor stale branch.<name>.gh-merge-base config
+    # from the durable staging checkout and publish the reviewed diff against a
+    # different target.
+    submit_base = direct_base or _validate_branch(
+      str(merge_patch.get("last_submit_upstream_branch") or "")
+    )
 
     push_source = "HEAD"
     if direct_base:
@@ -1861,8 +1869,7 @@ def _submit_prepared_pr(
           "--title", title,
           "--body-file", body_file,
         ]
-        if direct_base:
-          create_args.extend(("--base", direct_base))
+        create_args.extend(("--base", submit_base))
         create_transport_error = None
         try:
           pr = _gh(repo, *create_args, check=False)
@@ -1888,7 +1895,7 @@ def _submit_prepared_pr(
             login,
             branch,
             expected_head_sha=pushed_sha,
-            base_branch=direct_base,
+            base_branch=submit_base,
             same_repo=bool(direct_base),
           )
           if existing:
