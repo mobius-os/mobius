@@ -434,6 +434,13 @@ test.describe('Drawer touch lifecycle', () => {
     await setup(page, { width: 412, height: 915 })
     await openDrawer(page)
 
+    // The coordinate-level touchscreen tap below cannot use Playwright's
+    // locator click re-targeting. Wait until the 250ms opening transition has
+    // stopped moving the row before sampling its bounding box; otherwise a
+    // valid tap can land at the row's old in-flight coordinate under load.
+    const drawer = page.locator('#navigation-drawer')
+    await expect(drawer).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)')
+
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
     const beta = navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true })
     await expect(beta).toBeVisible()
