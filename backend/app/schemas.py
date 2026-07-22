@@ -286,9 +286,22 @@ class UpdateCheckOut(BaseModel):
   manifest_url, no git repo, no recorded upstream branch, or the upstream fetch
   failed — so the caller falls back to version comparison. It is a real
   true/false only when a byte-level compare actually ran, so a push that changed
-  code WITHOUT bumping the version still reads as an update. The version strings
-  are display-only, never the detection signal."""
+  code WITHOUT bumping the version still reads as an update.
+
+  A durable conflict receipt has two materially different states. In
+  `needs_resolution`, upstream is not yet incorporated into local source (or a
+  materialized merge still has conflicts). In `replay_pending`, source was
+  resolved and committed but the canonical installer still has to promote the
+  bundle/metadata transaction. Only the former should open a resolver chat.
+  `needs_resolution` remains as a derived rolling-deploy compatibility field;
+  new consumers should use `pending_update_state`. `unknown` means a receipt
+  proves an update is pending but Git could not safely classify its resolution
+  phase. The version strings are display-only, never the detection signal."""
   update_available: bool | None = None
+  pending_update_state: Literal[
+    "none", "needs_resolution", "replay_pending", "unknown",
+  ] = "none"
+  needs_resolution: bool = False
   upstream_version: str | None = None
   local_version: str | None = None
   checked_at: datetime

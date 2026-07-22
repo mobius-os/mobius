@@ -56,6 +56,12 @@
   min-height: 0;
 }
 
+.urm--result {
+  height: auto;
+  max-width: 520px;
+  grid-template-rows: auto auto auto;
+}
+
 .urm__head {
   display: flex;
   align-items: center;
@@ -121,6 +127,19 @@
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.urm__notice--result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-color: color-mix(in srgb, var(--accent) 68%, var(--border));
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+}
+
+.urm__notice--result strong {
+  color: var(--text);
+  font-size: 16px;
 }
 
 .urm__section {

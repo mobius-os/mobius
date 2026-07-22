@@ -60,6 +60,17 @@ def _state(chat_id):
     db.close()
 
 
+def _run_outcome(chat_id):
+  db = SessionLocal()
+  try:
+    row = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == chat_id,
+    ).one()
+    return row.status
+  finally:
+    db.close()
+
+
 def _sweep():
   db = SessionLocal()
   try:
@@ -75,6 +86,7 @@ def test_sweep_clears_orphaned_marker_and_preserves_queue():
   assert "wedged-1" in swept
   status, pending = _state("wedged-1")
   assert status is None, "orphaned marker should be cleared"
+  assert _run_outcome("wedged-1") == "interrupted"
   # The queue is preserved for the next-send stale-pending self-heal.
   assert len(pending) == 1
 

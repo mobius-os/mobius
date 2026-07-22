@@ -1214,7 +1214,7 @@ async def delete_chat(
   # run_status + drops the actor's _run_token_owner entry; it is best-effort
   # and safe on a soft-deleted row (clear commands don't resurrect), and
   # idempotent when the run state is already clean (the common idle delete).
-  await _clear_run_status(chat_id)
+  await _clear_run_status(chat_id, terminal_status="stopped")
 
 
 @router.post("/{chat_id}/recover", dependencies=[Depends(reject_cross_site)])

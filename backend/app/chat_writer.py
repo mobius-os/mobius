@@ -86,6 +86,13 @@ log = logging.getLogger("moebius.chat.writer")
 # error / 503) rather than hanging the turn forever.
 ACK_TIMEOUT_SECS = 30.0
 
+# Terminal outcomes accepted by the two actor commands that close a live
+# ChatRun.  Keep this separate from active/parking states: these values all
+# mean the turn is over and are safe for existing "active status" filters.
+_TERMINAL_RUN_STATUSES = frozenset({
+  "completed", "failed", "stopped", "interrupted",
+})
+
 
 async def await_ack(ack: Future, *, timeout: float | None = None):
   """Await a writer-actor ack on the loop, bounded by `timeout`.
@@ -398,6 +405,10 @@ class PromotePending(_Command):
 
   chat_id: str = ""
   run_token: str = ""
+  # Outcome of the turn handing off to this continuation.  Most callers are
+  # not turn-end handoffs and keep the clean default; drain_and_release passes
+  # "failed" when the provider returned an error before queued work continues.
+  ending_status: str = "completed"
 
 
 @dataclass
@@ -487,6 +498,10 @@ class ClearRunStatus(_Command):
 
   chat_id: str = ""
   run_token: str = ""
+  # Durable outcome for the run row.  Clearing Chat.run_status only means the
+  # chat is idle; it must not collapse a provider/setup failure into a
+  # successful "completed" run in the observability record.
+  terminal_status: str = "completed"
 
 
 @dataclass
@@ -2240,7 +2255,7 @@ class ChatWriterActor:
     # handoff — so this is where the prior run's record is closed.
     from app.models import ChatRun
     self._close_running_runs(
-      db, cmd.chat_id, "completed", except_token=cmd.run_token
+      db, cmd.chat_id, cmd.ending_status, except_token=cmd.run_token
     )
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
@@ -2342,6 +2357,9 @@ class ChatWriterActor:
 
     from app.models import ChatRun
 
+    if status not in _TERMINAL_RUN_STATUSES:
+      raise _PersistFailed(f"invalid terminal ChatRun status: {status!r}")
+
     # "parked" rows (a provider-limit park, design §2.4) are superseded here
     # too: a fresh StartTurn / PromotePending on a parked chat means the owner
     # resumed it themselves (one-tap Resume, or any new send), so the stale
@@ -2374,7 +2392,10 @@ class ChatWriterActor:
     know they own the marker (reconciliation, no-handoff cleanup).
 
     The per-run `chat_runs` record (077 Step 3) is closed in the SAME commit:
-    a tokened clear marks its own run's row "completed" IF it is still running.
+    a tokened clear marks its own run's row with `cmd.terminal_status` IF it is
+    still running. The default is the clean-success outcome "completed";
+    provider/setup errors, explicit Stop, and live interruption callers pass a
+    more specific terminal outcome.
     A run superseded by a fresh StartTurn is already terminal ("interrupted",
     set by that StartTurn's `_close_running_runs`), so its dying
     no-op-on-the-marker clear correctly leaves the row terminal rather than
@@ -2386,6 +2407,11 @@ class ChatWriterActor:
 
     from app.models import Chat, ChatRun
 
+    if cmd.terminal_status not in _TERMINAL_RUN_STATUSES:
+      raise _PersistFailed(
+        f"invalid terminal ChatRun status: {cmd.terminal_status!r}"
+      )
+
     owner = self._run_token_owner.get(cmd.chat_id)
     marker_is_ours = not (
       cmd.run_token and owner is not None and owner != cmd.run_token
@@ -2396,12 +2422,12 @@ class ChatWriterActor:
         db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
       )
       if run is not None and run.status == "running":
-        run.status = "completed"
+        run.status = cmd.terminal_status
         run.ended_at = datetime.now(UTC)
         changed = True
     elif marker_is_ours:
       changed = self._close_running_runs(
-        db, cmd.chat_id, "completed"
+        db, cmd.chat_id, cmd.terminal_status
       ) or changed
     if not marker_is_ours:
       # A dying run's stale clear: its own run record is closed above, but the

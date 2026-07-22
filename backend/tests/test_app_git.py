@@ -67,6 +67,20 @@ def _commit_all(repo: Path, msg: str) -> str:
   ).stdout.strip()
 
 
+def test_ref_is_ancestor_distinguishes_false_from_git_errors(tmp_path):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "export default function App() { return <div>local</div> }\n")
+  local = app_git.commit_local(repo, "local edit")
+  assert local
+
+  assert app_git.ref_is_ancestor(repo, base, local) is True
+  assert app_git.ref_is_ancestor(repo, local, base) is False
+  assert app_git.ref_is_ancestor(repo, "missing-ref", local) is None
+
+
 def test_clone_upstream_uses_real_origin_and_app_gitignore(tmp_path):
   """clone_upstream checks out main at a real origin/<ref> commit."""
   fixture = tmp_path / "fixture"
