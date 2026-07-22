@@ -520,14 +520,18 @@
 }
 .workspace__drop-preglow.is-on { opacity: 1; }
 
-/* The full-viewport shield: owns the grabbing cursor and blocks iframe hover
-   artifacts while a drag is live. Transparent, so the preview shows through;
-   pointer-events:auto so an app iframe never sees the drag pointer. */
+/* The full-viewport drag layer is VISUAL only. Pointer capture on the source
+   element owns the live stream and keeps iframe hover/touch out of it. Keeping
+   this transparent layer hit-testable created a much worse failure mode: if a
+   mobile browser stole the terminal pointer event, the orphaned layer covered
+   the drawer and the owner's next tap only removed the stale drag instead of
+   opening a destination. A visual layer can never make navigation inert. */
 .workspace__drag-shield {
   position: fixed;
   inset: 0;
   z-index: 250;
   background: transparent;
+  pointer-events: none;
   cursor: grabbing;
 }
 
