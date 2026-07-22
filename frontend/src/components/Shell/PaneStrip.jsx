@@ -6,6 +6,14 @@ import X from 'lucide-react/dist/esm/icons/x.mjs'
 import * as tabModel from './tabModel.js'
 import { STRIP_H, WORKSPACE_SPLITS_ENABLED } from './paneModel.js'
 
+// Keep normal generated chat titles near a steady, readable 30px/s while the
+// existing one-shot cycle traverses each direction. The floor keeps small clips
+// unhurried; the cap prevents an extreme manual 500-character rename from
+// holding a compositor animation for minutes.
+const TITLE_CYCLE_MIN_MS = 8000
+const TITLE_CYCLE_MAX_MS = 32000
+const TITLE_CYCLE_MS_PER_PX = 1000 / 6
+
 // The ONE strip implementation, shared by the multi-pane chrome overlay AND the
 // single-pane top nav (design §2/§3.6). The two CONTAINERS differ by a scroll
 // constraint — an absolute chrome strip vs the flow <nav> — but the .shell__tab
@@ -37,6 +45,17 @@ export function stripKeyDown(e, tabs, onClose) {
   buttons[next]?.focus()
 }
 
+// A trackpad already sends horizontal deltaX and remains fully native. Translate
+// only a dominant vertical wheel into the hidden horizontal overflow so a mouse
+// wheel can reach every tab without adding another control or persistent chrome.
+export function scrollStripWheel(e) {
+  if (Math.abs(e.deltaX) >= Math.abs(e.deltaY) || e.deltaY === 0) return
+  const strip = e.currentTarget
+  if (strip.scrollWidth <= strip.clientWidth) return
+  const scale = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? strip.clientWidth : 1)
+  strip.scrollLeft += e.deltaY * scale
+}
+
 // The presentational tab button (open + close). `role="tab"` inside the tablist
 // chrome strip; the flow nav omits it (a nav landmark, not a tablist) and marks
 // the current tab with aria-current instead. Only the active tab is tabbable
@@ -44,6 +63,7 @@ export function stripKeyDown(e, tabs, onClose) {
 export function PaneTab({
   tab, label, active, tabIndex, dragKey, role, onActivate, onClose, onContextMenu,
 }) {
+  const tabRef = useRef(null)
   const titleRef = useRef(null)
   // Only the active CHAT title cycles, and only when it is actually clipped. One
   // ResizeObserver follows that one title per pane; measurements update CSS vars
@@ -55,6 +75,7 @@ export function PaneTab({
     const clear = () => {
       delete title.dataset.overflow
       title.style.removeProperty('--tab-title-shift')
+      title.style.removeProperty('--tab-title-duration')
     }
     if (!active || tab.kind !== 'chat' || !text) {
       clear()
@@ -63,8 +84,13 @@ export function PaneTab({
     const measure = () => {
       const shift = Math.ceil(text.scrollWidth - title.clientWidth)
       if (shift > 3) {
+        const duration = Math.min(
+          TITLE_CYCLE_MAX_MS,
+          Math.max(TITLE_CYCLE_MIN_MS, Math.round(shift * TITLE_CYCLE_MS_PER_PX)),
+        )
         title.dataset.overflow = 'true'
         title.style.setProperty('--tab-title-shift', `-${shift}px`)
+        title.style.setProperty('--tab-title-duration', `${duration}ms`)
       } else {
         clear()
       }
@@ -80,11 +106,18 @@ export function PaneTab({
     }
   }, [active, label, tab.kind])
 
+  // A tab activated from outside the strip (drawer/history restore) must not stay
+  // clipped beyond an overflow edge. Browser focus already handles keyboard
+  // navigation; this covers state-driven activation without a React state loop.
+  useLayoutEffect(() => {
+    if (active) tabRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+  }, [active])
+
   const TabIcon = tab.kind === 'settings'
     ? Settings
     : (tab.kind === 'chat' ? MessageSquare : AppWindow)
   return (
-    <div className={`shell__tab${active ? ' shell__tab--active' : ''}`}>
+    <div ref={tabRef} className={`shell__tab${active ? ' shell__tab--active' : ''}`}>
       <button
         type="button"
         className="shell__tab-open"
@@ -161,6 +194,7 @@ export function PaneStrip({
       aria-label="Pane tabs"
       style={style}
       onKeyDown={(e) => stripKeyDown(e, pane.tabs, onClose)}
+      onWheel={scrollStripWheel}
       onPointerDown={(e) => { if (!e.target.closest('.shell__tab')) onFocus(pane.id) }}
     >
       {pane.tabs.map((tab) => {

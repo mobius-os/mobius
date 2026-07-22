@@ -42,6 +42,11 @@ _ROOT_SOURCE_FILES = {
   "index.html", "package-lock.json", "package.json", "vite.config.js",
 }
 _SOURCE_DIRS = {"public", "src"}
+_CONFLICT_SCAN_SUFFIXES = {
+  ".cjs", ".css", ".html", ".js", ".json", ".jsx", ".md", ".mjs",
+  ".svg", ".ts", ".tsx", ".txt", ".webmanifest", ".xml", ".yaml", ".yml",
+}
+_CONFLICT_MARKER_PREFIXES = (b"<<<<<<<", b">>>>>>>")
 _FRONTEND_DIR = Path(os.environ.get(
   "MOBIUS_FRONTEND_DIR", "/data/platform/frontend",
 ))
@@ -116,8 +121,8 @@ def _is_frontend_source_path(path: str | Path) -> bool:
   return bool(rel.parts and rel.parts[0] in _SOURCE_DIRS)
 
 
-def _source_snapshot() -> tuple[str, int]:
-  """Return a cheap source identity and newest input mtime."""
+def _source_paths() -> list[Path]:
+  """Return the files that can affect a frontend build."""
   paths = [
     _FRONTEND_DIR / name for name in sorted(_ROOT_SOURCE_FILES)
     if (_FRONTEND_DIR / name).is_file()
@@ -132,9 +137,14 @@ def _source_snapshot() -> tuple[str, int]:
       and not any(part.startswith(".") or part == "node_modules"
                   for part in path.relative_to(root).parts)
     )
+  return sorted(paths)
+
+
+def _source_snapshot() -> tuple[str, int]:
+  """Return a cheap source identity and newest input mtime."""
   digest = hashlib.sha256()
   newest_ns = 0
-  for path in sorted(paths):
+  for path in _source_paths():
     try:
       stat = path.stat()
       rel = path.relative_to(_FRONTEND_DIR).as_posix()
@@ -143,6 +153,46 @@ def _source_snapshot() -> tuple[str, int]:
     newest_ns = max(newest_ns, stat.st_mtime_ns)
     digest.update(f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
   return digest.hexdigest(), newest_ns
+
+
+def _source_conflict_markers() -> tuple[str, ...]:
+  """Return build inputs containing a Git conflict boundary at line start.
+
+  Restrict the scan to text-like inputs so a transient merge conflict is much
+  cheaper to reject than a Vite process, without reading large binary assets
+  under ``public``. Git writes conflict boundaries at column zero; requiring
+  an opener or closer there avoids matching marker text inside source strings.
+  """
+  conflicts: list[str] = []
+  for path in _source_paths():
+    if path.suffix.lower() not in _CONFLICT_SCAN_SUFFIXES:
+      continue
+    try:
+      with path.open("rb") as source:
+        if any(
+          line.startswith(_CONFLICT_MARKER_PREFIXES) for line in source
+        ):
+          conflicts.append(path.relative_to(_FRONTEND_DIR).as_posix())
+    except (OSError, ValueError):
+      # The before/after snapshots below turn ordinary edit races into a cheap
+      # retry. A genuinely unreadable stable input is still reported by Vite.
+      continue
+  return tuple(conflicts)
+
+
+def _stable_source_preflight() -> tuple[str, tuple[str, ...]] | None:
+  """Return a stable source signature and its conflict-marker inputs.
+
+  Files can change while the marker scan is reading them. Do not launch Vite
+  for that indeterminate snapshot; the demand-build loop will debounce and
+  retry it just like any other racing edit.
+  """
+  before, _ = _source_snapshot()
+  conflicts = _source_conflict_markers()
+  after, _ = _source_snapshot()
+  if before != after:
+    return None
+  return after, conflicts
 
 
 def _source_stamp_path() -> Path:
@@ -632,6 +682,7 @@ class _FrontendHandler(FileSystemEventHandler):
     self._build_requested = threading.Event()
     self._last_source_change = 0.0
     self._last_build_reason = "startup"
+    self._blocked_conflict_signature: str | None = None
     self._staging_dirty = False
     self._incomplete_since: float | None = None
     self._incomplete_notified = False
@@ -746,6 +797,10 @@ class _FrontendHandler(FileSystemEventHandler):
   def _request_build(self, reason: str) -> None:
     if reason != "startup" and not _is_frontend_source_path(reason):
       return
+    self._queue_build(reason)
+
+  def _queue_build(self, reason: str) -> None:
+    """Queue a debounced build without applying the filesystem-path filter."""
     if self._closed.is_set():
       return
     with self._state_lock:
@@ -828,7 +883,40 @@ class _FrontendHandler(FileSystemEventHandler):
 
   def _run_demand_build(self, reason: str) -> None:
     """Run one isolated build and publish it before releasing its heap."""
-    source_signature, _ = _source_snapshot()
+    with self._state_lock:
+      blocked_signature = self._blocked_conflict_signature
+    if blocked_signature is not None:
+      current_signature, _ = _source_snapshot()
+      if current_signature == blocked_signature:
+        # The same conflicted snapshot is still present. Stat it cheaply, but
+        # do not reread every text input on each backstop retry.
+        self._queue_build("conflict-marker preflight retry")
+        return
+    preflight = _stable_source_preflight()
+    if preflight is None:
+      self._queue_build("source changed during conflict-marker preflight")
+      return
+    source_signature, conflicts = preflight
+    if conflicts:
+      with self._state_lock:
+        newly_blocked = self._blocked_conflict_signature != source_signature
+        self._blocked_conflict_signature = source_signature
+      if newly_blocked:
+        log.warning(
+          "frontend demand build deferred; conflict markers remain in %s",
+          ", ".join(conflicts),
+        )
+      # Poll the cheap preflight after the normal debounce as a backstop for a
+      # missed/coalesced observer event. Do not make a transient editing state
+      # sticky, and do not emit shell_rebuild_failed while the last good dist
+      # remains served.
+      self._queue_build("conflict-marker preflight retry")
+      return
+    with self._state_lock:
+      conflict_cleared = self._blocked_conflict_signature is not None
+      self._blocked_conflict_signature = None
+    if conflict_cleared:
+      log.info("frontend conflict-marker preflight cleared; resuming build")
     _ensure_node_modules()
     if _STAGING_DIST_DIR.exists():
       shutil.rmtree(_STAGING_DIST_DIR)
@@ -872,6 +960,14 @@ class _FrontendHandler(FileSystemEventHandler):
       raise RuntimeError(detail)
     if output.strip():
       log.info("frontend demand build complete: %s", _tail(output, 1000))
+    current_source_signature, _ = _source_snapshot()
+    if current_source_signature != source_signature:
+      shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
+      log.info(
+        "frontend source changed during demand build; discarding staging",
+      )
+      self._queue_build("source changed during demand build")
+      return
     if not self._refresh_staging_signature():
       raise RuntimeError("vite build completed without a staging generation")
     self._publish_dirty_sync(f"build:{reason}")

@@ -654,6 +654,38 @@ test.describe('Workspace drag (PR3)', () => {
     expect(Object.keys(after.panes).length).toBe(Object.keys(before.panes).length)
   })
 
+  test('a cancelled drag cannot swallow the next intentional tab press', async ({ page }) => {
+    const { a, c } = await bootThreeTab(page, 'dragThenPress')
+    const source = page.locator(
+      `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${a.id}"]`,
+    )
+    const box = await source.boundingBox()
+    const x = box.x + box.width / 2
+    const y = box.y + box.height / 2
+
+    // Use a synthetic pointer stream so Chromium emits no compatibility click.
+    // This leaves the controller's one-shot click guard standing after Escape,
+    // exactly like browsers/devices that suppress the drag's compat click.
+    await source.dispatchEvent('pointerdown', {
+      pointerId: 91, pointerType: 'mouse', isPrimary: true,
+      button: 0, buttons: 1, clientX: x, clientY: y,
+    })
+    await source.dispatchEvent('pointermove', {
+      pointerId: 91, pointerType: 'mouse', isPrimary: true,
+      button: 0, buttons: 1, clientX: x + 10, clientY: y,
+    })
+    await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.workspace__drag-chip')).toHaveCount(0)
+    expect((await readWs(page)).panes.p0.activeTabKey).toBe(`chat:${c.id}`)
+
+    // A new physical press is user intent, never the old drag's compat click.
+    await source.click()
+    await expect.poll(async () => (await readWs(page)).panes.p0.activeTabKey, {
+      timeout: 3000, message: 'the first fresh press activates the requested tab',
+    }).toBe(`chat:${a.id}`)
+  })
+
   test('the undo chord restores a mis-dropped tab', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragUndo')
     const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
@@ -732,6 +764,14 @@ test.describe('Workspace drag (PR3)', () => {
       .toEqual(beforeOrder)
     await expect(page.locator('.workspace__drag-chip')).toHaveCount(0)
     expect(beforeOrder).toEqual([`chat:${a.id}`, `chat:${b.id}`, `chat:${c.id}`])
+
+    // A conventional vertical mouse wheel reaches the same hidden overflow;
+    // trackpad deltaX remains native and is deliberately not doubled.
+    await strip.evaluate(el => { el.scrollLeft = 0 })
+    await strip.dispatchEvent('wheel', { deltaX: 0, deltaY: 96, deltaMode: 0 })
+    await expect.poll(() => strip.evaluate(el => el.scrollLeft), {
+      timeout: 3000, message: 'vertical wheel advances the horizontal tab strip',
+    }).toBeGreaterThan(50)
   })
 
   test('phone touch-drag resizes the pane divider', async ({ page }) => {
@@ -767,7 +807,13 @@ test.describe('Workspace drag (PR3)', () => {
     })
     expect(motion.name).toBe('shell-tab-title-cycle')
     expect(motion.iterations).toBe('1')
-    expect(motion.duration).toBe('4.8s')
+    const durationMs = Number.parseFloat(motion.duration) * 1000
+    const expectedDurationMs = Math.min(
+      32000,
+      Math.max(8000, Math.round(Math.abs(motion.shift) * (1000 / 6))),
+    )
+    expect(durationMs).toBeCloseTo(expectedDurationMs, -1)
+    expect(durationMs).toBeGreaterThan(4800)
     expect(motion.delay).toBe('0.7s')
     expect(motion.shift).toBeLessThan(0)
 

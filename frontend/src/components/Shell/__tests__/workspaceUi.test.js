@@ -128,10 +128,12 @@ test('the coachmark gives one direct drag instruction and dismisses without a st
   assert.match(closeRule, /pointer-events:\s*auto/)
 })
 
-test('post-drag click suppression is limited to the original source', () => {
+test('post-drag click suppression is source-scoped and expires on fresh input', () => {
   assert.match(dragBinding, /function suppressNextSourceClick\(sourceEl\)/)
   assert.match(dragBinding, /path\.includes\(sourceEl\)/)
   assert.match(dragBinding, /if \(!belongsToSource\) return/)
+  assert.match(dragBinding, /window\.addEventListener\('pointerdown', clear, true\)/)
+  assert.match(dragBinding, /window\.removeEventListener\('pointerdown', clear, true\)/)
   assert.match(dragBinding, /suppressNextSourceClick\(srcEl\)/)
 })
 
@@ -669,14 +671,24 @@ test('an active overflowing chat title cycles once, then becomes idle', () => {
   assert.match(paneStrip, /new ResizeObserver\(measure\)/)
   assert.match(paneStrip, /!active \|\| tab\.kind !== 'chat'/)
   assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-shift'/)
+  assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-duration'/)
+  assert.match(paneStrip, /Math\.round\(shift \* TITLE_CYCLE_MS_PER_PX\)/)
   assert.match(paneStrip, /className="shell__tab-text-inner"/)
-  const cycle = shellCss.match(/\.shell__tabstrip:not\(\.workspace__strip\)[\s\S]*?shell-tab-title-cycle 4\.8s ease-in-out 700ms 1 both/)?.[0] || ''
+  const cycle = shellCss.match(/\.shell__tabstrip:not\(\.workspace__strip\)[\s\S]*?shell-tab-title-cycle var\(--tab-title-duration\) linear 700ms 1 both/)?.[0] || ''
   assert.match(cycle, /\.workspace__strip--focused/)
   assert.doesNotMatch(cycle, /infinite/)
   const keyframes = shellCss.match(/@keyframes shell-tab-title-cycle\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(keyframes, /85%, 100% \{ transform: translate3d\(0, 0, 0\)/,
     'the one pass returns to the beginning and rests there')
   assert.match(shellCss, /\.shell__tab-text-inner \{ animation: none !important; \}/)
+})
+
+test('overflowing strips keep native pan and add a no-chrome wheel path', () => {
+  assert.match(paneStrip, /export function scrollStripWheel\(e\)/)
+  assert.match(paneStrip, /Math\.abs\(e\.deltaX\) >= Math\.abs\(e\.deltaY\)/)
+  assert.match(paneStrip, /strip\.scrollLeft \+= e\.deltaY \* scale/)
+  assert.match(paneStrip, /onWheel=\{scrollStripWheel\}/)
+  assert.match(shell, /onWheel=\{scrollStripWheel\}/)
 })
 
 test('the mobile modal keeps its existing brand close path while the workspace is inert', () => {
