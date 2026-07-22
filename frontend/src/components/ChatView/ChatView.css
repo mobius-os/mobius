@@ -218,16 +218,6 @@
   max-width: 42ch;
 }
 
-.chat__empty-prompts {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px;
-  max-width: min(100%, 520px);
-  margin-top: 4px;
-}
-
-.chat__empty-prompt,
 .chat__empty-action {
   display: inline-flex;
   align-items: center;
@@ -248,13 +238,11 @@
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
-.chat__empty-prompt:hover,
 .chat__empty-action:hover {
   background: var(--surface);
   border-color: var(--border);
 }
 
-.chat__empty-prompt:focus-visible,
 .chat__empty-action:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -1495,7 +1483,6 @@
    target. These rows carry their disclosure state without a trailing chevron,
    so the whole labeled line must be comfortably tappable. */
 @media (pointer: coarse) {
-  .chat__empty-prompt,
   .chat__empty-action,
   .chat__quick-action-chip,
   .chat__activity-header:not(.chat__activity-header--static),

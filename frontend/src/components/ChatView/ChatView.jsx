@@ -103,12 +103,6 @@ const _touchMql = typeof matchMedia === 'function'
 let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
-const EMPTY_PROMPTS = [
-  { label: 'Make Möbius mine', prompt: 'Suggest three small changes that would make this Möbius feel more like mine, then implement the best one.' },
-  { label: 'Build a tiny app', prompt: 'Build a tiny useful app I can try in the next five minutes.' },
-  { label: 'Show me around', prompt: 'Show me what you can change in this Möbius, and recommend a first move.' },
-]
-
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 
 function delay(ms) {
@@ -3688,18 +3682,6 @@ export default function ChatView({
             <div className="chat__empty">
               <img className="chat__empty-glyph" src={mobiusLogoUrl} alt="" width="120" height="120" />
               <p className="chat__empty-title">What's on your mind?</p>
-              <div className="chat__empty-prompts">
-                {EMPTY_PROMPTS.map(prompt => (
-                  <button
-                    key={prompt.label}
-                    type="button"
-                    className="chat__empty-prompt"
-                    onClick={() => restoreComposerText(prompt.prompt, { focus: true })}
-                  >
-                    {prompt.label}
-                  </button>
-                ))}
-              </div>
             </div>
           )}
         </div>
