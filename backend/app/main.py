@@ -533,22 +533,53 @@ async def lifespan(app):
 
     _stalled_live_task = _asyncio.create_task(_stalled_live_loop())
 
-    # Provider-limit reset sweep (design §2.4): notifies once when a parked
-    # turn's reset time arrives, and — when the owner opted in — starts the
-    # strictly-serial auto-resume. Same shape as the two loops above.
+    # Durable automatic-continuation sweep (design §2.4): notifies once when
+    # a provider-limit reset arrives and starts either that continuation or a
+    # planned-restart continuation when the owner opted in. It runs once as
+    # soon as lifespan yields (so startup is fully complete and requests can
+    # be served), then wakes on a turn-finished event only when the preceding
+    # sweep found another due continuation blocked by a live turn, or at the
+    # 60s safety cadence. That hint drains recovered chats serially without
+    # querying after every unrelated ordinary turn.
     async def _reset_park_loop():
-      while True:
-        await _asyncio.sleep(60)
-        try:
-          _rp_db = _SweepSession()
+      from app.broadcast import get_system_broadcast as _system_broadcast
+      _resume_events = _system_broadcast().subscribe()
+      try:
+        while True:
+          _wait_for_turn_finish = False
           try:
-            await sweep_reset_parks(_rp_db)
-          finally:
-            _rp_db.close()
-        except _asyncio.CancelledError:
-          raise
-        except Exception as _exc:
-          _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
+            _rp_db = _SweepSession()
+            try:
+              _, _wait_for_turn_finish = await sweep_reset_parks(
+                _rp_db, include_wait_hint=True,
+              )
+            finally:
+              _rp_db.close()
+          except _asyncio.CancelledError:
+            raise
+          except Exception as _exc:
+            _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
+
+          _loop = _asyncio.get_running_loop()
+          _deadline = _loop.time() + 60
+          while True:
+            _remaining = _deadline - _loop.time()
+            if _remaining <= 0:
+              break
+            try:
+              _event = await _asyncio.wait_for(
+                _resume_events.get(), timeout=_remaining,
+              )
+            except _asyncio.TimeoutError:
+              break
+            if (
+              _wait_for_turn_finish
+              and _event
+              and _event.get("type") == "chat_run_finished"
+            ):
+              break
+      finally:
+        _system_broadcast().unsubscribe(_resume_events)
 
     _reset_park_task = _asyncio.create_task(_reset_park_loop())
 

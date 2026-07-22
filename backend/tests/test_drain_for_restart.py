@@ -6,8 +6,8 @@ Locks in the four contracts that distinguish a restart-drain from a Stop:
       stop_chat_for CLEARS the queue (contrast).
   (b) The drain persists the "paused for a platform update" note WITHOUT losing
       the accumulated partial blocks.
-  (c) Boot reconcile marks the paused note resumable (no double note) and the
-      boot notify fires exactly once.
+  (c) Boot reconcile marks the paused note resumable (no double note), prepares
+      opted-in planned restarts for serial continuation, and notifies once.
   (d) A send arriving while draining QUEUES instead of starting a turn.
 """
 
@@ -43,7 +43,10 @@ def _drain_writer():
   get_writer().submit(Barrier()).result(timeout=5)
 
 
-def _seed(chat_id: str, *, pending=None, messages=None, run_status="running"):
+def _seed(
+  chat_id: str, *, pending=None, messages=None, run_status="running",
+  auto_resume=True, initiated_by_app_id=None,
+):
   db = SessionLocal()
   try:
     started = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=30)
@@ -54,6 +57,7 @@ def _seed(chat_id: str, *, pending=None, messages=None, run_status="running"):
       pending_messages=pending or [],
       session_id="sess",
       provider="claude",
+      auto_resume_on_limit=auto_resume,
       run_status=run_status,
       run_started_at=started if run_status else None,
     ))
@@ -63,6 +67,7 @@ def _seed(chat_id: str, *, pending=None, messages=None, run_status="running"):
         chat_id=chat_id,
         status="running",
         provider="claude",
+        initiated_by_app_id=initiated_by_app_id,
         started_at=started,
       ))
     db.commit()
@@ -78,6 +83,19 @@ def _chat(chat_id: str):
       "messages": materialized_messages(row),
       "pending": list(row.pending_messages or []),
       "run_status": row.run_status,
+    }
+  finally:
+    db.close()
+
+
+def _run(run_id: str):
+  db = SessionLocal()
+  try:
+    row = db.query(models.ChatRun).filter(models.ChatRun.id == run_id).first()
+    return {
+      "status": row.status,
+      "parked_until": row.parked_until,
+      "park_reason": row.park_reason,
     }
   finally:
     db.close()
@@ -209,6 +227,13 @@ def test_reconcile_marks_paused_note_resumable_without_double_note():
   # persisted before it existed (or whose live event never landed) renders
   # in the calm "Paused" family, not danger-red.
   assert errors[0]["pause"] == {"kind": "restart"}
+  # The exact drain note distinguishes a planned restart from a crash. With
+  # the chat policy enabled, its latest owner run reuses the existing durable
+  # auto-resume state and is due immediately after serving begins.
+  run = _run(f"rt-{cid}")
+  assert run["status"] == "resume_pending"
+  assert run["parked_until"] is not None
+  assert run["park_reason"] == "restart"
 
 
 def test_reconcile_crash_note_is_resumable():
@@ -226,6 +251,9 @@ def test_reconcile_crash_note_is_resumable():
   blocks = _chat(cid)["messages"][-1]["blocks"]
   note = next(b for b in blocks if b.get("type") == "error")
   assert note["resumable"] is True
+  # Unplanned crashes remain manual even when the chat policy is enabled: an
+  # agent-triggered crash must not become a reboot loop.
+  assert _run(f"rt-{cid}")["status"] == "interrupted"
 
 
 def test_reconcile_question_tail_note_is_not_resumable():
@@ -255,6 +283,147 @@ def test_reconcile_question_tail_note_is_not_resumable():
   note = next(b for b in blocks if b.get("type") == "error")
   assert "answer is still needed" in note["message"]
   assert not note.get("resumable")
+  assert _run(f"rt-{cid}")["status"] == "interrupted"
+
+
+def test_reconcile_planned_restart_keeps_question_manual_and_answerable():
+  """The drain appends its exact note after an already-persisted question.
+
+  Reconciliation must look through that note, preserve the question as the
+  tail affordance, and reject automatic ``continue`` while a human answer is
+  still required.
+  """
+  cid = "reco-drained-question"
+  _seed(cid, messages=[
+    {"role": "user", "content": "hi", "ts": 1},
+    {"role": "assistant", "ts": 2, "content": "", "blocks": [
+      {"type": "text", "content": "thinking"},
+      {"type": "question", "id": "q1", "text": "Which one?"},
+      {"type": "error", "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE},
+    ]},
+  ])
+
+  db = SessionLocal()
+  try:
+    assert chat_mod.reconcile_interrupted_chats(db) == [cid]
+  finally:
+    db.close()
+
+  blocks = _chat(cid)["messages"][-1]["blocks"]
+  assert blocks[-1].get("type") == "question"
+  note = next(b for b in blocks if b.get("type") == "error")
+  assert note["message"] == chat_mod.PAUSED_FOR_RESTART_MESSAGE
+  assert note["pause"] == {"kind": "restart"}
+  assert not note.get("resumable")
+  assert _run(f"rt-{cid}")["status"] == "interrupted"
+
+
+def test_reconcile_old_nonterminal_restart_note_does_not_mask_new_crash():
+  """Only the drain's terminal note proves this specific run was planned.
+
+  A prior restart note can remain in an assistant row after a recovered
+  question continues. If a later turn crashes without a fresh terminal note,
+  that historical block must not manufacture an automatic reboot loop.
+  """
+  cid = "reco-old-restart-note"
+  _seed(cid, messages=[
+    {"role": "user", "content": "hi", "ts": 1},
+    {"role": "assistant", "ts": 2, "content": "", "blocks": [
+      {"type": "error", "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE},
+      {"type": "text", "content": "new work after recovery"},
+    ]},
+  ])
+
+  db = SessionLocal()
+  try:
+    assert chat_mod.reconcile_interrupted_chats(db) == [cid]
+  finally:
+    db.close()
+
+  assert _run(f"rt-{cid}")["status"] == "interrupted"
+
+
+def test_reconcile_planned_restart_respects_disabled_policy():
+  cid = "reco-drained-disabled"
+  _seed(cid, auto_resume=False, messages=[
+    {"role": "user", "content": "hi", "ts": 1},
+    {"role": "assistant", "ts": 2, "blocks": [{
+      "type": "error", "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE,
+    }]},
+  ])
+
+  db = SessionLocal()
+  try:
+    assert chat_mod.reconcile_interrupted_chats(db) == [cid]
+  finally:
+    db.close()
+
+  assert _run(f"rt-{cid}")["status"] == "interrupted"
+
+
+def test_reconcile_planned_restart_never_auto_continues_app_run():
+  cid = "reco-drained-app"
+  _seed(cid, initiated_by_app_id=17, messages=[
+    {"role": "user", "content": "background work", "ts": 1},
+    {"role": "assistant", "ts": 2, "blocks": [{
+      "type": "error", "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE,
+    }]},
+  ])
+
+  db = SessionLocal()
+  try:
+    assert chat_mod.reconcile_interrupted_chats(db) == [cid]
+  finally:
+    db.close()
+
+  assert _run(f"rt-{cid}")["status"] == "interrupted"
+
+
+def test_planned_restart_sweep_starts_one_marked_continuation(monkeypatch):
+  cid = "reco-drained-auto"
+  queued = {
+    "role": "user", "content": "queued ask", "ts": 3, "cid": "queued-1",
+  }
+  _seed(cid, pending=[queued], messages=[
+    {"role": "user", "content": "hi", "ts": 1, "cid": "owner-1"},
+    {"role": "assistant", "ts": 2, "blocks": [{
+      "type": "error", "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE,
+    }]},
+  ])
+  db = SessionLocal()
+  try:
+    assert chat_mod.reconcile_interrupted_chats(db) == [cid]
+  finally:
+    db.close()
+
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  db = SessionLocal()
+  try:
+    resolved = asyncio.run(chat_mod.sweep_reset_parks(db))
+  finally:
+    db.close()
+
+  try:
+    assert resolved == [cid]
+    assert len(scheduled) == 1
+    assert "queued ask" in scheduled[0]["next_user"]["content"]
+    assert "continue" in scheduled[0]["next_user"]["content"]
+    markers = [
+      msg for msg in _chat(cid)["messages"]
+      if msg.get("kind") == "auto_continuation"
+    ]
+    assert len(markers) == 1
+    assert markers[0]["role"] == "user"
+    assert markers[0]["content"] == "continue"
+    assert markers[0]["continuation_reason"] == "restart"
+    assert markers[0]["cid"] == f"restart-resume-rt-{cid}"
+  finally:
+    # The scheduler is stubbed, so release the claim the real spawned task owns.
+    chat_mod.discard_starting(cid)
 
 
 def test_notify_after_reconcile_fires_once(owner_token, monkeypatch):
@@ -274,6 +443,34 @@ def test_notify_after_reconcile_fires_once(owner_token, monkeypatch):
   assert result == "notif-id"
   assert len(calls) == 1
   assert "resume" in calls[0]["body"].lower()
+
+
+def test_notify_after_reconcile_names_automatic_restart(owner_token, monkeypatch):
+  del owner_token
+  cid = "reco-auto-notify"
+  _seed(cid, messages=[
+    {"role": "user", "content": "hi", "ts": 1},
+    {"role": "assistant", "ts": 2, "blocks": [{
+      "type": "error", "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE,
+    }]},
+  ])
+  calls = []
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
+  )
+
+  db = SessionLocal()
+  try:
+    reconciled = chat_mod.reconcile_interrupted_chats(db)
+    result = chat_mod.notify_after_reconcile(db, reconciled)
+  finally:
+    db.close()
+
+  assert result == "notif-id"
+  assert len(calls) == 1
+  assert "continu" in calls[0]["title"].lower()
+  assert "automatically" in calls[0]["body"].lower()
 
 
 def test_notify_after_reconcile_noop_when_nothing_reconciled(owner_token, monkeypatch):

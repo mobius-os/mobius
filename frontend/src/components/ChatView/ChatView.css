@@ -353,6 +353,7 @@
 }
 
 .chat__msg--user { align-items: flex-end; }
+.chat__msg--marker { align-items: stretch; }
 .chat__msg--assistant {
   --activity-block-gap: 8px;
   --activity-row-gap: 4px;
@@ -1514,7 +1515,7 @@
   }
 }
 
-/* ── Marker card (compaction + future system markers) ── */
+/* ── Marker card (compaction + automatic recovery events) ── */
 
 /* A marker is a product/system moment ("the chat was summarized", "the turn
    was interrupted"), not a tool call — so it gets a labeled card instead of
