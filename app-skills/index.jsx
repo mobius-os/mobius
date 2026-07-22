@@ -924,12 +924,12 @@ export default function SkillsApp({ appId, token }) {
               disabled={removeBusy}
               onClick={() => (removeArmed ? uninstallCurrent() : setRemoveArmed(true))}
               aria-label={removeArmed ? 'Tap again to remove this skill' : 'Remove this skill'}
-            >{TRASH}<span className="sk-tip" aria-hidden="true"><b>Delete</b> – removes the skill (asks once more before deleting)</span></button>
+            >{TRASH}<span className="sk-tip" aria-hidden="true">Delete – removes the skill (asks once more before deleting)</span></button>
           )}
           <button className="sk-iconbtn" onClick={() => {
             window.mobius?.signal?.('edit_requested', { type: 'skill', slug: current.id })
             askAgent(`Help me edit the "${current.id}" skill. Here's what I want to change: `)
-          }} aria-label="Edit skill with the agent">{PLUS}<span className="sk-tip" aria-hidden="true"><b>Edit</b> – opens a chat with the agent to change the skill</span></button>
+          }} aria-label="Edit skill with the agent">{PLUS}<span className="sk-tip" aria-hidden="true">Edit – opens a chat with the agent to change the skill</span></button>
         </div>
         {removeArmed && !removeError && (
           <div className="sk-alert" role="status">Tap the bin again to remove “{current.id}”. Its bytes are saved to git history first.</div>
@@ -986,13 +986,13 @@ export default function SkillsApp({ appId, token }) {
           </div>
         </div>
         <button className="sk-iconbtn" onClick={findSkills} aria-label="Ask the agent to find a new skill">
-          {SPARKLE}<span className="sk-tip" aria-hidden="true"><b>Find</b> – use agent to find a skill you need</span>
+          {SPARKLE}<span className="sk-tip" aria-hidden="true">Find – use agent to find a skill you need</span>
         </button>
         <button className="sk-iconbtn" onClick={openCatalog} aria-label="Browse skill catalogs">
-          {BOOK}<span className="sk-tip" aria-hidden="true"><b>Browse</b> – look at the public skill catalogs</span>
+          {BOOK}<span className="sk-tip" aria-hidden="true">Browse – look at the public skill catalogs</span>
         </button>
         <button className={`sk-iconbtn${refreshing ? ' is-spinning' : ''}`} onClick={refresh} disabled={refreshing} aria-label="Refresh skills">
-          {REFRESH}<span className="sk-tip" aria-hidden="true"><b>Refresh</b> – update the skills list</span>
+          {REFRESH}<span className="sk-tip" aria-hidden="true">Refresh – update the skills list</span>
         </button>
       </header>
 
