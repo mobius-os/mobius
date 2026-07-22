@@ -19,7 +19,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app import (
@@ -1824,7 +1824,7 @@ def get_app(
 
 
 class AppActivitySeenRequest(BaseModel):
-  activity_version: int
+  activity_version: int = Field(ge=1, le=(2**63 - 1))
 
 
 @router.post(

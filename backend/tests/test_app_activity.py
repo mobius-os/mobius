@@ -93,6 +93,28 @@ def test_late_seen_request_does_not_erase_newer_app_activity(client, auth, db):
   assert first.unseen is False
 
 
+def test_seen_rejects_versions_outside_sqlite_integer_range(client, auth, db):
+  app = _app(db)
+  sent = client.post("/api/notifications/send", headers=auth, json={
+    "title": "Background work finished",
+    "source_type": "app",
+    "source_id": str(app.id),
+  })
+  assert sent.status_code == 200, sent.text
+
+  for invalid_version in (0, -1, 1 << 63, 10**80):
+    response = client.post(
+      f"/api/apps/{app.id}/activity/seen",
+      headers=auth,
+      json={"activity_version": invalid_version},
+    )
+    assert response.status_code == 422, response.text
+
+  state = db.get(models.AppActivityState, app.id)
+  db.refresh(state)
+  assert state.unseen is True
+
+
 def test_non_app_and_unknown_app_notifications_do_not_create_markers(
   client, auth, db,
 ):
