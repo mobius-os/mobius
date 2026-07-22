@@ -1032,6 +1032,142 @@ def _parse_pr_number(url: str) -> int | None:
   return int(m.group(1)) if m else None
 
 
+def _reviewed_pr_labels(plan: dict) -> list[str]:
+  """Return only the two labels the owner could see in Contribute review."""
+  raw = plan.get("labels")
+  if not isinstance(raw, list):
+    return []
+  labels = []
+  seen = set()
+  for value in raw[:2]:
+    if not isinstance(value, str):
+      continue
+    label = value.strip()
+    folded = label.casefold()
+    if not label or len(label) > 50 or "\n" in label or folded in seen:
+      continue
+    seen.add(folded)
+    labels.append(label)
+  return labels
+
+
+def _apply_reviewed_pr_labels(
+  repo: Path,
+  upstream_repo: str,
+  number: int | None,
+  labels: list[str],
+) -> dict:
+  """Best-effort add reviewed labels that already exist in the target repo.
+
+  Labeling is deliberately secondary to PR creation: a missing repository
+  label, permission restriction, or transient API failure must not turn an
+  already-open pull request into an apparent failed submission. The outcome is
+  persisted so the review never claims an unavailable label was applied.
+  """
+  if not labels:
+    return {}
+  patch = {
+    "last_submit_labels_requested": labels,
+    "last_submit_labels_applied": [],
+  }
+  if number is None:
+    return {
+      **patch,
+      "last_submit_labels_note": "GitHub did not return a PR number for labeling.",
+    }
+
+  try:
+    available = _gh(
+      repo,
+      "api", "--paginate",
+      f"repos/{upstream_repo}/labels?per_page=100",
+      "--jq", ".[].name",
+      check=False,
+    )
+  except subprocess.TimeoutExpired:
+    return {
+      **patch,
+      "last_submit_labels_note": (
+        "Timed out while checking repository labels; the pull request is "
+        "open without confirmed labels."
+      ),
+    }
+  except OSError:
+    return {
+      **patch,
+      "last_submit_labels_note": (
+        "Could not start the GitHub label lookup; the pull request is open "
+        "without confirmed labels."
+      ),
+    }
+  if available.returncode != 0:
+    return {
+      **patch,
+      "last_submit_labels_note": (
+        "Could not verify the repository labels; the pull request is open "
+        "without confirmed labels."
+      ),
+    }
+  by_name = {}
+  for raw_name in (available.stdout or "").splitlines():
+    name = raw_name.strip()
+    if name:
+      by_name[name.casefold()] = name
+  applicable = [by_name[label.casefold()] for label in labels
+                if label.casefold() in by_name]
+  missing = [label for label in labels if label.casefold() not in by_name]
+  if not applicable:
+    return {
+      **patch,
+      "last_submit_labels_missing": missing,
+      "last_submit_labels_note": "The reviewed labels do not exist in this repository.",
+    }
+
+  try:
+    applied = _gh(
+      repo,
+      "api", "--method", "POST",
+      f"repos/{upstream_repo}/issues/{number}/labels",
+      *(part for label in applicable for part in ("-f", f"labels[]={label}")),
+      check=False,
+    )
+  except subprocess.TimeoutExpired:
+    return {
+      **patch,
+      "last_submit_labels_missing": missing,
+      "last_submit_labels_note": (
+        "Timed out while applying reviewed labels; the pull request is open, "
+        "but GitHub did not confirm the label result."
+      ),
+    }
+  except OSError:
+    return {
+      **patch,
+      "last_submit_labels_missing": missing,
+      "last_submit_labels_note": (
+        "Could not start the GitHub label update; the pull request is open "
+        "without confirmed labels."
+      ),
+    }
+  if applied.returncode != 0:
+    return {
+      **patch,
+      "last_submit_labels_missing": missing,
+      "last_submit_labels_note": (
+        "GitHub did not confirm these labels were applied; the pull request "
+        "is still open."
+      ),
+    }
+  result = {
+    **patch,
+    "last_submit_labels_applied": applicable,
+  }
+  if missing:
+    result["last_submit_labels_missing"] = missing
+    result["last_submit_labels_note"] = "Some reviewed labels no longer exist."
+  return result
+
+
 def _find_existing_pr(
   repo: Path,
   upstream_repo: str,
@@ -1702,7 +1838,18 @@ def _submit_prepared_pr(
             same_repo=bool(direct_base),
           )
           if existing:
-            return existing, _parse_pr_number(existing), pushed_patch
+            existing_number = _parse_pr_number(existing)
+            label_patch = _apply_reviewed_pr_labels(
+              repo,
+              upstream_repo,
+              existing_number,
+              _reviewed_pr_labels(plan),
+            )
+            return (
+              existing,
+              existing_number,
+              _record_patch_with(pushed_patch, label_patch),
+            )
           detail = (pr.stderr or pr.stdout or "GitHub command failed.").strip()
           raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
       except ContributionSubmitError as exc:
@@ -1723,7 +1870,14 @@ def _submit_prepared_pr(
         f"to {pushed_branch_url}.",
         record_patch=pushed_patch,
       )
-    return url, _parse_pr_number(url), pushed_patch
+    number = _parse_pr_number(url)
+    label_patch = _apply_reviewed_pr_labels(
+      repo,
+      upstream_repo,
+      number,
+      _reviewed_pr_labels(plan),
+    )
+    return url, number, _record_patch_with(pushed_patch, label_patch)
   finally:
     if checkout_back:
       _git(repo, "checkout", "-q", checkout_back, check=False)

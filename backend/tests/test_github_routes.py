@@ -748,6 +748,94 @@ def test_graphql_mutation_as_string_literal_allowed(client, auth, monkeypatch):
 # --- contribution submit (approval button path) -----------------------
 
 
+def test_reviewed_pr_labels_are_bounded_to_the_visible_two():
+  assert github_routes._reviewed_pr_labels({
+    "labels": [" bug ", "area: ui", "hidden-third"],
+  }) == ["bug", "area: ui"]
+  assert github_routes._reviewed_pr_labels({
+    "labels": ["bug", "BUG", "area: ui"],
+  }) == ["bug"]
+  assert github_routes._reviewed_pr_labels({"labels": "bug"}) == []
+
+
+def test_pr_labels_apply_only_existing_names_and_preserve_missing(
+  monkeypatch, tmp_path,
+):
+  calls = []
+
+  def fake_gh(repo, *args, check=True):
+    calls.append(args)
+    if "--paginate" in args:
+      return _cp("bug\narea: ui\n")
+    return _cp("[]")
+
+  monkeypatch.setattr(github_routes, "_gh", fake_gh)
+  patch = github_routes._apply_reviewed_pr_labels(
+    tmp_path,
+    "mobius-os/mobius",
+    123,
+    ["Bug", "area: backend"],
+  )
+
+  assert patch["last_submit_labels_requested"] == ["Bug", "area: backend"]
+  assert patch["last_submit_labels_applied"] == ["bug"]
+  assert patch["last_submit_labels_missing"] == ["area: backend"]
+  assert "Some reviewed labels" in patch["last_submit_labels_note"]
+  apply_call = calls[-1]
+  assert apply_call[:3] == ("api", "--method", "POST")
+  assert "labels[]=bug" in apply_call
+  assert "labels[]=area: backend" not in apply_call
+
+
+def test_pr_label_permission_failure_does_not_fail_an_open_pr(
+  monkeypatch, tmp_path,
+):
+  def fake_gh(repo, *args, check=True):
+    if "--paginate" in args:
+      return _cp("bug\n")
+    return _cp("forbidden", returncode=1)
+
+  monkeypatch.setattr(github_routes, "_gh", fake_gh)
+  patch = github_routes._apply_reviewed_pr_labels(
+    tmp_path,
+    "someone/example",
+    7,
+    ["bug"],
+  )
+
+  assert patch["last_submit_labels_applied"] == []
+  assert "did not confirm" in patch["last_submit_labels_note"]
+
+
+@pytest.mark.parametrize(
+  "label_failure",
+  [
+    subprocess.TimeoutExpired(["gh", "api"], timeout=30),
+    OSError("gh could not start"),
+  ],
+  ids=["apply-timeout", "apply-launch-error"],
+)
+def test_pr_label_apply_transport_failure_is_nonfatal(
+  monkeypatch, tmp_path, label_failure,
+):
+  def fake_gh(repo, *args, check=True):
+    if "--paginate" in args:
+      return _cp("bug\n")
+    raise label_failure
+
+  monkeypatch.setattr(github_routes, "_gh", fake_gh)
+  patch = github_routes._apply_reviewed_pr_labels(
+    tmp_path,
+    "someone/example",
+    7,
+    ["bug"],
+  )
+
+  assert patch["last_submit_labels_requested"] == ["bug"]
+  assert patch["last_submit_labels_applied"] == []
+  assert "pull request is open" in patch["last_submit_labels_note"]
+
+
 def _write_contribution(app_id, record_id, record, diff_text=""):
   base = Path(get_settings().data_dir) / "apps" / str(app_id) / "contributions"
   base.mkdir(parents=True, exist_ok=True)
@@ -1708,12 +1796,21 @@ def _commit_metadata(
   )
 
 
-def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
-  client, owner_token, monkeypatch,
+@pytest.mark.parametrize(
+  "failure_kind",
+  ["timeout", "launch-error"],
+)
+def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
+  client, owner_token, monkeypatch, failure_kind,
 ):
+  label_failure = (
+    subprocess.TimeoutExpired(["gh", "api"], timeout=30)
+    if failure_kind == "timeout"
+    else OSError("gh could not start")
+  )
   _write_token(login="octocat")
   app_id, app_token = _app_token(client, owner_token, github_access=True)
-  record_id = "rec-pr-1"
+  record_id = f"rec-pr-label-{failure_kind}"
   repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
@@ -1738,6 +1835,7 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
       "base_sha": base,
       "head_sha": head,
       "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+      "labels": ["bug"],
     },
   }
   _write_contribution(app_id, record_id, record, diff_text)
@@ -1803,6 +1901,8 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
       return _cp("[]")
     if args[:2] == ("pr", "create"):
       return _cp("https://github.com/mobius-os/app-demo/pull/42\n")
+    if args[:2] == ("api", "--paginate"):
+      raise label_failure
     return _cp("")
 
   monkeypatch.setattr("app.routes.github._git", fake_git)
@@ -1818,6 +1918,9 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
   assert body["number"] == 42
   assert body["record"]["status"] == "open"
   assert body["record"]["url"] == body["url"]
+  assert body["record"]["last_submit_labels_requested"] == ["bug"]
+  assert body["record"]["last_submit_labels_applied"] == []
+  assert "pull request is open" in body["record"]["last_submit_labels_note"]
   assert ("repo", "fork", "--remote", "--remote-name", "fork") in gh_calls
   assert not any(call[:2] == ("remote", "set-url") for call in git_calls)
   create_call = next(call for call in gh_calls if call[:2] == ("pr", "create"))
@@ -1837,6 +1940,9 @@ def test_submit_contribution_creates_review_ready_pr_from_prepared_record(
   assert stored["status"] == "open"
   assert stored["number"] == 42
   assert stored["head_repository"] == "octocat/app-demo-1"
+  assert stored["last_submit_labels_requested"] == ["bug"]
+  assert stored["last_submit_labels_applied"] == []
+  assert stored["last_submit_labels_note"] == body["record"]["last_submit_labels_note"]
 
 
 def test_submit_contribution_normalizes_fallback_author_before_push(
