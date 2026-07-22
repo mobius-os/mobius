@@ -57,6 +57,7 @@ test('new provider connections use the curated unattended defaults', () => {
   assert.match(view, /const onProviderConnected = useCallback\(async \(provider\)/)
   assert.match(view, /await persistBackgroundAgents\([\s\S]*providersBefore\.size === 0 \? \{ provider \} : \{\}/)
   assert.match(view, /api\.settings\.save\(\{[\s\S]*\.\.\.companionSettings,[\s\S]*background_agents: payload/)
+  assert.match(view, /await settleBackgroundAgentSave\([\s\S]*if \(stale\) return true/)
   assert.match(view, /if \(!saved\) return[\s\S]*setExpandedAuth\(null\)/)
   assert.doesNotMatch(view, /api\.settings\.save\(\{ provider \}\)/)
   assert.match(view, /effort: defaultEffort\(provider\)/)

@@ -7,6 +7,7 @@ import Sun from 'lucide-react/dist/esm/icons/sun.mjs'
 import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
+import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
 import {
   PROVIDER_AVAILABILITY_PHASE,
   resolveProviderAvailability,
@@ -536,12 +537,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           ...companionSettings,
           background_agents: payload,
         })
-        if (reqId !== backgroundSaveReqRef.current) return true
-        if (!res.ok) {
-          let detail = ''
-          try { detail = (await res.json()).detail || '' } catch {}
-          throw new Error(detail || 'Could not save background agents.')
-        }
+        const { stale } = await settleBackgroundAgentSave(
+          res,
+          () => reqId !== backgroundSaveReqRef.current,
+        )
+        if (stale) return true
         settingsQueries.owner.invalidate(queryClient)
         return true
       } catch (err) {
