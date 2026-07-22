@@ -16,8 +16,10 @@ prepared record, rechecks its reviewed branch/diff, pushes to the owner's
 fork, and creates the pull request. An explicitly enumerated stack Send
 validates every parent link and diff before publishing dedicated upstream
 stack branches in order; it is available only when the connected owner can
-push there. An app-scoped github_access token may submit only records from its
-own storage; it cannot act as a general GitHub write proxy.
+push there. A second explicitly confirmed stack action can atomically land a
+fully green chain on an unchanged, unprotected app branch; protected refs are
+never bypassed. An app-scoped github_access token may act only on records from
+its own storage; it cannot use either path as a general GitHub write proxy.
 
 The fetch-free /source-status read is the local companion for Contribute's
 Sources view. It exposes only sanitized repository identity, refs, diff
@@ -131,6 +133,10 @@ class GraphqlRequest(BaseModel):
 
 
 class ContributionStackSubmitRequest(BaseModel):
+  record_ids: list[str]
+
+
+class ContributionStackLandRequest(BaseModel):
   record_ids: list[str]
 
 
@@ -593,6 +599,154 @@ def _assert_upstream_branch_at(
     )
 
 
+def _assert_unprotected_landing_target(
+  repo: Path, upstream_repo: str, branch: str,
+) -> None:
+  """Atomic stack landing is deliberately limited to unprotected app refs.
+
+  The platform repository and any app that has opted into branch protection
+  keep GitHub's ordinary merge/queue path.  Admin bypass is not treated as
+  permission to skip those repository-owned invariants.
+  """
+  encoded = quote(_validate_branch(branch), safe="")
+  protection = _gh(
+    repo,
+    "api", f"repos/{upstream_repo}/branches/{encoded}/protection",
+    check=False,
+  )
+  protection_detail = (protection.stderr or protection.stdout or "").lower()
+  if protection.returncode == 0:
+    raise ContributionSubmitError(
+      f"{branch} is protected, so Contribute will not bypass its merge rules. "
+      "Use GitHub's normal merge or merge queue for this stack."
+    )
+  if "404" not in protection_detail and "not protected" not in protection_detail:
+    raise ContributionSubmitError(
+      f"Contribute could not verify that {branch} is safe for atomic landing. "
+      "Nothing was changed; try again after GitHub is reachable."
+    )
+
+  rules = _gh(
+    repo,
+    "api", f"repos/{upstream_repo}/rules/branches/{encoded}",
+    check=False,
+  )
+  if rules.returncode != 0:
+    raise ContributionSubmitError(
+      f"Contribute could not inspect the active rules for {branch}. Nothing "
+      "was changed; use GitHub's normal merge flow."
+    )
+  try:
+    active_rules = json.loads(rules.stdout or "[]")
+  except ValueError:
+    active_rules = None
+  if not isinstance(active_rules, list):
+    raise ContributionSubmitError(
+      f"Contribute could not understand the active rules for {branch}. "
+      "Nothing was changed; use GitHub's normal merge flow."
+    )
+  if active_rules:
+    raise ContributionSubmitError(
+      f"{branch} has repository rules, so Contribute will not bypass them. "
+      "Use GitHub's normal merge or merge queue for this stack."
+    )
+
+
+def _assert_pr_checks_green(
+  repo: Path,
+  *,
+  upstream_repo: str,
+  record: dict,
+  base_branch: str,
+  head_branch: str,
+) -> None:
+  number = record.get("number")
+  if not isinstance(number, int) or number <= 0:
+    raise ContributionSubmitError(
+      "A pull request in this stack has no verified GitHub number. Refresh "
+      "Contribute before landing it."
+    )
+  proc = _gh(
+    repo,
+    "pr", "view", str(number),
+    "-R", upstream_repo,
+    "--json",
+    "state,isDraft,baseRefName,headRefName,headRepositoryOwner,statusCheckRollup,url",
+    check=False,
+  )
+  if proc.returncode != 0:
+    raise ContributionSubmitError(
+      f"Contribute could not verify pull request #{number}. Nothing was "
+      "changed; refresh and try again."
+    )
+  try:
+    data = json.loads(proc.stdout or "{}")
+  except ValueError:
+    data = None
+  if not isinstance(data, dict):
+    raise ContributionSubmitError(
+      f"GitHub returned an invalid result for pull request #{number}."
+    )
+  owner = data.get("headRepositoryOwner")
+  owner_login = owner.get("login") if isinstance(owner, dict) else ""
+  upstream_owner = upstream_repo.split("/", 1)[0]
+  if (
+    data.get("state") != "OPEN"
+    or bool(data.get("isDraft"))
+    or data.get("baseRefName") != base_branch
+    or data.get("headRefName") != head_branch
+    or str(owner_login).lower() != upstream_owner.lower()
+  ):
+    raise ContributionSubmitError(
+      f"Pull request #{number} no longer matches the reviewed stack. Nothing "
+      "was changed; refresh Contribute before landing it."
+    )
+  expected_url = str(record.get("url") or "")
+  if expected_url and data.get("url") != expected_url:
+    raise ContributionSubmitError(
+      f"Pull request #{number} no longer matches its Contribute record."
+    )
+
+  checks = data.get("statusCheckRollup")
+  if not isinstance(checks, list) or not checks:
+    raise ContributionSubmitError(
+      f"Pull request #{number} has no completed CI checks yet. Nothing was "
+      "changed; wait for CI and try again."
+    )
+  unfinished = []
+  failed = []
+  for check in checks:
+    if not isinstance(check, dict):
+      failed.append("unknown check")
+      continue
+    name = str(check.get("name") or check.get("context") or "check")
+    if check.get("__typename") == "StatusContext":
+      state = str(check.get("state") or "").upper()
+      if state == "SUCCESS":
+        continue
+      if state in {"PENDING", "EXPECTED"}:
+        unfinished.append(name)
+      else:
+        failed.append(name)
+      continue
+    status = str(check.get("status") or "").upper()
+    conclusion = str(check.get("conclusion") or "").upper()
+    if status != "COMPLETED" or not conclusion:
+      unfinished.append(name)
+    elif conclusion not in {"SUCCESS", "NEUTRAL", "SKIPPED"}:
+      failed.append(name)
+  if failed:
+    raise ContributionSubmitError(
+      f"Pull request #{number} has failing CI ({', '.join(failed[:3])}). "
+      "Nothing was changed."
+    )
+  if unfinished:
+    raise ContributionSubmitError(
+      f"Pull request #{number} still has CI running ({', '.join(unfinished[:3])}). "
+      "Nothing was changed; try again when it is green."
+    )
+
+
 def _assert_merges_with_upstream(
   repo: Path, upstream_repo: str, branch: str,
 ) -> dict:
@@ -845,7 +999,7 @@ def _validate_stack_records(records: list[dict]) -> list[dict]:
   # A draft PR is already public and owner-approved; it is a valid durable
   # parent for a later private layer just like an open PR. `prepared` remains
   # the only private state this request is allowed to claim.
-  allowed_statuses = {"prepared", "draft", "open", "merged"}
+  allowed_statuses = {"prepared", "submitting", "draft", "open", "landing", "merged"}
   for record, meta in decorated:
     plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
     record_id = str(record.get("id") or "")
@@ -951,6 +1105,105 @@ def _claim_stack_records(
       detail="Every PR in this stack has already been submitted.",
     )
   return ordered
+
+
+def _claim_stack_landing(
+  *,
+  app_id: int,
+  record_ids: list[str],
+  db: Session,
+  expected_nonce: str | None,
+) -> list[dict]:
+  """Claim one complete, already-public stack for an atomic landing."""
+  if not 2 <= len(record_ids) <= 12 or len(set(record_ids)) != len(record_ids):
+    raise HTTPException(
+      status_code=400,
+      detail="Choose one complete PR stack of 2 to 12 unique records.",
+    )
+  _recheck_submit_app(db, app_id, expected_nonce)
+  rows = []
+  for record_id in record_ids:
+    record_path, diff_path = _record_paths(app_id, record_id)
+    record = _read_record(record_path)
+    if str(record.get("id") or "") != record_id:
+      raise HTTPException(status_code=409, detail="A stack record id changed.")
+    rows.append({
+      "record": record,
+      "record_path": record_path,
+      "diff_path": diff_path,
+    })
+  try:
+    validated = _validate_stack_records([row["record"] for row in rows])
+  except ContributionSubmitError as exc:
+    raise HTTPException(status_code=409, detail=exc.message) from exc
+  if any(item["record"].get("status") != "open" for item in validated):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "Every pull request in this stack must be open before it can land. "
+        "Refresh Contribute and try again."
+      ),
+    )
+
+  by_id = {row["record"]["id"]: row for row in rows}
+  ordered = []
+  now = _now_iso()
+  for item in validated:
+    row = by_id[item["record"]["id"]]
+    record = {
+      **item["record"],
+      "status": "landing",
+      "land_started_at": now,
+      "updated_at": now,
+    }
+    record.pop("last_land_error", None)
+    _write_record(row["record_path"], record)
+    ordered.append({**row, "record": record, "stack": item["stack"]})
+  return ordered
+
+
+def _mark_stack_land_failure(rows: list[dict], message: str) -> list[dict]:
+  snapshots = []
+  now = _now_iso()
+  for row in rows:
+    current = _read_record(row["record_path"])
+    if current.get("status") == "landing":
+      current = {
+        **current,
+        "status": "open",
+        "last_land_error": message,
+        "updated_at": now,
+      }
+      _write_record(row["record_path"], current)
+    snapshots.append(current)
+  return snapshots
+
+
+def _mark_stack_land_success(
+  rows: list[dict], *, target_branch: str, landed_sha: str,
+) -> list[dict]:
+  currents = [_read_record(row["record_path"]) for row in rows]
+  if any(current.get("status") != "landing" for current in currents):
+    raise ContributionSubmitError(
+      "This PR stack changed while it was landing. Refresh Contribute."
+    )
+  snapshots = []
+  now = _now_iso()
+  for row, current in zip(rows, currents, strict=True):
+    current = {
+      **current,
+      "status": "merged",
+      "merged_at": now,
+      "landed_at": now,
+      "last_land_mode": "atomic-fast-forward",
+      "last_land_target_branch": target_branch,
+      "last_land_head_sha": landed_sha,
+      "updated_at": now,
+    }
+    current.pop("last_land_error", None)
+    _write_record(row["record_path"], current)
+    snapshots.append(current)
+  return snapshots
 
 
 def _mark_submit_failure(
@@ -1817,6 +2070,166 @@ def _preflight_prepared_stack(rows: list[dict]) -> None:
         _git(repo, "checkout", "-q", checkout_back, check=False)
 
 
+def _push_stack_tip_with_lease(
+  repo: Path,
+  *,
+  upstream_repo: str,
+  target_branch: str,
+  expected_base: str,
+  landed_sha: str,
+) -> None:
+  """Atomically advance one unchanged upstream ref to a proven stack tip."""
+  remote = f"https://github.com/{upstream_repo}.git"
+  last_error = ""
+  for attempt in range(_PUSH_RETRIES):
+    proc = _git(
+      repo,
+      "push",
+      f"--force-with-lease=refs/heads/{target_branch}:{expected_base}",
+      remote,
+      f"{landed_sha}:refs/heads/{target_branch}",
+      check=False,
+    )
+    if proc.returncode == 0:
+      return
+    last_error = (proc.stderr or proc.stdout or "").strip()
+    if not _is_transient_push_error(last_error):
+      break
+    if attempt + 1 < _PUSH_RETRIES:
+      time.sleep(_PUSH_RETRY_BASE_SECONDS * (2 ** attempt))
+  if "stale info" in last_error.lower() or "fetch first" in last_error.lower():
+    raise ContributionSubmitError(
+      f"Upstream {target_branch} moved while this stack was landing. Nothing "
+      "was overwritten; refresh the stack and run CI again."
+    )
+  raise ContributionSubmitError(
+    (last_error[:600] if last_error else "GitHub rejected the atomic landing.")
+  )
+
+
+def _land_reviewed_stack(rows: list[dict]) -> tuple[str, str]:
+  """Prove and atomically fast-forward an open, green PR stack."""
+  if not shutil.which("git") or not shutil.which("gh"):
+    raise ContributionSubmitError(
+      "This platform needs git and gh installed before it can land PR stacks."
+    )
+  token = github_auth.get_token()
+  state = github_auth.read_state() or {}
+  login = str(state.get("login") or "")
+  if not token or not login:
+    raise ContributionSubmitError("Connect GitHub before landing this PR stack.", 401)
+
+  first_record = rows[0]["record"]
+  first_plan = first_record.get("plan") or {}
+  upstream_repo = _validate_repo_slug(
+    first_plan.get("repo") or first_record.get("repo")
+  )
+  anchor_repo = _safe_repo_path(first_plan.get("repo_path"))
+  target_branch = _upstream_default_branch(anchor_repo, upstream_repo)
+  if rows[0]["stack"]["base_branch"] != target_branch:
+    raise ContributionSubmitError(
+      f"The first PR in this stack no longer targets {target_branch}."
+    )
+  expected_base = _resolve_reviewed_commit(
+    anchor_repo, first_plan.get("base_sha"), "base sha",
+  )
+
+  _assert_upstream_push_permission(anchor_repo, upstream_repo)
+  _assert_unprotected_landing_target(anchor_repo, upstream_repo, target_branch)
+  _assert_upstream_branch_at(
+    anchor_repo, upstream_repo, target_branch, expected_base,
+  )
+
+  previous_head = ""
+  top_repo = anchor_repo
+  landed_sha = ""
+  reviewed_refs = []
+  for index, row in enumerate(rows):
+    record = row["record"]
+    if record.get("status") != "landing":
+      raise ContributionSubmitError(
+        "This PR stack changed while it was being verified. Refresh Contribute."
+      )
+    plan = record.get("plan") or {}
+    repo = _safe_repo_path(plan.get("repo_path"))
+    if not (repo / ".git").exists():
+      raise ContributionSubmitError("A staged stack checkout is no longer available.")
+    branch = _validate_branch(plan.get("branch") or record.get("branch"))
+    base_sha = str(plan.get("base_sha") or "")
+    head_sha = str(plan.get("head_sha") or record.get("head_sha") or "")
+    if index > 0 and base_sha != previous_head:
+      raise ContributionSubmitError(
+        "This public stack no longer has the exact reviewed parent chain. "
+        "Nothing was changed; refresh it before landing."
+      )
+
+    checkout_back = None
+    try:
+      current_branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+      checkout_back = (
+        _git(repo, "rev-parse", "HEAD").stdout.strip()
+        if current_branch == "HEAD"
+        else current_branch
+      )
+      _assert_clean_worktree(repo)
+      _git(repo, "checkout", "-q", branch)
+      _assert_clean_worktree(repo)
+      _, resolved_head, _ = _assert_fresh(
+        record, row["diff_path"], repo, branch,
+      )
+      _assert_coauthor_trailer(repo, branch)
+      _assert_upstream_branch_at(
+        repo, upstream_repo, branch, resolved_head,
+      )
+      _assert_pr_checks_green(
+        repo,
+        upstream_repo=upstream_repo,
+        record=record,
+        base_branch=row["stack"]["base_branch"],
+        head_branch=branch,
+      )
+      previous_head = resolved_head
+      top_repo = repo
+      landed_sha = resolved_head
+      reviewed_refs.append((branch, resolved_head))
+    finally:
+      if checkout_back:
+        _git(repo, "checkout", "-q", checkout_back, check=False)
+
+  ancestry = _git(
+    top_repo,
+    "merge-base", "--is-ancestor", expected_base, landed_sha,
+    check=False,
+  )
+  if ancestry.returncode != 0:
+    raise ContributionSubmitError(
+      "The top of this stack is no longer a fast-forward from upstream. "
+      "Nothing was changed."
+    )
+
+  # Recheck every public ref after reading CI so a concurrent branch update
+  # cannot make the checks describe a different commit. The target ref is
+  # also guarded by the push lease, making the final update compare-and-swap.
+  _assert_upstream_branch_at(
+    anchor_repo, upstream_repo, target_branch, expected_base,
+  )
+  for branch, head_sha in reviewed_refs:
+    _assert_upstream_branch_at(
+      anchor_repo,
+      upstream_repo,
+      branch,
+      head_sha,
+    )
+  _push_stack_tip_with_lease(
+    top_repo,
+    upstream_repo=upstream_repo,
+    target_branch=target_branch,
+    expected_base=expected_base,
+    landed_sha=landed_sha,
+  )
+  return target_branch, landed_sha
+
+
 async def _github_user(token: str) -> tuple[int, str, int | None, list[str]]:
   """GET /user with `token`; returns (status, login, user_id, scopes).
 
@@ -2554,6 +2967,85 @@ async def submit_contribution_stack(
     db.close()
     snapshots = _stack_record_snapshots(rows)
   return {"records": snapshots, "submitted": submitted_urls}
+
+
+@router.post(
+  "/contributions/{app_id}/land-stack",
+  dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("5/minute")
+async def land_contribution_stack(
+  request: Request,
+  app_id: int,
+  body: ContributionStackLandRequest,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Atomically fast-forward one unchanged, unprotected app stack.
+
+  The partner's confirmation enumerates the complete public stack. Before the
+  single upstream ref update, the server rechecks every stored review diff,
+  public branch tip, PR topology, and CI result. Protected branches are never
+  bypassed, even when the connected owner is an administrator.
+  """
+  expected_nonce = _validate_submit_app(app_id, principal, db)
+  db.close()
+  async with fs_locks.app_storage_lock(app_id):
+    rows = _claim_stack_landing(
+      app_id=app_id,
+      record_ids=body.record_ids,
+      db=db,
+      expected_nonce=expected_nonce,
+    )
+  db.close()
+
+  try:
+    repo_paths = sorted({
+      str(_safe_repo_path((row["record"].get("plan") or {}).get("repo_path")))
+      for row in rows
+    })
+    async with AsyncExitStack() as source_locks:
+      for repo_path in repo_paths:
+        await source_locks.enter_async_context(
+          fs_locks.source_dir_lock(repo_path)
+        )
+      target_branch, landed_sha = await asyncio.to_thread(
+        _land_reviewed_stack, rows,
+      )
+  except ContributionSubmitError as exc:
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
+      snapshots = _mark_stack_land_failure(rows, exc.message)
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"message": exc.message, "records": snapshots},
+    ) from exc
+  except Exception as exc:
+    log.exception("Contribution stack landing failed for app %s", app_id)
+    message = "Could not land this PR stack. Nothing was intentionally changed."
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
+      snapshots = _mark_stack_land_failure(rows, message)
+    raise HTTPException(
+      status_code=500,
+      detail={"message": message, "records": snapshots},
+    ) from exc
+
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    db.close()
+    snapshots = _mark_stack_land_success(
+      rows,
+      target_branch=target_branch,
+      landed_sha=landed_sha,
+    )
+  return {
+    "records": snapshots,
+    "target_branch": target_branch,
+    "landed_sha": landed_sha,
+  }
 
 
 @router.post(

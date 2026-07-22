@@ -2607,6 +2607,232 @@ def test_direct_stack_layer_pushes_upstream_and_uses_reviewed_base(
   assert not any(call[:2] == ("repo", "fork") for call in gh_calls)
 
 
+def test_land_contribution_stack_marks_every_layer_merged(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  stack_id = "green-app-stack"
+  record_ids = ["green-stack-01", "green-stack-02"]
+  base = "b" * 40
+  parent_head = "a" * 40
+  top_head = "c" * 40
+  for position, record_id in enumerate(record_ids, 1):
+    repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+    (repo / ".git").mkdir(parents=True)
+    branch = f"stack/{stack_id}/0{position}-layer"
+    diff_text = f"diff --git a/layer-{position} b/layer-{position}\n+green\n"
+    record = {
+      "id": record_id,
+      "type": "pr",
+      "repo": "mobius-os/app-demo",
+      "status": "open",
+      "title": f"Layer {position}",
+      "branch": branch,
+      "number": 90 + position,
+      "url": f"https://github.com/mobius-os/app-demo/pull/{90 + position}",
+      "plan": {
+        "action": "pr",
+        "repo": "mobius-os/app-demo",
+        "branch": branch,
+        "repo_path": str(repo),
+        "base_sha": base if position == 1 else parent_head,
+        "head_sha": parent_head if position == 1 else top_head,
+        "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+        "stack": {
+          "id": stack_id,
+          "position": position,
+          "total": 2,
+          "parent_record_id": "" if position == 1 else record_ids[0],
+          "base_branch": "main" if position == 1 else f"stack/{stack_id}/01-layer",
+        },
+      },
+    }
+    _write_contribution(app_id, record_id, record, diff_text)
+
+  seen = {}
+
+  def fake_land(rows):
+    seen["statuses"] = [row["record"]["status"] for row in rows]
+    seen["ids"] = [row["record"]["id"] for row in rows]
+    return "main", top_head
+
+  monkeypatch.setattr("app.routes.github._land_reviewed_stack", fake_land)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/land-stack",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"record_ids": record_ids},
+  )
+
+  assert response.status_code == 200, response.text
+  assert seen == {"statuses": ["landing", "landing"], "ids": record_ids}
+  body = response.json()
+  assert body["target_branch"] == "main"
+  assert body["landed_sha"] == top_head
+  assert [record["status"] for record in body["records"]] == ["merged", "merged"]
+  assert all(record["last_land_mode"] == "atomic-fast-forward" for record in body["records"])
+
+
+def test_land_contribution_stack_restores_open_records_on_preflight_failure(
+  client, owner_token, monkeypatch,
+):
+  from app.routes.github import ContributionSubmitError
+
+  _write_token(login="octocat")
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  stack_id = "red-app-stack"
+  ids = ["red-stack-01", "red-stack-02"]
+  for position, record_id in enumerate(ids, 1):
+    repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+    (repo / ".git").mkdir(parents=True)
+    parent = "a" * 40
+    branch = f"stack/{stack_id}/0{position}-layer"
+    record = {
+      "id": record_id, "type": "pr", "repo": "mobius-os/app-demo",
+      "status": "open", "branch": branch, "number": position,
+      "plan": {
+        "action": "pr", "repo": "mobius-os/app-demo", "branch": branch,
+        "repo_path": str(repo),
+        "base_sha": "b" * 40 if position == 1 else parent,
+        "head_sha": parent if position == 1 else "c" * 40,
+        "stack": {
+          "id": stack_id, "position": position, "total": 2,
+          "parent_record_id": "" if position == 1 else ids[0],
+          "base_branch": "main" if position == 1 else f"stack/{stack_id}/01-layer",
+        },
+      },
+    }
+    _write_contribution(app_id, record_id, record, "reviewed")
+
+  monkeypatch.setattr(
+    "app.routes.github._land_reviewed_stack",
+    lambda rows: (_ for _ in ()).throw(ContributionSubmitError("CI is still running.")),
+  )
+  response = client.post(
+    f"/api/github/contributions/{app_id}/land-stack",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"record_ids": ids},
+  )
+
+  assert response.status_code == 409
+  assert [record["status"] for record in response.json()["detail"]["records"]] == [
+    "open", "open",
+  ]
+  assert all(
+    record["last_land_error"] == "CI is still running."
+    for record in response.json()["detail"]["records"]
+  )
+
+
+def test_stack_landing_requires_every_pr_check_to_be_green(monkeypatch, tmp_path):
+  from app.routes.github import ContributionSubmitError, _assert_pr_checks_green
+
+  record = {
+    "number": 17,
+    "url": "https://github.com/mobius-os/app-demo/pull/17",
+  }
+
+  def fake_gh(repo, *args, check=True):
+    return _cp(json.dumps({
+      "state": "OPEN",
+      "isDraft": False,
+      "baseRefName": "main",
+      "headRefName": "stack/demo/01-layer",
+      "headRepositoryOwner": {"login": "mobius-os"},
+      "url": record["url"],
+      "statusCheckRollup": [{
+        "__typename": "CheckRun", "name": "test",
+        "status": "IN_PROGRESS", "conclusion": "",
+      }],
+    }))
+
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  with pytest.raises(ContributionSubmitError, match="still has CI running"):
+    _assert_pr_checks_green(
+      tmp_path,
+      upstream_repo="mobius-os/app-demo",
+      record=record,
+      base_branch="main",
+      head_branch="stack/demo/01-layer",
+    )
+
+
+def test_stack_landing_accepts_successful_neutral_and_skipped_checks(
+  monkeypatch, tmp_path,
+):
+  from app.routes.github import _assert_pr_checks_green
+
+  record = {
+    "number": 18,
+    "url": "https://github.com/mobius-os/app-demo/pull/18",
+  }
+
+  def fake_gh(repo, *args, check=True):
+    return _cp(json.dumps({
+      "state": "OPEN",
+      "isDraft": False,
+      "baseRefName": "main",
+      "headRefName": "stack/demo/01-layer",
+      "headRepositoryOwner": {"login": "mobius-os"},
+      "url": record["url"],
+      "statusCheckRollup": [
+        {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"__typename": "CheckRun", "name": "optional", "status": "COMPLETED", "conclusion": "NEUTRAL"},
+        {"__typename": "CheckRun", "name": "paths", "status": "COMPLETED", "conclusion": "SKIPPED"},
+        {"__typename": "StatusContext", "context": "external", "state": "SUCCESS"},
+      ],
+    }))
+
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  _assert_pr_checks_green(
+    tmp_path,
+    upstream_repo="mobius-os/app-demo",
+    record=record,
+    base_branch="main",
+    head_branch="stack/demo/01-layer",
+  )
+
+
+def test_stack_landing_never_bypasses_protected_branch(monkeypatch, tmp_path):
+  from app.routes.github import ContributionSubmitError, _assert_unprotected_landing_target
+
+  calls = []
+
+  def fake_gh(repo, *args, check=True):
+    calls.append(args)
+    return _cp('{"required_status_checks": {}}')
+
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  with pytest.raises(ContributionSubmitError, match="is protected"):
+    _assert_unprotected_landing_target(tmp_path, "mobius-os/mobius", "main")
+  assert len(calls) == 1
+
+
+def test_stack_tip_push_uses_exact_base_lease(monkeypatch, tmp_path):
+  from app.routes.github import _push_stack_tip_with_lease
+
+  calls = []
+
+  def fake_git(repo, *args, check=True):
+    calls.append(args)
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  _push_stack_tip_with_lease(
+    tmp_path,
+    upstream_repo="mobius-os/app-demo",
+    target_branch="main",
+    expected_base="b" * 40,
+    landed_sha="c" * 40,
+  )
+  assert calls == [(
+    "push",
+    f"--force-with-lease=refs/heads/main:{'b' * 40}",
+    "https://github.com/mobius-os/app-demo.git",
+    f"{'c' * 40}:refs/heads/main",
+  )]
+
+
 def test_submit_contribution_rejects_branch_diff_mismatch(
   client, owner_token, monkeypatch,
 ):
