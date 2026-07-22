@@ -755,6 +755,9 @@ def test_reviewed_pr_labels_are_bounded_to_the_visible_two():
   assert github_routes._reviewed_pr_labels({
     "labels": ["bug", "BUG", "area: ui"],
   }) == ["bug"]
+  assert github_routes._reviewed_pr_labels({
+    "labels": [None, "", "bug", "area: ui", "hidden-third"],
+  }) == ["bug", "area: ui"]
   assert github_routes._reviewed_pr_labels({"labels": "bug"}) == []
 
 

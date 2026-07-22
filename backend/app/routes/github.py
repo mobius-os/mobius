@@ -1037,14 +1037,25 @@ def _reviewed_pr_labels(plan: dict) -> list[str]:
   raw = plan.get("labels")
   if not isinstance(raw, list):
     return []
-  labels = []
-  seen = set()
-  for value in raw[:2]:
+  # Mirror Contribute's review surface: it filters malformed/blank values,
+  # trims them, and then shows at most two. Security validation and duplicate
+  # folding happen only after that visibility boundary, so an unseen third
+  # label can never replace a visible-but-unusable one at submit time.
+  visible = []
+  for value in raw:
     if not isinstance(value, str):
       continue
     label = value.strip()
+    if not label:
+      continue
+    visible.append(label)
+    if len(visible) == 2:
+      break
+  labels = []
+  seen = set()
+  for label in visible:
     folded = label.casefold()
-    if not label or len(label) > 50 or "\n" in label or folded in seen:
+    if len(label) > 50 or "\n" in label or folded in seen:
       continue
     seen.add(folded)
     labels.append(label)
