@@ -298,7 +298,7 @@ export default function useWorkspaceDrag({
         }
       }
 
-      // A vertical tab-body move, either-axis grip move, or cross-axis drawer-row
+      // A vertical tab-body move, either-axis kind-icon move, or cross-axis drawer-row
       // move arms immediately. A stationary hold is the alternate path to the
       // tab/row menu; it deliberately does not unfold the workspace just because
       // time passed.

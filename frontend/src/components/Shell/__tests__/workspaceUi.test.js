@@ -521,7 +521,7 @@ test('the living halo lifecycle: lit only in builder mode, one allocation-free r
 })
 
 test('entry assembles on keyed beat classes, compositor-only, instant under reduced motion (v3)', () => {
-  // v3: entry is a transform/opacity DEAL-IN or inverse-FLIP SETTLE keyed to the transient
+  // v3: entry is an opaque transform-only DEAL-IN or inverse-FLIP SETTLE keyed to the transient
   // .shell--builder-entering class, applied per-wrapper via data-mode-motion (never
   // the permanent .shell__view--paned). No animated layout property, shadow, or radius.
   const panedBase = css.match(/\.shell__view--paned \{[\s\S]*?\n\}/)?.[0] || ''
@@ -529,10 +529,11 @@ test('entry assembles on keyed beat classes, compositor-only, instant under redu
   assert.doesNotMatch(panedBase, /transition:/)
   assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="deal-in"\] \{[\s\S]*?animation:\s*\n?\s*shell-mode-deal-in/)
   assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="settle"\] \{[\s\S]*?shell-mode-settle/)
-  // The deal-in keyframe touches ONLY transform + opacity (no shadow/radius/filter).
+  // Deal-in is transform-only: an opaque pane physically covers the retained single
+  // screen as it arrives instead of exposing pane structure before fading content in.
   const dealIn = css.match(/@keyframes shell-mode-deal-in\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(dealIn, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
-  assert.match(dealIn, /opacity: 0/)
+  assert.doesNotMatch(dealIn, /opacity:/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
   // The old dead .workspace--resizing selector is gone entirely.
   assert.doesNotMatch(css, /workspace--resizing/)
@@ -648,13 +649,14 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
-test('mobile tab bodies pan while a dedicated grip owns either-axis dragging', () => {
+test('mobile tab bodies pan while the existing kind icon owns either-axis dragging', () => {
   assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
   assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
-  assert.match(shellCss, /\.shell__tab-drag-handle\s*\{[\s\S]*?touch-action:\s*none/)
+  assert.match(shellCss, /\.shell__tab-kind\[data-touch-drag-handle\]\s*\{[\s\S]*?touch-action:\s*none/)
   assert.match(paneStrip, /data-touch-drag-handle=\{dragKey\}/)
+  assert.doesNotMatch(paneStrip, /GripVertical|shell__tab-drag-handle/)
   assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
-    'the nested grip must not duplicate the generic drag-source selector')
+    'the nested icon target must not duplicate the generic drag-source selector')
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
   assert.match(dragBinding, /downEvent\.target\?\.closest\?\.\('\[data-touch-drag-handle\]'\)/)
   assert.match(dragBinding, /touchMoveIntent\(dx, dy, touchIntentKind\)/)
@@ -666,9 +668,12 @@ test('an active overflowing chat title cycles once, then becomes idle', () => {
   assert.match(paneStrip, /!active \|\| tab\.kind !== 'chat'/)
   assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-shift'/)
   assert.match(paneStrip, /className="shell__tab-text-inner"/)
-  const cycle = shellCss.match(/\.shell__tab--active \.shell__tab-text\[data-overflow="true"\][\s\S]*?\n\}/)?.[0] || ''
-  assert.match(cycle, /shell-tab-title-cycle 6\.8s ease-in-out 800ms 1 both/)
+  const cycle = shellCss.match(/\.shell__tabstrip:not\(\.workspace__strip\)[\s\S]*?shell-tab-title-cycle 4\.8s ease-in-out 700ms 1 both/)?.[0] || ''
+  assert.match(cycle, /\.workspace__strip--focused/)
   assert.doesNotMatch(cycle, /infinite/)
+  const keyframes = shellCss.match(/@keyframes shell-tab-title-cycle\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(keyframes, /85%, 100% \{ transform: translate3d\(0, 0, 0\)/,
+    'the one pass returns to the beginning and rests there')
   assert.match(shellCss, /\.shell__tab-text-inner \{ animation: none !important; \}/)
 })
 
@@ -973,7 +978,7 @@ test('N1: dead exit-presentation plumbing is removed', () => {
   assert.match(css, /--ease-mode-chrome: cubic-bezier/)
   assert.match(css, /--ease-mode-promote: cubic-bezier/)
   assert.match(css, /shell-mode-chrome-out 90ms var\(--ease-mode-chrome\)/)
-  assert.match(css, /shell-mode-chrome-in 100ms var\(--ease-mode-chrome\) both/)
+  assert.match(css, /shell-mode-chrome-in 70ms var\(--ease-mode-chrome\)[\s\S]*?calc\(var\(--mode-total, 210ms\) - 70ms\) both/)
   assert.match(css, /shell-mode-strip-clear 100ms var\(--ease-mode-chrome\)/)
   assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)/)
   // The unused excludeChatId param is gone; the helper is now the New Chat request

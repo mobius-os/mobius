@@ -92,7 +92,10 @@
     both;
 }
 
-/* Deal-in is the exact directional inverse: panes assemble from their outer edges. */
+/* Deal-in is the directional inverse, but deliberately NOT a crossfade: each pane
+   arrives fully painted from its edge and physically covers the stationary single
+   screen beneath it. Fading from zero exposed chrome before content and made the
+   two worlds look like separate transitions. */
 .shell--builder-entering
 .shell__view[data-mode-motion="deal-in"] {
   animation:
@@ -136,9 +139,8 @@
 @keyframes shell-mode-deal-in {
   from {
     transform: translate3d(var(--mode-offset-x), var(--mode-offset-y), 0);
-    opacity: 0;
   }
-  to { transform: translate3d(0, 0, 0); opacity: 1; }
+  to { transform: translate3d(0, 0, 0); }
 }
 
 /* Strips move WITH their pane, replacing the deleted parent-chrome opacity fade.
@@ -155,9 +157,6 @@
 .shell--builder-exiting .shell__tabstrip[data-mode-motion="promote"] {
   animation: shell-mode-strip-clear 100ms var(--ease-mode-chrome) both;
 }
-.shell--builder-entering .shell__tabstrip[data-mode-motion="settle"] {
-  animation: shell-mode-chrome-in 100ms var(--ease-mode-chrome) both;
-}
 .shell--builder-entering .shell__tabstrip[data-mode-motion="deal-in"] {
   animation:
     shell-mode-deal-in var(--mode-duration) var(--ease-mode-arrive)
@@ -168,10 +167,10 @@
   to { transform: translate3d(0, -6px, 0); opacity: 0; }
 }
 
-/* Dividers + the overflow chip lead the panes on the faster front-loaded chrome
-   curve, so structure simplifies FIRST on exit (dividers dissolve before the cards
-   depart, 90ms) and RESOLVES AFTER the focused card on entry (110ms, delayed 84ms so
-   it follows the first pane). Opacity-only; small elements. The chip selector is
+/* Dividers + the overflow chip simplify first on exit, then resolve only over the
+   LAST 70ms of entry. A settling strip follows the same rule: structure cannot appear
+   over the old screen before the panes themselves arrive. Opacity-only; small
+   elements. The chip selector is
    listed FIRST (before the divider) so it is followed by a comma, never a brace — a
    css-shape test that greps the base chip rule still finds it. */
 .shell--builder-exiting .workspace__pane-chip,
@@ -179,9 +178,12 @@
   pointer-events: none;
   animation: shell-mode-chrome-out 90ms var(--ease-mode-chrome) both;
 }
+.shell--builder-entering .shell__tabstrip[data-mode-motion="settle"],
 .shell--builder-entering .workspace__pane-chip,
 .shell--builder-entering .workspace__divider {
-  animation: shell-mode-chrome-in 100ms var(--ease-mode-chrome) both;
+  animation:
+    shell-mode-chrome-in 70ms var(--ease-mode-chrome)
+    calc(var(--mode-total, 210ms) - 70ms) both;
 }
 @keyframes shell-mode-chrome-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes shell-mode-chrome-in { from { opacity: 0; } to { opacity: 1; } }

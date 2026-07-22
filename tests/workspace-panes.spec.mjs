@@ -696,6 +696,8 @@ test.describe('Workspace drag (PR3)', () => {
     const src = page.locator(
       `[data-pane-strip="p0"] [data-touch-drag-handle="chat:${c.id}"]`,
     )
+    await expect(src).toHaveClass(/shell__tab-kind/)
+    await expect(page.locator('.shell__tab-drag-handle')).toHaveCount(0)
     await touchDrag(page, src, target.x + 2, target.y + target.height / 2, {
       firstDx: -12, firstDy: 0,
     })
@@ -745,11 +747,11 @@ test.describe('Workspace drag (PR3)', () => {
     }).not.toBe(before)
   })
 
-  test('an active clipped chat title reveals its full width with a bounded cycle', async ({ page }) => {
-    const { c } = await bootThreeTab(page, 'aVeryLongActiveChatTitle')
+  test('the focused active title reveals once, returns to its start, and restarts on reopen', async ({ page }) => {
+    const { a, c } = await bootThreeTab(page, 'aVeryLongActiveChatTitle')
     await page.setViewportSize(PHONE)
     const title = page.locator(
-      `[data-pane-strip="p0"] .shell__tab--active .shell__tab-text`,
+      `[data-pane-strip="p0"] [data-drag-key="chat:${c.id}"] .shell__tab-text`,
     )
     await expect(title).toHaveAttribute('data-overflow', 'true', { timeout: 3000 })
     const motion = await title.evaluate(el => {
@@ -758,12 +760,42 @@ test.describe('Workspace drag (PR3)', () => {
       return {
         name: style.animationName,
         iterations: style.animationIterationCount,
+        duration: style.animationDuration,
+        delay: style.animationDelay,
         shift: parseFloat(el.style.getPropertyValue('--tab-title-shift')),
       }
     })
     expect(motion.name).toBe('shell-tab-title-cycle')
     expect(motion.iterations).toBe('1')
+    expect(motion.duration).toBe('4.8s')
+    expect(motion.delay).toBe('0.7s')
     expect(motion.shift).toBeLessThan(0)
+
+    // Jump the bounded animation to completion: its filled final frame is the
+    // beginning of the title, and it remains finished rather than looping.
+    const final = await title.evaluate(async (el) => {
+      const inner = el.querySelector('.shell__tab-text-inner')
+      const animation = inner.getAnimations()[0]
+      animation.finish()
+      await new Promise(resolve => requestAnimationFrame(resolve))
+      return { transform: getComputedStyle(inner).transform, playState: animation.playState }
+    })
+    expect(final.playState).toBe('finished')
+    expect(['none', 'matrix(1, 0, 0, 1, 0, 0)']).toContain(final.transform)
+
+    // Opening another tab removes the animation; reopening this one creates a
+    // fresh bounded pass from the beginning.
+    await page.locator(`[data-pane-strip="p0"] [data-drag-key="chat:${a.id}"]`).click()
+    await page.locator(`[data-pane-strip="p0"] [data-drag-key="chat:${c.id}"]`).click()
+    await expect(page.locator(
+      `[data-pane-strip="p0"] [data-drag-key="chat:${c.id}"]`,
+    )).toHaveAttribute('aria-selected', 'true')
+    const restarted = await title.evaluate((el) => {
+      const animation = el.querySelector('.shell__tab-text-inner').getAnimations()[0]
+      return { playState: animation?.playState, currentTime: animation?.currentTime }
+    })
+    expect(restarted.playState).toBe('running')
+    expect(restarted.currentTime).toBeLessThan(1500)
   })
 })
 

@@ -317,23 +317,25 @@
   -webkit-tap-highlight-color: transparent;
 }
 /* The tab body remains the strip's native horizontal pan surface. A vertical pull
-   can still lift the tab, while the dedicated grip below owns both axes for an
-   intentional horizontal reorder. This keeps overflowed tabs reachable on touch. */
+   can still lift the tab, while the EXISTING kind icon owns both axes for an
+   intentional horizontal reorder. No separate grip or extra tab width is needed. */
 .shell__tab-open[data-drag-key] {
   touch-action: pan-x pinch-zoom;
 }
-.shell__tab-drag-handle {
-  align-self: stretch;
+.shell__tab-kind {
   display: grid;
   place-items: center;
   flex: none;
-  width: 24px;
-  margin: -5px 0 -5px -5px;
-  color: var(--muted);
+}
+.shell__tab-kind[data-touch-drag-handle] {
+  /* Expand the pointer box but cancel the padding from layout, preserving the
+     icon's original 13px footprint and every pixel of title space. */
+  margin: -5px;
+  padding: 5px;
   cursor: grab;
   touch-action: none;
 }
-.shell__tab-drag-handle:active {
+.shell__tab-kind[data-touch-drag-handle]:active {
   cursor: grabbing;
 }
 .shell__tab-open:focus-visible {
@@ -341,7 +343,7 @@
   box-shadow: inset 0 0 0 2px var(--accent);
   border-radius: 7px;
 }
-.shell__tab-open > svg {
+.shell__tab-kind > svg {
   flex: none;
 }
 .shell__tab-text {
@@ -355,18 +357,23 @@
   display: inline-block;
   min-width: max-content;
 }
-/* A newly-active overflowing chat title makes one bounded there-and-back pass.
-   It then goes completely idle: users can read the full name without paying for
-   a perpetual marquee on every open pane. ResizeObserver sets the distance only
-   when clipping is real. A native title tooltip remains available at any time. */
-.shell__tab--active .shell__tab-text[data-overflow="true"]
+/* Only the newly-active title in the focused strip makes one bounded reveal.
+   It rests at the beginning, travels far enough to expose the tail, rests there,
+   then returns to the beginning and stays idle. Other panes never start competing
+   marquees. ResizeObserver sets the distance only when clipping is real; the native
+   title tooltip remains available at any time. */
+.shell__tabstrip:not(.workspace__strip)
+  .shell__tab--active .shell__tab-text[data-overflow="true"]
+  .shell__tab-text-inner,
+.workspace__strip--focused
+  .shell__tab--active .shell__tab-text[data-overflow="true"]
   .shell__tab-text-inner {
-  animation: shell-tab-title-cycle 6.8s ease-in-out 800ms 1 both;
+  animation: shell-tab-title-cycle 4.8s ease-in-out 700ms 1 both;
 }
 @keyframes shell-tab-title-cycle {
-  0%, 18% { transform: translate3d(0, 0, 0); }
-  46%, 72% { transform: translate3d(var(--tab-title-shift), 0, 0); }
-  100% { transform: translate3d(0, 0, 0); }
+  0%, 25% { transform: translate3d(0, 0, 0); }
+  45%, 65% { transform: translate3d(var(--tab-title-shift), 0, 0); }
+  85%, 100% { transform: translate3d(0, 0, 0); }
 }
 .shell__tab-close {
   display: flex;

@@ -156,6 +156,53 @@ async function captureBeatPlan(page, rootClass) {
   }, rootClass)
 }
 
+// Sample the actual entry paint order. Incoming panes must remain fully opaque so
+// they cover the retained single screen physically, while structure-only chrome
+// (dividers/chip) stays absent during the first half of the travel.
+async function sampleEnterPaint(page) {
+  return page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let started = false
+    let minPaneOpacity = 1
+    let earlyChromeOpacity = 0
+    let paneFrames = 0
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        const entering = root.classList.contains('shell--builder-entering')
+        if (entering) {
+          started = true
+          const panes = [...document.querySelectorAll(
+            '.shell__view[data-mode-motion="deal-in"]',
+          )]
+          if (panes.length) {
+            paneFrames += 1
+            for (const pane of panes) {
+              minPaneOpacity = Math.min(minPaneOpacity, parseFloat(getComputedStyle(pane).opacity))
+            }
+            const progress = panes[0].getAnimations()[0]?.effect?.getComputedTiming?.().progress
+            if (progress != null && progress < 0.5) {
+              for (const chrome of document.querySelectorAll(
+                '.workspace__divider, .workspace__pane-chip',
+              )) {
+                earlyChromeOpacity = Math.max(
+                  earlyChromeOpacity,
+                  parseFloat(getComputedStyle(chrome).opacity),
+                )
+              }
+            }
+          }
+        }
+        frames += 1
+        if ((started && !entering) || frames > 120) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return { started, minPaneOpacity, earlyChromeOpacity, paneFrames }
+  })
+}
+
 // Focus the brand toggle and flip the mode via the keyboard path.
 async function toggleMode(page) {
   await page.getByLabel('Toggle navigation').focus()
@@ -367,14 +414,20 @@ test('v3 panes assemble over the stationary single screen from their correspondi
   await expect.poll(() => builderActive(page)).toBe(false)
 
   const sampler = captureBeatPlan(page, 'shell--builder-entering')
+  const paintSampler = sampleEnterPaint(page)
   await page.waitForTimeout(30)
   await toggleMode(page)
   const r = await sampler
+  const paint = await paintSampler
   expect(r.underlay, 'the current single screen remains beneath the assembly').toBe(true)
   expect(r.participants).toHaveLength(2)
   expect(r.participants.every(p => p.motion === 'deal-in')).toBe(true)
   expect(r.participants.some(p => p.x < 0 && p.y === 0), 'left pane enters from left').toBe(true)
   expect(r.participants.some(p => p.x > 0 && p.y === 0), 'right pane enters from right').toBe(true)
+  expect(paint.started).toBe(true)
+  expect(paint.paneFrames).toBeGreaterThan(2)
+  expect(paint.minPaneOpacity, 'pane content never fades in over visible structure').toBeGreaterThan(0.99)
+  expect(paint.earlyChromeOpacity, 'structure waits until pane content has arrived').toBeLessThan(0.05)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
   await expect.poll(() => builderActive(page)).toBe(true)
 })
