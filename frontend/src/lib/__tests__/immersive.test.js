@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { immersiveReducer, isImmersiveActive } from '../immersive.js'
+import {
+  immersiveLifecycleValue,
+  immersiveReducer,
+  isImmersiveActive,
+} from '../immersive.js'
 
 test('request value:true grants the immersive slot to the app', () => {
   assert.equal(immersiveReducer(null, { type: 'request', appId: 7, value: true }), 7)
@@ -50,4 +54,35 @@ test('immersive application tolerates numeric/string id mismatch', () => {
 
 test('no holder means no immersive regardless of view', () => {
   assert.equal(isImmersiveActive(null, 'canvas', 7), false)
+})
+
+test('leaving an app releases immersive intent', () => {
+  assert.equal(immersiveLifecycleValue(
+    { appId: 7, liveVersion: 'a', active: true },
+    { appId: 7, liveVersion: 'a', active: false },
+    true,
+  ), false)
+})
+
+test('returning to a cached app never resurrects its old immersive request', () => {
+  assert.equal(immersiveLifecycleValue(
+    { appId: 7, liveVersion: 'a', active: false },
+    { appId: 7, liveVersion: 'a', active: true },
+    true,
+  ), null)
+})
+
+test('a live frame promotion replays only the promoted frame intent', () => {
+  const previous = { appId: 7, liveVersion: 'a', active: true }
+  const current = { appId: 7, liveVersion: 'b', active: true }
+  assert.equal(immersiveLifecycleValue(previous, current, true), true)
+  assert.equal(immersiveLifecycleValue(previous, current, false), false)
+})
+
+test('initial mount is driven by the frame message, not a stale replay', () => {
+  assert.equal(immersiveLifecycleValue(
+    null,
+    { appId: 7, liveVersion: 'a', active: true },
+    true,
+  ), null)
 })

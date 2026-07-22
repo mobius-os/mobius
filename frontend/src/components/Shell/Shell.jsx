@@ -85,8 +85,8 @@ import {
 import PaneChatView from './PaneChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
-  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, transitionSignature, MODE_MOTION,
-  EMPTY_SINGLE_SURFACE_KEY,
+  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, projectFocusedPane,
+  transitionSignature, MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
 import { PaneTab, scrollStripWheel, stripKeyDown } from './PaneStrip.jsx'
@@ -159,6 +159,14 @@ export default function Shell() {
   // workspace boundary can then own every edge into an empty single screen without
   // making early navigation hooks depend on a callback declared later in the render.
   const requestEmptySingleNewChatRef = useRef(null)
+  // Ephemeral presentation state only. Focusing one pane must never rewrite the
+  // persisted split tree or ratios, so this id lives outside the workspace blob.
+  const [focusedPaneViewId, setFocusedPaneViewIdState] = useState(null)
+  const focusedPaneViewIdRef = useRef(null)
+  const setFocusedPaneViewId = useCallback((paneId) => {
+    focusedPaneViewIdRef.current = paneId
+    setFocusedPaneViewIdState(paneId)
+  }, [])
   const dispatchWorkspace = useCallback((action) => {
     const prev = workspaceStateRef.current
     const next = paneModel.workspaceReducer(prev, action)
@@ -174,12 +182,22 @@ export default function Shell() {
       )
     if (next.ws !== prev.ws) {
       onWorkspaceTransitionRef.current?.(prev.ws, next.ws)
+      const expanded = focusedPaneViewIdRef.current
+      if (expanded != null) {
+        const paneIds = Object.keys(next.ws.panes)
+        if (paneIds.length <= 1) {
+          setFocusedPaneViewId(null)
+        } else if (next.ws.focusedPaneId !== prev.ws.focusedPaneId
+            || !next.ws.panes[expanded]) {
+          setFocusedPaneViewId(next.ws.focusedPaneId)
+        }
+      }
     }
     dispatchWorkspaceRaw(action)
     // Queue the reducer commit before policy state. React batches both, while the
     // already-advanced ref still lets the request capture the pre-render chat target.
     if (enteredEmptySingle) requestEmptySingleNewChatRef.current?.()
-  }, [])
+  }, [setFocusedPaneViewId])
 
   // ── Multi-pane projection (design §2/§4) — computed BEFORE useNavigation so
   // the adapter learns the committed visible pane set. A ResizeObserver on
@@ -216,9 +234,15 @@ export default function Shell() {
     return () => { ro.disconnect() }
   }, [])
   const workspaceMode = useMemo(() => paneModel.modeForRect(contentRect), [contentRect])
-  const projection = useMemo(
+  const baseProjection = useMemo(
     () => paneModel.projectLayout(workspace, workspaceMode, contentRect),
     [workspace, workspaceMode, contentRect],
+  )
+  const projection = useMemo(
+    () => projectFocusedPane(
+      baseProjection, workspace, focusedPaneViewId, contentRect,
+    ),
+    [baseProjection, workspace, focusedPaneViewId, contentRect],
   )
   // The committed visible pane set the nav adapter reads. Settings-open is
   // applied separately inside isVisibleApp, so it is NOT excluded here.
@@ -229,7 +253,7 @@ export default function Shell() {
     activeAppId,
     activeChatId,
     drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
-    navTo, applyModeDestination, dismissSettings,
+    navTo, tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
     drawerOpenRef,
@@ -300,6 +324,29 @@ export default function Shell() {
     rootRef: shellRootRef,
   })
   const modeState = mode.state
+  // Keep the focused presentation through a Builder -> Standard exit so the
+  // latched beat animates exactly what the user saw. Once the descriptor idles,
+  // discard it; Standard mode has no pane-focus presentation to restore.
+  useEffect(() => {
+    if (workspace.viewMode === 'single' && !modeState.transition
+        && focusedPaneViewIdRef.current != null) {
+      setFocusedPaneViewId(null)
+    }
+  }, [workspace.viewMode, modeState.transition, setFocusedPaneViewId])
+
+  const toggleFocusedPaneView = useCallback((paneId) => {
+    const ws = workspaceStateRef.current.ws
+    if (!ws.panes[paneId] || Object.keys(ws.panes).length <= 1) {
+      setFocusedPaneViewId(null)
+      return
+    }
+    if (focusedPaneViewIdRef.current === paneId) {
+      setFocusedPaneViewId(null)
+      return
+    }
+    dispatchWorkspace({ type: 'FOCUS', paneId })
+    setFocusedPaneViewId(paneId)
+  }, [dispatchWorkspace, setFocusedPaneViewId])
   // Builder mode = the committed 'panes' world (logo twist + living halo + power
   // chrome), clamped off by the splits kill switch (INV 16). Flips synchronously
   // with the toggle, matching the gesture's own spring/snap.
@@ -431,9 +478,10 @@ export default function Shell() {
       // World-reveal exit: paint the mounted destination beneath the deal (adds its
       // app to visibleAppIds so the underlay is not a blank frame).
       exitUnderlayKey: modeUnderlayKey,
+      focusedPaneView: focusedPaneViewId != null,
     }),
     [workspace, projection, settingsActive, immersiveActive, immersiveAppId,
-      effectiveViewMode, modeUnderlayKey],
+      effectiveViewMode, modeUnderlayKey, focusedPaneViewId],
   )
   const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
   // The EFFECTIVE-mode-gated Settings takeover flag (finding F3): true only when the
@@ -1077,7 +1125,14 @@ export default function Shell() {
   const visibleChatPanes = useMemo(() => {
     const out = []
     const mountedChatIds = new Set()
-    for (const paneId of projection.visibleLeaves) {
+    // While one pane is focused, keep the base projection's chats mounted-hidden.
+    // Defocusing then changes geometry/visibility only — no transcript refetch,
+    // stream teardown, or scroll-state loss for the sibling panes.
+    const mountedPaneIds = new Set([
+      ...baseProjection.visibleLeaves,
+      ...projection.visibleLeaves,
+    ])
+    for (const paneId of mountedPaneIds) {
       const pane = workspace.panes[paneId]
       const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
       if (active && active.kind === 'chat') {
@@ -1096,7 +1151,7 @@ export default function Shell() {
       out.push({ paneId: paneModel.SINGLE_SLOT_PANE, chatId: slot.id })
     }
     return out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
-  }, [projection, workspace])
+  }, [baseProjection, projection, workspace])
   // The chat keys that actually PAINT (as opposed to merely being mounted): in
   // single mode ONLY the slot's chat (fullBleedKey), in builder every visible
   // pane's active chat. Separating painting from mounting is what lets the slot
@@ -3206,7 +3261,7 @@ export default function Shell() {
           self-corrects). Deliberately NOT a ChatView remount — that would
           reset the send-reservation and freeze stream-follow (the reason the
           bespoke split view was parked). */}
-      {tabStripVisible && !multiPane && (() => {
+      {tabStripVisible && !workspaceChromeActive && (() => {
         // Single-leaf beat: the sole strip deals in / out / clears WITH its pane
         // (there is no WorkspaceChrome at one leaf). Its active key is the beat
         // participant key.
@@ -3244,6 +3299,7 @@ export default function Shell() {
                 tab={tab}
                 label={labelForTab(tab)}
                 active={active}
+                revealKey={tabRevealRevision}
                 tabIndex={active ? 0 : -1}
                 dragKey={paneModel.WORKSPACE_SPLITS_ENABLED ? key : undefined}
                 onActivate={() => {
@@ -3283,7 +3339,7 @@ export default function Shell() {
           return (
           <div
             key={id}
-            data-tab-key={multiPane && !underlay ? tabKey : undefined}
+            data-tab-key={(multiPane || focusedPaneViewId != null) && !underlay ? tabKey : undefined}
             // COMPOSITOR-ONLY beat motion (v2): the wrapper HOLDS its tiled content
             // rect and animates only transform/opacity via data-mode-motion + the
             // latched --flip/--mode vars. A mid-beat focus change cannot retarget it
@@ -3366,7 +3422,8 @@ export default function Shell() {
           return (
             <div
               key={chatId}
-              data-tab-key={multiPane && role !== 'held' && !underlay ? tabKey : undefined}
+              data-tab-key={(multiPane || focusedPaneViewId != null) && role !== 'held' && !underlay
+                ? tabKey : undefined}
               // Compositor-only beat motion (v2): see the app wrapper. The world-
               // reveal underlay chat paints full-bleed beneath the deal.
               data-mode-motion={motion ? motion.motion : undefined}
@@ -3517,6 +3574,9 @@ export default function Shell() {
             // (each strip deals with its pane) — WorkspaceChrome owns no private
             // close dispatcher and no motion knowledge of its own.
             onCloseTab={closeTab}
+            focusedPaneViewId={focusedPaneViewId}
+            onTogglePaneFocus={toggleFocusedPaneView}
+            revealKey={tabRevealRevision}
             stripMotion={wrapperMotion}
             streamingChatIds={streamingChatIds}
             attentionChatIds={attentionChatIds}

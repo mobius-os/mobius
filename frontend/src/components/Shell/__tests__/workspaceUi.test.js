@@ -94,15 +94,17 @@ test('the drag chip is a pointer-transparent fixed layer with a [hidden] guard',
   assert.match(css, /\.workspace__drag-chip\[hidden\]\s*\{\s*display:\s*none/)
 })
 
-test('the drag shield owns the grabbing cursor over the whole viewport', () => {
+test('the drag layer covers the viewport visually but can never block navigation', () => {
   const rule = css.match(/\.workspace__drag-shield\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(rule, /position:\s*fixed/)
   assert.match(rule, /inset:\s*0/)
+  assert.match(rule, /pointer-events:\s*none/)
   assert.match(rule, /cursor:\s*grabbing/)
-  // The shield must out-layer the drawer (Drawer.css z-index 90/95) so a
-  // left-edge drag hits the drop zone, never the drawer beneath it.
+  // The visual layer may out-layer the drawer, but pointer capture — not this
+  // transparent DOM node — owns a live drag. An orphaned layer therefore cannot
+  // leave a visible drawer untappable.
   const z = Number(rule.match(/z-index:\s*(\d+)/)?.[1] || 0)
-  assert.ok(z >= 100, `drag shield z-index ${z} must sit above the drawer (95)`)
+  assert.ok(z >= 100, `drag layer z-index ${z} must paint above the drawer (95)`)
 })
 
 test('reduced motion makes the drop preview instant', () => {
@@ -667,7 +669,9 @@ test('mobile tab bodies pan while the existing kind icon owns either-axis draggi
 
 test('an active overflowing chat title cycles once, then becomes idle', () => {
   assert.match(paneStrip, /new ResizeObserver\(measure\)/)
-  assert.match(paneStrip, /!active \|\| tab\.kind !== 'chat'/)
+  assert.match(paneStrip, /!active \|\| !focused \|\| tab\.kind !== 'chat'/)
+  assert.match(paneStrip, /\}, \[active, focused, label, tab\.kind\]\)/,
+    'only the focused active tab should retain a ResizeObserver')
   assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-shift'/)
   assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-duration'/)
   assert.match(paneStrip, /Math\.round\(shift \* TITLE_CYCLE_MS_PER_PX\)/)
@@ -679,6 +683,13 @@ test('an active overflowing chat title cycles once, then becomes idle', () => {
   assert.match(keyframes, /85%, 100% \{ transform: translate3d\(0, 0, 0\)/,
     'the one pass returns to the beginning and rests there')
   assert.match(shellCss, /\.shell__tab-text-inner \{ animation: none !important; \}/)
+})
+
+test('the pane focus action uses one unambiguous accessible state contract', () => {
+  assert.match(paneStrip, /const label = focused \? 'Show all panes' : 'Focus pane'/)
+  assert.match(paneStrip, /aria-label=\{label\}/)
+  assert.doesNotMatch(paneStrip, /aria-pressed/,
+    'a button whose label changes with the action must not also announce a toggle state')
 })
 
 test('overflowing strips keep native pan and add a no-chrome wheel path', () => {
@@ -807,10 +818,13 @@ test('the builder preview cannot outlive its drag session past one visibility bo
   assert.match(dragBinding, /document\.removeEventListener\('visibilitychange', onForegroundVisible\)/)
   // (3) NEXT-INTERACTION — a visible->visible steal (partial occlusion / split-screen)
   //     fires NEITHER edge; the next pointerdown reconciles a standing session whose
-  //     pointer is dead (different pointerId + no live capture), then proceeds. A live
-  //     drag keeps its capture, so this never cancels one.
+  //     pointer is dead (no live capture), then proceeds. Pointer identity is NOT a
+  //     liveness signal because mobile reuses ids across sequential gestures. This
+  //     newer boundary needs no old-gesture click guard; adding one would eat the
+  //     fresh tap on the same drawer row. A live drag keeps its capture, so it stays.
   assert.match(dragBinding, /function standingSessionPointerIsLive\(\) \{[\s\S]*?hasPointerCapture\?\.\(activePointerId\)/)
-  assert.match(dragBinding, /if \(e\.pointerId !== activePointerId && !standingSessionPointerIsLive\(\)\) \{[\s\S]*?activeCleanup\(\{ suppressClick: true \}\)/)
+  assert.match(dragBinding, /if \(!standingSessionPointerIsLive\(\)\) \{\s*activeCleanup\(\)/)
+  assert.match(dragBinding, /clearPendingSourceClick\?\.\(\)[\s\S]*?if \(activeCleanup\)/)
   // The invariant now spans one boundary OR one subsequent interaction.
   assert.match(dragBinding, /may outlive its session by at most ONE visibility\/foreground boundary,\s*\n?\s*\/\/ or at most one subsequent user interaction/)
 })
