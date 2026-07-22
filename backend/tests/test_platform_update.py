@@ -516,6 +516,133 @@ def test_boot_reconcile_refreshes_copied_hooks(monkeypatch, tmp_path):
   assert "hooks=refreshed" in summary
 
 
+def _make_hook_repo(tmp_path: Path, *, complete: bool = True) -> Path:
+  tmp_path.mkdir(parents=True, exist_ok=True)
+  repo = tmp_path / "hook-repo"
+  _git(tmp_path, "init", "-b", "main", str(repo))
+  scripts = repo / "scripts"
+  (scripts / "githooks").mkdir(parents=True)
+  (scripts / "install-hooks.sh").write_text("#!/bin/sh\nexit 99\n")
+  (scripts / "pre-commit.sh").write_text("#!/bin/sh\necho committed-pre-commit\n")
+  if complete:
+    (scripts / "githooks" / "pre-push").write_text(
+      "#!/bin/sh\necho committed-pre-push\n"
+    )
+  _git(repo, "add", "scripts")
+  _git(repo, "commit", "-q", "-m", "add hooks")
+  return repo
+
+
+def test_hook_refresh_uses_only_committed_allowlisted_sources(tmp_path):
+  repo = _make_hook_repo(tmp_path)
+  # Neither a dirty managed hook nor a newly dropped executable may run merely
+  # because a healthy boot refreshes the installed copies.
+  (repo / "scripts" / "pre-commit.sh").write_text("#!/bin/sh\necho DIRTY\n")
+  (repo / "scripts" / "githooks" / "post-checkout").write_text(
+    "#!/bin/sh\necho UNTRACKED\n"
+  )
+
+  assert pu._refresh_git_hooks(repo) == ""
+
+  hooks = repo / ".git" / "hooks"
+  assert (hooks / "pre-commit").read_text() == (
+    "#!/bin/sh\necho committed-pre-commit\n"
+  )
+  assert (hooks / "pre-push").read_text() == (
+    "#!/bin/sh\necho committed-pre-push\n"
+  )
+  assert not (hooks / "post-checkout").exists()
+  assert (hooks / "pre-commit").stat().st_mode & 0o777 == 0o755
+  assert (hooks / "pre-push").stat().st_mode & 0o777 == 0o755
+  configured = _git(repo, "config", "--local", "--get", "core.hooksPath")
+  assert Path(configured.stdout.strip()) == hooks.resolve()
+
+
+def test_hook_refresh_rolls_back_without_absent_destinations(
+  tmp_path, monkeypatch,
+):
+  repo = _make_hook_repo(tmp_path)
+  assert pu._refresh_git_hooks(repo) == ""
+  hooks = repo / ".git" / "hooks"
+  old = {
+    name: (hooks / name).read_bytes()
+    for name in ("pre-commit", "pre-push")
+  }
+  (repo / "scripts" / "pre-commit.sh").write_text("#!/bin/sh\necho new-commit\n")
+  (repo / "scripts" / "githooks" / "pre-push").write_text(
+    "#!/bin/sh\necho new-push\n"
+  )
+  _git(repo, "add", "scripts")
+  _git(repo, "commit", "-q", "-m", "update hooks")
+
+  real_replace = pu.os.replace
+  failed = False
+
+  def fail_second_hook_once(source, destination):
+    nonlocal failed
+    target = Path(destination)
+    if target.name in old:
+      assert all((hooks / name).exists() for name in old)
+      if target.name == "pre-push" and not failed:
+        failed = True
+        raise OSError("simulated second replacement failure")
+    real_replace(source, destination)
+    if target.name in old:
+      assert all((hooks / name).exists() for name in old)
+
+  monkeypatch.setattr(pu.os, "replace", fail_second_hook_once)
+
+  result = pu._refresh_git_hooks(repo)
+
+  assert "simulated second replacement failure" in result
+  assert {(name, (hooks / name).read_bytes()) for name in old} == set(old.items())
+
+
+def test_hook_refresh_missing_incomplete_and_timeout_are_nonfatal(
+  tmp_path, monkeypatch,
+):
+  missing = tmp_path / "missing"
+  _git(tmp_path, "init", "-b", "main", str(missing))
+  (missing / "README").write_text("old checkout\n")
+  _git(missing, "add", "README")
+  _git(missing, "commit", "-q", "-m", "old checkout")
+  assert pu._refresh_git_hooks(missing) is None
+
+  incomplete = _make_hook_repo(tmp_path / "incomplete", complete=False)
+  result = pu._refresh_git_hooks(incomplete)
+  assert result
+  assert "pre-push" in result
+
+  monkeypatch.setattr(
+    pu, "_refresh_git_hooks_impl",
+    lambda _repo: (_ for _ in ()).throw(
+      subprocess.TimeoutExpired(["git", "show"], timeout=15)
+    ),
+  )
+  assert "TimeoutExpired" in pu._refresh_git_hooks(missing)
+
+
+def test_hook_refresh_config_failure_keeps_complete_first_population(
+  tmp_path, monkeypatch,
+):
+  repo = _make_hook_repo(tmp_path)
+  real_hook_git = pu._hook_git
+
+  def fail_config(repo_path, *args):
+    if args[:3] == ("config", "--local", "core.hooksPath"):
+      return subprocess.CompletedProcess(args, 1, b"", b"config locked")
+    return real_hook_git(repo_path, *args)
+
+  monkeypatch.setattr(pu, "_hook_git", fail_config)
+
+  result = pu._refresh_git_hooks(repo)
+
+  assert "config locked" in result
+  hooks = repo / ".git" / "hooks"
+  assert (hooks / "pre-commit").read_text().startswith("#!/bin/sh")
+  assert (hooks / "pre-push").read_text().startswith("#!/bin/sh")
+
+
 @pytest.mark.asyncio
 async def test_apply_restarts_and_rebuilds_when_update_touches_backend(
   monkeypatch, clone_env,
