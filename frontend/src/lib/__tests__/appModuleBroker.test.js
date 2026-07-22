@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { parse } from 'acorn'
 
 import {
   APP_MODULE_MAX_BYTES,
@@ -22,6 +23,29 @@ const caddy = readFileSync(
   new URL('../../../../Caddyfile', import.meta.url),
   'utf8',
 )
+
+function dynamicImportTargetsFromHtml(html) {
+  const targets = []
+  for (const match of html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    const [, attributes, source] = match
+    const sourceType = /\btype=["']module["']/i.test(attributes)
+      ? 'module'
+      : 'script'
+    const ast = parse(source, { ecmaVersion: 'latest', sourceType })
+    const visit = node => {
+      if (!node || typeof node !== 'object') return
+      if (node.type === 'ImportExpression') {
+        targets.push(source.slice(node.source.start, node.source.end).replace(/\s+/g, ' '))
+      }
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) value.forEach(visit)
+        else if (value && typeof value === 'object') visit(value)
+      }
+    }
+    visit(ast)
+  }
+  return targets
+}
 
 test('module request keys keep the app version but discard the frame revision', () => {
   const url = new URL(appModuleRequestUrl(
@@ -90,12 +114,24 @@ test('opaque frames request module bytes only after exact parent attribution', (
   assert.match(frame, /type: 'moebius:module-request'/)
   assert.match(frame, /new Blob\(\[bytes\], \{ type: 'text\/javascript' \}\)/)
   assert.match(frame, /URL\.revokeObjectURL\(blobUrl\)/)
-  assert.doesNotMatch(frame, /await import\(moduleUrl\([01]\)\)/)
+  // The opaque frame has one module-execution route: the bytes fetched by the
+  // exact parent broker are evaluated from its bounded blob. Pin the complete
+  // dynamic-import target list rather than one old helper spelling — a renamed
+  // direct URL fallback must not silently bypass attribution/version/offline
+  // behavior or put the app bearer in a module URL.
+  const dynamicImportTargets = dynamicImportTargetsFromHtml(frame)
+  assert.deepEqual(dynamicImportTargets, ['blobUrl'])
+  assert.doesNotMatch(frame, /\bimportDirectModule\b/)
   assert.doesNotMatch(frame, /type="importmap"/)
   assert.doesNotMatch(frame, /await import\(['"]react['"]\)/)
   assert.doesNotMatch(frame, /await import\(['"]\/mobius-runtime\.js['"]\)/)
   assert.match(frame, /globalThis\.__mobiusRuntimeConfig/)
   assert.match(frame, /compiledRuntime\.abi !== COMPILED_RUNTIME_ABI/)
+})
+
+test('dynamic import inventory includes multiline targets', () => {
+  const fixture = `<script type="module">await import(\n  moduleUrl(0)\n)</script>`
+  assert.deepEqual(dynamicImportTargetsFromHtml(fixture), ['moduleUrl(0)'])
 })
 
 test('the frame separates parent liveness from module transfer time', () => {
