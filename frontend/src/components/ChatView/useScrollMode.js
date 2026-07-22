@@ -131,13 +131,14 @@ const _scrollModes = (() => {
 })()
 
 
-/** Returns the topmost message <li> that ACTUALLY intersects the viewport.
+/** Returns the topmost intersecting message, or the last real row while the
+ * viewport is inside the dynamic reservation below the transcript.
  *
- * The dynamic spacer is intentionally scrollable blank room after the real
- * transcript. Returning the last row when the viewport is wholly inside that
- * room manufactures a huge negative anchor offset; persisting it makes reload
- * recreate the same black screen forever. No visible row means no reader
- * anchor — callers must fall back to the latest real conversation content. */
+ * That fallback is load-bearing for LIVE reader ownership: a gesture through
+ * reserved room still needs an anchor so streaming/layout work cannot move the
+ * viewport underneath the reader. Lifecycle save/restore validates that the
+ * anchor intersects real content and normalizes this live-only negative offset
+ * to the real transcript tail before persistence. */
 function _topmostVisibleMsg(scrollEl) {
   const items = scrollEl.querySelectorAll('.chat__msg[data-key]')
   const top = scrollEl.scrollTop
@@ -146,7 +147,7 @@ function _topmostVisibleMsg(scrollEl) {
     const itemBottom = el.offsetTop + el.offsetHeight
     if (itemBottom > top && el.offsetTop < bottom) return el
   }
-  return null
+  return items[items.length - 1] || null
 }
 
 
@@ -170,6 +171,24 @@ export function anchorModeFromScroll(scrollEl) {
     key: anchorEl.dataset.key,
     offset: anchorEl.offsetTop - scrollEl.scrollTop,
   }
+}
+
+
+/** Lifecycle anchors must describe visible conversation content. Live scroll
+ * handling may temporarily anchor reserved room, but foreground/chat restore
+ * must never recreate that blank viewport. */
+function _contentAnchorModeFromScroll(scrollEl) {
+  if (!scrollEl) return null
+  const row = _topmostVisibleMsg(scrollEl)
+  if (!row?.dataset?.key) return null
+  const mode = {
+    kind: 'ANCHOR_AT',
+    key: row.dataset.key,
+    offset: row.offsetTop - scrollEl.scrollTop,
+  }
+  return _anchorModeIntersectsContent(row, mode, scrollEl?.clientHeight)
+    ? mode
+    : null
 }
 
 
@@ -201,7 +220,8 @@ export function bottomAnchorModeFromScroll(scrollEl) {
  * that case, but the gesture must still retire live follow. Settle at the
  * latest real-content tail rather than leaving FOLLOW_BOTTOM armed. */
 export function contentHoldModeFromScroll(scrollEl) {
-  return anchorModeFromScroll(scrollEl) || bottomAnchorModeFromScroll(scrollEl)
+  return _contentAnchorModeFromScroll(scrollEl)
+    || bottomAnchorModeFromScroll(scrollEl)
 }
 
 
@@ -416,7 +436,7 @@ export function _computeSpacerH(
   let target = pinTarget
   if (mode?.kind === 'ANCHOR_AT') {
     const anchorEl = _anchorEl(scrollEl, mode.key)
-    if (_anchorModeIntersectsContent(anchorEl, mode, viewH)) {
+    if (anchorEl) {
       target = Math.max(target, Math.max(0, anchorEl.offsetTop - mode.offset))
     }
   }

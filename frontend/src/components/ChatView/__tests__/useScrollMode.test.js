@@ -1081,7 +1081,7 @@ test('anchor reservation disappears once real content makes the target reachable
   )
 })
 
-test('an off-content anchor cannot enlarge the dynamic spacer', () => {
+test('a live off-content anchor reserves its exact reader-owned position', () => {
   const anchor = { offsetTop: 500, offsetHeight: 220 }
   const scrollEl = {
     clientHeight: 700,
@@ -1094,8 +1094,8 @@ test('an off-content anchor cannot enlarge the dynamic spacer', () => {
   }
   assert.equal(
     _computeSpacerH(scrollEl, { offsetHeight: 700 }, { offsetTop: 100 }, 700, mode),
-    96,
-    'only the ordinary latest-user pin reservation remains',
+    1400,
+    'live reader ownership survives in reserved room; persistence rejects it',
   )
 })
 
