@@ -240,6 +240,7 @@ const CSS = `
   background: color-mix(in srgb, var(--ok, #2e7d32) 10%, transparent); }
 .sk-compat.is-warn { color: var(--warn, #b26a00); border-color: color-mix(in srgb, var(--warn, #b26a00) 45%, transparent);
   background: color-mix(in srgb, var(--warn, #b26a00) 10%, transparent); cursor: pointer; }
+.sk-compat.sm { font-size: 11px; padding: 1px 8px; cursor: inherit; }
 .sk-caveats { flex: 0 0 auto; margin: 10px 16px 0; padding: 9px 12px 9px 28px; border-radius: 10px;
   font-size: 13px; line-height: 1.5;
   border: 1px solid color-mix(in srgb, var(--warn, #b26a00) 35%, var(--border)); color: var(--muted);
@@ -314,13 +315,20 @@ function initialOnline() {
   return true
 }
 
-function ProvChips({ provenance, uses }) {
+function ProvChips({ provenance, uses, compat }) {
   const chip = provenanceChip(provenance)
   const usage = usageLabel(uses)
   return (
     <span className="sk-provrow">
       <span className={`sk-prov ${chip.kind}`} title={chip.title}>{chip.label}</span>
       {usage && <span className="sk-uses">{usage}</span>}
+      {compat && (compat.ok ? (
+        <span className="sk-compat is-ok sm">✓ Works with Möbius</span>
+      ) : (
+        <span className="sk-compat is-warn sm" title="Open the skill to see the notes">
+          ⚠ {compat.caveats.length} {compat.caveats.length === 1 ? 'thing' : 'things'} to know
+        </span>
+      ))}
     </span>
   )
 }
@@ -954,6 +962,32 @@ export default function SkillsApp({ appId, token }) {
     return out
   }
 
+  // Assess every installed:* skill in the background once the list loads, so
+  // the chip shows on the top-level rows too — not only after opening one.
+  // Sequential on purpose: a handful of installed skills at most, and the
+  // fetched markdown seeds the detail cache so opening the skill is instant.
+  useEffect(() => {
+    if (!skills) return undefined
+    const todo = skills.filter((s) => isUninstallable(s.provenance) && !instCompat[s.id])
+    if (!todo.length) return undefined
+    let stale = false
+    ;(async () => {
+      for (const s of todo) {
+        try {
+          const res = await fetch(skillContentPath(s), { headers: authHeaders })
+          if (!res.ok) continue
+          const raw = await res.text()
+          const files = s.is_dir ? await listSkillFiles(s.id) : []
+          if (files === null || stale) continue
+          setContents((c) => (c[s.id] ? c : { ...c, [s.id]: { status: 'ready', text: raw } }))
+          setInstCompat((m) => ({ ...m, [s.id]: assessInstalled(files, raw) }))
+        } catch { /* no verdict beats a wrong one */ }
+        if (stale) return
+      }
+    })()
+    return () => { stale = true }
+  }, [skills])
+
   // Post-install compat for the open skill. installed:* provenance only —
   // seed and agent-authored skills are written against this instance and
   // routinely mention files elsewhere in /data, which would read as false
@@ -1242,7 +1276,7 @@ export default function SkillsApp({ appId, token }) {
                   <div className="sk-rowname">{s.title}</div>
                   <div className="sk-rowslug">{s.id}</div>
                   {s.description && <div className="sk-rowdesc">{s.description}</div>}
-                  <ProvChips provenance={s.provenance} uses={s.uses} />
+                  <ProvChips provenance={s.provenance} uses={s.uses} compat={instCompat[s.id]} />
                 </span>
                 <span className="sk-chev" aria-hidden="true">{CHEV}</span>
               </button>
