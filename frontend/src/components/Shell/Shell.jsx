@@ -48,8 +48,11 @@ import {
 } from '../../lib/appRecovery.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import {
+  acknowledgeAppActivity,
+  appAttentionIds,
   freshChatBuiltApps,
   freshAppIds,
+  withAppActivitySeen,
   withAppsFlagged,
   withoutAppFlagged,
 } from './newAppAttention.js'
@@ -1597,6 +1600,10 @@ export default function Shell() {
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
+  const appAttentionSet = useMemo(
+    () => appAttentionIds(apps, newAppIds, visibleAppIds),
+    [apps, newAppIds, visibleAppIds],
+  )
   // First-sign-in walkthrough. The query result is the source of
   // truth — backend persists completion via
   // POST /api/owner/walkthrough/complete. We render the overlay iff
@@ -1716,6 +1723,35 @@ export default function Shell() {
   useEffect(() => {
     for (const id of visibleAppIds) clearAppAttention(Number(id))
   }, [visibleAppIds, clearAppAttention])
+
+  // Opening an app acknowledges its durable background activity. Optimistic
+  // cache clearing removes the dot immediately; server truth is restored on a
+  // failed request. In-flight keys include the observed activity version:
+  // duplicate renders share one request, while genuinely newer activity can
+  // be acknowledged independently without waiting for an older request.
+  const appActivityAckRef = useRef(new Set())
+  useEffect(() => {
+    for (const rawId of visibleAppIds) {
+      const appId = Number(rawId)
+      if (Number.isNaN(appId)) continue
+      const app = apps.find(row => Number(row.id) === appId)
+      if (!app?.has_unseen_activity || !app?.unseen_activity_version) continue
+      const observedActivityVersion = app.unseen_activity_version
+      acknowledgeAppActivity({
+        appId,
+        activityVersion: observedActivityVersion,
+        inFlight: appActivityAckRef.current,
+        request: api.apps.markActivitySeen,
+        clearCached: (seenAppId, seenThroughVersion) => {
+          queryClient.setQueryData(
+            appQueries.keys.all,
+            rows => withAppActivitySeen(rows, seenAppId, seenThroughVersion),
+          )
+        },
+        restoreServerTruth: () => appQueries.list.invalidate(queryClient),
+      })
+    }
+  }, [visibleAppIds, apps, queryClient])
 
   // Immersive games request OS fullscreen to also drop the Android status bar
   // and paint under the notch — but ENTER must come from the app, because the
@@ -2360,6 +2396,11 @@ export default function Shell() {
       // to bump appVersions / cycle iframe keys — that would tear
       // down running apps for a CSS swap and lose their state.
       loadTheme()
+    } else if (ev.type === 'app_activity') {
+      // The durable marker was committed with an app-attributed notification.
+      // A refetch surfaces the dot; if the app is already visible, the effect
+      // above immediately acknowledges it instead of leaving a stale nudge.
+      refreshApps()
     } else if (ev.type === 'app_updated' || ev.type === 'app_created') {
       const placementRequest = workspaceRequestFromSystemEvent(ev)
       // Refresh server truth before warming or placing. app_updated is
@@ -3235,7 +3276,7 @@ export default function Shell() {
         }}
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
-        newAppIds={newAppIds}
+        newAppIds={appAttentionSet}
         settingsWarning={providerAuth.needsAttention}
         dragActiveRef={dragActiveRef}
       />
@@ -3582,7 +3623,7 @@ export default function Shell() {
             stripMotion={wrapperMotion}
             streamingChatIds={streamingChatIds}
             attentionChatIds={attentionChatIds}
-            newAppIds={newAppIds}
+            newAppIds={appAttentionSet}
           />
         )}
       </main>

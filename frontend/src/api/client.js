@@ -358,6 +358,10 @@ export const api = {
   },
   apps: {
     list: () => apiFetch('/apps/'),
+    markActivitySeen: (appId, activityVersion) => apiFetch(`/apps/${appId}/activity/seen`, {
+      method: 'POST',
+      body: JSON.stringify({ activity_version: activityVersion }),
+    }),
     remove: (appId) => apiFetch(`/apps/${appId}`, { method: 'DELETE' }),
     recover: (appId) => apiFetch(`/apps/${appId}/recover`, { method: 'POST' }),
     // Wipes the app's runtime storage back to empty while KEEPING it
