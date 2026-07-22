@@ -2701,36 +2701,42 @@ async def _close_browser_session(chat_id: str) -> None:
 
   async def terminate_close_process(proc) -> None:
     """Bounded TERM/KILL cleanup for a wedged agent-browser close CLI."""
+    async def wait_for_reap(timeout: float, stage: str | None = None) -> bool:
+      try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        return True
+      except asyncio.TimeoutError:
+        # A stale/wedged child watcher can fail to publish the return code even
+        # after the OS process is gone. No process state is worth turning this
+        # best-effort terminal cleanup into an unbounded chat teardown.
+        if stage is not None:
+          log.warning(
+            "agent-browser close process did not reap %s for chat %s",
+            stage,
+            chat_id,
+          )
+        return False
+
     if getattr(proc, "returncode", None) is not None:
-      await proc.wait()
+      await wait_for_reap(
+        _BROWSER_CLOSE_KILL_WAIT_TIMEOUT, "after observed exit",
+      )
       return
     try:
       proc.terminate()
     except ProcessLookupError:
-      await proc.wait()
-      return
-    try:
-      await asyncio.wait_for(
-        proc.wait(), timeout=_BROWSER_CLOSE_KILL_GRACE,
+      await wait_for_reap(
+        _BROWSER_CLOSE_KILL_WAIT_TIMEOUT,
+        "after disappearing before SIGTERM",
       )
       return
-    except asyncio.TimeoutError:
-      pass
+    if await wait_for_reap(_BROWSER_CLOSE_KILL_GRACE):
+      return
     try:
       proc.kill()
     except ProcessLookupError:
       pass
-    try:
-      await asyncio.wait_for(
-        proc.wait(), timeout=_BROWSER_CLOSE_KILL_WAIT_TIMEOUT,
-      )
-    except asyncio.TimeoutError:
-      # SIGKILL has already been issued. A wedged child watcher must not turn
-      # this best-effort terminal cleanup into an unbounded chat teardown.
-      log.warning(
-        "agent-browser close process did not reap after SIGKILL for chat %s",
-        chat_id,
-      )
+    await wait_for_reap(_BROWSER_CLOSE_KILL_WAIT_TIMEOUT, "after SIGKILL")
 
   async def close_one(target: BrowserSessionTarget) -> bool:
     proc = None

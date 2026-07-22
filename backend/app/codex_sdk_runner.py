@@ -235,6 +235,12 @@ async def _enter_codex_context_owned(
       if enter_task.cancelled():
         break
       deferred_cancel = deferred_cancel or exc
+    except BaseException:
+      # The owned task has reached a terminal failure. Reconcile it below so
+      # a caller cancellation already deferred by this loop takes precedence
+      # over the later startup error instead of leaking that error as a normal
+      # RunnerResult.
+      break
   try:
     entered = enter_task.result()
   except asyncio.CancelledError:
@@ -249,7 +255,14 @@ async def _enter_codex_context_owned(
 
 
 class _EnteredCodexContext:
-  """Delegate exit for an AsyncCodex context whose enter is already owned."""
+  """Own exit for an AsyncCodex context whose enter is already owned.
+
+  The pinned SDK delegates close to ``asyncio.to_thread``. An ordinary await
+  lets a second caller cancellation cancel that awaiter while its worker is
+  still queued or running, allowing process-group reap and runner return to
+  overtake the SDK's direct-child ``wait()``. Keep the complete exit in a
+  runner-owned task and defer every repeated cancellation until it finishes.
+  """
 
   def __init__(self, context: Any, entered: Any) -> None:
     self._context = context
@@ -259,7 +272,41 @@ class _EnteredCodexContext:
     return self._entered
 
   async def __aexit__(self, exc_type, exc, traceback) -> Any:
-    return await self._context.__aexit__(exc_type, exc, traceback)
+    exit_task = asyncio.create_task(
+      self._context.__aexit__(exc_type, exc, traceback)
+    )
+    deferred_cancel: asyncio.CancelledError | None = None
+    while not exit_task.done():
+      try:
+        await asyncio.shield(exit_task)
+      except asyncio.CancelledError as cancel_exc:
+        if exit_task.cancelled():
+          break
+        deferred_cancel = deferred_cancel or cancel_exc
+      except BaseException:
+        # Reconcile the terminal exit failure below. In particular, a caller
+        # cancellation that was already unwinding the context must not be
+        # replaced by a later SDK-close error.
+        break
+    try:
+      result = exit_task.result()
+    except asyncio.CancelledError as exit_cancel:
+      caller_cancel = (
+        exc if isinstance(exc, asyncio.CancelledError) else deferred_cancel
+      )
+      if caller_cancel is not None:
+        raise caller_cancel from exit_cancel
+      raise
+    except BaseException as exit_exc:
+      caller_cancel = (
+        exc if isinstance(exc, asyncio.CancelledError) else deferred_cancel
+      )
+      if caller_cancel is not None:
+        raise caller_cancel from exit_exc
+      raise
+    if deferred_cancel is not None:
+      raise deferred_cancel
+    return result
 
 
 async def _capture_codex_process_group_during_start(

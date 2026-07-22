@@ -264,6 +264,53 @@ def test_terminal_browser_cleanup_bounds_wait_after_sigkill(monkeypatch, caplog)
   assert "did not reap after SIGKILL" in caplog.text
 
 
+def test_terminal_browser_cleanup_bounds_wait_when_process_disappears_before_term(
+  monkeypatch, caplog,
+):
+  monkeypatch.setattr(
+    browser_profiles, "browser_session_targets_for_chat", lambda _chat_id: set(),
+  )
+  monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
+  monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_WAIT_TIMEOUT", 0.01)
+
+  class GoneWithWedgedWatcher:
+    returncode = None
+
+    def __init__(self):
+      self.terminate_calls = 0
+      self.kill_calls = 0
+      self.wait_calls = 0
+
+    async def wait(self):
+      self.wait_calls += 1
+      await asyncio.Future()
+
+    def terminate(self):
+      self.terminate_calls += 1
+      raise ProcessLookupError
+
+    def kill(self):
+      self.kill_calls += 1
+
+  proc = GoneWithWedgedWatcher()
+
+  async def fake_create_subprocess_exec(*_args, **_kwargs):
+    return proc
+
+  monkeypatch.setattr(
+    chat.asyncio, "create_subprocess_exec", fake_create_subprocess_exec,
+  )
+
+  asyncio.run(asyncio.wait_for(
+    chat._close_browser_session("chat-a"), timeout=0.5,
+  ))
+
+  assert proc.wait_calls == 2
+  assert proc.terminate_calls == 1
+  assert proc.kill_calls == 0
+  assert "did not reap after disappearing before SIGTERM" in caplog.text
+
+
 def test_quota_prunes_regenerable_cache_before_profile(tmp_path):
   old = "11111111-1111-1111-1111-111111111111"
   profile = _profile(tmp_path, old, cache_bytes=80, durable_bytes=20)

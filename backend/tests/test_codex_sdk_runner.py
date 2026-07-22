@@ -1747,6 +1747,179 @@ def test_run_codex_sdk_turn_cancel_during_threaded_start_waits_then_reaps(
   assert reaped == [4321]
 
 
+@pytest.mark.parametrize("cancel_count", [1, 2, 5])
+def test_run_codex_sdk_turn_start_failure_preserves_deferred_cancellation(
+  monkeypatch, cancel_count,
+):
+  """Caller cancellation wins after owned startup later fails internally."""
+  startup_ready = None
+  release_startup = None
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(_proc=None, _approval_handler=None),
+      )
+
+    async def __aenter__(self):
+      self._client._sync._proc = SimpleNamespace(pid=4321)
+      startup_ready.set()
+      await release_startup.wait()
+      # Match an initialize failure after the SDK has closed/forgotten its
+      # direct process. The concurrent capture task is now the only PGID owner.
+      self._client._sync._proc = None
+      raise RuntimeError("initialize failed after caller cancellation")
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      raise AssertionError("a failed enter must not invoke __aexit__")
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  reaped = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: reaped.append(pgid) or True,
+  )
+
+  async def scenario():
+    nonlocal startup_ready, release_startup
+    startup_ready = asyncio.Event()
+    release_startup = asyncio.Event()
+    task = asyncio.create_task(codex_sdk_runner.run_codex_sdk_turn(
+      user_message="hello",
+      session_id=None,
+      base_env={},
+      cwd="/tmp",
+      chat_id=f"chat-cancel-failed-start-{cancel_count}",
+      bc=_FakeBroadcast(),
+      pending_questions={},
+      db=None,
+    ))
+    await startup_ready.wait()
+    # Let the concurrent PGID watcher observe the published process before the
+    # fake SDK forgets it on initialization failure.
+    await asyncio.sleep(0)
+    for _ in range(cancel_count):
+      task.cancel()
+      await asyncio.sleep(0)
+      assert not task.done()
+    release_startup.set()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+
+  asyncio.run(scenario())
+
+  assert reaped == [4321]
+
+
+@pytest.mark.parametrize("cancel_count", [1, 2, 5])
+def test_run_codex_sdk_turn_waits_for_sdk_exit_before_reap_and_return(
+  monkeypatch, cancel_count,
+):
+  """Repeated cancellation cannot outrun the SDK's threaded close/wait."""
+  body_ready = None
+  close_started = threading.Event()
+  release_close = threading.Event()
+  close_finished = threading.Event()
+  order = []
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(
+          _proc=SimpleNamespace(pid=4321),
+          _approval_handler=None,
+        ),
+      )
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      def close_worker():
+        close_started.set()
+        assert release_close.wait(timeout=5)
+        self._client._sync._proc = None
+        order.append("close")
+        close_finished.set()
+
+      # Match the pinned SDK close path. Cancelling this await must never
+      # abandon either a queued or already-running direct-child wait.
+      await asyncio.to_thread(close_worker)
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      body_ready.set()
+      await asyncio.Future()
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+
+  def reap(pgid):
+    assert pgid == 4321
+    assert close_finished.is_set()
+    order.append("reap")
+    return True
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    reap,
+  )
+
+  async def scenario():
+    nonlocal body_ready
+    body_ready = asyncio.Event()
+    task = asyncio.create_task(codex_sdk_runner.run_codex_sdk_turn(
+      user_message="hello",
+      session_id=None,
+      base_env={},
+      cwd="/tmp",
+      chat_id=f"chat-cancel-sdk-exit-{cancel_count}",
+      bc=_FakeBroadcast(),
+      pending_questions={},
+      db=None,
+    ))
+    await body_ready.wait()
+    task.cancel()
+    assert await asyncio.to_thread(close_started.wait, 2)
+    for _ in range(cancel_count - 1):
+      task.cancel()
+      await asyncio.sleep(0)
+    assert not task.done()
+    assert not close_finished.is_set()
+    assert order == []
+    release_close.set()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+
+  asyncio.run(scenario())
+
+  assert close_finished.is_set()
+  assert order == ["close", "reap"]
+
+
 def test_run_codex_sdk_turn_fallback_does_not_start_capture_poller(
   monkeypatch,
 ):
