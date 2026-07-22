@@ -494,6 +494,10 @@
       return EXTENSION_ORIGIN_RE.test(String(source || '')) || EXTENSION_ORIGIN_RE.test(String(stack || ''))
     }
     function handleFrameError(title, detail, source) {
+      // Redact before ANY branch can log, display or retain the detail. showErr
+      // repeats this at its direct call boundary for load failures that do not
+      // pass through the global error listeners.
+      detail = redactErrorCredentials(detail)
       if (window.__frameMounted) {
         // The browser also logs the uncaught error natively; this line
         // records why no error panel replaced the working UI.
@@ -509,9 +513,13 @@
     }
     window.addEventListener('error', function(e) {
       handleFrameError('Runtime error', e.error ? e.error.stack || e.message : e.message, e.filename)
+      // The browser's native console path would otherwise print the original
+      // token-bearing Error after our redacted replacement/panel.
+      e.preventDefault()
     })
     window.addEventListener('unhandledrejection', function(e) {
       handleFrameError('Unhandled error', e.reason ? (e.reason.stack || String(e.reason)) : String(e))
+      e.preventDefault()
     })
   </script>
 
@@ -984,17 +992,21 @@
     let _reportToken = null;
     const _reportSeen = new Map();
     function reportAppError(where, message, stack) {
-      if (!_reportToken || !message) return;
-      const key = String(message).slice(0, 200);
+      const safeMessage = redactErrorCredentials(message);
+      const safeStack = stack ? redactErrorCredentials(stack) : undefined;
+      const safeWhere = where ? redactErrorCredentials(where) : undefined;
+      const safeUrl = redactErrorCredentials(location.href);
+      if (!_reportToken || !safeMessage) return;
+      const key = safeMessage.slice(0, 200);
       const now = Date.now();
       const last = _reportSeen.get(key);
       if (last && now - last < 60000) return;
       _reportSeen.set(key, now);
       const body = JSON.stringify({
-        message: String(message).slice(0, 2000),
-        where: where,
-        stack: stack ? String(stack).slice(0, 8000) : undefined,
-        url: location.href,
+        message: safeMessage.slice(0, 2000),
+        where: safeWhere,
+        stack: safeStack ? safeStack.slice(0, 8000) : undefined,
+        url: safeUrl,
       });
       runtimeToken().then(function (token) {
         return fetch('/api/client-error', {

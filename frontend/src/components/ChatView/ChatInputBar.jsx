@@ -22,7 +22,7 @@
  * ║   CONTRACTS — small but load-bearing                             ║
  * ║                                                                  ║
  * ║   1. AUTOSIZE THRESHOLD                                          ║
- * ║      `handleTextareaChange` toggles `chat__pill--tall` when      ║
+ * ║      Shared textarea sizing toggles `chat__pill--tall` when     ║
  * ║      height > 45px. NOT 30 (single-line is ~31, fires every      ║
  * ║      keystroke), NOT 50 (lags two-line typing). 45 sits          ║
  * ║      safely between single-line and two-line. See ChatView.css   ║
@@ -62,9 +62,10 @@
  * ║      `_isTouchPrimary` is detected once via                      ║
  * ║      `matchMedia('(hover: none) and (pointer: coarse)')` and     ║
  * ║      gates plain Enter. Touch devices: Enter inserts a           ║
- * ║      newline. Desktop: Enter sends or steers. Cmd/Ctrl+Enter     ║
- * ║      is an explicit hardware-keyboard shortcut for the same      ║
- * ║      send/steer action. Shift+Enter always inserts a newline.    ║
+ * ║      newline. Desktop: Enter sends or steers queued text.        ║
+ * ║      Cmd/Ctrl+Enter fast-forwards composed text into a live      ║
+ * ║      turn when possible, otherwise it sends normally.            ║
+ * ║      Shift+Enter always inserts a newline.                        ║
  * ║                                                                  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
@@ -322,6 +323,8 @@ function FileChips({ files, onRemove, chatId }) {
  *   input              — current textarea value
  *   onInputChange      — receives new string
  *   onSubmit           — called with FormEvent | MouseEvent | TouchEvent
+ *   onSubmitSteer      — submits composed text and immediately steers
+ *                        it when a live turn can accept steering
  *   inputRef           — for caller to focus/blur (e.g. dismiss keyboard)
  *   sending            — agent is currently streaming
  *   listening          — voice input active
@@ -339,6 +342,8 @@ function FileChips({ files, onRemove, chatId }) {
  *                        existing steer handler to reconcile/steer queued
  *                        messages, even before the visual fast-forward gate
  *                        is ready.
+ *   canSubmitSteer     — true when Cmd/Ctrl+Enter may submit the current
+ *                        draft through the live-turn steer path.
  *   pendingFiles       — file upload chips state
  *   onAddFiles         — receives FileList from file picker
  *   onRemoveFile       — receives chip id
@@ -366,6 +371,7 @@ export default function ChatInputBar({
   input,
   onInputChange,
   onSubmit,
+  onSubmitSteer,
   inputRef,
   sending,
   listening,
@@ -376,6 +382,7 @@ export default function ChatInputBar({
   onSteer,
   canSteer,
   canRequestSteer = canSteer,
+  canSubmitSteer = canRequestSteer,
   offline,
   sendFailure = null,
   submissionBlocked = false,
@@ -439,17 +446,6 @@ export default function ChatInputBar({
   function handleTextareaChange(e) {
     if (listeningRef?.current) onManualVoiceEdit?.(e.target.value)
     onInputChange(e.target.value)
-    e.target.style.height = 'auto'
-    const h = Math.min(e.target.scrollHeight, 280)
-    e.target.style.height = h + 'px'
-    // Toggle the `--tall` class only when the textarea ACTUALLY
-    // spans multiple lines. A single line of 16px text at line-
-    // height 1.45 with 8px padding measures ~31px scrollHeight,
-    // so a threshold of 30 was triggering --tall on every keystroke
-    // and dropping the cursor + mic to the bottom. 45px sits
-    // safely between single-line (~31) and two-line (~55).
-    const pill = e.target.closest('.chat__pill')
-    if (pill) pill.classList.toggle('chat__pill--tall', h > 45)
   }
 
   function handlePaste(e) {
@@ -466,12 +462,17 @@ export default function ChatInputBar({
       hasInput,
       canSteer,
       canRequestSteer,
+      canSubmitSteer,
       isTouchPrimary: _isTouchPrimary,
     })
     if (!action) return
     e.preventDefault()
     if (action === 'steer') {
       onSteer()
+      return
+    }
+    if (action === 'submit-steer') {
+      if (!submissionBlocked) onSubmitSteer(e)
       return
     }
     if (action === 'submit') {

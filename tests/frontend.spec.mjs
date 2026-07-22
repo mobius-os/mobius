@@ -108,6 +108,56 @@ async function waitForChatMode(page, chatId, kind, timeout = 3000) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Input behavior', () => {
+  test('returning to the tab collapses stale empty-composer geometry', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+    await input.evaluate(el => {
+      el.value = ''
+      el.style.height = '280px'
+      el.closest('.chat__pill')?.classList.add('chat__pill--tall')
+    })
+    await expect(input).toHaveCSS('height', '280px')
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => 'hidden',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await expect(input).toHaveCSS('height', '280px')
+    await expect.poll(() => input.evaluate(
+      el => el.closest('.chat__pill')?.classList.contains('chat__pill--tall') || false,
+    )).toBe(true)
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => 'visible',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await expect.poll(() => input.evaluate(el => ({
+      collapsed: el.getBoundingClientRect().height < 60,
+      tall: el.closest('.chat__pill')?.classList.contains('chat__pill--tall') || false,
+    }))).toEqual({ collapsed: true, tall: false })
+
+    // The bfcache/pageshow trigger owns the same reconciliation contract.
+    await input.evaluate(el => {
+      el.style.height = '280px'
+      el.closest('.chat__pill')?.classList.add('chat__pill--tall')
+    })
+    await page.evaluate(() => {
+      window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))
+    })
+    await expect.poll(() => input.evaluate(el => ({
+      collapsed: el.getBoundingClientRect().height < 60,
+      tall: el.closest('.chat__pill')?.classList.contains('chat__pill--tall') || false,
+    }))).toEqual({ collapsed: true, tall: false })
+  })
+
   test('Voice input holds a screen wake lock until recording stops', async ({ page }) => {
     await page.addInitScript(() => {
       window.__wakeLockRequests = []

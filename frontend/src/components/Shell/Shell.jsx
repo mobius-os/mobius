@@ -48,8 +48,11 @@ import {
 } from '../../lib/appRecovery.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import {
+  acknowledgeAppActivity,
+  appAttentionIds,
   freshChatBuiltApps,
   freshAppIds,
+  withAppActivitySeen,
   withAppsFlagged,
   withoutAppFlagged,
 } from './newAppAttention.js'
@@ -425,14 +428,14 @@ export default function Shell() {
   const handleImmersive = useCallback((appId, value) => {
     dispatchImmersive({ type: 'request', appId, value })
   }, [])
-  // Immersive-solo is a full-screen takeover, so per the ABSOLUTE builder
-  // invariant ("no exceptions, no special casing") it applies ONLY in single-screen
-  // mode. In builder mode an immersive request never seizes the workspace — the app
-  // stays a normal pane (this also keeps the bar + exit button, which key off this
-  // flag, out of builder). The request (immersiveAppId) is retained, so switching
-  // to single mode with the holder focused solos it exactly as landed.
-  const immersiveActive = effectiveViewMode === 'single'
-    && isImmersiveActive(immersiveAppId, activeView, activeAppId)
+  // Immersive is a temporary overlay lease, independent of the durable builder /
+  // single worlds. A verified request from the focused app may therefore solo
+  // that app over EITHER world; clearing the lease reveals the exact world below
+  // without changing its workspace mode, pane tree, tabs, or single-screen slot.
+  // Settings keeps its builder invariant because isImmersiveActive additionally
+  // requires the active shell view to be the requesting canvas, and AppCanvas
+  // forwards live requests only from its focused active frame.
+  const immersiveActive = isImmersiveActive(immersiveAppId, activeView, activeAppId)
   useLayoutEffect(() => {
     if (!immersiveActive) return
     const drawer = document.getElementById('navigation-drawer')
@@ -1033,13 +1036,15 @@ export default function Shell() {
   // single leaf, where this single-pane .shell__tabstrip stands in for the
   // tiled WorkspaceChrome strips, giving phone users the drag source), riding
   // an exit beat or a single-mode drag preview with the rest of the tiled
-  // presentation, and NEVER rendered in single mode (owner: tabs exist in one
-  // world and don't exist in the other). The legacy tabStripEngaged latch is
+  // presentation, and NEVER rendered in single mode OR over an immersive lease
+  // (the shell exit replaces every builder navigation surface). The legacy
+  // tabStripEngaged latch is
   // the KILL-SWITCH world's rule only (engaged after 2+ tabs) — letting it
   // leak into the flag-ON formula painted the parked builder tree's strip
   // over single mode whenever the latch was set. An empty workspace (no tabs)
   // shows nothing either way — the >= 1 gate stays.
-  const tabStripVisible = (SPLITS ? effectiveViewMode === 'panes' : tabStripEngaged)
+  const tabStripVisible = !immersiveActive
+    && (SPLITS ? effectiveViewMode === 'panes' : tabStripEngaged)
     && openTabs.length >= 1
 
   // tabKey -> { paneId, CONTENT rect } (pane rect minus its strip) of the active
@@ -1527,9 +1532,9 @@ export default function Shell() {
     tabCount: openTabs.length,
     dismissed: wsCoachmarkDismissed,
     // M6: only where the tab strip actually exists — the EFFECTIVE builder world —
-    // and never over an immersive-solo (z-120). Immersive is single-mode only, so
-    // the panes gate already excludes it; the explicit check is the last line of
-    // defense if that coupling ever changes.
+    // and never over an immersive lease (z-120). Immersive may temporarily cover
+    // either durable world, so the explicit check keeps the hint with the chrome it
+    // teaches instead of painting it over the focused app.
     builderWorld: effectiveViewMode === 'panes' && !immersiveActive,
   })
   // Auto-dismiss after 12s — deliberately NOT on an unrelated pointerdown (§7.2).
@@ -1595,6 +1600,10 @@ export default function Shell() {
   // Ids of apps that appeared in the fetched list AFTER this session's
   // baseline — the drawer renders a subtle accent dot until each is opened.
   const [newAppIds, setNewAppIds] = useState(() => new Set())
+  const appAttentionSet = useMemo(
+    () => appAttentionIds(apps, newAppIds, visibleAppIds),
+    [apps, newAppIds, visibleAppIds],
+  )
   // First-sign-in walkthrough. The query result is the source of
   // truth — backend persists completion via
   // POST /api/owner/walkthrough/complete. We render the overlay iff
@@ -1714,6 +1723,35 @@ export default function Shell() {
   useEffect(() => {
     for (const id of visibleAppIds) clearAppAttention(Number(id))
   }, [visibleAppIds, clearAppAttention])
+
+  // Opening an app acknowledges its durable background activity. Optimistic
+  // cache clearing removes the dot immediately; server truth is restored on a
+  // failed request. In-flight keys include the observed activity version:
+  // duplicate renders share one request, while genuinely newer activity can
+  // be acknowledged independently without waiting for an older request.
+  const appActivityAckRef = useRef(new Set())
+  useEffect(() => {
+    for (const rawId of visibleAppIds) {
+      const appId = Number(rawId)
+      if (Number.isNaN(appId)) continue
+      const app = apps.find(row => Number(row.id) === appId)
+      if (!app?.has_unseen_activity || !app?.unseen_activity_version) continue
+      const observedActivityVersion = app.unseen_activity_version
+      acknowledgeAppActivity({
+        appId,
+        activityVersion: observedActivityVersion,
+        inFlight: appActivityAckRef.current,
+        request: api.apps.markActivitySeen,
+        clearCached: (seenAppId, seenThroughVersion) => {
+          queryClient.setQueryData(
+            appQueries.keys.all,
+            rows => withAppActivitySeen(rows, seenAppId, seenThroughVersion),
+          )
+        },
+        restoreServerTruth: () => appQueries.list.invalidate(queryClient),
+      })
+    }
+  }, [visibleAppIds, apps, queryClient])
 
   // Immersive games request OS fullscreen to also drop the Android status bar
   // and paint under the notch — but ENTER must come from the app, because the
@@ -2358,6 +2396,11 @@ export default function Shell() {
       // to bump appVersions / cycle iframe keys — that would tear
       // down running apps for a CSS swap and lose their state.
       loadTheme()
+    } else if (ev.type === 'app_activity') {
+      // The durable marker was committed with an app-attributed notification.
+      // A refetch surfaces the dot; if the app is already visible, the effect
+      // above immediately acknowledges it instead of leaving a stale nudge.
+      refreshApps()
     } else if (ev.type === 'app_updated' || ev.type === 'app_created') {
       const placementRequest = workspaceRequestFromSystemEvent(ev)
       // Refresh server truth before warming or placing. app_updated is
@@ -3233,7 +3276,7 @@ export default function Shell() {
         }}
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
-        newAppIds={newAppIds}
+        newAppIds={appAttentionSet}
         settingsWarning={providerAuth.needsAttention}
         dragActiveRef={dragActiveRef}
       />
@@ -3580,16 +3623,15 @@ export default function Shell() {
             stripMotion={wrapperMotion}
             streamingChatIds={streamingChatIds}
             attentionChatIds={attentionChatIds}
-            newAppIds={newAppIds}
+            newAppIds={appAttentionSet}
           />
         )}
       </main>
       {/* SHELL-provided immersive exit. With the top bar gone the drawer
           toggle is unreachable, so this floating button is the guaranteed
           way back — an app can never trap the user in immersive mode.
-          Exit only clears the shell-side request; the app re-enters by
-          posting again (which a mounted app won't do until it remounts),
-          so the user's choice sticks for the rest of the visit. */}
+          Exit only clears the shell-side request; re-entry requires another
+          explicit app post, so the user remains in control. */}
       {immersiveActive && (
         <button
           ref={immersiveExitRef}

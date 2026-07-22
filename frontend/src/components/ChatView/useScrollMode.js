@@ -131,15 +131,21 @@ const _scrollModes = (() => {
 })()
 
 
-/** Returns the first message <li> whose bottom edge is past the
- *  viewport top — i.e. the topmost partially-visible message.
- *  Used to resolve a fresh ANCHOR_AT when the user scrolls. */
+/** Returns the topmost intersecting message, or the last real row while the
+ * viewport is inside the dynamic reservation below the transcript.
+ *
+ * That fallback is load-bearing for LIVE reader ownership: a gesture through
+ * reserved room still needs an anchor so streaming/layout work cannot move the
+ * viewport underneath the reader. Lifecycle save/restore validates that the
+ * anchor intersects real content and normalizes this live-only negative offset
+ * to the real transcript tail before persistence. */
 function _topmostVisibleMsg(scrollEl) {
   const items = scrollEl.querySelectorAll('.chat__msg[data-key]')
   const top = scrollEl.scrollTop
+  const bottom = top + scrollEl.clientHeight
   for (const el of items) {
-    const bottom = el.offsetTop + el.offsetHeight
-    if (bottom > top) return el
+    const itemBottom = el.offsetTop + el.offsetHeight
+    if (itemBottom > top && el.offsetTop < bottom) return el
   }
   return items[items.length - 1] || null
 }
@@ -165,6 +171,24 @@ export function anchorModeFromScroll(scrollEl) {
     key: anchorEl.dataset.key,
     offset: anchorEl.offsetTop - scrollEl.scrollTop,
   }
+}
+
+
+/** Lifecycle anchors must describe visible conversation content. Live scroll
+ * handling may temporarily anchor reserved room, but foreground/chat restore
+ * must never recreate that blank viewport. */
+function _contentAnchorModeFromScroll(scrollEl) {
+  if (!scrollEl) return null
+  const row = _topmostVisibleMsg(scrollEl)
+  if (!row?.dataset?.key) return null
+  const mode = {
+    kind: 'ANCHOR_AT',
+    key: row.dataset.key,
+    offset: row.offsetTop - scrollEl.scrollTop,
+  }
+  return _anchorModeIntersectsContent(row, mode, scrollEl?.clientHeight)
+    ? mode
+    : null
 }
 
 
@@ -197,7 +221,9 @@ export function bottomAnchorModeFromScroll(scrollEl) {
  * or paused card too: composer clearance, any remaining reservation, and the
  * card's primary action. Keep that one-shot navigation as ANCHOR_AT rather
  * than FOLLOW_BOTTOM so revealing a control cannot manufacture live-follow
- * intent for a later answer or resume.
+ * intent for a later answer or resume. Persistence independently rejects an
+ * off-content physical anchor, so this live navigation cannot recreate a
+ * blank viewport on reload.
  */
 export function physicalBottomAnchorModeFromScroll(scrollEl) {
   if (!scrollEl) return null
@@ -214,6 +240,18 @@ export function physicalBottomAnchorModeFromScroll(scrollEl) {
     key,
     offset: last.offsetTop - targetScrollTop,
   }
+}
+
+
+/** Freeze a viewport to real conversation content.
+ *
+ * A reader can move away from the physical bottom while the viewport is
+ * wholly inside dynamic spacer. There is no exact visible row to anchor in
+ * that case, but the gesture must still retire live follow. Settle at the
+ * latest real-content tail rather than leaving FOLLOW_BOTTOM armed. */
+export function contentHoldModeFromScroll(scrollEl) {
+  return _contentAnchorModeFromScroll(scrollEl)
+    || bottomAnchorModeFromScroll(scrollEl)
 }
 
 
@@ -300,6 +338,20 @@ function _anchorEl(scrollEl, key) {
   return scrollEl.querySelector(`[data-key="${esc}"]`)
 }
 
+/** The defining ANCHOR_AT invariant: its row intersects the viewport encoded
+ * by `offset`. Negative offsets are valid while the row remains partially
+ * visible; an offset beyond either edge describes layout reservation, not a
+ * readable conversation location. */
+export function _anchorModeIntersectsContent(row, mode, viewportHeight) {
+  const offset = Number(mode?.offset)
+  return !!row
+    && Number.isFinite(offset)
+    && Number.isFinite(viewportHeight)
+    && viewportHeight > 0
+    && offset < viewportHeight
+    && offset > -row.offsetHeight
+}
+
 /** The ANCHOR_AT twin of `_pinReapplyNeeded` — the SAME two-case repair. A
  *  settled anchor drifts off its reader-chosen position when either the anchor
  *  element's offsetTop SHIFTED (content grew above it) or scrollTop was CLAMPED
@@ -345,9 +397,29 @@ export function _validateSavedMode(saved, messages, scrollEl) {
   if (saved.kind === 'ANCHOR_AT') {
     const sel = `[data-key="${(typeof CSS !== 'undefined' && CSS.escape)
       ? CSS.escape(saved.key) : saved.key}"]`
-    return scrollEl?.querySelector(sel) ? saved : holdBottom()
+    const row = scrollEl?.querySelector(sel)
+    // A resolvable row is not enough: an old build could persist that row with
+    // a huge negative offset while the viewport sat wholly in spacer below it.
+    // Enforce the same content-intersection invariant used by spacer sizing,
+    // self-healing every off-content restore to the real tail.
+    return _anchorModeIntersectsContent(row, saved, scrollEl?.clientHeight)
+      ? saved
+      : holdBottom()
   }
   return holdBottom()
+}
+
+
+/** Normalize durable reader locations without collapsing live mode state.
+ *
+ * FOLLOW_BOTTOM and PIN_USER_MSG are useful while this mount is active and
+ * are already converted to settled restore modes by `_validateSavedMode` on
+ * the next mount. ANCHOR_AT is the only mode whose stored geometry can point
+ * wholly into spacer, so validate that location before every write. */
+export function _modeForPersistence(mode, messages, scrollEl) {
+  return mode?.kind === 'ANCHOR_AT'
+    ? _validateSavedMode(mode, messages, scrollEl)
+    : mode
 }
 
 
@@ -625,7 +697,7 @@ export function readerInputNeedsFrameRelease(
  *  FOLLOW_BOTTOM afterward. */
 export function modeForForegroundReturn(scrollEl) {
   if (!scrollEl) return null
-  return anchorModeFromScroll(scrollEl)
+  return contentHoldModeFromScroll(scrollEl)
 }
 
 
@@ -636,7 +708,7 @@ export function modeForForegroundReturn(scrollEl) {
  *  yanking the reader to the latest tail. */
 export function modeForChatExit(scrollEl) {
   if (!scrollEl) return null
-  return anchorModeFromScroll(scrollEl)
+  return contentHoldModeFromScroll(scrollEl)
 }
 
 
@@ -958,18 +1030,27 @@ export default function useScrollMode({
         sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
         return
       }
-      const mode = freezeToCurrentPosition
+      const candidate = freezeToCurrentPosition
         ? (modeForChatExit(scrollRef.current) || modeRef.current)
         : modeRef.current
+      // One persistence gate for every lifecycle path. Invalid ANCHOR_AT
+      // geometry is normalized before it reaches sessionStorage. Live
+      // FOLLOW_BOTTOM/PIN_USER_MSG remains observable while mounted; the
+      // restore gate settles those modes on the next mount.
+      const mode = _modeForPersistence(
+        candidate, messagesRef.current, scrollRef.current,
+      )
       if (mode && mode.kind !== 'INITIAL') {
         if (freezeToCurrentPosition) {
           transitionMode(mode, 'lifecycle:chat-exit')
         }
         _scrollModes[chatId] = mode
-        sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
+      } else {
+        delete _scrollModes[chatId]
       }
+      sessionStorage.setItem('chat-mode', JSON.stringify(_scrollModes))
     } catch {}
-  }, [chatId, scrollRef, transitionMode])
+  }, [chatId, messagesRef, scrollRef, transitionMode])
 
   const settleNonPin = useCallback(({
     retireFollow = false,
@@ -981,7 +1062,7 @@ export default function useScrollMode({
         && !(retireFollow && kind === 'FOLLOW_BOTTOM')) {
       return modeRef.current
     }
-    const anchor = anchorModeFromScroll(scrollRef.current)
+    const anchor = contentHoldModeFromScroll(scrollRef.current)
     return anchor ? transitionMode(anchor, event) : modeRef.current
   }, [scrollRef, transitionMode])
 
@@ -1664,7 +1745,11 @@ export default function useScrollMode({
           'reader:physical-bottom',
         )
       } else {
-        const anchor = anchorModeFromScroll(scrollEl)
+        // Moving away from the physical bottom always retires live follow.
+        // If the viewport is wholly inside reserved spacer there is no exact
+        // row anchor, so settle on the real-content tail instead of leaving a
+        // stale FOLLOW_BOTTOM armed for the next content resize.
+        const anchor = contentHoldModeFromScroll(scrollEl)
         if (anchor) transitionMode(anchor, 'reader:hold-anchor')
       }
       persistMode()

@@ -37,6 +37,28 @@ model, lifecycle rules, and escape hatches.
 it collapses the boundary it is meant to protect. A deliberately trusted app
 must receive its own origin or become an explicit platform extension.
 
+## Credentials and authority
+
+Opacity removes the shell's ambient **owner** authority; it does not make an
+ordinary app powerless. In the current transport, the runtime receives a
+refreshable app-scoped bearer and app code in that realm must be treated as able
+to possess it. The bearer is narrower than the owner JWT: its app id,
+installation nonce, owner epoch and installed permissions are rechecked by the
+server.
+
+Credential placement and granted authority are separate decisions. A future
+host-mediated request transport could keep the raw app bearer in the exact
+parent while still letting the live frame invoke every server operation its
+installed permissions allow. That would reduce theft and replay outside the
+frame; it would not reduce the app's approved authority while the frame is
+running. A generic request transport also need not become one bespoke wrapper
+per API route — server permissions remain the authorization contract.
+
+This does not replace lifecycle-aware browser capabilities or the trust tiers
+above. Origin-bound facilities such as cookies, service workers and durable
+origin storage still require a host provider or a separate service origin; a
+raw general shell-origin bridge would recreate the authority opacity removed.
+
 ## Manifest contract
 
 Runtime capabilities live in the root `capabilities` object:
@@ -224,11 +246,12 @@ Add primitives only after a real app needs them. Likely families are:
 - `device.midi`, `device.serial`, `device.bluetooth`
 - `display.fullscreen`, `display.wake_lock`
 
-External HTTP remains an app-token authenticated server surface rather than a
-host session. Its reviewable permission should describe destinations and
+Today external HTTP remains an app-token-authenticated server surface rather
+than a host session. Its reviewable permission should describe destinations and
 methods; wildcard access can remain possible through explicit owner approval.
-Likewise, app storage and cross-app access are durable server capabilities, not
-browser-session providers.
+Moving credential possession into a generic host request transport would not
+change that authorization model. Likewise, app storage and cross-app access are
+durable server capabilities, not browser-session providers.
 
 ## Adding a capability
 

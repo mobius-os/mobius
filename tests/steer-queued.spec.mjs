@@ -195,6 +195,92 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(await page.locator('.queued__row').count()).toBe(0)
   })
 
+  test('Ctrl+Enter queues durably, then automatically steers only the composed message', async ({ page }) => {
+    const STEER_TEXT = 'change course immediately'
+    const messagePosts = []
+    let releaseQueueAck
+    const queueAckGate = new Promise(resolve => { releaseQueueAck = resolve })
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
+      let body = {}
+      try { body = JSON.parse(route.request().postData() || '{}') } catch { /* empty */ }
+      messagePosts.push(body)
+
+      if (body.force_steer) {
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'steered',
+            chat_id: 'mock',
+            pending_messages: [],
+          }),
+        })
+      }
+      if (body.content === 'first message') {
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'started',
+            message: {
+              role: 'user', content: body.content, ts: Date.now(), cid: body.cid,
+            },
+          }),
+        })
+      }
+      // Hold the durable queue acknowledgement open so a repeated shortcut
+      // exercises the synchronous submit guard, before steerBusy can flip.
+      await queueAckGate
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'queued', ts: 778001, position: 1 }),
+      })
+    })
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
+      await new Promise(resolve => setTimeout(resolve, 8000))
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        body: sseBody([{ type: 'catch_up_done' }, { type: 'text', content: 'streaming...' }]),
+      }).catch(() => {})
+    })
+
+    await setupChat(page)
+    await newChat(page)
+    await sendMessage(page, 'first message')
+    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+    await input.fill(STEER_TEXT)
+    await page.keyboard.press('Control+Enter')
+    await expect.poll(() => messagePosts.filter(body => (
+      !body.force_steer && body.content === STEER_TEXT
+    )).length).toBe(1)
+    await page.keyboard.press('Control+Enter')
+    await page.waitForTimeout(100)
+    expect(messagePosts.filter(body => (
+      !body.force_steer && body.content === STEER_TEXT
+    ))).toHaveLength(1)
+    releaseQueueAck()
+
+    await expect.poll(
+      () => messagePosts.filter(body => body.force_steer).length,
+      { timeout: 5000 },
+    ).toBe(1)
+
+    const queuePost = messagePosts.find(body => (
+      !body.force_steer && body.content === STEER_TEXT
+    ))
+    const steerPost = messagePosts.find(body => body.force_steer)
+    expect(typeof queuePost.cid).toBe('string')
+    expect(steerPost.content).toBe(STEER_TEXT)
+    expect(steerPost.consume_pending_cids).toEqual([queuePost.cid])
+    await expect(page.locator('.queued__row')).toHaveCount(0, { timeout: 5000 })
+  })
+
   test('two queued messages steer with the exact "\\n\\n"-joined content', async ({ page }) => {
     // Verifies the frontend content join sent to the provider steer: the
     // non-empty trimmed contents joined

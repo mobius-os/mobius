@@ -83,6 +83,10 @@ import {
 } from './sendAttemptRecovery.js'
 import { persistComposerDraft, readComposerDraft } from './composerDraft.js'
 import {
+  resetComposerTextarea,
+  resizeComposerTextarea,
+} from './composerTextareaSizing.js'
+import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
   buildPhaseRailViewModel,
@@ -98,12 +102,6 @@ const _touchMql = typeof matchMedia === 'function'
   : null
 let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
-
-const EMPTY_PROMPTS = [
-  { label: 'Make Möbius mine', prompt: 'Suggest three small changes that would make this Möbius feel more like mine, then implement the best one.' },
-  { label: 'Build a tiny app', prompt: 'Build a tiny useful app I can try in the next five minutes.' },
-  { label: 'Show me around', prompt: 'Show me what you can change in this Möbius, and recommend a first move.' },
-]
 
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 
@@ -1457,10 +1455,7 @@ export default function ChatView({
     requestAnimationFrame(() => {
       const el = inputRef.current
       if (!el) return
-      el.style.height = 'auto'
-      const h = Math.min(el.scrollHeight, 280)
-      el.style.height = `${h}px`
-      el.closest('.chat__pill')?.classList.toggle('chat__pill--tall', h > 45)
+      resizeComposerTextarea(el, text)
       if (focus) {
         try { el.focus({ preventScroll: true }) }
         catch { el.focus() }
@@ -1602,24 +1597,15 @@ export default function ChatView({
     persistComposerDraft(chatId, input, draftAttachmentsRef.current)
   }, [input, chatId])
 
-  // Auto-size textarea when a draft is restored. Cap matches the
-  // 280px max-height enforced by `handleTextareaChange` in
-  // ChatInputBar; without keeping these in sync a tall draft would
-  // restore visually truncated until the user types one more
-  // character to trigger the live-grow path. Also mirror the
-  // .chat__pill--tall class toggle so a restored multi-line draft
-  // anchors the send/mic buttons to the bottom of the pill — the
-  // toggle otherwise only fires on input keystrokes.
-  useEffect(() => {
+  // Text changes through input, restores, voice, send cleanup, and
+  // authoritative foreground reconciliation. Reconcile after every committed
+  // value — including the empty value — so no programmatic clear can retain a
+  // previous multi-line inline height. Hidden retained panes have no useful
+  // scrollHeight; they reconcile when `hidden` flips back to false.
+  useLayoutEffect(() => {
     const el = inputRef.current
-    if (el && input) {
-      el.style.height = 'auto'
-      const h = Math.min(el.scrollHeight, 280)
-      el.style.height = h + 'px'
-      const pill = el.closest('.chat__pill')
-      if (pill) pill.classList.toggle('chat__pill--tall', h > 45)
-    }
-  }, [chatId])
+    if (el && !hidden) resizeComposerTextarea(el, input)
+  }, [chatId, hidden, input])
 
   // Publish `.chat__foot`'s rendered height as `--composer-h` on
   // `.chat`. `.chat__list` reads this var for its bottom padding so
@@ -1641,8 +1627,16 @@ export default function ChatView({
         raf2 = requestAnimationFrame(measureComposerHeight)
       })
     }
+    const reconcileForegroundGeometry = () => {
+      // Chromium can restore form/layout state independently when a document
+      // returns from background or the back-forward cache. Reconcile the
+      // textarea first; measuring only the outer foot would preserve a stale
+      // multi-line height on an empty composer.
+      resizeComposerTextarea(inputRef.current, inputValueRef.current)
+      applySoon()
+    }
     const onVisible = () => {
-      if (document.visibilityState === 'visible') applySoon()
+      if (document.visibilityState === 'visible') reconcileForegroundGeometry()
     }
 
     applySoon()
@@ -1651,7 +1645,7 @@ export default function ChatView({
       : null
     ro?.observe(footEl)
     window.addEventListener('resize', applySoon)
-    window.addEventListener('pageshow', applySoon)
+    window.addEventListener('pageshow', reconcileForegroundGeometry)
     window.visualViewport?.addEventListener('resize', applySoon)
     window.visualViewport?.addEventListener('scroll', applySoon)
     document.addEventListener('visibilitychange', onVisible)
@@ -1661,7 +1655,7 @@ export default function ChatView({
       if (raf2) cancelAnimationFrame(raf2)
       ro?.disconnect()
       window.removeEventListener('resize', applySoon)
-      window.removeEventListener('pageshow', applySoon)
+      window.removeEventListener('pageshow', reconcileForegroundGeometry)
       window.visualViewport?.removeEventListener('resize', applySoon)
       window.visualViewport?.removeEventListener('scroll', applySoon)
       document.removeEventListener('visibilitychange', onVisible)
@@ -1955,6 +1949,15 @@ export default function ChatView({
   //     they just stopped) → original turn 1 user msg + partial get
   //     pushed above the viewport. Keep their current scroll mode
   //     instead — the new turn streams into view from where they were.
+  // Modified-Enter spans two requests (durable queue acknowledgement, then
+  // force-steer). Claim that whole operation synchronously so repeated
+  // keydowns cannot submit a second message before the steer busy state flips.
+  const submitSteerInFlightRef = useRef(false)
+  // doSend is intentionally stable and therefore must not capture the
+  // render-local steer implementation. Dereference the current function only
+  // after the queue POST settles, when a newer render may have replaced it.
+  const handleSteerOneRef = useRef(null)
+
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return
     const pin = opts.pin !== false  // default true
@@ -2076,17 +2079,15 @@ export default function ChatView({
       setComposerInput('')
       clearComposerFilesForSend()
       if (inputRef.current) {
-        inputRef.current.style.height = 'auto'
+        resetComposerTextarea(inputRef.current)
         // Drop the multi-line `.chat__pill--tall` class so send/mic
         // re-center vertically. Without this, the pill stays in
         // flex-end alignment after a send-from-tall and the freshly
         // empty textarea renders pinned to the bottom — text appears
         // off-center (lower than its resting position) until the
-        // user types again. `handleTextareaChange` re-evaluates this
-        // class on every keystroke, but send doesn't go through that
-        // path. Tap-to-focus doesn't trigger a change event either,
-        // so the visual stayed broken until the next keystroke.
-        inputRef.current.closest('.chat__pill')?.classList.remove('chat__pill--tall')
+        // user types again. Shared textarea sizing re-evaluates this
+        // on each committed value, but the synchronous reset keeps the
+        // send transition correct before React commits the empty value.
       }
       try {
         const result = await streamSend(
@@ -2164,6 +2165,12 @@ export default function ChatView({
               cidList: result.message?._consumed_cids,
             })
             bridgeHook.markBridged()
+          } else if (opts.steerAfterQueue) {
+            // Ctrl/Cmd+Enter uses the same durable queue -> force-steer path
+            // as the visible per-row arrow. The queue acknowledgement gives
+            // the new row a canonical ts before steering, so a failed or
+            // racing steer naturally leaves the message safely queued.
+            await handleSteerOneRef.current?.(cid)
           }
         }
         // Mid-turn steer: the backend delivered the send into the live
@@ -2276,10 +2283,9 @@ export default function ChatView({
     setComposerInput('')
     clearComposerFilesForSend()
     if (inputRef.current) {
-      inputRef.current.style.height = 'auto'
+      resetComposerTextarea(inputRef.current)
       // Drop the multi-line `.chat__pill--tall` class — see queue-path
       // comment above for the full rationale.
-      inputRef.current.closest('.chat__pill')?.classList.remove('chat__pill--tall')
     }
     setSending(true)
     setServerRunningState(true)
@@ -2613,6 +2619,15 @@ export default function ChatView({
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
     doSend(input.trim())
+  }
+
+  function handleSubmitSteer(e) {
+    e.preventDefault()
+    if (isProviderSwitchBlocking(chatId)) return
+    if (submitSteerInFlightRef.current) return
+    submitSteerInFlightRef.current = true
+    void doSend(input.trim(), { steerAfterQueue: true })
+      .finally(() => { submitSteerInFlightRef.current = false })
   }
 
   // Cancel one queued message via DELETE. Keep reconciliation scoped to that
@@ -3113,6 +3128,7 @@ export default function ChatView({
       setSteerBusy(false)
     }
   }
+  handleSteerOneRef.current = handleSteerOne
 
   // Re-anchor the scroll mode when the tab returns to the foreground
   // (visibilitychange/pageshow/online) while a turn is active, so a
@@ -3390,10 +3406,11 @@ export default function ChatView({
   const canSteer = !hasPendingQuestion
     && connectionError !== 'disconnected' && !steerBusy
     && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
-  const canRequestSteer = !hasPendingQuestion
+  const canSubmitSteer = !hasPendingQuestion
     && connectionError !== 'disconnected'
     && !steerBusy
     && turnActive
+  const canRequestSteer = canSubmitSteer
     && pendingQueue.pendingMessages.length > 0
 
   // ── Sticky "tap to resume" affordance ──────────────────────────────
@@ -3665,18 +3682,6 @@ export default function ChatView({
             <div className="chat__empty">
               <img className="chat__empty-glyph" src={mobiusLogoUrl} alt="" width="120" height="120" />
               <p className="chat__empty-title">What's on your mind?</p>
-              <div className="chat__empty-prompts">
-                {EMPTY_PROMPTS.map(prompt => (
-                  <button
-                    key={prompt.label}
-                    type="button"
-                    className="chat__empty-prompt"
-                    onClick={() => restoreComposerText(prompt.prompt, { focus: true })}
-                  >
-                    {prompt.label}
-                  </button>
-                ))}
-              </div>
             </div>
           )}
         </div>
@@ -3972,6 +3977,7 @@ export default function ChatView({
           input={input}
           onInputChange={handleComposerInputChange}
           onSubmit={handleSubmit}
+          onSubmitSteer={handleSubmitSteer}
           inputRef={inputRef}
           sending={composerBusy}
           listening={listening}
@@ -3982,6 +3988,7 @@ export default function ChatView({
           onSteer={handleSteer}
           canSteer={canSteer}
           canRequestSteer={canRequestSteer}
+          canSubmitSteer={canSubmitSteer}
           offline={!online}
           sendFailure={sendFailure}
           submissionBlocked={providerSwitching}

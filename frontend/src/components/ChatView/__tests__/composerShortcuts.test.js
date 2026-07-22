@@ -5,22 +5,35 @@ import { resolveComposerEnterAction } from '../composerShortcuts.js'
 
 const enter = (overrides = {}) => ({ key: 'Enter', ...overrides })
 
-test('Cmd+Enter submits composer text', () => {
+test('Cmd+Enter steers composer text when a live turn can accept it', () => {
   assert.equal(
     resolveComposerEnterAction(enter({ metaKey: true }), {
       hasInput: true,
       canSteer: true,
+      canSubmitSteer: true,
       isTouchPrimary: false,
     }),
-    'submit',
+    'submit-steer',
   )
 })
 
-test('Ctrl+Enter submits composer text', () => {
+test('Ctrl+Enter steers composer text when a live turn can accept it', () => {
   assert.equal(
     resolveComposerEnterAction(enter({ ctrlKey: true }), {
       hasInput: true,
       canSteer: false,
+      canSubmitSteer: true,
+      isTouchPrimary: false,
+    }),
+    'submit-steer',
+  )
+})
+
+test('Cmd/Ctrl+Enter submits normally when there is no steerable live turn', () => {
+  assert.equal(
+    resolveComposerEnterAction(enter({ metaKey: true }), {
+      hasInput: true,
+      canSubmitSteer: false,
       isTouchPrimary: false,
     }),
     'submit',

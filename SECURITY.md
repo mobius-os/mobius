@@ -28,8 +28,11 @@ being external attackers reaching the public HTTPS endpoint.
 - **Mini-app isolation and tokens:** shell-mounted app frames omit
   `allow-same-origin`, giving them an opaque origin. They cannot read shell
   localStorage or the owner JWT. Each receives a refreshable app JWT bound to
-  the live app id, installation nonce and owner token epoch; server routes
-  enforce the app's exact permissions.
+  the live app id, installation nonce and owner token epoch; app code must be
+  treated as able to possess that narrower bearer, and server routes enforce
+  the app's exact installed permissions. Opacity protects ambient **owner**
+  authority — it is not a promise that ordinary app code never sees its own
+  scoped credential.
 - **Rate limiting:** 120 req/min global, 3-5/min on auth endpoints.
   Uses TCP peer address (not X-Forwarded-For).
 
@@ -47,8 +50,11 @@ These are intentional design decisions appropriate for a single-owner app:
   outer PWA shell which hosts the existing opaque app-frame protocol. Until
   then, standalone launch must not be presented as isolated from owner storage.
 - **`null` CORS origin:** Required for sandboxed mini-app iframes to call
-  the API. Mitigated by scoped tokens — even if a mini-app reads the
-  iframe's token, it can only access storage/proxy/AI endpoints.
+  the API. Mitigated by scoped tokens — even if a mini-app reads or copies its
+  bearer, it can reach only routes authorized by that app's installed
+  permissions, live installation nonce and owner token epoch. Keep this stated
+  in terms of the principal rather than an endpoint list: app-authorized routes
+  evolve, and there is no synchronous `/api/ai` surface.
 - **`unsafe-inline` in style-src CSP:** Required for server-injected theme
   CSS. The owner controls the theme content.
 - **90-day service token:** Used by cron scripts. Stored at

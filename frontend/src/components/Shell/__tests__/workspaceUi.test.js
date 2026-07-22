@@ -53,8 +53,9 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   assert.match(shell, /if \(openTabs\.length >= 2\) setTabStripEngaged\(true\)/)
   assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)
   // With splits ON the strip follows the EFFECTIVE builder world only (never
-  // single mode); the engaged latch is the kill-switch world's legacy rule.
-  assert.match(shell, /const tabStripVisible = \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
+  // single mode or an immersive takeover); the engaged latch is the kill-switch
+  // world's legacy rule.
+  assert.match(shell, /const tabStripVisible = !immersiveActive\s*\n?\s*&& \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
   assert.match(shell, /tabStripEngaged[\s\S]*?paneModel\.flattenRollbackPriority\(workspace\)[\s\S]*?: \[\]/)
   // v2 DELETED the legacy sole-tab "unpin" shortcut (deletion list): the sole-tab
   // close is always a real CLOSE_TAB now, so an emptied builder auto-returns to
@@ -550,8 +551,9 @@ test('entry assembles on keyed beat classes, compositor-only, instant under redu
 
 test('builder single-leaf: the strip deals with its pane, entry through the ONE controller (item 3)', () => {
   // The strip is the builder surface: visible in the effective builder world even
-  // at one leaf, and never in single mode.
-  assert.match(shell, /const tabStripVisible = \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
+  // at one leaf, and never in single mode or while immersive is covering the
+  // preserved builder world.
+  assert.match(shell, /const tabStripVisible = !immersiveActive\s*\n?\s*&& \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   // v2: the handler builds the latched plan (deriveEnter/ExitPlan from the
   // projection) and dispatches the controller beat + the durable flip in the SAME
