@@ -3296,7 +3296,7 @@ export default function ChatView({
   const displayReady = revealed || showEmpty || showLoadError
   useLayoutEffect(() => {
     if (displayReady) onDisplayReadyRef.current?.(chatId)
-  }, [chatId, displayReady])
+  }, [chatId, displayReady, onDisplayReady])
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
   // The captured bridge partial enters the active row before catch-up emits a
   // single item. That is the load-bearing part of Lever 1: when SSE becomes the

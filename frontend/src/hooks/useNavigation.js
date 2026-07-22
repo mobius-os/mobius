@@ -182,6 +182,10 @@ export default function useNavigation({
   replaceImplicitBootTab,
   dragActiveRef,
 }) {
+  // Monotonic presentation signal for re-revealing an already-active tab. The
+  // semantic route remains a no-op (no history or workspace write), but a drawer
+  // activation can still bring a horizontally clipped tab back into view.
+  const [tabRevealRevision, setTabRevealRevision] = useState(0)
   // Resolve the initial view AND whether HOME must be seeded beneath it as the
   // back-stack root, in ONE place (resolveInitialNav) — enforces "HOME is always
   // the root of the shell back-stack" so a deep entry (notification deep-link,
@@ -891,6 +895,7 @@ export default function useNavigation({
     // route. This matters for a persistent desktop sidebar, where the active row
     // remains visible and repeated activations must not create dead Back steps.
     if (sameRoute(previousRoute, nextRoute)) {
+      if (openTab) setTabRevealRevision(revision => revision + 1)
       if (drawerOpenRef.current) closeDrawer()
       return
     }
@@ -1556,6 +1561,7 @@ export default function useNavigation({
     openDrawer,
     closeDrawer,
     navTo,
+    tabRevealRevision,
     applyModeDestination,
     dismissSettings,
     backFiredRef,

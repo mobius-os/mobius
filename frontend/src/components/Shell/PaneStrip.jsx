@@ -1,6 +1,8 @@
 import { useLayoutEffect, useRef } from 'react'
 import AppWindow from 'lucide-react/dist/esm/icons/app-window.mjs'
+import Maximize2 from 'lucide-react/dist/esm/icons/maximize-2.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
+import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
 import Settings from 'lucide-react/dist/esm/icons/settings.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
 import * as tabModel from './tabModel.js'
@@ -61,7 +63,8 @@ export function scrollStripWheel(e) {
 // the current tab with aria-current instead. Only the active tab is tabbable
 // (tabIndex 0); the rest and every close button are reached via stripKeyDown.
 export function PaneTab({
-  tab, label, active, tabIndex, dragKey, role, onActivate, onClose, onContextMenu,
+  tab, label, active, focused = true, revealKey = 0,
+  tabIndex, dragKey, role, onActivate, onClose, onContextMenu,
 }) {
   const tabRef = useRef(null)
   const titleRef = useRef(null)
@@ -77,7 +80,7 @@ export function PaneTab({
       title.style.removeProperty('--tab-title-shift')
       title.style.removeProperty('--tab-title-duration')
     }
-    if (!active || tab.kind !== 'chat' || !text) {
+    if (!active || !focused || tab.kind !== 'chat' || !text) {
       clear()
       return undefined
     }
@@ -104,14 +107,16 @@ export function PaneTab({
       observer.disconnect()
       clear()
     }
-  }, [active, label, tab.kind])
+  }, [active, focused, label, tab.kind])
 
   // A tab activated from outside the strip (drawer/history restore) must not stay
   // clipped beyond an overflow edge. Browser focus already handles keyboard
   // navigation; this covers state-driven activation without a React state loop.
   useLayoutEffect(() => {
-    if (active) tabRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
-  }, [active])
+    if (active && focused) {
+      tabRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+    }
+  }, [active, focused, revealKey])
 
   const TabIcon = tab.kind === 'settings'
     ? Settings
@@ -170,6 +175,23 @@ export function PaneTab({
   )
 }
 
+export function PaneFocusButton({ paneId, focused, onToggle }) {
+  const label = focused ? 'Show all panes' : 'Focus pane'
+  const Icon = focused ? Minimize2 : Maximize2
+  return (
+    <button
+      type="button"
+      className="workspace__pane-focus"
+      aria-label={label}
+      aria-pressed={focused ? 'true' : 'false'}
+      title={label}
+      onClick={() => onToggle(paneId)}
+    >
+      <Icon size={14} aria-hidden="true" />
+    </button>
+  )
+}
+
 // The absolute per-pane strip in the multi-pane chrome overlay. The strip focuses
 // its pane on WHITESPACE pointerdown only — a tab focuses via navTo, and
 // pre-focusing on the tab's own pointerdown would advance the workspace ref
@@ -177,6 +199,8 @@ export function PaneTab({
 export function PaneStrip({
   pane, paneRect, focused, labelForTab,
   onActivate, onClose, onFocus, onTabContextMenu, motion = null,
+  canFocusPane = false, paneFocused = false, onTogglePaneFocus,
+  revealKey = 0,
 }) {
   // The strip deals WITH its pane during a mode beat (exit-design v2): the same
   // compositor-only data-mode-motion + --mode-duration/--mode-delay the pane wrapper
@@ -195,7 +219,9 @@ export function PaneStrip({
       style={style}
       onKeyDown={(e) => stripKeyDown(e, pane.tabs, onClose)}
       onWheel={scrollStripWheel}
-      onPointerDown={(e) => { if (!e.target.closest('.shell__tab')) onFocus(pane.id) }}
+      onPointerDown={(e) => {
+        if (!e.target.closest('.shell__tab, .workspace__pane-focus')) onFocus(pane.id)
+      }}
     >
       {pane.tabs.map((tab) => {
         const key = tabModel.tabKey(tab)
@@ -206,6 +232,8 @@ export function PaneStrip({
             tab={tab}
             label={labelForTab(tab)}
             active={active}
+            focused={focused}
+            revealKey={revealKey}
             role="tab"
             tabIndex={active ? 0 : -1}
             dragKey={WORKSPACE_SPLITS_ENABLED ? key : undefined}
@@ -215,6 +243,13 @@ export function PaneStrip({
           />
         )
       })}
+      {canFocusPane && onTogglePaneFocus && (
+        <PaneFocusButton
+          paneId={pane.id}
+          focused={paneFocused}
+          onToggle={onTogglePaneFocus}
+        />
+      )}
     </div>
   )
 }
