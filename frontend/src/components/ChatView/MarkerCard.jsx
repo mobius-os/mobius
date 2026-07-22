@@ -2,10 +2,10 @@ import { useRef, useState } from 'react'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 
 // Shared shell for "marker" messages — system/product moments that are neither
-// agent prose nor a tool call. Compaction summaries and automatic continuation
-// events use this shell so every marker reads as one family (one card shape,
-// one disclosure motion) instead of each inventing its own look or masquerading
-// as a chat bubble.
+// agent prose nor a tool call. A compaction summary is the only marker today;
+// interrupted-turn and other system notes can adopt this shell later so every
+// marker reads as one family (one card shape, one disclosure motion) instead of
+// each inventing its own look or masquerading as a chat bubble.
 //
 // Extracted from CompactionCard with no visual change — the default look IS the
 // accent-tinted summary divider that card established (`.chat__marker*` CSS,

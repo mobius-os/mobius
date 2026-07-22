@@ -20,9 +20,6 @@ const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'u
 const paneChatView = readFileSync(new URL('../../Shell/PaneChatView.jsx', import.meta.url), 'utf8')
 const chatEmbed = readFileSync(new URL('../../ChatEmbed/ChatEmbed.jsx', import.meta.url), 'utf8')
 const chatSettingsPanel = readFileSync(new URL('../ChatSettingsPanel.jsx', import.meta.url), 'utf8')
-const autoContinuationCard = readFileSync(
-  new URL('../AutoContinuationCard.jsx', import.meta.url), 'utf8',
-)
 const settingsView = readFileSync(
   new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8',
 )
@@ -103,10 +100,10 @@ test('the parked card has styling distinct from a plain error', () => {
     'the reset line has its own style')
 })
 
-test('automatic continuation is chat-local and manageable at a rate-limit card', () => {
+test('auto-resume is a chat-local switch shown only on the active rate-limit card', () => {
   assert.match(msgContent, /resumable && parked && autoResumeAvailable && onAutoResumeChange/,
     'the switch must require the tail resumable rate-limit state')
-  assert.match(msgContent, /Always continue after limits and restarts in this chat/,
+  assert.match(msgContent, /Always continue after limits in this chat/,
     'the switch label makes the persistent, chat-local scope explicit')
   assert.match(msgContent, /htmlFor=\{autoResumeSwitchId\}/,
     'the visible switch label must also be its accessible name')
@@ -118,7 +115,7 @@ test('automatic continuation is chat-local and manageable at a rate-limit card',
     'the in-card control has a dedicated layout')
   assert.doesNotMatch(settingsView, /auto_resume_on_limit|Auto.?resume/i,
     'the removed global automatic option must not reappear in Settings')
-  assert.match(chatSettingsPanel, /Continue after limits and restarts/,
+  assert.match(chatSettingsPanel, /Continue after rate limits/,
     'the durable policy remains manageable in the per-chat settings surface')
   assert.doesNotMatch(chatSettingsPanel, /On for this chat|Off for this chat/,
     'the switch color communicates state without redundant state copy')
@@ -126,25 +123,6 @@ test('automatic continuation is chat-local and manageable at a rate-limit card',
     'the settings surface uses the same full-size black/purple switch treatment')
   assert.match(css, /\.chat-policy-switch button\[role="switch"\]\[data-state="checked"\]/,
     'the chat switch restores the SDK checked track after the button reset')
-})
-
-test('automatic sends render as durable product markers, not user bubbles', () => {
-  assert.match(msgContent, /msg\.kind === 'auto_continuation'/,
-    'the shared message renderer recognizes the persisted automatic action')
-  assert.match(msgContent, /<AutoContinuationCard msg=\{msg\}/,
-    'the automatic action uses the marker component')
-  assert.match(autoContinuationCard, /import MarkerCard from '\.\/MarkerCard\.jsx'/,
-    'the new event belongs to the same visual family as compaction')
-  assert.match(autoContinuationCard, /Server restarted — continuing automatically/,
-    'planned restart recovery names why the agent resumed')
-  assert.match(autoContinuationCard, /Usage available again — continuing automatically/,
-    'limit recovery names why the agent resumed')
-  assert.match(chatView, /continuationMarker \? 'marker' : msg\.role/,
-    'the transcript row does not keep user-bubble alignment')
-  assert.match(chatView, /onPointerDown=\{continuationMarker[\s\S]*?\? undefined/,
-    'the marker does not gain hold-to-copy interaction behavior')
-  assert.match(chatView, /const ownerUserMessage = isOwnerUserMessage\(msg\)/,
-    'timestamps and pin identity use the shared owner-message predicate')
 })
 
 test('an enabled policy stays cancellable after the viewer clock reaches reset', () => {

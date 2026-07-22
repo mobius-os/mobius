@@ -111,13 +111,11 @@ def build_transcript_text(
 ) -> str:
   """Render the chat's messages into the plain text the summarizer reads.
 
-  Each message becomes a `ROLE: content` line. Product-authored automatic
-  continuations keep a distinct role label rather than impersonating the
-  owner. Tool blocks and other non-text structure are dropped — the summary
-  cares about the dialogue and the assistant's prose, not the raw tool I/O.
-  By default the result is tail-capped to `_MAX_TRANSCRIPT_CHARS`; provider
-  handoffs pass ``max_chars=None`` and progressively synthesize the complete
-  transcript.
+  Each message becomes a `ROLE: content` line. Tool blocks and other
+  non-text structure are dropped — the summary cares about the dialogue
+  and the assistant's prose, not the raw tool I/O. By default the result is
+  tail-capped to `_MAX_TRANSCRIPT_CHARS`; provider handoffs pass
+  ``max_chars=None`` and progressively synthesize the complete transcript.
   """
   lines: list[str] = []
   for m in messages or []:
@@ -125,11 +123,7 @@ def build_transcript_text(
     # it back into a later synthesis recursively inflates the next handoff.
     if m.get("kind") == "compaction":
       continue
-    if m.get("kind") == "auto_continuation":
-      reason = str(m.get("continuation_reason") or "automatic recovery")
-      role = f"AUTOMATIC CONTINUATION ({reason.upper()})"
-    else:
-      role = (m.get("role") or "user").upper()
+    role = (m.get("role") or "user").upper()
     content = m.get("content") or ""
     if not content.strip():
       continue
