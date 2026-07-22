@@ -748,6 +748,91 @@ def test_graphql_mutation_as_string_literal_allowed(client, auth, monkeypatch):
 # --- contribution submit (approval button path) -----------------------
 
 
+def test_reviewed_pr_labels_are_bounded_to_the_visible_two():
+  assert github_routes._reviewed_pr_labels({
+    "labels": [" bug ", "area: ui", "hidden-third"],
+  }) == ["bug", "area: ui"]
+  assert github_routes._reviewed_pr_labels({
+    "labels": ["bug", "BUG", "area: ui"],
+  }) == ["bug", "area: ui"]
+  assert github_routes._reviewed_pr_labels({
+    "labels": [None, "bug", "area: ui"],
+  }) == ["bug", "area: ui"]
+  assert github_routes._reviewed_pr_labels({"labels": "bug"}) == []
+
+
+def test_pr_labels_apply_only_existing_names_and_preserve_missing(
+  monkeypatch, tmp_path,
+):
+  calls = []
+
+  def fake_gh(repo, *args, check=True):
+    calls.append(args)
+    if "--paginate" in args:
+      return _cp("bug\narea: ui\n")
+    return _cp("[]")
+
+  monkeypatch.setattr(github_routes, "_gh", fake_gh)
+  patch = github_routes._apply_reviewed_pr_labels(
+    tmp_path,
+    "mobius-os/mobius",
+    123,
+    ["Bug", "area: backend"],
+  )
+
+  assert patch["last_submit_labels_requested"] == ["Bug", "area: backend"]
+  assert patch["last_submit_labels_applied"] == ["bug"]
+  assert patch["last_submit_labels_missing"] == ["area: backend"]
+  assert "Some reviewed labels" in patch["last_submit_labels_note"]
+  apply_call = calls[-1]
+  assert apply_call[:3] == ("api", "--method", "POST")
+  assert "labels[]=bug" in apply_call
+  assert "labels[]=area: backend" not in apply_call
+
+
+def test_pr_label_permission_failure_does_not_fail_an_open_pr(
+  monkeypatch, tmp_path,
+):
+  def fake_gh(repo, *args, check=True):
+    if "--paginate" in args:
+      return _cp("bug\n")
+    return _cp("forbidden", returncode=1)
+
+  monkeypatch.setattr(github_routes, "_gh", fake_gh)
+  patch = github_routes._apply_reviewed_pr_labels(
+    tmp_path,
+    "someone/example",
+    7,
+    ["bug"],
+  )
+
+  assert patch["last_submit_labels_applied"] == []
+  assert "did not allow" in patch["last_submit_labels_note"]
+
+
+def test_pr_label_transport_exception_does_not_fail_an_open_pr(
+  monkeypatch, tmp_path,
+):
+  monkeypatch.setattr(
+    github_routes,
+    "_gh",
+    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+      subprocess.TimeoutExpired("gh", 30),
+    ),
+  )
+
+  patch = github_routes._apply_reviewed_pr_labels(
+    tmp_path,
+    "someone/example",
+    7,
+    ["bug"],
+  )
+
+  assert patch["last_submit_labels_requested"] == ["bug"]
+  assert patch["last_submit_labels_applied"] == []
+  assert "Could not verify" in patch["last_submit_labels_note"]
+
+
 def _write_contribution(app_id, record_id, record, diff_text=""):
   base = Path(get_settings().data_dir) / "apps" / str(app_id) / "contributions"
   base.mkdir(parents=True, exist_ok=True)
