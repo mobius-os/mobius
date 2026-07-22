@@ -12,6 +12,7 @@ to the test DB, so these exercise the actual `get_writer()` path.
 """
 
 import asyncio
+import json
 import threading
 import time
 
@@ -345,7 +346,12 @@ def test_finalize_failure_via_run_chat_leaves_marker_for_reconciliation(
     / "cli-auth" / "claude" / ".credentials.json"
   )
   creds.parent.mkdir(parents=True, exist_ok=True)
-  creds.write_text("{}", encoding="utf-8")
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "test-token",
+      "expiresAt": int(time.time() * 1000) + 3_600_000,
+    },
+  }), encoding="utf-8")
 
   # Fake the Claude SDK runner: stream one text block through the sink (so
   # finalize() has accumulated blocks and actually submits a Finalize), then

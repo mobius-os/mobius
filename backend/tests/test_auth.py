@@ -1,6 +1,7 @@
 """Tests for authentication flow."""
 
 import json
+import time
 
 import bcrypt
 
@@ -198,6 +199,137 @@ def test_provider_status_exposes_configured_with_legacy_alias(client, auth):
   assert r.status_code == 200, r.text
   body = r.json()
   assert body["configured"] is body["authenticated"]
+
+
+def test_providers_status_rejects_empty_claude_oauth_record(
+  client, auth, tmp_path, monkeypatch,
+):
+  """A leftover credential shell is not a connected Claude session.
+
+  Recovery can preserve the scopes/email metadata while clearing unusable
+  tokens. File-presence checks used to report that state as connected even
+  though the next turn deterministically failed authentication.
+  """
+  from app.config import get_settings
+
+  data_dir = tmp_path / "data"
+  creds = data_dir / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "expiresAt": 0,
+      "scopes": ["user:inference"],
+    },
+  }))
+  monkeypatch.setattr(get_settings(), "data_dir", str(data_dir))
+
+  r = client.get("/api/auth/providers/status", headers=auth)
+
+  assert r.status_code == 200, r.text
+  status = r.json()["claude"]
+  assert status["configured"] is False
+  assert status["authenticated"] is False
+  assert "reconnect" in status["error"].lower()
+
+
+def test_claude_auth_accepts_current_access_or_refreshable_session(tmp_path):
+  from app.providers import ClaudeProvider
+
+  creds = tmp_path / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "current-token",
+      "expiresAt": int(time.time() * 1000) + 120_000,
+    },
+  }))
+  assert ClaudeProvider().check_auth(str(tmp_path)) is None
+
+  # Older Claude credential documents omit refreshTokenExpiresAt.
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "expired-token",
+      "refreshToken": "refresh-token",
+      "expiresAt": 0,
+    },
+  }))
+  assert ClaudeProvider().check_auth(str(tmp_path)) is None
+
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "expired-token",
+      "refreshToken": "refresh-token",
+      "expiresAt": 0,
+      "refreshTokenExpiresAt": int(time.time() * 1000) + 120_000,
+    },
+  }))
+  assert ClaudeProvider().check_auth(str(tmp_path)) is None
+
+
+def test_claude_auth_rejects_expired_unrefreshable_session(tmp_path):
+  from app.providers import ClaudeProvider
+
+  creds = tmp_path / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "expired-token",
+      "expiresAt": 0,
+    },
+  }))
+
+  error = ClaudeProvider().check_auth(str(tmp_path))
+
+  assert error is not None
+  assert "reconnect" in error.lower()
+
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "expired-token",
+      "refreshToken": "expired-refresh-token",
+      "expiresAt": 0,
+      "refreshTokenExpiresAt": 0,
+    },
+  }))
+
+  error = ClaudeProvider().check_auth(str(tmp_path))
+
+  assert error is not None
+  assert "reconnect" in error.lower()
+
+
+def test_claude_auth_rejects_malformed_credentials(tmp_path):
+  from app.providers import ClaudeProvider
+
+  creds = tmp_path / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+  creds.write_text("{not-json")
+
+  error = ClaudeProvider().check_auth(str(tmp_path))
+
+  assert error is not None
+  assert "reconnect" in error.lower()
+
+
+def test_providers_status_rejects_non_utf8_claude_credentials(
+  client, auth, tmp_path, monkeypatch,
+):
+  from app.config import get_settings
+
+  data_dir = tmp_path / "data"
+  creds = data_dir / "cli-auth" / "claude" / ".credentials.json"
+  creds.parent.mkdir(parents=True)
+  creds.write_bytes(b"\xff\xfe")
+  monkeypatch.setattr(get_settings(), "data_dir", str(data_dir))
+
+  r = client.get("/api/auth/providers/status", headers=auth)
+
+  assert r.status_code == 200, r.text
+  status = r.json()["claude"]
+  assert status["configured"] is False
+  assert status["authenticated"] is False
+  assert "reconnect" in status["error"].lower()
 
 
 def test_providers_models_returns_known_models_on_missing_creds(

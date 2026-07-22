@@ -14,9 +14,11 @@ the test DB, so `get_writer()` is the real path throughout.
 """
 
 import asyncio
+import json
 import os
 import pathlib
 import threading
+import time
 
 import pytest
 
@@ -53,7 +55,12 @@ def _seed_owner_and_creds():
     / ".credentials.json"
   )
   creds.parent.mkdir(parents=True, exist_ok=True)
-  creds.write_text("{}", encoding="utf-8")
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "test-token",
+      "expiresAt": int(time.time() * 1000) + 3_600_000,
+    },
+  }), encoding="utf-8")
 
 
 def _seed_chat(chat_id, messages=None, pending=None, run_status=None,
@@ -928,22 +935,28 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
 
 
 # -- 12. auth-error setup cleanup: marker cleared, pending dropped ----------
-def test_auth_error_cleanup_clears_marker_before_registry_release(monkeypatch):
+@pytest.mark.parametrize("malformed_credentials", [False, True])
+def test_auth_error_cleanup_clears_marker_before_registry_release(
+  monkeypatch, malformed_credentials,
+):
   """The auth-error setup early return routes through the same bounded
   terminal cleanup: pending cleared, marker cleared, registry released, no
   continuation."""
-  # Seed an owner but NO creds file → Claude check_auth returns an error.
+  # Seed an owner with either NO creds file or a non-UTF-8 creds file →
+  # Claude check_auth returns an error without escaping into a route/runner 500.
   # The DATA_DIR tmpdir is shared across tests and conftest does not sweep
   # the creds file, so a prior _seed_owner_and_creds may have written one —
-  # remove it explicitly to guarantee the auth-error precondition.
+  # remove or replace it explicitly to guarantee the auth-error precondition.
   from app import auth as auth_mod
 
   creds = (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
     / ".credentials.json"
   )
-  if creds.exists():
-    creds.unlink()
+  creds.unlink(missing_ok=True)
+  if malformed_credentials:
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    creds.write_bytes(b"\xff\xfe")
   dbx = SessionLocal()
   try:
     dbx.add(models.Owner(
