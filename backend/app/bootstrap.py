@@ -34,9 +34,10 @@ BOOTSTRAP_STORE_MANIFEST_URL = (
 )
 
 # The Skills app (browse/install ecosystem skills + the skill-agent chat).
-# Developed in-repo under app-skills/; its canonical home is this catalog repo.
-# Bootstrap is failure-tolerant, so until the repo exists the install just
-# logs and retries next boot.
+# Canonical home is this catalog repo; the v2 app (compat badges, catalog
+# browser) depends on this platform's skills API, so its repo merges after
+# the platform does. Bootstrap is failure-tolerant, so a manifest/API skew
+# just logs and retries next boot.
 BOOTSTRAP_SKILLS_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-skills/main/mobius.json"
 )
