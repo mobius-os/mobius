@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import mobiusLogoUrl from '../../assets/moebius.png'
 import { api, setToken, BASE } from '../../api/client.js'
 import './LoginForm.css'
 
@@ -49,7 +50,7 @@ export default function LoginForm({ onLogin }) {
   return (
     <div className="login">
       <div className="login__card">
-        <img src={`${BASE}/moebius.png`} alt="Möbius" className="login__logo" />
+        <img src={mobiusLogoUrl} alt="Möbius" className="login__logo" />
         <h1 className="login__title">Möbius</h1>
         <p className="login__tagline">Your AI. Your apps. Your server.</p>
         {expired && (
