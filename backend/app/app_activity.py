@@ -23,6 +23,11 @@ def mark_from_notification(
     app_id = int(source_id)
   except (TypeError, ValueError):
     return None
+  # SQLite INTEGER keys are signed 64-bit values.  Reject values outside that
+  # bindable range before ``Session.get`` so malformed attribution cannot turn
+  # an otherwise valid notification into a persistence failure.
+  if app_id <= 0 or app_id > (2**63 - 1):
+    return None
   app = db.get(models.App, app_id)
   if app is None or app.deleted_at is not None:
     return None

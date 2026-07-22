@@ -97,7 +97,12 @@ def test_non_app_and_unknown_app_notifications_do_not_create_markers(
   client, auth, db,
 ):
   app = _app(db)
-  for source_type, source_id in (("system", None), ("app", "999")):
+  for source_type, source_id in (
+    ("system", None),
+    ("app", "999"),
+    ("app", "0"),
+    ("app", "999999999999999999999999999999999999"),
+  ):
     payload = {"title": "Background work finished", "source_type": source_type}
     if source_id is not None:
       payload["source_id"] = source_id
@@ -110,3 +115,4 @@ def test_non_app_and_unknown_app_notifications_do_not_create_markers(
   )
   assert row["has_unseen_activity"] is False
   assert db.query(models.AppActivityState).count() == 0
+  assert db.query(models.Notification).count() == 4
