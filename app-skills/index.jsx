@@ -229,17 +229,18 @@ const CSS = `
 .sk-cat { position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column; background: var(--bg); }
 .sk-cat-note { margin: 12px 20px 4px; max-width: 68ch; color: var(--muted); font-size: 13.5px; line-height: 1.5;
   text-wrap: pretty; }
-/* pre-install compat badge on the catalog skill page */
-.sk-compatwrap { max-width: 720px; margin: 14px auto -6px; padding: 0 18px; }
-.sk-compat { display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px; border-radius: 999px;
-  font-family: var(--font); font-size: 12.5px; font-weight: 600; border: 1px solid; background: none; }
+/* pre-install compat chip — on every catalog card next to Install, and in the
+   skill page's header next to Install. Amber chips open the plain-language
+   notes panel (.sk-caveats) under the skill page's header. */
+.sk-compat { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px;
+  border-radius: 999px; font-family: var(--font); font-size: 12.5px; font-weight: 600; border: 1px solid;
+  background: none; white-space: nowrap; }
 .sk-compat.is-ok { color: var(--ok, #2e7d32); border-color: color-mix(in srgb, var(--ok, #2e7d32) 45%, transparent);
   background: color-mix(in srgb, var(--ok, #2e7d32) 10%, transparent); }
 .sk-compat.is-warn { color: var(--warn, #b26a00); border-color: color-mix(in srgb, var(--warn, #b26a00) 45%, transparent);
   background: color-mix(in srgb, var(--warn, #b26a00) 10%, transparent); cursor: pointer; }
-.sk-compat.is-warn svg { width: 13px; height: 13px; transform: rotate(90deg); transition: transform .12s ease; }
-.sk-compat.is-warn.is-open svg { transform: rotate(-90deg); }
-.sk-caveats { margin: 8px 0 0; padding: 9px 12px 9px 26px; border-radius: 10px; font-size: 13px; line-height: 1.5;
+.sk-caveats { flex: 0 0 auto; margin: 10px 16px 0; padding: 9px 12px 9px 28px; border-radius: 10px;
+  font-size: 13px; line-height: 1.5;
   border: 1px solid color-mix(in srgb, var(--warn, #b26a00) 35%, var(--border)); color: var(--muted);
   background: color-mix(in srgb, var(--warn, #b26a00) 6%, transparent); }
 .sk-caveats li { margin: 3px 0; }
@@ -325,7 +326,7 @@ function ProvChips({ provenance, uses }) {
 // scan; the IntersectionObserver only lets visible cards jump that queue (and
 // is the fallback when the pool is cancelled mid-run). Tapping a card opens
 // the full SKILL.md as its own page, like an installed skill.
-function CatalogCard({ skill, desc, installed, busy, onOpen, onLoad, onInstall }) {
+function CatalogCard({ skill, desc, installed, busy, compat, onOpen, onLoad, onInstall, onCaveats }) {
   const ref = useRef(null)
 
   useEffect(() => {
@@ -358,6 +359,17 @@ function CatalogCard({ skill, desc, installed, busy, onOpen, onLoad, onInstall }
         >
           {installed ? 'Installed' : busy ? 'Installing…' : 'Install'}
         </button>
+        {compat && (compat.ok ? (
+          <span className="sk-compat is-ok">✓ Works with Möbius</span>
+        ) : (
+          <button
+            className="sk-compat is-warn"
+            onClick={(e) => { e.stopPropagation(); onCaveats() }}
+            title="See what to know before installing"
+          >
+            ⚠ {compat.caveats.length} {compat.caveats.length === 1 ? 'thing' : 'things'} to know
+          </button>
+        ))}
       </div>
     </div>
   )
@@ -383,6 +395,7 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
   descsRef.current = descs
   const inflightRef = useRef(new Set()) // synchronous dedupe (descs lags a render)
   const prefetcherRef = useRef(null)
+  const compatCacheRef = useRef({}) // dir -> assessCompat result, per source scan
 
   useEffect(() => {
     // Sources are app data: a saved sources.json overrides the defaults, so
@@ -433,6 +446,7 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
     setSkillList(null); setTruncated(false); setDescs({}); setFilter(''); setDetailDir(null)
     setScanBusy(true); setError(null); setNotice(null)
     inflightRef.current = new Set()
+    compatCacheRef.current = {}
     try {
       const data = JSON.parse(await proxied(treeScanUrl(source)))
       if (!Array.isArray(data.tree)) throw new Error(data.message || 'unexpected GitHub response (no tree)')
@@ -460,9 +474,10 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
     setSkillList(null); setError(null); setNotice(null); setDetailDir(null); setFilter('')
   }
 
-  const openSkillPage = (dir) => {
+  // withCaveats: a card's amber chip opens the page with the notes already out.
+  const openSkillPage = (dir, withCaveats = false) => {
     setDetailDir(dir)
-    setShowCaveats(false)
+    setShowCaveats(!!withCaveats)
     if (open) loadDescription(open.source, dir)
     window.mobius?.signal?.('item_opened', { type: 'catalog-skill', slug: dir })
   }
@@ -509,12 +524,22 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
     }
   }, [detailEntry])
 
-  // Pre-install compat: predict what the installer would drop, from the tree
-  // scan we already have. null until both the tree and the raw md are in hand.
-  const compat = useMemo(() => {
-    if (!detailDir || !detailLoaded || !Array.isArray(open?.tree)) return null
-    return assessCompat(open.tree, detailDir, detailEntry.raw || '')
-  }, [detailDir, detailLoaded, detailEntry, open])
+  // Pre-install compat, per card: predict what the installer would drop, from
+  // the tree scan we already have. A verdict appears once a card's SKILL.md is
+  // loaded; cached per dir (cleared each scan) so every new description doesn't
+  // re-assess the whole list against the tree.
+  const compatByDir = useMemo(() => {
+    if (!Array.isArray(open?.tree) || !skillList) return {}
+    const cache = compatCacheRef.current
+    const out = {}
+    for (const s of skillList) {
+      const d = descs[s.dir]
+      if (!d || d === 'loading' || d === 'failed') continue
+      out[s.dir] = cache[s.dir] || (cache[s.dir] = assessCompat(open.tree, s.dir, d.raw || ''))
+    }
+    return out
+  }, [open, skillList, descs])
+  const compat = (detailDir && compatByDir[detailDir]) || null
 
   // Links in a catalog SKILL.md: external → new tab; anything else (relative
   // resource paths we haven't fetched) is blocked so the app stays mounted.
@@ -551,6 +576,17 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
         </nav>
         {detailDir && open && (
           <>
+            {compat && (compat.ok ? (
+              <span className="sk-compat is-ok">✓ Works with Möbius</span>
+            ) : (
+              <button
+                className="sk-compat is-warn"
+                onClick={() => setShowCaveats((v) => !v)}
+                aria-expanded={showCaveats}
+              >
+                ⚠ {compat.caveats.length} {compat.caveats.length === 1 ? 'thing' : 'things'} to know
+              </button>
+            ))}
             <button
               className="sk-btn"
               disabled={busyDir === detailDir || detailInstalled}
@@ -572,6 +608,11 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
       </div>
       {error && <div className="sk-alert is-error" role="alert">{error}</div>}
       {notice && !error && <div className="sk-alert" role="status">{notice}</div>}
+      {detailDir && showCaveats && compat && !compat.ok && (
+        <ul className="sk-caveats" role="status">
+          {compat.caveats.map((c) => <li key={c.kind}>{c.text}</li>)}
+        </ul>
+      )}
       <div className="sk-scroll">
         <div className="sk-page">
           {!open && (
@@ -611,29 +652,7 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
                 )}
               </div>
             ) : detailLoaded ? (
-              <>
-                {compat && (
-                  <div className="sk-compatwrap">
-                    {compat.ok ? (
-                      <span className="sk-compat is-ok">✓ Works with Möbius</span>
-                    ) : (
-                      <button
-                        className={`sk-compat is-warn${showCaveats ? ' is-open' : ''}`}
-                        onClick={() => setShowCaveats((v) => !v)}
-                        aria-expanded={showCaveats}
-                      >
-                        {compat.caveats.length} {compat.caveats.length === 1 ? 'caveat' : 'caveats'} {CHEV}
-                      </button>
-                    )}
-                    {!compat.ok && showCaveats && (
-                      <ul className="sk-caveats">
-                        {compat.caveats.map((c) => <li key={c.kind}>{c.text}</li>)}
-                      </ul>
-                    )}
-                  </div>
-                )}
-                <div className="sk-md" onClick={onDetailClick} dangerouslySetInnerHTML={{ __html: detailHtml }} />
-              </>
+              <div className="sk-md" onClick={onDetailClick} dangerouslySetInnerHTML={{ __html: detailHtml }} />
             ) : (
               <div className="sk-empty"><div className="sk-spinner" /></div>
             )
@@ -672,9 +691,11 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
                       desc={descs[s.dir]}
                       installed={existingIds.has(s.name)}
                       busy={busyDir === s.dir}
+                      compat={compatByDir[s.dir] || null}
                       onOpen={() => openSkillPage(s.dir)}
                       onLoad={() => loadDescription(open.source, s.dir)}
                       onInstall={() => install(open.source, s.dir)}
+                      onCaveats={() => openSkillPage(s.dir, true)}
                     />
                   ))}
                 </div>

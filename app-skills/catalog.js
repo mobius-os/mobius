@@ -135,13 +135,13 @@ export function assessCompat(tree, dir, raw) {
   if (brokenRefs.length) {
     caveats.push({
       kind: 'broken-refs',
-      text: `SKILL.md references files that won't be installed: ${nameSome(brokenRefs)}.`,
+      text: `Its instructions mention files that won't be there after install (${nameSome(brokenRefs)}), so the steps that use them may not work.`,
     })
   }
   if (dropped.length) {
     caveats.push({
       kind: 'dropped',
-      text: `${dropped.length} bundled ${dropped.length === 1 ? 'file' : 'files'} won't be installed (unsupported type or too deeply nested): ${nameSome(dropped.map((f) => f.rel))}.`,
+      text: `${dropped.length} extra ${dropped.length === 1 ? 'file' : 'files'} won't be copied — Möbius only installs common text files, and ${dropped.length === 1 ? 'this one is' : 'these are'} a different type or buried too deep: ${nameSome(dropped.map((f) => f.rel))}. The main instructions still install fine.`,
     })
   }
   if (overCount || overSize) {
@@ -150,7 +150,7 @@ export function assessCompat(tree, dir, raw) {
     if (overSize) parts.push(`${(total / (1024 * 1024)).toFixed(1)} MB (max ${INSTALL_LIMITS.maxTotalBytes / (1024 * 1024)} MB)`)
     caveats.push({
       kind: 'over-budget',
-      text: `Installs partially — over Möbius's resource budget: ${parts.join(', ')}.`,
+      text: `This skill is bigger than Möbius's install limit — ${parts.join(', ')} — so only part of it will be copied.`,
     })
   }
 
@@ -158,7 +158,7 @@ export function assessCompat(tree, dir, raw) {
   if (scripts.length) {
     caveats.push({
       kind: 'scripts',
-      text: `Bundles ${scripts.length} ${scripts.length === 1 ? 'script' : 'scripts'} — installed as reference text; the agent reads them but nothing runs automatically.`,
+      text: `Comes with ${scripts.length} helper ${scripts.length === 1 ? 'script' : 'scripts'}. Möbius saves them for the agent to read — nothing runs automatically.`,
     })
   }
 
@@ -168,7 +168,7 @@ export function assessCompat(tree, dir, raw) {
   if (!desc || /^[>|][+-]?$/.test(desc)) {
     caveats.push({
       kind: 'frontmatter',
-      text: "No machine-readable description — the agent's skills index will fall back to the first paragraph.",
+      text: 'Missing its one-line summary, so skill lists will show its first paragraph instead. Purely cosmetic.',
     })
   }
 

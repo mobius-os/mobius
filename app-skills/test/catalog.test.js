@@ -192,7 +192,7 @@ test('assessCompat: disallowed extensions and deep nesting are flagged as droppe
   const res = assessCompat(tree, DIR, OK_MD)
   const dropped = res.caveats.find((c) => c.kind === 'dropped')
   assert.ok(dropped)
-  assert.match(dropped.text, /2 bundled files/)
+  assert.match(dropped.text, /2 extra files/)
   assert.match(dropped.text, /binary\.wasm/)
 })
 
