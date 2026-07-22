@@ -212,6 +212,56 @@ def _codex_process_group_id(
   return pgid
 
 
+async def _enter_codex_context_owned(
+  codex_context: Any,
+) -> tuple[Any, asyncio.CancelledError | None]:
+  """Enter AsyncCodex without abandoning its threaded startup on cancel.
+
+  The pinned SDK implements ``AsyncCodexClient.start()`` with
+  ``asyncio.to_thread(CodexClient.start)``. Cancelling ``__aenter__`` therefore
+  cancels only the awaiter; the worker can continue through ``Popen`` and
+  publish ``_proc`` after the cancelled runner has already returned. Keep the
+  complete enter operation in a runner-owned task, shield it through every
+  caller cancellation, and hand the cancellation back to the caller only once
+  startup has either completed or failed. That keeps PGID capture alive for
+  the entire interval in which the worker can create a process.
+  """
+  enter_task = asyncio.create_task(codex_context.__aenter__())
+  deferred_cancel: asyncio.CancelledError | None = None
+  while not enter_task.done():
+    try:
+      await asyncio.shield(enter_task)
+    except asyncio.CancelledError as exc:
+      if enter_task.cancelled():
+        break
+      deferred_cancel = deferred_cancel or exc
+  try:
+    entered = enter_task.result()
+  except asyncio.CancelledError:
+    if deferred_cancel is not None:
+      raise deferred_cancel
+    raise
+  except BaseException as exc:
+    if deferred_cancel is not None:
+      raise deferred_cancel from exc
+    raise
+  return entered, deferred_cancel
+
+
+class _EnteredCodexContext:
+  """Delegate exit for an AsyncCodex context whose enter is already owned."""
+
+  def __init__(self, context: Any, entered: Any) -> None:
+    self._context = context
+    self._entered = entered
+
+  async def __aenter__(self) -> Any:
+    return self._entered
+
+  async def __aexit__(self, exc_type, exc, traceback) -> Any:
+    return await self._context.__aexit__(exc_type, exc, traceback)
+
+
 async def _capture_codex_process_group_during_start(
   codex: Any,
   stop: asyncio.Event,
@@ -1405,7 +1455,8 @@ async def run_codex_sdk_turn(
     }
 
   try:
-    async with codex_context as codex:
+    codex, entry_cancel = await _enter_codex_context_owned(codex_context)
+    async with _EnteredCodexContext(codex_context, codex) as codex:
       process_group_id = _codex_process_group_id(codex)
       if process_group_capture_stop is not None:
         process_group_capture_stop.set()
@@ -1413,6 +1464,8 @@ async def run_codex_sdk_turn(
       # __aenter__ would propagate through an ordinary await and cancel the
       # task that owns our initialization-failure PGID. The outer finally is
       # its sole joiner and shields that join before reaping the group.
+      if entry_cancel is not None:
+        raise entry_cancel
       # Install AskUserQuestion bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;

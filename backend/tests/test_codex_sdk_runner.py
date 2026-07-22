@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -1608,6 +1609,8 @@ def test_run_codex_sdk_turn_reaps_group_when_initialization_fails(monkeypatch):
 
 
 def test_run_codex_sdk_turn_cancel_after_entry_still_reaps_group(monkeypatch):
+  owner_task = None
+
   class FakeAsyncCodex:
     def __init__(self, config=None):
       self.config = config
@@ -1622,7 +1625,7 @@ def test_run_codex_sdk_turn_cancel_after_entry_still_reaps_group(monkeypatch):
       # Deliver cancellation at the first await after entry. The runner must
       # synchronously retain the PGID and must not cancel its capture-task
       # ownership while unwinding.
-      asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+      asyncio.get_running_loop().call_soon(owner_task.cancel)
       return self
 
     async def __aexit__(self, _exc_type, _exc, _tb):
@@ -1651,6 +1654,8 @@ def test_run_codex_sdk_turn_cancel_after_entry_still_reaps_group(monkeypatch):
   )
 
   async def scenario():
+    nonlocal owner_task
+    owner_task = asyncio.current_task()
     with pytest.raises(asyncio.CancelledError):
       await codex_sdk_runner.run_codex_sdk_turn(
         user_message="hello",
@@ -1662,6 +1667,80 @@ def test_run_codex_sdk_turn_cancel_after_entry_still_reaps_group(monkeypatch):
         pending_questions={},
         db=None,
       )
+
+  asyncio.run(scenario())
+
+  assert reaped == [4321]
+
+
+def test_run_codex_sdk_turn_cancel_during_threaded_start_waits_then_reaps(
+  monkeypatch,
+):
+  """Cancellation cannot outrun the pinned SDK's asyncio.to_thread(start)."""
+  worker_started = threading.Event()
+  release_worker = threading.Event()
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(_proc=None, _approval_handler=None),
+      )
+
+    async def __aenter__(self):
+      def threaded_start():
+        worker_started.set()
+        assert release_worker.wait(timeout=2)
+        self._client._sync._proc = SimpleNamespace(pid=4321)
+
+      # Match the pinned SDK: cancelling this await does not stop the worker.
+      await asyncio.to_thread(threaded_start)
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      self._client._sync._proc = None
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      raise AssertionError("deferred cancellation must land before thread start")
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  reaped = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: reaped.append(pgid) or True,
+  )
+
+  async def scenario():
+    task = asyncio.create_task(codex_sdk_runner.run_codex_sdk_turn(
+      user_message="hello",
+      session_id=None,
+      base_env={},
+      cwd="/tmp",
+      chat_id="chat-cancel-during-start",
+      bc=_FakeBroadcast(),
+      pending_questions={},
+      db=None,
+    ))
+    while not worker_started.is_set():
+      await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release_worker.set()
+    with pytest.raises(asyncio.CancelledError):
+      await task
 
   asyncio.run(scenario())
 

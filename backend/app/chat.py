@@ -2668,6 +2668,7 @@ async def _drain_and_release(
 _BROWSER_CLOSE_CREATE_TIMEOUT = 5.0
 _BROWSER_CLOSE_WAIT_TIMEOUT = 5.0
 _BROWSER_CLOSE_KILL_GRACE = 1.0
+_BROWSER_CLOSE_KILL_WAIT_TIMEOUT = 1.0
 
 
 async def _close_browser_session(chat_id: str) -> None:
@@ -2719,7 +2720,17 @@ async def _close_browser_session(chat_id: str) -> None:
       proc.kill()
     except ProcessLookupError:
       pass
-    await proc.wait()
+    try:
+      await asyncio.wait_for(
+        proc.wait(), timeout=_BROWSER_CLOSE_KILL_WAIT_TIMEOUT,
+      )
+    except asyncio.TimeoutError:
+      # SIGKILL has already been issued. A wedged child watcher must not turn
+      # this best-effort terminal cleanup into an unbounded chat teardown.
+      log.warning(
+        "agent-browser close process did not reap after SIGKILL for chat %s",
+        chat_id,
+      )
 
   async def close_one(target: BrowserSessionTarget) -> bool:
     proc = None
