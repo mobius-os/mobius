@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func
+from sqlalchemy import Text, case, cast, func
 from sqlalchemy.orm import Session
 
 from app import activity, auth, models, providers, questions
@@ -262,6 +262,28 @@ def _owner_chat_summary(chat: models.Chat) -> dict:
   }
 
 
+def _owner_chat_summary_projection(chat) -> dict:
+  """Serialize the lightweight row projection used by the drawer list.
+
+  ``GET /api/chats`` used to hydrate every complete ``Chat`` ORM object merely
+  to return eight summary fields. On a long-lived instance that decoded tens of
+  megabytes of transcript JSON on every drawer open and chat switch, contending
+  with the selected chat's small detail read. Keep transcript inspection inside
+  the database (``message_count``) and never materialize ``messages`` here.
+  """
+  return {
+    "id": chat.id,
+    "title": chat.title,
+    "updated_at": chat.updated_at.isoformat(),
+    "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
+    "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
+    "has_messages": bool(chat.message_count),
+    "created_by_app_id": chat.created_by_app_id,
+    "run_status": chat.run_status,
+    "running": chat.run_status == "running" or is_chat_running(chat.id),
+  }
+
+
 def _chat_detail_response(
   chat: models.Chat,
   *,
@@ -419,7 +441,33 @@ def list_chats(
   # a `desc()` on a nullable column would put NULL last under our
   # SQLite collation, but making the boolean explicit is clearer and
   # portable.
-  q = db.query(models.Chat).filter(models.Chat.deleted_at.is_(None))
+  # Drawer projection only. Selecting the Chat entity here hydrates its full
+  # ``messages`` JSON column even though the response needs only a boolean; on
+  # this owner's history that was ~47 MB of JSON decoding per refresh. Compare
+  # the canonical serialized empty-array value in SQL instead of parsing every
+  # JSON array with json_array_length: Chat.messages is a non-null list written
+  # by SQLAlchemy's canonical serializer, and CAST(... AS TEXT) is portable
+  # across SQLite and PostgreSQL. A future raw-import path must normalize JSON
+  # text first (PostgreSQL's json type preserves whitespace such as ``[ ]``).
+  # The database can reject non-empty values from their stored length without
+  # walking every transcript.
+  q = db.query(
+    models.Chat.id,
+    models.Chat.title,
+    models.Chat.updated_at,
+    models.Chat.activity_at,
+    models.Chat.pinned_at,
+    models.Chat.created_by_app_id,
+    # App-created owner-visible chats carry their visibility bit here. Owner
+    # chats normally keep this NULL, so this remains a tiny projection rather
+    # than pulling transcript/runtime JSON into the hot path.
+    models.Chat.agent_settings_json,
+    models.Chat.run_status,
+    case(
+      (cast(models.Chat.messages, Text) != "[]", 1),
+      else_=0,
+    ).label("message_count"),
+  ).filter(models.Chat.deleted_at.is_(None))
   chats = (
     q.order_by(
       models.Chat.pinned_at.is_(None),
@@ -433,7 +481,7 @@ def list_chats(
     # embedded app panels and stay hidden; an app can opt a spawned, first-class
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
-  return [_owner_chat_summary(c) for c in chats]
+  return [_owner_chat_summary_projection(c) for c in chats]
 
 
 @router.get("/session-links")

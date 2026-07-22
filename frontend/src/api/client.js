@@ -338,7 +338,7 @@ export const api = {
     },
   },
   chats: {
-    list: () => apiFetch('/chats'),
+    list: (options = {}) => apiFetch('/chats', options),
     create: (payload) => apiFetch('/chats', {
       method: 'POST',
       body: JSON.stringify(payload),

@@ -59,8 +59,11 @@ import {
   addCreatedChatToList,
   createdChatDetailCache,
   currentReusableEmptyChat,
-  detailIsUntouchedEmptyChat,
   enteredEmptySingleScreen,
+  mergeChatListWithCreatedGuards,
+  reconcileCreatedChatGuard,
+  rememberCreatedChat,
+  reusableChatDetailVerdict,
 } from './newChatPolicy.js'
 import {
   reloadWhenWorkerTakesOver,
@@ -469,7 +472,20 @@ export default function Shell() {
   const { loadTheme } = useTheme()
   const queryClient = useQueryClient()
   const appsQuery = appQueries.list.useQuery()
-  const chatsQuery = chatQueries.list.useQuery()
+  // Create responses are authoritative even when the next NetworkFirst list
+  // request has to fall back to a just-stale service-worker copy. Reconcile at
+  // the query function boundary so the protected row never disappears from
+  // cache/render between fetch settlement and an after-the-fact patch.
+  const recentlyCreatedChatsRef = useRef(new Map())
+  const reconcileCreatedChats = useCallback(
+    rows => mergeChatListWithCreatedGuards(
+      rows, recentlyCreatedChatsRef.current,
+    ),
+    [],
+  )
+  const chatsQuery = chatQueries.list.useQuery({
+    reconcile: reconcileCreatedChats,
+  })
   const apps = appsQuery.data ?? []
   const chats = chatsQuery.data ?? []
   // Warm the model registry as soon as a chat is open so the composer's
@@ -2596,14 +2612,52 @@ export default function Shell() {
       })
     if (empty && online) {
       try {
+        const staleEmptyId = empty.id
         const res = await apiFetch(
           `/chats/${encodeURIComponent(empty.id)}?limit=1`,
           { timeoutMs: 5000 },
         )
-        const detail = res.ok ? await res.json() : null
-        if (!detailIsUntouchedEmptyChat(detail)) {
+        let detail = null
+        if (res.ok) detail = await res.json()
+        const verdict = reusableChatDetailVerdict({
+          ok: res.ok,
+          status: res.status,
+          detail,
+        })
+        if (verdict !== 'empty') {
           empty = null
-          void refreshChats()
+          reconcileCreatedChatGuard(
+            recentlyCreatedChatsRef.current,
+            staleEmptyId,
+            verdict,
+          )
+          if (verdict === 'missing') {
+            // A 404 is authoritative deletion, not evidence of content.
+            knownExistingOffListChatIdsRef.current.delete(String(staleEmptyId))
+            queryClient.setQueryData(chatQueries.keys.all, current => {
+              if (!Array.isArray(current)) return current
+              const next = current.filter(
+                chat => String(chat.id) !== String(staleEmptyId),
+              )
+              chatsRef.current = next
+              return next
+            })
+          } else if (verdict === 'occupied') {
+            // The complete successful detail read has given us the only fact
+            // New Chat needs: this row is no longer reusable. Publish that
+            // narrow correction instead of launching a drawer list beside the
+            // create request. Uncertain/malformed responses leave it unchanged.
+            queryClient.setQueryData(chatQueries.keys.all, current => {
+              if (!Array.isArray(current)) return current
+              const next = current.map(chat => (
+                String(chat.id) === String(staleEmptyId)
+                  ? { ...chat, has_messages: true }
+                  : chat
+              ))
+              chatsRef.current = next
+              return next
+            })
+          }
         }
       } catch {
         empty = null
@@ -2620,8 +2674,18 @@ export default function Shell() {
     if (creatingChatRef.current) return { chatId: null, reason: 'inflight' }
     creatingChatRef.current = true
     try {
+      // Opening the drawer may already have started a list read whose snapshot
+      // predates this POST. Cancel it before creation so it cannot land later
+      // and overwrite the optimistic row with a stale list. fetchChats consumes
+      // TanStack's AbortSignal, making this a real network cancellation rather
+      // than merely ignoring the query result.
+      await queryClient.cancelQueries({
+        queryKey: chatQueries.keys.all,
+        exact: true,
+      })
       const res = await api.chats.create({ title: 'New chat' })
       const chat = await jsonOrThrow(res, 'Chat creation failed')
+      rememberCreatedChat(recentlyCreatedChatsRef.current, chat)
       const detailCache = createdChatDetailCache(chat)
       if (detailCache) {
         queryClient.setQueryData(chatMessagesQueryKey(chat.id), detailCache)
@@ -2631,9 +2695,9 @@ export default function Shell() {
         chatsRef.current = next
         return next
       })
-      // Navigation and first paint can start from the authoritative create response.
-      // Both wider caches revalidate off the opening path.
-      void refreshChats()
+      // Navigation, drawer membership, and first paint all come from the
+      // authoritative create response. Do not immediately replace it with a
+      // second list read; ordinary drawer/run events revalidate later.
       return { chatId: chat.id, reason: null }
     } catch {
       return { chatId: null, reason: 'error' }
@@ -2802,7 +2866,6 @@ export default function Shell() {
   function selectChat(id) {
     clearChatAttention(id)
     navTo('chat', { chatId: id })
-    refreshChats()
   }
 
   async function deleteChat(id) {
@@ -2830,6 +2893,7 @@ export default function Shell() {
       }
       // A 404 means the server row is already gone; remove the local phantom.
     }
+    recentlyCreatedChatsRef.current.delete(String(id))
     try { sessionStorage.removeItem(`draft:${id}`) } catch {}
     // Evict the cached messages so a future chat-ID collision (e.g.
     // recovery) can't surface stale content.

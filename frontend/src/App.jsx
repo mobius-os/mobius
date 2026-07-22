@@ -182,9 +182,7 @@ function AppRoot() {
 
 function RouteLoading({ label }) {
   return (
-    <div className="app-route-loading" role="status" aria-label={label}>
-      <img src={`${BASE}/moebius.png`} width="56" height="56" alt="" />
-    </div>
+    <div className="app-route-loading" role="status" aria-label={label} />
   )
 }
 

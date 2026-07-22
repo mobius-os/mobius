@@ -21,7 +21,11 @@ export const ESM_CACHE = 'mobius-esm-v2'
 // app-frame.html (un-gated light @media flipping --bg on a light OS). Renaming
 // the cache makes isStaleRuntimeCache delete the old `-v2` cache on the next
 // activate so the next open re-warms under the correct revved key.
-export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v3'
+// Bumped -v3 → -v4 (2026-07-22): frame response CSP now lets user-opened
+// destination tabs escape the frame's opaque sandbox. Cache-first would serve
+// the old response policy once (or indefinitely offline), so activation must
+// evict v3 and make the first post-upgrade frame load use the new CSP.
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v4'
 export const STANDALONE_APPS_CACHE = 'mobius-standalone-v2'
 // app-assets bumped to -v2 ONCE (2026-06-12) to evict entries poisoned by
 // ranged-request bodies: CubeRun's probe GET with `Range: bytes=0-0` came

@@ -98,16 +98,19 @@ function useAppsQuery() {
   })
 }
 
-async function fetchChats() {
-  const res = await api.chats.list()
+async function fetchChats({ signal } = {}) {
+  const res = await api.chats.list({ signal })
   const data = await jsonOrThrow(res, 'chats fetch failed:')
   return Array.isArray(data) ? data : []
 }
 
-function useChatsQuery() {
+function useChatsQuery({ reconcile } = {}) {
   return useQuery({
     queryKey: chatsKey,
-    queryFn: fetchChats,
+    queryFn: async (context) => {
+      const rows = await fetchChats(context)
+      return reconcile ? reconcile(rows) : rows
+    },
   })
 }
 
