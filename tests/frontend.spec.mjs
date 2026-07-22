@@ -120,18 +120,42 @@ test.describe('Input behavior', () => {
     })
     await expect(input).toHaveCSS('height', '280px')
 
-    const background = await page.context().newPage()
-    await background.goto('about:blank')
-    await expect.poll(() => page.evaluate(() => document.visibilityState)).toBe('hidden')
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => 'hidden',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await expect(input).toHaveCSS('height', '280px')
+    await expect.poll(() => input.evaluate(
+      el => el.closest('.chat__pill')?.classList.contains('chat__pill--tall') || false,
+    )).toBe(true)
 
-    await page.bringToFront()
-    await expect.poll(() => page.evaluate(() => document.visibilityState)).toBe('visible')
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => 'visible',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
     await expect.poll(() => input.evaluate(el => ({
       collapsed: el.getBoundingClientRect().height < 60,
       tall: el.closest('.chat__pill')?.classList.contains('chat__pill--tall') || false,
     }))).toEqual({ collapsed: true, tall: false })
 
-    await background.close()
+    // The bfcache/pageshow trigger owns the same reconciliation contract.
+    await input.evaluate(el => {
+      el.style.height = '280px'
+      el.closest('.chat__pill')?.classList.add('chat__pill--tall')
+    })
+    await page.evaluate(() => {
+      window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))
+    })
+    await expect.poll(() => input.evaluate(el => ({
+      collapsed: el.getBoundingClientRect().height < 60,
+      tall: el.closest('.chat__pill')?.classList.contains('chat__pill--tall') || false,
+    }))).toEqual({ collapsed: true, tall: false })
   })
 
   test('Voice input holds a screen wake lock until recording stops', async ({ page }) => {

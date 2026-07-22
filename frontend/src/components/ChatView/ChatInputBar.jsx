@@ -22,7 +22,7 @@
  * ║   CONTRACTS — small but load-bearing                             ║
  * ║                                                                  ║
  * ║   1. AUTOSIZE THRESHOLD                                          ║
- * ║      `handleTextareaChange` toggles `chat__pill--tall` when      ║
+ * ║      Shared textarea sizing toggles `chat__pill--tall` when     ║
  * ║      height > 45px. NOT 30 (single-line is ~31, fires every      ║
  * ║      keystroke), NOT 50 (lags two-line typing). 45 sits          ║
  * ║      safely between single-line and two-line. See ChatView.css   ║

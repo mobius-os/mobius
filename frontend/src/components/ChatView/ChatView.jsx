@@ -2082,10 +2082,9 @@ export default function ChatView({
         // flex-end alignment after a send-from-tall and the freshly
         // empty textarea renders pinned to the bottom — text appears
         // off-center (lower than its resting position) until the
-        // user types again. `handleTextareaChange` re-evaluates this
-        // class on every keystroke, but send doesn't go through that
-        // path. Tap-to-focus doesn't trigger a change event either,
-        // so the visual stayed broken until the next keystroke.
+        // user types again. Shared textarea sizing re-evaluates this
+        // on each committed value, but the synchronous reset keeps the
+        // send transition correct before React commits the empty value.
       }
       try {
         const result = await streamSend(
