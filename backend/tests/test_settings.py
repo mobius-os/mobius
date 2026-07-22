@@ -269,7 +269,7 @@ def test_get_settings_returns_background_agent_defaults(client, auth):
   assert body["agent_settings"]["model"] is None
   assert body["agent_settings"]["effort"] == "medium"
   assert body["background_agents"]["primary"]["provider"] == "codex"
-  assert body["background_agents"]["primary"]["model"] is None
+  assert body["background_agents"]["primary"]["model"] == "gpt-5.6-terra"
   assert body["background_agents"]["primary"]["effort"] == "medium"
   assert body["background_agents"]["fallback"] is None
 
@@ -285,7 +285,7 @@ def test_background_agent_defaults_do_not_inherit_chat_model_defaults(tmp_path):
   background = providers.background_agent_settings(str(tmp_path), "codex")
   assert background["primary"] == {
     "provider": "codex",
-    "model": providers.DEFAULT_MODELS["codex"],
+    "model": providers.DEFAULT_BACKGROUND_MODELS["codex"],
     "effort": "medium",
   }
   assert background["fallback"] is None
@@ -669,7 +669,7 @@ def test_background_agent_settings_drops_cross_provider_models(tmp_path):
   }
   assert background["fallback"] == {
     "provider": "codex",
-    "model": providers.DEFAULT_MODELS["codex"],
+    "model": providers.DEFAULT_BACKGROUND_MODELS["codex"],
     "effort": "medium",
   }
 
@@ -821,11 +821,12 @@ def test_fetch_codex_models_requires_credentials(tmp_path, monkeypatch):
     asyncio.run(providers._fetch_codex_models(str(tmp_path)))
 
 
-def test_model_prefs_default_empty(client, auth):
-  """A fresh owner has no hidden models."""
+def test_model_prefs_default_is_curated(client, auth):
+  """A fresh owner starts with the compact recommended model set."""
+  from app import providers
   res = client.get("/api/owner/model-prefs", headers=auth)
   assert res.status_code == 200
-  assert res.json() == {"hidden_ids": []}
+  assert res.json() == {"hidden_ids": providers.hidden_model_ids(None)}
 
 
 def test_model_prefs_roundtrip_dedupes(client, auth, db):
@@ -899,24 +900,36 @@ def test_model_prefs_clear(client, auth, db):
   assert owner.model_prefs_json == {"hidden_ids": []}
 
 
-def test_live_model_entries_use_live_sdk_order_only():
-  """A successful live fetch uses provider SDK/CLI order and does not
-  mix in stale fallback rows."""
+def test_live_model_entries_keep_curated_aliases_plus_live_extras():
+  """The requested compatibility aliases survive a sparse live catalog."""
   from app.providers import _live_model_entries
   merged = _live_model_entries(
     "claude", ["claude-future-model", "claude-opus-4-8"],
   )
-  assert merged == [
-    {
-      "id": "claude-future-model", "label": "claude-future-model",
-      "provider": "claude", "available": True,
-    },
-    {
-      "id": "claude-opus-4-8", "label": "Opus 4.8",
-      "provider": "claude", "available": True,
-    },
+  assert [row["id"] for row in merged] == [
+    "claude-fable-5",
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-future-model",
   ]
   assert "claude-haiku-4-5-20251001" not in [m["id"] for m in merged]
+
+
+def test_live_model_entries_float_curated_defaults_in_requested_order():
+  from app import providers
+
+  entries = providers._live_model_entries(
+    "claude",
+    ["claude-sonnet-5", "claude-future-model", "claude-fable-5", "claude-opus-4-8"],
+  )
+  assert [entry["id"] for entry in entries] == [
+    "claude-fable-5",
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-future-model",
+  ]
 
 
 def test_resolve_displayed_models_keeps_selected_even_when_hidden():

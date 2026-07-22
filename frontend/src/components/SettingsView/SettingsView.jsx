@@ -56,6 +56,10 @@ const FALLBACK_MODEL_ROWS = {
   claude: CLAUDE_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
   codex: CODEX_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
 }
+const DEFAULT_BACKGROUND_MODELS = {
+  claude: 'claude-opus-4-8',
+  codex: 'gpt-5.6-terra',
+}
 
 // POST /platform/apply is the authoritative outcome of the mutation it just
 // performed. Project that result into the status shape immediately so a failed
@@ -92,6 +96,10 @@ function defaultModel(provider) {
   return FALLBACK_MODEL_ROWS[provider]?.[0]?.id || ''
 }
 
+function defaultBackgroundModel(provider) {
+  return DEFAULT_BACKGROUND_MODELS[provider] || defaultModel(provider)
+}
+
 function isKnownProvider(provider) {
   return PROVIDER_CHOICES.some(p => p.id === provider)
 }
@@ -112,7 +120,7 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
     if (!provider || seen.has(provider)) return
     rows.push({
       provider,
-      model: choice?.model || defaultModel(provider),
+      model: choice?.model || defaultBackgroundModel(provider),
       effort: choice?.effort || defaultEffort(provider),
       enabled: Object.prototype.hasOwnProperty.call(choice || {}, 'enabled')
         ? choice.enabled !== false
@@ -438,6 +446,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
   const setupFocusRefs = useRef({})
   const [attentionSection, setAttentionSection] = useState('')
+  const configuredProvidersRef = useRef(configuredProviders)
+  const authProvidersAtStartRef = useRef(null)
+  configuredProvidersRef.current = configuredProviders
 
   const setSetupFocusRef = useCallback((section, node) => {
     if (node) setupFocusRefs.current[section] = node
@@ -725,20 +736,60 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // render, which combined with the row's CSS transitions made the
   // panel feel jittery. With the updater form, deps are empty.
   const toggleClaudeAuth = useCallback(
-    () => setExpandedAuth(prev => prev === 'claude' ? null : 'claude'),
+    () => setExpandedAuth(prev => {
+      if (prev !== 'claude') {
+        authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
+      }
+      return prev === 'claude' ? null : 'claude'
+    }),
     [],
   )
   const toggleCodexAuth = useCallback(
-    () => setExpandedAuth(prev => prev === 'codex' ? null : 'codex'),
+    () => setExpandedAuth(prev => {
+      if (prev !== 'codex') {
+        authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
+      }
+      return prev === 'codex' ? null : 'codex'
+    }),
     [],
   )
-  const onClaudeAuthDone = useCallback(() => {
-    setExpandedAuth(null)
-  }, [])
-  const onCodexAuthDone = useCallback(() => {
+  const onProviderConnected = useCallback((provider) => {
+    const providersBefore = authProvidersAtStartRef.current || configuredProviders
+    authProvidersAtStartRef.current = null
+    const newlyConnected = !providersBefore.has(provider)
+    if (newlyConnected) {
+      const current = backgroundDraftRef.current || normalizeBackgroundAgents(
+        settingsQuery.data?.background_agents,
+        providerFromSettings(settingsQuery.data),
+      )
+      const connectedRow = {
+        ...(current.find(row => row.provider === provider) || { provider }),
+        enabled: true,
+        model: defaultBackgroundModel(provider),
+        effort: defaultEffort(provider),
+      }
+      const rest = current.filter(row => row.provider !== provider)
+      const next = providersBefore.size === 0
+        ? [connectedRow, ...rest.map(row => ({ ...row, enabled: false }))]
+        : current.map(row => row.provider === provider ? connectedRow : row)
+      backgroundDraftRef.current = next
+      setBackgroundDraft(next)
+      persistBackgroundAgents(next)
+      if (providersBefore.size === 0) {
+        api.settings.save({ provider }).then(() => {
+          settingsQueries.owner.invalidate(queryClient)
+        }).catch(() => {})
+      }
+    }
     settingsQueries.owner.invalidate(queryClient)
     setExpandedAuth(null)
-  }, [queryClient])
+  }, [configuredProviders, persistBackgroundAgents, queryClient, settingsQuery.data])
+  const onClaudeAuthDone = useCallback(() => {
+    onProviderConnected('claude')
+  }, [onProviderConnected])
+  const onCodexAuthDone = useCallback(() => {
+    onProviderConnected('codex')
+  }, [onProviderConnected])
 
   async function toggleTheme() {
     if (themeSwitching) return
@@ -1285,7 +1336,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                       }}
                       onModelChange={(model, effort) => setBackgroundProviderChoice(row.provider, {
                         enabled: !!model,
-                        model: model || defaultModel(row.provider),
+                        model: model || defaultBackgroundModel(row.provider),
                         ...(effort ? { effort } : {}),
                       })}
                       onEffortChange={(effort) => setBackgroundProviderChoice(row.provider, { effort })}
