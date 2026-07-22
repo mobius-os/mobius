@@ -764,6 +764,14 @@ test.describe('Workspace drag (PR3)', () => {
       .toEqual(beforeOrder)
     await expect(page.locator('.workspace__drag-chip')).toHaveCount(0)
     expect(beforeOrder).toEqual([`chat:${a.id}`, `chat:${b.id}`, `chat:${c.id}`])
+
+    // A conventional vertical mouse wheel reaches the same hidden overflow;
+    // trackpad deltaX remains native and is deliberately not doubled.
+    await strip.evaluate(el => { el.scrollLeft = 0 })
+    await strip.dispatchEvent('wheel', { deltaX: 0, deltaY: 96, deltaMode: 0 })
+    await expect.poll(() => strip.evaluate(el => el.scrollLeft), {
+      timeout: 3000, message: 'vertical wheel advances the horizontal tab strip',
+    }).toBeGreaterThan(50)
   })
 
   test('phone touch-drag resizes the pane divider', async ({ page }) => {
@@ -799,7 +807,13 @@ test.describe('Workspace drag (PR3)', () => {
     })
     expect(motion.name).toBe('shell-tab-title-cycle')
     expect(motion.iterations).toBe('1')
-    expect(motion.duration).toBe('4.8s')
+    const durationMs = Number.parseFloat(motion.duration) * 1000
+    const expectedDurationMs = Math.min(
+      32000,
+      Math.max(8000, Math.round(Math.abs(motion.shift) * (1000 / 6))),
+    )
+    expect(durationMs).toBeCloseTo(expectedDurationMs, -1)
+    expect(durationMs).toBeGreaterThan(4800)
     expect(motion.delay).toBe('0.7s')
     expect(motion.shift).toBeLessThan(0)
 

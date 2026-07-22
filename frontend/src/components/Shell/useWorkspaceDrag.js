@@ -41,12 +41,15 @@ function cssEscape(v) {
 // lands on the original source AFTER the shield is gone, so shield timing can't
 // stop it. Scope the guard to that source: a real drag often produces no compat
 // click at all, and a blanket "next click" guard would eat a quick Undo or other
-// unrelated action during this short window.
+// unrelated action during this short window. A fresh pointerdown is a new user
+// interaction, not the old drag's compat click, so it retires any standing guard
+// before that interaction can produce its own click.
 function suppressNextSourceClick(sourceEl) {
   let cleared = false
   const clear = () => {
     if (cleared) return
     cleared = true
+    window.removeEventListener('pointerdown', clear, true)
     window.removeEventListener('click', onClick, true)
     clearTimeout(timer)
   }
@@ -60,6 +63,7 @@ function suppressNextSourceClick(sourceEl) {
     ev.preventDefault()
     clear()
   }
+  window.addEventListener('pointerdown', clear, true)
   window.addEventListener('click', onClick, true)
   const timer = setTimeout(clear, 400)
 }

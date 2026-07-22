@@ -368,7 +368,7 @@
 .workspace__strip--focused
   .shell__tab--active .shell__tab-text[data-overflow="true"]
   .shell__tab-text-inner {
-  animation: shell-tab-title-cycle 4.8s ease-in-out 700ms 1 both;
+  animation: shell-tab-title-cycle var(--tab-title-duration) linear 700ms 1 both;
 }
 @keyframes shell-tab-title-cycle {
   0%, 25% { transform: translate3d(0, 0, 0); }

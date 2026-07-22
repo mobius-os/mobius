@@ -89,7 +89,7 @@ import {
   EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
-import { PaneTab, stripKeyDown } from './PaneStrip.jsx'
+import { PaneTab, scrollStripWheel, stripKeyDown } from './PaneStrip.jsx'
 import useAppIntentNavigation from './useAppIntentNavigation.js'
 import useDesktopSidebar from './useDesktopSidebar.js'
 import ShellBrand from './ShellBrand.jsx'
@@ -3214,6 +3214,7 @@ export default function Shell() {
         return (
         <nav
           className="shell__tabstrip"
+          onWheel={scrollStripWheel}
           // INV 9 (inert beat): the single-pane strip clears WITH its pane during
           // an exit beat, so it is pointer/keyboard inert throughout — not just under
           // the drawer (M4). It matches the WorkspaceChrome strips, which already go
