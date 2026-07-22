@@ -60,7 +60,7 @@ test('an uploaded attachment survives a chat switch and remains sendable', async
       body: JSON.stringify({ status: 'started' }),
     })
   })
-  await page.keyboard.press('Enter')
+  await composer.press('Enter')
   await expect.poll(() => sentBody?.attachments?.map(file => file.name) || [])
     .toEqual(['draft-note.txt'])
 })
