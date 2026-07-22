@@ -19,5 +19,14 @@ def test_frame_error_report_redacts_module_token():
     r"[\s\S]{0,120}?if \(window\.__frameMounted\)",
     frame,
   ), "runtime error details must be redacted before any console branch"
+  report_block = frame.split("function reportAppError", 1)[1].split(
+    "window.addEventListener('error'", 1
+  )[0]
+  assert "const safeMessage = redactErrorCredentials(message)" in report_block
+  assert "const safeStack = stack ? redactErrorCredentials(stack)" in report_block
+  assert "const safeUrl = redactErrorCredentials(location.href)" in report_block
+  assert "message: safeMessage.slice" in report_block
+  assert "stack: safeStack ? safeStack.slice" in report_block
+  assert frame.count("e.preventDefault()") >= 2
   assert "user-select: text" in frame
   assert "Report to agent" in frame
