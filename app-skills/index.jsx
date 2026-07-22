@@ -130,6 +130,12 @@ const CSS = `
 .sk-chev { flex: 0 0 auto; align-self: center; color: var(--muted); opacity: 0.6; }
 .sk-chev svg { width: 18px; height: 18px; }
 
+/* row + trailing uninstall button (installed:* skills only) */
+.sk-rowwrap { display: flex; align-items: center; border-bottom: 1px solid var(--border-light, var(--border)); }
+.sk-rowwrap:last-child { border-bottom: none; }
+.sk-rowwrap > .sk-row { flex: 1; min-width: 0; border-bottom: none; }
+.sk-rowtrash { flex: 0 0 auto; margin-left: -4px; }
+
 /* provenance + usage chips (rows and detail) */
 .sk-provrow { display: flex; align-items: center; gap: 7px; margin-top: 6px; flex-wrap: wrap; min-width: 0; }
 .sk-prov { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
@@ -340,6 +346,7 @@ function CatalogCard({ skill, desc, expanded, installed, busy, githubUrl, onTogg
           className="sk-btn"
           disabled={busy || installed}
           onClick={(e) => { e.stopPropagation(); onInstall() }}
+          title={installed ? 'Already in your agent’s skills' : 'Install this skill for your agent'}
         >
           {installed ? 'Installed' : busy ? 'Installing…' : 'Install'}
         </button>
@@ -350,6 +357,7 @@ function CatalogCard({ skill, desc, expanded, installed, busy, githubUrl, onTogg
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
+            title="Open the full SKILL.md on GitHub"
           >
             Read on GitHub {EXTERNAL}
           </a>
@@ -487,7 +495,9 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
             <>
               <p className="sk-cat-note">
                 Public catalogs that host installable skills. Open one to see every skill it
-                holds, or use ✦ Find on the main screen to have the agent search them all.
+                holds, or use ✦ Find on the main screen to have the agent search them all —
+                the agent also covers community awesome-lists and the rest of GitHub, which
+                only index skills and can’t be browsed here.
               </p>
               <div className="sk-list">
                 {sources.map((s) => (
@@ -578,6 +588,9 @@ export default function SkillsApp({ appId, token }) {
   const [removeArmed, setRemoveArmed] = useState(false)
   const [removeBusy, setRemoveBusy] = useState(false)
   const [removeError, setRemoveError] = useState(null)
+  const [rowArmed, setRowArmed] = useState(null) // id armed for list-row removal
+  const [rowBusy, setRowBusy] = useState(null)
+  const [rowError, setRowError] = useState(null)
   const [catalogOpen, setCatalogOpen] = useState(false)
   const [catalogMounted, setCatalogMounted] = useState(false)
   const [online, setOnline] = useState(initialOnline)
@@ -736,24 +749,36 @@ export default function SkillsApp({ appId, token }) {
 
   // Uninstall is a two-tap: first tap arms (danger ring + explainer), a second
   // within 4s executes. Modal confirms don't exist inside the sandboxed iframe.
+  // The same gesture exists in two places — the detail header and each
+  // installed row in the list — with separate arm state so they can't
+  // cross-trigger.
   useEffect(() => { setRemoveArmed(false); setRemoveError(null) }, [selected])
   useEffect(() => {
     if (!removeArmed) return undefined
     const t = setTimeout(() => setRemoveArmed(false), 4000)
     return () => clearTimeout(t)
   }, [removeArmed])
+  useEffect(() => {
+    if (!rowArmed) return undefined
+    const t = setTimeout(() => setRowArmed(null), 4000)
+    return () => clearTimeout(t)
+  }, [rowArmed])
+
+  async function deleteSkill(id) {
+    const res = await fetch(`/api/skills/${encodeURIComponent(id)}`, {
+      method: 'DELETE', headers: authHeaders,
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data?.detail || `uninstall ${res.status}`)
+    window.mobius?.signal?.('skill_uninstalled', { slug: id })
+  }
 
   async function uninstallCurrent() {
     if (!current || removeBusy) return
     setRemoveBusy(true)
     setRemoveError(null)
     try {
-      const res = await fetch(`/api/skills/${encodeURIComponent(current.id)}`, {
-        method: 'DELETE', headers: authHeaders,
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data?.detail || `uninstall ${res.status}`)
-      window.mobius?.signal?.('skill_uninstalled', { slug: current.id })
+      await deleteSkill(current.id)
       closeSkill()
       load({ isRefresh: true })
     } catch (err) {
@@ -762,6 +787,22 @@ export default function SkillsApp({ appId, token }) {
     } finally {
       setRemoveBusy(false)
       setRemoveArmed(false)
+    }
+  }
+
+  async function uninstallFromList(id) {
+    if (rowBusy) return
+    setRowBusy(id)
+    setRowError(null)
+    try {
+      await deleteSkill(id)
+      load({ isRefresh: true })
+    } catch (err) {
+      setRowError(String(err?.message || err))
+      window.mobius?.signal?.('error', { message: String(err?.message || err), source: 'skill_uninstall' })
+    } finally {
+      setRowBusy(null)
+      setRowArmed(null)
     }
   }
 
@@ -852,12 +893,13 @@ export default function SkillsApp({ appId, token }) {
               disabled={removeBusy}
               onClick={() => (removeArmed ? uninstallCurrent() : setRemoveArmed(true))}
               aria-label={removeArmed ? 'Tap again to remove this skill' : 'Remove this skill'}
+              title={removeArmed ? 'Tap again to confirm removal' : 'Remove this skill — asks once more before deleting'}
             >{TRASH}</button>
           )}
           <button className="sk-iconbtn" onClick={() => {
             window.mobius?.signal?.('edit_requested', { type: 'skill', slug: current.id })
             askAgent(`Help me edit the "${current.id}" skill. Here's what I want to change: `)
-          }} aria-label="Edit skill with the agent">{PLUS}</button>
+          }} aria-label="Edit skill with the agent" title="Edit this skill — opens a chat with the agent">{PLUS}</button>
         </div>
         {removeArmed && !removeError && (
           <div className="sk-alert" role="status">Tap the bin again to remove “{current.id}”. Its bytes are saved to git history first.</div>
@@ -913,10 +955,18 @@ export default function SkillsApp({ appId, token }) {
             <span className="sk-subtitle">{skills ? `${skills.length} agent ${skills.length === 1 ? 'skill' : 'skills'}` : 'Your agent’s abilities'}</span>
           </div>
         </div>
-        <button className="sk-iconbtn" onClick={findSkills} aria-label="Ask the agent to find a new skill">{SPARKLE}</button>
-        <button className="sk-iconbtn" onClick={openCatalog} aria-label="Browse skill catalogs">{BOOK}</button>
-        <button className={`sk-iconbtn${refreshing ? ' is-spinning' : ''}`} onClick={refresh} disabled={refreshing} aria-label="Refresh skills">{REFRESH}</button>
+        <button className="sk-iconbtn" onClick={findSkills} aria-label="Ask the agent to find a new skill"
+          title="Find a new skill — opens a chat where the agent searches the public catalogs with you">{SPARKLE}</button>
+        <button className="sk-iconbtn" onClick={openCatalog} aria-label="Browse skill catalogs"
+          title="Browse the public skill catalogs yourself and install from them">{BOOK}</button>
+        <button className={`sk-iconbtn${refreshing ? ' is-spinning' : ''}`} onClick={refresh} disabled={refreshing}
+          aria-label="Refresh skills" title="Refresh the skill list">{REFRESH}</button>
       </header>
+
+      {rowArmed && !rowError && (
+        <div className="sk-alert" role="status">Tap the bin again to remove “{rowArmed}”. Its bytes are saved to git history first.</div>
+      )}
+      {rowError && <div className="sk-alert is-error" role="alert">{rowError}</div>}
 
       <div className="sk-scroll">
         <div className="sk-page">
@@ -966,18 +1016,34 @@ export default function SkillsApp({ appId, token }) {
 
         {skills !== null && filtered.length > 0 && (
           <div className="sk-list">
-            {filtered.map((s) => (
-              <button key={s.id} className="sk-row" onClick={() => openSkill(s.id)}>
-                <span className="sk-rowicon" aria-hidden="true">{HAMMER}</span>
-                <span className="sk-rowbody">
-                  <div className="sk-rowname">{s.title}</div>
-                  <div className="sk-rowslug">{s.id}</div>
-                  {s.description && <div className="sk-rowdesc">{s.description}</div>}
-                  <ProvChips provenance={s.provenance} uses={s.uses} />
-                </span>
-                <span className="sk-chev" aria-hidden="true">{CHEV}</span>
-              </button>
-            ))}
+            {filtered.map((s) => {
+              const armed = rowArmed === s.id
+              return (
+                <div key={s.id} className="sk-rowwrap">
+                  <button className="sk-row" onClick={() => openSkill(s.id)} title={`Open “${s.title}”`}>
+                    <span className="sk-rowicon" aria-hidden="true">{HAMMER}</span>
+                    <span className="sk-rowbody">
+                      <div className="sk-rowname">{s.title}</div>
+                      <div className="sk-rowslug">{s.id}</div>
+                      {s.description && <div className="sk-rowdesc">{s.description}</div>}
+                      <ProvChips provenance={s.provenance} uses={s.uses} />
+                    </span>
+                    <span className="sk-chev" aria-hidden="true">{CHEV}</span>
+                  </button>
+                  {isUninstallable(s.provenance) && (
+                    <button
+                      className={`sk-iconbtn sk-rowtrash${armed ? ' is-armed' : ''}`}
+                      disabled={rowBusy === s.id}
+                      onClick={() => {
+                        if (armed) { uninstallFromList(s.id) } else { setRowArmed(s.id); setRowError(null) }
+                      }}
+                      aria-label={armed ? `Tap again to remove ${s.title}` : `Remove ${s.title}`}
+                      title={armed ? 'Tap again to confirm removal' : 'Remove this skill — asks once more before deleting'}
+                    >{TRASH}</button>
+                  )}
+                </div>
+              )
+            })}
           </div>
         )}
 
