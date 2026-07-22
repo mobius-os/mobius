@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-import { persistComposerDraft } from '../composerDraft.js'
+import { persistComposerDraft, readComposerDraft } from '../composerDraft.js'
 
 function storageStub(initial = {}) {
   const values = new Map(Object.entries(initial))
@@ -24,6 +24,53 @@ test('persists and clears a chat draft synchronously', () => {
   assert.equal(storage.getItem('draft:chat-a'), null)
 })
 
+test('persists uploaded attachments with text and restores a sendable draft', () => {
+  const storage = storageStub()
+  const attachments = [{
+    id: 'local-only',
+    name: 'map.png',
+    size: 1096340,
+    mime_type: 'image/png',
+    objectUrl: 'blob:temporary-and-non-restorable',
+    status: 'done',
+  }]
+
+  assert.equal(
+    persistComposerDraft('chat-map', 'What is this?', attachments, storage),
+    true,
+  )
+  assert.deepEqual(readComposerDraft('chat-map', storage), {
+    input: 'What is this?',
+    attachments: [{
+      name: 'map.png',
+      size: 1096340,
+      mime_type: 'image/png',
+    }],
+  })
+  assert.equal(storage.getItem('draft:chat-map').includes('blob:temporary'), false)
+})
+
+test('keeps legacy plain-text drafts readable', () => {
+  const storage = storageStub({ 'draft:legacy': 'unfinished thought' })
+  assert.deepEqual(readComposerDraft('legacy', storage), {
+    input: 'unfinished thought',
+    attachments: [],
+  })
+})
+
+test('does not restore attachments that never finished uploading', () => {
+  const storage = storageStub()
+  persistComposerDraft('chat-a', 'draft', [
+    { name: 'ready.png', status: 'done', mime_type: 'image/png', size: 1 },
+    { name: 'still-uploading.png', status: 'uploading', mime_type: 'image/png', size: 2 },
+    { name: 'failed.png', status: 'error', mime_type: 'image/png', size: 3 },
+  ], storage)
+  assert.deepEqual(
+    readComposerDraft('chat-a', storage).attachments.map(a => a.name),
+    ['ready.png'],
+  )
+})
+
 test('evicts one draft and retries when session storage is full', () => {
   const storage = storageStub({ 'draft:chat-a': 'older' })
   const normalSet = storage.setItem.bind(storage)
@@ -38,7 +85,7 @@ test('evicts one draft and retries when session storage is full', () => {
     normalSet(key, value)
   }
 
-  assert.equal(persistComposerDraft('chat-b', 'latest', storage), true)
+  assert.equal(persistComposerDraft('chat-b', 'latest', [], storage), true)
   assert.equal(storage.getItem('draft:chat-a'), null)
   assert.equal(storage.getItem('draft:chat-b'), 'latest')
 })
@@ -49,7 +96,7 @@ test('the composer state boundary saves before scheduling React state', () => {
   const end = source.indexOf('\n  }', start)
   const body = source.slice(start, end)
 
-  const save = body.indexOf('persistComposerDraft(chatId, nextInput)')
+  const save = body.indexOf('persistComposerDraft(chatId, nextInput, draftAttachmentsRef.current)')
   const render = body.indexOf('setInputState(nextInput)')
   assert.ok(save >= 0, 'all composer changes must be persisted directly')
   assert.ok(render > save, 'draft persistence must happen before navigation can unmount React')

@@ -69,8 +69,10 @@
  * ╚══════════════════════════════════════════════════════════════════╝
  */
 
-import { useRef, useLayoutEffect } from 'react'
+import { useRef, useState, useEffect, useLayoutEffect } from 'react'
 import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
+import { BASE } from '../../api/client.js'
+import { mediaTokenParam } from '../../api/mediaToken.js'
 import { resolveComposerEnterAction } from './composerShortcuts.js'
 import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
 
@@ -212,12 +214,34 @@ function stripExt(name) {
  *     type badge and the filename below.
  *  The remove `×` is a 20×20 button floating at the card's top-
  *  right corner (half-overlapping outside). */
-function FileChips({ files, onRemove }) {
+function FileChips({ files, onRemove, chatId }) {
+  const [tokenParam, setTokenParam] = useState('')
+  const hasRestoredImage = files?.some(file => (
+    file.mime_type?.startsWith('image/') && !file.objectUrl
+  ))
+
+  useEffect(() => {
+    if (!hasRestoredImage || !chatId) {
+      setTokenParam('')
+      return undefined
+    }
+    let cancelled = false
+    mediaTokenParam(chatId).then(param => {
+      if (!cancelled) setTokenParam(param)
+    })
+    return () => { cancelled = true }
+  }, [chatId, hasRestoredImage])
+
   if (!files?.length) return null
   return (
     <div className="chat__attach-tray">
       {files.map(chip => {
-        const isImage = !!chip.objectUrl
+        const isImage = !!chip.objectUrl || chip.mime_type?.startsWith('image/')
+        const previewSrc = chip.objectUrl || (
+          isImage && tokenParam
+            ? `${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(chip.name)}${tokenParam}`
+            : ''
+        )
         const cls = classifyFile(chip.name || '')
         const errorMark = chip.status === 'error' ? ' chat__attach-card--error' : ''
         return (
@@ -230,8 +254,10 @@ function FileChips({ files, onRemove }) {
             }
             title={chip.status === 'error' ? chip.error : chip.name}
           >
-            {isImage ? (
-              <img className="chat__attach-card-thumb" src={chip.objectUrl} alt="" />
+            {isImage && previewSrc ? (
+              <img className="chat__attach-card-thumb" src={previewSrc} alt="" />
+            ) : isImage ? (
+              <span className="chat__attach-card-spin" aria-hidden="true" />
             ) : (
               <>
                 <span className={`chat__attach-card-icon chat__attach-card-icon--${cls.kind}`}>
@@ -315,6 +341,7 @@ function FileChips({ files, onRemove }) {
  * The bar's only job: composition + the Send/Stop/Mic resolution.
  */
 export default function ChatInputBar({
+  chatId,
   input,
   onInputChange,
   onSubmit,
@@ -456,7 +483,11 @@ export default function ChatInputBar({
         {leftButtons}
         <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}`}>
           {hasFiles && (
-            <FileChips files={pendingFiles} onRemove={onRemoveFile} />
+            <FileChips
+              files={pendingFiles}
+              onRemove={onRemoveFile}
+              chatId={chatId}
+            />
           )}
           <div className="chat__input-line">
             <textarea
