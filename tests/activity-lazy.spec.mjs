@@ -13,6 +13,82 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 test.use({ serviceWorkers: 'block', hasTouch: true })
 attachCleanup()
 
+test('the first thinking event becomes interactive without moving the row', async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 915 })
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill({ status: 202, contentType: 'application/json', body: '{"status":"started"}' })
+  })
+  await page.route('**/api/chat/stop', route =>
+    route.fulfill({ status: 200, body: '{}' }))
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
+    route.fulfill({ status: 204, body: '' }))
+
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+      || document.querySelector('.chat__scroll')
+      || document.querySelector('.chat__form')),
+    { timeout: 10000 },
+  )
+  const chat = await createTaggedChat(page, 'thinking-handoff')
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
+  await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+
+  // The empty chat opens one terminal stream before a turn starts. Install
+  // the gated handler only after that mount so the delayed response belongs to
+  // the message below, leaving the real placeholder observable first.
+  let releaseThinking
+  const thinkingGate = new Promise(resolve => { releaseThinking = resolve })
+  let streamCount = 0
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+    streamCount += 1
+    if (streamCount > 1) return route.fulfill({ status: 204, body: '' })
+    await thinkingGate
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+      body: [
+        `data: ${JSON.stringify({
+          type: 'thinking',
+          content: 'Checking the handoff.',
+          ts: 1700000001000,
+        })}\n\n`,
+        'data: {"type":"done"}\n\n',
+      ].join(''),
+    })
+  })
+
+  await page.getByRole('textbox', { name: 'Message Möbius…' }).fill('Think about this')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.locator('.chat__msg--user')).toBeVisible()
+
+  const placeholder = page.locator('.chat__thinking .chat__activity-header')
+  await expect(placeholder).toBeVisible()
+  await expect(placeholder).not.toHaveAttribute('aria-expanded', /.+/)
+  const before = await placeholder.boundingBox()
+  expect(before).not.toBeNull()
+
+  releaseThinking()
+  const thought = page.locator(
+    '.chat__activity--direct-thought > .chat__activity-header[aria-expanded]',
+  )
+  await expect(thought).toBeVisible()
+  await expect(thought).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.locator('.chat__thinking')).toHaveCount(0)
+  await page.evaluate(() => new Promise(resolve =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  const after = await thought.boundingBox()
+  expect(after).not.toBeNull()
+
+  expect(Math.abs(after.x - before.x)).toBeLessThanOrEqual(0.5)
+  expect(Math.abs(after.y - before.y)).toBeLessThanOrEqual(0.5)
+  expect(Math.abs(after.width - before.width)).toBeLessThanOrEqual(0.5)
+  expect(Math.abs(after.height - before.height)).toBeLessThanOrEqual(0.5)
+})
+
 test('a lone activity is direct and sources render as local compact pills', async ({ page }) => {
   await page.setViewportSize({ width: 412, height: 915 })
   const requestedSourceHosts = []
