@@ -224,6 +224,10 @@ export default function useWorkspaceDrag({
     // ── One drag session ──────────────────────────────────────────────────────
     function startSession(downEvent, srcEl, sourceKind, key, paneId) {
       const isTouch = downEvent.pointerType !== 'mouse'
+      const touchIntentKind = sourceKind === 'tab'
+        && downEvent.target?.closest?.('[data-touch-drag-handle]')
+        ? 'tab-handle'
+        : sourceKind
       const start = { x: downEvent.clientX, y: downEvent.clientY }
       const pointerId = downEvent.pointerId
       let armed = false
@@ -294,9 +298,10 @@ export default function useWorkspaceDrag({
         }
       }
 
-      // A deliberate tab move (either axis) or cross-axis drawer-row move arms
-      // immediately. A stationary hold is the alternate path to the tab/row menu;
-      // it deliberately does not unfold the workspace just because time passed.
+      // A vertical tab-body move, either-axis grip move, or cross-axis drawer-row
+      // move arms immediately. A stationary hold is the alternate path to the
+      // tab/row menu; it deliberately does not unfold the workspace just because
+      // time passed.
       if (isTouch) {
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
@@ -378,7 +383,7 @@ export default function useWorkspaceDrag({
         const dy = ev.clientY - start.y
         if (!armed) {
           if (isTouch) {
-            const intent = touchMoveIntent(dx, dy, sourceKind)
+            const intent = touchMoveIntent(dx, dy, touchIntentKind)
             if (intent === 'scroll') { cancelled = true; cleanup(); return }
             if (intent === 'drag') {
               clearTimeout(holdTimer)

@@ -648,11 +648,16 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
-test('mobile tabs own either-axis dragging while empty strip space retains native pan-x', () => {
+test('mobile tab bodies pan while a dedicated grip owns either-axis dragging', () => {
   assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
-  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*none/)
+  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
+  assert.match(shellCss, /\.shell__tab-drag-handle\s*\{[\s\S]*?touch-action:\s*none/)
+  assert.match(paneStrip, /data-touch-drag-handle=\{dragKey\}/)
+  assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
+    'the nested grip must not duplicate the generic drag-source selector')
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
-  assert.match(dragBinding, /touchMoveIntent\(dx, dy, sourceKind\)/)
+  assert.match(dragBinding, /downEvent\.target\?\.closest\?\.\('\[data-touch-drag-handle\]'\)/)
+  assert.match(dragBinding, /touchMoveIntent\(dx, dy, touchIntentKind\)/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
 })
 

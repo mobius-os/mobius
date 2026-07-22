@@ -518,6 +518,12 @@ function twoStackedPanesThreeTabs(a, b, c) {
   return paneModel.focusPane(ws, 'p0')
 }
 
+function singlePaneThreeTabs(a, b, c) {
+  return paneModel.seedFromFlatTabs([
+    { kind: 'chat', id: a }, { kind: 'chat', id: b }, { kind: 'chat', id: c },
+  ])
+}
+
 function whichPaneHas(ws, tabKey) {
   for (const [pid, pane] of Object.entries(ws.panes)) {
     if (pane.tabs.some(t => `${t.kind}:${t.id}` === tabKey)) return pid
@@ -568,7 +574,7 @@ async function touchDrag(page, sourceLocator, toX, toY, { firstDx = 0, firstDy =
   await cdp.detach()
 }
 
-async function bootThreeTab(page, tag, workspaceFixture = twoPanesThreeTabs) {
+async function bootThreeTab(page, tag, workspaceFixture = twoPanesThreeTabs, expectTiled = true) {
   await boot(page, WIDE)
   // These cases exercise full-width three-pane geometry. The persistent
   // sidebar legitimately reduces the usable content rect, so make the
@@ -581,7 +587,8 @@ async function bootThreeTab(page, tag, workspaceFixture = twoPanesThreeTabs) {
   await mockApps(page, [])
   await seedWorkspace(page, workspaceFixture(a.id, b.id, c.id))
   await page.goto(`${BASE}/shell/?chat=${c.id}`, { waitUntil: 'domcontentloaded' })
-  await waitTiled(page)
+  if (expectTiled) await waitTiled(page)
+  else await expect(page.locator('[data-pane-strip="p0"]')).toBeVisible({ timeout: 8000 })
   return { a, b, c }
 }
 
@@ -687,7 +694,7 @@ test.describe('Workspace drag (PR3)', () => {
       `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${a.id}"]`,
     ).boundingBox()
     const src = page.locator(
-      `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`,
+      `[data-pane-strip="p0"] [data-touch-drag-handle="chat:${c.id}"]`,
     )
     await touchDrag(page, src, target.x + 2, target.y + target.height / 2, {
       firstDx: -12, firstDy: 0,
@@ -696,6 +703,33 @@ test.describe('Workspace drag (PR3)', () => {
       .map(t => `${t.kind}:${t.id}`), {
       timeout: 3000, message: 'the real horizontal touch stream reordered p0',
     }).toEqual([`chat:${c.id}`, `chat:${a.id}`])
+  })
+
+  test('phone horizontal swipe over a tab body scrolls overflow without reordering', async ({ page }) => {
+    const { a, b, c } = await bootThreeTab(
+      page, 'touchScroll', singlePaneThreeTabs, false,
+    )
+    await page.setViewportSize(PHONE)
+    const strip = page.locator('[data-pane-strip="p0"]')
+    await expect.poll(() => strip.evaluate(el => el.scrollWidth > el.clientWidth), {
+      timeout: 3000, message: 'the phone strip has horizontal overflow',
+    }).toBe(true)
+    const beforeOrder = (await readWs(page)).panes.p0.tabs.map(t => `${t.kind}:${t.id}`)
+    const beforeScroll = await strip.evaluate(el => el.scrollLeft)
+    const stripBox = await strip.boundingBox()
+    const body = page.locator(
+      `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${b.id}"] .shell__tab-text`,
+    )
+    await touchDrag(page, body, stripBox.x + 20, stripBox.y + stripBox.height / 2, {
+      firstDx: -12, firstDy: 0,
+    })
+    await expect.poll(() => strip.evaluate(el => el.scrollLeft), {
+      timeout: 3000, message: 'native pan-x advances the overflowed strip',
+    }).toBeGreaterThan(beforeScroll + 20)
+    expect((await readWs(page)).panes.p0.tabs.map(t => `${t.kind}:${t.id}`))
+      .toEqual(beforeOrder)
+    await expect(page.locator('.workspace__drag-chip')).toHaveCount(0)
+    expect(beforeOrder).toEqual([`chat:${a.id}`, `chat:${b.id}`, `chat:${c.id}`])
   })
 
   test('phone touch-drag resizes the pane divider', async ({ page }) => {

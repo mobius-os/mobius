@@ -42,10 +42,12 @@ test('passedSlop arms only past the slop radius', () => {
   assert.equal(passedSlop(3, 3), false) // hypot 4.24 < 5
 })
 
-test('touchMoveIntent lets a tab drag on either axis while preserving drawer scrolling', () => {
+test('touchMoveIntent preserves tab-body scrolling and gives the grip either-axis drag', () => {
   assert.equal(touchMoveIntent(8, 0, 'tab'), 'pending')
   assert.equal(touchMoveIntent(0, 8.1, 'tab'), 'drag', 'vertical pull drags a horizontal tab strip')
-  assert.equal(touchMoveIntent(8.1, 0, 'tab'), 'drag', 'horizontal pull reorders a tab')
+  assert.equal(touchMoveIntent(8.1, 0, 'tab'), 'scroll', 'horizontal pull scrolls over a tab body')
+  assert.equal(touchMoveIntent(8.1, 0, 'tab-handle'), 'drag', 'the grip reorders horizontally')
+  assert.equal(touchMoveIntent(0, 8.1, 'tab-handle'), 'drag', 'the grip can move across panes')
   assert.equal(touchMoveIntent(8.1, 0, 'drawer'), 'drag', 'horizontal pull drags a vertical drawer row')
   assert.equal(touchMoveIntent(0, 8.1, 'drawer'), 'scroll', 'vertical pull scrolls the drawer')
   assert.equal(touchMoveIntent(10, 10, 'drawer'), 'scroll', 'ambiguous diagonals favor native scroll')

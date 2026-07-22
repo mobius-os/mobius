@@ -316,11 +316,25 @@
   font-size: 12.5px;
   -webkit-tap-highlight-color: transparent;
 }
-/* A draggable tab owns its touch gesture after pointerdown. This matches mature
-   dock/tab UIs: the surrounding strip still pans natively, while the concrete drag
-   source cannot be pointercancelled when the gesture turns horizontal. */
+/* The tab body remains the strip's native horizontal pan surface. A vertical pull
+   can still lift the tab, while the dedicated grip below owns both axes for an
+   intentional horizontal reorder. This keeps overflowed tabs reachable on touch. */
 .shell__tab-open[data-drag-key] {
+  touch-action: pan-x pinch-zoom;
+}
+.shell__tab-drag-handle {
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  margin: -5px 0 -5px -5px;
+  color: var(--muted);
+  cursor: grab;
   touch-action: none;
+}
+.shell__tab-drag-handle:active {
+  cursor: grabbing;
 }
 .shell__tab-open:focus-visible {
   outline: none;
