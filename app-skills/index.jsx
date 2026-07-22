@@ -21,8 +21,10 @@ const CSS = `
 .sk-tab { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 8px; padding: 5px 12px; font-size: 13px; cursor: pointer; }
 .sk-tab.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 .sk-body { flex: 1; overflow-y: auto; padding: 12px 14px; min-height: 0; }
-.sk-crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 12.5px; color: var(--muted); margin-bottom: 10px; }
-.sk-crumbs button { border: none; background: none; color: var(--accent); cursor: pointer; padding: 2px 2px; font-size: 12.5px; }
+.sk-sticky { position: sticky; top: -12px; z-index: 5; background: var(--bg); margin: -12px -14px 10px; padding: 10px 14px 8px; border-bottom: 1px solid var(--border); }
+.sk-crumbs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); }
+.sk-crumbs button { border: 1px solid var(--border); background: var(--surface); color: var(--accent); cursor: pointer; padding: 3px 10px; border-radius: 8px; font-size: 12.5px; }
+.sk-crumbs .sk-search { margin: 8px 0 0; }
 .sk-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 9px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); margin-bottom: 8px; cursor: pointer; color: var(--text); font-size: 14px; }
 .sk-row:hover { border-color: var(--accent); }
 .sk-row .ico { flex: 0 0 auto; opacity: 0.75; }
@@ -33,7 +35,8 @@ const CSS = `
 .sk-card p { margin: 0 0 8px 0; font-size: 13px; color: var(--muted); line-height: 1.45; }
 .sk-details { border-top: 1px solid var(--border); margin: 8px 0 10px; padding-top: 8px; font-size: 12.5px; color: var(--muted); }
 .sk-details .meta { margin: 0 0 6px; word-break: break-all; }
-.sk-details .peek { white-space: pre-wrap; font-size: 12px; line-height: 1.5; max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--bg); }
+.sk-details .peek { white-space: pre-wrap; font-size: 12px; line-height: 1.5; max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--bg); margin-bottom: 8px; }
+.sk-btn.link { text-decoration: none; display: inline-block; margin-left: 8px; }
 .sk-chip { font-size: 10.5px; padding: 2px 7px; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); font-weight: 500; white-space: nowrap; }
 .sk-chip.seed { color: var(--accent); border-color: var(--accent); }
 .sk-chip.installed { color: var(--green, #1e7a46); border-color: var(--green, #1e7a46); }
@@ -83,10 +86,10 @@ POST /api/skills/install and DELETE /api/skills/{name} calls. When asked for "a 
 search the sources, offer the best matches with one-line summaries and provenance, and install the
 chosen one. Keep answers short; this is a side panel.`
 
-// Descriptions auto-load for this many cards the moment a source opens (an
-// instant first paint); every other card lazy-loads its summary as it scrolls
-// into view. Keeps a 200-skill catalog from firing 200 proxy fetches upfront.
-const EAGER_DESCRIPTIONS = 10
+// After a source opens, ALL summaries prefetch in the background through this
+// many parallel workers (raw.githubusercontent fetches — no API rate limit).
+// Cards scrolling into view jump the queue via their IntersectionObserver.
+const PREFETCH_CONCURRENCY = 5
 
 function parseFrontmatter(text) {
   // Minimal SKILL.md frontmatter reader: leading --- block, flat scalars only.
@@ -116,7 +119,7 @@ function firstParagraph(body) {
 // One catalog card. Its summary loads when the card scrolls into view (or on
 // tap as the no-IntersectionObserver fallback); tapping selects the card and
 // opens the detail panel: license, path in the repo, and a peek at the body.
-function SkillCard({ skill, desc, selected, installed, busy, onSelect, onLoad, onInstall }) {
+function SkillCard({ skill, desc, selected, installed, busy, githubUrl, onSelect, onLoad, onInstall }) {
   const ref = useRef(null)
 
   useEffect(() => {
@@ -156,6 +159,17 @@ function SkillCard({ skill, desc, selected, installed, busy, onSelect, onLoad, o
       >
         {installed ? 'Installed' : 'Install'}
       </button>
+      {selected && (
+        <a
+          className="sk-btn ghost link"
+          href={githubUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+        >
+          Read on GitHub ↗
+        </a>
+      )}
     </div>
   )
 }
@@ -168,6 +182,7 @@ export default function SkillsApp({ appId, token }) {
   const [descs, setDescs] = useState({}) // dir -> { description, license, peek } | 'loading' | 'failed'
   const [filter, setFilter] = useState('')
   const [selectedDir, setSelectedDir] = useState(null)
+  const [lastSource, setLastSource] = useState(null) // enables the forward button
   const [installedList, setInstalledList] = useState([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -176,6 +191,8 @@ export default function SkillsApp({ appId, token }) {
   const chatMountRef = useRef(null)
   const descsRef = useRef(descs)
   descsRef.current = descs
+  const inflightRef = useRef(new Set()) // synchronous dedupe (descs lags a render)
+  const scanGenRef = useRef(0) // cancels a stale prefetch pool on source switch
 
   const authed = useMemo(() => ({ Authorization: `Bearer ${token}` }), [token])
 
@@ -223,7 +240,8 @@ export default function SkillsApp({ appId, token }) {
     `https://raw.githubusercontent.com/${source.repo}/${source.ref || 'main'}/${dir}/SKILL.md`
 
   const loadDescription = async (source, dir) => {
-    if (descsRef.current[dir]) return
+    if (descsRef.current[dir] || inflightRef.current.has(dir)) return
+    inflightRef.current.add(dir)
     setDescs((d) => ({ ...d, [dir]: 'loading' }))
     try {
       const meta = parseFrontmatter(await proxyText(rawUrl(source, dir)))
@@ -245,6 +263,9 @@ export default function SkillsApp({ appId, token }) {
   const openSource = async (source) => {
     setBusy(true); setError(null); setNotice(null)
     setNav({ source }); setSkillList(null); setDescs({}); setFilter(''); setSelectedDir(null)
+    setLastSource(source)
+    inflightRef.current = new Set()
+    const gen = ++scanGenRef.current
     try {
       const url = `https://api.github.com/repos/${source.repo}/git/trees/${source.ref || 'main'}?recursive=1`
       const data = await proxyJson(url)
@@ -258,7 +279,14 @@ export default function SkillsApp({ appId, token }) {
         .sort((a, b) => a.name.localeCompare(b.name))
       setSkillList(skills)
       if (data.truncated) setNotice('Large repo — GitHub truncated the file list; some skills may be missing.')
-      skills.slice(0, EAGER_DESCRIPTIONS).forEach((s) => loadDescription(source, s.dir))
+      // Background-prefetch every summary; a stale pool stops when gen moves on.
+      let i = 0
+      const worker = () => {
+        if (scanGenRef.current !== gen) return
+        const s = skills[i++]
+        if (s) loadDescription(source, s.dir).then(worker)
+      }
+      for (let k = 0; k < PREFETCH_CONCURRENCY; k++) worker()
     } catch (e) {
       setError(String(e.message || e))
     } finally {
@@ -329,6 +357,11 @@ export default function SkillsApp({ appId, token }) {
 
         {tab === 'browse' && !nav && (
           <>
+            {lastSource && (
+              <div className="sk-crumbs" style={{ marginBottom: 10 }}>
+                <button onClick={() => openSource(lastSource)}>{lastSource.label} →</button>
+              </div>
+            )}
             <div className="sk-note">
               Public skill catalogs. Open one to see every skill it holds as a card.
               Ask the agent below to search across all of them.
@@ -347,20 +380,21 @@ export default function SkillsApp({ appId, token }) {
 
         {tab === 'browse' && nav && (
           <>
-            <div className="sk-crumbs">
-              <button onClick={() => { setNav(null); setSkillList(null); setError(null) }}>Sources</button>
-              <span>/</span>
-              <span>{nav.source.label}{skillList ? ` — ${skillList.length} skills` : ''}</span>
+            <div className="sk-sticky">
+              <div className="sk-crumbs">
+                <button onClick={() => { setNav(null); setSkillList(null); setError(null) }}>← Sources</button>
+                <span><b>{nav.source.label}</b>{skillList ? ` — ${skillList.length} skills` : ''}</span>
+              </div>
+              {skillList && skillList.length > 8 && (
+                <input
+                  className="sk-search"
+                  placeholder={`Filter ${skillList.length} skills…`}
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                />
+              )}
             </div>
             {busy && !skillList && <div className="sk-empty">Scanning {nav.source.repo}…</div>}
-            {skillList && skillList.length > 8 && (
-              <input
-                className="sk-search"
-                placeholder={`Filter ${skillList.length} skills…`}
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-              />
-            )}
             {shownSkills && shownSkills.map((s) => (
               <SkillCard
                 key={s.dir}
@@ -369,6 +403,7 @@ export default function SkillsApp({ appId, token }) {
                 selected={selectedDir === s.dir}
                 installed={installedIds.has(s.name)}
                 busy={busy}
+                githubUrl={`https://github.com/${nav.source.repo}/blob/${nav.source.ref || 'main'}/${s.dir}/SKILL.md`}
                 onSelect={() => {
                   setSelectedDir(selectedDir === s.dir ? null : s.dir)
                   loadDescription(nav.source, s.dir)
