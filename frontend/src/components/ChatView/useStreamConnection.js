@@ -393,16 +393,10 @@ export default function useStreamConnection(chatId, {
     return updated
   }
 
-  // Overwrite the trailing text block with the authoritative full text carried
-  // by a `text_final` event (the SDK's AssistantMessage TextBlock). Used only
-  // on the reconnect catch-up rebuild: if a streamed delta was dropped from the
-  // broadcast log, replaying the raw chunks would rebuild a truncated block, so
-  // the authoritative replace repairs it (idempotent when nothing was lost).
-  // Respects forceNewTextBlockRef exactly like appendTextChunk: a preceding
-  // text_boundary (a new assistant item started) means text_final materialises
-  // a NEW block rather than clobbering the previous item's text — the
-  // all-deltas-lost recovery case where the item has a boundary + a final but
-  // no streamed chunks in between.
+  // Apply the authoritative full text carried by a `text_final` event (the
+  // SDK's AssistantMessage TextBlock). Item identity can target an earlier
+  // block across an interleaved question; legacy replay gets the narrow
+  // prefix/question/suffix repair in replaceTextItem.
   function replaceLastText(prev, content, textItemId = null) {
     const updated = replaceTextItem(prev, content, {
       textItemId,
@@ -599,6 +593,7 @@ export default function useStreamConnection(chatId, {
       // streamItems atomically at catch_up_done / done.
       catchUpStartedRef.current = false
       textBufferRef.current = ''
+      textBufferItemIdRef.current = null
       forceNewTextBlockRef.current = false
     }
 
@@ -661,6 +656,7 @@ export default function useStreamConnection(chatId, {
         lastGoodItemsRef.current = []
         setStreamItems([])
         textBufferRef.current = ''
+        textBufferItemIdRef.current = null
         forceNewTextBlockRef.current = false
         // The chat may have finished while we were offline — re-fetch
         // messages from the DB so the component shows the final state.
@@ -1254,6 +1250,7 @@ export default function useStreamConnection(chatId, {
       lastGoodItemsRef.current = []
       setStreamItems([])
       textBufferRef.current = ''
+      textBufferItemIdRef.current = null
       setIsStreaming(true)
       setConnectionError(null)
       clearReconnectingNote()
@@ -1375,6 +1372,7 @@ export default function useStreamConnection(chatId, {
         lastGoodItemsRef.current = []
         setStreamItems([])
         textBufferRef.current = ''
+        textBufferItemIdRef.current = null
         forceNewTextBlockRef.current = false
         setIsStreaming(true)
         setConnectionError(null)
@@ -1389,6 +1387,7 @@ export default function useStreamConnection(chatId, {
         lastGoodItemsRef.current = []
         setStreamItems([])
         textBufferRef.current = ''
+        textBufferItemIdRef.current = null
         forceNewTextBlockRef.current = false
         setIsStreaming(true)
         setConnectionError(null)
@@ -1539,6 +1538,7 @@ export default function useStreamConnection(chatId, {
     lastGoodItemsRef.current = []
     setStreamItems([])
     textBufferRef.current = ''
+    textBufferItemIdRef.current = null
     forceNewTextBlockRef.current = false
   }
 
