@@ -8,6 +8,8 @@ import {
   canFastForwardQueue,
   cidOf,
   continuationRowsFromPromotedMessage,
+  isAutoContinuationMessage,
+  isOwnerUserMessage,
   mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   previewReadyAnnouncement,
@@ -148,6 +150,17 @@ test('cidOf returns the row cid, else null (no read-time derivation)', () => {
   assert.equal(cidOf({ ts: 5 }), null)
   assert.equal(cidOf({}), null)
   assert.equal(cidOf(null), null)
+})
+
+test('automatic continuation rows are product events, not owner messages', () => {
+  const marker = {
+    role: 'user', kind: 'auto_continuation', content: 'continue', cid: 'resume-1',
+  }
+  assert.equal(isAutoContinuationMessage(marker), true)
+  assert.equal(isOwnerUserMessage(marker), false)
+  assert.equal(isOwnerUserMessage({ role: 'user', content: 'hello' }), true)
+  assert.equal(isOwnerUserMessage({ role: 'user', hidden: true }), false)
+  assert.equal(isOwnerUserMessage({ role: 'assistant' }), false)
 })
 
 test('stripInternalUserMessageFields KEEPS cid and drops the envelope fields', () => {

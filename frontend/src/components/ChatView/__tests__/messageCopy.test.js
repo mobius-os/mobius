@@ -24,3 +24,11 @@ test('copyableMessageText removes hidden user augmentation', () => {
 test('copyableMessageText ignores hidden transcript rows', () => {
   assert.equal(copyableMessageText({ hidden: true, content: 'do not copy' }), '')
 })
+
+test('copyableMessageText ignores automatic continuation product markers', () => {
+  assert.equal(copyableMessageText({
+    role: 'user',
+    kind: 'auto_continuation',
+    content: 'continue',
+  }), '')
+})

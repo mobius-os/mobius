@@ -7,6 +7,7 @@ import QuestionCard from './QuestionCard.jsx'
 import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
+import AutoContinuationCard from './AutoContinuationCard.jsx'
 import { questionKey } from './questionKey.js'
 import {
   repairInterleavedQuestionText,
@@ -82,6 +83,9 @@ function MsgContentInner({
         <CompactionCard msg={msg} />
       </div>
     )
+  }
+  if (msg.kind === 'auto_continuation') {
+    return <AutoContinuationCard msg={msg} />
   }
 
   if (msg.blocks && msg.blocks.length > 0) {
@@ -221,7 +225,7 @@ function MsgContentInner({
                     className="chat__limit-option-label"
                     htmlFor={autoResumeSwitchId}
                   >
-                    Always continue after limits in this chat
+                    Always continue after limits and restarts in this chat
                   </label>
                 </div>
                 <Switch

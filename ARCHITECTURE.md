@@ -740,6 +740,34 @@ real turn as a `<compacted_chat>` block, so the new agent continues rather than
 starting cold. Same-provider model swaps skip the handoff because their session
 context is preserved.
 
+### Automatic continuation
+
+The per-chat continuation switch covers both provider-limit resets and
+**planned, drain-gated server restarts** (the persisted API/column name remains
+`auto_resume_on_limit` for rolling-client compatibility). Both paths converge
+on the existing `ChatRun.status="resume_pending"` gate and are claimed through
+the same transition lock, queue lock, global-idle check, actor append/promote,
+and identity-keyed rollback. The synthetic provider-facing user text remains
+`continue`; its persisted row carries `kind="auto_continuation"` plus a reason,
+so the UI renders a quiet marker rather than attributing text to the owner.
+
+| Durable state at recovery | Policy/ownership | Transition |
+|---|---|---|
+| Due provider park | Enabled owner chat | `parked → resume_pending →` one serial continuation |
+| Exact drain-for-update pause | Enabled owner chat, no open question/app queue | `running → resume_pending →` one serial continuation |
+| Planned restart, policy disabled | Any | `running → interrupted`; manual Resume |
+| Crash/OOM without the exact drain note | Any | `running → interrupted`; manual Resume (prevents reboot loops) |
+| Open question or app-attributed work | Any | `running → interrupted`; question/app ownership is preserved |
+| Manual send/provider switch/delete/newer run | Any pending auto state | Existing identity gate supersedes or retires it |
+
+The lifespan creates no short-interval polling loop. Its indexed due-run sweep
+executes once immediately after startup yields to serving, then at most once per
+minute. A sweep that finds another due continuation specifically blocked by the
+global live-turn gate returns a wait hint; only then does the loop wake early on
+the process-local `chat_run_finished` event. Ordinary completed turns do not
+trigger another database query. Automatic continuations therefore stay strictly
+serial and drain promptly without paying a per-turn polling cost.
+
 ### Staying aligned (enforcement)
 
 This section is the **owner-authoritative source of truth** for chat UX; the

@@ -494,10 +494,12 @@ def _due_park(
             - timedelta(minutes=1))
 
 
-def _run_sweep():
+def _run_sweep(*, include_wait_hint=False):
   db = SessionLocal()
   try:
-    return asyncio.run(chat_mod.sweep_reset_parks(db))
+    return asyncio.run(chat_mod.sweep_reset_parks(
+      db, include_wait_hint=include_wait_hint,
+    ))
   finally:
     db.close()
 
@@ -617,9 +619,10 @@ def test_sweep_auto_resume_on_starts_one_serial_continue(
   )
 
   try:
-    resolved = _run_sweep()
+    resolved, wait_for_turn_finish = _run_sweep(include_wait_hint=True)
 
     assert resolved == ["sweep-auto"]
+    assert wait_for_turn_finish is False
     assert _run_row("rt-sweep-auto")["status"] == "completed"
     assert len(scheduled) == 1
     assert scheduled[0]["chat_id"] == "sweep-auto"
@@ -631,6 +634,14 @@ def test_sweep_auto_resume_on_starts_one_serial_continue(
     state = _chat_row("sweep-auto")
     assert state["pending"] == []
     assert state["run_status"] == "running"  # PromotePending set the marker
+    markers = [
+      msg for msg in state["messages"]
+      if msg.get("kind") == "auto_continuation"
+    ]
+    assert len(markers) == 1
+    assert markers[0]["content"] == "continue"
+    assert markers[0]["continuation_reason"] == "usage_limit"
+    assert markers[0]["cid"] == "limit-resume-rt-sweep-auto"
   finally:
     # _schedule_continuation was stubbed, so release the claim it would have
     # handed to the spawned turn.
@@ -652,7 +663,7 @@ def test_sweep_auto_resume_defers_while_any_turn_is_live(
   handle = _Handle(other)
   registry.register(handle)
   try:
-    assert _run_sweep() == []
+    assert _run_sweep(include_wait_hint=True) == ([], True)
   finally:
     registry.unregister(other, handle.kind)
   # Untouched: still parked, not notified — deferred to a later tick, never
@@ -739,8 +750,9 @@ def test_sweep_starts_only_one_of_two_opted_chats(owner_token, monkeypatch):
   _due_park("sweep-auto-b", "rt-sweep-auto-b", auto_resume=True)
 
   try:
-    resolved = _run_sweep()
+    resolved, wait_for_turn_finish = _run_sweep(include_wait_hint=True)
     assert len(resolved) == 1
+    assert wait_for_turn_finish is True
     assert len(scheduled) == 1
     untouched = ({"sweep-auto-a", "sweep-auto-b"} - set(resolved)).pop()
     assert _run_row(f"rt-{untouched}")["status"] == "parked"
@@ -990,6 +1002,24 @@ def test_auto_resume_rechecks_app_work_inside_queue_handoff():
   state = _chat_row(cid)
   assert state["pending"] == [app_msg]
   assert state["run_status"] is None
+  assert not chat_mod.is_chat_running(cid)
+
+
+def test_auto_resume_rechecks_app_run_at_locked_handoff():
+  """A direct/stale sweep caller cannot bypass durable run attribution."""
+  cid = "auto-final-app-run-check"
+  park_token = f"rt-{cid}"
+  _seed_chat(cid, auto_resume=True)
+  _seed_run(
+    cid, park_token, status="resume_pending", started_offset=-30,
+    initiated_by_app_id=11,
+  )
+
+  assert asyncio.run(
+    chat_mod._auto_resume_chat(cid, "claude", park_token=park_token)
+  ) is False
+  assert _chat_row(cid)["pending"] == []
+  assert _run_row(park_token)["status"] == "resume_pending"
   assert not chat_mod.is_chat_running(cid)
 
 

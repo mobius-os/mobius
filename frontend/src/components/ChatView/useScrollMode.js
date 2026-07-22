@@ -40,7 +40,7 @@
  */
 
 import { useState, useRef, useLayoutEffect, useCallback } from 'react'
-import { cidOf } from './chatRuntimeState.js'
+import { cidOf, isOwnerUserMessage } from './chatRuntimeState.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 
 
@@ -334,7 +334,7 @@ export function _validateSavedMode(saved, messages, scrollEl) {
     // resolve a pin target — use the explicit no-location fallback.
     if (saved.cid == null) return holdBottom()
     const lastUserMsg = [...messages].reverse()
-      .find(m => m.role === 'user' && !m.hidden)
+      .find(isOwnerUserMessage)
     // Automatic pin→follow is live-turn state, never restoration state. Strip
     // the armed flag even if a pagehide captured it mid-stream; mount/return
     // must not manufacture tail-follow from saved geometry.

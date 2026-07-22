@@ -726,6 +726,27 @@ test('no saved chat location opens at the latest real content without enabling f
     'the real content tail is visible and reserved spacer room is excluded')
 })
 
+test('saved user pin ignores a newer automatic continuation marker', () => {
+  const scrollEl = {
+    scrollHeight: 1000,
+    scrollTop: 100,
+    clientHeight: 500,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  }
+  const saved = { kind: 'PIN_USER_MSG', cid: 'owner-cid', followWhenFilled: true }
+  const mode = _validateSavedMode(saved, [
+    { role: 'user', cid: 'owner-cid', content: 'owner message' },
+    { role: 'assistant', content: 'reply' },
+    {
+      role: 'user', cid: 'restart-marker', content: 'continue',
+      kind: 'auto_continuation',
+    },
+  ], scrollEl)
+
+  assert.deepEqual(mode, { kind: 'PIN_USER_MSG', cid: 'owner-cid' })
+})
+
 test('attention nudge anchors the physical tail without enabling follow', () => {
   const last = {
     offsetTop: 1500,
