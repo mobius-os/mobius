@@ -42,10 +42,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import logging
 import os
+import stat
 import subprocess
 import sys
-from dataclasses import dataclass, field
+import tempfile
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -54,6 +57,8 @@ from sqlalchemy.orm import Session
 
 from app import app_git
 
+
+log = logging.getLogger(__name__)
 
 PLATFORM_REPO = Path("/data/platform")
 # The served backend — the import probe's cwd, so ``import app.main`` resolves
@@ -106,6 +111,14 @@ _FETCH_TIMEOUT = 120
 # in agent-edited code would otherwise wedge boot forever; a timeout-kill counts
 # as probe-fail -> roll back.
 _PROBE_TIMEOUT = 60
+# Hook installation only copies a handful of local files and updates one
+# repo-local config value. A long run is a wedged filesystem/process, not work.
+_HOOK_INSTALL_TIMEOUT = 15
+_HOOK_MAX_BYTES = 1_000_000
+_HOOK_SOURCES = (
+  ("scripts/pre-commit.sh", "pre-commit"),
+  ("scripts/githooks/pre-push", "pre-push"),
+)
 
 # Update-preview payload bounds. A whole-platform deploy can carry a huge diff;
 # the review sheet renders the file summary (always small) by default and the raw
@@ -239,6 +252,10 @@ class ReconcileResult:
   target_sha: str | None
   conflict_paths: list[str] = field(default_factory=list)
   error: str | None = None
+  # Exact reviewed release/upstream commit captured while RECONCILE_LOCK is
+  # still held. Hook refresh reads every allowlisted blob from this immutable
+  # generation rather than trusting replayed local HEAD or a moving ref.
+  hook_source_sha: str | None = None
 
 
 def _scrubbed_git_env(repo: Path) -> dict:
@@ -731,6 +748,166 @@ def _touched_frontend(repo: Path, before: str | None, after: str | None) -> bool
   )
 
 
+def _hook_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+  """Run one bounded, non-interactive Git plumbing command for hook refresh."""
+  return subprocess.run(
+    ["git", "-C", str(repo), *args],
+    cwd=str(repo),
+    env=_scrubbed_git_env(repo),
+    capture_output=True,
+    timeout=_HOOK_INSTALL_TIMEOUT,
+    check=False,
+  )
+
+
+def _hook_command_error(proc: subprocess.CompletedProcess) -> str:
+  raw = proc.stderr or proc.stdout or f"exit {proc.returncode}".encode()
+  return os.fsdecode(raw).strip()[-500:]
+
+
+def _stage_hook_file(hooks_dir: Path, data: bytes) -> Path:
+  fd, raw_path = tempfile.mkstemp(prefix=".mobius-hook-", dir=str(hooks_dir))
+  path = Path(raw_path)
+  try:
+    with os.fdopen(fd, "wb") as handle:
+      handle.write(data)
+      handle.flush()
+      os.fchmod(handle.fileno(), 0o755)
+      os.fsync(handle.fileno())
+    return path
+  except Exception:
+    path.unlink(missing_ok=True)
+    raise
+
+
+def _read_hook_destination(path: Path) -> tuple[str, object] | None:
+  """Snapshot one destination without ever following a hook symlink."""
+  try:
+    info = path.lstat()
+  except FileNotFoundError:
+    return None
+  if stat.S_ISLNK(info.st_mode):
+    return ("symlink", os.readlink(path))
+  if not stat.S_ISREG(info.st_mode):
+    raise OSError(f"hook destination is not a regular file: {path.name}")
+  if info.st_size > _HOOK_MAX_BYTES:
+    raise OSError(f"existing hook is unexpectedly large: {path.name}")
+  return ("file", (path.read_bytes(), stat.S_IMODE(info.st_mode)))
+
+
+def _restore_hook_destination(path: Path, previous: tuple[str, object] | None) -> None:
+  if previous is None:
+    path.unlink(missing_ok=True)
+    return
+  kind, value = previous
+  if kind == "file":
+    data, mode = value
+    staged = _stage_hook_file(path.parent, data)
+    os.chmod(staged, mode)
+  else:
+    staged = path.parent / f".mobius-hook-link-{os.getpid()}-{path.name}"
+    staged.unlink(missing_ok=True)
+    os.symlink(value, staged)
+  os.replace(staged, path)
+
+
+def _refresh_git_hooks_impl(repo: Path, source_oid: str) -> str | None:
+  """Install allowlisted hooks from one pinned reviewed oid, without executing it."""
+  # Preserve the rollout contract of older trees: no committed installer means
+  # this checkout predates managed hooks and boot should simply skip refresh.
+  enabled = _hook_git(
+    repo, "cat-file", "-e", f"{source_oid}:scripts/install-hooks.sh",
+  )
+  if enabled.returncode != 0:
+    return None
+
+  sources: list[tuple[str, bytes]] = []
+  for source, destination in _HOOK_SOURCES:
+    blob = f"{source_oid}:{source}"
+    size_proc = _hook_git(repo, "cat-file", "-s", blob)
+    if size_proc.returncode != 0:
+      raise OSError(_hook_command_error(size_proc))
+    try:
+      size = int(size_proc.stdout.strip())
+    except (TypeError, ValueError) as exc:
+      raise OSError(f"could not size committed hook {source}") from exc
+    if size <= 0 or size > _HOOK_MAX_BYTES:
+      raise OSError(f"committed hook has invalid size: {source}")
+    # `cat-file blob` returns the committed bytes without textconv/filter
+    # execution. `git show` is presentation porcelain and may consult local
+    # diff-driver configuration, which is not a trusted boot-time code path.
+    show = _hook_git(repo, "cat-file", "blob", blob)
+    if show.returncode != 0:
+      raise OSError(_hook_command_error(show))
+    if len(show.stdout) != size or not show.stdout.startswith(b"#!"):
+      raise OSError(f"committed hook failed verification: {source}")
+    sources.append((destination, show.stdout))
+
+  common = _hook_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+  if common.returncode != 0:
+    raise OSError(_hook_command_error(common))
+  common_dir = Path(os.fsdecode(common.stdout.strip())).resolve(strict=True)
+  hooks_dir = common_dir / "hooks"
+  if hooks_dir.is_symlink():
+    raise OSError("refusing symlinked git hooks directory")
+  hooks_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+  if not hooks_dir.is_dir():
+    raise OSError("git hooks path is not a directory")
+
+  lock_path = hooks_dir / ".mobius-refresh.lock"
+  with lock_path.open("a+b") as lock_handle:
+    try:
+      fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+      return ""  # The concurrent refresher owns the same complete operation.
+
+    previous = {
+      name: _read_hook_destination(hooks_dir / name)
+      for name, _data in sources
+    }
+    staged: dict[str, Path] = {}
+    try:
+      for name, data in sources:
+        staged[name] = _stage_hook_file(hooks_dir, data)
+    except Exception:
+      for path in staged.values():
+        path.unlink(missing_ok=True)
+      raise
+    replaced: list[str] = []
+    try:
+      try:
+        for name, _data in sources:
+          os.replace(staged[name], hooks_dir / name)
+          replaced.append(name)
+      except Exception:
+        for name in reversed(replaced):
+          _restore_hook_destination(hooks_dir / name, previous[name])
+        raise
+      # A repository-local hooksPath takes effect only after the complete set
+      # exists. On refresh each destination changes by atomic inode swap, so a
+      # concurrent Git process sees either the previous hook or the new hook,
+      # never an absent path.
+      configured = _hook_git(
+        repo, "config", "--local", "core.hooksPath", str(hooks_dir),
+      )
+      if configured.returncode != 0:
+        raise OSError(_hook_command_error(configured))
+    finally:
+      for path in staged.values():
+        path.unlink(missing_ok=True)
+  return ""
+
+
+def _refresh_git_hooks(repo: Path, source_oid: str | None) -> str | None:
+  """Best-effort hook refresh that is total at boot and after committed Apply."""
+  if not source_oid:
+    return None
+  try:
+    return _refresh_git_hooks_impl(repo, source_oid)
+  except Exception as exc:
+    return repr(exc)[:500]
+
+
 async def _rebuild_frontend_after_update_if_needed(
   repo: Path, res: ReconcileResult,
 ) -> None:
@@ -897,7 +1074,15 @@ def _reconcile_under_lock(repo: Path, at_boot: bool) -> ReconcileResult:
   """Hold :data:`RECONCILE_LOCK` around one reconcile so the boot subprocess and
   the running uvicorn's Apply can never run two reconciles on the same repo."""
   with _reconcile_flock():
-    return reconcile_clone(repo, at_boot=at_boot)
+    result = reconcile_clone(repo, at_boot=at_boot)
+    # `upstream` is moved only by a successful/contained reconcile to the
+    # fetched release target. Capture its immutable oid before releasing the
+    # cross-process lock; local replay commits on main are intentionally not a
+    # hook trust transition.
+    return replace(
+      result,
+      hook_source_sha=_rev(repo, UPSTREAM_BRANCH) or None,
+    )
 
 
 def _short(sha: str | None) -> str:
@@ -911,10 +1096,18 @@ def reconcile_clone_sync() -> str:
   worst case leaves the pre-reconcile code serving and a flag set."""
   try:
     res = _reconcile_under_lock(PLATFORM_REPO, at_boot=True)
+    # Even an offline/conflict pass leaves a complete served tree on disk. Hook
+    # refresh is local-only, so do it on every boot rather than waiting for a
+    # successful fetch that may be unrelated to the stale installed copy.
+    hook_refresh = _refresh_git_hooks(PLATFORM_REPO, res.hook_source_sha)
     summary = (
       f"reconcile[{res.status}] pre={_short(res.pre_sha)} "
       f"new={_short(res.new_sha)} target={_short(res.target_sha)}"
     )
+    if hook_refresh == "":
+      summary += " hooks=refreshed"
+    elif hook_refresh:
+      summary += f" hooks=error:{hook_refresh}"
     if res.conflict_paths:
       summary += f" conflicts={len(res.conflict_paths)}"
     if res.error:
@@ -1159,6 +1352,11 @@ async def apply_platform_update(
     chat_id: str | None = None
 
     if res.status == "updated":
+      hook_refresh = await asyncio.to_thread(
+        _refresh_git_hooks, repo, res.hook_source_sha,
+      )
+      if hook_refresh:
+        log.warning("git hook refresh failed after platform update: %s", hook_refresh)
       # Frontend changes rebuild into dist (served per-request, no restart);
       # only a served-backend or constitution change requires restarting
       # uvicorn. Path-aware so test/docs/frontend-only updates finish without a
