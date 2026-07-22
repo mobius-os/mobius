@@ -136,13 +136,6 @@ const CSS = `
 .sk-chev { flex: 0 0 auto; align-self: center; color: var(--muted); opacity: 0.6; }
 .sk-chev svg { width: 18px; height: 18px; }
 
-/* row + corner uninstall button (installed:* skills only) */
-.sk-rowwrap { position: relative; border-bottom: 1px solid var(--border-light, var(--border)); }
-.sk-rowwrap:last-child { border-bottom: none; }
-.sk-rowwrap > .sk-row { border-bottom: none; }
-.sk-rowwrap.has-trash > .sk-row { padding-right: 44px; }
-.sk-rowtrash { position: absolute; top: 8px; right: 6px; width: 30px; height: 30px; border-radius: 8px; }
-.sk-rowtrash svg { width: 14px; height: 14px; }
 
 /* provenance + usage chips (rows and detail) */
 .sk-provrow { display: flex; align-items: center; gap: 7px; margin-top: 6px; flex-wrap: wrap; min-width: 0; }
@@ -235,6 +228,12 @@ const CSS = `
 .sk-cat { position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column; background: var(--bg); }
 .sk-cat-note { margin: 12px 20px 4px; max-width: 68ch; color: var(--muted); font-size: 13.5px; line-height: 1.5;
   text-wrap: pretty; }
+/* catalog breadcrumb chain — every ancestor segment is clickable */
+.sk-crumbs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; }
+.sk-crumb { border: none; background: none; padding: 0; font-family: var(--font); font-size: 14.5px;
+  color: var(--accent); cursor: pointer; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-crumb.cur { color: var(--text); font-weight: 700; cursor: default; }
+.sk-crumbsep { flex: 0 0 auto; color: var(--muted); }
 .sk-cat-count { padding: 2px 16px 8px; font-size: 12.5px; color: var(--muted); }
 .sk-cards { padding: 0 12px 32px; }
 .sk-card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
@@ -492,14 +491,25 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
   return (
     <div className="sk-cat" style={visible ? undefined : { display: 'none' }} aria-hidden={!visible}>
       <div className="sk-detail-head">
-        <button
-          className="sk-back"
-          onClick={() => (detailDir ? setDetailDir(null) : open ? backToSources() : onClose())}
-          aria-label={detailDir ? 'Back to the skill list' : open ? 'Back to catalogs' : 'Back to skills'}
-        >
-          {BACK}<span>{detailDir ? open?.source.label : open ? 'Catalogs' : 'Skills'}</span>
+        <button className="sk-back" onClick={onClose} aria-label="Back to skills">
+          {BACK}<span>Skills</span>
         </button>
-        <div className="sk-detail-title">{detailName || (open ? open.source.label : 'Skill catalogs')}</div>
+        {/* Full breadcrumb chain — tap any ancestor to jump straight back to it. */}
+        <nav className="sk-crumbs" aria-label="Catalog navigation">
+          {open ? (
+            <button className="sk-crumb" onClick={backToSources}>Skill catalogs</button>
+          ) : (
+            <span className="sk-crumb cur">Skill catalogs</span>
+          )}
+          {open && <span className="sk-crumbsep" aria-hidden="true">›</span>}
+          {open && (detailDir ? (
+            <button className="sk-crumb" onClick={() => setDetailDir(null)}>{open.source.label}</button>
+          ) : (
+            <span className="sk-crumb cur">{open.source.label}</span>
+          ))}
+          {detailDir && <span className="sk-crumbsep" aria-hidden="true">›</span>}
+          {detailDir && <span className="sk-crumb cur">{detailName}</span>}
+        </nav>
         {detailDir && open && (
           <>
             <button
@@ -636,9 +646,6 @@ export default function SkillsApp({ appId, token }) {
   const [removeArmed, setRemoveArmed] = useState(false)
   const [removeBusy, setRemoveBusy] = useState(false)
   const [removeError, setRemoveError] = useState(null)
-  const [rowArmed, setRowArmed] = useState(null) // id armed for list-row removal
-  const [rowBusy, setRowBusy] = useState(null)
-  const [rowError, setRowError] = useState(null)
   const [catalogOpen, setCatalogOpen] = useState(false)
   const [catalogMounted, setCatalogMounted] = useState(false)
   const [online, setOnline] = useState(initialOnline)
@@ -797,20 +804,12 @@ export default function SkillsApp({ appId, token }) {
 
   // Uninstall is a two-tap: first tap arms (danger ring + explainer), a second
   // within 4s executes. Modal confirms don't exist inside the sandboxed iframe.
-  // The same gesture exists in two places — the detail header and each
-  // installed row in the list — with separate arm state so they can't
-  // cross-trigger.
   useEffect(() => { setRemoveArmed(false); setRemoveError(null) }, [selected])
   useEffect(() => {
     if (!removeArmed) return undefined
     const t = setTimeout(() => setRemoveArmed(false), 4000)
     return () => clearTimeout(t)
   }, [removeArmed])
-  useEffect(() => {
-    if (!rowArmed) return undefined
-    const t = setTimeout(() => setRowArmed(null), 4000)
-    return () => clearTimeout(t)
-  }, [rowArmed])
 
   async function deleteSkill(id) {
     const res = await fetch(`/api/skills/${encodeURIComponent(id)}`, {
@@ -835,22 +834,6 @@ export default function SkillsApp({ appId, token }) {
     } finally {
       setRemoveBusy(false)
       setRemoveArmed(false)
-    }
-  }
-
-  async function uninstallFromList(id) {
-    if (rowBusy) return
-    setRowBusy(id)
-    setRowError(null)
-    try {
-      await deleteSkill(id)
-      load({ isRefresh: true })
-    } catch (err) {
-      setRowError(String(err?.message || err))
-      window.mobius?.signal?.('error', { message: String(err?.message || err), source: 'skill_uninstall' })
-    } finally {
-      setRowBusy(null)
-      setRowArmed(null)
     }
   }
 
@@ -941,13 +924,12 @@ export default function SkillsApp({ appId, token }) {
               disabled={removeBusy}
               onClick={() => (removeArmed ? uninstallCurrent() : setRemoveArmed(true))}
               aria-label={removeArmed ? 'Tap again to remove this skill' : 'Remove this skill'}
-              title={removeArmed ? 'Tap again to confirm removal' : 'Remove this skill — asks once more before deleting'}
-            >{TRASH}</button>
+            >{TRASH}<span className="sk-tip" aria-hidden="true"><b>Delete</b> – removes the skill (asks once more before deleting)</span></button>
           )}
           <button className="sk-iconbtn" onClick={() => {
             window.mobius?.signal?.('edit_requested', { type: 'skill', slug: current.id })
             askAgent(`Help me edit the "${current.id}" skill. Here's what I want to change: `)
-          }} aria-label="Edit skill with the agent" title="Edit this skill — opens a chat with the agent">{PLUS}</button>
+          }} aria-label="Edit skill with the agent">{PLUS}<span className="sk-tip" aria-hidden="true"><b>Edit</b> – opens a chat with the agent to change the skill</span></button>
         </div>
         {removeArmed && !removeError && (
           <div className="sk-alert" role="status">Tap the bin again to remove “{current.id}”. Its bytes are saved to git history first.</div>
@@ -1014,11 +996,6 @@ export default function SkillsApp({ appId, token }) {
         </button>
       </header>
 
-      {rowArmed && !rowError && (
-        <div className="sk-alert" role="status">Tap the bin again to remove “{rowArmed}”. Its bytes are saved to git history first.</div>
-      )}
-      {rowError && <div className="sk-alert is-error" role="alert">{rowError}</div>}
-
       <div className="sk-scroll">
         <div className="sk-page">
         {skills !== null && skills.length > 0 && (
@@ -1067,35 +1044,18 @@ export default function SkillsApp({ appId, token }) {
 
         {skills !== null && filtered.length > 0 && (
           <div className="sk-list">
-            {filtered.map((s) => {
-              const armed = rowArmed === s.id
-              const removable = isUninstallable(s.provenance)
-              return (
-                <div key={s.id} className={`sk-rowwrap${removable ? ' has-trash' : ''}`}>
-                  <button className="sk-row" onClick={() => openSkill(s.id)} title={`Open “${s.title}”`}>
-                    <span className="sk-rowicon" aria-hidden="true">{HAMMER}</span>
-                    <span className="sk-rowbody">
-                      <div className="sk-rowname">{s.title}</div>
-                      <div className="sk-rowslug">{s.id}</div>
-                      {s.description && <div className="sk-rowdesc">{s.description}</div>}
-                      <ProvChips provenance={s.provenance} uses={s.uses} />
-                    </span>
-                    <span className="sk-chev" aria-hidden="true">{CHEV}</span>
-                  </button>
-                  {removable && (
-                    <button
-                      className={`sk-iconbtn sk-rowtrash${armed ? ' is-armed' : ''}`}
-                      disabled={rowBusy === s.id}
-                      onClick={() => {
-                        if (armed) { uninstallFromList(s.id) } else { setRowArmed(s.id); setRowError(null) }
-                      }}
-                      aria-label={armed ? `Tap again to remove ${s.title}` : `Remove ${s.title}`}
-                      title={armed ? 'Tap again to confirm removal' : 'Remove this skill — asks once more before deleting'}
-                    >{TRASH}</button>
-                  )}
-                </div>
-              )
-            })}
+            {filtered.map((s) => (
+              <button key={s.id} className="sk-row" onClick={() => openSkill(s.id)} title={`Open “${s.title}”`}>
+                <span className="sk-rowicon" aria-hidden="true">{HAMMER}</span>
+                <span className="sk-rowbody">
+                  <div className="sk-rowname">{s.title}</div>
+                  <div className="sk-rowslug">{s.id}</div>
+                  {s.description && <div className="sk-rowdesc">{s.description}</div>}
+                  <ProvChips provenance={s.provenance} uses={s.uses} />
+                </span>
+                <span className="sk-chev" aria-hidden="true">{CHEV}</span>
+              </button>
+            ))}
           </div>
         )}
 
