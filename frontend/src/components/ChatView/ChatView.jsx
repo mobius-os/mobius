@@ -1461,7 +1461,7 @@ export default function ChatView({
     requestAnimationFrame(() => {
       const el = inputRef.current
       if (!el) return
-      resizeComposerTextarea(el)
+      resizeComposerTextarea(el, text)
       if (focus) {
         try { el.focus({ preventScroll: true }) }
         catch { el.focus() }
@@ -1610,7 +1610,7 @@ export default function ChatView({
   // scrollHeight; they reconcile when `hidden` flips back to false.
   useLayoutEffect(() => {
     const el = inputRef.current
-    if (el && !hidden) resizeComposerTextarea(el)
+    if (el && !hidden) resizeComposerTextarea(el, input)
   }, [chatId, hidden, input])
 
   // Publish `.chat__foot`'s rendered height as `--composer-h` on
@@ -1638,7 +1638,7 @@ export default function ChatView({
       // returns from background or the back-forward cache. Reconcile the
       // textarea first; measuring only the outer foot would preserve a stale
       // multi-line height on an empty composer.
-      resizeComposerTextarea(inputRef.current)
+      resizeComposerTextarea(inputRef.current, inputValueRef.current)
       applySoon()
     }
     const onVisible = () => {
