@@ -669,7 +669,9 @@ test('mobile tab bodies pan while the existing kind icon owns either-axis draggi
 
 test('an active overflowing chat title cycles once, then becomes idle', () => {
   assert.match(paneStrip, /new ResizeObserver\(measure\)/)
-  assert.match(paneStrip, /!active \|\| tab\.kind !== 'chat'/)
+  assert.match(paneStrip, /!active \|\| !focused \|\| tab\.kind !== 'chat'/)
+  assert.match(paneStrip, /\}, \[active, focused, label, tab\.kind\]\)/,
+    'only the focused active tab should retain a ResizeObserver')
   assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-shift'/)
   assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-duration'/)
   assert.match(paneStrip, /Math\.round\(shift \* TITLE_CYCLE_MS_PER_PX\)/)

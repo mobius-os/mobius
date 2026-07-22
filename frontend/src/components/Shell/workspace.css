@@ -216,6 +216,38 @@
   z-index: 5;
 }
 
+/* The explicitly requested per-pane focus toggle occupies one compact control at
+   the strip's trailing edge. Sticky positioning keeps the escape visible while
+   tabs scroll underneath it; focusing a pane is a presentation change only, so
+   the durable split tree and its ratios remain untouched. */
+.workspace__pane-focus {
+  position: sticky;
+  right: 0;
+  display: grid;
+  place-items: center;
+  flex: 0 0 34px;
+  align-self: stretch;
+  margin-left: auto;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  z-index: 1;
+}
+.workspace__pane-focus:hover {
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg));
+}
+.workspace__pane-focus:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.workspace__strip .shell__tab {
+  scroll-margin-inline-end: 42px;
+}
+
 /* Which tab is open in each pane, and which pane has focus, both read from the
    strips' active pill — there is NO ring or border around any pane's content
    (owner call, live testing). The base `.shell__tab--active` (Shell.css) already

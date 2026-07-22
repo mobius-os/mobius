@@ -16,6 +16,9 @@ test('chat display readiness preserves the existing transcript reveal gate', () 
     'a transcript may hand off only after useScrollMode reveals it')
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReadyRef\.current\?\.\(chatId\)/,
     'readiness must reach Shell before the browser paints the hidden transcript')
+  assert.match(chatView,
+    /if \(displayReady\) onDisplayReadyRef\.current\?\.\(chatId\)[\s\S]*\}, \[chatId, displayReady, onDisplayReady\]\)/,
+    'an already-ready chat must re-announce when a cross-pane move changes its handoff owner')
 })
 
 test('each pane holds one outgoing chat over one staging chat', () => {

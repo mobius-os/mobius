@@ -107,6 +107,9 @@ export default function WorkspaceChrome({
   // The ONE shared user-close action (INV 13) — Shell owns it, this layer no longer
   // dispatches CLOSE_TAB itself. Called with a tab object.
   onCloseTab,
+  focusedPaneViewId = null,
+  onTogglePaneFocus,
+  revealKey = 0,
   // key → { motion, vars } for the live mode beat, so each strip deals WITH its pane
   // (Shell's wrapperMotion). Null/absent when no beat is live.
   stripMotion = null,
@@ -274,7 +277,7 @@ export default function WorkspaceChrome({
   // at its minimum degrades to the compact focused-pair projection, so the chip
   // must reach the hidden panes regardless of the raw mode (finding: wide
   // min-width degrade would otherwise strand them).
-  const showChip = WORKSPACE_SPLITS_ENABLED && hasOverflow
+  const showChip = WORKSPACE_SPLITS_ENABLED && hasOverflow && focusedPaneViewId == null
   const hiddenActivity = useMemo(() => {
     const visible = new Set(projection.visibleLeaves)
     return allLeaves.some(id => !visible.has(id)
@@ -314,6 +317,10 @@ export default function WorkspaceChrome({
             onClose={onCloseTab}
             onFocus={focusPane}
             onTabContextMenu={onTabContextMenu}
+            canFocusPane={allLeaves.length > 1}
+            paneFocused={focusedPaneViewId === paneId}
+            onTogglePaneFocus={onTogglePaneFocus}
+            revealKey={revealKey}
             // The strip deals WITH its pane this beat (motion keyed by its active tab).
             motion={stripMotion ? stripMotion(pane.activeTabKey) : null}
           />
