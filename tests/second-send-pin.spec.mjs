@@ -204,7 +204,6 @@ test('A tall-composer send lands once without a post-paint pin repair', async ({
   await newChat(page)
   await sendMessage(page, 'First user message')
   await waitStreamDone(page)
-  await gestureToBottom(page)
 
   await replaceStreamRoute(page, [
     { type: 'catch_up_done' },
@@ -231,10 +230,25 @@ test('A tall-composer send lands once without a post-paint pin repair', async ({
     const foot = document.querySelector('.chat__foot')
     if (!chat || !foot) throw new Error('missing chat foot')
     chat.style.setProperty('--composer-h', `${foot.offsetHeight + 48}px`)
+  })
+
+  // The deliberate stale-height write changes the scroll range. Re-engage
+  // FOLLOW_BOTTOM after that mutation so the test exercises a following send,
+  // not the distinct (and correct) scrolled-up rule that leaves the row in
+  // place. Capture the precondition and then clear gesture setup from the
+  // trace so only the send landing is asserted below.
+  await gestureToBottom(page)
+  const bottomGap = await page.evaluate(() => {
+    const scroll = document.querySelector('.chat__scroll')
+    if (!scroll) throw new Error('missing chat scroll')
+    const gap = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop
     window.__mobiusChatScrollTrace = {
       version: 1, transitions: [], writes: [], events: [],
     }
+    return gap
   })
+  expect(bottomGap).toBeGreaterThanOrEqual(-2)
+  expect(bottomGap).toBeLessThanOrEqual(2)
 
   await page.keyboard.press('Enter')
   await expect(page.locator('.chat__msg--user')).toHaveCount(2, { timeout: 3000 })
