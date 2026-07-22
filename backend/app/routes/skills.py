@@ -63,11 +63,13 @@ log = logging.getLogger(__name__)
 # same shape as an app slug: lowercase, no traversal, no leading punctuation.
 _SKILL_NAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
-# Resource files a directory skill may carry alongside SKILL.md. Bounded so an
-# install can't smuggle a data payload through the skills tree — a skill is
-# instruction prose plus a few references, not an app.
+# Resource files a directory skill may carry alongside SKILL.md (including in
+# subdirectories — scripts/, references/, assets/ are common in the ecosystem).
+# Bounded so an install can't smuggle a data payload through the skills tree —
+# a skill is instruction prose plus a few references, not an app.
 _RESOURCE_COUNT_MAX = 24
 _RESOURCE_TOTAL_MAX = 2 * 1024 * 1024
+_RESOURCE_MAX_DEPTH = 4
 # Only text/reference file types are stored; anything else is skipped with a
 # warning rather than materialized into the skills tree.
 _RESOURCE_SUFFIXES = frozenset({
@@ -201,13 +203,54 @@ async def _github_contents(
     raise HTTPException(502, f"GitHub contents API returned non-JSON: {exc}")
 
 
+async def _github_tree(
+  client: httpx.AsyncClient, repo: str, path: str, ref: str,
+) -> list[dict]:
+  """Recursive git-trees listing of ONE subtree (`<ref>:<path>`), one request.
+
+  `<ref>:<path>` is git rev syntax resolving to the tree object at that path,
+  so the response paths come back already relative to the skill directory —
+  exactly the relpaths the installer materializes.
+  """
+  from urllib.parse import quote
+
+  spec = quote(f"{ref}:{path}" if path else ref, safe="")
+  url = f"{_GITHUB_API}/repos/{repo}/git/trees/{spec}?recursive=1"
+  raw = await install._http_get(client, url, max_bytes=4 * 1024 * 1024)
+  try:
+    data = json.loads(raw)
+  except ValueError as exc:
+    raise HTTPException(502, f"GitHub trees API returned non-JSON: {exc}")
+  tree = data.get("tree") if isinstance(data, dict) else None
+  if not isinstance(tree, list):
+    raise HTTPException(502, "GitHub trees API returned no tree for this path.")
+  return [e for e in tree if isinstance(e, dict)]
+
+
+def _resource_rel_ok(rel: str) -> bool:
+  """Whether a tree-relative path is safe to materialize under the skill dir.
+
+  Every segment must be a plain name (no dot-prefixed files/dirs, no
+  traversal, no backslashes), depth is bounded, and the suffix must be in the
+  text/reference allowlist.
+  """
+  segments = rel.split("/")
+  if not 1 <= len(segments) <= _RESOURCE_MAX_DEPTH:
+    return False
+  for seg in segments:
+    if not seg or seg.startswith(".") or "\\" in seg:
+      return False
+  return Path(rel).suffix.lower() in _RESOURCE_SUFFIXES
+
+
 async def _fetch_files(
   client: httpx.AsyncClient, body: SkillInstall,
 ) -> tuple[str, dict[str, bytes], str]:
   """Resolve the request into (skill_name, {relpath: bytes}, source_label).
 
-  `relpath` is always relative to the skill directory (SKILL.md at the root).
-  Exactly one skill is produced; the SKILL.md file is required.
+  `relpath` is always relative to the skill directory (SKILL.md at the root;
+  resources may live in subdirectories). Exactly one skill is produced; the
+  SKILL.md file is required.
   """
   files: dict[str, bytes] = {}
 
@@ -238,40 +281,57 @@ async def _fetch_files(
     )
     return name, files, _source_label(body.repo)
 
-  # A directory: find SKILL.md (case-insensitive), fetch it + bounded resources.
+  # A directory: enumerate the WHOLE subtree with one scoped git-trees call —
+  # the ecosystem keeps scripts/references in subdirectories, which the
+  # top-level contents listing above cannot see — then fetch SKILL.md
+  # (case-insensitive, root only) plus bounded resources.
   name = _derive_name(body.name, segments)
-  entries = [e for e in listing if isinstance(e, dict)]
-  skill_entry = next(
-    (e for e in entries if str(e.get("name", "")).upper() == "SKILL.MD"), None,
+  clean_path = body.path.strip("/")
+  tree = await _github_tree(client, body.repo, clean_path, body.ref)
+
+  from urllib.parse import quote
+
+  def _raw_url(rel: str) -> str:
+    prefix = f"{quote(clean_path, safe='/')}/" if clean_path else ""
+    return (
+      "https://raw.githubusercontent.com/"
+      f"{body.repo}/{quote(body.ref, safe='')}/{prefix}{quote(rel, safe='/')}"
+    )
+
+  skill_rel = next(
+    (
+      str(e.get("path"))
+      for e in tree
+      if e.get("type") == "blob" and str(e.get("path", "")).upper() == "SKILL.MD"
+    ),
+    None,
   )
-  if skill_entry is None:
+  if skill_rel is None:
     raise HTTPException(
       400,
       f"No SKILL.md in {body.repo}/{body.path} — not a skill directory.",
     )
   files["SKILL.md"] = await install._http_get(
-    client, skill_entry["download_url"], max_bytes=SKILL_MAX_BYTES,
+    client, _raw_url(skill_rel), max_bytes=SKILL_MAX_BYTES,
   )
 
   resource_count = 0
   resource_total = 0
-  for entry in entries:
-    if entry is skill_entry or entry.get("type") != "file":
+  for entry in tree:
+    if entry.get("type") != "blob":
       continue
-    rel = str(entry.get("name", ""))
-    if not rel or rel.startswith(".") or "/" in rel:
-      continue
-    if Path(rel).suffix.lower() not in _RESOURCE_SUFFIXES:
+    rel = str(entry.get("path", ""))
+    if not rel or rel == skill_rel or not _resource_rel_ok(rel):
       continue
     if resource_count >= _RESOURCE_COUNT_MAX:
       break
-    download = entry.get("download_url")
-    if not download:
-      continue
     remaining = _RESOURCE_TOTAL_MAX - resource_total
     if remaining <= 0:
       break
-    data = await install._http_get(client, download, max_bytes=remaining)
+    declared = entry.get("size")
+    if isinstance(declared, int) and declared > remaining:
+      continue  # skip an over-budget file, smaller ones may still fit
+    data = await install._http_get(client, _raw_url(rel), max_bytes=remaining)
     files[rel] = data
     resource_total += len(data)
     resource_count += 1
@@ -398,7 +458,9 @@ async def install_skill(
       )
     target_dir = skills_dir / name
     for rel, data in files.items():
-      # rel is a validated bare filename (SKILL.md or a vetted resource name).
+      # rel is a validated relative path (SKILL.md at the root, or a vetted
+      # resource path — _resource_rel_ok rejects traversal and dot segments);
+      # atomic_write creates the intermediate directories.
       atomic_write(target_dir / rel, data)
     _chown_mobius(target_dir)
 

@@ -217,36 +217,122 @@ def test_install_from_raw_url(client, auth, skills_dir, monkeypatch):
   assert "writing-tips" in (skills_dir / skills_mod.INDEX_FILENAME).read_text()
 
 
-def test_install_repo_dir_fetches_skill_and_vetted_resources(
+def _dir_install_mocks(monkeypatch, rs, tree, raw_files):
+  """Wire the dir-install flow: contents says "directory", trees lists it.
+
+  `tree` entries are subtree-relative (the `<ref>:<path>` trees call); raw
+  bytes are served from raw.githubusercontent.com URLs.
+  """
+
+  async def fake_contents(client_, repo, path, ref):
+    return [{"type": "dir", "name": "marker"}]  # any list means "a directory"
+
+  async def fake_tree(client_, repo, path, ref):
+    return tree
+
+  monkeypatch.setattr(rs, "_github_contents", fake_contents)
+  monkeypatch.setattr(rs, "_github_tree", fake_tree)
+  monkeypatch.setattr(rs.install, "_http_get", _fake_fetch(raw_files))
+
+
+def test_install_repo_dir_fetches_whole_subtree_of_vetted_resources(
   client, auth, skills_dir, monkeypatch,
 ):
   from app.routes import skills as rs
 
-  listing = [
-    {"type": "file", "name": "SKILL.md", "download_url": "https://dl/SKILL.md"},
-    {"type": "file", "name": "ref.md", "download_url": "https://dl/ref.md"},
-    {"type": "file", "name": "logo.png", "download_url": "https://dl/logo.png"},
-    {"type": "dir", "name": "sub", "download_url": None},
+  raw = "https://raw.githubusercontent.com/anthropics/skills/main/docs/pdf"
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 40},
+    {"type": "blob", "path": "ref.md", "size": 9},
+    {"type": "blob", "path": "scripts/helper.py", "size": 12},
+    {"type": "tree", "path": "scripts"},
+    {"type": "blob", "path": "logo.png", "size": 10},  # unvetted suffix
+    {"type": "blob", "path": ".github/ci.yml", "size": 5},  # dot segment
+    {"type": "blob", "path": "a/b/c/d/deep.md", "size": 5},  # over depth cap
   ]
-
-  async def fake_contents(client_, repo, path, ref):
-    assert (repo, path, ref) == ("anthropics/skills", "docs/pdf", "main")
-    return listing
-
-  monkeypatch.setattr(rs, "_github_contents", fake_contents)
-  monkeypatch.setattr(rs.install, "_http_get", _fake_fetch({
-    "https://dl/SKILL.md": b"---\nname: pdf\ndescription: PDFs.\n---\n",
-    "https://dl/ref.md": b"reference",
-  }))
+  _dir_install_mocks(monkeypatch, rs, tree, {
+    f"{raw}/SKILL.md": b"---\nname: pdf\ndescription: PDFs.\n---\n",
+    f"{raw}/ref.md": b"reference",
+    f"{raw}/scripts/helper.py": b"print('hi')\n",
+  })
   r = client.post(
     "/api/skills/install", headers=auth,
     json={"repo": "anthropics/skills", "path": "docs/pdf", "ref": "main"},
   )
   assert r.status_code == 201, r.text
-  assert sorted(r.json()["files"]) == ["SKILL.md", "ref.md"]
+  assert sorted(r.json()["files"]) == ["SKILL.md", "ref.md", "scripts/helper.py"]
+  # Subdirectory structure is preserved on disk.
+  assert (skills_dir / "pdf" / "scripts" / "helper.py").read_text() == "print('hi')\n"
   assert (skills_dir / "pdf" / "ref.md").read_text() == "reference"
-  # The .png was skipped (not a vetted text/reference suffix).
+  # Unvetted suffix, dot segments, and over-depth paths were never fetched
+  # (_fake_fetch would have raised) and never materialized.
   assert not (skills_dir / "pdf" / "logo.png").exists()
+  assert not (skills_dir / "pdf" / ".github").exists()
+  assert not (skills_dir / "pdf" / "a").exists()
+
+
+def test_install_repo_dir_rejects_traversal_paths_in_tree(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  raw = "https://raw.githubusercontent.com/o/r/main/sk"
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 10},
+    {"type": "blob", "path": "../escape.md", "size": 5},
+    {"type": "blob", "path": "ok/../../escape2.md", "size": 5},
+  ]
+  _dir_install_mocks(monkeypatch, rs, tree, {
+    f"{raw}/SKILL.md": b"# sk\n",
+  })
+  r = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "sk", "ref": "main"},
+  )
+  assert r.status_code == 201, r.text
+  assert r.json()["files"] == ["SKILL.md"]
+  assert not (skills_dir / "escape.md").exists()
+  assert not (skills_dir / "escape2.md").exists()
+
+
+def test_install_repo_dir_skips_over_budget_files_by_declared_size(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  raw = "https://raw.githubusercontent.com/o/r/main/sk"
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 10},
+    {"type": "blob", "path": "huge.md", "size": rs._RESOURCE_TOTAL_MAX + 1},
+    {"type": "blob", "path": "small.md", "size": 5},
+  ]
+  _dir_install_mocks(monkeypatch, rs, tree, {
+    f"{raw}/SKILL.md": b"# sk\n",
+    f"{raw}/small.md": b"small",
+  })
+  r = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "sk", "ref": "main"},
+  )
+  assert r.status_code == 201, r.text
+  # huge.md was skipped WITHOUT being fetched; the smaller file still landed.
+  assert sorted(r.json()["files"]) == ["SKILL.md", "small.md"]
+
+
+def test_resource_rel_ok_contract():
+  from app.routes.skills import _resource_rel_ok
+
+  assert _resource_rel_ok("ref.md")
+  assert _resource_rel_ok("scripts/run.py")
+  assert _resource_rel_ok("a/b/c/deep.md")  # depth 4 = at the cap
+  assert not _resource_rel_ok("a/b/c/d/deep.md")  # depth 5
+  assert not _resource_rel_ok("../up.md")
+  assert not _resource_rel_ok(".hidden.md")
+  assert not _resource_rel_ok("dir/.hidden.md")
+  assert not _resource_rel_ok("dir//double.md")
+  assert not _resource_rel_ok("win\\path.md")
+  assert not _resource_rel_ok("binary.png")
+  assert not _resource_rel_ok("")
 
 
 def test_install_collision_is_409_with_provenance(

@@ -1,12 +1,36 @@
 {
   "id": "skills",
   "name": "Skills",
-  "version": "0.1.0",
-  "description": "Browse, install, and manage agent skills — from your instance and the public ecosystem (Anthropic Agent Skills, Hermes catalogs, any SKILL.md on GitHub). Includes an agent chat that finds and offers matching skills.",
+  "version": "2.0.0",
+  "description": "Browse and read your agent's skills, and grow them: install from public skill catalogs, or ask the agent to find the right one for you.",
+  "author": "mobius-os",
+  "license": "MIT",
+  "homepage": "https://github.com/mobius-os/app-skills",
   "entry": "index.jsx",
-  "embeds_agent": true,
-  "theme_color": "#5A0FC8",
+  "icon": "icon.png",
+  "source_files": [
+    "domain.js",
+    "catalog.js"
+  ],
+  "offline_capable": false,
   "permissions": {
+    "cross_app_access": "none",
+    "share_with_apps": "none",
     "manage_skills": true
+  },
+  "runtime": {
+    "imports": [
+      "react",
+      "react-dom"
+    ],
+    "esm_deps": [
+      "marked",
+      "dompurify"
+    ]
+  },
+  "offline": {
+    "reads": false,
+    "writes": "none",
+    "execution": "none"
   }
 }

@@ -1,0 +1,170 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  DEFAULT_SOURCES,
+  sourceKey,
+  treeToSkills,
+  catalogSummary,
+  treeScanUrl,
+  rawSkillUrl,
+  githubSkillUrl,
+  createSummaryPrefetcher,
+} from '../catalog.js'
+
+// Regression tests for the catalog core. Portable: no absolute paths, no
+// install, discovered by `node --test` on a fresh clone.
+
+test('DEFAULT_SOURCES: every entry is scannable (repo shape, label, ref)', () => {
+  assert.ok(DEFAULT_SOURCES.length >= 5)
+  for (const s of DEFAULT_SOURCES) {
+    assert.match(s.repo, /^[\w.-]+\/[\w.-]+$/)
+    assert.ok(s.label)
+    assert.ok(s.ref)
+    assert.equal(typeof s.path, 'string')
+  }
+})
+
+test('sourceKey: distinguishes two subtrees of the same repo', () => {
+  const bundled = { repo: 'NousResearch/hermes-agent', path: 'skills' }
+  const optional = { repo: 'NousResearch/hermes-agent', path: 'optional-skills' }
+  assert.notEqual(sourceKey(bundled), sourceKey(optional))
+})
+
+test('treeToSkills: keeps only SKILL.md dirs, sorted by name', () => {
+  const tree = [
+    { path: 'skills/pdf/SKILL.md' },
+    { path: 'skills/artifacts/SKILL.md' },
+    { path: 'skills/pdf/scripts/fill.py' },
+    { path: 'README.md' },
+    { path: 'skills/notes.md' },
+  ]
+  assert.deepEqual(treeToSkills(tree, ''), [
+    { dir: 'skills/artifacts', name: 'artifacts' },
+    { dir: 'skills/pdf', name: 'pdf' },
+  ])
+})
+
+test('treeToSkills: a path prefix scopes to that subtree (boundary-safe)', () => {
+  const tree = [
+    { path: 'skills/a/SKILL.md' },
+    { path: 'skills-extra/b/SKILL.md' },
+    { path: 'other/c/SKILL.md' },
+  ]
+  assert.deepEqual(treeToSkills(tree, 'skills'), [{ dir: 'skills/a', name: 'a' }])
+})
+
+test('treeToSkills: tolerates malformed tree entries and a non-array input', () => {
+  assert.deepEqual(treeToSkills(null, ''), [])
+  assert.deepEqual(treeToSkills([{}, { path: 42 }, null, { path: 'x/SKILL.md' }], ''), [
+    { dir: 'x', name: 'x' },
+  ])
+})
+
+test('catalogSummary: frontmatter description wins; license and peek extracted', () => {
+  const md = [
+    '---',
+    'name: pdf',
+    'description: Work with PDF files.',
+    'license: Complete terms in LICENSE.txt',
+    '---',
+    '# PDF',
+    '',
+    'Body paragraph here.',
+  ].join('\n')
+  const s = catalogSummary(md)
+  assert.equal(s.description, 'Work with PDF files.')
+  assert.equal(s.license, 'Complete terms in LICENSE.txt')
+  assert.ok(s.peek.startsWith('# PDF'))
+  assert.ok(!s.peek.includes('---\nname'), 'peek is the frontmatter-stripped body')
+})
+
+test('catalogSummary: falls back to the first body paragraph, then placeholder copy', () => {
+  assert.equal(catalogSummary('# T\n\nFirst paragraph.').description, 'First paragraph.')
+  assert.equal(catalogSummary('').description, 'No description in SKILL.md.')
+  assert.equal(catalogSummary('').peek, null)
+})
+
+test('catalogSummary: peek is capped at 700 chars', () => {
+  const s = catalogSummary(`# T\n\n${'x'.repeat(2000)}`)
+  assert.equal(s.peek.length, 700)
+})
+
+test('url builders: ref defaults to main and paths compose correctly', () => {
+  const src = { repo: 'anthropics/skills', path: 'skills' }
+  assert.equal(treeScanUrl(src), 'https://api.github.com/repos/anthropics/skills/git/trees/main?recursive=1')
+  assert.equal(rawSkillUrl(src, 'skills/pdf'), 'https://raw.githubusercontent.com/anthropics/skills/main/skills/pdf/SKILL.md')
+  assert.equal(githubSkillUrl({ ...src, ref: 'v2' }, 'skills/pdf'), 'https://github.com/anthropics/skills/blob/v2/skills/pdf/SKILL.md')
+})
+
+test('prefetcher: bounds concurrency and still visits every dir', async () => {
+  let inflight = 0
+  let peak = 0
+  const seen = []
+  const prefetcher = createSummaryPrefetcher({
+    concurrency: 2,
+    loadOne: async (dir) => {
+      inflight += 1
+      peak = Math.max(peak, inflight)
+      seen.push(dir)
+      await new Promise((resolve) => setImmediate(resolve))
+      inflight -= 1
+    },
+  })
+  prefetcher.start(['a', 'b', 'c', 'd', 'e'])
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.deepEqual([...seen].sort(), ['a', 'b', 'c', 'd', 'e'])
+  assert.ok(peak <= 2, `peak concurrency ${peak} exceeded the bound`)
+})
+
+test('prefetcher: a rejecting loadOne does not stall the pool', async () => {
+  const seen = []
+  const prefetcher = createSummaryPrefetcher({
+    concurrency: 1,
+    loadOne: async (dir) => {
+      seen.push(dir)
+      if (dir === 'bad') throw new Error('boom')
+    },
+  })
+  prefetcher.start(['bad', 'good'])
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.deepEqual(seen, ['bad', 'good'])
+})
+
+test('prefetcher: starting a new pool strands the previous generation', async () => {
+  const seen = []
+  let releaseFirst
+  const gate = new Promise((resolve) => { releaseFirst = resolve })
+  const prefetcher = createSummaryPrefetcher({
+    concurrency: 1,
+    loadOne: async (dir) => {
+      seen.push(dir)
+      if (dir === 'old-1') await gate // old pool blocks until after the switch
+    },
+  })
+  prefetcher.start(['old-1', 'old-2'])
+  await new Promise((resolve) => setImmediate(resolve))
+  prefetcher.start(['new-1'])
+  releaseFirst()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.ok(seen.includes('new-1'))
+  assert.ok(!seen.includes('old-2'), 'the superseded pool must not continue its queue')
+})
+
+test('prefetcher: cancel() stops the pool without starting another', async () => {
+  const seen = []
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const prefetcher = createSummaryPrefetcher({
+    concurrency: 1,
+    loadOne: async (dir) => {
+      seen.push(dir)
+      if (dir === 'a') await gate
+    },
+  })
+  prefetcher.start(['a', 'b'])
+  await new Promise((resolve) => setImmediate(resolve))
+  prefetcher.cancel()
+  release()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.deepEqual(seen, ['a'])
+})
