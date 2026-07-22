@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import mobiusLogoUrl from '../../assets/moebius.png'
 import { api, setToken, BASE } from '../../api/client.js'
 import * as setupSession from '../../lib/setupSession.js'
 import { authQueries } from '../../hooks/queries.js'
@@ -139,7 +140,7 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
   return (
     <div className="setup">
       <div className="setup__card">
-        <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
+        <img src={mobiusLogoUrl} alt="Möbius" className="setup__logo" />
         <SetupProgress step="account" />
         <h1 className="setup__title">Create your home key</h1>
         <p className="setup__subtitle">
@@ -311,7 +312,7 @@ function ProviderStep({
   return (
     <div className="setup">
       <div className="setup__card">
-        <img src={`${BASE}/moebius.png`} alt="Möbius" className="setup__logo" />
+        <img src={mobiusLogoUrl} alt="Möbius" className="setup__logo" />
         <SetupProgress step="provider" />
         <h1 className="setup__title">Wake up your AI</h1>
         <p className="setup__subtitle">
