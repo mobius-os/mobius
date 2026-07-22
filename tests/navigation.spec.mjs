@@ -422,6 +422,107 @@ test.describe('Desktop sidebar navigation', () => {
   })
 })
 
+test.describe('Drawer touch lifecycle', () => {
+  test.use({ hasTouch: true })
+
+  test('an interrupted drawer drag cannot consume the next real row tap', async ({ page }) => {
+    // Enable drawer-row workspace gestures before the shell module evaluates.
+    // This is the production path that creates the full-viewport drag layer.
+    await page.addInitScript(() => {
+      localStorage.setItem('mobius:workspace-splits', '1')
+    })
+    await setup(page, { width: 412, height: 915 })
+    await openDrawer(page)
+
+    // The coordinate-level touchscreen tap below cannot use Playwright's
+    // locator click re-targeting. Wait until the 250ms opening transition has
+    // stopped moving the row before sampling its bounding box; otherwise a
+    // valid tap can land at the row's old in-flight coordinate under load.
+    const drawer = page.locator('#navigation-drawer')
+    await expect(drawer).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)')
+
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    const beta = navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true })
+    await expect(beta).toBeVisible()
+
+    // Reproduce the mobile interruption precisely: the row's drag controller
+    // arms and installs its transparent viewport layer, then the browser steals
+    // the terminal pointer event (notification shade/app switch), so no up or
+    // cancel reaches the shell. This used to leave the layer above the drawer.
+    await beta.evaluate((row) => {
+      const box = row.getBoundingClientRect()
+      const start = {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 1,
+        pointerType: 'touch',
+        isPrimary: true,
+        button: 0,
+        clientX: box.left + 40,
+        clientY: box.top + box.height / 2,
+      }
+      row.dispatchEvent(new PointerEvent('pointerdown', start))
+      window.dispatchEvent(new PointerEvent('pointermove', {
+        ...start,
+        clientX: start.clientX + 30,
+      }))
+    })
+    await expect(page.locator('.workspace__drag-shield')).toHaveCount(1)
+    await expect(page.locator('.workspace__drag-shield')).toHaveCSS('pointer-events', 'none')
+
+    // A real touchscreen gesture (not HTMLElement.click) must both reconcile the
+    // abandoned session and activate its row in this SAME interaction. Mobile
+    // browsers commonly reuse pointerId=1, which is why identity cannot stand in
+    // for the old pointer's liveness.
+    const box = await beta.boundingBox()
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
+
+    await expect(page.getByRole('button', { name: 'Toggle navigation' }))
+      .toHaveAttribute('aria-expanded', 'false')
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(NAV_CHATS[1].id)
+    await expect(page.locator('.workspace__drag-shield')).toHaveCount(0)
+  })
+
+  test('touch rows recover through both responsive drawer modes', async ({ page }) => {
+    await setup(page, { width: 412, height: 915 })
+    await openDrawer(page)
+
+    // Widening consumes the mobile history sentinel before converting the modal
+    // into a persistent sidebar. `drawer--locked` is deliberately allowed only
+    // during that traversal; it must not survive into the interactive sidebar.
+    await page.setViewportSize({ width: 1280, height: 800 })
+    const drawer = page.locator('#navigation-drawer')
+    await expect(drawer).toHaveClass(/drawer--persistent/)
+    await expect(drawer).not.toHaveClass(/drawer--locked/)
+    await expect(drawer).not.toHaveAttribute('inert', '')
+
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    const beta = navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true })
+    let box = await beta.boundingBox()
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(NAV_CHATS[1].id)
+
+    // Narrowing returns to a closed modal; one real touch opens it and one real
+    // touch selects a different destination. No desktop interaction lock or
+    // stale sentinel may leak across the reverse transition.
+    await page.setViewportSize({ width: 412, height: 915 })
+    await expect(drawer).not.toHaveClass(/drawer--persistent/)
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    box = await toggle.boundingBox()
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+    const gamma = navigation.getByRole('button', { name: NAV_CHATS[2].title, exact: true })
+    box = await gamma.boundingBox()
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(NAV_CHATS[2].id)
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  })
+})
+
 test.describe('Back button edge cases', () => {
   test('5. Multiple navigations — back pops in LIFO order', async ({ page }) => {
     await setup(page)

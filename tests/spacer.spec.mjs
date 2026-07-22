@@ -596,16 +596,21 @@ test.describe('SSE streaming (real React path)', () => {
     expect(m.msgCount).toBeGreaterThanOrEqual(2)
     assertSpacerReasonable(m)
 
-    // Once the tool settles, the compact line switches from progressive copy
-    // to the reviewed past-tense label (singular for a lone Read) and exposes the first activity's muted
-    // type glyph. The spinner belongs only to a live tool.
-    const activity = page.locator('.chat__activity').first()
-    await expect(activity.locator('.chat__activity-label')).toHaveText('Read a file')
-    await expect(activity.locator('[data-activity-kind="files"]')).toHaveCount(1)
-    await expect(activity.locator('.chat__tool-spin')).toHaveCount(0)
+    // A lone operation is its own collapsed disclosure: no redundant activity
+    // summary wrapping one identical child row. It keeps the concrete
+    // past-tense label and file glyph; the spinner belongs only to a live tool.
+    const tools = page.locator('.chat__tools').first()
+    await expect(tools.locator('.chat__activity')).toHaveCount(0)
+    const tool = tools.locator(':scope > .chat__tool')
+    await expect(tool.locator('.chat__tool-header')).toHaveAttribute('aria-expanded', 'false')
+    await expect(tool.locator('.chat__tool-name')).toHaveText(
+      'Read /data/apps/test/index.jsx',
+    )
+    await expect(tool.locator('[data-tool-kind="files"]')).toHaveCount(1)
+    await expect(tool.locator('.chat__tool-spin')).toHaveCount(0)
   })
 
-  test('16b. Near-foot activity taps hold position while live descendants churn', async ({ page }) => {
+  test('16b. Near-foot activity taps follow deterministically while live descendants churn', async ({ page }) => {
     const events = [
       { type: 'catch_up_done' },
       // Put the final activity disclosure close to the viewport foot once the
@@ -660,9 +665,11 @@ test.describe('SSE streaming (real React path)', () => {
     expect(before.relativeTop).toBeGreaterThan(before.viewport * 0.55)
     expect(before.relativeTop).toBeLessThan(before.viewport - 20)
 
-    // Simulate status/output churn inside an open live activity timeline. The
-    // toggle guard must observe only its direct body transition, not let these
-    // unrelated descendant mutations win the correction race.
+    // Simulate status/output churn inside an open live activity timeline. In
+    // FOLLOW_BOTTOM, the scroll controller remains the sole authority: opening
+    // follows the taller real-content tail and closing returns to the prior
+    // tail. Repeated equal states must land identically despite descendant
+    // mutations; that is the autoscroll half of the idempotent-toggle contract.
     await page.evaluate(() => {
       window.__disclosureChurn = setInterval(() => {
         const timeline = [...document.querySelectorAll('.chat__activity-timeline')].at(-1)
@@ -675,14 +682,30 @@ test.describe('SSE streaming (real React path)', () => {
     })
 
     try {
-      const box = await header.boundingBox()
-      expect(box).not.toBeNull()
+      let openTop = null
       for (let i = 0; i < 10; i++) {
-        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+        await header.click()
         await page.evaluate(() => new Promise(r =>
           requestAnimationFrame(() => requestAnimationFrame(r))))
-        const top = await header.evaluate(el => el.getBoundingClientRect().top)
-        expect(Math.abs(top - before.top), `toggle ${i + 1} drift`).toBeLessThanOrEqual(2)
+        const after = await page.evaluate(() => {
+          const s = document.querySelector('.chat__scroll')
+          const b = [...document.querySelectorAll('.chat__activity-header')].at(-1)
+          return {
+            top: b.getBoundingClientRect().top,
+            gap: s.scrollHeight - s.scrollTop - s.clientHeight,
+          }
+        })
+        expect(after.gap, `toggle ${i + 1} left the tail`).toBeLessThanOrEqual(4)
+        if (i % 2 === 0) {
+          if (openTop == null) {
+            openTop = after.top
+            expect(openTop).toBeLessThan(before.top - 20)
+          } else {
+            expect(Math.abs(after.top - openTop), `open ${i + 1} drift`).toBeLessThanOrEqual(2)
+          }
+        } else {
+          expect(Math.abs(after.top - before.top), `closed ${i + 1} drift`).toBeLessThanOrEqual(2)
+        }
       }
     } finally {
       await page.evaluate(() => clearInterval(window.__disclosureChurn))

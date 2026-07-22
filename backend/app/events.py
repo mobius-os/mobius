@@ -91,6 +91,7 @@ SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   "open_item",
   "app_updated",
   "app_build_failed",
+  "app_update_stale",
   "shell_rebuilding",
   "shell_rebuilt",
   "shell_apply_now",
@@ -217,9 +218,14 @@ def _tool_block_for_event(assistant_blocks: list, tool_use_id) -> dict | None:
 
 def _persisted_block(block: dict) -> dict:
   """Drop live-only reducer metadata from a block before storage."""
+  persisted = dict(block)
+  if block.get("type") == "text":
+    # Provider item identity is only needed while interleaved live events are
+    # being reduced. The finished transcript keeps plain text blocks.
+    persisted.pop("text_item_id", None)
+    return persisted
   if block.get("type") != "thinking":
     return block
-  persisted = dict(block)
   persisted.pop("_thinking_start_ts", None)
   persisted.pop("_thinking_closed", None)
   persisted.pop("_thinking_segment_id", None)
@@ -375,20 +381,37 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
 
   if event_type == "text":
     content = event.get("content", "")
+    text_item_id = event.get("text_item_id")
+    if text_item_id:
+      # request_user_input is a synchronous server request, but the Codex
+      # notification stream can still deliver the rest of the SAME assistant
+      # message item after the question card was published. Positional
+      # reduction would append that suffix after the card and make a genuinely
+      # live question look historical. Item identity lets the suffix return
+      # to the text block it belongs to, even across an interleaved question.
+      for block in reversed(assistant_blocks):
+        if (block.get("type") == "text"
+            and block.get("text_item_id") == text_item_id):
+          block["content"] += content
+          return True
     # Append to last text block or create new one. A preceding internal
     # text_boundary marker means the provider started a new assistant
     # message item without a visible tool block; replace the marker with
     # the real text block instead of concatenating into the prior text.
     if (assistant_blocks
         and assistant_blocks[-1].get("type") == "text_boundary"):
-      assistant_blocks[-1] = {"type": "text", "content": content}
+      assistant_blocks[-1] = {
+        "type": "text", "content": content,
+        **({"text_item_id": text_item_id} if text_item_id else {}),
+      }
     elif (assistant_blocks
         and assistant_blocks[-1].get("type") == "text"):
       assistant_blocks[-1]["content"] += content
     else:
-      assistant_blocks.append(
-        {"type": "text", "content": content}
-      )
+      assistant_blocks.append({
+        "type": "text", "content": content,
+        **({"text_item_id": text_item_id} if text_item_id else {}),
+      })
     return True
 
   if event_type == "thinking":
@@ -451,6 +474,62 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     content = event.get("content", "")
     if not content:
       return False
+    text_item_id = event.get("text_item_id")
+    if text_item_id:
+      for block in reversed(assistant_blocks):
+        if (block.get("type") == "text"
+            and block.get("text_item_id") == text_item_id):
+          if block.get("content") == content:
+            return False
+          block["content"] = content
+          return True
+    # Compatibility for replay logs written before text_item_id existed. A
+    # completed full item can arrive after: prefix, question, suffix. Repair
+    # that exact shape by replacing the earlier prefix and removing the suffix
+    # instead of placing authoritative prose after the still-live card.
+    if (assistant_blocks
+        and assistant_blocks[-1].get("type") == "text"):
+      trailing_idx = len(assistant_blocks) - 1
+      trailing = str(assistant_blocks[trailing_idx].get("content") or "")
+      saw_question = False
+      for idx in range(trailing_idx - 1, -1, -1):
+        block = assistant_blocks[idx]
+        if block.get("type") == "question":
+          saw_question = True
+          continue
+        if block.get("type") != "text" or not saw_question:
+          continue
+        prefix = str(block.get("content") or "")
+        if prefix and content.startswith(prefix) and (
+          content == prefix + trailing or content.endswith(trailing)
+        ):
+          block["content"] = content
+          assistant_blocks.pop(trailing_idx)
+          return True
+        break
+    # Codex can publish the question after only a PREFIX of the preceding
+    # assistant-message item, then complete that item with one authoritative
+    # text_final carrying a different/missing item id. There is no suffix text
+    # block in that shape: prefix -> unanswered question -> full text. The
+    # full text still belongs to the prefix item; appending it after the card
+    # duplicates the reply and, worse, makes the live question cease to be the
+    # transcript tail (so the UI correctly refuses its answer). An unanswered
+    # trailing question is a protocol barrier, therefore no genuinely new
+    # assistant item can follow it until an answer arrives. That makes this
+    # prefix replacement deterministic even when provider item identity is
+    # absent or changes between delta and completion.
+    if (assistant_blocks
+        and assistant_blocks[-1].get("type") == "question"
+        and not assistant_blocks[-1].get("answers")):
+      for idx in range(len(assistant_blocks) - 2, -1, -1):
+        block = assistant_blocks[idx]
+        if block.get("type") != "text":
+          continue
+        prefix = str(block.get("content") or "")
+        if prefix and content.startswith(prefix):
+          block["content"] = content
+          return True
+        break
     if (assistant_blocks
         and assistant_blocks[-1].get("type") == "text"):
       if assistant_blocks[-1].get("content") == content:

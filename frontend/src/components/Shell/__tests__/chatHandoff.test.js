@@ -14,8 +14,13 @@ function ruleBody(selector) {
 test('chat display readiness preserves the existing transcript reveal gate', () => {
   assert.match(chatView, /const displayReady = revealed \|\| showEmpty \|\| showLoadError/,
     'a transcript may hand off only after useScrollMode reveals it')
-  assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReadyRef\.current\?\.\(chatId\)/,
+  assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
     'readiness must reach Shell before the browser paints the hidden transcript')
+  assert.match(chatView,
+    /if \(displayReady\) onDisplayReady\?\.\(chatId\)[\s\S]*\}, \[chatId, displayReady, onDisplayReady\]\)/,
+    'an already-ready chat must re-announce when a cross-pane move changes its handoff owner')
+  assert.doesNotMatch(chatView, /onDisplayReadyRef/,
+    'the callback dependency is the owner-change signal; a parallel mutable ref would obscure it')
 })
 
 test('each pane holds one outgoing chat over one staging chat', () => {

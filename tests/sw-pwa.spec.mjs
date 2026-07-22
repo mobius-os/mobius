@@ -264,7 +264,7 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       const frameRev = await page.locator('meta[name="mobius-frame-rev"]').getAttribute('content')
       const frameVersion = frameRev ? `${appVersion}-${frameRev}` : appVersion
       await expect.poll(() => page.evaluate(async ({ appId, appVersion, frameVersion }) => {
-        const cache = await caches.open('mobius-offline-apps-v3')
+        const cache = await caches.open('mobius-offline-apps-v4')
         const keys = await cache.keys()
         const has = (route, version) => keys.some(request => {
           const url = new URL(request.url)

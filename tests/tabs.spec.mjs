@@ -279,15 +279,18 @@ test.describe('Tabs', () => {
     await expect(page.locator('.shell__tabstrip')).toHaveCount(1)
 
     // Close the last tab — the emptied builder auto-returns to SINGLE (owner
-    // semantic). The strip retires with the world flip, and the never-seeded
-    // single slot opens on the home surface.
+    // semantic). The strip retires with the world flip, and the never-seeded single
+    // slot lands on the first-class New Chat landing (round 4 item 3) — never the
+    // freshest transcript.
     await page.locator('.shell__tab-close').first().click()
     await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
     await expect.poll(() => page.evaluate(
       key => JSON.parse(sessionStorage.getItem(key))?.viewMode,
       paneModel.STORAGE_KEY,
     ), { timeout: 3000 }).toBe('single')
-    await expect(page.locator('.chat__scroll, .chat__empty-wrap')).toBeVisible({ timeout: 3000 })
+    // The New Chat empty surface (What's on your mind?) shows — the honest landing.
+    // Scope to the VISIBLE full-bleed surface (hidden panes can also carry the title).
+    await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible({ timeout: 3000 })
   })
 
   test('no toggle/strip surface when nothing is pinned (single-screen)', async ({ page }) => {

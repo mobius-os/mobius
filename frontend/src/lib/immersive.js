@@ -12,10 +12,15 @@
 // The state is the id of the app that currently HOLDS an immersive request,
 // or null. Holding a request is not the same as immersive being APPLIED:
 // application additionally requires that app to be the active canvas (see
-// isImmersiveActive). Keeping request-state per-app means a cached, hidden
-// iframe's request survives an app switch — returning to the game re-enters
-// immersive without the app having to re-post (its iframe never remounted,
-// so it never would).
+// isImmersiveActive).
+//
+// Immersive intent is deliberately SESSIONAL, not sticky navigation state.
+// Leaving an app releases its request, and returning does not resurrect a
+// previously recorded `true`: the app must make a fresh request while it is
+// visible. This makes the owner's shell-level Exit action durable across an
+// app switch and prevents an eager game from repeatedly taking the workspace
+// over merely because its cached iframe stayed mounted. A live frame promotion
+// is the one replay boundary; AppCanvas owns that distinction below.
 
 export function immersiveReducer(immersiveAppId, action) {
   switch (action.type) {
@@ -47,6 +52,32 @@ export function isImmersiveActive(immersiveAppId, activeView, activeAppId) {
   return immersiveAppId != null
     && activeView === 'canvas'
     && sameApp(immersiveAppId, activeAppId)
+}
+
+/**
+ * Decide whether AppCanvas should drive Shell from a lifecycle transition.
+ *
+ * Real-time frame messages are forwarded directly and do not pass through
+ * this helper. Lifecycle replay is narrower:
+ *   - becoming inactive releases the holder;
+ *   - returning to the same cached frame does nothing (no sticky re-entry);
+ *   - promoting a newly loaded frame while continuously active replays that
+ *     new frame's recorded intent, so an in-place app update stays seamless.
+ *
+ * `null` means no callback. A boolean is the value to send to Shell.
+ */
+export function immersiveLifecycleValue(previous, current, recordedIntent) {
+  if (!current?.appId) return null
+  if (!current.active) return false
+
+  const sameCanvas = previous?.appId != null
+    && String(previous.appId) === String(current.appId)
+  const promotedWhileActive = sameCanvas
+    && previous.active === true
+    && previous.liveVersion !== current.liveVersion
+
+  if (!promotedWhileActive) return null
+  return recordedIntent === true
 }
 
 // App ids are numeric from /api/apps but arrive as strings on some paths

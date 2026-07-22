@@ -11,14 +11,30 @@ from app.providers import PROVIDER_NAMES, _model_belongs_to_other_provider
 
 
 class SetupRequest(BaseModel):
-  username: str
-  password: str
+  username: str = Field(min_length=1, max_length=64)
+  # Generous enough for long passphrases while bounding accidental or hostile
+  # setup payloads before password hashing work. bcrypt receives a fixed-width
+  # digest, so every character remains significant.
+  password: str = Field(min_length=1, max_length=1024)
   # First-boot claim gate: the one-time possession proof from the deploy logs
   # / MOBIUS_SETUP_CLAIM. Optional-with-default on purpose — a missing field
   # must NOT become a Pydantic 422 (an oracle exposing the mechanism); the
   # route funnels missing/empty/malformed/wrong to one uniform 403. See
   # app.setup_claim.
   claim: str = ""
+
+  @field_validator("username", mode="before")
+  @classmethod
+  def normalize_username(cls, value):
+    """Store the visible username, not accidental surrounding whitespace."""
+    return value.strip() if isinstance(value, str) else value
+
+  @field_validator("password")
+  @classmethod
+  def reject_blank_password(cls, value: str) -> str:
+    if not value.strip():
+      raise ValueError("Password cannot be blank.")
+    return value
 
   @field_validator("claim", mode="before")
   @classmethod
@@ -270,9 +286,22 @@ class UpdateCheckOut(BaseModel):
   manifest_url, no git repo, no recorded upstream branch, or the upstream fetch
   failed — so the caller falls back to version comparison. It is a real
   true/false only when a byte-level compare actually ran, so a push that changed
-  code WITHOUT bumping the version still reads as an update. The version strings
-  are display-only, never the detection signal."""
+  code WITHOUT bumping the version still reads as an update.
+
+  A durable conflict receipt has two materially different states. In
+  `needs_resolution`, upstream is not yet incorporated into local source (or a
+  materialized merge still has conflicts). In `replay_pending`, source was
+  resolved and committed but the canonical installer still has to promote the
+  bundle/metadata transaction. Only the former should open a resolver chat.
+  `needs_resolution` remains as a derived rolling-deploy compatibility field;
+  new consumers should use `pending_update_state`. `unknown` means a receipt
+  proves an update is pending but Git could not safely classify its resolution
+  phase. The version strings are display-only, never the detection signal."""
   update_available: bool | None = None
+  pending_update_state: Literal[
+    "none", "needs_resolution", "replay_pending", "unknown",
+  ] = "none"
+  needs_resolution: bool = False
   upstream_version: str | None = None
   local_version: str | None = None
   checked_at: datetime

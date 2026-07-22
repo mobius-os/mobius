@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import auth, models, schemas, setup_claim
@@ -271,9 +271,26 @@ def login(
       detail="Incorrect username or password.",
       headers={"WWW-Authenticate": "Bearer"},
     )
+  # Existing installations may carry the legacy raw-bcrypt format, where only
+  # the first 72 password bytes mattered. Upgrade it only after a successful
+  # verification, keeping login compatible without a one-shot DB migration or
+  # forced password reset. A failed best-effort write must not lock the owner
+  # out after their credential already proved valid.
+  owner_username = owner.username
+  owner_token_epoch = owner.token_epoch
+  if auth.password_needs_rehash(owner.hashed_password):
+    try:
+      owner.hashed_password = auth.hash_password(form.password)
+      db.commit()
+    except SQLAlchemyError as exc:
+      db.rollback()
+      log.warning("Could not upgrade legacy owner password hash: %s", exc)
+    else:
+      from app import recovery_seed
+      recovery_seed.write_owner_seed(owner_username, owner.hashed_password)
   _reset_login_failures(form.username)
   token = auth.create_access_token(
-    {"sub": owner.username}, token_epoch=owner.token_epoch
+    {"sub": owner_username}, token_epoch=owner_token_epoch
   )
   return schemas.TokenResponse(access_token=token)
 

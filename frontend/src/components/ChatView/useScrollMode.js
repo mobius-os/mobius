@@ -352,7 +352,9 @@ export function _validateSavedMode(saved, messages, scrollEl) {
 
 
 /** Spacer height needed so the latest user message can sit near the
- *  top of the viewport, with the PIN_OFFSET breathing room above it.
+ *  top of the viewport, with the PIN_OFFSET breathing room above it. While an
+ *  ANCHOR_AT hold is active, also reserve enough room to keep that exact target
+ *  reachable if a mobile viewport grows before new response content arrives.
  *  The spacer's only job is reserving bottom room — it does NOT touch
  *  scrollTop and it does NOT decide whether a send pins.
  *
@@ -370,20 +372,34 @@ export function _validateSavedMode(saved, messages, scrollEl) {
  *  the pre-cushion behavior; a >0 value re-adds breathing room if the exact
  *  end-of-scroll rest ever feels cramped.)
  *
- *  Reservation is intentionally independent from pinning and component
- *  lifetime. This function always reserves enough bottom room for the latest
- *  visible user message, so leaving/reopening a chat, keyboard open/close, and
- *  later manual scrolls never make that message lose its reachable "top of
- *  screen" position.
+ *  The permanent pin reservation is intentionally independent from pin mode
+ *  and component lifetime. The anchor addition exists only while ANCHOR_AT
+ *  needs more room than that permanent baseline, and disappears as soon as
+ *  real content makes the anchor naturally reachable.
  */
 const PIN_OFFSET = 4
 const PIN_BOTTOM_ROOM = 0
-export function _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH) {
+export function _computeSpacerH(
+  scrollEl,
+  listEl,
+  lastUserMsgEl,
+  fullViewH,
+  mode = null,
+) {
   if (!scrollEl || !listEl) return 0
-  if (!lastUserMsgEl) return 0
   const viewH = fullViewH || scrollEl.clientHeight
-  const pinTarget = Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
-  return Math.max(0, viewH + pinTarget - listEl.offsetHeight + PIN_BOTTOM_ROOM)
+  const pinTarget = lastUserMsgEl
+    ? Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
+    : 0
+  let target = pinTarget
+  if (mode?.kind === 'ANCHOR_AT') {
+    const anchorEl = _anchorEl(scrollEl, mode.key)
+    if (anchorEl) {
+      target = Math.max(target, Math.max(0, anchorEl.offsetTop - mode.offset))
+    }
+  }
+  if (!lastUserMsgEl && target === 0) return 0
+  return Math.max(0, viewH + target - listEl.offsetHeight + PIN_BOTTOM_ROOM)
 }
 
 
@@ -500,9 +516,16 @@ export function modeAfterTerminalLayout(mode, spacerH, layoutStable) {
 export function modeAfterReaderReachesBottom({
   mode,
   spacerH,
+  anchorReservation = false,
   turnRunning,
   lastUserCid,
 }) {
+  // An ANCHOR_AT reservation makes that exact reader-owned position the
+  // physical bottom while the viewport is temporarily taller than the content
+  // beneath it. Reaching this synthetic edge is not a request to reinterpret
+  // the position as the latest-user pin; keep the anchor until real content
+  // makes its target naturally reachable and the extra reservation disappears.
+  if (anchorReservation && mode?.kind === 'ANCHOR_AT') return mode
   if (spacerH > 1 && lastUserCid != null) {
     if (mode?.kind === 'PIN_USER_MSG'
         && mode.cid === lastUserCid
@@ -560,7 +583,7 @@ export function readerInputActivatesDisclosure(
   pointerButton = 0,
 ) {
   const disclosure = target?.closest?.(
-    'button.chat__activity-header, button.chat__tool-header, button.chat__marker-header',
+    'button.chat__activity-header, button.chat__activity-think-toggle, button.chat__tool-header, button.chat__marker-header',
   )
   if (!disclosure) return false
   return (type === 'pointerdown' && pointerButton === 0)
@@ -614,6 +637,28 @@ export function modeForForegroundReturn(scrollEl) {
 export function modeForChatExit(scrollEl) {
   if (!scrollEl) return null
   return anchorModeFromScroll(scrollEl)
+}
+
+
+/** A disclosure toggle obeys the existing reading mode instead of inventing a
+ * second scroll policy. FOLLOW_BOTTOM stays live and follows the resized tail;
+ * every non-follow mode freezes the exact visible message anchor before the
+ * disclosure changes height. Repeating the same toggle therefore has the same
+ * result until the reader explicitly changes scroll mode. */
+export function modeForDisclosureToggle(scrollEl, currentMode) {
+  if (currentMode?.kind === 'FOLLOW_BOTTOM') return currentMode
+  return anchorModeFromScroll(scrollEl) || currentMode
+}
+
+
+/** Submitting an in-message question answer resumes output inside the same
+ * assistant row and may replace the card's controls immediately. It is not a
+ * request to follow the live tail. Freeze the exact visible row/offset before
+ * that card-to-stream handoff so neither the control reflow nor resumed output
+ * moves the reader. */
+export function modeForQuestionSubmission(scrollEl, currentMode) {
+  if (!scrollEl) return currentMode
+  return anchorModeFromScroll(scrollEl) || currentMode
 }
 
 
@@ -713,6 +758,10 @@ export function mountMediaSettled(scrollEl) {
  *   The dynamic spacer at the bottom of `.chat__list`.
  * @param {React.RefObject<HTMLElement>} args.lastUserMsgRef
  *   The most recent visible user message element.
+ * @param {() => void} args.syncComposerGeometry
+ *   Publishes the current overlaid composer height before the controller reads
+ *   list/spacer geometry. Keeping this in the same pre-paint layout pass stops
+ *   a later composer measurement from briefly clamping a newly pinned send.
  * @param {Array<object>} args.messages
  *   Persisted message list (drives effect re-runs).
  * @param {React.MutableRefObject<Array<object>>} args.messagesRef
@@ -745,6 +794,7 @@ export function mountMediaSettled(scrollEl) {
  *   closePreSendGestureWindow: () => void,
  *   freezeChatExit: () => void,
  *   freezeForegroundReturn: () => void,
+ *   freezeQuestionSubmission: () => void,
  *   freezeQueuedSubmission: () => void,
  *   revealConversationTail: () => void,
  *   settleNonPin: (event?: object) => void,
@@ -756,6 +806,7 @@ export default function useScrollMode({
   scrollRef,
   spacerRef,
   lastUserMsgRef,
+  syncComposerGeometry,
   messages,
   messagesRef,
   pendingMessagesLength,
@@ -874,12 +925,14 @@ export default function useScrollMode({
     const previousMode = modeRef.current
     if (nextMode === previousMode) return previousMode
     modeRef.current = nextMode
+    const scrollEl = scrollRef.current
+    if (scrollEl) scrollEl.dataset.scrollMode = nextMode.kind
     recordTrace('transitions', event, {
       from: previousMode,
       to: nextMode,
     })
     return nextMode
-  }, [recordTrace])
+  }, [recordTrace, scrollRef])
 
   // The sole automatic scrollTop funnel inside the controller. `applyMode`
   // remains exported as a pure executor for unit tests, but live code routes
@@ -962,6 +1015,14 @@ export default function useScrollMode({
     return transitionMode(
       modeForQueuedSubmission(scrollRef.current, modeRef.current),
       'send:queue-freeze',
+    )
+  }, [scrollRef, transitionMode])
+
+  const freezeQuestionSubmission = useCallback(() => {
+    readerLocationExplicitRef.current = true
+    return transitionMode(
+      modeForQuestionSubmission(scrollRef.current, modeRef.current),
+      'send:question-freeze',
     )
   }, [scrollRef, transitionMode])
 
@@ -1142,6 +1203,17 @@ export default function useScrollMode({
     resumeLayoutAfterGestureRef.current = resumeLayoutAfterGesture
 
     function sizeSpacer() {
+      // The list's bottom padding is derived from the absolutely-positioned
+      // composer height. React commits the emptied composer / new turn footer
+      // in the same render as a sent row, but the foot's ResizeObserver runs
+      // after paint. If spacer math reads the OLD padding first, the later
+      // --composer-h update transiently shortens the scroll range, the browser
+      // clamps the fresh pin, and the next controller pass visibly nudges the
+      // row upward a second time. Publish the committed foot height here,
+      // before ANY list/spacer reads, so reservation + scrollTop land from one
+      // geometry snapshot. Respect reader ownership: the CSS-variable write is
+      // scroll geometry too and must wait with the spacer during a gesture.
+      if (layoutOwnsScroll()) syncComposerGeometry?.()
       // Keep fullViewHRef authoritative at EVERY spacer sizing, not just at
       // the layout-effect entry and the RO callback start (the other two grow
       // sites). The visualViewport keyboard handler reaches sizeSpacer via
@@ -1183,7 +1255,7 @@ export default function useScrollMode({
       // exists. Null only when there is genuinely no user message → spacer 0.
       const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
       const h = _computeSpacerH(
-        scrollEl, listEl, lastUserEl, fullViewHRef.current,
+        scrollEl, listEl, lastUserEl, fullViewHRef.current, modeRef.current,
       )
       if (!layoutOwnsScroll()) {
         // Spacer height is itself scroll geometry: shrinking it can make the
@@ -1493,15 +1565,14 @@ export default function useScrollMode({
         scrollEl,
       })
       if (activatesDisclosure) {
-        // A disclosure tap says "hold what I am reading", not "keep following
-        // the conversation tail". Latch that intent BEFORE React changes the
-        // body height. The normal gesture gate below then defers ResizeObserver
-        // writes until pointerup, at which point it replays this anchor rather
-        // than the stale FOLLOW_BOTTOM that caused the non-repeatable jump.
-        const anchor = anchorModeFromScroll(scrollEl)
-        if (anchor) {
+        // A disclosure tap obeys the mode the reader already chose. FOLLOW_BOTTOM
+        // remains the sole tail authority; every other mode latches the visible
+        // anchor BEFORE React changes body height. The gesture gate below defers
+        // ResizeObserver writes until pointerup, then replays that same policy.
+        const nextMode = modeForDisclosureToggle(scrollEl, modeRef.current)
+        if (nextMode && nextMode !== modeRef.current) {
           readerLocationExplicitRef.current = true
-          transitionMode(anchor, 'reader:disclosure-toggle')
+          transitionMode(nextMode, 'reader:disclosure-toggle')
           persistMode()
         }
       }
@@ -1575,11 +1646,18 @@ export default function useScrollMode({
 
       if (atBottom) {
         const spacerH = spacerEl.offsetHeight || 0
-        const lastUserCid = _lastUserRowEl(scrollEl)?.dataset?.cid ?? null
+        const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
+        const lastUserCid = lastUserEl?.dataset?.cid ?? null
+        const pinSpacerH = _computeSpacerH(
+          scrollEl, listEl, lastUserEl, fullViewHRef.current,
+        )
+        const anchorReservation = modeRef.current?.kind === 'ANCHOR_AT'
+          && spacerH > pinSpacerH + 1
         transitionMode(
           modeAfterReaderReachesBottom({
             mode: modeRef.current,
             spacerH,
+            anchorReservation,
             turnRunning: turnRunningRef.current,
             lastUserCid,
           }),
@@ -1643,6 +1721,7 @@ export default function useScrollMode({
     chatId,
     initialEntryCanReveal,
     initialEntrySettled,
+    syncComposerGeometry,
   ])
 
   // Re-hold the reading position after an atomic catch-up commit lands
@@ -1783,6 +1862,7 @@ export default function useScrollMode({
     closePreSendGestureWindow,
     freezeChatExit,
     freezeForegroundReturn,
+    freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
     reapplyActiveMode,

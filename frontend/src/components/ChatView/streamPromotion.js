@@ -20,6 +20,10 @@ export function streamItemToBlock(item, { finalize = true } = {}) {
       ...(item.thinking_deferred ? {
         thinking_deferred: true,
         thinking_revision: item.thinking_revision,
+        // Reaching final promotion is the client-side completion boundary for
+        // this assistant turn. Surface it to an already-open lazy disclosure
+        // without polling or fetching the full trace in the background.
+        thinking_complete: true,
       } : {}),
       ...(Number.isFinite(item.duration_ms)
         ? { duration_ms: item.duration_ms }

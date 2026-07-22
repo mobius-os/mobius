@@ -276,8 +276,8 @@ async def lifespan(app):
     _bn_db = _BundleSession()
     try:
       healed_bundle_ids = await reconcile_missing_bundles(_bn_db)
-      # Compiler ABI migrations fix forward: every app frame receives one
-      # dependency-complete module, so legacy external-import bundles must be
+      # Compiler contract migrations fix forward: every app frame receives one
+      # dependency-complete module, so legacy or older-revision bundles must be
       # rebuilt before requests can expose them. The sweep is atomic per app
       # and resumable across interrupted boots.
       migrated_bundle_ids = await reconcile_outdated_bundles(_bn_db)

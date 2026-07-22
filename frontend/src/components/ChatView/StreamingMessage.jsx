@@ -33,6 +33,7 @@ export default function StreamingMessage({
       <MsgContent
         msg={msg}
         chatId={chatId}
+        messageKey={dataKey}
         onQuestionAnswer={onAnswer}
         onResume={onResume}
         onInternalNav={onInternalNav}

@@ -14,9 +14,11 @@ the test DB, so `get_writer()` is the real path throughout.
 """
 
 import asyncio
+import json
 import os
 import pathlib
 import threading
+import time
 
 import pytest
 
@@ -53,7 +55,12 @@ def _seed_owner_and_creds():
     / ".credentials.json"
   )
   creds.parent.mkdir(parents=True, exist_ok=True)
-  creds.write_text("{}", encoding="utf-8")
+  creds.write_text(json.dumps({
+    "claudeAiOauth": {
+      "accessToken": "test-token",
+      "expiresAt": int(time.time() * 1000) + 3_600_000,
+    },
+  }), encoding="utf-8")
 
 
 def _seed_chat(chat_id, messages=None, pending=None, run_status=None,
@@ -86,6 +93,36 @@ def _load(chat_id):
       "messages": list(chat.messages or []),
       "pending_messages": list(chat.pending_messages or []),
       "run_status": chat.run_status,
+    }
+  finally:
+    db.close()
+
+
+def _seed_run(run_id, chat_id, *, provider="claude"):
+  from datetime import UTC, datetime
+
+  db = SessionLocal()
+  try:
+    db.add(models.ChatRun(
+      id=run_id,
+      chat_id=chat_id,
+      status="running",
+      provider=provider,
+      started_at=datetime.now(UTC),
+    ))
+    db.commit()
+  finally:
+    db.close()
+
+
+def _run_outcomes(chat_id):
+  db = SessionLocal()
+  try:
+    return {
+      row.id: row.status
+      for row in db.query(models.ChatRun).filter(
+        models.ChatRun.chat_id == chat_id,
+      ).all()
     }
   finally:
     db.close()
@@ -146,6 +183,141 @@ def test_empty_queue_terminal_clears_marker(monkeypatch):
   # The chat was forgotten (generation dropped) after the clear.
   assert chat_mod.current_run_generation("t1") == 0
   assert not chat_mod.registry.is_alive("t1")
+
+
+def test_provider_error_clears_marker_but_records_failed_run(monkeypatch):
+  """The runner's terminal error is a settled turn, not a successful one.
+
+  This is the production OAuth/capacity-error shape: the error is persisted in
+  the transcript, the chat becomes idle, and the per-run observability row
+  records ``failed`` rather than overloading ``completed`` as "any terminal".
+  """
+  _seed_owner_and_creds()
+  _seed_chat(
+    "t1-failed", messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[], run_status="running",
+  )
+  _seed_run("rt-1-failed", "t1-failed")
+
+  async def error_runner(**_kwargs):
+    return {
+      "session_id": "sess",
+      "cost_usd": 0.0,
+      "error": "authentication failed",
+    }
+
+  import app.claude_sdk_runner as csr
+  monkeypatch.setattr(csr, "run_claude_sdk_turn", error_runner)
+
+  chat_mod.mark_starting("t1-failed")
+  gen = chat_mod.current_run_generation("t1-failed")
+  published = []
+  _run_real_chat(
+    "t1-failed",
+    run_token="rt-1-failed",
+    run_gen=gen,
+    published=published,
+  )
+  _drain_actor()
+
+  assert _load("t1-failed")["run_status"] is None
+  assert _run_outcomes("t1-failed") == {"rt-1-failed": "failed"}
+  assert "error" in published
+  assert "done" in published
+
+
+def test_provider_error_handoff_keeps_failed_predecessor(monkeypatch):
+  """A queued continuation gets a fresh running row without laundering the
+  provider-error predecessor into ``completed`` during PromotePending."""
+  _seed_owner_and_creds()
+  _seed_chat(
+    "t1-failed-queued",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "next", "ts": 2}],
+    run_status="running",
+  )
+  _seed_run("rt-1-failed-queued", "t1-failed-queued")
+
+  async def error_runner(**_kwargs):
+    return {"session_id": "sess", "cost_usd": 0.0, "error": "capacity"}
+
+  import app.claude_sdk_runner as csr
+  monkeypatch.setattr(csr, "run_claude_sdk_turn", error_runner)
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  chat_mod.mark_starting("t1-failed-queued")
+  gen = chat_mod.current_run_generation("t1-failed-queued")
+  _run_real_chat(
+    "t1-failed-queued",
+    run_token="rt-1-failed-queued",
+    run_gen=gen,
+  )
+  _drain_actor()
+
+  assert len(scheduled) == 1
+  successor_token = scheduled[0]["run_token"]
+  assert _run_outcomes("t1-failed-queued") == {
+    "rt-1-failed-queued": "failed",
+    successor_token: "running",
+  }
+  assert _load("t1-failed-queued")["run_status"] == "running"
+
+
+@pytest.mark.parametrize("queued", [False, True], ids=["settled", "handoff"])
+def test_empty_provider_result_persists_retryable_failure(monkeypatch, queued):
+  """A clean-looking provider return with no renderable output is a failed
+  run, including when queued work immediately opens a successor turn."""
+  cid = f"t1-empty-{'queued' if queued else 'settled'}"
+  run_token = f"rt-{cid}"
+  pending = (
+    [{"role": "user", "content": "next", "ts": 2}] if queued else []
+  )
+  _seed_owner_and_creds()
+  _seed_chat(
+    cid,
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=pending,
+    run_status="running",
+  )
+  _seed_run(run_token, cid)
+  _patch_claude_runner(monkeypatch, text=None)
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  chat_mod.mark_starting(cid)
+  gen = chat_mod.current_run_generation(cid)
+  _run_real_chat(cid, run_token=run_token, run_gen=gen)
+  _drain_actor()
+
+  state = _load(cid)
+  retry_blocks = [
+    block
+    for message in state["messages"]
+    if message.get("role") == "assistant"
+    for block in message.get("blocks", [])
+    if block.get("type") == "error"
+  ]
+  assert retry_blocks == [{
+    "type": "error",
+    "message": "This turn ended without a response — tap to retry.",
+  }]
+  outcomes = _run_outcomes(cid)
+  assert outcomes[run_token] == "failed"
+  if queued:
+    assert len(scheduled) == 1
+    assert outcomes[scheduled[0]["run_token"]] == "running"
+    assert state["run_status"] == "running"
+  else:
+    assert scheduled == []
+    assert outcomes == {run_token: "failed"}
+    assert state["run_status"] is None
 
 
 # -- 2. terminal write failure LEAVES the marker (+ reconcile repairs) ---
@@ -491,6 +663,7 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
     "t6", messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[], run_status="running",
   )
+  _seed_run("rt-6", "t6")
   _patch_claude_runner(monkeypatch)
 
   chat_mod.mark_starting("t6")
@@ -516,6 +689,7 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
   assert _load("t6")["run_status"] is None, (
     "Stop handoff must clear the marker after terminal persistence"
   )
+  assert _run_outcomes("t6") == {"rt-6": "stopped"}
 
   # A newer run's marker must NEVER be cleared by a stale Stop-bumped run.
   _seed_chat("t6b", run_status="running")
@@ -539,6 +713,50 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
   assert _load("t6b")["run_status"] == "running", (
     "a stale Stop-bumped run must NOT clear a newer run's marker"
   )
+
+
+def test_watchdog_handoff_records_interrupted_outcome(monkeypatch):
+  """The watchdog shares Stop's safe generation handoff, but its durable
+  outcome is an interruption rather than a user-requested stop."""
+  from app.runner_registry import RunnerKind
+
+  cid = "watchdog-outcome"
+  _seed_owner_and_creds()
+  _seed_chat(
+    cid, messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[], run_status="running",
+  )
+  _seed_run(f"rt-{cid}", cid)
+
+  class StoppableHandle:
+    chat_id = cid
+    kind = RunnerKind.CLAUDE_SDK
+
+    async def stop(self, timeout=2.0):
+      del timeout
+      chat_mod.registry.unregister(self.chat_id, self.kind)
+      return True
+
+  async def stalled_runner(*, bc, **_kwargs):
+    chat_mod.registry.register(StoppableHandle())
+    bc.bc.last_event_at = time.monotonic() - chat_mod.PROGRESS_TIMEOUT - 1
+    db = SessionLocal()
+    try:
+      assert await chat_mod.sweep_stalled_live_runs(db) == [cid]
+    finally:
+      db.close()
+    return {"session_id": "sess", "cost_usd": 0.0}
+
+  import app.claude_sdk_runner as csr
+  monkeypatch.setattr(csr, "run_claude_sdk_turn", stalled_runner)
+
+  chat_mod.mark_starting(cid)
+  gen = chat_mod.current_run_generation(cid)
+  _run_real_chat(cid, run_token=f"rt-{cid}", run_gen=gen)
+  _drain_actor()
+
+  assert _load(cid)["run_status"] is None
+  assert _run_outcomes(cid) == {f"rt-{cid}": "interrupted"}
 
 
 # -- 7. unsupported runtime cleanup: marker cleared, pending dropped -----
@@ -928,22 +1146,28 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
 
 
 # -- 12. auth-error setup cleanup: marker cleared, pending dropped ----------
-def test_auth_error_cleanup_clears_marker_before_registry_release(monkeypatch):
+@pytest.mark.parametrize("malformed_credentials", [False, True])
+def test_auth_error_cleanup_clears_marker_before_registry_release(
+  monkeypatch, malformed_credentials,
+):
   """The auth-error setup early return routes through the same bounded
   terminal cleanup: pending cleared, marker cleared, registry released, no
   continuation."""
-  # Seed an owner but NO creds file → Claude check_auth returns an error.
+  # Seed an owner with either NO creds file or a non-UTF-8 creds file →
+  # Claude check_auth returns an error without escaping into a route/runner 500.
   # The DATA_DIR tmpdir is shared across tests and conftest does not sweep
   # the creds file, so a prior _seed_owner_and_creds may have written one —
-  # remove it explicitly to guarantee the auth-error precondition.
+  # remove or replace it explicitly to guarantee the auth-error precondition.
   from app import auth as auth_mod
 
   creds = (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
     / ".credentials.json"
   )
-  if creds.exists():
-    creds.unlink()
+  creds.unlink(missing_ok=True)
+  if malformed_credentials:
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    creds.write_bytes(b"\xff\xfe")
   dbx = SessionLocal()
   try:
     dbx.add(models.Owner(
@@ -958,6 +1182,7 @@ def test_auth_error_cleanup_clears_marker_before_registry_release(monkeypatch):
     pending=[{"role": "user", "content": "queued", "ts": 3}],
     run_status="running",
   )
+  _seed_run("rt-12", "t12")
 
   scheduled = []
   orig_sched = chat_mod._schedule_continuation
@@ -978,6 +1203,7 @@ def test_auth_error_cleanup_clears_marker_before_registry_release(monkeypatch):
   state = _load("t12")
   assert state["run_status"] is None, "auth-error cleanup must clear the marker"
   assert state["pending_messages"] == [], "pending must be cleared durably"
+  assert _run_outcomes("t12") == {"rt-12": "failed"}
   assert not chat_mod.registry.is_alive("t12"), "registry released"
 
 

@@ -15,6 +15,7 @@ import time
 import uuid
 from datetime import datetime, UTC
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -65,7 +66,11 @@ from app.storage_io import (
 )
 from app.app_capabilities import diff_contracts
 from app.broadcast import get_system_broadcast
-from app.compiler import compile_jsx, recompile_app_bundle
+from app.compiler import (
+  app_bundle_uses_current_compile_contract,
+  compile_jsx,
+  recompile_app_bundle,
+)
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -1171,6 +1176,42 @@ def _fetched_differs_from_upstream(
   return False
 
 
+def _pending_update_state(repo: Path, upstream_commit: str) -> Literal[
+  "needs_resolution", "replay_pending", "unknown",
+]:
+  """Classify a validated pending receipt without changing repository state.
+
+  Before the owner resolves a click-gated conflict, the new ``upstream`` tip is
+  not an ancestor of local ``main``. Once marker-free source is committed, the
+  replay commit is parented on that upstream tip; the receipt deliberately
+  remains until the canonical installer promotes every artifact atomically.
+
+  During a materialized merge, text markers and unresolved binary paths still
+  need owner/agent work. Marker-free text may remain un-staged briefly, but the
+  watcher stages and commits it itself, so that is already replay-pending rather
+  than a reason to start another resolver. If Git cannot prove ancestry, report
+  unknown rather than inventing a resolution requirement.
+  """
+  try:
+    if app_git.merge_in_progress(repo):
+      if (
+        app_git.has_conflict_markers(repo)
+        or app_git.has_unresolved_binary_conflicts(repo)
+      ):
+        return "needs_resolution"
+      return "replay_pending"
+  except (OSError, subprocess.SubprocessError):
+    return "unknown"
+  ancestor = app_git.ref_is_ancestor(
+    repo, upstream_commit, app_git.LOCAL_BRANCH,
+  )
+  if ancestor is True:
+    return "replay_pending"
+  if ancestor is False:
+    return "needs_resolution"
+  return "unknown"
+
+
 @router.get(
   "/{app_id}/update-check",
   response_model=schemas.UpdateCheckOut,
@@ -1223,7 +1264,6 @@ async def update_check(
   target_app_id = app.id
   manifest_url = app.manifest_url
   source_dir = app.source_dir
-  upstream_commit = app.upstream_commit
 
   def _unknown() -> schemas.UpdateCheckOut:
     # Null is "we can't tell git-natively" — NOT an error. The caller falls back
@@ -1251,19 +1291,48 @@ async def update_check(
   ):
     return _unknown()
 
-  pending = install.read_pending_conflict_update_receipt(
-    repo, app_id=target_app_id, upstream_commit=upstream_commit,
-  )
-  if pending is not None:
-    # A resolver may have committed source while the final install replay was
-    # interrupted (network/restart). Keep Update visible so the owner can retry;
-    # the same receipt is also retried automatically by the watcher at startup.
+  def _current_pending_update() -> tuple[
+    dict | None,
+    Literal["needs_resolution", "replay_pending", "unknown"] | None,
+  ]:
+    """Read receipt identity and Git phase at one source-lock snapshot."""
+    current_upstream = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+    receipt = install.read_pending_conflict_update_receipt(
+      repo, app_id=target_app_id, upstream_commit=current_upstream,
+    )
+    state = (
+      _pending_update_state(repo, receipt["upstream_commit"])
+      if receipt is not None else None
+    )
+    return receipt, state
+
+  def _pending_result(
+    receipt: dict,
+    state: Literal["needs_resolution", "replay_pending", "unknown"],
+  ) -> schemas.UpdateCheckOut:
     return schemas.UpdateCheckOut(
       update_available=True,
-      upstream_version=str(pending["manifest"].get("version") or "") or None,
+      pending_update_state=state,
+      needs_resolution=state == "needs_resolution",
+      upstream_version=str(receipt["manifest"].get("version") or "") or None,
       local_version=local_version,
       checked_at=checked_at,
     )
+
+  async with fs_locks.source_dir_lock(str(repo)):
+    try:
+      pending, pending_state = await asyncio.to_thread(
+        _current_pending_update,
+      )
+    except (OSError, subprocess.SubprocessError):
+      return _unknown()
+  if pending is not None:
+    # A resolver may have committed source while the final install replay was
+    # interrupted (network/restart). Keep Update visible so the owner can retry,
+    # but do not send already-resolved source back through the resolver endpoint
+    # (which correctly 409s once upstream is an ancestor of main). The same
+    # receipt is also retried automatically by the watcher at startup.
+    return _pending_result(pending, pending_state)
 
   # Reconstruct the fetchable manifest URL from the stored canonical identity
   # key (`<base>#manifest-id=<id>`): the raw manifest lives at <base>/mobius.json,
@@ -1286,10 +1355,21 @@ async def update_check(
   if fetched.job_name and fetched.job_bytes is not None:
     fetched_tree[fetched.job_name] = fetched.job_bytes
 
-  # Hold the source-dir lock only around the git read so a concurrent installer's
-  # record_upstream can't move the `upstream` ref mid-read. The read itself
-  # (read_ref_tree = ls-tree + cat-file) never touches the index or working tree.
+  # This final lock is the response's linearization fence. A concurrent install
+  # can advance `upstream` and create a receipt while the network fetch is in
+  # flight; revalidate receipt identity against the CURRENT locked ref before
+  # comparing bytes, otherwise this request could overwrite a newly-observed
+  # needs-resolution state with stale false/none. With no receipt, the compare
+  # reads that same locked upstream snapshot (ls-tree + cat-file only).
   async with fs_locks.source_dir_lock(str(repo)):
+    try:
+      pending, pending_state = await asyncio.to_thread(
+        _current_pending_update,
+      )
+    except (OSError, subprocess.SubprocessError):
+      return _unknown()
+    if pending is not None:
+      return _pending_result(pending, pending_state)
     update_available = await asyncio.to_thread(
       _fetched_differs_from_upstream,
       repo, fetched_tree, cloned, install._MERGED_NON_SOURCE,
@@ -2218,13 +2298,21 @@ async def recover_app(
   source-dir lock, then its cadence is converged through the common supervised
   runner. Reinstalling a store app also re-registers it. See feature 110.
 
+  Before the row becomes live, a stale compiled artifact is rebuilt from its
+  preserved source. This covers tombstones intentionally skipped by the boot
+  sweep and keeps recovery from reviving an app without the current additive
+  runtime features.
+
   Held under install_uninstall_lock — the same lock the TTL purge takes — so a
   recover near the TTL boundary can't race the purge into reviving a row the
   sweep is hard-deleting (or vice versa). Whoever wins the lock leaves a
   consistent state: a purged row → recover 404s; a recovered row → purge's
   under-lock stale re-query no longer matches it.
   """
-  async with fs_locks.install_uninstall_lock():
+  async with (
+    fs_locks.install_uninstall_lock(),
+    fs_locks.app_storage_lock(app_id),
+  ):
     app = (
       db.query(models.App)
       .filter(models.App.id == app_id, models.App.deleted_at.isnot(None))
@@ -2238,6 +2326,23 @@ async def recover_app(
       now_naive_utc() - app.deleted_at
     ) >= APP_SOFT_DELETE_TTL:
       raise HTTPException(status_code=410, detail="Recovery window has expired.")
+    if not app_bundle_uses_current_compile_contract(app):
+      if not app.jsx_source or not app.jsx_source.strip():
+        raise HTTPException(
+          status_code=409,
+          detail="App source is unavailable; reinstall it to recover.",
+        )
+      try:
+        # recompile_app_bundle commits internally, but the row remains
+        # tombstoned until the separate commit below. A crash or compile error
+        # therefore cannot expose a stale or partially rebuilt app.
+        await recompile_app_bundle(db, app, app.jsx_source)
+      except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(
+          status_code=422,
+          detail=f"Could not rebuild app for recovery: {exc}",
+        )
     app.deleted_at = None
     app_name = app.name
     app_source_dir = app.source_dir
@@ -2484,7 +2589,10 @@ def _etag_for_app(app: models.App) -> str | None:
 
 
 def _not_modified_if_match(
-  request: Request, etag: str, offline: bool = False
+  request: Request,
+  etag: str,
+  offline: bool = False,
+  response_headers: dict[str, str] | None = None,
 ) -> Response | None:
   """Returns a 304 Response if the request's If-None-Match matches
   `etag`, else None. The 304 keeps the ETag header so a browser
@@ -2492,14 +2600,24 @@ def _not_modified_if_match(
   mirrors the X-Mobius-Offline marker so the 304 carries the same
   cache metadata as the 200 it stands in for. The SW's
   appCodeStoreAction policy keys on that header for the gated
-  standalone-navigation cache."""
+  standalone-navigation cache. Callers whose representation metadata changes
+  independently of the body (notably the frame CSP) pass it through so a 304
+  freshens the cached policy instead of preserving obsolete headers."""
   match = request.headers.get("if-none-match")
   if match and etag in [v.strip() for v in match.split(",")]:
-    headers = {"ETag": etag}
+    headers = dict(response_headers or {})
+    headers["ETag"] = etag
     if offline:
       headers["X-Mobius-Offline"] = "1"
     return Response(status_code=304, headers=headers)
   return None
+
+
+_APP_FRAME_CSP = (
+  "sandbox allow-scripts allow-forms allow-popups "
+  "allow-popups-to-escape-sandbox "
+  "allow-top-navigation-by-user-activation"
+)
 
 
 def _frame_etag(
@@ -2617,8 +2735,17 @@ def get_frame(
   # validator on it plus app.updated_at.
   frame_rev = theme.frame_content_rev(get_settings().data_dir)
   etag = _frame_etag(app, frame_path, frame_rev=frame_rev)
+  frame_cache_headers = {
+    "Cache-Control": "no-cache",
+    "Content-Security-Policy": _APP_FRAME_CSP,
+  }
   if etag:
-    not_modified = _not_modified_if_match(request, etag, app.offline_capable)
+    not_modified = _not_modified_if_match(
+      request,
+      etag,
+      app.offline_capable,
+      response_headers=frame_cache_headers,
+    )
     if not_modified is not None:
       return not_modified
 
@@ -2646,14 +2773,12 @@ def get_frame(
   # worker can intercept and serve a cached frame offline. Apply the equivalent
   # sandbox on the RESPONSE: the loaded app still receives an opaque origin,
   # including when this backend is reached without the edge proxy. Caddy adds
-  # the full resource policy while preserving this sandbox contract.
-  headers = {
-    "Cache-Control": "no-cache",
-    "Content-Security-Policy": (
-      "sandbox allow-scripts allow-forms allow-popups "
-      "allow-top-navigation-by-user-activation"
-    ),
-  }
+  # the full resource policy while preserving this sandbox contract. Popups
+  # opened by an explicit app link must escape the opaque-origin sandbox:
+  # otherwise the destination inherits Origin: null and sites such as GitHub
+  # load their document but fail same-origin API/storage requests. This does
+  # not relax the app frame itself or let it navigate the owner shell.
+  headers = dict(frame_cache_headers)
   if etag:
     headers["ETag"] = etag
   # The X-Mobius-Offline header does not gate frame/module caching: the SW

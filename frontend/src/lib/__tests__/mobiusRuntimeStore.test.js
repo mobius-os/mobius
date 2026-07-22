@@ -50,6 +50,12 @@ async function runtimeExports() {
   return import('../../../public/mobius-runtime.js')
 }
 
+test('runtime publishes additive feature markers for version-skew-safe app fallbacks', async () => {
+  const { runtimeFeatures } = await runtimeExports()
+  assert.equal(runtimeFeatures.idleDocument, true)
+  assert.equal(Object.isFrozen(runtimeFeatures), true)
+})
+
 test('an opaque sandbox without IndexedDB still reads and writes online', async () => {
   const { server } = freshEnv()
   globalThis.indexedDB = {
@@ -559,6 +565,9 @@ test('init reuses one runtime per installation and updates its token broker', as
       appInstanceId: 'install-one',
       getToken: async () => firstToken,
     })
+    assert.equal(first.runtimeFeatures, runtime.runtimeFeatures)
+    assert.equal(first.runtimeFeatures.idleDocument, true)
+    assert.equal(Object.isFrozen(first.runtimeFeatures), true)
     const listenerCounts = () => ({
       window: [...windowListeners].map(([type, callbacks]) => [type, callbacks.size]),
       document: [...documentListeners].map(([type, callbacks]) => [type, callbacks.size]),

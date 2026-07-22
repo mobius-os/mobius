@@ -94,7 +94,15 @@ async function sampleExitBeat(page) {
           for (const el of document.querySelectorAll('.shell__view[data-mode-motion]')) {
             const key = el.getAttribute('data-tab-key') || el.dataset.modeMotion
             let rec = byKey.get(key)
-            if (!rec) { rec = { boxes: new Set(), transforms: new Set(), node: el }; byKey.set(key, rec) }
+            if (!rec) {
+              rec = {
+                boxes: new Set(), transforms: new Set(), node: el,
+                motion: el.dataset.modeMotion,
+                offsetX: parseFloat(el.style.getPropertyValue('--mode-offset-x')) || 0,
+                offsetY: parseFloat(el.style.getPropertyValue('--mode-offset-y')) || 0,
+              }
+              byKey.set(key, rec)
+            }
             rec.boxes.add(`${el.offsetWidth}x${el.offsetHeight}@${el.offsetLeft},${el.offsetTop}`)
             rec.transforms.add(getComputedStyle(el).transform)
           }
@@ -105,13 +113,93 @@ async function sampleExitBeat(page) {
       }
       requestAnimationFrame(tick)
     })
-    const wrappers = [...byKey.values()].map(r => ({
+    const wrappers = [...byKey.entries()].map(([key, r]) => ({
+      key,
+      // Motion attributes and variables clear with the descriptor, so report the
+      // values latched on the first sampled frame rather than reading the idle DOM.
+      motion: r.motion,
+      offsetX: r.offsetX,
+      offsetY: r.offsetY,
       distinctBoxes: r.boxes.size,
       distinctTransforms: r.transforms.size,
       transformsMatrix: [...r.transforms].every(t => t === 'none' || t.startsWith('matrix')),
       survived: r.node.isConnected,
     }))
     return { started, dualClass, underlaySeen, wrappers }
+  })
+}
+
+// Capture the latched inline geometry on the first frame of either directional
+// beat. These are the pure projection outputs that tell each pane which edge owns it.
+async function captureBeatPlan(page, rootClass) {
+  return page.evaluate(async (wantedClass) => {
+    const root = document.querySelector('.shell')
+    for (let frames = 0; frames < 120; frames += 1) {
+      if (root.classList.contains(wantedClass)) {
+        const participants = [...document.querySelectorAll('.shell__view[data-mode-motion]')]
+          .map(el => ({
+            key: el.getAttribute('data-tab-key'),
+            motion: el.dataset.modeMotion,
+            x: parseFloat(el.style.getPropertyValue('--mode-offset-x')) || 0,
+            y: parseFloat(el.style.getPropertyValue('--mode-offset-y')) || 0,
+          }))
+        if (participants.length) {
+          return {
+            participants,
+            underlay: !!document.querySelector('.shell__view--exit-underlay'),
+          }
+        }
+      }
+      await new Promise(resolve => requestAnimationFrame(resolve))
+    }
+    return { participants: [], underlay: false }
+  }, rootClass)
+}
+
+// Sample the actual entry paint order. Incoming panes must remain fully opaque so
+// they cover the retained single screen physically, while structure-only chrome
+// (dividers/chip) stays absent during the first half of the travel.
+async function sampleEnterPaint(page) {
+  return page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let started = false
+    let minPaneOpacity = 1
+    let earlyChromeOpacity = 0
+    let paneFrames = 0
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        const entering = root.classList.contains('shell--builder-entering')
+        if (entering) {
+          started = true
+          const panes = [...document.querySelectorAll(
+            '.shell__view[data-mode-motion="deal-in"]',
+          )]
+          if (panes.length) {
+            paneFrames += 1
+            for (const pane of panes) {
+              minPaneOpacity = Math.min(minPaneOpacity, parseFloat(getComputedStyle(pane).opacity))
+            }
+            const progress = panes[0].getAnimations()[0]?.effect?.getComputedTiming?.().progress
+            if (progress != null && progress < 0.5) {
+              for (const chrome of document.querySelectorAll(
+                '.workspace__divider, .workspace__pane-chip',
+              )) {
+                earlyChromeOpacity = Math.max(
+                  earlyChromeOpacity,
+                  parseFloat(getComputedStyle(chrome).opacity),
+                )
+              }
+            }
+          }
+        }
+        frames += 1
+        if ((started && !entering) || frames > 120) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return { started, minPaneOpacity, earlyChromeOpacity, paneFrames }
   })
 }
 
@@ -262,14 +350,14 @@ for (const [name, viewport] of [
   })
 }
 
-// ── Exit-presentation v2 browser coverage (R4) ───────────────────────────────
+// ── Assemble/scatter v3 browser coverage ─────────────────────────────────────
 // Frame-sampled proof of the compositor-only contract in a real browser. Wide only
 // (two visible panes need a wide viewport). A seeded 2-pane builder is exited and
 // every frame of the beat is sampled: the participant wrappers' LAYOUT boxes must
 // stay constant while their transforms animate, and the same nodes must survive.
 const WIDE = { width: 1280, height: 900 }
 
-test('v2 exit is compositor-only: layout boxes constant while transforms animate, nodes survive', async ({ page }) => {
+test('v3 scatter is compositor-only: layout boxes constant while transforms animate, nodes survive', async ({ page }) => {
   // slot === the focused LEFT pane's chat → PROMOTE it (a real half→full FLIP scale)
   // and deal the right sibling out. Both are compositor-only participants.
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
@@ -289,6 +377,9 @@ test('v2 exit is compositor-only: layout boxes constant while transforms animate
   // and at least one participant's transform actually CHANGED across frames.
   for (const w of r.wrappers) expect(w.transformsMatrix, 'only matrix transforms').toBe(true)
   expect(r.wrappers.some(w => w.distinctTransforms > 1), 'a transform animated').toBe(true)
+  const departing = r.wrappers.find(w => w.motion === 'deal-out')
+  expect(departing.offsetX, 'the right sibling scatters toward the right edge').toBeGreaterThan(0)
+  expect(departing.offsetY).toBe(0)
   // INV 4 (stable identity): the same DOM nodes survived completion.
   for (const w of r.wrappers) expect(w.survived, 'same node survives completion').toBe(true)
   // The beat settled clean.
@@ -296,7 +387,7 @@ test('v2 exit is compositor-only: layout boxes constant while transforms animate
   await expect.poll(() => builderActive(page)).toBe(false)
 })
 
-test('v2 world-reveal exit paints the mounted destination underlay beneath the deal', async ({ page }) => {
+test('v3 world-reveal scatter paints the mounted destination underlay beneath the panes', async ({ page }) => {
   // slot === a tree-absent chat → WORLD REVEAL: every painted pane deals out over the
   // mounted underlay (INV 3 honest destination), no false promotion.
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
@@ -314,6 +405,214 @@ test('v2 world-reveal exit paints the mounted destination underlay beneath the d
   }
   expect(r.wrappers.some(w => w.distinctTransforms > 1)).toBe(true)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+})
+
+test('v3 panes assemble over the stationary single screen from their corresponding edges', async ({ page }) => {
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
+  await toggleMode(page)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(false)
+
+  const sampler = captureBeatPlan(page, 'shell--builder-entering')
+  const paintSampler = sampleEnterPaint(page)
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+  const paint = await paintSampler
+  expect(r.underlay, 'the current single screen remains beneath the assembly').toBe(true)
+  expect(r.participants).toHaveLength(2)
+  expect(r.participants.every(p => p.motion === 'deal-in')).toBe(true)
+  expect(r.participants.some(p => p.x < 0 && p.y === 0), 'left pane enters from left').toBe(true)
+  expect(r.participants.some(p => p.x > 0 && p.y === 0), 'right pane enters from right').toBe(true)
+  expect(paint.started).toBe(true)
+  expect(paint.paneFrames).toBeGreaterThan(2)
+  expect(paint.minPaneOpacity, 'pane content never fades in over visible structure').toBeGreaterThan(0.99)
+  expect(paint.earlyChromeOpacity, 'structure waits until pane content has arrived').toBeLessThan(0.05)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(true)
+})
+
+// Frame-sample the destination across a world reveal. It is ready and stationary
+// beneath one short leftward departure; there is no delayed second phase.
+async function sampleStationaryUnderlay(page) {
+  return page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let started = false
+    let cardsPresent = false
+    let minOpacity = 1
+    const transforms = new Set()
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        const exiting = root.className.includes('shell--builder-exiting')
+        const underlay = document.querySelector('.shell__view--exit-underlay')
+        if (exiting && underlay) {
+          started = true
+          const style = getComputedStyle(underlay)
+          minOpacity = Math.min(minOpacity, parseFloat(style.opacity))
+          transforms.add(style.transform)
+          const cards = [...document.querySelectorAll('.shell__view[data-mode-motion="deal-out"]')]
+          cardsPresent ||= cards.some(c => parseFloat(getComputedStyle(c).opacity) > 0.05)
+        }
+        frames += 1
+        if ((started && !exiting && frames > 4) || frames > 240) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return { started, cardsPresent, minOpacity, transforms: [...transforms] }
+  })
+}
+
+test('world reveal is one short scatter over a stationary, ready destination', async ({ page }) => {
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleStationaryUnderlay(page)
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+  expect(r.started, 'a world-reveal exit ran').toBe(true)
+  expect(r.cardsPresent, 'departing panes painted above the destination').toBe(true)
+  expect(r.minOpacity, 'the destination never waits behind a veil').toBeGreaterThanOrEqual(0.99)
+  expect(r.transforms, 'the destination itself stays still').toEqual(['none'])
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(false)
+})
+
+test('reduced motion has no intermediate exit phase (instant world flip)', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  // Watch for ANY exiting beat class or reveal underlay across the flip.
+  const sampler = page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let sawExitPhase = false
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        if (root.className.includes('shell--builder-exiting')
+          || document.querySelector('.shell__view--exit-underlay')) sawExitPhase = true
+        frames += 1
+        if (frames > 60) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return sawExitPhase
+  })
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const sawExitPhase = await sampler
+  expect(sawExitPhase, 'reduced motion discards the whole exit presentation (no phase)').toBe(false)
+  await expect.poll(() => builderActive(page)).toBe(false)
+})
+
+// ── Round 4 item 3: the null slot is a first-class New Chat landing ────────────
+test('round4-3: exiting a NULL-slot builder reveals the New Chat landing, not a blank main, no composer focus', async ({ page }) => {
+  // A materialize POST /chats (when there is no reusable empty) returns a fresh empty
+  // row so the swap to a real empty ChatView is seamless.
+  await page.route(/\/api\/chats$/, r => {
+    if (r.request().method() !== 'POST') return r.fallback()
+    return r.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ id: 'freshnew', title: 'New chat', has_messages: false }),
+    })
+  })
+  // Two-pane builder with an EXPLICIT null slot → exit reveals home:new-chat.
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  // The first-class New Chat empty surface renders (What's on your mind?), never a
+  // blank <main> and never the freshest transcript. Scope to the VISIBLE full-bleed
+  // surface — the preserved builder chat panes sit mounted-but-hidden and also carry
+  // an empty title, so an unscoped selector would strict-mode-match several.
+  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible({ timeout: 3000 })
+  // The automatic landing must NOT summon the mobile keyboard — the composer is not
+  // auto-focused by a mode toggle.
+  const composerFocused = await page.evaluate(() => document.activeElement?.tagName === 'TEXTAREA')
+  expect(composerFocused, 'a mode toggle must not auto-focus the composer').toBe(false)
+})
+
+test('round4-3: a persisted NULL single slot stays New Chat even with historical chats', async ({ page }) => {
+  let createCount = 0
+  await page.route(/\/api\/chats(?:\?.*)?$/, (route) => {
+    const method = route.request().method()
+    if (method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          { id: 'historical', title: 'Historical transcript', has_messages: true },
+        ]),
+      })
+    }
+    if (method === 'POST') {
+      createCount += 1
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ id: 'freshboot', title: 'New chat', has_messages: false }),
+      })
+    }
+    return route.fallback()
+  })
+  const ws = paneModel.setViewMode(twoPaneBuilder(null), 'single')
+  await bootSeededWorkspace(page, WIDE, ws)
+
+  await expect.poll(() => page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key))?.singleScreen?.id || null,
+    paneModel.STORAGE_KEY,
+  ), { timeout: 3000 }).toBe('freshboot')
+  expect(createCount, 'boot materializes one new row instead of selecting chats[0]').toBe(1)
+  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible()
+})
+
+test('round4-3: a superseding NULL-slot request drains after the older POST without duplicating it', async ({ page }) => {
+  let createCount = 0
+  let releaseFirstCreate
+  const firstCreateGate = new Promise(resolve => { releaseFirstCreate = resolve })
+  await page.route(/\/api\/chats(?:\?.*)?$/, async (route) => {
+    const method = route.request().method()
+    if (method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          { id: 'aaa', title: 'Left', has_messages: true },
+          { id: 'bbb', title: 'Right', has_messages: true },
+        ]),
+      })
+    }
+    if (method === 'POST') {
+      const ordinal = ++createCount
+      if (ordinal === 1) await firstCreateGate
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ id: `fresh-race-${ordinal}`, title: 'New chat', has_messages: false }),
+      })
+    }
+    return route.fallback()
+  })
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
+  await toggleMode(page) // builder -> null single; token 1 starts after the exit beat
+  await expect.poll(() => createCount, { timeout: 3000 }).toBe(1)
+
+  // Supersede token 1 while its POST is held: enter builder, then exit to the same
+  // null single destination again. The latest token must run once the old await ends.
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  await toggleMode(page)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  releaseFirstCreate()
+
+  await expect.poll(() => page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key))?.singleScreen?.id || null,
+    paneModel.STORAGE_KEY,
+  ), { timeout: 4000 }).toBe('fresh-race-1')
+  expect(createCount, 'the newer request reuses the already-created untouched row').toBe(1)
+  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible()
 })
 
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab
@@ -354,4 +653,168 @@ test('v2 auto-return flips the descriptor and the tree atomically (no lagging fr
   await expect.poll(() => page.evaluate(
     key => JSON.parse(sessionStorage.getItem(key))?.viewMode, paneModel.STORAGE_KEY,
   ), { timeout: 3000 }).toBe('single')
+})
+
+// ── Round 4 item 1: the logo holds its breath until completion ────────────────
+// The hold hands its compression to the descriptor: while an animated beat owns the
+// logo it stays compressed (~.84) and springs back so its first full-size frame lands
+// at completion. A standalone keyboard/swipe flip never synthesizes compression.
+
+// Press-and-hold the brand past the ~450ms threshold, then release. A completed hold
+// consumes its trailing click, so this never also opens the drawer.
+async function pressHoldLogo(page, holdMs = 650) {
+  const box = await page.getByLabel('Toggle navigation').boundingBox()
+  const cx = box.x + box.width / 2
+  const cy = box.y + box.height / 2
+  await page.mouse.move(cx, cy)
+  await page.mouse.down()
+  await page.waitForTimeout(holdMs)
+  await page.mouse.up()
+}
+
+// Sample the logo across a beat: install BEFORE the trigger. Records, on every frame,
+// whether .shell__brand carried is-beat-held, the min computed logo `scale`, and
+// whether data-logo-beat-epoch ever disagreed with the root data-mode-epoch while both
+// were present. Resolves once a beat started then settled (or a generous frame budget).
+async function sampleLogoBeat(page) {
+  return page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    const brand = document.querySelector('.shell__brand')
+    const logo = document.querySelector('.shell__logo')
+    let beatHeldSeen = false
+    let minScale = 1
+    let epochMismatch = false
+    let sawBeatClass = false
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        const cls = root.className
+        const beatClass = cls.includes('shell--builder-entering') || cls.includes('shell--builder-exiting')
+        if (beatClass) sawBeatClass = true
+        if (brand.classList.contains('is-beat-held')) {
+          beatHeldSeen = true
+          const s = parseFloat(getComputedStyle(logo).scale)
+          if (Number.isFinite(s)) minScale = Math.min(minScale, s)
+          const logoEpoch = brand.getAttribute('data-logo-beat-epoch')
+          const modeEpoch = root.getAttribute('data-mode-epoch')
+          if (logoEpoch != null && modeEpoch != null && logoEpoch !== modeEpoch) epochMismatch = true
+        }
+        frames += 1
+        if ((sawBeatClass && !beatClass && frames > 4) || frames > 320) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    const settledScale = parseFloat(getComputedStyle(logo).scale)
+    return { beatHeldSeen, minScale, epochMismatch, sawBeatClass, settledScale }
+  })
+}
+
+// Whether is-beat-held is on the brand RIGHT NOW (for the instant/no-compression checks).
+async function beatHeldNow(page) {
+  return page.evaluate(() => !!document.querySelector('.shell__brand.is-beat-held'))
+}
+
+test('round4-1: a completed HOLD keeps the logo compressed then springs back at completion', async ({ page }) => {
+  await bootShell(page, WIDE)
+  // Fresh boot = builder; a hold EXITS to single with an animated beat.
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleLogoBeat(page)
+  await page.waitForTimeout(30)
+  await pressHoldLogo(page)
+  const r = await sampler
+  expect(r.sawBeatClass, 'an animated beat ran').toBe(true)
+  expect(r.beatHeldSeen, 'the hold emitted the is-beat-held compression class').toBe(true)
+  // The mark stayed compressed at ~.84 through the beat (pointer release did NOT
+  // spring it) and reaches full size only at completion.
+  expect(r.minScale, 'the logo held its .84 compression during the beat').toBeLessThanOrEqual(0.88)
+  expect(r.epochMismatch, 'the logo release always tracks the live beat epoch').toBe(false)
+  await expect.poll(() => builderActive(page)).toBe(false)
+  // Settled: no compression class lingers, the mark is full size.
+  await expect.poll(() => beatHeldNow(page)).toBe(false)
+  const finalScale = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.shell__logo')).scale))
+  expect(Math.abs(finalScale - 1)).toBeLessThan(0.02)
+})
+
+test('round4-1: a standalone Shift+Enter flip never emits a compression class', async ({ page }) => {
+  await bootShell(page, WIDE)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleLogoBeat(page)
+  await page.waitForTimeout(30)
+  await toggleMode(page) // keyboard path — the standalone announcement is enough
+  const r = await sampler
+  expect(r.sawBeatClass, 'the keyboard flip still ran an animated beat').toBe(true)
+  expect(r.beatHeldSeen, 'no synthetic compression on a standalone keyboard flip').toBe(false)
+  // The logo never dipped toward .84 — it was not compressed.
+  expect(r.minScale, 'the logo stayed full size (no compression)').toBeGreaterThan(0.95)
+  await expect.poll(() => builderActive(page)).toBe(false)
+})
+
+test('round4-1: an EARLY logo release is a tap — mode unchanged, no compression class', async ({ page }) => {
+  await bootShell(page, WIDE)
+  const before = await builderActive(page)
+  // A press well under the ~450ms threshold releases as a tap (opens the drawer),
+  // never a mode flip, and never emits is-beat-held.
+  await pressHoldLogo(page, 150)
+  await page.waitForTimeout(200)
+  expect(await beatHeldNow(page)).toBe(false)
+  expect(await builderActive(page)).toBe(before)
+})
+
+test('round4-1: rapid hold → keyboard retoggle keeps the logo epoch equal to the mode epoch', async ({ page }) => {
+  await bootShell(page, WIDE)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  const sampler = sampleLogoBeat(page)
+  await page.waitForTimeout(30)
+  // Complete a hold (holdOwnsBeat latches), then immediately retoggle by keyboard —
+  // the compression rides through to the newest epoch, whose id the logo release must
+  // track (data-logo-beat-epoch === data-mode-epoch on every sampled frame).
+  await pressHoldLogo(page)
+  await toggleMode(page)
+  const r = await sampler
+  expect(r.beatHeldSeen, 'the hold-owned compression rode through the retoggle').toBe(true)
+  expect(r.epochMismatch, 'the logo release never lagged behind the newest beat epoch').toBe(false)
+  await expect.poll(() => modePhase(page), { timeout: 3000 }).toBe('idle')
+})
+
+test('round4-1: reduced motion keeps direct hold feedback but releases without animation', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await bootShell(page, WIDE)
+  await expect.poll(() => builderActive(page)).toBe(true)
+  await page.evaluate(() => {
+    const root = document.querySelector('.shell')
+    window.__reducedMotionBeatSeen = false
+    window.__reducedMotionObserver = new MutationObserver(() => {
+      const cls = root.className
+      if (cls.includes('shell--builder-entering') || cls.includes('shell--builder-exiting')) {
+        window.__reducedMotionBeatSeen = true
+      }
+    })
+    window.__reducedMotionObserver.observe(root, { attributes: true, attributeFilter: ['class'] })
+  })
+  const box = await page.getByLabel('Toggle navigation').boundingBox()
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.waitForTimeout(325)
+  const heldScale = await page.evaluate(() => parseFloat(
+    getComputedStyle(document.querySelector('.shell__logo')).scale,
+  ))
+  expect(heldScale, 'the user-controlled hold still gives immediate compression feedback').toBeLessThan(0.96)
+  // Cross the 450ms completion threshold. Under reduced motion the mode commits and
+  // the scale returns to 1 in that same frame; the old 160ms release failed here.
+  await page.waitForTimeout(150)
+  const result = await page.evaluate(() => {
+    window.__reducedMotionObserver?.disconnect()
+    return {
+      builder: !!document.querySelector('.shell__brand--builder'),
+      beatHeld: !!document.querySelector('.shell__brand.is-beat-held'),
+      beatSeen: !!window.__reducedMotionBeatSeen,
+      scale: parseFloat(getComputedStyle(document.querySelector('.shell__logo')).scale),
+    }
+  })
+  await page.mouse.up()
+  expect(result.builder, 'the hold still flips the mode').toBe(false)
+  expect(result.beatSeen, 'reduced motion arms no transition descriptor').toBe(false)
+  expect(result.beatHeld, 'reduced motion never hands compression to a beat').toBe(false)
+  expect(Math.abs(result.scale - 1), 'release is immediate under reduced motion').toBeLessThan(0.02)
 })

@@ -368,6 +368,12 @@
   min-width: 0;
 }
 
+/* Drawer rows scroll vertically. Horizontal touch movement stays available to the
+   workspace controller as an immediate drag-out gesture. */
+.drawer__row .drawer__item[data-drag-key] {
+  touch-action: pan-y pinch-zoom;
+}
+
 /* The ⋮ button matches the row height so its hit area aligns
    with the row's vertical bounds. Width bumped 32 → 40 for a
    compliant touch target (44 is the strict guideline but the

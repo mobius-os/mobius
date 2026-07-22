@@ -4,8 +4,8 @@ import {
   POINTER_SLOP, TAB_HOLD_MS, DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX, RELEASE_IN_PLACE_PX,
   HYSTERESIS_PX, ROOT_EDGE_PX, CARET_W, CARET_H, CENTER_INSET, DRAWER_EXIT_PX,
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
-  EDGE_BAND_MIN, EDGE_BAND_CAP_W, EDGE_BAND_CAP_H,
-  passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, chipOffset,
+  EDGE_BAND_MIN, EDGE_BAND_FRACTION,
+  passedSlop, touchMoveIntent, releasedInPlace, holdMsFor, chipOffset,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene, paneAcceptsJoin,
 } from '../dragController.js'
@@ -42,9 +42,15 @@ test('passedSlop arms only past the slop radius', () => {
   assert.equal(passedSlop(3, 3), false) // hypot 4.24 < 5
 })
 
-test('preHoldMoveCancels yields a pre-hold touch to native scroll past 8px', () => {
-  assert.equal(preHoldMoveCancels(8, 0), false)
-  assert.equal(preHoldMoveCancels(8.1, 0), true)
+test('touchMoveIntent preserves tab-body scrolling and gives the kind icon either-axis drag', () => {
+  assert.equal(touchMoveIntent(8, 0, 'tab'), 'pending')
+  assert.equal(touchMoveIntent(0, 8.1, 'tab'), 'drag', 'vertical pull drags a horizontal tab strip')
+  assert.equal(touchMoveIntent(8.1, 0, 'tab'), 'scroll', 'horizontal pull scrolls over a tab body')
+  assert.equal(touchMoveIntent(8.1, 0, 'tab-handle'), 'drag', 'the icon reorders horizontally')
+  assert.equal(touchMoveIntent(0, 8.1, 'tab-handle'), 'drag', 'the icon can move across panes')
+  assert.equal(touchMoveIntent(8.1, 0, 'drawer'), 'drag', 'horizontal pull drags a vertical drawer row')
+  assert.equal(touchMoveIntent(0, 8.1, 'drawer'), 'scroll', 'vertical pull scrolls the drawer')
+  assert.equal(touchMoveIntent(10, 10, 'drawer'), 'scroll', 'ambiguous diagonals favor native scroll')
   assert.equal(PRE_HOLD_MOVE_PX, 8)
 })
 
@@ -77,14 +83,16 @@ test('crossedDrawerExit fires only past the 24px glide threshold', () => {
 
 // ── Edge band geometry ───────────────────────────────────────────────────────
 
-test('edgeBands clamp between the floor and the per-axis cap', () => {
+test('edgeBands are an uncapped proportional quarter above the floor', () => {
+  assert.equal(EDGE_BAND_FRACTION, 0.25)
   // Tiny pane → both bands at the 40px floor.
   assert.deepEqual(edgeBands({ x: 0, y: 0, w: 100, h: 100 }), { w: EDGE_BAND_MIN, h: EDGE_BAND_MIN })
-  // Huge pane → each axis clamps at its own cap (110 / 96).
-  assert.deepEqual(edgeBands({ x: 0, y: 0, w: 4000, h: 4000 }), { w: EDGE_BAND_CAP_W, h: EDGE_BAND_CAP_H })
-  // Mid pane → the 0.22 fraction.
-  const b = edgeBands({ x: 0, y: 0, w: 300, h: 300 })
-  assert.ok(Math.abs(b.w - 66) < 1e-9 && Math.abs(b.h - 66) < 1e-9)
+  // Huge pane → a proportional quarter, NO fixed pixel cap (uncapped: the old
+  // 110/96 caps turned a wide pane's edge into a narrow precision target).
+  assert.deepEqual(edgeBands({ x: 0, y: 0, w: 4000, h: 4000 }), { w: 1000, h: 1000 })
+  // Typical desktop pane → a quarter on each axis, leaving 50% for center join.
+  const b = edgeBands({ x: 0, y: 0, w: 1280, h: 900 })
+  assert.ok(Math.abs(b.w - 320) < 1e-9 && Math.abs(b.h - 225) < 1e-9)
 })
 
 test('edgePreviewRect halves the pane minus the divider gap', () => {
@@ -171,21 +179,21 @@ test('corners resolve by greater normalized penetration', () => {
 // ── hitTest: hysteresis ──────────────────────────────────────────────────────
 
 test('an owning edge holds until the pointer is 10px past its band boundary', () => {
-  const p = pane('p0', { x: 0, y: 0, w: 400, h: 600 }) // left band = 88px
+  const p = pane('p0', { x: 0, y: 0, w: 400, h: 600 }) // left band = 100px (0.25)
   const s = scene([p])
   const prev = { type: 'edge', paneId: 'p0', edge: 'left' }
-  // 2px past the 88px boundary — inside the 10px hysteresis margin → stays left.
-  assert.equal(hitTest({ x: 90, y: 300 }, s, prev).edge, 'left')
+  // 2px past the 100px boundary — inside the 10px hysteresis margin → stays left.
+  assert.equal(hitTest({ x: 102, y: 300 }, s, prev).edge, 'left')
   // 12px past — beyond the margin → drops to center.
-  assert.equal(hitTest({ x: 100, y: 300 }, s, prev).type, 'center')
+  assert.equal(hitTest({ x: 112, y: 300 }, s, prev).type, 'center')
 })
 
 test('an owning center makes a new edge earn 10px of penetration before it flips', () => {
-  const p = pane('p0', { x: 0, y: 0, w: 400, h: 600 }) // left band = 88px
+  const p = pane('p0', { x: 0, y: 0, w: 400, h: 600 }) // left band = 100px (0.25)
   const s = scene([p])
   const prev = { type: 'center', paneId: 'p0' }
   // Just inside the band (3px penetration) — center still owns.
-  assert.equal(hitTest({ x: 85, y: 300 }, s, prev).type, 'center')
+  assert.equal(hitTest({ x: 97, y: 300 }, s, prev).type, 'center')
   // Well inside the band — edge takes over.
   assert.equal(hitTest({ x: 20, y: 300 }, s, prev).edge, 'left')
 })
@@ -435,12 +443,14 @@ test('a root-edge owner is lost at exactly HYSTERESIS_PX past its band', () => {
 })
 
 test('a challenger edge wins from an owning center at exactly HYSTERESIS_PX inside', () => {
-  const p = pane('p0', { x: 0, y: 0, w: 400, h: 600 }) // left band = 88px
+  // A 512px pane → left band 128px; 10/128 divides FP-cleanly at the boundary, so the
+  // "exactly 10px" assertion isn't at the mercy of 1 - 90/100 rounding below 0.1.
+  const p = pane('p0', { x: 0, y: 0, w: 512, h: 600 })
   const s = scene([p])
   const prev = { type: 'center', paneId: 'p0' }
-  // x=78 is exactly 10px inside the left band boundary (at x=88) → edge wins.
-  assert.equal(hitTest({ x: 78, y: 300 }, s, prev).edge, 'left', 'exactly 10px in flips')
-  assert.equal(hitTest({ x: 79, y: 300 }, s, prev).type, 'center', '9px in still center')
+  // x=118 is exactly 10px inside the left band boundary (at x=128) → edge wins.
+  assert.equal(hitTest({ x: 118, y: 300 }, s, prev).edge, 'left', 'exactly 10px in flips')
+  assert.equal(hitTest({ x: 119, y: 300 }, s, prev).type, 'center', '9px in still center')
 })
 
 // ── releaseZone: commit only the previewed operation (TOCTOU) ─────────────────
@@ -476,10 +486,11 @@ test('buildScene records each single-tab pane sole key', () => {
   assert.equal(s.panes[0].soleTabKey, 'chat:5')
 })
 
-test('phone edge bands are proportional thirds with no cap', () => {
+test('phone edge bands are proportional thirds; desktop is an uncapped quarter', () => {
   const b = edgeBands({ x: 0, y: 0, w: 400, h: 800 }, 'phone')
   assert.equal(b.h, 800 * 0.34)
   assert.equal(b.w, 400 * 0.34)
+  // Desktop is now ALSO uncapped — a proportional quarter, not the old 96px cap.
   const desktop = edgeBands({ x: 0, y: 0, w: 400, h: 800 })
-  assert.equal(desktop.h, 96)
+  assert.equal(desktop.h, 800 * 0.25)
 })

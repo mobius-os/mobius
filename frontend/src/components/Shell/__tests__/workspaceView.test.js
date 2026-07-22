@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import * as paneModel from '../paneModel.js'
 import * as tabModel from '../tabModel.js'
 import {
-  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, exitSignature, MODE_MOTION,
+  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, projectFocusedPane,
+  transitionSignature, MODE_MOTION,
+  EMPTY_SINGLE_SURFACE_KEY,
 } from '../workspaceView.js'
 
 const { makeTab, tabKey } = tabModel
@@ -50,6 +52,31 @@ test('multi-pane, no overlay: chrome on, no full-bleed, both actives visible', (
   assert.equal(v.fullBleedKey, null)
   assert.deepEqual([...v.visibleAppIds], ['42'])
   assert.equal(v.chatPanesVisible, true)
+})
+
+test('focused pane view is a reversible presentation projection, not a tree rewrite', () => {
+  const ws = twoPaneChatAndApp()
+  const base = project(ws)
+  const focused = projectFocusedPane(base, ws, ws.focusedPaneId, CONTENT)
+  assert.deepEqual(focused.visibleLeaves, [ws.focusedPaneId])
+  assert.deepEqual(focused.rects[ws.focusedPaneId], CONTENT)
+  assert.deepEqual(focused.dividers, [])
+  assert.equal(Object.keys(ws.panes).length, 2, 'the durable pane tree is untouched')
+
+  const v = deriveContentVisibility({
+    workspace: ws, projection: focused,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'panes', focusedPaneView: true,
+  })
+  assert.equal(v.chromeActive, true, 'the selected pane keeps its own tab strip')
+  assert.equal(v.fullBleedKey, null, 'content stays below that strip instead of covering it')
+  assert.deepEqual([...v.visibleAppIds], ['42'], 'hidden sibling panes stop painting')
+})
+
+test('focused pane projection falls back safely after its pane disappears', () => {
+  const ws = twoPaneChatAndApp()
+  const base = project(ws)
+  assert.equal(projectFocusedPane(base, ws, 'missing-pane', CONTENT), base)
 })
 
 test('multi-pane immersive solos the holder over the whole workspace', () => {
@@ -347,11 +374,14 @@ test('single mode with a CHAT slot paints no app frame', () => {
   assert.equal(v.chatPanesVisible, true)
 })
 
-test('single mode with a NULL slot is the empty/home screen', () => {
+test('single mode with a NULL slot is the first-class New Chat landing (round 4 item 3)', () => {
   const ws = { ...twoPaneChatAndApp(), singleScreen: null }
   const v = singleView(ws)
-  assert.equal(v.fullBleedKey, null, 'nothing painted full-bleed')
-  assert.deepEqual([...v.visibleAppIds], [])
+  // The empty single slot paints the New Chat surface, never chats[0]...
+  assert.equal(v.fullBleedKey, EMPTY_SINGLE_SURFACE_KEY, 'the New Chat landing paints full-bleed')
+  // ...but focusedActiveKey stays NULL so nav + AppCanvas never treat it as a tab.
+  assert.equal(v.focusedActiveKey, null, 'the landing is not a chat/app tab')
+  assert.deepEqual([...v.visibleAppIds], [], 'no app paints for the New Chat landing')
 })
 
 test('legacy (ABSENT slot) single mode falls back to the focused pane', () => {
@@ -361,6 +391,34 @@ test('legacy (ABSENT slot) single mode falls back to the focused pane', () => {
   const v = singleView(ws)
   assert.equal(v.fullBleedKey, 'app:42', 'falls back to the focused pane app')
   assert.deepEqual([...v.visibleAppIds], ['42'])
+})
+
+test('round 4 item 3: a null slot renders home:new-chat while its ROUTE stays chat:null (no chats[0])', () => {
+  // Even with populated chats in the tree, an empty single slot NEVER selects a chat —
+  // the render key is the New Chat landing and the semantic route is still chat:null.
+  const ws = { ...twoPaneChatAndApp(), singleScreen: null }
+  const v = singleView(ws)
+  assert.equal(v.fullBleedKey, EMPTY_SINGLE_SURFACE_KEY, 'render key is the New Chat landing')
+  assert.equal(v.fullBleedKey.startsWith('chat:'), false, 'never a chat key (never chats[0])')
+  // The persisted slot stays null; singleScreenRoute keeps reporting chat:null.
+  assert.deepEqual(paneModel.singleScreenRoute(ws), {
+    view: 'chat', chatId: null, appId: null, paneId: ws.focusedPaneId,
+  })
+})
+
+test('round 4 item 3: an INITIALIZED null slot targets home:new-chat; a legacy Settings-only absent slot stays null', () => {
+  // An initialized empty slot → New Chat landing target/underlay (world reveal).
+  const nullSlot = { ...twoPaneChatAndApp(), singleScreen: null }
+  const nullPlan = deriveExitPlan({ workspace: nullSlot, projection: project(nullSlot), contentRect: CONTENT })
+  assert.equal(nullPlan.target, EMPTY_SINGLE_SURFACE_KEY)
+  assert.equal(nullPlan.underlayKey, EMPTY_SINGLE_SURFACE_KEY)
+  // A LEGACY absent-slot whose sole pane is Settings seeds NO concrete item, so the
+  // target stays null (the opaque-background reveal) — unchanged by item 3.
+  const legacy = paneModel.seedFromFlatTabs([tabModel.settingsTab()])
+  assert.equal('singleScreen' in legacy, false, 'absent slot (legacy)')
+  const legacyPlan = deriveExitPlan({ workspace: legacy, projection: project(legacy), contentRect: CONTENT })
+  assert.equal(legacyPlan.target, null, 'a legacy Settings-only absent slot is not the New Chat landing')
+  assert.equal(legacyPlan.underlayKey, null, 'opaque background reveal, no underlay wrapper')
 })
 
 // ── Settings takeover is EFFECTIVE-mode gated (finding F3) ───────────────────
@@ -409,7 +467,7 @@ test('builder mode ignores the slot entirely (tree drives the render)', () => {
   assert.equal(v.visibleAppIds.has('42'), true, 'the tree app is what paints')
 })
 
-// ── Exit-presentation v2: the latched plan (deriveExitPlan / deriveEnterPlan) ──
+// ── Assemble/scatter v3: latched plans (deriveExitPlan / deriveEnterPlan) ─────
 
 test('deriveExitPlan: PROMOTE when the target is a visible pane active key (INV 3 honest destination)', () => {
   // twoPaneChatAndApp: chat 5 left (unfocused), app 42 right (focused). Legacy
@@ -427,6 +485,8 @@ test('deriveExitPlan: PROMOTE when the target is a visible pane active key (INV 
   const dealOut = plan.participants.filter(p => p.motion === 'deal-out')
   assert.equal(dealOut.length, 1)
   assert.equal(dealOut[0].key, 'chat:5')
+  assert.ok(dealOut[0].offset.x < 0, 'left sibling scatters past the left edge')
+  assert.equal(dealOut[0].offset.y, 0)
 })
 
 test('deriveExitPlan: WORLD-REVEAL when the slot is tree-absent (underlay + all deal out)', () => {
@@ -436,9 +496,7 @@ test('deriveExitPlan: WORLD-REVEAL when the slot is tree-absent (underlay + all 
   assert.equal(plan.underlayKey, 'chat:99', 'the mounted destination is revealed beneath')
   assert.equal(plan.participants.every(p => p.motion === 'deal-out'), true, 'no false promotion')
   assert.deepEqual(plan.completionNames, ['shell-mode-deal-out'])
-  // The FOCUSED pane (app 42) is the LAST card put away (world-reveal focus-last).
-  const last = plan.participants.reduce((a, b) => (b.delayMs > a.delayMs ? b : a))
-  assert.equal(last.key, 'app:42')
+  assert.ok(plan.participants.every(p => p.delayMs === 0), 'all panes leave together')
 })
 
 test('deriveExitPlan: WORLD-REVEAL when the slot tab is INACTIVE in a pane (never promote it)', () => {
@@ -455,24 +513,64 @@ test('deriveExitPlan: WORLD-REVEAL when the slot tab is INACTIVE in a pane (neve
   assert.equal(plan.participants.some(p => p.motion === 'promote'), false)
 })
 
-test('deriveExitPlan: NULL slot reveals home (underlayKey null), empty tree is instant (null plan)', () => {
+test('deriveExitPlan: NULL slot reveals the New Chat landing (round 4 item 3), empty tree is instant', () => {
   const home = { ...twoPaneChatAndApp(), singleScreen: null }
   const homePlan = deriveExitPlan({ workspace: home, projection: project(home), contentRect: CONTENT })
-  assert.equal(homePlan.target, null)
-  assert.equal(homePlan.underlayKey, null, 'home reveal uses the opaque background, no underlay wrapper')
+  // A null slot is a definite New Chat destination now — a WORLD REVEAL to the
+  // home:new-chat underlay, never the freshest chat and never the opaque-only home.
+  assert.equal(homePlan.target, EMPTY_SINGLE_SURFACE_KEY)
+  assert.equal(homePlan.underlayKey, EMPTY_SINGLE_SURFACE_KEY, 'the New Chat landing is revealed beneath the deal')
+  assert.ok(homePlan.participants.every(p => p.motion === 'deal-out'), 'every painted leaf deals out')
   assert.ok(homePlan.participants.length >= 1)
   // Empty tree → no participants → null plan → an INSTANT flip (no descriptor).
   const empty = paneModel.seedFromFlatTabs([])
   assert.equal(deriveExitPlan({ workspace: empty, projection: project(empty), contentRect: CONTENT }), null)
 })
 
-test('deriveExitPlan: siblings deal out on a 20ms visual-order stagger', () => {
+test('deriveExitPlan: siblings deal out together in one short beat', () => {
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
   const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
   const delays = plan.participants.map(p => p.delayMs).sort((a, b) => a - b)
-  assert.deepEqual(delays, [0, MODE_MOTION.staggerMs])
+  assert.deepEqual(delays, [0, 0])
+  assert.equal(MODE_MOTION.staggerMs, undefined)
   assert.ok(plan.participants.every(p => p.durationMs === MODE_MOTION.exitItemMs))
-  assert.equal(plan.totalMs, MODE_MOTION.staggerMs + MODE_MOTION.exitItemMs)
+  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
+})
+
+test('deriveExitPlan: a world reveal has no delayed destination phase', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
+  const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  assert.deepEqual(plan.completionNames, ['shell-mode-deal-out'])
+  assert.equal('destinationMotion' in plan, false)
+  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
+})
+
+test('deriveExitPlan: a promote keeps its seamless continuity', () => {
+  // twoPaneChatAndApp legacy absent-slot → seeds app:42 (focused) → PROMOTE.
+  const ws = twoPaneChatAndApp()
+  const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  assert.ok(plan.participants.some(p => p.motion === 'promote'))
+  assert.equal('destinationMotion' in plan, false)
+  assert.equal(plan.completionNames.includes('shell-mode-destination-arrive'), false)
+})
+
+test('deriveExitPlan: four panes cost the same 180ms beat as one pane', () => {
+  // Build MAX_PANES visible leaves (a balanced 2×2 within MAX_DEPTH) and a tree-absent
+  // slot so all four deal out over a revealed underlay. Tied to MAX_PANES so a future
+  // pane-count change can't silently blow the beat budget.
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', '1')])
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', '2'), { paneId: ws.focusedPaneId, edge: 'right' })
+  const leftId = paneModel.paneOf(ws, 'chat:1').id
+  const rightId = paneModel.paneOf(ws, 'chat:2').id
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', '3'), { paneId: leftId, edge: 'bottom' })
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', '4'), { paneId: rightId, edge: 'bottom' })
+  const proj = project(ws)
+  assert.equal(proj.visibleLeaves.length, paneModel.MAX_PANES, 'four visible leaves')
+  ws = { ...ws, singleScreen: { kind: 'chat', id: 'ghost' } } // tree-absent → world reveal
+  const plan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT })
+  assert.ok(plan.participants.every(p => p.motion === 'deal-out'), 'all four deal out')
+  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
+  assert.equal(plan.totalMs, 180)
 })
 
 test('N1: MODE_MOTION drops the unused chromeMs constant', () => {
@@ -575,29 +673,107 @@ test('deriveExitPlan: M2 a builder Settings tab that IS the destination does not
   assert.ok(plan.participants.some(p => p.key === 'chat:5'), 'the sibling pane still deals out')
 })
 
-test('deriveEnterPlan: each visible leaf deals in, 20ms stagger, single-leaf longer', () => {
-  const two = twoPaneChatAndApp()
-  const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two) })
-  assert.deepEqual(twoPlan.completionNames, ['shell-mode-deal-in'])
+test('deriveEnterPlan: the shared surface settles while siblings assemble from their edges', () => {
+  const two = twoPaneChatAndApp() // the app:42 pane is focused
+  const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two), contentRect: CONTENT })
+  assert.deepEqual(twoPlan.completionNames, ['shell-mode-settle', 'shell-mode-deal-in'])
   assert.equal(twoPlan.participants.length, 2)
   assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.enterItemMs))
-  assert.deepEqual(twoPlan.participants.map(p => p.delayMs).sort((a, b) => a - b), [0, MODE_MOTION.staggerMs])
+  const settle = twoPlan.participants.find(p => p.motion === 'settle')
+  const gather = twoPlan.participants.find(p => p.motion === 'deal-in')
+  assert.equal(settle.key, 'app:42')
+  assert.ok(settle.flip.sx > 1, 'the right pane starts at the single-world size')
+  assert.equal(gather.key, 'chat:5')
+  assert.ok(gather.offset.x < 0, 'the left pane assembles from the left edge')
+  // Everything moves at once; pane count adds no stagger.
+  assert.ok(twoPlan.participants.every(p => p.delayMs === 0))
+  assert.equal(twoPlan.totalMs, MODE_MOTION.enterItemMs)
   const one = paneModel.seedFromFlatTabs([makeTab('app', '42')])
-  const onePlan = deriveEnterPlan({ workspace: one, projection: project(one) })
+  const onePlan = deriveEnterPlan({ workspace: one, projection: project(one), contentRect: CONTENT })
   assert.equal(onePlan.participants.length, 1)
-  assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.enterSingleMs, 'the sole leaf uses the paired gesture duration')
+  assert.equal(onePlan.participants[0].motion, 'settle')
+  assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.enterSingleMs)
+  assert.equal(onePlan.totalMs, MODE_MOTION.enterSingleMs)
 })
 
-test('exitSignature is stable for the same tree and drifts on a topology/geometry change (INV 10)', () => {
+test('deriveEnterPlan: a tree-absent single surface stays beneath the assembling panes', () => {
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
-  const base = exitSignature({ workspace: ws, projection: project(ws), contentRect: CONTENT })
-  assert.equal(base, exitSignature({ workspace: ws, projection: project(ws), contentRect: CONTENT }))
+  const input = { workspace: ws, projection: project(ws), contentRect: CONTENT }
+  const plan = deriveEnterPlan(input)
+  assert.equal(plan.target, 'chat:99')
+  assert.equal(plan.underlayKey, 'chat:99')
+  assert.deepEqual(plan.completionNames, ['shell-mode-deal-in'])
+  assert.ok(plan.participants.every(p => p.motion === 'deal-in'))
+  const left = plan.participants.find(p => p.key === 'chat:5')
+  const right = plan.participants.find(p => p.key === 'app:42')
+  assert.ok(left.offset.x < 0)
+  assert.ok(right.offset.x > 0)
+  assert.equal(plan.snapshotSignature, transitionSignature(input), 'entry latches its input snapshot')
+  assert.notEqual(
+    plan.snapshotSignature,
+    transitionSignature({ ...input, contentRect: { ...CONTENT, w: CONTENT.w - 120 } }),
+    'a mid-entry content resize invalidates the latched edge offsets',
+  )
+})
+
+test('edge motions accept Shell\'s origin-free live content rect', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
+  const contentRect = { w: CONTENT.w, h: CONTENT.h }
+  const projection = paneModel.projectLayout(ws, paneModel.modeForRect(contentRect), contentRect)
+  for (const plan of [
+    deriveExitPlan({ workspace: ws, projection, contentRect }),
+    deriveEnterPlan({ workspace: ws, projection, contentRect }),
+  ]) {
+    assert.ok(plan.participants.length > 0)
+    for (const participant of plan.participants) {
+      assert.ok(Number.isFinite(participant.offset.x), 'horizontal offset stays finite')
+      assert.ok(Number.isFinite(participant.offset.y), 'vertical offset stays finite')
+    }
+  }
+})
+
+test('transitionSignature is stable and drifts on topology/content-bound changes (INV 10)', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
+  const base = transitionSignature({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  assert.equal(base, transitionSignature({ workspace: ws, projection: project(ws), contentRect: CONTENT }))
   // A content-box resize drifts the signature → the beat cancels.
-  const resized = exitSignature({ workspace: ws, projection: project(ws), contentRect: { x: 0, y: 0, w: 800, h: 600 } })
+  const resized = transitionSignature({ workspace: ws, projection: project(ws), contentRect: { x: 0, y: 0, w: 800, h: 600 } })
   assert.notEqual(base, resized)
+  const movedBounds = transitionSignature({
+    workspace: ws, projection: project(ws), contentRect: { ...CONTENT, x: 12 },
+  })
+  assert.notEqual(base, movedBounds, 'edge offsets include the content origin when supplied')
+  // A divider ratio changes edge offsets without changing the content bounds, so
+  // per-pane rects are part of the invalidation signature too.
+  const resizedPane = paneModel.setRatio(ws, ws.layout.id, 0.62)
+  assert.notEqual(base, transitionSignature({ workspace: resizedPane, projection: project(resizedPane), contentRect: CONTENT }))
   // A different slot target drifts it too.
-  const retargeted = exitSignature({ workspace: { ...ws, singleScreen: { kind: 'chat', id: '5' } }, projection: project(ws), contentRect: CONTENT })
+  const retargeted = transitionSignature({ workspace: { ...ws, singleScreen: { kind: 'chat', id: '5' } }, projection: project(ws), contentRect: CONTENT })
   assert.notEqual(base, retargeted)
+})
+
+test('transitionSignature folds the destination so a mid-beat destination change cancels (H2)', () => {
+  // The audit case: a live exit plan built toward the chat slot must cancel the moment
+  // a Settings takeover suspends over the slot mid-beat — the two signatures differ.
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '5' } }
+  const proj = project(ws)
+  const toChat = transitionSignature({ workspace: ws, projection: proj, contentRect: CONTENT })
+  const toSettings = transitionSignature({ workspace: ws, projection: proj, contentRect: CONTENT, settingsDestination: true })
+  assert.notEqual(toChat, toSettings, 'chat-target vs settings:settings destinations must differ')
+  // And the PLAN's stored snapshot equals a live recompute at the SAME destination, so
+  // the watcher never false-cancels while the destination holds (structural coupling:
+  // deriveExitPlan feeds its own input object to transitionSignature).
+  const settingsPlan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT, settingsDestination: true })
+  assert.equal(settingsPlan.snapshotSignature, toSettings)
+  const chatPlan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT })
+  assert.equal(chatPlan.snapshotSignature, toChat)
+  // An immersive holder that solos the exit slot is an INSTANT destination — its
+  // signature differs from the ordinary reveal, so a mid-beat immersive request cancels.
+  const app42 = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '42' } }
+  const projApp = project(app42)
+  const reveal = transitionSignature({ workspace: app42, projection: projApp, contentRect: CONTENT })
+  const immersive = transitionSignature({ workspace: app42, projection: projApp, contentRect: CONTENT, immersiveHolderId: 42 })
+  assert.notEqual(reveal, immersive, 'an immersive-instant destination must drift the signature')
 })
 
 test('deriveContentVisibility augments visibleAppIds with an app underlay (exit reveal)', () => {

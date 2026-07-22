@@ -30,7 +30,7 @@ test('reasoning markdown has a scoped quiet typography lane', () => {
     'bold lead-ins should not dominate the activity timeline')
 })
 
-test('placeholder and real stretches render through the shared activity header', () => {
+test('placeholder and the first real thought render through the shared activity header', () => {
   const placeholderStart = chatView.indexOf('className="chat__tools chat__thinking"')
   const placeholderEnd = chatView.indexOf('</li>', placeholderStart)
   const placeholder = chatView.slice(placeholderStart, placeholderEnd)
@@ -42,8 +42,13 @@ test('placeholder and real stretches render through the shared activity header',
   assert.ok(placeholderStart >= 0, 'placeholder should use the standard activity wrapper')
   assert.match(placeholder, /className="chat__activity chat__activity--running"/)
   assert.match(placeholder, /<ActivityLineHeader/)
+  assert.match(placeholder, /reserveInteractiveGeometry/,
+    'the static placeholder must reserve the eventual touch-target geometry')
   assert.doesNotMatch(placeholder, /chat__activity-icon|chat__activity-label/,
     'placeholder must not duplicate shared header internals')
+  assert.match(activityStretch,
+    /direct \? \([\s\S]*<ActivityLineHeader[\s\S]*interactive/,
+    'the direct first-thought branch must use the same header, not only grouped stretches')
   assert.doesNotMatch(chatCss, /\.chat__thinking\s*\{/,
     'the e2e presence hook must not carry layout compensation')
 })
@@ -57,8 +62,8 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
     'thinking is an activity type, not an empty icon column')
   assert.match(activityStretch, /function TimelineThought/,
     'a mixed thought owns its disclosure state')
-  assert.match(activityStretch, /const \[open, setOpen\] = useState\(false\)/,
-    'nested thinking starts collapsed')
+  assert.match(activityStretch, /const \[open, setOpen\] = useDisclosureState\(chatId, disclosureKey\)/,
+    'nested thinking restores its per-chat disclosure state')
   assert.match(activityStretch, /className="chat__activity-think-toggle"/)
   assert.doesNotMatch(activityStretch, /chat__activity-think-chevron/,
     'nested reasoning uses its icon and row affordance without a chevron')
@@ -66,16 +71,26 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
     'the nested toggle exposes its state')
   assert.match(activityStretch, /aria-controls=\{bodyId\}/,
     'the nested toggle names the thought body it controls')
+  assert.match(activityStretch, /id=\{bodyId\}[^>]*hidden=\{!open\}/,
+    'the controlled thought shell remains addressable while its payload is unmounted')
   assert.match(activityStretch, /role="status" aria-live="polite"/,
     'deferred thought state changes should be announced')
   assert.match(activityStretch, /className="chat__lazy-retry" onClick=\{trace\.retry\}/,
     'a failed thought should retry without a close/reopen ritual')
-  assert.match(activityStretch, /preserveTogglePosition\(headerRef\.current\)\s*setOpen\(o => !o\)/,
+  assert.match(activityStretch, /preserveTogglePosition\(headerRef\.current, bodyRef\.current\)\s*setOpen\(o => !o\)/,
     'opening a long trace preserves the reader anchor')
   assert.doesNotMatch(activityStretch, /if \(thinkingOnly\) \{/,
     'a thinking-only entry must not swap component type when the first tool arrives')
   assert.match(activityStretch, /<StandardMarkdown text=\{content\} \/>/,
     'reasoning remains available inside the nested disclosure')
+})
+
+test('a single activity discloses directly without a redundant parent row', () => {
+  assert.match(activityStretch, /if \(entries\.length === 1\)/)
+  assert.match(activityStretch, /<SingleActivity[\s\S]*entry=\{entries\[0\]\}/)
+  assert.match(activityStretch,
+    /item\.type === 'thinking'[\s\S]*<TimelineThought[\s\S]*direct[\s\S]*live=\{live\}/)
+  assert.match(activityStretch, /<ToolBlock[\s\S]*key=\{assistantBlockKey\(item, idx\)\}/)
 })
 
 test('lazy tool details and touch targets keep their accessibility contract', () => {
@@ -85,6 +100,8 @@ test('lazy tool details and touch targets keep their accessibility contract', ()
     .join('\n')
 
   assert.match(toolBlock, /aria-controls=\{detailId\}/)
+  assert.match(toolBlock, /id=\{detailId\}[\s\S]*hidden=\{!open\}/,
+    'the controlled detail shell remains addressable while its payload is unmounted')
   assert.match(toolBlock, /role="region"/)
   assert.match(toolBlock, /aria-labelledby=\{headerId\}/)
   assert.match(toolBlock, /className="chat__lazy-retry"/)

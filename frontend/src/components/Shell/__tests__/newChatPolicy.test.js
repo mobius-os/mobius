@@ -1,12 +1,23 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   addCreatedChatToList,
   createdChatDetailCache,
   currentReusableEmptyChat,
   detailIsUntouchedEmptyChat,
+  enteredEmptySingleScreen,
+  mergeChatListWithCreatedGuards,
+  reconcileCreatedChatGuard,
+  rememberCreatedChat,
+  reusableChatDetailVerdict,
 } from '../newChatPolicy.js'
+import { chatQueries } from '../../../hooks/queries.js'
+
+const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const queriesSource = readFileSync(new URL('../../../hooks/queries.js', import.meta.url), 'utf8')
+const clientSource = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
 const empty = (id, extra = {}) => ({
   id,
@@ -14,6 +25,39 @@ const empty = (id, extra = {}) => ({
   running: false,
   run_status: null,
   ...extra,
+})
+
+test('empty-single policy fires only on the transition edge', () => {
+  const chat = { kind: 'chat', id: '7' }
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'panes', singleScreen: null },
+    { viewMode: 'single', singleScreen: null },
+  ), true)
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'single', singleScreen: chat },
+    { viewMode: 'single', singleScreen: null },
+  ), true)
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'single', singleScreen: null },
+    { viewMode: 'single', singleScreen: null },
+  ), false)
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'panes', singleScreen: chat },
+    { viewMode: 'panes', singleScreen: null },
+  ), false)
+})
+
+test('empty-single policy respects the splits kill switch', () => {
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'panes', singleScreen: { kind: 'app', id: 4 } },
+    { viewMode: 'panes', singleScreen: null },
+    false,
+  ), true)
+  assert.equal(enteredEmptySingleScreen(
+    { viewMode: 'panes', singleScreen: null },
+    { viewMode: 'single', singleScreen: null },
+    false,
+  ), false)
 })
 
 test('only the active empty chat is eligible for client-side reuse', () => {
@@ -89,6 +133,24 @@ test('fresh detail fails closed on partial or malformed responses', () => {
   assert.equal(detailIsUntouchedEmptyChat(untouchedDetail({ total: '0' })), false)
 })
 
+test('fresh detail probe separates occupied, missing, and uncertain rows', () => {
+  assert.equal(reusableChatDetailVerdict({
+    ok: true, status: 200, detail: untouchedDetail(),
+  }), 'empty')
+  assert.equal(reusableChatDetailVerdict({
+    ok: true, status: 200, detail: untouchedDetail({ total: 1, messages: [{}] }),
+  }), 'occupied')
+  assert.equal(reusableChatDetailVerdict({
+    ok: false, status: 404, detail: null,
+  }), 'missing')
+  assert.equal(reusableChatDetailVerdict({
+    ok: false, status: 503, detail: null,
+  }), 'uncertain')
+  assert.equal(reusableChatDetailVerdict({
+    ok: true, status: 200, detail: { messages: [], pending_messages: [] },
+  }), 'uncertain')
+})
+
 test('a canonical create response becomes an authoritative empty detail cache', () => {
   const cache = createdChatDetailCache({
     id: 'new',
@@ -152,6 +214,55 @@ test('a created chat enters the cache without displacing pinned chats', () => {
   assert.equal('detail' in result[1], false)
 })
 
+test('ordinary chat selection does not launch a competing drawer refresh', () => {
+  const selectChat = shellSource.match(
+    /function selectChat\(id\) \{([\s\S]*?)\n  \}/,
+  )?.[1] || ''
+  assert.match(selectChat, /navTo\('chat', \{ chatId: id \}\)/)
+  assert.doesNotMatch(selectChat, /refreshChats/)
+})
+
+test('new-chat creation cancels stale list reads through a real AbortSignal', () => {
+  const cancelAt = shellSource.indexOf('await queryClient.cancelQueries({')
+  const createAt = shellSource.indexOf("api.chats.create({ title: 'New chat' })")
+  assert.ok(cancelAt >= 0 && cancelAt < createAt,
+    'the stale drawer read must be cancelled before the create request')
+  assert.match(queriesSource, /async function fetchChats\(\{ signal \} = \{\}\)/)
+  assert.match(queriesSource, /api\.chats\.list\(\{ signal \}\)/)
+  assert.match(clientSource, /list: \(options = \{\}\) => apiFetch\('\/chats', options\)/)
+})
+
+test('the drawer transport aborts before creation can continue', async () => {
+  const originalFetch = globalThis.fetch
+  const sequence = []
+  globalThis.fetch = (_url, options = {}) => new Promise(resolve => {
+    sequence.push('list-started')
+    options.signal?.addEventListener('abort', () => {
+      sequence.push('list-aborted')
+      // Resolve a non-success response instead of rejecting so apiFetch's
+      // connectivity verifier does not start unrelated background work.
+      resolve(new Response('[]', {
+        status: 499,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+    }, { once: true })
+  })
+
+  try {
+    const controller = new AbortController()
+    const list = chatQueries.list.fetch({ signal: controller.signal })
+    await Promise.resolve()
+    controller.abort()
+    await assert.rejects(list, /chats fetch failed: 499/)
+    sequence.push('create-allowed')
+    assert.deepEqual(sequence, [
+      'list-started', 'list-aborted', 'create-allowed',
+    ])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('a created chat replaces a duplicate cache row', () => {
   const result = addCreatedChatToList([
     { id: 'same', title: 'stale', pinned_at: null },
@@ -162,4 +273,97 @@ test('a created chat replaces a duplicate cache row', () => {
   assert.equal(result.length, 1)
   assert.equal(result[0].title, 'Fresh')
   assert.equal(result[0].has_messages, true)
+})
+
+test('a stale post-create list cannot hide the protected chat row', () => {
+  const guards = new Map()
+  const created = {
+    id: 'new', title: 'New chat', pinned_at: null, has_messages: false,
+  }
+  rememberCreatedChat(guards, created, { now: 1000, guardMs: 30_000 })
+
+  const stale = mergeChatListWithCreatedGuards([
+    { id: 'older', title: 'Older', pinned_at: null },
+  ], guards, { now: 2000 })
+  assert.deepEqual(stale.map(chat => chat.id), ['new', 'older'])
+
+  const confirmed = mergeChatListWithCreatedGuards([
+    { id: 'new', title: 'Server title', pinned_at: null, has_messages: true },
+    { id: 'older', title: 'Older', pinned_at: null },
+  ], guards, { now: 3000 })
+  assert.equal(confirmed[0].title, 'Server title')
+
+  const secondFallback = mergeChatListWithCreatedGuards([
+    { id: 'older', title: 'Older', pinned_at: null },
+  ], guards, { now: 4000 })
+  assert.equal(secondFallback[0].title, 'Server title')
+
+  const expired = mergeChatListWithCreatedGuards([
+    { id: 'older', title: 'Older', pinned_at: null },
+  ], guards, { now: 31_001 })
+  assert.deepEqual(expired.map(chat => chat.id), ['older'])
+  assert.equal(guards.size, 0)
+})
+
+test('detail verdicts update or retire the protected create row', () => {
+  const guards = new Map()
+  const created = {
+    id: 'new', title: 'New chat', pinned_at: null, has_messages: false,
+  }
+  rememberCreatedChat(guards, created, { now: 1000, guardMs: 30_000 })
+
+  reconcileCreatedChatGuard(guards, 'new', 'occupied')
+  const occupiedFallback = mergeChatListWithCreatedGuards([], guards, {
+    now: 2000,
+  })
+  assert.equal(occupiedFallback[0].has_messages, true)
+
+  reconcileCreatedChatGuard(guards, 'new', 'missing')
+  const missingFallback = mergeChatListWithCreatedGuards([], guards, {
+    now: 3000,
+  })
+  assert.deepEqual(missingFallback, [])
+  assert.equal(guards.size, 0)
+})
+
+test('stale-present rows cannot downgrade an occupied or newer guard', () => {
+  const guards = new Map()
+  rememberCreatedChat(guards, {
+    id: 'new',
+    title: 'Created title',
+    pinned_at: null,
+    has_messages: false,
+    updated_at: '2026-07-22T00:00:02Z',
+  }, { now: 1000, guardMs: 30_000 })
+  reconcileCreatedChatGuard(guards, 'new', 'occupied')
+
+  const stalePresent = mergeChatListWithCreatedGuards([{
+    id: 'new',
+    title: 'Older cached title',
+    pinned_at: null,
+    has_messages: false,
+    updated_at: '2026-07-22T00:00:01Z',
+  }], guards, { now: 2000 })
+  assert.equal(stalePresent[0].title, 'Created title')
+  assert.equal(stalePresent[0].has_messages, true)
+
+  const newerConfirmed = mergeChatListWithCreatedGuards([{
+    id: 'new',
+    title: 'Server title',
+    pinned_at: null,
+    has_messages: true,
+    updated_at: '2026-07-22T00:00:03Z',
+  }], guards, { now: 3000 })
+  assert.equal(newerConfirmed[0].title, 'Server title')
+  assert.equal(newerConfirmed[0].has_messages, true)
+
+  const secondStalePresent = mergeChatListWithCreatedGuards([{
+    id: 'new',
+    title: 'Older cached title',
+    pinned_at: null,
+    has_messages: false,
+    updated_at: '2026-07-22T00:00:01Z',
+  }], guards, { now: 4000 })
+  assert.equal(secondStalePresent[0].title, 'Server title')
+  assert.equal(secondStalePresent[0].has_messages, true)
 })

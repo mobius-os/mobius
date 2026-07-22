@@ -196,6 +196,7 @@ async def promote_pending_messages_locked(
   db: Session,
   chat_id: str,
   run_token: str,
+  ending_status: str = "completed",
 ) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
   """Inner promote logic. PRECONDITION: caller holds the per-chat
   queue lock.
@@ -228,7 +229,11 @@ async def promote_pending_messages_locked(
   from app.chat_writer import PromotePending, await_ack, get_writer
 
   ack = get_writer().submit(
-    PromotePending(chat_id=chat_id, run_token=run_token)
+    PromotePending(
+      chat_id=chat_id,
+      run_token=run_token,
+      ending_status=ending_status,
+    )
   )
   result = await await_ack(ack)
   promoted = result["promoted"]
@@ -286,6 +291,7 @@ async def drain_and_release(
   clear_run_status_strict,
   current_generation,
   ending_run_token: str = "",
+  ending_status: str = "completed",
 ) -> tuple[dict | None, list, str | None, "TerminalDisposition"]:
   """End-of-turn queue drain. Returns (next_user, next_messages,
   next_session_id, disposition) for the caller to publish + schedule.
@@ -349,7 +355,9 @@ async def drain_and_release(
       if not we_own_gen:
         return None, [], None, TerminalDisposition.STALE_NO_ACTION
       next_messages, first_pending, next_session_id = (
-        await promote_pending_messages_locked(db, chat_id, run_token)
+        await promote_pending_messages_locked(
+          db, chat_id, run_token, ending_status=ending_status,
+        )
       )
       if first_pending is None:
         # Clear-before-forget, all under this one lock: clear the durable
@@ -361,7 +369,9 @@ async def drain_and_release(
         # keyed on the finishing run's token, so even a StartTurn that lands
         # mid-drain (no generation bump → we_own_gen still true) keeps its
         # marker — the actor no-ops a clear that names the old owner.
-        await clear_run_status_strict(chat_id, ending_run_token)
+        await clear_run_status_strict(
+          chat_id, ending_run_token, ending_status,
+        )
         discard_starting(chat_id)
         forget_chat(chat_id)
         return (

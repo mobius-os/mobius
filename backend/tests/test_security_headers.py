@@ -201,6 +201,7 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
     if line.startswith("header @appFrame >Content-Security-Policy ")
   )
   assert "sandbox allow-scripts" in app_frame_csp
+  assert "allow-popups-to-escape-sandbox" in app_frame_csp
   assert "allow-same-origin" not in app_frame_csp
   assert "script-src 'self' 'unsafe-inline' blob: https://esm.sh" in app_frame_csp
   assert "blob:" not in ordinary_csp.split("style-src", 1)[0]

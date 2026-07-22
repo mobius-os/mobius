@@ -740,6 +740,10 @@ _SKILL_TEXT_CACHE: str | None = None
 # sink save. Hand durable-marker clearing back to that run's wrapper so
 # the marker survives until persistence is complete.
 _clear_after_terminal_generation: dict[str, int] = {}
+# Outcome paired with the generation handoff above. Explicit Stop and the
+# liveness watchdog share the same safe "bump, let the runner finalize, then
+# clear" mechanism, but they are different durable outcomes.
+_clear_after_terminal_status: dict[str, str] = {}
 
 # Liveness watchdog. Derived-only in v1: no persisted run-state enum.
 PROGRESS_TIMEOUT = 600.0
@@ -1081,7 +1085,11 @@ def recover_chat_generation(chat_id: str) -> int:
 # reconciliation instead of reporting a clean completion.
 
 
-async def _clear_run_status(chat_id: str, run_token: str = "") -> None:
+async def _clear_run_status(
+  chat_id: str,
+  run_token: str = "",
+  terminal_status: str = "completed",
+) -> None:
   """Clears the chat's durable run marker once the turn has ended.
 
   Routes through the actor's `ClearRunStatus` (the sole runtime mutator
@@ -1098,7 +1106,11 @@ async def _clear_run_status(chat_id: str, run_token: str = "") -> None:
     return
   try:
     ack = get_writer().submit(
-      ClearRunStatus(chat_id=chat_id, run_token=run_token)
+      ClearRunStatus(
+        chat_id=chat_id,
+        run_token=run_token,
+        terminal_status=terminal_status,
+      )
     )
     await _await_ack(ack)
   except Exception:
@@ -1108,7 +1120,11 @@ async def _clear_run_status(chat_id: str, run_token: str = "") -> None:
     )
 
 
-async def _clear_run_status_strict(chat_id: str, run_token: str = "") -> None:
+async def _clear_run_status_strict(
+  chat_id: str,
+  run_token: str = "",
+  terminal_status: str = "completed",
+) -> None:
   """Strict terminal variant of `_clear_run_status`: surfaces a failed ack.
 
   The best-effort `_clear_run_status` above swallows a failed ack because a
@@ -1131,7 +1147,11 @@ async def _clear_run_status_strict(chat_id: str, run_token: str = "") -> None:
   if not chat_id:
     return
   ack = get_writer().submit(
-    ClearRunStatus(chat_id=chat_id, run_token=run_token)
+    ClearRunStatus(
+      chat_id=chat_id,
+      run_token=run_token,
+      terminal_status=terminal_status,
+    )
   )
   await _await_ack(ack)
 
@@ -1576,7 +1596,9 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
           # owns a different token, so the actor no-ops instead of wiping it.
           # Strict variant so a failed ack RAISES — a marker we couldn't clear
           # must not be reported as swept (reconciliation repairs it on boot).
-          await _clear_run_status_strict(chat.id, run.id)
+          await _clear_run_status_strict(
+            chat.id, run.id, terminal_status="interrupted",
+          )
       _finalize_broadcast_if_running(chat.id)
       swept.append(chat.id)
     except (Exception, asyncio.TimeoutError):
@@ -1725,7 +1747,11 @@ async def sweep_stalled_live_runs(db: Session) -> list[str]:
       continue
     exemption = _stall_exemption(db, chat_id, now_wall)
     if exemption is not None:
-      log.info(
+      # Pending questions and limit parks can remain open for hours. The sweep
+      # runs every minute, so INFO here turns one healthy exemption into an
+      # unbounded stream of duplicate chat.log lines. Debug status already
+      # exposes the live state; retain the per-tick trace only in debug mode.
+      log.debug(
         "stalled-live watchdog skipped chat_id=%s exemption=%s",
         chat_id, exemption,
       )
@@ -1757,6 +1783,7 @@ async def sweep_stalled_live_runs(db: Session) -> list[str]:
       continue
     bump_run_generation(chat_id)
     _clear_after_terminal_generation[chat_id] = stopped_gen
+    _clear_after_terminal_status[chat_id] = "interrupted"
 
     all_interrupted = True
     for handle in handles:
@@ -1855,6 +1882,7 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
     _restart_draining_chats.add(chat_id)
     bump_run_generation(chat_id)
     _clear_after_terminal_generation[chat_id] = stopped_gen
+    _clear_after_terminal_status[chat_id] = "interrupted"
     all_interrupted = True
     for handle in handles:
       try:
@@ -2404,6 +2432,7 @@ async def stop_chat_for(
   handles = registry.get_handles(chat_id)
   if handles:
     _clear_after_terminal_generation[chat_id] = stopped_gen
+    _clear_after_terminal_status[chat_id] = "stopped"
   # The queue-lock window guards the clear's COMPOUND decision against a
   # racing append/cancel/promote (the actor's ClearPending serializes the
   # DB write itself). Generation bump happens BEFORE the lock so the dying
@@ -2479,7 +2508,7 @@ async def stop_chat_for(
   # dies first, the retained marker lets crash recovery reconcile the
   # interrupted turn.
   if not handles:
-    await _clear_run_status(chat_id)
+    await _clear_run_status(chat_id, terminal_status="stopped")
   _finalize_broadcast_if_running(chat_id)
   registry.discard_starting(chat_id)
   return all_stopped, cleared_pending_cids
@@ -2602,6 +2631,7 @@ async def _drain_and_release(
   run_gen: int | None,
   run_token: str,
   ending_run_token: str = "",
+  ending_status: str = "completed",
 ) -> tuple[dict | None, list, str | None, chat_queue.TerminalDisposition]:
   """Local helper around chat_queue.drain_and_release that binds the
   chat.py-owned discard_starting + forget_chat + strict-clear callbacks.
@@ -2631,6 +2661,7 @@ async def _drain_and_release(
     clear_run_status_strict=_clear_run_status_strict,
     current_generation=current_run_generation,
     ending_run_token=ending_run_token,
+    ending_status=ending_status,
   )
 
 
@@ -2721,7 +2752,9 @@ async def _terminal_setup_error_cleanup(
         if run_gen is not None and current_run_generation(chat_id) != run_gen:
           return chat_queue.TerminalDisposition.STALE_NO_ACTION
         await _clear_pending_strict(chat_id)
-        await _clear_run_status_strict(chat_id, run_token)
+        await _clear_run_status_strict(
+          chat_id, run_token, terminal_status="failed",
+        )
         discard_starting(chat_id)
         forget_chat_if_current(chat_id, run_gen)
     return chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
@@ -3156,12 +3189,19 @@ async def _complete_turn(
   # disowns the generation above), a park sets limit_reached, an errored/refused
   # turn sets _last_error, and any real text/thinking/tool_use makes the blocks
   # renderable. cost_usd is unusable (None for every run here) and not consulted.
-  sink._lost_reply_marker = (
+  lost_reply = (
     we_own_gen
     and not stop_handoff_successor
     and not limit_reached
     and not sink._last_error
     and not blocks_have_renderable_content(sink.assistant_blocks)
+  )
+  sink._lost_reply_marker = lost_reply
+  ending_status = (
+    _clear_after_terminal_status.get(chat_id, "stopped")
+    if stop_handoff_successor
+    else "failed" if sink._last_error or lost_reply
+    else "completed"
   )
 
   try:
@@ -3280,6 +3320,7 @@ async def _complete_turn(
       await _drain_and_release(
         db, chat_id, run_gen, next_run_token,
         ending_run_token=sink.run_token or "",
+        ending_status=ending_status,
       )
     )
   except (Exception, asyncio.TimeoutError) as exc:
@@ -3830,8 +3871,10 @@ async def run_chat(
   finally:
     stopped_gen = _clear_after_terminal_generation.get(chat_id)
     clear_stopped_run = run_gen is not None and stopped_gen == run_gen
+    terminal_status = _clear_after_terminal_status.get(chat_id, "stopped")
     if clear_stopped_run:
       _clear_after_terminal_generation.pop(chat_id, None)
+      _clear_after_terminal_status.pop(chat_id, None)
     # Only clear _starting if we still own this generation. A newer
     # stop_chat_for may have bumped the generation and taken ownership of
     # _starting. (The EMPTY_TERMINAL_CLEARED path already released _starting
@@ -3895,7 +3938,9 @@ async def run_chat(
                 # Identity-keyed on this dying run's token: if a fresh turn
                 # raced in and set a new marker (the is_alive window above),
                 # the actor no-ops this clear instead of wiping it.
-                await _clear_run_status_strict(chat_id, run_token or "")
+                await _clear_run_status_strict(
+                  chat_id, run_token or "", terminal_status=terminal_status,
+                )
                 disposition = (
                   chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED
                 )

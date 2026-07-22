@@ -1,20 +1,21 @@
-import { useState, useEffect } from 'react'
+import { lazy, Suspense, useState, useEffect } from 'react'
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
 import { QueryClientProvider, useIsRestoring } from '@tanstack/react-query'
-import SetupWizard from './components/SetupWizard/SetupWizard.jsx'
-import LoginForm from './components/LoginForm/LoginForm.jsx'
-import Shell from './components/Shell/Shell.jsx'
-import ChatEmbed from './components/ChatEmbed/ChatEmbed.jsx'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
 import { beginEphemeralAuth, getToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
-// Import the already-parsed shell-reload value from useNavigation — that
-// module-level IIFE already consumed and removed the sessionStorage key, so
-// reading it again here would always return null (dead branch). We use the
-// exported value directly so there is one reader, not two.
-import { shellReload } from './hooks/useNavigation.js'
+import { shellReload } from './lib/shellReloadState.js'
+import { beginEmbedBootstrap } from './lib/chatEmbedBootstrap.js'
+
+// These flows are mutually exclusive. Keep setup, login, the full shell, and
+// the opaque embed out of one another's startup path; first boot should not
+// parse the chat/editor/chart stack just to show the account form.
+const SetupWizard = lazy(() => import('./components/SetupWizard/SetupWizard.jsx'))
+const LoginForm = lazy(() => import('./components/LoginForm/LoginForm.jsx'))
+const Shell = lazy(() => import('./components/Shell/Shell.jsx'))
+const ChatEmbed = lazy(() => import('./components/ChatEmbed/ChatEmbed.jsx'))
 
 // True when this SPA load is the stripped-chrome chat embed
 // (capability A). The SPA catch-all serves index.html for any non-API
@@ -34,7 +35,10 @@ function isEmbedRoute() {
 }
 
 const EMBED_ROUTE = isEmbedRoute()
-if (EMBED_ROUTE) beginEphemeralAuth()
+if (EMBED_ROUTE) {
+  beginEphemeralAuth()
+  beginEmbedBootstrap()
+}
 
 // Validate a ?return= target: same-origin in-app path only. Rejects
 // backslashes (browsers normalize '/\\evil' to '//evil' -> open redirect),
@@ -57,7 +61,10 @@ export default function App() {
     return (
       <QueryClientProvider client={queryClient}>
         <ErrorBoundary label="chat-embed">
-          <ChatEmbed />
+          {/* Keep the opaque embed blank until its capability is verified. */}
+          <Suspense fallback={null}>
+            <ChatEmbed />
+          </Suspense>
         </ErrorBoundary>
       </QueryClientProvider>
     )
@@ -109,9 +116,8 @@ function AppRoot() {
 
   useEffect(() => {
     // shell-reload: skip splash entirely, go straight to shell.
-    // `shellReload` is the value parsed at module load by useNavigation's
-    // IIFE — the sessionStorage key has already been consumed and removed
-    // there; re-reading it here would always be null.
+    // shellReloadState parsed and removed the one-shot storage key at module
+    // load. App and useNavigation both share that same captured value.
     if (shellReload) {
       const splash = document.getElementById('splash')
       if (splash) splash.remove()
@@ -142,26 +148,42 @@ function AppRoot() {
     />
   )
   if (status === 'setup') return (
-    <SetupWizard
-      initialStep={initialSetupStep}
-      // First-boot claim gate: the account step collects the claim only when
-      // the backend says setup is still open. Absent (e.g. resuming with a
-      // token, where the account already exists) is treated as false.
-      claimRequired={!!setupStatusQuery.data?.claim_required}
-      onDone={() => {
-        setupSession.clearResumeStep()
-        setupSession.setInProgress(false)
-        setStatus('shell')
-      }}
-    />
+    <Suspense fallback={<RouteLoading label="Loading setup" />}>
+      <SetupWizard
+        initialStep={initialSetupStep}
+        // First-boot claim gate: the account step collects the claim only when
+        // the backend says setup is still open. Absent (e.g. resuming with a
+        // token, where the account already exists) is treated as false.
+        claimRequired={!!setupStatusQuery.data?.claim_required}
+        onDone={() => {
+          setupSession.clearResumeStep()
+          setupSession.setInProgress(false)
+          setStatus('shell')
+        }}
+      />
+    </Suspense>
   )
-  if (status === 'login') return <LoginForm onLogin={() => {
-    let ret
-    try { ret = safeReturnPath(new URLSearchParams(window.location.search).get('return')) } catch { /* ignore */ }
-    if (ret) { window.location.replace(ret); return }
-    setStatus('shell')
-  }} />
-  return <Shell />
+  if (status === 'login') return (
+    <Suspense fallback={<RouteLoading label="Loading sign in" />}>
+      <LoginForm onLogin={() => {
+        let ret
+        try { ret = safeReturnPath(new URLSearchParams(window.location.search).get('return')) } catch { /* ignore */ }
+        if (ret) { window.location.replace(ret); return }
+        setStatus('shell')
+      }} />
+    </Suspense>
+  )
+  return (
+    <Suspense fallback={<RouteLoading label="Loading Möbius" />}>
+      <Shell />
+    </Suspense>
+  )
+}
+
+function RouteLoading({ label }) {
+  return (
+    <div className="app-route-loading" role="status" aria-label={label} />
+  )
 }
 
 function SetupStatusError({ retrying, onRetry }) {

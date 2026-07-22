@@ -80,6 +80,13 @@ def test_stop_on_orphaned_run_after_restart_succeeds(client, auth, db):
     run_started_at=datetime.now(UTC),
   )
   db.add(c)
+  db.add(models.ChatRun(
+    id="rt-orphan-after-restart",
+    chat_id=chat_id,
+    status="running",
+    provider="claude",
+    started_at=datetime.now(UTC),
+  ))
   db.commit()
   # No registry handle — exactly the post-restart orphan shape.
   assert chat_mod.is_chat_running(chat_id) is False
@@ -92,4 +99,8 @@ def test_stop_on_orphaned_run_after_restart_succeeds(client, auth, db):
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   assert row.run_status is None, "the orphaned 'running' marker must be cleared"
   assert row.run_started_at is None
+  run = db.query(models.ChatRun).filter(
+    models.ChatRun.id == "rt-orphan-after-restart",
+  ).one()
+  assert run.status == "stopped"
   assert chat_mod.is_chat_running(chat_id) is False

@@ -235,6 +235,19 @@ def test_wiped_db_full_auth_path(env):
   assert recovery_auth.verify_password("wrong password", candidate) is False
 
 
+def test_wiped_db_authenticates_current_platform_hash_format(env):
+  from app import auth as platform_auth
+  import recovery_auth
+
+  password = "🔒" * 30
+  current_hash = platform_auth.hash_password(password)
+  env["seed"].write_owner_seed(_USER, current_hash)
+  candidate = env["db"].owner_password_hash(_USER)
+
+  assert recovery_auth.verify_password(password, candidate) is True
+  assert recovery_auth.verify_password(password[:-1], candidate) is False
+
+
 # --- busy/locked DB must fail closed, not fall back to the seed -----------
 
 def test_db_is_unreadable_classifier(env):

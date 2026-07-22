@@ -55,6 +55,13 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+.shell__bar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .shell__brand {
   display: flex;
   align-items: center;
@@ -274,6 +281,10 @@
   border-bottom: 1px solid var(--border-light);
   background: var(--bg);
   scrollbar-width: none;
+  /* Empty strip space retains native horizontal panning; an actual draggable tab
+     opts out below so Pointer Events can reorder it in either direction on touch. */
+  touch-action: pan-x pinch-zoom;
+  overscroll-behavior-inline: contain;
   z-index: 2;
 }
 .shell__tabstrip::-webkit-scrollbar { height: 0; width: 0; }
@@ -305,11 +316,64 @@
   font-size: 12.5px;
   -webkit-tap-highlight-color: transparent;
 }
+/* The tab body remains the strip's native horizontal pan surface. A vertical pull
+   can still lift the tab, while the EXISTING kind icon owns both axes for an
+   intentional horizontal reorder. No separate grip or extra tab width is needed. */
+.shell__tab-open[data-drag-key] {
+  touch-action: pan-x pinch-zoom;
+}
+.shell__tab-kind {
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.shell__tab-kind[data-touch-drag-handle] {
+  /* Expand the pointer box but cancel the padding from layout, preserving the
+     icon's original 13px footprint and every pixel of title space. */
+  margin: -5px;
+  padding: 5px;
+  cursor: grab;
+  touch-action: none;
+}
+.shell__tab-kind[data-touch-drag-handle]:active {
+  cursor: grabbing;
+}
+.shell__tab-open:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+  border-radius: 7px;
+}
+.shell__tab-kind > svg {
+  flex: none;
+}
 .shell__tab-text {
+  display: block;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   max-width: 110px;
+}
+.shell__tab-text-inner {
+  display: inline-block;
+  min-width: max-content;
+}
+/* Only the newly-active title in the focused strip makes one bounded reveal.
+   It rests at the beginning, travels far enough to expose the tail, rests there,
+   then returns to the beginning and stays idle. Other panes never start competing
+   marquees. ResizeObserver sets the distance only when clipping is real; the native
+   title tooltip remains available at any time. */
+.shell__tabstrip:not(.workspace__strip)
+  .shell__tab--active .shell__tab-text[data-overflow="true"]
+  .shell__tab-text-inner,
+.workspace__strip--focused
+  .shell__tab--active .shell__tab-text[data-overflow="true"]
+  .shell__tab-text-inner {
+  animation: shell-tab-title-cycle var(--tab-title-duration) linear 700ms 1 both;
+}
+@keyframes shell-tab-title-cycle {
+  0%, 25% { transform: translate3d(0, 0, 0); }
+  45%, 65% { transform: translate3d(var(--tab-title-shift), 0, 0); }
+  85%, 100% { transform: translate3d(0, 0, 0); }
 }
 .shell__tab-close {
   display: flex;
@@ -337,7 +401,6 @@
      browser reports offline (useOnlineStatus). Keeps the user oriented
      so they aren't guessing about connectivity. */
   .shell__offline {
-    margin-left: auto;
     align-self: center;
     padding: 3px 10px;
     border-radius: 999px;
@@ -382,10 +445,10 @@
   to { opacity: 0.35; transform: scale(0.75); }
 }
 
-/* ── Builder-mode control: the logo IS the control (owner placement) ─────────
-   No standalone toggle button. The brand opens the drawer on a single tap
-   (instant, unchanged); a HOLD (~450ms) or a touch swipe-right toggles the view
-   mode. Indicator = the mark itself (CHARGE model): the logo COMPRESSES as a hold
+/* ── Builder-mode logo gesture + indicator ──────────────────────────────────
+   There is deliberately no standalone header mode icon. The brand opens the drawer
+   on a single tap; a HOLD (~450ms), touch swipe-right, or Shift+Enter toggles mode.
+   Indicator = the mark itself (CHARGE model): the logo COMPRESSES as a hold
    charges (base .shell__logo scale), then SPRINGS (enter) / SNAPS (exit) back and
    rotates 180deg; a living HALO drifts behind it in builder mode. CSS-composed,
    driven by .shell__brand--builder / .is-holding / .is-igniting / .is-snapping and
@@ -405,15 +468,71 @@
 .shell__brand--builder .shell__wordmark {
   color: var(--accent);
 }
-/* Completion spring (entering builder): the compressed mark overshoots back to
-   full size. Snap (exiting to single): a quick settle. Both override `scale`; the
-   rotate rides its own transition. Cleared on animationend (JS drops the class). */
+/* Same-beat timing (polish item 5 + round 4 item 1): the logo, wordmark, and halo
+   settle on the SAME beat as the panes. The twist now rides --mode-total (the plan's
+   own totalMs, written on the shell root by Shell while the beat is live) so rotation
+   reaches its rest exactly when the panes do. Entering keeps a tiny signature
+   settle (the 1 control point); exiting is a quick, springless settle. */
+.shell--builder-entering .shell__logo {
+  transition:
+    rotate var(--mode-total, 260ms) cubic-bezier(0.2, 1, 0.32, 1),
+    scale 160ms ease;
+}
+.shell--builder-exiting .shell__logo {
+  transition:
+    rotate var(--mode-total, 220ms) cubic-bezier(0.25, 0.8, 0.25, 1),
+    scale 160ms ease;
+}
+/* HOLD-owned animated beat (round 4 item 1): the mark holds its .84 compression
+   through the beat and SPRINGS back over the terminal --logo-release-ms, so its first
+   full-size frame coincides with the descriptor's completion. `both` is load-bearing —
+   the backwards fill holds .84 through --logo-release-delay; the exponential release
+   gives spring character without overshooting the landing. Two identical keyframes
+   alternate by epoch parity (is-beat-held-a|b) so a rapid retoggle RESTARTS the delay
+   against the newest beat by swapping the animation NAME, never a remount. */
+.shell__brand.is-beat-held-a .shell__logo {
+  animation:
+    shell-logo-beat-release-a
+    var(--logo-release-ms, 120ms)
+    cubic-bezier(0.16, 1, 0.3, 1)
+    var(--logo-release-delay, 0ms)
+    both;
+}
+.shell__brand.is-beat-held-b .shell__logo {
+  animation:
+    shell-logo-beat-release-b
+    var(--logo-release-ms, 120ms)
+    cubic-bezier(0.16, 1, 0.3, 1)
+    var(--logo-release-delay, 0ms)
+    both;
+}
+@keyframes shell-logo-beat-release-a {
+  from { scale: 0.84; }
+  to { scale: 1; }
+}
+@keyframes shell-logo-beat-release-b {
+  from { scale: 0.84; }
+  to { scale: 1; }
+}
+/* The immediate ignite/snap survives ONLY for a NORMAL-motion INSTANT flip (an empty
+   tree — no descriptor to hand the spring to). An animated beat emits is-beat-held
+   instead, so these two never coincide. */
 .shell__brand.is-igniting .shell__logo {
-  animation: shell-logo-ignite 480ms cubic-bezier(0.22, 1.6, 0.36, 1);
+  animation: shell-logo-ignite 280ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .shell__brand.is-snapping .shell__logo {
-  animation: shell-logo-snap 150ms ease;
+  animation: shell-logo-snap 140ms cubic-bezier(0.25, 0.8, 0.25, 1);
 }
+/* The halo blooms with the entry (60-220ms) then its living drift resumes after
+   settlement; on exit it clears fast on the chrome curve. Wordmark tint keeps pace. */
+.shell--builder-entering .shell__logo-halo {
+  transition: opacity 160ms var(--ease-mode-arrive) 60ms;
+}
+.shell--builder-exiting .shell__logo-halo {
+  transition: opacity 100ms var(--ease-mode-chrome);
+}
+.shell--builder-entering .shell__wordmark { transition-duration: 220ms; }
+.shell--builder-exiting .shell__wordmark { transition-duration: 140ms; }
 @keyframes shell-logo-ignite {
   from { scale: 0.84; }
   to { scale: 1; }
@@ -477,10 +596,16 @@
   /* The mark flip + tint switch INSTANTLY; the completion spring/snap is skipped
      (the JS still fires the haptics — motion is dropped, feedback is not); and the
      halo settles STATIC (useLivingHalo runs no rAF under reduced motion). The hold
-     COMPRESS stays: it is direct feedback for the user's own press, not autonomous
-     motion. */
-  .shell__logo { transition: rotate 0s, scale 160ms ease; }
+     compression remains as immediate direct feedback, with no animated release. */
+  .shell__logo { transition: none; }
   .shell__wordmark { transition: none; }
+  .shell__tab-text-inner { animation: none !important; }
+  /* No completion motion under reduced motion — the ignite/snap AND the hold's
+     descriptor-owned release are both skipped (the toggle commits instantly, so
+     is-beat-held is never even emitted; this is the belt-and-braces). The direct
+     press compression and completion haptic remain; release snaps immediately. */
   .shell__brand.is-igniting .shell__logo,
-  .shell__brand.is-snapping .shell__logo { animation: none; }
+  .shell__brand.is-snapping .shell__logo,
+  .shell__brand.is-beat-held-a .shell__logo,
+  .shell__brand.is-beat-held-b .shell__logo { animation: none; }
 }

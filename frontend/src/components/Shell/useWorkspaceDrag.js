@@ -3,7 +3,7 @@ import * as tabModel from './tabModel.js'
 import { STRIP_H } from './paneModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
-  passedSlop, preHoldMoveCancels, releasedInPlace, holdMsFor, crossedDrawerExit,
+  passedSlop, touchMoveIntent, releasedInPlace, holdMsFor, crossedDrawerExit,
   rootEdgeAllowed,
 } from './dragController.js'
 
@@ -41,12 +41,15 @@ function cssEscape(v) {
 // lands on the original source AFTER the shield is gone, so shield timing can't
 // stop it. Scope the guard to that source: a real drag often produces no compat
 // click at all, and a blanket "next click" guard would eat a quick Undo or other
-// unrelated action during this short window.
+// unrelated action during this short window. A fresh pointerdown is a new user
+// interaction, not the old drag's compat click, so it retires any standing guard
+// before that interaction can produce its own click.
 function suppressNextSourceClick(sourceEl) {
   let cleared = false
   const clear = () => {
     if (cleared) return
     cleared = true
+    window.removeEventListener('pointerdown', clear, true)
     window.removeEventListener('click', onClick, true)
     clearTimeout(timer)
   }
@@ -60,8 +63,10 @@ function suppressNextSourceClick(sourceEl) {
     ev.preventDefault()
     clear()
   }
+  window.addEventListener('pointerdown', clear, true)
   window.addEventListener('click', onClick, true)
   const timer = setTimeout(clear, 400)
+  return clear
 }
 
 export default function useWorkspaceDrag({
@@ -100,6 +105,12 @@ export default function useWorkspaceDrag({
     let activeCleanup = null
     let activePointerId = null
     let activeSrcEl = null
+    // A drag-owned compatibility-click guard belongs to exactly one completed
+    // pointer gesture. A fresh pointerdown is proof that a later owner gesture
+    // has begun, so it must retire any old guard before that gesture's click.
+    // Without this boundary, an interrupted drag followed quickly by a tap on
+    // the same drawer row made the row look dead for up to 400ms.
+    let clearPendingSourceClick = null
 
     function contentBox() {
       return contentElRef.current?.getBoundingClientRect() || { left: 0, top: 0 }
@@ -224,12 +235,17 @@ export default function useWorkspaceDrag({
     // ── One drag session ──────────────────────────────────────────────────────
     function startSession(downEvent, srcEl, sourceKind, key, paneId) {
       const isTouch = downEvent.pointerType !== 'mouse'
+      const touchIntentKind = sourceKind === 'tab'
+        && downEvent.target?.closest?.('[data-touch-drag-handle]')
+        ? 'tab-handle'
+        : sourceKind
       const start = { x: downEvent.clientX, y: downEvent.clientY }
       const pointerId = downEvent.pointerId
       let armed = false
       let cancelled = false
       let cleaned = false
       let holdTimer = null
+      let held = false
       let curZone = null
       let scene = null
       let drawerEdgeX = null
@@ -254,7 +270,6 @@ export default function useWorkspaceDrag({
       // source, for the WHOLE hold window — not at arm, when the magnifier has
       // already won. `contextmenu` is prevented for a touch source too.
       let ctxListener = null
-      let touchMovePreventer = null
       if (isTouch) {
         prevBodySelect = document.body.style.userSelect
         document.body.style.userSelect = 'none'
@@ -263,16 +278,10 @@ export default function useWorkspaceDrag({
         srcEl.style.userSelect = 'none'
         ctxListener = (ev) => ev.preventDefault()
         window.addEventListener('contextmenu', ctxListener, true)
-        // Dynamic touch-action mid-gesture is ignored by the browser; a
-        // non-passive touchmove that preventDefaults ONLY while armed is what
-        // actually blocks Android `pan-y` native scrolling after lift, while
-        // pre-hold movement still scrolls.
-        touchMovePreventer = (ev) => { if (armed) ev.preventDefault() }
-        document.addEventListener('touchmove', touchMovePreventer, { passive: false })
       }
 
       const arm = () => {
-        if (cancelled || cleaned) return
+        if (armed || cancelled || cleaned) return
         armed = true
         dragActiveRef.current = true // the Drawer's swipe-close handlers stand down
         // DRAG IS BUILDING (point 15): arming a drag in single-screen mode unfolds
@@ -294,14 +303,23 @@ export default function useWorkspaceDrag({
         ensureOverlays()
         positionChip(start.x, start.y, isTouch, key)
         preGlow(scene)
-        if (isTouch && navigator.vibrate) { try { navigator.vibrate(10) } catch { /* unsupported */ } }
+        if (isTouch && !held && navigator.vibrate) { try { navigator.vibrate(10) } catch { /* unsupported */ } }
         if (sourceKind === 'drawer') {
           drawerEdgeX = document.getElementById('navigation-drawer')?.getBoundingClientRect().right ?? null
         }
       }
 
-      // Touch lift is a long-press; a pre-hold move yields to native scroll.
-      if (isTouch) holdTimer = setTimeout(arm, holdMsFor(sourceKind))
+      // A vertical tab-body move, either-axis kind-icon move, or cross-axis drawer-row
+      // move arms immediately. A stationary hold is the alternate path to the
+      // tab/row menu; it deliberately does not unfold the workspace just because
+      // time passed.
+      if (isTouch) {
+        holdTimer = setTimeout(() => {
+          if (cancelled || cleaned) return
+          held = true
+          if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
+        }, holdMsFor(sourceKind))
+      }
 
       function stopAutoScroll() {
         if (autoRAF) { cancelAnimationFrame(autoRAF); autoRAF = null }
@@ -361,7 +379,7 @@ export default function useWorkspaceDrag({
         positionChip(cx, cy, isTouch, key)
         // While the drawer still covers the panes, show no preview (the glide-close
         // crossing is handled synchronously in onMove).
-        if (sourceKind === 'drawer' && drawerOpenRef.current) {
+        if (sourceKind === 'drawer' && drawerOpenRef.current && !glided) {
           curZone = null; renderPreview(null); stopAutoScroll(); return
         }
         updateAutoScroll(cx, cy)
@@ -376,11 +394,17 @@ export default function useWorkspaceDrag({
         const dy = ev.clientY - start.y
         if (!armed) {
           if (isTouch) {
-            if (preHoldMoveCancels(dx, dy)) { cancelled = true; cleanup() }
-            return
+            const intent = touchMoveIntent(dx, dy, touchIntentKind)
+            if (intent === 'scroll') { cancelled = true; cleanup(); return }
+            if (intent === 'drag') {
+              clearTimeout(holdTimer)
+              arm()
+            }
+            if (!armed) return
+          } else {
+            if (passedSlop(dx, dy)) arm()
+            if (!armed) return
           }
-          if (passedSlop(dx, dy)) arm()
-          if (!armed) return
         }
         ev.preventDefault?.()
         // Drawer drag-out glide-close must fire SYNCHRONOUSLY (it dispatches
@@ -442,7 +466,20 @@ export default function useWorkspaceDrag({
 
       const onUp = (ev) => {
         if (ev.pointerId !== pointerId) return // ignore a second finger
-        if (!armed) { cleanup(); return }
+        const openTouchMenu = () => {
+          if (sourceKind === 'tab' && openTabMenuAtRef.current) {
+            openTabMenuAtRef.current(ev.clientX, ev.clientY, tabFromKey(key), paneId)
+          } else if (sourceKind === 'drawer') {
+            srcEl.closest('.drawer__row')?.querySelector('.drawer__more')?.click()
+          }
+        }
+        if (!armed) {
+          if (isTouch && held) {
+            openTouchMenu()
+            cleanup({ suppressClick: true })
+          } else cleanup()
+          return
+        }
         if (moveRAF) {
           cancelAnimationFrame(moveRAF)
           doMoveWork()
@@ -454,15 +491,11 @@ export default function useWorkspaceDrag({
         // Geometric, so it no longer depends on the drawer still reporting open
         // (which glide-close had already flipped false).
         const backOverDrawer = sourceKind === 'drawer' && drawerEdgeX != null
-          && ev.clientX <= drawerEdgeX
+          && ev.clientX <= drawerEdgeX && !(isTouch && glided)
         if (isTouch && releasedInPlace(dx, dy)) {
           // Lift → release-in-place = context menu. A strip tab reuses the
           // stage-A pane menu; a drawer row opens its own ⋮ menu (adjudicated).
-          if (sourceKind === 'tab' && openTabMenuAtRef.current) {
-            openTabMenuAtRef.current(ev.clientX, ev.clientY, tabFromKey(key), paneId)
-          } else if (sourceKind === 'drawer') {
-            srcEl.closest('.drawer__row')?.querySelector('.drawer__more')?.click()
-          }
+          openTouchMenu()
           cleanup()
         } else if (backOverDrawer) {
           // Released back over the drawer = cancel; cleanup reopens it if glided.
@@ -482,7 +515,13 @@ export default function useWorkspaceDrag({
       // blur / visibility cancel can still navigate to the source row.
       const onCancel = (ev) => { if (ev.pointerId === pointerId) cleanup({ suppressClick: armed }) }
       const onKey = (ev) => { if (ev.key === 'Escape' && armed) { ev.preventDefault(); cleanup({ suppressClick: true }) } }
-      const onLostCapture = (ev) => { if (ev.pointerId === pointerId) cleanup({ suppressClick: armed }) }
+      // Touch pointers already have implicit capture, and Chromium may release and
+      // reacquire it while the strip updates without ending the contact. The window
+      // listeners still receive that stream, so only pointerup/pointercancel is a
+      // terminal touch signal. A mouse capture loss remains a real cancellation.
+      const onLostCapture = (ev) => {
+        if (ev.pointerId === pointerId && !isTouch) cleanup({ suppressClick: armed })
+      }
       const onWinBlur = () => cleanup({ suppressClick: armed })
       const onVisibility = () => { if (document.visibilityState === 'hidden') cleanup({ suppressClick: armed }) }
       // BFCache freeze / bfcache navigation can be the ONLY interruption event some
@@ -517,7 +556,6 @@ export default function useWorkspaceDrag({
         window.removeEventListener('pagehide', onPageHide)
         document.removeEventListener('visibilitychange', onVisibility)
         if (ctxListener) window.removeEventListener('contextmenu', ctxListener, true)
-        if (touchMovePreventer) document.removeEventListener('touchmove', touchMovePreventer)
         // Restore selection/callout (set at pointerdown for touch, at arm for mouse).
         if (isTouch || armed) {
           document.body.style.userSelect = prevBodySelect
@@ -549,7 +587,10 @@ export default function useWorkspaceDrag({
         removeOverlays()
         // The compat click fires after the shield is already gone; swallow it so
         // a committed drop is exactly one action, not a drop + a tab/row click.
-        if (suppressClick) suppressNextSourceClick(srcEl)
+        if (suppressClick) {
+          clearPendingSourceClick?.()
+          clearPendingSourceClick = suppressNextSourceClick(srcEl)
+        }
         // V6 (vizreview): a CANCELLED drag (Escape / blur / lost-capture) must not
         // leave the drag-origin row wearing its focus ring — blur it so the ring
         // clears with the drag. A committed drop keeps focus (the tab moved).
@@ -590,13 +631,20 @@ export default function useWorkspaceDrag({
 
     // ── Source detection (capture-phase, never preventDefault here) ───────────
     function onPointerDown(e) {
+      // A compatibility click from the previous gesture cannot legitimately
+      // begin with a new pointerdown. Clear its one-shot guard before doing any
+      // stale-session reconciliation so this fresh interaction stays live.
+      clearPendingSourceClick?.()
+      clearPendingSourceClick = null
       if (activeCleanup) {
-        // A session already stands. If THIS is a different pointer and the standing
-        // session's pointer is dead (capture lost — a visible->visible steal), the
-        // session is stale: force-clean it, then fall through to start the new one.
-        // A genuinely live drag keeps its capture, so this never cancels one.
-        if (e.pointerId !== activePointerId && !standingSessionPointerIsLive()) {
-          activeCleanup({ suppressClick: true })
+        // Pointer ids are routinely REUSED across sequential touch gestures
+        // (notably id=1 on mobile). Liveness comes from capture, never identity:
+        // if the standing source no longer owns capture, force-clean it and let
+        // this SAME pointerdown continue into the row it actually targeted.
+        // This boundary is already newer than the abandoned gesture, so arming
+        // a click suppressor here would eat this interaction's own click.
+        if (!standingSessionPointerIsLive()) {
+          activeCleanup()
         } else {
           return // one session at a time
         }
@@ -655,6 +703,7 @@ export default function useWorkspaceDrag({
       window.removeEventListener('pageshow', reconcileStaleSession)
       document.removeEventListener('visibilitychange', onForegroundVisible)
       activeCleanup?.() // tear down an in-flight drag
+      clearPendingSourceClick?.()
       removeOverlays()
     }
     // enabled is a module-load constant and every volatile input arrives through

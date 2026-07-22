@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react'
 import {
   initialModeState, modeReducer, completionContract, reconcileVisibleEvent,
-  RECONCILE_SLACK_MS,
+  planArms, RECONCILE_SLACK_MS,
 } from './modeMachine.js'
 import { prefersReducedMotion } from './useLogoModeGesture.js'
 
@@ -143,15 +143,29 @@ export default function useModeController({
   // plan (deriveEnter/ExitPlan) and passes the HONEST cause ('hold'|'swipe'|
   // 'keyboard'|'auto'); a null presentation means an instant flip (reduced motion or
   // an empty tree — Shell passes none). `to` lets the auto-return pin the direction.
-  // Returns the destination mode so Shell can drive the matching workspace side.
+  // Returns an authoritative RECEIPT (round 4 item 1) so the logo gesture can tell an
+  // animated beat (compression held until the descriptor completes) from an instant
+  // flip (immediate ignite/snap). `transitionId` is read from stateRef BEFORE the
+  // dispatch — makeTransition consumes exactly this `nextId`, so the receipt names the
+  // epoch the new beat WILL wear (the same atomic-before-dispatch trick dragArm uses).
   const toggle = useCallback(({ cause, to, presentation } = {}) => {
-    const from = stateRef.current.committedMode
+    const pre = stateRef.current
+    const from = pre.committedMode
     const dest = to || (from === 'single' ? 'panes' : 'single')
     // Reduced motion commits directly — never arm a descriptor (the plan is dropped
     // so planArms is false and the reducer flips instantly). One place owns this.
     const plan = prefersReducedMotion() ? null : presentation
+    // A toggle to the already-committed mode with no live beat is a reducer no-op, so
+    // it arms nothing even with a plan — reflect that in the receipt.
+    const noop = dest === from && !pre.transition
+    const animated = planArms(plan) && !noop
     dispatch({ type: 'toggle', cause, to: dest, from, presentation: plan, now: now() })
-    return dest
+    return {
+      to: dest,
+      transitionId: animated ? pre.nextId : null,
+      animated,
+      totalMs: animated ? plan.totalMs : 0,
+    }
   }, [])
 
   // Undo restored the durable viewMode — routed here so the beat (re-entering

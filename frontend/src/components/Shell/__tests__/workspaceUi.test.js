@@ -8,6 +8,8 @@ const css = readFileSync(
 )
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const shellBrand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
+const newChatLanding = readFileSync(new URL('../NewChatLanding.jsx', import.meta.url), 'utf8')
+const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
 const drawer = readFileSync(new URL('../../Drawer/Drawer.jsx', import.meta.url), 'utf8')
 const paneModelSrc = readFileSync(new URL('../paneModel.js', import.meta.url), 'utf8')
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
@@ -73,9 +75,10 @@ test('the drop preview reads as an 18% accent fill with a 2px border and morph',
   assert.match(rule, /border:\s*2px solid var\(--accent\)/)
   assert.match(rule, /var\(--accent\)\s*18%/)
   assert.match(rule, /border-radius:\s*10px/)
-  // First-appear fade (80ms) + zone-to-zone morph (120ms cubic-bezier).
-  assert.match(rule, /opacity 80ms/)
-  assert.match(rule, /120ms cubic-bezier\(0\.2, 0, 0, 1\)/)
+  // First-appear fade (60ms) + zone-to-zone morph (90ms cubic-bezier) — the faster
+  // morph makes the larger uncapped bands feel even more responsive.
+  assert.match(rule, /opacity 60ms/)
+  assert.match(rule, /90ms cubic-bezier\(0\.2, 0, 0, 1\)/)
 })
 
 test('the strip caret variant drops the fill and border for a solid bar', () => {
@@ -91,15 +94,17 @@ test('the drag chip is a pointer-transparent fixed layer with a [hidden] guard',
   assert.match(css, /\.workspace__drag-chip\[hidden\]\s*\{\s*display:\s*none/)
 })
 
-test('the drag shield owns the grabbing cursor over the whole viewport', () => {
+test('the drag layer covers the viewport visually but can never block navigation', () => {
   const rule = css.match(/\.workspace__drag-shield\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(rule, /position:\s*fixed/)
   assert.match(rule, /inset:\s*0/)
+  assert.match(rule, /pointer-events:\s*none/)
   assert.match(rule, /cursor:\s*grabbing/)
-  // The shield must out-layer the drawer (Drawer.css z-index 90/95) so a
-  // left-edge drag hits the drop zone, never the drawer beneath it.
+  // The visual layer may out-layer the drawer, but pointer capture — not this
+  // transparent DOM node — owns a live drag. An orphaned layer therefore cannot
+  // leave a visible drawer untappable.
   const z = Number(rule.match(/z-index:\s*(\d+)/)?.[1] || 0)
-  assert.ok(z >= 100, `drag shield z-index ${z} must sit above the drawer (95)`)
+  assert.ok(z >= 100, `drag layer z-index ${z} must paint above the drawer (95)`)
 })
 
 test('reduced motion makes the drop preview instant', () => {
@@ -107,12 +112,12 @@ test('reduced motion makes the drop preview instant', () => {
   assert.match(block, /\.workspace__drop-preview\s*\{\s*transition:\s*none/)
 })
 
-test('the coachmark carries pointer-specific copy and dismisses without a stray tap', () => {
+test('the coachmark gives one direct drag instruction and dismisses without a stray tap', () => {
   assert.match(shell, /workspaceCoachmarkVisible/)
   // M6: gated to the effective builder world + non-immersive, so it never shows in
   // single mode (no tabs) or over an immersive-solo (z-120).
   assert.match(shell, /builderWorld: effectiveViewMode === 'panes' && !immersiveActive/)
-  assert.match(shell, /coarsePointer \? 'Hold a tab to move it' : 'Drag tabs to split the view'/)
+  assert.match(shell, /Drag a tab to move or split it/)
   assert.match(shell, /onClick=\{dismissWorkspaceCoachmark\}/)
   // 12s auto-dismiss, never an unrelated pointerdown.
   assert.match(shell, /setTimeout\(dismissWorkspaceCoachmark, 12000\)/)
@@ -123,10 +128,12 @@ test('the coachmark carries pointer-specific copy and dismisses without a stray 
   assert.match(closeRule, /pointer-events:\s*auto/)
 })
 
-test('post-drag click suppression is limited to the original source', () => {
+test('post-drag click suppression is source-scoped and expires on fresh input', () => {
   assert.match(dragBinding, /function suppressNextSourceClick\(sourceEl\)/)
   assert.match(dragBinding, /path\.includes\(sourceEl\)/)
   assert.match(dragBinding, /if \(!belongsToSource\) return/)
+  assert.match(dragBinding, /window\.addEventListener\('pointerdown', clear, true\)/)
+  assert.match(dragBinding, /window\.removeEventListener\('pointerdown', clear, true\)/)
   assert.match(dragBinding, /suppressNextSourceClick\(srcEl\)/)
 })
 
@@ -258,10 +265,11 @@ test('keyboard pane focus is visible but stays off for mouse and touch', () => {
   assert.match(css, /\.workspace__strip:has\(\.shell__tab-open:focus-visible\)\s*\{[\s\S]*?outline:/)
 })
 
-// ── Builder-mode control lives on the LOGO (owner placement) ────────────────
+// ── Builder-mode control + logo shortcuts ──────────────────────────────────
 
 const logoGestureSrc = readFileSync(new URL('../useLogoModeGesture.js', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
+const drawerCss = readFileSync(new URL('../../Drawer/Drawer.css', import.meta.url), 'utf8')
 const livingHaloSrc = readFileSync(new URL('../useLivingHalo.js', import.meta.url), 'utf8')
 
 test('the docked sidebar offsets only direct shell layout rows', () => {
@@ -275,12 +283,13 @@ test('the docked sidebar offsets only direct shell layout rows', () => {
   assert.doesNotMatch(shellCss, /\.shell--drawer-docked \.shell__tabstrip/)
 })
 
-test('there is NO standalone view-mode toggle button — the logo is the control', () => {
+test('the header never grows a standalone pane-mode icon', () => {
   assert.match(shell, /<header className="shell__bar"/)
-  // The old top-right toggle component and its class are gone entirely.
-  assert.doesNotMatch(shell, /ViewModeToggle/)
-  assert.doesNotMatch(shell, /shell__viewmode/)
-  assert.doesNotMatch(shellCss, /\.shell__viewmode\b/)
+  // Owner contract: hold/swipe the top-left Möbius brand or drag from the drawer.
+  // A second top-right affordance is redundant and must not quietly return.
+  assert.doesNotMatch(shell, /PanelsTopLeft|shell__mode-toggle|Use panes|Use single screen/)
+  assert.doesNotMatch(shell, /ViewModeToggle|shell__viewmode/)
+  assert.doesNotMatch(shellCss, /\.shell__(?:mode-toggle|viewmode)\b/)
 })
 
 test('the SINGLE tap keeps its drawer job — instant, NO setTimeout on the tap path', () => {
@@ -397,14 +406,35 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   // The 180° twist is a var flip in builder mode (not a transform override).
   assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?--logo-twist:\s*180deg/)
   assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?color:\s*var\(--accent\)/)
-  // Completion: spring (enter) overshoots 0.84→1 on a springy cubic; snap (exit) settles fast.
-  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-ignite 480ms cubic-bezier\(0\.22, 1\.6, 0\.36, 1\)/)
-  assert.match(shellCss, /\.shell__brand\.is-snapping \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-snap 150ms ease/)
+  // INSTANT flip (empty tree) completion keeps the immediate ignite/snap (0.84→1);
+  // an ANIMATED beat emits is-beat-held instead (round 4 item 1). Polish item 5's
+  // same-beat timing survives (280ms ignite, not 480ms).
+  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-ignite 280ms cubic-bezier\(0\.16, 1, 0\.3, 1\)/)
+  assert.match(shellCss, /\.shell__brand\.is-snapping \.shell__logo\s*\{[\s\S]*?animation:\s*shell-logo-snap 140ms cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
   assert.match(shellCss, /@keyframes shell-logo-ignite\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
   assert.match(shellCss, /@keyframes shell-logo-snap\s*\{[\s\S]*?scale:\s*0\.84/)
+  // Round 4 item 1: a HOLD-owned animated beat holds .84 and RELEASES over the
+  // terminal --logo-release-ms after --logo-release-delay (both fill), so the mark's
+  // first full-size frame lands at completion. Two identical keyframes alternate by
+  // epoch parity (a|b) so a retoggle restarts the delay by swapping the name.
+  assert.match(shellCss, /\.shell__brand\.is-beat-held-a \.shell__logo\s*\{[\s\S]*?animation:\s*[\s\S]*?shell-logo-beat-release-a[\s\S]*?var\(--logo-release-ms, 120ms\)[\s\S]*?var\(--logo-release-delay, 0ms\)[\s\S]*?both/)
+  assert.match(shellCss, /\.shell__brand\.is-beat-held-b \.shell__logo\s*\{[\s\S]*?animation:\s*[\s\S]*?shell-logo-beat-release-b[\s\S]*?var\(--logo-release-ms, 120ms\)[\s\S]*?var\(--logo-release-delay, 0ms\)[\s\S]*?both/)
+  assert.match(shellCss, /@keyframes shell-logo-beat-release-a\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
+  assert.match(shellCss, /@keyframes shell-logo-beat-release-b\s*\{[\s\S]*?scale:\s*0\.84[\s\S]*?scale:\s*1/)
+  // Item 5 + round 4 item 1: logo rotate rides --mode-total (the plan's own totalMs)
+  // so the twist settles with the panes — for a world reveal, at the end of the
+  // pane beat. Halo bloom + wordmark tint keep pace.
+  assert.match(shellCss, /\.shell--builder-entering \.shell__logo\s*\{[\s\S]*?rotate var\(--mode-total, 260ms\) cubic-bezier\(0\.2, 1, 0\.32, 1\)/)
+  assert.match(shellCss, /\.shell--builder-exiting \.shell__logo\s*\{[\s\S]*?rotate var\(--mode-total, 220ms\) cubic-bezier\(0\.25, 0\.8, 0\.25, 1\)/)
+  assert.match(shellCss, /\.shell--builder-entering \.shell__logo-halo\s*\{\s*transition: opacity 160ms var\(--ease-mode-arrive\) 60ms/)
+  assert.match(shellCss, /\.shell--builder-exiting \.shell__logo-halo\s*\{\s*transition: opacity 100ms var\(--ease-mode-chrome\)/)
+  assert.match(shellCss, /\.shell--builder-entering \.shell__wordmark \{ transition-duration: 220ms; \}/)
+  assert.match(shellCss, /\.shell--builder-exiting \.shell__wordmark \{ transition-duration: 140ms; \}/)
   // The LIVING HALO: a radial-gradient element behind the mark, driven by the rAF
   // vars, lit only in builder mode, per-theme base alpha via --halo-alpha.
-  const halo = shellCss.match(/\.shell__logo-halo\s*\{[\s\S]*?\}/)?.[0] || ''
+  // Anchor to the BASE rule (newline-prefixed), not the beat-scoped
+  // `.shell--builder-* .shell__logo-halo` overrides added by polish item 5.
+  const halo = shellCss.match(/\n\.shell__logo-halo\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(halo, /radial-gradient/)
   assert.match(halo, /var\(--halo-alpha, 0\.5\)/)
   assert.match(halo, /translate:\s*0 0/)
@@ -416,10 +446,13 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   assert.match(shellCss, /\.shell \{ --halo-alpha: 0\.4; \}/)
   assert.match(shellCss, /:root\[data-theme="light"\] \.shell \{ --halo-alpha: 0\.5; \}/)
   assert.doesNotMatch(shellCss, /@media \(prefers-color-scheme: dark\)[\s\S]*?--halo-alpha/)
-  // Reduced motion: twist instant, the compress kept (direct press feedback), the
-  // spring/snap skipped (haptic still fires in JS), halo static (no rAF).
-  assert.match(shellCss, /\.shell__logo \{ transition: rotate 0s, scale 160ms ease; \}/)
-  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo,\s*\n\s*\.shell__brand\.is-snapping \.shell__logo \{ animation: none; \}/)
+  // Reduced motion: twist + compression/release snap immediately, spring/snap is
+  // skipped (haptic still fires in JS), and the halo is static (no rAF).
+  assert.match(shellCss, /\.shell__logo \{ transition: none; \}/)
+  // The ignite/snap AND the hold's descriptor-owned beat-release are all disabled
+  // under reduced motion (round 4 item 1 — belt-and-braces; is-beat-held is not even
+  // emitted since the toggle commits instantly).
+  assert.match(shellCss, /\.shell__brand\.is-igniting \.shell__logo,\s*\n\s*\.shell__brand\.is-snapping \.shell__logo,\s*\n\s*\.shell__brand\.is-beat-held-a \.shell__logo,\s*\n\s*\.shell__brand\.is-beat-held-b \.shell__logo \{ animation: none; \}/)
 })
 
 test('the brand logo img is pointer-inert so a hold never raises the native image preview', () => {
@@ -491,18 +524,20 @@ test('the living halo lifecycle: lit only in builder mode, one allocation-free r
   assert.match(livingHaloSrc, /clearHaloStyles\(el\)/)
 })
 
-test('entry deals in on the keyed beat class, compositor-only, instant under reduced motion (v2)', () => {
-  // v2: entry is a transform/opacity DEAL-IN keyed to the transient
+test('entry assembles on keyed beat classes, compositor-only, instant under reduced motion (v3)', () => {
+  // v3: entry is an opaque transform-only DEAL-IN or inverse-FLIP SETTLE keyed to the transient
   // .shell--builder-entering class, applied per-wrapper via data-mode-motion (never
   // the permanent .shell__view--paned). No animated layout property, shadow, or radius.
   const panedBase = css.match(/\.shell__view--paned \{[\s\S]*?\n\}/)?.[0] || ''
   assert.doesNotMatch(panedBase, /animation:/)
   assert.doesNotMatch(panedBase, /transition:/)
   assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="deal-in"\] \{[\s\S]*?animation:\s*\n?\s*shell-mode-deal-in/)
-  // The deal-in keyframe touches ONLY transform + opacity (no shadow/radius/filter).
+  assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="settle"\] \{[\s\S]*?shell-mode-settle/)
+  // Deal-in is transform-only: an opaque pane physically covers the retained single
+  // screen as it arrives instead of exposing pane structure before fading content in.
   const dealIn = css.match(/@keyframes shell-mode-deal-in\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(dealIn, /translate3d\(32px, -4px, 0\) scale\(0\.985\)/)
-  assert.match(dealIn, /opacity: 0/)
+  assert.match(dealIn, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
+  assert.doesNotMatch(dealIn, /opacity:/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
   // The old dead .workspace--resizing selector is gone entirely.
   assert.doesNotMatch(css, /workspace--resizing/)
@@ -524,15 +559,15 @@ test('builder single-leaf: the strip deals with its pane, entry through the ONE 
   // The plan derives from the SETTLED post-flip state (the synchronous reducer
   // preview): the durable flip and the null-slot home resolution land first, so
   // the beat animates toward the surface single mode will actually paint.
-  assert.match(handler, /deriveEnterPlan\(\{ workspace: settled, projection \}\)/)
+  assert.match(handler, /deriveEnterPlan\(\{[\s\S]*?workspace: settled, projection, contentRect,/)
   assert.match(handler, /mode\.toggle\(\{ cause, presentation \}\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   assert.match(shell, /modeMachine\.transitionRootClass\(modeState/)
   // The single-pane nav strip carries the beat motion so it deals WITH its pane.
   assert.match(shell, /data-mode-motion=\{navMotion \? navMotion\.motion : undefined\}/)
-  // M4: and it is INERT throughout the exit beat (not just under the drawer), so a
-  // tap on the strip while it clears cannot re-target the transition.
-  assert.match(shell, /className="shell__tabstrip"[\s\S]*?inert=\{modalDrawerOpen \|\| exitBeatActive\}/)
+  // It is INERT throughout either direction (not just under the drawer), so a tap
+  // on an in-flight strip cannot re-target the transition.
+  assert.match(shell, /className="shell__tabstrip"[\s\S]*?inert=\{modalDrawerOpen \|\| modeBeatActive\}/)
   // CSS: a strip deals in with its pane on enter (shared with the WorkspaceChrome
   // strips via .shell__tabstrip[data-mode-motion]).
   assert.match(css, /\.shell--builder-entering \.shell__tabstrip\[data-mode-motion="deal-in"\] \{[\s\S]*?shell-mode-deal-in/)
@@ -544,13 +579,17 @@ test('builder single-leaf: the strip deals with its pane, entry through the ONE 
 test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, decisive (item 1)', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   // v2: the latched plan owns classification (promote a genuinely-shared pane vs
-  // reveal the single world underneath), the 20ms stagger, and the FLIP rects — the
+  // reveal the single world underneath), shared timing, and the FLIP rects — the
   // handler no longer computes settlePaneId / leavingPaneIds / dealMultiPane itself.
   assert.match(handler, /const leavingBuilder = ws\.viewMode !== 'single'/)
   assert.match(handler, /deriveExitPlan\(\{[\s\S]*?workspace: settled, projection, contentRect,/)
-  // A flip to single resolves a null/never-seeded slot to the freshest chat
-  // BEFORE the plan derives (no blank home, no dishonest beat target).
-  assert.match(handler, /if \(leavingBuilder\) resolveEmptySingleHome\(\)/)
+  // The durable flip goes through the workspace boundary BEFORE plan derivation. That
+  // boundary owns a null-slot New Chat request, so the destination remains
+  // home:new-chat through the beat without a toggle-specific policy patch.
+  assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)[\s\S]*?const settled/)
+  assert.match(shell, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
+  assert.match(shell, /requestEmptySingleNewChatRef\.current\?\.\(\)/)
+  assert.doesNotMatch(handler, /requestEmptySingleNewChat/)
   // M2: the exit plan is fed the honest single-world destination state (a suspended
   // Settings takeover / a retained immersive holder), so it reveals to Settings or
   // classifies immersive instant instead of promoting/revealing the covered slot.
@@ -570,11 +609,11 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   // honest destination), painted full-bleed beneath the deal via its mounted-hidden
   // wrapper rather than snapping over a revealed slot at completion.
   assert.match(shell, /const settingsUnderlay = isUnderlay\(SETTINGS_KEY\)/)
-  // CSS v2: promote FLIPs to full-bleed; deal-out drifts + fades. Both compositor-only.
+  // CSS v3: promote FLIPs to full-bleed; siblings scatter to projection-derived edges.
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="promote"\] \{[\s\S]*?shell-mode-promote/)
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="deal-out"\] \{[\s\S]*?shell-mode-deal-out/)
   const dealOut = css.match(/@keyframes shell-mode-deal-out\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(dealOut, /translate3d\(32px, -4px, 0\) scale\(0\.985\)/)
+  assert.match(dealOut, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
   assert.match(dealOut, /opacity: 0/)
   assert.doesNotMatch(dealOut, /box-shadow|border-radius|filter|clip/)
   // The parent-chrome opacity fade is DELETED (strips deal with their panes now).
@@ -582,6 +621,16 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   // Reduced motion drops any beat.
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(reduced, /\.shell \[data-mode-motion\] \{ animation: none !important; \}/)
+})
+
+test('world reveal keeps its destination stationary and ready beneath one short slide', () => {
+  const underlay = css.match(/\.shell__view--exit-underlay\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(underlay, /visibility:\s*visible/)
+  assert.doesNotMatch(underlay, /animation:|transition:|transform:|opacity:/)
+  assert.doesNotMatch(css, /shell-mode-destination-arrive|--mode-arrive/)
+  const workspaceView = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(workspaceView, /destinationMotion|DESTINATION_ARRIVE_NAME|exitArriveMs/)
+  assert.doesNotMatch(shell, /arriveVars|--mode-arrive/)
 })
 
 test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {
@@ -602,6 +651,53 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /aria-description=\{splitsEnabled\s*\n?\s*\? 'Hold or press Shift\+Enter for builder mode'/)
   assert.match(shellBrand, /role="status" aria-live="polite"/)
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
+})
+
+test('mobile tab bodies pan while the existing kind icon owns either-axis dragging', () => {
+  assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
+  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
+  assert.match(shellCss, /\.shell__tab-kind\[data-touch-drag-handle\]\s*\{[\s\S]*?touch-action:\s*none/)
+  assert.match(paneStrip, /data-touch-drag-handle=\{dragKey\}/)
+  assert.doesNotMatch(paneStrip, /GripVertical|shell__tab-drag-handle/)
+  assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
+    'the nested icon target must not duplicate the generic drag-source selector')
+  assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
+  assert.match(dragBinding, /downEvent\.target\?\.closest\?\.\('\[data-touch-drag-handle\]'\)/)
+  assert.match(dragBinding, /touchMoveIntent\(dx, dy, touchIntentKind\)/)
+  assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
+})
+
+test('an active overflowing chat title cycles once, then becomes idle', () => {
+  assert.match(paneStrip, /new ResizeObserver\(measure\)/)
+  assert.match(paneStrip, /!active \|\| !focused \|\| tab\.kind !== 'chat'/)
+  assert.match(paneStrip, /\}, \[active, focused, label, tab\.kind\]\)/,
+    'only the focused active tab should retain a ResizeObserver')
+  assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-shift'/)
+  assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-duration'/)
+  assert.match(paneStrip, /Math\.round\(shift \* TITLE_CYCLE_MS_PER_PX\)/)
+  assert.match(paneStrip, /className="shell__tab-text-inner"/)
+  const cycle = shellCss.match(/\.shell__tabstrip:not\(\.workspace__strip\)[\s\S]*?shell-tab-title-cycle var\(--tab-title-duration\) linear 700ms 1 both/)?.[0] || ''
+  assert.match(cycle, /\.workspace__strip--focused/)
+  assert.doesNotMatch(cycle, /infinite/)
+  const keyframes = shellCss.match(/@keyframes shell-tab-title-cycle\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(keyframes, /85%, 100% \{ transform: translate3d\(0, 0, 0\)/,
+    'the one pass returns to the beginning and rests there')
+  assert.match(shellCss, /\.shell__tab-text-inner \{ animation: none !important; \}/)
+})
+
+test('the pane focus action uses one unambiguous accessible state contract', () => {
+  assert.match(paneStrip, /const label = focused \? 'Show all panes' : 'Focus pane'/)
+  assert.match(paneStrip, /aria-label=\{label\}/)
+  assert.doesNotMatch(paneStrip, /aria-pressed/,
+    'a button whose label changes with the action must not also announce a toggle state')
+})
+
+test('overflowing strips keep native pan and add a no-chrome wheel path', () => {
+  assert.match(paneStrip, /export function scrollStripWheel\(e\)/)
+  assert.match(paneStrip, /Math\.abs\(e\.deltaX\) >= Math\.abs\(e\.deltaY\)/)
+  assert.match(paneStrip, /strip\.scrollLeft \+= e\.deltaY \* scale/)
+  assert.match(paneStrip, /onWheel=\{scrollStripWheel\}/)
+  assert.match(shell, /onWheel=\{scrollStripWheel\}/)
 })
 
 test('the mobile modal keeps its existing brand close path while the workspace is inert', () => {
@@ -722,10 +818,13 @@ test('the builder preview cannot outlive its drag session past one visibility bo
   assert.match(dragBinding, /document\.removeEventListener\('visibilitychange', onForegroundVisible\)/)
   // (3) NEXT-INTERACTION — a visible->visible steal (partial occlusion / split-screen)
   //     fires NEITHER edge; the next pointerdown reconciles a standing session whose
-  //     pointer is dead (different pointerId + no live capture), then proceeds. A live
-  //     drag keeps its capture, so this never cancels one.
+  //     pointer is dead (no live capture), then proceeds. Pointer identity is NOT a
+  //     liveness signal because mobile reuses ids across sequential gestures. This
+  //     newer boundary needs no old-gesture click guard; adding one would eat the
+  //     fresh tap on the same drawer row. A live drag keeps its capture, so it stays.
   assert.match(dragBinding, /function standingSessionPointerIsLive\(\) \{[\s\S]*?hasPointerCapture\?\.\(activePointerId\)/)
-  assert.match(dragBinding, /if \(e\.pointerId !== activePointerId && !standingSessionPointerIsLive\(\)\) \{[\s\S]*?activeCleanup\(\{ suppressClick: true \}\)/)
+  assert.match(dragBinding, /if \(!standingSessionPointerIsLive\(\)\) \{\s*activeCleanup\(\)/)
+  assert.match(dragBinding, /clearPendingSourceClick\?\.\(\)[\s\S]*?if \(activeCleanup\)/)
   // The invariant now spans one boundary OR one subsequent interaction.
   assert.match(dragBinding, /may outlive its session by at most ONE visibility\/foreground boundary,\s*\n?\s*\/\/ or at most one subsequent user interaction/)
 })
@@ -761,21 +860,134 @@ test('visual nits V3-V6: coachmark clears the strip, focus underline reads, chip
   assert.match(dragBinding, /if \(suppressClick && !committed\) srcEl\.blur\?\.\(\)/)
 })
 
-// ── M5: a slot app uninstalled while closed must not survive the first reconcile ─
-test('M5: the initial live reconcile validates the pinned single-world slot app', () => {
+// ── H1 (was M5): a slot app uninstalled while closed must not survive the first
+// reconcile — BUT absence from the NetworkFirst list is not deletion evidence ─────
+test('H1: the initial slot-app reconcile confirms absence with an authoritative 404 probe', () => {
   // The single-world slot app is pinned even while builder paints, so the present->
   // absent eviction (gated on seenAppIds) never fires for a slot app uninstalled
-  // while the browser was CLOSED — it was never "seen present" this session. A
-  // one-shot first-authoritative-fetch check closes it, mirroring the cold-restore
-  // probe, so it can't later paint a broken single world.
-  const effect = shell.match(/for \(const id of liveIds\) seenAppIdsRef\.current\.add\(id\)[\s\S]*?\/\/ Candidates:/)?.[0] || ''
-  assert.ok(effect.length > 0, 'found the initial reconcile body')
-  assert.match(effect, /if \(!initialSlotReconciledRef\.current\)/)
+  // while the browser was CLOSED — it was never "seen present" this session. Its
+  // one-shot check must NOT trust the /api/apps/ list's absence (NetworkFirst → a
+  // stale SW cache fallback is indistinguishable from a live response); it probes the
+  // AUTHORITATIVE per-app endpoint and deletes ONLY on a real 404, mirroring the chat
+  // 404-probe (cancelled + stale guards).
+  const effect = shell.match(/One-shot slot-app reconcile \(H1\)[\s\S]*?workspaceStateRef\]\)/)?.[0] || ''
+  assert.ok(effect.length > 0, 'found the slot-app probe effect')
+  assert.match(effect, /if \(!appsLiveFetched \|\| initialSlotReconciledRef\.current\) return/)
   assert.match(effect, /const slot = workspaceStateRef\.current\.ws\.singleScreen/)
-  assert.match(effect, /slot && slot\.kind === 'app' && !liveIds\.has\(Number\(slot\.id\)\)/)
-  // Close as deleted (reducer clears the slot), then resolve home instead of blank.
+  // Fast path: a slot app the live list already vouches for is skipped, no probe.
+  assert.match(effect, /if \(apps\.some\(a => Number\(a\.id\) === Number\(slot\.id\)\)\) return/)
+  // The authoritative per-app probe via the shared deletion-evidence contract, and
+  // teardown ONLY on a 'deleted' verdict (a real 404).
+  assert.match(effect, /probeDeletion\(`\/apps\/\$\{encodeURIComponent\(slotId\)\}`\)/)
+  assert.match(effect, /if \(verdict !== 'deleted'\) return/)
+  // Stale-guard: a slot change mid-probe must never delete the new slot.
+  assert.match(effect, /const current = workspaceStateRef\.current\.ws\.singleScreen/)
+  assert.match(effect, /Number\(current\.id\) !== Number\(slotId\)\) return/)
+  // Cancelled-guard cleanup, like the chat cold-restore probe.
+  assert.match(effect, /let cancelled = false/)
+  assert.match(effect, /return \(\) => \{ cancelled = true \}/)
+  // Close as deleted (the reducer clears the slot); the shared dispatch boundary,
+  // tested below, owns the New Chat landing rather than this effect patching it.
   assert.match(effect, /reason: 'deleted'/)
-  assert.match(effect, /resolveEmptySingleHome\(\)/)
+  assert.doesNotMatch(effect, /requestEmptySingleNewChat/)
+})
+
+// The shared deletion-evidence contract both cold-restore probes route through: list
+// absence is a HINT, an authoritative per-resource 404 is the only proof of deletion.
+test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unknown', () => {
+  const client = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
+  assert.match(client, /export async function probeDeletion\(path\)/)
+  assert.match(client, /if \(res\.status === 404\) return 'deleted'/)
+  assert.match(client, /if \(res\.ok\) return 'exists'/)
+  assert.match(client, /return 'unknown'/)
+  // Both cold-restore probes read the SAME contract (rhyme, not two copies).
+  assert.match(shell, /probeDeletion\(`\/apps\//)
+  assert.match(shell, /probeDeletion\(`\/chats\//)
+})
+
+// ── Round 4 item 3: the null slot is a first-class, deferred New Chat landing ──
+test('round4-3: requestEmptySingleNewChat records a tokenized request and does NOT write the slot', () => {
+  const fn = shell.match(/const requestEmptySingleNewChat = useCallback\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
+  assert.ok(fn.length > 0, 'found the request helper')
+  // Guarded to an empty single slot; captures the reuse candidate from the
+  // pre-transition active chat; records a monotonic token; NEVER writes a slot itself.
+  assert.match(fn, /if \(!single \|\| ws\.singleScreen != null\) return/)
+  assert.match(fn, /currentReusableEmptyChat\(chatsRef\.current/)
+  assert.match(fn, /activeChatId: activeChatIdRef\.current/)
+  assert.match(fn, /newChatRequestSeqRef\.current = token/)
+  assert.match(fn, /pendingNewChatRef\.current = \{ token, candidateId/)
+  assert.match(fn, /setPendingNewChatToken\(token\)/)
+  assert.doesNotMatch(fn, /applyModeDestination|SET_SINGLE_SCREEN|chatsRef\.current\[0\]/)
+})
+
+test('round4-3: every reducer edge into an empty single screen uses one policy boundary', () => {
+  const dispatch = shell.match(/const dispatchWorkspace = useCallback\(\(action\) => \{[\s\S]*?\}, \[\]\)/)?.[0] || ''
+  assert.ok(dispatch.length > 0, 'found the workspace dispatch boundary')
+  assert.match(dispatch, /workspaceReducer\(prev, action\)/)
+  assert.match(dispatch, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
+  assert.match(dispatch, /prev\.ws, next\.ws, paneModel\.WORKSPACE_SPLITS_ENABLED/)
+  assert.match(dispatch, /requestEmptySingleNewChatRef\.current\?\.\(\)/)
+  // Explicit calls remain only for boot states that do not cross a reducer edge:
+  // populated-history null restore and live-confirmed zero-chat bootstrap.
+  const explicitCalls = shell.match(/\brequestEmptySingleNewChat\(\)/g) || []
+  assert.equal(explicitCalls.length, 2)
+  // A create response updates the chat list before its slot write. Boot must not
+  // interpret that refresh as a second request and POST another empty row.
+  assert.match(shell, /chats\.length > 0\s*&& pendingNewChatRef\.current == null/)
+})
+
+test('round4-3: the materialize watcher gates on an IDLE descriptor', () => {
+  const effect = shell.match(/Deferred New Chat materialization watcher[\s\S]*?workspaceStateRef\]\)/)?.[0] || ''
+  assert.ok(effect.length > 0, 'found the materialize watcher')
+  // Deferred until the mode descriptor idles — a slot write mid-beat would drift the
+  // exit signature and cancel the latched plan.
+  assert.match(effect, /if \(modeState\.transition\) return/)
+  assert.match(effect, /pending\.token !== pendingNewChatToken/)
+  assert.match(effect, /if \(!single \|\| ws\.singleScreen != null\)/)
+  assert.match(effect, /materializeNewChatHomeRef\.current\?\.\(pending\)/)
+})
+
+test('round4-3: materializeNewChatHome is stale-guarded and writes a history-free, focus-free slot', () => {
+  const fn = shell.match(/async function materializeNewChatHome\(pending\) \{[\s\S]*?\n  \}/)?.[0] || ''
+  assert.ok(fn.length > 0, 'found materializeNewChatHome')
+  // Shares the ONE reuse-and-create policy with newChat.
+  assert.match(fn, /resolveNewChatId\(\{ candidate \}\)/)
+  // Stale-guard: token still current, then invalid destinations clear the request.
+  // A live beat is a separate keep-and-resume branch, not a destructive clear.
+  assert.match(fn, /newChatRequestSeqRef\.current !== pending\.token/)
+  assert.match(fn, /latest\.resolvedChatId = chatId/)
+  assert.match(fn, /if \(!single \|\| ws\.singleScreen != null\) \{[\s\S]*?pendingNewChatRef\.current = null/)
+  assert.match(fn, /if \(modeTransitionRef\.current\) return/)
+  assert.match(fn, /pending\.resolvedChatId = chatId/)
+  // A request that supersedes an in-flight token gets one event-driven retry after
+  // the older await releases; there is no interval/polling loop.
+  assert.match(fn, /latest\.token !== pending\.token[\s\S]*?setMaterializeNewChatRevision/)
+  assert.doesNotMatch(fn, /setInterval|setTimeout/)
+  // offline/failed → keep the landing with a retry state, never chats[0].
+  assert.match(fn, /if \(chatId == null\) \{[\s\S]*?setNewChatLandingOffline\(true\)/)
+  // The slot write is history-free (applyModeDestination pushes none) + preserveSettings,
+  // and there is NO composer focus (a mode toggle must not summon the keyboard).
+  assert.match(fn, /applyModeDestination\(\s*\{ view: 'chat', chatId, appId: null, paneId: ws\.focusedPaneId \},\s*\{ preserveSettings: true \}/)
+  assert.doesNotMatch(fn, /requestComposerFocus|focusComposer/)
+})
+
+test('round4-3: resolveNewChatId is the shared reuse-and-create policy; newChat + materialize both use it', () => {
+  assert.match(shell, /async function resolveNewChatId\(\{ candidate, draft, forceNew, exclude \} = \{\}\)/)
+  // newChat consumes the shared resolver, not its own inline reuse/create.
+  assert.match(shell, /const \{ chatId, reason \} = await resolveNewChatId\(\{ draft, forceNew, exclude \}\)/)
+})
+
+test('round4-3: the New Chat landing renders for a null slot / reveal underlay and reuses ChatView empty visuals', () => {
+  // The presentation key + its wiring.
+  assert.match(workspaceViewSrc, /export const EMPTY_SINGLE_SURFACE_KEY = 'home:new-chat'/)
+  assert.match(shell, /const newChatUnderlay = isUnderlay\(EMPTY_SINGLE_SURFACE_KEY\)/)
+  assert.match(shell, /const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY/)
+  assert.match(shell, /<NewChatLanding/)
+  assert.match(shell, /onRetry=\{requestEmptySingleNewChat\}/)
+  // Seamless swap: the landing reuses ChatView's exact empty treatment.
+  assert.match(newChatLanding, /className="chat chat--empty"/)
+  assert.match(newChatLanding, /className="chat__empty-wrap"/)
+  assert.match(newChatLanding, /What&apos;s on your mind\?/)
 })
 
 // ── N1: retired v2 plumbing is gone ───────────────────────────────────────────
@@ -785,11 +997,21 @@ test('N1: dead exit-presentation plumbing is removed', () => {
   assert.doesNotMatch(controller, /dragArm = useCallback\(\(focusedPaneId\)/)
   assert.doesNotMatch(controller, /drag-arm', focusedPaneId/)
   assert.match(shell, /mode\.dragArm\(\)/)
-  // The unused --ease-mode-chrome token is gone (only arrive/leave remain).
-  assert.doesNotMatch(css, /--ease-mode-chrome/)
-  // The unused excludeChatId param on resolveEmptySingleHome is gone.
+  // Polish item 2/3: --ease-mode-chrome + --ease-mode-promote are (re)introduced as
+  // USED tokens — the chrome fades + strip-clear ride the chrome curve, the promote
+  // FLIP rides the promote curve — so they are no longer the dead plumbing this
+  // originally removed.
+  assert.match(css, /--ease-mode-chrome: cubic-bezier/)
+  assert.match(css, /--ease-mode-promote: cubic-bezier/)
+  assert.match(css, /shell-mode-chrome-out 90ms var\(--ease-mode-chrome\)/)
+  assert.match(css, /shell-mode-chrome-in 70ms var\(--ease-mode-chrome\)[\s\S]*?calc\(var\(--mode-total, 210ms\) - 70ms\) both/)
+  assert.match(css, /shell-mode-strip-clear 100ms var\(--ease-mode-chrome\)/)
+  assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)/)
+  // The unused excludeChatId param is gone; the helper is now the New Chat request
+  // (round 4 item 3 — the old freshest-chat write is fully retired).
   assert.doesNotMatch(shell, /excludeChatId/)
-  assert.match(shell, /const resolveEmptySingleHome = useCallback\(\(\) =>/)
+  assert.doesNotMatch(shell, /resolveEmptySingleHome/)
+  assert.match(shell, /const requestEmptySingleNewChat = useCallback\(\(\) =>/)
   // The stale "Settings conversion" comment near the toggle handler is corrected.
   assert.doesNotMatch(shell, /Settings overlay<->tab conversion/)
 })

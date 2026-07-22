@@ -165,6 +165,18 @@ class _OverlapError(_BridgeError):
   """
 
 
+class _SteerOverlapError(_BridgeError):
+  """A user steer won admission before request_user_input registered.
+
+  The Codex SDK has one stdout reader thread. It handles server requests
+  synchronously, while ``AsyncTurnHandle.steer`` waits in another worker for
+  that same reader to route its response. Parking the reader on a new question
+  during steer would therefore deadlock the steer acknowledgement. Rejecting
+  the not-yet-published tool call lets the reader route the already-admitted
+  user steer; no durable question or owner answer is discarded.
+  """
+
+
 async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
   """Best-effort early persistence for provider resume continuity.
 
@@ -178,9 +190,11 @@ async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
   invoking it, so the codex thread id is recorded (and re-sighted idempotently
   on resume) with no second call site. The link record is what survives the
   provider switch / session reset that later NULLs ``Chat.session_id``. Mirrors
-  ``claude_sdk_runner._persist_session_id``.
+  ``claude_sdk_runner._persist_session_id``. Out-of-band callers such as the
+  nightly Reflection runner pass ``db=None`` because their synthetic chat id
+  has no durable Chat row; they must not enter these chat-only write paths.
   """
-  if not chat_id or not session_id:
+  if db is None or not chat_id or not session_id:
     return
   try:
     from app.chat_writer import PersistSessionId, await_ack, get_writer
@@ -216,9 +230,17 @@ class ActiveCodexTurn:
     self.kind = RunnerKind.CODEX_SDK
     self.thread = thread
     self.turn = turn
+    # Admission flag shared with request_user_input on the runner loop. Set
+    # synchronously before turn.steer's first await so a not-yet-registered
+    # question cannot park the SDK reader ahead of the steer acknowledgement.
+    self._steer_in_flight = False
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
+
+  @property
+  def steer_in_flight(self) -> bool:
+    return self._steer_in_flight
 
   async def interrupt(self) -> None:
     """Signals the live turn and waits for runner-side drain."""
@@ -730,7 +752,11 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
     # so a genuinely-empty message stays silent.
     text = item.text or ""
     if text.strip():
-      return [{"type": "text_final", "content": text}]
+      event = {"type": "text_final", "content": text}
+      item_id = getattr(item, "id", None)
+      if item_id:
+        event["text_item_id"] = item_id
+      return [event]
     return []
 
   return []
@@ -871,6 +897,18 @@ def _install_request_user_input_handler(
     notify_cb failure so the sync handler can surface a real error
     to Codex (B2, B4, B5 from round-5 review).
     """
+    # Admission is atomic on the runner loop: steer_into_active_turn marks the
+    # ActiveCodexTurn before its first await, and this coroutine also runs on
+    # that loop. If the user steer won, fail this not-yet-persisted tool call
+    # instead of parking the SDK's sole reader thread before it can route the
+    # steer response. A question that registered first is protected by the
+    # route's questions.is_waiting gate and remains answerable.
+    active = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
+    if isinstance(active, ActiveCodexTurn) and active.steer_in_flight:
+      raise _SteerOverlapError(
+        "Question superseded by steering input; continue with the new input."
+      )
+
     # Refuse to overlap with an existing pending question on the same
     # chat. Returning empty here would silently swallow the second
     # question — instead raise so the sync handler can fail the tool
@@ -1022,6 +1060,11 @@ def _install_request_user_input_handler(
 
     try:
       text_keyed = fut.result()
+    except _SteerOverlapError as exc:
+      log.info(
+        "Codex bridge: question lost steer admission race chat_id=%s", chat_id,
+      )
+      return {"error": {"message": str(exc)}}
     except _OverlapError as exc:
       log.warning(
         "Codex bridge: overlap rejected chat_id=%s: %s", chat_id, exc,
@@ -1118,7 +1161,8 @@ async def run_codex_sdk_turn(
     pending_questions: Shared AskUserQuestion registry owned by
       chat.py — keyed by chat_id. Used by the request_user_input
       bridge to park on a future while the user answers.
-    db: SQLAlchemy session for runner-side persistence paths.
+    db: SQLAlchemy session for durable-chat persistence paths, or None for an
+      out-of-band turn with no Chat row (for example nightly Reflection).
 
   Returns:
     Dict with `session_id`, `cost_usd`, and `error`.
@@ -1350,7 +1394,11 @@ async def run_codex_sdk_turn(
 
         if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
           if payload.delta:
-            bc.publish({"type": "text", "content": payload.delta})
+            event = {"type": "text", "content": payload.delta}
+            item_id = getattr(payload, "item_id", None)
+            if item_id:
+              event["text_item_id"] = item_id
+            bc.publish(event)
           continue
 
         # Reasoning deltas are Codex's analog of Claude's thinking_delta:
@@ -1511,6 +1559,18 @@ async def steer_into_active_turn(
   current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
   if not isinstance(current, ActiveCodexTurn) or current.turn is None:
     return False
+  if current.steer_in_flight:
+    return False
+
+  # The pinned SDK's async steer is asyncio.to_thread(sync.turn_steer). The
+  # sync request waits for the sole reader thread to route its response; that
+  # same reader invokes request_user_input handlers synchronously. Mark
+  # admission BEFORE the first await so park_question can reject the losing
+  # side of that race. Do not impose a route-side timeout: cancelling
+  # asyncio.to_thread cannot cancel its underlying JSON-RPC request, so a late
+  # success would be indistinguishable from failure and could duplicate the
+  # still-durable pending row when it later drains.
+  current._steer_in_flight = True
 
   try:
     await current.turn.steer(message)
@@ -1523,4 +1583,6 @@ async def steer_into_active_turn(
         current.mark_finished()
       return False
     raise
+  finally:
+    current._steer_in_flight = False
   return True

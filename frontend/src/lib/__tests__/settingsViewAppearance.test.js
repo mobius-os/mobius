@@ -24,6 +24,7 @@ test('appearance keeps one icon switch without making the section clickable', ()
 
 test('model and synced commit use the same normal-weight standard highlight', () => {
   assert.match(view, /provider-row__status-text settings__last-model/)
+  assert.match(view, /Choose which models appear\. New chats use your last pick\./)
   assert.match(view, /Last model: <span className="settings__standard-highlight">/)
   assert.match(view, /Synced to [\s\S]*settings__standard-highlight/)
   assert.doesNotMatch(view, /Serving local \{mobiusVersion\.localSha\}/)

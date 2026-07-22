@@ -15,7 +15,9 @@ import {
   layoutMayOwnScroll,
   mountMediaSettled,
   modeForChatExit,
+  modeForDisclosureToggle,
   modeForForegroundReturn,
+  modeForQuestionSubmission,
   modeForQueuedSubmission,
   modeForViewportChange,
   modeAfterReaderReachesBottom,
@@ -210,6 +212,26 @@ test('disclosure activation is recognized as an anchor-latching reading action',
   'a non-interactive status row must not stop live follow')
 })
 
+test('disclosure toggles follow only in FOLLOW_BOTTOM and otherwise hold the reader anchor', () => {
+  const row = {
+    dataset: { key: 'assistant-1' },
+    offsetTop: 420,
+    offsetHeight: 300,
+  }
+  const scrollEl = {
+    scrollTop: 500,
+    querySelectorAll: () => [row],
+  }
+  const follow = { kind: 'FOLLOW_BOTTOM' }
+  assert.equal(modeForDisclosureToggle(scrollEl, follow), follow,
+    'autoscroll remains the sole authority while following the tail')
+  assert.deepEqual(
+    modeForDisclosureToggle(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c1' }),
+    { kind: 'ANCHOR_AT', key: 'assistant-1', offset: -80 },
+    'outside autoscroll the visible reading position is frozen before resize',
+  )
+})
+
 test('only provably clamped wheel input gets a next-frame no-scroll release', () => {
   const middle = {
     scrollTop: 500,
@@ -289,6 +311,32 @@ test('queued submission freezes the visible row before footer reflow', () => {
     modeForQueuedSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
     { kind: 'ANCHOR_AT', key: 'assistant-live', offset: 60 },
   )
+})
+
+test('question submission freezes the visible row before same-turn output resumes', () => {
+  const item = {
+    offsetTop: 720,
+    offsetHeight: 420,
+    dataset: { key: 'assistant-with-question' },
+  }
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 660,
+    clientHeight: 600,
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [item] : []
+    },
+  }
+  assert.deepEqual(
+    modeForQuestionSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
+    { kind: 'ANCHOR_AT', key: 'assistant-with-question', offset: 60 },
+  )
+})
+
+test('question submission keeps the current mode when there is no visible row', () => {
+  const current = { kind: 'FOLLOW_BOTTOM' }
+  const scrollEl = { querySelectorAll() { return [] } }
+  assert.equal(modeForQuestionSubmission(scrollEl, current), current)
 })
 
 test('queued submission anchors before the active assistant shell that steer will split', () => {
@@ -560,6 +608,17 @@ test('idle reserved bottom is a settled pin and cannot manufacture follow', () =
     turnRunning: false,
     lastUserCid: 'c-123',
   }), { kind: 'PIN_USER_MSG', cid: 'c-123' })
+})
+
+test('a bottom edge created by anchor reservation keeps the reader anchor', () => {
+  const anchor = { kind: 'ANCHOR_AT', key: 'assistant-question', offset: 60 }
+  assert.equal(modeAfterReaderReachesBottom({
+    mode: anchor,
+    spacerH: 180,
+    anchorReservation: true,
+    turnRunning: true,
+    lastUserCid: 'c-123',
+  }), anchor)
 })
 
 test('a short settled pin retires automatic follow but keeps its identity', () => {
@@ -856,6 +915,48 @@ test('spacer reservation returns zero before there is a user message', () => {
   const listEl = { offsetHeight: 200 }
 
   assert.equal(_computeSpacerH(scrollEl, listEl, null, 600), 0)
+})
+
+test('viewport growth keeps a question-answer anchor reachable before output resumes', () => {
+  const anchor = { offsetTop: 1320 }
+  const scrollEl = {
+    clientHeight: 960,
+    querySelector(selector) {
+      return selector === '[data-key="assistant-question"]' ? anchor : null
+    },
+  }
+  const listEl = { offsetHeight: 1500 }
+  const lastUserMsgEl = { offsetTop: 900 }
+  const mode = {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: 60,
+  }
+
+  const spacerH = _computeSpacerH(
+    scrollEl, listEl, lastUserMsgEl, 960, mode,
+  )
+  const target = anchor.offsetTop - mode.offset
+  const maxScrollTop = listEl.offsetHeight + spacerH - scrollEl.clientHeight
+
+  assert.equal(maxScrollTop, target,
+    'the frozen card position is reachable in the first grown-viewport frame')
+})
+
+test('anchor reservation disappears once real content makes the target reachable', () => {
+  const anchor = { offsetTop: 1320 }
+  const scrollEl = {
+    clientHeight: 960,
+    querySelector(selector) {
+      return selector === '[data-key="assistant-question"]' ? anchor : null
+    },
+  }
+  const mode = { kind: 'ANCHOR_AT', key: 'assistant-question', offset: 60 }
+
+  assert.equal(
+    _computeSpacerH(scrollEl, { offsetHeight: 2300 }, { offsetTop: 900 }, 960, mode),
+    0,
+  )
 })
 
 test('queued tray does not shorten spacer reservation', () => {

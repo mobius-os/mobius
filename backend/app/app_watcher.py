@@ -160,6 +160,26 @@ def _publish_app_build_failed(
   })
 
 
+def _is_pending_update_changed(error: object) -> bool:
+  """Whether a deferred update's exact reviewed candidate went stale."""
+  detail = getattr(error, "detail", None)
+  return (
+    getattr(error, "status_code", None) == 409
+    and isinstance(detail, dict)
+    and detail.get("code") == "pending_update_changed"
+  )
+
+
+def _publish_app_update_stale(*, app_id: int, app_name: str) -> None:
+  """Tell the owner to review a changed pending update, without replay."""
+  from app.broadcast import get_system_broadcast
+  get_system_broadcast().publish({
+    "type": "app_update_stale",
+    "appId": str(app_id),
+    "appName": app_name,
+  })
+
+
 def _source_roots() -> list[Path]:
   data_dir = Path(get_settings().data_dir)
   return [source_dirs.apps_root(data_dir)]
@@ -508,15 +528,28 @@ class _JsxHandler(FileSystemEventHandler):
             )
           except Exception as exc:
             db.rollback()
-            log.warning(
-              "resolved update replay failed for app %s: %s",
-              replay_app_id, exc,
-            )
-            _publish_app_build_failed(
-              app_id=replay_app_id,
-              app_name=replay_app_name,
-              summary=_summarize_app_build_failure(exc),
-            )
+            if _is_pending_update_changed(exc):
+              # The receipt deliberately remains in place. It keeps watcher
+              # edits behind the atomic update gate until the owner reviews
+              # the new upstream candidate and starts the update again.
+              log.info(
+                "resolved update candidate changed for app %s; review required",
+                replay_app_id,
+              )
+              _publish_app_update_stale(
+                app_id=replay_app_id,
+                app_name=replay_app_name,
+              )
+            else:
+              log.warning(
+                "resolved update replay failed for app %s: %s",
+                replay_app_id, exc,
+              )
+              _publish_app_build_failed(
+                app_id=replay_app_id,
+                app_name=replay_app_name,
+                summary=_summarize_app_build_failure(exc),
+              )
             return
           if reapplied.id != replay_app_id:
             # install_from_manifest's expected_app_id guard (install.py) rejects

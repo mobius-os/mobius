@@ -3,6 +3,23 @@ function normalizedId(value) {
 }
 
 /**
+ * True only for the edge into the first-class empty single-screen surface.
+ *
+ * Keeping this at the workspace-dispatch boundary means every reducer action
+ * that clears the slot (close, prune, restore, mode flip, or a future action)
+ * inherits the New Chat policy without adding another call-site repair. The
+ * edge check is important: actions while the landing is already visible must
+ * not manufacture new request tokens.
+ */
+export function enteredEmptySingleScreen(previous, next, splitsEnabled = true) {
+  const previousSingle = !splitsEnabled || previous?.viewMode === 'single'
+  const nextSingle = !splitsEnabled || next?.viewMode === 'single'
+  return nextSingle
+    && next?.singleScreen == null
+    && (!previousSingle || previous?.singleScreen != null)
+}
+
+/**
  * Return the only client-side chat that is safe to consider for reuse.
  *
  * An off-screen empty row may belong to another browser that has just sent a
@@ -50,6 +67,24 @@ export function detailIsUntouchedEmptyChat(detail) {
   if (detail.pending_question_id != null) return false
   if (detail.session_id != null) return false
   return true
+}
+
+/** Classify a fresh detail probe without turning uncertainty into fake data. */
+export function reusableChatDetailVerdict({ ok, status, detail }) {
+  if (status === 404) return 'missing'
+  if (!ok) return 'uncertain'
+  if (detailIsUntouchedEmptyChat(detail)) return 'empty'
+  // A successful response is safe to call occupied only when its runtime
+  // shape is complete. Malformed/partial JSON is uncertainty, not evidence
+  // that the row has messages.
+  if (!detail || typeof detail !== 'object') return 'uncertain'
+  if (!Number.isInteger(detail.total)) return 'uncertain'
+  if (!Array.isArray(detail.messages)) return 'uncertain'
+  if (!Array.isArray(detail.pending_messages)) return 'uncertain'
+  if (typeof detail.running !== 'boolean') return 'uncertain'
+  if (!Object.hasOwn(detail, 'pending_question_id')) return 'uncertain'
+  if (!Object.hasOwn(detail, 'session_id')) return 'uncertain'
+  return 'occupied'
 }
 
 /** Convert a complete create response into ChatView's persisted cache shape.
@@ -108,4 +143,74 @@ export function addCreatedChatToList(
     row,
     ...existing.slice(insertAt),
   ]
+}
+
+// A NetworkFirst drawer read can fall back to the service worker's previous
+// list just after POST /chats succeeds. Keep the create response protected for
+// one bounded handoff window so that fallback cannot erase the new row. The
+// guard is Shell-owned (not global state); an explicit delete removes it.
+export const CREATED_CHAT_LIST_GUARD_MS = 30_000
+
+export function rememberCreatedChat(guards, created, {
+  now = Date.now(),
+  guardMs = CREATED_CHAT_LIST_GUARD_MS,
+} = {}) {
+  if (!guards || !created?.id) return
+  const row = addCreatedChatToList([], created)[0]
+  guards.set(String(created.id), {
+    row,
+    expiresAt: now + guardMs,
+  })
+}
+
+/** Keep the bounded create guard aligned with an authoritative detail probe. */
+export function reconcileCreatedChatGuard(guards, chatId, verdict) {
+  const id = String(chatId || '')
+  if (!id || !guards) return
+  if (verdict === 'missing') {
+    guards.delete(id)
+    return
+  }
+  if (verdict !== 'occupied') return
+  const guard = guards.get(id)
+  if (!guard?.row) return
+  guard.row = { ...guard.row, has_messages: true }
+}
+
+export function mergeChatListWithCreatedGuards(incoming, guards, {
+  now = Date.now(),
+} = {}) {
+  let merged = Array.isArray(incoming) ? incoming : []
+  if (!guards?.size) return merged
+  for (const [id, guard] of guards) {
+    if (!guard || guard.expiresAt <= now) {
+      guards.delete(id)
+      continue
+    }
+    const confirmedIndex = merged.findIndex(row => String(row?.id) === id)
+    if (confirmedIndex >= 0) {
+      const confirmed = merged[confirmedIndex]
+      const guardedAt = Date.parse(guard.row?.updated_at || '')
+      const confirmedAt = Date.parse(confirmed?.updated_at || '')
+      const guardedIsNewer = Number.isFinite(guardedAt)
+        && Number.isFinite(confirmedAt)
+        && guardedAt > confirmedAt
+      const preferred = guardedIsNewer ? guard.row : confirmed
+      // During this short post-create window, a chat cannot become untouched
+      // again. Keep has_messages monotonic even when a stale-present SW row
+      // arrives after an authoritative detail probe or newer list response.
+      const reconciled = {
+        ...preferred,
+        has_messages: !!(
+          guard.row?.has_messages || confirmed?.has_messages
+        ),
+      }
+      guard.row = reconciled
+      merged = [...merged]
+      merged[confirmedIndex] = reconciled
+      continue
+    }
+    merged = addCreatedChatToList(merged, guard.row)
+  }
+  return merged
 }

@@ -223,6 +223,13 @@ async function rememberedChatRootIsCurrent(page) {
   })
 }
 
+async function rememberedChatWrapperIsInert(page) {
+  return page.evaluate(() => {
+    const wrapper = window.__workspacePaneChatRoot?.closest('.shell__chat-view')
+    return wrapper ? wrapper.hasAttribute('inert') : null
+  })
+}
+
 /** Read scroll geometry through the remembered root. This keeps working after
  *  its pane wrapper moves or the layout collapses. */
 async function rememberedChatScroll(page) {
@@ -350,6 +357,132 @@ test.describe('Workspace panes (PR2 gate)', () => {
     const afterMove = await rememberedChatScroll(page)
     expect(afterMove, 'chat A scroller present after move').not.toBeNull()
     expect(afterMove.nearBottom, 'still following after cross-pane move').toBe(true)
+    await expect(page.locator('.shell__chat-view--held')).toHaveCount(0, { timeout: 3000 })
+    expect(await rememberedChatWrapperIsInert(page),
+      'the retained one-pane wrapper is interactive after handoff').toBe(false)
+  })
+
+  test('pane focus is reversible, preserves sibling mounts, and exits to an interactive standard chat', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'focusPaneA')
+    const b = await createTaggedChat(page, 'focusPaneB')
+    await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id))
+    await replaceStreamRoute(page, FOLLOW_STREAM)
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+    await sendInPane(page, b.id, 'A long transcript remains scrollable after focused-pane exit')
+
+    const baseline = await readWs(page)
+    expect(await rememberChatRoot(page, a.id), 'sibling chat root is present').toBe(true)
+    await expect(page.getByRole('button', { name: 'Focus pane' })).toHaveCount(2)
+
+    await page.locator('[data-pane-strip="p1"]')
+      .getByRole('button', { name: 'Focus pane' }).click()
+    await expect(page.locator('[data-pane-strip]')).toHaveCount(1)
+    await expect(page.locator('[data-pane-strip="p1"]')).toBeVisible()
+    await expect(page.locator('.workspace__divider')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Show all panes' })).toHaveCount(1)
+    expect(await rememberedChatRootIsCurrent(page),
+      'the hidden sibling stays mounted while one pane is focused').toBe(true)
+
+    const focused = await readWs(page)
+    expect(focused.layout, 'focus does not rewrite the split tree').toEqual(baseline.layout)
+    expect(focused.panes, 'focus does not rewrite tabs or ratios').toEqual(baseline.panes)
+    expect(focused.focusedPaneId).toBe('p1')
+
+    const contentBox = await page.locator('.shell__content').boundingBox()
+    const focusedBox = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
+    expect(Math.abs(focusedBox.x - contentBox.x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(focusedBox.width - contentBox.width)).toBeLessThanOrEqual(1)
+    expect(focusedBox.y).toBeGreaterThan(contentBox.y)
+
+    await page.getByRole('button', { name: 'Show all panes' }).click()
+    await waitTiled(page)
+    expect(await readWs(page), 'show-all restores presentation without another workspace write')
+      .toEqual(focused)
+    expect(await rememberedChatRootIsCurrent(page), 'the sibling root survives the round-trip').toBe(true)
+
+    // Exit while focused: this is the reported trap path. The selected chat must
+    // land as the one ordinary, scrollable surface with no stale inert cover, and
+    // a subsequent drawer selection must still replace it.
+    await page.locator('[data-pane-strip="p1"]')
+      .getByRole('button', { name: 'Focus pane' }).click()
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0, { timeout: 3000 })
+    await expect(page.locator('.shell__chat-view--held')).toHaveCount(0)
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
+    await expect(page.locator('.shell__chat-view.shell__view--active')).not.toHaveAttribute('inert', '')
+    await expect(page.locator('.shell__chat-view.shell__view--active .chat__scroll')).toBeVisible()
+
+    await ensureNavigationOpen(page)
+    await page.locator('.drawer__item').filter({ hasText: a.title }).click()
+    await expect.poll(async () => String((await readWs(page)).singleScreen?.id), {
+      timeout: 3000, message: 'standard mode remains navigable after focused-pane exit',
+    }).toBe(String(a.id))
+    await expect(page.locator('.shell__chat-view--held')).toHaveCount(0, { timeout: 3000 })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).not.toHaveAttribute('inert', '')
+  })
+
+  test('drawer activation focuses an already-open pane and reveals its clipped active tab', async ({ page }) => {
+    await boot(page, PHONE)
+    const a = await createTaggedChat(page, 'revealPaneA')
+    const b = await createTaggedChat(page, 'revealPaneB')
+    const c = await createTaggedChat(page, 'revealPaneC')
+    const d = await createTaggedChat(page, 'revealPaneD')
+    const e = await createTaggedChat(page, 'revealPaneE')
+    await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id, c.id, d.id, e.id])
+
+    let ws = paneModel.seedFromFlatTabs([
+      { kind: 'chat', id: a.id }, { kind: 'chat', id: b.id },
+      { kind: 'chat', id: c.id }, { kind: 'chat', id: d.id },
+      { kind: 'chat', id: e.id },
+    ])
+    ws = paneModel.moveTab(ws, `chat:${b.id}`, { root: true, edge: 'right' })
+    for (const chat of [c, d, e]) {
+      ws = paneModel.moveTab(ws, `chat:${chat.id}`, { paneId: 'p1' })
+    }
+    ws = paneModel.setActiveTab(ws, 'p1', `chat:${b.id}`)
+    ws = paneModel.focusPane(ws, 'p0')
+    await seedWorkspace(page, ws)
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('[data-pane-strip="p1"]')).toBeVisible({ timeout: 8000 })
+
+    const strip = page.locator('[data-pane-strip="p1"]')
+    const target = strip.locator(`[data-drag-key="chat:${b.id}"]`)
+    await expect.poll(() => strip.evaluate(el => el.scrollWidth > el.clientWidth), {
+      timeout: 3000, message: 'the destination pane strip overflows',
+    }).toBe(true)
+    await strip.evaluate(el => { el.scrollLeft = el.scrollWidth })
+    const clipped = await target.boundingBox()
+    const stripBefore = await strip.boundingBox()
+    expect(clipped.x + clipped.width).toBeLessThanOrEqual(stripBefore.x + 2)
+
+    await ensureNavigationOpen(page)
+    await page.locator('.drawer__item').filter({ hasText: b.title }).click()
+    await expect.poll(async () => (await readWs(page)).focusedPaneId, {
+      timeout: 3000, message: 'the existing tab owner becomes the focused pane',
+    }).toBe('p1')
+    await expect(target).toHaveAttribute('aria-selected', 'true')
+    const revealed = await target.boundingBox()
+    const stripAfter = await strip.boundingBox()
+    expect(revealed.x).toBeGreaterThanOrEqual(stripAfter.x - 1)
+    expect(revealed.x + revealed.width).toBeLessThanOrEqual(stripAfter.x + stripAfter.width + 1)
+
+    // Repeating the current route remains history-free, but still re-reveals the
+    // tab after the user has scrolled the strip away from it.
+    await strip.evaluate(el => { el.scrollLeft = el.scrollWidth })
+    await ensureNavigationOpen(page)
+    await page.locator('.drawer__item').filter({ hasText: b.title }).click()
+    const rerevealed = await target.boundingBox()
+    const stripFinal = await strip.boundingBox()
+    expect(rerevealed.x).toBeGreaterThanOrEqual(stripFinal.x - 1)
+    expect(rerevealed.x + rerevealed.width).toBeLessThanOrEqual(stripFinal.x + stripFinal.width + 1)
   })
 
   test('(c) an app iframe survives a cross-pane move with no second frame-init', async ({ page }) => {
@@ -496,9 +629,8 @@ test.describe('Workspace panes (PR2 gate)', () => {
  * exercise the whole binding end-to-end: the delegated pointerdown arms past
  * slop, geometric hit-testing picks the zone, and the drop dispatches exactly
  * one reducer action — asserted through the persisted workspace blob (the same
- * authority the PR2 cases read). Touch long-press cannot be expressed with
- * Playwright's mouse-only pointer input, so that case is skipped with a reason;
- * its geometry is covered exhaustively by the dragController unit suite.
+ * authority the PR2 cases read). Mobile cases use Chrome's real touch input, not
+ * synthetic PointerEvents, so pointer-cancellation and touch-action are covered.
  */
 
 // p0 = [chatA, chatC] (focused, C active), p1 = [chatB]. A two-tab source pane
@@ -509,6 +641,20 @@ function twoPanesThreeTabs(a, b, c) {
   ])
   ws = paneModel.moveTab(ws, `chat:${b}`, { root: true, edge: 'right' })
   return paneModel.focusPane(ws, 'p0')
+}
+
+function twoStackedPanesThreeTabs(a, b, c) {
+  let ws = paneModel.seedFromFlatTabs([
+    { kind: 'chat', id: a }, { kind: 'chat', id: b }, { kind: 'chat', id: c },
+  ])
+  ws = paneModel.moveTab(ws, `chat:${b}`, { root: true, edge: 'bottom' })
+  return paneModel.focusPane(ws, 'p0')
+}
+
+function singlePaneThreeTabs(a, b, c) {
+  return paneModel.seedFromFlatTabs([
+    { kind: 'chat', id: a }, { kind: 'chat', id: b }, { kind: 'chat', id: c },
+  ])
 }
 
 function whichPaneHas(ws, tabKey) {
@@ -535,7 +681,33 @@ async function mouseDrag(page, sourceLocator, toX, toY, { release = true } = {})
   if (release) await page.mouse.up()
 }
 
-async function bootThreeTab(page, tag) {
+/** A real Chromium touch stream (not synthetic PointerEvents). */
+async function touchDrag(page, sourceLocator, toX, toY, { firstDx = 0, firstDy = 12 } = {}) {
+  const box = await sourceLocator.boundingBox()
+  const sx = box.x + box.width / 2
+  const sy = box.y + box.height / 2
+  const cdp = await page.context().newCDPSession(page)
+  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
+  const point = (x, y) => [{ x, y, radiusX: 4, radiusY: 4, force: 1, id: 1 }]
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: point(sx, sy) })
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchMove', touchPoints: point(sx + firstDx, sy + firstDy),
+  })
+  for (let i = 1; i <= 10; i += 1) {
+    const t = i / 10
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: point(
+        sx + firstDx + (toX - sx - firstDx) * t,
+        sy + firstDy + (toY - sy - firstDy) * t,
+      ),
+    })
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  await cdp.detach()
+}
+
+async function bootThreeTab(page, tag, workspaceFixture = twoPanesThreeTabs, expectTiled = true) {
   await boot(page, WIDE)
   // These cases exercise full-width three-pane geometry. The persistent
   // sidebar legitimately reduces the usable content rect, so make the
@@ -546,9 +718,10 @@ async function bootThreeTab(page, tag) {
   const b = await createTaggedChat(page, `${tag}B`)
   const c = await createTaggedChat(page, `${tag}C`)
   await mockApps(page, [])
-  await seedWorkspace(page, twoPanesThreeTabs(a.id, b.id, c.id))
+  await seedWorkspace(page, workspaceFixture(a.id, b.id, c.id))
   await page.goto(`${BASE}/shell/?chat=${c.id}`, { waitUntil: 'domcontentloaded' })
-  await waitTiled(page)
+  if (expectTiled) await waitTiled(page)
+  else await expect(page.locator('[data-pane-strip="p0"]')).toBeVisible({ timeout: 8000 })
   return { a, b, c }
 }
 
@@ -614,6 +787,38 @@ test.describe('Workspace drag (PR3)', () => {
     expect(Object.keys(after.panes).length).toBe(Object.keys(before.panes).length)
   })
 
+  test('a cancelled drag cannot swallow the next intentional tab press', async ({ page }) => {
+    const { a, c } = await bootThreeTab(page, 'dragThenPress')
+    const source = page.locator(
+      `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${a.id}"]`,
+    )
+    const box = await source.boundingBox()
+    const x = box.x + box.width / 2
+    const y = box.y + box.height / 2
+
+    // Use a synthetic pointer stream so Chromium emits no compatibility click.
+    // This leaves the controller's one-shot click guard standing after Escape,
+    // exactly like browsers/devices that suppress the drag's compat click.
+    await source.dispatchEvent('pointerdown', {
+      pointerId: 91, pointerType: 'mouse', isPrimary: true,
+      button: 0, buttons: 1, clientX: x, clientY: y,
+    })
+    await source.dispatchEvent('pointermove', {
+      pointerId: 91, pointerType: 'mouse', isPrimary: true,
+      button: 0, buttons: 1, clientX: x + 10, clientY: y,
+    })
+    await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.workspace__drag-chip')).toHaveCount(0)
+    expect((await readWs(page)).panes.p0.activeTabKey).toBe(`chat:${c.id}`)
+
+    // A new physical press is user intent, never the old drag's compat click.
+    await source.click()
+    await expect.poll(async () => (await readWs(page)).panes.p0.activeTabKey, {
+      timeout: 3000, message: 'the first fresh press activates the requested tab',
+    }).toBe(`chat:${a.id}`)
+  })
+
   test('the undo chord restores a mis-dropped tab', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragUndo')
     const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
@@ -634,21 +839,150 @@ test.describe('Workspace drag (PR3)', () => {
     ).toBe('p0')
   })
 
-  // Touch long-press lift → drag cannot be expressed with Playwright's mouse
-  // pointer input (no synthetic touch hold in this harness), and the existing
-  // specs simulate only mouse/keyboard. The hold/slop thresholds and the touch
-  // escalation (hold→release-in-place = menu) are covered as pure predicates in
-  // dragController.test.js; a device path would need real touch events.
-  test.skip('touch long-press lifts a tab into a drag', async () => {
-    // Intentionally skipped — no touch-hold primitive in the mocked harness.
+  test('phone touch-drag moves a tab between stacked panes without a long press', async ({ page }) => {
+    const { c, b } = await bootThreeTab(page, 'touchDrag')
+    await page.setViewportSize(PHONE)
+    await expect(page.locator('[data-pane-strip="p1"]')).toBeVisible({ timeout: 4000 })
+    const target = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
+    const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
+    await touchDrag(page, src, target.x + target.width / 2, target.y + target.height / 2)
+    await expect.poll(
+      async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
+      { timeout: 3000, message: 'the real touch stream moved C into the lower pane' },
+    ).toBe('p1')
+  })
+
+  test('phone horizontal touch-drag reorders tabs in the same strip', async ({ page }) => {
+    const { a, c } = await bootThreeTab(page, 'touchReorder')
+    await page.setViewportSize(PHONE)
+    const target = await page.locator(
+      `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${a.id}"]`,
+    ).boundingBox()
+    const src = page.locator(
+      `[data-pane-strip="p0"] [data-touch-drag-handle="chat:${c.id}"]`,
+    )
+    await expect(src).toHaveClass(/shell__tab-kind/)
+    await expect(page.locator('.shell__tab-drag-handle')).toHaveCount(0)
+    await touchDrag(page, src, target.x + 2, target.y + target.height / 2, {
+      firstDx: -12, firstDy: 0,
+    })
+    await expect.poll(async () => (await readWs(page)).panes.p0.tabs
+      .map(t => `${t.kind}:${t.id}`), {
+      timeout: 3000, message: 'the real horizontal touch stream reordered p0',
+    }).toEqual([`chat:${c.id}`, `chat:${a.id}`])
+  })
+
+  test('phone horizontal swipe over a tab body scrolls overflow without reordering', async ({ page }) => {
+    const { a, b, c } = await bootThreeTab(
+      page, 'touchScroll', singlePaneThreeTabs, false,
+    )
+    await page.setViewportSize(PHONE)
+    const strip = page.locator('[data-pane-strip="p0"]')
+    await expect.poll(() => strip.evaluate(el => el.scrollWidth > el.clientWidth), {
+      timeout: 3000, message: 'the phone strip has horizontal overflow',
+    }).toBe(true)
+    const beforeOrder = (await readWs(page)).panes.p0.tabs.map(t => `${t.kind}:${t.id}`)
+    const beforeScroll = await strip.evaluate(el => el.scrollLeft)
+    const stripBox = await strip.boundingBox()
+    const body = page.locator(
+      `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${b.id}"] .shell__tab-text`,
+    )
+    await touchDrag(page, body, stripBox.x + 20, stripBox.y + stripBox.height / 2, {
+      firstDx: -12, firstDy: 0,
+    })
+    await expect.poll(() => strip.evaluate(el => el.scrollLeft), {
+      timeout: 3000, message: 'native pan-x advances the overflowed strip',
+    }).toBeGreaterThan(beforeScroll + 20)
+    expect((await readWs(page)).panes.p0.tabs.map(t => `${t.kind}:${t.id}`))
+      .toEqual(beforeOrder)
+    await expect(page.locator('.workspace__drag-chip')).toHaveCount(0)
+    expect(beforeOrder).toEqual([`chat:${a.id}`, `chat:${b.id}`, `chat:${c.id}`])
+
+    // A conventional vertical mouse wheel reaches the same hidden overflow;
+    // trackpad deltaX remains native and is deliberately not doubled.
+    await strip.evaluate(el => { el.scrollLeft = 0 })
+    await strip.dispatchEvent('wheel', { deltaX: 0, deltaY: 96, deltaMode: 0 })
+    await expect.poll(() => strip.evaluate(el => el.scrollLeft), {
+      timeout: 3000, message: 'vertical wheel advances the horizontal tab strip',
+    }).toBeGreaterThan(50)
+  })
+
+  test('phone touch-drag resizes the pane divider', async ({ page }) => {
+    await bootThreeTab(page, 'touchResize', twoStackedPanesThreeTabs)
+    await page.setViewportSize(PHONE)
+    const divider = page.locator('.workspace__divider').first()
+    await expect(divider).toBeVisible({ timeout: 4000 })
+    const before = (await readWs(page)).layout.ratio
+    const box = await divider.boundingBox()
+    await touchDrag(page, divider, box.x + box.width / 2, box.y + box.height / 2 + 90)
+    await expect.poll(async () => (await readWs(page)).layout.ratio, {
+      timeout: 3000, message: 'the real touch stream resized the stacked panes',
+    }).not.toBe(before)
+  })
+
+  test('the focused active title reveals once, returns to its start, and restarts on reopen', async ({ page }) => {
+    const { a, c } = await bootThreeTab(page, 'aVeryLongActiveChatTitle')
+    await page.setViewportSize(PHONE)
+    const title = page.locator(
+      `[data-pane-strip="p0"] [data-drag-key="chat:${c.id}"] .shell__tab-text`,
+    )
+    await expect(title).toHaveAttribute('data-overflow', 'true', { timeout: 3000 })
+    const motion = await title.evaluate(el => {
+      const inner = el.querySelector('.shell__tab-text-inner')
+      const style = getComputedStyle(inner)
+      return {
+        name: style.animationName,
+        iterations: style.animationIterationCount,
+        duration: style.animationDuration,
+        delay: style.animationDelay,
+        shift: parseFloat(el.style.getPropertyValue('--tab-title-shift')),
+      }
+    })
+    expect(motion.name).toBe('shell-tab-title-cycle')
+    expect(motion.iterations).toBe('1')
+    const durationMs = Number.parseFloat(motion.duration) * 1000
+    const expectedDurationMs = Math.min(
+      32000,
+      Math.max(8000, Math.round(Math.abs(motion.shift) * (1000 / 6))),
+    )
+    expect(durationMs).toBeCloseTo(expectedDurationMs, -1)
+    expect(durationMs).toBeGreaterThan(4800)
+    expect(motion.delay).toBe('0.7s')
+    expect(motion.shift).toBeLessThan(0)
+
+    // Jump the bounded animation to completion: its filled final frame is the
+    // beginning of the title, and it remains finished rather than looping.
+    const final = await title.evaluate(async (el) => {
+      const inner = el.querySelector('.shell__tab-text-inner')
+      const animation = inner.getAnimations()[0]
+      animation.finish()
+      await new Promise(resolve => requestAnimationFrame(resolve))
+      return { transform: getComputedStyle(inner).transform, playState: animation.playState }
+    })
+    expect(final.playState).toBe('finished')
+    expect(['none', 'matrix(1, 0, 0, 1, 0, 0)']).toContain(final.transform)
+
+    // Opening another tab removes the animation; reopening this one creates a
+    // fresh bounded pass from the beginning.
+    await page.locator(`[data-pane-strip="p0"] [data-drag-key="chat:${a.id}"]`).click()
+    await page.locator(`[data-pane-strip="p0"] [data-drag-key="chat:${c.id}"]`).click()
+    await expect(page.locator(
+      `[data-pane-strip="p0"] [data-drag-key="chat:${c.id}"]`,
+    )).toHaveAttribute('aria-selected', 'true')
+    const restarted = await title.evaluate((el) => {
+      const animation = el.querySelector('.shell__tab-text-inner').getAnimations()[0]
+      return { playState: animation?.playState, currentTime: animation?.currentTime }
+    })
+    expect(restarted.playState).toBe('running')
+    expect(restarted.currentTime).toBeLessThan(1500)
   })
 })
 
 /**
- * View-mode control (design: builder-mode activation). There is NO standalone
- * toggle button — the top-left LOGO is the control (a hold, a touch swipe-right,
- * or the Shift+Enter keyboard path flips 'panes' <-> 'single'; builder mode is the
- * accent .shell__brand--builder state). Single-mode collapses the preserved tree to
+ * View-mode control (design: builder-mode activation). Hold/swipe the top-left
+ * Möbius brand or drag from the drawer; there is deliberately no second header icon.
+ * Shift+Enter remains the keyboard path. Builder mode is
+ * the accent .shell__brand--builder state. Single-mode collapses the preserved tree to
  * the focused pane full-bleed WITHOUT rewriting the persisted geometry, so a
  * round-trip restores the identical tree. The one blob field a first flip DOES
  * write is the two-worlds `singleScreen` slot — seeded once from the focused
@@ -659,6 +993,19 @@ test.describe('Workspace drag (PR3)', () => {
  * non-splitting (center-join) drop does not.
  */
 test.describe('Workspace view-mode toggle', () => {
+  test('the header never renders a standalone panes button', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'modeButtonA')
+    const b = await createTaggedChat(page, 'modeButtonB')
+    await mockApps(page, [])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    await expect(page.locator('.shell__mode-toggle')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Use (panes|single screen)/ })).toHaveCount(0)
+  })
+
   test('the logo gesture flips to single (geometry preserved, one pane) and back', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmA')
@@ -671,8 +1018,7 @@ test.describe('Workspace view-mode toggle', () => {
     const baseline = await readWs(page)
     expect(baseline.viewMode).toBe('panes')
 
-    // The mode control is the logo (no standalone toggle). Flip via its keyboard
-    // path (Shift+Enter) — the deterministic equivalent of a hold. It must NOT
+    // Exercise the logo's keyboard shortcut (Shift+Enter). It must NOT
     // change the navigation state: no modal drawer opens, and the persistent
     // desktop sidebar (WIDE viewport) keeps its aria-expanded.
     const brand = page.getByRole('button', { name: 'Toggle navigation' })
@@ -1096,15 +1442,23 @@ test.describe('Builder-mode Settings', () => {
     await page.getByRole('button', { name: 'Toggle navigation' }).focus()
     await page.keyboard.press('Shift+Enter')
 
-    // Entering single: the Settings tab STAYS in the preserved tree (identity
-    // pinned to its original pane). The slot seed skips a Settings-focused pane
-    // (Settings never occupies the slot); the flip-site home resolution then
-    // seeds the freshest CHAT so the single world never paints the blank home —
-    // and never a Settings takeover.
+    // Entering single: the Settings tab STAYS in the preserved tree (identity pinned
+    // to its original pane). The slot seed skips a Settings-focused pane (Settings never
+    // occupies the slot); the flip lands on the first-class New Chat landing (round 4
+    // item 3) — the reusable active empty chat is materialized after the beat — so the
+    // single world shows its OWN empty New-Chat screen, never a Settings takeover and
+    // never the freshest OTHER transcript.
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
+    // The New Chat empty surface (What's on your mind?) shows, not a Settings takeover.
+    // Scope to the VISIBLE full-bleed surface — the preserved builder chat panes sit
+    // mounted-but-hidden and also carry an empty title.
+    await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible({ timeout: 3000 })
     const single = await readWs(page)
     expect(whichPaneHas(single, 'settings:settings'), 'Settings tab survives entering single').toBe(settingsPane)
-    expect(single.singleScreen?.kind, 'the slot resolves to a chat home, never Settings').toBe('chat')
+    // The empty single world is the New Chat landing — a null slot before the row
+    // materializes, or a chat home after — NEVER Settings.
+    expect(single.singleScreen == null || single.singleScreen?.kind === 'chat',
+      'the empty single world is the New Chat landing, never Settings').toBe(true)
     await expect(page.locator('.shell__settings-view.shell__view--active')).toHaveCount(0)
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
 

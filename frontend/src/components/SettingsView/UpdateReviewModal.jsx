@@ -42,12 +42,21 @@ function commitCountLabel(count) {
   return `${count} ${count === 1 ? 'commit' : 'commits'}`
 }
 
-export default function UpdateReviewModal({ onClose, onApply, applying, applyError }) {
+export default function UpdateReviewModal({
+  onClose,
+  onApply,
+  onResolve,
+  applying,
+  resolving,
+  applyError,
+}) {
   const [preview, setPreview] = useState(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
+  const [resultState, setResultState] = useState('')
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
+  const resultActionRef = useRef(null)
 
   const loadPreview = useCallback(async () => {
     setLoading(true)
@@ -66,23 +75,39 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
   useEffect(() => { loadPreview() }, [loadPreview])
 
   const requestClose = useCallback(() => {
-    if (!applying) onClose()
-  }, [applying, onClose])
+    if (!applying && !resolving) onClose()
+  }, [applying, onClose, resolving])
 
-  // Escape and backdrop dismissal remain disabled while an update is applying.
+  // Escape and backdrop dismissal remain disabled while an update or resolver
+  // request is in flight.
   useDialogFocus({
     containerRef: dialogRef,
     initialFocusRef: closeRef,
     onClose: requestClose,
-    closeOnEscape: !applying,
+    closeOnEscape: !applying && !resolving,
   })
 
   const handleApply = useCallback(async () => {
-    const ok = await onApply()
-    // On success the caller advances the row to "Restart to finish"; close so
-    // the owner sees that next step. On failure applyError renders in the sheet.
-    if (ok) onClose()
+    const result = await onApply()
+    // A successful request can still mean the update was blocked. Keep the
+    // reviewed sheet open and show that honest outcome in place; only a clean
+    // apply closes automatically and advances Settings to its next step.
+    if (result?.state === 'conflict' || result?.state === 'rolled_back') {
+      setResultState(result.state)
+      return
+    }
+    if (
+      result?.ok
+      && (result.state === 'restart_needed' || result.state === 'up_to_date')
+    ) onClose()
   }, [onApply, onClose])
+
+  // Applying replaces the focused Apply button with a result surface. Focus a
+  // real action in that surface so both Tab directions remain inside the
+  // dialog; the result notice announces the outcome through role=status.
+  useEffect(() => {
+    if (resultState) resultActionRef.current?.focus({ preventScroll: true })
+  }, [resultState])
 
   const summary = summarizePreview(preview)
   const trivial = preview && isTrivialUpdate(preview)
@@ -96,6 +121,10 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
   // A preview that resolved to "not available" (e.g. the update landed from
   // another surface between status and open) has nothing to apply.
   const notAvailable = preview && preview.available === false && !loadError
+  const hasResult = resultState === 'conflict' || resultState === 'rolled_back'
+  const resultTitle = resultState === 'rolled_back'
+    ? 'Update rolled back'
+    : 'Update not applied'
 
   const summaryBits = []
   if (summary.commitCount) summaryBits.push(commitCountLabel(summary.commitCount))
@@ -109,25 +138,28 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
     >
       <div
         ref={dialogRef}
-        className="urm"
+        className={`urm${hasResult ? ' urm--result' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="urm-title"
+        tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="urm__head">
-          <h2 id="urm-title" className="urm__title">Review update</h2>
+          <h2 id="urm-title" className="urm__title">
+            {hasResult ? resultTitle : 'Review update'}
+          </h2>
           <button
             ref={closeRef}
             type="button"
             className="urm__close"
             onClick={requestClose}
             aria-label="Close"
-            disabled={applying}
+            disabled={applying || resolving}
           >×</button>
         </div>
 
-        {!loadError && target && (
+        {!hasResult && !loadError && target && (
           <p className="urm__subtext">
             Updating Möbius to <code className="urm__sha">{target}</code>.
             {summaryBits.length ? ` ${summaryBits.join(' · ')}.` : ''}
@@ -135,7 +167,20 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
         )}
 
         <div className="urm__body">
-          {loading && (
+          {hasResult ? (
+            <div className="urm__notice urm__notice--result" role="status">
+              <strong>
+                {resultState === 'rolled_back'
+                  ? 'Your previous working version was restored.'
+                  : 'Your current version is still running.'}
+              </strong>
+              <span>
+                {resultState === 'rolled_back'
+                  ? 'The updated version could not start cleanly, so Möbius rolled it back. The update needs repair before it can land.'
+                  : 'Local changes overlap the new version, so Möbius left the working installation untouched. Resolve the overlap in chat when you’re ready.'}
+              </span>
+            </div>
+          ) : loading && (
             <div className="urm__skeleton" aria-hidden="true">
               <div className="urm__skeleton-row" />
               <div className="urm__skeleton-row" />
@@ -143,26 +188,26 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
             </div>
           )}
 
-          {!loading && loadError && (
+          {!hasResult && !loading && loadError && (
             <div className="urm__notice" role="status">
               Couldn’t load the change preview. You can try again, or apply the
               update without reviewing it.
             </div>
           )}
 
-          {!loading && !loadError && notAvailable && (
+          {!hasResult && !loading && !loadError && notAvailable && (
             <div className="urm__notice" role="status">
               This instance is already up to date — there’s nothing to apply.
             </div>
           )}
 
-          {!loading && !loadError && !notAvailable && trivial && (
+          {!hasResult && !loading && !loadError && !notAvailable && trivial && (
             <div className="urm__notice" role="status">
               No file changes to review — this update just advances the version.
             </div>
           )}
 
-          {!loading && !loadError && !notAvailable && !trivial && (
+          {!hasResult && !loading && !loadError && !notAvailable && !trivial && (
             <>
               {commits.length > 0 && (
                 <section className="urm__section">
@@ -193,19 +238,42 @@ export default function UpdateReviewModal({ onClose, onApply, applying, applyErr
         </div>
 
         {applyError && (
-          <Alert color="danger" variant="soft" description={applyError} />
+          <div className="urm__error">
+            <Alert color="danger" variant="soft" description={applyError} />
+          </div>
         )}
 
         <div className="urm__foot">
-          <button
-            type="button"
-            className="urm__btn urm__btn--ghost"
-            onClick={requestClose}
-            disabled={applying}
-          >
-            Not now
-          </button>
-          {loadError ? (
+          {resultState !== 'rolled_back' && (
+            <button
+              type="button"
+              className="urm__btn urm__btn--ghost"
+              onClick={requestClose}
+              disabled={applying || resolving}
+            >
+              Not now
+            </button>
+          )}
+          {resultState === 'conflict' ? (
+            <button
+              ref={resultActionRef}
+              type="button"
+              className="urm__btn"
+              onClick={onResolve}
+              disabled={applying || resolving}
+            >
+              {resolving ? 'Opening…' : 'Resolve in chat'}
+            </button>
+          ) : resultState === 'rolled_back' ? (
+            <button
+              ref={resultActionRef}
+              type="button"
+              className="urm__btn"
+              onClick={requestClose}
+            >
+              Done
+            </button>
+          ) : loadError ? (
             <div className="urm__foot-actions">
               <button
                 type="button"

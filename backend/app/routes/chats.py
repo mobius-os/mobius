@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func
+from sqlalchemy import Text, case, cast, func
 from sqlalchemy.orm import Session
 
 from app import activity, auth, models, providers, questions
@@ -56,6 +56,37 @@ app_chat_router = APIRouter(prefix="/api/app-chats", tags=["app-chats"])
 # because there's nothing to recover — content lived only in the
 # browser's sessionStorage, which is the user's problem to preserve.
 EMPTY_CHAT_GRACE = timedelta(hours=24)
+
+# The expanded tool UI renders at most this much text. Slice in SQLite so a
+# multi-megabyte result is never materialized in the API process or browser just
+# to paint the preview. Read one extra sentinel character to detect truncation
+# without making SQLite scan the full value with ``length()``. The exact value
+# remains available through the same endpoint when the user explicitly copies.
+TOOL_OUTPUT_PREVIEW_CHARS = 20_000
+THINKING_TRACE_PREVIEW_CHARS = 20_000
+
+
+def _drain_writer_before_sidecar_read(
+  db: Session,
+  chat_id: str,
+  sidecar: str,
+) -> None:
+  """Fence queued sidecar writes and refresh the request's read snapshot."""
+  from app.chat_writer import ACK_TIMEOUT_SECS, Barrier, get_writer
+
+  try:
+    get_writer().submit(Barrier()).result(timeout=ACK_TIMEOUT_SECS)
+  except Exception as exc:
+    log.warning("%s barrier failed for chat %s: %s", sidecar, chat_id, exc)
+    raise HTTPException(
+      status_code=503,
+      detail=f"{sidecar} is temporarily unavailable",
+    )
+
+  # Authentication dependencies may already have opened a read transaction on
+  # this request-scoped session. End that read-only snapshot after the barrier
+  # so the query can see the writer's just-committed stash.
+  db.rollback()
 
 
 def _purge_chat_dir(chat_id: str) -> None:
@@ -231,6 +262,28 @@ def _owner_chat_summary(chat: models.Chat) -> dict:
   }
 
 
+def _owner_chat_summary_projection(chat) -> dict:
+  """Serialize the lightweight row projection used by the drawer list.
+
+  ``GET /api/chats`` used to hydrate every complete ``Chat`` ORM object merely
+  to return eight summary fields. On a long-lived instance that decoded tens of
+  megabytes of transcript JSON on every drawer open and chat switch, contending
+  with the selected chat's small detail read. Keep transcript inspection inside
+  the database (``message_count``) and never materialize ``messages`` here.
+  """
+  return {
+    "id": chat.id,
+    "title": chat.title,
+    "updated_at": chat.updated_at.isoformat(),
+    "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
+    "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
+    "has_messages": bool(chat.message_count),
+    "created_by_app_id": chat.created_by_app_id,
+    "run_status": chat.run_status,
+    "running": chat.run_status == "running" or is_chat_running(chat.id),
+  }
+
+
 def _chat_detail_response(
   chat: models.Chat,
   *,
@@ -388,7 +441,33 @@ def list_chats(
   # a `desc()` on a nullable column would put NULL last under our
   # SQLite collation, but making the boolean explicit is clearer and
   # portable.
-  q = db.query(models.Chat).filter(models.Chat.deleted_at.is_(None))
+  # Drawer projection only. Selecting the Chat entity here hydrates its full
+  # ``messages`` JSON column even though the response needs only a boolean; on
+  # this owner's history that was ~47 MB of JSON decoding per refresh. Compare
+  # the canonical serialized empty-array value in SQL instead of parsing every
+  # JSON array with json_array_length: Chat.messages is a non-null list written
+  # by SQLAlchemy's canonical serializer, and CAST(... AS TEXT) is portable
+  # across SQLite and PostgreSQL. A future raw-import path must normalize JSON
+  # text first (PostgreSQL's json type preserves whitespace such as ``[ ]``).
+  # The database can reject non-empty values from their stored length without
+  # walking every transcript.
+  q = db.query(
+    models.Chat.id,
+    models.Chat.title,
+    models.Chat.updated_at,
+    models.Chat.activity_at,
+    models.Chat.pinned_at,
+    models.Chat.created_by_app_id,
+    # App-created owner-visible chats carry their visibility bit here. Owner
+    # chats normally keep this NULL, so this remains a tiny projection rather
+    # than pulling transcript/runtime JSON into the hot path.
+    models.Chat.agent_settings_json,
+    models.Chat.run_status,
+    case(
+      (cast(models.Chat.messages, Text) != "[]", 1),
+      else_=0,
+    ).label("message_count"),
+  ).filter(models.Chat.deleted_at.is_(None))
   chats = (
     q.order_by(
       models.Chat.pinned_at.is_(None),
@@ -402,7 +481,7 @@ def list_chats(
     # embedded app panels and stay hidden; an app can opt a spawned, first-class
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
-  return [_owner_chat_summary(c) for c in chats]
+  return [_owner_chat_summary_projection(c) for c in chats]
 
 
 @router.get("/session-links")
@@ -864,14 +943,21 @@ def get_chat(
 def get_tool_output_by_id(
   chat_id: str,
   tool_use_id: str,
+  preview: bool = False,
   principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ) -> PlainTextResponse:
-  """Returns the FULL text of a large tool block, fetched lazily on expand
-  (contract rule 6). A block ships only a bounded excerpt in the chat-load
-  payload and the live stream; the full output is stashed in ``tool_outputs``
-  keyed by the tool's stable ``tool_use_id``. A 404 (a dropped/absent stash)
-  tells the client to keep showing the inline excerpt.
+  """Return a large tool block's bounded preview or exact full text.
+
+  A block ships only a bounded excerpt in the chat-load payload and live
+  stream. Expansion requests ``preview=1``; explicit copy omits it. Before
+  reading, a writer barrier drains every stash already queued ahead of the
+  request. Since the final tool event queues its stash before it is broadcast,
+  a client reacting to that event cannot observe an older intermediate row.
+
+  A missing row is temporarily pending while the chat runs and terminal once
+  it settles. This prevents a brief writer delay from becoming a permanently
+  cached 404 in the open disclosure.
 
   This is the sole tool-output fetch path: every large block carries a
   ``tool_use_id`` (both SDK runners tag universally, and card-221 migrated all
@@ -880,13 +966,42 @@ def get_tool_output_by_id(
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:read")
   get_active_chat_for_principal(db, chat_id, principal)
-  row = db.query(models.ToolOutput).filter(
+
+  # This sync route runs in FastAPI's worker pool, so waiting on the concurrent
+  # Future does not block the event loop.
+  _drain_writer_before_sidecar_read(db, chat_id, "tool output")
+  # The barrier refreshes the request transaction. Recheck the chat so a
+  # concurrent soft-delete cannot expose a sidecar after its parent vanished.
+  get_active_chat_for_principal(db, chat_id, principal)
+  query = db.query(models.ToolOutput).filter(
     models.ToolOutput.chat_id == chat_id,
     models.ToolOutput.tool_use_id == tool_use_id,
-  ).first()
+  )
+  if preview:
+    row = query.with_entities(
+      func.substr(models.ToolOutput.output, 1, TOOL_OUTPUT_PREVIEW_CHARS + 1),
+    ).first()
+  else:
+    row = query.first()
   if row is None:
+    if is_chat_running(chat_id):
+      return Response(status_code=202, headers={"Retry-After": "1"})
     raise HTTPException(status_code=404, detail="tool output not found")
-  return PlainTextResponse(row.output or "")
+
+  if preview:
+    output = (row[0] or "")
+    preview_complete = len(output) <= TOOL_OUTPUT_PREVIEW_CHARS
+    return PlainTextResponse(
+      output[:TOOL_OUTPUT_PREVIEW_CHARS],
+      headers={
+        "Cache-Control": "private, no-store",
+        "X-Tool-Output-Complete": "1" if preview_complete else "0",
+      },
+    )
+  return PlainTextResponse(
+    row.output or "",
+    headers={"Cache-Control": "private, no-store"},
+  )
 
 
 @router.get(
@@ -897,27 +1012,66 @@ def get_thinking_trace_by_id(
   chat_id: str,
   thinking_id: str,
   revision: int = 0,
+  preview: bool = False,
   principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ) -> Response:
-  """Return one deferred reasoning run when its nested row is expanded."""
+  """Return a deferred reasoning preview or explicitly requested full trace."""
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:read")
   get_active_chat_for_principal(db, chat_id, principal)
-  row = db.query(models.ThinkingTrace).filter(
+  _drain_writer_before_sidecar_read(db, chat_id, "thinking trace")
+  get_active_chat_for_principal(db, chat_id, principal)
+  query = db.query(models.ThinkingTrace).filter(
     models.ThinkingTrace.chat_id == chat_id,
     models.ThinkingTrace.thinking_id == thinking_id,
-  ).first()
+  )
+  if preview:
+    row = query.with_entities(
+      func.substr(
+        models.ThinkingTrace.content,
+        1,
+        THINKING_TRACE_PREVIEW_CHARS + 1,
+      ),
+      models.ThinkingTrace.revision,
+      models.ThinkingTrace.complete,
+    ).first()
+  else:
+    row = query.first()
   requested = max(0, revision)
-  if row is None or int(row.revision or 0) < requested:
+  if row is None:
     if is_chat_running(chat_id):
       return Response(status_code=202, headers={"Retry-After": "1"})
     raise HTTPException(status_code=404, detail="thinking trace not found")
+
+  if preview:
+    content, stored_revision, complete = row
+  else:
+    stored_revision = row.revision
+  row_revision = int(stored_revision or 0)
+  if row_revision < requested:
+    if is_chat_running(chat_id):
+      return Response(status_code=202, headers={"Retry-After": "1"})
+    raise HTTPException(status_code=404, detail="thinking trace not found")
+
+  if preview:
+    content = content or ""
+    preview_complete = len(content) <= THINKING_TRACE_PREVIEW_CHARS
+    return PlainTextResponse(
+      content[:THINKING_TRACE_PREVIEW_CHARS],
+      headers={
+        "Cache-Control": "private, no-store",
+        "X-Thinking-Revision": str(row_revision),
+        "X-Thinking-Complete": "1" if complete else "0",
+        "X-Thinking-Preview-Complete": "1" if preview_complete else "0",
+      },
+    )
   return PlainTextResponse(
     row.content or "",
     headers={
-      "X-Thinking-Revision": str(row.revision or 0),
+      "Cache-Control": "private, no-store",
+      "X-Thinking-Revision": str(row_revision),
       "X-Thinking-Complete": "1" if row.complete else "0",
     },
   )
@@ -1060,7 +1214,7 @@ async def delete_chat(
   # run_status + drops the actor's _run_token_owner entry; it is best-effort
   # and safe on a soft-deleted row (clear commands don't resurrect), and
   # idempotent when the run state is already clean (the common idle delete).
-  await _clear_run_status(chat_id)
+  await _clear_run_status(chat_id, terminal_status="stopped")
 
 
 @router.post("/{chat_id}/recover", dependencies=[Depends(reject_cross_site)])

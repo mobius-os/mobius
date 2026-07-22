@@ -345,6 +345,92 @@ def test_steer_into_active_turn_reraises_real_errors():
     asyncio.run(_scenario())
 
 
+def test_concurrent_steer_is_refused_while_ack_is_pending():
+  """Only the steer that atomically won admission reaches the provider."""
+  async def _scenario() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _BlockingTurn(_FakeTurnHandle):
+      async def steer(self, message: str):
+        self.steered.append(message)
+        entered.set()
+        await release.wait()
+
+    turn = _BlockingTurn()
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), turn, chat_id="atomic-steer",
+    )
+    registry.register(active)
+    try:
+      first = asyncio.create_task(codex_sdk_runner.steer_into_active_turn(
+        "atomic-steer", "first",
+      ))
+      await asyncio.wait_for(entered.wait(), timeout=1)
+      assert active.steer_in_flight
+      assert await codex_sdk_runner.steer_into_active_turn(
+        "atomic-steer", "second",
+      ) is False
+      assert turn.steered == ["first"]
+
+      release.set()
+      assert await asyncio.wait_for(first, timeout=1) is True
+      assert not active.steer_in_flight
+    finally:
+      registry.unregister("atomic-steer", RunnerKind.CODEX_SDK)
+
+  asyncio.run(_scenario())
+
+
+def test_question_losing_steer_admission_race_never_parks():
+  """The sole SDK reader must not park before routing a steer response."""
+  class _Bc:
+    run_token = None
+
+    async def publish_question(self, _event):
+      raise AssertionError("losing question must not persist or broadcast")
+
+  class _SyncClient:
+    _approval_handler = None
+
+  class _Inner:
+    _sync = _SyncClient()
+
+  class _FakeCodex:
+    _client = _Inner()
+
+  async def _scenario() -> None:
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), _FakeTurnHandle(), chat_id="steer-question-race",
+    )
+    active._steer_in_flight = True
+    registry.register(active)
+    pending: dict = {}
+    try:
+      codex_sdk_runner._install_request_user_input_handler(
+        _FakeCodex(),
+        loop=asyncio.get_running_loop(),
+        chat_id="steer-question-race",
+        bc=_Bc(),
+        pending_questions=pending,
+        db=None,
+      )
+      result = await asyncio.to_thread(
+        _FakeCodex._client._sync._approval_handler,
+        "item/tool/requestUserInput",
+        {"questions": [{"id": "q1", "question": "Proceed?"}]},
+      )
+      assert result == {"error": {"message": (
+        "Question superseded by steering input; continue with the new input."
+      )}}
+      assert pending == {}
+    finally:
+      active._steer_in_flight = False
+      registry.unregister("steer-question-race", RunnerKind.CODEX_SDK)
+
+  asyncio.run(_scenario())
+
+
 def test_active_codex_turn_interrupt_waits_for_runner_finish():
   async def _scenario() -> None:
     turn = _FakeTurnHandle()
@@ -1295,6 +1381,30 @@ def test_persist_session_id_records_codex_link(db):
   assert link is not None
   assert link.chat_id == "codex-persist"
   assert link.first_seen_at == link.last_seen_at
+
+
+def test_persist_session_id_skips_synthetic_turn_without_db(monkeypatch, caplog):
+  # Reflection invokes the shared Codex runner with a synthetic chat id and no
+  # database session. It has no Chat row to update and must not initialize the
+  # chat writer/session-link stack (which also requires the web app's secrets).
+  from app import chat_writer, session_links
+
+  def fail_writer_lookup():
+    raise AssertionError("synthetic turn must not initialize the chat writer")
+
+  async def fail_link_write(*_args, **_kwargs):
+    raise AssertionError("synthetic turn must not record a chat session link")
+
+  monkeypatch.setattr(chat_writer, "get_writer", fail_writer_lookup)
+  monkeypatch.setattr(session_links, "record_session_link_async", fail_link_write)
+
+  asyncio.run(
+    codex_sdk_runner._persist_session_id(
+      None, "reflection-nightly", "thread-synthetic",
+    )
+  )
+
+  assert "Codex session id persistence failed" not in caplog.text
 
 
 def test_codex_config_overrides_default_pins_agents_namespace(monkeypatch):

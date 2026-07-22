@@ -27,6 +27,9 @@ import {
   thinkingElapsedMs,
   attachToolSources,
   reconcileStreamItems,
+  appendTextItem,
+  repairInterleavedQuestionText,
+  replaceTextItem,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
 
@@ -42,6 +45,73 @@ function questionEvent(id, text) {
     questions: [{ question: text, options: [{ label: 'A' }, { label: 'B' }] }],
   }
 }
+
+test('text item identity keeps late deltas before an interleaved question', () => {
+  let items = appendTextItem([], 'Build it', { textItemId: 'msg-1' })
+  items = upsertQuestionItem(items, questionEvent('q1', 'Proceed?'))
+  items = appendTextItem(items, ' safely', { textItemId: 'msg-1' })
+  items = replaceTextItem(items, 'Build it safely', { textItemId: 'msg-1' })
+
+  assert.deepEqual(items.map(item => item.type), ['text', 'question'])
+  assert.equal(items[0].content, 'Build it safely')
+  assert.equal(items[1].question_id, 'q1')
+})
+
+test('legacy full text repairs prefix-question-suffix catch-up order', () => {
+  const items = replaceTextItem([
+    { type: 'text', content: 'Build it' },
+    questionEvent('q1', 'Proceed?'),
+    { type: 'text', content: ' safely' },
+  ], 'Build it safely')
+
+  assert.deepEqual(items.map(item => item.type), ['text', 'question'])
+  assert.equal(items[0].content, 'Build it safely')
+})
+
+test('full text with mismatched identity stays before an unanswered question', () => {
+  const items = replaceTextItem([
+    { type: 'text', content: 'Review res', text_item_id: 'delta-item' },
+    questionEvent('q1', 'Harden it?'),
+  ], 'Review result', { textItemId: 'completed-item' })
+
+  assert.deepEqual(items.map(item => item.type), ['text', 'question'])
+  assert.equal(items[0].content, 'Review result')
+  assert.equal(items[1].question_id, 'q1')
+})
+
+test('boundary plus final-only item does not replace the preceding text', () => {
+  const items = replaceTextItem([
+    { type: 'text', content: 'first item' },
+  ], 'second item', { textItemId: 'msg-2', forceNew: true })
+
+  assert.deepEqual(items, [
+    { type: 'text', content: 'first item' },
+    { type: 'text', content: 'second item', text_item_id: 'msg-2' },
+  ])
+})
+
+test('persisted prefix-question-full duplication is repaired for display', () => {
+  const stored = [
+    { type: 'text', content: 'Review res' },
+    questionEvent('q1', 'Harden it?'),
+    { type: 'text', content: 'Review result' },
+  ]
+  const repaired = repairInterleavedQuestionText(stored)
+
+  assert.deepEqual(repaired.map(item => item.type), ['text', 'question'])
+  assert.equal(repaired[0].content, 'Review result')
+  assert.equal(stored.length, 3, 'the stored transcript is not mutated')
+})
+
+test('answered question boundaries preserve deliberate later text', () => {
+  const stored = [
+    { type: 'text', content: 'Before' },
+    { ...questionEvent('q1', 'Proceed?'), answers: { 'Proceed?': 'Yes' } },
+    { type: 'text', content: 'Before and after' },
+  ]
+
+  assert.equal(repairInterleavedQuestionText(stored), stored)
+})
 
 // ---------------------------------------------------------------------------
 // upsertQuestionItem — the card replaces its own pending tool block
@@ -709,6 +779,26 @@ test('reconcile never moves a live thinking clock backwards', () => {
   assert.equal(result[0].duration_ms, 19_000,
     'the visible snapshot was already at 19s when replay committed')
   assert.equal(result[0].startedAt, 1_000)
+})
+
+test('reconcile never advances a completed non-trailing thinking clock', () => {
+  const thought = {
+    type: 'thinking', content: 'plan', startedAt: 1_000,
+    firstTs: 10_000, lastAt: 20_000, duration_ms: 9_000,
+  }
+  const prev = [thought, { type: 'text', content: 'Done.' }]
+  // Catch-up is assembled incrementally. At its first atomic commit it can
+  // contain only this historical thought even though the visible snapshot
+  // already knows prose follows it. That one-item replay tail is not live.
+  const replay = [{
+    type: 'thinking', content: 'plan', startedAt: 30_000,
+    firstTs: 10_000, lastAt: 30_000, duration_ms: 9_000,
+  }]
+
+  const result = reconcileStreamItems(prev, replay)
+
+  assert.equal(result[0].duration_ms, 9_000,
+    'later replay wall time cannot be added after prose sealed the thought')
 })
 
 test('reconcile matches tools by tool_use_id, not position, and never merges two different tools', () => {

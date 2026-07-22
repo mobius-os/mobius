@@ -31,8 +31,8 @@ export function CodeBlock({ token }) {
   const code = token.text || ''
 
   // Try synchronous highlight first (no reflow).
-  // Falls back to async if hljs hasn't loaded yet (rare — only on
-  // very fast page loads before the eager import completes).
+  // The first code block falls back to plain text briefly while the lazy
+  // highlighter loads; later blocks usually highlight synchronously.
   const syncHtml = highlightSync(code, lang)
   const [asyncHtml, setAsyncHtml] = useState(null)
 

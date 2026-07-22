@@ -154,6 +154,7 @@ test('only app-frame responses admit brokered blob modules at the edge', () => {
     line => line.includes('header @notFrameableEmbed >Content-Security-Policy'),
   ) || ''
   assert.match(frameCsp, /sandbox allow-scripts/)
+  assert.match(frameCsp, /allow-popups-to-escape-sandbox/)
   assert.doesNotMatch(frameCsp, /allow-same-origin/)
   assert.match(frameCsp, /script-src[^;]*\bblob:/)
   assert.doesNotMatch(ordinaryCsp, /script-src[^;]*\bblob:/)

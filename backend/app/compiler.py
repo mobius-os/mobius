@@ -575,16 +575,37 @@ def _bundle_is_content_addressed(app_id: int, bundle: Path) -> bool:
     return False
 
 
+def app_bundle_uses_current_compile_contract(app) -> bool:
+  """Return whether ``app`` points at a current immutable bundle.
+
+  The banner includes both the host ABI and the additive artifact revision, so
+  this predicate can require a runtime refresh without making old and new host
+  processes reject one another during a live deployment.
+  """
+  bundle = _bundle_path_for_app(app)
+  try:
+    present = bundle.exists() and bundle.stat().st_size > 0
+  except OSError:
+    present = False
+  return bool(
+    present
+    and _bundle_uses_current_runtime(bundle)
+    and _bundle_is_content_addressed(app.id, bundle)
+  )
+
+
 async def reconcile_outdated_bundles(db) -> list[int]:
-  """Rebuild legacy, corrupt, or older-ABI bundles into immutable artifacts.
+  """Rebuild legacy, corrupt, or older-contract bundles into immutable artifacts.
 
   Opaque app frames execute one self-contained module: React, the Mobius
   runtime bridge, and every supported app dependency are part of that artifact.
   A compiler-runtime change therefore needs a durable migration for already
-  installed apps, not a frame-side compatibility path. ``esbuild_command``
-  stamps its ABI banner at byte zero, while publication names the output by its
-  SHA-256. This boot sweep recompiles any present, non-empty bundle without the
-  current banner or a valid content address. The latter condition migrates
+  installed apps. ``esbuild_command`` stamps the ABI + artifact revision at byte
+  zero, while publication names the output by its SHA-256. Keeping additive
+  refreshes in the revision lets a live checkout and the pre-restart backend
+  remain host-compatible throughout deployment. This boot sweep recompiles any
+  present, non-empty bundle without the current banner or a valid content
+  address. The latter condition migrates
   every legacy fixed-name bundle once and repairs the pre-migration same-ABI
   crash gap by rebuilding from the committed row source.
 
@@ -614,10 +635,7 @@ async def reconcile_outdated_bundles(db) -> list[int]:
       present = bundle.exists() and bundle.stat().st_size > 0
     except OSError:
       present = False
-    if not present or (
-      _bundle_uses_current_runtime(bundle)
-      and _bundle_is_content_addressed(app.id, bundle)
-    ):
+    if not present or app_bundle_uses_current_compile_contract(app):
       continue
     if not app.jsx_source or not app.jsx_source.strip():
       continue

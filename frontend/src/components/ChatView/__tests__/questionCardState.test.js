@@ -75,3 +75,27 @@ test('question submission paints a resumed turn only after the POST commits', ()
   assert.match(silentSubmit, /setServerRunningState\(wasServerRunning\)/,
     'a failed answer must restore the prior durable running verdict')
 })
+
+test('question submission freezes the visible anchor before the async handoff', () => {
+  const start = chatView.indexOf('const doSendSilent = useCallback')
+  const end = chatView.indexOf('function handleSubmit(e)', start)
+  const silentSubmit = chatView.slice(start, end)
+  const freeze = silentSubmit.indexOf('freezeQuestionSubmission()')
+  const send = silentSubmit.indexOf('const response = await streamSend')
+
+  assert.ok(freeze >= 0 && send > freeze,
+    'the reader anchor must freeze synchronously before answer delivery resumes output')
+})
+
+test('a pending question exposes Stop instead of an impossible steer', () => {
+  assert.match(
+    chatView,
+    /const canSteer = !hasPendingQuestion[\s\S]*?canFastForwardQueue/,
+    'the composer must fall back to Stop while request_user_input owns the turn',
+  )
+  assert.match(
+    chatView,
+    /steerActive=\{turnActive && !hasPendingQuestion\}/,
+    'queued rows must not offer per-row steer while the live question blocks it',
+  )
+})

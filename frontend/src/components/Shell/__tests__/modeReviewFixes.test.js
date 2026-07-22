@@ -96,25 +96,28 @@ test('finding 9: applyModeDestination clamps the kill switch BEFORE the world br
   assert.match(nav, /if \(mode === 'single'\) \{[\s\S]*?SET_SINGLE_SCREEN/)
 })
 
-test('bypass hunt: navTo and restoreRoute apply destinations ONLY through applyModeDestination', () => {
+test('bypass hunt: concrete restores funnel; explicit-null restores use the empty-single boundary', () => {
   assert.match(nav, /applyModeDestination\(nextRoute\)/)
   assert.match(nav, /applyModeDestination\(itemRoute\)/)
+  // Tombstoned/semantic-home routes deliberately clear the slot directly. They are
+  // safe because every workspace dispatch crosses the shared empty-single edge gate.
+  assert.match(nav, /SET_SINGLE_SCREEN', item: null/)
+  assert.match(shell, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
+  assert.match(shell, /requestEmptySingleNewChatRef\.current\?\.\(\)/)
 })
 
 // -- Finding F9 (expanding review): the chat repair/seed paths funnel too --------
-test('finding F9: mounted-chat + boot chat repair route through applyModeDestination, world-aware', () => {
-  // All three repair/seed sites (mounted-chat 404, boot chat-list seed, restored-
-  // chat 404) must set the fallback via the ONE decision point, not a raw OPEN_TAB
-  // into the hidden pane tree — else single mode paints an empty screen while the
-  // "repaired" chat sits invisible in the tree (INV 2/4).
-  // R1: the repair/seed sites preserve an open Settings takeover (they seed the slot
-  // BENEATH it), so they pass { preserveSettings: true }; the user-nav newChat path
-  // (finding 4) does NOT — it dismisses Settings.
+test('finding F9: historical-chat repair is builder-only; single mode requests New Chat', () => {
+  // Builder repair/boot sites still funnel through the one destination helper and
+  // preserve Settings. An emptied single slot must never select fallback/chats[0];
+  // the dispatch boundary (or boot policy when no reducer edge occurred) requests
+  // the explicit New Chat landing instead.
   assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: fallback\.id, appId: null, paneId: ws\.focusedPaneId \}, \{ preserveSettings: true \}\)/)
   assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: chats\[0\]\.id, appId: null, paneId: ws\.focusedPaneId \}, \{ preserveSettings: true \}\)/)
-  // The "visible world is empty" guard is mode-aware: single checks a null slot.
   assert.match(shell, /const single = !paneModel\.WORKSPACE_SPLITS_ENABLED \|\| ws\.viewMode === 'single'/)
-  assert.match(shell, /\? ws\.singleScreen == null/)
+  assert.match(shell, /if \(single && ws\.singleScreen == null && chats\.length > 0\s*&& pendingNewChatRef\.current == null\) \{\s*requestEmptySingleNewChat\(\)/)
+  assert.match(shell, /else if \(!single && focusedPaneEmpty && chats\[0\]\)/)
+  assert.match(shell, /const builderEmpty = !single/)
   // No repair path OPEN_TABs a fallback/seed chat into the tree any more.
   assert.doesNotMatch(shell, /type: 'OPEN_TAB', paneId: ws\.focusedPaneId,\s*\n\s*tab: tabModel\.makeTab\('chat', fallback\.id\)/)
   assert.doesNotMatch(shell, /type: 'OPEN_TAB', paneId: ws\.focusedPaneId,\s*\n\s*tab: tabModel\.makeTab\('chat', chats\[0\]\.id\)/)
@@ -143,12 +146,17 @@ test('finding 5: completion captures the originating epoch, not the current tran
   assert.equal(modeReducer(s, { type: 'complete', id: e1 }).transition.id, e3, 'stale epoch rejected')
 })
 
-// -- Finding 6 / INV 10: cancelBeat is wired to a plan-signature drift ----------
-test('finding 6: a topology/geometry change during an exit beat cancels it (INV 10)', () => {
+// -- Finding 6 / INV 10 / H2: cancelBeat is wired to either plan's signature drift --
+test('finding 6: topology/geometry/destination drift during either beat cancels it (INV 10 / H2)', () => {
   assert.match(shell, /mode\.cancelBeat\(\)/)
-  // v2: the cancel watcher recomputes the exit signature from the same projection
-  // authority and compares it to the latched snapshotSignature — any drift snaps.
-  assert.match(shell, /const live = exitSignature\(\{ workspace, projection, contentRect \}\)/)
+  // The watcher recomputes one signature for both enter and exit plans. There is no
+  // phase-only gate that would leave geometry-dependent entry transforms stale.
+  assert.match(shell, /if \(!t\?\.presentation\) return/)
+  assert.doesNotMatch(shell, /t\.phase !== 'exiting'/)
+  assert.match(shell, /const live = transitionSignature\(\{/)
+  assert.match(shell, /settingsDestination: settingsOpenRaw/)
+  assert.match(shell, /immersiveHolderId: immersiveAppId/)
+  assert.match(shell, /\}, \[workspace, projection, contentRect, settingsOpenRaw, immersiveAppId, modeState, mode\]\)/)
   assert.match(shell, /if \(live !== t\.presentation\.snapshotSignature\) mode\.cancelBeat\(\)/)
   // The reducer's cancel-beat clears the descriptor without touching committedMode.
   let s = modeReducer({ committedMode: 'panes', transition: null, nextId: 1 },
@@ -246,8 +254,8 @@ test('finding F5: handleBack restores the hidden app through applyModeDestinatio
 })
 
 // -- Finding 10: exit chrome is keyboard-inert during the latched deal ---------
-test('finding 10: WorkspaceChrome is inert during the exit beat, not just pointer-blocked', () => {
-  assert.match(shell, /<WorkspaceChrome[\s\S]*?inert=\{modalDrawerOpen \|\| exitBeatActive\}/)
+test('finding 10: WorkspaceChrome is inert during either mode beat, not just pointer-blocked', () => {
+  assert.match(shell, /<WorkspaceChrome[\s\S]*?inert=\{modalDrawerOpen \|\| modeBeatActive\}/)
 })
 
 // -- Finding 11: a live hold cancels on hide/blur/pagehide/lostpointercapture --

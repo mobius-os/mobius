@@ -11,9 +11,9 @@ const canvas = readFileSync(resolve(src, 'components/AppCanvas/AppCanvas.jsx'), 
 const shell = readFileSync(resolve(src, 'components/Shell/Shell.jsx'), 'utf8')
 
 test('drawer suspension reaches the live app frame before paint', () => {
-  // v2 also suspends iframe interaction throughout an exit beat (INV 9): painted
-  // apps stay visible but every AppCanvas is interactive:false while a pane deals out.
-  assert.match(shell, /interactive=\{visibleAppIds\.has\(String\(id\)\) && !modalDrawerOpen && !exitBeatActive\}/)
+  // Pane assembly/scatter also suspends iframe interaction throughout either beat:
+  // painted apps stay visible, but a moving cross-origin frame cannot intercept input.
+  assert.match(shell, /interactive=\{visibleAppIds\.has\(String\(id\)\) && !modalDrawerOpen && !modeBeatActive\}/)
   assert.match(canvas, /useLayoutEffect\(\(\) => \{[\s\S]*sendInteractivity\(swap\.liveVersion, interactive, visible\)/)
   assert.match(canvas, /suspendScrolling:\s*visible\s*&&\s*!enabled/)
   assert.match(canvas, /moebius:frame-interactivity/)

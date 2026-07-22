@@ -17,6 +17,33 @@
 import * as paneModel from './paneModel.js'
 import * as tabModel from './tabModel.js'
 
+// The presentation key for a null single-screen slot (round 4 item 3). The persisted
+// slot stays `null` — adding a `{kind:'new-chat'}` variant would only invent migration
+// + sanitizer work — but for RENDERING and for the exit target/underlay, null now maps
+// to this first-class New Chat landing rather than the freshest chat. `singleScreenRoute`
+// still reports {view:'chat', chatId:null}; only the render surface changes.
+export const EMPTY_SINGLE_SURFACE_KEY = 'home:new-chat'
+
+// Focus one builder pane without changing the durable split tree. This is a
+// presentation projection only: the selected leaf receives the full content box,
+// while its tab strip still reserves STRIP_H inside that box. Returning the base
+// projection for an invalid id makes pane deletion/collapse self-healing.
+export function projectFocusedPane(baseProjection, workspace, paneId, contentRect) {
+  if (!paneId || !workspace?.panes?.[paneId]) return baseProjection
+  return {
+    visibleLeaves: [paneId],
+    rects: {
+      [paneId]: {
+        x: Number.isFinite(contentRect?.x) ? contentRect.x : 0,
+        y: Number.isFinite(contentRect?.y) ? contentRect.y : 0,
+        w: Math.max(0, Number(contentRect?.w) || 0),
+        h: Math.max(0, Number(contentRect?.h) || 0),
+      },
+    },
+    dividers: [],
+  }
+}
+
 // ── Mode-transition motion (exit-presentation v2) ────────────────────────────
 // The presentation module owns the timing + the pure plan builders; the state
 // machine (modeMachine.js) treats a plan as OPAQUE data. A beat is described by a
@@ -26,14 +53,15 @@ import * as tabModel from './tabModel.js'
 //
 // Timing (ms). Constants live here, NOT in the machine, so the reconcile clock
 // (INV 14) and the missing-target fallback (INV 13) reason about the plan's own
-// totalMs rather than a fixed per-phase maximum. The 20ms visual-order stagger and
-// the critically-damped curves make the deal read as cards, never a generic fade.
+// totalMs rather than a fixed per-phase maximum. Mode changes are intentionally one
+// short beat: every pane moves together, using only compositor transforms + opacity.
+// There is no per-pane stagger or second destination phase to make the owner wait.
 export const MODE_MOTION = Object.freeze({
-  staggerMs: 20,
-  enterItemMs: 220, // one pane's deal-in (multi-pane entry)
-  enterSingleMs: 240, // the sole leaf's deal-in (single-leaf entry)
-  exitItemMs: 180, // one pane's deal-out (world reveal)
-  promoteMs: 240, // the survivor pane's FLIP grow-to-full-bleed
+  enterItemMs: 210,
+  enterSingleMs: 180,
+  exitItemMs: 180,
+  promoteMs: 210,
+  logoReleaseMs: 90,
 })
 
 // The slack a visibility-return reconcile allows past the plan's totalMs before it
@@ -46,6 +74,7 @@ export const RECONCILE_SLACK_MS = 250
 // keyframes so a name typo is caught by one grep. Strip-clear + chrome fades are
 // deliberately ABSENT: they are shorter and must not gate completion.
 export const PROMOTE_NAME = 'shell-mode-promote'
+export const SETTLE_NAME = 'shell-mode-settle'
 export const DEAL_OUT_NAME = 'shell-mode-deal-out'
 export const DEAL_IN_NAME = 'shell-mode-deal-in'
 
@@ -68,12 +97,41 @@ function flipTo(from, dest) {
   }
 }
 
-// The concrete chat/app key SINGLE mode will paint after this exit — the slot, or
-// (legacy absent-slot blob) the value the SAME SET_VIEW_MODE transaction will seed
-// from the focused item. A Settings-focused legacy seed and an explicit null slot
-// both resolve to null = the home reveal. The one classification input.
+// Push a pane just beyond the nearest outer edges, following its vector away from
+// the workspace centre. A left/right split therefore travels horizontally, a
+// top/bottom split vertically, and a corner pane diagonally. The resulting motion
+// reads as one assembled surface rather than four unrelated card transitions.
+// Values are projection-derived and latched with the plan — no DOM measurement.
+function edgeOffset(rect, bounds) {
+  // Shell's live contentRect is intentionally just {w, h}; projection rects are
+  // already content-local. Tests and other pure callers may include an origin,
+  // so accept both shapes without ever emitting an invalid `NaNpx` CSS variable.
+  const boundsX = Number.isFinite(bounds.x) ? bounds.x : 0
+  const boundsY = Number.isFinite(bounds.y) ? bounds.y : 0
+  const left = rect.x - boundsX
+  const top = rect.y - boundsY
+  const dx = (left + rect.w / 2) - bounds.w / 2
+  const dy = (top + rect.h / 2) - bounds.h / 2
+  const gap = 24
+  let x = 0
+  let y = 0
+  if (Math.abs(dx) > 1) x = dx < 0 ? -(left + rect.w + gap) : (bounds.w - left + gap)
+  if (Math.abs(dy) > 1) y = dy < 0 ? -(top + rect.h + gap) : (bounds.h - top + gap)
+  // A truly centred pane still needs a deterministic edge (possible with one
+  // tree-absent destination). Top is the least disruptive because the shell bar
+  // already establishes that spatial boundary.
+  if (x === 0 && y === 0) y = -(top + rect.h + gap)
+  return { x, y }
+}
+
+// The concrete surface key SINGLE mode will paint after this exit — the slot, the New
+// Chat landing (an explicit null slot, round 4 item 3), or (legacy absent-slot blob)
+// the value the SAME SET_VIEW_MODE transaction will seed from the focused item. A
+// Settings-focused legacy seed still resolves to null. The one classification input.
 function exitTargetKey(ws) {
-  if ('singleScreen' in ws) return paneModel.singleScreenKey(ws)
+  // An INITIALIZED slot: a concrete chat/app key, or the New Chat landing when null.
+  // Null now means a definite New Chat destination — never the freshest chat.
+  if ('singleScreen' in ws) return paneModel.singleScreenKey(ws) || EMPTY_SINGLE_SURFACE_KEY
   const seed = paneModel.focusedSlotSeed(ws)
   if (!seed) return null
   return seed.kind === 'app' ? `app:${seed.id}` : `chat:${seed.id}`
@@ -93,15 +151,38 @@ function visibleLeafDescriptors(workspace, projection) {
   return out
 }
 
-// The immutable invalidation key for an exit beat: target + visible (pane, active
-// key) pairs + content dimensions. Recomputed live by the controller's cancel
-// watcher; any drift means the latched plan no longer describes the tree, so the
-// beat snaps to the committed destination rather than retargeting a transform.
-export function exitSignature({ workspace, projection, contentRect }) {
-  const target = exitTargetKey(workspace)
+// The effective destination single mode will ACTUALLY paint on completion, given the
+// tree's slot plus the two live overlay states (M2). A suspended Settings takeover
+// paints full-bleed OVER the slot (reveal to Settings); a retained immersive holder
+// that solos the exit slot is an INSTANT destination (full-viewport, header gone) the
+// beat cannot honestly latch. Both the exit PLAN and the exit SIGNATURE classify
+// through THIS one function from the SAME input, so an overlay input can never change
+// the plan's destination without also changing its invalidation key (INV 10 / H2).
+function classifyExitDestination({ workspace, settingsDestination = false, immersiveHolderId = null }) {
+  const slotTarget = exitTargetKey(workspace)
+  const immersiveInstant = !settingsDestination
+    && immersiveHolderId != null
+    && slotTarget === `app:${immersiveHolderId}`
+  const target = settingsDestination ? tabModel.SETTINGS_TAB_KEY : slotTarget
+  return { target, immersiveInstant }
+}
+
+// The immutable invalidation key for either directional beat. INVARIANT (INV 10 /
+// H2): it incorporates EVERY input deriveExitPlan / deriveEnterPlan uses — visible
+// pane keys and rects, content bounds, and the effective destination (including live
+// Settings/immersive state). The controller recomputes it and cancels on ANY drift;
+// otherwise a live layout commit could move wrappers underneath stale FLIP/edge
+// transforms. New destination inputs belong in classifyExitDestination, shared by
+// this signature and both plan builders, never in one alone.
+export function transitionSignature(input) {
+  const { workspace, projection, contentRect } = input
+  const { target, immersiveInstant } = classifyExitDestination(input)
   const leaves = visibleLeafDescriptors(workspace, projection)
-    .map(l => `${l.paneId}=${l.activeKey}`)
-  return `${target || ''}|${leaves.join(',')}|${contentRect.w}x${contentRect.h}`
+    .map(l => `${l.paneId}=${l.activeKey}@${l.rect.x},${l.rect.y},${l.rect.w},${l.rect.h}`)
+  const x = Number.isFinite(contentRect.x) ? contentRect.x : 0
+  const y = Number.isFinite(contentRect.y) ? contentRect.y : 0
+  return `${target || ''}|${immersiveInstant ? 'i' : ''}|${leaves.join(',')}`
+    + `|${x},${y},${contentRect.w}x${contentRect.h}`
 }
 
 // Sort by visual reading order (top, then left) of the pane rect.
@@ -110,42 +191,39 @@ function byVisualOrder(a, b) {
   return a.rect.x - b.rect.x
 }
 
-// deriveExitPlan({ workspace, projection, contentRect }) → the latched exit plan,
-// or null when the beat is instant (empty tree — nothing painted to deal out).
+// deriveExitPlan(input) → the latched exit plan, or null when the beat is instant (an
+// empty tree — nothing painted to deal out — or an immersive-instant destination).
+// `input` is { workspace, projection, contentRect, settingsDestination?,
+// immersiveHolderId? }; the SAME object is fed to transitionSignature so the plan
+// and its invalidation key can never disagree about the destination (INV 10 / H2).
 //
 // Classification (exit-design v1 §exit-classification, honored by v2):
 //   - target is the active key of a VISIBLE leaf → promote that leaf (physical
 //     continuity), deal every sibling out, no underlay.
-//   - target is inactive-in-a-pane, tree-absent, or null → WORLD REVEAL: deal
-//     every painted leaf out over the mounted destination (underlayKey = target;
-//     null = the opaque home background). Never promote the focused pane to
+//   - target is inactive-in-a-pane, tree-absent, the New Chat landing (an empty single
+//     slot, round 4 item 3), or null → WORLD REVEAL: deal every painted leaf out over
+//     the mounted destination (underlayKey = target; null = the opaque background only
+//     for a legacy Settings-focused absent-slot). Never promote the focused pane to
 //     manufacture a correspondence single mode will not paint.
-export function deriveExitPlan({
-  workspace, projection, contentRect,
-  settingsDestination = false, immersiveHolderId = null,
-}) {
+export function deriveExitPlan(input) {
+  const { workspace, projection, contentRect, settingsDestination = false } = input
   const leaves = visibleLeafDescriptors(workspace, projection)
   if (leaves.length === 0) return null // empty tree → instant flip, no descriptor
-  // The concrete slot the single world seeds — the DEFAULT destination.
-  const slotTarget = exitTargetKey(workspace)
-  // HONEST DESTINATION (M2): classify against what the single world will ACTUALLY
-  // paint on completion, not the slot the tree seeds beneath a takeover/immersive-
-  // solo — else the takeover/immersive pops over the promoted-or-revealed slot when
-  // the beat ends, breaking the v2 "visually identical completion" contract.
-  //   - A retained immersive holder solos over the WHOLE viewport (header gone), a
-  //     rect the beat cannot honestly latch while the header is still painted and
-  //     the mode is still 'panes'. An honest INSTANT beats a false animation that
-  //     jumps at completion, so classify it instant (return null).
-  if (!settingsDestination
-      && immersiveHolderId != null
-      && slotTarget === `app:${immersiveHolderId}`) {
-    return null
-  }
+  // HONEST DESTINATION (M2): what single mode will ACTUALLY paint on completion — the
+  // tree's slot re-classified by the live overlays — never the slot the tree seeds
+  // beneath a takeover/immersive-solo (else the takeover/immersive pops over the
+  // promoted-or-revealed slot at completion, breaking the "visually identical
+  // completion" contract). The exit signature reads the SAME classifier (H2).
+  //   - An immersive holder that solos the exit slot is a full-viewport INSTANT the
+  //     beat cannot honestly latch while the header is still painted and the mode is
+  //     still 'panes'. An honest instant beats a false animation that jumps at
+  //     completion, so classify it instant (return null).
+  const { target, immersiveInstant } = classifyExitDestination(input)
+  if (immersiveInstant) return null
   //   - A suspended Settings takeover paints full-bleed OVER the slot → world reveal
   //     to the mounted-hidden Settings surface (part-2 F3), never the slot the
-  //     takeover then covers. modeMachine stays ignorant of what Settings means; the
-  //     underlayKey just names the destination wrapper the renderer paints beneath.
-  const target = settingsDestination ? tabModel.SETTINGS_TAB_KEY : slotTarget
+  //     takeover then covers (target = SETTINGS_TAB_KEY). modeMachine stays ignorant
+  //     of what Settings means; the underlayKey just names the destination wrapper.
   const dest = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
   // A Settings destination is always a world reveal (never a promote), even if a
   // builder Settings tab happens to be a visible leaf.
@@ -175,19 +253,17 @@ export function deriveExitPlan({
     completionNames.add(PROMOTE_NAME)
     // Siblings deal out in visual order beneath the promoting pane.
     const siblings = leaves.filter(l => l !== promoteLeaf).sort(byVisualOrder)
-    siblings.forEach((l, i) => {
+    siblings.forEach((l) => {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
-        delayMs: i * MODE_MOTION.staggerMs, durationMs: MODE_MOTION.exitItemMs,
+        delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
+        offset: edgeOffset(l.rect, contentRect),
       })
     })
     if (siblings.length) completionNames.add(DEAL_OUT_NAME)
   } else {
-    // World reveal: every painted leaf deals out. Visual order, but the FOCUSED
-    // pane moves to the LAST stagger slot so the surface the user was reading is
-    // the last card put away.
+    // World reveal: every painted leaf deals out together over the stationary target.
     underlayKey = target // null = home reveal (opaque --bg background)
-    const focusedId = workspace.focusedPaneId
     // The underlay is the stationary DESTINATION, so a visible leaf that IS the
     // underlay (a builder Settings tab equal to the takeover destination) never
     // also deals out. For an ordinary tree-absent chat/app slot this filters
@@ -196,12 +272,11 @@ export function deriveExitPlan({
     // beat has no honest motion → instant flip.
     const ordered = leaves.filter(l => l.activeKey !== target).sort(byVisualOrder)
     if (ordered.length === 0) return null
-    const focusedIdx = ordered.findIndex(l => l.paneId === focusedId)
-    if (focusedIdx !== -1) ordered.push(ordered.splice(focusedIdx, 1)[0])
-    ordered.forEach((l, i) => {
+    ordered.forEach((l) => {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
-        delayMs: i * MODE_MOTION.staggerMs, durationMs: MODE_MOTION.exitItemMs,
+        delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
+        offset: edgeOffset(l.rect, contentRect),
       })
     })
     completionNames.add(DEAL_OUT_NAME)
@@ -216,29 +291,65 @@ export function deriveExitPlan({
     underlayKey,
     completionNames: [...completionNames],
     totalMs,
-    snapshotSignature: exitSignature({ workspace, projection, contentRect }),
+    snapshotSignature: transitionSignature(input),
   }
 }
 
-// deriveEnterPlan({ workspace, projection }) → the latched entry plan, or null
-// when there is nothing to deal in. Entry is the reverse grammar: each visible
-// leaf (and its strip) deals in from a small offset with a 0/20/40/60 visual-order
-// stagger. Single-leaf entry uses the slightly longer paired gesture.
-export function deriveEnterPlan({ workspace, projection }) {
+// deriveEnterPlan(input) → the latched entry plan, or null when there is nothing
+// to assemble. The single-screen surface keeps physical continuity when it is an
+// active builder leaf: it starts full-bleed and settles into its pane via the inverse
+// FLIP. Every sibling gathers from its nearest outer edge. If the single-screen
+// surface is absent/inactive in the tree, it remains a stationary underlay while all
+// visible panes assemble over it. This is the exact inverse of deriveExitPlan.
+//
+export function deriveEnterPlan(input) {
+  const { workspace, projection, contentRect } = input
   const leaves = visibleLeafDescriptors(workspace, projection).sort(byVisualOrder)
   if (leaves.length === 0) return null
+  const { target, immersiveInstant } = classifyExitDestination(input)
+  if (immersiveInstant) return null
   const single = leaves.length === 1
   const duration = single ? MODE_MOTION.enterSingleMs : MODE_MOTION.enterItemMs
-  const participants = leaves.map((l, i) => ({
-    key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
-    delayMs: i * MODE_MOTION.staggerMs, durationMs: duration,
-  }))
+  const destinationRect = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
+  const settleLeaf = target ? leaves.find(l => l.activeKey === target) : null
+  const participants = []
+  const completionNames = new Set()
+  let underlayKey = null
+
+  if (settleLeaf) {
+    const fromRect = single ? settleLeaf.rect : contentRectOfPane(settleLeaf.rect)
+    participants.push({
+      key: settleLeaf.activeKey,
+      paneId: settleLeaf.paneId,
+      motion: 'settle',
+      delayMs: 0,
+      durationMs: duration,
+      flip: flipTo(fromRect, destinationRect),
+    })
+    completionNames.add(SETTLE_NAME)
+  } else {
+    underlayKey = target
+  }
+
+  for (const l of leaves) {
+    if (l === settleLeaf) continue
+    participants.push({
+      key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
+      delayMs: 0, durationMs: duration,
+      offset: edgeOffset(l.rect, contentRect),
+    })
+    completionNames.add(DEAL_IN_NAME)
+  }
   const totalMs = participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
   return {
     kind: 'enter',
+    target,
+    destinationRect,
     participants,
-    completionNames: [DEAL_IN_NAME],
+    underlayKey,
+    completionNames: [...completionNames],
     totalMs,
+    snapshotSignature: transitionSignature(input),
   }
 }
 
@@ -269,7 +380,7 @@ export function deriveEnterPlan({ workspace, projection }) {
 // last line of defense so a stray input still can't seize the builder workspace).
 export function deriveContentVisibility({
   workspace, projection, settingsOverlayOpen, immersiveActive, immersiveAppId,
-  viewMode = 'panes', exitUnderlayKey = null,
+  viewMode = 'panes', exitUnderlayKey = null, focusedPaneView = false,
 }) {
   const multiPane = projection.visibleLeaves.length >= 2
   const builder = viewMode !== 'single'
@@ -281,8 +392,8 @@ export function deriveContentVisibility({
   // TWO-WORLDS (codex-modecontext-design.md): in SINGLE mode the active content is
   // the persisted single-screen SLOT — the last item opened IN single mode — NOT
   // the focused builder pane. The slot may be absent from the pane tree entirely;
-  // Shell pins its iframe / chat mount regardless. A null slot is the empty/home
-  // screen. BACKWARD-COMPAT: a blob whose slot property is ABSENT is legacy/
+  // Shell pins its iframe / chat mount regardless. A null slot is the New Chat landing
+  // (round 4 item 3). BACKWARD-COMPAT: a blob whose slot property is ABSENT is legacy/
   // uninitialized (the reducer seeds it on the first builder→single switch, using
   // absence as the migration marker), so single mode falls back to the focused
   // pane's active tab until the slot is seeded — an older blob still collapses to
@@ -291,21 +402,34 @@ export function deriveContentVisibility({
   const hasSlot = ('singleScreen' in workspace)
   const focusedPaneKey = workspace.panes[workspace.focusedPaneId]?.activeTabKey ?? null
   const slotKey = single ? (hasSlot ? paneModel.singleScreenKey(workspace) : focusedPaneKey) : null
+  // An INITIALIZED but empty slot in single mode is the New Chat landing (round 4
+  // item 3): a first-class home:new-chat surface, never the freshest chat. Legacy
+  // absent-slot blobs still fall back to the focused pane (hasSlot false).
+  const emptySingleSlot = single && hasSlot && paneModel.singleScreenKey(workspace) == null
   // The active tab key that drives the full-bleed surface + AppCanvas `active`
   // prop. Under the Settings overlay it is null (panes hidden behind it). In single
   // mode it is the slot key (or the focused-pane fallback); otherwise the focused
   // pane's active tab — EVEN WHEN that is Settings (a builder Settings tab is the
   // paned/full-bleed surface, driven off this key). Immersive uses the holder key.
+  // A null slot keeps focusedActiveKey NULL so navigation + AppCanvas never pretend
+  // the New Chat landing is a chat/app tab (the landing is not a tab).
   const focusedActiveKey = settingsOverlay
     ? null
     : (single ? slotKey : focusedPaneKey)
   // Pane chrome (strips + dividers) whenever the box is TILED: ≥2 visible leaves
   // and no takeover. In builder this is simply `multiPane` (no takeover can trip
   // here); single-mode / a takeover paints one surface over the whole box.
-  const chromeActive = multiPane && !settingsOverlay && !immersive && !single
-  // The single wrapper painted full-bleed. Null ONLY in the tiled multi-pane
-  // render; under a single-mode collapse / takeover it is the focused/holder key.
-  const fullBleedKey = (multiPane && !immersive && !single) ? null : focusedActiveKey
+  const chromeActive = (multiPane || (builder && focusedPaneView))
+    && !settingsOverlay && !immersive && !single
+  // The single wrapper painted full-bleed. Null ONLY in the tiled multi-pane render;
+  // the New Chat landing key for an empty single slot; the focused/holder key
+  // otherwise. Distinct from focusedActiveKey (which stays null for the empty slot)
+  // so the render paints the landing while nav/AppCanvas see no active tab.
+  const fullBleedKey = focusedPaneView && builder
+    ? null
+    : emptySingleSlot
+    ? EMPTY_SINGLE_SURFACE_KEY
+    : ((multiPane && !immersive && !single) ? null : focusedActiveKey)
   // The app ids that PAINT and stay interactive/frame-visible. A single-mode
   // immersive solos the holder; single-mode solos the focused pane's active app;
   // the Settings overlay hides all; the tiled (incl. all of builder) render keeps

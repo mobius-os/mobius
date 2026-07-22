@@ -44,6 +44,9 @@ test('external hostile framer gets only an inert document without a grant', asyn
     const attacker = page.frames().find(frame => frame.url().startsWith('data:text/html,'))
     expect(attacker).toBeTruthy()
     const victim = page.frameLocator('#attacker').frameLocator('#victim')
+    // The embed route is a lazy chunk. Wait for its inert receiver to mount so
+    // this test exercises server rejection, not a pre-listener message race.
+    await expect(victim.locator('.chat-embed')).toHaveCount(1)
     await expect(victim.locator('#root')).toHaveText('')
 
     const exchanges = []

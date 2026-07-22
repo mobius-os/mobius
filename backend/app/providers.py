@@ -551,7 +551,43 @@ class ClaudeProvider(BaseProvider):
         "Not signed in. Open Settings and connect "
         "under AI provider."
       )
-    return None
+    try:
+      raw = json.loads(creds.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeError):
+      raw = None
+    oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
+    if isinstance(oauth, dict):
+      access_token = oauth.get("accessToken")
+      refresh_token = oauth.get("refreshToken")
+      expires_at = oauth.get("expiresAt")
+      refresh_expires_at = oauth.get("refreshTokenExpiresAt")
+      now_ms = time.time() * 1000
+      access_is_current = (
+        isinstance(access_token, str)
+        and bool(access_token.strip())
+        and isinstance(expires_at, (int, float))
+        and not isinstance(expires_at, bool)
+        and expires_at - now_ms >= _CLAUDE_TOKEN_REFRESH_MARGIN_MS
+      )
+      refresh_expiry_is_current = (
+        "refreshTokenExpiresAt" not in oauth
+        or (
+          isinstance(refresh_expires_at, (int, float))
+          and not isinstance(refresh_expires_at, bool)
+          and refresh_expires_at > now_ms
+        )
+      )
+      can_refresh = (
+        isinstance(refresh_token, str)
+        and bool(refresh_token.strip())
+        and refresh_expiry_is_current
+      )
+      if access_is_current or can_refresh:
+        return None
+    return (
+      "Claude sign-in is incomplete or expired. Open Settings and "
+      "reconnect under AI provider."
+    )
 
   async def ensure_auth(self, data_dir: str) -> None:
     """Refresh the Claude OAuth token before a chat turn, if expired.

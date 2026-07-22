@@ -340,7 +340,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see *Service worker + offline* below) |
 | `frontend/src/lib/` | Cross-cutting helpers: `appToken.js`, `chatEmbed.js`, `themeService.js`, `onlineStatus.js`, `navHistory.js`, `errorLog.js`, etc. |
 
-**Mini-app modules are self-contained.** `app_compile_contract.py` points esbuild at the pinned production dependencies in `frontend/package.json`, injects React plus `mobius-runtime`, and bundles every used static import into one ESM artifact. The opaque frame asks its exact controlled parent to fetch and transfer that artifact, so a cold offline load performs no dependency subrequests. A compiler ABI banner lets the boot reconciler atomically rebuild older installed bundles after any runtime-contract change. Public `/vendor/` files remain only for true browser assets that code refers to by URL (currently the pdf.js worker, KaTeX CSS/fonts, and the D3/Pixi classic scripts); they are not a package resolver.
+**Mini-app modules are self-contained.** `app_compile_contract.py` points esbuild at the pinned production dependencies in `frontend/package.json`, injects React plus `mobius-runtime`, and bundles every used static import into one ESM artifact. The opaque frame asks its exact controlled parent to fetch and transfer that artifact, so a cold offline load performs no dependency subrequests. A compiler banner carries both a host ABI and an artifact revision: bump the revision to rebuild installed bundles for additive runtime changes, and bump the ABI only when old and new hosts are incompatible. Public `/vendor/` files remain only for true browser assets that code refers to by URL (currently the pdf.js worker, KaTeX CSS/fonts, and the D3/Pixi classic scripts); they are not a package resolver.
 
 ## Where do I make a change?
 
@@ -356,7 +356,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Change chat scroll/spacer/keyboard | `ChatView/ChatView.jsx` + `ChatView.css`; run the spacer/send-pin tests in repo-root `tests/` |
 | Change drawer / back-stack nav | `frontend/src/hooks/useNavigation.js` + `Shell/Shell.jsx` (read *Navigation back-stack + drawer model* below first) |
 | Change the mini-app iframe / cache | `AppCanvas/AppCanvas.jsx` + `Shell/Shell.jsx` (`appCache`); ETag logic in `routes/apps.py` |
-| Add an app-runtime capability | `frontend/public/mobius-runtime.js` + `app_runtime_inject.js`; bump the compiler ABI when the compiled bridge contract changes |
+| Add an app-runtime capability | `frontend/public/mobius-runtime.js` + `app_runtime_inject.js`; bump the compiler artifact revision for additive compiled-bridge changes, or the ABI only for host-incompatible changes |
 | Add a supported app package | Pin it in `frontend/package.json`, add it to `BUNDLED_RUNTIME_LIBS`, and run the compiler/offline-frame contracts |
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
@@ -430,71 +430,53 @@ with the service token). Never edit
 `scripts/sync-core-apps.sh`; CI (`scripts/check-core-apps-sync.sh`) fails the
 build on drift.
 
-**Self-heal — LANDING (owner-signed-off 2026-06-30; the `recoveryd` container is
-BUILT — `backend/recovery/recoveryd.py`, its own service in `docker-compose.yml`
-with `restart: unless-stopped` on the same `/data` — and `/recover*` IS wired in
-the bundled `Caddyfile` (`handle /recover* { reverse_proxy recoveryd:8001 }`
-ahead of the `app:8000` catch-all, so it never falls through to the platform) —
-per the adversarially-reviewed plan in
-cards 148 + its recoveryd-hardened addendum. Some hardening is still in flight
-under an active session, so treat the finer status of the bullets below —
-especially the pre-flight gate (card 154) and the listed removals — as
-"intended end-state, confirm against the recovery rework" rather than settled).**
-The *end-state* model is git + a minimal pre-flight gate + a separate always-up
-recovery container, with **no baked duplicate, no `/app/app` symlink-swap, no
-auto-heal probe, no magic**. The whole-repo reshape landed most of it: boot now
-serves uvicorn directly with `cd /data/platform/backend` — **no `/app/app`
-symlink-swap** (`_platform_use_direct` restores `/app/app` to the baked dir) —
-and falls back to the baked floor when the platform tree fails its import probe.
-The removals not yet done at HEAD are noted in the last bullet:
-- The platform is served directly as a git repo.
-- **Pre-flight gate (card 154):** a change only takes effect on the restart that
-  applies it, so the running server keeps serving the working code while the agent
-  edits. Before applying, a minimal check — does the new tree import (`python -c
-  "import app.main"`) and answer `/api/health`? Green → apply; red → don't apply,
-  hand the traceback back to the agent's turn. A break never reaches the live server.
-- **Recovery is a SEPARATE CONTAINER, not a process inside the platform.**
-  `recoveryd` runs from the same image with its own command + `restart:
-  unless-stopped`, mounts the same `/data`, and is routed by the external
-  edge proxy at `/recover*` *independently of platform health* (with an
-  auto-surfaced broken-state page when `:8000` is down). It must be a separate
-  container — the adversarial review confirmed prod pid1 `exec`s uvicorn, so a
-  backgrounded supervisor inside the platform container dies with it. **Two tiers:**
-  *Tier 1* is a deterministic "Restore platform" button (git-reset `/data/platform`
-  via the existing `.recover-pending` + restart) needing **zero CLI / OAuth /
-  network / agent** — this is THE floor and the ONLY tier built today; *Tier 2*
-  (the lifted `recovery_chat_runner` spawning a rescue agent, best-effort when
-  creds exist) is an explicitly DEFERRED follow-on, NOT in the built recoveryd
-  (per `backend/recovery/recoveryd.py`'s docstring) — today the rescue chat still
-  lives only inside the platform uvicorn at `/recover`, so it dies with the
-  platform. recoveryd restarts the platform via a sentinel file + a baked
-  `kill -TERM 1` poller (no Docker socket — O1). Its auth bcrypt-checks the
-  owner password against the SQLite owner row read via raw sqlite3
-  (`backend/recovery/recovery_db.py`), with an HMAC session cookie keyed off
-  `/data/.recovery-secret`. It also survives a **wiped or corrupt DB** (O2): the
-  platform mirrors the owner's username + bcrypt hash into a DB-independent seed
-  at `/data/.recovery-owner.json` (`backend/app/recovery_seed.py`, written at
-  `setup()` and idempotently re-synced at boot), and `recovery_db` falls back to
-  it **only when the DB is unreadable** — never when it is readable-but-owner-less,
-  so a fresh install and a completed factory reset (both `DELETE FROM owner`,
-  leaving a readable empty table) still read as "no owner" and a transient
-  busy/locked DB fails closed. The seed is only ever written after an owner row
-  commits (the first-boot-takeover guard), deleted on factory reset, and
-  gitignored + FS-deny-listed so it never leaks through `pm-commit` or
-  `/api/fs/read`.
-- Of the planned removals, only the `.platform-serve-baked` probe/flag is gone
-  today. The crash-loop `cp`-restore (`backend/scripts/entrypoint.sh`, boot-counter
-  ≥ 3) and the destructive `platform-baked` `recovery_restore.sh` mode are STILL
-  PRESENT at HEAD — slated for removal with the recovery rework. Boot no longer
-  symlink-swaps `/app/app`: it serves uvicorn directly from `/data/platform/backend`
-  (restoring `/app/app` to the baked dir) and falls back to the baked floor when
-  the platform tree fails its import probe, stamping the decision to
-  `/tmp/serving-source`. End-state intent: real image/disk corruption is an
-  operator redeploy, not something to auto-heal around.
+**Recovery and self-heal.** Recovery is deliberately outside the editable
+platform. `recoveryd` is a separate `restart: unless-stopped` container with its
+own cgroup, read-only root filesystem, and root-owned frozen code under
+`/app/recovery`. The edge proxy routes `/recover*` to it before the platform
+catch-all, so a broken or OOM-killed app container does not take the recovery UI
+down with it. The recovery container mounts `/data` to repair the instance, but
+the platform container does not mount recoveryd's private `/recovery-live`
+volume.
+
+The dashboard exposes two complementary paths:
+
+- **Reasoned repair:** `/recover/chat` runs a fresh Claude or Codex recovery
+  agent as root. Its runner, auth, pages, and per-chat JSONL history are frozen
+  recovery modules with zero `app.*` imports, so broken production chat code is
+  not in the recovery dependency chain. The root filesystem remains read-only;
+  the agent can repair `/data/platform` and owner data but cannot rewrite its
+  own lifeboat.
+- **Deterministic floor:** `Restore platform` resets uncommitted changes in the
+  served clone; `Reset to baked floor` quarantines the clone and atomically
+  reseeds it from `/app/platform-baked`. recoveryd writes
+  `.recover-pending` before `.platform-restart-requested`; the platform
+  entrypoint consumes those files as root and its poller cycles pid 1 without a
+  Docker socket.
+
+Recovery auth normally reads the owner bcrypt hash through raw SQLite and falls
+back to `/data/.recovery-owner.json` only when the DB is unreadable. The
+platform writes that seed after owner setup, refreshes it idempotently at boot,
+and deletes it on factory reset. Recovery session HMAC state and an optional
+self-updated recovery bundle live on the recoveryd-only `/recovery-live`
+volume. An update is cloned only from the pinned recovery repository, hardened
+root-owned, syntax-checked, and atomically swapped; a persisted three-attempt
+guard quarantines a trusted live bundle that crash-loops back to the baked
+floor.
+
+Normal platform boot serves `/data/platform/backend` directly after an import
+probe. It fetches `origin/main`, commits stray local edits, and rebases them onto
+the update; a conflict or failed post-rebase import returns to the exact
+pre-reconcile commit and leaves a visible flag. An invalid existing clone serves
+the baked backend without overwriting the broken tree. Independently, three
+consecutive boots that never reach `/api/health` quarantine the served clone and
+reseed it on the next attempt. These mechanisms recover code; owner-data disaster
+recovery is the separate `backup-data.py` / `restore-data.py` flow and is not
+automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.5 (2026-07-15).** This section is the
+**Owner-authoritative contract — v1.6 (2026-07-22).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -595,6 +577,15 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   separate answers. The answer response declares this ownership independently as
   `answer_turn: "same" | "new"`: an in-process question answer (`answer_delivered`)
   resumes that same row and turn, so answering must not retire its source bridge.
+  Submitting an in-message answer is also a deliberate reading action: before the
+  card enters its pending state or output resumes, the controller snapshots the
+  currently visible message and its exact viewport offset as `ANCHOR_AT`. Resumed
+  output grows without dragging the reader, even when the chat had been following
+  the tail before Submit. If a mobile viewport grows before that output arrives,
+  the dynamic spacer temporarily reserves enough room to keep the anchor target
+  reachable; the reservation disappears as real content replaces it. A failed
+  answer keeps that settled reading anchor for the retryable card rather than
+  manufacturing follow intent again.
   The source handoff
   preserves the question, its answer, and every pre/post-answer thinking, tool, and
   text block in event order, without hiding, duplicating, or reordering them. Only a
@@ -626,7 +617,7 @@ path means routing it through the same entries rather than inventing another rul
 | Viewport/keyboard changes | `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply pin after resize; never infer intent from keyboard-open geometry |
 | Viewport/keyboard changes | follow or anchor hold | same follow if still at tail, otherwise hold anchor | Never creates follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
-| In-process question is answered | any | same mode and active assistant row | None |
+| In-process question is answered | any | `ANCHOR_AT` on current visible row; same active assistant row | Hold exact visible anchor through card reflow and resumed output |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
 | Offscreen question or paused-turn nudge tapped | any hold | `ANCHOR_AT` at physical tail | User-requested one-shot move; clears the overlaid composer |
 

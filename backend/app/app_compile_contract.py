@@ -35,9 +35,15 @@ BUNDLED_RUNTIME_LIBS: tuple[str, ...] = (
 )
 
 COMPILED_RUNTIME_ABI = 1
+# Bump this when every installed bundle must be rebuilt for an additive
+# compiled-runtime change that remains host-compatible. Keep ABI for actual
+# host/runtime incompatibilities: a revision-only rollout is safe while the
+# live checkout and backend process briefly run different generations.
+COMPILED_RUNTIME_ARTIFACT_REVISION = 3
 COMPILED_RUNTIME_GLOBAL = "__mobiusCompiledRuntime"
 COMPILED_RUNTIME_BANNER = (
-  f"/* mobius-compiled-runtime-abi:{COMPILED_RUNTIME_ABI} */"
+  f"/* mobius-compiled-runtime-abi:{COMPILED_RUNTIME_ABI};"
+  f"artifact-revision:{COMPILED_RUNTIME_ARTIFACT_REVISION} */"
 )
 
 
@@ -69,12 +75,37 @@ def esbuild_environment() -> dict[str, str]:
 
   Esbuild's CLI consumes Node's ``NODE_PATH`` environment variable (its JS API
   calls the equivalent option ``nodePaths``); there is no ``--node-path`` CLI
-  flag. Replace rather than append any inherited value so app builds resolve
-  bare imports only from the platform's pinned frontend runtime installation.
+  flag. Replace rather than append any inherited value. ``NODE_PATH`` is only a
+  fallback after an entry's nearby ``node_modules``, so the compile command also
+  aliases every supported package root to the platform runtime installation.
   """
   environment = dict(os.environ)
   environment["NODE_PATH"] = str(runtime_node_path())
   return environment
+
+
+def _package_root(specifier: str) -> str:
+  """Return the package root for a supported bare import or subpath."""
+  clean = specifier.removesuffix("/*")
+  if clean.startswith("@"):
+    return "/".join(clean.split("/")[:2])
+  return clean.split("/", 1)[0]
+
+
+def runtime_library_aliases() -> tuple[tuple[str, Path], ...]:
+  """Pin supported bare imports to one physical runtime package copy.
+
+  Esbuild normally resolves an app entry's imports relative to that app before
+  consulting ``NODE_PATH``. A gitignored development ``node_modules/react``
+  beside an app could therefore be bundled alongside the platform React used by
+  ``app_runtime_inject.js``. React then sees two dispatchers and every hook
+  fails at first render. Package-root aliases apply to the root and its subpaths
+  (for example ``react/jsx-runtime``), keeping each supported library singular.
+  """
+  node_path = runtime_node_path()
+  roots = sorted({_package_root(specifier) for specifier in BUNDLED_RUNTIME_LIBS})
+  return tuple((root, node_path / root) for root in roots)
+
 
 NO_DEFAULT_EXPORT_ERROR = (
   "JSX source has no default export — mini-apps must export a default React "
@@ -105,6 +136,10 @@ def esbuild_command(
     f"--banner:js={COMPILED_RUNTIME_BANNER}",
     f"--inject:{runtime_inject_path()}",
     f"--alias:mobius-runtime={mobius_runtime_path()}",
+    *(
+      f"--alias:{specifier}={path}"
+      for specifier, path in runtime_library_aliases()
+    ),
     f"--outfile={output}",
   ]
   if metafile is not None:

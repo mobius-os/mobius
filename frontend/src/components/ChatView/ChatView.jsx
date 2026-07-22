@@ -8,6 +8,7 @@ import {
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
+import mobiusLogoUrl from '../../assets/moebius.png'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
@@ -80,7 +81,7 @@ import {
   saveFailedSendAttempt,
   sendAttemptIsDurable,
 } from './sendAttemptRecovery.js'
-import { persistComposerDraft } from './composerDraft.js'
+import { persistComposerDraft, readComposerDraft } from './composerDraft.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
@@ -191,8 +192,8 @@ function readInitialComposer(chatId) {
     const failedAttempt = loadFailedSendAttempt(chatId)
     const pending = sessionStorage.getItem(PENDING_DRAFT_KEY)
     if (pending && failedAttempt) clearFailedSendAttempt(chatId)
-    const saved = sessionStorage.getItem(`draft:${chatId}`) || ''
-    const input = pending || failedAttempt?.text || saved
+    const saved = readComposerDraft(chatId)
+    const input = pending || failedAttempt?.text || saved.input
     const autoSendDraft =
       sessionStorage.getItem(PENDING_DRAFT_AUTOSEND_KEY) ||
       sessionStorage.getItem(`${DRAFT_AUTOSEND_PREFIX}${chatId}`)
@@ -200,7 +201,9 @@ function readInitialComposer(chatId) {
       input,
       autoSend: !!input && autoSendDraft === input,
       failedAttempt: pending ? null : failedAttempt,
-      attachments: pending ? [] : (failedAttempt?.attachments || []),
+      attachments: pending
+        ? []
+        : (failedAttempt?.attachments || saved.attachments),
     }
   } catch {
     return { input: '', autoSend: false, failedAttempt: null, attachments: [] }
@@ -353,12 +356,16 @@ export default function ChatView({
   if (!initialComposerRef.current) {
     initialComposerRef.current = readInitialComposer(chatId)
   }
+  const draftAttachmentsRef = useRef(initialComposerRef.current.attachments)
   const [input, setInputState] = useState(() => initialComposerRef.current.input)
+  const inputValueRef = useRef(input)
+  inputValueRef.current = input
   function setComposerInput(nextInput) {
     // Navigation can unmount this component before React flushes passive
     // effects. Keep every composer transition durable at the state boundary,
     // whether it came from typing, voice, restoration, or send cleanup.
-    persistComposerDraft(chatId, nextInput)
+    inputValueRef.current = nextInput
+    persistComposerDraft(chatId, nextInput, draftAttachmentsRef.current)
     setInputState(nextInput)
   }
   const [sendFailure, setSendFailure] = useState(() => (
@@ -831,6 +838,7 @@ export default function ChatView({
     closePreSendGestureWindow,
     freezeChatExit,
     freezeForegroundReturn,
+    freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
     reapplyActiveMode,
@@ -842,6 +850,7 @@ export default function ChatView({
     scrollRef,
     spacerRef,
     lastUserMsgRef,
+    syncComposerGeometry: measureComposerHeight,
     messages,
     messagesRef,
     pendingMessagesLength: pendingQueue.pendingMessages.length,
@@ -1401,6 +1410,10 @@ export default function ChatView({
   } = useFileUpload({
     chatId,
     initialFiles: initialComposerRef.current.attachments,
+    onFilesChange: nextFiles => {
+      draftAttachmentsRef.current = nextFiles
+      persistComposerDraft(chatId, inputValueRef.current, nextFiles)
+    },
   })
 
   function clearFailedAttempt() {
@@ -1586,7 +1599,7 @@ export default function ChatView({
   // voice transcription, send cleanup). Direct owner edits are saved
   // synchronously in handleComposerInputChange above.
   useEffect(() => {
-    persistComposerDraft(chatId, input)
+    persistComposerDraft(chatId, input, draftAttachmentsRef.current)
   }, [input, chatId])
 
   // Auto-size textarea when a draft is restored. Cap matches the
@@ -2485,6 +2498,12 @@ export default function ChatView({
       sendSilentInFlightRef.current = false
       return false
     }
+    // A question-card answer resumes the SAME assistant row. Freeze the
+    // currently visible message and its exact viewport offset synchronously,
+    // before QuestionCard's pending state commits or the POST can resume live
+    // output. Staying in FOLLOW_BOTTOM here caused the card-to-stream handoff
+    // to drag the screen upward after Submit.
+    if (resolvedAnswers) freezeQuestionSubmission()
     // Block a simultaneous composer send synchronously, but do not paint the
     // whole chat as a new active turn until the answer POST commits. On a
     // parked/durable question that premature parent transition swaps the
@@ -2495,10 +2514,10 @@ export default function ChatView({
     sendingRef.current = true
     promotedRef.current = false
     // Hidden answer is a continuation, NOT a new visible send. The
-    // user may be reading somewhere else; don't yank them with a
-    // PIN. The agent's response builds into the existing assistant
-    // message; if the user was at FOLLOW_BOTTOM they'll see it
-    // forming, if ANCHOR_AT they stay where they are.
+    // user may be reading somewhere else; don't yank them with a PIN.
+    // freezeQuestionSubmission above already converted the exact visible
+    // position into ANCHOR_AT, so resumed output grows inside the existing
+    // assistant row without creating tail-follow intent.
     try {
       // Mint a cid for symmetry so the persisted hidden row carries a stable
       // identity for reload dedup. It is inert here — a hidden answer send
@@ -2566,6 +2585,8 @@ export default function ChatView({
       // synchronous ref even when React state was already false; otherwise a
       // failed answer silently blocks every later composer send. A question
       // submitted while a live turn is parked keeps that live turn attached.
+      // Deliberately keep the reader anchor: the failed card remains the retry
+      // target, and an error-label reflow must not recreate live following.
       sendingRef.current = wasSending
       setSending(wasSending)
       setServerRunningState(wasServerRunning)
@@ -2586,7 +2607,7 @@ export default function ChatView({
     } finally {
       sendSilentInFlightRef.current = false
     }
-  }, [streamSend, commitMessages, fetchMessages])
+  }, [streamSend, commitMessages, fetchMessages, freezeQuestionSubmission])
 
   function handleSubmit(e) {
     e.preventDefault()
@@ -3167,13 +3188,6 @@ export default function ChatView({
   // the visible fast-forward affordance and its keyboard shortcut inert while
   // the stream is unavailable; otherwise the tray disappears but the composer
   // can still offer an action whose request cannot reach the running turn.
-  const canSteer = connectionError !== 'disconnected' && !steerBusy
-    && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
-  const canRequestSteer = connectionError !== 'disconnected'
-    && !steerBusy
-    && turnActive
-    && pendingQueue.pendingMessages.length > 0
-
   useEffect(() => {
     try {
       if (swReloadHoldTimerRef.current) {
@@ -3277,12 +3291,10 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  const onDisplayReadyRef = useRef(onDisplayReady)
-  onDisplayReadyRef.current = onDisplayReady
   const displayReady = revealed || showEmpty || showLoadError
   useLayoutEffect(() => {
-    if (displayReady) onDisplayReadyRef.current?.(chatId)
-  }, [chatId, displayReady])
+    if (displayReady) onDisplayReady?.(chatId)
+  }, [chatId, displayReady, onDisplayReady])
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
   // The captured bridge partial enters the active row before catch-up emits a
   // single item. That is the load-bearing part of Lever 1: when SSE becomes the
@@ -3369,6 +3381,20 @@ export default function ChatView({
     return false
   })()
   const hasPendingQuestion = pendingQuestionInStream || pendingQuestionInMessages
+
+  // A live question parks Codex's JSON-RPC reader inside request_user_input.
+  // turn/steer cannot be acknowledged until that question is released, so a
+  // steer button here is a dead end. Keep the existing deterministic Stop path
+  // available instead: Stop cancels the question first, interrupts the turn,
+  // and re-sends the queued rows as one fresh continuation.
+  const canSteer = !hasPendingQuestion
+    && connectionError !== 'disconnected' && !steerBusy
+    && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
+  const canRequestSteer = !hasPendingQuestion
+    && connectionError !== 'disconnected'
+    && !steerBusy
+    && turnActive
+    && pendingQueue.pendingMessages.length > 0
 
   // ── Sticky "tap to resume" affordance ──────────────────────────────
   // A turn paused by a drain-gated restart, a stall, or a provider-limit park
@@ -3637,7 +3663,7 @@ export default function ChatView({
             )
           ) : (
             <div className="chat__empty">
-              <img className="chat__empty-glyph" src={`${BASE}/moebius.png`} alt="" width="120" height="120" />
+              <img className="chat__empty-glyph" src={mobiusLogoUrl} alt="" width="120" height="120" />
               <p className="chat__empty-title">What's on your mind?</p>
               <div className="chat__empty-prompts">
                 {EMPTY_PROMPTS.map(prompt => (
@@ -3768,6 +3794,7 @@ export default function ChatView({
               <MsgContent
                 msg={msg}
                 chatId={chatId}
+                messageKey={dataKey}
                 onQuestionAnswer={doSendSilent}
                 onResume={doSend}
                 onInternalNav={internalNav}
@@ -3843,6 +3870,7 @@ export default function ChatView({
                     displayState="running"
                     iconKind="reasoning"
                     ariaLabel="Thinking, in progress"
+                    reserveInteractiveGeometry
                   />
                 </div>
               </div>
@@ -3934,12 +3962,13 @@ export default function ChatView({
             items={pendingQueue.pendingMessages}
             onCancel={handleCancelPending}
             onSteerOne={handleSteerOne}
-            steerActive={turnActive}
+            steerActive={turnActive && !hasPendingQuestion}
             steerBusy={steerBusy}
           />
           </>
         )}
         <ChatInputBar
+          chatId={chatId}
           input={input}
           onInputChange={handleComposerInputChange}
           onSubmit={handleSubmit}

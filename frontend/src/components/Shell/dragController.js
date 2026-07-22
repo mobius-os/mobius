@@ -36,8 +36,8 @@ export const POINTER_SLOP = 5
 // longer, more deliberate hold to not fight the scroll).
 export const TAB_HOLD_MS = 350
 export const DRAWER_HOLD_MS = 450
-// Movement past this BEFORE the hold completes cancels the lift and yields the
-// gesture to native scrolling — a touch that starts moving was a scroll.
+// Movement past this before the hold resolves is enough to classify the gesture
+// against the source scroller's axis (touchMoveIntent below).
 export const PRE_HOLD_MOVE_PX = 8
 // After a touch lift, a release that never moved past this opens the context
 // menu instead of dropping (lift → release-in-place = menu; lift → move = drag).
@@ -45,12 +45,13 @@ export const RELEASE_IN_PLACE_PX = 5
 
 // ── Zone geometry (design §3.2 / §3.3) ───────────────────────────────────────
 
-// Edge band: clamp(pane×0.22, 40px, cap). The horizontal cap is wider than the
-// vertical one because side splits read from a taller, narrower band.
+// Edge band: an uncapped proportional quarter, max(pane×0.25, 40px). Fixed pixel caps
+// were the actual ergonomics problem — on a wide pane they turned an edge into a
+// narrow precision target the owner had to "move the tab quite a bit toward" — so the
+// fraction is now its own proportional cap, leaving exactly 50% of each axis as the
+// center join corridor.
 export const EDGE_BAND_MIN = 40
-export const EDGE_BAND_CAP_W = 110
-export const EDGE_BAND_CAP_H = 96
-export const EDGE_BAND_FRACTION = 0.22
+export const EDGE_BAND_FRACTION = 0.25
 // A thumb on a phone cannot comfortably reach a 96px edge band on a tall
 // pane (the owner had to "drag too far"), so coarse phone panes use a
 // proportional third per edge — upper third splits up, lower third splits
@@ -94,10 +95,18 @@ export function passedSlop(dx, dy, slop = POINTER_SLOP) {
   return hypot(dx, dy) > slop
 }
 
-// A touch that moves this far before its hold timer fires is a scroll, not a
-// lift — the binding cancels the pending lift and lets the page scroll.
-export function preHoldMoveCancels(dx, dy, limit = PRE_HOLD_MOVE_PX) {
-  return hypot(dx, dy) > limit
+// Drawer rows live in a vertical list, so vertical movement stays native scrolling
+// and a horizontal pull becomes a drag. Tab bodies live in a horizontal strip: a
+// horizontal move stays native scrolling, while a vertical pull lifts the tab. The
+// dedicated tab handle owns its pointer stream in CSS and can therefore reorder on
+// either axis without taking horizontal scrolling away from the tab body.
+export function touchMoveIntent(dx, dy, sourceKind, limit = PRE_HOLD_MOVE_PX) {
+  if (hypot(dx, dy) <= limit) return 'pending'
+  const x = Math.abs(dx)
+  const y = Math.abs(dy)
+  if (sourceKind === 'drawer') return x > y ? 'drag' : 'scroll'
+  if (sourceKind === 'tab-handle') return 'drag'
+  return y > x ? 'drag' : 'scroll'
 }
 
 // After a lift, a release still within this radius opened no drag — it is the
@@ -142,10 +151,6 @@ export function crossedDrawerExit(pointX, edgeX, gap = DRAWER_EXIT_PX) {
 
 // ── Small geometry helpers ───────────────────────────────────────────────────
 
-function clamp(v, lo, hi) {
-  return Math.min(hi, Math.max(lo, v))
-}
-
 function contains(rect, point) {
   return point.x >= rect.x && point.x <= rect.x + rect.w
     && point.y >= rect.y && point.y <= rect.y + rect.h
@@ -155,8 +160,9 @@ function insetRect(rect, m) {
   return { x: rect.x + m, y: rect.y + m, w: Math.max(0, rect.w - 2 * m), h: Math.max(0, rect.h - 2 * m) }
 }
 
-// The band widths for a pane (design §3.2). Horizontal and vertical bands clamp
-// against different caps.
+// The band widths for a pane (design §3.2). Both axes are an uncapped proportional
+// quarter above the 40px floor — the same proportional shape phone uses, just a
+// smaller fraction (desktop 0.25 vs phone 0.34).
 export function edgeBands(rect, mode) {
   if (mode === 'phone') {
     return {
@@ -165,8 +171,8 @@ export function edgeBands(rect, mode) {
     }
   }
   return {
-    w: clamp(rect.w * EDGE_BAND_FRACTION, EDGE_BAND_MIN, EDGE_BAND_CAP_W),
-    h: clamp(rect.h * EDGE_BAND_FRACTION, EDGE_BAND_MIN, EDGE_BAND_CAP_H),
+    w: Math.max(rect.w * EDGE_BAND_FRACTION, EDGE_BAND_MIN),
+    h: Math.max(rect.h * EDGE_BAND_FRACTION, EDGE_BAND_MIN),
   }
 }
 
