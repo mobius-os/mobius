@@ -8,14 +8,18 @@ A skill is on-demand knowledge — a markdown document you `Read` when a task ma
 
 ## Where to look
 
-Search these sources, in rough order of quality:
+Search these sources, in rough order of quality (all verified to host real `SKILL.md` directories):
 
-1. **`anthropics/skills`** — Anthropic's official collection. Browse the repo tree; each top-level or category directory holding a `SKILL.md` is one skill.
-2. **`NousResearch/hermes-agent`** — MIT-licensed skills under `skills/` (bundled) and `optional-skills/` (heavier/niche), organized by category (`github/`, `creative/`, `data-science/`, …).
-3. **Awesome lists** — search GitHub for `awesome-claude-skills`, `awesome-agent-skills`, `awesome-hermes-agent`; they index community skills with descriptions.
-4. **General GitHub search** — `filename:SKILL.md <topic>` finds standalone skills anywhere.
+1. **`anthropics/skills`** — Anthropic's official collection, under `skills/`.
+2. **`anthropics/knowledge-work-plugins`** — Anthropic's knowledge-worker plugins; ~200 skills at `<plugin>/skills/<name>/SKILL.md` (research, bio, finance, legal, sales, …).
+3. **`obra/superpowers`** — the widely used dev-methodology set under `skills/` (brainstorming, planning, TDD, debugging, code review).
+4. **`trailofbits/skills`** — security research, vulnerability detection, and audit workflows, at `plugins/<plugin>/skills/<name>/SKILL.md`.
+5. **`cloudflare/skills`** — official Cloudflare skills for building on their platform, under `skills/`.
+6. **`NousResearch/hermes-agent`** — MIT-licensed skills under `skills/` (bundled) and `optional-skills/` (heavier/niche), organized by category (`github/`, `creative/`, `data-science/`, …).
+7. **Awesome lists** — search GitHub for `awesome-claude-skills`, `awesome-agent-skills`; they index community skills with descriptions but host none themselves (link lists, not installable trees).
+8. **General GitHub search** — `filename:SKILL.md <topic>` finds standalone skills anywhere.
 
-Fetch listings and files with your normal web access. To browse a repo directory programmatically: `https://api.github.com/repos/<owner>/<repo>/contents/<path>` returns the file list as JSON.
+Fetch listings and files with your normal web access. To enumerate every skill in a repo in ONE request: `https://api.github.com/repos/<owner>/<repo>/git/trees/<ref>?recursive=1`, then keep paths ending in `/SKILL.md` (this is what the Skills app itself does). `…/contents/<path>` works for a single directory.
 
 ## Judging fit
 

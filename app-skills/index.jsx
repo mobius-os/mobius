@@ -1,15 +1,14 @@
 // Skills — browse, install, and manage agent skills.
 //
-// Three zones: a source browser over public GitHub skill catalogs (fetched
-// through /api/proxy, SKILL.md frontmatter parsed client-side), the installed
-// list from GET /api/skills, and an embedded agent chat that can search the
-// ecosystem and install on the owner's go (permissions.manage_skills gates the
-// install/uninstall calls; the platform's finding-skills seed skill is the
-// agent's playbook here).
+// Three zones: a catalog browser over public GitHub skill repos (one
+// git-trees API call per source through /api/proxy finds every SKILL.md —
+// flat cards, no folder drilling), the installed list from GET /api/skills,
+// and an embedded agent chat that can search the ecosystem and install on the
+// owner's go (permissions.manage_skills gates the install/uninstall calls;
+// the platform's finding-skills seed skill is the agent's playbook here).
 //
 // Catalog sources are app data (sources.json) — agent-editable like everything
-// else, so "add the awesome-claude-skills list as a source" is a chat request,
-// not a code change.
+// else, so "add this repo as a source" is a chat request, not a code change.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 
@@ -27,9 +26,11 @@ const CSS = `
 .sk-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 9px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); margin-bottom: 8px; cursor: pointer; color: var(--text); font-size: 14px; }
 .sk-row:hover { border-color: var(--accent); }
 .sk-row .ico { flex: 0 0 auto; opacity: 0.75; }
+.sk-row .sub { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
 .sk-card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 12px; margin-bottom: 10px; }
 .sk-card h3 { margin: 0 0 4px 0; font-size: 15px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sk-card p { margin: 0 0 8px 0; font-size: 13px; color: var(--muted); line-height: 1.45; }
+.sk-card .path { font-size: 11.5px; color: var(--muted); opacity: 0.8; margin: -2px 0 6px; word-break: break-all; }
 .sk-chip { font-size: 10.5px; padding: 2px 7px; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); font-weight: 500; white-space: nowrap; }
 .sk-chip.seed { color: var(--accent); border-color: var(--accent); }
 .sk-chip.installed { color: var(--green, #1e7a46); border-color: var(--green, #1e7a46); }
@@ -40,6 +41,8 @@ const CSS = `
 .sk-note { font-size: 12.5px; color: var(--muted); margin: 6px 0 12px; }
 .sk-err { font-size: 13px; color: var(--danger); background: var(--surface); border: 1px solid var(--danger); border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; white-space: pre-wrap; }
 .sk-empty { text-align: center; color: var(--muted); padding: 28px 10px; font-size: 13.5px; }
+.sk-search { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font-size: 13.5px; margin-bottom: 10px; }
+.sk-search:focus { outline: none; border-color: var(--accent); }
 .sk-chat { flex: 0 0 300px; border-top: 1px solid var(--border); min-height: 0; display: flex; flex-direction: column; }
 .sk-chat.closed { flex-basis: 40px; }
 .sk-chat-bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; font-size: 13px; color: var(--muted); cursor: pointer; user-select: none; }
@@ -49,10 +52,24 @@ const CSS = `
 .sk-uses { font-size: 11px; color: var(--muted); margin-left: auto; white-space: nowrap; }
 `
 
+// Verified catalogs that HOST SKILL.md-format skills (link-list "awesome"
+// repos don't render here — hand those to the agent instead). `path` scopes
+// the tree scan to a subtree; '' scans the whole repo.
 const DEFAULT_SOURCES = [
-  { label: 'Anthropic Skills', repo: 'anthropics/skills', path: '', ref: 'main' },
-  { label: 'Hermes bundled', repo: 'NousResearch/hermes-agent', path: 'skills', ref: 'main' },
-  { label: 'Hermes optional', repo: 'NousResearch/hermes-agent', path: 'optional-skills', ref: 'main' },
+  { label: 'Anthropic Skills', repo: 'anthropics/skills', path: 'skills', ref: 'main',
+    blurb: 'Official Anthropic skills — documents, artifacts, MCP building, testing.' },
+  { label: 'Anthropic Knowledge Work', repo: 'anthropics/knowledge-work-plugins', path: '', ref: 'main',
+    blurb: 'Anthropic’s knowledge-worker plugins — research, bio, finance, legal, and more.' },
+  { label: 'Superpowers', repo: 'obra/superpowers', path: 'skills', ref: 'main',
+    blurb: 'The famous dev-methodology set — brainstorming, planning, TDD, debugging.' },
+  { label: 'Trail of Bits Security', repo: 'trailofbits/skills', path: '', ref: 'main',
+    blurb: 'Security research, vulnerability detection, and audit workflows.' },
+  { label: 'Cloudflare', repo: 'cloudflare/skills', path: 'skills', ref: 'main',
+    blurb: 'Official Cloudflare skills for building on Workers and the CF platform.' },
+  { label: 'Hermes bundled', repo: 'NousResearch/hermes-agent', path: 'skills', ref: 'main',
+    blurb: 'Nous Research’s always-on Hermes agent skills.' },
+  { label: 'Hermes optional', repo: 'NousResearch/hermes-agent', path: 'optional-skills', ref: 'main',
+    blurb: 'The big Hermes catalog — blockchain, research, media, agents, and more.' },
 ]
 
 const CHAT_SYSTEM_PROMPT = `You are the embedded agent of the Skills app. The partner is browsing,
@@ -62,6 +79,10 @@ summarize what it instructs, install only on the partner's go), and the exact
 POST /api/skills/install and DELETE /api/skills/{name} calls. When asked for "a skill for X",
 search the sources, offer the best matches with one-line summaries and provenance, and install the
 chosen one. Keep answers short; this is a side panel.`
+
+// Descriptions auto-load for this many cards after a source opens; the rest
+// load when tapped. Keeps a 200-skill catalog from firing 200 proxy fetches.
+const EAGER_DESCRIPTIONS = 10
 
 function parseFrontmatter(text) {
   // Minimal SKILL.md frontmatter reader: leading --- block, flat scalars only.
@@ -91,15 +112,18 @@ function firstParagraph(body) {
 export default function SkillsApp({ appId, token }) {
   const [tab, setTab] = useState('browse')
   const [sources, setSources] = useState(DEFAULT_SOURCES)
-  const [nav, setNav] = useState(null) // { source, path } | null = source list
-  const [listing, setListing] = useState(null)
-  const [skillMeta, setSkillMeta] = useState(null) // current dir's SKILL.md info
-  const [installed, setInstalled] = useState([])
+  const [nav, setNav] = useState(null) // { source } | null = source list
+  const [skillList, setSkillList] = useState(null) // [{ dir, name }] from the tree scan
+  const [descs, setDescs] = useState({}) // dir -> { description, license } | 'loading' | 'failed'
+  const [filter, setFilter] = useState('')
+  const [installedList, setInstalledList] = useState([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
   const [chatOpen, setChatOpen] = useState(true)
   const chatMountRef = useRef(null)
+  const descsRef = useRef(descs)
+  descsRef.current = descs
 
   const authed = useMemo(() => ({ Authorization: `Bearer ${token}` }), [token])
 
@@ -117,7 +141,7 @@ export default function SkillsApp({ appId, token }) {
   const refreshInstalled = async () => {
     try {
       const res = await fetch('/api/skills', { headers: authed })
-      if (res.ok) setInstalled((await res.json()).skills || [])
+      if (res.ok) setInstalledList((await res.json()).skills || [])
     } catch { /* keep the last list; the API being down shows via installs */ }
   }
 
@@ -143,25 +167,45 @@ export default function SkillsApp({ appId, token }) {
     return () => { disposed = true; handle?.destroy() }
   }, [])
 
-  const openPath = async (source, path) => {
-    setBusy(true); setError(null); setNotice(null); setSkillMeta(null); setListing(null)
-    setNav({ source, path })
+  const rawUrl = (source, dir) =>
+    `https://raw.githubusercontent.com/${source.repo}/${source.ref || 'main'}/${dir}/SKILL.md`
+
+  const loadDescription = async (source, dir) => {
+    if (descsRef.current[dir]) return
+    setDescs((d) => ({ ...d, [dir]: 'loading' }))
     try {
-      const clean = path.replace(/^\/+|\/+$/g, '')
-      const url = `https://api.github.com/repos/${source.repo}/contents/${clean}?ref=${source.ref || 'main'}`
-      const entries = await proxyJson(url)
-      if (!Array.isArray(entries)) throw new Error('unexpected GitHub response (not a directory)')
-      const dirs = entries.filter((e) => e.type === 'dir' && !e.name.startsWith('.'))
-      const skillFile = entries.find((e) => e.type === 'file' && e.name.toUpperCase() === 'SKILL.MD')
-      setListing(dirs)
-      if (skillFile?.download_url) {
-        const meta = parseFrontmatter(await proxyText(skillFile.download_url))
-        setSkillMeta({
-          name: meta.name || clean.split('/').pop(),
-          description: meta.description || firstParagraph(meta.body),
+      const meta = parseFrontmatter(await proxyText(rawUrl(source, dir)))
+      setDescs((d) => ({
+        ...d,
+        [dir]: {
+          description: meta.description || firstParagraph(meta.body) || 'No description in SKILL.md.',
           license: meta.license || null,
-        })
-      }
+        },
+      }))
+    } catch {
+      setDescs((d) => ({ ...d, [dir]: 'failed' }))
+    }
+  }
+
+  // One git-trees call finds every SKILL.md in the repo — flat cards, no
+  // folder drilling, no dead ends.
+  const openSource = async (source) => {
+    setBusy(true); setError(null); setNotice(null)
+    setNav({ source }); setSkillList(null); setDescs({}); setFilter('')
+    try {
+      const url = `https://api.github.com/repos/${source.repo}/git/trees/${source.ref || 'main'}?recursive=1`
+      const data = await proxyJson(url)
+      if (!Array.isArray(data.tree)) throw new Error(data.message || 'unexpected GitHub response (no tree)')
+      const prefix = (source.path || '').replace(/^\/+|\/+$/g, '')
+      const skills = data.tree
+        .filter((t) => t.path.endsWith('/SKILL.md'))
+        .map((t) => t.path.slice(0, -'/SKILL.md'.length))
+        .filter((dir) => !prefix || dir === prefix || dir.startsWith(`${prefix}/`))
+        .map((dir) => ({ dir, name: dir.split('/').pop() }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+      setSkillList(skills)
+      if (data.truncated) setNotice('Large repo — GitHub truncated the file list; some skills may be missing.')
+      skills.slice(0, EAGER_DESCRIPTIONS).forEach((s) => loadDescription(source, s.dir))
     } catch (e) {
       setError(String(e.message || e))
     } finally {
@@ -169,18 +213,13 @@ export default function SkillsApp({ appId, token }) {
     }
   }
 
-  const installCurrent = async () => {
-    if (!nav) return
+  const install = async (source, dir) => {
     setBusy(true); setError(null); setNotice(null)
     try {
       const res = await fetch('/api/skills/install', {
         method: 'POST',
         headers: { ...authed, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          repo: nav.source.repo,
-          path: nav.path.replace(/^\/+|\/+$/g, ''),
-          ref: nav.source.ref || 'main',
-        }),
+        body: JSON.stringify({ repo: source.repo, path: dir, ref: source.ref || 'main' }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.detail || `install failed (${res.status})`)
@@ -210,8 +249,13 @@ export default function SkillsApp({ appId, token }) {
     }
   }
 
-  const installedIds = useMemo(() => new Set(installed.map((s) => s.id)), [installed])
-  const crumbs = nav ? nav.path.split('/').filter(Boolean) : []
+  const installedIds = useMemo(() => new Set(installedList.map((s) => s.id)), [installedList])
+  const shownSkills = useMemo(() => {
+    if (!skillList) return null
+    const q = filter.trim().toLowerCase()
+    if (!q) return skillList
+    return skillList.filter((s) => s.dir.toLowerCase().includes(q))
+  }, [skillList, filter])
 
   return (
     <div className="skills-app">
@@ -221,7 +265,7 @@ export default function SkillsApp({ appId, token }) {
         <div className="sk-tabs">
           <button className={`sk-tab ${tab === 'browse' ? 'active' : ''}`} onClick={() => setTab('browse')}>Browse</button>
           <button className={`sk-tab ${tab === 'installed' ? 'active' : ''}`} onClick={() => setTab('installed')}>
-            Installed ({installed.length})
+            Installed ({installedList.length})
           </button>
         </div>
       </div>
@@ -233,13 +277,16 @@ export default function SkillsApp({ appId, token }) {
         {tab === 'browse' && !nav && (
           <>
             <div className="sk-note">
-              Public skill catalogs. Open a source, drill into a folder — when it holds a
-              SKILL.md you can install it. Ask the agent below to search across all of them.
+              Public skill catalogs. Open one to see every skill it holds as a card.
+              Ask the agent below to search across all of them.
             </div>
             {sources.map((s) => (
-              <button key={`${s.repo}/${s.path}`} className="sk-row" onClick={() => openPath(s, s.path)}>
+              <button key={`${s.repo}/${s.path}`} className="sk-row" onClick={() => openSource(s)}>
                 <span className="ico">📚</span>
-                <span><b>{s.label}</b> · {s.repo}{s.path ? `/${s.path}` : ''}</span>
+                <span>
+                  <b>{s.label}</b> · {s.repo}
+                  {s.blurb && <span className="sub">{s.blurb}</span>}
+                </span>
               </button>
             ))}
           </>
@@ -248,48 +295,62 @@ export default function SkillsApp({ appId, token }) {
         {tab === 'browse' && nav && (
           <>
             <div className="sk-crumbs">
-              <button onClick={() => { setNav(null); setListing(null); setSkillMeta(null); setError(null) }}>Sources</button>
+              <button onClick={() => { setNav(null); setSkillList(null); setError(null) }}>Sources</button>
               <span>/</span>
-              <button onClick={() => openPath(nav.source, nav.source.path)}>{nav.source.label}</button>
-              {crumbs.slice(nav.source.path.split('/').filter(Boolean).length).map((seg, i, rel) => (
-                <span key={i}>
-                  <span> / </span>
-                  <button onClick={() => openPath(nav.source, [
-                    nav.source.path, ...rel.slice(0, i + 1),
-                  ].filter(Boolean).join('/'))}>{seg}</button>
-                </span>
-              ))}
+              <span>{nav.source.label}{skillList ? ` — ${skillList.length} skills` : ''}</span>
             </div>
-            {busy && !listing && <div className="sk-empty">Loading…</div>}
-            {skillMeta && (
-              <div className="sk-card">
-                <h3>
-                  {skillMeta.name}
-                  {skillMeta.license && <span className="sk-chip">{skillMeta.license}</span>}
-                  {installedIds.has(nav.path.split('/').filter(Boolean).pop()) && (
-                    <span className="sk-chip installed">installed</span>
-                  )}
-                </h3>
-                <p>{skillMeta.description || 'No description in frontmatter.'}</p>
-                <button className="sk-btn" disabled={busy} onClick={installCurrent}>Install skill</button>
-              </div>
+            {busy && !skillList && <div className="sk-empty">Scanning {nav.source.repo}…</div>}
+            {skillList && skillList.length > 8 && (
+              <input
+                className="sk-search"
+                placeholder={`Filter ${skillList.length} skills…`}
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+              />
             )}
-            {listing && listing.map((d) => (
-              <button key={d.path} className="sk-row" onClick={() => openPath(nav.source, d.path)}>
-                <span className="ico">📁</span>
-                <span>{d.name}</span>
-              </button>
-            ))}
-            {listing && !listing.length && !skillMeta && (
-              <div className="sk-empty">Nothing recognizable here.</div>
+            {shownSkills && shownSkills.map((s) => {
+              const d = descs[s.dir]
+              const loaded = d && d !== 'loading' && d !== 'failed'
+              return (
+                <div
+                  key={s.dir}
+                  className="sk-card"
+                  onClick={() => !d && loadDescription(nav.source, s.dir)}
+                >
+                  <h3>
+                    {s.name}
+                    {loaded && d.license && <span className="sk-chip">{d.license}</span>}
+                    {installedIds.has(s.name) && <span className="sk-chip installed">installed</span>}
+                  </h3>
+                  {s.dir !== s.name && <div className="path">{s.dir}</div>}
+                  <p>
+                    {loaded ? d.description
+                      : d === 'loading' ? 'Loading summary…'
+                        : d === 'failed' ? 'Could not load SKILL.md.'
+                          : 'Tap for summary.'}
+                  </p>
+                  <button
+                    className="sk-btn"
+                    disabled={busy || installedIds.has(s.name)}
+                    onClick={(e) => { e.stopPropagation(); install(nav.source, s.dir) }}
+                  >
+                    {installedIds.has(s.name) ? 'Installed' : 'Install'}
+                  </button>
+                </div>
+              )
+            })}
+            {shownSkills && !shownSkills.length && (
+              <div className="sk-empty">
+                {skillList.length ? 'No skills match the filter.' : 'No SKILL.md files found in this source.'}
+              </div>
             )}
           </>
         )}
 
         {tab === 'installed' && (
           <>
-            {!installed.length && <div className="sk-empty">No skills yet — browse a catalog or ask the agent.</div>}
-            {installed.map((s) => (
+            {!installedList.length && <div className="sk-empty">No skills yet — browse a catalog or ask the agent.</div>}
+            {installedList.map((s) => (
               <div key={s.id} className="sk-card">
                 <h3>
                   {s.name}
