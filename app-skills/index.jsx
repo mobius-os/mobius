@@ -60,14 +60,12 @@ const CSS = `
 
 /* mobius-ui:Scrollskin v2 — keep in sync; hidden by default, content stays scrollable. */
 .sk-scroll,
-.sk-peek,
 .sk-md pre,
 .sk-md table {
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
 .sk-scroll::-webkit-scrollbar,
-.sk-peek::-webkit-scrollbar,
 .sk-md pre::-webkit-scrollbar,
 .sk-md table::-webkit-scrollbar {
   display: none;
@@ -88,9 +86,17 @@ const CSS = `
   background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 .sk-title { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0; }
 .sk-subtitle { display: block; margin-top: 1px; font-size: 12px; color: var(--muted); }
-.sk-iconbtn { flex: 0 0 auto; width: 44px; height: 44px; display: inline-flex; align-items: center;
+.sk-iconbtn { position: relative; flex: 0 0 auto; width: 44px; height: 44px; display: inline-flex; align-items: center;
   justify-content: center; border-radius: 10px; border: 1px solid var(--border); background: var(--surface);
   color: var(--text); cursor: pointer; transition: background .14s ease, transform .1s ease; }
+/* custom tooltip — faster than the native title (~0.15s vs ~1s) and stylable */
+.sk-tip { position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; pointer-events: none;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+  padding: 5px 10px; font-size: 12px; font-weight: 400; line-height: 1.35; white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); opacity: 0; transform: translateY(-2px);
+  transition: opacity .12s ease .15s, transform .12s ease .15s; }
+.sk-iconbtn:hover .sk-tip,
+.sk-iconbtn:focus-visible .sk-tip { opacity: 1; transform: none; }
 .sk-iconbtn:active { transform: scale(0.94); }
 .sk-iconbtn:disabled { opacity: 0.5; cursor: default; }
 .sk-iconbtn svg { width: 18px; height: 18px; }
@@ -130,11 +136,13 @@ const CSS = `
 .sk-chev { flex: 0 0 auto; align-self: center; color: var(--muted); opacity: 0.6; }
 .sk-chev svg { width: 18px; height: 18px; }
 
-/* row + trailing uninstall button (installed:* skills only) */
-.sk-rowwrap { display: flex; align-items: center; border-bottom: 1px solid var(--border-light, var(--border)); }
+/* row + corner uninstall button (installed:* skills only) */
+.sk-rowwrap { position: relative; border-bottom: 1px solid var(--border-light, var(--border)); }
 .sk-rowwrap:last-child { border-bottom: none; }
-.sk-rowwrap > .sk-row { flex: 1; min-width: 0; border-bottom: none; }
-.sk-rowtrash { flex: 0 0 auto; margin-left: -4px; }
+.sk-rowwrap > .sk-row { border-bottom: none; }
+.sk-rowwrap.has-trash > .sk-row { padding-right: 44px; }
+.sk-rowtrash { position: absolute; top: 8px; right: 6px; width: 30px; height: 30px; border-radius: 8px; }
+.sk-rowtrash svg { width: 14px; height: 14px; }
 
 /* provenance + usage chips (rows and detail) */
 .sk-provrow { display: flex; align-items: center; gap: 7px; margin-top: 6px; flex-wrap: wrap; min-width: 0; }
@@ -231,16 +239,9 @@ const CSS = `
 .sk-cards { padding: 0 12px 32px; }
 .sk-card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
   padding: 12px 14px; margin-bottom: 10px; cursor: pointer; }
-.sk-card.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .sk-card h3 { margin: 0 0 4px; font-size: 15px; font-weight: 650; display: flex; align-items: center;
   gap: 8px; flex-wrap: wrap; word-break: break-word; }
 .sk-carddesc { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
-.sk-cardmeta { border-top: 1px solid var(--border-light, var(--border)); margin: 8px 0 10px; padding-top: 8px;
-  font-size: 12.5px; color: var(--muted); }
-.sk-cardmeta .meta { margin: 0 0 8px; word-break: break-all; }
-.sk-peek { white-space: pre-wrap; font-family: var(--mono); font-size: 12px; line-height: 1.5; max-height: 180px;
-  overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
-  background: var(--bg); margin-bottom: 4px; }
 .sk-cardbtns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .sk-btn { min-height: 40px; padding: 8px 16px; border-radius: 10px; border: 1px solid var(--accent);
   background: var(--accent); color: var(--accent-fg, #fff); font-family: var(--font); font-size: 13.5px;
@@ -307,8 +308,9 @@ function ProvChips({ provenance, uses }) {
 
 // One catalog card. Summaries prefetch in the background after the source
 // scan; the IntersectionObserver only lets visible cards jump that queue (and
-// is the fallback when the pool is cancelled mid-run).
-function CatalogCard({ skill, desc, expanded, installed, busy, githubUrl, onToggle, onLoad, onInstall }) {
+// is the fallback when the pool is cancelled mid-run). Tapping a card opens
+// the full SKILL.md as its own page, like an installed skill.
+function CatalogCard({ skill, desc, installed, busy, onOpen, onLoad, onInstall }) {
   const ref = useRef(null)
 
   useEffect(() => {
@@ -322,7 +324,7 @@ function CatalogCard({ skill, desc, expanded, installed, busy, githubUrl, onTogg
 
   const loaded = desc && desc !== 'loading' && desc !== 'failed'
   return (
-    <div ref={ref} className={`sk-card${expanded ? ' sel' : ''}`} onClick={onToggle}>
+    <div ref={ref} className="sk-card" onClick={onOpen}>
       <h3>
         {skill.name}
         {installed && <span className="sk-prov installed">installed</span>}
@@ -332,15 +334,6 @@ function CatalogCard({ skill, desc, expanded, installed, busy, githubUrl, onTogg
           : desc === 'failed' ? 'Could not load SKILL.md.'
             : 'Loading summary…'}
       </p>
-      {expanded && loaded && (
-        <div className="sk-cardmeta" onClick={(e) => e.stopPropagation()}>
-          <div className="meta">
-            {skill.dir !== skill.name && <>In repo: <b>{skill.dir}</b><br /></>}
-            {desc.license && <>License: {desc.license}</>}
-          </div>
-          {desc.peek && <div className="sk-peek">{desc.peek}</div>}
-        </div>
-      )}
       <div className="sk-cardbtns">
         <button
           className="sk-btn"
@@ -350,18 +343,6 @@ function CatalogCard({ skill, desc, expanded, installed, busy, githubUrl, onTogg
         >
           {installed ? 'Installed' : busy ? 'Installing…' : 'Install'}
         </button>
-        {expanded && (
-          <a
-            className="sk-btn ghost"
-            href={githubUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            title="Open the full SKILL.md on GitHub"
-          >
-            Read on GitHub {EXTERNAL}
-          </a>
-        )}
       </div>
     </div>
   )
@@ -375,9 +356,9 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
   const [open, setOpen] = useState(null) // { source } | null = source list
   const [skillList, setSkillList] = useState(null)
   const [truncated, setTruncated] = useState(false)
-  const [descs, setDescs] = useState({}) // dir -> summary | 'loading' | 'failed'
+  const [descs, setDescs] = useState({}) // dir -> { ...summary, raw } | 'loading' | 'failed'
   const [filter, setFilter] = useState('')
-  const [expandedDir, setExpandedDir] = useState(null)
+  const [detailDir, setDetailDir] = useState(null) // dir open as a full page
   const [busyDir, setBusyDir] = useState(null)
   const [scanBusy, setScanBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -410,8 +391,10 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
     inflightRef.current.add(dir)
     setDescs((d) => ({ ...d, [dir]: 'loading' }))
     try {
-      const summary = catalogSummary(await proxied(rawSkillUrl(source, dir)))
-      setDescs((d) => ({ ...d, [dir]: summary }))
+      // Keep the raw markdown next to the summary: the card only needs the
+      // description, but the full-page detail view renders the whole file.
+      const text = await proxied(rawSkillUrl(source, dir))
+      setDescs((d) => ({ ...d, [dir]: { ...catalogSummary(text), raw: text } }))
     } catch {
       setDescs((d) => ({ ...d, [dir]: 'failed' }))
     }
@@ -420,7 +403,7 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
   const openSource = async (source) => {
     prefetcherRef.current?.cancel()
     setOpen({ source })
-    setSkillList(null); setTruncated(false); setDescs({}); setFilter(''); setExpandedDir(null)
+    setSkillList(null); setTruncated(false); setDescs({}); setFilter(''); setDetailDir(null)
     setScanBusy(true); setError(null); setNotice(null)
     inflightRef.current = new Set()
     try {
@@ -444,7 +427,13 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
   const backToSources = () => {
     prefetcherRef.current?.cancel()
     setOpen(null)
-    setSkillList(null); setError(null); setNotice(null); setExpandedDir(null); setFilter('')
+    setSkillList(null); setError(null); setNotice(null); setDetailDir(null); setFilter('')
+  }
+
+  const openSkillPage = (dir) => {
+    setDetailDir(dir)
+    if (open) loadDescription(open.source, dir)
+    window.mobius?.signal?.('item_opened', { type: 'catalog-skill', slug: dir })
   }
 
   const install = async (source, dir) => {
@@ -475,17 +464,62 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
     return skillList.filter((s) => s.dir.toLowerCase().includes(q))
   }, [skillList, filter])
 
+  const detailName = detailDir ? detailDir.split('/').pop() : null
+  const detailInstalled = detailName ? existingIds.has(detailName) : false
+  const detailEntry = detailDir ? descs[detailDir] : null
+  const detailLoaded = detailEntry && detailEntry !== 'loading' && detailEntry !== 'failed'
+  const detailHtml = useMemo(() => {
+    if (!detailLoaded) return ''
+    try {
+      return DOMPurify.sanitize(marked.parse(parseSkill('SKILL.md', detailEntry.raw || '').content || ''))
+    } catch (err) {
+      window.mobius?.signal?.('error', { message: String(err?.message || err), source: 'markdown_render' })
+      return ''
+    }
+  }, [detailEntry])
+
+  // Links in a catalog SKILL.md: external → new tab; anything else (relative
+  // resource paths we haven't fetched) is blocked so the app stays mounted.
+  function onDetailClick(e) {
+    const a = e.target.closest && e.target.closest('a')
+    if (!a) return
+    const link = classifyLink(a.getAttribute('href'))
+    if (link.kind === 'anchor') return
+    e.preventDefault()
+    if (link.kind === 'external') window.open(link.url, '_blank', 'noopener,noreferrer')
+  }
+
   return (
     <div className="sk-cat" style={visible ? undefined : { display: 'none' }} aria-hidden={!visible}>
       <div className="sk-detail-head">
         <button
           className="sk-back"
-          onClick={() => (open ? backToSources() : onClose())}
-          aria-label={open ? 'Back to catalogs' : 'Back to skills'}
+          onClick={() => (detailDir ? setDetailDir(null) : open ? backToSources() : onClose())}
+          aria-label={detailDir ? 'Back to the skill list' : open ? 'Back to catalogs' : 'Back to skills'}
         >
-          {BACK}<span>{open ? 'Catalogs' : 'Skills'}</span>
+          {BACK}<span>{detailDir ? open?.source.label : open ? 'Catalogs' : 'Skills'}</span>
         </button>
-        <div className="sk-detail-title">{open ? open.source.label : 'Skill catalogs'}</div>
+        <div className="sk-detail-title">{detailName || (open ? open.source.label : 'Skill catalogs')}</div>
+        {detailDir && open && (
+          <>
+            <button
+              className="sk-btn"
+              disabled={busyDir === detailDir || detailInstalled}
+              onClick={() => install(open.source, detailDir)}
+              title={detailInstalled ? 'Already in your agent’s skills' : 'Install this skill for your agent'}
+            >
+              {detailInstalled ? 'Installed' : busyDir === detailDir ? 'Installing…' : 'Install'}
+            </button>
+            <a
+              className="sk-iconbtn"
+              href={githubSkillUrl(open.source, detailDir)}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="View on GitHub"
+              title="View on GitHub"
+            >{EXTERNAL}</a>
+          </>
+        )}
       </div>
       {error && <div className="sk-alert is-error" role="alert">{error}</div>}
       {notice && !error && <div className="sk-alert" role="status">{notice}</div>}
@@ -515,7 +549,26 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
             </>
           )}
 
-          {open && (
+          {detailDir && (
+            detailEntry === 'failed' ? (
+              <div className="sk-empty">
+                <div className="sk-empty-mark" aria-hidden="true">⚠️</div>
+                <div className="sk-empty-title">Couldn’t load this skill</div>
+                <p className="sk-empty-text">SKILL.md for “{detailName}” couldn’t be fetched from GitHub.</p>
+                {open && (
+                  <a className="sk-btn ghost" href={githubSkillUrl(open.source, detailDir)} target="_blank" rel="noopener noreferrer">
+                    Read on GitHub {EXTERNAL}
+                  </a>
+                )}
+              </div>
+            ) : detailLoaded ? (
+              <div className="sk-md" onClick={onDetailClick} dangerouslySetInnerHTML={{ __html: detailHtml }} />
+            ) : (
+              <div className="sk-empty"><div className="sk-spinner" /></div>
+            )
+          )}
+
+          {open && !detailDir && (
             <>
               {skillList !== null && skillList.length > 8 && (
                 <div className="sk-searchwrap">
@@ -546,14 +599,9 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
                       key={s.dir}
                       skill={s}
                       desc={descs[s.dir]}
-                      expanded={expandedDir === s.dir}
                       installed={existingIds.has(s.name)}
                       busy={busyDir === s.dir}
-                      githubUrl={githubSkillUrl(open.source, s.dir)}
-                      onToggle={() => {
-                        setExpandedDir(expandedDir === s.dir ? null : s.dir)
-                        loadDescription(open.source, s.dir)
-                      }}
+                      onOpen={() => openSkillPage(s.dir)}
                       onLoad={() => loadDescription(open.source, s.dir)}
                       onInstall={() => install(open.source, s.dir)}
                     />
@@ -955,12 +1003,15 @@ export default function SkillsApp({ appId, token }) {
             <span className="sk-subtitle">{skills ? `${skills.length} agent ${skills.length === 1 ? 'skill' : 'skills'}` : 'Your agent’s abilities'}</span>
           </div>
         </div>
-        <button className="sk-iconbtn" onClick={findSkills} aria-label="Ask the agent to find a new skill"
-          title="Find a new skill — opens a chat where the agent searches the public catalogs with you">{SPARKLE}</button>
-        <button className="sk-iconbtn" onClick={openCatalog} aria-label="Browse skill catalogs"
-          title="Browse the public skill catalogs yourself and install from them">{BOOK}</button>
-        <button className={`sk-iconbtn${refreshing ? ' is-spinning' : ''}`} onClick={refresh} disabled={refreshing}
-          aria-label="Refresh skills" title="Refresh the skill list">{REFRESH}</button>
+        <button className="sk-iconbtn" onClick={findSkills} aria-label="Ask the agent to find a new skill">
+          {SPARKLE}<span className="sk-tip" aria-hidden="true"><b>Find</b> – use agent to find a skill you need</span>
+        </button>
+        <button className="sk-iconbtn" onClick={openCatalog} aria-label="Browse skill catalogs">
+          {BOOK}<span className="sk-tip" aria-hidden="true"><b>Browse</b> – look at the public skill catalogs</span>
+        </button>
+        <button className={`sk-iconbtn${refreshing ? ' is-spinning' : ''}`} onClick={refresh} disabled={refreshing} aria-label="Refresh skills">
+          {REFRESH}<span className="sk-tip" aria-hidden="true"><b>Refresh</b> – update the skills list</span>
+        </button>
       </header>
 
       {rowArmed && !rowError && (
@@ -1018,8 +1069,9 @@ export default function SkillsApp({ appId, token }) {
           <div className="sk-list">
             {filtered.map((s) => {
               const armed = rowArmed === s.id
+              const removable = isUninstallable(s.provenance)
               return (
-                <div key={s.id} className="sk-rowwrap">
+                <div key={s.id} className={`sk-rowwrap${removable ? ' has-trash' : ''}`}>
                   <button className="sk-row" onClick={() => openSkill(s.id)} title={`Open “${s.title}”`}>
                     <span className="sk-rowicon" aria-hidden="true">{HAMMER}</span>
                     <span className="sk-rowbody">
@@ -1030,7 +1082,7 @@ export default function SkillsApp({ appId, token }) {
                     </span>
                     <span className="sk-chev" aria-hidden="true">{CHEV}</span>
                   </button>
-                  {isUninstallable(s.provenance) && (
+                  {removable && (
                     <button
                       className={`sk-iconbtn sk-rowtrash${armed ? ' is-armed' : ''}`}
                       disabled={rowBusy === s.id}
