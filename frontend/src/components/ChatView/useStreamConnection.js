@@ -15,6 +15,8 @@ import {
   attachToolSources,
   reconcileStreamItems,
   applyTaskEvent,
+  appendTextItem,
+  replaceTextItem,
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
@@ -370,6 +372,10 @@ export default function useStreamConnection(chatId, {
 
   // Character buffer for smooth text reveal.
   const textBufferRef = useRef('')
+  // Provider ownership for the buffered characters. A question can interleave
+  // between deltas of one Codex message item, so the drain cannot infer its
+  // target from whichever block happens to be last when a frame commits.
+  const textBufferItemIdRef = useRef(null)
   const rafRef = useRef(null)
   const drainingRef = useRef(false)
   // Set by `text_boundary`: the next text chunk must create a new text item
@@ -378,38 +384,24 @@ export default function useStreamConnection(chatId, {
   // work rather than a visible tool block.
   const forceNewTextBlockRef = useRef(false)
 
-  function appendTextChunk(prev, chunk) {
-    const updated = [...prev]
-    const last = updated[updated.length - 1]
-    if (last?.type === 'text' && !forceNewTextBlockRef.current) {
-      updated[updated.length - 1] = {
-        ...last, content: last.content + chunk,
-      }
-    } else {
-      updated.push({ type: 'text', content: chunk })
-    }
+  function appendTextChunk(prev, chunk, textItemId = textBufferItemIdRef.current) {
+    const updated = appendTextItem(prev, chunk, {
+      textItemId,
+      forceNew: forceNewTextBlockRef.current,
+    })
     forceNewTextBlockRef.current = false
     return updated
   }
 
-  // Overwrite the trailing text block with the authoritative full text carried
-  // by a `text_final` event (the SDK's AssistantMessage TextBlock). Used only
-  // on the reconnect catch-up rebuild: if a streamed delta was dropped from the
-  // broadcast log, replaying the raw chunks would rebuild a truncated block, so
-  // the authoritative replace repairs it (idempotent when nothing was lost).
-  // Respects forceNewTextBlockRef exactly like appendTextChunk: a preceding
-  // text_boundary (a new assistant item started) means text_final materialises
-  // a NEW block rather than clobbering the previous item's text — the
-  // all-deltas-lost recovery case where the item has a boundary + a final but
-  // no streamed chunks in between.
-  function replaceLastText(prev, content) {
-    const updated = [...prev]
-    const last = updated[updated.length - 1]
-    if (last?.type === 'text' && !forceNewTextBlockRef.current) {
-      updated[updated.length - 1] = { ...last, content }
-    } else {
-      updated.push({ type: 'text', content })
-    }
+  // Apply the authoritative full text carried by a `text_final` event (the
+  // SDK's AssistantMessage TextBlock). Item identity can target an earlier
+  // block across an interleaved question; legacy replay gets the narrow
+  // prefix/question/suffix repair in replaceTextItem.
+  function replaceLastText(prev, content, textItemId = null) {
+    const updated = replaceTextItem(prev, content, {
+      textItemId,
+      forceNew: forceNewTextBlockRef.current,
+    })
     forceNewTextBlockRef.current = false
     return updated
   }
@@ -427,9 +419,10 @@ export default function useStreamConnection(chatId, {
       }
 
       const chunk = buf.slice(0, CHARS_PER_FRAME)
+      const textItemId = textBufferItemIdRef.current
       textBufferRef.current = buf.slice(CHARS_PER_FRAME)
 
-      setStreamItems(prev => appendTextChunk(prev, chunk))
+      setStreamItems(prev => appendTextChunk(prev, chunk, textItemId))
 
       rafRef.current = requestAnimationFrame(drain)
     }
@@ -451,9 +444,11 @@ export default function useStreamConnection(chatId, {
 
     const remaining = textBufferRef.current
     if (!remaining) return
+    const textItemId = textBufferItemIdRef.current
     textBufferRef.current = ''
+    textBufferItemIdRef.current = null
 
-    setStreamItems(prev => appendTextChunk(prev, remaining))
+    setStreamItems(prev => appendTextChunk(prev, remaining, textItemId))
   }, [])
 
   const disconnect = useCallback(({ clearStreaming = false } = {}) => {
@@ -498,6 +493,7 @@ export default function useStreamConnection(chatId, {
     disconnect()
     setStreamItems([])
     textBufferRef.current = ''
+    textBufferItemIdRef.current = null
     forceNewTextBlockRef.current = false
     lastGoodItemsRef.current = []
     // The reattach note (and its pending show-timer) belongs to the chat
@@ -598,6 +594,7 @@ export default function useStreamConnection(chatId, {
       // streamItems atomically at catch_up_done / done.
       catchUpStartedRef.current = false
       textBufferRef.current = ''
+      textBufferItemIdRef.current = null
       forceNewTextBlockRef.current = false
     }
 
@@ -660,6 +657,7 @@ export default function useStreamConnection(chatId, {
         lastGoodItemsRef.current = []
         setStreamItems([])
         textBufferRef.current = ''
+        textBufferItemIdRef.current = null
         forceNewTextBlockRef.current = false
         // The chat may have finished while we were offline — re-fetch
         // messages from the DB so the component shows the final state.
@@ -798,23 +796,33 @@ export default function useStreamConnection(chatId, {
             forceNewTextBlockRef.current = true
           } else if (event.type === 'text') {
             const content = event.content || ''
+            const textItemId = event.text_item_id || null
             if (isCatchUp) {
               // Catch-up burst: rebuild into the off-screen catch-up buffer.
-              applyStreamItems(prev => appendTextChunk(prev, content))
+              applyStreamItems(prev => appendTextChunk(prev, content, textItemId))
             } else {
               // Live streaming: buffer for typewriter reveal.
+              if (textBufferRef.current
+                  && textBufferItemIdRef.current !== textItemId) {
+                flushBuffer()
+              }
+              if (!textBufferRef.current) {
+                textBufferItemIdRef.current = textItemId
+              }
               textBufferRef.current += content
               startDraining()
             }
           } else if (event.type === 'text_final') {
-            // Authoritative full text of a completed assistant item. Only act on
-            // the catch-up rebuild — replace the truncated replayed block with
-            // the complete text. Live streaming already rendered the deltas and
-            // the persisted DB (repaired server-side by the same text_final) is
-            // authoritative on any reload, so the live typewriter is left alone.
-            if (isCatchUp) {
-              const content = event.content || ''
-              if (content) applyStreamItems(prev => replaceLastText(prev, content))
+            // Authoritative full text of a completed assistant item. Apply it
+            // live as well as during catch-up: Codex can interleave a question
+            // between this item's deltas, and the final is what repairs that
+            // legacy prefix/question/suffix ordering immediately.
+            flushBuffer()
+            const content = event.content || ''
+            if (content) {
+              applyStreamItems(prev => replaceLastText(
+                prev, content, event.text_item_id || null,
+              ))
             }
           } else if (event.type === 'thinking') {
             // The agent's extended reasoning (Claude thinking_delta /
@@ -1243,6 +1251,7 @@ export default function useStreamConnection(chatId, {
       lastGoodItemsRef.current = []
       setStreamItems([])
       textBufferRef.current = ''
+      textBufferItemIdRef.current = null
       setIsStreaming(true)
       setConnectionError(null)
       clearReconnectingNote()
@@ -1364,6 +1373,7 @@ export default function useStreamConnection(chatId, {
         lastGoodItemsRef.current = []
         setStreamItems([])
         textBufferRef.current = ''
+        textBufferItemIdRef.current = null
         forceNewTextBlockRef.current = false
         setIsStreaming(true)
         setConnectionError(null)
@@ -1378,6 +1388,7 @@ export default function useStreamConnection(chatId, {
         lastGoodItemsRef.current = []
         setStreamItems([])
         textBufferRef.current = ''
+        textBufferItemIdRef.current = null
         forceNewTextBlockRef.current = false
         setIsStreaming(true)
         setConnectionError(null)
@@ -1528,6 +1539,7 @@ export default function useStreamConnection(chatId, {
     lastGoodItemsRef.current = []
     setStreamItems([])
     textBufferRef.current = ''
+    textBufferItemIdRef.current = null
     forceNewTextBlockRef.current = false
   }
 

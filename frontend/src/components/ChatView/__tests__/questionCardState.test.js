@@ -86,3 +86,16 @@ test('question submission freezes the visible anchor before the async handoff', 
   assert.ok(freeze >= 0 && send > freeze,
     'the reader anchor must freeze synchronously before answer delivery resumes output')
 })
+
+test('a pending question exposes Stop instead of an impossible steer', () => {
+  assert.match(
+    chatView,
+    /const canSteer = !hasPendingQuestion[\s\S]*?canFastForwardQueue/,
+    'the composer must fall back to Stop while request_user_input owns the turn',
+  )
+  assert.match(
+    chatView,
+    /steerActive=\{turnActive && !hasPendingQuestion\}/,
+    'queued rows must not offer per-row steer while the live question blocks it',
+  )
+})

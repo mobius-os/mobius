@@ -3177,13 +3177,6 @@ export default function ChatView({
   // the visible fast-forward affordance and its keyboard shortcut inert while
   // the stream is unavailable; otherwise the tray disappears but the composer
   // can still offer an action whose request cannot reach the running turn.
-  const canSteer = connectionError !== 'disconnected' && !steerBusy
-    && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
-  const canRequestSteer = connectionError !== 'disconnected'
-    && !steerBusy
-    && turnActive
-    && pendingQueue.pendingMessages.length > 0
-
   useEffect(() => {
     try {
       if (swReloadHoldTimerRef.current) {
@@ -3379,6 +3372,20 @@ export default function ChatView({
     return false
   })()
   const hasPendingQuestion = pendingQuestionInStream || pendingQuestionInMessages
+
+  // A live question parks Codex's JSON-RPC reader inside request_user_input.
+  // turn/steer cannot be acknowledged until that question is released, so a
+  // steer button here is a dead end. Keep the existing deterministic Stop path
+  // available instead: Stop cancels the question first, interrupts the turn,
+  // and re-sends the queued rows as one fresh continuation.
+  const canSteer = !hasPendingQuestion
+    && connectionError !== 'disconnected' && !steerBusy
+    && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
+  const canRequestSteer = !hasPendingQuestion
+    && connectionError !== 'disconnected'
+    && !steerBusy
+    && turnActive
+    && pendingQueue.pendingMessages.length > 0
 
   // ── Sticky "tap to resume" affordance ──────────────────────────────
   // A turn paused by a drain-gated restart, a stall, or a provider-limit park
@@ -3945,7 +3952,7 @@ export default function ChatView({
             items={pendingQueue.pendingMessages}
             onCancel={handleCancelPending}
             onSteerOne={handleSteerOne}
-            steerActive={turnActive}
+            steerActive={turnActive && !hasPendingQuestion}
             steerBusy={steerBusy}
           />
           </>
