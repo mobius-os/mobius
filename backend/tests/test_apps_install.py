@@ -2631,7 +2631,17 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
   update = client.get(f"/api/apps/{payload['id']}/update-check", headers=auth)
   assert update.status_code == 200, update.text
   assert update.json()["update_available"] is True
+  assert update.json()["pending_update_state"] == "needs_resolution"
+  assert update.json()["needs_resolution"] is True
   assert update.json()["upstream_version"] == "2.0.0"
+  with patch("app.app_git.ref_is_ancestor", return_value=None):
+    unknown = client.get(
+      f"/api/apps/{payload['id']}/update-check", headers=auth,
+    )
+  assert unknown.status_code == 200, unknown.text
+  assert unknown.json()["update_available"] is True
+  assert unknown.json()["pending_update_state"] == "unknown"
+  assert unknown.json()["needs_resolution"] is False
 
   bypass = client.patch(
     f"/api/apps/{payload['id']}",
@@ -2649,6 +2659,27 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
   assert (app_dir / ".git" / "MERGE_HEAD").is_file()
   resolved = JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED TITLE")
   jsx_file.write_text(resolved)
+
+  # Resolution and promotion are separate crash-safe phases. Once the resolved
+  # source is committed, the receipt remains so the canonical installer can
+  # replay bundle/static/DB promotion. This state must stay updateable but must
+  # NOT offer another resolver: upstream is already an ancestor and that route
+  # correctly rejects it as no longer conflicted.
+  from app import app_git
+  resolved_commit = app_git.commit_local(app_dir, "resolve app update")
+  assert resolved_commit
+  assert not (app_dir / ".git" / "MERGE_HEAD").exists()
+  pending_update = client.get(
+    f"/api/apps/{payload['id']}/update-check", headers=auth,
+  )
+  assert pending_update.status_code == 200, pending_update.text
+  assert pending_update.json()["update_available"] is True
+  assert pending_update.json()["pending_update_state"] == "replay_pending"
+  assert pending_update.json()["needs_resolution"] is False
+  redundant_resolver = client.post(
+    f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
+  )
+  assert redundant_resolver.status_code == 409, redundant_resolver.text
 
   replay_responses = {
     base + "index.jsx": (200, jsx_v2.encode()),
@@ -4816,9 +4847,72 @@ def test_update_check_unchanged_upstream_is_false(
   assert res.status_code == 200, res.text
   payload = res.json()
   assert payload["update_available"] is False
+  assert payload["pending_update_state"] == "none"
+  assert payload["needs_resolution"] is False
   assert payload["upstream_version"] == "1.0.0"
   assert payload["local_version"] == "1.0.0"
   assert payload["checked_at"]
+
+
+def test_update_check_final_fence_preserves_concurrent_pending_conflict(
+  client, auth, bypass_url_validation, monkeypatch,
+):
+  """A conflict receipt created during fetch wins over the stale comparison.
+
+  The DB snapshot intentionally remains on v1 while the simulated concurrent
+  installer advances the locked repo ref to v2 and journals its receipt. Without
+  the final identity fence, comparing the just-fetched v2 bytes to that v2 ref
+  returns False and overwrites the App Store's already-observed blocked state.
+  """
+  from app import install
+
+  base = "https://uc-race.test/repo/"
+  manifest_v1 = {**MANIFEST_NEWS, "id": "uc-race"}
+  installed = _install_v1(client, auth, base, manifest_v1, JSX_MULTI)
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+  repo = Path(get_settings().data_dir) / "apps" / "uc-race"
+
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE")
+  (repo / "index.jsx").write_text(local)
+  assert app_git.commit_local(repo, "local edit before raced update")
+  upstream_v2 = JSX_MULTI.replace("ORIGINAL TITLE", "UPSTREAM TITLE")
+  manifest_v2 = {**manifest_v1, "version": "2.0.0"}
+
+  async def advance_during_fetch(_manifest_url):
+    current_upstream = app_git.record_upstream(
+      repo,
+      {"index.jsx": upstream_v2.encode()},
+      base + "mobius.json",
+      "2.0.0",
+    )
+    install.stage_pending_conflict_update(
+      repo,
+      app_id=app_id,
+      upstream_commit=current_upstream,
+      manifest=manifest_v2,
+      raw_base=base,
+      capability_digest="test-capability-digest",
+      candidate_digest="0" * 64,
+    )
+    return install.FetchedUpstream(
+      manifest=manifest_v2,
+      entry_bytes=upstream_v2.encode(),
+      source_files={},
+      job_name=None,
+      job_bytes=None,
+    )
+
+  monkeypatch.setattr(
+    "app.install.fetch_upstream_source", advance_during_fetch,
+  )
+  res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
+  assert res.status_code == 200, res.text
+  payload = res.json()
+  assert payload["update_available"] is True
+  assert payload["pending_update_state"] == "needs_resolution"
+  assert payload["needs_resolution"] is True
+  assert payload["upstream_version"] == "2.0.0"
 
 
 def test_update_check_changed_file_is_true(

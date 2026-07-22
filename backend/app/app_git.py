@@ -349,6 +349,32 @@ def head_sha(source_dir: str | Path, branch: str) -> str:
   return _run(Path(source_dir), "rev-parse", branch).stdout.strip()
 
 
+def ref_is_ancestor(
+  source_dir: str | Path, ancestor: str, descendant: str,
+) -> bool | None:
+  """Whether ``ancestor`` is reachable from ``descendant``.
+
+  Returns ``True`` for Git's proven-ancestor exit 0, ``False`` for its normal
+  not-an-ancestor exit 1, and ``None`` when Git cannot answer (missing/corrupt
+  refs, timeout, or another execution error). Callers must not turn an unknown
+  repository state into a positive conflict/resolution claim.
+  """
+  if not is_repo(source_dir):
+    return None
+  try:
+    proc = _run(
+      Path(source_dir), "merge-base", "--is-ancestor",
+      ancestor, descendant, check=False,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return None
+  if proc.returncode == 0:
+    return True
+  if proc.returncode == 1:
+    return False
+  return None
+
+
 def ref_exists(source_dir: str | Path, ref: str) -> bool:
   """Whether `ref` resolves in this repo. Read-only; never raises.
 
