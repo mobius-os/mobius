@@ -2325,7 +2325,7 @@
   width: fit-content;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: 14px;
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -2337,10 +2337,12 @@
 }
 
 .chat__attach-thumb {
-  height: 80px;
-  max-width: 160px;
+  /* Match the composer's attachment card after send. The thumbnail is a
+     consistent square crop; tapping it still opens the full source image. */
+  width: 96px;
+  height: 96px;
   object-fit: cover;
-  border-radius: 8px;
+  border-radius: 14px;
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   cursor: inherit;
   transition: opacity 0.15s;
