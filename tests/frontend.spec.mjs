@@ -108,6 +108,32 @@ async function waitForChatMode(page, chatId, kind, timeout = 3000) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Input behavior', () => {
+  test('returning to the tab collapses stale empty-composer geometry', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+
+    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+    await input.evaluate(el => {
+      el.value = ''
+      el.style.height = '280px'
+      el.closest('.chat__pill')?.classList.add('chat__pill--tall')
+    })
+    await expect(input).toHaveCSS('height', '280px')
+
+    const background = await page.context().newPage()
+    await background.goto('about:blank')
+    await expect.poll(() => page.evaluate(() => document.visibilityState)).toBe('hidden')
+
+    await page.bringToFront()
+    await expect.poll(() => page.evaluate(() => document.visibilityState)).toBe('visible')
+    await expect.poll(() => input.evaluate(el => ({
+      collapsed: el.getBoundingClientRect().height < 60,
+      tall: el.closest('.chat__pill')?.classList.contains('chat__pill--tall') || false,
+    }))).toEqual({ collapsed: true, tall: false })
+
+    await background.close()
+  })
+
   test('Voice input holds a screen wake lock until recording stops', async ({ page }) => {
     await page.addInitScript(() => {
       window.__wakeLockRequests = []

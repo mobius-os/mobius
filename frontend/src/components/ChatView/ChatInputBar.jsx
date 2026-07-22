@@ -391,17 +391,6 @@ export default function ChatInputBar({
   function handleTextareaChange(e) {
     if (listeningRef?.current) onManualVoiceEdit?.(e.target.value)
     onInputChange(e.target.value)
-    e.target.style.height = 'auto'
-    const h = Math.min(e.target.scrollHeight, 280)
-    e.target.style.height = h + 'px'
-    // Toggle the `--tall` class only when the textarea ACTUALLY
-    // spans multiple lines. A single line of 16px text at line-
-    // height 1.45 with 8px padding measures ~31px scrollHeight,
-    // so a threshold of 30 was triggering --tall on every keystroke
-    // and dropping the cursor + mic to the bottom. 45px sits
-    // safely between single-line (~31) and two-line (~55).
-    const pill = e.target.closest('.chat__pill')
-    if (pill) pill.classList.toggle('chat__pill--tall', h > 45)
   }
 
   function handlePaste(e) {
