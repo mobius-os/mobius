@@ -349,24 +349,23 @@ export function deriveEnterPlan(input) {
 // `viewMode` is 'panes' (tiled, the default = BUILDER mode) or 'single' (collapse
 // a preserved multi-pane tree to the focused pane's active tab, full-bleed).
 //
-// ABSOLUTE BUILDER INVARIANT (owner: "no exceptions, no special casing"): in
-// builder mode NOTHING renders full-screen — not the Settings overlay, not an
-// immersive-solo. Builder mode has exactly ONE rendering path: the tiled/paned
-// render. Full-screen takeovers (Settings overlay, immersive-solo, single-mode
-// collapse) exist ONLY in single-screen mode. So both the overlay flag and the
-// immersive-solo are GATED off in builder here — the invariant is structural,
-// not an upstream promise (the nav adapter also keeps settingsOverlayOpen false
-// in builder, and Shell keeps immersiveActive false in builder — this is the
-// last line of defense so a stray input still can't seize the builder workspace).
+// Builder's durable world has exactly one structural rendering path: its pane
+// tree is never collapsed or rewritten by Settings. Immersive is deliberately
+// different: it is a temporary verified app lease layered OVER either world.
+// While held it solos the focused app; clearing it re-derives the untouched pane
+// tree immediately. Settings remains mode-gated and cannot become a builder
+// takeover, preserving that invariant without making a game's explicit Focus
+// control silently inert whenever the owner happens to be in Builder mode.
 export function deriveContentVisibility({
   workspace, projection, settingsOverlayOpen, immersiveActive, immersiveAppId,
   viewMode = 'panes', exitUnderlayKey = null,
 }) {
   const multiPane = projection.visibleLeaves.length >= 2
   const builder = viewMode !== 'single'
-  // The two full-screen takeovers, forced INERT in builder mode.
+  // Settings is structurally inert in builder. Immersive is a temporary overlay
+  // lease and may cover either world without mutating it.
   const settingsOverlay = !!settingsOverlayOpen && !builder
-  const immersive = !builder && !!immersiveActive && immersiveAppId != null
+  const immersive = !!immersiveActive && immersiveAppId != null
   // Single view-mode collapse is active only when no takeover already owns the box.
   const single = !builder && !settingsOverlay && !immersive
   // TWO-WORLDS (codex-modecontext-design.md): in SINGLE mode the active content is
@@ -395,10 +394,10 @@ export function deriveContentVisibility({
   // the New Chat landing is a chat/app tab (the landing is not a tab).
   const focusedActiveKey = settingsOverlay
     ? null
-    : (single ? slotKey : focusedPaneKey)
+    : (immersive ? `app:${immersiveAppId}` : (single ? slotKey : focusedPaneKey))
   // Pane chrome (strips + dividers) whenever the box is TILED: ≥2 visible leaves
-  // and no takeover. In builder this is simply `multiPane` (no takeover can trip
-  // here); single-mode / a takeover paints one surface over the whole box.
+  // and no takeover. An ordinary builder render follows `multiPane`; single mode
+  // or an immersive lease paints one surface over the whole box.
   const chromeActive = multiPane && !settingsOverlay && !immersive && !single
   // The single wrapper painted full-bleed. Null ONLY in the tiled multi-pane render;
   // the New Chat landing key for an empty single slot; the focused/holder key
@@ -409,8 +408,8 @@ export function deriveContentVisibility({
     : ((multiPane && !immersive && !single) ? null : focusedActiveKey)
   // The app ids that PAINT and stay interactive/frame-visible. A single-mode
   // immersive solos the holder; single-mode solos the focused pane's active app;
-  // the Settings overlay hides all; the tiled (incl. all of builder) render keeps
-  // every visible pane's active app. A builder Settings tab is NOT an app, so it
+  // the Settings overlay hides all; an ordinary tiled builder render keeps every
+  // visible pane's active app. A builder Settings tab is NOT an app, so it
   // contributes no id here — sibling app panes keep painting.
   let visibleAppIds
   if (settingsOverlay) visibleAppIds = new Set()
@@ -437,7 +436,7 @@ export function deriveContentVisibility({
     visibleAppIds.add(exitUnderlayKey.slice('app:'.length))
   }
   // Chat panes stay MOUNTED (no remount on overlay/view toggle) but hidden while a
-  // takeover owns the box. In builder (never a takeover) and single-mode they
+  // takeover owns the box. In an ordinary builder world and single-mode they
   // paint; the renderer additionally gates each NON-focused single-mode chat pane
   // off via the `single` flag, the chat analogue of visibleAppIds.
   const chatPanesVisible = !settingsOverlay && !immersive
