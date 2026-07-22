@@ -112,6 +112,21 @@ def test_clear_run_status_completes_the_run_record():
   assert _run_status("r2") is None
 
 
+def test_clear_run_status_preserves_failed_outcome():
+  """An idle marker is not proof of success: a provider-error turn closes
+  durably as failed while clearing the same per-chat recovery marker."""
+  _seed_chat("r2-failed")
+  _start("r2-failed", "rt-2-failed")
+  get_writer().submit(ClearRunStatus(
+    chat_id="r2-failed",
+    run_token="rt-2-failed",
+    terminal_status="failed",
+  )).result(timeout=5)
+  _drain()
+  assert _runs("r2-failed")["rt-2-failed"] == ("failed", True)
+  assert _run_status("r2-failed") is None
+
+
 # -- continuation handoff -------------------------------------------------
 def test_promote_closes_prior_run_and_opens_the_continuation():
   _seed_chat("r3")
@@ -131,6 +146,27 @@ def test_promote_closes_prior_run_and_opens_the_continuation():
   assert runs["rt-3b"] == ("running", False)
   # The per-chat marker stays set across the handoff (the continuation runs).
   assert _run_status("r3") == "running"
+
+
+def test_error_handoff_marks_prior_run_failed_before_continuation():
+  """Queued work may continue after a provider error, but that continuation
+  must not rewrite the failed turn's observability row as successful."""
+  _seed_chat("r3-failed")
+  _start("r3-failed", "rt-3-failed-a")
+  get_writer().submit(AppendPending(
+    chat_id="r3-failed", run_token="rt-3-failed-a",
+    user_msg={"role": "user", "content": "next", "ts": 2},
+  )).result(timeout=5)
+  get_writer().submit(PromotePending(
+    chat_id="r3-failed",
+    run_token="rt-3-failed-b",
+    ending_status="failed",
+  )).result(timeout=5)
+  _drain()
+  runs = _runs("r3-failed")
+  assert runs["rt-3-failed-a"] == ("failed", True)
+  assert runs["rt-3-failed-b"] == ("running", False)
+  assert _run_status("r3-failed") == "running"
 
 
 # -- identity-keyed dying-run clear ---------------------------------------

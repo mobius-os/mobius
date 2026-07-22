@@ -127,6 +127,7 @@ def fresh_db():
   setattr(chat_mod, "_SKILL_TEXT_CACHE", None)
   chat_mod.draining = False
   chat_mod._clear_after_terminal_generation.clear()
+  chat_mod._clear_after_terminal_status.clear()
   chat_mod._restart_draining_chats.clear()
   bc_mod._broadcasts.clear() if hasattr(bc_mod, "_broadcasts") else None
   # Activity log: clear the per-process debounce cache and delete any

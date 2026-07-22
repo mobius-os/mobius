@@ -218,8 +218,10 @@ class ChatRun(Base):
   chat_id = Column(
     String(64), ForeignKey("chats.id"), nullable=False, index=True
   )
-  # "running" while in flight, "completed" on a clean turn end, "interrupted"
-  # when boot reconciliation resolves a turn whose process died mid-flight.
+  # "running" while in flight; terminal outcomes are "completed" for a clean
+  # turn, "failed" for a provider/setup error, "stopped" for an explicit user
+  # Stop, and "interrupted" for crash/supersession/watchdog recovery. Provider
+  # limits additionally use the parked/resume_pending/parked_notified states.
   status = Column(String(16), nullable=False, default="running", index=True)
   provider = Column(String(32), nullable=True, default=None)
   # App that initiated this turn under the app-attributed-chat contract

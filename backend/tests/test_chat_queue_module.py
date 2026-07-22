@@ -28,13 +28,15 @@ def _record_clear(sink: list):
   empty-queue case (clear-before-forget) and never for a promoted
   continuation, so the recorded list pins which disposition fired.
   """
-  async def _clear(chat_id, run_token=""):
+  async def _clear(chat_id, run_token="", terminal_status="completed"):
     sink.append(chat_id)
 
   return _clear
 
 
-async def _noop_clear(_chat_id, _run_token=""):
+async def _noop_clear(
+  _chat_id, _run_token="", _terminal_status="completed",
+):
   """An async clear stub that records nothing (for paths that don't clear)."""
   return None
 
