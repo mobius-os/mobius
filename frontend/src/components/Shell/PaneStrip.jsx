@@ -69,7 +69,7 @@ export function PaneTab({
   const tabRef = useRef(null)
   const titleRef = useRef(null)
   // Only the active CHAT title cycles, and only when it is actually clipped. One
-  // ResizeObserver follows that one title per pane; measurements update CSS vars
+  // ResizeObserver follows that one focused title; measurements update CSS vars
   // imperatively, so neither resizing nor the animation causes React renders.
   useLayoutEffect(() => {
     const title = titleRef.current
@@ -183,7 +183,6 @@ export function PaneFocusButton({ paneId, focused, onToggle }) {
       type="button"
       className="workspace__pane-focus"
       aria-label={label}
-      aria-pressed={focused ? 'true' : 'false'}
       title={label}
       onClick={() => onToggle(paneId)}
     >

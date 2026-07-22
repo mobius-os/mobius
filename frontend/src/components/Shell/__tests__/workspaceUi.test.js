@@ -685,6 +685,13 @@ test('an active overflowing chat title cycles once, then becomes idle', () => {
   assert.match(shellCss, /\.shell__tab-text-inner \{ animation: none !important; \}/)
 })
 
+test('the pane focus action uses one unambiguous accessible state contract', () => {
+  assert.match(paneStrip, /const label = focused \? 'Show all panes' : 'Focus pane'/)
+  assert.match(paneStrip, /aria-label=\{label\}/)
+  assert.doesNotMatch(paneStrip, /aria-pressed/,
+    'a button whose label changes with the action must not also announce a toggle state')
+})
+
 test('overflowing strips keep native pan and add a no-chrome wheel path', () => {
   assert.match(paneStrip, /export function scrollStripWheel\(e\)/)
   assert.match(paneStrip, /Math\.abs\(e\.deltaX\) >= Math\.abs\(e\.deltaY\)/)
