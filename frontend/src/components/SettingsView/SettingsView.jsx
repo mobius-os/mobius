@@ -502,14 +502,15 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     return FALLBACK_MODEL_ROWS[provider] || []
   }, [modelRegistryQuery.data])
 
-  const persistBackgroundAgents = useCallback((draft) => {
+  const persistBackgroundAgents = useCallback((draft, companionSettings = {}) => {
     const rows = Array.isArray(draft) ? draft : []
     const enabled = rows.filter(row => row.enabled !== false)
     if (!enabled.length) {
       setBackgroundError('Choose at least one background model.')
-      return Promise.resolve()
+      return Promise.resolve(false)
     }
     const reqId = ++backgroundSaveReqRef.current
+    const isCompanionSave = Object.keys(companionSettings).length > 0
     setBackgroundError('')
     const save = backgroundSaveChainRef.current.catch(() => {}).then(async () => {
       try {
@@ -528,18 +529,26 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           primary: toChoice(enabled[0]),
           fallback: enabled[1] ? toChoice(enabled[1]) : null,
         }
-        const res = await api.settings.save({ background_agents: payload })
-        if (reqId !== backgroundSaveReqRef.current) return
+        // A first provider connection also establishes the interactive default.
+        // Keep that transition in one settings write so disk failure cannot
+        // persist one half while the UI reports the whole setup as complete.
+        const res = await api.settings.save({
+          ...companionSettings,
+          background_agents: payload,
+        })
+        if (reqId !== backgroundSaveReqRef.current) return true
         if (!res.ok) {
           let detail = ''
           try { detail = (await res.json()).detail || '' } catch {}
           throw new Error(detail || 'Could not save background agents.')
         }
         settingsQueries.owner.invalidate(queryClient)
+        return true
       } catch (err) {
-        if (reqId === backgroundSaveReqRef.current) {
+        if (reqId === backgroundSaveReqRef.current || isCompanionSave) {
           setBackgroundError(err.message || 'Could not save background agents.')
         }
+        return false
       }
     })
     backgroundSaveChainRef.current = save
@@ -753,9 +762,8 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     }),
     [],
   )
-  const onProviderConnected = useCallback((provider) => {
+  const onProviderConnected = useCallback(async (provider) => {
     const providersBefore = authProvidersAtStartRef.current || configuredProviders
-    authProvidersAtStartRef.current = null
     const newlyConnected = !providersBefore.has(provider)
     if (newlyConnected) {
       const current = backgroundDraftRef.current || normalizeBackgroundAgents(
@@ -774,13 +782,15 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
         : current.map(row => row.provider === provider ? connectedRow : row)
       backgroundDraftRef.current = next
       setBackgroundDraft(next)
-      persistBackgroundAgents(next)
-      if (providersBefore.size === 0) {
-        api.settings.save({ provider }).then(() => {
-          settingsQueries.owner.invalidate(queryClient)
-        }).catch(() => {})
-      }
+      const saved = await persistBackgroundAgents(
+        next,
+        providersBefore.size === 0 ? { provider } : {},
+      )
+      // Authentication itself succeeded, but keep the panel and visible error
+      // in place until its associated defaults are durably saved.
+      if (!saved) return
     }
+    authProvidersAtStartRef.current = null
     settingsQueries.owner.invalidate(queryClient)
     setExpandedAuth(null)
   }, [configuredProviders, persistBackgroundAgents, queryClient, settingsQuery.data])

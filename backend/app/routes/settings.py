@@ -373,8 +373,9 @@ def get_model_prefs(
 ) -> dict:
   """Returns the owner's model-picker preferences.
 
-  Default shape is `{"hidden_ids": []}` — absent prefs and empty
-  prefs are equivalent (the picker shows every registry entry).
+  Owners without a saved preference receive the curated default hidden set.
+  An explicitly saved `{"hidden_ids": []}` is distinct and shows every
+  registry entry.
   """
   return {"hidden_ids": providers.hidden_model_ids(owner.model_prefs_json)}
 

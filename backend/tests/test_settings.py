@@ -829,6 +829,28 @@ def test_model_prefs_default_is_curated(client, auth):
   assert res.json() == {"hidden_ids": providers.hidden_model_ids(None)}
 
 
+def test_model_prefs_explicit_empty_is_distinct_from_missing(client, auth, db):
+  """Saving an empty hidden list opts into showing the whole registry."""
+  from app import models, providers
+
+  owner = db.query(models.Owner).first()
+  assert owner.model_prefs_json is None
+  assert providers.hidden_model_ids(owner.model_prefs_json)
+
+  res = client.patch(
+    "/api/owner/model-prefs",
+    json={"hidden_ids": []},
+    headers=auth,
+  )
+  assert res.status_code == 200
+  assert res.json() == {"hidden_ids": []}
+  db.refresh(owner)
+  assert owner.model_prefs_json == {"hidden_ids": []}
+  assert client.get("/api/owner/model-prefs", headers=auth).json() == {
+    "hidden_ids": [],
+  }
+
+
 def test_model_prefs_roundtrip_dedupes(client, auth, db):
   """PATCH stores hidden_ids verbatim (deduplicated, order-preserving)
   and GET returns the same set."""
