@@ -2665,6 +2665,11 @@ async def _drain_and_release(
   )
 
 
+_BROWSER_CLOSE_CREATE_TIMEOUT = 5.0
+_BROWSER_CLOSE_WAIT_TIMEOUT = 5.0
+_BROWSER_CLOSE_KILL_GRACE = 1.0
+
+
 async def _close_browser_session(chat_id: str) -> None:
   """Close every agent-browser session created by this chat.
 
@@ -2678,17 +2683,13 @@ async def _close_browser_session(chat_id: str) -> None:
   if not chat_id:
     return
   log = _get_logger()
-  sessions = {f"chat-{chat_id}"}
+  from app.browser_profiles import BrowserSessionTarget
+
+  targets = {BrowserSessionTarget(session=f"chat-{chat_id}")}
   try:
-    from app.browser_profiles import (
-      browser_session_is_safely_closable,
-      browser_sessions_for_chat,
-    )
-    discovered = await asyncio.to_thread(browser_sessions_for_chat, chat_id)
-    # Defense in depth: discovery already filters these, but keep the exact
-    # argv-safety predicate at the execution boundary too.
-    sessions.update(
-      name for name in discovered if browser_session_is_safely_closable(name)
+    from app.browser_profiles import browser_session_targets_for_chat
+    targets.update(
+      await asyncio.to_thread(browser_session_targets_for_chat, chat_id)
     )
   except Exception as exc:
     log.warning(
@@ -2697,20 +2698,64 @@ async def _close_browser_session(chat_id: str) -> None:
       exc,
     )
 
-  async def close_one(session: str) -> bool:
+  async def terminate_close_process(proc) -> None:
+    """Bounded TERM/KILL cleanup for a wedged agent-browser close CLI."""
+    if getattr(proc, "returncode", None) is not None:
+      await proc.wait()
+      return
     try:
+      proc.terminate()
+    except ProcessLookupError:
+      await proc.wait()
+      return
+    try:
+      await asyncio.wait_for(
+        proc.wait(), timeout=_BROWSER_CLOSE_KILL_GRACE,
+      )
+      return
+    except asyncio.TimeoutError:
+      pass
+    try:
+      proc.kill()
+    except ProcessLookupError:
+      pass
+    await proc.wait()
+
+  async def close_one(target: BrowserSessionTarget) -> bool:
+    proc = None
+    try:
+      # Session/namespace/socket-dir are daemon-provided opaque routing values.
+      # Keep them out of argv entirely: a dedicated child environment avoids
+      # shell expansion, option parsing, and path construction in Möbius while
+      # still selecting the exact daemon agent-browser created.
+      child_env = dict(os.environ)
+      for key in (
+        "AGENT_BROWSER_SESSION",
+        "AGENT_BROWSER_NAMESPACE",
+        "AGENT_BROWSER_SOCKET_DIR",
+      ):
+        child_env.pop(key, None)
+      child_env["AGENT_BROWSER_SESSION"] = target.session
+      if target.namespace is not None:
+        child_env["AGENT_BROWSER_NAMESPACE"] = target.namespace
+      if target.socket_dir is not None:
+        child_env["AGENT_BROWSER_SOCKET_DIR"] = target.socket_dir
+
       # Bound subprocess CREATION too, not just the wait. Custom sessions close
       # concurrently, so one wedged CLI adds at most this single 10s budget to
       # terminal teardown rather than one budget per leaked browser.
       proc = await asyncio.wait_for(
         asyncio.create_subprocess_exec(
-          "agent-browser", "--session", session, "close",
+          "agent-browser", "close",
           stdout=asyncio.subprocess.DEVNULL,
           stderr=asyncio.subprocess.DEVNULL,
+          env=child_env,
         ),
-        timeout=5.0,
+        timeout=_BROWSER_CLOSE_CREATE_TIMEOUT,
       )
-      return_code = await asyncio.wait_for(proc.wait(), timeout=5.0)
+      return_code = await asyncio.wait_for(
+        proc.wait(), timeout=_BROWSER_CLOSE_WAIT_TIMEOUT,
+      )
       if return_code != 0:
         log.warning(
           "agent-browser close exited nonzero for chat %s: rc=%s",
@@ -2723,11 +2768,25 @@ async def _close_browser_session(chat_id: str) -> None:
       return False  # agent-browser not installed (local dev)
     except asyncio.TimeoutError:
       log.warning("agent-browser close timed out for chat %s", chat_id)
+      if proc is not None:
+        await asyncio.shield(terminate_close_process(proc))
+    except asyncio.CancelledError:
+      if proc is not None:
+        await asyncio.shield(terminate_close_process(proc))
+      raise
     except Exception as exc:
       log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
     return False
 
-  results = await asyncio.gather(*(close_one(name) for name in sorted(sessions)))
+  results = await asyncio.gather(*(
+    close_one(target)
+    for target in sorted(
+      targets,
+      key=lambda value: (
+        value.session, value.namespace or "", value.socket_dir or "",
+      ),
+    )
+  ))
   closed = sum(results)
   if closed:
     log.info(

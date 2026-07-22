@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -42,23 +43,13 @@ _status = {
 }
 
 
-def browser_session_is_safely_closable(session: str) -> bool:
-  """Whether a discovered name is safe to pass as one CLI argv value.
+@dataclass(frozen=True)
+class BrowserSessionTarget:
+  """Opaque routing identity retained by one agent-browser daemon."""
 
-  Treat the daemon's ``AGENT_BROWSER_SESSION`` as an opaque value: Unicode,
-  colons, spaces, and values longer than 128 characters are not dangerous here.
-  Cleanup uses
-  ``create_subprocess_exec`` with an argv list, never a shell or a constructed
-  path.  Reject only values that can be interpreted as an option/path by the
-  downstream CLI, plus control characters that do not form a useful session
-  name.  There is no arbitrary length cap: the value already exists in a live
-  process environment, so it necessarily fit the host's exec/env limit.
-  """
-  if not isinstance(session, str) or not session or session.startswith("-"):
-    return False
-  if session in (".", "..") or "/" in session or "\\" in session:
-    return False
-  return not any(ord(char) < 0x20 or ord(char) == 0x7F for char in session)
+  session: str
+  namespace: str | None = None
+  socket_dir: str | None = None
 
 
 def _env_int(name: str, default: int) -> int:
@@ -153,21 +144,24 @@ def _active_profile_names(root: Path) -> set[str]:
   return active
 
 
-def browser_sessions_for_chat(
+def browser_session_targets_for_chat(
   chat_id: str,
   *,
   proc_root: Path = Path("/proc"),
-) -> set[str]:
-  """Return live agent-browser session names created by one chat.
+) -> set[BrowserSessionTarget]:
+  """Return live agent-browser routing targets created by one chat.
 
   ``AGENT_BROWSER_SESSION=chat-<id>`` gives ordinary invocations a safe
   inherited name, but an agent can explicitly pass ``--session foo``.  The
   agent-browser daemon detaches into its own session and preserves the
-  creator's ``CHAT_ID`` plus its resolved ``AGENT_BROWSER_SESSION`` in
-  ``/proc/<pid>/environ``.  Discovering that attribution lets terminal cleanup
-  reclaim custom sessions too instead of leaking their Chromium trees until a
-  container restart.
+  creator's ``CHAT_ID`` plus its resolved session, namespace, and socket-dir
+  routing in ``/proc/<pid>/environ``. Discovering that complete identity lets
+  terminal cleanup reach custom sessions instead of leaking their Chromium
+  trees until a container restart.
 
+  Routing values are opaque. agent-browser accepts values that look like paths
+  or options; cleanup passes them only through a child environment (never a
+  shell, CLI option value, or path operation), matching the daemon exactly.
   Only the agent-browser server binary is considered. Proc races and permission
   errors are normal and read as an incomplete, best-effort set.
   """
@@ -178,7 +172,7 @@ def browser_sessions_for_chat(
   except OSError:
     return set()
 
-  sessions: set[str] = set()
+  targets: set[BrowserSessionTarget] = set()
   for process in processes:
     if not process.name.isdigit():
       continue
@@ -187,20 +181,26 @@ def browser_sessions_for_chat(
       executable = Path(argv[0].decode("utf-8", errors="replace")).name
       if executable != "agent-browser-linux-x64":
         continue
-      values = {}
+      values: dict[bytes, str] = {}
       for raw in (process / "environ").read_bytes().split(b"\0"):
         key, separator, value = raw.partition(b"=")
-        if separator and key in (b"CHAT_ID", b"AGENT_BROWSER_SESSION"):
-          values[key] = value.decode("utf-8", errors="replace")
+        if separator and key in (
+          b"CHAT_ID",
+          b"AGENT_BROWSER_SESSION",
+          b"AGENT_BROWSER_NAMESPACE",
+          b"AGENT_BROWSER_SOCKET_DIR",
+        ):
+          values[key] = value.decode("utf-8", errors="surrogateescape")
     except OSError:
       continue
-    session = values.get(b"AGENT_BROWSER_SESSION", "")
-    if (
-      values.get(b"CHAT_ID") == chat_id
-      and browser_session_is_safely_closable(session)
-    ):
-      sessions.add(session)
-  return sessions
+    session = values.get(b"AGENT_BROWSER_SESSION")
+    if values.get(b"CHAT_ID") == chat_id and session is not None:
+      targets.add(BrowserSessionTarget(
+        session=session,
+        namespace=values.get(b"AGENT_BROWSER_NAMESPACE"),
+        socket_dir=values.get(b"AGENT_BROWSER_SOCKET_DIR"),
+      ))
+  return targets
 
 
 def chat_activity_snapshot(db: Session) -> dict[str, dict]:

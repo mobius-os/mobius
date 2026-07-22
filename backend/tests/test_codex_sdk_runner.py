@@ -1605,3 +1605,127 @@ def test_run_codex_sdk_turn_reaps_group_when_initialization_fails(monkeypatch):
 
   assert "initialize failed" in result["error"]
   assert reaped == [4321]
+
+
+def test_run_codex_sdk_turn_cancel_after_entry_still_reaps_group(monkeypatch):
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(
+          _proc=SimpleNamespace(pid=4321),
+          _approval_handler=None,
+        ),
+      )
+
+    async def __aenter__(self):
+      # Deliver cancellation at the first await after entry. The runner must
+      # synchronously retain the PGID and must not cancel its capture-task
+      # ownership while unwinding.
+      asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      await asyncio.sleep(0)
+      raise AssertionError("cancellation should land before thread start")
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  reaped = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: reaped.append(pgid) or True,
+  )
+
+  async def scenario():
+    with pytest.raises(asyncio.CancelledError):
+      await codex_sdk_runner.run_codex_sdk_turn(
+        user_message="hello",
+        session_id=None,
+        base_env={},
+        cwd="/tmp",
+        chat_id="chat-cancel-after-entry",
+        bc=_FakeBroadcast(),
+        pending_questions={},
+        db=None,
+      )
+
+  asyncio.run(scenario())
+
+  assert reaped == [4321]
+
+
+def test_run_codex_sdk_turn_fallback_does_not_start_capture_poller(
+  monkeypatch,
+):
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    )
+  ]
+  thread = _FakeThread("thread-1", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": None,
+  }.get(name))
+
+  async def forbidden_poller(*_args, **_kwargs):
+    raise AssertionError("fallback launch must not start PGID polling")
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_capture_codex_process_group_during_start",
+    forbidden_poller,
+  )
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_persist_session_id",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-fallback-no-poll",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+  ))
+
+  assert result["error"] is None

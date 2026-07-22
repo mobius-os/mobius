@@ -1384,12 +1384,15 @@ async def run_codex_sdk_turn(
   completed_turn: Any | None = None
   process_group_id: int | None = None
   codex_context = sdk["AsyncCodex"](config=config)
-  process_group_capture_stop = asyncio.Event()
-  process_group_capture_task = asyncio.create_task(
-    _capture_codex_process_group_during_start(
-      codex_context, process_group_capture_stop,
+  process_group_capture_stop: asyncio.Event | None = None
+  process_group_capture_task: asyncio.Task[int | None] | None = None
+  if launch_args is not None:
+    process_group_capture_stop = asyncio.Event()
+    process_group_capture_task = asyncio.create_task(
+      _capture_codex_process_group_during_start(
+        codex_context, process_group_capture_stop,
+      )
     )
-  )
 
   def abort_requested() -> bool:
     return bool(should_abort and should_abort())
@@ -1404,10 +1407,12 @@ async def run_codex_sdk_turn(
   try:
     async with codex_context as codex:
       process_group_id = _codex_process_group_id(codex)
-      process_group_capture_stop.set()
-      captured_during_start = await process_group_capture_task
-      if process_group_id is None:
-        process_group_id = captured_during_start
+      if process_group_capture_stop is not None:
+        process_group_capture_stop.set()
+      # Do NOT await the capture task here. Cancellation immediately after
+      # __aenter__ would propagate through an ordinary await and cancel the
+      # task that owns our initialization-failure PGID. The outer finally is
+      # its sole joiner and shields that join before reaping the group.
       # Install AskUserQuestion bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
@@ -1692,13 +1697,31 @@ async def run_codex_sdk_turn(
       "error": str(exc),
     }
   finally:
-    process_group_capture_stop.set()
-    try:
-      captured_during_start = await asyncio.shield(process_group_capture_task)
-      if process_group_id is None:
-        process_group_id = captured_during_start
-    except Exception as exc:
-      log.warning("Codex process-group capture failed: %s", exc)
+    deferred_cancel: asyncio.CancelledError | None = None
+    if process_group_capture_stop is not None:
+      process_group_capture_stop.set()
+    if process_group_capture_task is not None:
+      while not process_group_capture_task.done():
+        try:
+          await asyncio.shield(process_group_capture_task)
+        except asyncio.CancelledError as exc:
+          if process_group_capture_task.cancelled():
+            break
+          # A caller cancellation landed during the shielded join. Keep
+          # waiting for the runner-owned task so initialization-failure cleanup
+          # cannot lose the only observed PGID.
+          deferred_cancel = deferred_cancel or exc
+      try:
+        captured_during_start = process_group_capture_task.result()
+        if process_group_id is None:
+          process_group_id = captured_during_start
+      except asyncio.CancelledError:
+        # A task owned only by this runner should not be cancelled, but a
+        # proven PGID captured synchronously after __aenter__ still permits
+        # safe cleanup. Never let its CancelledError skip that cleanup.
+        log.warning("Codex process-group capture task was cancelled")
+      except Exception as exc:
+        log.warning("Codex process-group capture failed: %s", exc)
     current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
     if isinstance(current, ActiveCodexTurn) and current.turn is turn:
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)
@@ -1710,10 +1733,19 @@ async def run_codex_sdk_turn(
     # ensures task cancellation cannot prevent the SIGKILL backstop from
     # running in that worker once cleanup has started.
     if process_group_id is not None:
-      await asyncio.shield(asyncio.to_thread(
-        _terminate_codex_process_group,
-        process_group_id,
+      reap_task = asyncio.create_task(asyncio.to_thread(
+        _terminate_codex_process_group, process_group_id,
       ))
+      while not reap_task.done():
+        try:
+          await asyncio.shield(reap_task)
+        except asyncio.CancelledError as exc:
+          # shield keeps the worker alive. Defer every caller cancellation
+          # until its bounded TERM/KILL sequence has completed.
+          deferred_cancel = deferred_cancel or exc
+      reap_task.result()
+    if deferred_cancel is not None:
+      raise deferred_cancel
 
 
 async def steer_into_active_turn(

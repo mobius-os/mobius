@@ -54,15 +54,25 @@ def test_profile_sweep_interval_is_hourly_and_bounded(monkeypatch):
   assert browser_profiles.browser_profile_sweep_seconds() == 7200
 
 
-def _fake_browser_process(proc, pid, *, chat_id, session):
+def _fake_browser_process(
+  proc, pid, *, chat_id, session, namespace=None, socket_dir=None,
+):
   process = proc / str(pid)
   process.mkdir(parents=True)
   (process / "cmdline").write_bytes(
     b"/usr/local/lib/agent-browser-linux-x64\0"
   )
-  (process / "environ").write_bytes(
-    f"CHAT_ID={chat_id}\0AGENT_BROWSER_SESSION={session}\0".encode()
-  )
+  values = {
+    "CHAT_ID": chat_id,
+    "AGENT_BROWSER_SESSION": session,
+  }
+  if namespace is not None:
+    values["AGENT_BROWSER_NAMESPACE"] = namespace
+  if socket_dir is not None:
+    values["AGENT_BROWSER_SOCKET_DIR"] = socket_dir
+  (process / "environ").write_bytes("".join(
+    f"{key}={value}\0" for key, value in values.items()
+  ).encode())
 
 
 def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
@@ -75,6 +85,11 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
     proc, 102, chat_id="chat-a", session="unicode-ø-世界",
   )
   _fake_browser_process(proc, 103, chat_id="chat-a", session=long_name)
+  _fake_browser_process(
+    proc, 106, chat_id="chat-a", session="../escape",
+    namespace="custom/ns", socket_dir="/tmp/ab-sockets",
+  )
+  _fake_browser_process(proc, 107, chat_id="chat-a", session="-x")
 
   foreign = proc / "104"
   foreign.mkdir()
@@ -90,35 +105,40 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
     b"CHAT_ID=chat-a\0AGENT_BROWSER_SESSION=not-a-browser\0"
   )
 
-  assert browser_profiles.browser_sessions_for_chat(
+  assert browser_profiles.browser_session_targets_for_chat(
     "chat-a", proc_root=proc,
-  ) == {"custom:colon", "unicode-ø-世界", long_name}
-
-
-def test_browser_session_safety_rejects_path_option_and_control_names():
-  safe = browser_profiles.browser_session_is_safely_closable
-  assert safe("custom:colon")
-  assert safe("unicode-ø-世界")
-  assert safe("preview-" + ("x" * 256))
-  assert safe("name with spaces")
-
-  for unsafe in (
-    "", "-x", "--help", ".", "..", "../escape", "safe/../escape",
-    r"..\escape", "line\nbreak", "control\x7f",
-  ):
-    assert not safe(unsafe), unsafe
+  ) == {
+    browser_profiles.BrowserSessionTarget(session="custom:colon"),
+    browser_profiles.BrowserSessionTarget(session="unicode-ø-世界"),
+    browser_profiles.BrowserSessionTarget(session=long_name),
+    browser_profiles.BrowserSessionTarget(
+      session="../escape",
+      namespace="custom/ns",
+      socket_dir="/tmp/ab-sockets",
+    ),
+    browser_profiles.BrowserSessionTarget(session="-x"),
+  }
 
 
 def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
   monkeypatch,
 ):
   long_name = "preview-" + ("x" * 256)
+  monkeypatch.setenv("AGENT_BROWSER_NAMESPACE", "stale-parent-namespace")
+  monkeypatch.setenv("AGENT_BROWSER_SOCKET_DIR", "/stale/parent/socket-dir")
   monkeypatch.setattr(
     browser_profiles,
-    "browser_sessions_for_chat",
+    "browser_session_targets_for_chat",
     lambda _chat_id: {
-      "custom:colon", "unicode-ø-世界", long_name,
-      "../escape", "--help",
+      browser_profiles.BrowserSessionTarget(session="custom:colon"),
+      browser_profiles.BrowserSessionTarget(session="unicode-ø-世界"),
+      browser_profiles.BrowserSessionTarget(session=long_name),
+      browser_profiles.BrowserSessionTarget(
+        session="../escape",
+        namespace="custom/ns",
+        socket_dir="/tmp/ab-sockets",
+      ),
+      browser_profiles.BrowserSessionTarget(session="-x"),
     },
   )
   calls = []
@@ -127,8 +147,8 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
     async def wait(self):
       return 0
 
-  async def fake_create_subprocess_exec(*args, **_kwargs):
-    calls.append(args)
+  async def fake_create_subprocess_exec(*args, **kwargs):
+    calls.append((args, kwargs["env"]))
     return FakeProcess()
 
   monkeypatch.setattr(
@@ -139,12 +159,64 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
 
   asyncio.run(chat._close_browser_session("chat-a"))
 
-  assert calls == [
-    ("agent-browser", "--session", "chat-chat-a", "close"),
-    ("agent-browser", "--session", "custom:colon", "close"),
-    ("agent-browser", "--session", long_name, "close"),
-    ("agent-browser", "--session", "unicode-ø-世界", "close"),
-  ]
+  assert all(args == ("agent-browser", "close") for args, _env in calls)
+  routes = {
+    env["AGENT_BROWSER_SESSION"]: env
+    for _args, env in calls
+  }
+  assert set(routes) == {
+    "chat-chat-a", "custom:colon", "unicode-ø-世界", long_name,
+    "../escape", "-x",
+  }
+  assert "AGENT_BROWSER_NAMESPACE" not in routes["chat-chat-a"]
+  assert "AGENT_BROWSER_SOCKET_DIR" not in routes["chat-chat-a"]
+  assert routes["../escape"]["AGENT_BROWSER_NAMESPACE"] == "custom/ns"
+  assert routes["../escape"]["AGENT_BROWSER_SOCKET_DIR"] == "/tmp/ab-sockets"
+
+
+def test_terminal_browser_cleanup_kills_timed_out_close_process(monkeypatch):
+  monkeypatch.setattr(
+    browser_profiles, "browser_session_targets_for_chat", lambda _chat_id: set(),
+  )
+  monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
+  monkeypatch.setattr(chat, "_BROWSER_CLOSE_KILL_GRACE", 0.01)
+
+  class WedgedProcess:
+    returncode = None
+
+    def __init__(self):
+      self.terminate_calls = 0
+      self.kill_calls = 0
+      self.wait_calls = 0
+
+    async def wait(self):
+      self.wait_calls += 1
+      if self.kill_calls:
+        self.returncode = -9
+        return self.returncode
+      await asyncio.Future()
+
+    def terminate(self):
+      self.terminate_calls += 1
+
+    def kill(self):
+      self.kill_calls += 1
+
+  proc = WedgedProcess()
+
+  async def fake_create_subprocess_exec(*_args, **_kwargs):
+    return proc
+
+  monkeypatch.setattr(
+    chat.asyncio, "create_subprocess_exec", fake_create_subprocess_exec,
+  )
+
+  asyncio.run(chat._close_browser_session("chat-a"))
+
+  assert proc.terminate_calls == 1
+  assert proc.kill_calls == 1
+  assert proc.wait_calls == 3
+  assert proc.returncode == -9
 
 
 def test_quota_prunes_regenerable_cache_before_profile(tmp_path):
