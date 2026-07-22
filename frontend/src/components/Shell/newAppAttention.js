@@ -59,3 +59,36 @@ export function withoutAppFlagged(prev, id) {
   next.delete(n)
   return next
 }
+
+// The shell has two honest reasons to mark an app: it arrived during this
+// browser session, or a durable app-attributed background notification landed.
+// Present them as one visual state to Drawer + WorkspaceChrome.
+export function appAttentionIds(apps, newAppIds, visibleAppIds = []) {
+  const next = new Set()
+  const visible = new Set(
+    [...visibleAppIds].map(Number).filter(id => !Number.isNaN(id)),
+  )
+  for (const raw of newAppIds || []) {
+    const id = Number(raw)
+    if (!Number.isNaN(id) && !visible.has(id)) next.add(id)
+  }
+  for (const app of apps || []) {
+    const id = Number(app?.id)
+    if (!Number.isNaN(id) && !visible.has(id) && app?.has_unseen_activity) next.add(id)
+  }
+  return next
+}
+
+// Optimistically clear the query-cache flag as soon as a visible app is
+// acknowledged. A failed POST invalidates the list and restores server truth.
+export function withAppActivitySeen(apps, appId) {
+  const id = Number(appId)
+  if (!Array.isArray(apps) || Number.isNaN(id)) return apps
+  let changed = false
+  const next = apps.map(app => {
+    if (Number(app?.id) !== id || !app?.has_unseen_activity) return app
+    changed = true
+    return { ...app, has_unseen_activity: false }
+  })
+  return changed ? next : apps
+}

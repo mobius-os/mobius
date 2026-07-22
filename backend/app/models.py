@@ -521,6 +521,23 @@ class App(Base):
   )
 
 
+class AppActivityState(Base):
+  """Durable unread-activity marker for one installed app.
+
+  This deliberately lives outside ``apps``: acknowledging a report must not
+  advance ``App.updated_at``, which is the shell's executable-bundle cache key.
+  Notifications remain the detailed history; the drawer only needs one compact
+  unread/read row per app.
+  """
+
+  __tablename__ = "app_activity_state"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  activity_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+  activity_version = Column(Integer, nullable=False, default=1, server_default="1")
+  unseen = Column(Boolean, nullable=False, default=True, server_default=true())
+
+
 class PushSubscription(Base):
   """Browser push subscription for Web Push delivery."""
 

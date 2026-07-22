@@ -2,11 +2,43 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  appAttentionIds,
   freshChatBuiltApps,
   freshAppIds,
+  withAppActivitySeen,
   withAppsFlagged,
   withoutAppFlagged,
 } from '../newAppAttention.js'
+
+test('appAttentionIds combines session arrivals with durable app activity', () => {
+  const ids = appAttentionIds([
+    { id: 1, has_unseen_activity: false },
+    { id: '2', has_unseen_activity: true },
+    { id: 3, has_unseen_activity: true },
+  ], new Set([1, '2']))
+  assert.deepEqual([...ids], [1, 2, 3])
+})
+
+test('appAttentionIds never marks an app that is already visible', () => {
+  const ids = appAttentionIds([
+    { id: 1, has_unseen_activity: true },
+    { id: 2, has_unseen_activity: true },
+  ], new Set([1, 3]), new Set(['1', 3]))
+  assert.deepEqual([...ids], [2])
+})
+
+test('withAppActivitySeen clears only the matching durable flag', () => {
+  const rows = [
+    { id: 1, has_unseen_activity: true },
+    { id: 2, has_unseen_activity: true },
+  ]
+  const next = withAppActivitySeen(rows, '1')
+  assert.deepEqual(next, [
+    { id: 1, has_unseen_activity: false },
+    { id: 2, has_unseen_activity: true },
+  ])
+  assert.equal(withAppActivitySeen(next, 1), next)
+})
 
 test('freshAppIds returns only ids absent from the baseline', () => {
   const baseline = new Set([1, 2, 3])

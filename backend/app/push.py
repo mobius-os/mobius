@@ -161,6 +161,13 @@ def notify_owner(
     sent_at=datetime.now(UTC),
   )
   db.add(notif)
+  # App background jobs already attribute their success/failure notification
+  # to the app. Make that canonical completion edge own the drawer dot too,
+  # rather than requiring every cron script to remember a parallel signal.
+  from app.app_activity import mark_from_notification
+  activity_app_id = mark_from_notification(
+    db, source_type=source_type, source_id=source_id,
+  )
   try:
     db.commit()
   except Exception:
@@ -184,6 +191,14 @@ def notify_owner(
     except Exception:
       pass
     return notification_id
+
+  if activity_app_id is not None:
+    # The row above is durable; this replay-free event only makes a live shell
+    # refetch immediately. A reconnect/boot refetch recovers a missed event.
+    from app.broadcast import get_system_broadcast
+    get_system_broadcast().publish({
+      "type": "app_activity", "appId": str(activity_app_id),
+    })
 
   # Skip push when a live SSE subscriber is already watching the
   # source chat — the in-tab UX surfaces the event there. presence
