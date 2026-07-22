@@ -11,9 +11,10 @@
 
   The chat lives BELOW this brief: the Reflection app renders this static page, then
   mounts the morning-chat thread underneath it. Keep this page a clean READ. The
-  structured decisions ride in the brief as a declarative question carrier (the
-  data-report-questions section near the end) — the app lifts that out and renders
-  native tap cards whose answers are saved for the NEXT run. Do NOT call
+  A genuinely necessary structured decision can ride in the brief as an optional
+  declarative question carrier — the app lifts that out and renders native tap
+  cards whose answers are saved for the NEXT run. The default template asks
+  nothing. Do NOT call
   AskUserQuestion from the nightly run (it parks a future a reset orphans). The
   morning chat is the open-ended escape hatch for anything the cards can't capture.
 
@@ -581,50 +582,10 @@
     </div>
   </section>
 
-  <!-- ===================== §4 What needs your input ===================== -->
-  <section id="input" aria-labelledby="input-h">
-    <div class="sec-head"><span class="sec-num">4</span><h2 id="input-h">What needs your input</h2></div>
-    <p class="sec-sub">Decisions I didn’t make for you. Answer these as tappable cards at the end of this brief — one tap each. Your picks guide tomorrow night, not today.</p>
-    <div class="items">
-      <!-- repeatable collapsed decision; add .urgent for a security/data call.
-           badge: review | risk | hold | rank. The summary alone must say what
-           to decide; the triad inside carries the receipts. -->
-      <details class="item decision">
-        <summary><span class="badge review">Decide</span> {{INPUT_TITLE_1}}</summary>
-        <p class="lead">{{INPUT_DESC_1}}</p>
-        <dl class="meta">
-          <div><dt>Trigger</dt><span class="v">{{INPUT_TRIGGER_1}}</span></div>
-          <div><dt>Why</dt><span class="v">{{INPUT_WHY_1}}</span></div>
-          <div><dt>Options</dt><span class="v action">{{INPUT_OPTIONS_1}}</span></div>
-        </dl>
-        <p class="answer-hint"><span class="dot"></span>Tap your answer in the question card at the end of this brief — it’s saved for tomorrow night’s run.</p>
-      </details>
-      <!-- /repeatable -->
-    </div>
-
-    <!-- Declarative question carrier. The app extracts the JSON below, strips
-         this whole section before rendering the iframe, and shows native tap
-         cards. The script is INERT inside the sandboxed brief (it never
-         executes); it is a data carrier only. The partner's taps are saved for
-         your NEXT run. Fill questions[] with the real enumerable decisions, if any — ZERO is a valid night (omit this whole carrier when nothing genuinely needs input), several are fine when they're real; the same decisions;
-         each option has a label (required) and an optional description. Omit the
-         whole section if you have nothing real to ask. The JSON MUST be valid —
-         a malformed carrier is silently dropped. -->
-    <section class="report-questions" data-report-questions>
-      <h2>A few questions for tomorrow night</h2>
-      <p class="rq-note">Your answers guide my next run — they won't change this brief.</p>
-      <script type="application/mobius-questions+json">
-      {"version":1,"questions":[
-        {"question":"{{QUESTION_1}}","header":"{{Q1_LABEL}}","multiSelect":false,
-         "options":[{"label":"{{Q1_OPTION_A}}","description":"{{Q1_OPTION_A_DESC}}"},
-                    {"label":"{{Q1_OPTION_B}}"}]},
-        {"question":"{{QUESTION_2}}","header":"{{Q2_LABEL}}","multiSelect":false,
-         "options":[{"label":"{{Q2_OPTION_A}}"},{"label":"{{Q2_OPTION_B}}"}]}
-      ]}
-      </script>
-    </section>
-
-  </section>
+  <!-- §4 What needs your input is intentionally absent by default. Add that
+       section and ONE declarative question carrier only when a real decision
+       blocks a better next step and no safe reversible default is good enough.
+       The Reflection skill owns the exact carrier shape. -->
 
   <!-- ===================== §5 Details ===================== -->
   <section id="details" aria-labelledby="details-h">
