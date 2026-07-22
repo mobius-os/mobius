@@ -190,9 +190,11 @@ async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
   invoking it, so the codex thread id is recorded (and re-sighted idempotently
   on resume) with no second call site. The link record is what survives the
   provider switch / session reset that later NULLs ``Chat.session_id``. Mirrors
-  ``claude_sdk_runner._persist_session_id``.
+  ``claude_sdk_runner._persist_session_id``. Out-of-band callers such as the
+  nightly Reflection runner pass ``db=None`` because their synthetic chat id
+  has no durable Chat row; they must not enter these chat-only write paths.
   """
-  if not chat_id or not session_id:
+  if db is None or not chat_id or not session_id:
     return
   try:
     from app.chat_writer import PersistSessionId, await_ack, get_writer
@@ -1159,7 +1161,8 @@ async def run_codex_sdk_turn(
     pending_questions: Shared AskUserQuestion registry owned by
       chat.py — keyed by chat_id. Used by the request_user_input
       bridge to park on a future while the user answers.
-    db: SQLAlchemy session for runner-side persistence paths.
+    db: SQLAlchemy session for durable-chat persistence paths, or None for an
+      out-of-band turn with no Chat row (for example nightly Reflection).
 
   Returns:
     Dict with `session_id`, `cost_usd`, and `error`.
