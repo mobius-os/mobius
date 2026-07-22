@@ -90,7 +90,15 @@ test('opaque frames request module bytes only after exact parent attribution', (
   assert.match(frame, /type: 'moebius:module-request'/)
   assert.match(frame, /new Blob\(\[bytes\], \{ type: 'text\/javascript' \}\)/)
   assert.match(frame, /URL\.revokeObjectURL\(blobUrl\)/)
-  assert.doesNotMatch(frame, /await import\(moduleUrl\([01]\)\)/)
+  // The opaque frame has one module-execution route: the bytes fetched by the
+  // exact parent broker are evaluated from its bounded blob. Pin the complete
+  // dynamic-import target list rather than one old helper spelling — a renamed
+  // direct URL fallback must not silently bypass attribution/version/offline
+  // behavior or put the app bearer in a module URL.
+  const dynamicImportTargets = [...frame.matchAll(/\bimport\s*\(\s*([^)\r\n]+)\s*\)/g)]
+    .map(match => match[1].trim())
+  assert.deepEqual(dynamicImportTargets, ['blobUrl'])
+  assert.doesNotMatch(frame, /\bimportDirectModule\b/)
   assert.doesNotMatch(frame, /type="importmap"/)
   assert.doesNotMatch(frame, /await import\(['"]react['"]\)/)
   assert.doesNotMatch(frame, /await import\(['"]\/mobius-runtime\.js['"]\)/)

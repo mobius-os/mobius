@@ -494,6 +494,10 @@
       return EXTENSION_ORIGIN_RE.test(String(source || '')) || EXTENSION_ORIGIN_RE.test(String(stack || ''))
     }
     function handleFrameError(title, detail, source) {
+      // Redact before ANY branch can log, display or retain the detail. showErr
+      // repeats this at its direct call boundary for load failures that do not
+      // pass through the global error listeners.
+      detail = redactErrorCredentials(detail)
       if (window.__frameMounted) {
         // The browser also logs the uncaught error natively; this line
         // records why no error panel replaced the working UI.
