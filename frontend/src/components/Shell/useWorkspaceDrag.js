@@ -41,12 +41,15 @@ function cssEscape(v) {
 // lands on the original source AFTER the shield is gone, so shield timing can't
 // stop it. Scope the guard to that source: a real drag often produces no compat
 // click at all, and a blanket "next click" guard would eat a quick Undo or other
-// unrelated action during this short window.
+// unrelated action during this short window. A fresh pointerdown is a new user
+// interaction, not the old drag's compat click, so it retires any standing guard
+// before that interaction can produce its own click.
 function suppressNextSourceClick(sourceEl) {
   let cleared = false
   const clear = () => {
     if (cleared) return
     cleared = true
+    window.removeEventListener('pointerdown', clear, true)
     window.removeEventListener('click', onClick, true)
     clearTimeout(timer)
   }
@@ -60,8 +63,10 @@ function suppressNextSourceClick(sourceEl) {
     ev.preventDefault()
     clear()
   }
+  window.addEventListener('pointerdown', clear, true)
   window.addEventListener('click', onClick, true)
   const timer = setTimeout(clear, 400)
+  return clear
 }
 
 export default function useWorkspaceDrag({
@@ -100,6 +105,12 @@ export default function useWorkspaceDrag({
     let activeCleanup = null
     let activePointerId = null
     let activeSrcEl = null
+    // A drag-owned compatibility-click guard belongs to exactly one completed
+    // pointer gesture. A fresh pointerdown is proof that a later owner gesture
+    // has begun, so it must retire any old guard before that gesture's click.
+    // Without this boundary, an interrupted drag followed quickly by a tap on
+    // the same drawer row made the row look dead for up to 400ms.
+    let clearPendingSourceClick = null
 
     function contentBox() {
       return contentElRef.current?.getBoundingClientRect() || { left: 0, top: 0 }
@@ -576,7 +587,10 @@ export default function useWorkspaceDrag({
         removeOverlays()
         // The compat click fires after the shield is already gone; swallow it so
         // a committed drop is exactly one action, not a drop + a tab/row click.
-        if (suppressClick) suppressNextSourceClick(srcEl)
+        if (suppressClick) {
+          clearPendingSourceClick?.()
+          clearPendingSourceClick = suppressNextSourceClick(srcEl)
+        }
         // V6 (vizreview): a CANCELLED drag (Escape / blur / lost-capture) must not
         // leave the drag-origin row wearing its focus ring — blur it so the ring
         // clears with the drag. A committed drop keeps focus (the tab moved).
@@ -617,13 +631,20 @@ export default function useWorkspaceDrag({
 
     // ── Source detection (capture-phase, never preventDefault here) ───────────
     function onPointerDown(e) {
+      // A compatibility click from the previous gesture cannot legitimately
+      // begin with a new pointerdown. Clear its one-shot guard before doing any
+      // stale-session reconciliation so this fresh interaction stays live.
+      clearPendingSourceClick?.()
+      clearPendingSourceClick = null
       if (activeCleanup) {
-        // A session already stands. If THIS is a different pointer and the standing
-        // session's pointer is dead (capture lost — a visible->visible steal), the
-        // session is stale: force-clean it, then fall through to start the new one.
-        // A genuinely live drag keeps its capture, so this never cancels one.
-        if (e.pointerId !== activePointerId && !standingSessionPointerIsLive()) {
-          activeCleanup({ suppressClick: true })
+        // Pointer ids are routinely REUSED across sequential touch gestures
+        // (notably id=1 on mobile). Liveness comes from capture, never identity:
+        // if the standing source no longer owns capture, force-clean it and let
+        // this SAME pointerdown continue into the row it actually targeted.
+        // This boundary is already newer than the abandoned gesture, so arming
+        // a click suppressor here would eat this interaction's own click.
+        if (!standingSessionPointerIsLive()) {
+          activeCleanup()
         } else {
           return // one session at a time
         }
@@ -682,6 +703,7 @@ export default function useWorkspaceDrag({
       window.removeEventListener('pageshow', reconcileStaleSession)
       document.removeEventListener('visibilitychange', onForegroundVisible)
       activeCleanup?.() // tear down an in-flight drag
+      clearPendingSourceClick?.()
       removeOverlays()
     }
     // enabled is a module-load constant and every volatile input arrives through

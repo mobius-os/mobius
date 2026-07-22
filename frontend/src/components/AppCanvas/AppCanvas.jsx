@@ -12,6 +12,7 @@ import {
   readCachedAppToken, removeAppFrameStorage, setAppFrameStorage,
   isSharedVirtualStorageKey,
 } from '../../lib/appFrameStorage.js'
+import { immersiveLifecycleValue } from '../../lib/immersive.js'
 import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import { createCapabilityHost } from '../../lib/capabilityHost.js'
@@ -956,28 +957,27 @@ export default function AppCanvas({
     return () => { onNavReset?.(appId) }
   }, [appId, swap.liveVersion, onNavReset])
 
-  // Drive the shell chrome from the VISIBLE frame's recorded immersive intent,
-  // but ONLY while this canvas is the active one. Replays fire on promotion
-  // (swap.liveVersion changes — the promoted frame's real-time post was
-  // withheld while it was hidden, so an immersive game stays immersive across
-  // a rebuild) and on this canvas becoming active (`active` flips true — a
-  // hidden frame's post was withheld too, so returning to the game re-enters
-  // immersive). A hidden canvas never calls with value:true: Shell's holder is
-  // global last-writer-wins and a hidden promotion must not steal chrome from
-  // the app on screen. The cleanup release covers deactivation, swap, and
-  // unmount alike (a torn-down iframe can't run its own cleanup-post; the
-  // recorded intent survives in frameImmersiveRef, so reactivation restores
-  // it). Releasing an app that doesn't hold the slot is a no-op
-  // (lib/immersive.js). Keyed on swap.liveVersion, not the version prop, for
-  // the same reason as the nav reset above (a bump alone must not touch the
-  // live frame).
+  // Real-time immersive messages are forwarded in onMessage above. Lifecycle
+  // replay is intentionally narrower: leaving releases; returning to the same
+  // cached frame does NOT resurrect its old request; only a newly promoted
+  // frame may replay the intent it posted while hidden. This makes the shell's
+  // Exit choice survive app switches while preserving seamless in-place app
+  // updates. The pure helper keeps that policy regression-testable.
+  const immersiveLifecycleRef = useRef(null)
   useEffect(() => {
     if (!appId) return
-    if (active) {
-      onImmersive?.(appId, frameImmersiveRef.current.get(swap.liveVersion) === true)
-    }
-    return () => { onImmersive?.(appId, false) }
+    const current = { appId, liveVersion: swap.liveVersion, active }
+    const value = immersiveLifecycleValue(
+      immersiveLifecycleRef.current,
+      current,
+      frameImmersiveRef.current.get(swap.liveVersion),
+    )
+    immersiveLifecycleRef.current = current
+    if (value !== null) onImmersive?.(appId, value)
   }, [appId, swap.liveVersion, active, onImmersive])
+
+  // Unmount/eviction is a hard release even when no active-state render landed.
+  useEffect(() => () => { onImmersive?.(appId, false) }, [appId, onImmersive])
 
   // Broadcast theme updates to every loaded frame (live + any incoming) so each
   // refreshes its theme without remounting (and losing app state).

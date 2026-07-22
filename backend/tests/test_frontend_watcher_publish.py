@@ -23,6 +23,20 @@ def _write_build(root, marker):
   )
 
 
+class _FakeViteProcess:
+  def __init__(self, complete):
+    self.pid = 12345
+    self.returncode = 0
+    self._complete = complete
+
+  def communicate(self, timeout=None):
+    self._complete()
+    return "vite build complete", None
+
+  def poll(self):
+    return self.returncode
+
+
 @pytest.fixture
 def fw_dirs(tmp_path, monkeypatch):
   frontend = tmp_path / "frontend"
@@ -411,6 +425,171 @@ def test_edit_during_demand_build_requests_one_rerun(fw_dirs, monkeypatch):
     str(fw_dirs["frontend"] / "src" / "first.js"),
     str(fw_dirs["frontend"] / "src" / "second.js"),
   ]
+
+
+def test_conflict_markers_defer_vite_without_touching_generations(
+  fw_dirs, monkeypatch, caplog,
+):
+  src = fw_dirs["frontend"] / "src"
+  src.mkdir()
+  conflicted = src / "SettingsView.jsx"
+  conflicted.write_text(
+    "<<<<<<< HEAD\nexport default 'ours'\n=======\n"
+    "export default 'theirs'\n>>>>>>> incoming\n",
+    encoding="utf-8",
+  )
+  _write_build(fw_dirs["dist"], "served")
+  _write_build(fw_dirs["staging"], "unpublished")
+  events = []
+  marker_scans = 0
+  scan_conflicts = fw._source_conflict_markers
+
+  def counted_marker_scan():
+    nonlocal marker_scans
+    marker_scans += 1
+    return scan_conflicts()
+
+  monkeypatch.setattr(fw, "_publish_system_event", events.append)
+  monkeypatch.setattr(fw, "_source_conflict_markers", counted_marker_scan)
+  monkeypatch.setattr(
+    fw, "_ensure_node_modules",
+    lambda: pytest.fail("marker snapshot must be rejected before setup"),
+  )
+  monkeypatch.setattr(
+    fw.subprocess, "Popen",
+    lambda *args, **kwargs: pytest.fail("marker snapshot must not run Vite"),
+  )
+  monkeypatch.setattr(
+    fw, "_publish_built_dir",
+    lambda *args, **kwargs: pytest.fail("marker snapshot must not publish"),
+  )
+  loop = asyncio.new_event_loop()
+  handler = fw._FrontendHandler(loop, start_threads=False)
+  try:
+    handler._run_demand_build(str(conflicted))
+    handler._run_demand_build("conflict-marker preflight retry")
+
+    assert handler._build_requested.is_set()
+    assert handler._blocked_conflict_signature is not None
+  finally:
+    handler.close()
+    loop.close()
+
+  assert (fw_dirs["dist"] / "assets" / "index-served.js").is_file()
+  assert (
+    fw_dirs["staging"] / "assets" / "index-unpublished.js"
+  ).is_file()
+  assert events == []
+  assert marker_scans == 1
+  assert caplog.text.count("conflict markers remain in src/SettingsView.jsx") == 1
+
+
+def test_conflict_marker_retry_builds_after_resolution_without_observer_event(
+  fw_dirs, monkeypatch,
+):
+  src = fw_dirs["frontend"] / "src"
+  src.mkdir()
+  conflicted = src / "SetupWizard.jsx"
+  conflicted.write_text(
+    "<<<<<<< HEAD\nexport default 1\n=======\n"
+    "export default 2\n>>>>>>> incoming\n",
+    encoding="utf-8",
+  )
+  monkeypatch.setattr(fw, "_DEBOUNCE_SECS", 0.01)
+  monkeypatch.setattr(fw, "_ensure_node_modules", lambda: None)
+  vite_calls = []
+  publish_calls = []
+  events = []
+
+  def popen(*args, **kwargs):
+    vite_calls.append(args)
+    return _FakeViteProcess(
+      lambda: _write_build(fw_dirs["staging"], "resolved"),
+    )
+
+  monkeypatch.setattr(fw.subprocess, "Popen", popen)
+  monkeypatch.setattr(
+    fw, "_publish_built_dir",
+    lambda source, reason: publish_calls.append((source, reason)) or True,
+  )
+  monkeypatch.setattr(fw, "_publish_system_event", events.append)
+  loop = asyncio.new_event_loop()
+  handler = fw._FrontendHandler(loop, start_threads=False)
+  thread = threading.Thread(target=handler._build_loop)
+  try:
+    thread.start()
+    handler._request_build(str(conflicted))
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+      with handler._state_lock:
+        if handler._blocked_conflict_signature is not None:
+          break
+      time.sleep(0.005)
+    else:
+      pytest.fail("conflict snapshot was not deferred")
+
+    # No observer callback follows this edit. The deferred preflight itself
+    # must retain a retry so conflict resolution cannot become sticky.
+    conflicted.write_text("export default 2\n", encoding="utf-8")
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not publish_calls:
+      time.sleep(0.005)
+  finally:
+    handler.close()
+    thread.join(timeout=2)
+    loop.close()
+
+  assert len(vite_calls) == 1
+  assert len(publish_calls) == 1
+  assert publish_calls[0][0] == fw_dirs["staging"]
+  assert events == [{"type": "shell_rebuilt"}]
+
+
+def test_source_edit_during_vite_discards_staging_and_requests_rerun(
+  fw_dirs, monkeypatch,
+):
+  src = fw_dirs["frontend"] / "src"
+  src.mkdir()
+  source_file = src / "useStreamConnection.js"
+  source_file.write_text("export default 1\n", encoding="utf-8")
+  monkeypatch.setattr(fw, "_ensure_node_modules", lambda: None)
+  vite_calls = 0
+  publish_calls = []
+
+  def popen(*args, **kwargs):
+    nonlocal vite_calls
+    vite_calls += 1
+
+    def complete():
+      _write_build(fw_dirs["staging"], f"build-{vite_calls}")
+      if vite_calls == 1:
+        source_file.write_text("export default 2222\n", encoding="utf-8")
+
+    return _FakeViteProcess(complete)
+
+  monkeypatch.setattr(fw.subprocess, "Popen", popen)
+  monkeypatch.setattr(
+    fw, "_publish_built_dir",
+    lambda source, reason: publish_calls.append((source, reason)) or True,
+  )
+  monkeypatch.setattr(fw, "_publish_system_event", lambda event: None)
+  loop = asyncio.new_event_loop()
+  handler = fw._FrontendHandler(loop, start_threads=False)
+  try:
+    handler._run_demand_build(str(source_file))
+
+    assert publish_calls == []
+    assert not fw_dirs["staging"].exists()
+    assert handler._build_requested.is_set()
+
+    handler._run_demand_build("source changed during demand build")
+  finally:
+    handler.close()
+    loop.close()
+
+  assert vite_calls == 2
+  assert len(publish_calls) == 1
+  assert publish_calls[0][0] == fw_dirs["staging"]
 
 
 def test_idle_observer_requests_build_for_source_edit(fw_dirs, monkeypatch):

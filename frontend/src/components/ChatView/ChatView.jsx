@@ -3872,6 +3872,7 @@ export default function ChatView({
                     displayState="running"
                     iconKind="reasoning"
                     ariaLabel="Thinking, in progress"
+                    reserveInteractiveGeometry
                   />
                 </div>
               </div>

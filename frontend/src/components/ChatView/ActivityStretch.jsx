@@ -50,7 +50,7 @@ import { useDisclosureState } from './disclosureState.js'
 // shimmer plus the running-first activity summary already say what is
 // executing. So the sole open/close signal is `userOpen`, and no effect or
 // prop derives it.
-function TimelineThought({ label, thought, chatId, disclosureKey }) {
+function TimelineThought({ label, thought, chatId, disclosureKey, direct = false, live = false }) {
   const [open, setOpen] = useDisclosureState(chatId, disclosureKey)
   const headerRef = useRef(null)
   const bodyRef = useRef(null)
@@ -78,27 +78,45 @@ function TimelineThought({ label, thought, chatId, disclosureKey }) {
     )
   }
 
+  const toggle = () => {
+    preserveTogglePosition(headerRef.current, bodyRef.current)
+    setOpen(o => !o)
+  }
+
   return (
-    <div className={
-      `chat__activity-think chat__activity-think--collapsible`
-      + (open ? ' chat__activity-think--open' : '')
+    <div className={direct
+      ? `chat__activity chat__activity--direct-thought chat__activity--${live ? 'running' : 'done'}`
+        + (open ? ' chat__activity--open' : '')
+      : `chat__activity-think chat__activity-think--collapsible`
+        + (open ? ' chat__activity-think--open' : '')
     }>
-      <button
-        ref={headerRef}
-        type="button"
-        className="chat__activity-think-toggle"
-        onClick={() => {
-          preserveTogglePosition(headerRef.current, bodyRef.current)
-          setOpen(o => !o)
-        }}
-        aria-expanded={open}
-        aria-controls={bodyId}
-      >
-        <span className="chat__activity-think-icon" aria-hidden="true">
-          <ActivityTypeIcon kind="reasoning" />
-        </span>
-        <span className="chat__activity-think-label">{label}</span>
-      </button>
+      {direct ? (
+        <ActivityLineHeader
+          ref={headerRef}
+          text={label}
+          displayState={live ? 'running' : 'done'}
+          iconKind="reasoning"
+          interactive
+          open={open}
+          ariaLabel={`${label}${live ? ', in progress' : ''}`}
+          controlsId={bodyId}
+          onToggle={toggle}
+        />
+      ) : (
+        <button
+          ref={headerRef}
+          type="button"
+          className="chat__activity-think-toggle"
+          onClick={toggle}
+          aria-expanded={open}
+          aria-controls={bodyId}
+        >
+          <span className="chat__activity-think-icon" aria-hidden="true">
+            <ActivityTypeIcon kind="reasoning" />
+          </span>
+          <span className="chat__activity-think-label">{label}</span>
+        </button>
+      )}
       <div ref={bodyRef} id={bodyId} className="chat__reasoning-body" hidden={!open}>
         {open && body}
         {open && loadState === 'ready' && !trace.previewComplete && (
@@ -135,6 +153,8 @@ function SingleActivity({ entry, chatId, live, surfaceKey }) {
         thought={item}
         chatId={chatId}
         disclosureKey={`${surfaceKey}:thought:${blockKey}`}
+        direct
+        live={live}
       />
     )
   }

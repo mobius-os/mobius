@@ -1383,6 +1383,30 @@ def test_persist_session_id_records_codex_link(db):
   assert link.first_seen_at == link.last_seen_at
 
 
+def test_persist_session_id_skips_synthetic_turn_without_db(monkeypatch, caplog):
+  # Reflection invokes the shared Codex runner with a synthetic chat id and no
+  # database session. It has no Chat row to update and must not initialize the
+  # chat writer/session-link stack (which also requires the web app's secrets).
+  from app import chat_writer, session_links
+
+  def fail_writer_lookup():
+    raise AssertionError("synthetic turn must not initialize the chat writer")
+
+  async def fail_link_write(*_args, **_kwargs):
+    raise AssertionError("synthetic turn must not record a chat session link")
+
+  monkeypatch.setattr(chat_writer, "get_writer", fail_writer_lookup)
+  monkeypatch.setattr(session_links, "record_session_link_async", fail_link_write)
+
+  asyncio.run(
+    codex_sdk_runner._persist_session_id(
+      None, "reflection-nightly", "thread-synthetic",
+    )
+  )
+
+  assert "Codex session id persistence failed" not in caplog.text
+
+
 def test_codex_config_overrides_default_pins_agents_namespace(monkeypatch):
   """Multi-agent is on by default AND pins the 'agents' tool namespace so the
   reserved 'collaboration' default (Codex #31864) can never brick a turn."""
