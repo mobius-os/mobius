@@ -730,7 +730,11 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
     # so a genuinely-empty message stays silent.
     text = item.text or ""
     if text.strip():
-      return [{"type": "text_final", "content": text}]
+      event = {"type": "text_final", "content": text}
+      item_id = getattr(item, "id", None)
+      if item_id:
+        event["text_item_id"] = item_id
+      return [event]
     return []
 
   return []
@@ -1350,7 +1354,11 @@ async def run_codex_sdk_turn(
 
         if isinstance(payload, sdk["AgentMessageDeltaNotification"]):
           if payload.delta:
-            bc.publish({"type": "text", "content": payload.delta})
+            event = {"type": "text", "content": payload.delta}
+            item_id = getattr(payload, "item_id", None)
+            if item_id:
+              event["text_item_id"] = item_id
+            bc.publish(event)
           continue
 
         # Reasoning deltas are Codex's analog of Claude's thinking_delta:

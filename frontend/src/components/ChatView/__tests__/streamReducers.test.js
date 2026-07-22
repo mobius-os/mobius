@@ -27,6 +27,8 @@ import {
   thinkingElapsedMs,
   attachToolSources,
   reconcileStreamItems,
+  appendTextItem,
+  replaceTextItem,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
 
@@ -42,6 +44,28 @@ function questionEvent(id, text) {
     questions: [{ question: text, options: [{ label: 'A' }, { label: 'B' }] }],
   }
 }
+
+test('text item identity keeps late deltas before an interleaved question', () => {
+  let items = appendTextItem([], 'Build it', { textItemId: 'msg-1' })
+  items = upsertQuestionItem(items, questionEvent('q1', 'Proceed?'))
+  items = appendTextItem(items, ' safely', { textItemId: 'msg-1' })
+  items = replaceTextItem(items, 'Build it safely', { textItemId: 'msg-1' })
+
+  assert.deepEqual(items.map(item => item.type), ['text', 'question'])
+  assert.equal(items[0].content, 'Build it safely')
+  assert.equal(items[1].question_id, 'q1')
+})
+
+test('legacy full text repairs prefix-question-suffix catch-up order', () => {
+  const items = replaceTextItem([
+    { type: 'text', content: 'Build it' },
+    questionEvent('q1', 'Proceed?'),
+    { type: 'text', content: ' safely' },
+  ], 'Build it safely')
+
+  assert.deepEqual(items.map(item => item.type), ['text', 'question'])
+  assert.equal(items[0].content, 'Build it safely')
+})
 
 // ---------------------------------------------------------------------------
 // upsertQuestionItem — the card replaces its own pending tool block

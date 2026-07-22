@@ -38,6 +38,93 @@ import {
 // Mirrors backend/app/tool_summaries.py's question-tool branch.
 const QUESTION_TOOLS = new Set(['AskUserQuestion', 'request_user_input'])
 
+/**
+ * Append a streamed text delta to its provider message item.
+ *
+ * A synchronous question can be published between two deltas belonging to
+ * the SAME Codex assistant-message item.  Matching only the trailing block
+ * puts the later delta after the question and disables the still-live card.
+ * `text_item_id` restores the provider's ownership across that interleave.
+ */
+export function appendTextItem(prev, content, {
+  textItemId = null,
+  forceNew = false,
+} = {}) {
+  const updated = [...prev]
+  if (textItemId) {
+    for (let i = updated.length - 1; i >= 0; i -= 1) {
+      const item = updated[i]
+      if (item?.type === 'text' && item.text_item_id === textItemId) {
+        updated[i] = { ...item, content: (item.content || '') + content }
+        return updated
+      }
+    }
+  }
+  const last = updated[updated.length - 1]
+  const sameLegacyItem = !textItemId || !last?.text_item_id
+  if (last?.type === 'text' && !forceNew && sameLegacyItem) {
+    updated[updated.length - 1] = {
+      ...last,
+      content: (last.content || '') + content,
+      ...(textItemId ? { text_item_id: textItemId } : {}),
+    }
+  } else {
+    updated.push({
+      type: 'text',
+      content,
+      ...(textItemId ? { text_item_id: textItemId } : {}),
+    })
+  }
+  return updated
+}
+
+/** Replace the authoritative full text for one provider message item. */
+export function replaceTextItem(prev, content, { textItemId = null } = {}) {
+  const updated = [...prev]
+  if (textItemId) {
+    for (let i = updated.length - 1; i >= 0; i -= 1) {
+      const item = updated[i]
+      if (item?.type === 'text' && item.text_item_id === textItemId) {
+        updated[i] = { ...item, content }
+        return updated
+      }
+    }
+  }
+
+  const trailingIdx = updated.length - 1
+  const trailing = updated[trailingIdx]
+  // Legacy catch-up logs have no text_item_id. Repair the observed
+  // prefix → question → suffix → full-text sequence deterministically.
+  if (trailing?.type === 'text') {
+    let sawQuestion = false
+    for (let i = trailingIdx - 1; i >= 0; i -= 1) {
+      const item = updated[i]
+      if (item?.type === 'question') {
+        sawQuestion = true
+        continue
+      }
+      if (item?.type !== 'text' || !sawQuestion) continue
+      const prefix = item.content || ''
+      const suffix = trailing.content || ''
+      if (prefix && content.startsWith(prefix)
+          && (content === prefix + suffix || content.endsWith(suffix))) {
+        updated[i] = { ...item, content }
+        updated.splice(trailingIdx, 1)
+        return updated
+      }
+      break
+    }
+    updated[trailingIdx] = { ...trailing, content }
+    return updated
+  }
+  updated.push({
+    type: 'text',
+    content,
+    ...(textItemId ? { text_item_id: textItemId } : {}),
+  })
+  return updated
+}
+
 export function isQuestionTool(tool) {
   return QUESTION_TOOLS.has(tool)
 }
