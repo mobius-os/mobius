@@ -85,10 +85,10 @@ SUPPORTED_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 # NOT import app.providers or the SDK stack (the production chat path
 # may be exactly what's broken). So the model lists the recovery picker
 # offers are FROZEN LITERALS here, deliberately duplicated from
-# providers.KNOWN_MODELS rather than imported. They drift only when
-# someone hand-edits both — acceptable, because the recovery surface is
-# small, rarely changed, and its whole value is surviving a broken
-# import chain.
+# providers.KNOWN_MODELS rather than imported. A platform-side test requires
+# this frozen snapshot to match the fallback registry for every provider
+# Recovery supports. That preserves the broken-import-chain boundary at
+# runtime without letting the two user-facing pickers silently drift.
 #
 # Recovery always runs the single recovery system prompt built by
 # `_system_prompt(chat_id)` (it needs the per-chat log path
@@ -105,12 +105,22 @@ SUPPORTED_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 RECOVERY_MODELS: dict[str, tuple[str, ...]] = {
   "claude": (
     "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-opus-4-5-20251001",
     "claude-sonnet-4-6",
+    "claude-sonnet-4-7-20251215",
+    "claude-sonnet-4-5-20251001",
     "claude-haiku-4-5-20251001",
   ),
   "codex": (
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
   ),
 }
 
