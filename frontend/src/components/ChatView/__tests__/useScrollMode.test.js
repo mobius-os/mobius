@@ -26,6 +26,7 @@ import {
   modeAfterReaderReachesBottom,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
+  physicalBottomAnchorModeFromScroll,
   readerInputActivatesDisclosure,
   readerInputMayScroll,
   readerInputNeedsFrameRelease,
@@ -729,7 +730,7 @@ test('no saved chat location opens at the latest real content without enabling f
     'the real content tail is visible and reserved spacer room is excluded')
 })
 
-test('attention nudge anchors the real-content tail without enabling follow', () => {
+test('attention nudge anchors the physical tail without enabling follow', () => {
   const last = {
     offsetTop: 1500,
     offsetHeight: 220,
@@ -740,7 +741,6 @@ test('attention nudge anchors the real-content tail without enabling follow', ()
     scrollTop: 700,
     clientHeight: 700,
     querySelector(selector) {
-      if (selector === '.spacer-dynamic') return { offsetHeight: 200 }
       if (selector === '[data-key="assistant-paused-tail"]') return last
       return null
     },
@@ -749,18 +749,55 @@ test('attention nudge anchors the real-content tail without enabling follow', ()
     },
   }
 
-  const mode = bottomAnchorModeFromScroll(scrollEl)
+  const mode = physicalBottomAnchorModeFromScroll(scrollEl)
   assert.deepEqual(mode, {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-paused-tail',
+    offset: 100,
+  })
+  applyMode(scrollEl, mode)
+  assert.equal(scrollEl.scrollTop, 1400,
+    'the nudge includes all composer clearance after the attention card')
+  assert.notEqual(mode.kind, 'FOLLOW_BOTTOM',
+    'revealing a question or Resume control must not create live-follow intent')
+})
+
+test('an off-content physical nudge stays live but persists the real-content tail', () => {
+  const last = {
+    offsetTop: 1500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-paused-tail' },
+  }
+  const scrollEl = {
+    scrollHeight: 3100,
+    scrollTop: 700,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 1200 }
+      if (selector === '[data-key="assistant-paused-tail"]') return last
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  const liveMode = physicalBottomAnchorModeFromScroll(scrollEl)
+  assert.deepEqual(liveMode, {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-paused-tail',
+    offset: -900,
+  })
+  applyMode(scrollEl, liveMode)
+  assert.equal(scrollEl.scrollTop, 2400,
+    'the explicit nudge reaches the true physical tail in the live mount')
+
+  assert.deepEqual(_modeForPersistence(liveMode, [], scrollEl), {
     kind: 'ANCHOR_AT',
     key: 'assistant-paused-tail',
     offset: 300,
     defaultTail: true,
-  })
-  applyMode(scrollEl, mode)
-  assert.equal(scrollEl.scrollTop, 1200,
-    'the nudge excludes blank reservation while retaining composer-cleared content')
-  assert.notEqual(mode.kind, 'FOLLOW_BOTTOM',
-    'revealing a question or Resume control must not create live-follow intent')
+  }, 'durable state normalizes the off-content nudge to the real tail')
 })
 
 test('an unresolvable saved location falls back to a settled bottom anchor', () => {

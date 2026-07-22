@@ -213,6 +213,36 @@ export function bottomAnchorModeFromScroll(scrollEl) {
 }
 
 
+/** Create a settled hold anchor at the true physical scroll tail.
+ *
+ * This is deliberately different from `bottomAnchorModeFromScroll`, which
+ * excludes the dynamic reservation for the automatic no-location restore.
+ * An explicit attention-nudge tap asks to see everything after the question
+ * or paused card too: composer clearance, any remaining reservation, and the
+ * card's primary action. Keep that one-shot navigation as ANCHOR_AT rather
+ * than FOLLOW_BOTTOM so revealing a control cannot manufacture live-follow
+ * intent for a later answer or resume. Persistence independently rejects an
+ * off-content physical anchor, so this live navigation cannot recreate a
+ * blank viewport on reload.
+ */
+export function physicalBottomAnchorModeFromScroll(scrollEl) {
+  if (!scrollEl) return null
+  const items = scrollEl.querySelectorAll('.chat__msg[data-key]')
+  const last = items[items.length - 1]
+  const key = last?.dataset?.key
+  if (!last || !key) return null
+  const targetScrollTop = Math.max(
+    0,
+    scrollEl.scrollHeight - scrollEl.clientHeight,
+  )
+  return {
+    kind: 'ANCHOR_AT',
+    key,
+    offset: last.offsetTop - targetScrollTop,
+  }
+}
+
+
 /** Freeze a viewport to real conversation content.
  *
  * A reader can move away from the physical bottom while the viewport is
@@ -1114,10 +1144,7 @@ export default function useScrollMode({
   // be mistaken for a second human gesture that enables FOLLOW_BOTTOM.
   const revealConversationTail = useCallback(() => {
     const scrollEl = scrollRef.current
-    // The real-content tail already includes the list's measured composer
-    // clearance. The dynamic spacer is layout machinery for send pinning, not
-    // a conversation destination.
-    const nextMode = bottomAnchorModeFromScroll(scrollEl)
+    const nextMode = physicalBottomAnchorModeFromScroll(scrollEl)
     if (!scrollEl || !nextMode) return
     gestureWindowUntilRef.current = 0
     readerLocationExplicitRef.current = true
