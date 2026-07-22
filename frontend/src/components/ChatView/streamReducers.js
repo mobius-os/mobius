@@ -117,12 +117,60 @@ export function replaceTextItem(prev, content, { textItemId = null } = {}) {
     updated[trailingIdx] = { ...trailing, content }
     return updated
   }
+  // Provider item ids are best-effort.  Codex request_user_input has been
+  // observed to interrupt after a prefix and then complete that SAME message
+  // item with a different id: prefix -> unanswered question -> full text.
+  // Nothing genuinely new can follow an unanswered protocol barrier, so put
+  // the authoritative completion back into the preceding text item. Appending
+  // it would duplicate the reply and disable the still-live question card.
+  if (trailing?.type === 'question' && !trailing.answers) {
+    for (let i = trailingIdx - 1; i >= 0; i -= 1) {
+      const item = updated[i]
+      if (item?.type !== 'text') continue
+      const prefix = item.content || ''
+      if (prefix && content.startsWith(prefix)) {
+        updated[i] = { ...item, content }
+        return updated
+      }
+      break
+    }
+  }
   updated.push({
     type: 'text',
     content,
     ...(textItemId ? { text_item_id: textItemId } : {}),
   })
   return updated
+}
+
+/**
+ * Repair already-persisted copies of the same provider ordering defect.
+ *
+ * Old rows have no text_item_id (transport identity is intentionally stripped
+ * before persistence), but the malformed shape is still unambiguous: a partial
+ * text prefix, an UNANSWERED question barrier, then a full text block beginning
+ * with that prefix.  Return the original array when no repair is needed so
+ * React memoization remains effective for every normal message.
+ */
+export function repairInterleavedQuestionText(blocks) {
+  if (!Array.isArray(blocks) || blocks.length < 3) return blocks
+  let repaired = null
+  for (let i = 1; i < blocks.length - 1; i += 1) {
+    const source = repaired || blocks
+    const question = source[i]
+    const prefixBlock = source[i - 1]
+    const fullBlock = source[i + 1]
+    if (question?.type !== 'question' || question.answers) continue
+    if (prefixBlock?.type !== 'text' || fullBlock?.type !== 'text') continue
+    const prefix = prefixBlock.content || ''
+    const full = fullBlock.content || ''
+    if (!prefix || !full.startsWith(prefix)) continue
+    if (!repaired) repaired = [...blocks]
+    repaired[i - 1] = { ...prefixBlock, content: full }
+    repaired.splice(i + 1, 1)
+    i -= 1
+  }
+  return repaired || blocks
 }
 
 export function isQuestionTool(tool) {

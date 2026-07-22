@@ -507,6 +507,29 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
           assistant_blocks.pop(trailing_idx)
           return True
         break
+    # Codex can publish the question after only a PREFIX of the preceding
+    # assistant-message item, then complete that item with one authoritative
+    # text_final carrying a different/missing item id.  There is no suffix text
+    # block in that shape: prefix -> unanswered question -> full text.  The
+    # full text still belongs to the prefix item; appending it after the card
+    # duplicates the reply and, worse, makes the live question cease to be the
+    # transcript tail (so the UI correctly refuses its answer).  An unanswered
+    # trailing question is a protocol barrier, therefore no genuinely new
+    # assistant item can follow it until an answer arrives.  That makes this
+    # prefix replacement deterministic even when provider item identity is
+    # absent or changes between delta and completion.
+    if (assistant_blocks
+        and assistant_blocks[-1].get("type") == "question"
+        and not assistant_blocks[-1].get("answers")):
+      for idx in range(len(assistant_blocks) - 2, -1, -1):
+        block = assistant_blocks[idx]
+        if block.get("type") != "text":
+          continue
+        prefix = str(block.get("content") or "")
+        if prefix and content.startswith(prefix):
+          block["content"] = content
+          return True
+        break
     if (assistant_blocks
         and assistant_blocks[-1].get("type") == "text"):
       if assistant_blocks[-1].get("content") == content:

@@ -28,6 +28,7 @@ import {
   attachToolSources,
   reconcileStreamItems,
   appendTextItem,
+  repairInterleavedQuestionText,
   replaceTextItem,
 } from '../streamReducers.js'
 import { questionKey } from '../questionKey.js'
@@ -65,6 +66,40 @@ test('legacy full text repairs prefix-question-suffix catch-up order', () => {
 
   assert.deepEqual(items.map(item => item.type), ['text', 'question'])
   assert.equal(items[0].content, 'Build it safely')
+})
+
+test('full text with mismatched identity stays before an unanswered question', () => {
+  const items = replaceTextItem([
+    { type: 'text', content: 'Review res', text_item_id: 'delta-item' },
+    questionEvent('q1', 'Harden it?'),
+  ], 'Review result', { textItemId: 'completed-item' })
+
+  assert.deepEqual(items.map(item => item.type), ['text', 'question'])
+  assert.equal(items[0].content, 'Review result')
+  assert.equal(items[1].question_id, 'q1')
+})
+
+test('persisted prefix-question-full duplication is repaired for display', () => {
+  const stored = [
+    { type: 'text', content: 'Review res' },
+    questionEvent('q1', 'Harden it?'),
+    { type: 'text', content: 'Review result' },
+  ]
+  const repaired = repairInterleavedQuestionText(stored)
+
+  assert.deepEqual(repaired.map(item => item.type), ['text', 'question'])
+  assert.equal(repaired[0].content, 'Review result')
+  assert.equal(stored.length, 3, 'the stored transcript is not mutated')
+})
+
+test('answered question boundaries preserve deliberate later text', () => {
+  const stored = [
+    { type: 'text', content: 'Before' },
+    { ...questionEvent('q1', 'Proceed?'), answers: { 'Proceed?': 'Yes' } },
+    { type: 'text', content: 'Before and after' },
+  ]
+
+  assert.equal(repairInterleavedQuestionText(stored), stored)
 })
 
 // ---------------------------------------------------------------------------

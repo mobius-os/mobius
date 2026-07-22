@@ -8,7 +8,11 @@ import {
   currentReusableEmptyChat,
   detailIsUntouchedEmptyChat,
   enteredEmptySingleScreen,
+  mergeChatListWithCreatedGuards,
+  rememberCreatedChat,
+  reusableChatDetailVerdict,
 } from '../newChatPolicy.js'
+import { chatQueries } from '../../../hooks/queries.js'
 
 const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const queriesSource = readFileSync(new URL('../../../hooks/queries.js', import.meta.url), 'utf8')
@@ -128,6 +132,24 @@ test('fresh detail fails closed on partial or malformed responses', () => {
   assert.equal(detailIsUntouchedEmptyChat(untouchedDetail({ total: '0' })), false)
 })
 
+test('fresh detail probe separates occupied, missing, and uncertain rows', () => {
+  assert.equal(reusableChatDetailVerdict({
+    ok: true, status: 200, detail: untouchedDetail(),
+  }), 'empty')
+  assert.equal(reusableChatDetailVerdict({
+    ok: true, status: 200, detail: untouchedDetail({ total: 1, messages: [{}] }),
+  }), 'occupied')
+  assert.equal(reusableChatDetailVerdict({
+    ok: false, status: 404, detail: null,
+  }), 'missing')
+  assert.equal(reusableChatDetailVerdict({
+    ok: false, status: 503, detail: null,
+  }), 'uncertain')
+  assert.equal(reusableChatDetailVerdict({
+    ok: true, status: 200, detail: { messages: [], pending_messages: [] },
+  }), 'uncertain')
+})
+
 test('a canonical create response becomes an authoritative empty detail cache', () => {
   const cache = createdChatDetailCache({
     id: 'new',
@@ -209,6 +231,37 @@ test('new-chat creation cancels stale list reads through a real AbortSignal', ()
   assert.match(clientSource, /list: \(options = \{\}\) => apiFetch\('\/chats', options\)/)
 })
 
+test('the drawer transport aborts before creation can continue', async () => {
+  const originalFetch = globalThis.fetch
+  const sequence = []
+  globalThis.fetch = (_url, options = {}) => new Promise(resolve => {
+    sequence.push('list-started')
+    options.signal?.addEventListener('abort', () => {
+      sequence.push('list-aborted')
+      // Resolve a non-success response instead of rejecting so apiFetch's
+      // connectivity verifier does not start unrelated background work.
+      resolve(new Response('[]', {
+        status: 499,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+    }, { once: true })
+  })
+
+  try {
+    const controller = new AbortController()
+    const list = chatQueries.list.fetch({ signal: controller.signal })
+    await Promise.resolve()
+    controller.abort()
+    await assert.rejects(list, /chats fetch failed: 499/)
+    sequence.push('create-allowed')
+    assert.deepEqual(sequence, [
+      'list-started', 'list-aborted', 'create-allowed',
+    ])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('a created chat replaces a duplicate cache row', () => {
   const result = addCreatedChatToList([
     { id: 'same', title: 'stale', pinned_at: null },
@@ -219,4 +272,34 @@ test('a created chat replaces a duplicate cache row', () => {
   assert.equal(result.length, 1)
   assert.equal(result[0].title, 'Fresh')
   assert.equal(result[0].has_messages, true)
+})
+
+test('a stale post-create list cannot hide the protected chat row', () => {
+  const guards = new Map()
+  const created = {
+    id: 'new', title: 'New chat', pinned_at: null, has_messages: false,
+  }
+  rememberCreatedChat(guards, created, { now: 1000, guardMs: 30_000 })
+
+  const stale = mergeChatListWithCreatedGuards([
+    { id: 'older', title: 'Older', pinned_at: null },
+  ], guards, { now: 2000 })
+  assert.deepEqual(stale.map(chat => chat.id), ['new', 'older'])
+
+  const confirmed = mergeChatListWithCreatedGuards([
+    { id: 'new', title: 'Server title', pinned_at: null, has_messages: true },
+    { id: 'older', title: 'Older', pinned_at: null },
+  ], guards, { now: 3000 })
+  assert.equal(confirmed[0].title, 'Server title')
+
+  const secondFallback = mergeChatListWithCreatedGuards([
+    { id: 'older', title: 'Older', pinned_at: null },
+  ], guards, { now: 4000 })
+  assert.equal(secondFallback[0].title, 'Server title')
+
+  const expired = mergeChatListWithCreatedGuards([
+    { id: 'older', title: 'Older', pinned_at: null },
+  ], guards, { now: 31_001 })
+  assert.deepEqual(expired.map(chat => chat.id), ['older'])
+  assert.equal(guards.size, 0)
 })

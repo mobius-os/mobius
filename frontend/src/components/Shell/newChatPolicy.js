@@ -69,6 +69,24 @@ export function detailIsUntouchedEmptyChat(detail) {
   return true
 }
 
+/** Classify a fresh detail probe without turning uncertainty into fake data. */
+export function reusableChatDetailVerdict({ ok, status, detail }) {
+  if (status === 404) return 'missing'
+  if (!ok) return 'uncertain'
+  if (detailIsUntouchedEmptyChat(detail)) return 'empty'
+  // A successful response is safe to call occupied only when its runtime
+  // shape is complete.  Malformed/partial JSON is uncertainty, not evidence
+  // that the row has messages.
+  if (!detail || typeof detail !== 'object') return 'uncertain'
+  if (!Number.isInteger(detail.total)) return 'uncertain'
+  if (!Array.isArray(detail.messages)) return 'uncertain'
+  if (!Array.isArray(detail.pending_messages)) return 'uncertain'
+  if (typeof detail.running !== 'boolean') return 'uncertain'
+  if (!Object.hasOwn(detail, 'pending_question_id')) return 'uncertain'
+  if (!Object.hasOwn(detail, 'session_id')) return 'uncertain'
+  return 'occupied'
+}
+
 /** Convert a complete create response into ChatView's persisted cache shape.
  * Older/local backends that return only the historical summary fail closed and
  * keep the existing detail fetch path. */
@@ -125,4 +143,44 @@ export function addCreatedChatToList(
     row,
     ...existing.slice(insertAt),
   ]
+}
+
+// A NetworkFirst drawer read can fall back to the service worker's previous
+// list just after POST /chats succeeds. Keep the create response protected for
+// one bounded handoff window so that fallback cannot erase the new row. The
+// guard is Shell-owned (not global state); an explicit delete removes it.
+export const CREATED_CHAT_LIST_GUARD_MS = 30_000
+
+export function rememberCreatedChat(guards, created, {
+  now = Date.now(),
+  guardMs = CREATED_CHAT_LIST_GUARD_MS,
+} = {}) {
+  if (!guards || !created?.id) return
+  guards.set(String(created.id), {
+    row: created,
+    expiresAt: now + guardMs,
+  })
+}
+
+export function mergeChatListWithCreatedGuards(incoming, guards, {
+  now = Date.now(),
+} = {}) {
+  let merged = Array.isArray(incoming) ? incoming : []
+  if (!guards?.size) return merged
+  for (const [id, guard] of guards) {
+    if (!guard || guard.expiresAt <= now) {
+      guards.delete(id)
+      continue
+    }
+    const confirmed = merged.find(row => String(row?.id) === id)
+    if (confirmed) {
+      // Prefer newer server fields while retaining protection until the
+      // bounded window closes; a later fallback can still be older than this
+      // successful response if its cache write has not settled yet.
+      guard.row = confirmed
+      continue
+    }
+    merged = addCreatedChatToList(merged, guard.row)
+  }
+  return merged
 }

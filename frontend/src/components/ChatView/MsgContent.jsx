@@ -8,7 +8,10 @@ import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import { questionKey } from './questionKey.js'
-import { suppressedQuestionToolIndices } from './streamReducers.js'
+import {
+  repairInterleavedQuestionText,
+  suppressedQuestionToolIndices,
+} from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 import ErrorCard from './ErrorCard.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
@@ -82,12 +85,17 @@ function MsgContentInner({
   }
 
   if (msg.blocks && msg.blocks.length > 0) {
+    // Repair the one historical malformed sequence produced when a provider's
+    // authoritative completion lost identity across request_user_input.  This
+    // is render-time as well as reducer-time so already-saved chats self-heal
+    // without rewriting partner transcripts.
+    const displayBlocks = repairInterleavedQuestionText(msg.blocks)
     // The persisted transcript keeps the raw AskUserQuestion tool block
     // AND the question card (backend events.process_event appends both);
     // the live stream absorbs the tool twin into the card. Skip the twin
     // here so a reopened chat matches the live view — render-time, so it
     // also cleans up already-persisted old chats with no backend migration.
-    const skipToolIdx = suppressedQuestionToolIndices(msg.blocks)
+    const skipToolIdx = suppressedQuestionToolIndices(displayBlocks)
 
     // Entry idx is the POST-suppression position, not the raw msg.blocks
     // ordinal. The two surfaces of the active answer disagree about the twin:
@@ -101,7 +109,7 @@ function MsgContentInner({
     // surfaces produce identical positions for identical visible content, so
     // keys survive the switch. (Appends only ever extend the tail, so earlier
     // positions — and their keys — are stable mid-run too.)
-    const entries = msg.blocks
+    const entries = displayBlocks
       .map((block, i) => ({ item: block, rawIdx: i }))
       .filter(({ rawIdx }) => !skipToolIdx.has(rawIdx))
       .map(({ item }, pos) => ({ item, idx: pos }))
