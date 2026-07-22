@@ -88,6 +88,7 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
   controlsId,
   onToggle,
   count = null,
+  reserveInteractiveGeometry = false,
 }, ref) {
   const Header = interactive ? 'button' : 'div'
 
@@ -97,6 +98,9 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
       type={interactive ? 'button' : undefined}
       className={
         `chat__activity-header${interactive ? '' : ' chat__activity-header--static'}`
+        + (reserveInteractiveGeometry
+            ? ' chat__activity-header--reserve-interactive'
+            : '')
       }
       onClick={interactive ? onToggle : undefined}
       aria-expanded={interactive ? open : undefined}
