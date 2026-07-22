@@ -62,44 +62,6 @@
   gap: 8px;
 }
 
-/* A plain one-tap mode control. The logo gestures remain shortcuts, but pane mode
-   no longer depends on discovering a hold or keyboard chord. */
-.shell__mode-toggle {
-  display: grid;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-.shell__mode-toggle--active {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
-}
-.shell__mode-toggle:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-.shell__mode-toggle:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-@media (hover: hover) and (pointer: fine) {
-  .shell__mode-toggle:not(:disabled):hover {
-    background: color-mix(in srgb, var(--text) 8%, transparent);
-    color: var(--text);
-  }
-  .shell__mode-toggle--active:not(:disabled):hover {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-  }
-}
-
 .shell__brand {
   display: flex;
   align-items: center;
@@ -319,6 +281,10 @@
   border-bottom: 1px solid var(--border-light);
   background: var(--bg);
   scrollbar-width: none;
+  /* Empty strip space retains native horizontal panning; an actual draggable tab
+     opts out below so Pointer Events can reorder it in either direction on touch. */
+  touch-action: pan-x pinch-zoom;
+  overscroll-behavior-inline: contain;
   z-index: 2;
 }
 .shell__tabstrip::-webkit-scrollbar { height: 0; width: 0; }
@@ -350,16 +316,43 @@
   font-size: 12.5px;
   -webkit-tap-highlight-color: transparent;
 }
-/* The strip scrolls horizontally; a vertical touch pull is therefore free for the
-   workspace drag controller to claim without disabling native tab scrolling. */
+/* A draggable tab owns its touch gesture after pointerdown. This matches mature
+   dock/tab UIs: the surrounding strip still pans natively, while the concrete drag
+   source cannot be pointercancelled when the gesture turns horizontal. */
 .shell__tab-open[data-drag-key] {
-  touch-action: pan-x pinch-zoom;
+  touch-action: none;
+}
+.shell__tab-open:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+  border-radius: 7px;
+}
+.shell__tab-open > svg {
+  flex: none;
 }
 .shell__tab-text {
+  display: block;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   max-width: 110px;
+}
+.shell__tab-text-inner {
+  display: inline-block;
+  min-width: max-content;
+}
+/* A newly-active overflowing chat title makes one bounded there-and-back pass.
+   It then goes completely idle: users can read the full name without paying for
+   a perpetual marquee on every open pane. ResizeObserver sets the distance only
+   when clipping is real. A native title tooltip remains available at any time. */
+.shell__tab--active .shell__tab-text[data-overflow="true"]
+  .shell__tab-text-inner {
+  animation: shell-tab-title-cycle 6.8s ease-in-out 800ms 1 both;
+}
+@keyframes shell-tab-title-cycle {
+  0%, 18% { transform: translate3d(0, 0, 0); }
+  46%, 72% { transform: translate3d(var(--tab-title-shift), 0, 0); }
+  100% { transform: translate3d(0, 0, 0); }
 }
 .shell__tab-close {
   display: flex;
@@ -431,10 +424,10 @@
   to { opacity: 0.35; transform: scale(0.75); }
 }
 
-/* ── Builder-mode control: the logo IS the control (owner placement) ─────────
-   No standalone toggle button. The brand opens the drawer on a single tap
-   (instant, unchanged); a HOLD (~450ms) or a touch swipe-right toggles the view
-   mode. Indicator = the mark itself (CHARGE model): the logo COMPRESSES as a hold
+/* ── Builder-mode logo gesture + indicator ──────────────────────────────────
+   There is deliberately no standalone header mode icon. The brand opens the drawer
+   on a single tap; a HOLD (~450ms), touch swipe-right, or Shift+Enter toggles mode.
+   Indicator = the mark itself (CHARGE model): the logo COMPRESSES as a hold
    charges (base .shell__logo scale), then SPRINGS (enter) / SNAPS (exit) back and
    rotates 180deg; a living HALO drifts behind it in builder mode. CSS-composed,
    driven by .shell__brand--builder / .is-holding / .is-igniting / .is-snapping and
@@ -585,6 +578,7 @@
      compression remains as immediate direct feedback, with no animated release. */
   .shell__logo { transition: none; }
   .shell__wordmark { transition: none; }
+  .shell__tab-text-inner { animation: none !important; }
   /* No completion motion under reduced motion — the ignite/snap AND the hold's
      descriptor-owned release are both skipped (the toggle commits instantly, so
      is-beat-held is never even emitted; this is the belt-and-braces). The direct

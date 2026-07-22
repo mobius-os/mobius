@@ -37,10 +37,10 @@ export const EMPTY_SINGLE_SURFACE_KEY = 'home:new-chat'
 // short beat: every pane moves together, using only compositor transforms + opacity.
 // There is no per-pane stagger or second destination phase to make the owner wait.
 export const MODE_MOTION = Object.freeze({
-  enterItemMs: 160,
-  enterSingleMs: 160,
-  exitItemMs: 150,
-  promoteMs: 180,
+  enterItemMs: 210,
+  enterSingleMs: 180,
+  exitItemMs: 180,
+  promoteMs: 210,
   logoReleaseMs: 90,
 })
 
@@ -54,6 +54,7 @@ export const RECONCILE_SLACK_MS = 250
 // keyframes so a name typo is caught by one grep. Strip-clear + chrome fades are
 // deliberately ABSENT: they are shorter and must not gate completion.
 export const PROMOTE_NAME = 'shell-mode-promote'
+export const SETTLE_NAME = 'shell-mode-settle'
 export const DEAL_OUT_NAME = 'shell-mode-deal-out'
 export const DEAL_IN_NAME = 'shell-mode-deal-in'
 
@@ -74,6 +75,33 @@ function flipTo(from, dest) {
     sx: from.w ? dest.w / from.w : 1,
     sy: from.h ? dest.h / from.h : 1,
   }
+}
+
+// Push a pane just beyond the nearest outer edges, following its vector away from
+// the workspace centre. A left/right split therefore travels horizontally, a
+// top/bottom split vertically, and a corner pane diagonally. The resulting motion
+// reads as one assembled surface rather than four unrelated card transitions.
+// Values are projection-derived and latched with the plan — no DOM measurement.
+function edgeOffset(rect, bounds) {
+  // Shell's live contentRect is intentionally just {w, h}; projection rects are
+  // already content-local. Tests and other pure callers may include an origin,
+  // so accept both shapes without ever emitting an invalid `NaNpx` CSS variable.
+  const boundsX = Number.isFinite(bounds.x) ? bounds.x : 0
+  const boundsY = Number.isFinite(bounds.y) ? bounds.y : 0
+  const left = rect.x - boundsX
+  const top = rect.y - boundsY
+  const dx = (left + rect.w / 2) - bounds.w / 2
+  const dy = (top + rect.h / 2) - bounds.h / 2
+  const gap = 24
+  let x = 0
+  let y = 0
+  if (Math.abs(dx) > 1) x = dx < 0 ? -(left + rect.w + gap) : (bounds.w - left + gap)
+  if (Math.abs(dy) > 1) y = dy < 0 ? -(top + rect.h + gap) : (bounds.h - top + gap)
+  // A truly centred pane still needs a deterministic edge (possible with one
+  // tree-absent destination). Top is the least disruptive because the shell bar
+  // already establishes that spatial boundary.
+  if (x === 0 && y === 0) y = -(top + rect.h + gap)
+  return { x, y }
 }
 
 // The concrete surface key SINGLE mode will paint after this exit — the slot, the New
@@ -131,7 +159,7 @@ export function exitSignature(input) {
   const { workspace, projection, contentRect } = input
   const { target, immersiveInstant } = classifyExitDestination(input)
   const leaves = visibleLeafDescriptors(workspace, projection)
-    .map(l => `${l.paneId}=${l.activeKey}`)
+    .map(l => `${l.paneId}=${l.activeKey}@${l.rect.x},${l.rect.y},${l.rect.w},${l.rect.h}`)
   return `${target || ''}|${immersiveInstant ? 'i' : ''}|${leaves.join(',')}|${contentRect.w}x${contentRect.h}`
 }
 
@@ -207,6 +235,7 @@ export function deriveExitPlan(input) {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
         delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
+        offset: edgeOffset(l.rect, contentRect),
       })
     })
     if (siblings.length) completionNames.add(DEAL_OUT_NAME)
@@ -225,6 +254,7 @@ export function deriveExitPlan(input) {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
         delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
+        offset: edgeOffset(l.rect, contentRect),
       })
     })
     completionNames.add(DEAL_OUT_NAME)
@@ -243,25 +273,59 @@ export function deriveExitPlan(input) {
   }
 }
 
-// deriveEnterPlan({ workspace, projection }) → the latched entry plan, or null
-// when there is nothing to deal in. Entry is the reverse grammar: each visible
-// leaf (and its strip) slides in from the right together. The shared timing keeps the
-// interaction crisp regardless of whether the workspace has one or four panes.
+// deriveEnterPlan(input) → the latched entry plan, or null when there is nothing
+// to assemble. The single-screen surface keeps physical continuity when it is an
+// active builder leaf: it starts full-bleed and settles into its pane via the inverse
+// FLIP. Every sibling gathers from its nearest outer edge. If the single-screen
+// surface is absent/inactive in the tree, it remains a stationary underlay while all
+// visible panes assemble over it. This is the exact inverse of deriveExitPlan.
 //
-export function deriveEnterPlan({ workspace, projection }) {
+export function deriveEnterPlan(input) {
+  const { workspace, projection, contentRect } = input
   const leaves = visibleLeafDescriptors(workspace, projection).sort(byVisualOrder)
   if (leaves.length === 0) return null
+  const { target, immersiveInstant } = classifyExitDestination(input)
+  if (immersiveInstant) return null
   const single = leaves.length === 1
   const duration = single ? MODE_MOTION.enterSingleMs : MODE_MOTION.enterItemMs
-  const participants = leaves.map((l) => ({
-    key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
-    delayMs: 0, durationMs: duration,
-  }))
+  const destinationRect = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
+  const settleLeaf = target ? leaves.find(l => l.activeKey === target) : null
+  const participants = []
+  const completionNames = new Set()
+  let underlayKey = null
+
+  if (settleLeaf) {
+    const fromRect = single ? settleLeaf.rect : contentRectOfPane(settleLeaf.rect)
+    participants.push({
+      key: settleLeaf.activeKey,
+      paneId: settleLeaf.paneId,
+      motion: 'settle',
+      delayMs: 0,
+      durationMs: duration,
+      flip: flipTo(fromRect, destinationRect),
+    })
+    completionNames.add(SETTLE_NAME)
+  } else {
+    underlayKey = target
+  }
+
+  for (const l of leaves) {
+    if (l === settleLeaf) continue
+    participants.push({
+      key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
+      delayMs: 0, durationMs: duration,
+      offset: edgeOffset(l.rect, contentRect),
+    })
+    completionNames.add(DEAL_IN_NAME)
+  }
   const totalMs = participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
   return {
     kind: 'enter',
+    target,
+    destinationRect,
     participants,
-    completionNames: [DEAL_IN_NAME],
+    underlayKey,
+    completionNames: [...completionNames],
     totalMs,
   }
 }

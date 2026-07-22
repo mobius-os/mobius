@@ -294,9 +294,9 @@ export default function useWorkspaceDrag({
         }
       }
 
-      // Cross-axis movement can arm immediately. A stationary hold is the alternate
-      // path to the tab/row menu; it deliberately does not install a non-passive
-      // touchmove listener or unfold the workspace just because time passed.
+      // A deliberate tab move (either axis) or cross-axis drawer-row move arms
+      // immediately. A stationary hold is the alternate path to the tab/row menu;
+      // it deliberately does not unfold the workspace just because time passed.
       if (isTouch) {
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return

@@ -3,16 +3,16 @@
    presentation — a single-pane workspace renders today's DOM verbatim (Shell's
    parity branch) and never touches any class here. */
 
-/* ── Mode-transition motion (exit-presentation v2) ───────────────────────────
+/* ── Mode-transition motion (assemble/scatter v3) ────────────────────────────
    The mode beat is COMPOSITOR-ONLY: every keyframe touches transform + opacity
    and NOTHING that forces layout on the live iframe/ChatView surfaces (no
    box-shadow, border-radius, filter, clip, or animated top/left/width/height).
-   Panes hold their tiled content rect through the beat; a promote grows via a
-   FLIP transform, departures deal out via transform + fade, and the descriptor
+   Panes hold their tiled content rect through the beat; promote/settle use inverse
+   FLIP transforms, while siblings travel to/from their corresponding outer edge.
    clears in one commit that snaps the destination to ordinary full-bleed at
    visually identical bounds. Timing constants + the per-beat plan live in
    workspaceView.js (MODE_MOTION / deriveExit·EnterPlan); Shell writes each
-   participant's --mode-duration/--mode-delay (+ --flip-* for a promote) inline. */
+   participant's duration/delay and projection-derived transform variables inline. */
 .shell {
   --ease-mode-arrive: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-mode-leave: cubic-bezier(0.4, 0, 0.7, 0.2);
@@ -40,15 +40,27 @@
   pointer-events: auto;
 }
 
-/* The revealed destination in a WORLD-REVEAL exit: the already-mounted target
-   wrapper sits full-bleed BENEATH the dealing-out tree from the first exit frame.
-   z:0 keeps it under both the promote (z:2) and deal-out (z:4) layers; pointer-inert
-   while covered. */
+/* The stationary single-world destination beneath an assemble or scatter beat.
+   The already-mounted target sits full-bleed from the first frame. */
 .shell__view--exit-underlay {
   inset: 0;
   visibility: visible;
   pointer-events: none;
   z-index: 0;
+}
+
+/* Assemble continuity: the single-world surface is already laid out in its final
+   pane rect, so an inverse FLIP makes its first frame look full-bleed and settles it
+   into place. This is the reverse of promote and touches only transform. */
+.shell--builder-entering
+.shell__view[data-mode-motion="settle"] {
+  z-index: 1;
+  transform-origin: 0 0;
+  animation:
+    shell-mode-settle
+    var(--mode-duration)
+    var(--ease-mode-promote)
+    both;
 }
 /* Promote: the survivor pane keeps its tiled content rect and FLIPs to cover the
    full destination (transform-origin at its own top-left; Shell latches --flip-*
@@ -66,9 +78,8 @@
     both;
 }
 
-/* Deal-out: the tiled world leaves left in one short, simultaneous beat. Keeping the
-   offset small preserves context without making live chats/apps feel like cards being
-   performed at the owner. Pointer-inert (INV 9) throughout. */
+/* Deal-out: each pane scatters toward its corresponding outer edge in one short,
+   simultaneous beat. The offsets come from the pure projection — no DOM reads. */
 .shell--builder-exiting
 .shell__view[data-mode-motion="deal-out"] {
   z-index: 4;
@@ -81,7 +92,7 @@
     both;
 }
 
-/* Deal-in is the exact directional inverse: panes arrive together from the right. */
+/* Deal-in is the exact directional inverse: panes assemble from their outer edges. */
 .shell--builder-entering
 .shell__view[data-mode-motion="deal-in"] {
   animation:
@@ -103,13 +114,30 @@
   }
 }
 
+@keyframes shell-mode-settle {
+  from {
+    transform:
+      translate3d(var(--flip-x), var(--flip-y), 0)
+      scale(var(--flip-sx), var(--flip-sy));
+  }
+  to {
+    transform: translate3d(0, 0, 0) scale(1, 1);
+  }
+}
+
 @keyframes shell-mode-deal-out {
   from { transform: translate3d(0, 0, 0); opacity: 1; }
-  to { transform: translate3d(-16px, 0, 0); opacity: 0; }
+  to {
+    transform: translate3d(var(--mode-offset-x), var(--mode-offset-y), 0);
+    opacity: 0;
+  }
 }
 
 @keyframes shell-mode-deal-in {
-  from { transform: translate3d(16px, 0, 0); opacity: 0; }
+  from {
+    transform: translate3d(var(--mode-offset-x), var(--mode-offset-y), 0);
+    opacity: 0;
+  }
   to { transform: translate3d(0, 0, 0); opacity: 1; }
 }
 
@@ -126,6 +154,9 @@
 }
 .shell--builder-exiting .shell__tabstrip[data-mode-motion="promote"] {
   animation: shell-mode-strip-clear 100ms var(--ease-mode-chrome) both;
+}
+.shell--builder-entering .shell__tabstrip[data-mode-motion="settle"] {
+  animation: shell-mode-chrome-in 100ms var(--ease-mode-chrome) both;
 }
 .shell--builder-entering .shell__tabstrip[data-mode-motion="deal-in"] {
   animation:

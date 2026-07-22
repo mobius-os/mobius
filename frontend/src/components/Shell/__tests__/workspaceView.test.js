@@ -441,7 +441,7 @@ test('builder mode ignores the slot entirely (tree drives the render)', () => {
   assert.equal(v.visibleAppIds.has('42'), true, 'the tree app is what paints')
 })
 
-// ── Exit-presentation v2: the latched plan (deriveExitPlan / deriveEnterPlan) ──
+// ── Assemble/scatter v3: latched plans (deriveExitPlan / deriveEnterPlan) ─────
 
 test('deriveExitPlan: PROMOTE when the target is a visible pane active key (INV 3 honest destination)', () => {
   // twoPaneChatAndApp: chat 5 left (unfocused), app 42 right (focused). Legacy
@@ -459,6 +459,8 @@ test('deriveExitPlan: PROMOTE when the target is a visible pane active key (INV 
   const dealOut = plan.participants.filter(p => p.motion === 'deal-out')
   assert.equal(dealOut.length, 1)
   assert.equal(dealOut[0].key, 'chat:5')
+  assert.ok(dealOut[0].offset.x < 0, 'left sibling scatters past the left edge')
+  assert.equal(dealOut[0].offset.y, 0)
 })
 
 test('deriveExitPlan: WORLD-REVEAL when the slot is tree-absent (underlay + all deal out)', () => {
@@ -526,7 +528,7 @@ test('deriveExitPlan: a promote keeps its seamless continuity', () => {
   assert.equal(plan.completionNames.includes('shell-mode-destination-arrive'), false)
 })
 
-test('deriveExitPlan: four panes cost the same 150ms beat as one pane', () => {
+test('deriveExitPlan: four panes cost the same 180ms beat as one pane', () => {
   // Build MAX_PANES visible leaves (a balanced 2×2 within MAX_DEPTH) and a tree-absent
   // slot so all four deal out over a revealed underlay. Tied to MAX_PANES so a future
   // pane-count change can't silently blow the beat budget.
@@ -542,7 +544,7 @@ test('deriveExitPlan: four panes cost the same 150ms beat as one pane', () => {
   const plan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT })
   assert.ok(plan.participants.every(p => p.motion === 'deal-out'), 'all four deal out')
   assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
-  assert.equal(plan.totalMs, 150)
+  assert.equal(plan.totalMs, 180)
 })
 
 test('N1: MODE_MOTION drops the unused chromeMs constant', () => {
@@ -645,23 +647,56 @@ test('deriveExitPlan: M2 a builder Settings tab that IS the destination does not
   assert.ok(plan.participants.some(p => p.key === 'chat:5'), 'the sibling pane still deals out')
 })
 
-test('deriveEnterPlan: every visible leaf arrives together in one 160ms beat', () => {
+test('deriveEnterPlan: the shared surface settles while siblings assemble from their edges', () => {
   const two = twoPaneChatAndApp() // the app:42 pane is focused
-  const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two) })
-  assert.deepEqual(twoPlan.completionNames, ['shell-mode-deal-in'])
+  const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two), contentRect: CONTENT })
+  assert.deepEqual(twoPlan.completionNames, ['shell-mode-settle', 'shell-mode-deal-in'])
   assert.equal(twoPlan.participants.length, 2)
   assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.enterItemMs))
-  // Stable visual order is retained, but no pane waits for another.
-  assert.equal(twoPlan.participants[0].key, 'chat:5')
-  assert.equal(twoPlan.participants[0].delayMs, 0)
-  assert.equal(twoPlan.participants[1].key, 'app:42')
-  assert.equal(twoPlan.participants[1].delayMs, 0)
-  assert.equal(twoPlan.totalMs, 160)
+  const settle = twoPlan.participants.find(p => p.motion === 'settle')
+  const gather = twoPlan.participants.find(p => p.motion === 'deal-in')
+  assert.equal(settle.key, 'app:42')
+  assert.ok(settle.flip.sx > 1, 'the right pane starts at the single-world size')
+  assert.equal(gather.key, 'chat:5')
+  assert.ok(gather.offset.x < 0, 'the left pane assembles from the left edge')
+  // Everything moves at once; pane count adds no stagger.
+  assert.ok(twoPlan.participants.every(p => p.delayMs === 0))
+  assert.equal(twoPlan.totalMs, MODE_MOTION.enterItemMs)
   const one = paneModel.seedFromFlatTabs([makeTab('app', '42')])
-  const onePlan = deriveEnterPlan({ workspace: one, projection: project(one) })
+  const onePlan = deriveEnterPlan({ workspace: one, projection: project(one), contentRect: CONTENT })
   assert.equal(onePlan.participants.length, 1)
+  assert.equal(onePlan.participants[0].motion, 'settle')
   assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.enterSingleMs)
-  assert.equal(onePlan.totalMs, twoPlan.totalMs, 'pane count does not make mode entry slower')
+  assert.equal(onePlan.totalMs, MODE_MOTION.enterSingleMs)
+})
+
+test('deriveEnterPlan: a tree-absent single surface stays beneath the assembling panes', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
+  const plan = deriveEnterPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  assert.equal(plan.target, 'chat:99')
+  assert.equal(plan.underlayKey, 'chat:99')
+  assert.deepEqual(plan.completionNames, ['shell-mode-deal-in'])
+  assert.ok(plan.participants.every(p => p.motion === 'deal-in'))
+  const left = plan.participants.find(p => p.key === 'chat:5')
+  const right = plan.participants.find(p => p.key === 'app:42')
+  assert.ok(left.offset.x < 0)
+  assert.ok(right.offset.x > 0)
+})
+
+test('edge motions accept Shell\'s origin-free live content rect', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
+  const contentRect = { w: CONTENT.w, h: CONTENT.h }
+  const projection = paneModel.projectLayout(ws, paneModel.modeForRect(contentRect), contentRect)
+  for (const plan of [
+    deriveExitPlan({ workspace: ws, projection, contentRect }),
+    deriveEnterPlan({ workspace: ws, projection, contentRect }),
+  ]) {
+    assert.ok(plan.participants.length > 0)
+    for (const participant of plan.participants) {
+      assert.ok(Number.isFinite(participant.offset.x), 'horizontal offset stays finite')
+      assert.ok(Number.isFinite(participant.offset.y), 'vertical offset stays finite')
+    }
+  }
 })
 
 test('exitSignature is stable for the same tree and drifts on a topology/geometry change (INV 10)', () => {
@@ -671,6 +706,10 @@ test('exitSignature is stable for the same tree and drifts on a topology/geometr
   // A content-box resize drifts the signature → the beat cancels.
   const resized = exitSignature({ workspace: ws, projection: project(ws), contentRect: { x: 0, y: 0, w: 800, h: 600 } })
   assert.notEqual(base, resized)
+  // A divider ratio changes edge offsets without changing the content bounds, so
+  // per-pane rects are part of the invalidation signature too.
+  const resizedPane = paneModel.setRatio(ws, ws.layout.id, 0.62)
+  assert.notEqual(base, exitSignature({ workspace: resizedPane, projection: project(resizedPane), contentRect: CONTENT }))
   // A different slot target drifts it too.
   const retargeted = exitSignature({ workspace: { ...ws, singleScreen: { kind: 'chat', id: '5' } }, projection: project(ws), contentRect: CONTENT })
   assert.notEqual(base, retargeted)

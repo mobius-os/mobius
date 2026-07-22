@@ -94,7 +94,15 @@ async function sampleExitBeat(page) {
           for (const el of document.querySelectorAll('.shell__view[data-mode-motion]')) {
             const key = el.getAttribute('data-tab-key') || el.dataset.modeMotion
             let rec = byKey.get(key)
-            if (!rec) { rec = { boxes: new Set(), transforms: new Set(), node: el }; byKey.set(key, rec) }
+            if (!rec) {
+              rec = {
+                boxes: new Set(), transforms: new Set(), node: el,
+                motion: el.dataset.modeMotion,
+                offsetX: parseFloat(el.style.getPropertyValue('--mode-offset-x')) || 0,
+                offsetY: parseFloat(el.style.getPropertyValue('--mode-offset-y')) || 0,
+              }
+              byKey.set(key, rec)
+            }
             rec.boxes.add(`${el.offsetWidth}x${el.offsetHeight}@${el.offsetLeft},${el.offsetTop}`)
             rec.transforms.add(getComputedStyle(el).transform)
           }
@@ -105,7 +113,13 @@ async function sampleExitBeat(page) {
       }
       requestAnimationFrame(tick)
     })
-    const wrappers = [...byKey.values()].map(r => ({
+    const wrappers = [...byKey.entries()].map(([key, r]) => ({
+      key,
+      // Motion attributes and variables clear with the descriptor, so report the
+      // values latched on the first sampled frame rather than reading the idle DOM.
+      motion: r.motion,
+      offsetX: r.offsetX,
+      offsetY: r.offsetY,
       distinctBoxes: r.boxes.size,
       distinctTransforms: r.transforms.size,
       transformsMatrix: [...r.transforms].every(t => t === 'none' || t.startsWith('matrix')),
@@ -113,6 +127,33 @@ async function sampleExitBeat(page) {
     }))
     return { started, dualClass, underlaySeen, wrappers }
   })
+}
+
+// Capture the latched inline geometry on the first frame of either directional
+// beat. These are the pure projection outputs that tell each pane which edge owns it.
+async function captureBeatPlan(page, rootClass) {
+  return page.evaluate(async (wantedClass) => {
+    const root = document.querySelector('.shell')
+    for (let frames = 0; frames < 120; frames += 1) {
+      if (root.classList.contains(wantedClass)) {
+        const participants = [...document.querySelectorAll('.shell__view[data-mode-motion]')]
+          .map(el => ({
+            key: el.getAttribute('data-tab-key'),
+            motion: el.dataset.modeMotion,
+            x: parseFloat(el.style.getPropertyValue('--mode-offset-x')) || 0,
+            y: parseFloat(el.style.getPropertyValue('--mode-offset-y')) || 0,
+          }))
+        if (participants.length) {
+          return {
+            participants,
+            underlay: !!document.querySelector('.shell__view--exit-underlay'),
+          }
+        }
+      }
+      await new Promise(resolve => requestAnimationFrame(resolve))
+    }
+    return { participants: [], underlay: false }
+  }, rootClass)
 }
 
 // Focus the brand toggle and flip the mode via the keyboard path.
@@ -262,14 +303,14 @@ for (const [name, viewport] of [
   })
 }
 
-// ── Exit-presentation v2 browser coverage (R4) ───────────────────────────────
+// ── Assemble/scatter v3 browser coverage ─────────────────────────────────────
 // Frame-sampled proof of the compositor-only contract in a real browser. Wide only
 // (two visible panes need a wide viewport). A seeded 2-pane builder is exited and
 // every frame of the beat is sampled: the participant wrappers' LAYOUT boxes must
 // stay constant while their transforms animate, and the same nodes must survive.
 const WIDE = { width: 1280, height: 900 }
 
-test('v2 exit is compositor-only: layout boxes constant while transforms animate, nodes survive', async ({ page }) => {
+test('v3 scatter is compositor-only: layout boxes constant while transforms animate, nodes survive', async ({ page }) => {
   // slot === the focused LEFT pane's chat → PROMOTE it (a real half→full FLIP scale)
   // and deal the right sibling out. Both are compositor-only participants.
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
@@ -289,6 +330,9 @@ test('v2 exit is compositor-only: layout boxes constant while transforms animate
   // and at least one participant's transform actually CHANGED across frames.
   for (const w of r.wrappers) expect(w.transformsMatrix, 'only matrix transforms').toBe(true)
   expect(r.wrappers.some(w => w.distinctTransforms > 1), 'a transform animated').toBe(true)
+  const departing = r.wrappers.find(w => w.motion === 'deal-out')
+  expect(departing.offsetX, 'the right sibling scatters toward the right edge').toBeGreaterThan(0)
+  expect(departing.offsetY).toBe(0)
   // INV 4 (stable identity): the same DOM nodes survived completion.
   for (const w of r.wrappers) expect(w.survived, 'same node survives completion').toBe(true)
   // The beat settled clean.
@@ -296,7 +340,7 @@ test('v2 exit is compositor-only: layout boxes constant while transforms animate
   await expect.poll(() => builderActive(page)).toBe(false)
 })
 
-test('v2 world-reveal exit paints the mounted destination underlay beneath the deal', async ({ page }) => {
+test('v3 world-reveal scatter paints the mounted destination underlay beneath the panes', async ({ page }) => {
   // slot === a tree-absent chat → WORLD REVEAL: every painted pane deals out over the
   // mounted underlay (INV 3 honest destination), no false promotion.
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
@@ -314,6 +358,25 @@ test('v2 world-reveal exit paints the mounted destination underlay beneath the d
   }
   expect(r.wrappers.some(w => w.distinctTransforms > 1)).toBe(true)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+})
+
+test('v3 panes assemble over the stationary single screen from their corresponding edges', async ({ page }) => {
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
+  await toggleMode(page)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(false)
+
+  const sampler = captureBeatPlan(page, 'shell--builder-entering')
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+  expect(r.underlay, 'the current single screen remains beneath the assembly').toBe(true)
+  expect(r.participants).toHaveLength(2)
+  expect(r.participants.every(p => p.motion === 'deal-in')).toBe(true)
+  expect(r.participants.some(p => p.x < 0 && p.y === 0), 'left pane enters from left').toBe(true)
+  expect(r.participants.some(p => p.x > 0 && p.y === 0), 'right pane enters from right').toBe(true)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(true)
 })
 
 // Frame-sample the destination across a world reveal. It is ready and stationary
@@ -348,7 +411,7 @@ async function sampleStationaryUnderlay(page) {
   })
 }
 
-test('world reveal is one short slide over a stationary, ready destination', async ({ page }) => {
+test('world reveal is one short scatter over a stationary, ready destination', async ({ page }) => {
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
   await expect.poll(() => builderActive(page)).toBe(true)
   const sampler = sampleStationaryUnderlay(page)

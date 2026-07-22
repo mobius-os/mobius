@@ -279,14 +279,13 @@ test('the docked sidebar offsets only direct shell layout rows', () => {
   assert.doesNotMatch(shellCss, /\.shell--drawer-docked \.shell__tabstrip/)
 })
 
-test('the explicit mode button supplements the logo gestures without reviving old plumbing', () => {
+test('the header never grows a standalone pane-mode icon', () => {
   assert.match(shell, /<header className="shell__bar"/)
-  assert.match(shell, /className=\{`shell__mode-toggle/)
-  // The old separate component/state machine remains gone; this button calls the
-  // same mode boundary as every other gesture.
-  assert.doesNotMatch(shell, /ViewModeToggle/)
-  assert.doesNotMatch(shell, /shell__viewmode/)
-  assert.doesNotMatch(shellCss, /\.shell__viewmode\b/)
+  // Owner contract: hold/swipe the top-left Möbius brand or drag from the drawer.
+  // A second top-right affordance is redundant and must not quietly return.
+  assert.doesNotMatch(shell, /PanelsTopLeft|shell__mode-toggle|Use panes|Use single screen/)
+  assert.doesNotMatch(shell, /ViewModeToggle|shell__viewmode/)
+  assert.doesNotMatch(shellCss, /\.shell__(?:mode-toggle|viewmode)\b/)
 })
 
 test('the SINGLE tap keeps its drawer job — instant, NO setTimeout on the tap path', () => {
@@ -521,17 +520,18 @@ test('the living halo lifecycle: lit only in builder mode, one allocation-free r
   assert.match(livingHaloSrc, /clearHaloStyles\(el\)/)
 })
 
-test('entry deals in on the keyed beat class, compositor-only, instant under reduced motion (v2)', () => {
-  // v2: entry is a transform/opacity DEAL-IN keyed to the transient
+test('entry assembles on keyed beat classes, compositor-only, instant under reduced motion (v3)', () => {
+  // v3: entry is a transform/opacity DEAL-IN or inverse-FLIP SETTLE keyed to the transient
   // .shell--builder-entering class, applied per-wrapper via data-mode-motion (never
   // the permanent .shell__view--paned). No animated layout property, shadow, or radius.
   const panedBase = css.match(/\.shell__view--paned \{[\s\S]*?\n\}/)?.[0] || ''
   assert.doesNotMatch(panedBase, /animation:/)
   assert.doesNotMatch(panedBase, /transition:/)
   assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="deal-in"\] \{[\s\S]*?animation:\s*\n?\s*shell-mode-deal-in/)
+  assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="settle"\] \{[\s\S]*?shell-mode-settle/)
   // The deal-in keyframe touches ONLY transform + opacity (no shadow/radius/filter).
   const dealIn = css.match(/@keyframes shell-mode-deal-in\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(dealIn, /translate3d\(16px, 0, 0\)/)
+  assert.match(dealIn, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
   assert.match(dealIn, /opacity: 0/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
   // The old dead .workspace--resizing selector is gone entirely.
@@ -554,15 +554,15 @@ test('builder single-leaf: the strip deals with its pane, entry through the ONE 
   // The plan derives from the SETTLED post-flip state (the synchronous reducer
   // preview): the durable flip and the null-slot home resolution land first, so
   // the beat animates toward the surface single mode will actually paint.
-  assert.match(handler, /deriveEnterPlan\(\{ workspace: settled, projection \}\)/)
+  assert.match(handler, /deriveEnterPlan\(\{[\s\S]*?workspace: settled, projection, contentRect,/)
   assert.match(handler, /mode\.toggle\(\{ cause, presentation \}\)/)
   assert.match(handler, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE', mode: 'toggle' \}\)/)
   assert.match(shell, /modeMachine\.transitionRootClass\(modeState/)
   // The single-pane nav strip carries the beat motion so it deals WITH its pane.
   assert.match(shell, /data-mode-motion=\{navMotion \? navMotion\.motion : undefined\}/)
-  // M4: and it is INERT throughout the exit beat (not just under the drawer), so a
-  // tap on the strip while it clears cannot re-target the transition.
-  assert.match(shell, /className="shell__tabstrip"[\s\S]*?inert=\{modalDrawerOpen \|\| exitBeatActive\}/)
+  // It is INERT throughout either direction (not just under the drawer), so a tap
+  // on an in-flight strip cannot re-target the transition.
+  assert.match(shell, /className="shell__tabstrip"[\s\S]*?inert=\{modalDrawerOpen \|\| modeBeatActive\}/)
   // CSS: a strip deals in with its pane on enter (shared with the WorkspaceChrome
   // strips via .shell__tabstrip[data-mode-motion]).
   assert.match(css, /\.shell--builder-entering \.shell__tabstrip\[data-mode-motion="deal-in"\] \{[\s\S]*?shell-mode-deal-in/)
@@ -604,11 +604,11 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   // honest destination), painted full-bleed beneath the deal via its mounted-hidden
   // wrapper rather than snapping over a revealed slot at completion.
   assert.match(shell, /const settingsUnderlay = isUnderlay\(SETTINGS_KEY\)/)
-  // CSS v2: promote FLIPs to full-bleed; deal-out drifts + fades. Both compositor-only.
+  // CSS v3: promote FLIPs to full-bleed; siblings scatter to projection-derived edges.
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="promote"\] \{[\s\S]*?shell-mode-promote/)
   assert.match(css, /\.shell--builder-exiting\s*\n\.shell__view\[data-mode-motion="deal-out"\] \{[\s\S]*?shell-mode-deal-out/)
   const dealOut = css.match(/@keyframes shell-mode-deal-out\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(dealOut, /translate3d\(-16px, 0, 0\)/)
+  assert.match(dealOut, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
   assert.match(dealOut, /opacity: 0/)
   assert.doesNotMatch(dealOut, /box-shadow|border-radius|filter|clip/)
   // The parent-chrome opacity fade is DELETED (strips deal with their panes now).
@@ -648,21 +648,23 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
-test('pane mode has a visible one-tap header control with a full touch target', () => {
-  assert.match(shell, /aria-label=\{builderModeActive \? 'Use single screen' : 'Use panes'\}/)
-  assert.match(shell, /aria-pressed=\{builderModeActive\}/)
-  assert.match(shell, /onClick=\{\(\) => handleToggleViewMode\('button'\)\}/)
-  const control = shellCss.match(/\.shell__mode-toggle\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(control, /width:\s*44px/)
-  assert.match(control, /height:\s*44px/)
-  assert.match(shellCss, /\.shell__mode-toggle--active\s*\{[\s\S]*?color:\s*var\(--accent\)/)
-})
-
-test('mobile drag claims only the source cross-axis and adds no scroll-blocking listener', () => {
-  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
+test('mobile tabs own either-axis dragging while empty strip space retains native pan-x', () => {
+  assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
+  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*none/)
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
   assert.match(dragBinding, /touchMoveIntent\(dx, dy, sourceKind\)/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
+})
+
+test('an active overflowing chat title cycles once, then becomes idle', () => {
+  assert.match(paneStrip, /new ResizeObserver\(measure\)/)
+  assert.match(paneStrip, /!active \|\| tab\.kind !== 'chat'/)
+  assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-shift'/)
+  assert.match(paneStrip, /className="shell__tab-text-inner"/)
+  const cycle = shellCss.match(/\.shell__tab--active \.shell__tab-text\[data-overflow="true"\][\s\S]*?\n\}/)?.[0] || ''
+  assert.match(cycle, /shell-tab-title-cycle 6\.8s ease-in-out 800ms 1 both/)
+  assert.doesNotMatch(cycle, /infinite/)
+  assert.match(shellCss, /\.shell__tab-text-inner \{ animation: none !important; \}/)
 })
 
 test('the mobile modal keeps its existing brand close path while the workspace is inert', () => {

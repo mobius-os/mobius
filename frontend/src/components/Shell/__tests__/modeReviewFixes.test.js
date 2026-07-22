@@ -254,8 +254,8 @@ test('finding F5: handleBack restores the hidden app through applyModeDestinatio
 })
 
 // -- Finding 10: exit chrome is keyboard-inert during the latched deal ---------
-test('finding 10: WorkspaceChrome is inert during the exit beat, not just pointer-blocked', () => {
-  assert.match(shell, /<WorkspaceChrome[\s\S]*?inert=\{modalDrawerOpen \|\| exitBeatActive\}/)
+test('finding 10: WorkspaceChrome is inert during either mode beat, not just pointer-blocked', () => {
+  assert.match(shell, /<WorkspaceChrome[\s\S]*?inert=\{modalDrawerOpen \|\| modeBeatActive\}/)
 })
 
 // -- Finding 11: a live hold cancels on hide/blur/pagehide/lostpointercapture --

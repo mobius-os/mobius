@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react'
 import AppWindow from 'lucide-react/dist/esm/icons/app-window.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
 import Settings from 'lucide-react/dist/esm/icons/settings.mjs'
@@ -43,6 +44,42 @@ export function stripKeyDown(e, tabs, onClose) {
 export function PaneTab({
   tab, label, active, tabIndex, dragKey, role, onActivate, onClose, onContextMenu,
 }) {
+  const titleRef = useRef(null)
+  // Only the active CHAT title cycles, and only when it is actually clipped. One
+  // ResizeObserver follows that one title per pane; measurements update CSS vars
+  // imperatively, so neither resizing nor the animation causes React renders.
+  useLayoutEffect(() => {
+    const title = titleRef.current
+    if (!title) return undefined
+    const text = title.firstElementChild
+    const clear = () => {
+      delete title.dataset.overflow
+      title.style.removeProperty('--tab-title-shift')
+    }
+    if (!active || tab.kind !== 'chat' || !text) {
+      clear()
+      return undefined
+    }
+    const measure = () => {
+      const shift = Math.ceil(text.scrollWidth - title.clientWidth)
+      if (shift > 3) {
+        title.dataset.overflow = 'true'
+        title.style.setProperty('--tab-title-shift', `-${shift}px`)
+      } else {
+        clear()
+      }
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return clear
+    const observer = new ResizeObserver(measure)
+    observer.observe(title)
+    observer.observe(text)
+    return () => {
+      observer.disconnect()
+      clear()
+    }
+  }, [active, label, tab.kind])
+
   const TabIcon = tab.kind === 'settings'
     ? Settings
     : (tab.kind === 'chat' ? MessageSquare : AppWindow)
@@ -55,6 +92,7 @@ export function PaneTab({
         aria-selected={role === 'tab' ? (active ? 'true' : 'false') : undefined}
         aria-current={role !== 'tab' && active ? 'true' : undefined}
         tabIndex={tabIndex}
+        title={label}
         // The drag controller picks tab sources up by this attribute; only present
         // when the splits flag is on so a flag-off build carries no drag hooks.
         data-drag-key={dragKey}
@@ -72,7 +110,9 @@ export function PaneTab({
         onContextMenu={onContextMenu}
       >
         <TabIcon size={13} aria-hidden="true" />
-        <span className="shell__tab-text">{label}</span>
+        <span ref={titleRef} className="shell__tab-text">
+          <span className="shell__tab-text-inner">{label}</span>
+        </span>
       </button>
       <button
         type="button"

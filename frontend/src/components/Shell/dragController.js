@@ -95,19 +95,18 @@ export function passedSlop(dx, dy, slop = POINTER_SLOP) {
   return hypot(dx, dy) > slop
 }
 
-// Touch sources sit in one-axis scrollers. A deliberate move across that scroll
-// axis can become a drag immediately without waiting for the hold timer:
-//   - pane tabs live in a horizontal strip, so a vertical pull means drag;
-//   - drawer rows live in a vertical list, so a horizontal pull means drag.
-// Movement along the source's scroll axis is returned to native scrolling. This
-// avoids both failure modes of a blanket `touch-action:none`: dead scrolling, or a
-// browser-cancelled pointer stream after a long press.
+// Drawer rows live in a vertical list, so vertical movement stays native scrolling
+// and a horizontal pull becomes a drag. A concrete pane tab is different: its CSS
+// owns the pointer stream (`touch-action:none`) while the surrounding strip retains
+// native pan-x. Once a tab moves past the threshold, either axis therefore means the
+// user is repositioning it — including the horizontal reorder that was impossible
+// when pan-x caused the browser to cancel the pointer.
 export function touchMoveIntent(dx, dy, sourceKind, limit = PRE_HOLD_MOVE_PX) {
   if (hypot(dx, dy) <= limit) return 'pending'
   const x = Math.abs(dx)
   const y = Math.abs(dy)
   if (sourceKind === 'drawer') return x > y ? 'drag' : 'scroll'
-  return y > x ? 'drag' : 'scroll'
+  return 'drag'
 }
 
 // After a lift, a release still within this radius opened no drag — it is the

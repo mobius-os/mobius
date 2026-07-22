@@ -1,7 +1,6 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
-import PanelsTopLeft from 'lucide-react/dist/esm/icons/panels-top-left.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
 import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
@@ -282,7 +281,8 @@ export default function Shell() {
   // would hide every pane behind a builder Settings tab — the named risk).
   const settingsActive = settingsOverlayOpen
   // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
-  // exist). It drives both the logo's 180deg shortcut cue and the explicit button.
+  // exist). The logo itself is the persistent mode indicator and gesture surface;
+  // there is deliberately no separate header control.
   // ── Mode transition machine (modeMachine.js / useModeController) ───────────
   // The ONE descriptor { committedMode, transition } that replaces the old
   // dragPreviewBuilder / builderExiting / builderEntering booleans, their two
@@ -308,15 +308,13 @@ export default function Shell() {
   // preview holds the tiled world; the committed mode otherwise. The single source
   // (INV 4) — no scattered override.
   const effectiveViewMode = modeMachine.effectiveViewMode(modeState, { splitsEnabled: SPLITS })
-  // An exit beat is live: the render paints the revealed underlay, makes the beat
-  // surfaces inert, and passes every AppCanvas interactive:false (INV 9 inert beat).
-  const exitBeatActive = modeMachine.exitBeatActive(modeState, { splitsEnabled: SPLITS })
-  // The latched presentation plan for the live animated beat (enter or exit) and,
-  // separately, the exit-only plan (target + underlayKey). The render reads these to
-  // apply each participant's compositor-only motion + the revealed destination.
+  // The latched presentation plan for the live animated beat. Either direction may
+  // carry a stationary single-world underlay while panes scatter or assemble over it.
   const beatPlan = modeMachine.transitionPresentation(modeState)
-  const exitPlan = modeMachine.exitPresentation(modeState)
-  const exitUnderlayKey = exitPlan ? exitPlan.underlayKey : null
+  // A mode beat is live: moving surfaces are inert and app frames cannot intercept
+  // input while their compositor layer is in flight.
+  const modeBeatActive = !!beatPlan
+  const modeUnderlayKey = beatPlan ? beatPlan.underlayKey : null
   // The logo spring-back window on the shell root while an animated beat is live
   // (round 4 item 1): the mark holds .84 through the beat and releases over the
   // terminal logoReleaseMs so its first full-size frame lands at completion. `both`
@@ -333,10 +331,9 @@ export default function Shell() {
       '--logo-release-delay': `${Math.max(0, total - MODE_MOTION.logoReleaseMs)}ms`,
     }
   }, [beatPlan])
-  // The key SINGLE mode will paint after this exit. During the beat it drives the
-  // destination AppCanvas `active` prop so insets/immersive presentation are already
-  // correct and do not jump only at completion (exit-design v1 §Visibility).
-  const exitTargetKey = exitPlan ? exitPlan.target : null
+  // The key SINGLE mode paints beneath / within either directional beat. It drives
+  // destination AppCanvas insets before the first frame so neither direction jumps.
+  const beatTargetKey = beatPlan ? beatPlan.target : null
   // key → latched participant, for the render's data-mode-motion + inline vars.
   const beatParticipants = useMemo(() => {
     const m = new Map()
@@ -349,18 +346,22 @@ export default function Shell() {
     const p = beatParticipants.get(key)
     if (!p) return null
     const vars = { '--mode-duration': `${p.durationMs}ms`, '--mode-delay': `${p.delayMs}ms` }
-    if (p.motion === 'promote' && p.flip) {
+    if ((p.motion === 'promote' || p.motion === 'settle') && p.flip) {
       vars['--flip-x'] = `${p.flip.x}px`
       vars['--flip-y'] = `${p.flip.y}px`
       vars['--flip-sx'] = p.flip.sx
       vars['--flip-sy'] = p.flip.sy
     }
+    if ((p.motion === 'deal-in' || p.motion === 'deal-out') && p.offset) {
+      vars['--mode-offset-x'] = `${p.offset.x}px`
+      vars['--mode-offset-y'] = `${p.offset.y}px`
+    }
     return { motion: p.motion, vars }
   }, [beatParticipants])
-  // The wrapper matching the world-reveal underlay key paints full-bleed beneath.
+  // The wrapper matching the stationary world underlay paints full-bleed beneath.
   const isUnderlay = useCallback(
-    (key) => exitBeatActive && exitUnderlayKey != null && key === exitUnderlayKey,
-    [exitBeatActive, exitUnderlayKey],
+    (key) => modeBeatActive && modeUnderlayKey != null && key === modeUnderlayKey,
+    [modeBeatActive, modeUnderlayKey],
   )
   // Immersive mode (moebius:immersive, .pm/128). The state is the id of the app
   // holding an immersive request (or null); it's APPLIED — bar hidden, canvas
@@ -434,10 +435,10 @@ export default function Shell() {
       viewMode: effectiveViewMode, // 'panes' during a single-mode drag preview
       // World-reveal exit: paint the mounted destination beneath the deal (adds its
       // app to visibleAppIds so the underlay is not a blank frame).
-      exitUnderlayKey,
+      exitUnderlayKey: modeUnderlayKey,
     }),
     [workspace, projection, settingsActive, immersiveActive, immersiveAppId,
-      effectiveViewMode, exitUnderlayKey],
+      effectiveViewMode, modeUnderlayKey],
   )
   const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
   // The EFFECTIVE-mode-gated Settings takeover flag (finding F3): true only when the
@@ -1119,9 +1120,9 @@ export default function Shell() {
       if (active && active.kind === 'chat') set.add(`chat:${active.id}`)
     }
     // World-reveal exit: paint the (tree-absent) underlay chat beneath the deal.
-    if (exitUnderlayKey && exitUnderlayKey.startsWith('chat:')) set.add(exitUnderlayKey)
+    if (modeUnderlayKey && modeUnderlayKey.startsWith('chat:')) set.add(modeUnderlayKey)
     return set
-  }, [single, settingsOverlay, fullBleedKey, projection, workspace, exitUnderlayKey])
+  }, [single, settingsOverlay, fullBleedKey, projection, workspace, modeUnderlayKey])
 
   // Last chat that reached a stable painted frame in each visible pane. On a
   // chat-tab change, keep that outgoing ChatView mounted as an inert cover while
@@ -1386,8 +1387,9 @@ export default function Shell() {
       dragPreviewIdRef.current = null
     }
   }, [mode, workspaceStateRef])
-  // Builder mode has one explicit header button; the logo hold/swipe and Shift+Enter
-  // remain shortcuts. Toggling is a pure state flip: Settings needs NO
+  // Builder mode deliberately has no standalone header button. It is entered via
+  // the logo hold/swipe, drawer drag, or keyboard path. Toggling is a pure state
+  // flip: Settings needs NO
   // conversion (v2 deleted it) — its tab survives the flip and single mode paints
   // its own slot, never Settings. It never opens/closes the drawer, and the
   // reducer's SET_VIEW_MODE preserves the undo slot and never touches focus.
@@ -1417,8 +1419,12 @@ export default function Shell() {
         settingsDestination: settingsDestinationRef.current,
         immersiveHolderId: immersiveHolderRef.current,
       })
-      : deriveEnterPlan({ workspace: settled, projection })
-    // The honest `cause` ('button'|'hold'|'swipe'|'keyboard') threads from the caller;
+      : deriveEnterPlan({
+        workspace: settled, projection, contentRect,
+        settingsDestination: settingsDestinationRef.current,
+        immersiveHolderId: immersiveHolderRef.current,
+      })
+    // The honest `cause` ('hold'|'swipe'|'keyboard') threads from the caller;
     // an omitted cause falls back to 'toggle'. RETURN the
     // toggle receipt so the logo gesture can tell an animated beat from an instant
     // flip and hand its compression to the descriptor (round 4 item 1).
@@ -1511,6 +1517,9 @@ export default function Shell() {
             ? deriveEnterPlan({
               workspace: undoSlot.ws,
               projection: paneModel.projectLayout(undoSlot.ws, scene.mode, scene.contentRect),
+              contentRect: scene.contentRect,
+              settingsDestination: settingsDestinationRef.current,
+              immersiveHolderId: immersiveHolderRef.current,
             })
             : deriveExitPlan({
               workspace: wsState.ws, projection: scene.projection, contentRect: scene.contentRect,
@@ -3144,20 +3153,6 @@ export default function Shell() {
           onToggleNavigation={handleToggleNavigation}
         />
         <div className="shell__bar-actions">
-          {paneModel.WORKSPACE_SPLITS_ENABLED && (
-            <button
-              type="button"
-              className={`shell__mode-toggle${builderModeActive ? ' shell__mode-toggle--active' : ''}`}
-              aria-label={builderModeActive ? 'Use single screen' : 'Use panes'}
-              aria-pressed={builderModeActive}
-              aria-keyshortcuts="Shift+Enter"
-              title={builderModeActive ? 'Use single screen' : 'Use panes'}
-              disabled={modalDrawerOpen}
-              onClick={() => handleToggleViewMode('button')}
-            >
-              <PanelsTopLeft size={18} aria-hidden="true" />
-            </button>
-          )}
           {!online && (
             <span className="shell__offline" role="status" aria-live="polite">
               Offline
@@ -3227,8 +3222,8 @@ export default function Shell() {
           // INV 9 (inert beat): the single-pane strip clears WITH its pane during
           // an exit beat, so it is pointer/keyboard inert throughout — not just under
           // the drawer (M4). It matches the WorkspaceChrome strips, which already go
-          // inert on exitBeatActive.
-          inert={modalDrawerOpen || exitBeatActive}
+          // inert for the full mode beat.
+          inert={modalDrawerOpen || modeBeatActive}
           aria-label="Open tabs"
           // The single-pane strip is the PRIMARY drag source once the flag is on
           // (the coachmark teaches "drag tabs to split" here). Tag it with the
@@ -3305,15 +3300,15 @@ export default function Shell() {
                 ? 'shell__view shell__view--paned'
                 : `shell__view ${fullBleed ? 'shell__view--active' : ''}`)}
             style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
-            // INV 9 (inert beat): every exit-beat surface — a participant pane OR the
-            // underlay — is pointer/keyboard inert so a tap on a dealing-out / covered
+            // INV 9 (inert beat): every moving surface — a participant pane OR the
+            // underlay — is pointer/keyboard inert so a tap on an in-flight / covered
             // surface cannot dispatch FOCUS mid-animation.
-            inert={(exitBeatActive && (!!motion || underlay)) || undefined}
+            inert={(modeBeatActive && (!!motion || underlay)) || undefined}
             // Clicking a visible pane focuses it (chat panes are not opaque; app
             // iframes swallow interior clicks, so this catches wrapper padding —
             // interior app focus rides the runtime bridge later). Only in the
             // tiled path (finding D-i), and never during the exit beat.
-            onPointerDownCapture={paned && !exitBeatActive
+            onPointerDownCapture={paned && !modeBeatActive
               ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId }) : undefined}
           >
             <ErrorBoundary key={`ab-${id}`} variant="inline" label="app">
@@ -3321,9 +3316,9 @@ export default function Shell() {
               appId={id}
               // Focused-pane-only: gates safe-area insets + the immersive holder
               // (global last-writer-wins). During the exit beat the DESTINATION
-              // (exitTargetKey) is also driven active so its insets are correct
+              // (beatTargetKey) is also driven active so its insets are correct
               // before completion, not jumping only after (exit-design §Visibility).
-              active={tabKey === focusedActiveKey || (exitBeatActive && tabKey === exitTargetKey)}
+              active={tabKey === focusedActiveKey || (modeBeatActive && tabKey === beatTargetKey)}
               // Visible in ANY pane: gates frame-visibility + nav-push (§5). A
               // background split's app keeps running and can install sentinels;
               // Settings/immersive-solo/hidden panes exclude it (visibleAppIds).
@@ -3331,7 +3326,7 @@ export default function Shell() {
               // Every visible pane remains painted beneath the modal scrim, but
               // suspend its iframe interaction while the drawer is open OR during any
               // exit beat (INV 9: cross-origin app interaction is inert throughout).
-              interactive={visibleAppIds.has(String(id)) && !modalDrawerOpen && !exitBeatActive}
+              interactive={visibleAppIds.has(String(id)) && !modalDrawerOpen && !modeBeatActive}
               version={versionForApp(id)}
               appName={app?.name}
               appSlug={app?.slug}
@@ -3387,9 +3382,9 @@ export default function Shell() {
               style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
               // Inert while covered/handing-off OR while participating in / underlying
               // the exit beat (INV 9 inert beat).
-              inert={settingsOverlay || role !== 'active' || (exitBeatActive && (!!motion || underlay))}
+              inert={settingsOverlay || role !== 'active' || (modeBeatActive && (!!motion || underlay))}
               aria-hidden={settingsOverlay || role !== 'active' ? 'true' : undefined}
-              onPointerDownCapture={paned && role === 'active' && !exitBeatActive
+              onPointerDownCapture={paned && role === 'active' && !modeBeatActive
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId })
                 : undefined}
             >
@@ -3457,8 +3452,8 @@ export default function Shell() {
             style={settingsMotion
               ? { ...(settingsPos || {}), ...settingsMotion.vars }
               : (settingsPos || undefined)}
-            inert={(exitBeatActive && (!!settingsMotion || settingsUnderlay)) || undefined}
-            onPointerDownCapture={settingsPaned && !settingsUnderlay && !exitBeatActive
+            inert={(modeBeatActive && (!!settingsMotion || settingsUnderlay)) || undefined}
+            onPointerDownCapture={settingsPaned && !settingsUnderlay && !modeBeatActive
               ? () => dispatchWorkspace({ type: 'FOCUS', paneId: settingsPaned.paneId })
               : undefined}
           >
@@ -3492,7 +3487,7 @@ export default function Shell() {
               className={newChatUnderlay
                 ? 'shell__view shell__view--exit-underlay shell__chat-view'
                 : 'shell__view shell__view--active shell__chat-view'}
-              inert={(exitBeatActive && newChatUnderlay) || undefined}
+              inert={(modeBeatActive && newChatUnderlay) || undefined}
             >
               <NewChatLanding
                 // Retry state only on the resting surface — never mid-reveal.
@@ -3512,7 +3507,7 @@ export default function Shell() {
             // pointer-transparent (CSS) but fully INERT — keyboard-unfocusable and
             // aria-hidden — so a tab/divider that already held focus can't process
             // Enter/arrow input while invisibly dealing away.
-            inert={modalDrawerOpen || exitBeatActive}
+            inert={modalDrawerOpen || modeBeatActive}
             workspace={workspace}
             projection={projection}
             mode={workspaceMode}
