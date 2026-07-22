@@ -101,10 +101,17 @@ def runtime_library_aliases() -> tuple[tuple[str, Path], ...]:
   ``app_runtime_inject.js``. React then sees two dispatchers and every hook
   fails at first render. Package-root aliases apply to the root and its subpaths
   (for example ``react/jsx-runtime``), keeping each supported library singular.
+
+  Three's documented ``three/addons/*`` export is backed by the physical
+  ``examples/jsm`` directory rather than an ``addons`` directory. Once the
+  package root is replaced with an absolute alias, esbuild no longer consults
+  Three's package exports for that subpath. Pin the public addons spelling to
+  its runtime-owned physical directory before adding the package roots.
   """
   node_path = runtime_node_path()
   roots = sorted({_package_root(specifier) for specifier in BUNDLED_RUNTIME_LIBS})
-  return tuple((root, node_path / root) for root in roots)
+  subpaths = (("three/addons", node_path / "three" / "examples" / "jsm"),)
+  return subpaths + tuple((root, node_path / root) for root in roots)
 
 
 NO_DEFAULT_EXPORT_ERROR = (
