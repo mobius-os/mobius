@@ -14,7 +14,7 @@ from app.schemas import SettingsUpdate
 
 
 def test_global_settings_do_not_expose_chat_auto_resume(client, auth):
-  """Automatic continuation is controlled per chat, not globally."""
+  """Rate-limit auto-resume is controlled per chat, not globally."""
   res = client.get("/api/settings", headers=auth)
   assert res.status_code == 200
   assert "auto_resume_on_limit" not in res.json()

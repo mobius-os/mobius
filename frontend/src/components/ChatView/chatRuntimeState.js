@@ -16,19 +16,6 @@ export function cidOf(msg) {
   return msg.cid || null
 }
 
-export function isAutoContinuationMessage(message) {
-  return message?.kind === 'auto_continuation'
-}
-
-/** A visible transcript row authored by the owner, excluding product events
- * that are persisted with role=user only to keep provider history truthful. */
-export function isOwnerUserMessage(message) {
-  return !!message
-    && message.role === 'user'
-    && !message.hidden
-    && !isAutoContinuationMessage(message)
-}
-
 export function stripInternalUserMessageFields(raw) {
   if (!raw) return null
   // KEEP `cid` — it is now the durable row identity and must survive the

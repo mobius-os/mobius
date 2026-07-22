@@ -393,10 +393,9 @@ class ChatPatch(BaseModel):
   title: str | None = Field(default=None, max_length=500)
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
-  # Per-chat opt-in to continuing after a provider-limit reset or a planned
-  # server restart. The legacy wire name remains compatible with installed
-  # clients. This is intentionally absent from SettingsUpdate: background
-  # agents and unrelated existing chats must never inherit a runtime change.
+  # Per-chat opt-in to continuing a provider-limited turn at reset. This is
+  # intentionally absent from SettingsUpdate: background agents and other
+  # chats must never inherit it.
   auto_resume_on_limit: bool | None = None
   # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
   # only when the owner hasn't locked it via a manual rename. clear_title resets

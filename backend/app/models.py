@@ -35,7 +35,7 @@ class Owner(Base):
   hashed_password = Column(String(255), nullable=False)
   # Must stay in sync with providers.PROVIDER_NAMES.
   provider = Column(String(32), nullable=False, default="claude")
-  # Default automatic-continuation policy for newly-created chats. Each chat
+  # Default provider-limit recovery policy for newly-created chats. Each chat
   # stores its own copy; changing a chat's switch updates this seed for the
   # next chat without rewriting any existing conversation.
   auto_resume_on_limit_default = Column(
@@ -124,9 +124,7 @@ class Chat(Base):
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
-  # Per-chat policy for automatic recovery after provider limits and planned
-  # server restarts. The legacy column/API name is retained for compatibility.
-  # Kept out of
+  # Per-chat policy for provider-limit recovery. Kept out of
   # agent_settings_json because that blob is snapshotted/mirrored as SDK
   # runtime configuration; mixing this policy into it can skip first-send
   # model snapshots or overwrite the owner's global model defaults.
@@ -223,8 +221,7 @@ class ChatRun(Base):
   # "running" while in flight; terminal outcomes are "completed" for a clean
   # turn, "failed" for a provider/setup error, "stopped" for an explicit user
   # Stop, and "interrupted" for crash/supersession/watchdog recovery. Provider
-  # limits additionally use the parked/resume_pending/parked_notified states;
-  # a planned restart briefly reuses resume_pending with park_reason=restart.
+  # limits additionally use the parked/resume_pending/parked_notified states.
   status = Column(String(16), nullable=False, default="running", index=True)
   provider = Column(String(32), nullable=True, default=None)
   # App that initiated this turn under the app-attributed-chat contract

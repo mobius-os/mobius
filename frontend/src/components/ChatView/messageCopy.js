@@ -1,7 +1,6 @@
 // Message-to-plain-text helpers for the mobile hold-to-copy action.
 
 import { stripAugmentation } from './msgText.js'
-import { isAutoContinuationMessage } from './chatRuntimeState.js'
 
 function questionText(block) {
   return (block.questions || []).map(question => {
@@ -15,7 +14,7 @@ function questionText(block) {
 /** Resolve the owner-visible prose in one transcript row. Tool chrome and
  * hidden prompt augmentation stay out of copied text. */
 export function copyableMessageText(message) {
-  if (!message || message.hidden || isAutoContinuationMessage(message)) return ''
+  if (!message || message.hidden) return ''
   const parts = []
   if (Array.isArray(message.blocks) && message.blocks.length > 0) {
     for (const block of message.blocks) {
