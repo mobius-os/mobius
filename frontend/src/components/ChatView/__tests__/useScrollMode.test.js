@@ -5,11 +5,13 @@ import {
   _anchorModeIntersectsContent,
   _anchorReapplyNeeded,
   _computeSpacerH,
+  _modeForPersistence,
   _pinReapplyNeeded,
   _scrollModeForDiagnostics,
   _validateSavedMode,
   applyMode,
   bottomAnchorModeFromScroll,
+  contentHoldModeFromScroll,
   gestureLayoutRetryDelay,
   isNearContentBottom,
   isNearScrollBottom,
@@ -827,6 +829,35 @@ test('a saved anchor wholly inside reserved blank space self-heals to real conte
   })
 })
 
+test('live persistence preserves follow while restore settles it to real content', () => {
+  const last = {
+    offsetTop: 500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-tail' },
+  }
+  const scrollEl = {
+    scrollHeight: 1900,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 1200 }
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+  const follow = { kind: 'FOLLOW_BOTTOM' }
+
+  assert.equal(_modeForPersistence(follow, [], scrollEl), follow,
+    'ordinary live persistence must not erase the active follow state')
+  assert.deepEqual(_validateSavedMode(follow, [], scrollEl), {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-tail',
+    offset: 500,
+    defaultTail: true,
+  }, 'mount restore still converts follow into a settled content hold')
+})
+
 test('a saved partially-visible anchor remains exact', () => {
   const row = {
     offsetTop: 500,
@@ -911,6 +942,33 @@ test('chat exit from blank reservation persists the real-content tail', () => {
   }
 
   assert.deepEqual(modeForChatExit(scrollEl), {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: 500,
+    defaultTail: true,
+  })
+})
+
+test('leaving the physical bottom inside blank reservation retires follow', () => {
+  const last = {
+    offsetTop: 500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-question' },
+  }
+  const scrollEl = {
+    scrollHeight: 1900,
+    scrollTop: 1200,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 1200 }
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  assert.deepEqual(contentHoldModeFromScroll(scrollEl), {
     kind: 'ANCHOR_AT',
     key: 'assistant-question',
     offset: 500,

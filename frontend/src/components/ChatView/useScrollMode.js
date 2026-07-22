@@ -194,6 +194,17 @@ export function bottomAnchorModeFromScroll(scrollEl) {
 }
 
 
+/** Freeze a viewport to real conversation content.
+ *
+ * A reader can move away from the physical bottom while the viewport is
+ * wholly inside dynamic spacer. There is no exact visible row to anchor in
+ * that case, but the gesture must still retire live follow. Settle at the
+ * latest real-content tail rather than leaving FOLLOW_BOTTOM armed. */
+export function contentHoldModeFromScroll(scrollEl) {
+  return anchorModeFromScroll(scrollEl) || bottomAnchorModeFromScroll(scrollEl)
+}
+
+
 /** Resolve the DOM row a PIN_USER_MSG targets: the user row whose
  *  `data-cid` equals the mode's cid.
  *
@@ -346,6 +357,19 @@ export function _validateSavedMode(saved, messages, scrollEl) {
       : holdBottom()
   }
   return holdBottom()
+}
+
+
+/** Normalize durable reader locations without collapsing live mode state.
+ *
+ * FOLLOW_BOTTOM and PIN_USER_MSG are useful while this mount is active and
+ * are already converted to settled restore modes by `_validateSavedMode` on
+ * the next mount. ANCHOR_AT is the only mode whose stored geometry can point
+ * wholly into spacer, so validate that location before every write. */
+export function _modeForPersistence(mode, messages, scrollEl) {
+  return mode?.kind === 'ANCHOR_AT'
+    ? _validateSavedMode(mode, messages, scrollEl)
+    : mode
 }
 
 
@@ -623,7 +647,7 @@ export function readerInputNeedsFrameRelease(
  *  FOLLOW_BOTTOM afterward. */
 export function modeForForegroundReturn(scrollEl) {
   if (!scrollEl) return null
-  return anchorModeFromScroll(scrollEl) || bottomAnchorModeFromScroll(scrollEl)
+  return contentHoldModeFromScroll(scrollEl)
 }
 
 
@@ -634,7 +658,7 @@ export function modeForForegroundReturn(scrollEl) {
  *  yanking the reader to the latest tail. */
 export function modeForChatExit(scrollEl) {
   if (!scrollEl) return null
-  return anchorModeFromScroll(scrollEl) || bottomAnchorModeFromScroll(scrollEl)
+  return contentHoldModeFromScroll(scrollEl)
 }
 
 
@@ -959,12 +983,11 @@ export default function useScrollMode({
       const candidate = freezeToCurrentPosition
         ? (modeForChatExit(scrollRef.current) || modeRef.current)
         : modeRef.current
-      // One persistence gate for every lifecycle path. Never write a location
-      // that cannot render real conversation content; normalize invalid or
-      // stale modes to the settled real-content tail before they reach
-      // sessionStorage. Mount uses the same validator when reading, so the
-      // invariant is symmetric and older bad state self-heals.
-      const mode = _validateSavedMode(
+      // One persistence gate for every lifecycle path. Invalid ANCHOR_AT
+      // geometry is normalized before it reaches sessionStorage. Live
+      // FOLLOW_BOTTOM/PIN_USER_MSG remains observable while mounted; the
+      // restore gate settles those modes on the next mount.
+      const mode = _modeForPersistence(
         candidate, messagesRef.current, scrollRef.current,
       )
       if (mode && mode.kind !== 'INITIAL') {
@@ -989,7 +1012,7 @@ export default function useScrollMode({
         && !(retireFollow && kind === 'FOLLOW_BOTTOM')) {
       return modeRef.current
     }
-    const anchor = anchorModeFromScroll(scrollRef.current)
+    const anchor = contentHoldModeFromScroll(scrollRef.current)
     return anchor ? transitionMode(anchor, event) : modeRef.current
   }, [scrollRef, transitionMode])
 
@@ -1675,7 +1698,11 @@ export default function useScrollMode({
           'reader:physical-bottom',
         )
       } else {
-        const anchor = anchorModeFromScroll(scrollEl)
+        // Moving away from the physical bottom always retires live follow.
+        // If the viewport is wholly inside reserved spacer there is no exact
+        // row anchor, so settle on the real-content tail instead of leaving a
+        // stale FOLLOW_BOTTOM armed for the next content resize.
+        const anchor = contentHoldModeFromScroll(scrollEl)
         if (anchor) transitionMode(anchor, 'reader:hold-anchor')
       }
       persistMode()
