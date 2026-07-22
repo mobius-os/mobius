@@ -2,13 +2,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  _anchorModeIntersectsContent,
   _anchorReapplyNeeded,
   _computeSpacerH,
+  _modeForPersistence,
   _pinReapplyNeeded,
   _scrollModeForDiagnostics,
   _validateSavedMode,
   applyMode,
   bottomAnchorModeFromScroll,
+  contentHoldModeFromScroll,
   gestureLayoutRetryDelay,
   isNearContentBottom,
   isNearScrollBottom,
@@ -220,6 +223,7 @@ test('disclosure toggles follow only in FOLLOW_BOTTOM and otherwise hold the rea
   }
   const scrollEl = {
     scrollTop: 500,
+    clientHeight: 600,
     querySelectorAll: () => [row],
   }
   const follow = { kind: 'FOLLOW_BOTTOM' }
@@ -758,6 +762,44 @@ test('attention nudge anchors the physical tail without enabling follow', () => 
     'revealing a question or Resume control must not create live-follow intent')
 })
 
+test('an off-content physical nudge stays live but persists the real-content tail', () => {
+  const last = {
+    offsetTop: 1500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-paused-tail' },
+  }
+  const scrollEl = {
+    scrollHeight: 3100,
+    scrollTop: 700,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 1200 }
+      if (selector === '[data-key="assistant-paused-tail"]') return last
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  const liveMode = physicalBottomAnchorModeFromScroll(scrollEl)
+  assert.deepEqual(liveMode, {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-paused-tail',
+    offset: -900,
+  })
+  applyMode(scrollEl, liveMode)
+  assert.equal(scrollEl.scrollTop, 2400,
+    'the explicit nudge reaches the true physical tail in the live mount')
+
+  assert.deepEqual(_modeForPersistence(liveMode, [], scrollEl), {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-paused-tail',
+    offset: 300,
+    defaultTail: true,
+  }, 'durable state normalizes the off-content nudge to the real tail')
+})
+
 test('an unresolvable saved location falls back to a settled bottom anchor', () => {
   const last = {
     offsetTop: 900,
@@ -791,35 +833,98 @@ test('an unresolvable saved location falls back to a settled bottom anchor', () 
   assert.notEqual(mode.kind, 'FOLLOW_BOTTOM')
 })
 
-test('attention nudge anchors the physical tail without enabling follow', () => {
+test('a saved anchor wholly inside reserved blank space self-heals to real content', () => {
   const last = {
-    offsetTop: 1500,
+    offsetTop: 500,
     offsetHeight: 220,
-    dataset: { key: 'assistant-attention-tail' },
+    dataset: { key: 'assistant-question' },
   }
   const scrollEl = {
-    scrollHeight: 2100,
-    scrollTop: 700,
+    scrollHeight: 1900,
+    scrollTop: 0,
     clientHeight: 700,
     querySelector(selector) {
-      return selector === '[data-key="assistant-attention-tail"]' ? last : null
+      if (selector === '.spacer-dynamic') return { offsetHeight: 1200 }
+      if (selector === '[data-key="assistant-question"]') return last
+      return null
     },
     querySelectorAll(selector) {
       return selector === '.chat__msg[data-key]' ? [last] : []
     },
   }
 
-  const mode = physicalBottomAnchorModeFromScroll(scrollEl)
-  assert.deepEqual(mode, {
+  const restored = _validateSavedMode(
+    { kind: 'ANCHOR_AT', key: 'assistant-question', offset: -900 },
+    [],
+    scrollEl,
+  )
+  assert.deepEqual(restored, {
     kind: 'ANCHOR_AT',
-    key: 'assistant-attention-tail',
-    offset: 100,
+    key: 'assistant-question',
+    offset: 500,
+    defaultTail: true,
   })
-  applyMode(scrollEl, mode)
-  assert.equal(scrollEl.scrollTop, 1400,
-    'the move includes all composer clearance after the attention card')
-  assert.notEqual(mode.kind, 'FOLLOW_BOTTOM',
-    'revealing an action must not create live-follow intent')
+})
+
+test('live persistence preserves follow while restore settles it to real content', () => {
+  const last = {
+    offsetTop: 500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-tail' },
+  }
+  const scrollEl = {
+    scrollHeight: 1900,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 1200 }
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+  const follow = { kind: 'FOLLOW_BOTTOM' }
+
+  assert.equal(_modeForPersistence(follow, [], scrollEl), follow,
+    'ordinary live persistence must not erase the active follow state')
+  assert.deepEqual(_validateSavedMode(follow, [], scrollEl), {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-tail',
+    offset: 500,
+    defaultTail: true,
+  }, 'mount restore still converts follow into a settled content hold')
+})
+
+test('a saved partially-visible anchor remains exact', () => {
+  const row = {
+    offsetTop: 500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-reading' },
+  }
+  const saved = {
+    kind: 'ANCHOR_AT', key: 'assistant-reading', offset: -100,
+  }
+  const scrollEl = {
+    clientHeight: 700,
+    querySelector(selector) {
+      return selector === '[data-key="assistant-reading"]' ? row : null
+    },
+  }
+  assert.equal(_validateSavedMode(saved, [], scrollEl), saved,
+    'an anchor whose row still intersects its restored viewport is preserved')
+})
+
+test('the anchor invariant distinguishes content from layout reservation', () => {
+  const row = { offsetHeight: 220 }
+  assert.equal(_anchorModeIntersectsContent(
+    row, { offset: -100 }, 700,
+  ), true, 'a partially visible row is a readable location')
+  assert.equal(_anchorModeIntersectsContent(
+    row, { offset: -900 }, 700,
+  ), false, 'a row wholly above the viewport is blank reservation')
+  assert.equal(_anchorModeIntersectsContent(
+    row, { offset: 700 }, 700,
+  ), false, 'a row beginning below the viewport is not visible content')
 })
 
 test('chat exit freezes the visible anchor even at the physical tail', () => {
@@ -852,6 +957,60 @@ test('chat exit never infers follow mode when no message anchor exists', () => {
   }
 
   assert.equal(modeForChatExit(scrollEl), null)
+})
+
+test('chat exit from blank reservation persists the real-content tail', () => {
+  const last = {
+    offsetTop: 500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-question' },
+  }
+  const scrollEl = {
+    scrollHeight: 1900,
+    scrollTop: 1200,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 1200 }
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  assert.deepEqual(modeForChatExit(scrollEl), {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: 500,
+    defaultTail: true,
+  })
+})
+
+test('leaving the physical bottom inside blank reservation retires follow', () => {
+  const last = {
+    offsetTop: 500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-question' },
+  }
+  const scrollEl = {
+    scrollHeight: 1900,
+    scrollTop: 1200,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 1200 }
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [last] : []
+    },
+  }
+
+  assert.deepEqual(contentHoldModeFromScroll(scrollEl), {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: 500,
+    defaultTail: true,
+  })
 })
 
 test('applyMode PIN is a no-op when the cid resolves no row (strict, no fallback)', () => {
@@ -918,7 +1077,7 @@ test('spacer reservation returns zero before there is a user message', () => {
 })
 
 test('viewport growth keeps a question-answer anchor reachable before output resumes', () => {
-  const anchor = { offsetTop: 1320 }
+  const anchor = { offsetTop: 1320, offsetHeight: 220 }
   const scrollEl = {
     clientHeight: 960,
     querySelector(selector) {
@@ -944,7 +1103,7 @@ test('viewport growth keeps a question-answer anchor reachable before output res
 })
 
 test('anchor reservation disappears once real content makes the target reachable', () => {
-  const anchor = { offsetTop: 1320 }
+  const anchor = { offsetTop: 1320, offsetHeight: 220 }
   const scrollEl = {
     clientHeight: 960,
     querySelector(selector) {
@@ -956,6 +1115,24 @@ test('anchor reservation disappears once real content makes the target reachable
   assert.equal(
     _computeSpacerH(scrollEl, { offsetHeight: 2300 }, { offsetTop: 900 }, 960, mode),
     0,
+  )
+})
+
+test('a live off-content anchor reserves its exact reader-owned position', () => {
+  const anchor = { offsetTop: 500, offsetHeight: 220 }
+  const scrollEl = {
+    clientHeight: 700,
+    querySelector(selector) {
+      return selector === '[data-key="assistant-question"]' ? anchor : null
+    },
+  }
+  const mode = {
+    kind: 'ANCHOR_AT', key: 'assistant-question', offset: -900,
+  }
+  assert.equal(
+    _computeSpacerH(scrollEl, { offsetHeight: 700 }, { offsetTop: 100 }, 700, mode),
+    1400,
+    'live reader ownership survives in reserved room; persistence rejects it',
   )
 })
 
