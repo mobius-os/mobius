@@ -62,9 +62,10 @@
  * ║      `_isTouchPrimary` is detected once via                      ║
  * ║      `matchMedia('(hover: none) and (pointer: coarse)')` and     ║
  * ║      gates plain Enter. Touch devices: Enter inserts a           ║
- * ║      newline. Desktop: Enter sends or steers. Cmd/Ctrl+Enter     ║
- * ║      is an explicit hardware-keyboard shortcut for the same      ║
- * ║      send/steer action. Shift+Enter always inserts a newline.    ║
+ * ║      newline. Desktop: Enter sends or steers queued text.        ║
+ * ║      Cmd/Ctrl+Enter fast-forwards composed text into a live      ║
+ * ║      turn when possible, otherwise it sends normally.            ║
+ * ║      Shift+Enter always inserts a newline.                        ║
  * ║                                                                  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
@@ -275,6 +276,8 @@ function FileChips({ files, onRemove }) {
  *   input              — current textarea value
  *   onInputChange      — receives new string
  *   onSubmit           — called with FormEvent | MouseEvent | TouchEvent
+ *   onSubmitSteer      — submits composed text and immediately steers
+ *                        it when a live turn can accept steering
  *   inputRef           — for caller to focus/blur (e.g. dismiss keyboard)
  *   sending            — agent is currently streaming
  *   listening          — voice input active
@@ -292,6 +295,8 @@ function FileChips({ files, onRemove }) {
  *                        existing steer handler to reconcile/steer queued
  *                        messages, even before the visual fast-forward gate
  *                        is ready.
+ *   canSubmitSteer     — true when Cmd/Ctrl+Enter may submit the current
+ *                        draft through the live-turn steer path.
  *   pendingFiles       — file upload chips state
  *   onAddFiles         — receives FileList from file picker
  *   onRemoveFile       — receives chip id
@@ -318,6 +323,7 @@ export default function ChatInputBar({
   input,
   onInputChange,
   onSubmit,
+  onSubmitSteer,
   inputRef,
   sending,
   listening,
@@ -328,6 +334,7 @@ export default function ChatInputBar({
   onSteer,
   canSteer,
   canRequestSteer = canSteer,
+  canSubmitSteer = canRequestSteer,
   offline,
   sendFailure = null,
   submissionBlocked = false,
@@ -418,12 +425,17 @@ export default function ChatInputBar({
       hasInput,
       canSteer,
       canRequestSteer,
+      canSubmitSteer,
       isTouchPrimary: _isTouchPrimary,
     })
     if (!action) return
     e.preventDefault()
     if (action === 'steer') {
       onSteer()
+      return
+    }
+    if (action === 'submit-steer') {
+      if (!submissionBlocked) onSubmitSteer(e)
       return
     }
     if (action === 'submit') {
