@@ -48,7 +48,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -252,6 +252,10 @@ class ReconcileResult:
   target_sha: str | None
   conflict_paths: list[str] = field(default_factory=list)
   error: str | None = None
+  # Exact reviewed release/upstream commit captured while RECONCILE_LOCK is
+  # still held. Hook refresh reads every allowlisted blob from this immutable
+  # generation rather than trusting replayed local HEAD or a moving ref.
+  hook_source_sha: str | None = None
 
 
 def _scrubbed_git_env(repo: Path) -> dict:
@@ -807,17 +811,20 @@ def _restore_hook_destination(path: Path, previous: tuple[str, object] | None) -
   os.replace(staged, path)
 
 
-def _refresh_git_hooks_impl(repo: Path) -> str | None:
-  """Install the fixed hook allowlist from committed blobs, without executing it."""
+def _refresh_git_hooks_impl(repo: Path, source_oid: str) -> str | None:
+  """Install allowlisted hooks from one pinned reviewed oid, without executing it."""
   # Preserve the rollout contract of older trees: no committed installer means
   # this checkout predates managed hooks and boot should simply skip refresh.
-  enabled = _hook_git(repo, "cat-file", "-e", "HEAD:scripts/install-hooks.sh")
+  enabled = _hook_git(
+    repo, "cat-file", "-e", f"{source_oid}:scripts/install-hooks.sh",
+  )
   if enabled.returncode != 0:
     return None
 
   sources: list[tuple[str, bytes]] = []
   for source, destination in _HOOK_SOURCES:
-    size_proc = _hook_git(repo, "cat-file", "-s", f"HEAD:{source}")
+    blob = f"{source_oid}:{source}"
+    size_proc = _hook_git(repo, "cat-file", "-s", blob)
     if size_proc.returncode != 0:
       raise OSError(_hook_command_error(size_proc))
     try:
@@ -826,7 +833,10 @@ def _refresh_git_hooks_impl(repo: Path) -> str | None:
       raise OSError(f"could not size committed hook {source}") from exc
     if size <= 0 or size > _HOOK_MAX_BYTES:
       raise OSError(f"committed hook has invalid size: {source}")
-    show = _hook_git(repo, "show", f"HEAD:{source}")
+    # `cat-file blob` returns the committed bytes without textconv/filter
+    # execution. `git show` is presentation porcelain and may consult local
+    # diff-driver configuration, which is not a trusted boot-time code path.
+    show = _hook_git(repo, "cat-file", "blob", blob)
     if show.returncode != 0:
       raise OSError(_hook_command_error(show))
     if len(show.stdout) != size or not show.stdout.startswith(b"#!"):
@@ -888,10 +898,12 @@ def _refresh_git_hooks_impl(repo: Path) -> str | None:
   return ""
 
 
-def _refresh_git_hooks(repo: Path) -> str | None:
+def _refresh_git_hooks(repo: Path, source_oid: str | None) -> str | None:
   """Best-effort hook refresh that is total at boot and after committed Apply."""
+  if not source_oid:
+    return None
   try:
-    return _refresh_git_hooks_impl(repo)
+    return _refresh_git_hooks_impl(repo, source_oid)
   except Exception as exc:
     return repr(exc)[:500]
 
@@ -1062,7 +1074,15 @@ def _reconcile_under_lock(repo: Path, at_boot: bool) -> ReconcileResult:
   """Hold :data:`RECONCILE_LOCK` around one reconcile so the boot subprocess and
   the running uvicorn's Apply can never run two reconciles on the same repo."""
   with _reconcile_flock():
-    return reconcile_clone(repo, at_boot=at_boot)
+    result = reconcile_clone(repo, at_boot=at_boot)
+    # `upstream` is moved only by a successful/contained reconcile to the
+    # fetched release target. Capture its immutable oid before releasing the
+    # cross-process lock; local replay commits on main are intentionally not a
+    # hook trust transition.
+    return replace(
+      result,
+      hook_source_sha=_rev(repo, UPSTREAM_BRANCH) or None,
+    )
 
 
 def _short(sha: str | None) -> str:
@@ -1079,7 +1099,7 @@ def reconcile_clone_sync() -> str:
     # Even an offline/conflict pass leaves a complete served tree on disk. Hook
     # refresh is local-only, so do it on every boot rather than waiting for a
     # successful fetch that may be unrelated to the stale installed copy.
-    hook_refresh = _refresh_git_hooks(PLATFORM_REPO)
+    hook_refresh = _refresh_git_hooks(PLATFORM_REPO, res.hook_source_sha)
     summary = (
       f"reconcile[{res.status}] pre={_short(res.pre_sha)} "
       f"new={_short(res.new_sha)} target={_short(res.target_sha)}"
@@ -1332,7 +1352,9 @@ async def apply_platform_update(
     chat_id: str | None = None
 
     if res.status == "updated":
-      hook_refresh = await asyncio.to_thread(_refresh_git_hooks, repo)
+      hook_refresh = await asyncio.to_thread(
+        _refresh_git_hooks, repo, res.hook_source_sha,
+      )
       if hook_refresh:
         log.warning("git hook refresh failed after platform update: %s", hook_refresh)
       # Frontend changes rebuild into dist (served per-request, no restart);

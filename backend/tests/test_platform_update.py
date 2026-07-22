@@ -19,7 +19,7 @@ aborted on the next pass.
 
 import subprocess
 import textwrap
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -479,11 +479,11 @@ async def test_apply_rebuilds_frontend_but_no_restart_when_update_is_frontend_on
     calls.append((repo, res.new_sha))
 
   monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
-    pu.ReconcileResult("updated", served, new, new)
+    pu.ReconcileResult("updated", served, new, new, hook_source_sha=new)
   ))
   monkeypatch.setattr(
     pu, "_refresh_git_hooks",
-    lambda repo: hook_calls.append(repo) or "",
+    lambda repo, source_oid: hook_calls.append((repo, source_oid)) or "",
   )
   monkeypatch.setattr(pu, "_rebuild_frontend_after_update_if_needed", fake_rebuild)
 
@@ -494,7 +494,7 @@ async def test_apply_rebuilds_frontend_but_no_restart_when_update_is_frontend_on
   assert res["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
   assert res["needs_restart"] is False
   assert calls == [(platform, new)]
-  assert hook_calls == [platform]
+  assert hook_calls == [(platform, new)]
 
 
 def test_boot_reconcile_refreshes_copied_hooks(monkeypatch, tmp_path):
@@ -503,17 +503,53 @@ def test_boot_reconcile_refreshes_copied_hooks(monkeypatch, tmp_path):
   calls = []
   monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
   monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
-    pu.ReconcileResult("up_to_date", "pre-sha", "pre-sha", "target-sha")
+    pu.ReconcileResult(
+      "up_to_date", "pre-sha", "pre-sha", "target-sha",
+      hook_source_sha="trusted-hook-sha",
+    )
   ))
   monkeypatch.setattr(
     pu, "_refresh_git_hooks",
-    lambda repo: calls.append(repo) or "",
+    lambda repo, source_oid: calls.append((repo, source_oid)) or "",
   )
 
   summary = pu.reconcile_clone_sync()
 
-  assert calls == [platform]
+  assert calls == [(platform, "trusted-hook-sha")]
   assert "hooks=refreshed" in summary
+
+
+def test_reconcile_pins_upstream_hook_source_before_unlock(monkeypatch, tmp_path):
+  repo = tmp_path / "platform"
+  repo.mkdir()
+  events = []
+
+  @contextmanager
+  def fake_lock():
+    events.append("locked")
+    yield
+    events.append("unlocked")
+
+  def fake_reconcile(repo_path, *, at_boot):
+    assert events == ["locked"]
+    assert repo_path == repo
+    assert at_boot is True
+    return pu.ReconcileResult("up_to_date", "pre", "pre", "target")
+
+  def fake_rev(repo_path, ref):
+    assert events == ["locked"]
+    assert repo_path == repo
+    assert ref == pu.UPSTREAM_BRANCH
+    return "trusted-upstream-oid"
+
+  monkeypatch.setattr(pu, "_reconcile_flock", fake_lock)
+  monkeypatch.setattr(pu, "reconcile_clone", fake_reconcile)
+  monkeypatch.setattr(pu, "_rev", fake_rev)
+
+  result = pu._reconcile_under_lock(repo, at_boot=True)
+
+  assert events == ["locked", "unlocked"]
+  assert result.hook_source_sha == "trusted-upstream-oid"
 
 
 def _make_hook_repo(tmp_path: Path, *, complete: bool = True) -> Path:
@@ -535,6 +571,7 @@ def _make_hook_repo(tmp_path: Path, *, complete: bool = True) -> Path:
 
 def test_hook_refresh_uses_only_committed_allowlisted_sources(tmp_path):
   repo = _make_hook_repo(tmp_path)
+  source_oid = _git(repo, "rev-parse", "HEAD").stdout.strip()
   # Neither a dirty managed hook nor a newly dropped executable may run merely
   # because a healthy boot refreshes the installed copies.
   (repo / "scripts" / "pre-commit.sh").write_text("#!/bin/sh\necho DIRTY\n")
@@ -542,7 +579,7 @@ def test_hook_refresh_uses_only_committed_allowlisted_sources(tmp_path):
     "#!/bin/sh\necho UNTRACKED\n"
   )
 
-  assert pu._refresh_git_hooks(repo) == ""
+  assert pu._refresh_git_hooks(repo, source_oid) == ""
 
   hooks = repo / ".git" / "hooks"
   assert (hooks / "pre-commit").read_text() == (
@@ -558,11 +595,58 @@ def test_hook_refresh_uses_only_committed_allowlisted_sources(tmp_path):
   assert Path(configured.stdout.strip()) == hooks.resolve()
 
 
+def test_hook_refresh_reads_one_pinned_generation_when_head_moves(
+  tmp_path, monkeypatch,
+):
+  repo = _make_hook_repo(tmp_path)
+  source_oid = _git(repo, "rev-parse", "HEAD").stdout.strip()
+  expected = {
+    "pre-commit": b"#!/bin/sh\necho committed-pre-commit\n",
+    "pre-push": b"#!/bin/sh\necho committed-pre-push\n",
+  }
+
+  (repo / "scripts" / "pre-commit.sh").write_text("#!/bin/sh\necho NEW-commit\n")
+  (repo / "scripts" / "githooks" / "pre-push").write_text(
+    "#!/bin/sh\necho NEW-push\n"
+  )
+  _git(repo, "add", "scripts")
+  _git(repo, "commit", "-q", "-m", "new hook generation")
+  next_oid = _git(repo, "rev-parse", "HEAD").stdout.strip()
+  _git(repo, "reset", "--hard", "-q", source_oid)
+
+  real_hook_git = pu._hook_git
+  moved = False
+
+  def move_head_between_blob_reads(repo_path, *args):
+    nonlocal moved
+    result = real_hook_git(repo_path, *args)
+    if (
+      not moved
+      and args == (
+        "cat-file", "blob", f"{source_oid}:scripts/pre-commit.sh",
+      )
+    ):
+      moved = True
+      _git(repo, "reset", "--hard", "-q", next_oid)
+    return result
+
+  monkeypatch.setattr(pu, "_hook_git", move_head_between_blob_reads)
+
+  assert pu._refresh_git_hooks(repo, source_oid) == ""
+  assert moved is True
+  hooks = repo / ".git" / "hooks"
+  assert {
+    name: (hooks / name).read_bytes()
+    for name in expected
+  } == expected
+
+
 def test_hook_refresh_rolls_back_without_absent_destinations(
   tmp_path, monkeypatch,
 ):
   repo = _make_hook_repo(tmp_path)
-  assert pu._refresh_git_hooks(repo) == ""
+  source_oid = _git(repo, "rev-parse", "HEAD").stdout.strip()
+  assert pu._refresh_git_hooks(repo, source_oid) == ""
   hooks = repo / ".git" / "hooks"
   old = {
     name: (hooks / name).read_bytes()
@@ -574,6 +658,7 @@ def test_hook_refresh_rolls_back_without_absent_destinations(
   )
   _git(repo, "add", "scripts")
   _git(repo, "commit", "-q", "-m", "update hooks")
+  source_oid = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
   real_replace = pu.os.replace
   failed = False
@@ -592,7 +677,7 @@ def test_hook_refresh_rolls_back_without_absent_destinations(
 
   monkeypatch.setattr(pu.os, "replace", fail_second_hook_once)
 
-  result = pu._refresh_git_hooks(repo)
+  result = pu._refresh_git_hooks(repo, source_oid)
 
   assert "simulated second replacement failure" in result
   assert {(name, (hooks / name).read_bytes()) for name in old} == set(old.items())
@@ -606,26 +691,29 @@ def test_hook_refresh_missing_incomplete_and_timeout_are_nonfatal(
   (missing / "README").write_text("old checkout\n")
   _git(missing, "add", "README")
   _git(missing, "commit", "-q", "-m", "old checkout")
-  assert pu._refresh_git_hooks(missing) is None
+  missing_oid = _git(missing, "rev-parse", "HEAD").stdout.strip()
+  assert pu._refresh_git_hooks(missing, missing_oid) is None
 
   incomplete = _make_hook_repo(tmp_path / "incomplete", complete=False)
-  result = pu._refresh_git_hooks(incomplete)
+  incomplete_oid = _git(incomplete, "rev-parse", "HEAD").stdout.strip()
+  result = pu._refresh_git_hooks(incomplete, incomplete_oid)
   assert result
   assert "pre-push" in result
 
   monkeypatch.setattr(
     pu, "_refresh_git_hooks_impl",
-    lambda _repo: (_ for _ in ()).throw(
+    lambda _repo, _source_oid: (_ for _ in ()).throw(
       subprocess.TimeoutExpired(["git", "show"], timeout=15)
     ),
   )
-  assert "TimeoutExpired" in pu._refresh_git_hooks(missing)
+  assert "TimeoutExpired" in pu._refresh_git_hooks(missing, missing_oid)
 
 
 def test_hook_refresh_config_failure_keeps_complete_first_population(
   tmp_path, monkeypatch,
 ):
   repo = _make_hook_repo(tmp_path)
+  source_oid = _git(repo, "rev-parse", "HEAD").stdout.strip()
   real_hook_git = pu._hook_git
 
   def fail_config(repo_path, *args):
@@ -635,7 +723,7 @@ def test_hook_refresh_config_failure_keeps_complete_first_population(
 
   monkeypatch.setattr(pu, "_hook_git", fail_config)
 
-  result = pu._refresh_git_hooks(repo)
+  result = pu._refresh_git_hooks(repo, source_oid)
 
   assert "config locked" in result
   hooks = repo / ".git" / "hooks"
