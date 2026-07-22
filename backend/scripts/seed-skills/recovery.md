@@ -6,16 +6,30 @@ How backend edits load (restart, not live-reload), how to make them permanent, t
 
 ## Backend edits — restart to load, hand off persistence
 
-Edits to `/app/app/*.py` take effect on the **next uvicorn restart** and survive container restarts, BUT are wiped by `docker compose up --build` (a rebuild restores the image's baked code). Two failure modes to respect:
+The live backend is `/data/platform/backend/app/*.py`. Edits there take effect
+on the **next uvicorn restart** and survive container restarts and image rebuilds
+because `/data/platform` is the persistent served clone. The baked
+`/app/platform-baked` tree is a read-only recovery floor, not the normal edit
+surface. Two failure modes to respect:
 
-- **A bad import kills uvicorn at boot** — everything except `/recover` goes down. Always `python3 -m py_compile <file>` before asking for a restart; a failing compile proves you'll break boot.
-- **A container-only fix silently reverts on the next deploy.** Möbius can make the local live fix, but host-repo/release work is a handoff outside the in-product agent. If unsure, ask whether the fix is a one-off local change or needs outside persistence work. Do not push, publish, or manage external repo workflow from inside Möbius.
+- **A bad import keeps the edited tree from serving.** Boot import-probes the
+  persistent clone and falls back to the baked backend when that probe fails,
+  leaving the local tree intact for repair; `/recover` remains independently
+  available. Always `python3 -m py_compile <file>` before asking for a restart;
+  a failing compile proves the edited tree cannot pass that gate.
+- **A local fix is persistent but not upstream.** Boot preserves committed local
+  changes and reconciles them over newer `origin/main`, so an edit can survive
+  container and image deploys; a future reconcile can still conflict, and the
+  fix is not reusable by another installation. Host-repo/PR/release work is a
+  handoff outside the in-product agent. If unsure, ask whether the fix is a
+  one-off local overlay or needs an upstream handoff. Do not push, publish, or
+  manage external repo workflow from inside Möbius.
 
 All chat-persistence writes must route through the `chat_writer` actor — never assign `Chat.messages` / `Chat.pending_messages` directly (see core.md's write-surface section for why).
 
 ### The backend-fix loop
 
-1. Edit `/app/app/...py` in place; `py_compile` it.
+1. Edit `/data/platform/backend/app/...py` in place; `py_compile` it.
 2. If the main shell is healthy, ask the partner to open Settings -> Server and click **"Restart server"** (POSTs `/api/admin/restart`).
 3. If the main shell is broken, ask the partner to **open `/recover/chat` in a new browser tab** (they stay in your current chat — your session survives the restart). That chat may prompt for login: it uses the **same owner password** as the main shell, just behind a separate form. In that tab they click **"Restart server"** (POSTs `/recover/restart`, SIGTERMs uvicorn, container restarts).
 4. Restart takes ~5–15s; the page auto-reloads when healthy.

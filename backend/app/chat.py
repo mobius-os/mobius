@@ -1725,7 +1725,11 @@ async def sweep_stalled_live_runs(db: Session) -> list[str]:
       continue
     exemption = _stall_exemption(db, chat_id, now_wall)
     if exemption is not None:
-      log.info(
+      # Pending questions and limit parks can remain open for hours. The sweep
+      # runs every minute, so INFO here turns one healthy exemption into an
+      # unbounded stream of duplicate chat.log lines. Debug status already
+      # exposes the live state; retain the per-tick trace only in debug mode.
+      log.debug(
         "stalled-live watchdog skipped chat_id=%s exemption=%s",
         chat_id, exemption,
       )
