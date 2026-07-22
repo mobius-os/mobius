@@ -3768,6 +3768,7 @@ export default function ChatView({
               <MsgContent
                 msg={msg}
                 chatId={chatId}
+                messageKey={dataKey}
                 onQuestionAnswer={doSendSilent}
                 onResume={doSend}
                 onInternalNav={internalNav}

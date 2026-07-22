@@ -26,19 +26,22 @@ test('toggle position is corrected from the DOM mutation before rAF', () => {
   }
 
   try {
-    const parentElement = {}
+    const body = {}
     const scroller = { scrollTop: 40 }
     let top = 120
     const anchor = {
-      parentElement,
+      parentElement: {},
+      nextElementSibling: body,
       closest: () => scroller,
       getBoundingClientRect: () => ({ top }),
     }
 
     preserveTogglePosition(anchor)
-    assert.equal(observedNode, parentElement)
-    assert.deepEqual(observedOptions, { childList: true },
-      'live descendant churn must not win the disclosure mutation race')
+    assert.equal(observedNode, body)
+    assert.deepEqual(observedOptions, {
+      attributes: true,
+      attributeFilter: ['hidden'],
+    }, 'the body visibility commit must be the exact correction boundary')
 
     top = 155
     mutationCallback()
@@ -81,6 +84,44 @@ test('rAF remains a fallback when MutationObserver is unavailable', () => {
     assert.equal(scroller.scrollTop, 8)
   }
   finally {
+    globalThis.MutationObserver = originalMutationObserver
+    globalThis.requestAnimationFrame = originalRaf
+  }
+})
+
+test('toggle preservation never exempts a disclosure because follow was active', () => {
+  const originalMutationObserver = globalThis.MutationObserver
+  const originalRaf = globalThis.requestAnimationFrame
+  let observed = false
+  let scheduled = false
+  globalThis.MutationObserver = class {
+    constructor() {}
+    observe() { observed = true }
+    disconnect() {}
+  }
+  globalThis.requestAnimationFrame = () => {
+    scheduled = true
+    return 1
+  }
+
+  try {
+    const scroller = {
+      // Regression guard: an earlier implementation published this marker and
+      // used it to bypass preservation, replaying follow after the toggle.
+      dataset: { scrollMode: 'FOLLOW_BOTTOM' },
+      scrollTop: 30,
+      querySelector: () => null,
+    }
+    const body = {}
+    const anchor = {
+      closest: () => scroller,
+      getAttribute: () => 'false',
+      getBoundingClientRect: () => ({ top: 80 }),
+    }
+    preserveTogglePosition(anchor, body)
+    assert.equal(observed, true)
+    assert.equal(scheduled, true)
+  } finally {
     globalThis.MutationObserver = originalMutationObserver
     globalThis.requestAnimationFrame = originalRaf
   }
