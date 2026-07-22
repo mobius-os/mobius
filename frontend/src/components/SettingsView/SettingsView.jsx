@@ -45,6 +45,9 @@ const RETURN_VIEW_KEY = 'mobius:return-view'
 const RESTART_POLL_INTERVAL_MS = 1500
 const RESTART_POLL_MAX = 40
 const RESTART_SHELL_READY_PATH = '/shell/'
+const PLATFORM_APPLY_STATES = new Set([
+  'restart_needed', 'up_to_date', 'conflict', 'rolled_back',
+])
 const PROVIDER_CHOICES = [
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
@@ -52,6 +55,32 @@ const PROVIDER_CHOICES = [
 const FALLBACK_MODEL_ROWS = {
   claude: CLAUDE_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
   codex: CODEX_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
+}
+
+// POST /platform/apply is the authoritative outcome of the mutation it just
+// performed. Project that result into the status shape immediately so a failed
+// follow-up GET /status cannot leave Settings claiming the old state. A fresh
+// successful status response still replaces this fallback in refreshPlatform.
+function platformStatusFromApply(previous, result) {
+  const state = result.state
+  const upstream = result.upstream_commit || previous?.recorded_upstream_sha || null
+  const clean = state === 'restart_needed' || state === 'up_to_date'
+  return {
+    ...(previous || {}),
+    state,
+    available: state === 'rolled_back',
+    needs_restart: state === 'restart_needed' || !!result.needs_restart,
+    current_build_sha: previous?.current_build_sha || null,
+    recorded_upstream_sha: upstream,
+    contained_upstream_sha: clean
+      ? (result.upstream_commit || previous?.contained_upstream_sha || null)
+      : (previous?.contained_upstream_sha || null),
+    seed_required: false,
+    conflict_paths: Array.isArray(result.conflict_paths)
+      ? result.conflict_paths
+      : [],
+    conflict_chat_id: state === 'conflict' ? (result.chat_id || null) : null,
+  }
 }
 
 function defaultEffort(provider) {
@@ -328,6 +357,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // it so the owner reviews the incoming changes before applying, rather than
   // Apply firing on the first click.
   const [reviewOpen, setReviewOpen] = useState(false)
+  // Every update-row action occupies the same conditional slot. Keep one ref
+  // on that slot so closing the review can focus the live replacement button
+  // after refreshPlatform swaps Review for Restart/Resolve/Check.
+  const platformActionRef = useRef(null)
   // 'idle' | 'checking' | 'checked' | 'error' — the "Check for updates" button
   // asks the service worker to re-check cached frontend assets and re-reads
   // /api/version. 'checked' is a short-lived success label when no update is
@@ -914,25 +947,40 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // Apply the reviewed update: merge the fetched platform release into the live
   // backend. Clean -> the row flips to "restart needed"; conflict -> show a
   // resolver action, but wait for the owner's click before opening an agent
-  // chat. Returns whether the apply landed cleanly so the review sheet can close
-  // on success and keep itself open (showing the error) on failure.
+  // chat. Returns the domain outcome (not merely HTTP success) so the review
+  // sheet closes only for a clean apply and becomes an explicit result when
+  // the update was blocked.
   async function applyPlatformUpdate() {
-    if (platformPhase !== 'idle') return false
+    if (platformPhase !== 'idle') return { ok: false }
     setPlatformError('')
     setPlatformPhase('applying')
     try {
       const res = await api.platform.apply()
+      let body = null
+      try { body = await res.json() } catch {}
       if (!res.ok) {
-        let detail = ''
-        try { detail = (await res.json())?.detail || '' } catch {}
+        const detail = body?.detail || ''
         setPlatformError(detail ? `Update failed: ${detail}` : 'Update failed — the instance is unchanged.')
-        return false
+        return { ok: false }
+      }
+      const state = typeof body?.state === 'string' ? body.state : ''
+      if (PLATFORM_APPLY_STATES.has(state)) {
+        setPlatform(current => platformStatusFromApply(current, body))
       }
       await refreshPlatform()
-      return true
+      if (state === 'restart_needed' || state === 'up_to_date') {
+        return { ok: true, state }
+      }
+      if (state === 'conflict' || state === 'rolled_back') {
+        return { ok: false, state }
+      }
+      setPlatformError(
+        'The update returned an unexpected result. This review will stay open — check the current status before trying again.',
+      )
+      return { ok: false, state }
     } catch {
       setPlatformError('Update failed — the instance is unchanged.')
-      return false
+      return { ok: false }
     } finally {
       setPlatformPhase('idle')
     }
@@ -974,6 +1022,16 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     if (platformPhase !== 'idle' || !platform?.available) return
     setPlatformError('')
     setReviewOpen(true)
+  }
+
+  function closeUpdateReview() {
+    setReviewOpen(false)
+    // useDialogFocus first restores the opener captured at mount. A successful
+    // apply can replace that node during refreshPlatform, so focus the live
+    // conditional action after React commits the close and replacement.
+    requestAnimationFrame(() => {
+      platformActionRef.current?.focus({ preventScroll: true })
+    })
   }
 
   // Poll until the restart is actually safe to navigate. A plain successful
@@ -1341,7 +1399,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 color={platformConflict || platformRolledBack || platformRestart || updateAvailable ? '--accent' : '--green'}
               >
                 {platformConflict
-                  ? 'Resolving a conflict'
+                  ? 'Update blocked'
                   : platformRolledBack
                     ? 'Update needs repair'
                     : platformRestart
@@ -1361,6 +1419,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
             {platformConflict ? (
               onOpenChat ? (
                 <button
+                  ref={platformActionRef}
                   className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
                   type="button"
                   onClick={resolvePlatformConflict}
@@ -1375,6 +1434,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               ) : null
             ) : platformRestart ? (
               <button
+                ref={platformActionRef}
                 className="settings__btn settings__btn--sm settings__btn--nowrap"
                 type="button"
                 onClick={restartToFinish}
@@ -1388,6 +1448,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               </button>
             ) : updateAvailable ? (
               <button
+                ref={platformActionRef}
                 className="settings__btn settings__btn--sm settings__btn--nowrap"
                 type="button"
                 onClick={openUpdateReview}
@@ -1402,6 +1463,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               // If the check surfaces an update, this slot re-renders to the
               // Update button on the next paint.
               <button
+                ref={platformActionRef}
                 className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
                 type="button"
                 onClick={checkForUpdates}
@@ -1423,9 +1485,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
 
         {reviewOpen && (
           <UpdateReviewModal
-            onClose={() => setReviewOpen(false)}
+            onClose={closeUpdateReview}
             onApply={applyPlatformUpdate}
+            onResolve={resolvePlatformConflict}
             applying={platformPhase === 'applying'}
+            resolving={platformPhase === 'resolving'}
             applyError={platformError}
           />
         )}
