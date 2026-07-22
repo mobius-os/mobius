@@ -1412,6 +1412,15 @@
   padding-block: 2px var(--activity-row-gap, 4px);
 }
 
+/* A lone thought discloses directly through the same activity header used by
+   the pre-first-event placeholder. Only its body needs the reasoning indent;
+   the closed row therefore keeps identical geometry while it changes from a
+   static placeholder into a real button. */
+.chat__activity--direct-thought .chat__reasoning-body {
+  margin-inline-start: 20px;
+  padding-block: 2px var(--activity-row-gap, 4px);
+}
+
 .chat__reasoning-load {
   display: inline-block;
   padding: 3px 0;
@@ -1490,6 +1499,7 @@
   .chat__empty-action,
   .chat__quick-action-chip,
   .chat__activity-header:not(.chat__activity-header--static),
+  .chat__activity-header--reserve-interactive,
   .chat__activity-think-toggle,
   .chat__tool-header:not(.chat__tool-header--static),
   .chat__activity-timeline .chat__tool-header:not(.chat__tool-header--static),

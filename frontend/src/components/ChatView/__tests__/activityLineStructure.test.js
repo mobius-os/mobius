@@ -30,7 +30,7 @@ test('reasoning markdown has a scoped quiet typography lane', () => {
     'bold lead-ins should not dominate the activity timeline')
 })
 
-test('placeholder and real stretches render through the shared activity header', () => {
+test('placeholder and the first real thought render through the shared activity header', () => {
   const placeholderStart = chatView.indexOf('className="chat__tools chat__thinking"')
   const placeholderEnd = chatView.indexOf('</li>', placeholderStart)
   const placeholder = chatView.slice(placeholderStart, placeholderEnd)
@@ -42,8 +42,13 @@ test('placeholder and real stretches render through the shared activity header',
   assert.ok(placeholderStart >= 0, 'placeholder should use the standard activity wrapper')
   assert.match(placeholder, /className="chat__activity chat__activity--running"/)
   assert.match(placeholder, /<ActivityLineHeader/)
+  assert.match(placeholder, /reserveInteractiveGeometry/,
+    'the static placeholder must reserve the eventual touch-target geometry')
   assert.doesNotMatch(placeholder, /chat__activity-icon|chat__activity-label/,
     'placeholder must not duplicate shared header internals')
+  assert.match(activityStretch,
+    /direct \? \([\s\S]*<ActivityLineHeader[\s\S]*interactive/,
+    'the direct first-thought branch must use the same header, not only grouped stretches')
   assert.doesNotMatch(chatCss, /\.chat__thinking\s*\{/,
     'the e2e presence hook must not carry layout compensation')
 })
@@ -84,7 +89,7 @@ test('a single activity discloses directly without a redundant parent row', () =
   assert.match(activityStretch, /if \(entries\.length === 1\)/)
   assert.match(activityStretch, /<SingleActivity[\s\S]*entry=\{entries\[0\]\}/)
   assert.match(activityStretch,
-    /item\.type === 'thinking'[\s\S]*<TimelineThought[\s\S]*key=\{assistantBlockKey\(item, idx\)\}/)
+    /item\.type === 'thinking'[\s\S]*<TimelineThought[\s\S]*direct[\s\S]*live=\{live\}/)
   assert.match(activityStretch, /<ToolBlock[\s\S]*key=\{assistantBlockKey\(item, idx\)\}/)
 })
 
