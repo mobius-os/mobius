@@ -76,7 +76,23 @@ Read `inputs/meta-state.md` first. It is your compact current operating model of
 
 Read `inputs/resource-snapshot.json`, `inputs/resource-history.jsonl`, and `inputs/resource-decisions.jsonl` in the same pass. The snapshot already paid for tonight's observation: it always contains cheap disk/cgroup counters and contains a bounded deep `/data` inventory only when due, under pressure, or after unusual growth. The history supplies recent trends and the last deep inventory; the decisions ledger says what prior runs changed, the measured result, when to look again, and what trigger permits an earlier review. **Do not rerun broad `du`, recursive `find`, browser sweeps, or equivalent diagnostics when the snapshot is fresh and the relevant decision is neither due nor triggered.** Missing or failed telemetry is a reason to repair telemetry, not permission to launch an unbounded scan.
 
-Also read `inputs/prev-question-answers.json` here (present when the partner tapped a recent brief's question cards). Those answers were saved for THIS run — no live agent waited on them. Note each decision now and **act on it in phase 2**: build the feature they picked, apply the fix they approved, drop the declines. Absent on first runs or when no questions were asked → move on.
+Also read `inputs/prev-question-answers.json` here when present. Those answers
+were saved for THIS run — no live agent waited on them. Note each decision now
+and **act on it in phase 2**: build the feature they picked, apply the fix they
+approved, drop the declines. The staged file is the newest answer record, not
+necessarily an answer to `prev-report.html`; use its `report_date` when relating
+it to a particular brief.
+
+**Question-engagement evidence must be report-aligned.** Read
+`inputs/prev-report-name.txt` for the previous report's date and inspect
+`inputs/prev-report.html` for a valid, non-empty
+`application/mobius-questions+json` carrier. Infer that the previous brief's
+cards were unanswered only when that exact report really contained questions
+and no staged answer record has the same `report_date`. A missing carrier or an
+empty questions array means the run asked nothing, so it supplies no
+non-response evidence. A mismatched older answer record proves neither that the
+previous brief asked questions nor that its cards were ignored. One unanswered
+brief is a weak channel signal, never a durable partner preference.
 
 ### 1. INTROSPECTION — interview the agents worth interviewing (summary-first triage)
 
@@ -394,7 +410,16 @@ Copy this skeleton — the template (and the base style the app injects into eve
 
 Be ruthless below the lede: a section with nothing that clears the trigger/why/next-action bar gets deleted, not padded, and a one-item night is a fine brief. The exec-summary is never collapsed; everything else defaults shut.
 
-**Honor the brief-style setting.** Use the `verbosity` value supplied in tonight's goal from canonical numeric app storage (`/data/apps/<Reflection app id>/settings.json`): `terse` = TL;DR plus keypoints plus only the must-act items, everything else dropped entirely; `standard` = the default above; `chatty` = the partner has opted into more narrative, so the lead paragraphs *inside* the collapsed items may run longer (the TL;DR cap and collapsed-by-default details still hold). Do not read settings from the `/data/apps/reflection` source directory. Absent or unrecognized → treat as `standard`.
+**Adapt the brief instead of obeying a fixed style control.** Start concise: a
+TL;DR, keypoints, and only items that clear the trigger/why/next-action bar.
+Compare `prev-report.html` with what changed tonight; compress repeated context
+and spend detail only where it improves a decision or explains a concrete
+result. Use the report-aligned engagement evidence above to ask fewer, sharper
+questions when cards are low-yield, but do not treat one unanswered brief as a
+request for less writing. The collapsed details can carry necessary narrative;
+the TL;DR cap and collapsed-by-default contract remain fixed. There is no
+`verbosity`, `focus`, or `avoid` setting to honor — editorial judgment belongs
+to the Reflection agent each run.
 
 **Put the questions IN the brief as tappable cards — the in-report contract.** The partner answers your decisions by tapping cards rendered *in the brief itself*, and those answers are saved for your **NEXT run** — not collected by a live agent. This is the durable replacement for the old "post AskUserQuestion cards in a morning chat" flow: a background/morning agent that calls `AskUserQuestion` parks a synchronous in-memory future that a server reset orphans, freezing the night. Instead, **emit the questions declaratively inside the brief HTML** and let the app render the cards.
 

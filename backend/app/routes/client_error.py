@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app import activity
+from app.chat_log_redaction import scrub_secrets
 from app.deps import Principal, get_principal, reject_cross_site
 
 router = APIRouter(prefix="/api/client-error", tags=["client-error"])
@@ -44,16 +45,19 @@ def report_client_error(
   that differ only past the cap still collapse — so a render loop can't flood
   the log.
   """
-  message = body.message[:_MSG_MAX]
+  # Treat the server as the final retention boundary. A stale or hostile
+  # client can bypass the frame scrubber, so scrub every retained text field
+  # before debounce, truncation, and the activity.jsonl write.
+  message = scrub_secrets(body.message)[:_MSG_MAX]
   if not activity.should_emit_app_error(principal.app_id, message):
     return  # debounced — already recorded within the window; still 204
   fields: dict[str, object] = {"message": message}
   if principal.app_id is not None:
     fields["app_id"] = principal.app_id
   if body.where:
-    fields["where"] = body.where[:_WHERE_MAX]
+    fields["where"] = scrub_secrets(body.where)[:_WHERE_MAX]
   if body.stack:
-    fields["stack"] = body.stack[:_STACK_MAX]
+    fields["stack"] = scrub_secrets(body.stack)[:_STACK_MAX]
   if body.url:
-    fields["url"] = body.url[:_URL_MAX]
+    fields["url"] = scrub_secrets(body.url)[:_URL_MAX]
   activity.log_event("app_error", **fields)

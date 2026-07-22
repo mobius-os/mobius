@@ -7,6 +7,7 @@ import Sun from 'lucide-react/dist/esm/icons/sun.mjs'
 import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
+import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
 import {
   PROVIDER_AVAILABILITY_PHASE,
   resolveProviderAvailability,
@@ -56,6 +57,10 @@ const FALLBACK_MODEL_ROWS = {
   claude: CLAUDE_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
   codex: CODEX_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
 }
+const DEFAULT_BACKGROUND_MODELS = {
+  claude: 'claude-opus-4-8',
+  codex: 'gpt-5.6-terra',
+}
 
 // POST /platform/apply is the authoritative outcome of the mutation it just
 // performed. Project that result into the status shape immediately so a failed
@@ -92,6 +97,10 @@ function defaultModel(provider) {
   return FALLBACK_MODEL_ROWS[provider]?.[0]?.id || ''
 }
 
+function defaultBackgroundModel(provider) {
+  return DEFAULT_BACKGROUND_MODELS[provider] || defaultModel(provider)
+}
+
 function isKnownProvider(provider) {
   return PROVIDER_CHOICES.some(p => p.id === provider)
 }
@@ -112,7 +121,7 @@ function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude')
     if (!provider || seen.has(provider)) return
     rows.push({
       provider,
-      model: choice?.model || defaultModel(provider),
+      model: choice?.model || defaultBackgroundModel(provider),
       effort: choice?.effort || defaultEffort(provider),
       enabled: Object.prototype.hasOwnProperty.call(choice || {}, 'enabled')
         ? choice.enabled !== false
@@ -438,6 +447,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
   const setupFocusRefs = useRef({})
   const [attentionSection, setAttentionSection] = useState('')
+  const configuredProvidersRef = useRef(configuredProviders)
+  const authProvidersAtStartRef = useRef(null)
+  configuredProvidersRef.current = configuredProviders
 
   const setSetupFocusRef = useCallback((section, node) => {
     if (node) setupFocusRefs.current[section] = node
@@ -491,14 +503,15 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     return FALLBACK_MODEL_ROWS[provider] || []
   }, [modelRegistryQuery.data])
 
-  const persistBackgroundAgents = useCallback((draft) => {
+  const persistBackgroundAgents = useCallback((draft, companionSettings = {}) => {
     const rows = Array.isArray(draft) ? draft : []
     const enabled = rows.filter(row => row.enabled !== false)
     if (!enabled.length) {
       setBackgroundError('Choose at least one background model.')
-      return Promise.resolve()
+      return Promise.resolve(false)
     }
     const reqId = ++backgroundSaveReqRef.current
+    const isCompanionSave = Object.keys(companionSettings).length > 0
     setBackgroundError('')
     const save = backgroundSaveChainRef.current.catch(() => {}).then(async () => {
       try {
@@ -517,18 +530,25 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           primary: toChoice(enabled[0]),
           fallback: enabled[1] ? toChoice(enabled[1]) : null,
         }
-        const res = await api.settings.save({ background_agents: payload })
-        if (reqId !== backgroundSaveReqRef.current) return
-        if (!res.ok) {
-          let detail = ''
-          try { detail = (await res.json()).detail || '' } catch {}
-          throw new Error(detail || 'Could not save background agents.')
-        }
+        // A first provider connection also establishes the interactive default.
+        // Keep that transition in one settings write so disk failure cannot
+        // persist one half while the UI reports the whole setup as complete.
+        const res = await api.settings.save({
+          ...companionSettings,
+          background_agents: payload,
+        })
+        const { stale } = await settleBackgroundAgentSave(
+          res,
+          () => reqId !== backgroundSaveReqRef.current,
+        )
+        if (stale) return true
         settingsQueries.owner.invalidate(queryClient)
+        return true
       } catch (err) {
-        if (reqId === backgroundSaveReqRef.current) {
+        if (reqId === backgroundSaveReqRef.current || isCompanionSave) {
           setBackgroundError(err.message || 'Could not save background agents.')
         }
+        return false
       }
     })
     backgroundSaveChainRef.current = save
@@ -725,20 +745,61 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // render, which combined with the row's CSS transitions made the
   // panel feel jittery. With the updater form, deps are empty.
   const toggleClaudeAuth = useCallback(
-    () => setExpandedAuth(prev => prev === 'claude' ? null : 'claude'),
+    () => setExpandedAuth(prev => {
+      if (prev !== 'claude') {
+        authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
+      }
+      return prev === 'claude' ? null : 'claude'
+    }),
     [],
   )
   const toggleCodexAuth = useCallback(
-    () => setExpandedAuth(prev => prev === 'codex' ? null : 'codex'),
+    () => setExpandedAuth(prev => {
+      if (prev !== 'codex') {
+        authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
+      }
+      return prev === 'codex' ? null : 'codex'
+    }),
     [],
   )
-  const onClaudeAuthDone = useCallback(() => {
-    setExpandedAuth(null)
-  }, [])
-  const onCodexAuthDone = useCallback(() => {
+  const onProviderConnected = useCallback(async (provider) => {
+    const providersBefore = authProvidersAtStartRef.current || configuredProviders
+    const newlyConnected = !providersBefore.has(provider)
+    if (newlyConnected) {
+      const current = backgroundDraftRef.current || normalizeBackgroundAgents(
+        settingsQuery.data?.background_agents,
+        providerFromSettings(settingsQuery.data),
+      )
+      const connectedRow = {
+        ...(current.find(row => row.provider === provider) || { provider }),
+        enabled: true,
+        model: defaultBackgroundModel(provider),
+        effort: defaultEffort(provider),
+      }
+      const rest = current.filter(row => row.provider !== provider)
+      const next = providersBefore.size === 0
+        ? [connectedRow, ...rest.map(row => ({ ...row, enabled: false }))]
+        : current.map(row => row.provider === provider ? connectedRow : row)
+      backgroundDraftRef.current = next
+      setBackgroundDraft(next)
+      const saved = await persistBackgroundAgents(
+        next,
+        providersBefore.size === 0 ? { provider } : {},
+      )
+      // Authentication itself succeeded, but keep the panel and visible error
+      // in place until its associated defaults are durably saved.
+      if (!saved) return
+    }
+    authProvidersAtStartRef.current = null
     settingsQueries.owner.invalidate(queryClient)
     setExpandedAuth(null)
-  }, [queryClient])
+  }, [configuredProviders, persistBackgroundAgents, queryClient, settingsQuery.data])
+  const onClaudeAuthDone = useCallback(() => {
+    onProviderConnected('claude')
+  }, [onProviderConnected])
+  const onCodexAuthDone = useCallback(() => {
+    onProviderConnected('codex')
+  }, [onProviderConnected])
 
   async function toggleTheme() {
     if (themeSwitching) return
@@ -1285,7 +1346,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                       }}
                       onModelChange={(model, effort) => setBackgroundProviderChoice(row.provider, {
                         enabled: !!model,
-                        model: model || defaultModel(row.provider),
+                        model: model || defaultBackgroundModel(row.provider),
                         ...(effort ? { effort } : {}),
                       })}
                       onEffortChange={(effort) => setBackgroundProviderChoice(row.provider, { effort })}

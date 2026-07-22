@@ -1,4 +1,6 @@
 import asyncio
+import signal
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -17,9 +19,13 @@ from app.runner_registry import RunnerKind, registry
 class _FakeBroadcast:
   def __init__(self):
     self.events: list[dict] = []
+    self.lifecycle_events: list[dict] = []
 
   def publish(self, event: dict) -> None:
     self.events.append(event)
+
+  def record_lifecycle(self, event: dict) -> None:
+    self.lifecycle_events.append(event)
 
 
 class _FakeCodexConfig:
@@ -132,6 +138,7 @@ def _fake_sdk(async_codex_cls):
 
   return {
     "AgentMessageDeltaNotification": _Dummy,
+    "AgentMessageThreadItem": _Dummy,
     "ApprovalMode": _FakeApprovalMode,
     "AsyncCodex": async_codex_cls,
     "CodexConfig": _FakeCodexConfig,
@@ -661,7 +668,7 @@ def test_run_codex_sdk_turn_resume_validation_error_now_propagates(monkeypatch, 
   assert "rejected subAgentActivity history" not in caplog.text
 
 
-def test_subagent_activity_item_dispatch_is_noop():
+def test_subagent_activity_item_dispatch_stays_out_of_tool_stream():
   # The native subAgentActivity marker is classified explicitly at both
   # dispatch sites as a no-op: it opens and closes no Möbius tool block (the
   # live delegation rides CollabAgentToolCallThreadItem's Task events instead).
@@ -676,6 +683,322 @@ def test_subagent_activity_item_dispatch_is_noop():
 
   assert codex_sdk_runner._tool_start_event(item, sdk) is None
   assert codex_sdk_runner._tool_completed_events(item, sdk) == []
+
+  started = codex_sdk_runner._subagent_lifecycle_event(
+    item, sdk, provider_session_id="root-thread", occurred_at=123_000,
+    provider_activation_id="activation-1",
+  )
+  assert started["type"] == "agent_lifecycle"
+  assert started["provider"] == "codex"
+  assert started["provider_session_id"] == "root-thread"
+  assert started["provider_agent_id"] == "thread-1"
+  assert started["event_type"] == "agent_started"
+  assert started["state"] == "running"
+  assert started["summary"] == "/root/scout"
+  assert started["occurred_at"] == 123_000
+  assert started["provider_activation_id"] == "activation-1"
+
+  item.kind = "interrupted"
+  assert codex_sdk_runner._subagent_lifecycle_event(
+    item, sdk, provider_session_id="root-thread",
+  )["event_type"] == "agent_terminal"
+
+
+def test_codex_lifecycle_reactivation_and_terminal_state_mapping():
+  class CollabItem:
+    pass
+
+  class AgentState:
+    def __init__(self, status, message=None):
+      self.status = status
+      self.message = message
+
+  sdk = {"CollabAgentToolCallThreadItem": CollabItem}
+  item = CollabItem()
+  item.id = "call-resume"
+  item.tool = "resumeAgent"
+  item.sender_thread_id = "root-thread"
+  item.receiver_thread_ids = ["child-thread"]
+  item.prompt = "Continue the review"
+  item.agents_states = {}
+  active = {}
+  known = set()
+  by_call = {}
+  last = {}
+
+  starts = codex_sdk_runner._collab_reactivation_events(
+    item, sdk, root_thread_id="root-thread", occurred_at=123_000,
+    active=active, known=known,
+    activation_by_call_child=by_call, last_activation_by_child=last,
+  )
+  assert len(starts) == 1
+  assert starts[0]["provider_activation_id"] == "call-resume:child-thread"
+  assert starts[0]["parent_kind"] == "main"
+  assert starts[0]["occurred_at"] == 123_000
+  assert active == {"child-thread": "call-resume:child-thread"}
+
+  item.agents_states = {
+    "child-thread": AgentState("completed", "Review complete"),
+  }
+  terminals = codex_sdk_runner._collab_completion_events(
+    item, sdk, root_thread_id="root-thread", occurred_at=125_000,
+    active=active, known=known,
+    activation_by_call_child=by_call, last_activation_by_child=last,
+  )
+  assert len(terminals) == 1
+  assert terminals[0]["state"] == "done"
+  assert terminals[0]["provider_activation_id"] == "call-resume:child-thread"
+  assert terminals[0]["occurred_at"] == 125_000
+  assert active == {}
+
+
+def test_codex_thread_status_closes_known_child_and_ignores_root():
+  class StatusPayload:
+    def __init__(self, thread_id, status):
+      self.thread_id = thread_id
+      self.status = SimpleNamespace(root=SimpleNamespace(type=status))
+
+  active = {"child": "activation-1"}
+  known = {"child"}
+  counts = {}
+  last = {}
+  done = codex_sdk_runner._thread_status_lifecycle_event(
+    StatusPayload("child", "idle"), root_thread_id="root",
+    active=active, known=known, activation_counts=counts,
+    last_activation_by_child=last,
+  )
+  assert done["event_type"] == "agent_terminal"
+  assert done["state"] == "done"
+  assert done["provider_activation_id"] == "activation-1"
+  assert active == {}
+  assert codex_sdk_runner._thread_status_lifecycle_event(
+    StatusPayload("root", "idle"), root_thread_id="root",
+    active={"root": "bad"}, known={"root"}, activation_counts={},
+    last_activation_by_child={},
+  ) is None
+
+
+def test_codex_late_completion_targets_its_call_without_closing_new_activation():
+  class CollabItem:
+    pass
+
+  class AgentState:
+    def __init__(self, status):
+      self.status = status
+      self.message = None
+
+  class StatusPayload:
+    def __init__(self, status):
+      self.thread_id = "child"
+      self.status = SimpleNamespace(root=SimpleNamespace(type=status))
+
+  sdk = {"CollabAgentToolCallThreadItem": CollabItem}
+  active, by_call, last, counts = {}, {}, {}, {}
+  known = set()
+
+  def call(call_id, operation="resumeAgent"):
+    item = CollabItem()
+    item.id = call_id
+    item.tool = operation
+    item.sender_thread_id = "root"
+    item.receiver_thread_ids = ["child"]
+    item.prompt = "Continue"
+    item.agents_states = {}
+    return item
+
+  call_a = call("call-a")
+  start_a = codex_sdk_runner._collab_reactivation_events(
+    call_a, sdk, root_thread_id="root", occurred_at=100,
+    active=active, known=known, activation_by_call_child=by_call,
+    last_activation_by_child=last,
+  )
+  assert start_a[0]["provider_activation_id"] == "call-a:child"
+
+  # Status is a useful observed terminal, but the call association survives so
+  # a later exact completion can still refine this same activation.
+  observed_done = codex_sdk_runner._thread_status_lifecycle_event(
+    StatusPayload("idle"), root_thread_id="root", active=active, known=known,
+    activation_counts=counts, last_activation_by_child=last,
+  )
+  assert observed_done["provider_activation_id"] == "call-a:child"
+  assert active == {}
+
+  call_b = call("call-b")
+  start_b = codex_sdk_runner._collab_reactivation_events(
+    call_b, sdk, root_thread_id="root", occurred_at=200,
+    active=active, known=known, activation_by_call_child=by_call,
+    last_activation_by_child=last,
+  )
+  assert start_b[0]["provider_activation_id"] == "call-b:child"
+  call_a.agents_states = {"child": AgentState("errored")}
+  late_a = codex_sdk_runner._collab_completion_events(
+    call_a, sdk, root_thread_id="root", occurred_at=250,
+    active=active, known=known, activation_by_call_child=by_call,
+    last_activation_by_child=last,
+  )
+  assert late_a[0]["provider_activation_id"] == "call-a:child"
+  assert late_a[0]["state"] == "failed"
+  assert active == {"child": "call-b:child"}
+
+
+def test_codex_input_to_running_child_is_progress_and_nested_spawn_uses_current_parent():
+  class CollabItem:
+    pass
+
+  sdk = {"CollabAgentToolCallThreadItem": CollabItem}
+  active = {"child": "resume-b:child"}
+  known = {"child"}
+  by_call, last = {}, {"child": "resume-b:child"}
+  item = CollabItem()
+  item.id = "send-input"
+  item.tool = "sendInput"
+  item.sender_thread_id = "root"
+  item.receiver_thread_ids = ["child"]
+  item.prompt = "One more check"
+  assert codex_sdk_runner._collab_reactivation_events(
+    item, sdk, root_thread_id="root", occurred_at=300,
+    active=active, known=known, activation_by_call_child=by_call,
+    last_activation_by_child=last,
+  ) == []
+  assert active == {"child": "resume-b:child"}
+  assert by_call[("send-input", "child")] == "resume-b:child"
+
+  payload = SimpleNamespace(thread=SimpleNamespace(
+    id="grandchild", parent_thread_id="child", agent_role="reviewer",
+    agent_nickname=None, preview="Review", created_at=301,
+  ))
+  nested = codex_sdk_runner._thread_started_lifecycle_event(
+    payload, root_thread_id="root",
+    parent_provider_activation_id=active["child"],
+  )
+  assert nested["parent_kind"] == "agent"
+  assert nested["parent_provider_activation_id"] == "resume-b:child"
+
+
+def test_run_codex_sdk_turn_dispatches_lifecycle_sequence_with_late_exact_fact(
+  monkeypatch,
+):
+  class CollabItem:
+    def __init__(self, item_id, tool, receivers, states=None):
+      self.id = item_id
+      self.tool = tool
+      self.sender_thread_id = "root"
+      self.receiver_thread_ids = receivers
+      self.agents_states = states or {}
+      self.prompt = "Delegate"
+
+  class AgentState:
+    def __init__(self, status):
+      self.status = status
+      self.message = status
+
+  class ItemStarted:
+    def __init__(self, item, at):
+      self.item = item
+      self.started_at_ms = at
+
+  class ItemCompleted:
+    def __init__(self, item, at):
+      self.item = item
+      self.completed_at_ms = at
+
+  class ThreadStarted:
+    def __init__(self, thread):
+      self.thread = thread
+
+  class ThreadStatus:
+    def __init__(self, thread_id, status):
+      self.thread_id = thread_id
+      self.status = SimpleNamespace(root=SimpleNamespace(type=status))
+
+  class SubActivity:
+    def __init__(self):
+      self.id = "late-interrupt"
+      self.kind = "interrupted"
+      self.agent_path = "/root/child"
+      self.agent_thread_id = "child"
+
+  spawn = CollabItem("call-a", "spawnAgent", ["child"])
+  resume = CollabItem("call-b", "resumeAgent", ["child"])
+  late_spawn = CollabItem(
+    "call-a", "spawnAgent", ["child"], {"child": AgentState("errored")},
+  )
+  done_resume = CollabItem(
+    "call-b", "resumeAgent", ["child"], {"child": AgentState("completed")},
+  )
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(method="item/started", payload=ItemStarted(spawn, 100)),
+    SimpleNamespace(method="thread/started", payload=ThreadStarted(SimpleNamespace(
+      id="child", parent_thread_id="root", agent_role="researcher",
+      agent_nickname=None, preview="Research", created_at=101,
+    ))),
+    SimpleNamespace(method="thread/status/changed", payload=ThreadStatus("child", "idle")),
+    SimpleNamespace(method="item/started", payload=ItemStarted(resume, 200)),
+    SimpleNamespace(method="item/completed", payload=ItemCompleted(done_resume, 260)),
+    SimpleNamespace(method="thread/started", payload=ThreadStarted(SimpleNamespace(
+      id="grandchild", parent_thread_id="child", agent_role="reviewer",
+      agent_nickname=None, preview="Review", created_at=270,
+    ))),
+    SimpleNamespace(method="item/started", payload=ItemStarted(SubActivity(), 275)),
+    SimpleNamespace(method="item/completed", payload=ItemCompleted(late_spawn, 250)),
+    SimpleNamespace(
+      method="turn/completed", payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ]
+  thread = _FakeThread("root", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk.update({
+    "CollabAgentToolCallThreadItem": CollabItem,
+    "ItemStartedNotification": ItemStarted,
+    "ItemCompletedNotification": ItemCompleted,
+    "ThreadStartedNotification": ThreadStarted,
+    "ThreadStatusChangedNotification": ThreadStatus,
+    "SubAgentActivityThreadItem": SubActivity,
+  })
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+
+  async def no_links(*_args, **_kwargs):
+    return None
+
+  monkeypatch.setattr(codex_sdk_runner, "_record_collab_child_links", no_links)
+  bus = _FakeBroadcast()
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="delegate", session_id=None, base_env={}, cwd="/tmp",
+    chat_id="chat-sequence", bc=bus, pending_questions={}, db=None,
+  ))
+
+  assert result["error"] is None
+  late = next(event for event in bus.lifecycle_events
+              if event.get("source_event_id") == "call-a:child:errored")
+  resumed = next(event for event in bus.lifecycle_events
+                 if event.get("source_event_id") == "call-b:child:started")
+  nested = next(event for event in bus.lifecycle_events
+                if event.get("provider_agent_id") == "grandchild")
+  completed = next(event for event in bus.lifecycle_events
+                   if event.get("source_event_id") == "call-b:child:completed")
+  interrupted = next(event for event in bus.lifecycle_events
+                     if event.get("source_event_id") == "late-interrupt")
+  assert late["provider_activation_id"] == "thread-started:child"
+  assert resumed["provider_activation_id"] == "call-b:child"
+  assert nested["parent_provider_activation_id"] == "call-b:child"
+  assert completed["provider_activation_id"] == "call-b:child"
+  assert interrupted["provider_activation_id"] == "call-b:child"
+  assert all(event.get("type") != "agent_lifecycle" for event in bus.events)
 
 
 def test_run_codex_sdk_turn_aborts_after_turn_before_stream_registration(monkeypatch):
@@ -1425,3 +1748,557 @@ def test_codex_config_overrides_kill_switch(monkeypatch):
   ov = runner._codex_config_overrides()
   assert ov == ["features.default_mode_request_user_input=true"]
   assert not any("multi_agent_v2" in o for o in ov)
+
+
+def test_codex_app_server_launch_args_preserve_overrides_under_setsid(
+  monkeypatch,
+):
+  paths = {
+    "setsid": "/usr/bin/setsid",
+  }
+  monkeypatch.setattr(
+    codex_sdk_runner.shutil,
+    "which",
+    lambda name: paths.get(name),
+  )
+
+  args = codex_sdk_runner._codex_app_server_launch_args(
+    "/usr/local/bin/codex",
+    ["feature.one=true", "feature.two=false"],
+  )
+
+  assert args == [
+    "/usr/bin/setsid",
+    "/usr/local/bin/codex",
+    "--config",
+    "feature.one=true",
+    "--config",
+    "feature.two=false",
+    "app-server",
+    "--listen",
+    "stdio://",
+  ]
+
+
+def test_codex_process_group_id_refuses_shared_uvicorn_group(monkeypatch):
+  codex = SimpleNamespace(
+    _client=SimpleNamespace(
+      _sync=SimpleNamespace(_proc=SimpleNamespace(pid=4321)),
+    ),
+  )
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4000)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 4000)
+
+  assert codex_sdk_runner._codex_process_group_id(codex) is None
+
+
+def test_terminate_codex_process_group_has_sigkill_backstop(monkeypatch):
+  calls = []
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  monkeypatch.setattr(
+    codex_sdk_runner.os,
+    "killpg",
+    lambda pgid, sig: calls.append((pgid, sig)),
+  )
+
+  assert codex_sdk_runner._terminate_codex_process_group(
+    4321, grace_seconds=0,
+  ) is True
+  assert calls == [
+    (4321, signal.SIGTERM),
+    (4321, signal.SIGKILL),
+  ]
+
+
+def test_run_codex_sdk_turn_reaps_isolated_descendants(monkeypatch):
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    )
+  ]
+  thread = _FakeThread("thread-1", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(
+          _proc=SimpleNamespace(pid=4321),
+          _approval_handler=None,
+        ),
+      )
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  reaped = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: reaped.append(pgid) or True,
+  )
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_persist_session_id",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-process-group",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+  ))
+
+  assert result["error"] is None
+  assert reaped == [4321]
+
+
+def test_run_codex_sdk_turn_reaps_group_when_initialization_fails(monkeypatch):
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(_proc=None, _approval_handler=None),
+      )
+
+    async def __aenter__(self):
+      # Model the pinned SDK's lifecycle: start() publishes _proc, initialize()
+      # yields/fails, and close() clears _proc before __aenter__ re-raises.
+      self._client._sync._proc = SimpleNamespace(pid=4321)
+      await asyncio.sleep(0)
+      self._client._sync._proc = None
+      raise RuntimeError("initialize failed")
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  reaped = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: reaped.append(pgid) or True,
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-init-failure",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+  ))
+
+  assert "initialize failed" in result["error"]
+  assert reaped == [4321]
+
+
+def test_run_codex_sdk_turn_cancel_after_entry_still_reaps_group(monkeypatch):
+  owner_task = None
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(
+          _proc=SimpleNamespace(pid=4321),
+          _approval_handler=None,
+        ),
+      )
+
+    async def __aenter__(self):
+      # Deliver cancellation at the first await after entry. The runner must
+      # synchronously retain the PGID and must not cancel its capture-task
+      # ownership while unwinding.
+      asyncio.get_running_loop().call_soon(owner_task.cancel)
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      await asyncio.sleep(0)
+      raise AssertionError("cancellation should land before thread start")
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  reaped = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: reaped.append(pgid) or True,
+  )
+
+  async def scenario():
+    nonlocal owner_task
+    owner_task = asyncio.current_task()
+    with pytest.raises(asyncio.CancelledError):
+      await codex_sdk_runner.run_codex_sdk_turn(
+        user_message="hello",
+        session_id=None,
+        base_env={},
+        cwd="/tmp",
+        chat_id="chat-cancel-after-entry",
+        bc=_FakeBroadcast(),
+        pending_questions={},
+        db=None,
+      )
+
+  asyncio.run(scenario())
+
+  assert reaped == [4321]
+
+
+def test_run_codex_sdk_turn_cancel_during_threaded_start_waits_then_reaps(
+  monkeypatch,
+):
+  """Cancellation cannot outrun the pinned SDK's asyncio.to_thread(start)."""
+  worker_started = threading.Event()
+  release_worker = threading.Event()
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(_proc=None, _approval_handler=None),
+      )
+
+    async def __aenter__(self):
+      def threaded_start():
+        worker_started.set()
+        assert release_worker.wait(timeout=2)
+        self._client._sync._proc = SimpleNamespace(pid=4321)
+
+      # Match the pinned SDK: cancelling this await does not stop the worker.
+      await asyncio.to_thread(threaded_start)
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      self._client._sync._proc = None
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      raise AssertionError("deferred cancellation must land before thread start")
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  reaped = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: reaped.append(pgid) or True,
+  )
+
+  async def scenario():
+    task = asyncio.create_task(codex_sdk_runner.run_codex_sdk_turn(
+      user_message="hello",
+      session_id=None,
+      base_env={},
+      cwd="/tmp",
+      chat_id="chat-cancel-during-start",
+      bc=_FakeBroadcast(),
+      pending_questions={},
+      db=None,
+    ))
+    while not worker_started.is_set():
+      await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release_worker.set()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+
+  asyncio.run(scenario())
+
+  assert reaped == [4321]
+
+
+@pytest.mark.parametrize("cancel_count", [1, 2, 5])
+def test_run_codex_sdk_turn_start_failure_preserves_deferred_cancellation(
+  monkeypatch, cancel_count,
+):
+  """Caller cancellation wins after owned startup later fails internally."""
+  startup_ready = None
+  release_startup = None
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(_proc=None, _approval_handler=None),
+      )
+
+    async def __aenter__(self):
+      self._client._sync._proc = SimpleNamespace(pid=4321)
+      startup_ready.set()
+      await release_startup.wait()
+      # Match an initialize failure after the SDK has closed/forgotten its
+      # direct process. The concurrent capture task is now the only PGID owner.
+      self._client._sync._proc = None
+      raise RuntimeError("initialize failed after caller cancellation")
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      raise AssertionError("a failed enter must not invoke __aexit__")
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  reaped = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: reaped.append(pgid) or True,
+  )
+
+  async def scenario():
+    nonlocal startup_ready, release_startup
+    startup_ready = asyncio.Event()
+    release_startup = asyncio.Event()
+    task = asyncio.create_task(codex_sdk_runner.run_codex_sdk_turn(
+      user_message="hello",
+      session_id=None,
+      base_env={},
+      cwd="/tmp",
+      chat_id=f"chat-cancel-failed-start-{cancel_count}",
+      bc=_FakeBroadcast(),
+      pending_questions={},
+      db=None,
+    ))
+    await startup_ready.wait()
+    # Let the concurrent PGID watcher observe the published process before the
+    # fake SDK forgets it on initialization failure.
+    await asyncio.sleep(0)
+    for _ in range(cancel_count):
+      task.cancel()
+      await asyncio.sleep(0)
+      assert not task.done()
+    release_startup.set()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+
+  asyncio.run(scenario())
+
+  assert reaped == [4321]
+
+
+@pytest.mark.parametrize("cancel_count", [1, 2, 5])
+def test_run_codex_sdk_turn_waits_for_sdk_exit_before_reap_and_return(
+  monkeypatch, cancel_count,
+):
+  """Repeated cancellation cannot outrun the SDK's threaded close/wait."""
+  body_ready = None
+  close_started = threading.Event()
+  release_close = threading.Event()
+  close_finished = threading.Event()
+  order = []
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(
+          _proc=SimpleNamespace(pid=4321),
+          _approval_handler=None,
+        ),
+      )
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      def close_worker():
+        close_started.set()
+        assert release_close.wait(timeout=5)
+        self._client._sync._proc = None
+        order.append("close")
+        close_finished.set()
+
+      # Match the pinned SDK close path. Cancelling this await must never
+      # abandon either a queued or already-running direct-child wait.
+      await asyncio.to_thread(close_worker)
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      body_ready.set()
+      await asyncio.Future()
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+
+  def reap(pgid):
+    assert pgid == 4321
+    assert close_finished.is_set()
+    order.append("reap")
+    return True
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    reap,
+  )
+
+  async def scenario():
+    nonlocal body_ready
+    body_ready = asyncio.Event()
+    task = asyncio.create_task(codex_sdk_runner.run_codex_sdk_turn(
+      user_message="hello",
+      session_id=None,
+      base_env={},
+      cwd="/tmp",
+      chat_id=f"chat-cancel-sdk-exit-{cancel_count}",
+      bc=_FakeBroadcast(),
+      pending_questions={},
+      db=None,
+    ))
+    await body_ready.wait()
+    task.cancel()
+    assert await asyncio.to_thread(close_started.wait, 2)
+    for _ in range(cancel_count - 1):
+      task.cancel()
+      await asyncio.sleep(0)
+    assert not task.done()
+    assert not close_finished.is_set()
+    assert order == []
+    release_close.set()
+    with pytest.raises(asyncio.CancelledError):
+      await task
+
+  asyncio.run(scenario())
+
+  assert close_finished.is_set()
+  assert order == ["close", "reap"]
+
+
+def test_run_codex_sdk_turn_fallback_does_not_start_capture_poller(
+  monkeypatch,
+):
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    )
+  ]
+  thread = _FakeThread("thread-1", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": None,
+  }.get(name))
+
+  async def forbidden_poller(*_args, **_kwargs):
+    raise AssertionError("fallback launch must not start PGID polling")
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_capture_codex_process_group_during_start",
+    forbidden_poller,
+  )
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_persist_session_id",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-fallback-no-poll",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+  ))
+
+  assert result["error"] is None

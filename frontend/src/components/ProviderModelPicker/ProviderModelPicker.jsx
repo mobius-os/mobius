@@ -16,6 +16,8 @@
  *  for older generations stay listed so existing chats that persisted them in
  *  agent_settings_json keep resolving (the API treats them as aliases). */
 export const CLAUDE_MODELS = [
+  { value: 'claude-fable-5', label: 'Fable 5' },
+  { value: 'claude-sonnet-5', label: 'Sonnet 5' },
   { value: 'claude-opus-4-8', label: 'Opus 4.8' },
   { value: 'claude-opus-4-7', label: 'Opus 4.7' },
   { value: 'claude-opus-4-6', label: 'Opus 4.6' },

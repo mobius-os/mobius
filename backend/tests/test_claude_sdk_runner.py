@@ -56,9 +56,13 @@ class _Bus:
 
   def __init__(self) -> None:
     self.events: list[dict] = []
+    self.lifecycle_events: list[dict] = []
 
   def publish(self, event: dict) -> None:
     self.events.append(event)
+
+  def record_lifecycle(self, event: dict) -> None:
+    self.lifecycle_events.append(event)
 
 
 class _ChatBus(_Bus):
@@ -1081,6 +1085,29 @@ def test_dispatch_task_started():
     "task_type": "build",
     "tool_use_id": "tu_spawn",
   }]
+  assert bus.lifecycle_events[0]["provider_session_id"] == "sess-1"
+  assert bus.lifecycle_events[0]["source_event_id"] == "u-1"
+
+
+def test_dispatch_task_started_accepts_sdk_shape_without_identity_attrs(
+  monkeypatch,
+):
+  class MinimalTaskStarted:
+    subtype = "task_started"
+    task_id = "t-minimal"
+    description = "inspect"
+    task_type = "explore"
+    tool_use_id = None
+
+  monkeypatch.setattr(claude_sdk_runner, "SystemMessage", MinimalTaskStarted)
+  monkeypatch.setattr(
+    claude_sdk_runner, "TaskStartedMessage", MinimalTaskStarted,
+  )
+  bus = _Bus()
+  dispatch_sdk_message(MinimalTaskStarted(), bus, "known-session")
+  assert "provider_session_id" not in bus.events[0]
+  assert bus.lifecycle_events[0]["provider_session_id"] == "known-session"
+  assert bus.lifecycle_events[0]["source_event_id"] is None
 
 
 def test_dispatch_task_progress():
@@ -1123,6 +1150,8 @@ def test_dispatch_task_notification_done():
     "summary": "all good",
     "tool_use_id": "tu_spawn",
   }]
+  assert bus.lifecycle_events[0]["provider_session_id"] == "sess-1"
+  assert bus.lifecycle_events[0]["source_event_id"] == "u-1"
 
 
 def test_dispatch_task_updated_terminal_emits_task_done():
@@ -1149,6 +1178,9 @@ def test_dispatch_task_updated_terminal_emits_task_done():
     "summary": None,
     "tool_use_id": None,
   }]
+  assert bus.lifecycle_events[0]["provider_session_id"] == "sess-1"
+  assert bus.lifecycle_events[0]["source_event_id"] == "u-1"
+  assert bus.lifecycle_events[0]["occurred_at"] == 123
 
 
 def test_dispatch_task_updated_nonterminal_is_silent():

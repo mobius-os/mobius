@@ -124,6 +124,10 @@ class AppOut(BaseModel):
   chat_id: str | None = None
   source_dir: str | None = None
   pinned_at: datetime | None = None
+  # A durable app-attributed notification landed since this app was last
+  # opened. The shell renders the same quiet activity dot used for chats.
+  has_unseen_activity: bool = False
+  unseen_activity_version: int | None = None
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
   offline_capable: bool = False

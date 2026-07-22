@@ -64,6 +64,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shutil
 import time
 from typing import Any, Callable
@@ -146,6 +147,233 @@ def _codex_config_overrides() -> list[str]:
       "suppress_unstable_features_warning=true",
     ]
   return overrides
+
+
+def _codex_app_server_launch_args(
+  codex_bin: str | None,
+  config_overrides: list[str],
+) -> list[str] | None:
+  """Build an app-server command isolated in its own Unix session.
+
+  The Python SDK starts Codex with a plain ``subprocess.Popen`` and, on
+  ``close()``, terminates only that one PID.  Tool commands are descendants of
+  the app-server; if a shell exits while one of its children is still running,
+  that child is re-parented to PID 1 and survives both the tool result and the
+  SDK close.  A memory-hungry survivor can therefore outlive its chat and push
+  the whole platform cgroup into OOM.
+
+  ``setsid`` makes the app-server the leader of a private process group/session
+  without requiring a change in the upstream SDK.  The terminal cleanup below
+  can then signal exactly that group, never uvicorn or another concurrent chat.
+  Return ``None`` outside the Linux/container runtime so local SDK resolution
+  keeps its existing fallback behavior.
+  """
+  setsid_bin = shutil.which("setsid")
+  if not codex_bin or not setsid_bin:
+    return None
+  args = [setsid_bin, codex_bin]
+  for override in config_overrides:
+    args.extend(["--config", override])
+  args.extend(["app-server", "--listen", "stdio://"])
+  return args
+
+
+def _codex_process_group_id(
+  codex: Any,
+  *,
+  log_unisolated: bool = True,
+) -> int | None:
+  """Return the isolated app-server PGID, or ``None`` if not provable.
+
+  The SDK does not expose its child PID publicly.  We already target its sync
+  client for the documented approval-handler slot, so keep this second private
+  access in one defensive helper.  Refuse a group that is not led by the SDK
+  process: on an old/non-``setsid`` launch that group can be uvicorn's own.
+  """
+  sync_client = getattr(getattr(codex, "_client", None), "_sync", None)
+  proc = getattr(sync_client, "_proc", None)
+  pid = getattr(proc, "pid", None)
+  if not isinstance(pid, int) or pid <= 1:
+    return None
+  try:
+    pgid = os.getpgid(pid)
+  except (OSError, ProcessLookupError):
+    return None
+  if pgid != pid or pgid == os.getpgrp():
+    if not log_unisolated:
+      return None
+    log.error(
+      "Codex app-server process group is not isolated pid=%s pgid=%s; "
+      "descendant cleanup disabled",
+      pid,
+      pgid,
+    )
+    return None
+  return pgid
+
+
+async def _enter_codex_context_owned(
+  codex_context: Any,
+) -> tuple[Any, asyncio.CancelledError | None]:
+  """Enter AsyncCodex without abandoning its threaded startup on cancel.
+
+  The pinned SDK implements ``AsyncCodexClient.start()`` with
+  ``asyncio.to_thread(CodexClient.start)``. Cancelling ``__aenter__`` therefore
+  cancels only the awaiter; the worker can continue through ``Popen`` and
+  publish ``_proc`` after the cancelled runner has already returned. Keep the
+  complete enter operation in a runner-owned task, shield it through every
+  caller cancellation, and hand the cancellation back to the caller only once
+  startup has either completed or failed. That keeps PGID capture alive for
+  the entire interval in which the worker can create a process.
+  """
+  enter_task = asyncio.create_task(codex_context.__aenter__())
+  deferred_cancel: asyncio.CancelledError | None = None
+  while not enter_task.done():
+    try:
+      await asyncio.shield(enter_task)
+    except asyncio.CancelledError as exc:
+      if enter_task.cancelled():
+        break
+      deferred_cancel = deferred_cancel or exc
+    except BaseException:
+      # The owned task has reached a terminal failure. Reconcile it below so
+      # a caller cancellation already deferred by this loop takes precedence
+      # over the later startup error instead of leaking that error as a normal
+      # RunnerResult.
+      break
+  try:
+    entered = enter_task.result()
+  except asyncio.CancelledError:
+    if deferred_cancel is not None:
+      raise deferred_cancel
+    raise
+  except BaseException as exc:
+    if deferred_cancel is not None:
+      raise deferred_cancel from exc
+    raise
+  return entered, deferred_cancel
+
+
+class _EnteredCodexContext:
+  """Own exit for an AsyncCodex context whose enter is already owned.
+
+  The pinned SDK delegates close to ``asyncio.to_thread``. An ordinary await
+  lets a second caller cancellation cancel that awaiter while its worker is
+  still queued or running, allowing process-group reap and runner return to
+  overtake the SDK's direct-child ``wait()``. Keep the complete exit in a
+  runner-owned task and defer every repeated cancellation until it finishes.
+  """
+
+  def __init__(self, context: Any, entered: Any) -> None:
+    self._context = context
+    self._entered = entered
+
+  async def __aenter__(self) -> Any:
+    return self._entered
+
+  async def __aexit__(self, exc_type, exc, traceback) -> Any:
+    exit_task = asyncio.create_task(
+      self._context.__aexit__(exc_type, exc, traceback)
+    )
+    deferred_cancel: asyncio.CancelledError | None = None
+    while not exit_task.done():
+      try:
+        await asyncio.shield(exit_task)
+      except asyncio.CancelledError as cancel_exc:
+        if exit_task.cancelled():
+          break
+        deferred_cancel = deferred_cancel or cancel_exc
+      except BaseException:
+        # Reconcile the terminal exit failure below. In particular, a caller
+        # cancellation that was already unwinding the context must not be
+        # replaced by a later SDK-close error.
+        break
+    try:
+      result = exit_task.result()
+    except asyncio.CancelledError as exit_cancel:
+      caller_cancel = (
+        exc if isinstance(exc, asyncio.CancelledError) else deferred_cancel
+      )
+      if caller_cancel is not None:
+        raise caller_cancel from exit_cancel
+      raise
+    except BaseException as exit_exc:
+      caller_cancel = (
+        exc if isinstance(exc, asyncio.CancelledError) else deferred_cancel
+      )
+      if caller_cancel is not None:
+        raise caller_cancel from exit_exc
+      raise
+    if deferred_cancel is not None:
+      raise deferred_cancel
+    return result
+
+
+async def _capture_codex_process_group_during_start(
+  codex: Any,
+  stop: asyncio.Event,
+) -> int | None:
+  """Capture the isolated PGID while ``AsyncCodex.__aenter__`` initializes.
+
+  ``__aenter__`` starts the subprocess and then performs a separate async SDK
+  initialize request. If that request fails, the SDK closes the direct Popen
+  and clears ``_proc`` before propagating the error. Polling concurrently from
+  before entry captures the group in that window, so the outer runner finally
+  can still reap a descendant the SDK direct-PID close left behind.
+
+  During the tiny pre-exec window the child still has uvicorn's group. The
+  identity helper therefore runs silently until ``setsid`` makes PID == PGID;
+  it never returns or signals the shared group.
+  """
+  while not stop.is_set():
+    pgid = _codex_process_group_id(codex, log_unisolated=False)
+    if pgid is not None:
+      return pgid
+    await asyncio.sleep(0)
+  return _codex_process_group_id(codex, log_unisolated=False)
+
+
+def _terminate_codex_process_group(
+  pgid: int | None,
+  *,
+  grace_seconds: float = 0.25,
+) -> bool:
+  """Terminate every process left in one completed Codex turn's group.
+
+  Called only after the SDK context has closed its app-server PID.  SIGTERM
+  gives ordinary shell/browser helpers a brief exit window; SIGKILL is the
+  bounded backstop for the exact failure mode this guards (a CPU-heavy child
+  that ignores or never receives its parent's termination).  Returns whether
+  a live group was found.  All failures are best-effort because terminal chat
+  persistence must not fail merely because the OS already reaped the group.
+  """
+  if not isinstance(pgid, int) or pgid <= 1 or pgid == os.getpgrp():
+    return False
+  try:
+    os.killpg(pgid, signal.SIGTERM)
+  except ProcessLookupError:
+    return False
+  except OSError as exc:
+    log.warning("Codex descendant SIGTERM failed pgid=%s: %s", pgid, exc)
+    return False
+
+  deadline = time.monotonic() + max(0.0, grace_seconds)
+  while time.monotonic() < deadline:
+    try:
+      os.killpg(pgid, 0)
+    except ProcessLookupError:
+      return True
+    except OSError:
+      break
+    time.sleep(min(0.025, max(0.0, deadline - time.monotonic())))
+
+  try:
+    os.killpg(pgid, signal.SIGKILL)
+  except ProcessLookupError:
+    pass
+  except OSError as exc:
+    log.warning("Codex descendant SIGKILL failed pgid=%s: %s", pgid, exc)
+  return True
 
 
 class _BridgeError(Exception):
@@ -346,11 +574,16 @@ def _sdk_imports() -> dict[str, Any]:
     CollabAgentToolCallThreadItem = None
     SubAgentActivityThreadItem = None
     ThreadStartedNotification = None
+  try:
+    from openai_codex.generated.v2_all import ThreadStatusChangedNotification
+  except ImportError:
+    ThreadStatusChangedNotification = None
 
   return {
     "CollabAgentToolCallThreadItem": CollabAgentToolCallThreadItem,
     "SubAgentActivityThreadItem": SubAgentActivityThreadItem,
     "ThreadStartedNotification": ThreadStartedNotification,
+    "ThreadStatusChangedNotification": ThreadStatusChangedNotification,
     "AgentMessageDeltaNotification": AgentMessageDeltaNotification,
     "AgentMessageThreadItem": AgentMessageThreadItem,
     "ApprovalMode": ApprovalMode,
@@ -550,6 +783,222 @@ def _collab_summary(item: Any) -> str | None:
   if not messages:
     return None
   return "; ".join(messages)[:_COLLAB_SUMMARY_MAX]
+
+
+def _subagent_lifecycle_event(
+  item: Any, sdk: dict[str, Any], *, provider_session_id: str | None,
+  occurred_at: Any = None, provider_activation_id: str | None = None,
+) -> dict[str, Any] | None:
+  """Normalize a Codex subAgentActivity marker without inventing completion.
+
+  The native marker currently exposes started/interacted/interrupted.  Started
+  opens a helper lane; interrupted closes it as stopped. Interacted is progress,
+  not a lifecycle boundary, and remains intentionally silent.
+  """
+  cls = sdk.get("SubAgentActivityThreadItem")
+  if cls is None or not isinstance(item, cls):
+    return None
+  kind = getattr(getattr(item, "kind", None), "value", None)
+  kind = kind or str(getattr(item, "kind", ""))
+  if kind == "started":
+    event_type, state = "agent_started", "running"
+  elif kind == "interrupted":
+    event_type, state = "agent_terminal", "stopped"
+  else:
+    return None
+  return {
+    "type": "agent_lifecycle",
+    "provider": "codex",
+    "provider_session_id": provider_session_id,
+    "provider_agent_id": getattr(item, "agent_thread_id", None),
+    "provider_activation_id": provider_activation_id,
+    "parent_kind": "unknown",
+    "event_type": event_type,
+    "state": state,
+    "summary": getattr(item, "agent_path", None),
+    "occurred_at": occurred_at,
+    "source": "runner",
+    "source_event_id": getattr(item, "id", None),
+  }
+
+
+def _thread_started_lifecycle_event(
+  payload: Any, *, root_thread_id: str | None,
+  parent_provider_activation_id: str | None = None,
+) -> dict[str, Any] | None:
+  """Build the exact spawn/parent fact carried by ThreadStartedNotification."""
+  thread = getattr(payload, "thread", None)
+  thread_id = getattr(thread, "id", None)
+  if not thread_id:
+    return None
+  parent_id = getattr(thread, "parent_thread_id", None)
+  # A top-level thread started notification is not a spawned helper.
+  if not parent_id or parent_id == thread_id:
+    return None
+  role = getattr(thread, "agent_role", None)
+  nickname = getattr(thread, "agent_nickname", None)
+  return {
+    "type": "agent_lifecycle",
+    "provider": "codex",
+    "provider_session_id": root_thread_id,
+    "provider_agent_id": thread_id,
+    "provider_activation_id": f"thread-started:{thread_id}",
+    "parent_provider_agent_id": parent_id,
+    "parent_provider_activation_id": (
+      parent_provider_activation_id or f"thread-started:{parent_id}"
+    ),
+    "parent_kind": "main" if parent_id == root_thread_id else "agent",
+    "event_type": "agent_spawned",
+    "state": "running",
+    "agent_type": role or nickname,
+    "summary": getattr(thread, "preview", None),
+    "occurred_at": getattr(thread, "created_at", None),
+    "source": "runner",
+    "source_event_id": f"thread-started:{thread_id}",
+  }
+
+
+def _record_private_lifecycle(bc: Any, event: dict[str, Any] | None) -> None:
+  if event is None:
+    return
+  recorder = getattr(bc, "record_lifecycle", None)
+  if callable(recorder):
+    recorder(event)
+
+
+def _collab_reactivation_events(
+  item: Any, sdk: dict[str, Any], *, root_thread_id: str | None,
+  occurred_at: Any, active: dict[str, str], known: set[str],
+  activation_by_call_child: dict[tuple[str, str], str],
+  last_activation_by_child: dict[str, str],
+) -> list[dict[str, Any]]:
+  cls = sdk.get("CollabAgentToolCallThreadItem")
+  if cls is None or not isinstance(item, cls):
+    return []
+  operation = _collab_op(item)
+  receivers = [str(value) for value in (
+    getattr(item, "receiver_thread_ids", None) or []) if value]
+  sender = getattr(item, "sender_thread_id", None)
+  call_id = str(getattr(item, "id", None) or operation)
+  if operation == "spawnAgent":
+    known.update(receivers)
+    for child_id in receivers:
+      activation = active.setdefault(child_id, f"thread-started:{child_id}")
+      activation_by_call_child[(call_id, child_id)] = activation
+      last_activation_by_child[child_id] = activation
+    return []  # ThreadStarted carries the exact spawn + ancestry fact.
+  if operation not in ("sendInput", "resumeAgent"):
+    return []
+  events = []
+  for child_id in receivers:
+    known.add(child_id)
+    activation = active.get(child_id)
+    if activation is not None:
+      # Input sent to an already-running child is progress in the current
+      # activation, not proof of a new lane. Keep the call association so its
+      # exact completion can still enrich that activation later.
+      activation_by_call_child[(call_id, child_id)] = activation
+      continue
+    activation = f"{call_id}:{child_id}"
+    active[child_id] = activation
+    activation_by_call_child[(call_id, child_id)] = activation
+    last_activation_by_child[child_id] = activation
+    parent_kind = "main" if sender and sender == root_thread_id else (
+      "agent" if sender else "unknown")
+    events.append({
+      "type": "agent_lifecycle", "provider": "codex",
+      "provider_session_id": root_thread_id,
+      "provider_agent_id": child_id,
+      "provider_activation_id": activation,
+      "parent_provider_agent_id": sender,
+      "parent_provider_activation_id": active.get(str(sender)) if sender else None,
+      "parent_kind": parent_kind,
+      "event_type": "agent_started", "state": "running",
+      "summary": getattr(item, "prompt", None), "occurred_at": occurred_at,
+      "source": "runner", "source_event_id": f"{call_id}:{child_id}:started",
+    })
+  return events
+
+
+def _collab_completion_events(
+  item: Any, sdk: dict[str, Any], *, root_thread_id: str | None,
+  occurred_at: Any, active: dict[str, str], known: set[str],
+  activation_by_call_child: dict[tuple[str, str], str],
+  last_activation_by_child: dict[str, str],
+) -> list[dict[str, Any]]:
+  cls = sdk.get("CollabAgentToolCallThreadItem")
+  if cls is None or not isinstance(item, cls):
+    return []
+  terminal = {
+    "completed": "done", "errored": "failed", "interrupted": "stopped",
+    "shutdown": "stopped",
+  }
+  events = []
+  call_id = str(getattr(item, "id", None) or _collab_op(item))
+  for child_id, agent_state in (getattr(item, "agents_states", None) or {}).items():
+    child_id = str(child_id)
+    raw_status = getattr(agent_state, "status", None)
+    status = getattr(raw_status, "value", None) or str(raw_status or "")
+    state = terminal.get(status)
+    activation = activation_by_call_child.get((call_id, child_id))
+    if activation is None:
+      activation = active.get(child_id) or last_activation_by_child.get(child_id)
+    if state is None or activation is None:
+      continue
+    known.add(child_id)
+    events.append({
+      "type": "agent_lifecycle", "provider": "codex",
+      "provider_session_id": root_thread_id,
+      "provider_agent_id": child_id,
+      "provider_activation_id": activation,
+      "parent_kind": "unknown", "event_type": "agent_terminal",
+      "state": state, "summary": getattr(agent_state, "message", None),
+      "occurred_at": occurred_at, "source": "runner",
+      "source_event_id": f"{call_id}:{child_id}:{status}",
+    })
+    last_activation_by_child[child_id] = activation
+    if active.get(child_id) == activation:
+      active.pop(child_id, None)
+  return events
+
+
+def _thread_status_lifecycle_event(
+  payload: Any, *, root_thread_id: str | None, active: dict[str, str],
+  known: set[str], activation_counts: dict[str, int],
+  last_activation_by_child: dict[str, str],
+) -> dict[str, Any] | None:
+  thread_id = str(getattr(payload, "thread_id", None) or "")
+  if not thread_id or thread_id == root_thread_id or thread_id not in known:
+    return None
+  status_union = getattr(payload, "status", None)
+  status_root = getattr(status_union, "root", status_union)
+  status_type = str(getattr(status_root, "type", ""))
+  if status_type == "active":
+    if thread_id in active:
+      return None
+    activation_counts[thread_id] = activation_counts.get(thread_id, 0) + 1
+    activation = f"status:{thread_id}:{activation_counts[thread_id]}"
+    active[thread_id] = activation
+    last_activation_by_child[thread_id] = activation
+    event_type, state = "agent_started", "running"
+  elif status_type in ("idle", "systemError"):
+    activation = active.pop(thread_id, None)
+    if activation is None:
+      return None
+    last_activation_by_child[thread_id] = activation
+    event_type = "agent_terminal"
+    state = "done" if status_type == "idle" else "failed"
+  else:
+    return None
+  return {
+    "type": "agent_lifecycle", "provider": "codex",
+    "provider_session_id": root_thread_id,
+    "provider_agent_id": thread_id,
+    "provider_activation_id": activation,
+    "parent_kind": "unknown", "event_type": event_type, "state": state,
+    "source": "runner",
+    "source_event_id": f"thread-status:{thread_id}:{activation}:{status_type}",
+  }
 
 
 async def _record_collab_child_links(
@@ -1232,17 +1681,39 @@ async def run_codex_sdk_turn(
   # config_overrides carries the request_user_input (AskUserQuestion parity) and
   # multi-agent enablement flags — assembled, with the #31864 tool_namespace pin
   # and the MOEBIUS_CODEX_MULTI_AGENT kill switch, in _codex_config_overrides().
-  config = sdk["CodexConfig"](
-    codex_bin=shutil.which("codex"),
+  codex_bin = shutil.which("codex")
+  config_overrides = _codex_config_overrides()
+  launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
+  config_kwargs: dict[str, Any] = dict(
+    codex_bin=codex_bin,
     cwd=cwd,
     env=env,
-    config_overrides=_codex_config_overrides(),
+    config_overrides=config_overrides,
   )
+  if launch_args is not None:
+    config_kwargs["launch_args_override"] = launch_args
+  else:
+    log.warning(
+      "Codex app-server process-group isolation unavailable; "
+      "descendant cleanup is best-effort only"
+    )
+  config = sdk["CodexConfig"](**config_kwargs)
 
   thread = None
   turn = None
   current_session_id = session_id
   completed_turn: Any | None = None
+  process_group_id: int | None = None
+  codex_context = sdk["AsyncCodex"](config=config)
+  process_group_capture_stop: asyncio.Event | None = None
+  process_group_capture_task: asyncio.Task[int | None] | None = None
+  if launch_args is not None:
+    process_group_capture_stop = asyncio.Event()
+    process_group_capture_task = asyncio.create_task(
+      _capture_codex_process_group_during_start(
+        codex_context, process_group_capture_stop,
+      )
+    )
 
   def abort_requested() -> bool:
     return bool(should_abort and should_abort())
@@ -1255,7 +1726,17 @@ async def run_codex_sdk_turn(
     }
 
   try:
-    async with sdk["AsyncCodex"](config=config) as codex:
+    codex, entry_cancel = await _enter_codex_context_owned(codex_context)
+    async with _EnteredCodexContext(codex_context, codex) as codex:
+      process_group_id = _codex_process_group_id(codex)
+      if process_group_capture_stop is not None:
+        process_group_capture_stop.set()
+      # Do NOT await the capture task here. Cancellation immediately after
+      # __aenter__ would propagate through an ordinary await and cancel the
+      # task that owns our initialization-failure PGID. The outer finally is
+      # its sole joiner and shields that join before reaping the group.
+      if entry_cancel is not None:
+        raise entry_cancel
       # Install AskUserQuestion bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
@@ -1392,6 +1873,12 @@ async def run_codex_sdk_turn(
       # recorded.
       await _persist_session_id(db, chat_id, current_session_id)
 
+      known_child_ids: set[str] = set()
+      active_activation_by_child: dict[str, str] = {}
+      last_activation_by_child: dict[str, str] = {}
+      activation_by_call_child: dict[tuple[str, str], str] = {}
+      activation_counts: dict[str, int] = {}
+
       async for notification in turn.stream():
         payload = notification.payload
 
@@ -1450,6 +1937,36 @@ async def run_codex_sdk_turn(
           # the session->chat link now so the child rollout stays attributed
           # even if we never resume it directly.
           await _record_collab_child_links(item, sdk, chat_id=chat_id)
+          for lifecycle in _collab_reactivation_events(
+            item, sdk, root_thread_id=current_session_id,
+            occurred_at=getattr(payload, "started_at_ms", None),
+            active=active_activation_by_child, known=known_child_ids,
+            activation_by_call_child=activation_by_call_child,
+            last_activation_by_child=last_activation_by_child,
+          ):
+            _record_private_lifecycle(bc, lifecycle)
+          child_id = str(getattr(item, "agent_thread_id", None) or "")
+          kind = getattr(getattr(item, "kind", None), "value", None)
+          kind = kind or str(getattr(item, "kind", ""))
+          activation = (active_activation_by_child.get(child_id)
+                        or last_activation_by_child.get(child_id))
+          if child_id and kind == "started":
+            known_child_ids.add(child_id)
+            activation = activation or str(getattr(item, "id", None) or child_id)
+            active_activation_by_child[child_id] = activation
+            last_activation_by_child[child_id] = activation
+          lifecycle = _subagent_lifecycle_event(
+            item, sdk, provider_session_id=current_session_id,
+            occurred_at=getattr(payload, "started_at_ms", None),
+            provider_activation_id=activation,
+          )
+          _record_private_lifecycle(bc, lifecycle)
+          if lifecycle is not None and lifecycle.get("event_type") == "agent_terminal":
+            activation = str(lifecycle.get("provider_activation_id") or "")
+            if activation:
+              last_activation_by_child[child_id] = activation
+            if active_activation_by_child.get(child_id) == activation:
+              active_activation_by_child.pop(child_id, None)
           continue
 
         if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
@@ -1469,6 +1986,14 @@ async def run_codex_sdk_turn(
           # only populates on completion — a missed link silently loses the
           # attribution this recording exists to provide.
           await _record_collab_child_links(item, sdk, chat_id=chat_id)
+          for lifecycle in _collab_completion_events(
+            item, sdk, root_thread_id=current_session_id,
+            occurred_at=getattr(payload, "completed_at_ms", None),
+            active=active_activation_by_child, known=known_child_ids,
+            activation_by_call_child=activation_by_call_child,
+            last_activation_by_child=last_activation_by_child,
+          ):
+            _record_private_lifecycle(bc, lifecycle)
           continue
 
         if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
@@ -1496,12 +2021,38 @@ async def run_codex_sdk_turn(
         if sdk.get("ThreadStartedNotification") is not None and isinstance(
           payload, sdk["ThreadStartedNotification"]
         ):
-          # A spawned sub-agent announces its own thread on the parent turn's
-          # stream. The invariant is that this notification stays silent because
-          # emitting session_init would repoint the chat at the child thread.
-          # Generic live work is already represented by the ordinary collab tool
-          # activity, while the Workflows parser attributes the named child via
-          # parent_thread_id.
+          # Never emit session_init (that would repoint the chat to the child),
+          # but preserve the child thread's exact spawn time + immediate parent
+          # as a normalized lifecycle fact for Workflows.
+          lifecycle = _thread_started_lifecycle_event(
+            payload, root_thread_id=current_session_id,
+            parent_provider_activation_id=(
+              active_activation_by_child.get(str(
+                getattr(getattr(payload, "thread", None), "parent_thread_id", None)
+              )) or last_activation_by_child.get(str(
+                getattr(getattr(payload, "thread", None), "parent_thread_id", None)
+              ))
+            ),
+          )
+          if lifecycle is not None:
+            child_id = str(lifecycle["provider_agent_id"])
+            known_child_ids.add(child_id)
+            activation = active_activation_by_child.setdefault(
+              child_id, str(lifecycle["provider_activation_id"]),
+            )
+            last_activation_by_child[child_id] = activation
+            lifecycle["provider_activation_id"] = activation
+            _record_private_lifecycle(bc, lifecycle)
+          continue
+
+        status_cls = sdk.get("ThreadStatusChangedNotification")
+        if status_cls is not None and isinstance(payload, status_cls):
+          _record_private_lifecycle(bc, _thread_status_lifecycle_event(
+            payload, root_thread_id=current_session_id,
+            active=active_activation_by_child, known=known_child_ids,
+            activation_counts=activation_counts,
+            last_activation_by_child=last_activation_by_child,
+          ))
           continue
 
         if isinstance(payload, sdk["TurnCompletedNotification"]):
@@ -1540,10 +2091,55 @@ async def run_codex_sdk_turn(
       "error": str(exc),
     }
   finally:
+    deferred_cancel: asyncio.CancelledError | None = None
+    if process_group_capture_stop is not None:
+      process_group_capture_stop.set()
+    if process_group_capture_task is not None:
+      while not process_group_capture_task.done():
+        try:
+          await asyncio.shield(process_group_capture_task)
+        except asyncio.CancelledError as exc:
+          if process_group_capture_task.cancelled():
+            break
+          # A caller cancellation landed during the shielded join. Keep
+          # waiting for the runner-owned task so initialization-failure cleanup
+          # cannot lose the only observed PGID.
+          deferred_cancel = deferred_cancel or exc
+      try:
+        captured_during_start = process_group_capture_task.result()
+        if process_group_id is None:
+          process_group_id = captured_during_start
+      except asyncio.CancelledError:
+        # A task owned only by this runner should not be cancelled, but a
+        # proven PGID captured synchronously after __aenter__ still permits
+        # safe cleanup. Never let its CancelledError skip that cleanup.
+        log.warning("Codex process-group capture task was cancelled")
+      except Exception as exc:
+        log.warning("Codex process-group capture failed: %s", exc)
     current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
     if isinstance(current, ActiveCodexTurn) and current.turn is turn:
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)
       current.mark_finished()
+    # AsyncCodex.close() terminates only its direct Popen PID.  Reap the
+    # isolated group after that context exit so a tool child cannot be
+    # re-parented to container init and consume CPU/RAM after the turn.  A
+    # worker keeps the short grace period off the FastAPI event loop; shield
+    # ensures task cancellation cannot prevent the SIGKILL backstop from
+    # running in that worker once cleanup has started.
+    if process_group_id is not None:
+      reap_task = asyncio.create_task(asyncio.to_thread(
+        _terminate_codex_process_group, process_group_id,
+      ))
+      while not reap_task.done():
+        try:
+          await asyncio.shield(reap_task)
+        except asyncio.CancelledError as exc:
+          # shield keeps the worker alive. Defer every caller cancellation
+          # until its bounded TERM/KILL sequence has completed.
+          deferred_cancel = deferred_cancel or exc
+      reap_task.result()
+    if deferred_cancel is not None:
+      raise deferred_cancel
 
 
 async def steer_into_active_turn(

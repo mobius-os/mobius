@@ -49,6 +49,7 @@ from app.chat_writer import (
   Finalize,
   ParkRun,
   PrepareAutoResume,
+  RecordAgentLifecycle,
   PersistError,
   PersistTranscript,
   QuestionCommit,
@@ -238,6 +239,8 @@ class _ChatEventSink:
     - `question` is REJECTED by `publish()` — it must go through
       `publish_question()` (save-before-broadcast), so a runner can't
       bypass the QuestionCommit barrier;
+    - private helper lifecycle facts are buffered and fenced (with one retry)
+      by `finalize()` because no transcript snapshot can reconstruct them;
     - `finalize()` → `Finalize` (commit-before-ack: the queue only
       drains / a continuation only schedules once the terminal state is
       durable).
@@ -283,6 +286,7 @@ class _ChatEventSink:
     # the next snapshot (or the terminal finalize) appends the continuation as
     # a fresh assistant message.
     self._steering = False
+    self._lifecycle_writes: list[tuple[RecordAgentLifecycle, object]] = []
 
   def _prepare_thinking_event(self, event: ChatEvent) -> None:
     """Give a reasoning run stable identity before reducer + broadcast."""
@@ -416,6 +420,45 @@ class _ChatEventSink:
       )
     )
 
+  def record_lifecycle(self, event: dict) -> None:
+    """Queue private lifecycle metadata without broadcasting it.
+
+    Unlike coalescible transcript snapshots, these append-only facts cannot be
+    reconstructed by Finalize. Their acknowledgements are retained and fenced
+    at turn finalization, with one idempotent retry on failure.
+    """
+    if not (self.chat_id and self.run_token):
+      return
+    from app.agent_lifecycle import normalize_chat_event
+    lifecycle = normalize_chat_event(
+      chat_id=self.chat_id,
+      chat_run_id=self.run_token,
+      event=event,
+      observed_at=datetime.now(UTC),
+    )
+    if lifecycle is not None:
+      cmd = RecordAgentLifecycle(values=lifecycle)
+      ack = get_writer().submit(cmd)
+      self._lifecycle_writes.append((cmd, ack))
+
+  async def _flush_lifecycle(self) -> None:
+    pending = self._lifecycle_writes
+    self._lifecycle_writes = []
+    for cmd, ack in pending:
+      try:
+        await _await_ack(ack)
+      except Exception:
+        _get_logger().warning(
+          "agent lifecycle write failed; retrying once chat_id=%s",
+          self.chat_id, exc_info=True,
+        )
+        # RecordAgentLifecycle is event-key idempotent, so retrying after an
+        # ambiguous timeout cannot duplicate a committed fact. A fresh command
+        # is essential: writer commands own their ack Future, and resubmitting
+        # the failed object would just return that already-failed Future.
+        retry = RecordAgentLifecycle(values=cmd.values)
+        await _await_ack(get_writer().submit(retry))
+
   def publish(self, event: ChatEvent) -> bool:
     """Publishes an ordinary event and routes any due save to the actor.
 
@@ -539,6 +582,7 @@ class _ChatEventSink:
     """
     if not (self.chat_id and self.run_token):
       return
+    await self._flush_lifecycle()
     if not blocks_have_renderable_content(self.assistant_blocks):
       if self._last_error:
         # Synthesize an error block so the failure is durable in the transcript.
@@ -2665,40 +2709,150 @@ async def _drain_and_release(
   )
 
 
+_BROWSER_CLOSE_CREATE_TIMEOUT = 5.0
+_BROWSER_CLOSE_WAIT_TIMEOUT = 5.0
+_BROWSER_CLOSE_KILL_GRACE = 1.0
+_BROWSER_CLOSE_KILL_WAIT_TIMEOUT = 1.0
+
+
 async def _close_browser_session(chat_id: str) -> None:
-  """Close this chat's agent-browser session so Chrome doesn't linger.
+  """Close every agent-browser session created by this chat.
 
   Best-effort: logs and swallows any error so cleanup never blocks a
   chat from completing. agent-browser must be on PATH (installed by the
   Dockerfile); if it's not (e.g. local dev outside the container), the
-  call silently no-ops.
+  call silently no-ops. The inherited ``chat-<id>`` session is always tried;
+  proc attribution also finds explicit ``--session`` names whose detached
+  Chromium trees would otherwise escape terminal cleanup.
   """
   if not chat_id:
     return
   log = _get_logger()
+  from app.browser_profiles import BrowserSessionTarget
+
+  targets = {BrowserSessionTarget(session=f"chat-{chat_id}")}
   try:
-    # Bound the subprocess CREATION too, not just the wait below.
-    # This runs on the terminal/cleanup path; an unbounded create_subprocess
-    # (e.g. a wedged event-loop child watcher or fork) would hang the whole
-    # turn's teardown. The wait() is already bounded at 5s; cap creation at
-    # the same budget. On either timeout we just stop waiting and let cleanup
-    # continue — a lingering Chrome is far cheaper than a hung turn.
-    proc = await asyncio.wait_for(
-      asyncio.create_subprocess_exec(
-        "agent-browser", "--session", f"chat-{chat_id}", "close",
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-      ),
-      timeout=5.0,
+    from app.browser_profiles import browser_session_targets_for_chat
+    targets.update(
+      await asyncio.to_thread(browser_session_targets_for_chat, chat_id)
     )
-    await asyncio.wait_for(proc.wait(), timeout=5.0)
-    log.info("agent-browser session closed chat_id=%s", chat_id)
-  except FileNotFoundError:
-    pass  # agent-browser not installed (local dev)
-  except asyncio.TimeoutError:
-    log.warning("agent-browser close timed out for chat %s", chat_id)
   except Exception as exc:
-    log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
+    log.warning(
+      "agent-browser session discovery failed for chat %s: %s",
+      chat_id,
+      exc,
+    )
+
+  async def terminate_close_process(proc) -> None:
+    """Bounded TERM/KILL cleanup for a wedged agent-browser close CLI."""
+    async def wait_for_reap(timeout: float, stage: str | None = None) -> bool:
+      try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        return True
+      except asyncio.TimeoutError:
+        # A stale/wedged child watcher can fail to publish the return code even
+        # after the OS process is gone. No process state is worth turning this
+        # best-effort terminal cleanup into an unbounded chat teardown.
+        if stage is not None:
+          log.warning(
+            "agent-browser close process did not reap %s for chat %s",
+            stage,
+            chat_id,
+          )
+        return False
+
+    if getattr(proc, "returncode", None) is not None:
+      await wait_for_reap(
+        _BROWSER_CLOSE_KILL_WAIT_TIMEOUT, "after observed exit",
+      )
+      return
+    try:
+      proc.terminate()
+    except ProcessLookupError:
+      await wait_for_reap(
+        _BROWSER_CLOSE_KILL_WAIT_TIMEOUT,
+        "after disappearing before SIGTERM",
+      )
+      return
+    if await wait_for_reap(_BROWSER_CLOSE_KILL_GRACE):
+      return
+    try:
+      proc.kill()
+    except ProcessLookupError:
+      pass
+    await wait_for_reap(_BROWSER_CLOSE_KILL_WAIT_TIMEOUT, "after SIGKILL")
+
+  async def close_one(target: BrowserSessionTarget) -> bool:
+    proc = None
+    try:
+      # Session/namespace/socket-dir are daemon-provided opaque routing values.
+      # Keep them out of argv entirely: a dedicated child environment avoids
+      # shell expansion, option parsing, and path construction in Möbius while
+      # still selecting the exact daemon agent-browser created.
+      child_env = dict(os.environ)
+      for key in (
+        "AGENT_BROWSER_SESSION",
+        "AGENT_BROWSER_NAMESPACE",
+        "AGENT_BROWSER_SOCKET_DIR",
+      ):
+        child_env.pop(key, None)
+      child_env["AGENT_BROWSER_SESSION"] = target.session
+      if target.namespace is not None:
+        child_env["AGENT_BROWSER_NAMESPACE"] = target.namespace
+      if target.socket_dir is not None:
+        child_env["AGENT_BROWSER_SOCKET_DIR"] = target.socket_dir
+
+      # Bound subprocess CREATION too, not just the wait. Custom sessions close
+      # concurrently, so one wedged CLI adds at most this single 10s budget to
+      # terminal teardown rather than one budget per leaked browser.
+      proc = await asyncio.wait_for(
+        asyncio.create_subprocess_exec(
+          "agent-browser", "close",
+          stdout=asyncio.subprocess.DEVNULL,
+          stderr=asyncio.subprocess.DEVNULL,
+          env=child_env,
+        ),
+        timeout=_BROWSER_CLOSE_CREATE_TIMEOUT,
+      )
+      return_code = await asyncio.wait_for(
+        proc.wait(), timeout=_BROWSER_CLOSE_WAIT_TIMEOUT,
+      )
+      if return_code != 0:
+        log.warning(
+          "agent-browser close exited nonzero for chat %s: rc=%s",
+          chat_id,
+          return_code,
+        )
+        return False
+      return True
+    except FileNotFoundError:
+      return False  # agent-browser not installed (local dev)
+    except asyncio.TimeoutError:
+      log.warning("agent-browser close timed out for chat %s", chat_id)
+      if proc is not None:
+        await asyncio.shield(terminate_close_process(proc))
+    except asyncio.CancelledError:
+      if proc is not None:
+        await asyncio.shield(terminate_close_process(proc))
+      raise
+    except Exception as exc:
+      log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
+    return False
+
+  results = await asyncio.gather(*(
+    close_one(target)
+    for target in sorted(
+      targets,
+      key=lambda value: (
+        value.session, value.namespace or "", value.socket_dir or "",
+      ),
+    )
+  ))
+  closed = sum(results)
+  if closed:
+    log.info(
+      "agent-browser sessions closed chat_id=%s count=%d", chat_id, closed,
+    )
 
 
 async def _terminal_setup_error_cleanup(
@@ -3174,6 +3328,15 @@ async def _complete_turn(
     # pointer), and yanking its browser is worse than the alternative — in the
     # rare Stop-with-no-successor case a lingering Chrome is cheaper than a yank,
     # and the next turn / reconciliation reclaims it.
+    # The transcript belongs to the newer owner and must not be finalized, but
+    # private lifecycle facts live in a separate append-only table and are safe
+    # to fence. They cannot be reconstructed by the successor's Finalize.
+    try:
+      await sink._flush_lifecycle()
+    except Exception:
+      _get_logger().warning(
+        "stale turn lifecycle flush failed chat_id=%s", chat_id, exc_info=True,
+      )
     clear_active_broadcast_if(bc)
     bc.publish({"type": "done"})
     bc.mark_completed()

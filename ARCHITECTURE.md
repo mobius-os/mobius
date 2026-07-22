@@ -49,6 +49,15 @@ Möbius is meant to be self-hosted on a user-provisioned host — a managed plat
 
 Two invariants follow. (1) **Möbius never patches the kernel from inside the container** — it only *surfaces* "host reboot pending / kernel CVE outstanding" to the owner; the platform/OS applies it. (2) **The in-container agent cannot recreate its own container** (the swap would kill its own process), so the shape is *propose-in* (agent scans → bumps → tests → commits) / *dispose-out* (a host-driven `deploy-prod.sh`, or blue-green, does the rebuild+recreate). Detection is the agent's leverage on every tier: `pip-audit` + `npm audit` + an image scanner (Trivy / `docker scout`) over the built image → triage → bump → test → deploy (tier 1) or surface a reboot window (tiers 2/3).
 
+**The in-product platform updater does not update host deployment files.**
+Settings advances the served `/data/platform` clone inside the app volume; the
+bundled self-hosted Caddy service instead reads `./Caddyfile` from the host
+checkout, and image/dependency changes likewise need a host rebuild/recreate.
+An incoming change to `Caddyfile`, `docker-compose.yml`, `Dockerfile`, or a
+dependency manifest therefore carries a separate host action (and may require a
+particular ordering) even when the live clone rebases cleanly. Never describe
+Apply + server restart alone as activating those files.
+
 **lodash is pinned to 4.18.1 via `overrides`.** `@openai/apps-sdk-ui` pulls lodash transitively — only through its `Slider` component, which the shell does not import. The 4.17.x line sat unfixed against several advisories for a long stretch; 4.18.x restored maintenance and patched them, so `frontend/package.json` `overrides` forces the transitive lodash to 4.18.1 (`npm audit` is clean). As defense-in-depth, `frontend/src/lib/__tests__/appsSdkLodash.test.js` also fails if the shell ever imports `Slider`, which keeps lodash tree-shaken out of the shipped bundle regardless of the pin.
 
 ## Self-update model — `upstream` / `main`, replay on update

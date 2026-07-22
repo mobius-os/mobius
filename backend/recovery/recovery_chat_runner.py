@@ -104,6 +104,8 @@ SUPPORTED_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 # picker always allows "CLI default" (no --model) too.
 RECOVERY_MODELS: dict[str, tuple[str, ...]] = {
   "claude": (
+    "claude-fable-5",
+    "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",

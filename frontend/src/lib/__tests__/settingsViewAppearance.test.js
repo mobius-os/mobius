@@ -48,6 +48,21 @@ test('background agents are always draggable without reorder chrome or a trailin
   assert.doesNotMatch(css, /settings-bg-row--drop-before|settings-bg-row--drop-after/)
 })
 
+test('new provider connections use the curated unattended defaults', () => {
+  assert.match(view, /claude: 'claude-opus-4-8'/)
+  assert.match(view, /codex: 'gpt-5\.6-terra'/)
+  assert.match(view, /authProvidersAtStartRef\.current = new Set\(configuredProvidersRef\.current\)/)
+  assert.match(view, /const newlyConnected = !providersBefore\.has\(provider\)/)
+  assert.match(view, /providersBefore\.size === 0[\s\S]*connectedRow[\s\S]*enabled: false/)
+  assert.match(view, /const onProviderConnected = useCallback\(async \(provider\)/)
+  assert.match(view, /await persistBackgroundAgents\([\s\S]*providersBefore\.size === 0 \? \{ provider \} : \{\}/)
+  assert.match(view, /api\.settings\.save\(\{[\s\S]*\.\.\.companionSettings,[\s\S]*background_agents: payload/)
+  assert.match(view, /await settleBackgroundAgentSave\([\s\S]*if \(stale\) return true/)
+  assert.match(view, /if \(!saved\) return[\s\S]*setExpandedAuth\(null\)/)
+  assert.doesNotMatch(view, /api\.settings\.save\(\{ provider \}\)/)
+  assert.match(view, /effort: defaultEffort\(provider\)/)
+})
+
 test('appearance indicator waits for the same seeded theme repaint as the palette', () => {
   assert.doesNotMatch(view, /setThemeMode\(newMode\)/)
   assert.match(view, /await themeService\.toggleTheme\(queryClient, currentMode, api\)/)

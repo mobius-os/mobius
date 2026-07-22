@@ -224,6 +224,18 @@ class PersistSessionId(_Command):
 
 
 @dataclass
+class RecordAgentLifecycle(_Command):
+  """Append one normalized helper lifecycle milestone.
+
+  This command is intentionally not coalesced and does not fence transcript
+  snapshots: it writes a separate append-only table. FIFO ordering still puts
+  every submitted milestone before the turn's later terminal Finalize.
+  """
+
+  values: dict = field(default_factory=dict)
+
+
+@dataclass
 class StashToolOutput(_Command):
   """Fire-and-forget stash of a large tool output's FULL text (contract rule 6).
 
@@ -1334,6 +1346,9 @@ class ChatWriterActor:
       return self._answer_question(db, cmd)
     if isinstance(cmd, PersistSessionId):
       return self._persist_session_id(db, cmd)
+    if isinstance(cmd, RecordAgentLifecycle):
+      from app.agent_lifecycle import record_event
+      return record_event(db, cmd.values)
     if isinstance(cmd, StashToolOutput):
       return self._stash_tool_output(db, cmd)
     if isinstance(cmd, StashThinkingTrace):

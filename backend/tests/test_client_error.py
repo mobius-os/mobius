@@ -88,6 +88,36 @@ def test_oversized_message_and_stack_are_truncated(client, owner_token):
     assert len(errs[0].get("stack", "")) <= 8000
 
 
+def test_client_error_scrubs_every_field_before_activity_retention(client, owner_token):
+    app_id = _make_app(client, owner_token)
+    token = _app_token(client, owner_token, app_id)
+    secrets = {
+        "message": "MESSAGE-SECRET",
+        "where": "WHERE-SECRET",
+        "stack": "STACK-SECRET",
+        "url": "URL-SECRET",
+    }
+    r = client.post(
+        "/api/client-error",
+        json={
+            "message": f"boom?token={secrets['message']}",
+            "where": f"app:window.onerror?token={secrets['where']}",
+            "stack": f"at render (https://app.test/?token={secrets['stack']})",
+            "url": f"https://mobius.test/shell/?token={secrets['url']}",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 204, r.text
+
+    errs = [e for e in _activity_lines() if e.get("ev") == "app_error"]
+    assert len(errs) == 1
+    retained = json.dumps(errs[0])
+    for secret in secrets.values():
+        assert secret not in retained
+    for field in ("message", "where", "stack", "url"):
+        assert "[redacted]" in errs[0][field]
+
+
 def test_owner_shell_error_records_no_app_id(client, owner_token):
     # An error reported with the owner JWT (the shell, not an app iframe)
     # must NOT carry an app_id, or it would pollute a real app's last_5_errors.

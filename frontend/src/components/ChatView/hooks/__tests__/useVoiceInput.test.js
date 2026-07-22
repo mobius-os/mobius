@@ -25,20 +25,16 @@ function installSpeechRecognition() {
   return instances
 }
 
-test('live dictation grows to the composer cap and bottom-anchors its mic', () => {
+test('live dictation delegates geometry to the controlled composer value owner', () => {
   const instances = installSpeechRecognition()
-  const toggles = []
+  let closestCalls = 0
   const input = {
     value: '',
     scrollHeight: 120,
     style: {},
-    closest: () => ({
-      classList: { toggle: (...args) => toggles.push(args) },
-    }),
+    closest: () => { closestCalls += 1 },
   }
   const transcripts = []
-  const prevRaf = globalThis.requestAnimationFrame
-  globalThis.requestAnimationFrame = fn => { fn(); return 1 }
   try {
     const { result } = renderHook(() => useVoiceInput({
       onTranscript: text => transcripts.push(text),
@@ -48,10 +44,9 @@ test('live dictation grows to the composer cap and bottom-anchors its mic', () =
     instances[0].onresult(speechResult('a sufficiently long dictated message'))
 
     assert.equal(transcripts.at(-1), 'a sufficiently long dictated message')
-    assert.equal(input.style.height, '120px')
-    assert.deepEqual(toggles.at(-1), ['chat__pill--tall', true])
+    assert.equal(input.style.height, undefined)
+    assert.equal(closestCalls, 0, 'the hook must not force a second layout')
   } finally {
-    globalThis.requestAnimationFrame = prevRaf
     delete globalThis.window
   }
 })
@@ -63,14 +58,12 @@ test('a manual edit while listening survives late speech results and rebases dic
   let timerId = 0
   const prevTimeout = globalThis.setTimeout
   const prevClearTimeout = globalThis.clearTimeout
-  const prevRaf = globalThis.requestAnimationFrame
   globalThis.setTimeout = fn => {
     const id = ++timerId
     timers.set(id, fn)
     return id
   }
   globalThis.clearTimeout = id => timers.delete(id)
-  globalThis.requestAnimationFrame = fn => { fn(); return 1 }
   try {
     const input = { value: 'draft', style: {}, scrollHeight: 30, closest: () => null }
     const { result } = renderHook(() => useVoiceInput({
@@ -94,7 +87,6 @@ test('a manual edit while listening survives late speech results and rebases dic
   } finally {
     globalThis.setTimeout = prevTimeout
     globalThis.clearTimeout = prevClearTimeout
-    globalThis.requestAnimationFrame = prevRaf
     delete globalThis.window
   }
 })

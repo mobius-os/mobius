@@ -21,6 +21,7 @@ from app.app_compile_contract import (
   mobius_runtime_path,
   runtime_library_aliases,
   runtime_inject_path,
+  runtime_node_path,
 )
 
 
@@ -119,6 +120,50 @@ export default function Fixture() {
   )
   assert completed.returncode == 0, completed.stderr
   assert "shadow-react-copy" not in output.read_text()
+
+
+def test_three_addons_resolve_from_the_pinned_runtime(tmp_path):
+  """Documented addons imports must survive package-root runtime pinning."""
+  aliases = dict(runtime_library_aliases())
+  assert aliases["three"] == runtime_node_path() / "three"
+  assert (
+    aliases["three/addons"]
+    == runtime_node_path() / "three" / "examples" / "jsm"
+  )
+
+  entry = tmp_path / "three-addons.jsx"
+  output = tmp_path / "three-addons.js"
+  metafile = tmp_path / "three-addons-meta.json"
+  entry.write_text(
+    """import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { STLLoader } from 'three/addons/loaders/STLLoader.js'
+
+export default function ThreeAddonsFixture() {
+  return [OrbitControls.name, STLLoader.name]
+}
+"""
+  )
+
+  completed = subprocess.run(
+    esbuild_command(entry, output, metafile=metafile),
+    capture_output=True,
+    check=False,
+    env=esbuild_environment(),
+    text=True,
+    timeout=ESBUILD_TIMEOUT_SECS,
+  )
+  assert completed.returncode == 0, completed.stderr
+
+  metadata = json.loads(metafile.read_text())
+  entry_outputs = [
+    details for details in metadata["outputs"].values()
+    if details.get("entryPoint")
+  ]
+  assert len(entry_outputs) == 1
+  assert entry_outputs[0].get("imports") == [], (
+    "Three addons escaped the pinned self-contained app bundle"
+  )
+  assert output.is_file() and output.stat().st_size > 0
 
 
 def test_app_hosts_have_no_runtime_import_map_or_static_module_imports():

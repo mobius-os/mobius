@@ -109,8 +109,10 @@ test('connection failure hides queued actions and disables composer steering', (
     'the lost-connection state should own the footer stack until Retry succeeds')
   assert.match(chatView, /const canSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected' && !steerBusy[\s\S]*?canFastForwardQueue/,
     'the visible composer steer action must be gated by pending QA and connection health')
-  assert.match(chatView, /const canRequestSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?!steerBusy[\s\S]*?turnActive/,
-    'the keyboard steer path must be gated by pending QA and connection health too')
+  assert.match(chatView, /const canSubmitSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?!steerBusy[\s\S]*?turnActive/,
+    'the composed-text keyboard steer path must be gated by pending QA and connection health too')
+  assert.match(chatView, /const canRequestSteer = canSubmitSteer[\s\S]*?pendingQueue\.pendingMessages\.length > 0/,
+    'the empty-composer keyboard path must share the same gate and require queued work')
 })
 
 test('a send that merely enqueues preserves the in-flight build rail', () => {

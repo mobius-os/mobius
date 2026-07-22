@@ -19,11 +19,12 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app import (
-  activity, app_git, app_jobs, fs_locks, icon_cache, legacy_platform_apps,
+  activity, app_activity, app_git, app_jobs, fs_locks, icon_cache,
+  legacy_platform_apps,
   models, providers, schemas,
   source_dirs, theme,
 )
@@ -410,6 +411,11 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   # cleanup of the slug-keyed source tree below leaves harmless orphans — those
   # are not addressable by a reused integer id, so a live row pointing at
   # missing files (a 404) is the acceptable failure, not data exposure.
+  # The activity marker is id-keyed too; remove it before the reusable app id
+  # is freed so a future unrelated app never inherits the old app's dot.
+  db.query(models.AppActivityState).filter(
+    models.AppActivityState.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
   db.delete(app)
   db.commit()
   get_system_broadcast().publish(
@@ -671,7 +677,7 @@ async def list_apps(
               "hard-delete purge failed for app %s; leaving tombstone", app.id
             )
             db.rollback()
-  return (
+  apps = (
     db.query(models.App)
     .filter(models.App.deleted_at.is_(None))
     .order_by(
@@ -681,6 +687,7 @@ async def list_apps(
     )
     .all()
   )
+  return app_activity.annotate_apps(db, apps)
 
 
 @router.get("/schedules", response_model=list[schemas.AppScheduleOut])
@@ -1814,7 +1821,29 @@ def get_app(
 ):
   """Returns a single mini-app by ID (404 for a tombstoned one)."""
   app = live_app_or_404(db, app_id)
-  return app
+  return app_activity.annotate_apps(db, [app])[0]
+
+
+class AppActivitySeenRequest(BaseModel):
+  activity_version: int = Field(ge=1, le=(2**63 - 1))
+
+
+@router.post(
+  "/{app_id}/activity/seen",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+def mark_app_activity_seen(
+  app_id: int,
+  body: AppActivitySeenRequest,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Clear an app's durable activity dot when the owner opens the app."""
+  live_app_or_404(db, app_id)
+  app_activity.mark_seen(db, app_id, body.activity_version)
+  db.commit()
+  return Response(status_code=204)
 
 
 @router.patch(

@@ -714,13 +714,22 @@ def dispatch_sdk_message(
       # oversized provider string would otherwise ride the wire, the in-memory
       # event log, and Chat.messages verbatim. Clipping also coerces a
       # non-string (SDK shape drift) to text so a downstream render can't crash.
-      bc.publish({
+      public_event = {
         "type": "task_start",
         "task_id": sdk_msg.task_id,
         "description": _clip_task_text(sdk_msg.description, _TASK_TEXT_CAP),
         "task_type": sdk_msg.task_type,
         "tool_use_id": sdk_msg.tool_use_id,
-      })
+      }
+      recorder = getattr(bc, "record_lifecycle", None)
+      if callable(recorder):
+        recorder({**public_event,
+          "provider_session_id": (
+            getattr(sdk_msg, "session_id", None) or current_session_id
+          ),
+          "source_event_id": getattr(sdk_msg, "uuid", None),
+        })
+      bc.publish(public_event)
       return current_session_id, None
     if isinstance(sdk_msg, TaskProgressMessage):
       bc.publish({
@@ -732,13 +741,22 @@ def dispatch_sdk_message(
       })
       return current_session_id, None
     if isinstance(sdk_msg, TaskNotificationMessage):
-      bc.publish({
+      public_event = {
         "type": "task_done",
         "task_id": sdk_msg.task_id,
         "status": sdk_msg.status,
         "summary": _clip_task_text(sdk_msg.summary, _TASK_TEXT_CAP),
         "tool_use_id": sdk_msg.tool_use_id,
-      })
+      }
+      recorder = getattr(bc, "record_lifecycle", None)
+      if callable(recorder):
+        recorder({**public_event,
+          "provider_session_id": (
+            getattr(sdk_msg, "session_id", None) or current_session_id
+          ),
+          "source_event_id": getattr(sdk_msg, "uuid", None),
+        })
+      bc.publish(public_event)
       return current_session_id, None
     if TaskUpdatedMessage is not None and isinstance(sdk_msg, TaskUpdatedMessage):
       # A background task's terminal state can arrive ONLY as a task_updated
@@ -752,13 +770,25 @@ def dispatch_sdk_message(
       # tool_use_id are read via getattr — the SDK class omits them, so they
       # resolve to None and the task_done shape stays uniform across both paths.
       if sdk_msg.status in TERMINAL_TASK_STATUSES:
-        bc.publish({
+        private_event = {
           "type": "task_done",
           "task_id": sdk_msg.task_id,
           "status": sdk_msg.status,
           "summary": getattr(sdk_msg, "summary", None),
           "tool_use_id": getattr(sdk_msg, "tool_use_id", None),
-        })
+          "provider_session_id": (
+            getattr(sdk_msg, "session_id", None) or current_session_id
+          ),
+          "source_event_id": getattr(sdk_msg, "uuid", None),
+          "occurred_at": (getattr(sdk_msg, "patch", None) or {}).get(
+            "end_time"
+          ),
+        }
+        recorder = getattr(bc, "record_lifecycle", None)
+        if callable(recorder):
+          recorder(private_event)
+        bc.publish({key: private_event.get(key) for key in (
+          "type", "task_id", "status", "summary", "tool_use_id")})
       return current_session_id, None
     if sdk_msg.subtype == "init":
       # Setup metadata only — no Möbius-side render.

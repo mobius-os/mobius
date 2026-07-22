@@ -1032,15 +1032,165 @@ def _parse_pr_number(url: str) -> int | None:
   return int(m.group(1)) if m else None
 
 
+def _reviewed_pr_labels(plan: dict) -> list[str]:
+  """Return only the two labels the owner could see in Contribute review."""
+  raw = plan.get("labels")
+  if not isinstance(raw, list):
+    return []
+  # Mirror Contribute's review surface: it filters malformed/blank values,
+  # trims them, and then shows at most two. Security validation and duplicate
+  # folding happen only after that visibility boundary, so an unseen third
+  # label can never replace a visible-but-unusable one at submit time.
+  visible = []
+  for value in raw:
+    if not isinstance(value, str):
+      continue
+    label = value.strip()
+    if not label:
+      continue
+    visible.append(label)
+    if len(visible) == 2:
+      break
+  labels = []
+  seen = set()
+  for label in visible:
+    folded = label.casefold()
+    if len(label) > 50 or "\n" in label or folded in seen:
+      continue
+    seen.add(folded)
+    labels.append(label)
+  return labels
+
+
+def _apply_reviewed_pr_labels(
+  repo: Path,
+  upstream_repo: str,
+  number: int | None,
+  labels: list[str],
+) -> dict:
+  """Best-effort add reviewed labels that already exist in the target repo.
+
+  Labeling is deliberately secondary to PR creation: a missing repository
+  label, permission restriction, or transient API failure must not turn an
+  already-open pull request into an apparent failed submission. The outcome is
+  persisted so the review never claims an unavailable label was applied.
+  """
+  if not labels:
+    return {}
+  patch = {
+    "last_submit_labels_requested": labels,
+    "last_submit_labels_applied": [],
+  }
+  if number is None:
+    return {
+      **patch,
+      "last_submit_labels_note": "GitHub did not return a PR number for labeling.",
+    }
+
+  try:
+    available = _gh(
+      repo,
+      "api", "--paginate",
+      f"repos/{upstream_repo}/labels?per_page=100",
+      "--jq", ".[].name",
+      check=False,
+    )
+  except subprocess.TimeoutExpired:
+    return {
+      **patch,
+      "last_submit_labels_note": (
+        "Timed out while checking repository labels; the pull request is "
+        "open without confirmed labels."
+      ),
+    }
+  except OSError:
+    return {
+      **patch,
+      "last_submit_labels_note": (
+        "Could not start the GitHub label lookup; the pull request is open "
+        "without confirmed labels."
+      ),
+    }
+  if available.returncode != 0:
+    return {
+      **patch,
+      "last_submit_labels_note": (
+        "Could not verify the repository labels; the pull request is open "
+        "without confirmed labels."
+      ),
+    }
+  by_name = {}
+  for raw_name in (available.stdout or "").splitlines():
+    name = raw_name.strip()
+    if name:
+      by_name[name.casefold()] = name
+  applicable = [by_name[label.casefold()] for label in labels
+                if label.casefold() in by_name]
+  missing = [label for label in labels if label.casefold() not in by_name]
+  if not applicable:
+    return {
+      **patch,
+      "last_submit_labels_missing": missing,
+      "last_submit_labels_note": "The reviewed labels do not exist in this repository.",
+    }
+
+  try:
+    applied = _gh(
+      repo,
+      "api", "--method", "POST",
+      f"repos/{upstream_repo}/issues/{number}/labels",
+      *(part for label in applicable for part in ("-f", f"labels[]={label}")),
+      check=False,
+    )
+  except subprocess.TimeoutExpired:
+    return {
+      **patch,
+      "last_submit_labels_missing": missing,
+      "last_submit_labels_note": (
+        "Timed out while applying reviewed labels; the pull request is open, "
+        "but GitHub did not confirm the label result."
+      ),
+    }
+  except OSError:
+    return {
+      **patch,
+      "last_submit_labels_missing": missing,
+      "last_submit_labels_note": (
+        "Could not start the GitHub label update; the pull request is open "
+        "without confirmed labels."
+      ),
+    }
+  if applied.returncode != 0:
+    return {
+      **patch,
+      "last_submit_labels_missing": missing,
+      "last_submit_labels_note": (
+        "GitHub did not confirm these labels were applied; the pull request "
+        "is still open."
+      ),
+    }
+  result = {
+    **patch,
+    "last_submit_labels_applied": applicable,
+  }
+  if missing:
+    result["last_submit_labels_missing"] = missing
+    result["last_submit_labels_note"] = "Some reviewed labels no longer exist."
+  return result
+
+
 def _find_existing_pr(
   repo: Path,
   upstream_repo: str,
   login: str,
   branch: str,
   *,
+  expected_head_sha: str,
   base_branch: str | None = None,
   same_repo: bool = False,
 ) -> str | None:
+  if not _GIT_SHA.match(str(expected_head_sha or "")):
+    return None
   head = branch if same_repo else f"{login}:{branch}"
   args = [
     "pr", "list",
@@ -1049,22 +1199,32 @@ def _find_existing_pr(
   ]
   if base_branch:
     args.extend(("--base", _validate_branch(base_branch)))
-  args.extend(("--state", "open", "--json", "url", "--limit", "1"))
-  proc = _gh(
-    repo,
-    *args,
-    check=False,
-  )
+  args.extend((
+    "--state", "open", "--json", "url,headRefOid", "--limit", "10",
+  ))
+  try:
+    proc = _gh(
+      repo,
+      *args,
+      check=False,
+    )
+  except (subprocess.TimeoutExpired, OSError):
+    return None
   if proc.returncode != 0:
     return None
   try:
     rows = json.loads(proc.stdout or "[]")
   except ValueError:
     return None
-  if isinstance(rows, list) and rows:
-    url = rows[0].get("url") if isinstance(rows[0], dict) else None
-    if isinstance(url, str) and url.startswith("https://github.com/"):
-      return url
+  if isinstance(rows, list):
+    for row in rows:
+      if not isinstance(row, dict):
+        continue
+      if str(row.get("headRefOid") or "") != expected_head_sha:
+        continue
+      url = row.get("url")
+      if isinstance(url, str) and url.startswith("https://github.com/"):
+        return url
   return None
 
 
@@ -1621,6 +1781,14 @@ def _submit_prepared_pr(
       record_patch = _record_patch_with(record_patch, merge_patch)
     except ContributionSubmitError as exc:
       raise _merge_error_patch(exc, record_patch) from exc
+    # The merge preflight proves one exact upstream base. Pin that same branch
+    # into both create and ambiguous-response recovery. Without an explicit
+    # standalone --base, gh may honor stale branch.<name>.gh-merge-base config
+    # from the durable staging checkout and publish the reviewed diff against a
+    # different target.
+    submit_base = direct_base or _validate_branch(
+      str(merge_patch.get("last_submit_upstream_branch") or "")
+    )
 
     push_source = "HEAD"
     if direct_base:
@@ -1674,6 +1842,20 @@ def _submit_prepared_pr(
       ),
       "last_pushed_branch_url": pushed_branch_url,
     }
+    pushed_sha = str(
+      pushed_patch.get("last_submit_push_sha")
+      or pushed_patch.get("head_sha")
+      or plan.get("head_sha")
+      or ""
+    ).strip()
+    if not _GIT_SHA.match(pushed_sha):
+      pushed_sha = _git(repo, "rev-parse", push_source).stdout.strip()
+    if not _GIT_SHA.match(pushed_sha):
+      raise ContributionSubmitError(
+        "Could not verify the exact reviewed commit after pushing this branch.",
+        record_patch=pushed_patch,
+      )
+    pushed_patch["last_submit_push_sha"] = pushed_sha
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
       f.write(body)
@@ -1687,23 +1869,51 @@ def _submit_prepared_pr(
           "--title", title,
           "--body-file", body_file,
         ]
-        if direct_base:
-          create_args.extend(("--base", direct_base))
-        pr = _gh(repo, *create_args, check=False)
-        if pr.returncode != 0:
+        create_args.extend(("--base", submit_base))
+        create_transport_error = None
+        try:
+          pr = _gh(repo, *create_args, check=False)
+        except subprocess.TimeoutExpired:
+          pr = None
+          create_transport_error = (
+            "Timed out while waiting for GitHub to confirm pull request creation."
+          )
+        except OSError:
+          pr = None
+          create_transport_error = (
+            "Could not start the GitHub pull request creation command."
+          )
+        if pr is None or pr.returncode != 0:
           # Retried sends commonly arrive after GitHub already created the PR.
-          # Pay for the list lookup only on this uncommon recovery path.
+          # A create transport failure is also ambiguous: GitHub may have
+          # accepted the request before the local process lost its response.
+          # Probe the reviewed branch and require its exact pushed commit before
+          # treating the PR as open. Never issue a second create in this call.
           existing = _find_existing_pr(
             repo,
             upstream_repo,
             login,
             branch,
-            base_branch=direct_base,
+            expected_head_sha=pushed_sha,
+            base_branch=submit_base,
             same_repo=bool(direct_base),
           )
           if existing:
-            return existing, _parse_pr_number(existing), pushed_patch
-          detail = (pr.stderr or pr.stdout or "GitHub command failed.").strip()
+            existing_number = _parse_pr_number(existing)
+            label_patch = _apply_reviewed_pr_labels(
+              repo,
+              upstream_repo,
+              existing_number,
+              _reviewed_pr_labels(plan),
+            )
+            return (
+              existing,
+              existing_number,
+              _record_patch_with(pushed_patch, label_patch),
+            )
+          detail = create_transport_error or (
+            pr.stderr or pr.stdout or "GitHub command failed."
+          ).strip()
           raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
       except ContributionSubmitError as exc:
         raise ContributionSubmitError(
@@ -1723,7 +1933,14 @@ def _submit_prepared_pr(
         f"to {pushed_branch_url}.",
         record_patch=pushed_patch,
       )
-    return url, _parse_pr_number(url), pushed_patch
+    number = _parse_pr_number(url)
+    label_patch = _apply_reviewed_pr_labels(
+      repo,
+      upstream_repo,
+      number,
+      _reviewed_pr_labels(plan),
+    )
+    return url, number, _record_patch_with(pushed_patch, label_patch)
   finally:
     if checkout_back:
       _git(repo, "checkout", "-q", checkout_back, check=False)
