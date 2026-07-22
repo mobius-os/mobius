@@ -28,9 +28,12 @@ const CSS = `
 .sk-row .ico { flex: 0 0 auto; opacity: 0.75; }
 .sk-row .sub { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
 .sk-card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 12px; margin-bottom: 10px; }
+.sk-card.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .sk-card h3 { margin: 0 0 4px 0; font-size: 15px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sk-card p { margin: 0 0 8px 0; font-size: 13px; color: var(--muted); line-height: 1.45; }
-.sk-card .path { font-size: 11.5px; color: var(--muted); opacity: 0.8; margin: -2px 0 6px; word-break: break-all; }
+.sk-details { border-top: 1px solid var(--border); margin: 8px 0 10px; padding-top: 8px; font-size: 12.5px; color: var(--muted); }
+.sk-details .meta { margin: 0 0 6px; word-break: break-all; }
+.sk-details .peek { white-space: pre-wrap; font-size: 12px; line-height: 1.5; max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--bg); }
 .sk-chip { font-size: 10.5px; padding: 2px 7px; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); font-weight: 500; white-space: nowrap; }
 .sk-chip.seed { color: var(--accent); border-color: var(--accent); }
 .sk-chip.installed { color: var(--green, #1e7a46); border-color: var(--green, #1e7a46); }
@@ -80,8 +83,9 @@ POST /api/skills/install and DELETE /api/skills/{name} calls. When asked for "a 
 search the sources, offer the best matches with one-line summaries and provenance, and install the
 chosen one. Keep answers short; this is a side panel.`
 
-// Descriptions auto-load for this many cards after a source opens; the rest
-// load when tapped. Keeps a 200-skill catalog from firing 200 proxy fetches.
+// Descriptions auto-load for this many cards the moment a source opens (an
+// instant first paint); every other card lazy-loads its summary as it scrolls
+// into view. Keeps a 200-skill catalog from firing 200 proxy fetches upfront.
 const EAGER_DESCRIPTIONS = 10
 
 function parseFrontmatter(text) {
@@ -109,13 +113,61 @@ function firstParagraph(body) {
   return ''
 }
 
+// One catalog card. Its summary loads when the card scrolls into view (or on
+// tap as the no-IntersectionObserver fallback); tapping selects the card and
+// opens the detail panel: license, path in the repo, and a peek at the body.
+function SkillCard({ skill, desc, selected, installed, busy, onSelect, onLoad, onInstall }) {
+  const ref = useRef(null)
+
+  useEffect(() => {
+    if (desc || !ref.current || typeof IntersectionObserver === 'undefined') return undefined
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) { onLoad(); obs.disconnect() }
+    }, { rootMargin: '250px' })
+    obs.observe(ref.current)
+    return () => obs.disconnect()
+  }, [desc])
+
+  const loaded = desc && desc !== 'loading' && desc !== 'failed'
+  return (
+    <div ref={ref} className={`sk-card ${selected ? 'sel' : ''}`} onClick={onSelect}>
+      <h3>
+        {skill.name}
+        {installed && <span className="sk-chip installed">installed</span>}
+      </h3>
+      <p>
+        {loaded ? desc.description
+          : desc === 'failed' ? 'Could not load SKILL.md.'
+            : 'Loading summary…'}
+      </p>
+      {selected && loaded && (
+        <div className="sk-details" onClick={(e) => e.stopPropagation()}>
+          <div className="meta">
+            {skill.dir !== skill.name && <>In repo: <b>{skill.dir}</b><br /></>}
+            {desc.license && <>License: {desc.license}</>}
+          </div>
+          {desc.peek && <div className="peek">{desc.peek}</div>}
+        </div>
+      )}
+      <button
+        className="sk-btn"
+        disabled={busy || installed}
+        onClick={(e) => { e.stopPropagation(); onInstall() }}
+      >
+        {installed ? 'Installed' : 'Install'}
+      </button>
+    </div>
+  )
+}
+
 export default function SkillsApp({ appId, token }) {
   const [tab, setTab] = useState('browse')
   const [sources, setSources] = useState(DEFAULT_SOURCES)
   const [nav, setNav] = useState(null) // { source } | null = source list
   const [skillList, setSkillList] = useState(null) // [{ dir, name }] from the tree scan
-  const [descs, setDescs] = useState({}) // dir -> { description, license } | 'loading' | 'failed'
+  const [descs, setDescs] = useState({}) // dir -> { description, license, peek } | 'loading' | 'failed'
   const [filter, setFilter] = useState('')
+  const [selectedDir, setSelectedDir] = useState(null)
   const [installedList, setInstalledList] = useState([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -180,6 +232,7 @@ export default function SkillsApp({ appId, token }) {
         [dir]: {
           description: meta.description || firstParagraph(meta.body) || 'No description in SKILL.md.',
           license: meta.license || null,
+          peek: (meta.body || '').trim().slice(0, 700) || null,
         },
       }))
     } catch {
@@ -191,7 +244,7 @@ export default function SkillsApp({ appId, token }) {
   // folder drilling, no dead ends.
   const openSource = async (source) => {
     setBusy(true); setError(null); setNotice(null)
-    setNav({ source }); setSkillList(null); setDescs({}); setFilter('')
+    setNav({ source }); setSkillList(null); setDescs({}); setFilter(''); setSelectedDir(null)
     try {
       const url = `https://api.github.com/repos/${source.repo}/git/trees/${source.ref || 'main'}?recursive=1`
       const data = await proxyJson(url)
@@ -308,37 +361,22 @@ export default function SkillsApp({ appId, token }) {
                 onChange={(e) => setFilter(e.target.value)}
               />
             )}
-            {shownSkills && shownSkills.map((s) => {
-              const d = descs[s.dir]
-              const loaded = d && d !== 'loading' && d !== 'failed'
-              return (
-                <div
-                  key={s.dir}
-                  className="sk-card"
-                  onClick={() => !d && loadDescription(nav.source, s.dir)}
-                >
-                  <h3>
-                    {s.name}
-                    {loaded && d.license && <span className="sk-chip">{d.license}</span>}
-                    {installedIds.has(s.name) && <span className="sk-chip installed">installed</span>}
-                  </h3>
-                  {s.dir !== s.name && <div className="path">{s.dir}</div>}
-                  <p>
-                    {loaded ? d.description
-                      : d === 'loading' ? 'Loading summary…'
-                        : d === 'failed' ? 'Could not load SKILL.md.'
-                          : 'Tap for summary.'}
-                  </p>
-                  <button
-                    className="sk-btn"
-                    disabled={busy || installedIds.has(s.name)}
-                    onClick={(e) => { e.stopPropagation(); install(nav.source, s.dir) }}
-                  >
-                    {installedIds.has(s.name) ? 'Installed' : 'Install'}
-                  </button>
-                </div>
-              )
-            })}
+            {shownSkills && shownSkills.map((s) => (
+              <SkillCard
+                key={s.dir}
+                skill={s}
+                desc={descs[s.dir]}
+                selected={selectedDir === s.dir}
+                installed={installedIds.has(s.name)}
+                busy={busy}
+                onSelect={() => {
+                  setSelectedDir(selectedDir === s.dir ? null : s.dir)
+                  loadDescription(nav.source, s.dir)
+                }}
+                onLoad={() => loadDescription(nav.source, s.dir)}
+                onInstall={() => install(nav.source, s.dir)}
+              />
+            ))}
             {shownSkills && !shownSkills.length && (
               <div className="sk-empty">
                 {skillList.length ? 'No skills match the filter.' : 'No SKILL.md files found in this source.'}
