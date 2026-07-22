@@ -83,6 +83,10 @@ import {
 } from './sendAttemptRecovery.js'
 import { persistComposerDraft, readComposerDraft } from './composerDraft.js'
 import {
+  resetComposerTextarea,
+  resizeComposerTextarea,
+} from './composerTextareaSizing.js'
+import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
   buildPhaseRailViewModel,
@@ -1457,10 +1461,7 @@ export default function ChatView({
     requestAnimationFrame(() => {
       const el = inputRef.current
       if (!el) return
-      el.style.height = 'auto'
-      const h = Math.min(el.scrollHeight, 280)
-      el.style.height = `${h}px`
-      el.closest('.chat__pill')?.classList.toggle('chat__pill--tall', h > 45)
+      resizeComposerTextarea(el, text)
       if (focus) {
         try { el.focus({ preventScroll: true }) }
         catch { el.focus() }
@@ -1602,24 +1603,15 @@ export default function ChatView({
     persistComposerDraft(chatId, input, draftAttachmentsRef.current)
   }, [input, chatId])
 
-  // Auto-size textarea when a draft is restored. Cap matches the
-  // 280px max-height enforced by `handleTextareaChange` in
-  // ChatInputBar; without keeping these in sync a tall draft would
-  // restore visually truncated until the user types one more
-  // character to trigger the live-grow path. Also mirror the
-  // .chat__pill--tall class toggle so a restored multi-line draft
-  // anchors the send/mic buttons to the bottom of the pill — the
-  // toggle otherwise only fires on input keystrokes.
-  useEffect(() => {
+  // Text changes through input, restores, voice, send cleanup, and
+  // authoritative foreground reconciliation. Reconcile after every committed
+  // value — including the empty value — so no programmatic clear can retain a
+  // previous multi-line inline height. Hidden retained panes have no useful
+  // scrollHeight; they reconcile when `hidden` flips back to false.
+  useLayoutEffect(() => {
     const el = inputRef.current
-    if (el && input) {
-      el.style.height = 'auto'
-      const h = Math.min(el.scrollHeight, 280)
-      el.style.height = h + 'px'
-      const pill = el.closest('.chat__pill')
-      if (pill) pill.classList.toggle('chat__pill--tall', h > 45)
-    }
-  }, [chatId])
+    if (el && !hidden) resizeComposerTextarea(el, input)
+  }, [chatId, hidden, input])
 
   // Publish `.chat__foot`'s rendered height as `--composer-h` on
   // `.chat`. `.chat__list` reads this var for its bottom padding so
@@ -1641,8 +1633,16 @@ export default function ChatView({
         raf2 = requestAnimationFrame(measureComposerHeight)
       })
     }
+    const reconcileForegroundGeometry = () => {
+      // Chromium can restore form/layout state independently when a document
+      // returns from background or the back-forward cache. Reconcile the
+      // textarea first; measuring only the outer foot would preserve a stale
+      // multi-line height on an empty composer.
+      resizeComposerTextarea(inputRef.current, inputValueRef.current)
+      applySoon()
+    }
     const onVisible = () => {
-      if (document.visibilityState === 'visible') applySoon()
+      if (document.visibilityState === 'visible') reconcileForegroundGeometry()
     }
 
     applySoon()
@@ -1651,7 +1651,7 @@ export default function ChatView({
       : null
     ro?.observe(footEl)
     window.addEventListener('resize', applySoon)
-    window.addEventListener('pageshow', applySoon)
+    window.addEventListener('pageshow', reconcileForegroundGeometry)
     window.visualViewport?.addEventListener('resize', applySoon)
     window.visualViewport?.addEventListener('scroll', applySoon)
     document.addEventListener('visibilitychange', onVisible)
@@ -1661,7 +1661,7 @@ export default function ChatView({
       if (raf2) cancelAnimationFrame(raf2)
       ro?.disconnect()
       window.removeEventListener('resize', applySoon)
-      window.removeEventListener('pageshow', applySoon)
+      window.removeEventListener('pageshow', reconcileForegroundGeometry)
       window.visualViewport?.removeEventListener('resize', applySoon)
       window.visualViewport?.removeEventListener('scroll', applySoon)
       document.removeEventListener('visibilitychange', onVisible)
@@ -2085,17 +2085,15 @@ export default function ChatView({
       setComposerInput('')
       clearComposerFilesForSend()
       if (inputRef.current) {
-        inputRef.current.style.height = 'auto'
+        resetComposerTextarea(inputRef.current)
         // Drop the multi-line `.chat__pill--tall` class so send/mic
         // re-center vertically. Without this, the pill stays in
         // flex-end alignment after a send-from-tall and the freshly
         // empty textarea renders pinned to the bottom — text appears
         // off-center (lower than its resting position) until the
-        // user types again. `handleTextareaChange` re-evaluates this
-        // class on every keystroke, but send doesn't go through that
-        // path. Tap-to-focus doesn't trigger a change event either,
-        // so the visual stayed broken until the next keystroke.
-        inputRef.current.closest('.chat__pill')?.classList.remove('chat__pill--tall')
+        // user types again. Shared textarea sizing re-evaluates this
+        // on each committed value, but the synchronous reset keeps the
+        // send transition correct before React commits the empty value.
       }
       try {
         const result = await streamSend(
@@ -2291,10 +2289,9 @@ export default function ChatView({
     setComposerInput('')
     clearComposerFilesForSend()
     if (inputRef.current) {
-      inputRef.current.style.height = 'auto'
+      resetComposerTextarea(inputRef.current)
       // Drop the multi-line `.chat__pill--tall` class — see queue-path
       // comment above for the full rationale.
-      inputRef.current.closest('.chat__pill')?.classList.remove('chat__pill--tall')
     }
     setSending(true)
     setServerRunningState(true)

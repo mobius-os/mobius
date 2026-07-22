@@ -23,10 +23,11 @@ import useScreenWakeLock from '../../hooks/useScreenWakeLock.js'
  * @param {object} options
  * @param {(text: string) => void} options.onTranscript
  *   Called with the concatenated final+interim transcript on every
- *   onresult event. Caller writes this into the composer textarea.
+ *   onresult event. Caller commits this into the controlled composer; the
+ *   composer layout effect owns its post-commit textarea sizing.
  * @param {React.RefObject<HTMLTextAreaElement>} options.inputRef
- *   The composer textarea — used for auto-height resize on transcript
- *   growth and to seed voiceFinalRef with the current value on start.
+ *   The composer textarea — used to seed voiceFinalRef with the current value
+ *   on start and to preserve the current value in permission-error copy.
  *
  * @returns {{
  *   listening: boolean,
@@ -87,15 +88,6 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
       }
       const text = voiceFinalRef.current + interim
       onTranscript(text)
-      requestAnimationFrame(() => {
-        if (inputRef.current) {
-          inputRef.current.style.height = 'auto'
-          const h = Math.min(inputRef.current.scrollHeight, 280)
-          inputRef.current.style.height = h + 'px'
-          inputRef.current.closest('.chat__pill')
-            ?.classList.toggle('chat__pill--tall', h > 45)
-        }
-      })
     }
 
     rec.onerror = (e) => {
