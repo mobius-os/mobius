@@ -3291,11 +3291,9 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  const onDisplayReadyRef = useRef(onDisplayReady)
-  onDisplayReadyRef.current = onDisplayReady
   const displayReady = revealed || showEmpty || showLoadError
   useLayoutEffect(() => {
-    if (displayReady) onDisplayReadyRef.current?.(chatId)
+    if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
   // The captured bridge partial enters the active row before catch-up emits a
