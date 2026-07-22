@@ -9,6 +9,7 @@ must not depend on the platform either.
 
 import importlib
 import hashlib
+import logging
 import os
 import sqlite3
 import sys
@@ -200,6 +201,31 @@ def test_build_status_shape(recovery_env, monkeypatch):
   assert status["owner_configured"] is False
   _create_owner(recovery_env["db_path"], "admin", "secret")
   assert recoveryd.build_status()["owner_configured"] is True
+
+
+def test_access_log_suppresses_only_successful_health_probes(
+    recovery_env, caplog):
+  """Routine Docker health checks must not bury actionable recovery logs."""
+  recoveryd = recovery_env["recoveryd"]
+  handler = recoveryd._Handler.__new__(recoveryd._Handler)
+  handler.client_address = ("127.0.0.1", 12345)
+
+  with caplog.at_level(logging.INFO, logger="recoveryd"):
+    handler.path = "/recover/health"
+    handler.log_message('"%s" %s %s', "GET /recover/health HTTP/1.1", 200, "-")
+    assert caplog.records == []
+
+    handler.log_message('"%s" %s %s', "GET /recover/health HTTP/1.1", 500, "-")
+    handler.path = "/recover/status.json"
+    handler.log_message(
+      '"%s" %s %s', "GET /recover/status.json HTTP/1.1", 200, "-",
+    )
+
+  messages = [record.getMessage() for record in caplog.records]
+  assert any("/recover/health" in message and "500" in message
+             for message in messages)
+  assert any("/recover/status.json" in message and "200" in message
+             for message in messages)
 
 
 # -- import isolation -------------------------------------------------------
