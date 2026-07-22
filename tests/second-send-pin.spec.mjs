@@ -250,10 +250,35 @@ test('A tall-composer send lands once without a post-paint pin repair', async ({
   expect(bottomGap).toBeGreaterThanOrEqual(-2)
   expect(bottomGap).toBeLessThanOrEqual(2)
 
+  // Sample the row from its first renderable frame onward. The controller may
+  // use its intentional mode-write + clamp-settle pair inside ONE pre-paint
+  // layout pass; the user-facing contract is that the first painted position
+  // is already final and no later frame needs another correction.
+  await page.evaluate(() => {
+    window.__mobiusLandingFrames = []
+    const sample = () => {
+      const scroll = document.querySelector('.chat__scroll')
+      const users = document.querySelectorAll('.chat__msg--user')
+      const last = users[users.length - 1]
+      if (scroll && last && users.length >= 2) {
+        const sr = scroll.getBoundingClientRect()
+        const ur = last.getBoundingClientRect()
+        window.__mobiusLandingFrames.push({
+          at: Math.round(performance.now()),
+          visualTop: Math.round(ur.top - sr.top),
+        })
+      }
+      if (window.__mobiusLandingFrames.length < 20) requestAnimationFrame(sample)
+    }
+    requestAnimationFrame(sample)
+  })
+
   await page.keyboard.press('Enter')
   await expect(page.locator('.chat__msg--user')).toHaveCount(2, { timeout: 3000 })
   await expect(page.locator('.chat__msg--user').last()).toContainText('Second user message')
-  await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 350)))
+  await expect.poll(() => page.evaluate(
+    () => window.__mobiusLandingFrames?.length || 0,
+  )).toBe(20)
 
   const result = await page.evaluate(() => {
     const scroll = document.querySelector('.chat__scroll')
@@ -261,19 +286,35 @@ test('A tall-composer send lands once without a post-paint pin repair', async ({
     const last = users[users.length - 1]
     const sr = scroll?.getBoundingClientRect()
     const ur = last?.getBoundingClientRect()
+    const frames = window.__mobiusLandingFrames || []
+    const writes = window.__mobiusChatScrollTrace?.writes || []
+    const firstFrameAt = frames[0]?.at ?? Number.POSITIVE_INFINITY
     return {
       visualTop: sr && ur ? Math.round(ur.top - sr.top) : null,
-      pinWrites: (window.__mobiusChatScrollTrace?.writes || [])
+      frameTops: frames.map(frame => frame.visualTop),
+      pinWrites: writes
         .filter(row => row?.from?.kind === 'PIN_USER_MSG')
         .map(row => row.event),
+      latePinRepairs: writes.filter(row => (
+        row?.from?.kind === 'PIN_USER_MSG'
+        && row.event === 'layout:repair-pin'
+        && row.at > firstFrameAt
+      )),
     }
   })
 
   expect(result.visualTop).not.toBeNull()
   expect(result.visualTop).toBeGreaterThanOrEqual(-2)
   expect(result.visualTop).toBeLessThanOrEqual(12)
+  expect(result.frameTops).toHaveLength(20)
+  for (const top of result.frameTops) {
+    expect(top).toBeGreaterThanOrEqual(-2)
+    expect(top).toBeLessThanOrEqual(12)
+  }
+  expect(Math.max(...result.frameTops) - Math.min(...result.frameTops))
+    .toBeLessThanOrEqual(1)
   expect(result.pinWrites).toContain('layout:mode-transition')
-  expect(result.pinWrites).not.toContain('layout:repair-pin')
+  expect(result.latePinRepairs).toEqual([])
 })
 
 test('Pin HOLDS when content above the pinned message grows after send (late image/error/question layout)', async ({ page }) => {
