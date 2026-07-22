@@ -1948,6 +1948,149 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
   assert stored["last_submit_labels_note"] == body["record"]["last_submit_labels_note"]
 
 
+@pytest.mark.parametrize(
+  ("failure_kind", "existing_mode"),
+  [
+    ("timeout", "match"),
+    ("launch-error", "match"),
+    ("timeout", "absent"),
+    ("launch-error", "absent"),
+    ("timeout", "wrong-head"),
+  ],
+)
+def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
+  client, owner_token, monkeypatch, failure_kind, existing_mode,
+):
+  """A lost create response probes once and never creates a second PR."""
+  create_failure = (
+    subprocess.TimeoutExpired(["gh", "pr", "create"], timeout=30)
+    if failure_kind == "timeout"
+    else OSError("gh could not start")
+  )
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_id = f"rec-pr-create-{failure_kind}-{existing_mode}"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
+  base = "b" * 40
+  head = "a" * 40
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "prepared",
+    "title": "Polish demo",
+    "branch": "fix/demo-polish",
+    "created_at": "2026-07-09T00:00:00Z",
+    "updated_at": "2026-07-09T00:00:00Z",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Polish demo",
+      "body_draft": "## What\n\nPolishes the demo.",
+      "branch": "fix/demo-polish",
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+      "labels": ["bug"],
+    },
+  }
+  _write_contribution(app_id, record_id, record, diff_text)
+
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  monkeypatch.setattr(
+    "app.routes.github._assert_fresh",
+    lambda *_args, **_kwargs: (base, head, record["plan"]["diff_sha256"]),
+  )
+  monkeypatch.setattr("app.routes.github._assert_coauthor_trailer", lambda *_args: None)
+  monkeypatch.setattr("app.routes.github._assert_clean_worktree", lambda *_args: None)
+  monkeypatch.setattr(
+    "app.routes.github._normalize_head_attribution",
+    lambda *_args, **_kwargs: {},
+  )
+  monkeypatch.setattr(
+    "app.routes.github._assert_merges_with_upstream",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": "main",
+      "last_submit_upstream_sha": base,
+    },
+  )
+  monkeypatch.setattr(
+    "app.routes.github._ensure_owner_fork_remote",
+    lambda *_args, **_kwargs: "octocat/app-demo-1",
+  )
+  monkeypatch.setattr(
+    "app.routes.github._push_reviewed_topic",
+    lambda *_args, **kwargs: ("HEAD", kwargs["record_patch"]),
+  )
+
+  git_calls = []
+
+  def fake_git(repo_path, *args, check=True):
+    git_calls.append(args)
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp("develop\n")
+    if args == ("rev-parse", "HEAD"):
+      return _cp(head + "\n")
+    return _cp("")
+
+  gh_calls = []
+
+  def fake_gh(repo_path, *args, check=True):
+    gh_calls.append(args)
+    if args[:2] == ("pr", "create"):
+      raise create_failure
+    if args[:2] == ("pr", "list"):
+      if existing_mode == "absent":
+        return _cp("[]")
+      found_head = head if existing_mode == "match" else "c" * 40
+      return _cp(json.dumps([{
+        "url": "https://github.com/mobius-os/app-demo/pull/42",
+        "headRefOid": found_head,
+      }]))
+    if args[:2] == ("api", "--paginate"):
+      return _cp("bug\n")
+    if args[:3] == ("api", "--method", "POST"):
+      return _cp("[]")
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  creates = [call for call in gh_calls if call[:2] == ("pr", "create")]
+  probes = [call for call in gh_calls if call[:2] == ("pr", "list")]
+  assert len(creates) == 1, "an ambiguous response must never trigger a second create"
+  assert len(probes) == 1
+  assert "url,headRefOid" in probes[0]
+  assert "octocat:fix/demo-polish" in probes[0]
+  assert ("checkout", "-q", "develop") in git_calls
+
+  stored = json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id) /
+     "contributions" / f"{record_id}.json").read_text()
+  )
+  if existing_mode == "match":
+    assert response.status_code == 200, response.text
+    assert response.json()["url"].endswith("/pull/42")
+    assert stored["status"] == "open"
+    assert stored["url"].endswith("/pull/42")
+    assert stored["last_submit_push_sha"] == head
+    assert stored["last_submit_labels_applied"] == ["bug"]
+  else:
+    assert response.status_code == 409, response.text
+    assert stored["status"] == "prepared"
+    assert stored["last_submit_stage"] == "pushed"
+    assert stored["last_submit_push_sha"] == head
+    assert "url" not in stored
+
+
 def test_submit_contribution_normalizes_fallback_author_before_push(
   client, owner_token, monkeypatch,
 ):

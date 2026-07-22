@@ -1185,9 +1185,12 @@ def _find_existing_pr(
   login: str,
   branch: str,
   *,
+  expected_head_sha: str,
   base_branch: str | None = None,
   same_repo: bool = False,
 ) -> str | None:
+  if not _GIT_SHA.match(str(expected_head_sha or "")):
+    return None
   head = branch if same_repo else f"{login}:{branch}"
   args = [
     "pr", "list",
@@ -1196,22 +1199,32 @@ def _find_existing_pr(
   ]
   if base_branch:
     args.extend(("--base", _validate_branch(base_branch)))
-  args.extend(("--state", "open", "--json", "url", "--limit", "1"))
-  proc = _gh(
-    repo,
-    *args,
-    check=False,
-  )
+  args.extend((
+    "--state", "open", "--json", "url,headRefOid", "--limit", "10",
+  ))
+  try:
+    proc = _gh(
+      repo,
+      *args,
+      check=False,
+    )
+  except (subprocess.TimeoutExpired, OSError):
+    return None
   if proc.returncode != 0:
     return None
   try:
     rows = json.loads(proc.stdout or "[]")
   except ValueError:
     return None
-  if isinstance(rows, list) and rows:
-    url = rows[0].get("url") if isinstance(rows[0], dict) else None
-    if isinstance(url, str) and url.startswith("https://github.com/"):
-      return url
+  if isinstance(rows, list):
+    for row in rows:
+      if not isinstance(row, dict):
+        continue
+      if str(row.get("headRefOid") or "") != expected_head_sha:
+        continue
+      url = row.get("url")
+      if isinstance(url, str) and url.startswith("https://github.com/"):
+        return url
   return None
 
 
@@ -1821,6 +1834,20 @@ def _submit_prepared_pr(
       ),
       "last_pushed_branch_url": pushed_branch_url,
     }
+    pushed_sha = str(
+      pushed_patch.get("last_submit_push_sha")
+      or pushed_patch.get("head_sha")
+      or plan.get("head_sha")
+      or ""
+    ).strip()
+    if not _GIT_SHA.match(pushed_sha):
+      pushed_sha = _git(repo, "rev-parse", push_source).stdout.strip()
+    if not _GIT_SHA.match(pushed_sha):
+      raise ContributionSubmitError(
+        "Could not verify the exact reviewed commit after pushing this branch.",
+        record_patch=pushed_patch,
+      )
+    pushed_patch["last_submit_push_sha"] = pushed_sha
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
       f.write(body)
@@ -1836,15 +1863,31 @@ def _submit_prepared_pr(
         ]
         if direct_base:
           create_args.extend(("--base", direct_base))
-        pr = _gh(repo, *create_args, check=False)
-        if pr.returncode != 0:
+        create_transport_error = None
+        try:
+          pr = _gh(repo, *create_args, check=False)
+        except subprocess.TimeoutExpired:
+          pr = None
+          create_transport_error = (
+            "Timed out while waiting for GitHub to confirm pull request creation."
+          )
+        except OSError:
+          pr = None
+          create_transport_error = (
+            "Could not start the GitHub pull request creation command."
+          )
+        if pr is None or pr.returncode != 0:
           # Retried sends commonly arrive after GitHub already created the PR.
-          # Pay for the list lookup only on this uncommon recovery path.
+          # A create transport failure is also ambiguous: GitHub may have
+          # accepted the request before the local process lost its response.
+          # Probe the reviewed branch and require its exact pushed commit before
+          # treating the PR as open. Never issue a second create in this call.
           existing = _find_existing_pr(
             repo,
             upstream_repo,
             login,
             branch,
+            expected_head_sha=pushed_sha,
             base_branch=direct_base,
             same_repo=bool(direct_base),
           )
@@ -1861,7 +1904,9 @@ def _submit_prepared_pr(
               existing_number,
               _record_patch_with(pushed_patch, label_patch),
             )
-          detail = (pr.stderr or pr.stdout or "GitHub command failed.").strip()
+          detail = create_transport_error or (
+            pr.stderr or pr.stdout or "GitHub command failed."
+          ).strip()
           raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
       except ContributionSubmitError as exc:
         raise ContributionSubmitError(
