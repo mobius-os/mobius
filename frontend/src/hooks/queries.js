@@ -104,10 +104,13 @@ async function fetchChats({ signal } = {}) {
   return Array.isArray(data) ? data : []
 }
 
-function useChatsQuery() {
+function useChatsQuery({ reconcile } = {}) {
   return useQuery({
     queryKey: chatsKey,
-    queryFn: fetchChats,
+    queryFn: async (context) => {
+      const rows = await fetchChats(context)
+      return reconcile ? reconcile(rows) : rows
+    },
   })
 }
 

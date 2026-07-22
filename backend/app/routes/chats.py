@@ -447,8 +447,10 @@ def list_chats(
   # the canonical serialized empty-array value in SQL instead of parsing every
   # JSON array with json_array_length: Chat.messages is a non-null list written
   # by SQLAlchemy's canonical serializer, and CAST(... AS TEXT) is portable
-  # across SQLite and PostgreSQL. The database can reject non-empty values from
-  # their stored length without walking every transcript.
+  # across SQLite and PostgreSQL. A future raw-import path must normalize JSON
+  # text first (PostgreSQL's json type preserves whitespace such as ``[ ]``).
+  # The database can reject non-empty values from their stored length without
+  # walking every transcript.
   q = db.query(
     models.Chat.id,
     models.Chat.title,
