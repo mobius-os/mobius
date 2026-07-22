@@ -147,20 +147,22 @@ function classifyExitDestination({ workspace, settingsDestination = false, immer
   return { target, immersiveInstant }
 }
 
-// The immutable invalidation key for an exit beat. INVARIANT (INV 10 / H2): it must
-// incorporate EVERY input deriveExitPlan derives its plan from — the visible (pane,
-// active key) pairs + content dimensions AND the effective destination (which folds
-// the live Settings/immersive overlay states via classifyExitDestination). The
-// controller's cancel watcher recomputes this live and snaps the beat to the committed
-// destination on ANY drift; an input that changed the plan but not this key would let a
-// stale plan animate to the wrong surface. New destination inputs therefore belong in
-// classifyExitDestination — which this and the plan SHARE — never in one alone.
-export function exitSignature(input) {
+// The immutable invalidation key for either directional beat. INVARIANT (INV 10 /
+// H2): it incorporates EVERY input deriveExitPlan / deriveEnterPlan uses — visible
+// pane keys and rects, content bounds, and the effective destination (including live
+// Settings/immersive state). The controller recomputes it and cancels on ANY drift;
+// otherwise a live layout commit could move wrappers underneath stale FLIP/edge
+// transforms. New destination inputs belong in classifyExitDestination, shared by
+// this signature and both plan builders, never in one alone.
+export function transitionSignature(input) {
   const { workspace, projection, contentRect } = input
   const { target, immersiveInstant } = classifyExitDestination(input)
   const leaves = visibleLeafDescriptors(workspace, projection)
     .map(l => `${l.paneId}=${l.activeKey}@${l.rect.x},${l.rect.y},${l.rect.w},${l.rect.h}`)
-  return `${target || ''}|${immersiveInstant ? 'i' : ''}|${leaves.join(',')}|${contentRect.w}x${contentRect.h}`
+  const x = Number.isFinite(contentRect.x) ? contentRect.x : 0
+  const y = Number.isFinite(contentRect.y) ? contentRect.y : 0
+  return `${target || ''}|${immersiveInstant ? 'i' : ''}|${leaves.join(',')}`
+    + `|${x},${y},${contentRect.w}x${contentRect.h}`
 }
 
 // Sort by visual reading order (top, then left) of the pane rect.
@@ -172,8 +174,8 @@ function byVisualOrder(a, b) {
 // deriveExitPlan(input) → the latched exit plan, or null when the beat is instant (an
 // empty tree — nothing painted to deal out — or an immersive-instant destination).
 // `input` is { workspace, projection, contentRect, settingsDestination?,
-// immersiveHolderId? }; the SAME object is fed to exitSignature so the plan and its
-// invalidation key can never disagree about the destination (INV 10 / H2).
+// immersiveHolderId? }; the SAME object is fed to transitionSignature so the plan
+// and its invalidation key can never disagree about the destination (INV 10 / H2).
 //
 // Classification (exit-design v1 §exit-classification, honored by v2):
 //   - target is the active key of a VISIBLE leaf → promote that leaf (physical
@@ -269,7 +271,7 @@ export function deriveExitPlan(input) {
     underlayKey,
     completionNames: [...completionNames],
     totalMs,
-    snapshotSignature: exitSignature(input),
+    snapshotSignature: transitionSignature(input),
   }
 }
 
@@ -327,6 +329,7 @@ export function deriveEnterPlan(input) {
     underlayKey,
     completionNames: [...completionNames],
     totalMs,
+    snapshotSignature: transitionSignature(input),
   }
 }
 

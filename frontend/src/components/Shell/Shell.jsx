@@ -85,7 +85,7 @@ import {
 import PaneChatView from './PaneChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
-  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, exitSignature, MODE_MOTION,
+  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, transitionSignature, MODE_MOTION,
   EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
@@ -403,20 +403,15 @@ export default function Shell() {
   const immersiveHolderRef = useRef(immersiveAppId)
   immersiveHolderRef.current = immersiveAppId
 
-  // INV 10 / H2: a topology, geometry, OR DESTINATION change DURING an exit beat makes
-  // the latched plan no longer describe what single mode will paint — a participant
-  // pane closes, its active tab changes, the slot moves, the box resizes, OR a Settings
-  // takeover / immersive request suspends or lands over the slot mid-beat. Cancel
-  // rather than retarget a live transform: recompute the exit signature from the same
-  // projection authority AND the live overlay classification, and compare to the
-  // latched one. Because the signature folds the destination through the SAME
-  // classifier the plan used, every input the plan derives from also drifts this key —
-  // so the live overlay state (settingsOpenRaw / immersiveAppId) is both read here and
-  // in the deps, letting a mid-beat destination flip fire this. Only caller of cancelBeat.
+  // INV 10 / H2: a topology, geometry, OR DESTINATION change DURING either animated
+  // beat makes its latched FLIP/edge transforms stale. Cancel rather than retarget a
+  // live transform: recompute the shared transition signature from the same projection
+  // authority and overlay classification both plan builders use. The live overlay state
+  // is in the deps, so a mid-beat Settings/immersive destination change also snaps.
   useEffect(() => {
     const t = modeState.transition
-    if (!t || t.phase !== 'exiting' || !t.presentation) return
-    const live = exitSignature({
+    if (!t?.presentation) return
+    const live = transitionSignature({
       workspace, projection, contentRect,
       settingsDestination: settingsOpenRaw,
       immersiveHolderId: immersiveAppId,

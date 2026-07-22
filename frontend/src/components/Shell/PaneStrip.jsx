@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from 'react'
 import AppWindow from 'lucide-react/dist/esm/icons/app-window.mjs'
+import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
 import Settings from 'lucide-react/dist/esm/icons/settings.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
@@ -109,6 +110,15 @@ export function PaneTab({
         onMouseDown={(e) => { if (e.button === 1) e.preventDefault() }}
         onContextMenu={onContextMenu}
       >
+        {dragKey && (
+          <span
+            className="shell__tab-drag-handle"
+            data-touch-drag-handle={dragKey}
+            aria-hidden="true"
+          >
+            <GripVertical size={12} />
+          </span>
+        )}
         <TabIcon size={13} aria-hidden="true" />
         <span ref={titleRef} className="shell__tab-text">
           <span className="shell__tab-text-inner">{label}</span>

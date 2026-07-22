@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import * as paneModel from '../paneModel.js'
 import * as tabModel from '../tabModel.js'
 import {
-  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, exitSignature, MODE_MOTION,
+  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, transitionSignature, MODE_MOTION,
   EMPTY_SINGLE_SURFACE_KEY,
 } from '../workspaceView.js'
 
@@ -672,7 +672,8 @@ test('deriveEnterPlan: the shared surface settles while siblings assemble from t
 
 test('deriveEnterPlan: a tree-absent single surface stays beneath the assembling panes', () => {
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
-  const plan = deriveEnterPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  const input = { workspace: ws, projection: project(ws), contentRect: CONTENT }
+  const plan = deriveEnterPlan(input)
   assert.equal(plan.target, 'chat:99')
   assert.equal(plan.underlayKey, 'chat:99')
   assert.deepEqual(plan.completionNames, ['shell-mode-deal-in'])
@@ -681,6 +682,12 @@ test('deriveEnterPlan: a tree-absent single surface stays beneath the assembling
   const right = plan.participants.find(p => p.key === 'app:42')
   assert.ok(left.offset.x < 0)
   assert.ok(right.offset.x > 0)
+  assert.equal(plan.snapshotSignature, transitionSignature(input), 'entry latches its input snapshot')
+  assert.notEqual(
+    plan.snapshotSignature,
+    transitionSignature({ ...input, contentRect: { ...CONTENT, w: CONTENT.w - 120 } }),
+    'a mid-entry content resize invalidates the latched edge offsets',
+  )
 })
 
 test('edge motions accept Shell\'s origin-free live content rect', () => {
@@ -699,33 +706,37 @@ test('edge motions accept Shell\'s origin-free live content rect', () => {
   }
 })
 
-test('exitSignature is stable for the same tree and drifts on a topology/geometry change (INV 10)', () => {
+test('transitionSignature is stable and drifts on topology/content-bound changes (INV 10)', () => {
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '99' } }
-  const base = exitSignature({ workspace: ws, projection: project(ws), contentRect: CONTENT })
-  assert.equal(base, exitSignature({ workspace: ws, projection: project(ws), contentRect: CONTENT }))
+  const base = transitionSignature({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  assert.equal(base, transitionSignature({ workspace: ws, projection: project(ws), contentRect: CONTENT }))
   // A content-box resize drifts the signature → the beat cancels.
-  const resized = exitSignature({ workspace: ws, projection: project(ws), contentRect: { x: 0, y: 0, w: 800, h: 600 } })
+  const resized = transitionSignature({ workspace: ws, projection: project(ws), contentRect: { x: 0, y: 0, w: 800, h: 600 } })
   assert.notEqual(base, resized)
+  const movedBounds = transitionSignature({
+    workspace: ws, projection: project(ws), contentRect: { ...CONTENT, x: 12 },
+  })
+  assert.notEqual(base, movedBounds, 'edge offsets include the content origin when supplied')
   // A divider ratio changes edge offsets without changing the content bounds, so
   // per-pane rects are part of the invalidation signature too.
   const resizedPane = paneModel.setRatio(ws, ws.layout.id, 0.62)
-  assert.notEqual(base, exitSignature({ workspace: resizedPane, projection: project(resizedPane), contentRect: CONTENT }))
+  assert.notEqual(base, transitionSignature({ workspace: resizedPane, projection: project(resizedPane), contentRect: CONTENT }))
   // A different slot target drifts it too.
-  const retargeted = exitSignature({ workspace: { ...ws, singleScreen: { kind: 'chat', id: '5' } }, projection: project(ws), contentRect: CONTENT })
+  const retargeted = transitionSignature({ workspace: { ...ws, singleScreen: { kind: 'chat', id: '5' } }, projection: project(ws), contentRect: CONTENT })
   assert.notEqual(base, retargeted)
 })
 
-test('exitSignature folds the destination so a mid-beat destination change cancels (H2)', () => {
+test('transitionSignature folds the destination so a mid-beat destination change cancels (H2)', () => {
   // The audit case: a live exit plan built toward the chat slot must cancel the moment
   // a Settings takeover suspends over the slot mid-beat — the two signatures differ.
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '5' } }
   const proj = project(ws)
-  const toChat = exitSignature({ workspace: ws, projection: proj, contentRect: CONTENT })
-  const toSettings = exitSignature({ workspace: ws, projection: proj, contentRect: CONTENT, settingsDestination: true })
+  const toChat = transitionSignature({ workspace: ws, projection: proj, contentRect: CONTENT })
+  const toSettings = transitionSignature({ workspace: ws, projection: proj, contentRect: CONTENT, settingsDestination: true })
   assert.notEqual(toChat, toSettings, 'chat-target vs settings:settings destinations must differ')
   // And the PLAN's stored snapshot equals a live recompute at the SAME destination, so
   // the watcher never false-cancels while the destination holds (structural coupling:
-  // deriveExitPlan feeds its own input object to exitSignature).
+  // deriveExitPlan feeds its own input object to transitionSignature).
   const settingsPlan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT, settingsDestination: true })
   assert.equal(settingsPlan.snapshotSignature, toSettings)
   const chatPlan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT })
@@ -734,8 +745,8 @@ test('exitSignature folds the destination so a mid-beat destination change cance
   // signature differs from the ordinary reveal, so a mid-beat immersive request cancels.
   const app42 = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '42' } }
   const projApp = project(app42)
-  const reveal = exitSignature({ workspace: app42, projection: projApp, contentRect: CONTENT })
-  const immersive = exitSignature({ workspace: app42, projection: projApp, contentRect: CONTENT, immersiveHolderId: 42 })
+  const reveal = transitionSignature({ workspace: app42, projection: projApp, contentRect: CONTENT })
+  const immersive = transitionSignature({ workspace: app42, projection: projApp, contentRect: CONTENT, immersiveHolderId: 42 })
   assert.notEqual(reveal, immersive, 'an immersive-instant destination must drift the signature')
 })
 

@@ -96,17 +96,17 @@ export function passedSlop(dx, dy, slop = POINTER_SLOP) {
 }
 
 // Drawer rows live in a vertical list, so vertical movement stays native scrolling
-// and a horizontal pull becomes a drag. A concrete pane tab is different: its CSS
-// owns the pointer stream (`touch-action:none`) while the surrounding strip retains
-// native pan-x. Once a tab moves past the threshold, either axis therefore means the
-// user is repositioning it — including the horizontal reorder that was impossible
-// when pan-x caused the browser to cancel the pointer.
+// and a horizontal pull becomes a drag. Tab bodies live in a horizontal strip: a
+// horizontal move stays native scrolling, while a vertical pull lifts the tab. The
+// dedicated tab handle owns its pointer stream in CSS and can therefore reorder on
+// either axis without taking horizontal scrolling away from the tab body.
 export function touchMoveIntent(dx, dy, sourceKind, limit = PRE_HOLD_MOVE_PX) {
   if (hypot(dx, dy) <= limit) return 'pending'
   const x = Math.abs(dx)
   const y = Math.abs(dy)
   if (sourceKind === 'drawer') return x > y ? 'drag' : 'scroll'
-  return 'drag'
+  if (sourceKind === 'tab-handle') return 'drag'
+  return y > x ? 'drag' : 'scroll'
 }
 
 // After a lift, a release still within this radius opened no drag — it is the
