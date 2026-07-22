@@ -11,6 +11,7 @@ import {
 } from './toolActivityLabel.js'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { ActivityTypeIcon } from './ActivityLineHeader.jsx'
+import { useDisclosureState } from './disclosureState.js'
 
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
 // output reads as a terminal (stdout / stderr / exit code) and a structured
@@ -72,13 +73,14 @@ function ToolResult({ r }) {
   )
 }
 
-export default function ToolBlock({ t, chatId }) {
+export default function ToolBlock({ t, chatId, compact = false, disclosureKey }) {
   // Collapsed until tapped — nothing produces a pre-opened tool block anymore
   // (the last producer, the legacy compaction path, renders as CompactionCard;
   // a legacy persisted `defaultOpen` field is ignored and renders collapsed
   // like everything else).
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useDisclosureState(chatId, disclosureKey)
   const headerRef = useRef(null)
+  const detailRef = useRef(null)
   const headerId = useId()
   const detailId = useId()
   // Expansion fetches only the renderer-sized preview. The exact full output
@@ -327,6 +329,7 @@ export default function ToolBlock({ t, chatId }) {
   return (
     <div className={
       `chat__tool chat__tool--${t.status || 'done'}${failed ? ' chat__tool--failed' : ''}`
+      + (compact ? ' chat__tool--compact' : '')
     }>
       {hasDetail ? (
         // A real <button> so the disclosure is keyboard-operable (the old
@@ -337,7 +340,7 @@ export default function ToolBlock({ t, chatId }) {
           type="button"
           className="chat__tool-header"
           onClick={() => {
-            preserveTogglePosition(headerRef.current)
+            preserveTogglePosition(headerRef.current, detailRef.current)
             setOpen(o => !o)
           }}
           aria-expanded={open}
@@ -354,6 +357,7 @@ export default function ToolBlock({ t, chatId }) {
       )}
       {hasDetail && (
         <div
+          ref={detailRef}
           id={detailId}
           className="chat__tool-detail"
           role="region"

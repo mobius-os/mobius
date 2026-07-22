@@ -610,7 +610,7 @@ test.describe('SSE streaming (real React path)', () => {
     await expect(tool.locator('.chat__tool-spin')).toHaveCount(0)
   })
 
-  test('16b. Near-foot activity taps hold position while live descendants churn', async ({ page }) => {
+  test('16b. Near-foot activity taps follow deterministically while live descendants churn', async ({ page }) => {
     const events = [
       { type: 'catch_up_done' },
       // Put the final activity disclosure close to the viewport foot once the
@@ -665,9 +665,11 @@ test.describe('SSE streaming (real React path)', () => {
     expect(before.relativeTop).toBeGreaterThan(before.viewport * 0.55)
     expect(before.relativeTop).toBeLessThan(before.viewport - 20)
 
-    // Simulate status/output churn inside an open live activity timeline. The
-    // toggle guard must observe only its direct body transition, not let these
-    // unrelated descendant mutations win the correction race.
+    // Simulate status/output churn inside an open live activity timeline. In
+    // FOLLOW_BOTTOM, the scroll controller remains the sole authority: opening
+    // follows the taller real-content tail and closing returns to the prior
+    // tail. Repeated equal states must land identically despite descendant
+    // mutations; that is the autoscroll half of the idempotent-toggle contract.
     await page.evaluate(() => {
       window.__disclosureChurn = setInterval(() => {
         const timeline = [...document.querySelectorAll('.chat__activity-timeline')].at(-1)
@@ -680,14 +682,30 @@ test.describe('SSE streaming (real React path)', () => {
     })
 
     try {
-      const box = await header.boundingBox()
-      expect(box).not.toBeNull()
+      let openTop = null
       for (let i = 0; i < 10; i++) {
-        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+        await header.click()
         await page.evaluate(() => new Promise(r =>
           requestAnimationFrame(() => requestAnimationFrame(r))))
-        const top = await header.evaluate(el => el.getBoundingClientRect().top)
-        expect(Math.abs(top - before.top), `toggle ${i + 1} drift`).toBeLessThanOrEqual(2)
+        const after = await page.evaluate(() => {
+          const s = document.querySelector('.chat__scroll')
+          const b = [...document.querySelectorAll('.chat__activity-header')].at(-1)
+          return {
+            top: b.getBoundingClientRect().top,
+            gap: s.scrollHeight - s.scrollTop - s.clientHeight,
+          }
+        })
+        expect(after.gap, `toggle ${i + 1} left the tail`).toBeLessThanOrEqual(4)
+        if (i % 2 === 0) {
+          if (openTop == null) {
+            openTop = after.top
+            expect(openTop).toBeLessThan(before.top - 20)
+          } else {
+            expect(Math.abs(after.top - openTop), `open ${i + 1} drift`).toBeLessThanOrEqual(2)
+          }
+        } else {
+          expect(Math.abs(after.top - before.top), `closed ${i + 1} drift`).toBeLessThanOrEqual(2)
+        }
       }
     } finally {
       await page.evaluate(() => clearInterval(window.__disclosureChurn))

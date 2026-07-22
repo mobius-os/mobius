@@ -33,6 +33,7 @@ function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnsw
 function MsgContentInner({
   msg,
   chatId,
+  messageKey,
   onQuestionAnswer,
   // Resume a turn paused by a drain-gated restart (or interrupted by a crash):
   // a stable send callback that re-sends a short "continue". Only the tail
@@ -278,7 +279,12 @@ function MsgContentInner({
                 key={assistantBlockKey(node.group[0].item, node.group[0].idx)}
                 className="chat__tools"
               >
-                <ActivityStretch entries={node.group} chatId={chatId} live={live} />
+                <ActivityStretch
+                  entries={node.group}
+                  chatId={chatId}
+                  live={live}
+                  surfaceKey={messageKey}
+                />
               </div>
             )
           }
@@ -287,7 +293,9 @@ function MsgContentInner({
         {/* The turn's web sources, collected from its tool blocks and shown
             once after the answer. Renders nothing when the turn did no web
             search, so an ordinary reply is unchanged. */}
-        {msg.role === 'assistant' && <MessageSources blocks={msg.blocks} />}
+        {msg.role === 'assistant' && !isStreaming && (
+          <MessageSources blocks={msg.blocks} />
+        )}
       </>
     )
   }
@@ -333,6 +341,7 @@ export default memo(MsgContentInner, (prev, next) => {
   return (
     prev.msg === next.msg
     && prev.chatId === next.chatId
+    && prev.messageKey === next.messageKey
     && prev.onQuestionAnswer === next.onQuestionAnswer
     && prev.onResume === next.onResume
     && prev.onInternalNav === next.onInternalNav

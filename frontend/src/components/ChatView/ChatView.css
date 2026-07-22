@@ -754,6 +754,31 @@
   border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border-light)); /* CONTRACT: 1px line mixing accent with hairline */
 }
 
+/* A lone activity is already one disclosure row; putting a card boundary
+   around it adds hierarchy without information and makes a single command
+   look heavier than the surrounding answer. Multi-step children keep their
+   timeline rail, while the one-step surface stays the same quiet line used by
+   the collapsed activity summary. Its expanded detail remains available. */
+.chat__tool--compact.chat__tool--running,
+.chat__tool--compact.chat__tool--done {
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+
+.chat__tool--compact .chat__tool-header {
+  padding-inline: 0;
+}
+
+.chat__tool--compact .chat__tool-detail {
+  margin-block-start: var(--activity-row-gap, 4px);
+  margin-inline-start: 20px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
 /* The header is a real <button> when there's detail to disclose (keyboard
    operable) and a static div otherwise; the button resets below keep both
    looking identical to the old clickable div. */
@@ -994,15 +1019,8 @@
   flex-wrap: wrap;
   width: 100%;
   max-width: 100%;
-  gap: 5px 8px;
+  gap: 5px;
   padding: 2px 8px;
-}
-
-.chat__sources-label {
-  padding-top: 7px;
-  color: var(--muted); /* CONTRACT: lower emphasis section label */
-  font-size: 12.5px;
-  font-weight: 600;
 }
 
 .chat__sources-list {
@@ -1010,7 +1028,7 @@
   box-sizing: border-box;
   min-width: 0;
   max-width: 100%;
-  flex: 1 1 220px;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   gap: 5px;
   margin: 0;

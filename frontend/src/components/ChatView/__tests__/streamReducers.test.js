@@ -711,6 +711,26 @@ test('reconcile never moves a live thinking clock backwards', () => {
   assert.equal(result[0].startedAt, 1_000)
 })
 
+test('reconcile never advances a completed non-trailing thinking clock', () => {
+  const thought = {
+    type: 'thinking', content: 'plan', startedAt: 1_000,
+    firstTs: 10_000, lastAt: 20_000, duration_ms: 9_000,
+  }
+  const prev = [thought, { type: 'text', content: 'Done.' }]
+  // Catch-up is assembled incrementally. At its first atomic commit it can
+  // contain only this historical thought even though the visible snapshot
+  // already knows prose follows it. That one-item replay tail is not live.
+  const replay = [{
+    type: 'thinking', content: 'plan', startedAt: 30_000,
+    firstTs: 10_000, lastAt: 30_000, duration_ms: 9_000,
+  }]
+
+  const result = reconcileStreamItems(prev, replay)
+
+  assert.equal(result[0].duration_ms, 9_000,
+    'later replay wall time cannot be added after prose sealed the thought')
+})
+
 test('reconcile matches tools by tool_use_id, not position, and never merges two different tools', () => {
   const t1 = { type: 'tool', tool: 'Bash', input: 'ls', output: 'x', status: 'done', tool_use_id: 'toolu_1' }
   const prev = [t1]

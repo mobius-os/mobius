@@ -1,4 +1,3 @@
-import { useId } from 'react'
 import { messageSources, sourceHost, sourceLabel } from './messageSources.js'
 
 function sourceMark(host) {
@@ -16,13 +15,11 @@ function sourceMark(host) {
 // whole citation set.
 
 export default function MessageSources({ blocks }) {
-  const labelId = useId()
   const sources = messageSources(blocks)
   if (sources.length === 0) return null
 
   return (
-    <section className="chat__sources" aria-labelledby={labelId}>
-      <span id={labelId} className="chat__sources-label">Sources</span>
+    <section className="chat__sources" aria-label="Source links">
       <ul className="chat__sources-list">
         {sources.map(source => {
           const label = sourceLabel(source)

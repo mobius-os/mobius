@@ -383,16 +383,19 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   expect(thinkingRequests).toBe(4)
   await thoughtToggle.click()
 
-  // Closing the outer stretch unmounts every nested payload; reopening proves
-  // both sidecars are still closed and no hidden request is made.
+  // Closing the outer stretch unmounts every nested payload. Reopening restores
+  // each deliberate disclosure state: the thought was closed, while the tool
+  // was open. The restored visible tool starts one fresh bounded preview fetch;
+  // its previously loaded payload was released rather than retained offscreen.
   await activityHeader.click()
   await expect(activity.locator('.chat__activity-timeline')).toBeHidden()
   await activityHeader.click()
   await expect(activity.locator('.chat__activity-timeline')).toBeVisible()
   await expect(activity.locator('.chat__activity-think-toggle')).toHaveAttribute('aria-expanded', 'false')
-  await expect(activity.locator('.chat__tool-header')).toHaveAttribute('aria-expanded', 'false')
+  await expect(activity.locator('.chat__tool-header')).toHaveAttribute('aria-expanded', 'true')
+  await expect(page.getByText(fullOutput)).toBeVisible()
   expect(thinkingRequests).toBe(4)
   expect(thinkingFullRequests).toBe(1)
-  expect(toolPreviewRequests).toBe(5)
+  expect(toolPreviewRequests).toBe(6)
   expect(toolCopyRequests).toBe(1)
 })

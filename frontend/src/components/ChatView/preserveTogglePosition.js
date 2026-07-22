@@ -15,10 +15,17 @@ function unwindProvisionalSpacer(spacer) {
   provisionalSpacer.delete(spacer)
 }
 
-export function preserveTogglePosition(anchorEl) {
+export function preserveTogglePosition(anchorEl, bodyEl = anchorEl?.nextElementSibling) {
   if (!anchorEl || typeof requestAnimationFrame !== 'function') return
   const scroller = anchorEl.closest?.('.chat__scroll')
   if (!scroller) return
+
+  // FOLLOW_BOTTOM is already a complete, idempotent layout policy: the scroll
+  // controller follows the new real-content tail after every ResizeObserver
+  // pass. A second header-local correction would race that authority and make
+  // identical toggles sometimes hold and sometimes move. Outside follow mode,
+  // preserve the reader's exact header position below.
+  if (scroller.dataset?.scrollMode === 'FOLLOW_BOTTOM') return
 
   // Closing a disclosure at the physical tail removes height before the chat's
   // ResizeObserver can grow its dynamic bottom reservation. The browser clamps
@@ -31,11 +38,10 @@ export function preserveTogglePosition(anchorEl) {
   if (spacer) unwindProvisionalSpacer(spacer)
 
   if (anchorEl.getAttribute?.('aria-expanded') === 'true') {
-    const body = anchorEl.nextElementSibling
-    if (spacer && body) {
-      const rectHeight = body.getBoundingClientRect?.().height || 0
+    if (spacer && bodyEl) {
+      const rectHeight = bodyEl.getBoundingClientRect?.().height || 0
       const styles = typeof getComputedStyle === 'function'
-        ? getComputedStyle(body)
+        ? getComputedStyle(bodyEl)
         : null
       const marginTop = Number.parseFloat(styles?.marginTop) || 0
       const marginBottom = Number.parseFloat(styles?.marginBottom) || 0
@@ -67,16 +73,17 @@ export function preserveTogglePosition(anchorEl) {
     if (Math.abs(delta) > 0.5) scroller.scrollTop += delta
   }
 
-  if (typeof MutationObserver === 'function' && anchorEl.parentElement) {
+  if (typeof MutationObserver === 'function' && bodyEl) {
     observer = new MutationObserver(settle)
-    // The disclosure body is always a DIRECT sibling of the header. Observe
-    // only that wrapper's child list: an open live activity stretch keeps
-    // changing text, tool status, and timeline children below this level. A
-    // subtree observer can therefore settle on unrelated stream churn before
-    // React inserts/removes the disclosure body, making the same tap hold on
-    // one attempt and drift on the next. Direct-child observation names the
-    // actual transition and leaves live descendants out of the race.
-    observer.observe(anchorEl.parentElement, { childList: true })
+    // Every disclosure keeps its body node mounted and flips `hidden` while
+    // inserting/removing its rendered children. Watching the header's parent
+    // child list never saw that transition, leaving the rAF fallback to race a
+    // ResizeObserver. The body's own hidden attribute is the exact commit
+    // boundary, independent of live descendant churn.
+    observer.observe(bodyEl, {
+      attributes: true,
+      attributeFilter: ['hidden'],
+    })
   }
 
   // Safety fallback for an unusual disclosure that changes layout without a
