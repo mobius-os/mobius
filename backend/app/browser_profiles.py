@@ -15,7 +15,6 @@ from app import models
 
 
 _CHAT_PROFILE = re.compile(r"^chat-([0-9a-fA-F-]{36})$")
-_BROWSER_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CACHE_PATHS = (
   "Default/Cache",
   "Default/Code Cache",
@@ -41,6 +40,25 @@ _status = {
   "cache_dirs_pruned": 0,
   "profiles_pruned": 0,
 }
+
+
+def browser_session_is_safely_closable(session: str) -> bool:
+  """Whether a discovered name is safe to pass as one CLI argv value.
+
+  Treat the daemon's ``AGENT_BROWSER_SESSION`` as an opaque value: Unicode,
+  colons, spaces, and values longer than 128 characters are not dangerous here.
+  Cleanup uses
+  ``create_subprocess_exec`` with an argv list, never a shell or a constructed
+  path.  Reject only values that can be interpreted as an option/path by the
+  downstream CLI, plus control characters that do not form a useful session
+  name.  There is no arbitrary length cap: the value already exists in a live
+  process environment, so it necessarily fit the host's exec/env limit.
+  """
+  if not isinstance(session, str) or not session or session.startswith("-"):
+    return False
+  if session in (".", "..") or "/" in session or "\\" in session:
+    return False
+  return not any(ord(char) < 0x20 or ord(char) == 0x7F for char in session)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -150,9 +168,8 @@ def browser_sessions_for_chat(
   reclaim custom sessions too instead of leaking their Chromium trees until a
   container restart.
 
-  Only the agent-browser server binary is considered, and returned names are
-  restricted to the CLI's simple session-name alphabet.  Proc races and
-  permission errors are normal and read as an incomplete, best-effort set.
+  Only the agent-browser server binary is considered. Proc races and permission
+  errors are normal and read as an incomplete, best-effort set.
   """
   if not chat_id or not proc_root.is_dir():
     return set()
@@ -180,7 +197,7 @@ def browser_sessions_for_chat(
     session = values.get(b"AGENT_BROWSER_SESSION", "")
     if (
       values.get(b"CHAT_ID") == chat_id
-      and _BROWSER_SESSION.fullmatch(session) is not None
+      and browser_session_is_safely_closable(session)
     ):
       sessions.add(session)
   return sessions

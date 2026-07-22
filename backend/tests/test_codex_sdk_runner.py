@@ -1553,3 +1553,55 @@ def test_run_codex_sdk_turn_reaps_isolated_descendants(monkeypatch):
 
   assert result["error"] is None
   assert reaped == [4321]
+
+
+def test_run_codex_sdk_turn_reaps_group_when_initialization_fails(monkeypatch):
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(_proc=None, _approval_handler=None),
+      )
+
+    async def __aenter__(self):
+      # Model the pinned SDK's lifecycle: start() publishes _proc, initialize()
+      # yields/fails, and close() clears _proc before __aenter__ re-raises.
+      self._client._sync._proc = SimpleNamespace(pid=4321)
+      await asyncio.sleep(0)
+      self._client._sync._proc = None
+      raise RuntimeError("initialize failed")
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  reaped = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: reaped.append(pgid) or True,
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-init-failure",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+  ))
+
+  assert "initialize failed" in result["error"]
+  assert reaped == [4321]

@@ -54,25 +54,36 @@ def test_profile_sweep_interval_is_hourly_and_bounded(monkeypatch):
   assert browser_profiles.browser_profile_sweep_seconds() == 7200
 
 
-def test_browser_sessions_for_chat_attributes_custom_detached_session(tmp_path):
-  proc = tmp_path / "proc"
-  matching = proc / "101"
-  matching.mkdir(parents=True)
-  (matching / "cmdline").write_bytes(
+def _fake_browser_process(proc, pid, *, chat_id, session):
+  process = proc / str(pid)
+  process.mkdir(parents=True)
+  (process / "cmdline").write_bytes(
     b"/usr/local/lib/agent-browser-linux-x64\0"
   )
-  (matching / "environ").write_bytes(
-    b"CHAT_ID=chat-a\0AGENT_BROWSER_SESSION=custom-preview-3\0"
+  (process / "environ").write_bytes(
+    f"CHAT_ID={chat_id}\0AGENT_BROWSER_SESSION={session}\0".encode()
   )
 
-  foreign = proc / "102"
+
+def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
+  proc = tmp_path / "proc"
+  long_name = "preview-" + ("x" * 256)
+  _fake_browser_process(
+    proc, 101, chat_id="chat-a", session="custom:colon",
+  )
+  _fake_browser_process(
+    proc, 102, chat_id="chat-a", session="unicode-ø-世界",
+  )
+  _fake_browser_process(proc, 103, chat_id="chat-a", session=long_name)
+
+  foreign = proc / "104"
   foreign.mkdir()
   (foreign / "cmdline").write_bytes(b"/opt/agent-browser-linux-x64\0")
   (foreign / "environ").write_bytes(
     b"CHAT_ID=chat-b\0AGENT_BROWSER_SESSION=foreign-preview\0"
   )
 
-  unrelated = proc / "103"
+  unrelated = proc / "105"
   unrelated.mkdir()
   (unrelated / "cmdline").write_bytes(b"/usr/bin/python3\0")
   (unrelated / "environ").write_bytes(
@@ -81,16 +92,34 @@ def test_browser_sessions_for_chat_attributes_custom_detached_session(tmp_path):
 
   assert browser_profiles.browser_sessions_for_chat(
     "chat-a", proc_root=proc,
-  ) == {"custom-preview-3"}
+  ) == {"custom:colon", "unicode-ø-世界", long_name}
+
+
+def test_browser_session_safety_rejects_path_option_and_control_names():
+  safe = browser_profiles.browser_session_is_safely_closable
+  assert safe("custom:colon")
+  assert safe("unicode-ø-世界")
+  assert safe("preview-" + ("x" * 256))
+  assert safe("name with spaces")
+
+  for unsafe in (
+    "", "-x", "--help", ".", "..", "../escape", "safe/../escape",
+    r"..\escape", "line\nbreak", "control\x7f",
+  ):
+    assert not safe(unsafe), unsafe
 
 
 def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
   monkeypatch,
 ):
+  long_name = "preview-" + ("x" * 256)
   monkeypatch.setattr(
     browser_profiles,
     "browser_sessions_for_chat",
-    lambda _chat_id: {"custom-preview-3"},
+    lambda _chat_id: {
+      "custom:colon", "unicode-ø-世界", long_name,
+      "../escape", "--help",
+    },
   )
   calls = []
 
@@ -112,7 +141,9 @@ def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
 
   assert calls == [
     ("agent-browser", "--session", "chat-chat-a", "close"),
-    ("agent-browser", "--session", "custom-preview-3", "close"),
+    ("agent-browser", "--session", "custom:colon", "close"),
+    ("agent-browser", "--session", long_name, "close"),
+    ("agent-browser", "--session", "unicode-ø-世界", "close"),
   ]
 
 

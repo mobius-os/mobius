@@ -178,7 +178,11 @@ def _codex_app_server_launch_args(
   return args
 
 
-def _codex_process_group_id(codex: Any) -> int | None:
+def _codex_process_group_id(
+  codex: Any,
+  *,
+  log_unisolated: bool = True,
+) -> int | None:
   """Return the isolated app-server PGID, or ``None`` if not provable.
 
   The SDK does not expose its child PID publicly.  We already target its sync
@@ -196,6 +200,8 @@ def _codex_process_group_id(codex: Any) -> int | None:
   except (OSError, ProcessLookupError):
     return None
   if pgid != pid or pgid == os.getpgrp():
+    if not log_unisolated:
+      return None
     log.error(
       "Codex app-server process group is not isolated pid=%s pgid=%s; "
       "descendant cleanup disabled",
@@ -204,6 +210,30 @@ def _codex_process_group_id(codex: Any) -> int | None:
     )
     return None
   return pgid
+
+
+async def _capture_codex_process_group_during_start(
+  codex: Any,
+  stop: asyncio.Event,
+) -> int | None:
+  """Capture the isolated PGID while ``AsyncCodex.__aenter__`` initializes.
+
+  ``__aenter__`` starts the subprocess and then performs a separate async SDK
+  initialize request. If that request fails, the SDK closes the direct Popen
+  and clears ``_proc`` before propagating the error. Polling concurrently from
+  before entry captures the group in that window, so the outer runner finally
+  can still reap a descendant the SDK direct-PID close left behind.
+
+  During the tiny pre-exec window the child still has uvicorn's group. The
+  identity helper therefore runs silently until ``setsid`` makes PID == PGID;
+  it never returns or signals the shared group.
+  """
+  while not stop.is_set():
+    pgid = _codex_process_group_id(codex, log_unisolated=False)
+    if pgid is not None:
+      return pgid
+    await asyncio.sleep(0)
+  return _codex_process_group_id(codex, log_unisolated=False)
 
 
 def _terminate_codex_process_group(
@@ -1353,6 +1383,13 @@ async def run_codex_sdk_turn(
   current_session_id = session_id
   completed_turn: Any | None = None
   process_group_id: int | None = None
+  codex_context = sdk["AsyncCodex"](config=config)
+  process_group_capture_stop = asyncio.Event()
+  process_group_capture_task = asyncio.create_task(
+    _capture_codex_process_group_during_start(
+      codex_context, process_group_capture_stop,
+    )
+  )
 
   def abort_requested() -> bool:
     return bool(should_abort and should_abort())
@@ -1365,8 +1402,12 @@ async def run_codex_sdk_turn(
     }
 
   try:
-    async with sdk["AsyncCodex"](config=config) as codex:
+    async with codex_context as codex:
       process_group_id = _codex_process_group_id(codex)
+      process_group_capture_stop.set()
+      captured_during_start = await process_group_capture_task
+      if process_group_id is None:
+        process_group_id = captured_during_start
       # Install AskUserQuestion bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
@@ -1651,6 +1692,13 @@ async def run_codex_sdk_turn(
       "error": str(exc),
     }
   finally:
+    process_group_capture_stop.set()
+    try:
+      captured_during_start = await asyncio.shield(process_group_capture_task)
+      if process_group_id is None:
+        process_group_id = captured_during_start
+    except Exception as exc:
+      log.warning("Codex process-group capture failed: %s", exc)
     current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
     if isinstance(current, ActiveCodexTurn) and current.turn is turn:
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)

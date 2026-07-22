@@ -2680,10 +2680,16 @@ async def _close_browser_session(chat_id: str) -> None:
   log = _get_logger()
   sessions = {f"chat-{chat_id}"}
   try:
-    from app.browser_profiles import browser_sessions_for_chat
-    sessions.update(await asyncio.to_thread(
-      browser_sessions_for_chat, chat_id,
-    ))
+    from app.browser_profiles import (
+      browser_session_is_safely_closable,
+      browser_sessions_for_chat,
+    )
+    discovered = await asyncio.to_thread(browser_sessions_for_chat, chat_id)
+    # Defense in depth: discovery already filters these, but keep the exact
+    # argv-safety predicate at the execution boundary too.
+    sessions.update(
+      name for name in discovered if browser_session_is_safely_closable(name)
+    )
   except Exception as exc:
     log.warning(
       "agent-browser session discovery failed for chat %s: %s",
@@ -2704,7 +2710,14 @@ async def _close_browser_session(chat_id: str) -> None:
         ),
         timeout=5.0,
       )
-      await asyncio.wait_for(proc.wait(), timeout=5.0)
+      return_code = await asyncio.wait_for(proc.wait(), timeout=5.0)
+      if return_code != 0:
+        log.warning(
+          "agent-browser close exited nonzero for chat %s: rc=%s",
+          chat_id,
+          return_code,
+        )
+        return False
       return True
     except FileNotFoundError:
       return False  # agent-browser not installed (local dev)
