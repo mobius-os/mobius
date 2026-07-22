@@ -81,14 +81,62 @@ export function appAttentionIds(apps, newAppIds, visibleAppIds = []) {
 
 // Optimistically clear the query-cache flag as soon as a visible app is
 // acknowledged. A failed POST invalidates the list and restores server truth.
-export function withAppActivitySeen(apps, appId) {
+export function withAppActivitySeen(apps, appId, seenThroughVersion = Infinity) {
   const id = Number(appId)
+  const seenThrough = Number(seenThroughVersion)
   if (!Array.isArray(apps) || Number.isNaN(id)) return apps
   let changed = false
   const next = apps.map(app => {
     if (Number(app?.id) !== id || !app?.has_unseen_activity) return app
+    const rowVersion = Number(app.unseen_activity_version)
+    if (
+      Number.isFinite(seenThrough) &&
+      Number.isFinite(rowVersion) &&
+      rowVersion > seenThrough
+    ) return app
     changed = true
-    return { ...app, has_unseen_activity: false }
+    return {
+      ...app,
+      has_unseen_activity: false,
+      unseen_activity_version: null,
+    }
   })
   return changed ? next : apps
+}
+
+// Own one exact app/version acknowledgement. The key is released before a
+// failed request restores server truth, so the resulting refetch can retry
+// immediately while the app is still visible. A successful request clears the
+// cache again because an unrelated in-flight refetch may have restored the
+// just-acknowledged version after the initial optimistic update.
+export async function acknowledgeAppActivity({
+  appId,
+  activityVersion,
+  inFlight,
+  request,
+  clearCached,
+  restoreServerTruth,
+}) {
+  const key = `${appId}:${activityVersion}`
+  if (inFlight.has(key)) return false
+  inFlight.add(key)
+  clearCached(appId, activityVersion)
+  try {
+    const response = await request(appId, activityVersion)
+    if (!response?.ok) {
+      throw new Error(`activity acknowledgement failed (${response?.status ?? 'unknown'})`)
+    }
+    clearCached(appId, activityVersion)
+    return true
+  } catch {
+    inFlight.delete(key)
+    try {
+      await restoreServerTruth()
+    } catch {
+      // Reconnect/foreground refresh remains the durable recovery path.
+    }
+    return false
+  } finally {
+    inFlight.delete(key)
+  }
 }

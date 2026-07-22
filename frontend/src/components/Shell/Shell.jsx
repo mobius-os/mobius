@@ -48,6 +48,7 @@ import {
 } from '../../lib/appRecovery.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import {
+  acknowledgeAppActivity,
   appAttentionIds,
   freshChatBuiltApps,
   freshAppIds,
@@ -1734,19 +1735,18 @@ export default function Shell() {
       const app = apps.find(row => Number(row.id) === appId)
       if (!app?.has_unseen_activity || !app?.unseen_activity_version) continue
       const observedActivityVersion = app.unseen_activity_version
-      const ackKey = `${appId}:${observedActivityVersion}`
-      if (appActivityAckRef.current.has(ackKey)) continue
-      appActivityAckRef.current.add(ackKey)
-      queryClient.setQueryData(
-        appQueries.keys.all,
-        rows => withAppActivitySeen(rows, appId),
-      )
-      api.apps.markActivitySeen(appId, observedActivityVersion).then(res => {
-        if (!res.ok) throw new Error(`activity acknowledgement failed (${res.status})`)
-      }).catch(() => {
-        appQueries.list.invalidate(queryClient)
-      }).finally(() => {
-        appActivityAckRef.current.delete(ackKey)
+      acknowledgeAppActivity({
+        appId,
+        activityVersion: observedActivityVersion,
+        inFlight: appActivityAckRef.current,
+        request: api.apps.markActivitySeen,
+        clearCached: (seenAppId, seenThroughVersion) => {
+          queryClient.setQueryData(
+            appQueries.keys.all,
+            rows => withAppActivitySeen(rows, seenAppId, seenThroughVersion),
+          )
+        },
+        restoreServerTruth: () => appQueries.list.invalidate(queryClient),
       })
     }
   }, [visibleAppIds, apps, queryClient])

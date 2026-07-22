@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  acknowledgeAppActivity,
   appAttentionIds,
   freshChatBuiltApps,
   freshAppIds,
@@ -29,15 +30,79 @@ test('appAttentionIds never marks an app that is already visible', () => {
 
 test('withAppActivitySeen clears only the matching durable flag', () => {
   const rows = [
-    { id: 1, has_unseen_activity: true },
+    { id: 1, has_unseen_activity: true, unseen_activity_version: 4 },
     { id: 2, has_unseen_activity: true },
   ]
-  const next = withAppActivitySeen(rows, '1')
+  const next = withAppActivitySeen(rows, '1', 4)
   assert.deepEqual(next, [
-    { id: 1, has_unseen_activity: false },
+    { id: 1, has_unseen_activity: false, unseen_activity_version: null },
     { id: 2, has_unseen_activity: true },
   ])
   assert.equal(withAppActivitySeen(next, 1), next)
+})
+
+test('withAppActivitySeen never lets an older acknowledgement hide newer work', () => {
+  const rows = [
+    { id: 1, has_unseen_activity: true, unseen_activity_version: 5 },
+  ]
+  assert.equal(withAppActivitySeen(rows, 1, 4), rows)
+})
+
+test('acknowledgement deduplicates one exact app version and confirms the cache', async () => {
+  const inFlight = new Set()
+  const clears = []
+  let releaseRequest
+  let requests = 0
+  const request = () => {
+    requests += 1
+    return new Promise(resolve => { releaseRequest = resolve })
+  }
+  const options = {
+    appId: 7,
+    activityVersion: 3,
+    inFlight,
+    request,
+    clearCached: (...args) => clears.push(args),
+    restoreServerTruth: () => assert.fail('success must not restore server truth'),
+  }
+
+  const first = acknowledgeAppActivity(options)
+  const duplicate = acknowledgeAppActivity(options)
+  assert.equal(await duplicate, false)
+  assert.equal(requests, 1)
+  assert.deepEqual(clears, [[7, 3]])
+  releaseRequest({ ok: true, status: 204 })
+  assert.equal(await first, true)
+  assert.deepEqual(clears, [[7, 3], [7, 3]])
+  assert.equal(inFlight.size, 0)
+})
+
+test('failed acknowledgement releases its key before server truth can retry', async () => {
+  const inFlight = new Set()
+  let attempts = 0
+  let restores = 0
+  const options = {
+    appId: 7,
+    activityVersion: 3,
+    inFlight,
+    request: async () => {
+      attempts += 1
+      return attempts === 1
+        ? { ok: false, status: 503 }
+        : { ok: true, status: 204 }
+    },
+    clearCached: () => {},
+    restoreServerTruth: async () => {
+      restores += 1
+      assert.equal(inFlight.has('7:3'), false)
+    },
+  }
+
+  assert.equal(await acknowledgeAppActivity(options), false)
+  assert.equal(await acknowledgeAppActivity(options), true)
+  assert.equal(attempts, 2)
+  assert.equal(restores, 1)
+  assert.equal(inFlight.size, 0)
 })
 
 test('freshAppIds returns only ids absent from the baseline', () => {
