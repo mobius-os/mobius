@@ -8,6 +8,8 @@ A skill is on-demand knowledge — a markdown document you `Read` when a task ma
 
 ## Where to look
 
+**Step 0 — grep the cached catalog index.** `shared/skills/catalog-index.md` lists every skill in the curated catalogs below — one line each with name, description, and install coordinates `(repo dir @ref)`. `grep -i <topic> shared/skills/catalog-index.md` answers most "is there a skill for X?" questions in one local read, no GitHub calls. It regenerates whenever the owner opens the Skills app's Browse screen; if it's missing or stale, `POST /api/skills/catalog-index/refresh` with your token (body `{"force": true}` bypasses the 24-hour gate). Fall back to the live searches below only for topics the index doesn't cover.
+
 Search these sources, in rough order of quality (all verified to host real `SKILL.md` directories):
 
 1. **`anthropics/skills`** — Anthropic's official collection, under `skills/`.

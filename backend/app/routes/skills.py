@@ -43,9 +43,11 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from app import activity, install, models, skills
+from app import activity, catalog_index, install, models, skills
 from app.config import get_settings
+from app.database import get_db
 from app.deps import (
   get_current_owner_or_app,
   get_owner_or_app_with_manage_skills,
@@ -478,6 +480,53 @@ async def install_skill(
   skills.write_index(skills_dir)
   log.info("installed skill %r from %s (%d file(s))", name, source, len(files))
   return {"name": name, "source": source, "files": sorted(files.keys())}
+
+
+class CatalogRefreshBody(BaseModel):
+  force: bool = False
+
+
+def _catalog_sources_override(db: Session) -> list[dict] | None:
+  """The Skills app's saved Browse-source list, if it has one.
+
+  The app's catalog sources are app data — a `sources.json` in its storage
+  (`/data/apps/<id>/`) overrides its defaults. The cached catalog index should
+  scan the same list the owner actually browses, so pick the override up here;
+  None falls back to `catalog_index.CATALOG_SOURCES` (the mirror of the app's
+  defaults).
+  """
+  try:
+    app_row = db.query(models.App).filter(models.App.slug == "skills").first()
+    if app_row is None:
+      return None
+    raw = (
+      Path(get_settings().data_dir) / "apps" / str(app_row.id) / "sources.json"
+    ).read_text(encoding="utf-8")
+    data = json.loads(raw)
+  except (OSError, ValueError):
+    return None
+  if not isinstance(data, list):
+    return None
+  cleaned = [s for s in data if isinstance(s, dict) and s.get("repo")]
+  return cleaned or None
+
+
+@router.post("/catalog-index/refresh", dependencies=[Depends(reject_cross_site)])
+async def refresh_catalog_index(
+  body: CatalogRefreshBody | None = None,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_skills),
+) -> dict:
+  """Regenerate the agent's cached catalog index (shared/skills/catalog-index.md).
+
+  Gated to once per 24h unless `force` — the Skills app fires this
+  fire-and-forget whenever the owner opens the Browse screen, so the gate is
+  what keeps casual browsing from hammering GitHub.
+  """
+  return await catalog_index.refresh(
+    force=bool(body and body.force),
+    sources=_catalog_sources_override(db),
+  )
 
 
 @router.delete("/{name}", dependencies=[Depends(reject_cross_site)])

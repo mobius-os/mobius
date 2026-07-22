@@ -60,6 +60,126 @@ export function catalogSummary(text) {
   }
 }
 
+// Mirror of the backend's install bounds (backend/app/routes/skills.py —
+// _RESOURCE_COUNT_MAX / _RESOURCE_TOTAL_MAX / _RESOURCE_MAX_DEPTH /
+// _RESOURCE_SUFFIXES). Advisory display only: the backend enforces for real,
+// this just predicts what it will do so the badge can warn before install.
+export const INSTALL_LIMITS = {
+  maxFiles: 24,
+  maxTotalBytes: 2 * 1024 * 1024,
+  maxDepth: 4,
+  suffixes: ['.md', '.txt', '.json', '.yaml', '.yml', '.csv', '.py', '.js', '.ts',
+    '.sh', '.toml', '.html', '.css'],
+}
+
+const SCRIPT_SUFFIXES = ['.py', '.js', '.ts', '.sh']
+
+function suffixOf(path) {
+  const base = path.split('/').pop() || ''
+  const dot = base.lastIndexOf('.')
+  return dot > 0 ? base.slice(dot).toLowerCase() : ''
+}
+
+// Relative paths mentioned in SKILL.md — markdown links/images plus bare
+// inline-code paths like `scripts/helper.py`. External URLs and anchors are
+// not the skill's files, so they're skipped.
+export function relativeRefs(raw) {
+  const refs = new Set()
+  const consider = (target, { needsSlash } = {}) => {
+    const t = String(target || '').trim().replace(/^\.\//, '').split(/[#?]/)[0]
+    if (!t || t.startsWith('/') || t.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(t)) return
+    if (needsSlash && !t.includes('/')) return
+    // Files only — a trailing dir ref like `scripts/` isn't checkable.
+    if (/\.[a-z0-9]{1,6}$/i.test(t)) refs.add(t)
+  }
+  for (const m of String(raw || '').matchAll(/!?\[[^\]]*\]\(([^)\s]+)[^)]*\)/g)) consider(m[1])
+  // Inline code must be path-shaped (`scripts/helper.py`) — a bare `foo.json`
+  // is usually a generic mention, not a bundled file.
+  for (const m of String(raw || '').matchAll(/`([^`\n]+\.[a-z0-9]{1,5})`/gi)) consider(m[1], { needsSlash: true })
+  return [...refs]
+}
+
+// Predict how POST /api/skills/install would treat a catalog skill, from data
+// the screen already holds: the source's recursive git tree and the raw
+// SKILL.md. Returns { ok, caveats: [{ kind, text }] } — ok means "installs
+// whole and indexes cleanly", caveats are ordered most→least serious.
+export function assessCompat(tree, dir, raw) {
+  const caveats = []
+  const prefix = `${String(dir || '').replace(/\/+$/g, '')}/`
+  const files = (Array.isArray(tree) ? tree : [])
+    .filter((t) => t?.type === 'blob' && typeof t?.path === 'string' && t.path.startsWith(prefix))
+    .map((t) => ({ rel: t.path.slice(prefix.length), size: Number(t.size) || 0 }))
+
+  const kept = []
+  const dropped = []
+  for (const f of files) {
+    if (/^skill\.md$/i.test(f.rel)) continue
+    const depthOk = f.rel.split('/').length - 1 <= INSTALL_LIMITS.maxDepth
+    const suffixOk = INSTALL_LIMITS.suffixes.includes(suffixOf(f.rel))
+    ;(depthOk && suffixOk ? kept : dropped).push(f)
+  }
+
+  // Install materializes resources in order and stops adding once over budget;
+  // predicting the exact survivors would overfit, so over-budget is its own
+  // "installs partially" caveat instead.
+  const total = kept.reduce((n, f) => n + f.size, 0)
+  const overCount = kept.length > INSTALL_LIMITS.maxFiles
+  const overSize = total > INSTALL_LIMITS.maxTotalBytes
+
+  // A ref is broken when it names a file the install will drop, or a file the
+  // tree scan proves doesn't exist in the skill dir at all.
+  const keptSet = new Set(kept.map((f) => f.rel))
+  const brokenRefs = relativeRefs(raw).filter(
+    (r) => !keptSet.has(r) && !/^skill\.md$/i.test(r),
+  )
+  if (brokenRefs.length) {
+    caveats.push({
+      kind: 'broken-refs',
+      text: `SKILL.md references files that won't be installed: ${nameSome(brokenRefs)}.`,
+    })
+  }
+  if (dropped.length) {
+    caveats.push({
+      kind: 'dropped',
+      text: `${dropped.length} bundled ${dropped.length === 1 ? 'file' : 'files'} won't be installed (unsupported type or too deeply nested): ${nameSome(dropped.map((f) => f.rel))}.`,
+    })
+  }
+  if (overCount || overSize) {
+    const parts = []
+    if (overCount) parts.push(`${kept.length} files (max ${INSTALL_LIMITS.maxFiles})`)
+    if (overSize) parts.push(`${(total / (1024 * 1024)).toFixed(1)} MB (max ${INSTALL_LIMITS.maxTotalBytes / (1024 * 1024)} MB)`)
+    caveats.push({
+      kind: 'over-budget',
+      text: `Installs partially — over Möbius's resource budget: ${parts.join(', ')}.`,
+    })
+  }
+
+  const scripts = kept.filter((f) => SCRIPT_SUFFIXES.includes(suffixOf(f.rel)))
+  if (scripts.length) {
+    caveats.push({
+      kind: 'scripts',
+      text: `Bundles ${scripts.length} ${scripts.length === 1 ? 'script' : 'scripts'} — installed as reference text; the agent reads them but nothing runs automatically.`,
+    })
+  }
+
+  // Both flat parsers (here and backend) read only `key: value` scalars, so a
+  // YAML block scalar (`description: >`) leaves just the indicator behind.
+  const desc = String(splitFrontmatter(raw || '').meta.description || '').trim()
+  if (!desc || /^[>|][+-]?$/.test(desc)) {
+    caveats.push({
+      kind: 'frontmatter',
+      text: "No machine-readable description — the agent's skills index will fall back to the first paragraph.",
+    })
+  }
+
+  return { ok: caveats.length === 0, caveats }
+}
+
+function nameSome(names, cap = 4) {
+  const shown = names.slice(0, cap).join(', ')
+  return names.length > cap ? `${shown}, +${names.length - cap} more` : shown
+}
+
 export function treeScanUrl(source) {
   return `https://api.github.com/repos/${source.repo}/git/trees/${source.ref || 'main'}?recursive=1`
 }

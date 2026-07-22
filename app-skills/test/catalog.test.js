@@ -9,6 +9,7 @@ import {
   rawSkillUrl,
   githubSkillUrl,
   createSummaryPrefetcher,
+  assessCompat,
 } from '../catalog.js'
 
 // Regression tests for the catalog core. Portable: no absolute paths, no
@@ -167,4 +168,96 @@ test('prefetcher: cancel() stops the pool without starting another', async () =>
   release()
   await new Promise((resolve) => setTimeout(resolve, 20))
   assert.deepEqual(seen, ['a'])
+})
+
+// --- assessCompat: the pre-install badge's prediction of the installer ---
+
+const blob = (path, size = 100) => ({ path, type: 'blob', size })
+const DIR = 'skills/pdf'
+const OK_MD = '---\nname: pdf\ndescription: Fill and read PDFs.\n---\n\nProse body.\n'
+
+test('assessCompat: clean prose skill is ok', () => {
+  const tree = [blob(`${DIR}/SKILL.md`), blob(`${DIR}/references/forms.md`)]
+  const res = assessCompat(tree, DIR, OK_MD)
+  assert.equal(res.ok, true)
+  assert.deepEqual(res.caveats, [])
+})
+
+test('assessCompat: disallowed extensions and deep nesting are flagged as dropped', () => {
+  const tree = [
+    blob(`${DIR}/SKILL.md`),
+    blob(`${DIR}/binary.wasm`),
+    blob(`${DIR}/a/b/c/d/e/deep.md`),
+  ]
+  const res = assessCompat(tree, DIR, OK_MD)
+  const dropped = res.caveats.find((c) => c.kind === 'dropped')
+  assert.ok(dropped)
+  assert.match(dropped.text, /2 bundled files/)
+  assert.match(dropped.text, /binary\.wasm/)
+})
+
+test('assessCompat: over the file-count budget → installs partially', () => {
+  const tree = [blob(`${DIR}/SKILL.md`)]
+  for (let i = 0; i < 30; i++) tree.push(blob(`${DIR}/ref-${i}.md`))
+  const res = assessCompat(tree, DIR, OK_MD)
+  const over = res.caveats.find((c) => c.kind === 'over-budget')
+  assert.ok(over)
+  assert.match(over.text, /30 files \(max 24\)/)
+})
+
+test('assessCompat: over the total-size budget → installs partially', () => {
+  const tree = [blob(`${DIR}/SKILL.md`), blob(`${DIR}/big.csv`, 3 * 1024 * 1024)]
+  const res = assessCompat(tree, DIR, OK_MD)
+  const over = res.caveats.find((c) => c.kind === 'over-budget')
+  assert.ok(over)
+  assert.match(over.text, /max 2 MB/)
+})
+
+test('assessCompat: bundled scripts are an informational caveat', () => {
+  const tree = [blob(`${DIR}/SKILL.md`), blob(`${DIR}/scripts/fill.py`)]
+  const res = assessCompat(tree, DIR, OK_MD)
+  assert.equal(res.ok, false)
+  const scripts = res.caveats.find((c) => c.kind === 'scripts')
+  assert.match(scripts.text, /nothing runs automatically/)
+})
+
+test('assessCompat: missing frontmatter description is flagged', () => {
+  const tree = [blob(`${DIR}/SKILL.md`)]
+  const res = assessCompat(tree, DIR, '# PDF skill\n\nJust a body.\n')
+  const fm = res.caveats.find((c) => c.kind === 'frontmatter')
+  assert.ok(fm)
+})
+
+test('assessCompat: multi-line YAML description defeats the flat parser → flagged', () => {
+  const raw = '---\nname: pdf\ndescription: >\n  Long folded\n  description.\n---\n\nBody.\n'
+  const res = assessCompat([blob(`${DIR}/SKILL.md`)], DIR, raw)
+  assert.ok(res.caveats.find((c) => c.kind === 'frontmatter'))
+})
+
+test('assessCompat: refs to dropped or absent files are the broken-refs caveat', () => {
+  const tree = [blob(`${DIR}/SKILL.md`), blob(`${DIR}/helper.rb`)]
+  const raw = `${OK_MD}\nRun [the helper](helper.rb), read \`scripts/gone.py\`, see [docs](https://example.com/x.md).\n`
+  const res = assessCompat(tree, DIR, raw)
+  const broken = res.caveats.find((c) => c.kind === 'broken-refs')
+  assert.ok(broken)
+  assert.match(broken.text, /helper\.rb/)
+  assert.match(broken.text, /scripts\/gone\.py/)
+  assert.ok(!broken.text.includes('example.com'))
+})
+
+test('assessCompat: bare inline-code filenames and dir refs are not treated as refs', () => {
+  const tree = [blob(`${DIR}/SKILL.md`)]
+  const raw = `${OK_MD}\nMention \`package.json\` and [the scripts](scripts/) generically.\n`
+  const res = assessCompat(tree, DIR, raw)
+  assert.equal(res.caveats.find((c) => c.kind === 'broken-refs'), undefined)
+})
+
+test('assessCompat: files outside the skill dir are ignored', () => {
+  const tree = [
+    blob(`${DIR}/SKILL.md`),
+    blob('skills/other/huge.bin', 10 * 1024 * 1024),
+    blob('README.rb'),
+  ]
+  const res = assessCompat(tree, DIR, OK_MD)
+  assert.equal(res.ok, true)
 })

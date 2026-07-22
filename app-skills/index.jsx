@@ -23,6 +23,7 @@ import {
   rawSkillUrl,
   githubSkillUrl,
   createSummaryPrefetcher,
+  assessCompat,
 } from './catalog.js'
 
 // Skills — browse, read, and grow the agent's skills (the SKILL-style markdown
@@ -228,6 +229,21 @@ const CSS = `
 .sk-cat { position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column; background: var(--bg); }
 .sk-cat-note { margin: 12px 20px 4px; max-width: 68ch; color: var(--muted); font-size: 13.5px; line-height: 1.5;
   text-wrap: pretty; }
+/* pre-install compat badge on the catalog skill page */
+.sk-compatwrap { max-width: 720px; margin: 14px auto -6px; padding: 0 18px; }
+.sk-compat { display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px; border-radius: 999px;
+  font-family: var(--font); font-size: 12.5px; font-weight: 600; border: 1px solid; background: none; }
+.sk-compat.is-ok { color: var(--ok, #2e7d32); border-color: color-mix(in srgb, var(--ok, #2e7d32) 45%, transparent);
+  background: color-mix(in srgb, var(--ok, #2e7d32) 10%, transparent); }
+.sk-compat.is-warn { color: var(--warn, #b26a00); border-color: color-mix(in srgb, var(--warn, #b26a00) 45%, transparent);
+  background: color-mix(in srgb, var(--warn, #b26a00) 10%, transparent); cursor: pointer; }
+.sk-compat.is-warn svg { width: 13px; height: 13px; transform: rotate(90deg); transition: transform .12s ease; }
+.sk-compat.is-warn.is-open svg { transform: rotate(-90deg); }
+.sk-caveats { margin: 8px 0 0; padding: 9px 12px 9px 26px; border-radius: 10px; font-size: 13px; line-height: 1.5;
+  border: 1px solid color-mix(in srgb, var(--warn, #b26a00) 35%, var(--border)); color: var(--muted);
+  background: color-mix(in srgb, var(--warn, #b26a00) 6%, transparent); }
+.sk-caveats li { margin: 3px 0; }
+
 /* catalog breadcrumb chain — every ancestor segment is clickable */
 .sk-crumbs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; }
 .sk-crumb { border: none; background: none; padding: 0; font-family: var(--font); font-size: 14.5px;
@@ -358,6 +374,7 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
   const [descs, setDescs] = useState({}) // dir -> { ...summary, raw } | 'loading' | 'failed'
   const [filter, setFilter] = useState('')
   const [detailDir, setDetailDir] = useState(null) // dir open as a full page
+  const [showCaveats, setShowCaveats] = useState(false)
   const [busyDir, setBusyDir] = useState(null)
   const [scanBusy, setScanBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -378,6 +395,17 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
     }
     return () => prefetcherRef.current?.cancel()
   }, [])
+
+  useEffect(() => {
+    // Owner browsing is the natural freshness signal for the agent's cached
+    // catalog index — fire-and-forget; the server's 24h gate absorbs repeats.
+    if (!visible) return
+    fetch('/api/skills/catalog-index/refresh', {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: '{}',
+    }).catch(() => {})
+  }, [visible])
 
   const proxied = async (url) => {
     const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, { headers: authHeaders })
@@ -409,6 +437,9 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
       const data = JSON.parse(await proxied(treeScanUrl(source)))
       if (!Array.isArray(data.tree)) throw new Error(data.message || 'unexpected GitHub response (no tree)')
       const skills = treeToSkills(data.tree, source.path)
+      // Keep the raw tree: the skill page's compat badge predicts what the
+      // installer would drop from it, no extra fetches needed.
+      setOpen({ source, tree: data.tree })
       setSkillList(skills)
       setTruncated(!!data.truncated)
       window.mobius?.signal?.('item_opened', { type: 'catalog-source', slug: source.repo })
@@ -431,6 +462,7 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
 
   const openSkillPage = (dir) => {
     setDetailDir(dir)
+    setShowCaveats(false)
     if (open) loadDescription(open.source, dir)
     window.mobius?.signal?.('item_opened', { type: 'catalog-skill', slug: dir })
   }
@@ -476,6 +508,13 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
       return ''
     }
   }, [detailEntry])
+
+  // Pre-install compat: predict what the installer would drop, from the tree
+  // scan we already have. null until both the tree and the raw md are in hand.
+  const compat = useMemo(() => {
+    if (!detailDir || !detailLoaded || !Array.isArray(open?.tree)) return null
+    return assessCompat(open.tree, detailDir, detailEntry.raw || '')
+  }, [detailDir, detailLoaded, detailEntry, open])
 
   // Links in a catalog SKILL.md: external → new tab; anything else (relative
   // resource paths we haven't fetched) is blocked so the app stays mounted.
@@ -572,7 +611,29 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
                 )}
               </div>
             ) : detailLoaded ? (
-              <div className="sk-md" onClick={onDetailClick} dangerouslySetInnerHTML={{ __html: detailHtml }} />
+              <>
+                {compat && (
+                  <div className="sk-compatwrap">
+                    {compat.ok ? (
+                      <span className="sk-compat is-ok">✓ Works with Möbius</span>
+                    ) : (
+                      <button
+                        className={`sk-compat is-warn${showCaveats ? ' is-open' : ''}`}
+                        onClick={() => setShowCaveats((v) => !v)}
+                        aria-expanded={showCaveats}
+                      >
+                        {compat.caveats.length} {compat.caveats.length === 1 ? 'caveat' : 'caveats'} {CHEV}
+                      </button>
+                    )}
+                    {!compat.ok && showCaveats && (
+                      <ul className="sk-caveats">
+                        {compat.caveats.map((c) => <li key={c.kind}>{c.text}</li>)}
+                      </ul>
+                    )}
+                  </div>
+                )}
+                <div className="sk-md" onClick={onDetailClick} dangerouslySetInnerHTML={{ __html: detailHtml }} />
+              </>
             ) : (
               <div className="sk-empty"><div className="sk-spinner" /></div>
             )
