@@ -473,6 +473,7 @@ async def test_apply_rebuilds_frontend_but_no_restart_when_update_is_frontend_on
   pu.SERVING_SHA_FILE.write_text(served + "\n")  # the running uvicorn's sha
   new = _local_commit(platform, edits={"frontend/src/App.jsx": "export default 2\n"})
   calls = []
+  hook_calls = []
 
   async def fake_rebuild(repo, res):
     calls.append((repo, res.new_sha))
@@ -480,6 +481,10 @@ async def test_apply_rebuilds_frontend_but_no_restart_when_update_is_frontend_on
   monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
     pu.ReconcileResult("updated", served, new, new)
   ))
+  monkeypatch.setattr(
+    pu, "_refresh_git_hooks",
+    lambda repo: hook_calls.append(repo) or "",
+  )
   monkeypatch.setattr(pu, "_rebuild_frontend_after_update_if_needed", fake_rebuild)
 
   res = await pu.apply_platform_update(SimpleNamespace(), platform)
@@ -489,6 +494,26 @@ async def test_apply_rebuilds_frontend_but_no_restart_when_update_is_frontend_on
   assert res["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
   assert res["needs_restart"] is False
   assert calls == [(platform, new)]
+  assert hook_calls == [platform]
+
+
+def test_boot_reconcile_refreshes_copied_hooks(monkeypatch, tmp_path):
+  platform = tmp_path / "platform"
+  platform.mkdir()
+  calls = []
+  monkeypatch.setattr(pu, "PLATFORM_REPO", platform)
+  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
+    pu.ReconcileResult("up_to_date", "pre-sha", "pre-sha", "target-sha")
+  ))
+  monkeypatch.setattr(
+    pu, "_refresh_git_hooks",
+    lambda repo: calls.append(repo) or "",
+  )
+
+  summary = pu.reconcile_clone_sync()
+
+  assert calls == [platform]
+  assert "hooks=refreshed" in summary
 
 
 @pytest.mark.asyncio

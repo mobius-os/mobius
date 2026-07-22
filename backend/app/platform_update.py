@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import logging
 import os
 import subprocess
 import sys
@@ -54,6 +55,8 @@ from sqlalchemy.orm import Session
 
 from app import app_git
 
+
+log = logging.getLogger(__name__)
 
 PLATFORM_REPO = Path("/data/platform")
 # The served backend — the import probe's cwd, so ``import app.main`` resolves
@@ -106,6 +109,9 @@ _FETCH_TIMEOUT = 120
 # in agent-edited code would otherwise wedge boot forever; a timeout-kill counts
 # as probe-fail -> roll back.
 _PROBE_TIMEOUT = 60
+# Hook installation only copies a handful of local files and updates one
+# repo-local config value. A long run is a wedged filesystem/process, not work.
+_HOOK_INSTALL_TIMEOUT = 15
 
 # Update-preview payload bounds. A whole-platform deploy can carry a huge diff;
 # the review sheet renders the file summary (always small) by default and the raw
@@ -731,6 +737,39 @@ def _touched_frontend(repo: Path, before: str | None, after: str | None) -> bool
   )
 
 
+def _refresh_git_hooks(repo: Path) -> str | None:
+  """Refresh copied repository hooks from the newly served platform tree.
+
+  ``install-hooks.sh`` deliberately installs copies, not symlinks, so linked
+  worktrees keep working if their source worktree disappears. The consequence
+  is that a platform update can advance ``scripts/pre-commit.sh`` while the
+  active ``.git/hooks/pre-commit`` stays stale. Run the existing deterministic
+  installer after a successful Apply and on every healthy boot. ``None`` means
+  there is no installer in this checkout, ``""`` means success, and a non-empty
+  string is a bounded diagnostic. Hook refresh is important development hygiene
+  but must never roll back an otherwise healthy platform update.
+  """
+  installer = repo / "scripts" / "install-hooks.sh"
+  if not installer.is_file():
+    return None
+  try:
+    proc = subprocess.run(
+      ["bash", str(installer)],
+      cwd=str(repo),
+      env=_scrubbed_git_env(repo),
+      capture_output=True,
+      text=True,
+      timeout=_HOOK_INSTALL_TIMEOUT,
+      check=False,
+    )
+  except (OSError, subprocess.TimeoutExpired) as exc:
+    return repr(exc)[:500]
+  if proc.returncode != 0:
+    detail = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
+    return detail[-500:]
+  return ""
+
+
 async def _rebuild_frontend_after_update_if_needed(
   repo: Path, res: ReconcileResult,
 ) -> None:
@@ -911,10 +950,18 @@ def reconcile_clone_sync() -> str:
   worst case leaves the pre-reconcile code serving and a flag set."""
   try:
     res = _reconcile_under_lock(PLATFORM_REPO, at_boot=True)
+    # Even an offline/conflict pass leaves a complete served tree on disk. Hook
+    # refresh is local-only, so do it on every boot rather than waiting for a
+    # successful fetch that may be unrelated to the stale installed copy.
+    hook_refresh = _refresh_git_hooks(PLATFORM_REPO)
     summary = (
       f"reconcile[{res.status}] pre={_short(res.pre_sha)} "
       f"new={_short(res.new_sha)} target={_short(res.target_sha)}"
     )
+    if hook_refresh == "":
+      summary += " hooks=refreshed"
+    elif hook_refresh:
+      summary += f" hooks=error:{hook_refresh}"
     if res.conflict_paths:
       summary += f" conflicts={len(res.conflict_paths)}"
     if res.error:
@@ -1159,6 +1206,9 @@ async def apply_platform_update(
     chat_id: str | None = None
 
     if res.status == "updated":
+      hook_refresh = await asyncio.to_thread(_refresh_git_hooks, repo)
+      if hook_refresh:
+        log.warning("git hook refresh failed after platform update: %s", hook_refresh)
       # Frontend changes rebuild into dist (served per-request, no restart);
       # only a served-backend or constitution change requires restarting
       # uvicorn. Path-aware so test/docs/frontend-only updates finish without a
