@@ -427,67 +427,49 @@ with the service token). Never edit
 `scripts/sync-core-apps.sh`; CI (`scripts/check-core-apps-sync.sh`) fails the
 build on drift.
 
-**Self-heal — LANDING (owner-signed-off 2026-06-30; the `recoveryd` container is
-BUILT — `backend/recovery/recoveryd.py`, its own service in `docker-compose.yml`
-with `restart: unless-stopped` on the same `/data` — and `/recover*` IS wired in
-the bundled `Caddyfile` (`handle /recover* { reverse_proxy recoveryd:8001 }`
-ahead of the `app:8000` catch-all, so it never falls through to the platform) —
-per the adversarially-reviewed plan in
-cards 148 + its recoveryd-hardened addendum. Some hardening is still in flight
-under an active session, so treat the finer status of the bullets below —
-especially the pre-flight gate (card 154) and the listed removals — as
-"intended end-state, confirm against the recovery rework" rather than settled).**
-The *end-state* model is git + a minimal pre-flight gate + a separate always-up
-recovery container, with **no baked duplicate, no `/app/app` symlink-swap, no
-auto-heal probe, no magic**. The whole-repo reshape landed most of it: boot now
-serves uvicorn directly with `cd /data/platform/backend` — **no `/app/app`
-symlink-swap** (`_platform_use_direct` restores `/app/app` to the baked dir) —
-and falls back to the baked floor when the platform tree fails its import probe.
-The removals not yet done at HEAD are noted in the last bullet:
-- The platform is served directly as a git repo.
-- **Pre-flight gate (card 154):** a change only takes effect on the restart that
-  applies it, so the running server keeps serving the working code while the agent
-  edits. Before applying, a minimal check — does the new tree import (`python -c
-  "import app.main"`) and answer `/api/health`? Green → apply; red → don't apply,
-  hand the traceback back to the agent's turn. A break never reaches the live server.
-- **Recovery is a SEPARATE CONTAINER, not a process inside the platform.**
-  `recoveryd` runs from the same image with its own command + `restart:
-  unless-stopped`, mounts the same `/data`, and is routed by the external
-  edge proxy at `/recover*` *independently of platform health* (with an
-  auto-surfaced broken-state page when `:8000` is down). It must be a separate
-  container — the adversarial review confirmed prod pid1 `exec`s uvicorn, so a
-  backgrounded supervisor inside the platform container dies with it. **Two tiers:**
-  *Tier 1* is a deterministic "Restore platform" button (git-reset `/data/platform`
-  via the existing `.recover-pending` + restart) needing **zero CLI / OAuth /
-  network / agent** — this is THE floor and the ONLY tier built today; *Tier 2*
-  (the lifted `recovery_chat_runner` spawning a rescue agent, best-effort when
-  creds exist) is an explicitly DEFERRED follow-on, NOT in the built recoveryd
-  (per `backend/recovery/recoveryd.py`'s docstring) — today the rescue chat still
-  lives only inside the platform uvicorn at `/recover`, so it dies with the
-  platform. recoveryd restarts the platform via a sentinel file + a baked
-  `kill -TERM 1` poller (no Docker socket — O1). Its auth bcrypt-checks the
-  owner password against the SQLite owner row read via raw sqlite3
-  (`backend/recovery/recovery_db.py`), with an HMAC session cookie keyed off
-  `/data/.recovery-secret`. It also survives a **wiped or corrupt DB** (O2): the
-  platform mirrors the owner's username + bcrypt hash into a DB-independent seed
-  at `/data/.recovery-owner.json` (`backend/app/recovery_seed.py`, written at
-  `setup()` and idempotently re-synced at boot), and `recovery_db` falls back to
-  it **only when the DB is unreadable** — never when it is readable-but-owner-less,
-  so a fresh install and a completed factory reset (both `DELETE FROM owner`,
-  leaving a readable empty table) still read as "no owner" and a transient
-  busy/locked DB fails closed. The seed is only ever written after an owner row
-  commits (the first-boot-takeover guard), deleted on factory reset, and
-  gitignored + FS-deny-listed so it never leaks through `pm-commit` or
-  `/api/fs/read`.
-- Of the planned removals, only the `.platform-serve-baked` probe/flag is gone
-  today. The crash-loop `cp`-restore (`backend/scripts/entrypoint.sh`, boot-counter
-  ≥ 3) and the destructive `platform-baked` `recovery_restore.sh` mode are STILL
-  PRESENT at HEAD — slated for removal with the recovery rework. Boot no longer
-  symlink-swaps `/app/app`: it serves uvicorn directly from `/data/platform/backend`
-  (restoring `/app/app` to the baked dir) and falls back to the baked floor when
-  the platform tree fails its import probe, stamping the decision to
-  `/tmp/serving-source`. End-state intent: real image/disk corruption is an
-  operator redeploy, not something to auto-heal around.
+**Recovery and self-heal.** Recovery is deliberately outside the editable
+platform. `recoveryd` is a separate `restart: unless-stopped` container with its
+own cgroup, read-only root filesystem, and root-owned frozen code under
+`/app/recovery`. The edge proxy routes `/recover*` to it before the platform
+catch-all, so a broken or OOM-killed app container does not take the recovery UI
+down with it. The recovery container mounts `/data` to repair the instance, but
+the platform container does not mount recoveryd's private `/recovery-live`
+volume.
+
+The dashboard exposes two complementary paths:
+
+- **Reasoned repair:** `/recover/chat` runs a fresh Claude or Codex recovery
+  agent as root. Its runner, auth, pages, and per-chat JSONL history are frozen
+  recovery modules with zero `app.*` imports, so broken production chat code is
+  not in the recovery dependency chain. The root filesystem remains read-only;
+  the agent can repair `/data/platform` and owner data but cannot rewrite its
+  own lifeboat.
+- **Deterministic floor:** `Restore platform` resets uncommitted changes in the
+  served clone; `Reset to baked floor` quarantines the clone and atomically
+  reseeds it from `/app/platform-baked`. recoveryd writes
+  `.recover-pending` before `.platform-restart-requested`; the platform
+  entrypoint consumes those files as root and its poller cycles pid 1 without a
+  Docker socket.
+
+Recovery auth normally reads the owner bcrypt hash through raw SQLite and falls
+back to `/data/.recovery-owner.json` only when the DB is unreadable. The
+platform writes that seed after owner setup, refreshes it idempotently at boot,
+and deletes it on factory reset. Recovery session HMAC state and an optional
+self-updated recovery bundle live on the recoveryd-only `/recovery-live`
+volume. An update is cloned only from the pinned recovery repository, hardened
+root-owned, syntax-checked, and atomically swapped; a persisted three-attempt
+guard quarantines a trusted live bundle that crash-loops back to the baked
+floor.
+
+Normal platform boot serves `/data/platform/backend` directly after an import
+probe. It fetches `origin/main`, commits stray local edits, and rebases them onto
+the update; a conflict or failed post-rebase import returns to the exact
+pre-reconcile commit and leaves a visible flag. An invalid existing clone serves
+the baked backend without overwriting the broken tree. Independently, three
+consecutive boots that never reach `/api/health` quarantine the served clone and
+reseed it on the next attempt. These mechanisms recover code; owner-data disaster
+recovery is the separate `backup-data.py` / `restore-data.py` flow and is not
+automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 

@@ -1,6 +1,7 @@
 """Live-turn liveness watchdog + debug health surface."""
 
 import asyncio
+import logging
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -125,7 +126,7 @@ def test_watchdog_interrupts_stale_client_preserves_queue_and_persists_error():
   )
 
 
-def test_watchdog_exempts_registered_pending_question():
+def test_watchdog_exempts_registered_pending_question_without_info_spam(caplog):
   _bc, _sink, handle = _live_stale("question-1")
   loop = asyncio.new_event_loop()
   try:
@@ -139,12 +140,17 @@ def test_watchdog_exempts_registered_pending_question():
       ),
     )
 
-    swept = _sweep()
+    with caplog.at_level(logging.INFO, logger="moebius.chat"):
+      swept = _sweep()
   finally:
     loop.close()
 
   assert swept == []
   assert handle.stop_calls == 0
+  assert not any(
+    "stalled-live watchdog skipped" in record.getMessage()
+    for record in caplog.records
+  )
 
 
 def test_watchdog_reclaims_provider_wedged_after_question_answered():

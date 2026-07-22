@@ -20,17 +20,14 @@ Design constraints (owner-signed plan _148):
     strips `/app`, `/data/platform*`, and cwd so `import app` can never
     resolve onto the broken platform tree.
 
-Tier-1 floor (this MVP): deterministic, agent-free, network-free
-restore. POST /recover/restore writes `/data/.recover-pending=<mode>`
-(reusing the entrypoint's existing boot-time handler) then the restart
-sentinel `/data/.platform-restart-requested` (acted on by the platform
-container's poller -> kill pid1 -> Docker recreate -> fix loads).
-
-Deferred (NOT in this MVP, noted for the follow-on):
-  * Tier-2 SSE AI-rescue chat (lifts recover_chat_runner).
-  * DB-independent `owner.json` auth (survives a wiped DB — O2). This
-    floor uses the DB owner row, so it survives a broken PLATFORM but
-    not a wiped DB.
+The deterministic, agent-free floor is POST /recover/restore: it writes
+`/data/.recover-pending=<mode>` (reusing the entrypoint's boot-time handler)
+then `/data/.platform-restart-requested` (the platform poller kills pid1,
+Docker restarts it, and the fix loads). The complementary `/recover/chat`
+surface runs a frozen, full-root Claude or Codex rescue agent through the
+standalone recovery_chat_runner. Authentication reads the owner row directly
+with stdlib SQLite and falls back to the DB-independent
+`/data/.recovery-owner.json` seed only when the DB is unreadable.
 """
 
 from __future__ import annotations
@@ -1755,6 +1752,14 @@ class _Handler(BaseHTTPRequestHandler):
 
   def log_message(self, fmt: str, *args) -> None:  # noqa: A003
     # Route stdlib access logs through our logger (and never log bodies).
+    # Docker probes this endpoint every 30 seconds. Logging every successful
+    # probe buries the recovery events this log exists to preserve (a normal
+    # ten-hour boot produces roughly 1,200 identical lines). Keep failures and
+    # every other request visible; only the routine 200 health response is
+    # silent.
+    path = urllib.parse.urlsplit(getattr(self, "path", "")).path
+    if path == "/recover/health" and len(args) >= 2 and str(args[1]) == "200":
+      return
     log.info("%s - %s", self.address_string(), fmt % args)
 
 

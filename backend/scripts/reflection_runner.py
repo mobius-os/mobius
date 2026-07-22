@@ -144,8 +144,7 @@ DEFAULT_MAX_TURNS = 60
 
 # Default provider/model when settings.json doesn't pin one. Reflection
 # defaults to Claude (the production default provider); the owner can
-# override per-instance via /data/apps/reflection/settings.json without
-# touching code.
+# override per-instance via numeric app storage without touching code.
 DEFAULT_PROVIDER = "claude"
 
 # Turn budget for the guaranteed-brief rescue session. Small on
@@ -280,6 +279,29 @@ def steering_message(
   return None
 
 
+def reflection_storage_dir() -> Path | None:
+  """Returns the Reflection app's canonical numeric storage directory.
+
+  Catalog-app source lives at ``/data/apps/reflection`` while app-owned storage
+  lives at ``/data/apps/<numeric-id>``. ``fetch.sh`` stages that id before the
+  runner starts. Keeping the resolution in one helper prevents settings and
+  reports from silently drifting back to the source tree.
+  """
+  app_id_file = DATA_DIR / "apps" / "reflection" / "inputs" / "app_id"
+  try:
+    app_id = app_id_file.read_text(encoding="utf-8").strip()
+  except OSError:
+    return None
+  if (
+    not app_id.isascii()
+    or not app_id.isdecimal()
+    or app_id.startswith("0")
+    or len(app_id) > 18
+  ):
+    return None
+  return DATA_DIR / "apps" / app_id
+
+
 def todays_brief_path() -> Path | None:
   """Returns tonight's expected brief path, or None when unknowable.
 
@@ -290,16 +312,12 @@ def todays_brief_path() -> Path | None:
   that as "assume no brief" and let the rescue agent resolve the id
   itself.
   """
-  app_id_file = DATA_DIR / "apps" / "reflection" / "inputs" / "app_id"
-  try:
-    app_id = app_id_file.read_text(encoding="utf-8").strip()
-  except OSError:
-    return None
-  if not app_id:
+  storage_dir = reflection_storage_dir()
+  if storage_dir is None:
     return None
   from datetime import date
   return (
-    DATA_DIR / "apps" / app_id / "reports"
+    storage_dir / "reports"
     / f"{date.today().isoformat()}.html"
   )
 
@@ -528,15 +546,21 @@ def seed_brief_template() -> None:
 
 
 def load_settings() -> dict:
-  """Reads /data/apps/reflection/settings.json, tolerating absence/corruption.
+  """Reads the app's numeric-storage settings, tolerating old installations.
 
-  This is the SAME file the Reflection mini-app writes (cron hour,
-  exclude_apps). Provider/model selection adds two optional
-  keys — `provider` ("claude" | "codex") and `model` (a provider model
-  id) — so the owner can steer which agent dreams without a code
-  change. Missing or malformed → {} (the caller applies defaults).
+  The mini-app writes ``/data/apps/<numeric-id>/settings.json`` through the
+  storage API. Older runner builds incorrectly read the catalog source tree at
+  ``/data/apps/reflection/settings.json``, so retain that path only as a legacy
+  fallback when canonical numeric storage has no settings file. If the
+  canonical file exists but is malformed, fail closed to defaults instead of
+  reviving a stale legacy choice.
   """
-  path = DATA_DIR / "apps" / "reflection" / "settings.json"
+  storage_dir = reflection_storage_dir()
+  if storage_dir is None:
+    return {}
+  canonical = storage_dir / "settings.json"
+  legacy = DATA_DIR / "apps" / "reflection" / "settings.json"
+  path = canonical if canonical.is_file() else legacy
   if not path.is_file():
     return {}
   try:
@@ -544,6 +568,69 @@ def load_settings() -> dict:
   except (json.JSONDecodeError, OSError):
     return {}
   return data if isinstance(data, dict) else {}
+
+
+def _bounded_owner_text(value: object, max_chars: int = 500) -> str:
+  """Normalize one owner-authored goal hint without admitting control spam."""
+  if not isinstance(value, str):
+    return ""
+  return " ".join(value.split())[:max_chars]
+
+
+def _safe_cron_hint(value: object) -> str:
+  """Return a bounded five-field cron preference, or no actionable hint."""
+  text = _bounded_owner_text(value, 120)
+  fields = text.split()
+  if len(fields) != 5:
+    return ""
+
+  def valid_field(field: str, low: int, high: int) -> bool:
+    for item in field.split(","):
+      base, separator, step = item.partition("/")
+      if separator and (not step.isdecimal() or int(step) < 1):
+        return False
+      if base == "*":
+        continue
+      start, dash, end = base.partition("-")
+      if not start.isdecimal():
+        return False
+      start_num = int(start)
+      end_num = int(end) if dash and end.isdecimal() else start_num
+      if dash and not end.isdecimal():
+        return False
+      if not (low <= start_num <= end_num <= high):
+        return False
+    return True
+
+  bounds = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+  if not all(valid_field(field, *bound) for field, bound in zip(fields, bounds)):
+    return ""
+  return text
+
+
+def _bounded_excludes(value: object) -> list[str]:
+  """Bound app labels before interpolating them into the full-tools goal."""
+  if not isinstance(value, list):
+    return []
+  result = []
+  for item in value[:50]:
+    if isinstance(item, bool) or not isinstance(item, (str, int)):
+      continue
+    label = _bounded_owner_text(str(item), 80)
+    if label:
+      result.append(label)
+  return result
+
+
+def _bounded_max_turns(value: object) -> int:
+  """Keep corrupt app settings from disabling or exploding a nightly run."""
+  if isinstance(value, bool):
+    return DEFAULT_MAX_TURNS
+  try:
+    parsed = int(value)
+  except (TypeError, ValueError, OverflowError):
+    return DEFAULT_MAX_TURNS
+  return max(10, min(parsed, 120))
 
 
 def _resolve_agents(settings: dict) -> dict:
@@ -574,7 +661,13 @@ def build_goal(settings: dict) -> str:
   """
   from datetime import date
   today = date.today().isoformat()
-  exclude = settings.get("exclude_apps") or []
+  exclude = _bounded_excludes(settings.get("exclude_apps"))
+  verbosity = settings.get("verbosity")
+  if verbosity not in {"terse", "standard", "chatty"}:
+    verbosity = "standard"
+  focus = _bounded_owner_text(settings.get("focus"))
+  avoid = _bounded_owner_text(settings.get("avoid"))
+  cron = _safe_cron_hint(settings.get("cron"))
   inputs_dir = DATA_DIR / "apps" / "reflection" / "inputs"
   lines = [
     f"It is the night of {today}. Begin tonight's Reflection run.",
@@ -611,7 +704,14 @@ def build_goal(settings: dict) -> str:
     "                          some inputs are missing due to a transport error,",
     "                          NOT a quiet night — say so in the brief instead of",
     "                          implying nothing happened.",
-    "  - activity.jsonl        last 24h of raw platform events",
+    "  - activity.jsonl        last 24h of raw platform events. The",
+    "                          canonical user-turn event is `chat_sent`.",
+    "                          `chat_created` only means a row was created and",
+    "                          misses resumed-chat turns.",
+    "                          `chat_log_read` is an app audit event, not user activity.",
+    "                          Zero",
+    "                          `chat_sent` in a valid",
+    "                          window means a quiet window, not schema drift.",
     "  - chats.md              recent chats list (fork + interview these)",
     "  - prev-report.html      yesterday's brief (don't repeat yourself)",
     "  - prev-question-answers.json  the partner's taps on a recent brief's",
@@ -630,7 +730,21 @@ def build_goal(settings: dict) -> str:
     f"Your working directory is {DATA_DIR}. You have a real token "
     "($AGENT_TOKEN / $SERVICE_TOKEN) and full tools — no sandbox. "
     "Commit as you go with pm-commit.",
+    "",
+    f"Owner settings for this run: brief verbosity is {verbosity}.",
   ]
+  storage_dir = reflection_storage_dir()
+  if storage_dir is not None:
+    lines.append(f"Canonical app settings path: {storage_dir / 'settings.json'}.")
+  if cron:
+    lines.append(
+      f"Saved schedule preference: {cron}. If the installed Reflection cron "
+      "differs, reconcile it using the cron skill before the run ends."
+    )
+  if focus:
+    lines.append(f"The owner asked you to PRIORITISE tonight: {focus}")
+  if avoid:
+    lines.append(f"The owner asked you to AVOID tonight: {avoid}")
   if exclude:
     lines.append(
       f"\nThe owner asked you to SKIP these apps tonight: {', '.join(map(str, exclude))}."
@@ -1110,7 +1224,7 @@ async def run() -> int:
   seed_brief_template()
   goal = build_goal(settings)
   env = build_env()
-  max_turns = int(settings.get("max_turns") or DEFAULT_MAX_TURNS)
+  max_turns = _bounded_max_turns(settings.get("max_turns"))
   log_fh = None
   try:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
