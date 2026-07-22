@@ -690,6 +690,182 @@ def test_generated_indexes_do_not_count_as_skill_loads(skills_dir):
   assert _skill_names_in_command(cmd, data_dir) == ["pdf-forms"]
 
 
+# --- crash recovery: install is one durable, reconcilable transition ---
+
+
+def test_crash_after_publish_reconciles_to_owned_and_uninstallable(
+  client, auth, skills_dir,
+):
+  """Kill between the atomic rename and the record finalize: the published
+  dir plus its durable 'installing' intent must reconcile to a normally owned
+  skill — not an orphan that collides on retry and refuses uninstall."""
+  d = skills_dir / "tips"
+  d.mkdir()
+  (d / "SKILL.md").write_text("# tips\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "tips": {
+      "source": "o/r", "status": "installing", "staging": ".staging-gone",
+    },
+  }))
+
+  repaired = skills_mod.reconcile_installed(skills_dir)
+  assert repaired == ["tips"]
+  rec = _sidecar(skills_dir)["tips"]
+  assert "status" not in rec and "staging" not in rec  # finalized
+
+  r = client.delete("/api/skills/tips", headers=auth)  # normally removable
+  assert r.status_code == 200, r.text
+  assert not d.exists()
+
+
+def test_crash_before_publish_discards_staging_and_frees_retry(
+  client, auth, skills_dir, monkeypatch,
+):
+  """Kill between the intent write and the rename: the staging dir and the
+  intent record must both go, and a retry installs cleanly."""
+  staged = skills_dir / ".staging-abc"
+  staged.mkdir()
+  (staged / "SKILL.md").write_text("# partial\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "tips": {
+      "source": "o/r", "status": "installing", "staging": ".staging-abc",
+    },
+  }))
+
+  from app.routes import skills as rs
+
+  monkeypatch.setattr(
+    rs.install, "_http_get", _fake_fetch({"https://x/tips.md": b"# tips"}),
+  )
+  r = client.post(
+    "/api/skills/install", headers=auth, json={"url": "https://x/tips.md"},
+  )
+  assert r.status_code == 201, r.text  # reconcile ran first — no collision
+  assert not staged.exists()
+  assert "status" not in _sidecar(skills_dir)["tips"]
+
+
+def test_finalize_failure_is_truthful_and_self_heals(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  monkeypatch.setattr(rs.install, "_http_get", _fake_fetch({
+    "https://x/tips.md": b"# tips", "https://x/other.md": b"# other",
+  }))
+
+  real_write = rs._write_installed_sidecar
+  calls = {"n": 0}
+
+  def finalize_fails(skills_dir_, records):
+    calls["n"] += 1
+    if calls["n"] == 2:  # intent write succeeds, the FINALIZE write fails
+      raise OSError("disk full")
+    return real_write(skills_dir_, records)
+
+  monkeypatch.setattr(rs, "_write_installed_sidecar", finalize_fails)
+  r = client.post(
+    "/api/skills/install", headers=auth, json={"url": "https://x/tips.md"},
+  )
+  assert r.status_code == 500
+  # Truthful: published + reconcilable, no rollback claim.
+  assert "reconcile" in r.json()["detail"]
+  assert (skills_dir / "tips" / "SKILL.md").is_file()
+  assert _sidecar(skills_dir)["tips"]["status"] == "installing"
+
+  # The next skills operation heals it.
+  monkeypatch.setattr(rs, "_write_installed_sidecar", real_write)
+  r = client.post(
+    "/api/skills/install", headers=auth, json={"url": "https://x/other.md"},
+  )
+  assert r.status_code == 201, r.text
+  assert "status" not in _sidecar(skills_dir)["tips"]
+
+
+# --- truthfulness: usage keying + install identity + API exposure ---
+
+
+def test_uses_30d_keyed_by_disk_id_not_frontmatter_alias(
+  client, auth, skills_dir,
+):
+  from app import activity
+
+  (skills_dir / "real.md").write_text("# real\n\nA skill.\n")
+  (skills_dir / "alias.md").write_text(
+    "---\nname: real\ndescription: pretender\n---\nBody.\n",
+  )
+  activity.log_skill_load("chat-1", "real")
+
+  rows = {r["id"]: r for r in client.get("/api/skills", headers=auth).json()["skills"]}
+  assert rows["real"]["uses_30d"] == 1
+  assert rows["alias"]["uses_30d"] == 0  # the alias borrows nothing
+
+
+def test_url_install_records_content_hash_and_api_exposes_identity(
+  client, auth, skills_dir, monkeypatch,
+):
+  import hashlib as _hashlib
+
+  from app.routes import skills as rs
+
+  body = b"---\nname: tips\ndescription: t\n---\nBody."
+  monkeypatch.setattr(
+    rs.install, "_http_get", _fake_fetch({"https://x/tips.md": body}),
+  )
+  r = client.post(
+    "/api/skills/install", headers=auth, json={"url": "https://x/tips.md"},
+  )
+  assert r.status_code == 201, r.text
+  rec = _sidecar(skills_dir)["tips"]
+  # No commit exists for a raw URL — the content hash is the immutable
+  # identity of the exact reviewed bytes.
+  assert rec["commit"] is None
+  assert rec["skill_sha256"] == _hashlib.sha256(body).hexdigest()
+
+  (row,) = client.get("/api/skills", headers=auth).json()["skills"]
+  assert row["source_url"] == "https://x/tips.md"
+  assert row["commit"] is None
+
+
+# --- manage_skills revocation (owner-only downgrade) ---
+
+
+def test_owner_can_revoke_manage_skills_from_minted_token(
+  client, db, auth, skills_dir, monkeypatch,
+):
+  from app import models
+  from app.routes import skills as rs
+
+  monkeypatch.setattr(
+    rs.install, "_http_get", _fake_fetch({"https://x/tips.md": b"# tips"}),
+  )
+  granted = _app_token(db, manage_skills=True)
+  app_row = db.query(models.App).filter(models.App.name == "Skills").first()
+
+  r = client.post(
+    "/api/skills/install", headers=granted, json={"url": "https://x/tips.md"},
+  )
+  assert r.status_code == 201, r.text
+
+  # Owner revokes; the ALREADY-MINTED app JWT loses access on its next call.
+  r = client.patch(
+    f"/api/apps/{app_row.id}", headers=auth, json={"manage_skills": False},
+  )
+  assert r.status_code == 200, r.text
+  assert r.json()["manage_skills"] is False
+  r = client.post(
+    "/api/skills/install", headers=granted, json={"url": "https://x/tips.md"},
+  )
+  assert r.status_code == 403
+
+  # Granting back via PATCH is refused — that path is manifest review.
+  r = client.patch(
+    f"/api/apps/{app_row.id}", headers=auth, json={"manage_skills": True},
+  )
+  assert r.status_code == 400
+  # No-op True on an already-granted app is not a grant and passes through.
+
+
 def test_index_body_defuses_hostile_frontmatter_name(skills_dir):
   (skills_dir / "evil.md").write_text(
     "---\nname: bad | `rm -rf` | name\ndescription: d | e\n---\nBody.\n",

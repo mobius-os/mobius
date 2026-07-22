@@ -56,7 +56,7 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
-  """Store returns after uninstall; Memory stays gone; live Reflection skips."""
+  """Store returns after uninstall; Skills/Memory stay gone; live Reflection skips."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.install import _canonical_identity_key
 
@@ -108,12 +108,12 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  # Both reinstall_after_uninstall=True apps (store, skills) come back;
-  # Memory (policy False) stays gone; live Reflection is skipped.
-  assert install_mock.await_count == 2
+  # Only the Store (the recovery surface) returns after an owner uninstall;
+  # Skills and Memory (policy False) stay gone; live Reflection is skipped.
+  assert install_mock.await_count == 1
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
-  ] == [BOOTSTRAP_STORE_MANIFEST_URL, BOOTSTRAP_SKILLS_MANIFEST_URL]
+  ] == [BOOTSTRAP_STORE_MANIFEST_URL]
 
 
 @pytest.mark.asyncio

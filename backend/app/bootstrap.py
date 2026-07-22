@@ -34,12 +34,16 @@ BOOTSTRAP_STORE_MANIFEST_URL = (
 )
 
 # The Skills app (browse/install ecosystem skills + the skill-agent chat).
-# Canonical home is this catalog repo; the v2 app (compat badges, catalog
-# browser) depends on this platform's skills API, so its repo merges after
-# the platform does. Bootstrap is failure-tolerant, so a manifest/API skew
-# just logs and retries next boot.
+# Canonical home is the app-skills catalog repo. PINNED to a reviewed commit,
+# never a mutable branch: core and app releases pair explicitly — this pin
+# names the newest app revision reviewed against THIS platform's API surface,
+# and bumping it is a deliberate platform commit that rides the same release.
+# (Currently v1.1.2, which needs no skills API and works on any core; the v2
+# app — compat badges, catalog browser — requires this platform's skills API
+# and gets pinned here only once both sides have merged.)
 BOOTSTRAP_SKILLS_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-skills/main/mobius.json"
+  "https://raw.githubusercontent.com/mobius-os/app-skills/"
+  "fd09c995d943cb23bf2215be128fc68851750ebf/mobius.json"
 )
 
 LEGACY_PLATFORM_APP_MANIFEST_URLS = legacy_platform_apps.MANIFEST_URLS
@@ -54,7 +58,9 @@ class _BootstrapApp:
 
 _BOOTSTRAP_APPS = (
   _BootstrapApp("store", BOOTSTRAP_STORE_MANIFEST_URL, True),
-  _BootstrapApp("skills", BOOTSTRAP_SKILLS_MANIFEST_URL, True),
+  # Skills is NOT the recovery surface — an owner uninstall is respected, and
+  # the Store remains the way back.
+  _BootstrapApp("skills", BOOTSTRAP_SKILLS_MANIFEST_URL, False),
   _BootstrapApp("memory", LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], False),
   _BootstrapApp(
     "reflection", LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], False,

@@ -106,6 +106,11 @@ class AppUpdate(BaseModel):
   cross_app_access: ShareLevel | None = None
   share_with_apps: ShareLevel | None = None
   offline_capable: bool | None = None
+  # Owner-only DOWNGRADE of skills authority: False revokes immediately (the
+  # request gate reads the live row, so already-minted app JWTs lose access on
+  # their next call). Granting (True) is rejected — that path stays with the
+  # reviewed manifest install.
+  manage_skills: bool | None = None
   # None preserves the declaration. An object replaces it ({} removes all
   # runtime capabilities). Store-installed apps remain manifest-review owned.
   capabilities: dict | None = None

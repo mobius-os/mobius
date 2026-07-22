@@ -221,6 +221,48 @@ def _skills_dir() -> Path:
   return Path(get_settings().data_dir) / "shared" / "skills"
 
 
+def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
+  """Repair interrupted installs recorded in the installed-skills sidecar.
+
+  The installer persists an ``"status": "installing"`` intent (carrying its
+  staging directory name) BEFORE publishing, so a crash at any point leaves a
+  self-describing state this sweep repairs:
+
+    intent + published dir   -> the atomic rename happened; finalize the record
+    intent + staging dir     -> the crash preceded publish; discard the staging
+    intent + neither         -> nothing durable happened; drop the record
+
+  Runs at boot (init_skills) and at the start of every install/uninstall
+  (under the shared-skills lock), so an orphan can never outlive the next
+  skills operation. Returns the names it repaired.
+  """
+  import json
+  import shutil
+
+  root = skills_dir or _skills_dir()
+  sidecar = root / INSTALLED_SKILLS_SIDECAR
+  records = _read_sidecar(sidecar)
+  repaired: list[str] = []
+  for name, rec in list(records.items()):
+    if not isinstance(rec, dict) or rec.get("status") != "installing":
+      continue
+    target = root / str(name)
+    staging_name = str(rec.get("staging") or "")
+    if target.is_dir() and not target.is_symlink():
+      rec.pop("status", None)
+      rec.pop("staging", None)
+    else:
+      if staging_name:
+        staging = root / staging_name
+        if staging.is_dir() and not staging.is_symlink():
+          shutil.rmtree(staging, ignore_errors=True)
+      records.pop(name)
+    repaired.append(str(name))
+  if repaired:
+    atomic_write(sidecar, json.dumps(records, indent=2, sort_keys=True) + "\n")
+  return repaired
+
+
 def enumerate_skills(skills_dir: Path | None = None) -> list[Skill]:
   """All installed skills (flat + directory), sorted by name.
 

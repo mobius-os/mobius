@@ -1896,6 +1896,19 @@ async def update_app(
       app.cross_app_access = body.cross_app_access
     if body.offline_capable is not None:
       app.offline_capable = body.offline_capable
+    if body.manage_skills is not None:
+      # Downgrade-only: the owner can revoke skills authority here (effective
+      # on the app's next request — the gate reads the live row), but a grant
+      # must come from a reviewed manifest install, never a bare PATCH.
+      if body.manage_skills and not app.manage_skills:
+        raise HTTPException(
+          status_code=400,
+          detail=(
+            "manage_skills can only be granted through a reviewed manifest "
+            "install; PATCH may only revoke it."
+          ),
+        )
+      app.manage_skills = body.manage_skills
     if body.capabilities is not None and app.manifest_url is not None:
       raise HTTPException(
         status_code=409,

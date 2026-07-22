@@ -97,8 +97,14 @@ def _write_index() -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from app.skills import write_index
+    from app.skills import reconcile_installed, write_index
 
+    # Startup half of the installer's crash-recovery contract: repair any
+    # install a crash interrupted (finalize published, discard staged) before
+    # the index snapshots the tree.
+    repaired = reconcile_installed(SKILLS)
+    if repaired:
+      print(f"init_skills: reconciled interrupted install(s): {repaired}")
     write_index(SKILLS)
     print("init_skills: skills-index.md regenerated")
   except Exception as exc:  # noqa: BLE001 - boot must not fail on the index

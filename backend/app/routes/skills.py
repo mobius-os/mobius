@@ -31,6 +31,7 @@ Design choices that match the codebase philosophy:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -459,19 +460,32 @@ def list_skills(_: models.Owner = Depends(get_current_owner_or_app)) -> dict:
     }
   except Exception:  # pragma: no cover - usage is a non-critical enrichment
     counts = {}
+  installed_records = _read_installed_sidecar(skills_dir)
   out = []
   for skill in skills.enumerate_skills(skills_dir):
     disk_name = (
       skill.read_path.parent.name if skill.is_dir else skill.read_path.stem
     )
-    out.append({
+    row = {
       "name": skill.name,
       "id": disk_name,
       "description": skill.description,
       "provenance": skill.provenance,
       "is_dir": skill.is_dir,
-      "uses_30d": counts.get(skill.name, 0) or counts.get(disk_name, 0),
-    })
+      # Usage is keyed STRICTLY by the on-disk id — both runners observe loads
+      # by file path. Frontmatter `name` is untrusted; keying by it would let
+      # an alias borrow another skill's count.
+      "uses_30d": counts.get(disk_name, 0),
+    }
+    rec = installed_records.get(disk_name)
+    if isinstance(rec, dict):
+      # Surface the immutable install identity so UIs can link the exact
+      # reviewed revision, not just a mutable repo label.
+      row["commit"] = rec.get("commit")
+      row["source_repo"] = rec.get("repo")
+      row["source_path"] = rec.get("path")
+      row["source_url"] = rec.get("url")
+    out.append(row)
   return {"skills": out}
 
 
@@ -498,6 +512,9 @@ async def install_skill(
     raise HTTPException(400, "Resolved skill has no SKILL.md content.")
 
   async with fs_locks.shared_skills_lock():
+    # Repair anything a previous crash left behind before deciding collisions.
+    skills.reconcile_installed(skills_dir)
+
     # ANY existing dirent at either skill shape is a collision — including a
     # symlink or non-skill leftover. Deciding by lstat (never following the
     # entry) closes the redirect hole where a pre-existing link at the target
@@ -512,10 +529,30 @@ async def install_skill(
           "rename it first, or install under a different `name`.",
         )
 
-    # One durable transition: stage the complete bounded tree in a fresh
-    # dot-prefixed directory (invisible to enumeration), then publish with a
-    # single atomic rename. A failure mid-write leaves nothing at the final
-    # name, so a retry never collides with a stranded partial install.
+    # One crash-recoverable transition, in four durable steps:
+    #   1. stage the complete bounded tree in a fresh dot-prefixed dir
+    #   2. persist an 'installing' intent (with the staging name) in the
+    #      sidecar — from here on, ANY crash leaves a self-describing state
+    #      that reconcile_installed() repairs on boot or the next mutation
+    #   3. publish with a single atomic rename
+    #   4. finalize the record (drop the intent markers)
+    # A failure before 3 publishes nothing; a crash after 3 leaves a visible
+    # skill WITH a record that reconciles to owned — never an orphan that
+    # blocks retries and refuses uninstall.
+    record = {
+      "source": source,
+      "repo": body.repo,
+      "path": body.path,
+      "ref": body.ref if body.repo else None,
+      "commit": commit,
+      "url": body.url,
+      # The immutable identity of the reviewed entry document — for raw-URL
+      # installs (no commit to pin) this is the only revision evidence.
+      "skill_sha256": hashlib.sha256(files["SKILL.md"]).hexdigest(),
+      "files": sorted(files.keys()),
+      "installed_at": datetime.now(UTC).isoformat(),
+    }
+
     staged = Path(tempfile.mkdtemp(prefix=".staging-", dir=skills_dir))
     try:
       for rel, data in files.items():
@@ -524,7 +561,6 @@ async def install_skill(
         # segments); atomic_write creates the intermediate directories.
         atomic_write(staged / rel, data)
       _chown_mobius(staged)
-      os.rename(staged, target_dir)
     except OSError as exc:
       shutil.rmtree(staged, ignore_errors=True)
       raise HTTPException(
@@ -533,30 +569,45 @@ async def install_skill(
         "was published.",
       )
 
+    records = _read_installed_sidecar(skills_dir)
+    records[name] = {**record, "status": "installing", "staging": staged.name}
     try:
-      records = _read_installed_sidecar(skills_dir)
-      records[name] = {
-        "source": source,
-        "repo": body.repo,
-        "path": body.path,
-        "ref": body.ref if body.repo else None,
-        "commit": commit,
-        "url": body.url,
-        "files": sorted(files.keys()),
-        "installed_at": datetime.now(UTC).isoformat(),
-      }
       _write_installed_sidecar(skills_dir, records)
-    except Exception as exc:  # noqa: BLE001 — publish counts only with its record
-      # An unowned directory would block every retry with a collision, so the
-      # publish is rolled back when its ownership record cannot be committed.
-      try:
-        shutil.rmtree(target_dir)
-      except OSError:
-        log.exception("rollback of %s failed after sidecar error", target_dir)
+    except Exception as exc:  # noqa: BLE001
+      shutil.rmtree(staged, ignore_errors=True)
       raise HTTPException(
         500,
-        f"Install of {name!r} failed while recording provenance ({exc}); "
-        "the published files were rolled back.",
+        f"Install of {name!r} could not record its intent ({exc}); nothing "
+        "was published.",
+      )
+
+    try:
+      os.rename(staged, target_dir)
+    except OSError as exc:
+      records.pop(name, None)
+      try:
+        _write_installed_sidecar(skills_dir, records)
+      except Exception:  # noqa: BLE001 — reconcile drops the intent later
+        log.exception("could not withdraw install intent for %r", name)
+      shutil.rmtree(staged, ignore_errors=True)
+      raise HTTPException(
+        500,
+        f"Install of {name!r} failed to publish ({exc}); nothing was "
+        "published.",
+      )
+
+    records[name] = record
+    try:
+      _write_installed_sidecar(skills_dir, records)
+    except Exception as exc:  # noqa: BLE001
+      # The skill IS published and its intent record IS durable — say exactly
+      # that. reconcile_installed() finalizes it on the next operation; no
+      # claim of a rollback that didn't happen.
+      raise HTTPException(
+        500,
+        f"{name!r} was published but its install record could not be "
+        f"finalized ({exc}); it will reconcile automatically on the next "
+        "skills operation.",
       )
 
     warnings = _refresh_index_with_warning(skills_dir)
@@ -654,6 +705,9 @@ async def uninstall_skill(
   data_dir = Path(get_settings().data_dir)
 
   async with fs_locks.shared_skills_lock():
+    # A crash-interrupted install reconciles first, so its skill is either a
+    # properly owned record (removable here) or gone — never a stuck orphan.
+    skills.reconcile_installed(skills_dir)
     records = _read_installed_sidecar(skills_dir)
     if name not in records:
       raise HTTPException(
