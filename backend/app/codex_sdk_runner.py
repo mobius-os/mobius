@@ -64,6 +64,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shutil
 import time
 from typing import Any, Callable
@@ -146,6 +147,233 @@ def _codex_config_overrides() -> list[str]:
       "suppress_unstable_features_warning=true",
     ]
   return overrides
+
+
+def _codex_app_server_launch_args(
+  codex_bin: str | None,
+  config_overrides: list[str],
+) -> list[str] | None:
+  """Build an app-server command isolated in its own Unix session.
+
+  The Python SDK starts Codex with a plain ``subprocess.Popen`` and, on
+  ``close()``, terminates only that one PID.  Tool commands are descendants of
+  the app-server; if a shell exits while one of its children is still running,
+  that child is re-parented to PID 1 and survives both the tool result and the
+  SDK close.  A memory-hungry survivor can therefore outlive its chat and push
+  the whole platform cgroup into OOM.
+
+  ``setsid`` makes the app-server the leader of a private process group/session
+  without requiring a change in the upstream SDK.  The terminal cleanup below
+  can then signal exactly that group, never uvicorn or another concurrent chat.
+  Return ``None`` outside the Linux/container runtime so local SDK resolution
+  keeps its existing fallback behavior.
+  """
+  setsid_bin = shutil.which("setsid")
+  if not codex_bin or not setsid_bin:
+    return None
+  args = [setsid_bin, codex_bin]
+  for override in config_overrides:
+    args.extend(["--config", override])
+  args.extend(["app-server", "--listen", "stdio://"])
+  return args
+
+
+def _codex_process_group_id(
+  codex: Any,
+  *,
+  log_unisolated: bool = True,
+) -> int | None:
+  """Return the isolated app-server PGID, or ``None`` if not provable.
+
+  The SDK does not expose its child PID publicly.  We already target its sync
+  client for the documented approval-handler slot, so keep this second private
+  access in one defensive helper.  Refuse a group that is not led by the SDK
+  process: on an old/non-``setsid`` launch that group can be uvicorn's own.
+  """
+  sync_client = getattr(getattr(codex, "_client", None), "_sync", None)
+  proc = getattr(sync_client, "_proc", None)
+  pid = getattr(proc, "pid", None)
+  if not isinstance(pid, int) or pid <= 1:
+    return None
+  try:
+    pgid = os.getpgid(pid)
+  except (OSError, ProcessLookupError):
+    return None
+  if pgid != pid or pgid == os.getpgrp():
+    if not log_unisolated:
+      return None
+    log.error(
+      "Codex app-server process group is not isolated pid=%s pgid=%s; "
+      "descendant cleanup disabled",
+      pid,
+      pgid,
+    )
+    return None
+  return pgid
+
+
+async def _enter_codex_context_owned(
+  codex_context: Any,
+) -> tuple[Any, asyncio.CancelledError | None]:
+  """Enter AsyncCodex without abandoning its threaded startup on cancel.
+
+  The pinned SDK implements ``AsyncCodexClient.start()`` with
+  ``asyncio.to_thread(CodexClient.start)``. Cancelling ``__aenter__`` therefore
+  cancels only the awaiter; the worker can continue through ``Popen`` and
+  publish ``_proc`` after the cancelled runner has already returned. Keep the
+  complete enter operation in a runner-owned task, shield it through every
+  caller cancellation, and hand the cancellation back to the caller only once
+  startup has either completed or failed. That keeps PGID capture alive for
+  the entire interval in which the worker can create a process.
+  """
+  enter_task = asyncio.create_task(codex_context.__aenter__())
+  deferred_cancel: asyncio.CancelledError | None = None
+  while not enter_task.done():
+    try:
+      await asyncio.shield(enter_task)
+    except asyncio.CancelledError as exc:
+      if enter_task.cancelled():
+        break
+      deferred_cancel = deferred_cancel or exc
+    except BaseException:
+      # The owned task has reached a terminal failure. Reconcile it below so
+      # a caller cancellation already deferred by this loop takes precedence
+      # over the later startup error instead of leaking that error as a normal
+      # RunnerResult.
+      break
+  try:
+    entered = enter_task.result()
+  except asyncio.CancelledError:
+    if deferred_cancel is not None:
+      raise deferred_cancel
+    raise
+  except BaseException as exc:
+    if deferred_cancel is not None:
+      raise deferred_cancel from exc
+    raise
+  return entered, deferred_cancel
+
+
+class _EnteredCodexContext:
+  """Own exit for an AsyncCodex context whose enter is already owned.
+
+  The pinned SDK delegates close to ``asyncio.to_thread``. An ordinary await
+  lets a second caller cancellation cancel that awaiter while its worker is
+  still queued or running, allowing process-group reap and runner return to
+  overtake the SDK's direct-child ``wait()``. Keep the complete exit in a
+  runner-owned task and defer every repeated cancellation until it finishes.
+  """
+
+  def __init__(self, context: Any, entered: Any) -> None:
+    self._context = context
+    self._entered = entered
+
+  async def __aenter__(self) -> Any:
+    return self._entered
+
+  async def __aexit__(self, exc_type, exc, traceback) -> Any:
+    exit_task = asyncio.create_task(
+      self._context.__aexit__(exc_type, exc, traceback)
+    )
+    deferred_cancel: asyncio.CancelledError | None = None
+    while not exit_task.done():
+      try:
+        await asyncio.shield(exit_task)
+      except asyncio.CancelledError as cancel_exc:
+        if exit_task.cancelled():
+          break
+        deferred_cancel = deferred_cancel or cancel_exc
+      except BaseException:
+        # Reconcile the terminal exit failure below. In particular, a caller
+        # cancellation that was already unwinding the context must not be
+        # replaced by a later SDK-close error.
+        break
+    try:
+      result = exit_task.result()
+    except asyncio.CancelledError as exit_cancel:
+      caller_cancel = (
+        exc if isinstance(exc, asyncio.CancelledError) else deferred_cancel
+      )
+      if caller_cancel is not None:
+        raise caller_cancel from exit_cancel
+      raise
+    except BaseException as exit_exc:
+      caller_cancel = (
+        exc if isinstance(exc, asyncio.CancelledError) else deferred_cancel
+      )
+      if caller_cancel is not None:
+        raise caller_cancel from exit_exc
+      raise
+    if deferred_cancel is not None:
+      raise deferred_cancel
+    return result
+
+
+async def _capture_codex_process_group_during_start(
+  codex: Any,
+  stop: asyncio.Event,
+) -> int | None:
+  """Capture the isolated PGID while ``AsyncCodex.__aenter__`` initializes.
+
+  ``__aenter__`` starts the subprocess and then performs a separate async SDK
+  initialize request. If that request fails, the SDK closes the direct Popen
+  and clears ``_proc`` before propagating the error. Polling concurrently from
+  before entry captures the group in that window, so the outer runner finally
+  can still reap a descendant the SDK direct-PID close left behind.
+
+  During the tiny pre-exec window the child still has uvicorn's group. The
+  identity helper therefore runs silently until ``setsid`` makes PID == PGID;
+  it never returns or signals the shared group.
+  """
+  while not stop.is_set():
+    pgid = _codex_process_group_id(codex, log_unisolated=False)
+    if pgid is not None:
+      return pgid
+    await asyncio.sleep(0)
+  return _codex_process_group_id(codex, log_unisolated=False)
+
+
+def _terminate_codex_process_group(
+  pgid: int | None,
+  *,
+  grace_seconds: float = 0.25,
+) -> bool:
+  """Terminate every process left in one completed Codex turn's group.
+
+  Called only after the SDK context has closed its app-server PID.  SIGTERM
+  gives ordinary shell/browser helpers a brief exit window; SIGKILL is the
+  bounded backstop for the exact failure mode this guards (a CPU-heavy child
+  that ignores or never receives its parent's termination).  Returns whether
+  a live group was found.  All failures are best-effort because terminal chat
+  persistence must not fail merely because the OS already reaped the group.
+  """
+  if not isinstance(pgid, int) or pgid <= 1 or pgid == os.getpgrp():
+    return False
+  try:
+    os.killpg(pgid, signal.SIGTERM)
+  except ProcessLookupError:
+    return False
+  except OSError as exc:
+    log.warning("Codex descendant SIGTERM failed pgid=%s: %s", pgid, exc)
+    return False
+
+  deadline = time.monotonic() + max(0.0, grace_seconds)
+  while time.monotonic() < deadline:
+    try:
+      os.killpg(pgid, 0)
+    except ProcessLookupError:
+      return True
+    except OSError:
+      break
+    time.sleep(min(0.025, max(0.0, deadline - time.monotonic())))
+
+  try:
+    os.killpg(pgid, signal.SIGKILL)
+  except ProcessLookupError:
+    pass
+  except OSError as exc:
+    log.warning("Codex descendant SIGKILL failed pgid=%s: %s", pgid, exc)
+  return True
 
 
 class _BridgeError(Exception):
@@ -1229,17 +1457,39 @@ async def run_codex_sdk_turn(
   # config_overrides carries the request_user_input (AskUserQuestion parity) and
   # multi-agent enablement flags — assembled, with the #31864 tool_namespace pin
   # and the MOEBIUS_CODEX_MULTI_AGENT kill switch, in _codex_config_overrides().
-  config = sdk["CodexConfig"](
-    codex_bin=shutil.which("codex"),
+  codex_bin = shutil.which("codex")
+  config_overrides = _codex_config_overrides()
+  launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
+  config_kwargs: dict[str, Any] = dict(
+    codex_bin=codex_bin,
     cwd=cwd,
     env=env,
-    config_overrides=_codex_config_overrides(),
+    config_overrides=config_overrides,
   )
+  if launch_args is not None:
+    config_kwargs["launch_args_override"] = launch_args
+  else:
+    log.warning(
+      "Codex app-server process-group isolation unavailable; "
+      "descendant cleanup is best-effort only"
+    )
+  config = sdk["CodexConfig"](**config_kwargs)
 
   thread = None
   turn = None
   current_session_id = session_id
   completed_turn: Any | None = None
+  process_group_id: int | None = None
+  codex_context = sdk["AsyncCodex"](config=config)
+  process_group_capture_stop: asyncio.Event | None = None
+  process_group_capture_task: asyncio.Task[int | None] | None = None
+  if launch_args is not None:
+    process_group_capture_stop = asyncio.Event()
+    process_group_capture_task = asyncio.create_task(
+      _capture_codex_process_group_during_start(
+        codex_context, process_group_capture_stop,
+      )
+    )
 
   def abort_requested() -> bool:
     return bool(should_abort and should_abort())
@@ -1252,7 +1502,17 @@ async def run_codex_sdk_turn(
     }
 
   try:
-    async with sdk["AsyncCodex"](config=config) as codex:
+    codex, entry_cancel = await _enter_codex_context_owned(codex_context)
+    async with _EnteredCodexContext(codex_context, codex) as codex:
+      process_group_id = _codex_process_group_id(codex)
+      if process_group_capture_stop is not None:
+        process_group_capture_stop.set()
+      # Do NOT await the capture task here. Cancellation immediately after
+      # __aenter__ would propagate through an ordinary await and cancel the
+      # task that owns our initialization-failure PGID. The outer finally is
+      # its sole joiner and shields that join before reaping the group.
+      if entry_cancel is not None:
+        raise entry_cancel
       # Install AskUserQuestion bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
@@ -1537,10 +1797,55 @@ async def run_codex_sdk_turn(
       "error": str(exc),
     }
   finally:
+    deferred_cancel: asyncio.CancelledError | None = None
+    if process_group_capture_stop is not None:
+      process_group_capture_stop.set()
+    if process_group_capture_task is not None:
+      while not process_group_capture_task.done():
+        try:
+          await asyncio.shield(process_group_capture_task)
+        except asyncio.CancelledError as exc:
+          if process_group_capture_task.cancelled():
+            break
+          # A caller cancellation landed during the shielded join. Keep
+          # waiting for the runner-owned task so initialization-failure cleanup
+          # cannot lose the only observed PGID.
+          deferred_cancel = deferred_cancel or exc
+      try:
+        captured_during_start = process_group_capture_task.result()
+        if process_group_id is None:
+          process_group_id = captured_during_start
+      except asyncio.CancelledError:
+        # A task owned only by this runner should not be cancelled, but a
+        # proven PGID captured synchronously after __aenter__ still permits
+        # safe cleanup. Never let its CancelledError skip that cleanup.
+        log.warning("Codex process-group capture task was cancelled")
+      except Exception as exc:
+        log.warning("Codex process-group capture failed: %s", exc)
     current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
     if isinstance(current, ActiveCodexTurn) and current.turn is turn:
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)
       current.mark_finished()
+    # AsyncCodex.close() terminates only its direct Popen PID.  Reap the
+    # isolated group after that context exit so a tool child cannot be
+    # re-parented to container init and consume CPU/RAM after the turn.  A
+    # worker keeps the short grace period off the FastAPI event loop; shield
+    # ensures task cancellation cannot prevent the SIGKILL backstop from
+    # running in that worker once cleanup has started.
+    if process_group_id is not None:
+      reap_task = asyncio.create_task(asyncio.to_thread(
+        _terminate_codex_process_group, process_group_id,
+      ))
+      while not reap_task.done():
+        try:
+          await asyncio.shield(reap_task)
+        except asyncio.CancelledError as exc:
+          # shield keeps the worker alive. Defer every caller cancellation
+          # until its bounded TERM/KILL sequence has completed.
+          deferred_cancel = deferred_cancel or exc
+      reap_task.result()
+    if deferred_cancel is not None:
+      raise deferred_cancel
 
 
 async def steer_into_active_turn(

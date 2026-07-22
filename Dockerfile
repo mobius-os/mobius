@@ -42,7 +42,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # it before execing the job. docker-compose.yml supplies the three required
 # capabilities absent from Docker's default bounding set.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cron curl ca-certificates git sudo procps bubblewrap age \
+    cron curl ca-certificates git sudo procps util-linux bubblewrap age \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
