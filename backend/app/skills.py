@@ -49,11 +49,20 @@ INSTALLED_SKILLS_SIDECAR = ".installed-skills.json"
 # enumeration so the index never lists itself.
 INDEX_FILENAME = "skills-index.md"
 
+# The generated catalog cache (`app.catalog_index` writes it; defined here so
+# every consumer shares one reservation list without a circular import).
+CATALOG_INDEX_FILENAME = "catalog-index.md"
+
+# Stems of the generated files, for the runners' usage accounting: Reading a
+# generated index is consulting a listing, never loading a skill.
+GENERATED_INDEX_STEMS = frozenset({"skills-index", "catalog-index"})
+
 # Names inside the skills dir that are never skills.
 _RESERVED_NAMES = frozenset({
   APP_SKILLS_SIDECAR,
   INSTALLED_SKILLS_SIDECAR,
   INDEX_FILENAME,
+  CATALOG_INDEX_FILENAME,
   ".seed-version",
   ".inactive",
 })
@@ -292,9 +301,19 @@ def _index_body(skills: list[Skill]) -> str:
       if skill.is_dir
       else f"`shared/skills/{skill.read_path.name}`"
     )
-    desc = (skill.description or "").replace("|", "\\|").replace("\n", " ")
-    lines.append(f"| {read_ref} — {skill.name} | {desc} | {skill.provenance} |")
+    # Name and description originate in third-party frontmatter — one table
+    # cell each, whatever they contain: newlines/pipes escaped, length capped.
+    title = _table_cell(skill.name, 100)
+    desc = _table_cell(skill.description, _DESCRIPTION_MAX)
+    lines.append(f"| {read_ref} — {title} | {desc} | {skill.provenance} |")
   return "\n".join(lines) + "\n"
+
+
+def _table_cell(text: str, max_len: int) -> str:
+  """Bound an untrusted string into a single Markdown table cell."""
+  line = "".join(ch if ch >= " " else " " for ch in str(text or ""))
+  line = " ".join(line.split()).replace("|", "\\|")
+  return line[: max_len - 1] + "…" if len(line) > max_len else line
 
 
 def write_index(skills_dir: Path | None = None) -> Path | None:

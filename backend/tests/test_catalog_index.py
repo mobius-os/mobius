@@ -71,22 +71,70 @@ def test_build_index_groups_sources_and_carries_coordinates():
       {"source": bad, "skills": [], "error": "boom"},
     ],
     "2026-07-22T00:00:00Z",
+    "fp123",
   )
   assert "## Anthropic Skills (anthropics/skills/skills)" in text
   assert "- pdf — Fill PDFs. (anthropics/skills skills/pdf @main)" in text
   assert "_Scan failed: boom_" in text
   assert "Grep this file first" in text
+  assert "<!-- sources:fp123 -->" in text
+  assert "untrusted discovery data" in text
 
 
-def test_is_fresh_gate(tmp_path):
+def test_build_index_defuses_hostile_names_and_paths():
+  """Git tree paths and frontmatter names are third-party data — a newline,
+  pipe, or backtick must not break the one-record-per-line promise or smuggle
+  Markdown structure into the generated file."""
+  src = {"label": "Evil\nLabel | x", "repo": "o/r", "path": "", "ref": "main"}
+  text = ci.build_index(
+    [
+      {"source": src, "skills": [
+        {"name": "bad\nname`x`", "dir": "a|b\nc", "description": "d"},
+      ], "error": None},
+    ],
+    "t",
+    "fp",
+  )
+  record_lines = [l for l in text.splitlines() if l.startswith("- ")]
+  assert len(record_lines) == 1  # the record stayed one line
+  (record,) = record_lines
+  assert "`" not in record
+  assert "\\|" in record  # pipes arrive escaped, not structural
+  assert "## Evil Label \\| x (o/r)" in text
+
+
+def test_is_fresh_requires_recency_and_matching_fingerprint(tmp_path):
   missing = tmp_path / "nope.md"
-  assert ci.is_fresh(missing) is False
+  assert ci.is_fresh(missing, "fp") is False
   f = tmp_path / "catalog-index.md"
-  f.write_text("x")
-  assert ci.is_fresh(f) is True
+  f.write_text("# x\n\n<!-- sources:fp -->\n")
+  assert ci.is_fresh(f, "fp") is True
+  # A changed source list invalidates immediately, before the 24h window.
+  assert ci.is_fresh(f, "other") is False
   old = time.time() - ci.FRESH_SECONDS - 60
   os.utime(f, (old, old))
-  assert ci.is_fresh(f) is False
+  assert ci.is_fresh(f, "fp") is False
+
+
+def test_normalize_sources_bounds_and_validates():
+  good = {"label": "Ok", "repo": "o/r", "path": "skills", "ref": "main"}
+  out = ci.normalize_sources([
+    good,
+    "not-a-dict",
+    {"repo": "no-slash"},
+    {"repo": "o/r", "path": "../up"},
+    {"repo": "o/r", "path": "ok", "ref": "bad ref!"},
+    {"repo": "o/r2", "label": "Multi\nline | label"},
+  ])
+  assert out[0] == good
+  assert len(out) == 2
+  assert out[1]["label"] == "Multi line \\| label"  # sanitized to one line
+  assert out[1]["ref"] == "main"  # defaulted
+
+  oversized = [{"repo": f"o/r{i}"} for i in range(30)]
+  assert len(ci.normalize_sources(oversized)) == ci._MAX_SOURCES
+  assert ci.normalize_sources("garbage") == []
+  assert ci.normalize_sources(None) == []
 
 
 # ------------------------------------------------------------------ refresh
@@ -129,6 +177,41 @@ def test_refresh_writes_index_and_gates_on_freshness(skills_dir, monkeypatch):
   _canned(monkeypatch)
   forced = asyncio.run(ci.refresh(force=True, sources=[_SRC]))
   assert forced["refreshed"] is True
+
+
+def test_refresh_source_change_bypasses_freshness_gate(skills_dir, monkeypatch):
+  """A fresh file generated from DIFFERENT sources is not fresh: changing the
+  Browse-source list must invalidate the cache immediately, not after 24h."""
+  _canned(monkeypatch)
+  assert asyncio.run(ci.refresh(sources=[_SRC]))["refreshed"] is True
+
+  async def explode(client, url, max_bytes, _hops=0):
+    raise RuntimeError("scan attempted — gate correctly bypassed")
+
+  monkeypatch.setattr(ci.install, "_http_get", explode)
+  other = {"label": "Other", "repo": "o/other", "path": "skills", "ref": "main"}
+  out = asyncio.run(ci.refresh(sources=[other]))
+  assert out["refreshed"] is True  # new fingerprint → rescan (which failed soft)
+  assert "_Scan failed:" in (skills_dir / ci.INDEX_FILENAME).read_text()
+
+
+def test_refresh_malformed_override_falls_back_to_defaults(skills_dir, monkeypatch):
+  """A hostile/broken override list can't 500 the refresh or trigger an
+  unbounded scan — nothing valid in it means the curated defaults are used."""
+  seen: list[str] = []
+
+  async def record(client, url, max_bytes, _hops=0):
+    seen.append(url)
+    raise RuntimeError("down")  # every source scan fails soft
+
+  monkeypatch.setattr(ci.install, "_http_get", record)
+  out = asyncio.run(ci.refresh(
+    force=True,
+    sources=[{"repo": "no-slash"}, "garbage", {"path": "../.."}],
+  ))
+  assert out["refreshed"] is True
+  # One tree fetch per DEFAULT source — the malformed override was discarded.
+  assert len(seen) == len(ci.normalize_sources(ci.CATALOG_SOURCES))
 
 
 def test_refresh_survives_a_failing_source(skills_dir, monkeypatch):

@@ -36,9 +36,13 @@ import logging
 import os
 import pwd
 import re
+import shutil
+import stat
 import subprocess
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -81,6 +85,10 @@ _RESOURCE_SUFFIXES = frozenset({
 
 _GITHUB_API = "https://api.github.com"
 _USAGE_WINDOW_DAYS = 30
+
+_GIT_SHA = re.compile(r"[0-9a-f]{40}")
+_GIT_REF_OK = re.compile(r"[A-Za-z0-9._/-]{1,100}")
+_REPO_OK = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
 class SkillInstall(BaseModel):
@@ -136,19 +144,24 @@ def _write_installed_sidecar(skills_dir: Path, records: dict) -> None:
   )
 
 
-def _existing_basenames(skills_dir: Path) -> set[str]:
-  """Every on-disk skill basename (flat `<name>.md` stem or dir `<name>`)."""
-  names: set[str] = set()
-  if not skills_dir.is_dir():
-    return names
-  for entry in skills_dir.iterdir():
-    if entry.name.startswith("."):
-      continue
-    if entry.is_dir() and (entry / "SKILL.md").is_file():
-      names.add(entry.name)
-    elif entry.is_file() and entry.suffix == ".md" and entry.name != skills.INDEX_FILENAME:
-      names.add(entry.stem)
-  return names
+def _entry_kind(path: Path) -> str:
+  """lstat-based dirent type: 'absent' | 'dir' | 'file' | 'symlink' | 'other'.
+
+  Never follows symlinks — for install/uninstall decisions a link is a link,
+  wherever it points, so it can neither hide a collision nor redirect a write
+  or delete outside the skills tree.
+  """
+  try:
+    st = os.lstat(path)
+  except OSError:
+    return "absent"
+  if stat.S_ISLNK(st.st_mode):
+    return "symlink"
+  if stat.S_ISDIR(st.st_mode):
+    return "dir"
+  if stat.S_ISREG(st.st_mode):
+    return "file"
+  return "other"
 
 
 def _provenance_of(skills_dir: Path, base_name: str) -> str:
@@ -188,11 +201,36 @@ def _derive_name(explicit: str | None, source_segments: list[str]) -> str:
   return candidate
 
 
+async def _resolve_commit(client: httpx.AsyncClient, repo: str, ref: str) -> str:
+  """Resolve a mutable ref to the immutable commit OID it points at right now.
+
+  Contents, tree, and every raw-file fetch afterwards name this OID, so an
+  install is one consistent snapshot even if the branch moves while requests
+  are in flight — and the OID lands in provenance so the exact installed
+  revision stays known. A 40-hex ref is already an OID and passes through.
+  """
+  if _GIT_SHA.fullmatch(ref):
+    return ref
+  if _GIT_REF_OK.fullmatch(ref) is None or ".." in ref:
+    raise HTTPException(400, f"Invalid git ref {ref!r}.")
+  url = f"{_GITHUB_API}/repos/{repo}/commits/{quote(ref, safe='')}"
+  raw = await install._http_get(client, url, max_bytes=1 * 1024 * 1024)
+  try:
+    sha = json.loads(raw).get("sha")
+  except (ValueError, AttributeError):
+    sha = None
+  if not isinstance(sha, str) or _GIT_SHA.fullmatch(sha) is None:
+    raise HTTPException(
+      502, f"Could not resolve ref {ref!r} to a commit in {repo}.",
+    )
+  return sha
+
+
 async def _github_contents(
   client: httpx.AsyncClient, repo: str, path: str, ref: str,
 ) -> list | dict:
   """GitHub contents API for a repo path. Returns a list (dir) or dict (file)."""
-  if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+  if not _REPO_OK.fullmatch(repo):
     raise HTTPException(400, f"`repo` must be `owner/name`, got {repo!r}.")
   clean = path.strip("/")
   if ".." in clean.split("/"):
@@ -214,8 +252,6 @@ async def _github_tree(
   so the response paths come back already relative to the skill directory —
   exactly the relpaths the installer materializes.
   """
-  from urllib.parse import quote
-
   spec = quote(f"{ref}:{path}" if path else ref, safe="")
   url = f"{_GITHUB_API}/repos/{repo}/git/trees/{spec}?recursive=1"
   raw = await install._http_get(client, url, max_bytes=4 * 1024 * 1024)
@@ -226,6 +262,13 @@ async def _github_tree(
   tree = data.get("tree") if isinstance(data, dict) else None
   if not isinstance(tree, list):
     raise HTTPException(502, "GitHub trees API returned no tree for this path.")
+  if data.get("truncated"):
+    # An incomplete listing must not masquerade as the whole skill.
+    raise HTTPException(
+      502,
+      "GitHub truncated the tree listing for this path — the skill directory "
+      "cannot be enumerated completely, so nothing was installed.",
+    )
   return [e for e in tree if isinstance(e, dict)]
 
 
@@ -247,12 +290,13 @@ def _resource_rel_ok(rel: str) -> bool:
 
 async def _fetch_files(
   client: httpx.AsyncClient, body: SkillInstall,
-) -> tuple[str, dict[str, bytes], str]:
-  """Resolve the request into (skill_name, {relpath: bytes}, source_label).
+) -> tuple[str, dict[str, bytes], str, str | None]:
+  """Resolve the request into (skill_name, {relpath: bytes}, source, commit).
 
   `relpath` is always relative to the skill directory (SKILL.md at the root;
   resources may live in subdirectories). Exactly one skill is produced; the
-  SKILL.md file is required.
+  SKILL.md file is required. For repo installs `commit` is the OID every fetch
+  was pinned to; a raw-URL install has no commit to pin (None).
   """
   files: dict[str, bytes] = {}
 
@@ -262,18 +306,23 @@ async def _fetch_files(
     name = _derive_name(body.name, segments)
     data = await install._http_get(client, body.url, max_bytes=SKILL_MAX_BYTES)
     files["SKILL.md"] = data
-    return name, files, _source_label(body.url)
+    return name, files, _source_label(body.url), None
 
   if not (body.repo and body.path):
     raise HTTPException(
       400, "Provide either `url`, or both `repo` and `path`.",
     )
+  if not _REPO_OK.fullmatch(body.repo):
+    raise HTTPException(400, f"`repo` must be `owner/name`, got {body.repo!r}.")
 
-  listing = await _github_contents(client, body.repo, body.path, body.ref)
+  # Pin the whole install to one immutable revision before any content fetch.
+  commit = await _resolve_commit(client, body.repo, body.ref)
+  listing = await _github_contents(client, body.repo, body.path, commit)
   segments = body.path.strip("/").split("/")
 
   if isinstance(listing, dict):
-    # A single file path. Treat as this skill's SKILL.md.
+    # A single file path. Treat as this skill's SKILL.md. download_url comes
+    # from the ?ref=<commit> listing, so it names the pinned revision too.
     name = _derive_name(body.name, segments)
     download = listing.get("download_url")
     if not download:
@@ -281,7 +330,7 @@ async def _fetch_files(
     files["SKILL.md"] = await install._http_get(
       client, download, max_bytes=SKILL_MAX_BYTES,
     )
-    return name, files, _source_label(body.repo)
+    return name, files, _source_label(body.repo), commit
 
   # A directory: enumerate the WHOLE subtree with one scoped git-trees call —
   # the ecosystem keeps scripts/references in subdirectories, which the
@@ -289,15 +338,13 @@ async def _fetch_files(
   # (case-insensitive, root only) plus bounded resources.
   name = _derive_name(body.name, segments)
   clean_path = body.path.strip("/")
-  tree = await _github_tree(client, body.repo, clean_path, body.ref)
-
-  from urllib.parse import quote
+  tree = await _github_tree(client, body.repo, clean_path, commit)
 
   def _raw_url(rel: str) -> str:
     prefix = f"{quote(clean_path, safe='/')}/" if clean_path else ""
     return (
       "https://raw.githubusercontent.com/"
-      f"{body.repo}/{quote(body.ref, safe='')}/{prefix}{quote(rel, safe='/')}"
+      f"{body.repo}/{commit}/{prefix}{quote(rel, safe='/')}"
     )
 
   skill_rel = next(
@@ -338,7 +385,7 @@ async def _fetch_files(
     resource_total += len(data)
     resource_count += 1
 
-  return name, files, _source_label(body.repo)
+  return name, files, _source_label(body.repo), commit
 
 
 def _source_label(source: str) -> str:
@@ -445,41 +492,103 @@ async def install_skill(
   # follow_redirects=False — install._http_get walks the chain itself so every
   # hop is SSRF-revalidated and IP-pinned.
   async with httpx.AsyncClient(follow_redirects=False, timeout=install._HTTP_TIMEOUT) as client:
-    name, files, source = await _fetch_files(client, body)
+    name, files, source, commit = await _fetch_files(client, body)
 
   if "SKILL.md" not in files or not files["SKILL.md"].strip():
     raise HTTPException(400, "Resolved skill has no SKILL.md content.")
 
   async with fs_locks.shared_skills_lock():
-    if name in _existing_basenames(skills_dir):
-      raise HTTPException(
-        409,
-        f"A skill named {name!r} already exists "
-        f"(provenance: {_provenance_of(skills_dir, name)}). Remove or rename "
-        "it first, or install under a different `name`.",
-      )
+    # ANY existing dirent at either skill shape is a collision — including a
+    # symlink or non-skill leftover. Deciding by lstat (never following the
+    # entry) closes the redirect hole where a pre-existing link at the target
+    # name could route install writes outside shared/skills.
     target_dir = skills_dir / name
-    for rel, data in files.items():
-      # rel is a validated relative path (SKILL.md at the root, or a vetted
-      # resource path — _resource_rel_ok rejects traversal and dot segments);
-      # atomic_write creates the intermediate directories.
-      atomic_write(target_dir / rel, data)
-    _chown_mobius(target_dir)
+    for existing in (target_dir, skills_dir / f"{name}.md"):
+      if _entry_kind(existing) != "absent":
+        raise HTTPException(
+          409,
+          f"A skill named {name!r} already exists "
+          f"(provenance: {_provenance_of(skills_dir, name)}). Remove or "
+          "rename it first, or install under a different `name`.",
+        )
 
-    records = _read_installed_sidecar(skills_dir)
-    records[name] = {
-      "source": source,
-      "repo": body.repo,
-      "path": body.path,
-      "url": body.url,
-      "files": sorted(files.keys()),
-      "installed_at": datetime.now(UTC).isoformat(),
-    }
-    _write_installed_sidecar(skills_dir, records)
+    # One durable transition: stage the complete bounded tree in a fresh
+    # dot-prefixed directory (invisible to enumeration), then publish with a
+    # single atomic rename. A failure mid-write leaves nothing at the final
+    # name, so a retry never collides with a stranded partial install.
+    staged = Path(tempfile.mkdtemp(prefix=".staging-", dir=skills_dir))
+    try:
+      for rel, data in files.items():
+        # rel is a validated relative path (SKILL.md at the root, or a vetted
+        # resource path — _resource_rel_ok rejects traversal and dot
+        # segments); atomic_write creates the intermediate directories.
+        atomic_write(staged / rel, data)
+      _chown_mobius(staged)
+      os.rename(staged, target_dir)
+    except OSError as exc:
+      shutil.rmtree(staged, ignore_errors=True)
+      raise HTTPException(
+        500,
+        f"Install of {name!r} failed while staging files ({exc}); nothing "
+        "was published.",
+      )
 
-  skills.write_index(skills_dir)
+    try:
+      records = _read_installed_sidecar(skills_dir)
+      records[name] = {
+        "source": source,
+        "repo": body.repo,
+        "path": body.path,
+        "ref": body.ref if body.repo else None,
+        "commit": commit,
+        "url": body.url,
+        "files": sorted(files.keys()),
+        "installed_at": datetime.now(UTC).isoformat(),
+      }
+      _write_installed_sidecar(skills_dir, records)
+    except Exception as exc:  # noqa: BLE001 — publish counts only with its record
+      # An unowned directory would block every retry with a collision, so the
+      # publish is rolled back when its ownership record cannot be committed.
+      try:
+        shutil.rmtree(target_dir)
+      except OSError:
+        log.exception("rollback of %s failed after sidecar error", target_dir)
+      raise HTTPException(
+        500,
+        f"Install of {name!r} failed while recording provenance ({exc}); "
+        "the published files were rolled back.",
+      )
+
+    warnings = _refresh_index_with_warning(skills_dir)
+
   log.info("installed skill %r from %s (%d file(s))", name, source, len(files))
-  return {"name": name, "source": source, "files": sorted(files.keys())}
+  return {
+    "name": name,
+    "source": source,
+    "commit": commit,
+    "files": sorted(files.keys()),
+    "warnings": warnings,
+  }
+
+
+def _refresh_index_with_warning(skills_dir: Path) -> list[str]:
+  """Regenerate skills-index.md from the locked final state.
+
+  Runs INSIDE the skills lock so the written snapshot can never interleave
+  with a concurrent mutation, and never raises: by the time it runs the
+  install/uninstall has durably succeeded, so an index failure must degrade
+  to a truthful warning in the response — not a 500 that makes the caller
+  retry a mutation that already happened.
+  """
+  try:
+    skills.write_index(skills_dir)
+    return []
+  except Exception as exc:  # noqa: BLE001
+    log.warning("skills index regeneration failed", exc_info=True)
+    return [
+      f"skills-index.md regeneration failed ({exc}); the index will refresh "
+      "on the next install, uninstall, or boot.",
+    ]
 
 
 class CatalogRefreshBody(BaseModel):
@@ -553,7 +662,30 @@ async def uninstall_skill(
         "/api/skills/install can be uninstalled here.",
       )
     target = skills_dir / name
-    if target.exists() and (data_dir / ".git").is_dir():
+    flat = skills_dir / f"{name}.md"
+    target_kind = _entry_kind(target)
+    flat_kind = _entry_kind(flat)
+
+    # Only the two expected shapes are ever deleted. A symlink (or any other
+    # surprise dirent) is refused outright: rmtree on a link deletes nothing,
+    # and dropping the ownership record anyway would report success while the
+    # entry survives — or worse, a follow would delete through the link.
+    if target_kind not in ("absent", "dir"):
+      raise HTTPException(
+        409,
+        f"Refusing to remove {name!r}: shared/skills/{name} is a "
+        f"{target_kind}, not an installed skill directory. Inspect and "
+        "remove it manually; the install record was kept.",
+      )
+    if target_kind == "absent" and flat_kind not in ("absent", "file"):
+      raise HTTPException(
+        409,
+        f"Refusing to remove {name!r}: shared/skills/{name}.md is a "
+        f"{flat_kind}, not a regular file. Inspect and remove it manually; "
+        "the install record was kept.",
+      )
+
+    if target_kind == "dir" and (data_dir / ".git").is_dir():
       try:
         ok, detail = await asyncio.to_thread(_snapshot_skill_dir, data_dir, name)
       except Exception as exc:  # pragma: no cover - defensive
@@ -564,16 +696,33 @@ async def uninstall_skill(
           f"Refusing to remove {name!r}: could not snapshot its bytes into "
           f"git first ({detail}). Nothing was deleted.",
         )
-    if target.is_dir():
-      import shutil
 
-      shutil.rmtree(target, ignore_errors=True)
-    elif target.with_suffix(".md").is_file():
-      # Defensive: an installed record for a flat file (older shape).
-      target.with_suffix(".md").unlink(missing_ok=True)
+    # Deletion failures surface as errors WITH the record kept — never a
+    # success report for a deletion that didn't happen.
+    try:
+      if target_kind == "dir":
+        shutil.rmtree(target)
+      elif flat_kind == "file":
+        # Defensive: an installed record for a flat file (older shape).
+        flat.unlink()
+    except OSError as exc:
+      raise HTTPException(
+        500,
+        f"Could not delete {name!r} ({exc}); the install record was kept.",
+      )
+
+    # The ownership record goes only once the entry is provably gone.
+    removed_kind = target_kind if target_kind == "dir" else flat_kind
+    check = target if target_kind == "dir" else flat
+    if removed_kind != "absent" and _entry_kind(check) != "absent":
+      raise HTTPException(
+        500,
+        f"{name!r} is still present after deletion; the install record "
+        "was kept.",
+      )
     records.pop(name, None)
     _write_installed_sidecar(skills_dir, records)
+    warnings = _refresh_index_with_warning(skills_dir)
 
-  skills.write_index(skills_dir)
   log.info("uninstalled skill %r", name)
-  return {"removed": name}
+  return {"removed": name, "warnings": warnings}

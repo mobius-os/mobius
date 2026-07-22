@@ -775,13 +775,16 @@ def _skill_names_in_command(command: str, data_dir: str) -> list[str]:
   """
   if not command:
     return []
+  from app.skills import GENERATED_INDEX_STEMS
+
   prefix = re.escape(
     os.path.normpath(os.path.join(data_dir, "shared", "skills"))
   )
   names: list[str] = []
   for match in re.finditer(prefix + r"/([A-Za-z0-9._-]+)\.md\b", command):
     name = match.group(1)
-    if name not in names:
+    # Reading a generated index is consulting a listing, not loading a skill.
+    if name not in names and name not in GENERATED_INDEX_STEMS:
       names.append(name)
   return names
 

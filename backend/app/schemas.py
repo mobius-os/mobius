@@ -128,6 +128,9 @@ class AppOut(BaseModel):
   manage_apps: bool = False
   # GitHub connection access — see models.App.github_access.
   github_access: bool = False
+  # Skills lifecycle authority (install/uninstall/catalog refresh) — see
+  # models.App.manage_skills.
+  manage_skills: bool = False
   # Guarded owner-filesystem access — see models.App.filesystem_access.
   filesystem_access: bool = False
   # URL slug for the standalone PWA install at /apps/<slug>/. Null

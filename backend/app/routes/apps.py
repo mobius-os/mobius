@@ -831,6 +831,7 @@ async def install_app(
     embeds_agent=app.embeds_agent,
     manage_apps=app.manage_apps,
     github_access=app.github_access,
+    manage_skills=app.manage_skills,
     filesystem_access=app.filesystem_access,
     slug=app.slug,
     manifest_url=app.manifest_url,

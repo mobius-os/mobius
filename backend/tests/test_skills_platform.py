@@ -217,19 +217,31 @@ def test_install_from_raw_url(client, auth, skills_dir, monkeypatch):
   assert "writing-tips" in (skills_dir / skills_mod.INDEX_FILENAME).read_text()
 
 
+# The immutable OID every mocked dir install resolves its ref to. Raw URLs in
+# the canned fetch maps must name it — installs never fetch at the mutable ref.
+PINNED = "a1b2c3d4" * 5
+
+
 def _dir_install_mocks(monkeypatch, rs, tree, raw_files):
-  """Wire the dir-install flow: contents says "directory", trees lists it.
+  """Wire the dir-install flow: ref pins to PINNED, contents says
+  "directory", trees lists it.
 
   `tree` entries are subtree-relative (the `<ref>:<path>` trees call); raw
-  bytes are served from raw.githubusercontent.com URLs.
+  bytes are served from raw.githubusercontent.com URLs at the PINNED OID.
   """
 
+  async def fake_resolve(client_, repo, ref):
+    return PINNED
+
   async def fake_contents(client_, repo, path, ref):
+    assert ref == PINNED  # every post-resolve request names the OID
     return [{"type": "dir", "name": "marker"}]  # any list means "a directory"
 
   async def fake_tree(client_, repo, path, ref):
+    assert ref == PINNED
     return tree
 
+  monkeypatch.setattr(rs, "_resolve_commit", fake_resolve)
   monkeypatch.setattr(rs, "_github_contents", fake_contents)
   monkeypatch.setattr(rs, "_github_tree", fake_tree)
   monkeypatch.setattr(rs.install, "_http_get", _fake_fetch(raw_files))
@@ -240,7 +252,7 @@ def test_install_repo_dir_fetches_whole_subtree_of_vetted_resources(
 ):
   from app.routes import skills as rs
 
-  raw = "https://raw.githubusercontent.com/anthropics/skills/main/docs/pdf"
+  raw = f"https://raw.githubusercontent.com/anthropics/skills/{PINNED}/docs/pdf"
   tree = [
     {"type": "blob", "path": "SKILL.md", "size": 40},
     {"type": "blob", "path": "ref.md", "size": 9},
@@ -276,7 +288,7 @@ def test_install_repo_dir_rejects_traversal_paths_in_tree(
 ):
   from app.routes import skills as rs
 
-  raw = "https://raw.githubusercontent.com/o/r/main/sk"
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/sk"
   tree = [
     {"type": "blob", "path": "SKILL.md", "size": 10},
     {"type": "blob", "path": "../escape.md", "size": 5},
@@ -300,7 +312,7 @@ def test_install_repo_dir_skips_over_budget_files_by_declared_size(
 ):
   from app.routes import skills as rs
 
-  raw = "https://raw.githubusercontent.com/o/r/main/sk"
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/sk"
   tree = [
     {"type": "blob", "path": "SKILL.md", "size": 10},
     {"type": "blob", "path": "huge.md", "size": rs._RESOURCE_TOTAL_MAX + 1},
@@ -414,3 +426,276 @@ def test_uninstall_removes_dir_and_sidecar_record(client, auth, skills_dir):
 def test_uninstall_rejects_traversal_name(client, auth, skills_dir):
   r = client.delete("/api/skills/..%2Fetc", headers=auth)
   assert r.status_code in (400, 404, 409)
+
+
+# --- install/uninstall lifecycle hardening (PR review round 1) ---
+
+
+def test_install_symlink_at_target_is_collision_and_writes_nowhere(
+  client, auth, skills_dir, monkeypatch,
+):
+  """A pre-existing symlink at the target name must be a 409, never a
+  redirect: the old skill-shaped collision check missed links to non-skill
+  directories, and installs then wrote straight through them."""
+  from app.routes import skills as rs
+
+  outside = skills_dir.parent / "outside-skills"
+  outside.mkdir()
+  (skills_dir / "demo").symlink_to(outside)
+
+  monkeypatch.setattr(
+    rs.install, "_http_get", _fake_fetch({"https://x/demo.md": b"# demo"}),
+  )
+  r = client.post(
+    "/api/skills/install", headers=auth, json={"url": "https://x/demo.md"},
+  )
+  assert r.status_code == 409, r.text
+  assert list(outside.iterdir()) == []  # nothing escaped through the link
+  assert (skills_dir / "demo").is_symlink()  # and the link itself is untouched
+
+
+def test_install_staging_failure_publishes_nothing_and_retry_succeeds(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/sk"
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 10},
+    {"type": "blob", "path": "ref.md", "size": 5},
+  ]
+  canned = {f"{raw}/SKILL.md": b"# sk\n", f"{raw}/ref.md": b"reference"}
+  _dir_install_mocks(monkeypatch, rs, tree, canned)
+
+  real_write = rs.atomic_write
+  calls = {"n": 0}
+
+  def failing_write(path, data):
+    calls["n"] += 1
+    if calls["n"] == 2:  # the SECOND staged file fails mid-install
+      raise OSError("disk full")
+    return real_write(path, data)
+
+  monkeypatch.setattr(rs, "atomic_write", failing_write)
+  r = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "sk", "ref": "main"},
+  )
+  assert r.status_code == 500, r.text
+  # Nothing published, nothing stranded, nothing recorded.
+  assert not (skills_dir / "sk").exists()
+  assert not list(skills_dir.glob(".staging-*"))
+  assert "sk" not in _sidecar(skills_dir)
+
+  # The retry starts clean instead of colliding with a partial.
+  monkeypatch.setattr(rs, "atomic_write", real_write)
+  r = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "sk", "ref": "main"},
+  )
+  assert r.status_code == 201, r.text
+  assert (skills_dir / "sk" / "ref.md").read_text() == "reference"
+
+
+def test_install_sidecar_failure_rolls_back_published_dir(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  url = "https://x/tips.md"
+  monkeypatch.setattr(rs.install, "_http_get", _fake_fetch({url: b"# tips"}))
+
+  def failing_sidecar(skills_dir_, records):
+    raise OSError("sidecar write failed")
+
+  monkeypatch.setattr(rs, "_write_installed_sidecar", failing_sidecar)
+  r = client.post("/api/skills/install", headers=auth, json={"url": url})
+  assert r.status_code == 500, r.text
+  assert not (skills_dir / "tips").exists()  # publish rolled back
+
+  monkeypatch.undo()
+  monkeypatch.setattr(rs.install, "_http_get", _fake_fetch({url: b"# tips"}))
+  r = client.post("/api/skills/install", headers=auth, json={"url": url})
+  assert r.status_code == 201, r.text
+
+
+def _sidecar(skills_dir):
+  try:
+    return json.loads(
+      (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).read_text(),
+    )
+  except OSError:
+    return {}
+
+
+def test_install_pins_every_fetch_to_the_resolved_commit(
+  client, auth, skills_dir, monkeypatch,
+):
+  """A branch moving mid-install must not mix generations: the ref resolves
+  to an OID once, and contents/tree/raw fetches all name that OID. The canned
+  map only serves OID-pinned URLs — any fetch at `main` fails the test."""
+  from urllib.parse import quote as q
+
+  from app.routes import skills as rs
+
+  spec = q(f"{PINNED}:sk", safe="")
+  canned = {
+    f"https://api.github.com/repos/o/r/commits/main":
+      json.dumps({"sha": PINNED}).encode(),
+    f"https://api.github.com/repos/o/r/contents/sk?ref={PINNED}":
+      json.dumps([{"type": "dir", "name": "marker"}]).encode(),
+    f"https://api.github.com/repos/o/r/git/trees/{spec}?recursive=1":
+      json.dumps({"tree": [{"type": "blob", "path": "SKILL.md", "size": 4}]}).encode(),
+    f"https://raw.githubusercontent.com/o/r/{PINNED}/sk/SKILL.md":
+      b"# sk\n",
+  }
+  monkeypatch.setattr(rs.install, "_http_get", _fake_fetch(canned))
+  r = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "sk", "ref": "main"},
+  )
+  assert r.status_code == 201, r.text
+  assert r.json()["commit"] == PINNED
+  # The exact installed revision is durable provenance.
+  assert _sidecar(skills_dir)["sk"]["commit"] == PINNED
+
+
+def test_install_rejects_truncated_tree(client, auth, skills_dir, monkeypatch):
+  from urllib.parse import quote as q
+
+  from app.routes import skills as rs
+
+  spec = q(f"{PINNED}:sk", safe="")
+  canned = {
+    "https://api.github.com/repos/o/r/commits/main":
+      json.dumps({"sha": PINNED}).encode(),
+    f"https://api.github.com/repos/o/r/contents/sk?ref={PINNED}":
+      json.dumps([{"type": "dir", "name": "marker"}]).encode(),
+    f"https://api.github.com/repos/o/r/git/trees/{spec}?recursive=1":
+      json.dumps({
+        "truncated": True,
+        "tree": [{"type": "blob", "path": "SKILL.md", "size": 4}],
+      }).encode(),
+  }
+  monkeypatch.setattr(rs.install, "_http_get", _fake_fetch(canned))
+  r = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "sk", "ref": "main"},
+  )
+  assert r.status_code == 502, r.text
+  assert "truncated" in r.json()["detail"]
+  assert not (skills_dir / "sk").exists()
+
+
+def test_install_rejects_invalid_ref(client, auth, skills_dir, monkeypatch):
+  r = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "sk", "ref": "bad..ref"},
+  )
+  assert r.status_code == 400
+
+
+def test_uninstall_refuses_symlink_and_keeps_record(client, auth, skills_dir):
+  outside = skills_dir.parent / "outside-uninstall"
+  outside.mkdir()
+  (outside / "keep.md").write_text("survives")
+  (skills_dir / "linked").symlink_to(outside)
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(
+    json.dumps({"linked": {"source": "o/r"}}),
+  )
+  r = client.delete("/api/skills/linked", headers=auth)
+  assert r.status_code == 409, r.text
+  assert (skills_dir / "linked").is_symlink()  # entry untouched
+  assert (outside / "keep.md").exists()  # nothing deleted through the link
+  assert "linked" in _sidecar(skills_dir)  # record kept — no false success
+
+
+def test_uninstall_deletion_failure_keeps_record(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  d = skills_dir / "tips"
+  d.mkdir()
+  (d / "SKILL.md").write_text("# tips\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(
+    json.dumps({"tips": {"source": "o/r"}}),
+  )
+
+  def failing_rmtree(path, **kwargs):
+    raise OSError("busy")
+
+  # Replace the module BINDING inside routes.skills only — patching the global
+  # shutil module would leak into fixture teardown.
+  import types
+
+  monkeypatch.setattr(
+    rs, "shutil", types.SimpleNamespace(rmtree=failing_rmtree),
+  )
+  r = client.delete("/api/skills/tips", headers=auth)
+  assert r.status_code == 500, r.text
+  assert d.exists()
+  assert "tips" in _sidecar(skills_dir)  # record kept for the retry
+
+
+def test_index_write_failure_degrades_to_warning_not_500(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  monkeypatch.setattr(rs.install, "_http_get", _fake_fetch({
+    "https://x/tips.md": b"# tips",
+  }))
+
+  def failing_index(*args, **kwargs):
+    raise OSError("read-only fs")
+
+  monkeypatch.setattr(rs.skills, "write_index", failing_index)
+  r = client.post(
+    "/api/skills/install", headers=auth, json={"url": "https://x/tips.md"},
+  )
+  # The durable mutation succeeded — the response says so, with a warning.
+  assert r.status_code == 201, r.text
+  assert r.json()["warnings"]
+  assert (skills_dir / "tips" / "SKILL.md").is_file()
+
+
+# --- generated files are never skills (PR review round 2) ---
+
+
+def test_catalog_index_file_is_not_enumerated_as_a_skill(client, auth, skills_dir):
+  (skills_dir / "real.md").write_text("# real\n\nA skill.\n")
+  (skills_dir / skills_mod.CATALOG_INDEX_FILENAME).write_text("# cache\n")
+  rows = client.get("/api/skills", headers=auth).json()["skills"]
+  assert [row["id"] for row in rows] == ["real"]
+  skills_mod.write_index(skills_dir)
+  index = (skills_dir / skills_mod.INDEX_FILENAME).read_text()
+  assert "catalog-index" not in index
+
+
+def test_generated_indexes_do_not_count_as_skill_loads(skills_dir):
+  from app.claude_sdk_runner import _skill_file_read_name
+  from app.codex_sdk_runner import _skill_names_in_command
+  from app.config import get_settings
+
+  data_dir = get_settings().data_dir
+  for stem in ("skills-index", "catalog-index"):
+    assert _skill_file_read_name(
+      "Read", {"file_path": f"{data_dir}/shared/skills/{stem}.md"}, "/",
+    ) == ""
+  cmd = (
+    f"grep -i pdf {data_dir}/shared/skills/catalog-index.md && "
+    f"cat {data_dir}/shared/skills/pdf-forms.md"
+  )
+  assert _skill_names_in_command(cmd, data_dir) == ["pdf-forms"]
+
+
+def test_index_body_defuses_hostile_frontmatter_name(skills_dir):
+  (skills_dir / "evil.md").write_text(
+    "---\nname: bad | `rm -rf` | name\ndescription: d | e\n---\nBody.\n",
+  )
+  skills_mod.write_index(skills_dir)
+  text = (skills_dir / skills_mod.INDEX_FILENAME).read_text()
+  (row,) = [l for l in text.splitlines() if "evil.md" in l]
+  # Escaped pipes can't add table cells; the row stays one line.
+  assert row.count(" | ") == 2

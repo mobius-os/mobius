@@ -3477,6 +3477,7 @@ def test_install_response_includes_capability_flags(
   manifest["embeds_agent"] = True
   manifest["permissions"]["manage_apps"] = True
   manifest["permissions"]["github_access"] = True
+  manifest["permissions"]["manage_skills"] = True
   manifest["permissions"]["filesystem_access"] = True
 
   r = _install_simple(client, auth, base, manifest)
@@ -3486,6 +3487,7 @@ def test_install_response_includes_capability_flags(
   assert payload["embeds_agent"] is True
   assert payload["manage_apps"] is True
   assert payload["github_access"] is True
+  assert payload["manage_skills"] is True
   assert payload["filesystem_access"] is True
 
   listed = client.get("/api/apps/", headers=auth).json()
@@ -3493,6 +3495,7 @@ def test_install_response_includes_capability_flags(
   assert row["embeds_agent"] is True
   assert row["manage_apps"] is True
   assert row["github_access"] is True
+  assert row["manage_skills"] is True
   assert row["filesystem_access"] is True
 
 

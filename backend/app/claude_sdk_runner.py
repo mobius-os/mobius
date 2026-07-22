@@ -521,8 +521,10 @@ def _skill_file_read_name(
   )
   parent, filename = os.path.split(path)
   if parent == skills_dir and filename.endswith(".md"):
+    from app.skills import GENERATED_INDEX_STEMS
+
     name = filename[: -len(".md")]
-    return "" if name == "skills-index" else name
+    return "" if name in GENERATED_INDEX_STEMS else name
   grandparent, dirname = os.path.split(parent)
   if grandparent == skills_dir and filename.upper() == "SKILL.MD" and dirname:
     return dirname
