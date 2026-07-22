@@ -574,11 +574,16 @@ def _sdk_imports() -> dict[str, Any]:
     CollabAgentToolCallThreadItem = None
     SubAgentActivityThreadItem = None
     ThreadStartedNotification = None
+  try:
+    from openai_codex.generated.v2_all import ThreadStatusChangedNotification
+  except ImportError:
+    ThreadStatusChangedNotification = None
 
   return {
     "CollabAgentToolCallThreadItem": CollabAgentToolCallThreadItem,
     "SubAgentActivityThreadItem": SubAgentActivityThreadItem,
     "ThreadStartedNotification": ThreadStartedNotification,
+    "ThreadStatusChangedNotification": ThreadStatusChangedNotification,
     "AgentMessageDeltaNotification": AgentMessageDeltaNotification,
     "AgentMessageThreadItem": AgentMessageThreadItem,
     "ApprovalMode": ApprovalMode,
@@ -778,6 +783,222 @@ def _collab_summary(item: Any) -> str | None:
   if not messages:
     return None
   return "; ".join(messages)[:_COLLAB_SUMMARY_MAX]
+
+
+def _subagent_lifecycle_event(
+  item: Any, sdk: dict[str, Any], *, provider_session_id: str | None,
+  occurred_at: Any = None, provider_activation_id: str | None = None,
+) -> dict[str, Any] | None:
+  """Normalize a Codex subAgentActivity marker without inventing completion.
+
+  The native marker currently exposes started/interacted/interrupted.  Started
+  opens a helper lane; interrupted closes it as stopped. Interacted is progress,
+  not a lifecycle boundary, and remains intentionally silent.
+  """
+  cls = sdk.get("SubAgentActivityThreadItem")
+  if cls is None or not isinstance(item, cls):
+    return None
+  kind = getattr(getattr(item, "kind", None), "value", None)
+  kind = kind or str(getattr(item, "kind", ""))
+  if kind == "started":
+    event_type, state = "agent_started", "running"
+  elif kind == "interrupted":
+    event_type, state = "agent_terminal", "stopped"
+  else:
+    return None
+  return {
+    "type": "agent_lifecycle",
+    "provider": "codex",
+    "provider_session_id": provider_session_id,
+    "provider_agent_id": getattr(item, "agent_thread_id", None),
+    "provider_activation_id": provider_activation_id,
+    "parent_kind": "unknown",
+    "event_type": event_type,
+    "state": state,
+    "summary": getattr(item, "agent_path", None),
+    "occurred_at": occurred_at,
+    "source": "runner",
+    "source_event_id": getattr(item, "id", None),
+  }
+
+
+def _thread_started_lifecycle_event(
+  payload: Any, *, root_thread_id: str | None,
+  parent_provider_activation_id: str | None = None,
+) -> dict[str, Any] | None:
+  """Build the exact spawn/parent fact carried by ThreadStartedNotification."""
+  thread = getattr(payload, "thread", None)
+  thread_id = getattr(thread, "id", None)
+  if not thread_id:
+    return None
+  parent_id = getattr(thread, "parent_thread_id", None)
+  # A top-level thread started notification is not a spawned helper.
+  if not parent_id or parent_id == thread_id:
+    return None
+  role = getattr(thread, "agent_role", None)
+  nickname = getattr(thread, "agent_nickname", None)
+  return {
+    "type": "agent_lifecycle",
+    "provider": "codex",
+    "provider_session_id": root_thread_id,
+    "provider_agent_id": thread_id,
+    "provider_activation_id": f"thread-started:{thread_id}",
+    "parent_provider_agent_id": parent_id,
+    "parent_provider_activation_id": (
+      parent_provider_activation_id or f"thread-started:{parent_id}"
+    ),
+    "parent_kind": "main" if parent_id == root_thread_id else "agent",
+    "event_type": "agent_spawned",
+    "state": "running",
+    "agent_type": role or nickname,
+    "summary": getattr(thread, "preview", None),
+    "occurred_at": getattr(thread, "created_at", None),
+    "source": "runner",
+    "source_event_id": f"thread-started:{thread_id}",
+  }
+
+
+def _record_private_lifecycle(bc: Any, event: dict[str, Any] | None) -> None:
+  if event is None:
+    return
+  recorder = getattr(bc, "record_lifecycle", None)
+  if callable(recorder):
+    recorder(event)
+
+
+def _collab_reactivation_events(
+  item: Any, sdk: dict[str, Any], *, root_thread_id: str | None,
+  occurred_at: Any, active: dict[str, str], known: set[str],
+  activation_by_call_child: dict[tuple[str, str], str],
+  last_activation_by_child: dict[str, str],
+) -> list[dict[str, Any]]:
+  cls = sdk.get("CollabAgentToolCallThreadItem")
+  if cls is None or not isinstance(item, cls):
+    return []
+  operation = _collab_op(item)
+  receivers = [str(value) for value in (
+    getattr(item, "receiver_thread_ids", None) or []) if value]
+  sender = getattr(item, "sender_thread_id", None)
+  call_id = str(getattr(item, "id", None) or operation)
+  if operation == "spawnAgent":
+    known.update(receivers)
+    for child_id in receivers:
+      activation = active.setdefault(child_id, f"thread-started:{child_id}")
+      activation_by_call_child[(call_id, child_id)] = activation
+      last_activation_by_child[child_id] = activation
+    return []  # ThreadStarted carries the exact spawn + ancestry fact.
+  if operation not in ("sendInput", "resumeAgent"):
+    return []
+  events = []
+  for child_id in receivers:
+    known.add(child_id)
+    activation = active.get(child_id)
+    if activation is not None:
+      # Input sent to an already-running child is progress in the current
+      # activation, not proof of a new lane. Keep the call association so its
+      # exact completion can still enrich that activation later.
+      activation_by_call_child[(call_id, child_id)] = activation
+      continue
+    activation = f"{call_id}:{child_id}"
+    active[child_id] = activation
+    activation_by_call_child[(call_id, child_id)] = activation
+    last_activation_by_child[child_id] = activation
+    parent_kind = "main" if sender and sender == root_thread_id else (
+      "agent" if sender else "unknown")
+    events.append({
+      "type": "agent_lifecycle", "provider": "codex",
+      "provider_session_id": root_thread_id,
+      "provider_agent_id": child_id,
+      "provider_activation_id": activation,
+      "parent_provider_agent_id": sender,
+      "parent_provider_activation_id": active.get(str(sender)) if sender else None,
+      "parent_kind": parent_kind,
+      "event_type": "agent_started", "state": "running",
+      "summary": getattr(item, "prompt", None), "occurred_at": occurred_at,
+      "source": "runner", "source_event_id": f"{call_id}:{child_id}:started",
+    })
+  return events
+
+
+def _collab_completion_events(
+  item: Any, sdk: dict[str, Any], *, root_thread_id: str | None,
+  occurred_at: Any, active: dict[str, str], known: set[str],
+  activation_by_call_child: dict[tuple[str, str], str],
+  last_activation_by_child: dict[str, str],
+) -> list[dict[str, Any]]:
+  cls = sdk.get("CollabAgentToolCallThreadItem")
+  if cls is None or not isinstance(item, cls):
+    return []
+  terminal = {
+    "completed": "done", "errored": "failed", "interrupted": "stopped",
+    "shutdown": "stopped",
+  }
+  events = []
+  call_id = str(getattr(item, "id", None) or _collab_op(item))
+  for child_id, agent_state in (getattr(item, "agents_states", None) or {}).items():
+    child_id = str(child_id)
+    raw_status = getattr(agent_state, "status", None)
+    status = getattr(raw_status, "value", None) or str(raw_status or "")
+    state = terminal.get(status)
+    activation = activation_by_call_child.get((call_id, child_id))
+    if activation is None:
+      activation = active.get(child_id) or last_activation_by_child.get(child_id)
+    if state is None or activation is None:
+      continue
+    known.add(child_id)
+    events.append({
+      "type": "agent_lifecycle", "provider": "codex",
+      "provider_session_id": root_thread_id,
+      "provider_agent_id": child_id,
+      "provider_activation_id": activation,
+      "parent_kind": "unknown", "event_type": "agent_terminal",
+      "state": state, "summary": getattr(agent_state, "message", None),
+      "occurred_at": occurred_at, "source": "runner",
+      "source_event_id": f"{call_id}:{child_id}:{status}",
+    })
+    last_activation_by_child[child_id] = activation
+    if active.get(child_id) == activation:
+      active.pop(child_id, None)
+  return events
+
+
+def _thread_status_lifecycle_event(
+  payload: Any, *, root_thread_id: str | None, active: dict[str, str],
+  known: set[str], activation_counts: dict[str, int],
+  last_activation_by_child: dict[str, str],
+) -> dict[str, Any] | None:
+  thread_id = str(getattr(payload, "thread_id", None) or "")
+  if not thread_id or thread_id == root_thread_id or thread_id not in known:
+    return None
+  status_union = getattr(payload, "status", None)
+  status_root = getattr(status_union, "root", status_union)
+  status_type = str(getattr(status_root, "type", ""))
+  if status_type == "active":
+    if thread_id in active:
+      return None
+    activation_counts[thread_id] = activation_counts.get(thread_id, 0) + 1
+    activation = f"status:{thread_id}:{activation_counts[thread_id]}"
+    active[thread_id] = activation
+    last_activation_by_child[thread_id] = activation
+    event_type, state = "agent_started", "running"
+  elif status_type in ("idle", "systemError"):
+    activation = active.pop(thread_id, None)
+    if activation is None:
+      return None
+    last_activation_by_child[thread_id] = activation
+    event_type = "agent_terminal"
+    state = "done" if status_type == "idle" else "failed"
+  else:
+    return None
+  return {
+    "type": "agent_lifecycle", "provider": "codex",
+    "provider_session_id": root_thread_id,
+    "provider_agent_id": thread_id,
+    "provider_activation_id": activation,
+    "parent_kind": "unknown", "event_type": event_type, "state": state,
+    "source": "runner",
+    "source_event_id": f"thread-status:{thread_id}:{activation}:{status_type}",
+  }
 
 
 async def _record_collab_child_links(
@@ -1649,6 +1870,12 @@ async def run_codex_sdk_turn(
       # recorded.
       await _persist_session_id(db, chat_id, current_session_id)
 
+      known_child_ids: set[str] = set()
+      active_activation_by_child: dict[str, str] = {}
+      last_activation_by_child: dict[str, str] = {}
+      activation_by_call_child: dict[tuple[str, str], str] = {}
+      activation_counts: dict[str, int] = {}
+
       async for notification in turn.stream():
         payload = notification.payload
 
@@ -1707,6 +1934,36 @@ async def run_codex_sdk_turn(
           # the session->chat link now so the child rollout stays attributed
           # even if we never resume it directly.
           await _record_collab_child_links(item, sdk, chat_id=chat_id)
+          for lifecycle in _collab_reactivation_events(
+            item, sdk, root_thread_id=current_session_id,
+            occurred_at=getattr(payload, "started_at_ms", None),
+            active=active_activation_by_child, known=known_child_ids,
+            activation_by_call_child=activation_by_call_child,
+            last_activation_by_child=last_activation_by_child,
+          ):
+            _record_private_lifecycle(bc, lifecycle)
+          child_id = str(getattr(item, "agent_thread_id", None) or "")
+          kind = getattr(getattr(item, "kind", None), "value", None)
+          kind = kind or str(getattr(item, "kind", ""))
+          activation = (active_activation_by_child.get(child_id)
+                        or last_activation_by_child.get(child_id))
+          if child_id and kind == "started":
+            known_child_ids.add(child_id)
+            activation = activation or str(getattr(item, "id", None) or child_id)
+            active_activation_by_child[child_id] = activation
+            last_activation_by_child[child_id] = activation
+          lifecycle = _subagent_lifecycle_event(
+            item, sdk, provider_session_id=current_session_id,
+            occurred_at=getattr(payload, "started_at_ms", None),
+            provider_activation_id=activation,
+          )
+          _record_private_lifecycle(bc, lifecycle)
+          if lifecycle is not None and lifecycle.get("event_type") == "agent_terminal":
+            activation = str(lifecycle.get("provider_activation_id") or "")
+            if activation:
+              last_activation_by_child[child_id] = activation
+            if active_activation_by_child.get(child_id) == activation:
+              active_activation_by_child.pop(child_id, None)
           continue
 
         if isinstance(payload, sdk["FileChangePatchUpdatedNotification"]):
@@ -1726,6 +1983,14 @@ async def run_codex_sdk_turn(
           # only populates on completion — a missed link silently loses the
           # attribution this recording exists to provide.
           await _record_collab_child_links(item, sdk, chat_id=chat_id)
+          for lifecycle in _collab_completion_events(
+            item, sdk, root_thread_id=current_session_id,
+            occurred_at=getattr(payload, "completed_at_ms", None),
+            active=active_activation_by_child, known=known_child_ids,
+            activation_by_call_child=activation_by_call_child,
+            last_activation_by_child=last_activation_by_child,
+          ):
+            _record_private_lifecycle(bc, lifecycle)
           continue
 
         if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
@@ -1753,12 +2018,38 @@ async def run_codex_sdk_turn(
         if sdk.get("ThreadStartedNotification") is not None and isinstance(
           payload, sdk["ThreadStartedNotification"]
         ):
-          # A spawned sub-agent announces its own thread on the parent turn's
-          # stream. The invariant is that this notification stays silent because
-          # emitting session_init would repoint the chat at the child thread.
-          # Generic live work is already represented by the ordinary collab tool
-          # activity, while the Workflows parser attributes the named child via
-          # parent_thread_id.
+          # Never emit session_init (that would repoint the chat to the child),
+          # but preserve the child thread's exact spawn time + immediate parent
+          # as a normalized lifecycle fact for Workflows.
+          lifecycle = _thread_started_lifecycle_event(
+            payload, root_thread_id=current_session_id,
+            parent_provider_activation_id=(
+              active_activation_by_child.get(str(
+                getattr(getattr(payload, "thread", None), "parent_thread_id", None)
+              )) or last_activation_by_child.get(str(
+                getattr(getattr(payload, "thread", None), "parent_thread_id", None)
+              ))
+            ),
+          )
+          if lifecycle is not None:
+            child_id = str(lifecycle["provider_agent_id"])
+            known_child_ids.add(child_id)
+            activation = active_activation_by_child.setdefault(
+              child_id, str(lifecycle["provider_activation_id"]),
+            )
+            last_activation_by_child[child_id] = activation
+            lifecycle["provider_activation_id"] = activation
+            _record_private_lifecycle(bc, lifecycle)
+          continue
+
+        status_cls = sdk.get("ThreadStatusChangedNotification")
+        if status_cls is not None and isinstance(payload, status_cls):
+          _record_private_lifecycle(bc, _thread_status_lifecycle_event(
+            payload, root_thread_id=current_session_id,
+            active=active_activation_by_child, known=known_child_ids,
+            activation_counts=activation_counts,
+            last_activation_by_child=last_activation_by_child,
+          ))
           continue
 
         if isinstance(payload, sdk["TurnCompletedNotification"]):

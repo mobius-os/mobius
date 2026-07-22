@@ -8,7 +8,7 @@ import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Text, case, cast, func
@@ -359,6 +359,14 @@ def list_chats(
     # no ON DELETE CASCADE and SQLite leaves FK enforcement off, so a hard
     # chat delete would otherwise orphan its run rows and grow the table
     # unbounded over the instance's life.
+    # Lifecycle rows can reference both the chat and one of its runs, so delete
+    # them before either parent for FK-correctness on stricter databases.
+    db.query(models.AgentLifecycleEvent).filter(
+      models.AgentLifecycleEvent.chat_id == c.id
+    ).delete(synchronize_session=False)
+    db.query(models.AgentLifecycleRunUpdate).filter(
+      models.AgentLifecycleRunUpdate.chat_id == c.id
+    ).delete(synchronize_session=False)
     db.query(models.ChatRun).filter(
       models.ChatRun.chat_id == c.id
     ).delete(synchronize_session=False)
@@ -414,6 +422,12 @@ def list_chats(
     _purge_chat_dir(c.id)
     # Drop the chat's run records with it (see the stale-purge note above —
     # no FK cascade on SQLite, so these would orphan otherwise).
+    db.query(models.AgentLifecycleEvent).filter(
+      models.AgentLifecycleEvent.chat_id == c.id
+    ).delete(synchronize_session=False)
+    db.query(models.AgentLifecycleRunUpdate).filter(
+      models.AgentLifecycleRunUpdate.chat_id == c.id
+    ).delete(synchronize_session=False)
     db.query(models.ChatRun).filter(
       models.ChatRun.chat_id == c.id
     ).delete(synchronize_session=False)
@@ -523,6 +537,102 @@ def list_session_links(
       }
       for r in rows
     ]
+  }
+
+
+def _iso(value):
+  return value.isoformat() if value is not None else None
+
+
+@router.get("/agent-lifecycle")
+def list_agent_lifecycle(
+  after_id: int = Query(default=0, ge=0),
+  runs_after_id: int = Query(default=0, ge=0),
+  limit: int = Query(default=500, ge=1, le=1000),
+  run_limit: int = Query(default=500, ge=1, le=1000),
+  chat_id: str | None = Query(default=None, min_length=1, max_length=64),
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Incremental owner-only feed of normalized helper lifecycle milestones.
+
+  Event ``id`` is an ingestion cursor, not visual chronology. Consumers sort by
+  provider ``occurred_at`` where present and fall back to server
+  ``observed_at``. Root ChatRun snapshots have an independent append-only
+  ``runs_after_id`` cursor, so a late ``ended_at`` update is visible without
+  rescanning or returning all historical runs. ``chat_id`` provides a current
+  scoped replay for a chat that re-enters the owner roster after recovery.
+  SQLite AUTOINCREMENT guarantees consumed cursors are never reused.
+  """
+  query = (
+    db.query(models.AgentLifecycleEvent)
+    .join(models.Chat, models.Chat.id == models.AgentLifecycleEvent.chat_id)
+    .filter(
+      models.Chat.deleted_at.is_(None),
+      models.AgentLifecycleEvent.id > after_id,
+    )
+    .order_by(models.AgentLifecycleEvent.id.asc())
+  )
+  if chat_id is not None:
+    query = query.filter(models.AgentLifecycleEvent.chat_id == chat_id)
+  fetched = query.limit(limit + 1).all()
+  has_more = len(fetched) > limit
+  rows = fetched[:limit]
+
+  run_query = (
+    db.query(models.AgentLifecycleRunUpdate)
+    .join(models.Chat, models.Chat.id == models.AgentLifecycleRunUpdate.chat_id)
+    .filter(
+      models.Chat.deleted_at.is_(None),
+      models.AgentLifecycleRunUpdate.id > runs_after_id,
+    )
+    .order_by(models.AgentLifecycleRunUpdate.id.asc())
+  )
+  if chat_id is not None:
+    run_query = run_query.filter(
+      models.AgentLifecycleRunUpdate.chat_id == chat_id
+    )
+  fetched_runs = run_query.limit(run_limit + 1).all()
+  runs_has_more = len(fetched_runs) > run_limit
+  runs = fetched_runs[:run_limit]
+  return {
+    "events": [{
+      "id": row.id,
+      "event_key": row.event_key,
+      "chat_id": row.chat_id,
+      "chat_run_id": row.chat_run_id,
+      "provider": row.provider,
+      "provider_session_id": row.provider_session_id,
+      "agent_id": row.agent_id,
+      "agent_run_id": row.activation_id,
+      "provider_agent_id": row.provider_agent_id,
+      "parent_agent_id": row.parent_agent_id,
+      "parent_agent_run_id": row.parent_activation_id,
+      "parent_kind": row.parent_kind,
+      "parent_source_id": row.parent_source_id,
+      "type": row.event_type,
+      "state": row.state,
+      "agent_type": row.agent_type,
+      "summary": row.summary,
+      "occurred_at": _iso(row.occurred_at),
+      "observed_at": _iso(row.observed_at),
+      "time_quality": row.time_quality,
+      "source": row.source,
+      "source_event_id": row.source_event_id,
+    } for row in rows],
+    "runs": [{
+      "update_id": run.id,
+      "id": run.chat_run_id,
+      "chat_id": run.chat_id,
+      "provider": run.provider,
+      "status": run.status,
+      "started_at": _iso(run.started_at),
+      "ended_at": _iso(run.ended_at),
+    } for run in runs],
+    "next_after_id": rows[-1].id if rows else after_id,
+    "next_runs_after_id": runs[-1].id if runs else runs_after_id,
+    "has_more": has_more,
+    "runs_has_more": runs_has_more,
   }
 
 

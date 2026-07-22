@@ -49,6 +49,7 @@ from app.chat_writer import (
   Finalize,
   ParkRun,
   PrepareAutoResume,
+  RecordAgentLifecycle,
   PersistError,
   PersistTranscript,
   QuestionCommit,
@@ -238,6 +239,8 @@ class _ChatEventSink:
     - `question` is REJECTED by `publish()` — it must go through
       `publish_question()` (save-before-broadcast), so a runner can't
       bypass the QuestionCommit barrier;
+    - private helper lifecycle facts are buffered and fenced (with one retry)
+      by `finalize()` because no transcript snapshot can reconstruct them;
     - `finalize()` → `Finalize` (commit-before-ack: the queue only
       drains / a continuation only schedules once the terminal state is
       durable).
@@ -283,6 +286,7 @@ class _ChatEventSink:
     # the next snapshot (or the terminal finalize) appends the continuation as
     # a fresh assistant message.
     self._steering = False
+    self._lifecycle_writes: list[tuple[RecordAgentLifecycle, object]] = []
 
   def _prepare_thinking_event(self, event: ChatEvent) -> None:
     """Give a reasoning run stable identity before reducer + broadcast."""
@@ -416,6 +420,45 @@ class _ChatEventSink:
       )
     )
 
+  def record_lifecycle(self, event: dict) -> None:
+    """Queue private lifecycle metadata without broadcasting it.
+
+    Unlike coalescible transcript snapshots, these append-only facts cannot be
+    reconstructed by Finalize. Their acknowledgements are retained and fenced
+    at turn finalization, with one idempotent retry on failure.
+    """
+    if not (self.chat_id and self.run_token):
+      return
+    from app.agent_lifecycle import normalize_chat_event
+    lifecycle = normalize_chat_event(
+      chat_id=self.chat_id,
+      chat_run_id=self.run_token,
+      event=event,
+      observed_at=datetime.now(UTC),
+    )
+    if lifecycle is not None:
+      cmd = RecordAgentLifecycle(values=lifecycle)
+      ack = get_writer().submit(cmd)
+      self._lifecycle_writes.append((cmd, ack))
+
+  async def _flush_lifecycle(self) -> None:
+    pending = self._lifecycle_writes
+    self._lifecycle_writes = []
+    for cmd, ack in pending:
+      try:
+        await _await_ack(ack)
+      except Exception:
+        _get_logger().warning(
+          "agent lifecycle write failed; retrying once chat_id=%s",
+          self.chat_id, exc_info=True,
+        )
+        # RecordAgentLifecycle is event-key idempotent, so retrying after an
+        # ambiguous timeout cannot duplicate a committed fact. A fresh command
+        # is essential: writer commands own their ack Future, and resubmitting
+        # the failed object would just return that already-failed Future.
+        retry = RecordAgentLifecycle(values=cmd.values)
+        await _await_ack(get_writer().submit(retry))
+
   def publish(self, event: ChatEvent) -> bool:
     """Publishes an ordinary event and routes any due save to the actor.
 
@@ -539,6 +582,7 @@ class _ChatEventSink:
     """
     if not (self.chat_id and self.run_token):
       return
+    await self._flush_lifecycle()
     if not blocks_have_renderable_content(self.assistant_blocks):
       if self._last_error:
         # Synthesize an error block so the failure is durable in the transcript.
@@ -3284,6 +3328,15 @@ async def _complete_turn(
     # pointer), and yanking its browser is worse than the alternative — in the
     # rare Stop-with-no-successor case a lingering Chrome is cheaper than a yank,
     # and the next turn / reconciliation reclaims it.
+    # The transcript belongs to the newer owner and must not be finalized, but
+    # private lifecycle facts live in a separate append-only table and are safe
+    # to fence. They cannot be reconstructed by the successor's Finalize.
+    try:
+      await sink._flush_lifecycle()
+    except Exception:
+      _get_logger().warning(
+        "stale turn lifecycle flush failed chat_id=%s", chat_id, exc_info=True,
+      )
     clear_active_broadcast_if(bc)
     bc.publish({"type": "done"})
     bc.mark_completed()

@@ -19,9 +19,13 @@ from app.runner_registry import RunnerKind, registry
 class _FakeBroadcast:
   def __init__(self):
     self.events: list[dict] = []
+    self.lifecycle_events: list[dict] = []
 
   def publish(self, event: dict) -> None:
     self.events.append(event)
+
+  def record_lifecycle(self, event: dict) -> None:
+    self.lifecycle_events.append(event)
 
 
 class _FakeCodexConfig:
@@ -134,6 +138,7 @@ def _fake_sdk(async_codex_cls):
 
   return {
     "AgentMessageDeltaNotification": _Dummy,
+    "AgentMessageThreadItem": _Dummy,
     "ApprovalMode": _FakeApprovalMode,
     "AsyncCodex": async_codex_cls,
     "CodexConfig": _FakeCodexConfig,
@@ -663,7 +668,7 @@ def test_run_codex_sdk_turn_resume_validation_error_now_propagates(monkeypatch, 
   assert "rejected subAgentActivity history" not in caplog.text
 
 
-def test_subagent_activity_item_dispatch_is_noop():
+def test_subagent_activity_item_dispatch_stays_out_of_tool_stream():
   # The native subAgentActivity marker is classified explicitly at both
   # dispatch sites as a no-op: it opens and closes no Möbius tool block (the
   # live delegation rides CollabAgentToolCallThreadItem's Task events instead).
@@ -678,6 +683,322 @@ def test_subagent_activity_item_dispatch_is_noop():
 
   assert codex_sdk_runner._tool_start_event(item, sdk) is None
   assert codex_sdk_runner._tool_completed_events(item, sdk) == []
+
+  started = codex_sdk_runner._subagent_lifecycle_event(
+    item, sdk, provider_session_id="root-thread", occurred_at=123_000,
+    provider_activation_id="activation-1",
+  )
+  assert started["type"] == "agent_lifecycle"
+  assert started["provider"] == "codex"
+  assert started["provider_session_id"] == "root-thread"
+  assert started["provider_agent_id"] == "thread-1"
+  assert started["event_type"] == "agent_started"
+  assert started["state"] == "running"
+  assert started["summary"] == "/root/scout"
+  assert started["occurred_at"] == 123_000
+  assert started["provider_activation_id"] == "activation-1"
+
+  item.kind = "interrupted"
+  assert codex_sdk_runner._subagent_lifecycle_event(
+    item, sdk, provider_session_id="root-thread",
+  )["event_type"] == "agent_terminal"
+
+
+def test_codex_lifecycle_reactivation_and_terminal_state_mapping():
+  class CollabItem:
+    pass
+
+  class AgentState:
+    def __init__(self, status, message=None):
+      self.status = status
+      self.message = message
+
+  sdk = {"CollabAgentToolCallThreadItem": CollabItem}
+  item = CollabItem()
+  item.id = "call-resume"
+  item.tool = "resumeAgent"
+  item.sender_thread_id = "root-thread"
+  item.receiver_thread_ids = ["child-thread"]
+  item.prompt = "Continue the review"
+  item.agents_states = {}
+  active = {}
+  known = set()
+  by_call = {}
+  last = {}
+
+  starts = codex_sdk_runner._collab_reactivation_events(
+    item, sdk, root_thread_id="root-thread", occurred_at=123_000,
+    active=active, known=known,
+    activation_by_call_child=by_call, last_activation_by_child=last,
+  )
+  assert len(starts) == 1
+  assert starts[0]["provider_activation_id"] == "call-resume:child-thread"
+  assert starts[0]["parent_kind"] == "main"
+  assert starts[0]["occurred_at"] == 123_000
+  assert active == {"child-thread": "call-resume:child-thread"}
+
+  item.agents_states = {
+    "child-thread": AgentState("completed", "Review complete"),
+  }
+  terminals = codex_sdk_runner._collab_completion_events(
+    item, sdk, root_thread_id="root-thread", occurred_at=125_000,
+    active=active, known=known,
+    activation_by_call_child=by_call, last_activation_by_child=last,
+  )
+  assert len(terminals) == 1
+  assert terminals[0]["state"] == "done"
+  assert terminals[0]["provider_activation_id"] == "call-resume:child-thread"
+  assert terminals[0]["occurred_at"] == 125_000
+  assert active == {}
+
+
+def test_codex_thread_status_closes_known_child_and_ignores_root():
+  class StatusPayload:
+    def __init__(self, thread_id, status):
+      self.thread_id = thread_id
+      self.status = SimpleNamespace(root=SimpleNamespace(type=status))
+
+  active = {"child": "activation-1"}
+  known = {"child"}
+  counts = {}
+  last = {}
+  done = codex_sdk_runner._thread_status_lifecycle_event(
+    StatusPayload("child", "idle"), root_thread_id="root",
+    active=active, known=known, activation_counts=counts,
+    last_activation_by_child=last,
+  )
+  assert done["event_type"] == "agent_terminal"
+  assert done["state"] == "done"
+  assert done["provider_activation_id"] == "activation-1"
+  assert active == {}
+  assert codex_sdk_runner._thread_status_lifecycle_event(
+    StatusPayload("root", "idle"), root_thread_id="root",
+    active={"root": "bad"}, known={"root"}, activation_counts={},
+    last_activation_by_child={},
+  ) is None
+
+
+def test_codex_late_completion_targets_its_call_without_closing_new_activation():
+  class CollabItem:
+    pass
+
+  class AgentState:
+    def __init__(self, status):
+      self.status = status
+      self.message = None
+
+  class StatusPayload:
+    def __init__(self, status):
+      self.thread_id = "child"
+      self.status = SimpleNamespace(root=SimpleNamespace(type=status))
+
+  sdk = {"CollabAgentToolCallThreadItem": CollabItem}
+  active, by_call, last, counts = {}, {}, {}, {}
+  known = set()
+
+  def call(call_id, operation="resumeAgent"):
+    item = CollabItem()
+    item.id = call_id
+    item.tool = operation
+    item.sender_thread_id = "root"
+    item.receiver_thread_ids = ["child"]
+    item.prompt = "Continue"
+    item.agents_states = {}
+    return item
+
+  call_a = call("call-a")
+  start_a = codex_sdk_runner._collab_reactivation_events(
+    call_a, sdk, root_thread_id="root", occurred_at=100,
+    active=active, known=known, activation_by_call_child=by_call,
+    last_activation_by_child=last,
+  )
+  assert start_a[0]["provider_activation_id"] == "call-a:child"
+
+  # Status is a useful observed terminal, but the call association survives so
+  # a later exact completion can still refine this same activation.
+  observed_done = codex_sdk_runner._thread_status_lifecycle_event(
+    StatusPayload("idle"), root_thread_id="root", active=active, known=known,
+    activation_counts=counts, last_activation_by_child=last,
+  )
+  assert observed_done["provider_activation_id"] == "call-a:child"
+  assert active == {}
+
+  call_b = call("call-b")
+  start_b = codex_sdk_runner._collab_reactivation_events(
+    call_b, sdk, root_thread_id="root", occurred_at=200,
+    active=active, known=known, activation_by_call_child=by_call,
+    last_activation_by_child=last,
+  )
+  assert start_b[0]["provider_activation_id"] == "call-b:child"
+  call_a.agents_states = {"child": AgentState("errored")}
+  late_a = codex_sdk_runner._collab_completion_events(
+    call_a, sdk, root_thread_id="root", occurred_at=250,
+    active=active, known=known, activation_by_call_child=by_call,
+    last_activation_by_child=last,
+  )
+  assert late_a[0]["provider_activation_id"] == "call-a:child"
+  assert late_a[0]["state"] == "failed"
+  assert active == {"child": "call-b:child"}
+
+
+def test_codex_input_to_running_child_is_progress_and_nested_spawn_uses_current_parent():
+  class CollabItem:
+    pass
+
+  sdk = {"CollabAgentToolCallThreadItem": CollabItem}
+  active = {"child": "resume-b:child"}
+  known = {"child"}
+  by_call, last = {}, {"child": "resume-b:child"}
+  item = CollabItem()
+  item.id = "send-input"
+  item.tool = "sendInput"
+  item.sender_thread_id = "root"
+  item.receiver_thread_ids = ["child"]
+  item.prompt = "One more check"
+  assert codex_sdk_runner._collab_reactivation_events(
+    item, sdk, root_thread_id="root", occurred_at=300,
+    active=active, known=known, activation_by_call_child=by_call,
+    last_activation_by_child=last,
+  ) == []
+  assert active == {"child": "resume-b:child"}
+  assert by_call[("send-input", "child")] == "resume-b:child"
+
+  payload = SimpleNamespace(thread=SimpleNamespace(
+    id="grandchild", parent_thread_id="child", agent_role="reviewer",
+    agent_nickname=None, preview="Review", created_at=301,
+  ))
+  nested = codex_sdk_runner._thread_started_lifecycle_event(
+    payload, root_thread_id="root",
+    parent_provider_activation_id=active["child"],
+  )
+  assert nested["parent_kind"] == "agent"
+  assert nested["parent_provider_activation_id"] == "resume-b:child"
+
+
+def test_run_codex_sdk_turn_dispatches_lifecycle_sequence_with_late_exact_fact(
+  monkeypatch,
+):
+  class CollabItem:
+    def __init__(self, item_id, tool, receivers, states=None):
+      self.id = item_id
+      self.tool = tool
+      self.sender_thread_id = "root"
+      self.receiver_thread_ids = receivers
+      self.agents_states = states or {}
+      self.prompt = "Delegate"
+
+  class AgentState:
+    def __init__(self, status):
+      self.status = status
+      self.message = status
+
+  class ItemStarted:
+    def __init__(self, item, at):
+      self.item = item
+      self.started_at_ms = at
+
+  class ItemCompleted:
+    def __init__(self, item, at):
+      self.item = item
+      self.completed_at_ms = at
+
+  class ThreadStarted:
+    def __init__(self, thread):
+      self.thread = thread
+
+  class ThreadStatus:
+    def __init__(self, thread_id, status):
+      self.thread_id = thread_id
+      self.status = SimpleNamespace(root=SimpleNamespace(type=status))
+
+  class SubActivity:
+    def __init__(self):
+      self.id = "late-interrupt"
+      self.kind = "interrupted"
+      self.agent_path = "/root/child"
+      self.agent_thread_id = "child"
+
+  spawn = CollabItem("call-a", "spawnAgent", ["child"])
+  resume = CollabItem("call-b", "resumeAgent", ["child"])
+  late_spawn = CollabItem(
+    "call-a", "spawnAgent", ["child"], {"child": AgentState("errored")},
+  )
+  done_resume = CollabItem(
+    "call-b", "resumeAgent", ["child"], {"child": AgentState("completed")},
+  )
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(method="item/started", payload=ItemStarted(spawn, 100)),
+    SimpleNamespace(method="thread/started", payload=ThreadStarted(SimpleNamespace(
+      id="child", parent_thread_id="root", agent_role="researcher",
+      agent_nickname=None, preview="Research", created_at=101,
+    ))),
+    SimpleNamespace(method="thread/status/changed", payload=ThreadStatus("child", "idle")),
+    SimpleNamespace(method="item/started", payload=ItemStarted(resume, 200)),
+    SimpleNamespace(method="item/completed", payload=ItemCompleted(done_resume, 260)),
+    SimpleNamespace(method="thread/started", payload=ThreadStarted(SimpleNamespace(
+      id="grandchild", parent_thread_id="child", agent_role="reviewer",
+      agent_nickname=None, preview="Review", created_at=270,
+    ))),
+    SimpleNamespace(method="item/started", payload=ItemStarted(SubActivity(), 275)),
+    SimpleNamespace(method="item/completed", payload=ItemCompleted(late_spawn, 250)),
+    SimpleNamespace(
+      method="turn/completed", payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ]
+  thread = _FakeThread("root", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk.update({
+    "CollabAgentToolCallThreadItem": CollabItem,
+    "ItemStartedNotification": ItemStarted,
+    "ItemCompletedNotification": ItemCompleted,
+    "ThreadStartedNotification": ThreadStarted,
+    "ThreadStatusChangedNotification": ThreadStatus,
+    "SubAgentActivityThreadItem": SubActivity,
+  })
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+
+  async def no_links(*_args, **_kwargs):
+    return None
+
+  monkeypatch.setattr(codex_sdk_runner, "_record_collab_child_links", no_links)
+  bus = _FakeBroadcast()
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="delegate", session_id=None, base_env={}, cwd="/tmp",
+    chat_id="chat-sequence", bc=bus, pending_questions={}, db=None,
+  ))
+
+  assert result["error"] is None
+  late = next(event for event in bus.lifecycle_events
+              if event.get("source_event_id") == "call-a:child:errored")
+  resumed = next(event for event in bus.lifecycle_events
+                 if event.get("source_event_id") == "call-b:child:started")
+  nested = next(event for event in bus.lifecycle_events
+                if event.get("provider_agent_id") == "grandchild")
+  completed = next(event for event in bus.lifecycle_events
+                   if event.get("source_event_id") == "call-b:child:completed")
+  interrupted = next(event for event in bus.lifecycle_events
+                     if event.get("source_event_id") == "late-interrupt")
+  assert late["provider_activation_id"] == "thread-started:child"
+  assert resumed["provider_activation_id"] == "call-b:child"
+  assert nested["parent_provider_activation_id"] == "call-b:child"
+  assert completed["provider_activation_id"] == "call-b:child"
+  assert interrupted["provider_activation_id"] == "call-b:child"
+  assert all(event.get("type") != "agent_lifecycle" for event in bus.events)
 
 
 def test_run_codex_sdk_turn_aborts_after_turn_before_stream_registration(monkeypatch):

@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text, true,
+  String, Text, event, true,
 )
 
 from app.database import Base
@@ -288,6 +288,109 @@ class ChatSessionLink(Base):
   # are set explicitly by record_session_link; these defaults are the safety net.
   first_seen_at = Column(DateTime, default=lambda: now_naive_utc())
   last_seen_at = Column(DateTime, default=lambda: now_naive_utc())
+
+
+class AgentLifecycleEvent(Base):
+  """Append-only normalized lifecycle milestones for spawned helpers.
+
+  Provider-native identifiers and timestamps are retained for audit, while
+  ``agent_id`` is the stable cross-provider identity exposed to Workflows.
+  Prompt bodies never belong here; summaries are bounded and scrubbed by
+  ``agent_lifecycle.normalize_chat_event`` before insertion.
+
+  ``agent_id`` identifies a logical provider thread/task; ``activation_id``
+  identifies one use inside a root ChatRun. ``event_key`` is the unique fact
+  idempotency key. ``id`` is the AUTOINCREMENT ingestion cursor used only for
+  incremental API reads and is never reused after tail deletion.
+  """
+
+  __tablename__ = "agent_lifecycle_events"
+  __table_args__ = {"sqlite_autoincrement": True}
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  event_key = Column(String(64), nullable=False, unique=True, index=True)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  chat_run_id = Column(
+    String(64), ForeignKey("chat_runs.id"), nullable=True, index=True
+  )
+  provider = Column(String(32), nullable=False)
+  provider_session_id = Column(String(160), nullable=True)
+  provider_agent_id = Column(String(160), nullable=False)
+  agent_id = Column(String(70), nullable=False, index=True)
+  activation_id = Column(String(70), nullable=False, index=True)
+  parent_agent_id = Column(String(70), nullable=True, index=True)
+  parent_activation_id = Column(String(70), nullable=True, index=True)
+  parent_kind = Column(String(16), nullable=False, default="unknown")
+  parent_source_id = Column(String(160), nullable=True)
+  event_type = Column(String(32), nullable=False)
+  state = Column(String(16), nullable=False)
+  agent_type = Column(String(64), nullable=True)
+  summary = Column(Text, nullable=True)
+  occurred_at = Column(DateTime, nullable=True)
+  observed_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+  time_quality = Column(String(16), nullable=False, default="observed")
+  source = Column(String(32), nullable=False, default="runner")
+  source_event_id = Column(String(160), nullable=True)
+
+
+class AgentLifecycleRunUpdate(Base):
+  """Append-only cursor stream of root ChatRun snapshots for Workflows.
+
+  A helper event cursor cannot reveal a later root-run status change, while
+  returning every historical run on each poll is unbounded. This companion
+  stream gives those changes their own never-reused incremental cursor. Its
+  run id is deliberately not an FK: a final ``deleted`` tombstone must outlive
+  rollback of a speculative ChatRun so consumers can remove the prior snapshot.
+  """
+
+  __tablename__ = "agent_lifecycle_run_updates"
+  __table_args__ = {"sqlite_autoincrement": True}
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  chat_run_id = Column(
+    String(64), nullable=False, index=True
+  )
+  provider = Column(String(32), nullable=True)
+  status = Column(String(16), nullable=False)
+  started_at = Column(DateTime, nullable=True)
+  ended_at = Column(DateTime, nullable=True)
+  observed_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+def _append_agent_lifecycle_run_update(_mapper, connection, run) -> None:
+  """Record every inserted/updated ChatRun snapshot in the same transaction."""
+  connection.execute(AgentLifecycleRunUpdate.__table__.insert().values(
+    chat_id=run.chat_id,
+    chat_run_id=run.id,
+    provider=run.provider,
+    status=run.status,
+    started_at=run.started_at,
+    ended_at=run.ended_at,
+    observed_at=now_naive_utc(),
+  ))
+
+
+def _append_agent_lifecycle_run_tombstone(_mapper, connection, run) -> None:
+  """Keep cursor consumers honest when a speculative ChatRun is rolled back."""
+  connection.execute(AgentLifecycleRunUpdate.__table__.insert().values(
+    chat_id=run.chat_id,
+    chat_run_id=run.id,
+    provider=run.provider,
+    status="deleted",
+    started_at=run.started_at,
+    ended_at=run.ended_at or now_naive_utc(),
+    observed_at=now_naive_utc(),
+  ))
+
+
+event.listen(ChatRun, "after_insert", _append_agent_lifecycle_run_update)
+event.listen(ChatRun, "after_update", _append_agent_lifecycle_run_update)
+event.listen(ChatRun, "before_delete", _append_agent_lifecycle_run_tombstone)
 
 
 class ChatEmbedGrant(Base):

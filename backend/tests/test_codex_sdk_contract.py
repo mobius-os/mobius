@@ -173,6 +173,42 @@ def test_subagent_activity_is_natively_modeled_and_fallback_removed():
   assert not hasattr(codex_sdk_runner, "_is_subagent_activity_resume_validation_error")
 
 
+def test_lifecycle_notification_fields_and_status_enums_are_pinned():
+  """Fail loudly if the generated lifecycle surface drifts under the runner."""
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+
+  assert set(v2_all.ItemStartedNotification.model_fields) >= {
+    "item", "started_at_ms", "thread_id", "turn_id",
+  }
+  assert (v2_all.ItemStartedNotification.model_fields["started_at_ms"].alias
+          == "startedAtMs")
+  assert set(v2_all.ItemCompletedNotification.model_fields) >= {
+    "item", "completed_at_ms", "thread_id", "turn_id",
+  }
+  assert (v2_all.ItemCompletedNotification.model_fields["completed_at_ms"].alias
+          == "completedAtMs")
+  assert set(v2_all.ThreadStartedNotification.model_fields) == {"thread"}
+  assert set(v2_all.ThreadStatusChangedNotification.model_fields) == {
+    "status", "thread_id",
+  }
+  assert set(v2_all.CollabAgentToolCallThreadItem.model_fields) >= {
+    "id", "tool", "sender_thread_id", "receiver_thread_ids", "agents_states",
+  }
+  collab_schema = json.dumps(v2_all.CollabAgentState.model_json_schema())
+  for status in ("completed", "errored", "interrupted", "shutdown"):
+    assert status in collab_schema
+  thread_schema = json.dumps(v2_all.ThreadStatus.model_json_schema())
+  for status in ("active", "idle", "systemError", "notLoaded"):
+    assert status in thread_schema
+  assert {item.value for item in v2_all.CollabAgentTool} >= {
+    "spawnAgent", "sendInput", "resumeAgent",
+  }
+  assert {item.value for item in v2_all.SubAgentActivityKind} >= {
+    "started", "interacted", "interrupted",
+  }
+
+
 def test_reasoning_effort_enum_tolerates_unknown_efforts():
   """Lock in the forgiving ReasoningEffort enum that unblocked models()/resume.
 
