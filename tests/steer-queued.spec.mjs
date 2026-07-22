@@ -198,6 +198,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
   test('Ctrl+Enter queues durably, then automatically steers only the composed message', async ({ page }) => {
     const STEER_TEXT = 'change course immediately'
     const messagePosts = []
+    let releaseQueueAck
+    const queueAckGate = new Promise(resolve => { releaseQueueAck = resolve })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       let body = {}
@@ -227,6 +229,9 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           }),
         })
       }
+      // Hold the durable queue acknowledgement open so a repeated shortcut
+      // exercises the synchronous submit guard, before steerBusy can flip.
+      await queueAckGate
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
@@ -251,6 +256,15 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill(STEER_TEXT)
     await page.keyboard.press('Control+Enter')
+    await expect.poll(() => messagePosts.filter(body => (
+      !body.force_steer && body.content === STEER_TEXT
+    )).length).toBe(1)
+    await page.keyboard.press('Control+Enter')
+    await page.waitForTimeout(100)
+    expect(messagePosts.filter(body => (
+      !body.force_steer && body.content === STEER_TEXT
+    ))).toHaveLength(1)
+    releaseQueueAck()
 
     await expect.poll(
       () => messagePosts.filter(body => body.force_steer).length,

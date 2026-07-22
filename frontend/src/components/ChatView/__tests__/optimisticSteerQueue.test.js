@@ -76,14 +76,31 @@ test('a steer request disables sibling row actions until it settles', () => {
 })
 
 test('the modified-Enter submit waits for durability, then reuses per-row steer', () => {
-  assert.match(
-    source,
-    /pendingQueue\.confirmQueued\(cid,[\s\S]*?else if \(opts\.steerAfterQueue\) \{[\s\S]*?await handleSteerOne\(cid\)/,
-    'the composed message must be server-confirmed before the existing row steer consumes it',
+  const refDeclaration = source.indexOf('const handleSteerOneRef = useRef(null)')
+  const doSendDeclaration = source.indexOf('const doSend = useCallback')
+  assert.ok(
+    refDeclaration >= 0 && refDeclaration < doSendDeclaration,
+    'the stable doSend callback must reach the current steer implementation through a ref',
   )
   assert.match(
     source,
-    /function handleSubmitSteer\(e\) \{[\s\S]*?doSend\(input\.trim\(\), \{ steerAfterQueue: true \}\)/,
-    'the keyboard handler should opt into the queue-to-steer path without changing ordinary sends',
+    /pendingQueue\.confirmQueued\(cid,[\s\S]*?else if \(opts\.steerAfterQueue\) \{[\s\S]*?await handleSteerOneRef\.current\?\.\(cid\)/,
+    'the composed message must be server-confirmed before the existing row steer consumes it',
+  )
+  assert.doesNotMatch(
+    source,
+    /else if \(opts\.steerAfterQueue\) \{[\s\S]*?await handleSteerOne\(cid\)/,
+    'doSend must not capture a render-local steer function across the queue request',
+  )
+  const steerOneDeclaration = source.indexOf('async function handleSteerOne(cid)')
+  const currentAssignment = source.indexOf('handleSteerOneRef.current = handleSteerOne')
+  assert.ok(
+    steerOneDeclaration >= 0 && currentAssignment > steerOneDeclaration,
+    'each render must publish the current per-row steer implementation',
+  )
+  assert.match(
+    source,
+    /function handleSubmitSteer\(e\) \{[\s\S]*?if \(submitSteerInFlightRef\.current\) return[\s\S]*?submitSteerInFlightRef\.current = true[\s\S]*?doSend\(input\.trim\(\), \{ steerAfterQueue: true \}\)[\s\S]*?\.finally\(\(\) => \{ submitSteerInFlightRef\.current = false \}\)/,
+    'the keyboard handler must synchronously guard the full queue-to-steer operation',
   )
 })

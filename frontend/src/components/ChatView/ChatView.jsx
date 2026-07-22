@@ -1945,6 +1945,15 @@ export default function ChatView({
   //     they just stopped) → original turn 1 user msg + partial get
   //     pushed above the viewport. Keep their current scroll mode
   //     instead — the new turn streams into view from where they were.
+  // Modified-Enter spans two requests (durable queue acknowledgement, then
+  // force-steer). Claim that whole operation synchronously so repeated
+  // keydowns cannot submit a second message before the steer busy state flips.
+  const submitSteerInFlightRef = useRef(false)
+  // doSend is intentionally stable and therefore must not capture the
+  // render-local steer implementation. Dereference the current function only
+  // after the queue POST settles, when a newer render may have replaced it.
+  const handleSteerOneRef = useRef(null)
+
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return
     const pin = opts.pin !== false  // default true
@@ -2159,7 +2168,7 @@ export default function ChatView({
             // as the visible per-row arrow. The queue acknowledgement gives
             // the new row a canonical ts before steering, so a failed or
             // racing steer naturally leaves the message safely queued.
-            await handleSteerOne(cid)
+            await handleSteerOneRef.current?.(cid)
           }
         }
         // Mid-turn steer: the backend delivered the send into the live
@@ -2614,7 +2623,10 @@ export default function ChatView({
   function handleSubmitSteer(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
-    doSend(input.trim(), { steerAfterQueue: true })
+    if (submitSteerInFlightRef.current) return
+    submitSteerInFlightRef.current = true
+    void doSend(input.trim(), { steerAfterQueue: true })
+      .finally(() => { submitSteerInFlightRef.current = false })
   }
 
   // Cancel one queued message via DELETE. Keep reconciliation scoped to that
@@ -3115,6 +3127,7 @@ export default function ChatView({
       setSteerBusy(false)
     }
   }
+  handleSteerOneRef.current = handleSteerOne
 
   // Re-anchor the scroll mode when the tab returns to the foreground
   // (visibilitychange/pageshow/online) while a turn is active, so a
