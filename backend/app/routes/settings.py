@@ -373,14 +373,11 @@ def get_model_prefs(
 ) -> dict:
   """Returns the owner's model-picker preferences.
 
-  Default shape is `{"hidden_ids": []}` — absent prefs and empty
-  prefs are equivalent (the picker shows every registry entry).
+  Owners without a saved preference receive the curated default hidden set.
+  An explicitly saved `{"hidden_ids": []}` is distinct and shows every
+  registry entry.
   """
-  prefs = owner.model_prefs_json or {}
-  hidden = prefs.get("hidden_ids") or []
-  # Defensive normalize: any persisted non-string falls out here so
-  # the client never sees a malformed entry.
-  return {"hidden_ids": [s for s in hidden if isinstance(s, str)]}
+  return {"hidden_ids": providers.hidden_model_ids(owner.model_prefs_json)}
 
 
 @owner_router.patch("/model-prefs", dependencies=[Depends(reject_cross_site)])

@@ -53,6 +53,8 @@ _model_registry_log = logging.getLogger(f"{__name__}.models")
 # source of truth for newly released IDs.
 KNOWN_MODELS = {
   "claude": [
+    "claude-fable-5",
+    "claude-sonnet-5",
     # Anthropic switched to dateless pinned IDs starting with 4.6;
     # the dated entries below stay listed because existing chats
     # persist them in agent_settings_json and the API still resolves
@@ -84,6 +86,8 @@ KNOWN_MODELS = {
 # Codex's models() returns slugs only), so labels come from this map
 # when present and fall back to the raw ID for newly released models.
 MODEL_LABELS: dict[str, str] = {
+  "claude-fable-5": "Fable 5",
+  "claude-sonnet-5": "Sonnet 5",
   "claude-opus-4-8": "Opus 4.8",
   "claude-opus-4-7": "Opus 4.7",
   "claude-opus-4-6": "Opus 4.6",
@@ -107,8 +111,42 @@ MODEL_LABELS: dict[str, str] = {
 # registry carries it to every shell/app picker as data.
 MODEL_EFFORT_LEVELS: dict[str, list[str]] = {}
 
+# Runtime recovery defaults are intentionally independent of picker order.
+# Fable is presented first in the interactive picker, but a stale/mismatched
+# saved value must not silently opt an unattended retry into usage credits.
 DEFAULT_MODELS = {
-  provider: models[0] for provider, models in KNOWN_MODELS.items()
+  "claude": "claude-opus-4-8",
+  "codex": "gpt-5.6-sol",
+}
+
+# Curated first-run model visibility. The registry remains broader so an
+# existing chat can keep rendering an older saved model and the owner can
+# reveal any hidden row from Settings. An explicit owner preference (including
+# an explicit empty hidden list) always wins over this starter set.
+DEFAULT_VISIBLE_MODEL_ORDER: dict[str, tuple[str, ...]] = {
+  "claude": (
+    "claude-fable-5",
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+  ),
+  "codex": (
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+  ),
+}
+DEFAULT_VISIBLE_MODELS: dict[str, frozenset[str]] = {
+  provider_id: frozenset(models)
+  for provider_id, models in DEFAULT_VISIBLE_MODEL_ORDER.items()
+}
+
+# Unattended work gets deliberately conservative provider-specific defaults,
+# independent of the first model shown in the interactive chat picker.
+DEFAULT_BACKGROUND_MODELS = {
+  "claude": "claude-opus-4-8",
+  "codex": "gpt-5.6-terra",
 }
 
 # Initial effort when no global default exists. Aligns with the
@@ -171,6 +209,23 @@ def _load_agent_settings(data_dir: str) -> dict:
       except (json.JSONDecodeError, OSError):
         pass
     return {}
+
+
+def hidden_model_ids(model_prefs: Any) -> list[str]:
+  """Resolve model-picker visibility for an owner.
+
+  Missing preferences use the curated starter set above. Once the owner saves
+  Manage models, even ``{"hidden_ids": []}`` is explicit and means show all.
+  """
+  if isinstance(model_prefs, dict) and "hidden_ids" in model_prefs:
+    raw = model_prefs.get("hidden_ids")
+    return [entry for entry in (raw or []) if isinstance(entry, str)]
+  return [
+    model_id
+    for provider_id, models in KNOWN_MODELS.items()
+    for model_id in models
+    if model_id not in DEFAULT_VISIBLE_MODELS.get(provider_id, frozenset())
+  ]
 
 
 def skills_enabled(data_dir: str) -> bool:
@@ -304,7 +359,7 @@ def _background_default_choice(
 ) -> dict:
   return {
     "provider": provider,
-    "model": model,
+    "model": model if model is not None else DEFAULT_BACKGROUND_MODELS.get(provider),
     "effort": DEFAULT_EFFORT,
     "enabled": enabled,
   }
@@ -328,14 +383,14 @@ def _clean_background_choice(
   if isinstance(raw_model, str) and raw_model.strip():
     model = raw_model.strip()
     if _model_belongs_to_other_provider(model, provider):
-      model = DEFAULT_MODELS.get(provider)
+      model = DEFAULT_BACKGROUND_MODELS.get(provider)
   elif "model" in raw:
     # Explicit null/empty means "let this provider use its native default".
     model = None
   else:
     # Legacy provider-only choices predate nullable model defaults; keep them
     # concrete so background runners do not inherit the chat model by accident.
-    model = DEFAULT_MODELS.get(provider)
+    model = DEFAULT_BACKGROUND_MODELS.get(provider)
   out["model"] = model
   effort = raw.get("effort")
   out["effort"] = effort.strip() if isinstance(effort, str) and effort.strip() else None
@@ -369,14 +424,6 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
   file_layer = _load_agent_settings(data_dir)
   raw = file_layer.get("background_agents")
   bg = raw if isinstance(raw, dict) else {}
-  # When the owner has already picked a chat model, synthesize a concrete
-  # provider-native background model rather than inheriting that chat default.
-  # With no manual model choice at all, keep the background model nullable so
-  # the provider SDK can use its own default until the owner saves a row.
-  synthetic_default_model = (
-    DEFAULT_MODELS.get(provider) if "model" in file_layer else None
-  )
-
   rows: list[dict[str, Any]] = []
   seen: set[str] = set()
 
@@ -410,7 +457,6 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
       primary = _background_default_choice(
         provider,
         enabled=True,
-        model=synthetic_default_model,
       )
     add_row(primary, enabled_default=True)
     add_row(_clean_background_choice(bg.get("fallback")), enabled_default=True)
@@ -420,7 +466,6 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
       _background_default_choice(
         provider,
         enabled=True,
-        model=synthetic_default_model,
       ),
       enabled_default=True,
     )
@@ -431,7 +476,7 @@ def background_agent_settings(data_dir: str, default_provider: str | None = None
         _background_default_choice(
           provider_id,
           enabled=False,
-          model=DEFAULT_MODELS.get(provider_id),
+          model=DEFAULT_BACKGROUND_MODELS.get(provider_id),
         )
       )
 
@@ -835,6 +880,13 @@ def _live_model_entries(
   succeeds, the provider SDK/CLI is the source of truth; labels are a
   cosmetic map with raw-ID fallback.
   """
+  # The curated compatibility aliases are an owner-chosen product surface, not
+  # a mirror of one catalog response. Keep them available even when a provider
+  # temporarily omits an older-but-still-supported alias (Sonnet 4.6 / GPT-5.5)
+  # from discovery, then append every genuinely live extra in provider order.
+  preferred = DEFAULT_VISIBLE_MODEL_ORDER.get(provider_id, ())
+  ordered_ids = list(preferred)
+  ordered_ids.extend(model_id for model_id in live_ids if model_id not in preferred)
   return [
     {
       "id": mid,
@@ -844,7 +896,7 @@ def _live_model_entries(
       **({"effort_levels": MODEL_EFFORT_LEVELS[mid]}
          if mid in MODEL_EFFORT_LEVELS else {}),
     }
-    for mid in live_ids
+    for mid in ordered_ids
   ]
 
 

@@ -48,6 +48,8 @@ def test_known_models_fallback_lists_current_claude_and_codex():
   # asserting them by name catches a wrong date suffix that a startswith
   # check would miss.
   for model_id in (
+    "claude-fable-5",
+    "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
@@ -58,7 +60,13 @@ def test_known_models_fallback_lists_current_claude_and_codex():
     "claude-haiku-4-5-20251001",
   ):
     assert model_id in claude, f"{model_id} missing from KNOWN_MODELS[claude]"
-  assert claude[0] == "claude-opus-4-8", "Opus 4.8 must be the default"
+  assert claude[:4] == [
+    "claude-fable-5",
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+  ]
+  assert providers.DEFAULT_MODELS["claude"] == "claude-opus-4-8"
   # Current Codex family — each canonical id present by name.
   for model_id in (
     "gpt-5.6-sol",
@@ -98,6 +106,24 @@ def test_recovery_models_match_platform_fallback_registry():
     for provider in chat_runner.SUPPORTED_PROVIDERS
   }
   assert chat_runner.RECOVERY_MODELS == expected
+
+
+def test_default_model_visibility_is_curated_until_owner_saves_preferences():
+  hidden = set(providers.hidden_model_ids(None))
+  for model_id in (
+    "claude-fable-5",
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+  ):
+    assert model_id not in hidden
+  assert "claude-opus-4-7" in hidden
+  assert "gpt-5.4" in hidden
+  assert providers.hidden_model_ids({"hidden_ids": []}) == []
 
 
 def test_fallback_models_shape_matches_registry_entries():

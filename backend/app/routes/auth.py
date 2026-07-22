@@ -622,11 +622,8 @@ async def providers_models(
   from app.providers import list_models
   data_dir = get_settings().data_dir
   registry = await list_models(data_dir)
-  prefs = owner.model_prefs_json or {}
-  hidden_ids = {
-    entry for entry in (prefs.get("hidden_ids") or [])
-    if isinstance(entry, str)
-  }
+  from app.providers import hidden_model_ids
+  hidden_ids = set(hidden_model_ids(owner.model_prefs_json))
   out: dict[str, list[dict[str, str]]] = {}
   for provider_id, entries in registry.items():
     rows: list[dict[str, str]] = []
