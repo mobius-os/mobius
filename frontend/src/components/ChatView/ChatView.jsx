@@ -8,6 +8,7 @@ import {
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
+import mobiusLogoUrl from '../../assets/moebius.png'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
@@ -3654,7 +3655,7 @@ export default function ChatView({
             )
           ) : (
             <div className="chat__empty">
-              <img className="chat__empty-glyph" src={`${BASE}/moebius.png`} alt="" width="120" height="120" />
+              <img className="chat__empty-glyph" src={mobiusLogoUrl} alt="" width="120" height="120" />
               <p className="chat__empty-title">What's on your mind?</p>
               <div className="chat__empty-prompts">
                 {EMPTY_PROMPTS.map(prompt => (
