@@ -81,7 +81,7 @@ import {
   saveFailedSendAttempt,
   sendAttemptIsDurable,
 } from './sendAttemptRecovery.js'
-import { persistComposerDraft } from './composerDraft.js'
+import { persistComposerDraft, readComposerDraft } from './composerDraft.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
@@ -192,8 +192,8 @@ function readInitialComposer(chatId) {
     const failedAttempt = loadFailedSendAttempt(chatId)
     const pending = sessionStorage.getItem(PENDING_DRAFT_KEY)
     if (pending && failedAttempt) clearFailedSendAttempt(chatId)
-    const saved = sessionStorage.getItem(`draft:${chatId}`) || ''
-    const input = pending || failedAttempt?.text || saved
+    const saved = readComposerDraft(chatId)
+    const input = pending || failedAttempt?.text || saved.input
     const autoSendDraft =
       sessionStorage.getItem(PENDING_DRAFT_AUTOSEND_KEY) ||
       sessionStorage.getItem(`${DRAFT_AUTOSEND_PREFIX}${chatId}`)
@@ -201,7 +201,9 @@ function readInitialComposer(chatId) {
       input,
       autoSend: !!input && autoSendDraft === input,
       failedAttempt: pending ? null : failedAttempt,
-      attachments: pending ? [] : (failedAttempt?.attachments || []),
+      attachments: pending
+        ? []
+        : (failedAttempt?.attachments || saved.attachments),
     }
   } catch {
     return { input: '', autoSend: false, failedAttempt: null, attachments: [] }
@@ -354,12 +356,16 @@ export default function ChatView({
   if (!initialComposerRef.current) {
     initialComposerRef.current = readInitialComposer(chatId)
   }
+  const draftAttachmentsRef = useRef(initialComposerRef.current.attachments)
   const [input, setInputState] = useState(() => initialComposerRef.current.input)
+  const inputValueRef = useRef(input)
+  inputValueRef.current = input
   function setComposerInput(nextInput) {
     // Navigation can unmount this component before React flushes passive
     // effects. Keep every composer transition durable at the state boundary,
     // whether it came from typing, voice, restoration, or send cleanup.
-    persistComposerDraft(chatId, nextInput)
+    inputValueRef.current = nextInput
+    persistComposerDraft(chatId, nextInput, draftAttachmentsRef.current)
     setInputState(nextInput)
   }
   const [sendFailure, setSendFailure] = useState(() => (
@@ -1404,6 +1410,10 @@ export default function ChatView({
   } = useFileUpload({
     chatId,
     initialFiles: initialComposerRef.current.attachments,
+    onFilesChange: nextFiles => {
+      draftAttachmentsRef.current = nextFiles
+      persistComposerDraft(chatId, inputValueRef.current, nextFiles)
+    },
   })
 
   function clearFailedAttempt() {
@@ -1589,7 +1599,7 @@ export default function ChatView({
   // voice transcription, send cleanup). Direct owner edits are saved
   // synchronously in handleComposerInputChange above.
   useEffect(() => {
-    persistComposerDraft(chatId, input)
+    persistComposerDraft(chatId, input, draftAttachmentsRef.current)
   }, [input, chatId])
 
   // Auto-size textarea when a draft is restored. Cap matches the
@@ -3281,12 +3291,10 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  const onDisplayReadyRef = useRef(onDisplayReady)
-  onDisplayReadyRef.current = onDisplayReady
   const displayReady = revealed || showEmpty || showLoadError
   useLayoutEffect(() => {
-    if (displayReady) onDisplayReadyRef.current?.(chatId)
-  }, [chatId, displayReady])
+    if (displayReady) onDisplayReady?.(chatId)
+  }, [chatId, displayReady, onDisplayReady])
   const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
   // The captured bridge partial enters the active row before catch-up emits a
   // single item. That is the load-bearing part of Lever 1: when SSE becomes the
@@ -3960,6 +3968,7 @@ export default function ChatView({
           </>
         )}
         <ChatInputBar
+          chatId={chatId}
           input={input}
           onInputChange={handleComposerInputChange}
           onSubmit={handleSubmit}

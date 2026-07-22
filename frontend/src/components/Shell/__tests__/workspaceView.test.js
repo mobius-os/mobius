@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import * as paneModel from '../paneModel.js'
 import * as tabModel from '../tabModel.js'
 import {
-  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, transitionSignature, MODE_MOTION,
+  deriveContentVisibility, deriveExitPlan, deriveEnterPlan, projectFocusedPane,
+  transitionSignature, MODE_MOTION,
   EMPTY_SINGLE_SURFACE_KEY,
 } from '../workspaceView.js'
 
@@ -51,6 +52,31 @@ test('multi-pane, no overlay: chrome on, no full-bleed, both actives visible', (
   assert.equal(v.fullBleedKey, null)
   assert.deepEqual([...v.visibleAppIds], ['42'])
   assert.equal(v.chatPanesVisible, true)
+})
+
+test('focused pane view is a reversible presentation projection, not a tree rewrite', () => {
+  const ws = twoPaneChatAndApp()
+  const base = project(ws)
+  const focused = projectFocusedPane(base, ws, ws.focusedPaneId, CONTENT)
+  assert.deepEqual(focused.visibleLeaves, [ws.focusedPaneId])
+  assert.deepEqual(focused.rects[ws.focusedPaneId], CONTENT)
+  assert.deepEqual(focused.dividers, [])
+  assert.equal(Object.keys(ws.panes).length, 2, 'the durable pane tree is untouched')
+
+  const v = deriveContentVisibility({
+    workspace: ws, projection: focused,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    viewMode: 'panes', focusedPaneView: true,
+  })
+  assert.equal(v.chromeActive, true, 'the selected pane keeps its own tab strip')
+  assert.equal(v.fullBleedKey, null, 'content stays below that strip instead of covering it')
+  assert.deepEqual([...v.visibleAppIds], ['42'], 'hidden sibling panes stop painting')
+})
+
+test('focused pane projection falls back safely after its pane disappears', () => {
+  const ws = twoPaneChatAndApp()
+  const base = project(ws)
+  assert.equal(projectFocusedPane(base, ws, 'missing-pane', CONTENT), base)
 })
 
 test('multi-pane immersive solos the holder over the whole workspace', () => {

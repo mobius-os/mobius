@@ -15,9 +15,11 @@ Two gaps this guards:
   fetch still offers today's models, not a stale snapshot.
 """
 
+import importlib.util
 import json
 import stat
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -69,6 +71,33 @@ def test_known_models_fallback_lists_current_claude_and_codex():
   ):
     assert model_id in codex, f"{model_id} missing from KNOWN_MODELS[codex]"
   assert codex[0] == "gpt-5.6-sol", "gpt-5.6-sol must be the Codex default"
+
+
+def test_recovery_models_match_platform_fallback_registry():
+  """The isolated Recovery literals must not silently lag Settings.
+
+  Recovery cannot import app.providers at runtime because that dependency
+  boundary is the feature. This platform-side test can compare both registries
+  and force a fallback-model change to update the frozen snapshot in the same
+  reviewed commit.
+  """
+  recovery_path = (
+    Path(__file__).resolve().parents[1]
+    / "recovery"
+    / "recovery_chat_runner.py"
+  )
+  spec = importlib.util.spec_from_file_location(
+    "recovery_model_snapshot_for_test",
+    recovery_path,
+  )
+  assert spec is not None and spec.loader is not None
+  chat_runner = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(chat_runner)
+  expected = {
+    provider: tuple(providers.KNOWN_MODELS[provider])
+    for provider in chat_runner.SUPPORTED_PROVIDERS
+  }
+  assert chat_runner.RECOVERY_MODELS == expected
 
 
 def test_fallback_models_shape_matches_registry_entries():

@@ -223,6 +223,13 @@ async function rememberedChatRootIsCurrent(page) {
   })
 }
 
+async function rememberedChatWrapperIsInert(page) {
+  return page.evaluate(() => {
+    const wrapper = window.__workspacePaneChatRoot?.closest('.shell__chat-view')
+    return wrapper ? wrapper.hasAttribute('inert') : null
+  })
+}
+
 /** Read scroll geometry through the remembered root. This keeps working after
  *  its pane wrapper moves or the layout collapses. */
 async function rememberedChatScroll(page) {
@@ -350,6 +357,132 @@ test.describe('Workspace panes (PR2 gate)', () => {
     const afterMove = await rememberedChatScroll(page)
     expect(afterMove, 'chat A scroller present after move').not.toBeNull()
     expect(afterMove.nearBottom, 'still following after cross-pane move').toBe(true)
+    await expect(page.locator('.shell__chat-view--held')).toHaveCount(0, { timeout: 3000 })
+    expect(await rememberedChatWrapperIsInert(page),
+      'the retained one-pane wrapper is interactive after handoff').toBe(false)
+  })
+
+  test('pane focus is reversible, preserves sibling mounts, and exits to an interactive standard chat', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'focusPaneA')
+    const b = await createTaggedChat(page, 'focusPaneB')
+    await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id))
+    await replaceStreamRoute(page, FOLLOW_STREAM)
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+    await sendInPane(page, b.id, 'A long transcript remains scrollable after focused-pane exit')
+
+    const baseline = await readWs(page)
+    expect(await rememberChatRoot(page, a.id), 'sibling chat root is present').toBe(true)
+    await expect(page.getByRole('button', { name: 'Focus pane' })).toHaveCount(2)
+
+    await page.locator('[data-pane-strip="p1"]')
+      .getByRole('button', { name: 'Focus pane' }).click()
+    await expect(page.locator('[data-pane-strip]')).toHaveCount(1)
+    await expect(page.locator('[data-pane-strip="p1"]')).toBeVisible()
+    await expect(page.locator('.workspace__divider')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Show all panes' })).toHaveCount(1)
+    expect(await rememberedChatRootIsCurrent(page),
+      'the hidden sibling stays mounted while one pane is focused').toBe(true)
+
+    const focused = await readWs(page)
+    expect(focused.layout, 'focus does not rewrite the split tree').toEqual(baseline.layout)
+    expect(focused.panes, 'focus does not rewrite tabs or ratios').toEqual(baseline.panes)
+    expect(focused.focusedPaneId).toBe('p1')
+
+    const contentBox = await page.locator('.shell__content').boundingBox()
+    const focusedBox = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
+    expect(Math.abs(focusedBox.x - contentBox.x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(focusedBox.width - contentBox.width)).toBeLessThanOrEqual(1)
+    expect(focusedBox.y).toBeGreaterThan(contentBox.y)
+
+    await page.getByRole('button', { name: 'Show all panes' }).click()
+    await waitTiled(page)
+    expect(await readWs(page), 'show-all restores presentation without another workspace write')
+      .toEqual(focused)
+    expect(await rememberedChatRootIsCurrent(page), 'the sibling root survives the round-trip').toBe(true)
+
+    // Exit while focused: this is the reported trap path. The selected chat must
+    // land as the one ordinary, scrollable surface with no stale inert cover, and
+    // a subsequent drawer selection must still replace it.
+    await page.locator('[data-pane-strip="p1"]')
+      .getByRole('button', { name: 'Focus pane' }).click()
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('single')
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0, { timeout: 3000 })
+    await expect(page.locator('.shell__chat-view--held')).toHaveCount(0)
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
+    await expect(page.locator('.shell__chat-view.shell__view--active')).not.toHaveAttribute('inert', '')
+    await expect(page.locator('.shell__chat-view.shell__view--active .chat__scroll')).toBeVisible()
+
+    await ensureNavigationOpen(page)
+    await page.locator('.drawer__item').filter({ hasText: a.title }).click()
+    await expect.poll(async () => String((await readWs(page)).singleScreen?.id), {
+      timeout: 3000, message: 'standard mode remains navigable after focused-pane exit',
+    }).toBe(String(a.id))
+    await expect(page.locator('.shell__chat-view--held')).toHaveCount(0, { timeout: 3000 })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).not.toHaveAttribute('inert', '')
+  })
+
+  test('drawer activation focuses an already-open pane and reveals its clipped active tab', async ({ page }) => {
+    await boot(page, PHONE)
+    const a = await createTaggedChat(page, 'revealPaneA')
+    const b = await createTaggedChat(page, 'revealPaneB')
+    const c = await createTaggedChat(page, 'revealPaneC')
+    const d = await createTaggedChat(page, 'revealPaneD')
+    const e = await createTaggedChat(page, 'revealPaneE')
+    await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id, c.id, d.id, e.id])
+
+    let ws = paneModel.seedFromFlatTabs([
+      { kind: 'chat', id: a.id }, { kind: 'chat', id: b.id },
+      { kind: 'chat', id: c.id }, { kind: 'chat', id: d.id },
+      { kind: 'chat', id: e.id },
+    ])
+    ws = paneModel.moveTab(ws, `chat:${b.id}`, { root: true, edge: 'right' })
+    for (const chat of [c, d, e]) {
+      ws = paneModel.moveTab(ws, `chat:${chat.id}`, { paneId: 'p1' })
+    }
+    ws = paneModel.setActiveTab(ws, 'p1', `chat:${b.id}`)
+    ws = paneModel.focusPane(ws, 'p0')
+    await seedWorkspace(page, ws)
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('[data-pane-strip="p1"]')).toBeVisible({ timeout: 8000 })
+
+    const strip = page.locator('[data-pane-strip="p1"]')
+    const target = strip.locator(`[data-drag-key="chat:${b.id}"]`)
+    await expect.poll(() => strip.evaluate(el => el.scrollWidth > el.clientWidth), {
+      timeout: 3000, message: 'the destination pane strip overflows',
+    }).toBe(true)
+    await strip.evaluate(el => { el.scrollLeft = el.scrollWidth })
+    const clipped = await target.boundingBox()
+    const stripBefore = await strip.boundingBox()
+    expect(clipped.x + clipped.width).toBeLessThanOrEqual(stripBefore.x + 2)
+
+    await ensureNavigationOpen(page)
+    await page.locator('.drawer__item').filter({ hasText: b.title }).click()
+    await expect.poll(async () => (await readWs(page)).focusedPaneId, {
+      timeout: 3000, message: 'the existing tab owner becomes the focused pane',
+    }).toBe('p1')
+    await expect(target).toHaveAttribute('aria-selected', 'true')
+    const revealed = await target.boundingBox()
+    const stripAfter = await strip.boundingBox()
+    expect(revealed.x).toBeGreaterThanOrEqual(stripAfter.x - 1)
+    expect(revealed.x + revealed.width).toBeLessThanOrEqual(stripAfter.x + stripAfter.width + 1)
+
+    // Repeating the current route remains history-free, but still re-reveals the
+    // tab after the user has scrolled the strip away from it.
+    await strip.evaluate(el => { el.scrollLeft = el.scrollWidth })
+    await ensureNavigationOpen(page)
+    await page.locator('.drawer__item').filter({ hasText: b.title }).click()
+    const rerevealed = await target.boundingBox()
+    const stripFinal = await strip.boundingBox()
+    expect(rerevealed.x).toBeGreaterThanOrEqual(stripFinal.x - 1)
+    expect(rerevealed.x + rerevealed.width).toBeLessThanOrEqual(stripFinal.x + stripFinal.width + 1)
   })
 
   test('(c) an app iframe survives a cross-pane move with no second frame-init', async ({ page }) => {

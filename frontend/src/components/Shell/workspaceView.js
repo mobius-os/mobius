@@ -24,6 +24,26 @@ import * as tabModel from './tabModel.js'
 // still reports {view:'chat', chatId:null}; only the render surface changes.
 export const EMPTY_SINGLE_SURFACE_KEY = 'home:new-chat'
 
+// Focus one builder pane without changing the durable split tree. This is a
+// presentation projection only: the selected leaf receives the full content box,
+// while its tab strip still reserves STRIP_H inside that box. Returning the base
+// projection for an invalid id makes pane deletion/collapse self-healing.
+export function projectFocusedPane(baseProjection, workspace, paneId, contentRect) {
+  if (!paneId || !workspace?.panes?.[paneId]) return baseProjection
+  return {
+    visibleLeaves: [paneId],
+    rects: {
+      [paneId]: {
+        x: Number.isFinite(contentRect?.x) ? contentRect.x : 0,
+        y: Number.isFinite(contentRect?.y) ? contentRect.y : 0,
+        w: Math.max(0, Number(contentRect?.w) || 0),
+        h: Math.max(0, Number(contentRect?.h) || 0),
+      },
+    },
+    dividers: [],
+  }
+}
+
 // ── Mode-transition motion (exit-presentation v2) ────────────────────────────
 // The presentation module owns the timing + the pure plan builders; the state
 // machine (modeMachine.js) treats a plan as OPAQUE data. A beat is described by a
@@ -358,7 +378,7 @@ export function deriveEnterPlan(input) {
 // control silently inert whenever the owner happens to be in Builder mode.
 export function deriveContentVisibility({
   workspace, projection, settingsOverlayOpen, immersiveActive, immersiveAppId,
-  viewMode = 'panes', exitUnderlayKey = null,
+  viewMode = 'panes', exitUnderlayKey = null, focusedPaneView = false,
 }) {
   const multiPane = projection.visibleLeaves.length >= 2
   const builder = viewMode !== 'single'
@@ -396,14 +416,17 @@ export function deriveContentVisibility({
     ? null
     : (immersive ? `app:${immersiveAppId}` : (single ? slotKey : focusedPaneKey))
   // Pane chrome (strips + dividers) whenever the box is TILED: ≥2 visible leaves
-  // and no takeover. An ordinary builder render follows `multiPane`; single mode
-  // or an immersive lease paints one surface over the whole box.
-  const chromeActive = multiPane && !settingsOverlay && !immersive && !single
+  // and no takeover. A focused builder projection retains its single pane's strip;
+  // single mode or an immersive lease paints one surface over the whole box.
+  const chromeActive = (multiPane || (builder && focusedPaneView))
+    && !settingsOverlay && !immersive && !single
   // The single wrapper painted full-bleed. Null ONLY in the tiled multi-pane render;
   // the New Chat landing key for an empty single slot; the focused/holder key
   // otherwise. Distinct from focusedActiveKey (which stays null for the empty slot)
   // so the render paints the landing while nav/AppCanvas see no active tab.
-  const fullBleedKey = emptySingleSlot
+  const fullBleedKey = focusedPaneView && builder
+    ? null
+    : emptySingleSlot
     ? EMPTY_SINGLE_SURFACE_KEY
     : ((multiPane && !immersive && !single) ? null : focusedActiveKey)
   // The app ids that PAINT and stay interactive/frame-visible. A single-mode

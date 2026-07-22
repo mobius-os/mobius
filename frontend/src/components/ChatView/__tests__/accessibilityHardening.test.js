@@ -48,6 +48,15 @@ test('chat image preview actions use labeled buttons', () => {
   assert.match(markdown, /<button[\s\S]*className="md-image-frame"[\s\S]*aria-label=\{`Open \$\{alt \|\| 'image'\} preview`\}/)
 })
 
+test('a restored image with no media token stops spinning and exposes its failure', () => {
+  const composer = read('../ChatInputBar.jsx')
+  assert.match(composer, /setTokenState\(\{ chatId, param, failed: !param \}\)/)
+  assert.match(composer, /className="chat__attach-card-preview-error" role="status"/)
+  assert.match(composer, /Preview unavailable/)
+  assert.match(composer, /aria-label=\{`Remove \$\{chip\.name\}`\}/,
+    'the failed preview must retain an explicit removal affordance')
+})
+
 test('QuestionCard gives the conditional Other field a durable accessible name', () => {
   const source = read('../QuestionCard.jsx')
   assert.match(source, /aria-label=\{`Other answer for: \$\{q\.question\}`\}/)
