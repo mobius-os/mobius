@@ -654,6 +654,38 @@ test.describe('Workspace drag (PR3)', () => {
     expect(Object.keys(after.panes).length).toBe(Object.keys(before.panes).length)
   })
 
+  test('a cancelled drag cannot swallow the next intentional tab press', async ({ page }) => {
+    const { a, c } = await bootThreeTab(page, 'dragThenPress')
+    const source = page.locator(
+      `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${a.id}"]`,
+    )
+    const box = await source.boundingBox()
+    const x = box.x + box.width / 2
+    const y = box.y + box.height / 2
+
+    // Use a synthetic pointer stream so Chromium emits no compatibility click.
+    // This leaves the controller's one-shot click guard standing after Escape,
+    // exactly like browsers/devices that suppress the drag's compat click.
+    await source.dispatchEvent('pointerdown', {
+      pointerId: 91, pointerType: 'mouse', isPrimary: true,
+      button: 0, buttons: 1, clientX: x, clientY: y,
+    })
+    await source.dispatchEvent('pointermove', {
+      pointerId: 91, pointerType: 'mouse', isPrimary: true,
+      button: 0, buttons: 1, clientX: x + 10, clientY: y,
+    })
+    await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.workspace__drag-chip')).toHaveCount(0)
+    expect((await readWs(page)).panes.p0.activeTabKey).toBe(`chat:${c.id}`)
+
+    // A new physical press is user intent, never the old drag's compat click.
+    await source.click()
+    await expect.poll(async () => (await readWs(page)).panes.p0.activeTabKey, {
+      timeout: 3000, message: 'the first fresh press activates the requested tab',
+    }).toBe(`chat:${a.id}`)
+  })
+
   test('the undo chord restores a mis-dropped tab', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragUndo')
     const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
