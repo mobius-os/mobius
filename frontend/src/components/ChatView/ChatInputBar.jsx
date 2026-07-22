@@ -215,22 +215,34 @@ function stripExt(name) {
  *  The remove `×` is a 20×20 button floating at the card's top-
  *  right corner (half-overlapping outside). */
 function FileChips({ files, onRemove, chatId }) {
-  const [tokenParam, setTokenParam] = useState('')
+  const [tokenState, setTokenState] = useState({
+    chatId: null,
+    param: '',
+    failed: false,
+  })
   const hasRestoredImage = files?.some(file => (
     file.mime_type?.startsWith('image/') && !file.objectUrl
   ))
 
   useEffect(() => {
     if (!hasRestoredImage || !chatId) {
-      setTokenParam('')
+      setTokenState({ chatId: null, param: '', failed: false })
       return undefined
     }
     let cancelled = false
+    setTokenState({ chatId, param: '', failed: false })
     mediaTokenParam(chatId).then(param => {
-      if (!cancelled) setTokenParam(param)
+      if (!cancelled) setTokenState({ chatId, param, failed: !param })
+    }).catch(() => {
+      if (!cancelled) setTokenState({ chatId, param: '', failed: true })
     })
     return () => { cancelled = true }
   }, [chatId, hasRestoredImage])
+
+  // Never reuse a previous chat's token during the effect boundary.
+  const currentTokenState = tokenState.chatId === chatId
+    ? tokenState
+    : { param: '', failed: false }
 
   if (!files?.length) return null
   return (
@@ -238,9 +250,12 @@ function FileChips({ files, onRemove, chatId }) {
       {files.map(chip => {
         const isImage = !!chip.objectUrl || chip.mime_type?.startsWith('image/')
         const previewSrc = chip.objectUrl || (
-          isImage && tokenParam
-            ? `${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(chip.name)}${tokenParam}`
+          isImage && currentTokenState.param
+            ? `${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(chip.name)}${currentTokenState.param}`
             : ''
+        )
+        const previewFailed = !!(
+          isImage && !chip.objectUrl && currentTokenState.failed
         )
         const cls = classifyFile(chip.name || '')
         const errorMark = chip.status === 'error' ? ' chat__attach-card--error' : ''
@@ -252,10 +267,16 @@ function FileChips({ files, onRemove, chatId }) {
               + (isImage ? ' chat__attach-card--image' : ' chat__attach-card--file')
               + errorMark
             }
-            title={chip.status === 'error' ? chip.error : chip.name}
+            title={previewFailed
+              ? `${chip.name} — preview unavailable; attachment is still ready to send`
+              : (chip.status === 'error' ? chip.error : chip.name)}
           >
             {isImage && previewSrc ? (
               <img className="chat__attach-card-thumb" src={previewSrc} alt="" />
+            ) : previewFailed ? (
+              <span className="chat__attach-card-preview-error" role="status">
+                Preview unavailable
+              </span>
             ) : isImage ? (
               <span className="chat__attach-card-spin" aria-hidden="true" />
             ) : (

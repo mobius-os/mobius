@@ -5,23 +5,45 @@ function availableStorage(storage) {
 
 const DRAFT_ENVELOPE = 'mobius-composer-draft'
 
-function restorableAttachments(attachments) {
+function attachmentMetadata(attachment) {
+  return {
+    name: attachment.name,
+    size: Number.isFinite(attachment.size) ? attachment.size : 0,
+    mime_type: typeof attachment.mime_type === 'string'
+      ? attachment.mime_type
+      : 'application/octet-stream',
+  }
+}
+
+function isNamedAttachment(attachment) {
+  return !!(
+    attachment
+    && typeof attachment.name === 'string'
+    && attachment.name.length > 0
+  )
+}
+
+// Live upload state is an explicit trust boundary: only a completed upload is
+// safe to persist as a sendable draft. Unknown/future states fail closed.
+function completedAttachments(attachments) {
   if (!Array.isArray(attachments)) return []
   return attachments
-    .filter(attachment => (
-      attachment
-      && attachment.status !== 'uploading'
-      && attachment.status !== 'error'
-      && typeof attachment.name === 'string'
-      && attachment.name.length > 0
-    ))
-    .map(attachment => ({
-      name: attachment.name,
-      size: Number.isFinite(attachment.size) ? attachment.size : 0,
-      mime_type: typeof attachment.mime_type === 'string'
-        ? attachment.mime_type
-        : 'application/octet-stream',
-    }))
+    .filter(attachment => isNamedAttachment(attachment) && attachment.status === 'done')
+    .map(attachmentMetadata)
+}
+
+// Stored envelopes are intentionally status-less because persistence already
+// crossed the completed-only boundary above. Reject status-bearing/malformed
+// rows instead of accidentally blessing a future pending state on reload.
+function storedAttachments(attachments) {
+  if (!Array.isArray(attachments)) return []
+  return attachments
+    .filter(attachment => isNamedAttachment(attachment) && attachment.status === undefined)
+    // The envelope stays status-less on disk, but the live composer boundary
+    // is explicit: a successfully validated stored row is a completed upload.
+    // Returning `done` prevents the mount persistence effect (and React strict
+    // remount) from immediately filtering the restored attachment back out.
+    .map(attachment => ({ ...attachmentMetadata(attachment), status: 'done' }))
 }
 
 /**
@@ -40,7 +62,7 @@ export function readComposerDraft(chatId, storage) {
       if (parsed?.type === DRAFT_ENVELOPE && parsed.version === 1) {
         return {
           input: typeof parsed.input === 'string' ? parsed.input : '',
-          attachments: restorableAttachments(parsed.attachments),
+          attachments: storedAttachments(parsed.attachments),
         }
       }
     } catch { /* legacy plain text */ }
@@ -84,7 +106,7 @@ export function persistComposerDraft(chatId, input, attachments = [], storage) {
   const target = availableStorage(storage ?? legacyStorage)
   if (!target || chatId == null) return false
   const key = `draft:${chatId}`
-  const safeAttachments = restorableAttachments(draftAttachments)
+  const safeAttachments = completedAttachments(draftAttachments)
   const value = safeAttachments.length > 0
     ? JSON.stringify({
         type: DRAFT_ENVELOPE,
