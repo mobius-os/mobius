@@ -1084,3 +1084,17 @@ def test_seed_skill_uses_chat_sent_without_false_activity_substitutes():
   assert "never infer activity from `Chat.created_at`" in seed
   assert "a shared timestamp alone is not evidence" in seed
   assert "this schema has no `chat_sent`" not in seed
+
+
+def test_seed_skill_aligns_question_engagement_and_owns_brief_style():
+  seed = (
+    Path(dr.__file__).resolve().parent / "seed-skills" / "reflection.md"
+  ).read_text(encoding="utf-8")
+  assert "Question-engagement evidence must be report-aligned" in seed
+  assert "valid, non-empty" in seed
+  assert "same `report_date`" in seed
+  assert "empty questions array means the run asked nothing" in seed
+  assert "weak channel signal, never a durable partner preference" in seed
+  assert "Adapt the brief instead of obeying a fixed style control" in seed
+  assert "There is no\n`verbosity`, `focus`, or `avoid` setting to honor" in seed
+  assert "Honor the brief-style setting" not in seed
