@@ -74,3 +74,16 @@ test('a steer request disables sibling row actions until it settles', () => {
   assert.match(source, /steerBusy=\{steerBusy\}/,
     'the queued tray should receive the in-flight state for its row buttons')
 })
+
+test('the modified-Enter submit waits for durability, then reuses per-row steer', () => {
+  assert.match(
+    source,
+    /pendingQueue\.confirmQueued\(cid,[\s\S]*?else if \(opts\.steerAfterQueue\) \{[\s\S]*?await handleSteerOne\(cid\)/,
+    'the composed message must be server-confirmed before the existing row steer consumes it',
+  )
+  assert.match(
+    source,
+    /function handleSubmitSteer\(e\) \{[\s\S]*?doSend\(input\.trim\(\), \{ steerAfterQueue: true \}\)/,
+    'the keyboard handler should opt into the queue-to-steer path without changing ordinary sends',
+  )
+})

@@ -2154,6 +2154,12 @@ export default function ChatView({
               cidList: result.message?._consumed_cids,
             })
             bridgeHook.markBridged()
+          } else if (opts.steerAfterQueue) {
+            // Ctrl/Cmd+Enter uses the same durable queue -> force-steer path
+            // as the visible per-row arrow. The queue acknowledgement gives
+            // the new row a canonical ts before steering, so a failed or
+            // racing steer naturally leaves the message safely queued.
+            await handleSteerOne(cid)
           }
         }
         // Mid-turn steer: the backend delivered the send into the live
@@ -2603,6 +2609,12 @@ export default function ChatView({
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
     doSend(input.trim())
+  }
+
+  function handleSubmitSteer(e) {
+    e.preventDefault()
+    if (isProviderSwitchBlocking(chatId)) return
+    doSend(input.trim(), { steerAfterQueue: true })
   }
 
   // Cancel one queued message via DELETE. Keep reconciliation scoped to that
@@ -3382,10 +3394,11 @@ export default function ChatView({
   const canSteer = !hasPendingQuestion
     && connectionError !== 'disconnected' && !steerBusy
     && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
-  const canRequestSteer = !hasPendingQuestion
+  const canSubmitSteer = !hasPendingQuestion
     && connectionError !== 'disconnected'
     && !steerBusy
     && turnActive
+  const canRequestSteer = canSubmitSteer
     && pendingQueue.pendingMessages.length > 0
 
   // ── Sticky "tap to resume" affordance ──────────────────────────────
@@ -3962,6 +3975,7 @@ export default function ChatView({
           input={input}
           onInputChange={handleComposerInputChange}
           onSubmit={handleSubmit}
+          onSubmitSteer={handleSubmitSteer}
           inputRef={inputRef}
           sending={composerBusy}
           listening={listening}
@@ -3972,6 +3986,7 @@ export default function ChatView({
           onSteer={handleSteer}
           canSteer={canSteer}
           canRequestSteer={canRequestSteer}
+          canSubmitSteer={canSubmitSteer}
           offline={!online}
           sendFailure={sendFailure}
           submissionBlocked={providerSwitching}
