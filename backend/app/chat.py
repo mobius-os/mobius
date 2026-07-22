@@ -2666,39 +2666,60 @@ async def _drain_and_release(
 
 
 async def _close_browser_session(chat_id: str) -> None:
-  """Close this chat's agent-browser session so Chrome doesn't linger.
+  """Close every agent-browser session created by this chat.
 
   Best-effort: logs and swallows any error so cleanup never blocks a
   chat from completing. agent-browser must be on PATH (installed by the
   Dockerfile); if it's not (e.g. local dev outside the container), the
-  call silently no-ops.
+  call silently no-ops. The inherited ``chat-<id>`` session is always tried;
+  proc attribution also finds explicit ``--session`` names whose detached
+  Chromium trees would otherwise escape terminal cleanup.
   """
   if not chat_id:
     return
   log = _get_logger()
+  sessions = {f"chat-{chat_id}"}
   try:
-    # Bound the subprocess CREATION too, not just the wait below.
-    # This runs on the terminal/cleanup path; an unbounded create_subprocess
-    # (e.g. a wedged event-loop child watcher or fork) would hang the whole
-    # turn's teardown. The wait() is already bounded at 5s; cap creation at
-    # the same budget. On either timeout we just stop waiting and let cleanup
-    # continue — a lingering Chrome is far cheaper than a hung turn.
-    proc = await asyncio.wait_for(
-      asyncio.create_subprocess_exec(
-        "agent-browser", "--session", f"chat-{chat_id}", "close",
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-      ),
-      timeout=5.0,
-    )
-    await asyncio.wait_for(proc.wait(), timeout=5.0)
-    log.info("agent-browser session closed chat_id=%s", chat_id)
-  except FileNotFoundError:
-    pass  # agent-browser not installed (local dev)
-  except asyncio.TimeoutError:
-    log.warning("agent-browser close timed out for chat %s", chat_id)
+    from app.browser_profiles import browser_sessions_for_chat
+    sessions.update(await asyncio.to_thread(
+      browser_sessions_for_chat, chat_id,
+    ))
   except Exception as exc:
-    log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
+    log.warning(
+      "agent-browser session discovery failed for chat %s: %s",
+      chat_id,
+      exc,
+    )
+
+  async def close_one(session: str) -> bool:
+    try:
+      # Bound subprocess CREATION too, not just the wait. Custom sessions close
+      # concurrently, so one wedged CLI adds at most this single 10s budget to
+      # terminal teardown rather than one budget per leaked browser.
+      proc = await asyncio.wait_for(
+        asyncio.create_subprocess_exec(
+          "agent-browser", "--session", session, "close",
+          stdout=asyncio.subprocess.DEVNULL,
+          stderr=asyncio.subprocess.DEVNULL,
+        ),
+        timeout=5.0,
+      )
+      await asyncio.wait_for(proc.wait(), timeout=5.0)
+      return True
+    except FileNotFoundError:
+      return False  # agent-browser not installed (local dev)
+    except asyncio.TimeoutError:
+      log.warning("agent-browser close timed out for chat %s", chat_id)
+    except Exception as exc:
+      log.warning("agent-browser close failed for chat %s: %s", chat_id, exc)
+    return False
+
+  results = await asyncio.gather(*(close_one(name) for name in sorted(sessions)))
+  closed = sum(results)
+  if closed:
+    log.info(
+      "agent-browser sessions closed chat_id=%s count=%d", chat_id, closed,
+    )
 
 
 async def _terminal_setup_error_cleanup(

@@ -1,4 +1,5 @@
 import asyncio
+import signal
 from types import SimpleNamespace
 
 import pytest
@@ -1425,3 +1426,130 @@ def test_codex_config_overrides_kill_switch(monkeypatch):
   ov = runner._codex_config_overrides()
   assert ov == ["features.default_mode_request_user_input=true"]
   assert not any("multi_agent_v2" in o for o in ov)
+
+
+def test_codex_app_server_launch_args_preserve_overrides_under_setsid(
+  monkeypatch,
+):
+  paths = {
+    "setsid": "/usr/bin/setsid",
+  }
+  monkeypatch.setattr(
+    codex_sdk_runner.shutil,
+    "which",
+    lambda name: paths.get(name),
+  )
+
+  args = codex_sdk_runner._codex_app_server_launch_args(
+    "/usr/local/bin/codex",
+    ["feature.one=true", "feature.two=false"],
+  )
+
+  assert args == [
+    "/usr/bin/setsid",
+    "/usr/local/bin/codex",
+    "--config",
+    "feature.one=true",
+    "--config",
+    "feature.two=false",
+    "app-server",
+    "--listen",
+    "stdio://",
+  ]
+
+
+def test_codex_process_group_id_refuses_shared_uvicorn_group(monkeypatch):
+  codex = SimpleNamespace(
+    _client=SimpleNamespace(
+      _sync=SimpleNamespace(_proc=SimpleNamespace(pid=4321)),
+    ),
+  )
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4000)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 4000)
+
+  assert codex_sdk_runner._codex_process_group_id(codex) is None
+
+
+def test_terminate_codex_process_group_has_sigkill_backstop(monkeypatch):
+  calls = []
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  monkeypatch.setattr(
+    codex_sdk_runner.os,
+    "killpg",
+    lambda pgid, sig: calls.append((pgid, sig)),
+  )
+
+  assert codex_sdk_runner._terminate_codex_process_group(
+    4321, grace_seconds=0,
+  ) is True
+  assert calls == [
+    (4321, signal.SIGTERM),
+    (4321, signal.SIGKILL),
+  ]
+
+
+def test_run_codex_sdk_turn_reaps_isolated_descendants(monkeypatch):
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    )
+  ]
+  thread = _FakeThread("thread-1", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+      self._client = SimpleNamespace(
+        _sync=SimpleNamespace(
+          _proc=SimpleNamespace(pid=4321),
+          _approval_handler=None,
+        ),
+      )
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(codex_sdk_runner.shutil, "which", lambda name: {
+    "codex": "/usr/local/bin/codex",
+    "setsid": "/usr/bin/setsid",
+  }.get(name))
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgid", lambda _pid: 4321)
+  monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 9999)
+  reaped = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: reaped.append(pgid) or True,
+  )
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_persist_session_id",
+    lambda *_args, **_kwargs: asyncio.sleep(0),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-process-group",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+  ))
+
+  assert result["error"] is None
+  assert reaped == [4321]

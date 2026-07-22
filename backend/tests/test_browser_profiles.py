@@ -1,6 +1,7 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
-from app import browser_profiles
+from app import browser_profiles, chat
 from app.browser_profiles import enforce_browser_profile_quota
 
 
@@ -51,6 +52,68 @@ def test_profile_sweep_interval_is_hourly_and_bounded(monkeypatch):
   assert browser_profiles.browser_profile_sweep_seconds() == 60
   monkeypatch.setenv("AGENT_BROWSER_PROFILE_SWEEP_SECONDS", "7200")
   assert browser_profiles.browser_profile_sweep_seconds() == 7200
+
+
+def test_browser_sessions_for_chat_attributes_custom_detached_session(tmp_path):
+  proc = tmp_path / "proc"
+  matching = proc / "101"
+  matching.mkdir(parents=True)
+  (matching / "cmdline").write_bytes(
+    b"/usr/local/lib/agent-browser-linux-x64\0"
+  )
+  (matching / "environ").write_bytes(
+    b"CHAT_ID=chat-a\0AGENT_BROWSER_SESSION=custom-preview-3\0"
+  )
+
+  foreign = proc / "102"
+  foreign.mkdir()
+  (foreign / "cmdline").write_bytes(b"/opt/agent-browser-linux-x64\0")
+  (foreign / "environ").write_bytes(
+    b"CHAT_ID=chat-b\0AGENT_BROWSER_SESSION=foreign-preview\0"
+  )
+
+  unrelated = proc / "103"
+  unrelated.mkdir()
+  (unrelated / "cmdline").write_bytes(b"/usr/bin/python3\0")
+  (unrelated / "environ").write_bytes(
+    b"CHAT_ID=chat-a\0AGENT_BROWSER_SESSION=not-a-browser\0"
+  )
+
+  assert browser_profiles.browser_sessions_for_chat(
+    "chat-a", proc_root=proc,
+  ) == {"custom-preview-3"}
+
+
+def test_terminal_browser_cleanup_closes_inherited_and_custom_sessions(
+  monkeypatch,
+):
+  monkeypatch.setattr(
+    browser_profiles,
+    "browser_sessions_for_chat",
+    lambda _chat_id: {"custom-preview-3"},
+  )
+  calls = []
+
+  class FakeProcess:
+    async def wait(self):
+      return 0
+
+  async def fake_create_subprocess_exec(*args, **_kwargs):
+    calls.append(args)
+    return FakeProcess()
+
+  monkeypatch.setattr(
+    chat.asyncio,
+    "create_subprocess_exec",
+    fake_create_subprocess_exec,
+  )
+
+  asyncio.run(chat._close_browser_session("chat-a"))
+
+  assert calls == [
+    ("agent-browser", "--session", "chat-chat-a", "close"),
+    ("agent-browser", "--session", "custom-preview-3", "close"),
+  ]
 
 
 def test_quota_prunes_regenerable_cache_before_profile(tmp_path):

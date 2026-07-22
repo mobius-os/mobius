@@ -64,6 +64,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shutil
 import time
 from typing import Any, Callable
@@ -146,6 +147,106 @@ def _codex_config_overrides() -> list[str]:
       "suppress_unstable_features_warning=true",
     ]
   return overrides
+
+
+def _codex_app_server_launch_args(
+  codex_bin: str | None,
+  config_overrides: list[str],
+) -> list[str] | None:
+  """Build an app-server command isolated in its own Unix session.
+
+  The Python SDK starts Codex with a plain ``subprocess.Popen`` and, on
+  ``close()``, terminates only that one PID.  Tool commands are descendants of
+  the app-server; if a shell exits while one of its children is still running,
+  that child is re-parented to PID 1 and survives both the tool result and the
+  SDK close.  A memory-hungry survivor can therefore outlive its chat and push
+  the whole platform cgroup into OOM.
+
+  ``setsid`` makes the app-server the leader of a private process group/session
+  without requiring a change in the upstream SDK.  The terminal cleanup below
+  can then signal exactly that group, never uvicorn or another concurrent chat.
+  Return ``None`` outside the Linux/container runtime so local SDK resolution
+  keeps its existing fallback behavior.
+  """
+  setsid_bin = shutil.which("setsid")
+  if not codex_bin or not setsid_bin:
+    return None
+  args = [setsid_bin, codex_bin]
+  for override in config_overrides:
+    args.extend(["--config", override])
+  args.extend(["app-server", "--listen", "stdio://"])
+  return args
+
+
+def _codex_process_group_id(codex: Any) -> int | None:
+  """Return the isolated app-server PGID, or ``None`` if not provable.
+
+  The SDK does not expose its child PID publicly.  We already target its sync
+  client for the documented approval-handler slot, so keep this second private
+  access in one defensive helper.  Refuse a group that is not led by the SDK
+  process: on an old/non-``setsid`` launch that group can be uvicorn's own.
+  """
+  sync_client = getattr(getattr(codex, "_client", None), "_sync", None)
+  proc = getattr(sync_client, "_proc", None)
+  pid = getattr(proc, "pid", None)
+  if not isinstance(pid, int) or pid <= 1:
+    return None
+  try:
+    pgid = os.getpgid(pid)
+  except (OSError, ProcessLookupError):
+    return None
+  if pgid != pid or pgid == os.getpgrp():
+    log.error(
+      "Codex app-server process group is not isolated pid=%s pgid=%s; "
+      "descendant cleanup disabled",
+      pid,
+      pgid,
+    )
+    return None
+  return pgid
+
+
+def _terminate_codex_process_group(
+  pgid: int | None,
+  *,
+  grace_seconds: float = 0.25,
+) -> bool:
+  """Terminate every process left in one completed Codex turn's group.
+
+  Called only after the SDK context has closed its app-server PID.  SIGTERM
+  gives ordinary shell/browser helpers a brief exit window; SIGKILL is the
+  bounded backstop for the exact failure mode this guards (a CPU-heavy child
+  that ignores or never receives its parent's termination).  Returns whether
+  a live group was found.  All failures are best-effort because terminal chat
+  persistence must not fail merely because the OS already reaped the group.
+  """
+  if not isinstance(pgid, int) or pgid <= 1 or pgid == os.getpgrp():
+    return False
+  try:
+    os.killpg(pgid, signal.SIGTERM)
+  except ProcessLookupError:
+    return False
+  except OSError as exc:
+    log.warning("Codex descendant SIGTERM failed pgid=%s: %s", pgid, exc)
+    return False
+
+  deadline = time.monotonic() + max(0.0, grace_seconds)
+  while time.monotonic() < deadline:
+    try:
+      os.killpg(pgid, 0)
+    except ProcessLookupError:
+      return True
+    except OSError:
+      break
+    time.sleep(min(0.025, max(0.0, deadline - time.monotonic())))
+
+  try:
+    os.killpg(pgid, signal.SIGKILL)
+  except ProcessLookupError:
+    pass
+  except OSError as exc:
+    log.warning("Codex descendant SIGKILL failed pgid=%s: %s", pgid, exc)
+  return True
 
 
 class _BridgeError(Exception):
@@ -1229,17 +1330,29 @@ async def run_codex_sdk_turn(
   # config_overrides carries the request_user_input (AskUserQuestion parity) and
   # multi-agent enablement flags — assembled, with the #31864 tool_namespace pin
   # and the MOEBIUS_CODEX_MULTI_AGENT kill switch, in _codex_config_overrides().
-  config = sdk["CodexConfig"](
-    codex_bin=shutil.which("codex"),
+  codex_bin = shutil.which("codex")
+  config_overrides = _codex_config_overrides()
+  launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
+  config_kwargs: dict[str, Any] = dict(
+    codex_bin=codex_bin,
     cwd=cwd,
     env=env,
-    config_overrides=_codex_config_overrides(),
+    config_overrides=config_overrides,
   )
+  if launch_args is not None:
+    config_kwargs["launch_args_override"] = launch_args
+  else:
+    log.warning(
+      "Codex app-server process-group isolation unavailable; "
+      "descendant cleanup is best-effort only"
+    )
+  config = sdk["CodexConfig"](**config_kwargs)
 
   thread = None
   turn = None
   current_session_id = session_id
   completed_turn: Any | None = None
+  process_group_id: int | None = None
 
   def abort_requested() -> bool:
     return bool(should_abort and should_abort())
@@ -1253,6 +1366,7 @@ async def run_codex_sdk_turn(
 
   try:
     async with sdk["AsyncCodex"](config=config) as codex:
+      process_group_id = _codex_process_group_id(codex)
       # Install AskUserQuestion bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
@@ -1541,6 +1655,17 @@ async def run_codex_sdk_turn(
     if isinstance(current, ActiveCodexTurn) and current.turn is turn:
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)
       current.mark_finished()
+    # AsyncCodex.close() terminates only its direct Popen PID.  Reap the
+    # isolated group after that context exit so a tool child cannot be
+    # re-parented to container init and consume CPU/RAM after the turn.  A
+    # worker keeps the short grace period off the FastAPI event loop; shield
+    # ensures task cancellation cannot prevent the SIGKILL backstop from
+    # running in that worker once cleanup has started.
+    if process_group_id is not None:
+      await asyncio.shield(asyncio.to_thread(
+        _terminate_codex_process_group,
+        process_group_id,
+      ))
 
 
 async def steer_into_active_turn(

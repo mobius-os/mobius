@@ -15,6 +15,7 @@ from app import models
 
 
 _CHAT_PROFILE = re.compile(r"^chat-([0-9a-fA-F-]{36})$")
+_BROWSER_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CACHE_PATHS = (
   "Default/Cache",
   "Default/Code Cache",
@@ -132,6 +133,57 @@ def _active_profile_names(root: Path) -> set[str]:
       except (OSError, RuntimeError):
         pass
   return active
+
+
+def browser_sessions_for_chat(
+  chat_id: str,
+  *,
+  proc_root: Path = Path("/proc"),
+) -> set[str]:
+  """Return live agent-browser session names created by one chat.
+
+  ``AGENT_BROWSER_SESSION=chat-<id>`` gives ordinary invocations a safe
+  inherited name, but an agent can explicitly pass ``--session foo``.  The
+  agent-browser daemon detaches into its own session and preserves the
+  creator's ``CHAT_ID`` plus its resolved ``AGENT_BROWSER_SESSION`` in
+  ``/proc/<pid>/environ``.  Discovering that attribution lets terminal cleanup
+  reclaim custom sessions too instead of leaking their Chromium trees until a
+  container restart.
+
+  Only the agent-browser server binary is considered, and returned names are
+  restricted to the CLI's simple session-name alphabet.  Proc races and
+  permission errors are normal and read as an incomplete, best-effort set.
+  """
+  if not chat_id or not proc_root.is_dir():
+    return set()
+  try:
+    processes = list(proc_root.iterdir())
+  except OSError:
+    return set()
+
+  sessions: set[str] = set()
+  for process in processes:
+    if not process.name.isdigit():
+      continue
+    try:
+      argv = (process / "cmdline").read_bytes().split(b"\0")
+      executable = Path(argv[0].decode("utf-8", errors="replace")).name
+      if executable != "agent-browser-linux-x64":
+        continue
+      values = {}
+      for raw in (process / "environ").read_bytes().split(b"\0"):
+        key, separator, value = raw.partition(b"=")
+        if separator and key in (b"CHAT_ID", b"AGENT_BROWSER_SESSION"):
+          values[key] = value.decode("utf-8", errors="replace")
+    except OSError:
+      continue
+    session = values.get(b"AGENT_BROWSER_SESSION", "")
+    if (
+      values.get(b"CHAT_ID") == chat_id
+      and _BROWSER_SESSION.fullmatch(session) is not None
+    ):
+      sessions.add(session)
+  return sessions
 
 
 def chat_activity_snapshot(db: Session) -> dict[str, dict]:
