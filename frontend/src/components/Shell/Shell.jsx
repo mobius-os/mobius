@@ -59,8 +59,11 @@ import {
   addCreatedChatToList,
   createdChatDetailCache,
   currentReusableEmptyChat,
-  detailIsUntouchedEmptyChat,
   enteredEmptySingleScreen,
+  mergeChatListWithCreatedGuards,
+  reconcileCreatedChatGuard,
+  rememberCreatedChat,
+  reusableChatDetailVerdict,
 } from './newChatPolicy.js'
 import {
   reloadWhenWorkerTakesOver,
@@ -469,7 +472,20 @@ export default function Shell() {
   const { loadTheme } = useTheme()
   const queryClient = useQueryClient()
   const appsQuery = appQueries.list.useQuery()
-  const chatsQuery = chatQueries.list.useQuery()
+  // Create responses are authoritative even when the next NetworkFirst list
+  // request has to fall back to a just-stale service-worker copy. Reconcile at
+  // the query function boundary so the protected row never disappears from
+  // cache/render between fetch settlement and an after-the-fact patch.
+  const recentlyCreatedChatsRef = useRef(new Map())
+  const reconcileCreatedChats = useCallback(
+    rows => mergeChatListWithCreatedGuards(
+      rows, recentlyCreatedChatsRef.current,
+    ),
+    [],
+  )
+  const chatsQuery = chatQueries.list.useQuery({
+    reconcile: reconcileCreatedChats,
+  })
   const apps = appsQuery.data ?? []
   const chats = chatsQuery.data ?? []
   // Warm the model registry as soon as a chat is open so the composer's
@@ -2601,22 +2617,47 @@ export default function Shell() {
           `/chats/${encodeURIComponent(empty.id)}?limit=1`,
           { timeoutMs: 5000 },
         )
-        const detail = res.ok ? await res.json() : null
-        if (!detailIsUntouchedEmptyChat(detail)) {
+        let detail = null
+        if (res.ok) detail = await res.json()
+        const verdict = reusableChatDetailVerdict({
+          ok: res.ok,
+          status: res.status,
+          detail,
+        })
+        if (verdict !== 'empty') {
           empty = null
-          // The detail read has already given us the only fact New Chat needs:
-          // this row is no longer empty. Publish that narrow correction instead
-          // of launching the expensive drawer list beside the create request.
-          queryClient.setQueryData(chatQueries.keys.all, current => {
-            if (!Array.isArray(current)) return current
-            const next = current.map(chat => (
-              String(chat.id) === String(staleEmptyId)
-                ? { ...chat, has_messages: true }
-                : chat
-            ))
-            chatsRef.current = next
-            return next
-          })
+          reconcileCreatedChatGuard(
+            recentlyCreatedChatsRef.current,
+            staleEmptyId,
+            verdict,
+          )
+          if (verdict === 'missing') {
+            // A 404 is authoritative deletion, not evidence of content.
+            knownExistingOffListChatIdsRef.current.delete(String(staleEmptyId))
+            queryClient.setQueryData(chatQueries.keys.all, current => {
+              if (!Array.isArray(current)) return current
+              const next = current.filter(
+                chat => String(chat.id) !== String(staleEmptyId),
+              )
+              chatsRef.current = next
+              return next
+            })
+          } else if (verdict === 'occupied') {
+            // The complete successful detail read has given us the only fact
+            // New Chat needs: this row is no longer reusable. Publish that
+            // narrow correction instead of launching a drawer list beside the
+            // create request. Uncertain/malformed responses leave it unchanged.
+            queryClient.setQueryData(chatQueries.keys.all, current => {
+              if (!Array.isArray(current)) return current
+              const next = current.map(chat => (
+                String(chat.id) === String(staleEmptyId)
+                  ? { ...chat, has_messages: true }
+                  : chat
+              ))
+              chatsRef.current = next
+              return next
+            })
+          }
         }
       } catch {
         empty = null
@@ -2644,6 +2685,7 @@ export default function Shell() {
       })
       const res = await api.chats.create({ title: 'New chat' })
       const chat = await jsonOrThrow(res, 'Chat creation failed')
+      rememberCreatedChat(recentlyCreatedChatsRef.current, chat)
       const detailCache = createdChatDetailCache(chat)
       if (detailCache) {
         queryClient.setQueryData(chatMessagesQueryKey(chat.id), detailCache)
@@ -2851,6 +2893,7 @@ export default function Shell() {
       }
       // A 404 means the server row is already gone; remove the local phantom.
     }
+    recentlyCreatedChatsRef.current.delete(String(id))
     try { sessionStorage.removeItem(`draft:${id}`) } catch {}
     // Evict the cached messages so a future chat-ID collision (e.g.
     // recovery) can't surface stale content.
