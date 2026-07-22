@@ -709,6 +709,15 @@ async def send_message(
         },
       )
 
+  # A pending question parks the provider's control channel inside the
+  # synchronous request_user_input bridge. A force-steer cannot be accepted
+  # until that question is released, so waiting for it while holding the
+  # transition + queue locks circularly blocks Stop, the only deterministic
+  # escape. Refuse before either lock; the queued rows remain durable and the
+  # frontend restores them from the not_steered response.
+  if body.force_steer and questions.is_waiting(chat_id):
+    return _not_steered_response(chat_id)
+
   # Serialize an ordinary send with the provider-switch synthesis/commit.
   # Whichever request owns the lock first establishes the state the other
   # observes: a send first makes the switch see a busy chat; a switch first
@@ -809,6 +818,7 @@ async def _send_message_locked(
     provider = chat.provider or "claude"
     if (
       is_chat_running(chat_id)
+      and not questions.is_waiting(chat_id)
       and (body.force_steer or _steer_enabled(chat))
       and (body.force_steer or not chat.pending_messages)
       and _has_live_steerable_turn(chat_id, provider)
@@ -839,22 +849,22 @@ async def _send_message_locked(
       # complete. The reserved pending row is the durable copy; the
       # handle buffer is only a delivery cache.
       defer_to_runner = provider == "claude"
-      try:
-        steered = await _steer_into_active_turn(
-          provider, chat_id, steer_content,
-          user_msgs if defer_to_runner else None,
-          consume_cids if defer_to_runner else None,
-        )
-      except Exception:
-        # A failed delivery leaves the reserved row pending.
+      if questions.is_waiting(chat_id):
+        # An ordinary auto-steer awaits AppendPending above. A question can
+        # register during that actor round-trip even though the entry gate was
+        # clear, so re-check immediately before touching the provider channel.
         steered = False
+      else:
+        try:
+          steered = await _steer_into_active_turn(
+            provider, chat_id, steer_content,
+            user_msgs if defer_to_runner else None,
+            consume_cids if defer_to_runner else None,
+          )
+        except Exception:
+          # A failed delivery leaves the reserved row pending.
+          steered = False
       if steered:
-        # A question tool is a synchronous human pause. Once the owner
-        # fast-forwards (or a steer-enabled chat auto-steers), the new message
-        # supersedes that pause; leaving its future registered would strand
-        # Codex waiting on a card the transcript has moved past. Retire it only
-        # AFTER acceptance so a failed steer leaves the question answerable.
-        questions.cancel(chat_id)
         if defer_to_runner:
           # The optimistic response mirrors the runner's cid conversion.
           consumed = set(consume_cids)

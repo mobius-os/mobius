@@ -185,9 +185,15 @@ def test_steers_into_live_codex_turn_when_flag_on(
   ]
 
 
-def test_accepted_steer_retires_open_question(client, auth, monkeypatch):
-  """Steering supersedes a synchronous question instead of leaving its hidden
-  future parked after the transcript has already moved on."""
+def test_pending_question_refuses_force_steer_without_holding_queue(
+  client, auth, monkeypatch,
+):
+  """A synchronous question owns the provider control channel.
+
+  Force-steer must fail before it calls that blocked channel or takes the
+  transition/queue locks; the durable queued row and live question remain
+  available for Answer or Stop.
+  """
   chat_id = "questionsteer"
   question_id = "q-open"
   _make_codex_chat(chat_id, steer_enabled=False)
@@ -219,11 +225,17 @@ def test_accepted_steer_retires_open_question(client, auth, monkeypatch):
   ))
   registry.register(_make_active_codex_turn(chat_id))
 
-  async def _fake_steer(cid, message):
-    return True
+  async def _fail_if_called(_cid, _message):
+    raise AssertionError("pending QA must block provider steer")
 
   monkeypatch.setattr(
-    "app.codex_sdk_runner.steer_into_active_turn", _fake_steer,
+    "app.codex_sdk_runner.steer_into_active_turn", _fail_if_called,
+  )
+  monkeypatch.setattr(
+    "app.chat_queue.get_transition_lock",
+    lambda _chat_id: (_ for _ in ()).throw(
+      AssertionError("force-steer refusal must happen before chat locks")
+    ),
   )
 
   res = client.post(
@@ -237,11 +249,60 @@ def test_accepted_steer_retires_open_question(client, auth, monkeypatch):
   )
 
   assert res.status_code == 202, res.text
-  assert res.json()["status"] == "steered"
-  assert waiting.cancelled()
-  assert questions.get(chat_id) is None
-  assert questions.was_cancelled(chat_id, question_id)
-  assert _read_chat(chat_id).messages[-1]["content"] == "Skip that and use the default"
+  assert res.json()["status"] == "not_steered"
+  assert not waiting.done()
+  assert questions.get(chat_id) is not None
+  chat = _read_chat(chat_id)
+  assert [m["content"] for m in chat.pending_messages] == [
+    "Skip that and use the default",
+  ]
+  assert chat.messages[-1]["role"] == "assistant"
+  questions.cancel(chat_id)
+
+
+def test_question_registered_during_append_blocks_ordinary_auto_steer(
+  client, auth, monkeypatch,
+):
+  """Re-check after AppendPending closes the registration race."""
+  chat_id = "questionautosteer"
+  _make_codex_chat(chat_id, steer_enabled=True)
+  waiting = Future()
+  registry.register(_make_active_codex_turn(chat_id))
+
+  from app.routes import chats_stream
+  original_append = chats_stream._append_to_pending
+
+  async def _append_then_register(*args, **kwargs):
+    stored = await original_append(*args, **kwargs)
+    questions.register(chat_id, PendingQuestion(
+      question_id="q-auto",
+      questions=[],
+      future=waiting,
+    ))
+    return stored
+
+  monkeypatch.setattr(chats_stream, "_append_to_pending", _append_then_register)
+
+  async def _fail_if_called(_cid, _message):
+    raise AssertionError("pending QA must block provider auto-steer")
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fail_if_called,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "queue this instead", "cid": "qa-queued-cid"},
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "queued"
+  assert not waiting.done()
+  assert [m["content"] for m in _read_chat(chat_id).pending_messages] == [
+    "queue this instead",
+  ]
+  questions.cancel(chat_id)
 
 
 def _register_sink_with_partial(chat_id: str, run_token: str, text: str):

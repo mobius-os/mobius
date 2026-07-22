@@ -89,6 +89,84 @@ def test_text_final_empty_is_noop():
   assert blocks == [{"type": "text", "content": "kept"}]
 
 
+def test_text_item_continues_before_interleaved_live_question():
+  blocks = []
+  process_event({
+    "type": "text", "content": "Build it",
+    "text_item_id": "msg-1",
+  }, blocks)
+  process_event({
+    "type": "question", "question_id": "q-1",
+    "questions": [{"question": "Proceed?"}],
+  }, blocks)
+  process_event({
+    "type": "text", "content": " safely",
+    "text_item_id": "msg-1",
+  }, blocks)
+  process_event({
+    "type": "text_final", "content": "Build it safely",
+    "text_item_id": "msg-1",
+  }, blocks)
+
+  assert [block["type"] for block in blocks] == ["text", "question"]
+  assert blocks[0]["content"] == "Build it safely"
+  assert blocks[-1]["question_id"] == "q-1"
+  persisted = build_assistant_message(blocks)
+  assert "text_item_id" not in persisted["blocks"][0]
+
+
+def test_text_final_repairs_legacy_prefix_question_suffix_replay():
+  blocks = [
+    {"type": "text", "content": "Build it"},
+    {"type": "question", "question_id": "q-1", "questions": []},
+    {"type": "text", "content": " safely"},
+  ]
+  process_event({
+    "type": "text_final", "content": "Build it safely",
+  }, blocks)
+
+  assert blocks == [
+    {"type": "text", "content": "Build it safely"},
+    {"type": "question", "question_id": "q-1", "questions": []},
+  ]
+
+
+def test_text_final_repairs_prefix_question_with_mismatched_item_identity():
+  # Observed with Codex request_user_input: the deltas carried one item id,
+  # the question interrupted after a prefix, and the authoritative completion
+  # carried a different id. The full text belongs before the still-open card.
+  blocks = []
+  process_event({
+    "type": "text", "content": "Review res",
+    "text_item_id": "delta-item",
+  }, blocks)
+  process_event({
+    "type": "question", "question_id": "q-1",
+    "questions": [{"question": "Harden it?"}],
+  }, blocks)
+  process_event({
+    "type": "text_final", "content": "Review result",
+    "text_item_id": "completed-item",
+  }, blocks)
+
+  assert [block["type"] for block in blocks] == ["text", "question"]
+  assert blocks[0]["content"] == "Review result"
+  assert blocks[-1]["question_id"] == "q-1"
+
+
+def test_text_final_does_not_rewrite_an_answered_question_boundary():
+  blocks = [
+    {"type": "text", "content": "Before"},
+    {"type": "question", "question_id": "q-1", "questions": [],
+     "answers": {"Proceed?": "Yes"}},
+  ]
+  process_event({"type": "text_final", "content": "Before and after"}, blocks)
+
+  assert [block["type"] for block in blocks] == ["text", "question", "text"]
+  assert blocks[0]["content"] == "Before"
+  assert blocks[-1]["content"] == "Before and after"
+
+
 def test_tool_start_creates_block():
   blocks = []
   process_event({"type": "tool_start", "tool": "Bash", "input": "ls"}, blocks)
