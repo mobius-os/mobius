@@ -24,6 +24,7 @@ import {
   githubSkillUrl,
   createSummaryPrefetcher,
   assessCompat,
+  assessInstalled,
 } from './catalog.js'
 
 // Skills — browse, read, and grow the agent's skills (the SKILL-style markdown
@@ -244,6 +245,8 @@ const CSS = `
   border: 1px solid color-mix(in srgb, var(--warn, #b26a00) 35%, var(--border)); color: var(--muted);
   background: color-mix(in srgb, var(--warn, #b26a00) 6%, transparent); }
 .sk-caveats li { margin: 3px 0; }
+/* variant for panels living inside the reading column (installed-skill detail) */
+.sk-caveats.in-page { width: calc(100% - 36px); max-width: 684px; margin: 12px auto 0; box-sizing: border-box; }
 
 /* catalog breadcrumb chain — every ancestor segment is clickable */
 .sk-crumbs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; }
@@ -396,6 +399,8 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
   const inflightRef = useRef(new Set()) // synchronous dedupe (descs lags a render)
   const prefetcherRef = useRef(null)
   const compatCacheRef = useRef({}) // dir -> assessCompat result, per source scan
+  const scrollRef = useRef(null)
+  const listScrollRef = useRef(0) // card-list offset, restored when a page closes
 
   useEffect(() => {
     // Sources are app data: a saved sources.json overrides the defaults, so
@@ -419,6 +424,20 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
       body: '{}',
     }).catch(() => {})
   }, [visible])
+
+  // The sources list, the card list, and the skill page all share this one
+  // scroller, so a scrolled card list would otherwise bleed its offset into
+  // the page. Open a page at the top; restore the list position on the way back.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    if (detailDir) {
+      listScrollRef.current = el.scrollTop
+      el.scrollTop = 0
+    } else {
+      el.scrollTop = listScrollRef.current
+    }
+  }, [detailDir])
 
   const proxied = async (url) => {
     const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, { headers: authHeaders })
@@ -447,6 +466,8 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
     setScanBusy(true); setError(null); setNotice(null)
     inflightRef.current = new Set()
     compatCacheRef.current = {}
+    listScrollRef.current = 0
+    if (scrollRef.current) scrollRef.current.scrollTop = 0
     try {
       const data = JSON.parse(await proxied(treeScanUrl(source)))
       if (!Array.isArray(data.tree)) throw new Error(data.message || 'unexpected GitHub response (no tree)')
@@ -472,6 +493,8 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
     prefetcherRef.current?.cancel()
     setOpen(null)
     setSkillList(null); setError(null); setNotice(null); setDetailDir(null); setFilter('')
+    listScrollRef.current = 0
+    if (scrollRef.current) scrollRef.current.scrollTop = 0
   }
 
   // withCaveats: a card's amber chip opens the page with the notes already out.
@@ -613,7 +636,7 @@ function CatalogScreen({ visible, authHeaders, existingIds, onInstalled, onClose
           {compat.caveats.map((c) => <li key={c.kind}>{c.text}</li>)}
         </ul>
       )}
-      <div className="sk-scroll">
+      <div className="sk-scroll" ref={scrollRef}>
         <div className="sk-page">
           {!open && (
             <>
@@ -731,6 +754,10 @@ export default function SkillsApp({ appId, token }) {
   const [catalogOpen, setCatalogOpen] = useState(false)
   const [catalogMounted, setCatalogMounted] = useState(false)
   const [online, setOnline] = useState(initialOnline)
+  const [instCompat, setInstCompat] = useState({}) // id -> assessInstalled verdict (installed:* skills)
+  const [showInstCaveats, setShowInstCaveats] = useState(false)
+  const mainScrollRef = useRef(null)
+  const mainListScrollRef = useRef(0) // list offset, restored when a detail closes
   // The detail back-sentinel state machine (in domain.js so it is unit-testable
   // — the double-tap-during-pending-push race can't be exercised through the
   // React component alone). Created once; onShow/onClose close over the stable
@@ -822,9 +849,25 @@ export default function SkillsApp({ appId, token }) {
   async function refresh() {
     setRefreshing(true)
     setContents({}) // an explicit refresh also drops cached detail markdown
+    setInstCompat({}) // compat verdicts derive from that markdown — drop them too
     await load({ isRefresh: true })
     setRefreshing(false)
   }
+
+  // React reuses the scroller DOM node when the list swaps to the detail tree
+  // (same element type, same position), so a scrolled list would open every
+  // skill part-way down the page. Open at the top; restore the list offset on
+  // the way back. Same fix as the catalog screen's shared scroller.
+  useEffect(() => {
+    const el = mainScrollRef.current
+    if (!el) return
+    if (selected) {
+      mainListScrollRef.current = el.scrollTop
+      el.scrollTop = 0
+    } else {
+      el.scrollTop = mainListScrollRef.current
+    }
+  }, [selected])
 
   // Track connectivity for the Offline pill (silent-sync: pill only when offline).
   useEffect(() => {
@@ -884,9 +927,58 @@ export default function SkillsApp({ appId, token }) {
       })
   }, [selected, skills])
 
+  // Every installed file under shared/skills/<id>/, relative to the skill dir.
+  // Bounded BFS over the non-recursive shared-list API — depth and page caps
+  // match the install bounds, so anything real fits well inside them.
+  async function listSkillFiles(id) {
+    const root = `skills/${encodeURIComponent(id)}`
+    const queue = ['']
+    const out = []
+    let pages = 0
+    while (queue.length && pages < 12) {
+      const sub = queue.shift()
+      pages += 1
+      const res = await fetch(`/api/storage/shared-list/${root}${sub ? `/${sub}` : ''}?limit=200`, { headers: authHeaders })
+      if (!res.ok) return null
+      const data = await res.json().catch(() => null)
+      if (!Array.isArray(data?.entries)) return null
+      for (const e of data.entries) {
+        const rel = sub ? `${sub}/${e.name}` : String(e.name || '')
+        if (e.type === 'directory') {
+          if (rel.split('/').length <= 4) queue.push(rel)
+        } else {
+          out.push(rel)
+        }
+      }
+    }
+    return out
+  }
+
+  // Post-install compat for the open skill. installed:* provenance only —
+  // seed and agent-authored skills are written against this instance and
+  // routinely mention files elsewhere in /data, which would read as false
+  // alarms here.
+  useEffect(() => {
+    if (!current || !isUninstallable(current.provenance)) return undefined
+    const { id, is_dir: isDir } = current
+    const entry = contents[id]
+    if (entry?.status !== 'ready' || instCompat[id]) return undefined
+    let stale = false
+    ;(async () => {
+      let files = []
+      if (isDir) {
+        files = await listSkillFiles(id)
+        if (files === null) return // listing failed — no verdict beats a wrong one
+      }
+      const verdict = assessInstalled(files, entry.text || '')
+      if (!stale) setInstCompat((m) => ({ ...m, [id]: verdict }))
+    })().catch(() => {})
+    return () => { stale = true }
+  }, [current, contents])
+
   // Uninstall is a two-tap: first tap arms (danger ring + explainer), a second
   // within 4s executes. Modal confirms don't exist inside the sandboxed iframe.
-  useEffect(() => { setRemoveArmed(false); setRemoveError(null) }, [selected])
+  useEffect(() => { setRemoveArmed(false); setRemoveError(null); setShowInstCaveats(false) }, [selected])
   useEffect(() => {
     if (!removeArmed) return undefined
     const t = setTimeout(() => setRemoveArmed(false), 4000)
@@ -993,6 +1085,7 @@ export default function SkillsApp({ appId, token }) {
   // ---- Detail view ----
   if (current) {
     const removable = isUninstallable(current.provenance)
+    const compatInfo = instCompat[current.id] || null
     return (
       <div className="sk-root">
         <style>{CSS}</style>
@@ -1017,10 +1110,26 @@ export default function SkillsApp({ appId, token }) {
           <div className="sk-alert" role="status">Tap the bin again to remove “{current.id}”. Its bytes are saved to git history first.</div>
         )}
         {removeError && <div className="sk-alert is-error" role="alert">{removeError}</div>}
-        <div className="sk-scroll">
+        <div className="sk-scroll" ref={mainScrollRef}>
           <div className="sk-detailmeta">
             <ProvChips provenance={current.provenance} uses={current.uses} />
+            {compatInfo && (compatInfo.ok ? (
+              <span className="sk-compat is-ok">✓ Works with Möbius</span>
+            ) : (
+              <button
+                className="sk-compat is-warn"
+                onClick={() => setShowInstCaveats((v) => !v)}
+                aria-expanded={showInstCaveats}
+              >
+                ⚠ {compatInfo.caveats.length} {compatInfo.caveats.length === 1 ? 'thing' : 'things'} to know
+              </button>
+            ))}
           </div>
+          {compatInfo && !compatInfo.ok && showInstCaveats && (
+            <ul className="sk-caveats in-page" role="status">
+              {compatInfo.caveats.map((c) => <li key={c.kind}>{c.text}</li>)}
+            </ul>
+          )}
           {currentContent?.status === 'failed' ? (
             <div className="sk-empty">
               <div className="sk-empty-mark" aria-hidden="true">⚠️</div>
@@ -1078,7 +1187,7 @@ export default function SkillsApp({ appId, token }) {
         </button>
       </header>
 
-      <div className="sk-scroll">
+      <div className="sk-scroll" ref={mainScrollRef}>
         <div className="sk-page">
         {skills !== null && skills.length > 0 && (
           <div className="sk-searchwrap">

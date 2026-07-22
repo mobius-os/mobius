@@ -10,6 +10,7 @@ import {
   githubSkillUrl,
   createSummaryPrefetcher,
   assessCompat,
+  assessInstalled,
 } from '../catalog.js'
 
 // Regression tests for the catalog core. Portable: no absolute paths, no
@@ -250,6 +251,52 @@ test('assessCompat: bare inline-code filenames and dir refs are not treated as r
   const raw = `${OK_MD}\nMention \`package.json\` and [the scripts](scripts/) generically.\n`
   const res = assessCompat(tree, DIR, raw)
   assert.equal(res.caveats.find((c) => c.kind === 'broken-refs'), undefined)
+})
+
+test('assessCompat: shell snippets and home/abs paths in inline code are not refs', () => {
+  const tree = [blob(`${DIR}/SKILL.md`)]
+  const raw = `${OK_MD}\nRun \`open /tmp/review_<name>.html\`, save to \`~/Downloads/set.json\`, read \`/etc/hosts.conf\`.\n`
+  const res = assessCompat(tree, DIR, raw)
+  assert.equal(res.caveats.find((c) => c.kind === 'broken-refs'), undefined)
+})
+
+// --- assessInstalled: the same verdict for skills already on disk ---
+
+test('assessInstalled: clean installed skill with its files present is ok', () => {
+  const raw = `${OK_MD}\nSee [the forms guide](references/forms.md).\n`
+  const res = assessInstalled(['references/forms.md'], raw)
+  assert.equal(res.ok, true)
+  assert.deepEqual(res.caveats, [])
+})
+
+test('assessInstalled: refs to files not on disk are broken-refs', () => {
+  const raw = `${OK_MD}\nRun \`scripts/fill.py\` first.\n`
+  const res = assessInstalled([], raw)
+  const broken = res.caveats.find((c) => c.kind === 'broken-refs')
+  assert.ok(broken)
+  assert.match(broken.text, /scripts\/fill\.py/)
+})
+
+test('assessInstalled: installed scripts are the informational caveat', () => {
+  const res = assessInstalled(['scripts/fill.py'], `${OK_MD}\nRun \`scripts/fill.py\`.\n`)
+  assert.equal(res.ok, false)
+  const scripts = res.caveats.find((c) => c.kind === 'scripts')
+  assert.match(scripts.text, /nothing runs automatically/)
+  assert.equal(res.caveats.find((c) => c.kind === 'broken-refs'), undefined)
+})
+
+test('assessInstalled: flat skill (no files) with plain prose and a description is ok', () => {
+  assert.equal(assessInstalled([], OK_MD).ok, true)
+})
+
+test('assessInstalled: missing frontmatter description is flagged', () => {
+  const res = assessInstalled([], '# Notes\n\nJust a body.\n')
+  assert.ok(res.caveats.find((c) => c.kind === 'frontmatter'))
+})
+
+test('assessInstalled: SKILL.md itself never counts as a resource or a broken ref', () => {
+  const res = assessInstalled(['SKILL.md'], `${OK_MD}\nSee [itself](SKILL.md).\n`)
+  assert.equal(res.ok, true)
 })
 
 test('assessCompat: files outside the skill dir are ignored', () => {

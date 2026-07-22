@@ -87,7 +87,9 @@ export function relativeRefs(raw) {
   const refs = new Set()
   const consider = (target, { needsSlash } = {}) => {
     const t = String(target || '').trim().replace(/^\.\//, '').split(/[#?]/)[0]
-    if (!t || t.startsWith('/') || t.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(t)) return
+    if (!t || t.startsWith('/') || t.startsWith('~') || t.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(t)) return
+    // A shell snippet (`open /tmp/x.html`) or home path is not a bundled file.
+    if (/\s/.test(t)) return
     if (needsSlash && !t.includes('/')) return
     // Files only — a trailing dir ref like `scripts/` isn't checkable.
     if (/\.[a-z0-9]{1,6}$/i.test(t)) refs.add(t)
@@ -162,15 +164,53 @@ export function assessCompat(tree, dir, raw) {
     })
   }
 
-  // Both flat parsers (here and backend) read only `key: value` scalars, so a
-  // YAML block scalar (`description: >`) leaves just the indicator behind.
+  const fm = frontmatterCaveat(raw)
+  if (fm) caveats.push(fm)
+
+  return { ok: caveats.length === 0, caveats }
+}
+
+// Both flat parsers (here and backend) read only `key: value` scalars, so a
+// YAML block scalar (`description: >`) leaves just the indicator behind.
+function frontmatterCaveat(raw) {
   const desc = String(splitFrontmatter(raw || '').meta.description || '').trim()
-  if (!desc || /^[>|][+-]?$/.test(desc)) {
+  if (desc && !/^[>|][+-]?$/.test(desc)) return null
+  return {
+    kind: 'frontmatter',
+    text: 'Missing its one-line summary, so skill lists will show its first paragraph instead. Purely cosmetic.',
+  }
+}
+
+// The same verdict for an already-INSTALLED skill, from what's actually on
+// disk: `files` is the installed resource list relative to the skill dir
+// (empty for flat skills). The repo-side caveats (dropped, over-budget) are
+// install-time facts we can no longer see — their lasting symptom is a
+// reference to a file that isn't there, which this does catch.
+export function assessInstalled(files, raw) {
+  const caveats = []
+  const rels = (Array.isArray(files) ? files : [])
+    .map((f) => String(f || ''))
+    .filter((r) => r && !/^skill\.md$/i.test(r))
+  const have = new Set(rels)
+
+  const broken = relativeRefs(raw).filter((r) => !have.has(r) && !/^skill\.md$/i.test(r))
+  if (broken.length) {
     caveats.push({
-      kind: 'frontmatter',
-      text: 'Missing its one-line summary, so skill lists will show its first paragraph instead. Purely cosmetic.',
+      kind: 'broken-refs',
+      text: `Its instructions mention files that aren't installed (${nameSome(broken)}), so the steps that use them may not work.`,
     })
   }
+
+  const scripts = rels.filter((r) => SCRIPT_SUFFIXES.includes(suffixOf(r)))
+  if (scripts.length) {
+    caveats.push({
+      kind: 'scripts',
+      text: `Comes with ${scripts.length} helper ${scripts.length === 1 ? 'script' : 'scripts'}. Möbius saves them for the agent to read — nothing runs automatically.`,
+    })
+  }
+
+  const fm = frontmatterCaveat(raw)
+  if (fm) caveats.push(fm)
 
   return { ok: caveats.length === 0, caveats }
 }
