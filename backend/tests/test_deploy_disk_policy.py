@@ -116,11 +116,15 @@ def test_cleanup_removes_only_the_superseded_rollback_image(tmp_path):
   harness = _helpers() + textwrap.dedent(f"""\
     ok() {{ printf 'OK %s\n' "$1"; }}
     warn() {{ printf 'WARN %s\n' "$1"; }}
+    removed=0
     docker() {{
       if [ "$1" = inspect ]; then
         printf 'sha256:new\n'
+      elif [ "$1" = image ] && [ "$2" = ls ]; then
+        if [ "$removed" = 0 ]; then printf 'sha256:superseded\n'; fi
       elif [ "$1" = image ] && [ "$2" = rm ]; then
         printf 'REMOVE %s\n' "$3" >>{str(docker_log)!r}
+        removed=1
       else
         return 1
       fi
@@ -163,16 +167,69 @@ def test_admission_refusal_happens_before_rollback_tag_mutation():
   assert admission < pin
 
 
-def test_reflection_refresh_is_cheap_and_runs_after_success_cleanup():
+def test_superseded_rollback_is_removed_before_the_build_can_fail():
+  text = _read()
+  build_step = text.index("# ── step 1: build")
+  pin = text.index('if ! docker tag "$PREV_IMAGE" "$ROLLBACK_TAG";', build_step)
+  cleanup = text.index("remove_superseded_rollback_image", pin)
+  build = text.index('docker compose "${COMPOSE_ARGS[@]}" build', cleanup)
+
+  assert pin < cleanup < build
+  assert text.count("remove_superseded_rollback_image", build_step) == 1
+
+
+def test_missing_superseded_image_is_already_clean(tmp_path):
+  harness = _helpers() + textwrap.dedent("""\
+    ok() { printf 'OK %s\n' "$1"; }
+    warn() { printf 'WARN %s\n' "$1"; }
+    docker() {
+      if [ "$1" = image ] && [ "$2" = ls ]; then
+        return 0
+      fi
+      return 99
+    }
+    CONTAINER=mobius
+    PREV_IMAGE=sha256:current
+    PREVIOUS_ROLLBACK_IMAGE=sha256:already-gone
+    remove_superseded_rollback_image
+    printf 'OLD=%s\n' "$PREVIOUS_ROLLBACK_IMAGE"
+  """)
+  result = subprocess.run(
+    ["bash", "-c", harness], capture_output=True, text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.stdout == "OLD=\n"
+
+
+def test_unverifiable_image_state_keeps_identity_and_fails_closed():
+  harness = _helpers() + textwrap.dedent("""\
+    ok() { printf 'OK %s\n' "$1"; }
+    warn() { printf 'WARN %s\n' "$1"; }
+    docker() { return 1; }
+    CONTAINER=mobius
+    PREV_IMAGE=sha256:current
+    PREVIOUS_ROLLBACK_IMAGE=sha256:unknown
+    remove_superseded_rollback_image
+  """)
+  result = subprocess.run(
+    ["bash", "-c", harness], capture_output=True, text=True,
+  )
+
+  assert result.returncode == 1
+  assert "refusing to forget its identity" in result.stdout
+
+
+def test_reflection_refresh_is_cheap_and_runs_after_success_cache_cleanup():
   text = _read()
   refresh_call = text.rindex("refresh_reflection_resource_snapshot")
   recovery_failure = text.rindex(
     'if [ "${RECOVERYD_CUTOVER_FAILED:-0}" = "1" ]'
   )
-  exact_cleanup = text.rindex("remove_superseded_rollback_image")
+  cache_cleanup = text.rindex("prune_old_build_cache")
 
   assert "REFLECTION_RESOURCE_DEEP_SCAN=skip" in text
-  assert recovery_failure < exact_cleanup < refresh_call
+  assert recovery_failure < cache_cleanup < refresh_call
 
 
 def test_deploy_script_still_parses():

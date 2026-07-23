@@ -598,17 +598,42 @@ rollback_tag_for_image() {
 }
 
 remove_superseded_rollback_image() {
-  local old_image="${PREVIOUS_ROLLBACK_IMAGE:-}" current_image
+  local old_image="${PREVIOUS_ROLLBACK_IMAGE:-}" current_image ids state
   [ -n "$old_image" ] || return 0
+  if ids="$(docker image ls -q --no-trunc 2>/dev/null)"; then
+    if grep -Fxq "$old_image" <<<"$ids"; then state=0; else state=1; fi
+  else
+    state=2
+  fi
+  if [ "$state" -eq 1 ]; then
+    PREVIOUS_ROLLBACK_IMAGE=""
+    return 0
+  fi
+  if [ "$state" -eq 2 ]; then
+    warn "could not verify the superseded rollback image; refusing to forget its identity."
+    return 1
+  fi
   current_image=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true)
   if [ "$old_image" = "$PREV_IMAGE" ] || [ "$old_image" = "$current_image" ]; then
     return 0
   fi
-  if docker image rm "$old_image" >/dev/null 2>&1; then
-    ok "removed the superseded rollback image (${old_image:0:19}…)"
+  docker image rm "$old_image" >/dev/null 2>&1 || true
+  if ids="$(docker image ls -q --no-trunc 2>/dev/null)"; then
+    if grep -Fxq "$old_image" <<<"$ids"; then state=0; else state=1; fi
   else
-    warn "superseded rollback image ${old_image:0:19}… is still referenced; left it untouched."
+    state=2
   fi
+  if [ "$state" -eq 1 ]; then
+    ok "removed the superseded rollback image (${old_image:0:19}…)"
+    PREVIOUS_ROLLBACK_IMAGE=""
+    return 0
+  fi
+  if [ "$state" -eq 0 ]; then
+    warn "superseded rollback image ${old_image:0:19}… is still referenced; left it untouched."
+    return 0
+  fi
+  warn "could not verify cleanup of superseded rollback image ${old_image:0:19}…"
+  return 1
 }
 
 prune_old_build_cache() {
@@ -1184,8 +1209,10 @@ else
     exit 1
   fi
   # Keep exactly one last-known-good image before compose reuses IMAGE_TAG for
-  # the new build. The prior rollback target was captured above and is removed
-  # only after the new image has passed every deploy verification.
+  # the new build. Once the currently-running image is pinned, the superseded
+  # rollback is no longer part of the recovery set and can be removed now. This
+  # must happen before `docker compose build`: a failed build must not strand an
+  # untagged old rollback image whose ID is forgotten on the next run.
   if [ -n "$PREV_IMAGE" ] && [ -n "$ROLLBACK_TAG" ]; then
     intent "docker tag ${PREV_IMAGE} ${ROLLBACK_TAG}"
     if ! docker tag "$PREV_IMAGE" "$ROLLBACK_TAG"; then
@@ -1193,6 +1220,10 @@ else
       exit 1
     fi
     ok "running image pinned as the one rollback target"
+    if ! remove_superseded_rollback_image; then
+      fail "could not verify bounded rollback retention; refusing to build while an image identity could be lost."
+      exit 1
+    fi
   fi
   docker compose "${COMPOSE_ARGS[@]}" build
   ok "image rebuilt"
@@ -1591,11 +1622,10 @@ if [ "${RECOVERYD_CUTOVER_FAILED:-0}" = "1" ]; then
   exit 1
 fi
 
-# Keep the running image plus one rollback image and remove only the exact
-# rollback target this successful build superseded. Never run a host-wide image
-# prune: a dangling sibling image may belong to another checkout or workload.
+# The rollback set was bounded before the build. After a fully successful
+# deploy, bound only unused build cache. Never run a host-wide image prune: a
+# dangling sibling image may belong to another checkout or workload.
 if [ "$BUILT_THIS_RUN" = "1" ]; then
-  remove_superseded_rollback_image
   prune_old_build_cache
   storage=$(docker_storage_path)
   free_bytes=$(disk_available_bytes "$storage")
