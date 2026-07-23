@@ -37,4 +37,6 @@ def test_helper_owns_exact_container_identity_and_cleanup():
   assert "trap cleanup EXIT" in helper
   assert "trap 'exit 143' TERM" in helper
   assert "io.mobius.probe.started_at" in helper
+  assert "io.mobius.probe.owner_token" in helper
+  assert '[ "$token" = "$OWNER_TOKEN" ]' in helper
   assert "docker stats --no-stream" in helper

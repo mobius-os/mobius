@@ -91,20 +91,36 @@ fi
 STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mobius-docker-probe.XXXXXX")" || exit 1
 CID_FILE="$STATE_DIR/cid"
 TIMED_OUT="$STATE_DIR/timed-out"
+OWNER_TOKEN="${BASHPID}-${RANDOM}-${RANDOM}"
 CLIENT_PID=""
 WATCHDOG_PID=""
 
 container_ref() {
+  local identity ref token
   if [ -s "$CID_FILE" ]; then
     head -n 1 "$CID_FILE"
-  else
-    printf '%s\n' "$PROBE_NAME"
+    return
   fi
+
+  # docker run can fail before writing the cidfile because PROBE_NAME already
+  # belongs to someone else. Resolve the name to an immutable container ID only
+  # when its private label proves this invocation created it.
+  identity=$(
+    docker inspect \
+      --format '{{.Id}} {{index .Config.Labels "io.mobius.probe.owner_token"}}' \
+      "$PROBE_NAME" 2>/dev/null
+  ) || return 1
+  ref="${identity%% *}"
+  token="${identity#* }"
+  [ -n "$ref" ] && [ "$token" = "$OWNER_TOKEN" ] || return 1
+  printf '%s\n' "$ref"
 }
 
 remove_container() {
   local ref attempt
-  ref="$(container_ref)"
+  if ! ref="$(container_ref)"; then
+    return 0
+  fi
   docker rm -f "$ref" >/dev/null 2>&1 || true
   for attempt in 1 2 3; do
     if ! docker inspect "$ref" >/dev/null 2>&1; then
@@ -150,6 +166,7 @@ docker run --rm \
   --label io.mobius.probe=true \
   --label "io.mobius.probe.started_at=$started_at" \
   --label "io.mobius.probe.owner_pid=$$" \
+  --label "io.mobius.probe.owner_token=$OWNER_TOKEN" \
   "$@" <&0 &
 CLIENT_PID="$!"
 
