@@ -63,7 +63,6 @@ export function projectFocusedPane(baseProjection, workspace, paneId, contentRec
 // There is no per-pane stagger or second destination phase to make the owner wait.
 export const MODE_MOTION = Object.freeze({
   enterItemMs: 210,
-  enterSingleMs: 180,
   exitItemMs: 180,
   promoteMs: 210,
   logoReleaseMs: 90,
@@ -79,7 +78,6 @@ export const RECONCILE_SLACK_MS = 250
 // keyframes so a name typo is caught by one grep. Strip-clear + chrome fades are
 // deliberately ABSENT: they are shorter and must not gate completion.
 export const PROMOTE_NAME = 'shell-mode-promote'
-export const SETTLE_NAME = 'shell-mode-settle'
 export const DEAL_OUT_NAME = 'shell-mode-deal-out'
 export const DEAL_IN_NAME = 'shell-mode-deal-in'
 
@@ -327,11 +325,11 @@ export function deriveExitPlan(input) {
 }
 
 // deriveEnterPlan(input) → the latched entry plan, or null when there is nothing
-// to assemble. The single-screen surface keeps physical continuity when it is an
-// active builder leaf: it starts full-bleed and settles into its pane via the inverse
-// FLIP. Every sibling gathers from its nearest outer edge. If the single-screen
-// surface is absent/inactive in the tree, it remains a stationary underlay while all
-// visible panes assemble over it. This is the exact inverse of deriveExitPlan.
+// to assemble. The single-screen surface remains a stationary full-bleed underlay
+// while every OTHER visible pane gathers from its nearest outer edge. When that
+// surface is also a builder leaf, completion simply crops the retained wrapper
+// into its pane. This keeps the Standard world visually still instead of scaling
+// it like a foreground card, and needs no duplicate ChatView/AppCanvas.
 //
 export function deriveEnterPlan(input) {
   const { workspace, projection, contentRect } = input
@@ -339,31 +337,14 @@ export function deriveEnterPlan(input) {
   if (leaves.length === 0) return null
   const { target, immersiveInstant } = classifyExitDestination(input)
   if (immersiveInstant) return null
-  const single = leaves.length === 1
-  const duration = single ? MODE_MOTION.enterSingleMs : MODE_MOTION.enterItemMs
+  const duration = MODE_MOTION.enterItemMs
   const destinationRect = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
-  const settleLeaf = target ? leaves.find(l => l.activeKey === target) : null
   const participants = []
   const completionNames = new Set()
-  let underlayKey = null
-
-  if (settleLeaf) {
-    const fromRect = paintedContentRect(settleLeaf, projection, leaves.length)
-    participants.push({
-      key: settleLeaf.activeKey,
-      paneId: settleLeaf.paneId,
-      motion: 'settle',
-      delayMs: 0,
-      durationMs: duration,
-      flip: flipTo(fromRect, destinationRect),
-    })
-    completionNames.add(SETTLE_NAME)
-  } else {
-    underlayKey = target
-  }
+  const underlayKey = target
 
   for (const l of leaves) {
-    if (l === settleLeaf) continue
+    if (l.activeKey === target) continue
     participants.push({
       key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
       delayMs: 0,
@@ -372,6 +353,7 @@ export function deriveEnterPlan(input) {
     })
     completionNames.add(DEAL_IN_NAME)
   }
+  if (participants.length === 0) return null
   const totalMs = participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
   return {
     kind: 'enter',
