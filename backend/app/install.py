@@ -2542,6 +2542,7 @@ async def install_from_manifest(
         manage_apps=bool(perms.get("manage_apps", False)),
         manage_skills=bool(perms.get("manage_skills", False)),
         github_access=bool(perms.get("github_access", False)),
+        github_connect=bool(perms.get("github_connect", False)),
         filesystem_access=bool(perms.get("filesystem_access", False)),
         # The manifest's `offline_capable: true` opts the app into the
         # SW frame cache + the window.mobius.storage outbox. Without
@@ -2948,6 +2949,7 @@ async def install_from_manifest(
           app.manage_apps = bool(perms.get("manage_apps", False))
           app.manage_skills = bool(perms.get("manage_skills", False))
           app.github_access = bool(perms.get("github_access", False))
+          app.github_connect = bool(perms.get("github_connect", False))
           app.filesystem_access = bool(perms.get("filesystem_access", False))
           if "offline_capable" in manifest:
             app.offline_capable = bool(manifest["offline_capable"])

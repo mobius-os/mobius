@@ -316,13 +316,23 @@ def run_migrations(eng) -> None:
       ))
       conn.commit()
   if "github_access" not in apps_cols:
-    # GitHub connection access — gates the whole /api/github surface
-    # (connection management + the read-only data proxy). Defaults to 0;
+    # GitHub data access — gates the read-only proxy and reviewed contribution
+    # submit surface. Connection management has its own stronger grant below.
     # apps gain it by declaring permissions.github_access=true in their
     # manifest and reinstalling.
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN github_access BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      ))
+      conn.commit()
+  if "github_connect" not in apps_cols:
+    # GitHub credential-management authority: device flow, PAT install, status,
+    # and disconnect. Kept separate so a future read-only GitHub consumer never
+    # inherits account mutation merely to inspect public repository state.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN github_connect BOOLEAN "
         "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()

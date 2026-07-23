@@ -153,6 +153,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "manage_apps": bool(perms.get("manage_apps", False)),
       "manage_skills": bool(perms.get("manage_skills", False)),
       "github_access": bool(perms.get("github_access", False)),
+      "github_connect": bool(perms.get("github_connect", False)),
     },
     "background": (
       {
@@ -229,6 +230,7 @@ def contract_from_app_state(
       "manage_apps": bool(getattr(app, "manage_apps", False)),
       "manage_skills": bool(getattr(app, "manage_skills", False)),
       "github_access": bool(getattr(app, "github_access", False)),
+      "github_connect": bool(getattr(app, "github_connect", False)),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),
     "offline": getattr(app, "offline_contract", None),
