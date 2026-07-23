@@ -39,11 +39,16 @@ class Owner(Base):
   hashed_password = Column(String(255), nullable=False)
   # Must stay in sync with providers.PROVIDER_NAMES.
   provider = Column(String(32), nullable=False, default="claude")
-  # Default automatic-continuation policy for newly-created chats. Each chat
+  # Default provider-limit recovery policy for newly-created chats. Each chat
   # stores its own copy; changing a chat's switch updates this seed for the
-  # next chat without rewriting any existing conversation. The historical
-  # column name is retained to avoid rewriting every local SQLite database.
+  # next chat without rewriting any existing conversation. Automatic provider
+  # retries are initially off because they can consume paid usage.
   auto_resume_on_limit_default = Column(
+    Boolean, nullable=False, default=False, server_default=false()
+  )
+  # Planned restarts are initiated by Möbius, so continuing interrupted work
+  # is initially on. This remains independently configurable per chat.
+  auto_resume_on_restart_default = Column(
     Boolean, nullable=False, default=True, server_default=true()
   )
   # Per-owner model-picker preferences. Shape:
@@ -129,10 +134,14 @@ class Chat(Base):
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
-  # Per-chat policy for automatic continuation after provider limits and
-  # supervisor-authenticated planned restarts. The historical column name is
-  # retained to avoid rewriting every local SQLite database.
+  # Per-chat policy for automatic recovery after provider limits. Initially
+  # off because another attempt can consume paid usage.
   auto_resume_on_limit = Column(
+    Boolean, nullable=False, default=False, server_default=false()
+  )
+  # Per-chat policy for continuing after a supervisor-authenticated planned
+  # restart. Initially on because Möbius interrupted the work itself.
+  auto_resume_on_restart = Column(
     Boolean, nullable=False, default=True, server_default=true()
   )
   # Vestigial: the named-agent feature was removed; column retained

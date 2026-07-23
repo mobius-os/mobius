@@ -226,7 +226,7 @@ function MsgContentInner({
                     className="chat__limit-option-label"
                     htmlFor={autoResumeSwitchId}
                   >
-                    Always continue automatically in this chat
+                    Always continue after usage limits in this chat
                   </label>
                 </div>
                 <Switch

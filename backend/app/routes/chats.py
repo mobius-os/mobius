@@ -324,6 +324,7 @@ def _chat_detail_response(
     "provider": provider,
     "created_by_app_id": chat.created_by_app_id,
     "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
+    "auto_resume_on_restart": bool(chat.auto_resume_on_restart),
     "agent_settings_json": settings_obj,
     "effective_agent_settings": effective_agent_settings(
       get_settings().data_dir,
@@ -674,7 +675,10 @@ def create_chat(
     provider=provider,
     agent_settings_json=None,
     auto_resume_on_limit=(
-      bool(owner.auto_resume_on_limit_default) if owner else True
+      bool(owner.auto_resume_on_limit_default) if owner else False
+    ),
+    auto_resume_on_restart=(
+      bool(owner.auto_resume_on_restart_default) if owner else True
     ),
   )
   db.add(chat)
@@ -794,6 +798,7 @@ async def patch_chat(
     body.title is not None
     or body.pinned is not None
     or body.auto_resume_on_limit is not None
+    or body.auto_resume_on_restart is not None
     or body.by_agent
     or body.clear_title
   ):
@@ -854,6 +859,12 @@ async def patch_chat(
       # chat, matching other "last picked" defaults without making the setting
       # global at runtime.
       principal.owner.auto_resume_on_limit_default = body.auto_resume_on_limit
+
+    if body.auto_resume_on_restart is not None:
+      chat.auto_resume_on_restart = body.auto_resume_on_restart
+      principal.owner.auto_resume_on_restart_default = (
+        body.auto_resume_on_restart
+      )
 
     # Determine the effective target provider. The body may set it
     # explicitly, OR it may be implied by a model-only PATCH whose
@@ -1012,6 +1023,7 @@ async def patch_chat(
       "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
       "provider": chat.provider or "claude",
       "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
+      "auto_resume_on_restart": bool(chat.auto_resume_on_restart),
       "effective": effective_agent_settings(
         data_dir,
         _coerce_agent_settings(chat.agent_settings_json) or None,
