@@ -73,16 +73,14 @@ _SKILL_NAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 # Resource files a directory skill may carry alongside SKILL.md (including in
 # subdirectories — scripts/, references/, assets/ are common in the ecosystem).
 # Bounded so an install can't smuggle a data payload through the skills tree —
-# a skill is instruction prose plus a few references, not an app.
-_RESOURCE_COUNT_MAX = 24
-_RESOURCE_TOTAL_MAX = 2 * 1024 * 1024
-_RESOURCE_MAX_DEPTH = 4
+# a skill is instruction prose plus a few references, not an app. Recovery
+# reads these exact shared limits too.
+_RESOURCE_COUNT_MAX = skills.RESOURCE_COUNT_MAX
+_RESOURCE_TOTAL_MAX = skills.RESOURCE_TOTAL_MAX
+_RESOURCE_MAX_DEPTH = skills.RESOURCE_MAX_DEPTH
 # Only text/reference file types are stored; anything else is skipped with a
 # warning rather than materialized into the skills tree.
-_RESOURCE_SUFFIXES = frozenset({
-  ".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".py", ".js", ".ts",
-  ".sh", ".toml", ".html", ".css",
-})
+_RESOURCE_SUFFIXES = skills.RESOURCE_SUFFIXES
 
 _GITHUB_API = "https://api.github.com"
 _USAGE_WINDOW_DAYS = 30
@@ -129,33 +127,12 @@ def _chown_mobius(path: Path) -> None:
       pass
 
 
-class _CorruptSidecar(Exception):
-  """The installed-skills sidecar is present but unparseable/not an object."""
-
-
 def _load_installed_sidecar(skills_dir: Path) -> dict:
-  """Parse the installed-skills sidecar, distinguishing MISSING from CORRUPT.
+  """Strict shared sidecar read for mutating route paths."""
+  return skills.load_installed_sidecar(skills_dir)
 
-  A missing sidecar is a legitimate empty state ({}). A present-but-unparseable
-  or non-object sidecar is CORRUPT and raises: mapping corruption to {} (as the
-  read path does) would let the next MUTATION overwrite the file with only its
-  own new record, silently orphaning every previously-installed skill —
-  present on disk but unowned and no longer uninstallable through the API.
-  """
-  path = skills_dir / skills.INSTALLED_SKILLS_SIDECAR
-  try:
-    raw = path.read_text(encoding="utf-8")
-  except FileNotFoundError:
-    return {}
-  except OSError as exc:
-    raise _CorruptSidecar(f"could not read {path.name}: {exc}") from exc
-  try:
-    loaded = json.loads(raw)
-  except ValueError as exc:
-    raise _CorruptSidecar(f"{path.name} is not valid JSON: {exc}") from exc
-  if not isinstance(loaded, dict):
-    raise _CorruptSidecar(f"{path.name} is not a JSON object")
-  return loaded
+
+_CorruptSidecar = skills.CorruptInstalledSkillsSidecar
 
 
 def _read_installed_sidecar(skills_dir: Path) -> dict:
@@ -306,19 +283,8 @@ async def _github_tree(
 
 
 def _resource_rel_ok(rel: str) -> bool:
-  """Whether a tree-relative path is safe to materialize under the skill dir.
-
-  Every segment must be a plain name (no dot-prefixed files/dirs, no
-  traversal, no backslashes), depth is bounded, and the suffix must be in the
-  text/reference allowlist.
-  """
-  segments = rel.split("/")
-  if not 1 <= len(segments) <= _RESOURCE_MAX_DEPTH:
-    return False
-  for seg in segments:
-    if not seg or seg.startswith(".") or "\\" in seg:
-      return False
-  return Path(rel).suffix.lower() in _RESOURCE_SUFFIXES
+  """Shared installer/recovery resource path contract."""
+  return skills.resource_rel_ok(rel)
 
 
 async def _fetch_files(
@@ -474,37 +440,54 @@ def _snapshot_skill_dir(data_dir: Path, name: str) -> tuple[bool, str]:
   return True, "committed"
 
 
-def _redact_source_url(url: str | None) -> str | None:
-  """Origin + path only, `http(s)` only — no userinfo, query, or fragment.
-
-  Signed object links and private raw URLs commonly carry access tokens or
-  signatures in the query string (and occasionally in userinfo); those must
-  never cross the API boundary to an ordinary app token. The full submitted URL
-  stays owner-only; every caller still gets the authoritative `skill_sha256`.
-
-  Anything that is not a well-formed http/https URL — an exotic scheme, a
-  malformed port (accessing `.port` raises), a hostless value, or an
-  unparseable string — redacts to None rather than raising: an app-scoped
-  ``GET /api/skills`` must fail SAFE on damaged provenance, never 500. All
-  parsing goes through this one strict helper.
-  """
-  if not url:
-    return url
-  from urllib.parse import urlparse, urlunparse
-
-  try:
-    parts = urlparse(url)
-    if parts.scheme not in ("http", "https"):
-      return None
-    host = parts.hostname or ""
-    port = parts.port  # property; raises ValueError on a malformed port
-    if not host:
-      return None
-    if port is not None:
-      host = f"{host}:{port}"
-    return urlunparse((parts.scheme, host, parts.path, "", "", ""))
-  except ValueError:
-    return None
+def _skill_row(
+  skill: skills.Skill,
+  installed_records: dict,
+  counts: dict[str, int],
+  *,
+  is_owner: bool,
+) -> dict:
+  """One canonical mutation/list result shape for a skill."""
+  disk_name = (
+    skill.read_path.parent.name if skill.is_dir else skill.read_path.stem
+  )
+  row = {
+    "name": skill.name,
+    "id": disk_name,
+    "description": skill.description,
+    "provenance": skill.provenance,
+    "is_dir": skill.is_dir,
+    "uses_30d": counts.get(disk_name, 0),
+  }
+  rec = installed_records.get(disk_name)
+  if isinstance(rec, dict):
+    commit = rec.get("commit")
+    repo = rec.get("repo")
+    source_path = rec.get("path")
+    safe_repo_locator = (
+      isinstance(commit, str)
+      and _GIT_SHA.fullmatch(commit) is not None
+      and isinstance(repo, str)
+      and _REPO_OK.fullmatch(repo) is not None
+      and isinstance(source_path, str)
+      and 0 < len(source_path) <= 1000
+      and all(ord(ch) >= 32 for ch in source_path)
+      and "\\" not in source_path
+      and ".." not in source_path.strip("/").split("/")
+    )
+    # Owners can inspect the exact repairable sidecar state. App callers only
+    # receive a complete validated immutable GitHub locator, never arbitrary
+    # strings an agent or damaged sidecar placed in provenance fields.
+    row["commit"] = commit if is_owner or safe_repo_locator else None
+    row["source_repo"] = repo if is_owner or safe_repo_locator else None
+    row["source_path"] = source_path if is_owner or safe_repo_locator else None
+    row["skill_sha256"] = rec.get("skill_sha256")
+    files = rec.get("files")
+    row["files"] = files if isinstance(files, list) else None
+    # Raw source URLs are owner-only. Removing query/userinfo is insufficient:
+    # signed and private locators may also carry secrets in path segments.
+    row["source_url"] = rec.get("url") if is_owner else None
+  return row
 
 
 @router.get("")
@@ -513,8 +496,8 @@ def list_skills(principal=Depends(get_principal)) -> dict:
 
   Drives the Skills mini-app's "installed" view. Readable by the owner or any
   app token (browsing is not privileged; only install/uninstall are gated) —
-  but the raw submitted `source_url` (which may carry credentials in its query
-  string) is owner-only; app callers get a redacted origin/path instead.
+  but a raw submitted `source_url` is owner-only because credentials may occur
+  in userinfo, query strings, or path segments.
   """
   is_owner = getattr(principal, "scope", "app") == "owner"
   skills_dir = _skills_dir()
@@ -529,42 +512,10 @@ def list_skills(principal=Depends(get_principal)) -> dict:
   except Exception:  # pragma: no cover - usage is a non-critical enrichment
     counts = {}
   installed_records = _read_installed_sidecar(skills_dir)
-  out = []
-  for skill in skills.enumerate_skills(skills_dir):
-    disk_name = (
-      skill.read_path.parent.name if skill.is_dir else skill.read_path.stem
-    )
-    row = {
-      "name": skill.name,
-      "id": disk_name,
-      "description": skill.description,
-      "provenance": skill.provenance,
-      "is_dir": skill.is_dir,
-      # Usage is keyed STRICTLY by the on-disk id — both runners observe loads
-      # by file path. Frontmatter `name` is untrusted; keying by it would let
-      # an alias borrow another skill's count.
-      "uses_30d": counts.get(disk_name, 0),
-    }
-    rec = installed_records.get(disk_name)
-    if isinstance(rec, dict):
-      # The immutable install identity, safe for every caller: the content hash
-      # is the authoritative locator (a mutable/redirected repo URL is not).
-      row["commit"] = rec.get("commit")
-      row["source_repo"] = rec.get("repo")
-      row["source_path"] = rec.get("path")
-      row["skill_sha256"] = rec.get("skill_sha256")
-      # The installer-owned bounded file inventory (relative paths incl.
-      # SKILL.md). The companion app assesses installed-skill compatibility from
-      # THIS authoritative list — the paginated shared-list walk can silently
-      # omit names its narrower path regex rejects, so it can't be trusted as
-      # complete. Safe for every caller (filenames only, no secrets).
-      files = rec.get("files")
-      row["files"] = files if isinstance(files, list) else None
-      # The raw submitted URL can carry query credentials — full only for the
-      # owner; app callers get a redacted origin/path locator.
-      url = rec.get("url")
-      row["source_url"] = url if is_owner else _redact_source_url(url)
-    out.append(row)
+  out = [
+    _skill_row(skill, installed_records, counts, is_owner=is_owner)
+    for skill in skills.enumerate_skills(skills_dir)
+  ]
   return {"skills": out}
 
 
@@ -707,11 +658,35 @@ async def install_skill(
     warnings = _refresh_index_with_warning(skills_dir)
 
   log.info("installed skill %r from %s (%d file(s))", name, source, len(files))
+  installed = next(
+    (
+      item for item in skills.enumerate_skills(skills_dir)
+      if item.is_dir and item.read_path.parent.name == name
+    ),
+    None,
+  )
+  # The mutation is already durable. A surprising readback failure must never
+  # turn success into a retryable 500/collision; return a truthful minimal row
+  # and let the app's reconciliation refresh enrich it later.
+  if installed is None:  # pragma: no cover - defensive filesystem failure
+    row = {
+      "name": name,
+      "id": name,
+      "description": "",
+      "provenance": f"installed:{source}",
+      "is_dir": True,
+      "uses_30d": 0,
+      "commit": commit,
+      "source_repo": body.repo,
+      "source_path": body.path,
+      "source_url": None,
+      "skill_sha256": record["skill_sha256"],
+      "files": record["files"],
+    }
+  else:
+    row = _skill_row(installed, records, {}, is_owner=False)
   return {
-    "name": name,
-    "source": source,
-    "commit": commit,
-    "files": sorted(files.keys()),
+    "skill": row,
     "warnings": warnings,
   }
 

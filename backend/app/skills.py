@@ -34,13 +34,18 @@ replacing the hand-maintained table that used to live in `skill/core.md`.
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import os
 import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.manifest_contract import SKILL_MAX_BYTES
 from app.storage_io import atomic_write
+
+log = logging.getLogger(__name__)
 
 # Installer-owned sidecars (kept in sync with the literals in install.py and
 # routes/skills.py — a dotfile that is not `*.md`, so no skill loader lists it).
@@ -231,8 +236,19 @@ _STAGING_PREFIX = ".staging-"
 # An unreferenced staging tree younger than this may belong to an install still
 # in flight, so GC leaves it alone; older ones are crash orphans.
 _STAGING_GC_AGE_SECONDS = 3600
-# Cap the recovery inventory walk so a tampered target can't make it unbounded.
-_INVENTORY_FILE_CAP = 256
+
+# One install/recovery tree contract. The writer and the recovery reader share
+# these bounds so recovery never accepts or loads a shape the installer could
+# not have published.
+RESOURCE_COUNT_MAX = 24
+RESOURCE_TOTAL_MAX = 2 * 1024 * 1024
+RESOURCE_MAX_DEPTH = 4
+RESOURCE_SUFFIXES = frozenset({
+  ".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".py", ".js", ".ts",
+  ".sh", ".toml", ".html", ".css",
+})
+TREE_FILE_COUNT_MAX = 1 + RESOURCE_COUNT_MAX  # root SKILL.md + resources
+TREE_TOTAL_BYTES_MAX = SKILL_MAX_BYTES + RESOURCE_TOTAL_MAX
 
 # One canonical identity for a complete skill tree: SKILL.md plus every
 # resource, path AND bytes. Versioned so recovery can tell a recognized record
@@ -265,6 +281,48 @@ def tree_digest_from_files(files: dict[str, bytes]) -> str:
   return _TREE_DIGEST_PREFIX + digest.hexdigest()
 
 
+class CorruptInstalledSkillsSidecar(Exception):
+  """The ownership sidecar exists but cannot be trusted as an object."""
+
+
+def load_installed_sidecar(skills_dir: Path) -> dict:
+  """Strict installed-skills sidecar read for every mutating path.
+
+  Missing means an empty installation set. Present-but-unreadable, invalid
+  JSON, or a non-object is corruption: callers must stop rather than infer an
+  empty set and mutate owner data from that false premise.
+  """
+  path = skills_dir / INSTALLED_SKILLS_SIDECAR
+  try:
+    raw = path.read_text(encoding="utf-8")
+  except FileNotFoundError:
+    return {}
+  except OSError as exc:
+    raise CorruptInstalledSkillsSidecar(
+      f"could not read {path.name}: {exc}",
+    ) from exc
+  try:
+    loaded = json.loads(raw)
+  except ValueError as exc:
+    raise CorruptInstalledSkillsSidecar(
+      f"{path.name} is not valid JSON: {exc}",
+    ) from exc
+  if not isinstance(loaded, dict):
+    raise CorruptInstalledSkillsSidecar(f"{path.name} is not a JSON object")
+  return loaded
+
+
+def resource_rel_ok(rel: str) -> bool:
+  """Whether an installer/recovery resource path belongs in a skill tree."""
+  segments = rel.split("/")
+  if not 1 <= len(segments) <= RESOURCE_MAX_DEPTH:
+    return False
+  for segment in segments:
+    if not segment or segment.startswith(".") or "\\" in segment:
+      return False
+  return Path(rel).suffix.lower() in RESOURCE_SUFFIXES
+
+
 def _safe_child(root: Path, name: str) -> Path | None:
   """A single-component child of `root`, or None if `name` would escape it.
 
@@ -294,10 +352,13 @@ def _read_tree_bytes(target: Path) -> dict[str, bytes] | None:
   """Root-relative path -> bytes for every regular file under `target`.
 
   Returns None on any surprise a clean install never contains — a symlink or
-  special file, an unreadable entry, or more than `_INVENTORY_FILE_CAP` files —
-  so the caller fails closed. Never follows a symlink (lstat-gated).
+  special file, malformed path, or a tree outside the exact install count/byte
+  bounds — so the caller fails closed. Never follows a symlink (lstat-gated).
   """
   out: dict[str, bytes] = {}
+  resource_count = 0
+  resource_bytes = 0
+  seen_dirs: set[str] = set()
   stack = [target]
   while stack:
     cur = stack.pop()
@@ -311,16 +372,66 @@ def _read_tree_bytes(target: Path) -> dict[str, bytes] | None:
       except OSError:
         return None
       if stat.S_ISDIR(mode):
+        try:
+          rel_dir = entry.relative_to(target).as_posix()
+          rel_dir.encode("utf-8")
+        except (UnicodeError, ValueError):
+          return None
+        segments = rel_dir.split("/")
+        if (
+          not 1 <= len(segments) < RESOURCE_MAX_DEPTH
+          or any(
+            not segment or segment.startswith(".") or "\\" in segment
+            for segment in segments
+          )
+        ):
+          return None
+        seen_dirs.add(rel_dir)
         stack.append(entry)
       elif stat.S_ISREG(mode):
-        if len(out) >= _INVENTORY_FILE_CAP:
+        if len(out) >= TREE_FILE_COUNT_MAX:
           return None
         try:
-          out[entry.relative_to(target).as_posix()] = entry.read_bytes()
-        except OSError:
+          rel = entry.relative_to(target).as_posix()
+          # The digest format is UTF-8. A filesystem surrogate or an excessive
+          # depth is not a shape the installer can create.
+          rel.encode("utf-8")
+          declared_size = entry.lstat().st_size
+          if declared_size < 0:
+            return None
+          if rel == "SKILL.md":
+            if declared_size > SKILL_MAX_BYTES:
+              return None
+          else:
+            if not resource_rel_ok(rel):
+              return None
+            resource_count += 1
+            resource_bytes += declared_size
+            if (
+              resource_count > RESOURCE_COUNT_MAX
+              or resource_bytes > RESOURCE_TOTAL_MAX
+            ):
+              return None
+          data = entry.read_bytes()
+          if len(data) != declared_size:
+            return None
+          out[rel] = data
+        except (OSError, UnicodeError, ValueError):
           return None
       else:
         return None
+  if "SKILL.md" not in out:
+    return None
+  # The installer only creates parent directories for real resources. An extra
+  # empty directory is a different on-disk tree even though a file-only digest
+  # would otherwise overlook it.
+  file_dirs = {
+    "/".join(rel.split("/")[:depth])
+    for rel in out
+    for depth in range(1, len(rel.split("/")))
+  }
+  if seen_dirs != file_dirs:
+    return None
   return out
 
 
@@ -392,12 +503,18 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
   write. Runs at boot (init_skills) and at the start of every install/uninstall
   under the shared-skills lock. Returns the names it repaired.
   """
-  import json
   import shutil
 
   root = skills_dir or _skills_dir()
   sidecar = root / INSTALLED_SKILLS_SIDECAR
-  records = _read_sidecar(sidecar)
+  try:
+    records = load_installed_sidecar(root)
+  except CorruptInstalledSkillsSidecar as exc:
+    # Recovery is itself a mutating path. With no trustworthy ownership set,
+    # even age-bounded GC could delete the only surviving copy of an interrupted
+    # install, so do nothing until the owner repairs the record.
+    log.warning("skills recovery skipped: %s", exc)
+    return []
 
   # Staging names any record still points at — GC must not reclaim these.
   referenced: set[str] = set()

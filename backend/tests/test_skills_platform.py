@@ -206,7 +206,12 @@ def test_install_from_raw_url(client, auth, skills_dir, monkeypatch):
   )
   r = client.post("/api/skills/install", headers=auth, json={"url": url})
   assert r.status_code == 201, r.text
-  assert r.json()["name"] == "writing-tips"
+  result = r.json()["skill"]
+  assert result["id"] == "writing-tips"
+  assert result["name"] == "writing-tips"
+  assert result["provenance"] == "installed:raw.githubusercontent.com"
+  assert result["is_dir"] is True
+  assert result["source_url"] is None  # mutation result is safe for app callers
   target = skills_dir / "writing-tips" / "SKILL.md"
   assert target.is_file()
   sidecar = json.loads(
@@ -272,7 +277,7 @@ def test_install_repo_dir_fetches_whole_subtree_of_vetted_resources(
     json={"repo": "anthropics/skills", "path": "docs/pdf", "ref": "main"},
   )
   assert r.status_code == 201, r.text
-  assert sorted(r.json()["files"]) == ["SKILL.md", "ref.md", "scripts/helper.py"]
+  assert sorted(r.json()["skill"]["files"]) == ["SKILL.md", "ref.md", "scripts/helper.py"]
   # Subdirectory structure is preserved on disk.
   assert (skills_dir / "pdf" / "scripts" / "helper.py").read_text() == "print('hi')\n"
   assert (skills_dir / "pdf" / "ref.md").read_text() == "reference"
@@ -302,7 +307,7 @@ def test_install_repo_dir_rejects_traversal_paths_in_tree(
     json={"repo": "o/r", "path": "sk", "ref": "main"},
   )
   assert r.status_code == 201, r.text
-  assert r.json()["files"] == ["SKILL.md"]
+  assert r.json()["skill"]["files"] == ["SKILL.md"]
   assert not (skills_dir / "escape.md").exists()
   assert not (skills_dir / "escape2.md").exists()
 
@@ -328,7 +333,7 @@ def test_install_repo_dir_skips_over_budget_files_by_declared_size(
   )
   assert r.status_code == 201, r.text
   # huge.md was skipped WITHOUT being fetched; the smaller file still landed.
-  assert sorted(r.json()["files"]) == ["SKILL.md", "small.md"]
+  assert sorted(r.json()["skill"]["files"]) == ["SKILL.md", "small.md"]
 
 
 def test_resource_rel_ok_contract():
@@ -555,7 +560,7 @@ def test_install_pins_every_fetch_to_the_resolved_commit(
     json={"repo": "o/r", "path": "sk", "ref": "main"},
   )
   assert r.status_code == 201, r.text
-  assert r.json()["commit"] == PINNED
+  assert r.json()["skill"]["commit"] == PINNED
   # The exact installed revision is durable provenance.
   assert _sidecar(skills_dir)["sk"]["commit"] == PINNED
 
@@ -1020,42 +1025,173 @@ def test_reconcile_gc_reclaims_only_aged_unreferenced_staging(skills_dir):
   assert fresh.is_dir()  # too fresh -> possibly in-flight -> kept
 
 
-def test_list_skills_redacts_source_url_for_app_but_not_owner(
+def test_reconcile_corrupt_sidecar_never_mutates_recovery_trees(skills_dir):
+  """A corrupt ownership record is not an empty record.
+
+  Recovery cannot know whether a staging tree is orphaned or referenced, so it
+  must leave even an aged candidate untouched.
+  """
+  import os
+  import time
+
+  staged = skills_dir / ".staging-only-copy"
+  staged.mkdir()
+  (staged / "SKILL.md").write_text("# only surviving copy\n")
+  old = time.time() - skills_mod._STAGING_GC_AGE_SECONDS - 60
+  os.utime(staged, (old, old))
+  sidecar = skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR
+  sidecar.write_text("{not json")
+
+  assert skills_mod.reconcile_installed(skills_dir) == []
+  assert staged.is_dir()
+  assert sidecar.read_text() == "{not json"
+
+
+def test_reconcile_refuses_tree_outside_installer_byte_bound(skills_dir):
+  target = skills_dir / "pdf"
+  target.mkdir()
+  oversized = b"x" * (skills_mod.TREE_TOTAL_BYTES_MAX + 1)
+  (target / "SKILL.md").write_bytes(oversized)
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "pdf": {
+      "source": "o/r", "status": "installing", "staging": ".staging-gone",
+      "tree_digest": skills_mod.tree_digest_from_files({"SKILL.md": oversized}),
+    },
+  }))
+
+  assert skills_mod.reconcile_installed(skills_dir) == []
+  assert _sidecar(skills_dir)["pdf"]["status"] == "installing"
+
+
+def test_reconcile_enforces_entry_and_resource_budgets_separately(skills_dir):
+  target = skills_dir / "pdf"
+  target.mkdir()
+  # Combined bytes remain below TREE_TOTAL_BYTES_MAX, but the entry document
+  # alone is larger than the installer's SKILL.md cap.
+  oversized_entry = b"x" * (skills_mod.SKILL_MAX_BYTES + 1)
+  (target / "SKILL.md").write_bytes(oversized_entry)
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "pdf": {
+      "source": "o/r", "status": "installing", "staging": ".staging-gone",
+      "tree_digest": skills_mod.tree_digest_from_files({
+        "SKILL.md": oversized_entry,
+      }),
+    },
+  }))
+
+  assert skills_mod.reconcile_installed(skills_dir) == []
+  assert _sidecar(skills_dir)["pdf"]["status"] == "installing"
+
+
+def test_reconcile_rejects_extra_empty_directory_not_created_by_installer(
+  skills_dir,
+):
+  reviewed = {"SKILL.md": b"# pdf\n"}
+  target = skills_dir / "pdf"
+  target.mkdir()
+  (target / "SKILL.md").write_bytes(reviewed["SKILL.md"])
+  (target / "empty").mkdir()
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "pdf": {
+      "source": "o/r", "status": "installing", "staging": ".staging-gone",
+      "tree_digest": skills_mod.tree_digest_from_files(reviewed),
+    },
+  }))
+
+  assert skills_mod.reconcile_installed(skills_dir) == []
+  assert _sidecar(skills_dir)["pdf"]["status"] == "installing"
+
+
+def test_reconcile_malformed_filesystem_name_fails_closed(skills_dir):
+  """A Unix filename that is not UTF-8 cannot crash the boot recovery sweep."""
+  import os
+
+  target = skills_dir / "pdf"
+  target.mkdir()
+  (target / "SKILL.md").write_text("# pdf\n")
+  bad_path = os.fsencode(target) + b"/bad-\xff.md"
+  fd = os.open(bad_path, os.O_CREAT | os.O_WRONLY, 0o600)
+  os.close(fd)
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "pdf": {
+      "source": "o/r", "status": "installing", "staging": ".staging-gone",
+      "tree_digest": skills_mod.tree_digest_from_files(
+        {"SKILL.md": b"# pdf\n"},
+      ),
+    },
+  }))
+
+  assert skills_mod.reconcile_installed(skills_dir) == []
+  assert _sidecar(skills_dir)["pdf"]["status"] == "installing"
+
+
+def test_list_skills_keeps_raw_source_url_owner_only(
   client, auth, db, skills_dir,
 ):
-  """R2-1/R2-2: app tokens get a redacted origin/path (no query credentials or
-  fragment) and the authoritative skill_sha256; the owner gets the full URL."""
+  """A secret may occur in any URL component, including the path.
+
+  App callers get immutable/structured provenance and no raw URL; the owner
+  retains the exact submitted value.
+  """
   d = skills_dir / "priv"
   d.mkdir()
   (d / "SKILL.md").write_text("# priv\n")
   (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
     "priv": {
       "source": "example.com",
-      "url": "https://example.com/raw/priv.md?token=secret#frag",
+      "repo": "example/skills",
+      "path": "private/token-in-path/SKILL.md",
+      "commit": "a" * 40,
+      "url": "https://example.com/private/token-in-path?token=secret#frag",
       "skill_sha256": "deadbeef",
     },
   }))
 
   owner_row = client.get("/api/skills", headers=auth).json()["skills"][0]
   assert owner_row["source_url"] == (
-    "https://example.com/raw/priv.md?token=secret#frag"
+    "https://example.com/private/token-in-path?token=secret#frag"
   )
   assert owner_row["skill_sha256"] == "deadbeef"
 
   app_headers = _app_token(db, manage_skills=False)
   app_row = client.get("/api/skills", headers=app_headers).json()["skills"][0]
-  assert app_row["source_url"] == "https://example.com/raw/priv.md"
-  assert "secret" not in app_row["source_url"]
-  assert "frag" not in app_row["source_url"]
+  assert app_row["source_url"] is None
+  assert app_row["source_repo"] == "example/skills"
+  assert app_row["commit"] == "a" * 40
   assert app_row["skill_sha256"] == "deadbeef"  # hash is safe for all callers
 
 
-def test_list_skills_survives_malformed_source_url_for_app_caller(
+def test_list_skills_app_gets_only_validated_repo_locator(
   client, auth, db, skills_dir,
 ):
-  """R3-3: damaged provenance (a URL whose port makes `.port` raise) must not
-  turn an app-scoped GET /api/skills into a 500 — it redacts to None and the
-  owner still sees the raw value."""
+  d = skills_dir / "priv"
+  d.mkdir()
+  (d / "SKILL.md").write_text("# priv\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "priv": {
+      "source": "example.com",
+      "repo": "owner/repo",
+      "path": "secret\nheader/SKILL.md",
+      "commit": "not-a-commit",
+    },
+  }))
+
+  owner_row = client.get("/api/skills", headers=auth).json()["skills"][0]
+  assert owner_row["source_path"] == "secret\nheader/SKILL.md"
+  assert owner_row["commit"] == "not-a-commit"
+
+  app_row = client.get(
+    "/api/skills", headers=_app_token(db, manage_skills=False),
+  ).json()["skills"][0]
+  assert app_row["source_repo"] is None
+  assert app_row["source_path"] is None
+  assert app_row["commit"] is None
+
+
+def test_list_skills_does_not_parse_owner_source_url_for_app_caller(
+  client, auth, db, skills_dir,
+):
+  """Damaged provenance remains owner-visible and cannot crash an app read."""
   d = skills_dir / "priv"
   d.mkdir()
   (d / "SKILL.md").write_text("# priv\n")
@@ -1074,22 +1210,6 @@ def test_list_skills_survives_malformed_source_url_for_app_caller(
   r = client.get("/api/skills", headers=app_headers)
   assert r.status_code == 200, r.text  # fails safe, never 500
   assert r.json()["skills"][0]["source_url"] is None
-
-
-def test_redact_source_url_rejects_non_http_and_malformed():
-  """Unit: the one strict helper returns no URL on exotic scheme or bad port,
-  and never raises."""
-  from app.routes.skills import _redact_source_url
-
-  assert _redact_source_url("https://h.example/raw/x.md?t=1#f") == (
-    "https://h.example/raw/x.md"
-  )
-  assert _redact_source_url("https://example.com:bad/p") is None  # bad port
-  assert _redact_source_url("file:///etc/passwd") is None  # exotic scheme
-  assert _redact_source_url("ftp://h/x") is None
-  assert _redact_source_url("::::not a url") is None
-  assert _redact_source_url(None) is None
-  assert _redact_source_url("") == ""
 
 
 def test_corrupt_sidecar_fails_install_closed_and_preserves_ownership(
