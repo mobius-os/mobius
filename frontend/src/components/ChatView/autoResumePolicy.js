@@ -80,11 +80,6 @@ export function saveAutoResumePolicy(args) {
 }
 
 
-export function saveRestartResumePolicy(args) {
-  return saveBooleanPolicy({...args, field: 'auto_resume_on_restart'})
-}
-
-
 export function resetDeadlineState(resetAt, now = Date.now()) {
   if (!resetAt) return { elapsed: false, remainingMs: null }
   const remainingMs = Date.parse(resetAt) - now

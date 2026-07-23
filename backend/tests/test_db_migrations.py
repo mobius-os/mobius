@@ -193,9 +193,7 @@ def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
   assert "auto_resume_on_limit" in cols
   assert cols["auto_resume_on_limit"]["nullable"] is False
   assert cols["auto_resume_on_limit"]["default"] is not None
-  assert "auto_resume_on_restart" in cols
-  assert cols["auto_resume_on_restart"]["nullable"] is False
-  assert cols["auto_resume_on_restart"]["default"] is not None
+  assert "auto_resume_on_restart" not in cols
   assert "system_prompt_snapshot_id" in cols
   with eng.connect() as conn:
     value = conn.execute(text(
@@ -208,12 +206,8 @@ def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
       "SELECT auto_resume_on_limit FROM chats "
       "WHERE id = 'new-after-upgrade'"
     )).scalar_one()
-    restart_values = conn.execute(text(
-      "SELECT id, auto_resume_on_restart FROM chats ORDER BY id"
-    )).all()
   assert value in (True, 1)
   assert future_value in (True, 1)
-  assert all(restart in (False, 0) for _, restart in restart_values)
 
 
 def test_run_migrations_adds_bounded_live_assistant_snapshot(tmp_path):
@@ -244,11 +238,6 @@ def test_fresh_chat_schema_has_database_auto_resume_default():
   assert column.default is not None
   assert column.server_default is not None
   assert str(column.server_default.arg).lower() == "true"
-  restart = models.Chat.__table__.c.auto_resume_on_restart
-  assert restart.nullable is False
-  assert restart.default is not None
-  assert restart.server_default is not None
-  assert str(restart.server_default.arg).lower() == "false"
 
 
 def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
@@ -274,17 +263,11 @@ def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
   cols = {c["name"]: c for c in inspect(eng).get_columns("owner")}
   assert "auto_resume_on_limit_default" in cols
   assert cols["auto_resume_on_limit_default"]["nullable"] is False
-  assert "auto_resume_on_restart_default" in cols
-  assert cols["auto_resume_on_restart_default"]["nullable"] is False
   with eng.connect() as conn:
     value = conn.execute(text(
       "SELECT auto_resume_on_limit_default FROM owner WHERE id = 1"
     )).scalar_one()
-    restart_value = conn.execute(text(
-      "SELECT auto_resume_on_restart_default FROM owner WHERE id = 1"
-    )).scalar_one()
   assert value in (True, 1)
-  assert restart_value in (False, 0)
 
 
 def test_fresh_owner_schema_has_auto_resume_default():
@@ -294,8 +277,3 @@ def test_fresh_owner_schema_has_auto_resume_default():
   assert column.default is not None
   assert column.server_default is not None
   assert str(column.server_default.arg).lower() == "true"
-  restart = models.Owner.__table__.c.auto_resume_on_restart_default
-  assert restart.nullable is False
-  assert restart.default is not None
-  assert restart.server_default is not None
-  assert str(restart.server_default.arg).lower() == "false"

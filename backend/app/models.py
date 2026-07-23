@@ -39,17 +39,12 @@ class Owner(Base):
   hashed_password = Column(String(255), nullable=False)
   # Must stay in sync with providers.PROVIDER_NAMES.
   provider = Column(String(32), nullable=False, default="claude")
-  # Default provider-limit recovery policy for newly-created chats. Each chat
+  # Default automatic-continuation policy for newly-created chats. Each chat
   # stores its own copy; changing a chat's switch updates this seed for the
-  # next chat without rewriting any existing conversation.
+  # next chat without rewriting any existing conversation. The historical
+  # column name is retained to avoid rewriting every local SQLite database.
   auto_resume_on_limit_default = Column(
     Boolean, nullable=False, default=True, server_default=true()
-  )
-  # Separately consented planned-restart policy for newly created chats.
-  # Existing owners migrate to false: consenting to provider-limit recovery
-  # never silently opts them into replay after a process restart.
-  auto_resume_on_restart_default = Column(
-    Boolean, nullable=False, default=False, server_default=false()
   )
   # Per-owner model-picker preferences. Shape:
   #   {"hidden_ids": ["claude-haiku-4-5-20251001", ...]}
@@ -134,15 +129,11 @@ class Chat(Base):
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
-  # Per-chat policy for automatic recovery after provider limits.
+  # Per-chat policy for automatic continuation after provider limits and
+  # supervisor-authenticated planned restarts. The historical column name is
+  # retained to avoid rewriting every local SQLite database.
   auto_resume_on_limit = Column(
     Boolean, nullable=False, default=True, server_default=true()
-  )
-  # Planned restart continuation is materially broader than provider-limit
-  # recovery and therefore has separate, explicit consent. Existing and fresh
-  # chats start off until the owner enables it in that chat.
-  auto_resume_on_restart = Column(
-    Boolean, nullable=False, default=False, server_default=false()
   )
   # Vestigial: the named-agent feature was removed; column retained
   # nullable to avoid a prod migration. Nothing reads or writes it.
