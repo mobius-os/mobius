@@ -129,6 +129,41 @@ async function sampleExitBeat(page) {
   })
 }
 
+// A shared left surface used to expand under its right sibling immediately. Their
+// boundary overlapped for most of the beat, so the departing pane looked glued to
+// the survivor instead of scattering independently. Sample the painted boxes, not
+// just animation metadata, to lock the visible seam open.
+async function sampleSharedExitSeam(page) {
+  return page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let started = false
+    let samples = 0
+    let minGap = Infinity
+    await new Promise((resolve) => {
+      let frames = 0
+      const tick = () => {
+        const exiting = root.classList.contains('shell--builder-exiting')
+        if (exiting) {
+          started = true
+          const shared = document.querySelector('.shell__view[data-mode-motion="promote"]')
+          const departing = document.querySelector('.shell__view[data-mode-motion="deal-out"]')
+          if (shared && departing) {
+            const sharedBox = shared.getBoundingClientRect()
+            const departingBox = departing.getBoundingClientRect()
+            minGap = Math.min(minGap, departingBox.left - sharedBox.right)
+            samples += 1
+          }
+        }
+        frames += 1
+        if ((started && !exiting) || frames > 90) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return { started, samples, minGap: Number.isFinite(minGap) ? minGap : null }
+  })
+}
+
 // Capture the latched inline geometry on the first frame of either directional
 // beat. These are the pure projection outputs that tell each pane which edge owns it.
 async function captureBeatPlan(page, rootClass) {
@@ -364,9 +399,10 @@ test('v3 scatter is compositor-only: layout boxes constant while transforms anim
   await expect.poll(() => builderActive(page)).toBe(true)
   await expect(page.locator('.workspace__strip')).toHaveCount(2)
   const sampler = sampleExitBeat(page)
+  const seamSampler = sampleSharedExitSeam(page)
   await page.waitForTimeout(30) // let the rAF sampler install before the toggle
   await toggleMode(page)
-  const r = await sampler
+  const [r, seam] = await Promise.all([sampler, seamSampler])
   expect(r.started, 'an exit beat ran').toBe(true)
   expect(r.dualClass, 'INV 1: never both beat classes at once').toBe(false)
   expect(r.wrappers.length, 'the participant wrappers were sampled').toBeGreaterThanOrEqual(2)
@@ -380,11 +416,40 @@ test('v3 scatter is compositor-only: layout boxes constant while transforms anim
   const departing = r.wrappers.find(w => w.motion === 'deal-out')
   expect(departing.offsetX, 'the right sibling scatters toward the right edge').toBeGreaterThan(0)
   expect(departing.offsetY).toBe(0)
+  expect(seam.started).toBe(true)
+  expect(seam.samples).toBeGreaterThan(2)
+  expect(seam.minGap, 'the right pane separates instead of overlapping the shared left pane')
+    .toBeGreaterThanOrEqual(-1)
   // INV 4 (stable identity): the same DOM nodes survived completion.
   for (const w of r.wrappers) expect(w.survived, 'same node survives completion').toBe(true)
   // The beat settled clean.
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
   await expect.poll(() => builderActive(page)).toBe(false)
+})
+
+test('focused pane retains its durable edge during a mode exit', async ({ page }) => {
+  // Standard targets left chat aaa; focus the right builder pane bbb before exit.
+  // The focused presentation is centred/full-size, but its durable pane identity
+  // is still RIGHT, so it must leave right and fully clear the viewport—not fall
+  // back to the old arbitrary top exit.
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  await page.locator('[data-pane-strip="p1"]')
+    .getByRole('button', { name: 'Focus pane' }).click()
+  await expect(page.locator('[data-pane-strip]')).toHaveCount(1)
+  const content = await page.locator('.shell__content').boundingBox()
+
+  const sampler = captureBeatPlan(page, 'shell--builder-exiting')
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+  expect(r.underlay, 'the left Standard chat is ready beneath the focused pane').toBe(true)
+  expect(r.participants).toHaveLength(1)
+  expect(r.participants[0].motion).toBe('deal-out')
+  expect(r.participants[0].x, 'a full-size focused pane clears beyond the right edge')
+    .toBeGreaterThan(content.width)
+  expect(r.participants[0].y).toBe(0)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
 })
 
 test('v3 world-reveal scatter paints the mounted destination underlay beneath the panes', async ({ page }) => {

@@ -78,6 +78,7 @@
     shell-mode-promote
     var(--mode-duration)
     var(--ease-mode-promote)
+    var(--mode-delay, 0ms)
     both;
 }
 
@@ -186,7 +187,7 @@
 .shell--builder-entering .workspace__divider {
   animation:
     shell-mode-chrome-in 70ms var(--ease-mode-chrome)
-    calc(var(--mode-total, 210ms) - 70ms) both;
+    calc(var(--mode-total, 220ms) - 70ms) both;
 }
 @keyframes shell-mode-chrome-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes shell-mode-chrome-in { from { opacity: 0; } to { opacity: 1; } }

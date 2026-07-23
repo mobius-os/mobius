@@ -61,6 +61,9 @@ test('focused pane view is a reversible presentation projection, not a tree rewr
   assert.deepEqual(focused.visibleLeaves, [ws.focusedPaneId])
   assert.deepEqual(focused.rects[ws.focusedPaneId], CONTENT)
   assert.deepEqual(focused.dividers, [])
+  assert.equal(focused.focusedPaneView, true)
+  assert.equal(focused.motionRects, base.rects,
+    'the durable pane geometry remains available to directional mode motion')
   assert.equal(Object.keys(ws.panes).length, 2, 'the durable pane tree is untouched')
 
   const v = deriveContentVisibility({
@@ -505,6 +508,8 @@ test('deriveExitPlan: PROMOTE when the target is a visible pane active key (INV 
   assert.equal(plan.underlayKey, null, 'physical continuity — no world reveal')
   const promote = plan.participants.find(p => p.motion === 'promote')
   assert.equal(promote.key, 'app:42')
+  assert.equal(promote.delayMs, MODE_MOTION.sharedLagMs,
+    'siblings open a seam before the shared surface expands')
   assert.ok(plan.completionNames.includes('shell-mode-promote'))
   // The FLIP grows the promote pane's content rect to the full destination.
   assert.equal(promote.flip.sx > 1, true, 'a half-width pane scales up to full width')
@@ -559,8 +564,8 @@ test('deriveExitPlan: siblings deal out together in one short beat', () => {
   const delays = plan.participants.map(p => p.delayMs).sort((a, b) => a - b)
   assert.deepEqual(delays, [0, 0])
   assert.equal(MODE_MOTION.staggerMs, undefined)
-  assert.ok(plan.participants.every(p => p.durationMs === MODE_MOTION.exitItemMs))
-  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
+  assert.ok(plan.participants.every(p => p.durationMs === MODE_MOTION.itemMs))
+  assert.equal(plan.totalMs, MODE_MOTION.itemMs)
 })
 
 test('deriveExitPlan: a world reveal has no delayed destination phase', () => {
@@ -568,7 +573,7 @@ test('deriveExitPlan: a world reveal has no delayed destination phase', () => {
   const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
   assert.deepEqual(plan.completionNames, ['shell-mode-deal-out'])
   assert.equal('destinationMotion' in plan, false)
-  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
+  assert.equal(plan.totalMs, MODE_MOTION.itemMs)
 })
 
 test('deriveExitPlan: a promote keeps its seamless continuity', () => {
@@ -595,15 +600,39 @@ test('deriveExitPlan: four panes cost the same 180ms beat as one pane', () => {
   ws = { ...ws, singleScreen: { kind: 'chat', id: 'ghost' } } // tree-absent → world reveal
   const plan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT })
   assert.ok(plan.participants.every(p => p.motion === 'deal-out'), 'all four deal out')
-  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
+  assert.equal(plan.totalMs, MODE_MOTION.itemMs)
   assert.equal(plan.totalMs, 180)
+})
+
+test('four-pane assemble/scatter preserves all four outer-edge vectors', () => {
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', '1')])
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', '2'), { paneId: ws.focusedPaneId, edge: 'right' })
+  const leftId = paneModel.paneOf(ws, 'chat:1').id
+  const rightId = paneModel.paneOf(ws, 'chat:2').id
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', '3'), { paneId: leftId, edge: 'bottom' })
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', '4'), { paneId: rightId, edge: 'bottom' })
+  ws = { ...ws, singleScreen: { kind: 'chat', id: 'ghost' } }
+  const projection = project(ws)
+
+  for (const plan of [
+    deriveExitPlan({ workspace: ws, projection, contentRect: CONTENT }),
+    deriveEnterPlan({ workspace: ws, projection, contentRect: CONTENT }),
+  ]) {
+    const offsets = new Map(plan.participants.map(p => [p.key, p.offset]))
+    assert.ok(offsets.get('chat:1').x < 0 && offsets.get('chat:1').y < 0, 'top-left owns top+left')
+    assert.ok(offsets.get('chat:2').x > 0 && offsets.get('chat:2').y < 0, 'top-right owns top+right')
+    assert.ok(offsets.get('chat:3').x < 0 && offsets.get('chat:3').y > 0, 'bottom-left owns bottom+left')
+    assert.ok(offsets.get('chat:4').x > 0 && offsets.get('chat:4').y > 0, 'bottom-right owns bottom+right')
+    assert.ok(plan.participants.every(p => p.delayMs === 0),
+      'world-reveal edge panes move together; no pane-count stagger')
+    assert.equal(plan.totalMs, MODE_MOTION.itemMs)
+  }
 })
 
 test('N1: MODE_MOTION drops the unused chromeMs constant', () => {
   assert.equal(MODE_MOTION.chromeMs, undefined)
   // The live timings the plan builders use are still present.
-  assert.equal(typeof MODE_MOTION.promoteMs, 'number')
-  assert.equal(typeof MODE_MOTION.exitItemMs, 'number')
+  assert.equal(typeof MODE_MOTION.itemMs, 'number')
 })
 
 // ── M4: the single-leaf promote FLIP must not overshoot ───────────────────────
@@ -704,22 +733,55 @@ test('deriveEnterPlan: the shared surface settles while siblings assemble from t
   const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two), contentRect: CONTENT })
   assert.deepEqual(twoPlan.completionNames, ['shell-mode-settle', 'shell-mode-deal-in'])
   assert.equal(twoPlan.participants.length, 2)
-  assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.enterItemMs))
+  assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.itemMs))
   const settle = twoPlan.participants.find(p => p.motion === 'settle')
   const gather = twoPlan.participants.find(p => p.motion === 'deal-in')
   assert.equal(settle.key, 'app:42')
   assert.ok(settle.flip.sx > 1, 'the right pane starts at the single-world size')
   assert.equal(gather.key, 'chat:5')
   assert.ok(gather.offset.x < 0, 'the left pane assembles from the left edge')
-  // Everything moves at once; pane count adds no stagger.
-  assert.ok(twoPlan.participants.every(p => p.delayMs === 0))
-  assert.equal(twoPlan.totalMs, MODE_MOTION.enterItemMs)
+  // This is one bounded handoff, not a pane-count stagger: the shared surface
+  // settles first, then every sibling starts together after the same short gap.
+  assert.equal(settle.delayMs, 0)
+  assert.equal(gather.delayMs, MODE_MOTION.sharedLagMs)
+  assert.equal(twoPlan.totalMs, MODE_MOTION.itemMs + MODE_MOTION.sharedLagMs)
   const one = paneModel.seedFromFlatTabs([makeTab('app', '42')])
   const onePlan = deriveEnterPlan({ workspace: one, projection: project(one), contentRect: CONTENT })
   assert.equal(onePlan.participants.length, 1)
   assert.equal(onePlan.participants[0].motion, 'settle')
-  assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.enterSingleMs)
-  assert.equal(onePlan.totalMs, MODE_MOTION.enterSingleMs)
+  assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.itemMs)
+  assert.equal(onePlan.totalMs, MODE_MOTION.itemMs)
+})
+
+test('focused-pane mode keeps its original edge and its in-pane strip geometry', () => {
+  const ws = twoPaneChatAndApp() // chat:5 left, focused app:42 right
+  const base = project(ws)
+  const focused = projectFocusedPane(base, ws, ws.focusedPaneId, CONTENT)
+
+  // When Standard targets the focused app, the shared wrapper is not an identity
+  // FLIP: focused-pane chrome still occupies STRIP_H inside the full-size pane.
+  const shared = deriveExitPlan({ workspace: ws, projection: focused, contentRect: CONTENT })
+  const promote = shared.participants.find(p => p.motion === 'promote')
+  assert.ok(promote)
+  assert.equal(promote.flip.y, -paneModel.STRIP_H)
+  assert.ok(promote.flip.sy > 1)
+  assert.equal(promote.delayMs, 0, 'no sibling is painted, so no handoff gap is needed')
+
+  // When Standard targets the left chat instead, the focused right pane scatters
+  // right. Its full-size painted rect must clear the viewport completely; it must
+  // never fall back to the centred-pane "top" direction.
+  const toLeft = { ...ws, singleScreen: { kind: 'chat', id: '5' } }
+  const exit = deriveExitPlan({ workspace: toLeft, projection: focused, contentRect: CONTENT })
+  const departing = exit.participants.find(p => p.key === 'app:42')
+  assert.equal(departing.motion, 'deal-out')
+  assert.ok(departing.offset.x > CONTENT.w)
+  assert.equal(departing.offset.y, 0)
+
+  const enter = deriveEnterPlan({ workspace: toLeft, projection: focused, contentRect: CONTENT })
+  const arriving = enter.participants.find(p => p.key === 'app:42')
+  assert.equal(arriving.motion, 'deal-in')
+  assert.equal(arriving.offset.x, departing.offset.x, 'entry is the directional inverse')
+  assert.equal(arriving.offset.y, 0)
 })
 
 test('deriveEnterPlan: a tree-absent single surface stays beneath the assembling panes', () => {
@@ -773,6 +835,21 @@ test('transitionSignature is stable and drifts on topology/content-bound changes
   // per-pane rects are part of the invalidation signature too.
   const resizedPane = paneModel.setRatio(ws, ws.layout.id, 0.62)
   assert.notEqual(base, transitionSignature({ workspace: resizedPane, projection: project(resizedPane), contentRect: CONTENT }))
+  // Focused presentation geometry stays full-size across a divider change, but its
+  // durable source edge can move. That source rect must invalidate the live beat too.
+  const baseProjection = project(ws)
+  const focused = projectFocusedPane(baseProjection, ws, ws.focusedPaneId, CONTENT)
+  const focusedSig = transitionSignature({ workspace: ws, projection: focused, contentRect: CONTENT })
+  const sourceRect = focused.motionRects[ws.focusedPaneId]
+  const movedSource = {
+    ...focused,
+    motionRects: {
+      ...focused.motionRects,
+      [ws.focusedPaneId]: { ...sourceRect, x: sourceRect.x - 12 },
+    },
+  }
+  assert.notEqual(focusedSig,
+    transitionSignature({ workspace: ws, projection: movedSource, contentRect: CONTENT }))
   // A different slot target drifts it too.
   const retargeted = transitionSignature({ workspace: { ...ws, singleScreen: { kind: 'chat', id: '5' } }, projection: project(ws), contentRect: CONTENT })
   assert.notEqual(base, retargeted)

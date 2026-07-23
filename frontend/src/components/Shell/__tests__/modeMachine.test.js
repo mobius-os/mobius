@@ -17,7 +17,7 @@ import {
 // modeMachine.js.
 
 // A minimal enter plan (one deal-in participant).
-function enterPlan({ totalMs = MODE_MOTION.enterItemMs } = {}) {
+function enterPlan({ totalMs = MODE_MOTION.itemMs } = {}) {
   return {
     kind: 'enter',
     participants: [{ key: 'chat:1', paneId: 'p1', motion: 'deal-in', delayMs: 0, durationMs: totalMs }],
@@ -26,7 +26,7 @@ function enterPlan({ totalMs = MODE_MOTION.enterItemMs } = {}) {
   }
 }
 // A minimal exit plan (one deal-out participant, a chat underlay).
-function exitPlan({ underlayKey = 'chat:5', target = 'chat:5', sig = 'sigA', totalMs = MODE_MOTION.exitItemMs } = {}) {
+function exitPlan({ underlayKey = 'chat:5', target = 'chat:5', sig = 'sigA', totalMs = MODE_MOTION.itemMs } = {}) {
   return {
     kind: 'exit',
     target,
@@ -44,10 +44,10 @@ function promotePlan({ sig = 'sigP' } = {}) {
     kind: 'exit',
     target: 'app:9',
     destinationRect: { x: 0, y: 0, w: 100, h: 200 },
-    participants: [{ key: 'app:9', paneId: 'p1', motion: 'promote', delayMs: 0, durationMs: MODE_MOTION.promoteMs, flip: { x: 0, y: 0, sx: 1, sy: 1 } }],
+    participants: [{ key: 'app:9', paneId: 'p1', motion: 'promote', delayMs: 0, durationMs: MODE_MOTION.itemMs, flip: { x: 0, y: 0, sx: 1, sy: 1 } }],
     underlayKey: null,
     completionNames: ['shell-mode-promote'],
-    totalMs: MODE_MOTION.promoteMs,
+    totalMs: MODE_MOTION.itemMs,
     snapshotSignature: sig,
   }
 }

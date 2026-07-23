@@ -1018,9 +1018,9 @@ test('N1: dead exit-presentation plumbing is removed', () => {
   assert.match(css, /--ease-mode-chrome: cubic-bezier/)
   assert.match(css, /--ease-mode-promote: cubic-bezier/)
   assert.match(css, /shell-mode-chrome-out 90ms var\(--ease-mode-chrome\)/)
-  assert.match(css, /shell-mode-chrome-in 70ms var\(--ease-mode-chrome\)[\s\S]*?calc\(var\(--mode-total, 210ms\) - 70ms\) both/)
+  assert.match(css, /shell-mode-chrome-in 70ms var\(--ease-mode-chrome\)[\s\S]*?calc\(var\(--mode-total, 220ms\) - 70ms\) both/)
   assert.match(css, /shell-mode-strip-clear 100ms var\(--ease-mode-chrome\)/)
-  assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)/)
+  assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)\s*\n?\s*var\(--mode-delay, 0ms\)/)
   // The unused excludeChatId param is gone; the helper is now the New Chat request
   // (round 4 item 3 — the old freshest-chat write is fully retired).
   assert.doesNotMatch(shell, /excludeChatId/)
