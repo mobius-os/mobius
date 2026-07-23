@@ -72,7 +72,7 @@ def _drain_writer():
 
 def _seed_chat(
   chat_id: str, *, pending=None, run_status=None, deleted=False,
-  auto_resume=False, messages=None,
+  auto_resume=False, auto_restart=True, messages=None,
 ):
   db = SessionLocal()
   try:
@@ -88,6 +88,7 @@ def _seed_chat(
       session_id="sess",
       provider="claude",
       auto_resume_on_limit=auto_resume,
+      auto_resume_on_restart=auto_restart,
       run_status=run_status,
       run_started_at=(
         datetime.now(UTC).replace(tzinfo=None) if run_status else None
@@ -559,11 +560,11 @@ def test_park_run_strict_tokenless_falls_back_to_marker_clear():
 
 def _due_park(
   cid: str, token: str, *, pending=None, deleted=False, auto_resume=False,
-  park_reason=None, messages=None, restart_nonce=None,
+  auto_restart=True, park_reason=None, messages=None, restart_nonce=None,
 ):
   _seed_chat(
     cid, pending=pending, deleted=deleted, auto_resume=auto_resume,
-    messages=messages,
+    auto_restart=auto_restart, messages=messages,
   )
   _seed_run(cid, token, status="parked",
             parked_until=datetime.now(UTC).replace(tzinfo=None)
@@ -760,7 +761,7 @@ def test_restart_park_auto_continues_with_product_marker(
     lambda: nonce,
   )
   _due_park(
-    cid, token, auto_resume=True,
+    cid, token, auto_restart=True,
     park_reason="restart", restart_nonce=nonce,
   )
 
@@ -805,7 +806,7 @@ def test_restart_park_waiting_on_question_stays_manual(
   _due_park(
     cid,
     token,
-    auto_resume=True,
+    auto_restart=True,
     park_reason="restart",
     restart_nonce=nonce,
     messages=[
@@ -850,9 +851,10 @@ def test_restart_park_policy_off_resolves_to_manual_interruption(
     "app.restart_ledger.authorized_restart_nonce",
     lambda: nonce,
   )
-  # The one shared continuation policy is off, so restart recovery is manual.
+  # Usage-limit continuation is deliberately on. The independent restart
+  # policy remains off, proving the causes do not share consent.
   _due_park(
-    cid, token, auto_resume=False,
+    cid, token, auto_resume=True, auto_restart=False,
     park_reason="restart", restart_nonce=nonce,
   )
 
@@ -878,7 +880,7 @@ def test_restart_park_without_current_boot_ack_stays_manual(
   cid = "restart-no-ack"
   token = f"rt-{cid}"
   _due_park(
-    cid, token, auto_resume=True, park_reason="restart",
+    cid, token, auto_restart=True, park_reason="restart",
     restart_nonce="unaccepted-nonce-1234",
   )
 
@@ -901,7 +903,7 @@ def test_restart_park_with_no_nonce_never_matches_missing_ack(
   cid = "restart-no-nonce"
   token = f"rt-{cid}"
   _due_park(
-    cid, token, auto_resume=True, park_reason="restart",
+    cid, token, auto_restart=True, park_reason="restart",
     restart_nonce=None,
   )
 
@@ -925,7 +927,7 @@ def test_restart_park_rejects_ack_for_the_wrong_nonce(
   _due_park(
     cid,
     token,
-    auto_resume=True,
+    auto_restart=True,
     park_reason="restart",
     restart_nonce="db-nonce-12345678",
   )
@@ -950,7 +952,7 @@ def test_restart_spawn_failure_retires_one_shot_authorization(
     lambda: nonce,
   )
   _due_park(
-    cid, token, auto_resume=True, park_reason="restart",
+    cid, token, auto_restart=True, park_reason="restart",
     restart_nonce=nonce,
   )
   original_create_broadcast = chat_mod.create_broadcast

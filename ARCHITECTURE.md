@@ -687,9 +687,9 @@ pins. Reservation lifetime and pin decisions are independent.
 
 ### Automatic continuation after limits and planned restarts
 
-Automatic continuation reuses one durable run transition and one chat-local
-policy while keeping distinct cause validation. Provider-limit exits mark their
-exact `ChatRun` as `parked` until the parsed reset time. A planned restart
+Automatic continuation reuses one durable run transition with separate
+chat-local policies and cause validation. Provider-limit exits mark their exact
+`ChatRun` as `parked` until the parsed reset time. A planned restart
 creates a fresh nonce, stops and finalizes each exact live run, and parks it
 due-now with that nonce. The platform process then publishes an intent and
 restart request; it does not terminate itself on the normal path.
@@ -699,7 +699,7 @@ records its one-shot nonce in `/data/.restart-ledger`, and only then terminates
 pid 1. At the very start of the next entrypoint invocation, the ledger binds
 that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
 restart park when the root-owned boot acknowledgement matches the nonce on the
-latest exact DB run and the chat's continuation policy is on. The supervisor
+latest exact DB run and the restart policy is on. The supervisor
 attests the boot transition; the database owns run identity. An intent merely
 written before a crash/OOM, an acknowledgement skipped by a failed handshake,
 or an acknowledgement left across another boot authorizes nothing. Transcript
@@ -707,8 +707,8 @@ text is presentation, never restart-cause evidence.
 
 | Event | Durable result | Boot/sweep result |
 |-------|----------------|-------------------|
-| Provider usage/rate limit | exact run `parked` until reset | notify; continue if the chat policy is on |
-| Accepted planned restart, exact park + boot nonce match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if the chat policy is on |
+| Provider usage/rate limit | exact run `parked` until reset | notify; continue if the usage policy is on |
+| Accepted planned restart, exact park + boot nonce match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if the restart policy is on |
 | Crash/OOM before supervisor acknowledgement | unacknowledged park or generic `running` evidence | resolve/reconcile to manual resumable interruption |
 | Repeated/unrelated boot before claim | acknowledgement is retired by boot-id mismatch | manual resumable interruption |
 | Policy off, unanswered question, app-owned run, or app-queued work | due park resolves without an automatic send | notify/manual owner action |
@@ -726,10 +726,10 @@ marker rather than owner speech.
 The sweep is cheap: one indexed due-row query immediately at boot, on
 `chat_run_finished`, and on a 60-second fallback, plus one bounded local ledger
 read when due rows exist. It does not create per-chat workers or poll at a short
-interval. `auto_resume_on_limit` keeps its legacy initial default of on.
-Despite its historical storage name, it is the single chat-local policy for
-both provider-limit and planned-restart continuation. Changing it also seeds
-future chats without rewriting existing conversations.
+interval. Paid provider-limit continuation (`auto_resume_on_limit`) initially
+defaults off; planned-restart continuation (`auto_resume_on_restart`) initially
+defaults on. Each chat stores both choices independently, and changing either
+choice seeds future chats without rewriting existing conversations.
 
 ### Tool output rendering
 

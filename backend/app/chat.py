@@ -2246,7 +2246,12 @@ async def _auto_resume_chat(
                 and accepted_nonce == park.restart_nonce
               )
             policy_enabled = bool(
-              chat is not None and chat.auto_resume_on_limit
+              chat is not None
+              and (
+                chat.auto_resume_on_restart
+                if park is not None and park.park_reason == "restart"
+                else chat.auto_resume_on_limit
+              )
             )
             if (
               chat is None
@@ -2454,7 +2459,13 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       for msg in pending
     )
     restart_park = run.park_reason == "restart"
-    policy_enabled = bool(chat is not None and chat.auto_resume_on_limit)
+    policy_enabled = bool(
+      chat is not None
+      and (
+        chat.auto_resume_on_restart
+        if restart_park else chat.auto_resume_on_limit
+      )
+    )
     restart_authorized = (
       not restart_park
       or (

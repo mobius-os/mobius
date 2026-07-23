@@ -583,10 +583,15 @@ def run_migrations(eng) -> None:
         "ALTER TABLE chats ADD COLUMN system_prompt_snapshot_id VARCHAR(64) NULL"
       )
     if "auto_resume_on_limit" not in chats_cols:
-      # Chat-local automatic continuation policy for provider limits and
-      # planned restarts. Any later owner selection remains stored per chat.
+      # Paid provider-limit retries start off until the owner enables them.
       _add.append(
         "ALTER TABLE chats ADD COLUMN auto_resume_on_limit BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      )
+    if "auto_resume_on_restart" not in chats_cols:
+      # Möbius-initiated planned restarts continue by default.
+      _add.append(
+        "ALTER TABLE chats ADD COLUMN auto_resume_on_restart BOOLEAN "
         "NOT NULL DEFAULT TRUE"
       )
     if "pinned_at" not in chats_cols:
@@ -638,10 +643,15 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 'claude'"
       )
     if "auto_resume_on_limit_default" not in owner_cols:
-      # The initial choice is on. Later chat-level selections update this
+      # Paid provider-limit retries start off. Later chat selections update this
       # owner seed so new chats inherit the most recently chosen value.
       _add_owner.append(
         "ALTER TABLE owner ADD COLUMN auto_resume_on_limit_default BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      )
+    if "auto_resume_on_restart_default" not in owner_cols:
+      _add_owner.append(
+        "ALTER TABLE owner ADD COLUMN auto_resume_on_restart_default BOOLEAN "
         "NOT NULL DEFAULT TRUE"
       )
     if "model_prefs_json" not in owner_cols:

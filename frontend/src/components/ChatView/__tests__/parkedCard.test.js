@@ -106,7 +106,7 @@ test('the parked card has styling distinct from a plain error', () => {
 test('auto-resume is a chat-local switch shown only on the active rate-limit card', () => {
   assert.match(msgContent, /resumable && parked && autoResumeAvailable && onAutoResumeChange/,
     'the switch must require the tail resumable rate-limit state')
-  assert.match(msgContent, /Always continue automatically in this chat/,
+  assert.match(msgContent, /Always continue after usage limits in this chat/,
     'the switch label makes the persistent, chat-local scope explicit')
   assert.match(msgContent, /htmlFor=\{autoResumeSwitchId\}/,
     'the visible switch label must also be its accessible name')
@@ -118,10 +118,10 @@ test('auto-resume is a chat-local switch shown only on the active rate-limit car
     'the in-card control has a dedicated layout')
   assert.doesNotMatch(settingsView, /auto_resume_on_limit|Auto.?resume/i,
     'the removed global automatic option must not reappear in Settings')
-  assert.match(chatSettingsPanel, /Continue after usage limits and restarts/,
-    'one durable policy controls both automatic continuation reasons')
-  assert.doesNotMatch(chatSettingsPanel, /restartResume|RestartResume/,
-    'restart continuation must not grow a second switch')
+  assert.match(chatSettingsPanel, /Continue after usage limits/,
+    'the paid-usage policy remains manageable in chat settings')
+  assert.match(chatSettingsPanel, /Continue after planned restarts/,
+    'restart continuation has an independent switch')
   assert.doesNotMatch(chatSettingsPanel, /On for this chat|Off for this chat/,
     'the switch color communicates state without redundant state copy')
   assert.match(chatSettingsPanel, /className="chat-policy-switch"/,
