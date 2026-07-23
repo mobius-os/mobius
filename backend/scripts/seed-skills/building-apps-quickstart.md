@@ -36,6 +36,13 @@ The first slice is not a blank shell or wireframe. It should already have:
 Polish the core interaction; do not delay the preview for secondary features,
 packaging research, speculative screens, or exhaustive checks.
 
+For a one-screen app, keep the first registered draft compact. If it is growing
+toward roughly 500 lines before the partner can see it, cut secondary controls,
+extra presets, elaborate completion effects, and nonessential saved settings.
+One beautiful working interaction visible sooner is better than a complete
+product hidden for another minute. Add only the refinements that materially
+improve the requested experience after registration.
+
 ## The common sequence
 
 ### 1. Check only what can change the decision
@@ -203,6 +210,18 @@ Check the partner's actual viewport first. Add one phone-sized check only when
 the supplied viewport is not already phone-sized or the layout materially
 changes on small screens. Keep only screenshots that show a useful distinct
 state—never a loader, drawer transition, or redundant verification frame.
+
+The default visual-test budget for an ordinary one-screen app is:
+
+1. one readiness-gated preview that you view;
+2. one batched primary-flow interaction, followed by a scoped snapshot and
+   console/error check;
+3. one responsive check when needed.
+
+Do not call browser `--help` during this path; the commands above and
+`visual-testing.md` are the contract. Do not test every secondary control or
+capture the same state twice. If a check exposes a real defect, fix it and
+repeat only the affected check.
 
 ### 6. Close in one pass
 
