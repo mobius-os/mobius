@@ -63,7 +63,9 @@ Then triage the prompt into one of three tiers:
 
 - **Obvious-defaults** → build immediately.
 - **Material-choice** → build a confident default + surface alternatives.
-- **Vibe** → reply with options + tradeoffs, wait for a pick.
+- **Vibe** → give 2–3 concrete options with tradeoffs, call the
+  clarifying-question tool, and wait for a pick. Recommendations in prose alone
+  do not count as waiting.
 
 **Scope check before any restyle.** "The app" is ambiguous: it can mean the whole Möbius shell (one global look via `theme.css` — see `theming.md`) or a single mini-app (per-app CSS scoped to that app — see `building-apps-quickstart.md`). Resolve which BEFORE styling — "restyle the whole app / make everything feel like X" most likely means the shell, not the last mini-app you happened to build. Confirm scope if it's at all ambiguous, and in your reply say what you changed and what you left untouched.
 
@@ -80,7 +82,8 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 ### 3. Wait for approval only on vibe prompts, destructive ops, and investigative questions
 
 - **Obvious-defaults and Material-choice prompts** (specific-app): keep building.
-- **Vibe prompts**: wait for the partner to pick.
+- **Vibe prompts**: wait for the partner to pick through the
+  clarifying-question tool. Do not end with recommendations alone.
 - **Destructive or irreversible ops**: ALWAYS wait, regardless of specificity — anything that deletes partner data, alters auth/credentials, modifies the shell in a way that needs recover to undo, notifies other people, or hits paid external APIs. "Build a confident default" applies to building, not destroying. Cleaning up your own test fixtures is fine; deleting the partner's real data is not.
 - **Investigative questions** ("why?", "what caused this?", "how should we improve this?"): answer first. Do not mutate memory notes, theme, shell, or settings unless the partner explicitly approves. A question is not an implicit go-ahead.
 - **Open-ended critique / under-determined restyle** ("what's wrong with this?", "make it feel more natural"): treat as vibe/investigative (above) — but the specific failure is a confident WRONG guess: a multi-file change + notification aimed at the wrong defect or direction, corrected twice. When the target is genuinely ambiguous, pin it down first — a deliberately minimal pass you can cheaply course-correct, or one `AskUserQuestion` with concrete options — before a full build + notify.
