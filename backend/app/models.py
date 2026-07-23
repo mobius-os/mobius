@@ -750,3 +750,107 @@ class ThinkingTrace(Base):
   revision = Column(Integer, nullable=False, default=0)
   complete = Column(Boolean, nullable=False, default=False)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class ContributionAutopilot(Base):
+  """Platform-owned authorization + claim state for one contribution's autopilot.
+
+  The Contribute mini-app's ledger (``contributions/<id>.json`` in app storage)
+  is AGENT-WRITABLE, so nothing there can be trusted as consent or as claim
+  truth. This table is the trust anchor: one row per (app_id, record_id), written
+  ONLY by platform code — the submit endpoints stamp the grant when the owner
+  clicks Send, and the autopilot endpoints move the claim/round state. A forged
+  ``autopilot`` block in the ledger changes nothing; every enforcement path reads
+  this row. The ledger block is a one-way MIRROR of these fields for the UI/cron.
+
+  ``create_all`` builds this table on the next boot — a new table needs no ALTER
+  migration (see ``database.run_migrations``, which only ALTERs existing tables).
+  """
+
+  __tablename__ = "contribution_autopilot"
+
+  # (app_id, record_id) — the same identity the ledger file uses, but held here
+  # where only the platform can write it. record_id is the ledger record's `id`.
+  app_id = Column(
+    Integer, ForeignKey("apps.id"), primary_key=True
+  )
+  record_id = Column(String(128), primary_key=True)
+  # The grant: True once Send stamped consent, flipped False by an owner Pause.
+  # Absent row = classic manual flow; this is the only authorization autopilot
+  # ever consults.
+  enabled = Column(Boolean, nullable=False, default=True)
+  granted_at = Column(DateTime, nullable=True, default=None)
+  # The reviewed head the grant was issued against — a re-send refreshes it.
+  granted_head_sha = Column(String(64), nullable=True, default=None)
+  # "idle" between rounds; "responding" while a round holds the claim.
+  state = Column(String(16), nullable=False, default="idle")
+  # The live claim. run_id is a fresh uuid per round and is the round's whole
+  # identity: /update, /reply, /complete, /escalate require the caller to
+  # present it, so a zombie agent from a reclaimed round holds a dead id.
+  run_id = Column(String(64), nullable=True, default=None)
+  attention_key = Column(String(256), nullable=True, default=None)
+  claimed_at = Column(DateTime, nullable=True, default=None)
+  lease_expires_at = Column(DateTime, nullable=True, default=None)
+  # The dedicated owner-visible chat where every round for this record runs.
+  followup_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=True, default=None
+  )
+  # Also the budget-attribution registry: a run counts as autopilot spend iff
+  # its chat_id equals some row's followup_chat_id.
+  rounds_used = Column(Integer, nullable=False, default=0)
+  max_rounds = Column(Integer, nullable=False, default=5)
+  # Consecutive non-productive rounds (stale/failed); 2 in a row auto-escalates.
+  consecutive_failures = Column(Integer, nullable=False, default=0)
+  # Cursor: attention whose event timestamp is <= this is already settled, so a
+  # re-posted event (incl. the agent's own reply seen by the next cron pass)
+  # cannot re-trigger. Stored as the ISO string the ledger/GraphQL use.
+  last_handled_event_at = Column(String(40), nullable=True, default=None)
+  # Capped audit log (newest last, trimmed to 30 entries): each entry is
+  # {attention_key, run_id, started_at, finished_at, outcome, summary, head_sha}.
+  rounds_json = Column(JSON, nullable=True, default=None)
+  created_at = Column(DateTime, default=lambda: now_naive_utc())
+  updated_at = Column(DateTime, default=lambda: now_naive_utc())
+
+
+class AgentBudgetWindow(Base):
+  """Per-allowance-window ledger of background-autopilot model spend.
+
+  Enforces the owner's cap (default 10% of the weekly allowance) on how much
+  autopilot may consume. Keyed by (provider, window_key): on Claude subscription
+  plans window_key is the SDK-reported ``resets_at`` and spend is measured in
+  ``points`` (utilization-percent deltas observed across a run); on API-key
+  setups with no utilization signal window_key is a trailing-7-day bucket and
+  spend is measured in ``tokens``. Written by the runner-finalization accrual
+  hook (crashed rounds still count) and read by ``/respond`` before it claims.
+
+  ``create_all`` builds this table on the next boot — no ALTER migration needed.
+  """
+
+  __tablename__ = "agent_budget_windows"
+
+  provider = Column(String(32), primary_key=True)
+  # resets_at ISO (subscription) or "trailing:<YYYY-Wnn>" bucket (token path).
+  window_key = Column(String(64), primary_key=True)
+  points_spent = Column(Float, nullable=False, default=0.0)
+  tokens_spent = Column(Integer, nullable=False, default=0)
+  runs = Column(Integer, nullable=False, default=0)
+  updated_at = Column(DateTime, default=lambda: now_naive_utc())
+
+
+class AgentBudgetObservation(Base):
+  """Last-observed weekly-allowance utilization per provider.
+
+  One row per provider, overwritten as the SDK reports RateLimitEvents. Feeds
+  two things: the per-run utilization delta the window ledger accrues, and the
+  independent 90% HEADROOM ceiling in ``/respond`` (background work never eats
+  the user's final tokens, regardless of autopilot's own share). Reads live
+  utilization, not the meter, so a lost accrual write cannot defeat it.
+  """
+
+  __tablename__ = "agent_budget_observations"
+
+  provider = Column(String(32), primary_key=True)
+  # 0..100 percent of the weekly allowance consumed, per the SDK.
+  utilization = Column(Float, nullable=True, default=None)
+  resets_at = Column(String(64), nullable=True, default=None)
+  observed_at = Column(DateTime, default=lambda: now_naive_utc())
