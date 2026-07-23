@@ -162,6 +162,22 @@ async def lifespan(app):
     # report cleanup failure without making the whole service unbootable.
     _log.error("legacy global auto-resume cleanup failed: %s", exc, exc_info=True)
   _init_db()
+  # Upgrade hygiene for lifecycle observability. The append-only link table is
+  # new, but older chats can already carry a current provider session pointer.
+  # Seed those once after create_all has made the table; future sightings are
+  # recorded by the runners. Ambiguous historical claims remain unlinked.
+  try:
+    from app.session_links import backfill_current_session_links
+    with SessionLocal() as _session_link_db:
+      _backfilled_links = backfill_current_session_links(_session_link_db)
+    if _backfilled_links:
+      _log.info(
+        "backfilled %s historical chat session link(s)", _backfilled_links,
+      )
+  except Exception as exc:
+    # Observability must never block the recovery surface. A failed link is
+    # retried on the next boot and the runner still records future sightings.
+    _log.error("session-link backfill failed: %s", exc, exc_info=True)
   # First-boot claim gate (card 261). Publish/reconcile the one-time setup
   # claim now — after _init_db() so the owner state is readable, and before
   # `yield` so no request can reach POST /api/auth/setup before the gate

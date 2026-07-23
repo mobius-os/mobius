@@ -9,7 +9,7 @@ owner-only `GET /api/chats/session-links` endpoint contract.
 from __future__ import annotations
 
 from app import models
-from app.session_links import record_session_link
+from app.session_links import backfill_current_session_links, record_session_link
 
 
 def _chat(db, chat_id: str, *, provider: str = "claude", session_id=None):
@@ -95,6 +95,45 @@ def test_record_session_link_noops_on_missing_args(db):
   record_session_link(None, "claude", "sess-A", "chat-1")
 
   assert db.query(models.ChatSessionLink).count() == 0
+
+
+def test_backfill_current_session_links_is_idempotent(db):
+  _chat(db, "chat-1", provider="claude", session_id="sess-A")
+  _chat(db, "chat-2", provider="codex", session_id="sess-B")
+  _chat(db, "chat-empty", provider="claude", session_id="")
+
+  assert backfill_current_session_links(db) == 2
+  assert backfill_current_session_links(db) == 0
+
+  links = {
+    (link.provider, link.session_id): link.chat_id
+    for link in db.query(models.ChatSessionLink).all()
+  }
+  assert links == {
+    ("claude", "sess-A"): "chat-1",
+    ("codex", "sess-B"): "chat-2",
+  }
+
+
+def test_backfill_preserves_existing_and_skips_ambiguous_claims(db):
+  _chat(db, "chat-existing", provider="claude", session_id="sess-existing")
+  _chat(db, "chat-claim", provider="claude", session_id="sess-existing")
+  _chat(db, "chat-a", provider="codex", session_id="sess-ambiguous")
+  _chat(db, "chat-b", provider="codex", session_id="sess-ambiguous")
+  db.add(models.ChatSessionLink(
+    provider="claude",
+    session_id="sess-existing",
+    chat_id="chat-existing",
+  ))
+  db.commit()
+
+  assert backfill_current_session_links(db) == 0
+  assert db.get(
+    models.ChatSessionLink, ("claude", "sess-existing")
+  ).chat_id == "chat-existing"
+  assert db.get(
+    models.ChatSessionLink, ("codex", "sess-ambiguous")
+  ) is None
 
 
 def test_provider_switch_nulls_session_id_but_leaves_links(
