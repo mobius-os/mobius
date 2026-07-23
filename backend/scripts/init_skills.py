@@ -34,7 +34,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "13"  # v13: remove the retired built-in image provider
+SEED_VERSION = "14"  # v14: finding-skills (ecosystem discovery + install API)
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -84,6 +84,33 @@ def _chown_mobius(path: Path) -> None:
       pass
 
 
+def _write_index() -> None:
+  """Regenerates skills-index.md via app.skills; best-effort.
+
+  This script runs standalone from the entrypoint (before uvicorn), so the
+  app package import can fail on a badly broken tree — the index is a
+  convenience surface, never worth failing boot over. The server-side install
+  paths regenerate it too, so a skipped boot write self-heals on the next
+  install.
+  """
+  try:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from app.skills import reconcile_installed, write_index
+
+    # Startup half of the installer's crash-recovery contract: repair any
+    # install a crash interrupted (finalize published, discard staged) before
+    # the index snapshots the tree.
+    repaired = reconcile_installed(SKILLS)
+    if repaired:
+      print(f"init_skills: reconciled interrupted install(s): {repaired}")
+    write_index(SKILLS)
+    print("init_skills: skills-index.md regenerated")
+  except Exception as exc:  # noqa: BLE001 - boot must not fail on the index
+    print(f"init_skills: index generation skipped ({exc})")
+
+
 def init() -> None:
   seed = _seed_dir()
   if seed is None:
@@ -98,11 +125,22 @@ def init() -> None:
     n = len(list(SKILLS.glob("*.md")))
     print(f"init_skills: seeded {n} skills (v{SEED_VERSION})")
     _chown_mobius(SKILLS)
+    _write_index()
     return
   # Present already — preserve the agent's edits. Only add NEW seed skills the
   # instance doesn't have yet (never overwrite an existing one).
+  # Resolve any crash-interrupted /api/skills install first, so a pending
+  # directory skill is either published (and seen as a collision below) or
+  # gone — the same reconciliation the runtime skills mutations run.
+  try:
+    from app.skills import reconcile_installed
+
+    reconcile_installed(SKILLS)
+  except Exception as exc:  # pragma: no cover - best-effort at boot
+    print(f"init_skills: reconcile skipped ({exc})")
   added = 0
   migrated = 0
+  skipped = 0
   for src in seed.glob("*.md"):
     dst = SKILLS / src.name
     old_digests = _UNMODIFIED_MIGRATIONS.get(src.name)
@@ -115,14 +153,24 @@ def init() -> None:
         shutil.copy2(src, dst)
         migrated += 1
         continue
+    # Both on-disk shapes share one logical id: never add a flat `foo.md` seed
+    # when an install-provenance directory skill `foo/` already holds `foo`
+    # (the runtime install path enforces the same both-shape rule).
+    if (SKILLS / src.stem).is_dir():
+      skipped += 1
+      continue
     if not dst.exists():
       shutil.copy2(src, dst)
       added += 1
+  if skipped:
+    print(f"init_skills: skipped {skipped} seed skill(s) colliding with an "
+          "installed directory skill of the same id")
   if added:
     print(f"init_skills: added {added} new seed skill(s) (existing kept)")
   if migrated:
     print(f"init_skills: migrated {migrated} unmodified base skill(s)")
   _chown_mobius(SKILLS)
+  _write_index()
 
 
 if __name__ == "__main__":

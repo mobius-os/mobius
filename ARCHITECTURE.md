@@ -153,6 +153,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | File | Role |
 |------|------|
 | `memory.py` | `build_memory_block()` — assembles only bounded recent-chat Digests; graph/app data is never injected here |
+| `skills.py` | Skill enumeration (flat `<name>.md` + external-convention `<name>/SKILL.md` dirs), dependency-free frontmatter parsing, provenance labels (`seed`/`agent`/`app:<slug>`/`installed:<source>`), and `write_index()` — the generated `shared/skills/skills-index.md` both providers Read (regenerated on boot, app-skill sync, and skill install/uninstall) |
 | `reflection_checkpoint.py` | Reflection's last-run marker (what to review tonight) |
 | `activity.py` | Append-only JSONL platform-activity log (app_open, app_install, storage_write, …) |
 | `self_reminders.py` | Agent self-scheduling: append-only store of relational check-ins |
@@ -216,6 +217,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `settings.py` | Owner-level configuration |
 | `github.py` | GitHub connect status + read-only REST/GraphQL passthrough for in-product upstream contributions (pairs with `github_auth.py` + the `contributing.md` skill) |
 | `self_reminders.py` | Agent self-scheduling endpoints |
+| `skills.py` | `GET /api/skills` (installed skills + provenance + 30-day usage), `POST /install` (fetch a `SKILL.md` dir or single markdown from GitHub via the same SSRF-safe fetcher as app installs; `.installed-skills.json` provenance sidecar; basename collision ⇒ 409), `DELETE /{name}` (installed-provenance only, git-snapshot before removal). Install/uninstall gated owner-or-`manage_skills` (the Skills app's permission, pattern of `manage_apps`) |
 | `admin.py` | Admin / introspection endpoints (service-token gated) |
 | `debug.py` | Observability: active SDK clients/sessions, broadcasts, chat logs |
 | `client_error.py` | `POST /api/client-error` — record an uncaught client/app JS error |
@@ -367,6 +369,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Add a supported app package | Pin it in `frontend/package.json`, add it to `BUNDLED_RUNTIME_LIBS`, and run the compiler/offline-frame contracts |
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
+| Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); new platform seeds go in `backend/scripts/seed-skills/` + a `SEED_VERSION` bump in `init_skills.py`; the index (`skills-index.md`) is generated — never hand-edit it |
 | Change a built-in core app (Memory / Reflection) | The catalog repo (`mobius-os/app-<slug>`) is the source of truth — `core-apps/` is a committed snapshot, never hand-edited. Bump the pinned commit in `core-apps/SOURCES`, run `scripts/sync-core-apps.sh`, commit the diff; CI (`scripts/check-core-apps-sync.sh`) fails on drift. The snapshot is baked to `/app/core-apps` (Dockerfile) and installed at boot by `backend/scripts/install-core-apps.sh` (which prefers `/data/platform/core-apps` when the platform clone exists, falling back to the baked `/app/core-apps` floor) |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 

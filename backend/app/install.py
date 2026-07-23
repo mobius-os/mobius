@@ -337,6 +337,74 @@ def _canonical_base(url_or_base: str) -> str:
   return base.rstrip("/")
 
 
+def _trusted_catalog_repo_base(url_or_base: str) -> str | None:
+  """A ref-INDEPENDENT identity base for a trusted mobius-os catalog ROOT
+  manifest, or None when `url_or_base` isn't that shape.
+
+  `raw.githubusercontent.com/mobius-os/<repo>/<ref>/mobius.json` collapses to the
+  identity `raw.githubusercontent.com/mobius-os/<repo>` — the mutable `<ref>`
+  segment dropped. A `mobius-os/app-*` repo is ONE app whatever revision we
+  fetch, so a pinned-commit bump (bootstrap moving app-skills from `main` to a
+  reviewed commit, and every later re-pin) must name the SAME app as the row it
+  supersedes — never fork a duplicate, never miss an owner's tombstone and
+  silently undo their uninstall.
+
+  Deliberately narrow, mirroring `_derive_repo_ref`: only the canonical
+  single-segment-ref ROOT shape (canonical base == `<org>/<repo>/<ref>`, three
+  path parts) qualifies. A repo SUBDIR manifest keeps its ref-bearing base, so
+  two apps hosted in one repo can never collapse onto one identity.
+  """
+  if not isinstance(url_or_base, str) or not url_or_base:
+    return None
+  base = _canonical_base(url_or_base)
+  parsed = urlparse(base)
+  if parsed.hostname != "raw.githubusercontent.com":
+    return None
+  parts = [unquote(part) for part in parsed.path.split("/") if part]
+  if len(parts) != 3 or ".." in parts:
+    return None
+  org, repo, ref = parts
+  if org != "mobius-os":
+    return None
+  for part in (org, repo, ref):
+    if part in ("", ".", "..") or part.startswith("-") or "\\" in part:
+      return None
+  return f"{parsed.scheme}://{parsed.hostname}/{org}/{repo}"
+
+
+def _find_ref_independent_catalog_row(
+  db: Session, canonical_manifest_url: str, manifest_id: str,
+) -> models.App | None:
+  """An existing row for the same trusted repo + manifest id at ANY ref.
+
+  Used only when the exact-ref identity lookups miss. Prefers a live row, then
+  the lowest id, and re-verifies each candidate in Python because SQL `LIKE`
+  treats `_` as a wildcard (a ref may contain one). Tombstone-agnostic like the
+  primary identity lookup: an explicit install/update/pin-bump that reaches here
+  revives a soft-deleted row in place (keeping its id + storage). Honoring an
+  owner's uninstall of a `reinstall_after_uninstall=False` app is the bootstrap
+  layer's job — it decides whether to call install at all.
+  """
+  repo_base = _trusted_catalog_repo_base(canonical_manifest_url)
+  if repo_base is None:
+    return None
+  suffix = f"#manifest-id={manifest_id}"
+  candidates = (
+    db.query(models.App)
+    .filter(models.App.manifest_url.like(f"{repo_base}/%{suffix}"))
+    .order_by(
+      case((models.App.deleted_at.is_(None), 0), else_=1),
+      models.App.id.asc(),
+    )
+    .all()
+  )
+  for cand in candidates:
+    url = cand.manifest_url or ""
+    if url.endswith(suffix) and _trusted_catalog_repo_base(url) == repo_base:
+      return cand
+  return None
+
+
 def _canonical_identity_key(url_or_base: str, manifest_id: str) -> str:
   """Single canonical shape for the `manifest_url` column.
 
@@ -1322,6 +1390,18 @@ async def _sync_app_skills(
   source_dir = Path(app.source_dir)
   version = str(manifest.get("version", "unknown"))
   async with fs_locks.shared_skills_lock():
+    from app import skills as skills_mod
+
+    # Resolve any crash-interrupted /api/skills install FIRST, so a pending
+    # directory skill is either a fully-owned collision below or gone — the
+    # same reconciliation the direct install/uninstall paths run under this
+    # lock. Then read the installed-skills sidecar so this writer honors the
+    # SAME basename-collision policy as a direct install: a flat `foo.md` must
+    # never coexist with an installed directory skill `foo/` under one id.
+    skills_mod.reconcile_installed(skills_dir)
+    installed_records = skills_mod._read_sidecar(
+      skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR
+    )
     sidecar_path = skills_dir / _APP_SKILLS_SIDECAR
     records: dict = {}
     if sidecar_path.exists():
@@ -1378,6 +1458,19 @@ async def _sync_app_skills(
           continue
         # The recorded owner was hard-purged after its recovery window, so the
         # basename is no longer reserved and this app may take it over.
+      # Cross-SHAPE collision: an install-provenance skill may hold the same
+      # logical id in the OTHER on-disk shape. `rel` is the flat `<stem>.md`;
+      # the colliding directory skill is `<stem>/`. Refuse to write a second
+      # skill under one id (the direct-install path enforces the same both-shape
+      # rule) — the owner resolves it by removing one deliberately.
+      stem = Path(rel).stem
+      dir_shape = skills_dir / stem
+      if isinstance(installed_records.get(stem), dict) or dir_shape.is_dir():
+        warnings.append(
+          f"skill {rel}: an installed skill already holds id {stem!r} "
+          "(directory shape) — skipped"
+        )
+        continue
       if (
         isinstance(rec, dict)
         and owner_id == app.id
@@ -1445,6 +1538,11 @@ async def _sync_app_skills(
         sidecar_path,
         json.dumps(records, indent=2, sort_keys=True) + "\n",
       )
+    # The skill set changed (or may have) — refresh the generated tier-1 index
+    # INSIDE the lock. Regenerating after release let a concurrent direct
+    # install/uninstall's newer index be overwritten by this writer's stale
+    # snapshot. Best-effort like everything else in this post-commit phase.
+    _regenerate_skills_index(skills_dir)
 
 
 def _read_app_skill_records(skills_dir: Path) -> tuple[Path, dict]:
@@ -1494,6 +1592,9 @@ async def deactivate_app_skills(app_id: int) -> list[str]:
         sidecar,
         json.dumps(records, indent=2, sort_keys=True) + "\n",
       )
+    # Inside the lock: a stale post-release regen could clobber a concurrent
+    # mutation's newer index.
+    _regenerate_skills_index(skills_dir)
   return warnings
 
 
@@ -1542,6 +1643,9 @@ async def restore_app_skills(app_id: int) -> list[str]:
         sidecar,
         json.dumps(records, indent=2, sort_keys=True) + "\n",
       )
+    # Inside the lock: a stale post-release regen could clobber a concurrent
+    # mutation's newer index.
+    _regenerate_skills_index(skills_dir)
   return warnings
 
 
@@ -1568,6 +1672,19 @@ async def purge_app_skills(app_id: int) -> None:
       sidecar,
       json.dumps(records, indent=2, sort_keys=True) + "\n",
     )
+    # Inside the lock: a stale post-release regen could clobber a concurrent
+    # mutation's newer index.
+    _regenerate_skills_index(skills_dir)
+
+
+def _regenerate_skills_index(skills_dir: Path) -> None:
+  """Best-effort refresh of the generated skills-index.md after a change."""
+  try:
+    from app import skills as skills_mod
+
+    skills_mod.write_index(skills_dir)
+  except Exception:  # noqa: BLE001 - the index is a convenience surface
+    log.warning("skills index regeneration failed", exc_info=True)
 
 
 def _check_source_completeness(
@@ -2041,6 +2158,19 @@ async def install_from_manifest(
       )
       .first()
     )
+  if existing is None:
+    # REF-INDEPENDENT IDENTITY (trusted catalog ROOT only). The base-drift block
+    # above still keys on the exact `<ref>` segment, so it can't recognize a row
+    # installed at a DIFFERENT revision of the same mobius-os/app-* repo. That is
+    # exactly what a pin bump produces (bootstrap moving app-skills from `main`
+    # to a reviewed commit), and missing it forks a duplicate app — or, if the
+    # owner had uninstalled, resurrects their tombstone. Match any ref of the
+    # same repo + manifest id and update IN PLACE; the write path self-heals
+    # `manifest_url` to the new canonical form. Tombstone-agnostic on purpose
+    # (see helper); a NULL return leaves untrusted/subdir installs unaffected.
+    existing = _find_ref_independent_catalog_row(
+      db, canonical_manifest_url, manifest_id,
+    )
   # adopt_kind records HOW a predecessor was matched when the manifest_url
   # lookup missed — "" for a normal install/update (the canonical match above),
   # "rename" when this manifest renamed a prior catalog app (via `previous_id`),
@@ -2410,6 +2540,7 @@ async def install_from_manifest(
         share_with_apps=perms.get("share_with_apps", "none"),
         chat_log_access=perms.get("chat_log_access", "none"),
         manage_apps=bool(perms.get("manage_apps", False)),
+        manage_skills=bool(perms.get("manage_skills", False)),
         github_access=bool(perms.get("github_access", False)),
         filesystem_access=bool(perms.get("filesystem_access", False)),
         # The manifest's `offline_capable: true` opts the app into the
@@ -2806,15 +2937,17 @@ async def install_from_manifest(
           app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
           app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
           app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)
-          # Privileged booleans and offline_capable can change across
-          # versions; default to the existing value when the manifest omits the key.
-          if "manage_apps" in perms:
-            app.manage_apps = bool(perms["manage_apps"])
-          if "github_access" in perms:
-            app.github_access = bool(perms["github_access"])
-          # Filesystem authority is opt-in on every published version. Omitting
-          # the grant from an update revokes it instead of preserving a stale
-          # privileged bit from an older manifest.
+          # Privileged grants are opt-in on EVERY published version: an update
+          # that omits the key REVOKES it, never preserves a stale privileged
+          # bit from an older manifest. This must match the capability contract
+          # (app_capabilities builds each as `perms.get(key, False)`) and the
+          # fresh-install path above — retaining an omitted grant here diverged
+          # the durable row from its own contract (e.g. `manage_skills=true`
+          # while the contract recorded false), leaving authorization to trust a
+          # capability the new manifest never asked for.
+          app.manage_apps = bool(perms.get("manage_apps", False))
+          app.manage_skills = bool(perms.get("manage_skills", False))
+          app.github_access = bool(perms.get("github_access", False))
           app.filesystem_access = bool(perms.get("filesystem_access", False))
           if "offline_capable" in manifest:
             app.offline_capable = bool(manifest["offline_capable"])

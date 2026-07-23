@@ -561,6 +561,13 @@ class App(Base):
   # storage-write. The App Store mini-app is the canonical caller.
   # Default False — only granted by manifest declaration on install.
   manage_apps = Column(Boolean, nullable=False, default=False)
+  # Skills-management access. When True, the app's token can call the
+  # /api/skills surface (install a skill from an online source, uninstall an
+  # installed one) on the owner's behalf. Distinct from manage_apps so the
+  # skills-install consent is its own user-visible permission. The Skills
+  # mini-app is the canonical caller. Default False — only granted by manifest
+  # declaration on install.
+  manage_skills = Column(Boolean, nullable=False, default=False)
   # GitHub connection access. When True, the app's token can call the
   # whole /api/github surface: manage the connection (connect / poll /
   # disconnect / status) and use the read-only data proxy (GET

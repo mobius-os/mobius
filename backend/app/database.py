@@ -305,6 +305,16 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
+  if "manage_skills" not in apps_cols:
+    # Skills-management authority — gates the /api/skills install/uninstall
+    # surface. Defaults to 0; apps gain it by declaring
+    # permissions.manage_skills=true in their manifest and reinstalling.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN manage_skills BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      ))
+      conn.commit()
   if "github_access" not in apps_cols:
     # GitHub connection access — gates the whole /api/github surface
     # (connection management + the read-only data proxy). Defaults to 0;

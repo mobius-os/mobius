@@ -1256,21 +1256,33 @@ def _skill_names_in_command(command: str, data_dir: str) -> list[str]:
 
   Codex has no Read tool and no `can_use_tool` hook — its closest
   interception point is the command-execution item stream, where a
-  skill load looks like `cat /data/shared/skills/<name>.md` (or a
-  sed/head/grep over the same path). Any reference to a skill file in
-  a command counts as a load; that over-counts an edit-in-place,
-  which is acceptable for an aggregate most-used signal. Returns
-  deduped names in first-mention order.
+  skill load looks like `cat /data/shared/skills/<name>.md` (flat) or
+  `cat /data/shared/skills/<id>/SKILL.md` (the directory shape installed
+  skills use), possibly via sed/head/grep over the same path. Any
+  reference to a skill file in a command counts as a load; that
+  over-counts an edit-in-place, which is acceptable for an aggregate
+  most-used signal. A directory skill is keyed by its DIRECTORY name —
+  the on-disk id — matching the Claude Read observer and the usage
+  aggregation; a deeper resource read inside the directory is not a
+  load. Returns deduped names in first-mention order.
   """
   if not command:
     return []
+  from app.skills import GENERATED_INDEX_STEMS
+
   prefix = re.escape(
     os.path.normpath(os.path.join(data_dir, "shared", "skills"))
   )
   names: list[str] = []
-  for match in re.finditer(prefix + r"/([A-Za-z0-9._-]+)\.md\b", command):
+  # Either `<id>/SKILL.md` (directory skill, id = the dir name, SKILL.md
+  # case-insensitive) or a flat `<name>.md` directly under skills/. The two
+  # alternatives are disjoint (a flat match can't span a `/`), so one pass in
+  # command order preserves first-mention order without double counting.
+  pattern = prefix + r"/([A-Za-z0-9._-]+)(?:/(?i:SKILL\.md)|\.md)\b"
+  for match in re.finditer(pattern, command):
     name = match.group(1)
-    if name not in names:
+    # Reading a generated index is consulting a listing, not loading a skill.
+    if name not in names and name not in GENERATED_INDEX_STEMS:
       names.append(name)
   return names
 

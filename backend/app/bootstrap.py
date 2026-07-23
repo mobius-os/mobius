@@ -33,6 +33,19 @@ BOOTSTRAP_STORE_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-store/main/mobius.json"
 )
 
+# The Skills app (browse/install ecosystem skills + the skill-agent chat).
+# Canonical home is the app-skills catalog repo. PINNED to a reviewed commit,
+# never a mutable branch: core and app releases pair explicitly — this pin
+# names the newest app revision reviewed against THIS platform's API surface,
+# and bumping it is a deliberate platform commit that rides the same release.
+# (Currently v1.1.2, which needs no skills API and works on any core; the v2
+# app — compat badges, catalog browser — requires this platform's skills API
+# and gets pinned here only once both sides have merged.)
+BOOTSTRAP_SKILLS_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-skills/"
+  "fd09c995d943cb23bf2215be128fc68851750ebf/mobius.json"
+)
+
 LEGACY_PLATFORM_APP_MANIFEST_URLS = legacy_platform_apps.MANIFEST_URLS
 
 
@@ -45,6 +58,9 @@ class _BootstrapApp:
 
 _BOOTSTRAP_APPS = (
   _BootstrapApp("store", BOOTSTRAP_STORE_MANIFEST_URL, True),
+  # Skills is NOT the recovery surface — an owner uninstall is respected, and
+  # the Store remains the way back.
+  _BootstrapApp("skills", BOOTSTRAP_SKILLS_MANIFEST_URL, False),
   _BootstrapApp("memory", LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], False),
   _BootstrapApp(
     "reflection", LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], False,
@@ -139,17 +155,33 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
   # Manifest installs store the canonical identity key
   # (`<base>#manifest-id=<id>`, with a trailing `/mobius.json` stripped from the
   # base), not the bare URL.
-  from app.install import _canonical_base
+  from app.install import _canonical_base, _trusted_catalog_repo_base
 
   for bootstrap_app in _BOOTSTRAP_APPS:
-    query = db.query(models.App).filter(models.App.manifest_url.like(
-      _canonical_base(bootstrap_app.manifest_url) + "#manifest-id=%"
-    ))
+    # A trusted mobius-os catalog app's identity is its REPO, not the pinned
+    # `<ref>`: match any revision so a pin bump (or the original branch install)
+    # resolves to the SAME row. Without this the presence check keys on the new
+    # commit's base, misses a row installed at an older ref, and either
+    # duplicates the app or — for a `reinstall_after_uninstall=False` app whose
+    # owner uninstalled it — misses the tombstone and silently reinstalls.
+    repo_base = _trusted_catalog_repo_base(bootstrap_app.manifest_url)
+    if repo_base is not None:
+      pattern = repo_base + "/%#manifest-id=%"
+    else:
+      pattern = _canonical_base(bootstrap_app.manifest_url) + "#manifest-id=%"
+    query = db.query(models.App).filter(models.App.manifest_url.like(pattern))
     if bootstrap_app.reinstall_after_uninstall:
       # The store is the recovery surface, so it must return after uninstall;
-      # owner uninstalls of the other bootstrap apps are respected.
+      # owner uninstalls of the other bootstrap apps are respected (the query is
+      # otherwise tombstone-agnostic, so a tombstone counts as "present").
       query = query.filter(models.App.deleted_at.is_(None))
-    existing = query.first()
+    # Re-verify in Python: SQL LIKE treats `_` as a wildcard, and a ref may
+    # contain one; the repo-base check rejects any incidental over-match.
+    existing = None
+    for row in query.all():
+      if repo_base is None or _trusted_catalog_repo_base(row.manifest_url) == repo_base:
+        existing = row
+        break
     if existing is not None:
       log.info(
         "bootstrap: %s already installed (app id=%s)",
