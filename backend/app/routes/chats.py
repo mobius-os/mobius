@@ -912,7 +912,7 @@ async def patch_chat(
     if provider_changing:
       active_run = db.query(models.ChatRun).filter(
         models.ChatRun.chat_id == chat_id,
-        models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
       ).first()
       if (
         is_chat_running(chat_id)
@@ -1619,7 +1619,7 @@ async def compact_chat(
       )
     active_run = db.query(models.ChatRun).filter(
       models.ChatRun.chat_id == chat_id,
-      models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+      models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
     ).first()
     if (
       is_chat_running(chat_id)
@@ -2016,7 +2016,7 @@ async def patch_app_chat(
     if body.system_prompt is not None:
       active_run = db.query(models.ChatRun).filter(
         models.ChatRun.chat_id == chat_id,
-        models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
       ).first()
       if (
         chat.system_prompt_snapshot_id
@@ -2050,7 +2050,7 @@ async def patch_app_chat(
       if chat.provider != body.provider:
         active_run = db.query(models.ChatRun).filter(
           models.ChatRun.chat_id == chat_id,
-          models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+          models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
         ).first()
         if (
           is_chat_running(chat_id)

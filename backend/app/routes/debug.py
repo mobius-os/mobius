@@ -122,7 +122,7 @@ def debug_status(
     }
     for run in (
       db.query(models.ChatRun)
-      .filter(models.ChatRun.status.in_(("parked", "resume_pending")))
+      .filter(models.ChatRun.status.in_(models.CONTINUATION_RUN_STATUSES))
       # id.asc() tiebreak keeps the listing stable across reads when two
       # rows share a started_at (same rationale as the latest-run probe in
       # chat._parked_until_for_chat).

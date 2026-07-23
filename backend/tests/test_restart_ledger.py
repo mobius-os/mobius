@@ -56,18 +56,17 @@ def _bind(supervisor, root: Path, monkeypatch) -> None:
   )
 
 
-def _request(root: Path, *, boot: str, nonce: str, now: float) -> None:
+def _request(*, boot: str, nonce: str, now: float) -> None:
   platform_ledger.request_restart(
     boot_id=boot,
     nonce=nonce,
-    runs=[{"chat_id": "chat-12345678", "run_token": "run-12345678"}],
     now=now,
   )
 
 
 def _authorized(root: Path, boot: str):
   del root
-  return platform_ledger.authorized_runs(
+  return platform_ledger.authorized_restart_nonce(
     boot,
     trusted_uid=os.getuid(),
     trusted_gid=os.getgid(),
@@ -85,14 +84,12 @@ def test_exact_accepted_restart_is_bound_to_immediately_following_boot(
   nonce = "nonce-12345678"
 
   assert supervisor.begin_boot(source_boot, now=now) is False
-  _request(tmp_path, boot=source_boot, nonce=nonce, now=now)
+  _request(boot=source_boot, nonce=nonce, now=now)
   assert supervisor.accept(source_boot, now=now + 1) is True
   assert supervisor.begin_boot(target_boot, now=now + 2) is True
 
-  assert _authorized(tmp_path, target_boot) == {
-    "run-12345678": ("chat-12345678", nonce),
-  }
-  assert _authorized(tmp_path, source_boot) == {}
+  assert _authorized(tmp_path, target_boot) == nonce
+  assert _authorized(tmp_path, source_boot) is None
 
 
 def test_crash_after_intent_before_supervisor_acceptance_is_not_authorized(
@@ -104,10 +101,10 @@ def test_crash_after_intent_before_supervisor_acceptance_is_not_authorized(
   source_boot = "boot-source-1234"
 
   supervisor.begin_boot(source_boot, now=now)
-  _request(tmp_path, boot=source_boot, nonce="nonce-12345678", now=now)
+  _request(boot=source_boot, nonce="nonce-12345678", now=now)
   # Simulate OOM/SIGKILL before the frozen poller accepts the request.
   assert supervisor.begin_boot("boot-after-oom-1", now=now + 1) is False
-  assert _authorized(tmp_path, "boot-after-oom-1") == {}
+  assert _authorized(tmp_path, "boot-after-oom-1") is None
   assert not supervisor.INTENT_PATH.exists()
   assert not supervisor.REQUEST_PATH.exists()
 
@@ -119,14 +116,14 @@ def test_second_boot_before_claim_retires_one_shot_ack(tmp_path, monkeypatch):
   source_boot = "boot-source-1234"
 
   supervisor.begin_boot(source_boot, now=now)
-  _request(tmp_path, boot=source_boot, nonce="nonce-12345678", now=now)
+  _request(boot=source_boot, nonce="nonce-12345678", now=now)
   assert supervisor.accept(source_boot, now=now + 1)
   assert supervisor.begin_boot("boot-target-1234", now=now + 2)
   assert _authorized(tmp_path, "boot-target-1234")
 
   assert supervisor.begin_boot("boot-repeated-1234", now=now + 3) is False
-  assert _authorized(tmp_path, "boot-target-1234") == {}
-  assert _authorized(tmp_path, "boot-repeated-1234") == {}
+  assert _authorized(tmp_path, "boot-target-1234") is None
+  assert _authorized(tmp_path, "boot-repeated-1234") is None
 
 
 def test_boot_does_not_ack_when_accepted_intent_cannot_be_consumed(
@@ -137,7 +134,7 @@ def test_boot_does_not_ack_when_accepted_intent_cannot_be_consumed(
   now = time.time()
   source_boot = "boot-source-1234"
   supervisor.begin_boot(source_boot, now=now)
-  _request(tmp_path, boot=source_boot, nonce="nonce-12345678", now=now)
+  _request(boot=source_boot, nonce="nonce-12345678", now=now)
   assert supervisor.accept(source_boot, now=now + 1)
   real_remove = supervisor._remove
 
@@ -164,7 +161,7 @@ def test_recovery_restart_without_chat_intent_never_authorizes(
 
   assert supervisor.accept(source_boot, now=now + 1) is False
   assert supervisor.begin_boot("boot-recovery-1234", now=now + 2) is False
-  assert _authorized(tmp_path, "boot-recovery-1234") == {}
+  assert _authorized(tmp_path, "boot-recovery-1234") is None
 
 
 def test_mismatched_or_expired_request_is_consumed_without_ack(
@@ -176,7 +173,6 @@ def test_mismatched_or_expired_request_is_consumed_without_ack(
   source_boot = "boot-source-1234"
   supervisor.begin_boot(source_boot, now=now)
   _request(
-    tmp_path,
     boot=source_boot,
     nonce="nonce-12345678",
     now=now - supervisor.MAX_REQUEST_AGE_SECONDS - 1,
@@ -195,21 +191,18 @@ def test_platform_rejects_writable_or_tampered_ack(tmp_path, monkeypatch):
   source_boot = "boot-source-1234"
   target_boot = "boot-target-1234"
   supervisor.begin_boot(source_boot, now=now)
-  _request(tmp_path, boot=source_boot, nonce="nonce-12345678", now=now)
+  _request(boot=source_boot, nonce="nonce-12345678", now=now)
   assert supervisor.accept(source_boot, now=now + 1)
   assert supervisor.begin_boot(target_boot, now=now + 2)
 
   supervisor.ACK_PATH.chmod(0o644)
-  assert _authorized(tmp_path, target_boot) == {}
+  assert _authorized(tmp_path, target_boot) is None
   supervisor.ACK_PATH.chmod(0o444)
   value = json.loads(supervisor.ACK_PATH.read_text(encoding="utf-8"))
-  value["runs"][0]["run_token"] = "forged-run-1234"
+  value["nonce"] = "forged-nonce-1234"
   supervisor.ACK_PATH.chmod(0o644)
   supervisor.ACK_PATH.write_text(json.dumps(value), encoding="utf-8")
   supervisor.ACK_PATH.chmod(0o444)
-  # Filesystem ownership proves who wrote the ledger in production. This test
-  # process is the trusted uid, so content tampering is structurally valid; the
-  # exact DB run/nonce comparison remains the second authorization boundary.
-  assert _authorized(tmp_path, target_boot) == {
-    "forged-run-1234": ("chat-12345678", "nonce-12345678"),
-  }
+  # This test process is the trusted uid, so structurally valid content written
+  # by it is accepted. In production only the frozen supervisor owns this file.
+  assert _authorized(tmp_path, target_boot) == "forged-nonce-1234"
