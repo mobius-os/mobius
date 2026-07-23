@@ -1,0 +1,9 @@
+#!/bin/sh
+# Put Claude and its ordinary tool descendants in a private process group. If
+# a future SDK already supplies isolation, reuse it instead of calling setsid
+# twice.
+_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')
+if [ -n "$_pgid" ] && [ "$_pgid" = "$$" ]; then
+  exec /usr/local/bin/claude "$@"
+fi
+exec /usr/bin/setsid /usr/local/bin/claude "$@"

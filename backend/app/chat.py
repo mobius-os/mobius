@@ -1813,6 +1813,61 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
   return started
 
 
+async def _stop_handle_with_escalation(
+  chat_id: str,
+  handle,
+  *,
+  source: str,
+) -> tuple[bool, bool]:
+  """Gracefully stop one handle, then hard-stop only that same identity.
+
+  Returns ``(stopped, escalated)``. The registry identity recheck is the
+  successor guard: a late timeout can never signal a replacement handle.
+  """
+  log = _get_logger()
+  kind = getattr(handle, "kind", None)
+  try:
+    stopped = await handle.stop(timeout=2.0)
+  except asyncio.CancelledError:
+    raise
+  except Exception:
+    log.warning(
+      "%s graceful stop failed chat_id=%s kind=%s",
+      source, chat_id, kind or "?", exc_info=True,
+    )
+    stopped = False
+  if stopped:
+    return True, False
+
+  current = registry.get_handle(chat_id, kind)
+  if current is None:
+    # The runner completed in the narrow race after stop() timed out.
+    return True, False
+  if current is not handle:
+    # A different identity owns the slot. Never act on the stale handle.
+    return False, False
+
+  force_stop = getattr(handle, "force_stop", None)
+  if not callable(force_stop):
+    return False, False
+
+  log.warning(
+    "%s graceful stop timed out chat_id=%s kind=%s; "
+    "hard-stopping the same isolated runner",
+    source, chat_id, kind or "?",
+  )
+  try:
+    return await force_stop(timeout=5.0), True
+  except asyncio.CancelledError:
+    raise
+  except Exception:
+    log.warning(
+      "%s hard stop failed chat_id=%s kind=%s",
+      source, chat_id, kind or "?", exc_info=True,
+    )
+    return False, True
+
+
 async def sweep_stalled_live_runs(db: Session) -> list[str]:
   """Interrupt live SDK turns whose broadcast has been silent too long.
 
@@ -1882,23 +1937,19 @@ async def sweep_stalled_live_runs(db: Session) -> list[str]:
     _clear_after_terminal_status[chat_id] = "interrupted"
 
     all_interrupted = True
+    escalated = False
     for handle in handles:
-      try:
-        stopped = await handle.stop(timeout=2.0)
-      except asyncio.CancelledError:
-        raise
-      except Exception:
-        log.warning(
-          "stalled-live watchdog interrupt failed chat_id=%s kind=%s",
-          chat_id, getattr(handle, "kind", "?"), exc_info=True,
-        )
-        stopped = False
-      if not stopped:
-        all_interrupted = False
-        log.warning(
-          "stalled-live watchdog interrupt timed out chat_id=%s kind=%s",
-          chat_id, getattr(handle, "kind", "?"),
-        )
+      stopped, used_force = await _stop_handle_with_escalation(
+        chat_id,
+        handle,
+        source="stalled-live watchdog",
+      )
+      escalated = escalated or used_force
+      all_interrupted = all_interrupted and stopped
+    if escalated:
+      # agent-browser daemons intentionally detach from the SDK group. Their
+      # CHAT_ID/session routing is the separate, identity-safe cleanup key.
+      await _close_browser_session(chat_id)
     if all_interrupted:
       interrupted.append(chat_id)
   if interrupted:
@@ -2716,8 +2767,14 @@ async def stop_chat_for(
       )
   questions.cancel(chat_id)
   all_stopped = True
+  escalated = False
   for handle in handles:
-    stopped = await handle.stop(timeout=2.0)
+    stopped, used_force = await _stop_handle_with_escalation(
+      chat_id,
+      handle,
+      source="stop_chat_for",
+    )
+    escalated = escalated or used_force
     if not stopped:
       # SDK subprocess is still draining — do NOT unregister/finalize-broadcast
       # here. Unregistering while the runner is alive lets it later finalize
@@ -2742,6 +2799,8 @@ async def stop_chat_for(
       all_stopped = False
       continue
     registry.unregister(chat_id, handle.kind)
+  if escalated:
+    await _close_browser_session(chat_id)
   # Broadcast and run-status cleanup only when EVERY handle stopped cleanly.
   # A still-draining runner owns both; it will finalize and clear in its own
   # finally block (guarded by _clear_after_terminal_generation). Only the
