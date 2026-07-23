@@ -1596,6 +1596,13 @@ def platform_update_preview(repo: Path = PLATFORM_REPO) -> PlatformUpdatePreview
   uses; an up-to-date instance returns an empty preview. Degrades to an empty
   preview (never raises) when the clone or ancestry can't be read, so it can never
   break Settings."""
+  # A missing/non-clone tree has no source snapshot to protect. Return before
+  # touching the durable /data lock so read-only diagnostics and recovery
+  # surfaces still degrade cleanly when DATA_DIR itself is unavailable.
+  # Actual clones take the lock below; the unlocked builder repeats this check
+  # after acquisition, which closes a removal/reseed race.
+  if not (repo / ".git").exists():
+    return empty_platform_update_preview()
   with _reconcile_flock():
     return _platform_update_preview_unlocked(repo)
 

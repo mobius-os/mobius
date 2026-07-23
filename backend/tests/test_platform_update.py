@@ -1273,9 +1273,17 @@ def test_update_preview_reports_exact_total_beyond_rendered_commit_cap(clone_env
   assert preview["commits_truncated"] is True
 
 
-def test_update_preview_degrades_when_not_a_clone(tmp_path):
+def test_update_preview_degrades_when_not_a_clone(tmp_path, monkeypatch):
   # A non-git directory must degrade to an empty preview, never raise, so the
-  # route + Settings can't break on a missing/odd platform tree.
+  # route + Settings can't break on a missing/odd platform tree. It also has no
+  # source snapshot to protect and therefore must not need the durable /data
+  # reconcile lock (which may be unavailable on a recovery/read-only surface).
+  @contextmanager
+  def fail_if_locked():
+    raise AssertionError("non-clone preview attempted to acquire reconcile lock")
+    yield
+
+  monkeypatch.setattr(pu, "_reconcile_flock", fail_if_locked)
   preview = pu.platform_update_preview(tmp_path)
 
   assert preview["available"] is False
