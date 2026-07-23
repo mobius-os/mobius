@@ -142,6 +142,10 @@ export default function QueuedMessages({
                     type="button"
                     className="queued__steer"
                     onPointerDown={(e) => e.preventDefault()}
+                    onTouchEnd={(e) => {
+                      e.preventDefault()
+                      onSteerOne?.(cidOf(msg))
+                    }}
                     onClick={() => onSteerOne?.(cidOf(msg))}
                     aria-label="Send this queued message now"
                     title="Send now"

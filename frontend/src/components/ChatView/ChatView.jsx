@@ -54,6 +54,7 @@ import { questionKey } from './questionKey.js'
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
+import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
 import { copyableMessageText, copyPlainText } from './messageCopy.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
@@ -2076,17 +2077,24 @@ export default function ChatView({
       || pendingQueue.pendingMessagesRef.current.length > 0
     )
     if (queuesBehindActiveTurn) {
-      // Queueing changes the footer immediately (new chip, cleared composer,
-      // mobile keyboard close) but adds no transcript row yet. Freeze the
-      // exact visible message before any of those layout changes. The captured
-      // submit intent above is kept for the later promotion/steer, while the
-      // current in-flight answer stays where the reader left it now.
+      // Queueing changes the footer immediately (new chip, cleared composer)
+      // but adds no transcript row yet. Freeze the exact visible message
+      // before that layout change. The captured submit intent above is kept
+      // for the later promotion/steer, while the current in-flight answer
+      // stays where the reader left it now.
       freezeQueuedSubmission()
     }
 
-    // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
-    // focus so the cursor stays ready for the next message.
-    if (_isTouchPrimary) inputRef.current?.blur()
+    // Keep the mobile keyboard open for queue-only sends so another follow-up
+    // can be typed immediately. Fresh sends and explicit queue+steer submits
+    // dismiss it; desktop retains its existing cursor-ready behaviour.
+    if (shouldDismissComposerKeyboardOnSubmit({
+      isTouchPrimary: _isTouchPrimary,
+      queuesBehindActiveTurn,
+      steerAfterQueue: opts.steerAfterQueue === true,
+    })) {
+      inputRef.current?.blur()
+    }
 
     function clearComposerFilesForSend() {
       if (!usesComposerFiles) return
@@ -3083,6 +3091,12 @@ export default function ChatView({
         isFirstUserMsg: steerIsFirstUser,
       })
       steerPinIntentRef.current = makeSendPinIntent(steerWillPin)
+      // Queue-only sends deliberately retain mobile focus. Fast-forward is
+      // the explicit hand-off point, but snapshot reader position BEFORE
+      // blurring: keyboard dismissal resizes the viewport and can otherwise
+      // corrupt the pin decision. Both composer and per-row steer actions
+      // share this path.
+      if (_isTouchPrimary) inputRef.current?.blur()
       // The queued tray is part of the footer height. If it stays visible
       // until after the steered row is inserted, the scroll system pins with
       // one layout and then immediately reflows when the tray disappears — the

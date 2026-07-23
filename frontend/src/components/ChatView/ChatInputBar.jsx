@@ -129,6 +129,11 @@ function PrimaryAction({
         key="steer"
         className="chat__action chat__steer"
         type="button"
+        // Keep focus stable through pointerdown, then let ChatView dismiss
+        // the keyboard deliberately as part of the steer action. Dispatching
+        // on touchend avoids waiting for Safari's synthesized click.
+        onPointerDown={(e) => e.preventDefault()}
+        onTouchEnd={(e) => { e.preventDefault(); onSteer() }}
         onClick={onSteer}
         aria-label="Send queued message now"
       >
