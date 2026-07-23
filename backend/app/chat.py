@@ -2781,13 +2781,13 @@ async def stop_chat_for(
       # against a reclaimed chat (zombie-run clobber). Leave the registry entry
       # and broadcast intact so the runner's own finally does teardown; the
       # generation guard already protects the transcript from a stale write.
-      # A stop() returning False is ambiguous (wedged-but-alive vs dead), and
-      # the signals that could distinguish them — the handle's `_finished`
-      # future — are corrupted by Stop's own 2s wait_for cancellation AND
-      # resolve before chat.py's final sink save, so there is no safe in-process
-      # "this runner is truly dead" test. A genuinely dead in-process runner is
-      # rare and self-heals on the next restart via reconcile_interrupted_chats
-      # (which clears the stuck marker and preserves the queue). The
+      # A stop() returning False after escalation means the runner still did
+      # not acknowledge its terminal cleanup. Keep its registry/broadcast
+      # ownership intact: `_finished` resolves before chat.py's final sink save,
+      # so it is not a safe "all durable teardown finished" signal. A genuinely
+      # dead in-process runner self-heals on the next restart via
+      # reconcile_interrupted_chats (which clears the stuck marker and
+      # preserves the queue). The
       # orphaned-run-AFTER-RESTART case the user reported has an EMPTY registry
       # (no handles), so it takes the `not handles` clear below — it never lands
       # here.
