@@ -59,14 +59,13 @@ export function projectFocusedPane(baseProjection, workspace, paneId, contentRec
 // Timing (ms). Constants live here, NOT in the machine, so the reconcile clock
 // (INV 14) and the missing-target fallback (INV 13) reason about the plan's own
 // totalMs rather than a fixed per-phase maximum. Mode changes are intentionally one
-// short beat using only compositor transforms + opacity. Edge panes share one
-// duration; the only offset is the fixed shared-surface handoff below, independent
-// of pane count (never a growing stagger or second destination phase).
+// short beat: every pane moves together, using only compositor transforms + opacity.
+// There is no per-pane stagger or second destination phase to make the owner wait.
 export const MODE_MOTION = Object.freeze({
-  itemMs: 180,
-  // Let departing panes clear a small gap before the shared surface expands;
-  // reverse that order on entry. This is still one compositor-only beat.
-  sharedLagMs: 40,
+  enterItemMs: 210,
+  enterSingleMs: 180,
+  exitItemMs: 180,
+  promoteMs: 210,
   logoReleaseMs: 90,
 })
 
@@ -279,10 +278,8 @@ export function deriveExitPlan(input) {
       key: promoteLeaf.activeKey,
       paneId: promoteLeaf.paneId,
       motion: 'promote',
-      // Open a visible seam before the shared surface grows beneath a sibling.
-      // With no sibling there is nothing to separate, so keep the direct beat.
-      delayMs: siblings.length ? MODE_MOTION.sharedLagMs : 0,
-      durationMs: MODE_MOTION.itemMs,
+      delayMs: 0,
+      durationMs: MODE_MOTION.promoteMs,
       flip: flipTo(fromRect, dest),
     })
     completionNames.add(PROMOTE_NAME)
@@ -290,7 +287,7 @@ export function deriveExitPlan(input) {
     siblings.forEach((l) => {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
-        delayMs: 0, durationMs: MODE_MOTION.itemMs,
+        delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
         offset: edgeOffset(l.rect, contentRect, l.motionRect),
       })
     })
@@ -309,7 +306,7 @@ export function deriveExitPlan(input) {
     ordered.forEach((l) => {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
-        delayMs: 0, durationMs: MODE_MOTION.itemMs,
+        delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
         offset: edgeOffset(l.rect, contentRect, l.motionRect),
       })
     })
@@ -342,7 +339,8 @@ export function deriveEnterPlan(input) {
   if (leaves.length === 0) return null
   const { target, immersiveInstant } = classifyExitDestination(input)
   if (immersiveInstant) return null
-  const duration = MODE_MOTION.itemMs
+  const single = leaves.length === 1
+  const duration = single ? MODE_MOTION.enterSingleMs : MODE_MOTION.enterItemMs
   const destinationRect = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
   const settleLeaf = target ? leaves.find(l => l.activeKey === target) : null
   const participants = []
@@ -368,9 +366,7 @@ export function deriveEnterPlan(input) {
     if (l === settleLeaf) continue
     participants.push({
       key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
-      // Reverse the exit order: settle the shared live surface first, then let
-      // siblings arrive. A world reveal has no shared surface and no delay.
-      delayMs: settleLeaf ? MODE_MOTION.sharedLagMs : 0,
+      delayMs: 0,
       durationMs: duration,
       offset: edgeOffset(l.rect, contentRect, l.motionRect),
     })
