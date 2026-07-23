@@ -472,6 +472,12 @@ class ActiveCodexTurn:
     # synchronously before turn.steer's first await so a not-yet-registered
     # question cannot park the SDK reader ahead of the steer acknowledgement.
     self._steer_in_flight = False
+    # Set synchronously before interrupt()'s first await. The SDK reports both
+    # user-requested stops and unexpected provider interruption with the same
+    # TurnStatus.interrupted value; this local fact is what lets terminal
+    # validation distinguish them without treating a deliberate Stop as an
+    # error.
+    self._interrupt_requested = False
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -480,8 +486,13 @@ class ActiveCodexTurn:
   def steer_in_flight(self) -> bool:
     return self._steer_in_flight
 
+  @property
+  def interrupt_requested(self) -> bool:
+    return self._interrupt_requested
+
   async def interrupt(self) -> None:
     """Signals the live turn and waits for runner-side drain."""
+    self._interrupt_requested = True
     try:
       await self.turn.interrupt()
     except Exception as exc:
@@ -572,11 +583,13 @@ def _sdk_imports() -> dict[str, Any]:
     ItemGuardianApprovalReviewCompletedNotification,
     ItemGuardianApprovalReviewStartedNotification,
     ItemStartedNotification,
+    MessagePhase,
     McpToolCallThreadItem,
     ReasoningSummaryTextDeltaNotification,
     ReasoningTextDeltaNotification,
     ThreadTokenUsageUpdatedNotification,
     TurnCompletedNotification,
+    TurnStatus,
     WebSearchThreadItem,
   )
 
@@ -643,6 +656,7 @@ def _sdk_imports() -> dict[str, Any]:
       ItemGuardianApprovalReviewStartedNotification
     ),
     "ItemStartedNotification": ItemStartedNotification,
+    "MessagePhase": MessagePhase,
     "McpToolCallThreadItem": McpToolCallThreadItem,
     "ReasoningSummaryTextDeltaNotification": (
       ReasoningSummaryTextDeltaNotification
@@ -652,6 +666,7 @@ def _sdk_imports() -> dict[str, Any]:
       ThreadTokenUsageUpdatedNotification
     ),
     "TurnCompletedNotification": TurnCompletedNotification,
+    "TurnStatus": TurnStatus,
     "WebSearchThreadItem": WebSearchThreadItem,
   }
 
@@ -1251,6 +1266,129 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
   return []
 
 
+def _enum_wire_value(value: Any) -> str | None:
+  """Returns the wire value for a generated enum, tolerating test doubles."""
+  if value is None:
+    return None
+  raw = getattr(value, "value", value)
+  return raw if isinstance(raw, str) else str(raw)
+
+
+def _agent_message_phase(item: Any, sdk: dict[str, Any]) -> str | None:
+  """Returns a completed agent message's native SDK phase."""
+  if not isinstance(item, sdk["AgentMessageThreadItem"]):
+    return None
+  return _enum_wire_value(getattr(item, "phase", None))
+
+
+def _turn_items(turn: Any) -> list[Any]:
+  """Unwraps the typed items included in a TurnCompleted payload."""
+  items = getattr(turn, "items", None) or []
+  return [
+    item.root if hasattr(item, "root") else item
+    for item in items
+  ]
+
+
+def _codex_terminal_error(
+  completed_turn: Any | None,
+  sdk: dict[str, Any],
+  *,
+  interrupt_requested: bool,
+  completed_message_phases: list[str | None],
+) -> tuple[str | None, str | None, str | None]:
+  """Validates the SDK's native turn-status and message-phase contract.
+
+  `turn/completed` is the terminal notification envelope, not proof that the
+  model completed the task. The nested TurnStatus carries that fact. Likewise,
+  an AgentMessageThreadItem marked `commentary` is an in-progress preamble,
+  while `final_answer` is the SDK's explicit completion signal.
+
+  Older SDK payloads can omit both status and message phase; that fully-legacy
+  shape retains historical success. Otherwise a completed turn needs an actual
+  agent message, and the LAST such message must be final: an earlier final
+  followed by commentary is not terminal completion. phase=None remains the
+  SDK helper's legacy final-response marker when a message is present.
+  """
+  if completed_turn is None:
+    return (
+      "Codex turn stream ended without a turn/completed notification.",
+      None,
+      None,
+    )
+
+  terminal_status = _enum_wire_value(getattr(completed_turn, "status", None))
+  failed_status = _enum_wire_value(sdk["TurnStatus"].failed)
+  interrupted_status = _enum_wire_value(sdk["TurnStatus"].interrupted)
+  completed_status = _enum_wire_value(sdk["TurnStatus"].completed)
+  error = getattr(completed_turn, "error", None)
+  error_message = getattr(error, "message", None) if error is not None else None
+
+  if terminal_status == failed_status:
+    return (
+      str(error_message or "Codex turn failed without an error message."),
+      terminal_status,
+      None,
+    )
+  if terminal_status == interrupted_status:
+    if not interrupt_requested:
+      return (
+        "Codex turn was interrupted unexpectedly.",
+        terminal_status,
+        None,
+      )
+    return None, terminal_status, None
+  if terminal_status not in (None, completed_status):
+    return (
+      f"Codex turn ended with unexpected status {terminal_status!r}.",
+      terminal_status,
+      None,
+    )
+  if error is not None:
+    return (
+      str(error_message or "Codex turn completed with an unknown error."),
+      terminal_status,
+      None,
+    )
+
+  # ItemCompleted normally carries phases first. When TurnCompleted includes
+  # agent items, that ordered snapshot is authoritative rather than additive:
+  # deduping/merging two streams can reorder messages and turn an earlier final
+  # into a false terminal success.
+  turn_phases = [
+    _agent_message_phase(item, sdk)
+    for item in _turn_items(completed_turn)
+    if isinstance(item, sdk["AgentMessageThreadItem"])
+  ]
+  phases = turn_phases if turn_phases else list(completed_message_phases)
+  commentary_phase = _enum_wire_value(sdk["MessagePhase"].commentary)
+  final_answer_phase = _enum_wire_value(sdk["MessagePhase"].final_answer)
+  if not phases:
+    if terminal_status is None:
+      return None, terminal_status, None
+    return (
+      "Codex turn completed without an agent final answer.",
+      terminal_status,
+      None,
+    )
+
+  final_message_phase = phases[-1]
+  if final_message_phase == commentary_phase:
+    return (
+      "Codex turn completed after commentary without a final answer.",
+      terminal_status,
+      final_message_phase,
+    )
+  if final_message_phase not in (None, final_answer_phase):
+    return (
+      f"Codex turn completed with unexpected final message phase "
+      f"{final_message_phase!r}.",
+      terminal_status,
+      final_message_phase,
+    )
+  return None, terminal_status, final_message_phase
+
+
 def _skill_names_in_command(command: str, data_dir: str) -> list[str]:
   """Extracts Möbius skill names a shell command reads.
 
@@ -1738,8 +1876,10 @@ async def run_codex_sdk_turn(
 
   thread = None
   turn = None
+  active_turn: ActiveCodexTurn | None = None
   current_session_id = session_id
   completed_turn: Any | None = None
+  completed_message_phases: list[str | None] = []
   process_group_id: int | None = None
   codex_context = sdk["AsyncCodex"](config=config)
   process_group_capture_stop: asyncio.Event | None = None
@@ -2021,6 +2161,8 @@ async def run_codex_sdk_turn(
 
         if isinstance(payload, sdk["ItemCompletedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
+          if isinstance(item, sdk["AgentMessageThreadItem"]):
+            completed_message_phases.append(_agent_message_phase(item, sdk))
           for event in _tool_completed_events(item, sdk):
             _stamp_tool_use_id(event, item)
             bc.publish(event)
@@ -2115,17 +2257,25 @@ async def run_codex_sdk_turn(
             continue
           raise RuntimeError(str(message or "Codex error"))
 
-      error_text = None
-      # The installed SDK routes notifications by `turnId` and drops late
-      # `turn/completed` events once the queue is unregistered, so normal
-      # turn streams are expected to terminate with TurnCompleted.
-      if completed_turn is not None and completed_turn.error is not None:
-        error_text = getattr(completed_turn.error, "message", None)
-      return {
+      error_text, terminal_status, final_message_phase = _codex_terminal_error(
+        completed_turn,
+        sdk,
+        interrupt_requested=bool(
+          (active_turn and active_turn.interrupt_requested)
+          or abort_requested()
+        ),
+        completed_message_phases=completed_message_phases,
+      )
+      result: RunnerResult = {
         "session_id": current_session_id,
         "cost_usd": None,
         "error": error_text,
       }
+      if terminal_status is not None:
+        result["terminal_status"] = terminal_status
+      if final_message_phase is not None:
+        result["final_message_phase"] = final_message_phase
+      return result
   except Exception as exc:
     return {
       "session_id": current_session_id,
