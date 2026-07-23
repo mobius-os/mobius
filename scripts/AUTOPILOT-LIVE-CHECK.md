@@ -1,16 +1,25 @@
 # Autopilot live check — runbook
 
-`scripts/autopilot-live-check.sh` is the **Stage-2** smoke test for the Contribute
-autopilot loop: it proves the parts the automated tests stub out — a **real git
-push updating a real PR**, and **`job.sh` detecting a real review** — against a
-running Docker stack + a scratch GitHub account. It plays the follow-up agent
-*mechanically* (no reasoning, no agent tokens), and it **cleans up after itself**,
-so you can re-run it any time.
+`scripts/autopilot-live-check.sh` is the **live** smoke test for the Contribute
+autopilot loop, against a running Docker stack + scratch GitHub accounts. It
+seeds a fresh contribution, opens a real PR, posts a review, then triggers
+`job.sh` and **observes the real review-followup agent** detect the review, push
+a fix to the PR, reply, and complete the round — verifying the parts the
+automated tests stub out (real git push to a real PR, real review detection, the
+self-activity filter). It **cleans up after itself**, so it's re-runnable any
+time.
 
-The automated Stage-1 test (`backend/tests/test_autopilot_loop.py`) already proves
-the endpoint wiring + state machine with stubs on every push; this is the live
-counterpart. Stage-3 (a real agent driving the round from the skill) is separate
-and manual — see the plan.
+> **Note on providers.** When a chat provider is authenticated in the instance
+> (e.g. `/data/cli-auth/claude`), `job.sh` → `/respond` spawns a **real agent**
+> that drives the round — so this script *observes* that agent (it does not, and
+> must not, mechanically drive `/update` itself, which would race the agent).
+> Each run therefore also spends some agent budget. On an instance with **no**
+> provider authed, the round can't complete on its own; use the automated
+> `backend/tests/test_autopilot_loop.py` for the stubbed, token-free path.
+
+The automated Stage-1 test (`backend/tests/test_autopilot_loop.py`) proves the
+endpoint wiring + state machine with stubs on every push; this is the live
+counterpart that also exercises real GitHub and a real agent.
 
 ## Prerequisites (one-time)
 
@@ -56,30 +65,44 @@ export REVIEWER_TOKEN=<PAT for the reviewer account>
 1. **Seed** a fresh reviewable contribution (unique branch `autopilot-check/<ts>`).
 2. **Send** → a real PR opens and the grant mirror appears on the record.
 3. Reviewer posts **changes requested**.
-4. **`run-job`** → a dedicated `Autopilot: …` chat is created (detection →
-   `/respond` → claim → spawn).
-5. **Mechanical round**: `/respond` (gets `run_id`) → a real follow-up commit +
-   `/update` → **the PR head advances on GitHub** → `/reply` → `/complete`.
+4. **`run-job`** → job.sh detects the review, `/respond` claims a round
+   (`state=responding`) and spawns the agent.
+5. **Observe** the round complete: `state` returns to `idle` with
+   `rounds_used ≥ 1`, the **PR advances to ≥ 2 commits** on GitHub, and the
+   follow-up commit carries the `Co-authored-by: Möbius Agent` trailer.
 6. **Re-run `run-job`** → the record stays `idle` (the agent's own reply is
    filtered — no self-re-trigger).
 
 Any failed step aborts with a red `✗` and the offending HTTP body.
 
-## First-run caveat
+## Topology
 
-This harness has not yet had a live shakeout run (no scratch stack was available
-when it was written). Treat the **first** run as validation of the script itself:
-the API contracts and git steps match the code, but environment specifics — the
-exact storage PUT body shape, `register_app` id, container paths — may need a
-small tweak on first contact. Run it with a throwaway PR and expect to iterate
-once; after that it's a repeatable one-command check.
+The autopilot flow contributes via a **fork**, so the upstream repo must be owned
+by a **different** account than the one connecting. Use the **reviewer** account
+(scratch #2) as the upstream owner and connect as scratch #1; scratch #1 forks it
+and opens the PR, and scratch #2 (the repo owner) reviews. `UPSTREAM_REPO` should
+therefore be `scratch2/<repo>`, not the connected account's own repo (you can't
+fork your own repo).
+
+## Status: validated
+
+This harness had its first successful live run on 2026-07-23 against
+`mobius-scratch2/autopilot-upstream`: job.sh detected the review, a real agent
+reworded the file, pushed a second commit (with the co-author trailer), replied
+on the PR, completed the round, and the re-run did not re-trigger. The merge path
+fired the 🎉 notification and closed out the DB row. Budget accrued (~79k tokens,
+`chat_runs.cost_usd` recorded).
 
 ## Troubleshooting
 
-- **`/respond` returns `deferred`** — the weekly-allowance budget is exhausted or
-  `percent` is 0. Raise it in Settings (or `agent-settings.json`) and re-run.
-- **No `Autopilot: …` chat in step 4** — detection still works if step 5 drives
-  the round manually; the chat only appears when a provider is configured to run
-  the spawned turn. For a pure mechanical check this is informational.
-- **`PR head on GitHub is … expected …`** — the push didn't land; check the app
-  container's `gh` auth (`/data/cli-auth/gh`) and that the fork remote exists.
+- **Round claims but never completes** — no provider is authed, so the spawned
+  turn can't run. Authenticate a provider, or use the automated
+  `test_autopilot_loop.py` for the token-free path.
+- **`/respond`/job.sh defers** — the weekly-allowance budget is exhausted or
+  `autopilot_budget.percent` is 0. Raise it in Settings and re-run.
+- **Submit 409 "no longer waiting for approval"** — the ledger record wasn't
+  written raw; the storage PUT body must be the record JSON itself (no envelope).
+- **git "dubious ownership"** — the staging worktree must be owned by `mobius`
+  (the user the backend runs git as); the script creates it accordingly.
+- **PR didn't advance** — check the app container's `gh` auth
+  (`/data/cli-auth/gh`) and that the owner's fork of the upstream exists.

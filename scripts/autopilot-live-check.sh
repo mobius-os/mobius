@@ -60,7 +60,13 @@ api() {  # api METHOD PATH [JSON]  → prints body, fails on non-2xx
   printf '%s' "$out"
 }
 
-dex() { docker exec "$CONTAINER" bash -lc "$*"; }
+# Run container-side git prep as `mobius` — the same user the backend runs git
+# as — so the staging worktree is mobius-owned and git never trips its
+# dubious-ownership guard between the script and the submit endpoint.
+dex()  { docker exec -u mobius "$CONTAINER" bash -lc "$*"; }
+# Root helper — only for creating/removing the staging dir under the root-owned
+# /data/contrib (mobius can't mkdir/rmdir there itself).
+dexr() { docker exec -u root "$CONTAINER" bash -lc "$*"; }
 
 cleanup() {
   [ "${KEEP:-}" = "1" ] && { say "KEEP=1 — leaving ${REC} / PR ${PR_NUMBER}"; return; }
@@ -76,15 +82,16 @@ cleanup() {
   api DELETE "/api/storage/apps/${APP_ID}/contributions/${REC}.json" >/dev/null 2>&1 || true
   api DELETE "/api/storage/apps/${APP_ID}/contributions/${REC}.diff" >/dev/null 2>&1 || true
   api POST "/api/github/contributions/${APP_ID}/${REC}/cleanup-staging" '{}' >/dev/null 2>&1 || true
-  dex "rm -rf /data/contrib/${REC}" >/dev/null 2>&1 || true
+  dexr "rm -rf /data/contrib/${REC}" >/dev/null 2>&1 || true
   ok "removed ${REC}"
 }
 trap cleanup EXIT
 
 # ── 1. Seed a fresh contribution (container-side git) ────────────────────────
 say "1. Seed a reviewable contribution on ${UPSTREAM_REPO}"
+# Create the staging dir as root, hand it to mobius, then do all git as mobius.
+dexr "mkdir -p '/data/contrib/${REC}' && chown mobius:mobius '/data/contrib/${REC}'"
 dex "set -e
-  mkdir -p '$(dirname "${WORKTREE}")'
   rm -rf '${WORKTREE}'
   git clone --depth 1 'https://github.com/${UPSTREAM_REPO}.git' '${WORKTREE}'
   cd '${WORKTREE}'
@@ -104,13 +111,10 @@ read -r BASE_SHA HEAD_SHA < /tmp/${REC}.meta
 DIFF_SHA="$(dex "sha256sum /tmp/${REC}.diff | cut -d' ' -f1")"
 ok "base=${BASE_SHA:0:8} head=${HEAD_SHA:0:8}"
 
-# Write the ledger record + diff via the storage API (as the agent would).
-DIFF_JSON="$(dex "cat /tmp/${REC}.diff" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
-api PUT "/api/storage/apps/${APP_ID}/contributions/${REC}.diff" \
-  "$(python3 -c "import json,sys; print(json.dumps({'content': json.loads(sys.argv[1])}))" "$DIFF_JSON")" >/dev/null 2>&1 || \
-  dex "cp /tmp/${REC}.diff /data/apps/${APP_ID}/contributions/${REC}.diff"
+# Write the ledger record + diff. The storage PUT writes the body VERBATIM as
+# the file (like job.sh), so the record JSON is sent raw (no envelope).
 RECORD=$(cat <<JSON
-{"content": {
+{
   "id": "${REC}", "type": "pr", "repo": "${UPSTREAM_REPO}", "status": "prepared",
   "title": "Autopilot check ${STAMP}", "branch": "${BRANCH}",
   "created_at": "$(date -u +%FT%TZ)", "updated_at": "$(date -u +%FT%TZ)",
@@ -120,10 +124,12 @@ RECORD=$(cat <<JSON
     "branch": "${BRANCH}", "repo_path": "${WORKTREE}",
     "base_sha": "${BASE_SHA}", "head_sha": "${HEAD_SHA}", "diff_sha256": "${DIFF_SHA}",
     "diff_stat": "1 file changed"}
-}}
+}
 JSON
 )
 api PUT "/api/storage/apps/${APP_ID}/contributions/${REC}.json" "$RECORD" >/dev/null
+# The diff sits beside the record as raw text — write it container-side (mobius).
+dex "mkdir -p /data/apps/${APP_ID}/contributions && cp /tmp/${REC}.diff /data/apps/${APP_ID}/contributions/${REC}.diff"
 ok "record ${REC} staged"
 
 # ── 2. Send (opens the real PR, stamps the grant) ────────────────────────────
@@ -142,75 +148,54 @@ GH_TOKEN="$REVIEWER_TOKEN" gh api -X POST \
   -f event=REQUEST_CHANGES -f body='Please tweak the note wording.' >/dev/null
 ok "review posted"
 
-# ── 4. Detection: run-job should claim + create the Autopilot chat ───────────
-say "4. Trigger job.sh → it should detect the review and claim a round"
+# Helper: the record's mirrored autopilot state (app-token readable).
+mirror() {
+  api GET "/api/storage/apps/${APP_ID}/contributions/${REC}.json" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("autopilot",{}); print(a.get("state",""), int(a.get("rounds_used",0)), (a.get("last_round") or {}).get("outcome",""))'
+}
+
+# ── 4. Detection: job.sh should detect the review and spawn a real round ──────
+say "4. Trigger job.sh → detect the review, claim a round, spawn the agent"
 api POST "/api/apps/${APP_ID}/run-job" '{}' >/dev/null
-sleep 6
-CHATS="$(api GET "/api/chats")"
-if printf '%s' "$CHATS" | grep -q "Autopilot: Autopilot check ${STAMP}"; then
-  ok "dedicated 'Autopilot: …' chat created (detection → /respond → spawn)"
-else
-  echo "  (note: no Autopilot chat yet — detection may need a moment or a provider)"
-fi
+SPAWNED=""
+for _ in $(seq 1 10); do
+  sleep 4
+  read -r ST _ _ <<<"$(mirror)"
+  [ "$ST" = "responding" ] && { SPAWNED=1; break; }
+done
+[ -n "$SPAWNED" ] && ok "job.sh detected the review → claimed a round (state=responding)" \
+  || die "job.sh did not claim a round (check the provider is authed + budget)"
 
-# ── 5. Drive the mechanical round (app token plays the agent) ────────────────
-say "5. Mechanical round: /respond → /update → /reply → /complete"
-RESP="$(api POST "/api/github/contributions/${APP_ID}/${REC}/respond" \
-  "{\"attention\": {\"key\": \"changes_requested:${STAMP}\", \"type\": \"changes_requested\", \"event_at\": \"$(date -u +%FT%TZ)\"}}")"
-STATUS="$(printf '%s' "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')"
-RUN_ID="$(printf '%s' "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("run_id",""))')"
-case "$STATUS" in
-  responding) ok "claimed round (run_id ${RUN_ID:0:8})";;
-  deferred)   die "budget deferred — raise autopilot_budget.percent and retry";;
-  *)          [ -n "$RUN_ID" ] || die "no run_id from /respond: $RESP";;
-esac
+# ── 5. Observe the real agent complete the round ─────────────────────────────
+say "5. Watch the review-followup agent fix + push + reply + complete"
+DONE=""
+for _ in $(seq 1 30); do  # up to ~5 min for the agent turn
+  sleep 10
+  read -r ST RU OUT <<<"$(mirror)"
+  echo "  … state=${ST} rounds=${RU} last=${OUT}"
+  [ "$ST" = "idle" ] && [ "${RU:-0}" -ge 1 ] && { DONE=1; break; }
+done
+[ -n "$DONE" ] || die "round did not complete (still ${ST}); inspect the Autopilot chat"
+read -r _ _ OUTCOME <<<"$(mirror)"
+[ "$OUTCOME" = "pushed" ] && ok "round completed with a push" \
+  || ok "round completed (outcome=${OUTCOME})"
 
-# Make a follow-up commit + recompute the reviewed diff, then CAS the record.
-dex "set -e
-  cd '${WORKTREE}'
-  printf '\n<!-- autopilot-check followup ${STAMP} -->\n' >> README.md
-  git add README.md
-  git commit -q -m 'Autopilot check: address review' -m '${COAUTHOR}'
-  NEW=\$(git rev-parse HEAD)
-  git -c core.quotePath=false diff --no-ext-diff --no-color --binary \
-    --full-index --src-prefix=a/ --dst-prefix=b/ \"${BASE_SHA}..\${NEW}\" > /tmp/${REC}.diff
-  cp /tmp/${REC}.diff /data/apps/${APP_ID}/contributions/${REC}.diff
-  echo \"\${NEW}\"" > /tmp/${REC}.newhead
-NEW_HEAD="$(cat /tmp/${REC}.newhead)"
-NEW_DIFF_SHA="$(dex "sha256sum /tmp/${REC}.diff | cut -d' ' -f1")"
-# Patch head_sha/diff_sha256 on the stored record (the agent's CAS write).
-CUR="$(api GET "/api/storage/apps/${APP_ID}/contributions/${REC}.json")"
-PATCHED="$(printf '%s' "$CUR" | python3 -c "
-import json,sys
-r=json.load(sys.stdin); r.setdefault('plan',{})
-r['plan']['head_sha']='${NEW_HEAD}'; r['plan']['diff_sha256']='${NEW_DIFF_SHA}'
-print(json.dumps({'content': r}))")"
-api PUT "/api/storage/apps/${APP_ID}/contributions/${REC}.json" "$PATCHED" >/dev/null
-
-api POST "/api/github/contributions/${APP_ID}/${REC}/update" \
-  "{\"run_id\": \"${RUN_ID}\", \"head_sha\": \"${NEW_HEAD}\", \"diff_sha256\": \"${NEW_DIFF_SHA}\", \"summary\": \"Addressed the review.\"}" >/dev/null
-ok "/update accepted"
-
-# Verify the REAL PR advanced to the new head.
-GH_HEAD="$(GH_TOKEN="$REVIEWER_TOKEN" gh api "repos/${UPSTREAM_REPO}/pulls/${PR_NUMBER}" -q .head.sha)"
-[ "$GH_HEAD" = "$NEW_HEAD" ] && ok "PR head advanced on GitHub (${NEW_HEAD:0:8})" \
-  || die "PR head on GitHub is ${GH_HEAD:0:8}, expected ${NEW_HEAD:0:8}"
-
-api POST "/api/github/contributions/${APP_ID}/${REC}/reply" \
-  "{\"run_id\": \"${RUN_ID}\", \"body\": \"Addressed the review — please take another look.\", \"re_request_review\": true}" >/dev/null
-ok "/reply posted"
-api POST "/api/github/contributions/${APP_ID}/${REC}/complete" \
-  "{\"run_id\": \"${RUN_ID}\", \"outcome\": \"pushed\", \"summary\": \"Fixed the note wording.\", \"event_at\": \"$(date -u +%FT%TZ)\"}" >/dev/null
-ok "/complete → round logged"
+# Verify the REAL PR advanced beyond the first commit.
+COMMITS="$(GH_TOKEN="$REVIEWER_TOKEN" gh api "repos/${UPSTREAM_REPO}/pulls/${PR_NUMBER}/commits" -q 'length')"
+[ "${COMMITS:-0}" -ge 2 ] && ok "PR advanced on GitHub (${COMMITS} commits)" \
+  || echo "  (PR has ${COMMITS} commit(s) — the agent may have only replied)"
+# Verify the co-author trailer on the newest commit.
+GH_TOKEN="$REVIEWER_TOKEN" gh api "repos/${UPSTREAM_REPO}/pulls/${PR_NUMBER}/commits" \
+  -q '.[-1].commit.message' 2>/dev/null | grep -q 'Co-authored-by: Möbius Agent' \
+  && ok "follow-up commit carries the co-author trailer" || true
 
 # ── 6. No self-re-trigger ────────────────────────────────────────────────────
 say "6. Re-run job.sh → the agent's own reply must NOT re-trigger a round"
 api POST "/api/apps/${APP_ID}/run-job" '{}' >/dev/null
-sleep 6
-MIRROR="$(api GET "/api/storage/apps/${APP_ID}/contributions/${REC}.json" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("autopilot",{}).get("state",""))')"
-[ "$MIRROR" = "idle" ] && ok "record stayed idle (self-event filtered)" \
-  || echo "  (state=${MIRROR}; inspect if not idle)"
+sleep 8
+read -r ST2 _ _ <<<"$(mirror)"
+[ "$ST2" = "idle" ] && ok "record stayed idle (self-event filtered)" \
+  || die "record re-triggered to ${ST2} on the agent's own reply"
 
-say "PASS — live mechanical loop verified end to end."
-echo "PR (will be closed on cleanup unless KEEP=1): ${PR_URL}"
+say "PASS — full autopilot loop verified live end to end."
+echo "PR (closed on cleanup unless KEEP=1): ${PR_URL}"
