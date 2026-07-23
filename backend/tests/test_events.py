@@ -981,6 +981,32 @@ def test_process_error_event_carries_whitelisted_extras_on_append():
   }
 
 
+def test_restart_error_stays_before_unanswered_question_without_resume():
+  blocks = [
+    {"type": "text", "content": "I need one detail."},
+    {
+      "type": "question",
+      "questions": [{"question": "Which color?"}],
+    },
+  ]
+  event = {
+    "type": "error",
+    "message": "Paused for a platform update.",
+    "resumable": True,
+    "pause": {"kind": "restart"},
+  }
+
+  process_event(event, blocks)
+  process_event(event, blocks)
+
+  assert [block["type"] for block in blocks] == [
+    "text", "error", "question",
+  ]
+  marker = blocks[1]
+  assert marker["pause"] == {"kind": "restart"}
+  assert not marker.get("resumable")
+
+
 def test_process_error_event_extras_are_whitelist_only():
   """An unexpected event key must NOT leak into the durable transcript."""
   blocks = []

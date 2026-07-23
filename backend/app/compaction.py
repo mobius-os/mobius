@@ -123,7 +123,11 @@ def build_transcript_text(
     # it back into a later synthesis recursively inflates the next handoff.
     if m.get("kind") == "compaction":
       continue
-    role = (m.get("role") or "user").upper()
+    if m.get("kind") == "auto_continuation":
+      reason = str(m.get("continuation_reason") or "automatic recovery")
+      role = f"AUTOMATIC CONTINUATION ({reason.upper()})"
+    else:
+      role = (m.get("role") or "user").upper()
     content = m.get("content") or ""
     if not content.strip():
       continue

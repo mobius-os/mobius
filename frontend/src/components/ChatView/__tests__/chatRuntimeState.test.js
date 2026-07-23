@@ -8,6 +8,8 @@ import {
   canFastForwardQueue,
   cidOf,
   continuationRowsFromPromotedMessage,
+  isAutoContinuationMessage,
+  isOwnerUserMessage,
   mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   previewReadyAnnouncement,
@@ -21,6 +23,19 @@ import {
   stripInternalUserMessageFields,
   systemEventForChat,
 } from '../chatRuntimeState.js'
+
+test('automatic continuations are product markers, not owner messages', () => {
+  const marker = {
+    role: 'user',
+    content: 'continue',
+    kind: 'auto_continuation',
+    continuation_reason: 'restart',
+  }
+  assert.equal(isAutoContinuationMessage(marker), true)
+  assert.equal(isOwnerUserMessage(marker), false)
+  assert.equal(isOwnerUserMessage({ role: 'user', content: 'hello' }), true)
+  assert.equal(isOwnerUserMessage({ role: 'user', hidden: true }), false)
+})
 
 test('an in-process question answer keeps ownership of the active assistant turn', () => {
   assert.equal(answerTurnDisposition({

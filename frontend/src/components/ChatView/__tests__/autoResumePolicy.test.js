@@ -7,6 +7,7 @@ import {
   resetDeadlineDelay,
   resetDeadlineState,
   saveAutoResumePolicy,
+  saveRestartResumePolicy,
 } from '../autoResumePolicy.js'
 
 
@@ -34,6 +35,27 @@ test('policy PATCH is time-boxed and returns the authoritative response', async 
   assert.equal(calls.length, 1)
   assert.equal(calls[0][0], '/chats/chat%2Fa')
   assert.equal(calls[0][1].timeoutMs, AUTO_RESUME_REQUEST_TIMEOUT_MS)
+})
+
+
+test('restart policy uses a separate explicit wire field', async () => {
+  const calls = []
+  const result = await saveRestartResumePolicy({
+    chatId: 'chat-1',
+    next: true,
+    request: async (path, options) => {
+      calls.push({ path, options })
+      return jsonResponse({
+        auto_resume_on_limit: true,
+        auto_resume_on_restart: true,
+      })
+    },
+  })
+
+  assert.deepEqual(result, { value: true, error: '' })
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    auto_resume_on_restart: true,
+  })
 })
 
 

@@ -116,7 +116,11 @@ def _render_transcript(raw: str) -> str:
     # recursively duplicate the same context on every later re-switch.
     if isinstance(m, dict) and m.get("kind") == "compaction":
       continue
-    role = m.get("role", "?") if isinstance(m, dict) else "?"
+    if isinstance(m, dict) and m.get("kind") == "auto_continuation":
+      reason = str(m.get("continuation_reason") or "automatic recovery")
+      role = f"automatic continuation ({reason})"
+    else:
+      role = m.get("role", "?") if isinstance(m, dict) else "?"
     content = m.get("content") if isinstance(m, dict) else None
     if isinstance(content, list):
       text = " ".join(
