@@ -163,6 +163,12 @@ def redact_message(msg: dict) -> dict | None:
     return None
   if msg.get("hidden"):
     return None
+  if msg.get("kind") == "auto_continuation":
+    reason = str(msg.get("continuation_reason") or "automatic recovery")
+    return {
+      "role": "system",
+      "text": f"Automatic continuation ({reason}).",
+    }
   role = msg.get("role")
   if role == "assistant":
     text = _assistant_text(msg.get("blocks") or [], msg.get("content", ""))

@@ -687,6 +687,37 @@ pins. Reservation lifetime and pin decisions are independent.
 - **Regression guards (owner-observed prod bugs):** an at-bottom send must not land
   mid-viewport; a steered row must not render after the agent's reply.
 
+### Automatic continuation after limits and planned restarts
+
+Automatic continuation reuses one durable transition. Provider-limit exits mark
+their exact `ChatRun` as `parked` until the parsed reset time; a planned restart
+that successfully stops a live handle marks that exact run `parked` with
+`park_reason="restart"` and a due time of now, before SIGTERM. The next process
+runs the same due-park sweep immediately. There is no restart ledger and startup
+never infers intent from transcript text.
+
+| Event | Durable result | Boot/sweep result |
+|-------|----------------|-------------------|
+| Provider usage/rate limit | exact run `parked` until reset | notify; continue if the chat policy is on |
+| Planned restart, handle stopped and exact transition committed | exact run `parked`, reason `restart`, due now | continue immediately if eligible |
+| Crash, stuck handle, missing exact token, or failed park commit | generic `running` evidence remains | reconcile to a manual resumable interruption |
+| Policy off, unanswered question, app-owned run, or app-queued work | due park resolves without an automatic send | notify/manual owner action |
+| Owner sends, switches provider, deletes the chat, or a newer run wins | old park is superseded by the existing latest-run fence | no stale continuation |
+
+Eligibility is rechecked under the per-chat transition lock immediately before
+promotion, and the global idle gate permits only one automatic turn at a time.
+The provider still receives a synthetic user `continue`, but the durable row is
+tagged `kind="auto_continuation"` with reason `restart` or `usage_limit`; the UI,
+copy behavior, title selection, time context, compaction, provider-switch
+handoff, chat-note summarization, and redacted chat logs treat it as a product
+marker rather than owner speech.
+
+The sweep is cheap: one indexed due-row query immediately at boot, on
+`chat_run_finished`, and on a 60-second fallback. It does not create per-chat
+workers or poll at a short interval. The shared chat-local policy retains its
+legacy wire name `auto_resume_on_limit` for compatibility, while product copy
+states that it covers both limits and restarts.
+
 ### Tool output rendering
 
 Tool runs are **grouped** so the reader sees at a glance what is running vs finished
