@@ -88,14 +88,18 @@ cleanup() {
   fi
   # Order matters: run cleanup-staging FIRST, while the ledger record still
   # exists — it resolves the record to find the row and calls autopilot.close_out
-  # (dropping the DB row) now that the PR reads closed. Deleting the record before
-  # this would make cleanup-staging 404 and leak the DB row.
+  # now that the PR reads closed. Deleting the record before this would make
+  # cleanup-staging 404, leaving the grant live on a dead PR.
+  # close_out revokes the grant (enabled=False) and releases the claim; it
+  # deliberately KEEPS the row so the round audit log survives. Each run
+  # therefore leaves one disabled row under its unique timestamped record id —
+  # inert, and no collision with later runs.
   capi POST "/api/github/contributions/${APP_ID}/${REC}/cleanup-staging" '{}'
   dex "cd '${WORKTREE}' 2>/dev/null && git push fork --delete '${BRANCH}'" >/dev/null 2>&1 || true
   capi DELETE "/api/storage/apps/${APP_ID}/contributions/${REC}.json"
   capi DELETE "/api/storage/apps/${APP_ID}/contributions/${REC}.diff"
   dexr "rm -rf /data/contrib/${REC}" >/dev/null 2>&1 || true
-  ok "removed ${REC}"
+  ok "removed ${REC} (autopilot row left disabled for its audit log)"
 }
 trap cleanup EXIT
 
