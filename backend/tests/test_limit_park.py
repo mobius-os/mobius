@@ -1,4 +1,4 @@
-"""Provider-limit parking (design §2.4): parse → park → sweep → resume.
+"""Durable continuation (design §2.4): parse/drain → park → sweep → resume.
 
 Locks in the six contracts of the limit-park feature:
 
@@ -18,6 +18,8 @@ Locks in the six contracts of the limit-park feature:
       park per tick, none while any turn is live; the resumed turn combines
       the preserved queue + a "continue" into one continuation.
   (f) The parks are observable: /api/debug/status lists parked runs.
+  (g) A planned restart reuses the same exact-run state with a due-now time;
+      crashes, unanswered questions, and app-owned work stay manual.
 """
 
 import asyncio
@@ -70,14 +72,18 @@ def _drain_writer():
 
 def _seed_chat(
   chat_id: str, *, pending=None, run_status=None, deleted=False,
-  auto_resume=False,
+  auto_resume=False, messages=None,
 ):
   db = SessionLocal()
   try:
     db.add(models.Chat(
       id=chat_id,
       title="t",
-      messages=[{"role": "user", "content": "do work", "ts": 1}],
+      messages=(
+        messages
+        if messages is not None
+        else [{"role": "user", "content": "do work", "ts": 1}]
+      ),
       pending_messages=pending or [],
       session_id="sess",
       provider="claude",
@@ -286,6 +292,20 @@ def test_park_run_parks_row_and_clears_marker():
   assert _chat_row(cid)["run_status"] is None
 
 
+def test_park_run_missing_exact_row_keeps_generic_marker():
+  """Losing the exact identity must fail safe into manual crash recovery."""
+  cid = "park-missing-exact-row"
+  _seed_chat(cid, run_status="running")
+
+  parked = get_writer().submit(ParkRun(
+    chat_id=cid, run_token="rt-does-not-exist",
+    parked_until=datetime(2026, 7, 11, 1, 40), park_reason="restart",
+  )).result(timeout=5)
+
+  assert parked is False
+  assert _chat_row(cid)["run_status"] == "running"
+
+
 def test_park_run_superseded_owner_completes_without_parking():
   """A dying run whose marker a fresh turn took must NOT park (a stale park
   would fire a spurious notify) — its own row closes 'completed' and the
@@ -485,13 +505,15 @@ def test_park_run_strict_tokenless_falls_back_to_marker_clear():
 
 def _due_park(
   cid: str, token: str, *, pending=None, deleted=False, auto_resume=False,
+  park_reason=None, messages=None,
 ):
   _seed_chat(
     cid, pending=pending, deleted=deleted, auto_resume=auto_resume,
+    messages=messages,
   )
   _seed_run(cid, token, status="parked",
             parked_until=datetime.now(UTC).replace(tzinfo=None)
-            - timedelta(minutes=1))
+            - timedelta(minutes=1), park_reason=park_reason)
 
 
 def _run_sweep():
@@ -628,6 +650,8 @@ def test_sweep_auto_resume_on_starts_one_serial_continue(
     promoted = scheduled[0]["next_user"]
     assert "queued ask" in promoted["content"]
     assert "continue" in promoted["content"]
+    assert promoted["_messages"][-1]["kind"] == "auto_continuation"
+    assert promoted["_messages"][-1]["continuation_reason"] == "usage_limit"
     state = _chat_row("sweep-auto")
     assert state["pending"] == []
     assert state["run_status"] == "running"  # PromotePending set the marker
@@ -635,6 +659,105 @@ def test_sweep_auto_resume_on_starts_one_serial_continue(
     # _schedule_continuation was stubbed, so release the claim it would have
     # handed to the spawned turn.
     chat_mod.discard_starting("sweep-auto")
+
+
+def test_restart_park_auto_continues_with_product_marker(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  notifications = []
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  cid = "restart-auto"
+  token = f"rt-{cid}"
+  _due_park(cid, token, auto_resume=True, park_reason="restart")
+
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    marker = scheduled[0]["next_user"]["_messages"][-1]
+    assert marker["role"] == "user"
+    assert marker["content"] == "continue"
+    assert marker["kind"] == "auto_continuation"
+    assert marker["continuation_reason"] == "restart"
+    assert marker["cid"] == f"restart-resume-{token}"
+    assert notifications[0]["title"] == "Möbius restarted"
+    assert "limit" not in notifications[0]["body"].lower()
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def test_restart_park_waiting_on_question_stays_manual(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  notifications = []
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+  )
+  resumes = []
+
+  async def _fake_resume(*args, **kwargs):
+    resumes.append((args, kwargs))
+    return True
+
+  monkeypatch.setattr(chat_mod, "_auto_resume_chat", _fake_resume)
+  cid = "restart-question"
+  _due_park(
+    cid,
+    f"rt-{cid}",
+    auto_resume=True,
+    park_reason="restart",
+    messages=[
+      {"role": "user", "content": "help me choose", "ts": 1},
+      {
+        "role": "assistant",
+        "ts": 2,
+        "blocks": [
+          {
+            "type": "error",
+            "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE,
+            "pause": {"kind": "restart"},
+          },
+          {
+            "type": "question",
+            "questions": [{"question": "Which one?"}],
+          },
+        ],
+      },
+    ],
+  )
+
+  assert _run_sweep() == [cid]
+  assert resumes == []
+  assert _run_row(f"rt-{cid}")["status"] == "interrupted"
+  assert notifications[0]["title"] == "Möbius restarted"
+
+
+def test_restart_park_policy_off_resolves_to_manual_interruption(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  notifications = []
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+  )
+  cid = "restart-policy-off"
+  _due_park(cid, f"rt-{cid}", auto_resume=False, park_reason="restart")
+
+  assert _run_sweep() == [cid]
+  assert _run_row(f"rt-{cid}")["status"] == "interrupted"
+  assert notifications[0]["title"] == "Möbius restarted"
+  assert "limit" not in notifications[0]["body"].lower()
 
 
 def test_sweep_auto_resume_defers_while_any_turn_is_live(
@@ -993,6 +1116,27 @@ def test_auto_resume_rechecks_app_work_inside_queue_handoff():
   assert not chat_mod.is_chat_running(cid)
 
 
+def test_auto_resume_rechecks_app_run_at_locked_handoff():
+  """A direct or stale sweep caller cannot bypass durable attribution."""
+  cid = "auto-final-app-run-check"
+  park_token = f"rt-{cid}"
+  _seed_chat(cid, auto_resume=True)
+  _seed_run(
+    cid,
+    park_token,
+    status="resume_pending",
+    started_offset=-30,
+    initiated_by_app_id=11,
+  )
+
+  assert asyncio.run(
+    chat_mod._auto_resume_chat(cid, "claude", park_token=park_token)
+  ) is False
+  assert _chat_row(cid)["pending"] == []
+  assert _run_row(park_token)["status"] == "resume_pending"
+  assert not chat_mod.is_chat_running(cid)
+
+
 # -- (f) observability ----------------------------------------------------------
 
 def test_debug_status_lists_parked_runs(client, auth):
@@ -1098,7 +1242,7 @@ def test_parked_probe_tiebreak_is_deterministic():
 
 
 def _limit_complete_turn(cid, *, parked_until, monkeypatch=None,
-                         park_raises=False):
+                         park_raises=False, park_returns_false=False):
   """Drive _complete_turn's limit branch with a real bc + sink + seeded run."""
   from app.broadcast import create_broadcast
 
@@ -1114,6 +1258,10 @@ def _limit_complete_turn(cid, *, parked_until, monkeypatch=None,
     async def _boom(*a, **kw):
       raise RuntimeError("park exploded")
     monkeypatch.setattr(chat_mod, "_park_run_strict", _boom)
+  elif park_returns_false:
+    async def _not_parked(*a, **kw):
+      return False
+    monkeypatch.setattr(chat_mod, "_park_run_strict", _not_parked)
 
   db = SessionLocal()
   disposition = asyncio.run(chat_mod._complete_turn(
@@ -1148,6 +1296,24 @@ def test_park_failure_degrades_card_and_keeps_resume(monkeypatch):
   # The degraded follow-up carries no pause descriptor, so the coalesced block
   # stops rendering the "resets at …" card.
   assert "pause" not in tail
+
+
+def test_park_false_result_uses_same_manual_recovery_fallback(monkeypatch):
+  cid = "park-false-result"
+  until = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+
+  disposition = _limit_complete_turn(
+    cid,
+    parked_until=until,
+    monkeypatch=monkeypatch,
+    park_returns_false=True,
+  )
+
+  assert disposition.value == "failed_leave_marker"
+  assert _chat_row(cid)["run_status"] == "running"
+  tail = _chat_row(cid)["messages"][-1]["blocks"][-1]
+  assert "could not be scheduled" in tail["message"]
+  assert not tail.get("pause")
 
 
 def test_limit_park_releases_starting_claim_before_returning():
