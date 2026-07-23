@@ -138,26 +138,16 @@ Before visually testing, capturing, or describing any Möbius screen, **Read `/d
 - Viewing an image is private; if you describe a screenshot, embed it first in the same message so the partner can see the evidence.
 - Reproduce the partner's actual failing state when possible. If a device-only condition cannot be exercised headlessly, state what remains unverified and do not call it fixed.
 
-### 7. Before handing control back, run the ensure-checklist
+### 6. Close a tool-using turn deliberately
 
-When about to stop tool-calling and write the final assistant message **on any tool-using task — not just builds and restyles** — walk this table. Each row is "if you did X this turn, do Y before you stop." (Tool names are Claude's; on Codex use its equivalents — `shell`/`apply_patch`/`view_image`.) The platform summarizes the resulting conversation after the turn; do not write its chat-note file yourself.
+Before handing control back after any tool use:
 
-| If this turn... | Do this before handing over |
-|---|---|
-| **(every turn)** | Make the outcome, current state, and next open step explicit enough that the platform summary can carry them forward. |
-| Created an app | State **Built X** + what it does. Then the notification curl (`notifications.md`). |
-| Updated an app | The notification curl (`notifications.md`). Don't record the update *event* — but if it surfaced a gotcha, record the gotcha. |
-| Deleted an app | State **Deleted X** + the reason. Uninstall is a reversible 7-day tombstone — recover via `POST /api/apps/{id}/recover`, or reinstall a store app to reattach by manifest_url. |
-| Took a screenshot | In the SAME message, emit the `![]` embed BEFORE any describing text; confirm the embed is present. See `visual-testing.md`. |
-| Learned a partner preference / durable fact | Acknowledge it clearly enough that it is unambiguous in the transcript. |
-| Changed shell / CSS / cron | State what changed and why. |
-| Made an app / platform / shell change that would help other Möbius users | Offer to share it, every time, in plain words that name the button: "I can prepare this in Contribute for your review — you approve before anything goes public." A partner without a technical background won't know to ask, so the offer is yours to make — `contributing.md` has the how. |
-| About to overwrite `theme.css` | Snapshot first for a named undo (the server also auto-snapshots; `?reset-theme=1` rolls back). See `theming.md`. |
-| Changed or reviewed code (app or platform) | Run the design-for-the-next-change check: *does this solve the cause in the path that owns it, make the next related change easier, avoid unearned machinery and permanent compatibility weight, and keep shared resources lean without compromising behavior or correctness?* Rework it unless a concrete requirement or invariant justifies the complexity. |
-| **(second to last)** | Scan this turn's tool calls for missed gotchas — wrong assumptions, workarounds, infra surprises — and state any durable one. |
-| **(final check)** | Re-read the partner's latest message; confirm every question/concern/change is addressed. Then ask: does this look right? Anything to change? |
-
-**In the final message**, tell the partner what changed and why — in partner-facing language.
+1. Apply the relevant closeout: app creates/updates send the push described in `notifications.md`; app deletion states the reason and 7-day recovery; screenshot descriptions include the embed first.
+2. For code, confirm the change fixes the cause in the path that owns it, makes the next related change easier, and adds no unearned machinery or compatibility weight.
+3. State what changed and why, the current state, any restart/rebuild or device verification still needed, and the next open step.
+4. Surface durable surprises, workarounds, partner preferences, or facts clearly enough for the platform summary to preserve them. Do not edit the platform-owned chat note.
+5. If the change could help other Möbius users, offer: “I can prepare this in Contribute for your review — you approve before anything goes public.”
+6. Re-read the partner's latest message, address every concern, and ask whether the result looks right or needs adjustment.
 
 ---
 
