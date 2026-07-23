@@ -1,9 +1,9 @@
 """restart_this_worker — the reliable, drain-gated in-process restart behind the
-Settings + platform "Restart" buttons (design §2.2). A bare SIGTERM hangs uvicorn
-on the open chat SSE stream, so this must ALSO arm a hard-kill fallback; and it
-must drain live turns first so a restart never simply kills a turn. These pin all
-three halves (drain → SIGTERM → armed SIGKILL) without killing the test process
-(os.kill is mocked) and without a real event loop turn (drain is stubbed)."""
+Settings + platform "Restart" buttons (design §2.2). The normal path asks the
+frozen supervisor to acknowledge the exact intent and terminate pid 1; a direct
+SIGTERM is only the fail-closed handshake fallback. Every path arms a hard-kill
+backstop and drains first. These tests pin those boundaries without killing the
+test process (os.kill is mocked)."""
 
 import asyncio
 import os

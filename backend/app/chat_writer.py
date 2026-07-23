@@ -2447,6 +2447,7 @@ class ChatWriterActor:
       if run is not None and run.status == "running":
         run.status = cmd.terminal_status
         run.ended_at = datetime.now(UTC)
+        run.restart_nonce = None
         changed = True
     elif marker_is_ours:
       changed = self._close_running_runs(
@@ -2509,6 +2510,10 @@ class ChatWriterActor:
           run is not None
           and run.status in ("parked", "resume_pending")
           and run.park_reason == (cmd.park_reason or None)
+          and (
+            run.park_reason != "restart"
+            or run.restart_nonce == (cmd.restart_nonce or None)
+          )
         )
       if marker_is_ours:
         run.status = "parked"
@@ -2520,6 +2525,7 @@ class ChatWriterActor:
         parked = True
       else:
         run.status = "completed"
+        run.restart_nonce = None
       run.ended_at = datetime.now(UTC)
       changed = True
     if not marker_is_ours:

@@ -1483,6 +1483,7 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       ):
         run.status = "interrupted"
         run.ended_at = datetime.now(UTC)
+        run.restart_nonce = None
       db.commit()
       reconciled.append(chat.id)
     except Exception:
@@ -1536,6 +1537,7 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
         continue
       run.status = "interrupted"
       run.ended_at = datetime.now(UTC)
+      run.restart_nonce = None
       closed += 1
     if closed:
       db.commit()
@@ -2112,7 +2114,7 @@ def _has_unanswered_question(chat: models.Chat | None) -> bool:
 async def _auto_resume_chat(
   chat_id: str, provider_id: str | None, park_token: str | None = None,
 ) -> bool:
-  """Start ONE continue turn for a limit-parked chat whose reset arrived.
+  """Start one continuation for an eligible due park.
 
   The opt-in half of design §2.4 — mirrors the stale-pending drain in
   chats_stream.send_message (the same claim → append → promote → schedule
@@ -2269,8 +2271,9 @@ async def _auto_resume_chat(
           )
           if scheduled is False:
             # PromotePending committed before task creation. Reverse only this
-            # exact speculative handoff while the queue lock is still held, so
-            # the original park and preserved queue remain retryable.
+            # exact speculative handoff while the queue lock is still held.
+            # Provider-limit parks remain retryable; one-shot restart parks
+            # retire to manual recovery while preserving the queue.
             rolled_back = await _await_ack(get_writer().submit(
               RollbackAutoResume(
                 chat_id=chat_id,

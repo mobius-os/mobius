@@ -90,7 +90,7 @@ async def restart_this_worker() -> None:
     )
   except Exception:
     # Never let a drain failure block the restart — the backstop timer and the
-    # SIGTERM below still reboots the worker. Exact runs already transitioned
+    # fallback path still reboots the worker. Exact runs already transitioned
     # remain due; any marker left set falls back to manual boot reconciliation.
     log.warning("drain-for-restart failed; restarting anyway", exc_info=True)
 

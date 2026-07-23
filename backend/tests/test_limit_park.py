@@ -314,6 +314,39 @@ def test_restart_park_carries_one_shot_intent_nonce():
   assert row["restart_nonce"] == "nonce-park-1234"
 
 
+def test_restart_park_idempotency_requires_the_same_nonce():
+  cid = "park-restart-idempotency"
+  token = "rt-park-restart-idempotency"
+  _seed_chat(cid)
+  _seed_run(
+    cid,
+    token,
+    status="parked",
+    parked_until=datetime(2026, 7, 11, 1, 40),
+    park_reason="restart",
+    restart_nonce="nonce-first-1234",
+  )
+
+  same = get_writer().submit(ParkRun(
+    chat_id=cid,
+    run_token=token,
+    parked_until=datetime(2026, 7, 11, 1, 40),
+    park_reason="restart",
+    restart_nonce="nonce-first-1234",
+  )).result(timeout=5)
+  different = get_writer().submit(ParkRun(
+    chat_id=cid,
+    run_token=token,
+    parked_until=datetime(2026, 7, 11, 1, 40),
+    park_reason="restart",
+    restart_nonce="nonce-second-1234",
+  )).result(timeout=5)
+
+  assert same is True
+  assert different is False
+  assert _run_row(token)["restart_nonce"] == "nonce-first-1234"
+
+
 def test_park_run_missing_exact_row_keeps_generic_marker():
   """Losing the exact identity must fail safe into manual crash recovery."""
   cid = "park-missing-exact-row"
@@ -834,6 +867,32 @@ def test_restart_park_without_current_boot_ack_stays_manual(
   assert notifications[0]["title"] == "Möbius restarted"
 
 
+def test_restart_park_rejects_ack_for_the_wrong_nonce(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  cid = "restart-wrong-ack"
+  token = f"rt-{cid}"
+  monkeypatch.setattr(
+    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+  )
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_runs",
+    lambda: {token: (cid, "different-nonce-1234")},
+  )
+  _due_park(
+    cid,
+    token,
+    auto_restart=True,
+    park_reason="restart",
+    restart_nonce="db-nonce-12345678",
+  )
+
+  assert _run_sweep() == [cid]
+  assert _run_row(token)["status"] == "interrupted"
+  assert _run_row(token)["restart_nonce"] is None
+
+
 def test_restart_spawn_failure_retires_one_shot_authorization(
   owner_token, monkeypatch,
 ):
@@ -914,6 +973,79 @@ def test_unacknowledged_restart_pending_cannot_bypass_via_idle_sweep(
     db.close()
   assert scheduled == []
   assert _chat_row(cid)["pending"]
+
+
+def test_owner_send_releases_restart_manual_hold():
+  """Manual recovery remains available after automatic replay fails closed."""
+  cid = "restart-manual-owner-send"
+  token = f"rt-{cid}"
+  _seed_chat(cid)
+  _seed_run(
+    cid, token, status="interrupted", park_reason="restart",
+    restart_nonce=None, started_offset=-60,
+  )
+
+  db = SessionLocal()
+  try:
+    assert chat_mod._restart_manual_hold_for_chat(db, cid) is True
+  finally:
+    db.close()
+
+  get_writer().submit(StartTurn(
+    chat_id=cid,
+    run_token=f"{token}-manual",
+    user_msg={
+      "role": "user",
+      "content": "continue",
+      "ts": 2,
+      "cid": f"manual-resume-{token}",
+    },
+    title_source="continue",
+    default_provider="claude",
+  )).result(timeout=5)
+
+  db = SessionLocal()
+  try:
+    assert chat_mod._restart_manual_hold_for_chat(db, cid) is False
+  finally:
+    db.close()
+  assert _run_row(f"{token}-manual")["status"] == "running"
+
+
+def test_owner_send_drains_preserved_queue_and_releases_restart_hold():
+  """The real stale-pending owner-send path is not blocked by the hold."""
+  cid = "restart-manual-pending-send"
+  token = f"rt-{cid}"
+  _seed_chat(
+    cid,
+    pending=[{
+      "role": "user",
+      "content": "continue",
+      "ts": 1,
+      "cid": f"restart-resume-{token}",
+      "kind": "auto_continuation",
+      "continuation_reason": "restart",
+    }],
+  )
+  _seed_run(
+    cid, token, status="interrupted", park_reason="restart",
+    restart_nonce=None, started_offset=-60,
+  )
+  promoted_token = f"{token}-owner"
+
+  result = get_writer().submit(PromotePending(
+    chat_id=cid,
+    run_token=promoted_token,
+  )).result(timeout=5)
+
+  assert result["promoted"]["content"] == "continue"
+  assert _chat_row(cid)["pending"] == []
+  assert _run_row(promoted_token)["status"] == "running"
+  db = SessionLocal()
+  try:
+    assert chat_mod._restart_manual_hold_for_chat(db, cid) is False
+  finally:
+    db.close()
 
 
 def test_sweep_auto_resume_defers_while_any_turn_is_live(
