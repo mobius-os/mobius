@@ -369,23 +369,41 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
-def test_hosted_suites_run_once_for_pull_requests_and_main():
-  workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
+def test_pull_requests_run_required_suites_and_main_only_refreshes_cache():
+  test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
-  triggers = workflow.split("\npermissions:\n", 1)[0]
-  backend = workflow.split("\n  backend:\n", 1)[1].split(
+  cache_workflow = (ROOT / ".github" / "workflows" / "image-cache.yml").read_text(
+    encoding="utf-8"
+  )
+  test_triggers = test_workflow.split("\npermissions:\n", 1)[0]
+  cache_triggers = cache_workflow.split("\npermissions:\n", 1)[0]
+  backend = test_workflow.split("\n  backend:\n", 1)[1].split(
     "\n  frontend-unit:\n", 1,
   )[0]
-  e2e = workflow.split("\n  e2e:\n", 1)[1]
+  e2e = test_workflow.split("\n  e2e:\n", 1)[1]
 
-  assert "push:\n" in triggers
-  assert "    branches: [main]\n" in triggers
-  assert "pull_request:\n" in triggers
-  assert "'feat/**'" not in triggers
-  assert "'fix/**'" not in triggers
+  assert "pull_request:\n" in test_triggers
+  assert "push:\n" not in test_triggers
+  assert "'feat/**'" not in test_triggers
+  assert "'fix/**'" not in test_triggers
   for job in (backend, e2e):
     assert "github.event_name == 'pull_request'" not in job
     assert "refs/heads/integration/" not in job
   assert "needs: privacy" in e2e
   assert "needs: backend" not in e2e
+  assert "cache-from: type=gha" in e2e
+  assert "cache-to:" not in e2e
+
+  assert "push:\n" in cache_triggers
+  assert "    branches: [main]\n" in cache_triggers
+  assert "pull_request:\n" not in cache_triggers
+  assert "outputs: type=cacheonly" in cache_workflow
+  assert "cache-to: type=gha,mode=max,ignore-error=true" in cache_workflow
+  assert "load: true" not in cache_workflow
+
+  workflows = test_workflow + cache_workflow
+  assert workflows.count("DOCKER_BUILD_RECORD_UPLOAD: 'false'") == 2
+  assert "actions/checkout@v5" not in workflows
+  assert "actions/setup-node@v5" not in workflows
+  assert "actions/setup-python@v5" not in workflows

@@ -1,11 +1,6 @@
 name: Tests
 
 on:
-  push:
-    # Topic branches are validated by their pull_request event. Running the
-    # same commit for both push and pull_request wastes a runner and leaves a
-    # cancelled copy of each required check attached to the commit.
-    branches: [main]
   pull_request:
     # True PR stacks target the upstream branch directly beneath them. Run the
     # same suite for every layer so the chain is reviewable in parallel; main's
@@ -15,18 +10,22 @@ on:
 permissions:
   contents: read
 
-# Supersede stale runs for the same pull request. Never cancel main: its run is
-# the authoritative post-merge validation and the only cache producer.
+env:
+  # Build summaries remain available in the job log. The downloadable Buildx
+  # record duplicates that data for every image build and is not used here.
+  DOCKER_BUILD_RECORD_UPLOAD: 'false'
+
+# Only the newest synthetic merge for a pull request can land.
 concurrency:
-  group: tests-${{ github.event.pull_request.head.ref || github.ref_name }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: tests-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: true
 
 jobs:
   privacy:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Reject private workspace paths
@@ -41,14 +40,14 @@ jobs:
     # headroom for pytest to report assertions instead of being killed near 90%.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: 'pip'
           cache-dependency-path: backend/requirements.txt
       - name: Set up Node with npm cache
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: 'npm'
@@ -95,9 +94,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Set up Node with npm cache
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: 'npm'
@@ -130,7 +129,7 @@ jobs:
     needs: privacy
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -148,12 +147,10 @@ jobs:
           # checked-out PR's tests against main's backend and rebuilt frontend.
           build-args: |
             BUILD_SHA=${{ github.sha }}
-          # PR merge refs can restore the default branch cache, but caches they
-          # export are isolated to that short-lived ref. Only main refreshes
-          # the max-mode cache; PRs consume it without duplicating the image's
-          # large browser and CLI layers.
+          # Pull requests consume the default branch cache. Exporting from a
+          # short-lived merge ref duplicates large browser and CLI layers that
+          # subsequent pull requests cannot restore.
           cache-from: type=gha
-          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,ignore-error=true' || '' }}
 
       - name: Validate production Codex SDK contract
         # The SDK is pinned and installed only in the production image. Run its
@@ -219,7 +216,7 @@ jobs:
           echo "Runtime identity matches checkout: $GITHUB_SHA"
 
       - name: Set up Node with npm cache
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: 'npm'

@@ -24,7 +24,9 @@ any non-trivial change.
 
 ## Tests
 
-CI is `.github/workflows/test.yml`; the commands below mirror it.
+Required PR CI is `.github/workflows/test.yml`; the commands below mirror it.
+After protected merges, `.github/workflows/image-cache.yml` refreshes the
+shared Docker cache without repeating the test suite.
 
 ## Submitting a session branch
 
