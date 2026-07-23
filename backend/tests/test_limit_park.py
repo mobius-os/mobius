@@ -653,6 +653,28 @@ def test_sweep_resolves_deleted_chat_without_notify(owner_token, monkeypatch):
   assert _run_row("rt-sweep-deleted")["status"] == "parked_notified"
 
 
+def test_sweep_processes_a_bounded_batch(owner_token, monkeypatch):
+  del owner_token
+  monkeypatch.setattr(chat_mod, "CONTINUATION_SWEEP_BATCH_SIZE", 2)
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda db, owner_id, **kw: "notif-id",
+  )
+  for suffix in ("a", "b", "c"):
+    _due_park(f"sweep-batch-{suffix}", f"rt-sweep-batch-{suffix}")
+
+  first = _run_sweep()
+
+  assert len(first) == 2
+  remaining = {
+    token
+    for token in ("rt-sweep-batch-a", "rt-sweep-batch-b", "rt-sweep-batch-c")
+    if _run_row(token)["status"] == "parked"
+  }
+  assert len(remaining) == 1
+  assert _run_sweep() == [next(iter(remaining)).removeprefix("rt-")]
+
+
 # -- (e) auto-resume -----------------------------------------------------------
 
 def test_sweep_auto_resume_off_by_default(owner_token, monkeypatch):
@@ -735,8 +757,8 @@ def test_restart_park_auto_continues_with_product_marker(
   token = f"rt-{cid}"
   nonce = "restart-nonce-auto"
   monkeypatch.setattr(
-    "app.restart_ledger.authorized_runs",
-    lambda: {token: (cid, nonce)},
+    "app.restart_ledger.authorized_restart_nonce",
+    lambda: nonce,
   )
   _due_park(
     cid, token, auto_resume=True, auto_restart=True,
@@ -778,8 +800,8 @@ def test_restart_park_waiting_on_question_stays_manual(
   token = f"rt-{cid}"
   nonce = "restart-nonce-question"
   monkeypatch.setattr(
-    "app.restart_ledger.authorized_runs",
-    lambda: {token: (cid, nonce)},
+    "app.restart_ledger.authorized_restart_nonce",
+    lambda: nonce,
   )
   _due_park(
     cid,
@@ -827,8 +849,8 @@ def test_restart_park_policy_off_resolves_to_manual_interruption(
   token = f"rt-{cid}"
   nonce = "restart-nonce-policy"
   monkeypatch.setattr(
-    "app.restart_ledger.authorized_runs",
-    lambda: {token: (cid, nonce)},
+    "app.restart_ledger.authorized_restart_nonce",
+    lambda: nonce,
   )
   # Provider-limit policy is deliberately ON. Separate restart consent remains
   # off, proving the legacy preference cannot broaden into restart replay.
@@ -853,7 +875,9 @@ def test_restart_park_without_current_boot_ack_stays_manual(
     "app.push.notify_owner",
     lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
   )
-  monkeypatch.setattr("app.restart_ledger.authorized_runs", lambda: {})
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_restart_nonce", lambda: None,
+  )
   cid = "restart-no-ack"
   token = f"rt-{cid}"
   _due_park(
@@ -867,6 +891,27 @@ def test_restart_park_without_current_boot_ack_stays_manual(
   assert notifications[0]["title"] == "Möbius restarted"
 
 
+def test_restart_park_with_no_nonce_never_matches_missing_ack(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+  )
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_restart_nonce", lambda: None,
+  )
+  cid = "restart-no-nonce"
+  token = f"rt-{cid}"
+  _due_park(
+    cid, token, auto_restart=True, park_reason="restart",
+    restart_nonce=None,
+  )
+
+  assert _run_sweep() == [cid]
+  assert _run_row(token)["status"] == "interrupted"
+
+
 def test_restart_park_rejects_ack_for_the_wrong_nonce(
   owner_token, monkeypatch,
 ):
@@ -877,8 +922,8 @@ def test_restart_park_rejects_ack_for_the_wrong_nonce(
     "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
   )
   monkeypatch.setattr(
-    "app.restart_ledger.authorized_runs",
-    lambda: {token: (cid, "different-nonce-1234")},
+    "app.restart_ledger.authorized_restart_nonce",
+    lambda: "different-nonce-1234",
   )
   _due_park(
     cid,
@@ -904,8 +949,8 @@ def test_restart_spawn_failure_retires_one_shot_authorization(
     "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
   )
   monkeypatch.setattr(
-    "app.restart_ledger.authorized_runs",
-    lambda: {token: (cid, nonce)},
+    "app.restart_ledger.authorized_restart_nonce",
+    lambda: nonce,
   )
   _due_park(
     cid, token, auto_restart=True, park_reason="restart",

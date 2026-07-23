@@ -697,19 +697,20 @@ The platform process then publishes an intent and restart request; it does not
 terminate itself on the normal path.
 
 The frozen root-owned entrypoint poller validates and consumes the request,
-records the exact `(chat_id, run_id, nonce)` set in `/data/.restart-ledger`, and
-only then terminates pid 1. At the very start of the next entrypoint invocation,
-the ledger binds that accepted intent to the new `MOBIUS_BOOT_ID`. The app only
-continues a restart park when this root-owned acknowledgement, the exact DB run
-and nonce, and the separately stored restart policy all match. An intent that
-was merely written before a crash/OOM, an acknowledgement skipped by a failed
-handshake, or an acknowledgement left across another boot authorizes nothing.
-Transcript text is presentation, never restart-cause evidence.
+records its one-shot nonce in `/data/.restart-ledger`, and only then terminates
+pid 1. At the very start of the next entrypoint invocation, the ledger binds
+that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
+restart park when the root-owned boot acknowledgement matches the nonce on the
+latest exact DB run and the separately stored restart policy is on. The
+supervisor attests the boot transition; the database owns run identity. An
+intent merely written before a crash/OOM, an acknowledgement skipped by a
+failed handshake, or an acknowledgement left across another boot authorizes
+nothing. Transcript text is presentation, never restart-cause evidence.
 
 | Event | Durable result | Boot/sweep result |
 |-------|----------------|-------------------|
 | Provider usage/rate limit | exact run `parked` until reset | notify; continue if the chat policy is on |
-| Accepted planned restart, exact park + ledger tuple match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if separate restart consent is on |
+| Accepted planned restart, exact park + boot nonce match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if separate restart consent is on |
 | Crash/OOM before supervisor acknowledgement | unacknowledged park or generic `running` evidence | resolve/reconcile to manual resumable interruption |
 | Repeated/unrelated boot before claim | acknowledgement is retired by boot-id mismatch | manual resumable interruption |
 | Policy off, unanswered question, app-owned run, or app-queued work | due park resolves without an automatic send | notify/manual owner action |

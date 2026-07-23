@@ -2127,6 +2127,7 @@ async def drain_all_for_restart(
 # (design §2.4 step "at parked_until, push-notify").
 LIMIT_RESET_NOTIFY_TITLE = "Your limit has reset"
 LIMIT_RESET_NOTIFY_BODY = "Your limit has reset."
+CONTINUATION_SWEEP_BATCH_SIZE = 100
 
 
 def _has_unanswered_question(chat: models.Chat | None) -> bool:
@@ -2240,10 +2241,12 @@ async def _auto_resume_chat(
             latest_id = latest[0] if latest is not None else None
             restart_authorized = True
             if park is not None and park.park_reason == "restart":
-              from app.restart_ledger import authorized_runs
+              from app.restart_ledger import authorized_restart_nonce
+              accepted_nonce = authorized_restart_nonce()
               restart_authorized = (
-                authorized_runs().get(park.id)
-                == (chat_id, park.restart_nonce)
+                bool(accepted_nonce)
+                and bool(park.restart_nonce)
+                and accepted_nonce == park.restart_nonce
               )
             policy_enabled = bool(
               chat is not None
@@ -2357,8 +2360,9 @@ async def sweep_reset_parks(db: Session) -> list[str]:
   stalled-live sweeps). A due park is a `chat_runs` row still
   ``status`` is ``parked`` or ``resume_pending`` and whose
   `parked_until` has passed. Provider limits use their reset time; a planned
-  restart is parked by the drain itself with a due time of now. For each,
-  oldest due row first:
+  restart is parked by the drain itself with a due time of now. Each pass
+  processes a bounded oldest-first batch so a large backlog cannot monopolize
+  the event loop or produce an unbounded burst of database work. For each row:
 
     - Notify-only parks resolve first, then send one best-effort notification.
     - Auto-resume parks first become ``resume_pending``. That durable
@@ -2384,10 +2388,11 @@ async def sweep_reset_parks(db: Session) -> list[str]:
   try:
     due = (
       db.query(models.ChatRun)
-      .filter(models.ChatRun.status.in_(("parked", "resume_pending")))
+      .filter(models.ChatRun.status.in_(models.CONTINUATION_RUN_STATUSES))
       .filter(models.ChatRun.parked_until.isnot(None))
       .filter(models.ChatRun.parked_until <= now)
-      .order_by(models.ChatRun.parked_until.asc())
+      .order_by(models.ChatRun.parked_until.asc(), models.ChatRun.id.asc())
+      .limit(CONTINUATION_SWEEP_BATCH_SIZE)
       .all()
     )
   except Exception:
@@ -2395,20 +2400,39 @@ async def sweep_reset_parks(db: Session) -> list[str]:
     return resolved
   if not due:
     return resolved
+  chat_ids = {run.chat_id for run in due}
   try:
-    from app.restart_ledger import authorized_runs
-    restart_authorizations = authorized_runs()
+    chats = {
+      chat.id: chat
+      for chat in (
+        db.query(models.Chat)
+        .filter(models.Chat.id.in_(chat_ids))
+        .all()
+      )
+    }
   except Exception:
-    log.warning(
-      "sweep_reset_parks: restart ledger read failed; restart parks will "
-      "fall back to manual recovery",
-      exc_info=True,
-    )
-    restart_authorizations = {}
+    log.exception("sweep_reset_parks: chat batch query failed")
+    return resolved
+  restart_authorization = None
+  if any(run.park_reason == "restart" for run in due):
+    try:
+      from app.restart_ledger import authorized_restart_nonce
+      restart_authorization = authorized_restart_nonce()
+    except Exception:
+      log.warning(
+        "sweep_reset_parks: restart ledger read failed; restart parks will "
+        "fall back to manual recovery",
+        exc_info=True,
+      )
+  owner_loaded = False
+  owner = None
 
   def notify_due(chat_id: str, run: models.ChatRun) -> None:
+    nonlocal owner, owner_loaded
     try:
-      owner = db.query(models.Owner).first()
+      if not owner_loaded:
+        owner = db.query(models.Owner).first()
+        owner_loaded = True
       if owner is not None:
         from app import push
         restarted = run.park_reason == "restart"
@@ -2426,6 +2450,7 @@ async def sweep_reset_parks(db: Session) -> list[str]:
           target=f"/shell/?chat={chat_id}",
         )
     except Exception:
+      owner_loaded = True
       log.warning(
         "continuation notify failed chat_id=%s", chat_id, exc_info=True,
       )
@@ -2446,8 +2471,11 @@ async def sweep_reset_parks(db: Session) -> list[str]:
     )
     restart_authorized = (
       not restart_park
-      or restart_authorizations.get(run.id)
-      == (run.chat_id, run.restart_nonce)
+      or (
+        bool(restart_authorization)
+        and bool(run.restart_nonce)
+        and restart_authorization == run.restart_nonce
+      )
     )
     return bool(
       chat is not None
@@ -2462,7 +2490,7 @@ async def sweep_reset_parks(db: Session) -> list[str]:
   auto_resume_started = False
   for run in due:
     chat_id = run.chat_id
-    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    chat = chats.get(chat_id)
     chat_gone = chat is None or chat.deleted_at is not None
     auto_resume = wants_auto_resume(chat, run)
     if auto_resume and (

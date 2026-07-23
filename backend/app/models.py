@@ -25,6 +25,10 @@ from app.database import Base
 from app.timeutil import now_naive_utc
 
 
+CONTINUATION_RUN_STATUSES = ("parked", "resume_pending")
+NONTERMINAL_RUN_STATUSES = ("running", *CONTINUATION_RUN_STATUSES)
+
+
 class Owner(Base):
   """Single owner account for this installation."""
 
