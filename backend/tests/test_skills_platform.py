@@ -875,3 +875,162 @@ def test_index_body_defuses_hostile_frontmatter_name(skills_dir):
   (row,) = [l for l in text.splitlines() if "evil.md" in l]
   # Escaped pipes can't add table cells; the row stays one line.
   assert row.count(" | ") == 2
+
+
+# --- exact-head re-review round: recovery confinement, privacy, contracts ---
+
+
+def test_reconcile_staging_traversal_cannot_delete_outside_root(skills_dir):
+  """R1-1: a corrupt sidecar `staging: '../victim'` must not rmtree a sibling."""
+  victim = skills_dir.parent / "victim"
+  victim.mkdir()
+  (victim / "keep.txt").write_text("precious\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "tips": {"source": "o/r", "status": "installing", "staging": "../victim"},
+  }))
+
+  skills_mod.reconcile_installed(skills_dir)
+
+  assert victim.is_dir() and (victim / "keep.txt").is_file()  # untouched
+
+
+def test_reconcile_does_not_adopt_unrelated_dir_when_staging_present(skills_dir):
+  """R1-2: target present AND recorded staging present is ambiguous — finalize
+  nothing, delete nothing, keep the intent (fail closed)."""
+  target = skills_dir / "pdf"
+  target.mkdir()
+  (target / "SKILL.md").write_text("# unrelated bytes\n")
+  staging = skills_dir / ".staging-intended"
+  staging.mkdir()
+  (staging / "SKILL.md").write_text("# the intended skill\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "pdf": {
+      "source": "o/r", "status": "installing", "staging": ".staging-intended",
+    },
+  }))
+
+  repaired = skills_mod.reconcile_installed(skills_dir)
+
+  assert repaired == []  # nothing finalized
+  rec = _sidecar(skills_dir)["pdf"]
+  assert rec.get("status") == "installing"  # intent retained
+  assert staging.is_dir()  # the intended tree is not stranded/deleted
+
+
+def test_reconcile_finalize_requires_matching_sha256(skills_dir):
+  """R1-2: a published dir whose SKILL.md hash != the record's is NOT adopted."""
+  import hashlib
+
+  target = skills_dir / "pdf"
+  target.mkdir()
+  (target / "SKILL.md").write_text("# tampered bytes\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "pdf": {
+      "source": "o/r", "status": "installing", "staging": ".staging-gone",
+      "skill_sha256": hashlib.sha256(b"# the ORIGINAL bytes\n").hexdigest(),
+      "files": ["SKILL.md"],
+    },
+  }))
+
+  repaired = skills_mod.reconcile_installed(skills_dir)
+
+  assert repaired == []
+  assert _sidecar(skills_dir)["pdf"].get("status") == "installing"
+
+
+def test_reconcile_gc_reclaims_only_aged_unreferenced_staging(skills_dir):
+  """R1-3: an aged `.staging-*` orphan NO record references (crash before the
+  intent write) is reclaimed; a fresh one is left for a possible in-flight
+  install. No sidecar exists, so only the GC can act."""
+  import os
+  import time
+
+  orphan = skills_dir / ".staging-orphan"
+  orphan.mkdir()
+  old = time.time() - skills_mod._STAGING_GC_AGE_SECONDS - 60
+  os.utime(orphan, (old, old))
+
+  fresh = skills_dir / ".staging-fresh"
+  fresh.mkdir()  # mtime = now
+
+  skills_mod.reconcile_installed(skills_dir)
+
+  assert not orphan.exists()  # aged + unreferenced -> reclaimed
+  assert fresh.is_dir()  # too fresh -> possibly in-flight -> kept
+
+
+def test_list_skills_redacts_source_url_for_app_but_not_owner(
+  client, auth, db, skills_dir,
+):
+  """R2-1/R2-2: app tokens get a redacted origin/path (no query credentials or
+  fragment) and the authoritative skill_sha256; the owner gets the full URL."""
+  d = skills_dir / "priv"
+  d.mkdir()
+  (d / "SKILL.md").write_text("# priv\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "priv": {
+      "source": "example.com",
+      "url": "https://example.com/raw/priv.md?token=secret#frag",
+      "skill_sha256": "deadbeef",
+    },
+  }))
+
+  owner_row = client.get("/api/skills", headers=auth).json()["skills"][0]
+  assert owner_row["source_url"] == (
+    "https://example.com/raw/priv.md?token=secret#frag"
+  )
+  assert owner_row["skill_sha256"] == "deadbeef"
+
+  app_headers = _app_token(db, manage_skills=False)
+  app_row = client.get("/api/skills", headers=app_headers).json()["skills"][0]
+  assert app_row["source_url"] == "https://example.com/raw/priv.md"
+  assert "secret" not in app_row["source_url"]
+  assert "frag" not in app_row["source_url"]
+  assert app_row["skill_sha256"] == "deadbeef"  # hash is safe for all callers
+
+
+def test_corrupt_sidecar_fails_install_closed_and_preserves_ownership(
+  client, auth, skills_dir, monkeypatch,
+):
+  """F-4: a present-but-corrupt installed-skills sidecar must not be silently
+  overwritten by a mutation (which would orphan every prior installed skill)."""
+  from app.routes import skills as rs
+
+  # A previously-installed dir skill + a corrupt (non-JSON) ownership sidecar.
+  d = skills_dir / "old"
+  d.mkdir()
+  (d / "SKILL.md").write_text("# old\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text("{not json")
+
+  monkeypatch.setattr(
+    rs.install, "_http_get", _fake_fetch({"https://x/new.md": b"# new"}),
+  )
+  r = client.post(
+    "/api/skills/install", headers=auth, json={"url": "https://x/new.md"},
+  )
+  assert r.status_code == 500
+  assert "corrupt" in r.json()["detail"]
+  # Nothing published, corrupt sidecar untouched (recoverable by hand).
+  assert not (skills_dir / "new").exists()
+  assert (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).read_text() == "{not json"
+
+  # Uninstall of a real installed skill is likewise refused while corrupt.
+  r = client.delete("/api/skills/old", headers=auth)
+  assert r.status_code == 500
+  assert "corrupt" in r.json()["detail"]
+  assert d.is_dir()
+
+
+def test_codex_usage_counts_directory_skill_by_id(skills_dir):
+  """F-5: a `cat <skills>/pdf/SKILL.md` read counts pdf as loaded (keyed by the
+  directory id), matching the Claude Read observer."""
+  from app.codex_sdk_runner import _skill_names_in_command
+  from app.config import get_settings
+
+  data_dir = get_settings().data_dir
+  cmd = (
+    f"cat {data_dir}/shared/skills/pdf/SKILL.md; "
+    f"head {data_dir}/shared/skills/cron.md; "
+    f"cat {data_dir}/shared/skills/pdf/reference.md"  # resource: NOT a load
+  )
+  assert _skill_names_in_command(cmd, data_dir) == ["pdf", "cron"]

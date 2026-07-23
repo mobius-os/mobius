@@ -54,8 +54,8 @@ from app import activity, catalog_index, install, models, skills
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
-  get_current_owner_or_app,
   get_owner_or_app_with_manage_skills,
+  get_principal,
   reject_cross_site,
 )
 from app import fs_locks
@@ -129,13 +129,45 @@ def _chown_mobius(path: Path) -> None:
       pass
 
 
-def _read_installed_sidecar(skills_dir: Path) -> dict:
+class _CorruptSidecar(Exception):
+  """The installed-skills sidecar is present but unparseable/not an object."""
+
+
+def _load_installed_sidecar(skills_dir: Path) -> dict:
+  """Parse the installed-skills sidecar, distinguishing MISSING from CORRUPT.
+
+  A missing sidecar is a legitimate empty state ({}). A present-but-unparseable
+  or non-object sidecar is CORRUPT and raises: mapping corruption to {} (as the
+  read path does) would let the next MUTATION overwrite the file with only its
+  own new record, silently orphaning every previously-installed skill —
+  present on disk but unowned and no longer uninstallable through the API.
+  """
   path = skills_dir / skills.INSTALLED_SKILLS_SIDECAR
   try:
-    loaded = json.loads(path.read_text(encoding="utf-8"))
-  except (OSError, ValueError):
+    raw = path.read_text(encoding="utf-8")
+  except FileNotFoundError:
     return {}
-  return loaded if isinstance(loaded, dict) else {}
+  except OSError as exc:
+    raise _CorruptSidecar(f"could not read {path.name}: {exc}") from exc
+  try:
+    loaded = json.loads(raw)
+  except ValueError as exc:
+    raise _CorruptSidecar(f"{path.name} is not valid JSON: {exc}") from exc
+  if not isinstance(loaded, dict):
+    raise _CorruptSidecar(f"{path.name} is not a JSON object")
+  return loaded
+
+
+def _read_installed_sidecar(skills_dir: Path) -> dict:
+  """Best-effort read for display paths: corruption degrades to {} here.
+
+  Mutations must use `_load_installed_sidecar` instead so they fail closed
+  rather than clobbering a recoverable sidecar.
+  """
+  try:
+    return _load_installed_sidecar(skills_dir)
+  except _CorruptSidecar:
+    return {}
 
 
 def _write_installed_sidecar(skills_dir: Path, records: dict) -> None:
@@ -442,13 +474,38 @@ def _snapshot_skill_dir(data_dir: Path, name: str) -> tuple[bool, str]:
   return True, "committed"
 
 
+def _redact_source_url(url: str | None) -> str | None:
+  """Origin + path only — no userinfo, query, or fragment.
+
+  Signed object links and private raw URLs commonly carry access tokens or
+  signatures in the query string (and occasionally in userinfo); those must
+  never cross the API boundary to an ordinary app token. The full submitted URL
+  stays owner-only; every caller still gets the authoritative `skill_sha256`.
+  """
+  if not url:
+    return url
+  from urllib.parse import urlparse, urlunparse
+
+  try:
+    parts = urlparse(url)
+  except ValueError:
+    return None
+  host = parts.hostname or ""
+  if parts.port:
+    host = f"{host}:{parts.port}"
+  return urlunparse((parts.scheme, host, parts.path, "", "", ""))
+
+
 @router.get("")
-def list_skills(_: models.Owner = Depends(get_current_owner_or_app)) -> dict:
+def list_skills(principal=Depends(get_principal)) -> dict:
   """Every installed skill with metadata, provenance, and recent usage counts.
 
   Drives the Skills mini-app's "installed" view. Readable by the owner or any
-  app token (browsing is not privileged; only install/uninstall are gated).
+  app token (browsing is not privileged; only install/uninstall are gated) —
+  but the raw submitted `source_url` (which may carry credentials in its query
+  string) is owner-only; app callers get a redacted origin/path instead.
   """
+  is_owner = getattr(principal, "scope", "app") == "owner"
   skills_dir = _skills_dir()
   now = datetime.now(UTC)
   try:
@@ -479,12 +536,23 @@ def list_skills(_: models.Owner = Depends(get_current_owner_or_app)) -> dict:
     }
     rec = installed_records.get(disk_name)
     if isinstance(rec, dict):
-      # Surface the immutable install identity so UIs can link the exact
-      # reviewed revision, not just a mutable repo label.
+      # The immutable install identity, safe for every caller: the content hash
+      # is the authoritative locator (a mutable/redirected repo URL is not).
       row["commit"] = rec.get("commit")
       row["source_repo"] = rec.get("repo")
       row["source_path"] = rec.get("path")
-      row["source_url"] = rec.get("url")
+      row["skill_sha256"] = rec.get("skill_sha256")
+      # The installer-owned bounded file inventory (relative paths incl.
+      # SKILL.md). The companion app assesses installed-skill compatibility from
+      # THIS authoritative list — the paginated shared-list walk can silently
+      # omit names its narrower path regex rejects, so it can't be trusted as
+      # complete. Safe for every caller (filenames only, no secrets).
+      files = rec.get("files")
+      row["files"] = files if isinstance(files, list) else None
+      # The raw submitted URL can carry query credentials — full only for the
+      # owner; app callers get a redacted origin/path locator.
+      url = rec.get("url")
+      row["source_url"] = url if is_owner else _redact_source_url(url)
     out.append(row)
   return {"skills": out}
 
@@ -569,7 +637,17 @@ async def install_skill(
         "was published.",
       )
 
-    records = _read_installed_sidecar(skills_dir)
+    try:
+      records = _load_installed_sidecar(skills_dir)
+    except _CorruptSidecar as exc:
+      shutil.rmtree(staged, ignore_errors=True)
+      raise HTTPException(
+        500,
+        f"Refusing to install {name!r}: the installed-skills ownership record "
+        f"is corrupt ({exc}). Repair or remove "
+        f"shared/skills/{skills.INSTALLED_SKILLS_SIDECAR} first — overwriting "
+        "it would orphan every already-installed skill. Nothing was published.",
+      )
     records[name] = {**record, "status": "installing", "staging": staged.name}
     try:
       _write_installed_sidecar(skills_dir, records)
@@ -708,7 +786,16 @@ async def uninstall_skill(
     # A crash-interrupted install reconciles first, so its skill is either a
     # properly owned record (removable here) or gone — never a stuck orphan.
     skills.reconcile_installed(skills_dir)
-    records = _read_installed_sidecar(skills_dir)
+    try:
+      records = _load_installed_sidecar(skills_dir)
+    except _CorruptSidecar as exc:
+      raise HTTPException(
+        500,
+        f"Refusing to uninstall {name!r}: the installed-skills ownership "
+        f"record is corrupt ({exc}). Repair or remove "
+        f"shared/skills/{skills.INSTALLED_SKILLS_SIDECAR} first. Nothing was "
+        "deleted.",
+      )
     if name not in records:
       raise HTTPException(
         409,

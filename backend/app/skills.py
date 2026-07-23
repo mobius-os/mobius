@@ -33,7 +33,10 @@ replacing the hand-maintained table that used to live in `skill/core.md`.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import stat
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -221,20 +224,157 @@ def _skills_dir() -> Path:
   return Path(get_settings().data_dir) / "shared" / "skills"
 
 
+# Installer staging directories live under the skills root as `.staging-*`
+# (see routes/skills.install_skill). Dot-prefixed, so enumeration never lists
+# them; recovery is the only thing that touches them.
+_STAGING_PREFIX = ".staging-"
+# An unreferenced staging tree younger than this may belong to an install still
+# in flight, so GC leaves it alone; older ones are crash orphans.
+_STAGING_GC_AGE_SECONDS = 3600
+# Cap the recovery inventory walk so a tampered target can't make it unbounded.
+_INVENTORY_FILE_CAP = 256
+
+
+def _safe_child(root: Path, name: str) -> Path | None:
+  """A single-component child of `root`, or None if `name` would escape it.
+
+  The installed-skills sidecar lives in the agent-editable shared tree, so its
+  `name` keys and `staging` values are untrusted: a value like ``../victim`` or
+  ``a/b`` must never steer a recovery delete or finalize outside `root`. `name`
+  must be one plain path component (no separators, not ``.``/``..``) whose
+  lexical parent is exactly `root`.
+  """
+  if not name or name in (".", "..") or "/" in name or "\\" in name:
+    return None
+  if os.sep in name or (os.altsep and os.altsep in name):
+    return None
+  candidate = root / name
+  return candidate if candidate.parent == root else None
+
+
+def _is_real_dir(path: Path) -> bool:
+  """True only for a real directory — never a symlink (which we never follow)."""
+  try:
+    return stat.S_ISDIR(path.lstat().st_mode)
+  except OSError:
+    return False
+
+
+def _relative_files(target: Path) -> set[str] | None:
+  """Root-relative regular-file paths under `target`, or None on any surprise.
+
+  Bounded by `_INVENTORY_FILE_CAP`; returns None if the cap is exceeded or a
+  symlink/special file (never part of a clean install) is found — both treated
+  as a non-match by the caller, which fails closed.
+  """
+  out: set[str] = set()
+  stack = [target]
+  while stack:
+    cur = stack.pop()
+    try:
+      entries = list(cur.iterdir())
+    except OSError:
+      return None
+    for entry in entries:
+      try:
+        mode = entry.lstat().st_mode
+      except OSError:
+        return None
+      if stat.S_ISDIR(mode):
+        stack.append(entry)
+      elif stat.S_ISREG(mode):
+        out.add(entry.relative_to(target).as_posix())
+        if len(out) > _INVENTORY_FILE_CAP:
+          return None
+      else:
+        return None
+  return out
+
+
+def _published_matches(target: Path, rec: dict) -> bool:
+  """Whether a published skill dir matches the identity its record claims.
+
+  Recovery grants ownership only after the published SKILL.md hashes to the
+  recorded ``skill_sha256`` and the on-disk file inventory equals the recorded
+  ``files`` set — so an unrelated directory that merely shares the target name
+  is never silently adopted.
+  """
+  skill_md = target / "SKILL.md"
+  try:
+    if not stat.S_ISREG(skill_md.lstat().st_mode):
+      return False
+  except OSError:
+    return False
+  expected_hash = rec.get("skill_sha256")
+  if isinstance(expected_hash, str) and expected_hash:
+    try:
+      data = skill_md.read_bytes()
+    except OSError:
+      return False
+    if hashlib.sha256(data).hexdigest() != expected_hash:
+      return False
+  expected_files = rec.get("files")
+  if isinstance(expected_files, list):
+    actual = _relative_files(target)
+    if actual is None or actual != {str(f) for f in expected_files}:
+      return False
+  return True
+
+
+def _gc_orphan_staging(root: Path, referenced: set[str]) -> None:
+  """Remove crash-orphaned `.staging-*` trees no record references.
+
+  A crash BETWEEN staging-dir creation and the intent write leaves a staging
+  tree nothing points at; the per-record sweep can't see it. Only real
+  directories (never a symlink wearing the prefix), only those older than the
+  GC age (so an install still in flight is safe), only directly under `root`.
+  """
+  import shutil
+
+  now = time.time()
+  try:
+    entries = list(root.iterdir())
+  except OSError:
+    return
+  for entry in entries:
+    if not entry.name.startswith(_STAGING_PREFIX) or entry.name in referenced:
+      continue
+    try:
+      st = entry.lstat()
+    except OSError:
+      continue
+    if not stat.S_ISDIR(st.st_mode):
+      continue  # a symlink/file wearing the prefix — not ours to remove
+    if now - st.st_mtime < _STAGING_GC_AGE_SECONDS:
+      continue  # possibly an in-flight install's staging
+    shutil.rmtree(entry, ignore_errors=True)
+
+
 def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
   """Repair interrupted installs recorded in the installed-skills sidecar.
 
   The installer persists an ``"status": "installing"`` intent (carrying its
-  staging directory name) BEFORE publishing, so a crash at any point leaves a
-  self-describing state this sweep repairs:
+  staging directory name) BEFORE publishing, so a crash leaves a state this
+  sweep repairs against the ONE true post-publish invariant — *target present
+  AND staging absent*:
 
-    intent + published dir   -> the atomic rename happened; finalize the record
-    intent + staging dir     -> the crash preceded publish; discard the staging
-    intent + neither         -> nothing durable happened; drop the record
+    target present, staging absent  -> the atomic rename happened; finalize the
+                                       record, but only after verifying the
+                                       published bytes match the recorded
+                                       identity (hash + inventory)
+    staging present, target absent  -> the crash preceded publish; discard the
+                                       staging tree and the intent
+    neither present                 -> nothing durable happened; drop the record
+    BOTH present                    -> ambiguous (corrupt/tampered sidecar, or an
+                                       unrelated dir squatting the name); finalize
+                                       nothing, delete nothing, keep the intent
 
-  Runs at boot (init_skills) and at the start of every install/uninstall
-  (under the shared-skills lock), so an orphan can never outlive the next
-  skills operation. Returns the names it repaired.
+  Every `name`/`staging` string is treated as untrusted (the sidecar lives in
+  the agent-editable shared tree) and resolved through `_safe_child`, so a
+  traversal value can never steer a delete outside `root`. A separate
+  age-bounded GC reclaims staging trees a crash orphaned *before* the intent
+  write. Runs at boot (init_skills) and at the start of every install/uninstall
+  under the shared-skills lock. Returns the names it repaired.
   """
   import json
   import shutil
@@ -242,23 +382,53 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
   root = skills_dir or _skills_dir()
   sidecar = root / INSTALLED_SKILLS_SIDECAR
   records = _read_sidecar(sidecar)
+
+  # Staging names any record still points at — GC must not reclaim these.
+  referenced: set[str] = set()
+  for rec in records.values():
+    if isinstance(rec, dict):
+      staging_name = rec.get("staging")
+      if isinstance(staging_name, str) and staging_name:
+        referenced.add(staging_name)
+
   repaired: list[str] = []
+  dirty = False
   for name, rec in list(records.items()):
     if not isinstance(rec, dict) or rec.get("status") != "installing":
       continue
-    target = root / str(name)
-    staging_name = str(rec.get("staging") or "")
-    if target.is_dir() and not target.is_symlink():
-      rec.pop("status", None)
-      rec.pop("staging", None)
-    else:
-      if staging_name:
-        staging = root / staging_name
-        if staging.is_dir() and not staging.is_symlink():
-          shutil.rmtree(staging, ignore_errors=True)
+    target = _safe_child(root, str(name))
+    staging = _safe_child(root, str(rec.get("staging") or ""))
+    target_present = target is not None and _is_real_dir(target)
+    staging_present = staging is not None and _is_real_dir(staging)
+
+    if target_present and not staging_present:
+      # Post-rename invariant met. Adopt only if the published bytes match the
+      # recorded identity; otherwise leave the intent for deliberate cleanup.
+      if _published_matches(target, rec):
+        rec.pop("status", None)
+        rec.pop("staging", None)
+        dirty = True
+        repaired.append(str(name))
+      continue
+    if staging_present and not target_present:
+      # Crash before publish: discard the confined staging tree and the intent.
+      shutil.rmtree(staging, ignore_errors=True)
       records.pop(name)
-    repaired.append(str(name))
-  if repaired:
+      dirty = True
+      repaired.append(str(name))
+      continue
+    if not staging_present and not target_present:
+      # Nothing durable survives (or an unresolvable name): drop the intent.
+      records.pop(name)
+      dirty = True
+      repaired.append(str(name))
+      continue
+    # target_present AND staging_present -> ambiguous; fail closed, keep intent.
+
+  # Reclaim crash orphans no record references (age-bounded; see helper).
+  _gc_orphan_staging(root, referenced)
+
+  if dirty:
     atomic_write(sidecar, json.dumps(records, indent=2, sort_keys=True) + "\n")
   return repaired
 

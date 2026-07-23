@@ -129,8 +129,18 @@ def init() -> None:
     return
   # Present already — preserve the agent's edits. Only add NEW seed skills the
   # instance doesn't have yet (never overwrite an existing one).
+  # Resolve any crash-interrupted /api/skills install first, so a pending
+  # directory skill is either published (and seen as a collision below) or
+  # gone — the same reconciliation the runtime skills mutations run.
+  try:
+    from app.skills import reconcile_installed
+
+    reconcile_installed(SKILLS)
+  except Exception as exc:  # pragma: no cover - best-effort at boot
+    print(f"init_skills: reconcile skipped ({exc})")
   added = 0
   migrated = 0
+  skipped = 0
   for src in seed.glob("*.md"):
     dst = SKILLS / src.name
     old_digests = _UNMODIFIED_MIGRATIONS.get(src.name)
@@ -143,9 +153,18 @@ def init() -> None:
         shutil.copy2(src, dst)
         migrated += 1
         continue
+    # Both on-disk shapes share one logical id: never add a flat `foo.md` seed
+    # when an install-provenance directory skill `foo/` already holds `foo`
+    # (the runtime install path enforces the same both-shape rule).
+    if (SKILLS / src.stem).is_dir():
+      skipped += 1
+      continue
     if not dst.exists():
       shutil.copy2(src, dst)
       added += 1
+  if skipped:
+    print(f"init_skills: skipped {skipped} seed skill(s) colliding with an "
+          "installed directory skill of the same id")
   if added:
     print(f"init_skills: added {added} new seed skill(s) (existing kept)")
   if migrated:

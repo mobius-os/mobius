@@ -305,3 +305,19 @@ def test_sources_override_absent_or_malformed_is_none(db, monkeypatch):
   storage.mkdir(parents=True, exist_ok=True)
   (storage / "sources.json").write_text("{not json")
   assert rs._catalog_sources_override(db) is None
+
+
+def test_refresh_fails_truncated_source_closed_as_error(skills_dir, monkeypatch):
+  """F-6: a truncated Git tree must NOT be published as a complete catalog —
+  the source becomes an error entry, mirroring the installer's invariant."""
+  tree = {"truncated": True, "tree": [{"path": "pdf/SKILL.md", "type": "blob"}]}
+  monkeypatch.setattr(ci.install, "_http_get", _fake_fetch({
+    "https://api.github.com/repos/o/r/git/trees/main%3Askills?recursive=1":
+      json.dumps(tree).encode(),
+  }))
+  out = asyncio.run(ci.refresh(force=True, sources=[_SRC]))
+  assert out["refreshed"] is True
+  assert out["skills"] == 0  # nothing adopted from the truncated listing
+  text = (skills_dir / ci.INDEX_FILENAME).read_text()
+  assert "Scan failed" in text and "truncated" in text
+  assert "pdf" not in text  # the partial entry is not presented as complete

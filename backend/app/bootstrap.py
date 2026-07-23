@@ -155,17 +155,33 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
   # Manifest installs store the canonical identity key
   # (`<base>#manifest-id=<id>`, with a trailing `/mobius.json` stripped from the
   # base), not the bare URL.
-  from app.install import _canonical_base
+  from app.install import _canonical_base, _trusted_catalog_repo_base
 
   for bootstrap_app in _BOOTSTRAP_APPS:
-    query = db.query(models.App).filter(models.App.manifest_url.like(
-      _canonical_base(bootstrap_app.manifest_url) + "#manifest-id=%"
-    ))
+    # A trusted mobius-os catalog app's identity is its REPO, not the pinned
+    # `<ref>`: match any revision so a pin bump (or the original branch install)
+    # resolves to the SAME row. Without this the presence check keys on the new
+    # commit's base, misses a row installed at an older ref, and either
+    # duplicates the app or — for a `reinstall_after_uninstall=False` app whose
+    # owner uninstalled it — misses the tombstone and silently reinstalls.
+    repo_base = _trusted_catalog_repo_base(bootstrap_app.manifest_url)
+    if repo_base is not None:
+      pattern = repo_base + "/%#manifest-id=%"
+    else:
+      pattern = _canonical_base(bootstrap_app.manifest_url) + "#manifest-id=%"
+    query = db.query(models.App).filter(models.App.manifest_url.like(pattern))
     if bootstrap_app.reinstall_after_uninstall:
       # The store is the recovery surface, so it must return after uninstall;
-      # owner uninstalls of the other bootstrap apps are respected.
+      # owner uninstalls of the other bootstrap apps are respected (the query is
+      # otherwise tombstone-agnostic, so a tombstone counts as "present").
       query = query.filter(models.App.deleted_at.is_(None))
-    existing = query.first()
+    # Re-verify in Python: SQL LIKE treats `_` as a wildcard, and a ref may
+    # contain one; the repo-base check rejects any incidental over-match.
+    existing = None
+    for row in query.all():
+      if repo_base is None or _trusted_catalog_repo_base(row.manifest_url) == repo_base:
+        existing = row
+        break
     if existing is not None:
       log.info(
         "bootstrap: %s already installed (app id=%s)",

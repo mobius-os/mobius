@@ -215,9 +215,16 @@ async def _scan_source(client: httpx.AsyncClient, source: dict) -> dict:
       f"https://api.github.com/repos/{repo}/git/trees/{spec}?recursive=1",
       max_bytes=4 * 1024 * 1024,
     )
-    tree = json.loads(raw).get("tree")
+    data = json.loads(raw)
+    tree = data.get("tree") if isinstance(data, dict) else None
     if not isinstance(tree, list):
       raise ValueError("no tree in GitHub response")
+    if data.get("truncated"):
+      # A truncated listing is INCOMPLETE. Publishing a partial skill list as if
+      # it were the whole catalog silently hides skills; fail this source closed
+      # (an error entry) the same way the installer refuses a truncated tree
+      # (routes/skills._github_tree).
+      raise ValueError("GitHub truncated the tree listing — catalog incomplete")
   except Exception as exc:  # noqa: BLE001 — refresh must survive one bad source
     log.warning("catalog-index: scanning %s failed: %s", repo, exc)
     return {"source": source, "skills": [], "error": _one_line(str(exc))}

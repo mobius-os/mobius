@@ -275,3 +275,58 @@ async def test_bootstrap_respects_skip_env_var(db, monkeypatch):
     await ensure_bootstrap_apps_installed(db)
   install_mock.assert_not_awaited()
   migration_mock.assert_not_awaited()
+
+
+_SKILLS_MAIN_MANIFEST = (
+  "https://raw.githubusercontent.com/mobius-os/app-skills/main/mobius.json"
+)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_recognizes_skills_row_installed_at_other_ref(
+  db, monkeypatch,
+):
+  """F-1: the pinned bootstrap URL names a COMMIT, but a skills row installed at
+  `main` is the SAME app (identity is the repo, not the ref) — bootstrap must
+  recognize it and never reinstall a duplicate."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.install import _canonical_identity_key, _trusted_catalog_repo_base
+
+  # Guard: this test is only meaningful while the pin is a non-`main` ref.
+  assert _trusted_catalog_repo_base(BOOTSTRAP_SKILLS_MANIFEST_URL) == (
+    "https://raw.githubusercontent.com/mobius-os/app-skills"
+  )
+  db.add(models.App(
+    id=50, name="Skills", slug="skills",
+    manifest_url=_canonical_identity_key(_SKILLS_MAIN_MANIFEST, "skills"),
+  ))
+  db.commit()
+
+  install_mock = AsyncMock(return_value=_install_result())
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  urls = [c.kwargs["manifest_url"] for c in install_mock.await_args_list]
+  assert BOOTSTRAP_SKILLS_MANIFEST_URL not in urls  # skills already present
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_honors_skills_tombstone_at_other_ref(db, monkeypatch):
+  """F-1: an owner uninstalled skills (a tombstone) at `main`; a commit-pinned
+  bootstrap must still see it and NOT silently reinstall past the uninstall."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.install import _canonical_identity_key
+
+  db.add(models.App(
+    id=51, name="Skills", slug="skills",
+    manifest_url=_canonical_identity_key(_SKILLS_MAIN_MANIFEST, "skills"),
+    deleted_at=datetime.now(timezone.utc),
+  ))
+  db.commit()
+
+  install_mock = AsyncMock(return_value=_install_result())
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  urls = [c.kwargs["manifest_url"] for c in install_mock.await_args_list]
+  assert BOOTSTRAP_SKILLS_MANIFEST_URL not in urls  # tombstone respected
