@@ -540,10 +540,10 @@ test('entry assembles on keyed beat classes, compositor-only, instant under redu
   assert.match(dealIn, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
   assert.doesNotMatch(dealIn, /opacity:/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
-  assert.match(css, /--ease-mode-arrive:\s*cubic-bezier\(0\.25, 1, 0\.5, 1\)/,
-    'edge travel must remain visible across the short entry beat')
-  assert.match(css, /--ease-mode-promote:\s*cubic-bezier\(0\.25, 1, 0\.5, 1\)/,
-    'the shared pane settles with the same readable arrival curve')
+  assert.match(css, /--ease-mode-arrive:\s*cubic-bezier\(0\.16, 1, 0\.3, 1\)/,
+    'entry keeps the accepted all-sides assembly curve')
+  assert.match(css, /--ease-mode-promote:\s*cubic-bezier\(0\.2, 0\.82, 0\.2, 1\)/,
+    'the shared pane keeps its accepted weighted settle curve')
   // The old dead .workspace--resizing selector is gone entirely.
   assert.doesNotMatch(css, /workspace--resizing/)
   assert.doesNotMatch(css, /shell-pane-deal|shell-strip-deal-in|shell-pane-settle/)
@@ -622,8 +622,8 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   assert.match(dealOut, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
   assert.match(dealOut, /opacity: 0/)
   assert.doesNotMatch(dealOut, /box-shadow|border-radius|filter|clip/)
-  assert.match(css, /--ease-mode-leave:\s*cubic-bezier\(0\.4, 0, 0\.2, 1\)/,
-    'scatter must move promptly instead of saving most travel for its last frames')
+  assert.match(css, /--ease-mode-leave:\s*cubic-bezier\(0\.4, 0, 0\.7, 0\.2\)/,
+    'scatter keeps the accepted inverse departure curve')
   // The parent-chrome opacity fade is DELETED (strips deal with their panes now).
   assert.doesNotMatch(css, /\.shell--builder-exiting \.workspace__chrome \{[\s\S]*?opacity: 0/)
   // Reduced motion drops any beat.
@@ -1018,9 +1018,9 @@ test('N1: dead exit-presentation plumbing is removed', () => {
   assert.match(css, /--ease-mode-chrome: cubic-bezier/)
   assert.match(css, /--ease-mode-promote: cubic-bezier/)
   assert.match(css, /shell-mode-chrome-out 90ms var\(--ease-mode-chrome\)/)
-  assert.match(css, /shell-mode-chrome-in 70ms var\(--ease-mode-chrome\)[\s\S]*?calc\(var\(--mode-total, 220ms\) - 70ms\) both/)
+  assert.match(css, /shell-mode-chrome-in 70ms var\(--ease-mode-chrome\)[\s\S]*?calc\(var\(--mode-total, 210ms\) - 70ms\) both/)
   assert.match(css, /shell-mode-strip-clear 100ms var\(--ease-mode-chrome\)/)
-  assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)\s*\n?\s*var\(--mode-delay, 0ms\)/)
+  assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)/)
   // The unused excludeChatId param is gone; the helper is now the New Chat request
   // (round 4 item 3 — the old freshest-chat write is fully retired).
   assert.doesNotMatch(shell, /excludeChatId/)

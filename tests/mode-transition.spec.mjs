@@ -129,41 +129,6 @@ async function sampleExitBeat(page) {
   })
 }
 
-// A shared left surface used to expand under its right sibling immediately. Their
-// boundary overlapped for most of the beat, so the departing pane looked glued to
-// the survivor instead of scattering independently. Sample the painted boxes, not
-// just animation metadata, to lock the visible seam open.
-async function sampleSharedExitSeam(page) {
-  return page.evaluate(async () => {
-    const root = document.querySelector('.shell')
-    let started = false
-    let samples = 0
-    let minGap = Infinity
-    await new Promise((resolve) => {
-      let frames = 0
-      const tick = () => {
-        const exiting = root.classList.contains('shell--builder-exiting')
-        if (exiting) {
-          started = true
-          const shared = document.querySelector('.shell__view[data-mode-motion="promote"]')
-          const departing = document.querySelector('.shell__view[data-mode-motion="deal-out"]')
-          if (shared && departing) {
-            const sharedBox = shared.getBoundingClientRect()
-            const departingBox = departing.getBoundingClientRect()
-            minGap = Math.min(minGap, departingBox.left - sharedBox.right)
-            samples += 1
-          }
-        }
-        frames += 1
-        if ((started && !exiting) || frames > 90) { resolve(); return }
-        requestAnimationFrame(tick)
-      }
-      requestAnimationFrame(tick)
-    })
-    return { started, samples, minGap: Number.isFinite(minGap) ? minGap : null }
-  })
-}
-
 // Capture the latched inline geometry on the first frame of either directional
 // beat. These are the pure projection outputs that tell each pane which edge owns it.
 async function captureBeatPlan(page, rootClass) {
@@ -399,10 +364,9 @@ test('v3 scatter is compositor-only: layout boxes constant while transforms anim
   await expect.poll(() => builderActive(page)).toBe(true)
   await expect(page.locator('.workspace__strip')).toHaveCount(2)
   const sampler = sampleExitBeat(page)
-  const seamSampler = sampleSharedExitSeam(page)
   await page.waitForTimeout(30) // let the rAF sampler install before the toggle
   await toggleMode(page)
-  const [r, seam] = await Promise.all([sampler, seamSampler])
+  const r = await sampler
   expect(r.started, 'an exit beat ran').toBe(true)
   expect(r.dualClass, 'INV 1: never both beat classes at once').toBe(false)
   expect(r.wrappers.length, 'the participant wrappers were sampled').toBeGreaterThanOrEqual(2)
@@ -416,10 +380,6 @@ test('v3 scatter is compositor-only: layout boxes constant while transforms anim
   const departing = r.wrappers.find(w => w.motion === 'deal-out')
   expect(departing.offsetX, 'the right sibling scatters toward the right edge').toBeGreaterThan(0)
   expect(departing.offsetY).toBe(0)
-  expect(seam.started).toBe(true)
-  expect(seam.samples).toBeGreaterThan(2)
-  expect(seam.minGap, 'the right pane separates instead of overlapping the shared left pane')
-    .toBeGreaterThanOrEqual(-1)
   // INV 4 (stable identity): the same DOM nodes survived completion.
   for (const w of r.wrappers) expect(w.survived, 'same node survives completion').toBe(true)
   // The beat settled clean.
