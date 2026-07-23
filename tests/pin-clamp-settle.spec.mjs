@@ -44,6 +44,7 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     () => !!(document.querySelector('.chat__empty-wrap')
           || document.querySelector('.chat__scroll')
           || document.querySelector('.chat__form')),
+    undefined,
     { timeout: 10000 })
 }
 
@@ -98,9 +99,17 @@ async function newChat(page) {
     const btn = document.querySelector('[aria-expanded]')
     if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
   })
-  await page.waitForFunction(() => !!document.querySelector('.drawer--open'), { timeout: 3000 })
+  await page.waitForFunction(
+    () => !!document.querySelector('.drawer--open'),
+    undefined,
+    { timeout: 3000 },
+  )
   await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
-  await page.waitForFunction(() => !document.querySelector('.drawer--open'), { timeout: 3000 })
+  await page.waitForFunction(
+    () => !document.querySelector('.drawer--open'),
+    undefined,
+    { timeout: 3000 },
+  )
 }
 
 async function sendMessage(page, text) {
@@ -140,7 +149,7 @@ async function gestureToBottom(page) {
     const id = localStorage.getItem('moebius_active_chat')
     const modes = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')
     return !!id && modes[id]?.kind === 'FOLLOW_BOTTOM'
-  }, { timeout: 3000 })
+  }, undefined, { timeout: 3000 })
   // Let the 250ms gesture window close before the next send. Otherwise the
   // send's programmatic pin-scroll fires inside the window and the hook's
   // gesture-gated onScroll misreads it as a user gesture, flipping the
@@ -149,7 +158,11 @@ async function gestureToBottom(page) {
 }
 
 async function waitStreamDone(page) {
-  await page.waitForFunction(() => !document.querySelector('.chat__stop'), { timeout: 10000 })
+  await page.waitForFunction(
+    () => !document.querySelector('.chat__stop'),
+    undefined,
+    { timeout: 10000 },
+  )
   await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
 }
 
@@ -168,6 +181,28 @@ async function measure(page) {
       userMsgCount: users.length,
     }
   })
+}
+
+async function waitForLastUserPinned(page) {
+  await page.waitForFunction(() => {
+    const scroll = document.querySelector('.chat__scroll')
+    const users = document.querySelectorAll('.chat__msg--user')
+    const last = users[users.length - 1]
+    if (!scroll || !last) return false
+    const top = last.getBoundingClientRect().top - scroll.getBoundingClientRect().top
+    return top >= -2 && top <= 10
+  }, undefined, { timeout: 5000 })
+}
+
+async function waitForFollowBottom(page) {
+  await page.waitForFunction(() => {
+    const scroll = document.querySelector('.chat__scroll')
+    if (!scroll || scroll.dataset.scrollMode !== 'FOLLOW_BOTTOM') return false
+    const spacerH = document.querySelector('.spacer-dynamic')?.offsetHeight || 0
+    const contentGap =
+      scroll.scrollHeight - spacerH - scroll.scrollTop - scroll.clientHeight
+    return Math.abs(contentGap) <= 4
+  }, undefined, { timeout: 5000 })
 }
 
 async function measureStreamingGeometry(page) {
@@ -271,14 +306,20 @@ test('Keyboard close cannot retire a pin before a short stream settles', async (
   // makes the pin look away from the PHYSICAL bottom while the keyboard is
   // open; that temporary geometry must not be mistaken for reader intent.
   await page.setViewportSize({ width: 426, height: 560 })
+  // Chromium dispatches the resize after setViewportSize resolves. Wait for
+  // FOLLOW_BOTTOM to apply the new geometry before Enter snapshots whether
+  // this send is eligible to pin.
+  await waitForFollowBottom(page)
   await sendMessage(page, 'Second deep message')
   await expect(page.locator('.chat__cursor')).toBeVisible({ timeout: 5000 })
 
+  await waitForLastUserPinned(page)
   const pinnedWithKeyboard = await measure(page)
   expect(pinnedWithKeyboard.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
   expect(pinnedWithKeyboard.lastUserVisualTop).toBeLessThanOrEqual(10)
 
   await page.setViewportSize({ width: 426, height: 860 })
+  await waitForLastUserPinned(page)
   const pinnedAfterKeyboardClose = await measure(page)
   expect(pinnedAfterKeyboardClose.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
   expect(pinnedAfterKeyboardClose.lastUserVisualTop).toBeLessThanOrEqual(10)
@@ -317,7 +358,7 @@ test('A live pin holds while spacer remains, then follows only after it is fille
   // token-count heuristic involved.
   await page.waitForFunction(() => (
     (document.querySelector('.spacer-dynamic')?.offsetHeight ?? 999) <= 1
-  ), { timeout: 10000 })
+  ), undefined, { timeout: 10000 })
   await expect(page.getByText(/TAIL_MARKER/)).toBeVisible({ timeout: 10000 })
   await page.waitForFunction(() => {
     const s = document.querySelector('.chat__scroll')
@@ -325,7 +366,7 @@ test('A live pin holds while spacer remains, then follows only after it is fille
     if (!s) return false
     const gap = s.scrollHeight - spacerH - s.scrollTop - s.clientHeight
     return Math.abs(gap) <= 4
-  }, { timeout: 10000 })
+  }, undefined, { timeout: 10000 })
   const following = await measureStreamingGeometry(page)
   expect(following.spacerH).toBeLessThanOrEqual(1)
   expect(following.scrollTop).toBeGreaterThan(early.scrollTop)
@@ -347,7 +388,7 @@ test('Reader gesture owns scroll and spacer geometry while a reply is streaming'
 
   await page.waitForFunction(() => (
     (document.querySelector('.spacer-dynamic')?.offsetHeight ?? 999) <= 1
-  ), { timeout: 10000 })
+  ), undefined, { timeout: 10000 })
   const before = await measureStreamingGeometry(page)
   expect(before.spacerH).toBeLessThanOrEqual(1)
 

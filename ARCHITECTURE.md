@@ -370,7 +370,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
 | Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); new platform seeds go in `backend/scripts/seed-skills/` + a `SEED_VERSION` bump in `init_skills.py`; the index (`skills-index.md`) is generated — never hand-edit it |
-| Change a built-in core app (Memory / Reflection) | The catalog repo (`mobius-os/app-<slug>`) is the source of truth — `core-apps/` is a committed snapshot, never hand-edited. Bump the pinned commit in `core-apps/SOURCES`, run `scripts/sync-core-apps.sh`, commit the diff; CI (`scripts/check-core-apps-sync.sh`) fails on drift. The snapshot is baked to `/app/core-apps` (Dockerfile) and installed at boot by `backend/scripts/install-core-apps.sh` (which prefers `/data/platform/core-apps` when the platform clone exists, falling back to the baked `/app/core-apps` floor) |
+| Change a bootstrap app (Store / Memory / Reflection) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
 ## In-product agent context — three layers
@@ -427,17 +427,12 @@ stamp `entrypoint.sh` writes at boot), `platform_sha`, `platform_dirty`,
 (it also hard-blocks deploying a checkout strictly BEHIND
 `origin/main`).
 
-**Built-in apps (Memory, Reflection)** come from the tracked top-level
-`core-apps/<slug>/` trees — committed SNAPSHOTS of their catalog repos
-(`mobius-os/app-*`), pinned by commit in `core-apps/SOURCES`, baked to
-`/app/core-apps` (Dockerfile), and registered/re-synced at boot by
-`backend/scripts/install-core-apps.sh` (which prefers `/data/platform/core-apps`
-when the platform clone exists, else the baked `/app/core-apps` floor;
-backgrounded post-launch by the entrypoint; registration goes through the API
-with the service token). Never edit
-`core-apps/` directly: update the catalog repo, bump `SOURCES`, and run
-`scripts/sync-core-apps.sh`; CI (`scripts/check-core-apps-sync.sh`) fails the
-build on drift.
+**Bootstrap apps (Store, Memory, Reflection)** install from their canonical
+catalog manifests through `backend/app/bootstrap.py` on first boot. Each becomes
+an ordinary owner-editable app under `/data/apps/<slug>` and follows the same
+update and divergence rules as any other catalog app. The bootstrap path also
+migrates rows left by old images whose source still points at the retired
+platform-core tree; no app snapshot is baked into the platform image.
 
 **Recovery and self-heal.** Recovery is deliberately outside the editable
 platform. `recoveryd` is a separate `restart: unless-stopped` container with its
