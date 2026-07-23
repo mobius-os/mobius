@@ -3106,6 +3106,15 @@ async def cleanup_contribution_staging(
   repo = _safe_repo_path(plan.get("repo_path"))
   async with fs_locks.source_dir_lock(str(repo)):
     cleaned = await asyncio.to_thread(_cleanup_terminal_staging_checkout, record)
+  # Terminal cleanup also ends autopilot: the PR merged/closed, so release any
+  # claim and disable the grant (symmetric with the submit-time grant stamp).
+  try:
+    from app import contribution_autopilot as autopilot
+    autopilot.close_out(db, app_id, record_id)
+    await autopilot.mirror_to_ledger(app_id, record_id)
+  except Exception:
+    log.debug("autopilot close_out failed %s/%s", app_id, record_id,
+              exc_info=True)
   return {"cleaned": cleaned}
 
 
