@@ -225,6 +225,36 @@ test('shouldShowOpenAppCta is tied to the built app, not turn completion', () =>
   assert.equal(shouldShowOpenAppCta({ id: 42, name: 'Habits' }), true)
 })
 
+test('opening a preview hides it until the turn settles, then final open hides it', () => {
+  const previewSeen = {
+    id: 42,
+    name: 'Habits',
+    updated_at: 't1',
+    preview_seen_updated_at: 't1',
+    preview_seen_final: false,
+  }
+  assert.equal(shouldShowOpenAppCta(previewSeen, true), false)
+  assert.equal(shouldShowOpenAppCta(previewSeen, false), true)
+  assert.equal(openAppCtaViewModel(previewSeen, true), null)
+  assert.equal(openAppCtaViewModel(previewSeen, false)?.label, 'Open Habits')
+
+  const finalSeen = { ...previewSeen, preview_seen_final: true }
+  assert.equal(shouldShowOpenAppCta(finalSeen, false), false)
+  assert.equal(openAppCtaViewModel(finalSeen, false), null)
+})
+
+test('a newer app build resurfaces after the prior build was opened', () => {
+  const updated = {
+    id: 42,
+    name: 'Habits',
+    updated_at: 't2',
+    preview_seen_updated_at: 't1',
+    preview_seen_final: true,
+  }
+  assert.equal(shouldShowOpenAppCta(updated, true), true)
+  assert.equal(openAppCtaViewModel(updated, true)?.label, 'Open Habits preview')
+})
+
 test('openAppCtaViewModel names the active preview and idle app action', () => {
   assert.equal(openAppCtaViewModel(null, true), null)
   assert.deepEqual(openAppCtaViewModel({ id: 42, name: 'Habits' }, true), {

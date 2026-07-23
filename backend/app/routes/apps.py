@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app import (
-  activity, app_activity, app_git, app_jobs, fs_locks, icon_cache,
+  activity, app_activity, app_git, app_jobs, app_preview, fs_locks, icon_cache,
   legacy_platform_apps,
   models, providers, schemas,
   source_dirs, theme,
@@ -416,6 +416,9 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   db.query(models.AppActivityState).filter(
     models.AppActivityState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
+  db.query(models.AppPreviewState).filter(
+    models.AppPreviewState.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
   db.delete(app)
   db.commit()
   get_system_broadcast().publish(
@@ -702,7 +705,9 @@ async def list_apps(
     )
     .all()
   )
-  return app_activity.annotate_apps(db, apps)
+  return app_preview.annotate_apps(
+    db, app_activity.annotate_apps(db, apps)
+  )
 
 
 @router.get("/schedules", response_model=list[schemas.AppScheduleOut])
@@ -1837,7 +1842,9 @@ def get_app(
 ):
   """Returns a single mini-app by ID (404 for a tombstoned one)."""
   app = live_app_or_404(db, app_id)
-  return app_activity.annotate_apps(db, [app])[0]
+  return app_preview.annotate_apps(
+    db, app_activity.annotate_apps(db, [app])
+  )[0]
 
 
 class AppActivitySeenRequest(BaseModel):
@@ -1858,6 +1865,43 @@ def mark_app_activity_seen(
   """Clear an app's durable activity dot when the owner opens the app."""
   live_app_or_404(db, app_id)
   app_activity.mark_seen(db, app_id, body.activity_version)
+  db.commit()
+  return Response(status_code=204)
+
+
+class AppPreviewSeenRequest(BaseModel):
+  updated_at: datetime
+  final: bool = False
+
+
+@router.post(
+  "/{app_id}/preview/seen",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+def mark_app_preview_seen(
+  app_id: int,
+  body: AppPreviewSeenRequest,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Acknowledge the exact app build opened from its owning chat.
+
+  The client sends the version it rendered, not merely the app id. If a newer
+  compile races this request, the older acknowledgement remains older and the
+  new build's CTA stays visible.
+  """
+  app = live_app_or_404(db, app_id)
+  observed = app_preview.naive_utc(body.updated_at)
+  current = app_preview.naive_utc(app.updated_at)
+  if observed > current:
+    raise HTTPException(
+      status_code=409,
+      detail="Cannot acknowledge a preview newer than the installed app.",
+    )
+  app_preview.mark_seen(
+    db, app_id, observed, seen_as_final=body.final,
+  )
   db.commit()
   return Response(status_code=204)
 

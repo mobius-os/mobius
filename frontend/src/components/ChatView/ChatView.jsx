@@ -3973,7 +3973,7 @@ export default function ChatView({
                     key={app.id}
                     className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
                     aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
-                    onClick={() => onOpenApp?.(app.id)}
+                    onClick={() => onOpenApp?.(app, { final: !turnActive })}
                   >
                     {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
                   </button>

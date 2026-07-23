@@ -674,6 +674,25 @@ class AppActivityState(Base):
   unseen = Column(Boolean, nullable=False, default=True, server_default=true())
 
 
+class AppPreviewState(Base):
+  """Durable acknowledgement of the exact app build opened from its chat CTA.
+
+  This is separate from ``apps`` so acknowledging a preview never advances
+  ``App.updated_at`` — the executable-bundle version the acknowledgement is
+  meant to record. ``seen_as_final`` distinguishes opening a live preview from
+  opening the settled result: finishing the turn may surface the same build one
+  last time even when no final source write was needed.
+  """
+
+  __tablename__ = "app_preview_state"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  seen_updated_at = Column(DateTime, nullable=False)
+  seen_as_final = Column(
+    Boolean, nullable=False, default=False, server_default=false()
+  )
+
+
 class PushSubscription(Base):
   """Browser push subscription for Web Push delivery."""
 

@@ -34,6 +34,7 @@ function PaneChatView({
   markStreamingEnd,
   markVoiceListening,
   refreshApps,
+  acknowledgeAppPreview,
   refreshChats,
   loadTheme,
   navTo,
@@ -69,9 +70,10 @@ function PaneChatView({
   // Open the app the CTA points at into THIS pane (design §5, finding D-ii), so
   // a background chat's "Open app" lands beside it rather than in the globally
   // focused pane.
-  const handleOpenApp = useCallback((appId) => {
-    navTo('canvas', { appId, paneId })
-  }, [navTo, paneId])
+  const handleOpenApp = useCallback((app, { final = false } = {}) => {
+    navTo('canvas', { appId: app.id, paneId })
+    acknowledgeAppPreview?.(app, final)
+  }, [navTo, paneId, acknowledgeAppPreview])
 
   const handleChatMissing = useCallback((missingId) => {
     onChatMissing?.(missingId, chatId)

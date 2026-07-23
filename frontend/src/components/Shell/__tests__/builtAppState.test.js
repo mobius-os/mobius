@@ -1,9 +1,21 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { builtAppsSignature, derivedBuiltApps } from '../builtAppState.js'
+import {
+  acknowledgeAppPreview,
+  builtAppsSignature,
+  derivedBuiltApps,
+  withAppPreviewSeen,
+} from '../builtAppState.js'
 
 const app = (id, name, updated_at, chat_id) => ({ id, name, updated_at, chat_id })
+const derived = (id, name, updated_at) => ({
+  id,
+  name,
+  updated_at,
+  preview_seen_updated_at: null,
+  preview_seen_final: false,
+})
 
 test('built apps are derived from the apps that carry this chat_id', () => {
   const apps = [
@@ -11,7 +23,7 @@ test('built apps are derived from the apps that carry this chat_id', () => {
     app(9, 'Other', '2026-07-12T00:00:00Z', 'chat-b'),
   ]
   assert.deepEqual(derivedBuiltApps(apps, 'chat-a'), [
-    { id: 7, name: 'Habits', updated_at: '2026-07-12T00:00:00Z' },
+    derived(7, 'Habits', '2026-07-12T00:00:00Z'),
   ])
   assert.deepEqual(derivedBuiltApps(apps, 'chat-c'), [])
 })
@@ -22,8 +34,8 @@ test('a chat can own several built apps, oldest updated first', () => {
     app(7, 'Notes', '2026-07-12T01:00:00Z', 'chat-a'),
   ]
   assert.deepEqual(derivedBuiltApps(apps, 'chat-a'), [
-    { id: 7, name: 'Notes', updated_at: '2026-07-12T01:00:00Z' },
-    { id: 8, name: 'Habits', updated_at: '2026-07-12T02:00:00Z' },
+    derived(7, 'Notes', '2026-07-12T01:00:00Z'),
+    derived(8, 'Habits', '2026-07-12T02:00:00Z'),
   ])
 })
 
@@ -85,4 +97,71 @@ test('signature changes when this chat owns a new app or a recompile', () => {
     builtAppsSignature(base, 'chat-a'), builtAppsSignature(recompiled, 'chat-a'))
   assert.notEqual(
     builtAppsSignature(base, 'chat-a'), builtAppsSignature(added, 'chat-a'))
+})
+
+test('signature changes when the current build or final result is acknowledged', () => {
+  const base = [app(7, 'Habits', 't1', 'chat-a')]
+  const previewSeen = [{
+    ...base[0], preview_seen_updated_at: 't1', preview_seen_final: false,
+  }]
+  const finalSeen = [{
+    ...base[0], preview_seen_updated_at: 't1', preview_seen_final: true,
+  }]
+  assert.notEqual(
+    builtAppsSignature(base, 'chat-a'),
+    builtAppsSignature(previewSeen, 'chat-a'),
+  )
+  assert.notEqual(
+    builtAppsSignature(previewSeen, 'chat-a'),
+    builtAppsSignature(finalSeen, 'chat-a'),
+  )
+})
+
+test('withAppPreviewSeen never lets a stale click hide a newer build', () => {
+  const rows = [app(7, 'Habits', 't2', 'chat-a')]
+  assert.equal(withAppPreviewSeen(rows, 7, 't1', true), rows)
+  assert.deepEqual(withAppPreviewSeen(rows, 7, 't2', false), [{
+    ...rows[0],
+    preview_seen_updated_at: 't2',
+    preview_seen_final: false,
+  }])
+})
+
+test('a final acknowledgement promotes the same build monotonically', () => {
+  const previewSeen = [{
+    ...app(7, 'Habits', 't1', 'chat-a'),
+    preview_seen_updated_at: 't1',
+    preview_seen_final: false,
+  }]
+  const finalSeen = withAppPreviewSeen(previewSeen, 7, 't1', true)
+  assert.deepEqual(finalSeen, [{
+    ...previewSeen[0], preview_seen_final: true,
+  }])
+  assert.equal(withAppPreviewSeen(finalSeen, 7, 't1', false), finalSeen)
+})
+
+test('preview acknowledgement deduplicates an exact build phase', async () => {
+  const inFlight = new Set()
+  const clears = []
+  let release
+  let requests = 0
+  const options = {
+    app: app(7, 'Habits', 't1', 'chat-a'),
+    final: false,
+    inFlight,
+    request: () => {
+      requests += 1
+      return new Promise(resolve => { release = resolve })
+    },
+    clearCached: (...args) => clears.push(args),
+    restoreServerTruth: () => assert.fail('success must not restore'),
+  }
+  const first = acknowledgeAppPreview(options)
+  const duplicate = acknowledgeAppPreview(options)
+  assert.equal(await duplicate, false)
+  assert.equal(requests, 1)
+  assert.deepEqual(clears, [[7, 't1', false]])
+  release({ ok: true, status: 204 })
+  assert.equal(await first, true)
+  assert.deepEqual(clears, [[7, 't1', false], [7, 't1', false]])
 })
