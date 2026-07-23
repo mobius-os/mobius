@@ -8,11 +8,11 @@ the other is exactly the bug this consolidates away.
 Every restart routes through one DRAIN-GATED path (design §2.2): live turns are
 never simply killed. The worker first sets the ``draining`` gate (new sends
 queue), interrupts each live turn so it finalizes its partials + a "paused for a
-platform update" note WITHOUT touching the pending queue, then restarts — SIGTERM
-for a graceful exit, with a SIGKILL backstop so a hung shutdown still cycles the
-container. A successfully stopped exact run is marked due for continuation before
-SIGTERM; boot reconcile handles only the fallback markers that could not make that
-transition.
+platform update" note WITHOUT touching the pending queue, then asks the frozen
+entrypoint supervisor to acknowledge the exact restart intent and cycle pid 1.
+A SIGKILL backstop still guarantees recovery if the handshake or shutdown
+wedges. Boot reconcile handles fallback markers and unacknowledged parks
+manually.
 """
 
 from __future__ import annotations
@@ -50,10 +50,10 @@ async def restart_this_worker() -> None:
        ``DRAIN_TIMEOUT``; best-effort — a turn that won't drain, or whose exact
        transition cannot commit, leaves its generic marker for manual boot
        reconciliation.
-    4. SIGTERM uvicorn for a graceful exit. If it drains and exits within the
-       remaining window the backstop never fires (SIGKILL never runs); if it
-       hangs on the open SSE stream, the backstop force-exits and the container
-       cycles, and a fresh worker boots.
+    4. Publish the exact intent + restart sentinel. The frozen root-owned
+       poller acknowledges it in the boot ledger, then SIGTERMs pid 1. If that
+       path wedges, the backstop force-exits the worker without an
+       acknowledgement, so the next boot recovers manually.
 
   Data is safe: the chat writer commits before any response returns, and the
   drain flushes each paused note before SIGTERM, so a hard kill loses nothing a
@@ -75,9 +75,17 @@ async def restart_this_worker() -> None:
   timer.daemon = True
   timer.start()
 
+  from app import restart_ledger
+
+  boot_id = restart_ledger.current_boot_id()
+  restart_nonce = restart_ledger.new_nonce()
+  parked_runs: list[dict[str, str]] = []
   try:
-    await asyncio.wait_for(
-      chat.drain_all_for_restart(timeout=chat.DRAIN_TIMEOUT),
+    parked_runs = await asyncio.wait_for(
+      chat.drain_all_for_restart(
+        timeout=chat.DRAIN_TIMEOUT,
+        restart_nonce=restart_nonce,
+      ),
       timeout=chat.DRAIN_TIMEOUT,
     )
   except Exception:
@@ -86,4 +94,25 @@ async def restart_this_worker() -> None:
     # remain due; any marker left set falls back to manual boot reconciliation.
     log.warning("drain-for-restart failed; restarting anyway", exc_info=True)
 
-  os.kill(pid, signal.SIGTERM)
+  try:
+    if not boot_id:
+      raise RuntimeError("entrypoint boot id is unavailable")
+    # Publishing the sentinel is the only normal shutdown request. The frozen
+    # root-owned entrypoint poller validates the matching intent, records its
+    # exact runs in the one-shot boot ledger, and then terminates pid 1.
+    restart_ledger.request_restart(
+      boot_id=boot_id,
+      nonce=restart_nonce,
+      runs=parked_runs,
+    )
+  except Exception:
+    # Restart reliability and continuation authorization are independent.
+    # If the external handshake cannot be published, restart directly; the
+    # next boot has no root-owned acknowledgement and resolves every parked run
+    # to manual recovery.
+    log.warning(
+      "planned-restart handshake failed; restarting without automatic "
+      "continuation",
+      exc_info=True,
+    )
+    os.kill(pid, signal.SIGTERM)

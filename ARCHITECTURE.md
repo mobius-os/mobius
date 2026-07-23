@@ -689,20 +689,32 @@ pins. Reservation lifetime and pin decisions are independent.
 
 ### Automatic continuation after limits and planned restarts
 
-Automatic continuation reuses one durable transition. Provider-limit exits mark
-their exact `ChatRun` as `parked` until the parsed reset time; a planned restart
-that successfully stops a live handle marks that exact run `parked` with
-`park_reason="restart"` and a due time of now, before SIGTERM. The next process
-runs the same due-park sweep immediately. There is no restart ledger and startup
-never infers intent from transcript text.
+Automatic continuation reuses one durable run transition but has two separate
+consent and cause boundaries. Provider-limit exits mark their exact `ChatRun` as
+`parked` until the parsed reset time. A planned restart creates a fresh nonce,
+stops and finalizes each exact live run, and parks it due-now with that nonce.
+The platform process then publishes an intent and restart request; it does not
+terminate itself on the normal path.
+
+The frozen root-owned entrypoint poller validates and consumes the request,
+records the exact `(chat_id, run_id, nonce)` set in `/data/.restart-ledger`, and
+only then terminates pid 1. At the very start of the next entrypoint invocation,
+the ledger binds that accepted intent to the new `MOBIUS_BOOT_ID`. The app only
+continues a restart park when this root-owned acknowledgement, the exact DB run
+and nonce, and the separately stored restart policy all match. An intent that
+was merely written before a crash/OOM, an acknowledgement skipped by a failed
+handshake, or an acknowledgement left across another boot authorizes nothing.
+Transcript text is presentation, never restart-cause evidence.
 
 | Event | Durable result | Boot/sweep result |
 |-------|----------------|-------------------|
 | Provider usage/rate limit | exact run `parked` until reset | notify; continue if the chat policy is on |
-| Planned restart, handle stopped and exact transition committed | exact run `parked`, reason `restart`, due now | continue immediately if eligible |
-| Crash, stuck handle, missing exact token, or failed park commit | generic `running` evidence remains | reconcile to a manual resumable interruption |
+| Accepted planned restart, exact park + ledger tuple match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if separate restart consent is on |
+| Crash/OOM before supervisor acknowledgement | unacknowledged park or generic `running` evidence | resolve/reconcile to manual resumable interruption |
+| Repeated/unrelated boot before claim | acknowledgement is retired by boot-id mismatch | manual resumable interruption |
 | Policy off, unanswered question, app-owned run, or app-queued work | due park resolves without an automatic send | notify/manual owner action |
 | Owner sends, switches provider, deletes the chat, or a newer run wins | old park is superseded by the existing latest-run fence | no stale continuation |
+| Restart task creation fails after promotion | exact promoted rows roll back; restart park becomes `interrupted` | manual recovery; one-shot cause is not retried |
 
 Eligibility is rechecked under the per-chat transition lock immediately before
 promotion, and the global idle gate permits only one automatic turn at a time.
@@ -713,10 +725,12 @@ handoff, chat-note summarization, and redacted chat logs treat it as a product
 marker rather than owner speech.
 
 The sweep is cheap: one indexed due-row query immediately at boot, on
-`chat_run_finished`, and on a 60-second fallback. It does not create per-chat
-workers or poll at a short interval. The shared chat-local policy retains its
-legacy wire name `auto_resume_on_limit` for compatibility, while product copy
-states that it covers both limits and restarts.
+`chat_run_finished`, and on a 60-second fallback, plus one bounded local ledger
+read when due rows exist. It does not create per-chat workers or poll at a short
+interval. `auto_resume_on_limit` keeps its legacy initial default of on.
+`auto_resume_on_restart` is a separate chat-local preference and migrates
+existing chats and owners to off; enabling it is explicit consent and only
+seeds future chats without rewriting existing conversations.
 
 ### Tool output rendering
 

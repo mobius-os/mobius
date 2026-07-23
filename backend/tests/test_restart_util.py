@@ -10,6 +10,7 @@ import os
 import signal
 
 from app import chat as chat_mod
+from app import restart_ledger
 import app.restart_util as ru
 
 
@@ -27,16 +28,24 @@ class _FakeTimer:
     self.started = True
 
 
-def test_restart_drains_then_sigterms_and_arms_force_kill(monkeypatch):
+def test_restart_drains_then_requests_supervisor_and_arms_force_kill(monkeypatch):
   _FakeTimer.instances = []
   calls = []
   drained = {"n": 0}
   monkeypatch.setattr(ru.os, "kill", lambda pid, sig: calls.append((pid, sig)))
   monkeypatch.setattr(ru.threading, "Timer", _FakeTimer)
+  requests = []
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "new_nonce", lambda: "nonce-12345678")
+  monkeypatch.setattr(
+    restart_ledger, "request_restart",
+    lambda **kwargs: requests.append(kwargs),
+  )
 
-  async def _fake_drain(timeout=0):
+  async def _fake_drain(timeout=0, *, restart_nonce=""):
+    assert restart_nonce == "nonce-12345678"
     drained["n"] += 1
-    return []
+    return [{"chat_id": "chat-12345678", "run_token": "run-12345678"}]
 
   monkeypatch.setattr(chat_mod, "drain_all_for_restart", _fake_drain)
   # Start from a clean gate so the assertion below is meaningful.
@@ -47,8 +56,13 @@ def test_restart_drains_then_sigterms_and_arms_force_kill(monkeypatch):
   # The drain ran, and the gate was set so mid-restart sends queue.
   assert drained["n"] == 1
   assert chat_mod.draining is True
-  # The graceful ask: SIGTERM to our own worker, AFTER the drain.
-  assert calls == [(os.getpid(), signal.SIGTERM)]
+  # Only the frozen root-owned poller may acknowledge and terminate pid 1.
+  assert calls == []
+  assert requests == [{
+    "boot_id": "boot-12345678",
+    "nonce": "nonce-12345678",
+    "runs": [{"chat_id": "chat-12345678", "run_token": "run-12345678"}],
+  }]
   # A single force-kill fallback, armed as a daemon and started, so a hung
   # graceful shutdown can't leave the container "Up" with a dead worker. Its
   # window covers the drain budget + the post-SIGTERM grace floor.
@@ -63,19 +77,55 @@ def test_restart_drains_then_sigterms_and_arms_force_kill(monkeypatch):
   assert calls[-1] == (os.getpid(), signal.SIGKILL)
 
 
-def test_restart_sigterms_even_when_drain_fails(monkeypatch):
-  """A drain failure must never block the restart — SIGTERM + backstop still fire."""
+def test_restart_request_survives_drain_failure(monkeypatch):
   _FakeTimer.instances = []
   calls = []
   monkeypatch.setattr(ru.os, "kill", lambda pid, sig: calls.append((pid, sig)))
   monkeypatch.setattr(ru.threading, "Timer", _FakeTimer)
+  requests = []
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "new_nonce", lambda: "nonce-12345678")
+  monkeypatch.setattr(
+    restart_ledger, "request_restart",
+    lambda **kwargs: requests.append(kwargs),
+  )
 
-  async def _boom(timeout=0):
+  async def _boom(timeout=0, *, restart_nonce=""):
+    del timeout, restart_nonce
     raise RuntimeError("drain exploded")
 
   monkeypatch.setattr(chat_mod, "drain_all_for_restart", _boom)
 
   asyncio.run(ru.restart_this_worker())
 
-  assert calls == [(os.getpid(), signal.SIGTERM)]
+  assert calls == []
+  assert requests == [{
+    "boot_id": "boot-12345678",
+    "nonce": "nonce-12345678",
+    "runs": [],
+  }]
   assert len(_FakeTimer.instances) == 1
+
+
+def test_restart_handshake_failure_restarts_without_authorization(monkeypatch):
+  _FakeTimer.instances = []
+  calls = []
+  monkeypatch.setattr(ru.os, "kill", lambda pid, sig: calls.append((pid, sig)))
+  monkeypatch.setattr(ru.threading, "Timer", _FakeTimer)
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "new_nonce", lambda: "nonce-12345678")
+
+  async def _fake_drain(timeout=0, *, restart_nonce=""):
+    del timeout, restart_nonce
+    return [{"chat_id": "chat-12345678", "run_token": "run-12345678"}]
+
+  def _request_fails(**kwargs):
+    del kwargs
+    raise OSError("volume unavailable")
+
+  monkeypatch.setattr(chat_mod, "drain_all_for_restart", _fake_drain)
+  monkeypatch.setattr(restart_ledger, "request_restart", _request_fails)
+
+  asyncio.run(ru.restart_this_worker())
+
+  assert calls == [(os.getpid(), signal.SIGTERM)]

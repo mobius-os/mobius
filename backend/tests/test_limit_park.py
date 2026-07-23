@@ -72,7 +72,7 @@ def _drain_writer():
 
 def _seed_chat(
   chat_id: str, *, pending=None, run_status=None, deleted=False,
-  auto_resume=False, messages=None,
+  auto_resume=False, auto_restart=False, messages=None,
 ):
   db = SessionLocal()
   try:
@@ -88,6 +88,7 @@ def _seed_chat(
       session_id="sess",
       provider="claude",
       auto_resume_on_limit=auto_resume,
+      auto_resume_on_restart=auto_restart,
       run_status=run_status,
       run_started_at=(
         datetime.now(UTC).replace(tzinfo=None) if run_status else None
@@ -103,7 +104,7 @@ def _seed_chat(
 
 def _seed_run(chat_id: str, token: str, *, status="running",
               parked_until=None, park_reason=None, started_offset=0,
-              initiated_by_app_id=None):
+              initiated_by_app_id=None, restart_nonce=None):
   db = SessionLocal()
   try:
     db.add(models.ChatRun(
@@ -118,6 +119,7 @@ def _seed_run(chat_id: str, token: str, *, status="running",
       ),
       parked_until=parked_until,
       park_reason=park_reason,
+      restart_nonce=restart_nonce,
     ))
     db.commit()
   finally:
@@ -134,6 +136,7 @@ def _run_row(token: str):
       "status": run.status,
       "parked_until": run.parked_until,
       "park_reason": run.park_reason,
+      "restart_nonce": run.restart_nonce,
       "ended_at": run.ended_at,
     }
   finally:
@@ -290,6 +293,25 @@ def test_park_run_parks_row_and_clears_marker():
   assert row["ended_at"] is not None
   # The per-chat marker is cleared: the turn is over, the chat is not busy.
   assert _chat_row(cid)["run_status"] is None
+
+
+def test_restart_park_carries_one_shot_intent_nonce():
+  cid = "park-restart-nonce"
+  token = "rt-park-restart-nonce"
+  _seed_chat(cid, run_status="running")
+  _seed_run(cid, token)
+
+  get_writer().submit(ParkRun(
+    chat_id=cid,
+    run_token=token,
+    parked_until=datetime(2026, 7, 11, 1, 40),
+    park_reason="restart",
+    restart_nonce="nonce-park-1234",
+  )).result(timeout=5)
+
+  row = _run_row(token)
+  assert row["status"] == "parked"
+  assert row["restart_nonce"] == "nonce-park-1234"
 
 
 def test_park_run_missing_exact_row_keeps_generic_marker():
@@ -505,15 +527,16 @@ def test_park_run_strict_tokenless_falls_back_to_marker_clear():
 
 def _due_park(
   cid: str, token: str, *, pending=None, deleted=False, auto_resume=False,
-  park_reason=None, messages=None,
+  auto_restart=False, park_reason=None, messages=None, restart_nonce=None,
 ):
   _seed_chat(
     cid, pending=pending, deleted=deleted, auto_resume=auto_resume,
-    messages=messages,
+    auto_restart=auto_restart, messages=messages,
   )
   _seed_run(cid, token, status="parked",
             parked_until=datetime.now(UTC).replace(tzinfo=None)
-            - timedelta(minutes=1), park_reason=park_reason)
+            - timedelta(minutes=1), park_reason=park_reason,
+            restart_nonce=restart_nonce)
 
 
 def _run_sweep():
@@ -677,7 +700,15 @@ def test_restart_park_auto_continues_with_product_marker(
   )
   cid = "restart-auto"
   token = f"rt-{cid}"
-  _due_park(cid, token, auto_resume=True, park_reason="restart")
+  nonce = "restart-nonce-auto"
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_runs",
+    lambda: {token: (cid, nonce)},
+  )
+  _due_park(
+    cid, token, auto_resume=True, auto_restart=True,
+    park_reason="restart", restart_nonce=nonce,
+  )
 
   try:
     assert _run_sweep() == [cid]
@@ -711,11 +742,19 @@ def test_restart_park_waiting_on_question_stays_manual(
 
   monkeypatch.setattr(chat_mod, "_auto_resume_chat", _fake_resume)
   cid = "restart-question"
+  token = f"rt-{cid}"
+  nonce = "restart-nonce-question"
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_runs",
+    lambda: {token: (cid, nonce)},
+  )
   _due_park(
     cid,
-    f"rt-{cid}",
+    token,
     auto_resume=True,
+    auto_restart=True,
     park_reason="restart",
+    restart_nonce=nonce,
     messages=[
       {"role": "user", "content": "help me choose", "ts": 1},
       {
@@ -752,12 +791,129 @@ def test_restart_park_policy_off_resolves_to_manual_interruption(
     lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
   )
   cid = "restart-policy-off"
-  _due_park(cid, f"rt-{cid}", auto_resume=False, park_reason="restart")
+  token = f"rt-{cid}"
+  nonce = "restart-nonce-policy"
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_runs",
+    lambda: {token: (cid, nonce)},
+  )
+  # Provider-limit policy is deliberately ON. Separate restart consent remains
+  # off, proving the legacy preference cannot broaden into restart replay.
+  _due_park(
+    cid, token, auto_resume=True, auto_restart=False,
+    park_reason="restart", restart_nonce=nonce,
+  )
 
   assert _run_sweep() == [cid]
   assert _run_row(f"rt-{cid}")["status"] == "interrupted"
   assert notifications[0]["title"] == "Möbius restarted"
   assert "limit" not in notifications[0]["body"].lower()
+
+
+def test_restart_park_without_current_boot_ack_stays_manual(
+  owner_token, monkeypatch,
+):
+  """OOM after DB park but before supervisor acceptance cannot auto-replay."""
+  del owner_token
+  notifications = []
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+  )
+  monkeypatch.setattr("app.restart_ledger.authorized_runs", lambda: {})
+  cid = "restart-no-ack"
+  token = f"rt-{cid}"
+  _due_park(
+    cid, token, auto_restart=True, park_reason="restart",
+    restart_nonce="unaccepted-nonce-1234",
+  )
+
+  assert _run_sweep() == [cid]
+  assert _run_row(token)["status"] == "interrupted"
+  assert _run_row(token)["restart_nonce"] is None
+  assert notifications[0]["title"] == "Möbius restarted"
+
+
+def test_restart_spawn_failure_retires_one_shot_authorization(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  cid = "restart-spawn-failure"
+  token = f"rt-{cid}"
+  nonce = "restart-nonce-spawn"
+  monkeypatch.setattr(
+    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+  )
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_runs",
+    lambda: {token: (cid, nonce)},
+  )
+  _due_park(
+    cid, token, auto_restart=True, park_reason="restart",
+    restart_nonce=nonce,
+  )
+  original_create_broadcast = chat_mod.create_broadcast
+
+  def _spawn_fails(chat_id):
+    del chat_id
+    raise RuntimeError("spawn failed")
+
+  monkeypatch.setattr(chat_mod, "create_broadcast", _spawn_fails)
+  try:
+    assert _run_sweep() == []
+  finally:
+    monkeypatch.setattr(
+      chat_mod, "create_broadcast", original_create_broadcast,
+    )
+
+  row = _run_row(token)
+  assert row["status"] == "interrupted"
+  assert row["restart_nonce"] is None
+  state = _chat_row(cid)
+  assert state["run_status"] is None
+  assert state["pending"][-1]["cid"] == f"restart-resume-{token}"
+  assert _run_sweep() == []
+  db = SessionLocal()
+  try:
+    assert chat_mod._restart_manual_hold_for_chat(db, cid) is True
+    assert asyncio.run(chat_mod.sweep_idle_pending_chats(db)) == []
+  finally:
+    db.close()
+
+
+def test_unacknowledged_restart_pending_cannot_bypass_via_idle_sweep(
+  monkeypatch,
+):
+  cid = "restart-idle-bypass"
+  token = f"rt-{cid}"
+  _seed_chat(
+    cid,
+    pending=[{
+      "role": "user",
+      "content": "continue",
+      "ts": 1,
+      "cid": f"restart-resume-{token}",
+      "kind": "auto_continuation",
+      "continuation_reason": "restart",
+    }],
+  )
+  _seed_run(
+    cid, token, status="interrupted", park_reason="restart",
+    restart_nonce=None,
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  db = SessionLocal()
+  try:
+    assert asyncio.run(chat_mod.sweep_idle_pending_chats(db)) == []
+  finally:
+    db.close()
+  assert scheduled == []
+  assert _chat_row(cid)["pending"]
 
 
 def test_sweep_auto_resume_defers_while_any_turn_is_live(

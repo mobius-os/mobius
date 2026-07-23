@@ -1003,6 +1003,34 @@ def _parked_until_for_chat(
   return None
 
 
+def _restart_manual_hold_for_chat(db: Session, chat_id: str) -> bool:
+  """Whether the latest run retired to manual restart recovery.
+
+  ResolvePark and a one-shot task-creation rollback deliberately leave restart
+  history as ``interrupted``. Pending owner rows must remain intact, but the
+  generic stale-pending sweeper must not turn that manual outcome back into an
+  unauthenticated automatic continuation. A new owner send/Resume inserts a
+  newer run and naturally releases this latest-run hold.
+  """
+  try:
+    run = (
+      db.query(models.ChatRun.status, models.ChatRun.park_reason)
+      .filter(models.ChatRun.chat_id == chat_id)
+      .order_by(
+        models.ChatRun.started_at.desc(),
+        models.ChatRun.id.desc(),
+      )
+      .first()
+    )
+  except Exception:
+    return True  # Fail closed: a DB probe failure cannot authorize replay.
+  return bool(
+    run is not None
+    and run[0] == "interrupted"
+    and run[1] == "restart"
+  )
+
+
 def _is_future_park(
   parked_until: datetime | None,
   now: datetime | None = None,
@@ -1722,6 +1750,8 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     # distinguish "crashed drain" from "parked on purpose".
     if _parked_until_for_chat(db, chat.id) is not None:
       continue
+    if _restart_manual_hold_for_chat(db, chat.id):
+      continue
     claimed = False
     try:
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
@@ -1733,6 +1763,7 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
               chat.run_status is not None
               or not _pending_head_is_stale(pending, now_ms)
               or _parked_until_for_chat(db, chat.id) is not None
+              or _restart_manual_hold_for_chat(db, chat.id)
               or not mark_starting(chat.id)
             ):
               continue
@@ -1876,7 +1907,11 @@ async def sweep_stalled_live_runs(db: Session) -> list[str]:
   return interrupted
 
 
-async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
+async def drain_all_for_restart(
+  timeout: float = DRAIN_TIMEOUT,
+  *,
+  restart_nonce: str = "",
+) -> list[dict[str, str]]:
   """Interrupt every live turn for a graceful restart, preserving queues.
 
   This is the DrainForRestart path from design §2.2 — distinct from
@@ -1912,11 +1947,12 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
   stops run serially at up to 2s each, so with many concurrent live turns the
   tail may not drain before the backstop — accepted for the single-owner
   reality (a handful of turns at most); parallelize the stops before this
-  assumption breaks. Returns the chat ids it interrupted cleanly.
+  assumption breaks. Returns only the exact chat/run pairs that finalized and
+  parked successfully; the restart supervisor binds precisely that set.
   """
   begin_drain()
   log = _get_logger()
-  drained: list[str] = []
+  parked_runs: list[dict[str, str]] = []
   # `resumable` rides the event LIVE (events.process_event carries the
   # whitelisted extras onto the persisted block), so a drained turn's manual
   # Resume fallback renders immediately. The exact ChatRun transition below,
@@ -1966,17 +2002,36 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
       if not stopped:
         all_interrupted = False
     if all_interrupted:
-      drained.append(chat_id)
       run_token = sink.run_token if sink is not None else None
-      if run_token:
+      # Own the terminal snapshot fence here instead of assuming the runner's
+      # teardown won the scheduling race. This force-completes running tool
+      # blocks/thinking sidecars before ParkRun clears the generic boot-reconcile
+      # marker. A failed Finalize leaves that marker intact for manual recovery.
+      if sink is not None:
+        try:
+          await sink.finalize()
+        except Exception:
+          log.warning(
+            "drain-for-restart terminal snapshot failed; leaving manual "
+            "recovery chat_id=%s run_token=%s",
+            chat_id, run_token, exc_info=True,
+          )
+          continue
+      if run_token and restart_nonce:
         try:
           parked = await _park_run_strict(
             chat_id,
             run_token,
             datetime.now(UTC).replace(tzinfo=None),
             "restart",
+            restart_nonce=restart_nonce,
           )
-          if not parked:
+          if parked:
+            parked_runs.append({
+              "chat_id": chat_id,
+              "run_token": run_token,
+            })
+          else:
             log.warning(
               "drain-for-restart could not park exact run; leaving manual "
               "recovery chat_id=%s run_token=%s",
@@ -1995,9 +2050,9 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
           )
       else:
         log.warning(
-          "drain-for-restart has no exact run token; leaving manual recovery "
-          "chat_id=%s",
-          chat_id,
+          "drain-for-restart has no exact run token/nonce; leaving manual "
+          "recovery chat_id=%s run_token=%s",
+          chat_id, run_token,
         )
   # Flush the writer so every paused note (the sink's fire-and-forget
   # PersistError above) is durably committed before the worker restarts.
@@ -2006,12 +2061,13 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
     await _await_ack(ack, timeout=min(timeout, 10.0))
   except Exception:
     log.warning("drain-for-restart writer flush failed", exc_info=True)
-  if drained:
+  if parked_runs:
     log.info(
-      "drain-for-restart interrupted %d turn(s): %s",
-      len(drained), ", ".join(drained),
+      "drain-for-restart parked %d exact turn(s): %s",
+      len(parked_runs),
+      ", ".join(item["chat_id"] for item in parked_runs),
     )
-  return drained
+  return parked_runs
 
 
 # One-shot notify copy for a limit park whose reset time has arrived
@@ -2129,10 +2185,26 @@ async def _auto_resume_chat(
               .first()
             )
             latest_id = latest[0] if latest is not None else None
+            restart_authorized = True
+            if park is not None and park.park_reason == "restart":
+              from app.restart_ledger import authorized_runs
+              restart_authorized = (
+                authorized_runs().get(park.id)
+                == (chat_id, park.restart_nonce)
+              )
+            policy_enabled = bool(
+              chat is not None
+              and (
+                chat.auto_resume_on_restart
+                if park is not None and park.park_reason == "restart"
+                else chat.auto_resume_on_limit
+              )
+            )
             if (
               chat is None
               or chat.deleted_at is not None
-              or not chat.auto_resume_on_limit
+              or not policy_enabled
+              or not restart_authorized
               or _has_unanswered_question(chat)
               or park is None
               or park.status != "resume_pending"
@@ -2207,6 +2279,7 @@ async def _auto_resume_chat(
                 promoted_pending=list(
                   next_user.get("_promoted_pending") or []
                 ),
+                retry_park=resume_reason != "restart",
               )
             ))
             if rolled_back:
@@ -2268,6 +2341,16 @@ async def sweep_reset_parks(db: Session) -> list[str]:
     return resolved
   if not due:
     return resolved
+  try:
+    from app.restart_ledger import authorized_runs
+    restart_authorizations = authorized_runs()
+  except Exception:
+    log.warning(
+      "sweep_reset_parks: restart ledger read failed; restart parks will "
+      "fall back to manual recovery",
+      exc_info=True,
+    )
+    restart_authorizations = {}
 
   def notify_due(chat_id: str, run: models.ChatRun) -> None:
     try:
@@ -2299,13 +2382,27 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       isinstance(msg, dict) and msg.get("_initiated_by_app_id") is not None
       for msg in pending
     )
+    restart_park = run.park_reason == "restart"
+    policy_enabled = bool(
+      chat is not None
+      and (
+        chat.auto_resume_on_restart
+        if restart_park else chat.auto_resume_on_limit
+      )
+    )
+    restart_authorized = (
+      not restart_park
+      or restart_authorizations.get(run.id)
+      == (run.chat_id, run.restart_nonce)
+    )
     return bool(
       chat is not None
       and chat.deleted_at is None
       and run.initiated_by_app_id is None
       and not app_work_queued
       and not _has_unanswered_question(chat)
-      and chat.auto_resume_on_limit
+      and policy_enabled
+      and restart_authorized
     )
 
   auto_resume_started = False
@@ -3256,6 +3353,8 @@ async def _park_run_strict(
   run_token: str,
   parked_until: datetime,
   park_reason: str,
+  *,
+  restart_nonce: str = "",
 ) -> bool:
   """Park the run via the actor (commit-before-return); raises on failure.
 
@@ -3277,6 +3376,7 @@ async def _park_run_strict(
       run_token=run_token,
       parked_until=parked_until,
       park_reason=park_reason,
+      restart_nonce=restart_nonce,
     )
   )
   return bool(await _await_ack(ack))

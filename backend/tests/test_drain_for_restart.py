@@ -95,6 +95,7 @@ def _run(chat_id: str):
       "status": row.status,
       "parked_until": row.parked_until,
       "park_reason": row.park_reason,
+      "restart_nonce": row.restart_nonce,
     }
   finally:
     db.close()
@@ -115,7 +116,9 @@ def _live_turn(chat_id: str, *, pending=None, partial="partial answer"):
 
 
 def _run_drain():
-  return asyncio.run(chat_mod.drain_all_for_restart())
+  return asyncio.run(chat_mod.drain_all_for_restart(
+    restart_nonce="restart-nonce-drain",
+  ))
 
 
 # -- (b) the drain persists the paused note + preserves partials --------------
@@ -126,7 +129,10 @@ def test_drain_persists_paused_note_and_preserves_partials():
   drained = _run_drain()
   _drain_writer()
 
-  assert drained == ["drain-note-1"]
+  assert drained == [{
+    "chat_id": "drain-note-1",
+    "run_token": "rt-drain-note-1",
+  }]
   assert handle.stop_calls == 1
   state = _chat("drain-note-1")
   blocks = state["messages"][-1]["blocks"]
@@ -145,6 +151,32 @@ def test_drain_persists_paused_note_and_preserves_partials():
   assert _run("drain-note-1")["status"] == "parked"
   assert _run("drain-note-1")["park_reason"] == "restart"
   assert _run("drain-note-1")["parked_until"] is not None
+  assert _run("drain-note-1")["restart_nonce"] == "restart-nonce-drain"
+
+
+def test_drain_finalizes_running_tool_before_clearing_reconcile_marker():
+  cid = "drain-running-tool"
+  _, sink, _ = _live_turn(cid, partial="")
+  sink.publish({
+    "type": "tool_start",
+    "tool": "Bash",
+    "input": "long command",
+    "tool_use_id": "tool-drain-1",
+  })
+
+  assert _run_drain() == [{
+    "chat_id": cid,
+    "run_token": f"rt-{cid}",
+  }]
+  _drain_writer()
+
+  state = _chat(cid)
+  tool = next(
+    block for block in state["messages"][-1]["blocks"]
+    if block.get("type") == "tool"
+  )
+  assert tool["status"] == "done"
+  assert state["run_status"] is None
 
 
 # -- (a) DrainForRestart preserves the queue; stop_chat_for clears it ---------
@@ -210,7 +242,7 @@ def test_drain_park_failure_leaves_generic_marker_for_manual_recovery(
     raise RuntimeError("writer unavailable")
 
   monkeypatch.setattr(chat_mod, "_park_run_strict", _fail_park)
-  assert _run_drain() == [cid]
+  assert _run_drain() == []
   _drain_writer()
 
   assert _chat(cid)["run_status"] == "running"
@@ -226,7 +258,7 @@ def test_drain_without_exact_run_token_stays_manual():
   handle = _Handle(cid)
   registry.register(handle)
 
-  assert _run_drain() == [cid]
+  assert _run_drain() == []
   _drain_writer()
 
   assert _chat(cid)["run_status"] == "running"

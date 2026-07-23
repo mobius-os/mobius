@@ -56,7 +56,7 @@ from app.routes import (
   published_router,
 )
 
-_BOOT_ID = f"{os.getpid()}-{time.time_ns()}"
+_BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
 
 
 def _init_db():

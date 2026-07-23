@@ -579,6 +579,13 @@ def run_migrations(eng) -> None:
         "ALTER TABLE chats ADD COLUMN auto_resume_on_limit BOOLEAN "
         "NOT NULL DEFAULT TRUE"
       )
+    if "auto_resume_on_restart" not in chats_cols:
+      # Separate consent boundary. Every existing chat is explicitly off even
+      # when its legacy provider-limit preference is on.
+      _add.append(
+        "ALTER TABLE chats ADD COLUMN auto_resume_on_restart BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      )
     if "pinned_at" not in chats_cols:
       # NOT NULL = pinned. Drawer sort key (see routes/chats.py).
       _add.append("ALTER TABLE chats ADD COLUMN pinned_at DATETIME NULL")
@@ -634,6 +641,11 @@ def run_migrations(eng) -> None:
         "ALTER TABLE owner ADD COLUMN auto_resume_on_limit_default BOOLEAN "
         "NOT NULL DEFAULT TRUE"
       )
+    if "auto_resume_on_restart_default" not in owner_cols:
+      _add_owner.append(
+        "ALTER TABLE owner ADD COLUMN auto_resume_on_restart_default BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      )
     if "model_prefs_json" not in owner_cols:
       # Nullable JSON blob holding the owner's model-picker
       # preferences (e.g. hidden model IDs). Null = "show
@@ -681,6 +693,10 @@ def run_migrations(eng) -> None:
     if "park_reason" not in chat_runs_cols:
       _add_runs.append(
         "ALTER TABLE chat_runs ADD COLUMN park_reason VARCHAR(32) NULL"
+      )
+    if "restart_nonce" not in chat_runs_cols:
+      _add_runs.append(
+        "ALTER TABLE chat_runs ADD COLUMN restart_nonce VARCHAR(128) NULL"
       )
     if _add_runs:
       with eng.connect() as conn:

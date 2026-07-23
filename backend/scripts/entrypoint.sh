@@ -15,6 +15,17 @@ mkdir -p /data/db /data/apps /data/app-secrets /data/compiled /data/shared /data
 # discovered managed schedule has been converged through the common runner.
 rm -f /data/run/app-cron-supervision-ready
 
+# Root-owned planned-restart ledger. Bind an externally accepted intent to this
+# exact boot BEFORE any fallible platform/bootstrap work, so a boot that dies
+# early cannot pass the authorization on to a later unrelated boot. The helper
+# is frozen under /app/recovery and imports no platform code.
+MOBIUS_BOOT_ID="${MOBIUS_BOOT_ID:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')}"
+export MOBIUS_BOOT_ID
+if ! DATA_DIR=/data python3 -P /app/recovery/restart_ledger.py \
+  begin-boot "$MOBIUS_BOOT_ID"; then
+  echo "WARNING: planned-restart ledger could not begin this boot; automatic restart continuation is disabled." >&2
+fi
+
 # /data/agent-browser-profiles holds PER-CHAT Chrome user-data dirs
 # (chat-<chat_id>/...) for agent-browser. The path is set per-chat by
 # `app.chat._build_subprocess_env` so the agent's repeated screenshots
@@ -120,6 +131,14 @@ if ! chown -R mobius:mobius /data 2>/dev/null; then
   echo "WARNING: it needs to be able to create files in /data, not just traverse." >&2
   chmod 1777 /data 2>/dev/null || true
   chmod -R 777 /data/db /data/apps /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/run 2>/dev/null || true
+fi
+
+# The compatibility chown above necessarily traverses the root-owned restart
+# ledger. Re-harden it before any mobius process starts. Failure is fail-closed:
+# the app rejects a non-root-owned acknowledgement and offers manual Resume.
+if ! DATA_DIR=/data python3 -P /app/recovery/restart_ledger.py \
+  harden "$MOBIUS_BOOT_ID"; then
+  echo "WARNING: planned-restart ledger could not be re-hardened; automatic restart continuation is disabled." >&2
 fi
 
 # App credentials live outside ordinary app storage and the outer /data git
@@ -238,7 +257,16 @@ _start_platform_restart_poller() {
   (
     while true; do
       if [ -f /data/.platform-restart-requested ]; then
-        rm -f /data/.platform-restart-requested 2>/dev/null || true
+        # The frozen helper authenticates a matching one-shot chat intent when
+        # present, or consumes the legacy Recovery restore sentinel without
+        # granting chat continuation. Either way, only this external poller
+        # acknowledges the cause before terminating pid 1.
+        if ! DATA_DIR=/data python3 -P /app/recovery/restart_ledger.py \
+          accept "$MOBIUS_BOOT_ID"; then
+          rm -f /data/.platform-restart-requested \
+            /data/.restart-continuation-intent.json 2>/dev/null || true
+          echo "O1: restart ledger acceptance failed — restarting without automatic continuation." >&2
+        fi
         echo "O1: platform-restart sentinel seen — sending SIGTERM to pid 1 (container restart)." >&2
         kill -TERM 1 2>/dev/null || true
         # pid1 is now draining + exiting; give it a moment, then stop polling.

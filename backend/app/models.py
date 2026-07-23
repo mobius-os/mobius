@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text, event, true,
+  String, Text, event, false, true,
 )
 
 from app.database import Base
@@ -40,6 +40,12 @@ class Owner(Base):
   # next chat without rewriting any existing conversation.
   auto_resume_on_limit_default = Column(
     Boolean, nullable=False, default=True, server_default=true()
+  )
+  # Separately consented planned-restart policy for newly created chats.
+  # Existing owners migrate to false: consenting to provider-limit recovery
+  # never silently opts them into replay after a process restart.
+  auto_resume_on_restart_default = Column(
+    Boolean, nullable=False, default=False, server_default=false()
   )
   # Per-owner model-picker preferences. Shape:
   #   {"hidden_ids": ["claude-haiku-4-5-20251001", ...]}
@@ -124,13 +130,15 @@ class Chat(Base):
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
-  # Per-chat policy for automatic recovery after provider limits and planned
-  # server restarts. The legacy column/API name stays compatible. Kept out of
-  # agent_settings_json because that blob is snapshotted/mirrored as SDK
-  # runtime configuration; mixing this policy into it can skip first-send
-  # model snapshots or overwrite the owner's global model defaults.
+  # Per-chat policy for automatic recovery after provider limits.
   auto_resume_on_limit = Column(
     Boolean, nullable=False, default=True, server_default=true()
+  )
+  # Planned restart continuation is materially broader than provider-limit
+  # recovery and therefore has separate, explicit consent. Existing and fresh
+  # chats start off until the owner enables it in that chat.
+  auto_resume_on_restart = Column(
+    Boolean, nullable=False, default=False, server_default=false()
   )
   # Vestigial: the named-agent feature was removed; column retained
   # nullable to avoid a prod migration. Nothing reads or writes it.
@@ -251,6 +259,10 @@ class ChatRun(Base):
   # non-parked run and on rows created before this column existed.
   parked_until = Column(DateTime, nullable=True, default=None)
   park_reason = Column(String(32), nullable=True, default=None)
+  # One-shot platform-authored intent identity for a planned restart. It only
+  # authorizes replay when the frozen supervisor's root-owned boot ledger binds
+  # the same nonce + exact run id to the current boot.
+  restart_nonce = Column(String(128), nullable=True, default=None)
 
 
 class ChatSessionLink(Base):

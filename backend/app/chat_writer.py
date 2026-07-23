@@ -538,6 +538,7 @@ class ParkRun(_Command):
   run_token: str = ""
   parked_until: object = None
   park_reason: str = ""
+  restart_nonce: str = ""
 
 
 @dataclass
@@ -587,6 +588,9 @@ class RollbackAutoResume(_Command):
   run_token: str = ""
   promoted_run_token: str = ""
   promoted_pending: list[dict] = field(default_factory=list)
+  # Provider-limit retries remain eligible after a task-creation failure.
+  # A restart authorization is one-shot, so that path resolves to manual.
+  retry_park: bool = True
 
 
 @dataclass
@@ -2129,6 +2133,7 @@ class ChatWriterActor:
     ).all():
       run.status = "interrupted"
       run.ended_at = datetime.now(UTC)
+      run.restart_nonce = None
     if not _commit_or_rollback(db):
       raise _PersistFailed("SwitchProviderWithCompaction did not persist")
     return {
@@ -2394,6 +2399,7 @@ class ChatWriterActor:
     for run in q.all():
       run.status = status
       run.ended_at = datetime.now(UTC)
+      run.restart_nonce = None
       changed = True
     return changed
 
@@ -2508,6 +2514,9 @@ class ChatWriterActor:
         run.status = "parked"
         run.parked_until = cmd.parked_until
         run.park_reason = (cmd.park_reason or None)
+        run.restart_nonce = (
+          cmd.restart_nonce if cmd.park_reason == "restart" else None
+        )
         parked = True
       else:
         run.status = "completed"
@@ -2542,6 +2551,7 @@ class ChatWriterActor:
       # A newer run already superseded this park. Retire the stale signal but
       # report False so the sweep neither notifies nor claims it resolved.
       run.status = "completed"
+      run.restart_nonce = None
       if run.ended_at is None:
         run.ended_at = datetime.now(UTC)
       if not _commit_or_rollback(db):
@@ -2553,6 +2563,8 @@ class ChatWriterActor:
     run.status = (
       "interrupted" if run.park_reason == "restart" else "parked_notified"
     )
+    if run.park_reason == "restart":
+      run.restart_nonce = None
     if run.ended_at is None:
       run.ended_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -2570,6 +2582,7 @@ class ChatWriterActor:
       return {"active": False, "notify": False}
     if not self._run_is_latest(db, run):
       run.status = "completed"
+      run.restart_nonce = None
       if run.ended_at is None:
         run.ended_at = datetime.now(UTC)
       if not _commit_or_rollback(db):
@@ -2639,7 +2652,11 @@ class ChatWriterActor:
     chat.run_status = None
     chat.run_started_at = None
     db.delete(promoted_run)
-    park.status = "resume_pending"
+    if cmd.retry_park:
+      park.status = "resume_pending"
+    else:
+      park.status = "interrupted"
+      park.restart_nonce = None
     if not _commit_or_rollback(db):
       raise _PersistFailed("RollbackAutoResume did not persist")
     self._run_token_owner.pop(cmd.chat_id, None)
