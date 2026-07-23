@@ -268,15 +268,6 @@ class _ChatEventSink:
     self.assistant_blocks: list = []
     self.session_id: str | None = None
     self.cost_usd: float | None = None
-    # Weekly-allowance meter inputs (agent_budget). The runner emits
-    # `rate_limit` events carrying utilization (0..100 percent of the weekly
-    # allowance) + resets_at, and a terminal `usage` with token counts. The
-    # sink records the first + last utilization it sees and the last usage so
-    # _complete_turn can accrue this turn's autopilot spend from a single point.
-    self.util_first: float | None = None
-    self.util_last: float | None = None
-    self.util_resets_at: str | None = None
-    self.last_usage: dict | None = None
     self._last_save = 0.0
     # The last error message published via publish() during this turn, or None.
     # Used by finalize(): a turn that errors before accumulating any content
@@ -534,27 +525,6 @@ class _ChatEventSink:
     # done: capture cost.
     if event_type == "done":
       self.cost_usd = event.get("cost_usd")
-
-    # Weekly-allowance meter inputs. `rate_limit` carries the running
-    # utilization the window ledger accrues deltas from; `usage` carries the
-    # token counts the fallback (no-utilization) path bills against.
-    if event_type == "rate_limit":
-      util = event.get("utilization")
-      if isinstance(util, (int, float)):
-        if self.util_first is None:
-          self.util_first = float(util)
-        self.util_last = float(util)
-      resets = event.get("resets_at")
-      if resets:
-        self.util_resets_at = str(resets)
-    elif event_type == "usage":
-      self.last_usage = {
-        k: event.get(k)
-        for k in (
-          "input_tokens", "output_tokens",
-          "cache_creation_input_tokens", "cache_read_input_tokens",
-        )
-      }
 
     # Route the due save to the actor AFTER broadcast. An `error` is a
     # non-coalescing PersistError (it must not be collapsed away by a
@@ -3549,46 +3519,6 @@ def _limit_exit(
   }
 
 
-def _accrue_agent_budget(
-  *,
-  chat_id: str,
-  provider: str | None,
-  run_token: str,
-  util_first,
-  util_last,
-  resets_at,
-  usage: dict | None,
-  cost_usd,
-) -> None:
-  """Best-effort weekly-allowance accrual on a throwaway session.
-
-  A dedicated session keeps this fully decoupled from the caller's terminal
-  transaction; any failure is logged inside agent_budget and swallowed here.
-  """
-  try:
-    from app import agent_budget
-    from app.config import get_settings
-    from app.database import SessionLocal
-
-    db = SessionLocal()
-    try:
-      agent_budget.accrue_run(
-        db,
-        chat_id=chat_id,
-        provider=provider,
-        run_token=run_token,
-        util_first=util_first,
-        util_last=util_last,
-        resets_at=resets_at,
-        usage=usage,
-        cost_usd=cost_usd,
-      )
-    finally:
-      db.close()
-  except Exception:
-    _get_logger().debug("agent-budget accrual skipped", exc_info=True)
-
-
 async def _complete_turn(
   *,
   bc,
@@ -3730,23 +3660,6 @@ async def _complete_turn(
     if stop_handoff_successor
     else "failed" if sink._last_error or lost_reply
     else "completed"
-  )
-
-  # Weekly-allowance metering (agent_budget): record this run's cost, refresh
-  # the provider utilization observation, and — for autopilot chats — accrue the
-  # run's spend against the window ledger. Runs on its OWN session so it can
-  # never disturb the terminal transaction below, and is fully best-effort:
-  # metering must not fail a turn. Placed before finalize so a crashed round
-  # (finalize raising) has still been counted.
-  _accrue_agent_budget(
-    chat_id=chat_id,
-    provider=provider_id,
-    run_token=sink.run_token or "",
-    util_first=sink.util_first,
-    util_last=sink.util_last,
-    resets_at=sink.util_resets_at,
-    usage=sink.last_usage,
-    cost_usd=cost_usd if cost_usd is not None else sink.cost_usd,
   )
 
   try:

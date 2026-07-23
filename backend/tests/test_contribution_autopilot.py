@@ -9,7 +9,6 @@ Two layers:
 """
 
 import json
-import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -213,14 +212,13 @@ def _open_pr_record(record_id="rec1"):
   }
 
 
-def test_status_advertises_autopilot_and_budget(client, owner_token):
+def test_status_advertises_autopilot(client, owner_token):
   app_id, app_token = _app_with_github_access(client, owner_token)
   r = client.get("/api/github/status",
                  headers={"Authorization": f"Bearer {app_token}"})
   assert r.status_code == 200, r.text
   body = r.json()
   assert body["autopilot_available"] is True
-  assert "autopilot_budget" in body
 
 
 def test_forged_ledger_block_is_ignored_no_db_row(client, owner_token):
@@ -277,30 +275,6 @@ def test_pause_resume_requires_grant(client, owner_token):
   r = client.post(f"/api/github/contributions/{app_id}/rec1/autopilot",
                   json={"enabled": True}, headers=headers)
   assert r.status_code == 200 and r.json()["enabled"] is True
-
-
-def test_respond_defers_when_budget_exhausted(client, owner_token):
-  app_id, app_token = _app_with_github_access(client, owner_token)
-  _write_record(app_id, "rec1", _open_pr_record())
-  # Grant + a budget setting of 0% (disables spend) → /respond defers.
-  os.makedirs(os.path.join(get_settings().data_dir, "shared"), exist_ok=True)
-  with open(os.path.join(get_settings().data_dir, "shared",
-                         "agent-settings.json"), "w") as handle:
-    json.dump({"autopilot_budget": {"percent": 0}}, handle)
-  s = SessionLocal()
-  try:
-    autopilot.stamp_grant(s, app_id, "rec1", head_sha="a" * 40)
-  finally:
-    s.close()
-  r = client.post(
-    f"/api/github/contributions/{app_id}/rec1/respond",
-    json={"attention": {"key": "changes_requested:1"}},
-    headers={"Authorization": f"Bearer {app_token}"},
-  )
-  assert r.status_code == 200
-  assert r.json()["status"] == "deferred"
-  os.remove(os.path.join(get_settings().data_dir, "shared",
-                         "agent-settings.json"))
 
 
 def test_respond_requires_attention_key(client, owner_token):

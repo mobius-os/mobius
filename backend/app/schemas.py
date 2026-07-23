@@ -554,15 +554,6 @@ class BackgroundAgentsUpdate(BaseModel):
   fallback: BackgroundAgentChoice | None = None
 
 
-class AutopilotBudgetUpdate(BaseModel):
-  """Share of the weekly model allowance the Contribute autopilot may spend."""
-
-  # 0 disables autopilot spend; capped 0..100 server-side.
-  percent: float | None = None
-  # Fallback cap for providers with no utilization signal (API-key setups).
-  weekly_tokens: int | None = None
-
-
 class SettingsUpdate(BaseModel):
   """Owner-level settings updates."""
 
@@ -580,8 +571,6 @@ class SettingsUpdate(BaseModel):
   # to the shared agent-settings.json rather than the frozen Owner
   # model. None means "leave unchanged".
   skills_enabled: bool | None = None
-  # Contribute autopilot weekly-allowance cap. None leaves it unchanged.
-  autopilot_budget: AutopilotBudgetUpdate | None = None
 
   @field_validator("provider")
   @classmethod

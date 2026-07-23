@@ -795,8 +795,8 @@ class ContributionAutopilot(Base):
   followup_chat_id = Column(
     String(64), ForeignKey("chats.id"), nullable=True, default=None
   )
-  # Also the budget-attribution registry: a run counts as autopilot spend iff
-  # its chat_id equals some row's followup_chat_id.
+  # Rounds cap: the primary bound on how much work one contribution can drive.
+  # Exhausting it escalates to the owner rather than continuing silently.
   rounds_used = Column(Integer, nullable=False, default=0)
   max_rounds = Column(Integer, nullable=False, default=5)
   # Consecutive non-productive rounds (stale/failed); 2 in a row auto-escalates.
@@ -810,47 +810,3 @@ class ContributionAutopilot(Base):
   rounds_json = Column(JSON, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: now_naive_utc())
   updated_at = Column(DateTime, default=lambda: now_naive_utc())
-
-
-class AgentBudgetWindow(Base):
-  """Per-allowance-window ledger of background-autopilot model spend.
-
-  Enforces the owner's cap (default 10% of the weekly allowance) on how much
-  autopilot may consume. Keyed by (provider, window_key): on Claude subscription
-  plans window_key is the SDK-reported ``resets_at`` and spend is measured in
-  ``points`` (utilization-percent deltas observed across a run); on API-key
-  setups with no utilization signal window_key is a trailing-7-day bucket and
-  spend is measured in ``tokens``. Written by the runner-finalization accrual
-  hook (crashed rounds still count) and read by ``/respond`` before it claims.
-
-  ``create_all`` builds this table on the next boot — no ALTER migration needed.
-  """
-
-  __tablename__ = "agent_budget_windows"
-
-  provider = Column(String(32), primary_key=True)
-  # resets_at ISO (subscription) or "trailing:<YYYY-Wnn>" bucket (token path).
-  window_key = Column(String(64), primary_key=True)
-  points_spent = Column(Float, nullable=False, default=0.0)
-  tokens_spent = Column(Integer, nullable=False, default=0)
-  runs = Column(Integer, nullable=False, default=0)
-  updated_at = Column(DateTime, default=lambda: now_naive_utc())
-
-
-class AgentBudgetObservation(Base):
-  """Last-observed weekly-allowance utilization per provider.
-
-  One row per provider, overwritten as the SDK reports RateLimitEvents. Feeds
-  two things: the per-run utilization delta the window ledger accrues, and the
-  independent 90% HEADROOM ceiling in ``/respond`` (background work never eats
-  the user's final tokens, regardless of autopilot's own share). Reads live
-  utilization, not the meter, so a lost accrual write cannot defeat it.
-  """
-
-  __tablename__ = "agent_budget_observations"
-
-  provider = Column(String(32), primary_key=True)
-  # 0..100 percent of the weekly allowance consumed, per the SDK.
-  utilization = Column(Float, nullable=True, default=None)
-  resets_at = Column(String(64), nullable=True, default=None)
-  observed_at = Column(DateTime, default=lambda: now_naive_utc())

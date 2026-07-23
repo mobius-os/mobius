@@ -3678,15 +3678,14 @@ async def autopilot_respond(
   """Claim a record for one background response round and spawn the agent.
 
   Caller: job.sh (service/app token) or the app's "Retry now". Order — dedupe on
-  attention key + cursor, budget gate (a denied round costs nothing), DB claim,
-  ensure the dedicated chat, spawn the round. Every non-spawn outcome is a
-  normal state job.sh re-tries next pass, so events queue rather than drop.
+  attention key + cursor, DB claim, ensure the dedicated chat, spawn the round.
+  Every non-spawn outcome is a normal state job.sh re-tries next pass, so events
+  queue rather than drop.
   """
-  from app import agent_budget, contribution_autopilot as autopilot
+  from app import contribution_autopilot as autopilot
 
   _validate_submit_app(app_id, principal, db)
   owner_id = principal.owner.id
-  provider_for_budget = principal.owner.provider or "claude"
 
   attention = body.attention if isinstance(body.attention, dict) else {}
   attention_key = str(attention.get("key") or "").strip()
@@ -3698,15 +3697,6 @@ async def autopilot_respond(
   if row is None or not row.enabled:
     # No grant / paused — the app should notify the owner the classic way.
     return {"status": "not_granted"}
-
-  # Budget gate BEFORE claiming.
-  budget = agent_budget.may_spend(db, get_settings().data_dir, provider_for_budget)
-  if not budget["allowed"]:
-    return {
-      "status": "deferred",
-      "reason": budget["reason"],
-      "resume_at": budget["resume_at"],
-    }
 
   verdict = autopilot.claim_for_round(
     db, app_id, record_id, attention_key=attention_key, event_at=event_at,

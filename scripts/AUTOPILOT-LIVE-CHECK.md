@@ -13,7 +13,7 @@ time.
 > (e.g. `/data/cli-auth/claude`), `job.sh` → `/respond` spawns a **real agent**
 > that drives the round — so this script *observes* that agent (it does not, and
 > must not, mechanically drive `/update` itself, which would race the agent).
-> Each run therefore also spends some agent budget. On an instance with **no**
+> Each run therefore also spends some model usage. On an instance with **no**
 > provider authed, the round can't complete on its own; use the automated
 > `backend/tests/test_autopilot_loop.py` for the stubbed, token-free path.
 
@@ -86,20 +86,19 @@ fork your own repo).
 
 ## Status: validated
 
-This harness had its first successful live run on 2026-07-23 against
-`mobius-scratch2/autopilot-upstream`: job.sh detected the review, a real agent
-reworded the file, pushed a second commit (with the co-author trailer), replied
-on the PR, completed the round, and the re-run did not re-trigger. The merge path
-fired the 🎉 notification and closed out the DB row. Budget accrued (~79k tokens,
-`chat_runs.cost_usd` recorded).
+Validated live on 2026-07-23 against `mobius-scratch2/autopilot-upstream` (two
+green runs): job.sh detected the review, a real agent reworded the file, pushed a
+second commit (with the co-author trailer), replied on the PR, completed the
+round, and the re-run did not re-trigger. The merge path fired the 🎉
+notification and closed out the DB row.
 
 ## Troubleshooting
 
 - **Round claims but never completes** — no provider is authed, so the spawned
   turn can't run. Authenticate a provider, or use the automated
   `test_autopilot_loop.py` for the token-free path.
-- **`/respond`/job.sh defers** — the weekly-allowance budget is exhausted or
-  `autopilot_budget.percent` is 0. Raise it in Settings and re-run.
+- **`/respond` returns `escalated`** — the record used up its five rounds (or hit
+  repeated failures). Resume it from the app's autopilot panel and re-run.
 - **Submit 409 "no longer waiting for approval"** — the ledger record wasn't
   written raw; the storage PUT body must be the record JSON itself (no envelope).
 - **git "dubious ownership"** — the staging worktree must be owned by `mobius`

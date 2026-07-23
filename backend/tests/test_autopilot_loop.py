@@ -1,7 +1,7 @@
 """Stage-1 integration test: the whole autopilot loop through real HTTP.
 
-Unit coverage lives in test_contribution_autopilot.py (state machine + trust) and
-test_agent_budget.py (meter). This drives the loop END TO END across the real
+Unit coverage lives in test_contribution_autopilot.py (state machine + trust).
+This drives the loop END TO END across the real
 endpoints — submit stamps the grant, /respond claims + creates the dedicated chat
 + writes the ledger mirror, /update runs the submit push path, /reply, /complete
 advances the cursor, and a second /respond proves the self-re-trigger guard.
@@ -309,37 +309,6 @@ def test_injection_diff_outside_allowlist_is_rejected(
     headers=headers,
   )
   assert r.status_code == 422
-
-
-def test_budget_exhaustion_defers_respond(client, owner_token, monkeypatch):
-  """percent=0 disables spend → /respond defers rather than claiming."""
-  _write_token(login="octocat")
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
-  headers = {"Authorization": f"Bearer {app_token}"}
-  record_id = "rec-budget"
-  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
-  (repo / ".git").mkdir(parents=True)
-  rec = _record(record_id, repo)
-  rec["status"] = "open"
-  _write_contribution(app_id, record_id, rec, _DIFF1)
-  db = SessionLocal()
-  try:
-    autopilot.stamp_grant(db, app_id, record_id, head_sha=_HEAD1)
-  finally:
-    db.close()
-  shared = Path(get_settings().data_dir) / "shared"
-  shared.mkdir(parents=True, exist_ok=True)
-  (shared / "agent-settings.json").write_text(
-    json.dumps({"autopilot_budget": {"percent": 0}})
-  )
-  r = client.post(
-    f"/api/github/contributions/{app_id}/{record_id}/respond",
-    json={"attention": {"key": "changes_requested:1",
-                        "event_at": "2026-07-10T00:00:00Z"}},
-    headers=headers,
-  )
-  assert r.status_code == 200
-  assert r.json()["status"] == "deferred"
 
 
 def test_stale_lease_then_second_failure_escalates(

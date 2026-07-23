@@ -176,7 +176,7 @@ for _ in $(seq 1 10); do
   [ "$ST" = "responding" ] && { SPAWNED=1; break; }
 done
 [ -n "$SPAWNED" ] && ok "job.sh detected the review → claimed a round (state=responding)" \
-  || die "job.sh did not claim a round (check the provider is authed + budget)"
+  || die "job.sh did not claim a round (check the provider is authed)"
 
 # ── 5. Observe the real agent complete the round ─────────────────────────────
 say "5. Watch the review-followup agent fix + push + reply + complete"
