@@ -12,40 +12,16 @@ Möbius is AI-maximalist: light up the good path with design, examples, and inst
 
 ## Write surface
 
-`/data/platform/` **is the whole Möbius repo** — a real git clone of `mobius-os/mobius`, and what actually runs. You edit it in place; **nothing in it is frozen.** Backend, frontend, scripts, your own skills (`skill/`), tests — all yours to change.
+`/data/platform/` is the whole running Möbius repository and is editable in place. Before changing platform source, **Read `/data/shared/skills/recovery.md`** for activation, testing, commit, update, and recovery procedure; before any public GitHub action, read `contributing.md`.
 
-| Path (under `/data/platform/`) | Editable? | How it takes effect |
-|---|---|---|
-| `frontend/src/`, `frontend/` | yes | Frontend source. Your saved edits **rebuild automatically** (a watcher runs `vite build` into the served `dist/`; reload the page — no manual rebuild). One exception: source that arrives from a git/platform update fires no edit event, so after such an update kick the watcher by touching a changed file under `frontend/src`, then restart if prompted. The updater does not auto-detect this by design — run the step explicitly. |
-| `backend/app/` | yes | Backend Python. Edits take effect on the **next server restart** — when your edit is finished and correct, tell the partner to restart (Settings → Server → Restart), or use `/recover` if the shell is broken. |
-| `backend/scripts/`, `tests/`, and everything else tracked | yes | Scripts (take effect next time they run), tests, other source — plain source you own. |
-| `skill/core.md` (this constitution) | yes | Read from this live platform checkout and cached for the server process. Edits take effect after a **server restart**; `/app/skill/core.md` is only the degraded-boot fallback when the checkout is unavailable. Your next-turn-editable how-to skills are under `/data/shared/skills/` — see the Skills section. |
-| `backend/requirements.txt`, `frontend/package.json`, `Dockerfile` | yes, but | Dependency/image changes need a **container rebuild** to take effect, not just a restart — a heavier operation we avoid where we can. Prefer a code change; reach for these only for a genuinely needed dependency. |
-| `/data/apps/<slug>/`, `/data/shared/` | yes | Mini-app source + shared data. |
-| `/data/cli-auth/`, `/data/.secret-key` | NO | Credentials, signing key. |
+Keep these boundaries always-on:
 
-**Recovery is separate and always up — there is no "frozen island" inside the platform to work around.** Recovery is its own `recoveryd` container at `/recover`, independent of your code. That separation is exactly what lets the whole platform repo be yours: break the running platform and recovery brings it back (see `recovery.md`). The only immutable pieces are the boot + recovery infrastructure baked into the *image* (the entrypoint, the recoveryd bundle) — you never need to touch them.
-
-**Your edits are contributable.** `/data/platform` is a real clone with `origin = mobius-os/mobius`, so `git diff origin/main` is exactly your changes. A generally-useful fix can become a pull request upstream that improves Möbius for everyone. GitHub credentials exist only when the owner connects GitHub from the Contribute app; with them you may prepare private Contribute records for review, and the owner's **Send PR for review** click publishes the reviewed PR under the owner's identity. Nothing goes public without a yes (`contributing.md`). Updates flow the other way too: the partner's Settings → Möbius row checks for and applies upstream updates (a git rebase of `/data/platform` onto `origin/main`, then "Restart to finish"); if an update conflicts with local edits, Settings shows the conflict and the partner chooses **Resolve in chat** before a "Resolve platform update conflict" chat starts with the git steps.
-
-**Chat persistence is serialized — don't bypass it.** `chat.py`, `chat_writer.py`, `chats_stream.py`, `chat_queue.py`, `broadcast.py` are editable, but ALL writes to `Chat.messages` / `Chat.pending_messages` MUST go through the `chat_writer.py` single-writer actor's domain commands — never assign those JSON columns directly. SQLite WAL serializes commits but NOT app-level JSON read-modify-write, so a direct write reintroduces a lost-update race. Read the `chat_writer.py` docstring before touching this layer. (Backend-edit lifecycle: `recovery.md`.)
-
-**Commit deliberately — and into the platform repo.** After substantial changes, commit *inside* the platform repo so undo is clean and your diff stays readable: `git -C /data/platform add <the files you changed> && git -C /data/platform commit -m 'one-line what and why'`. Your shell cwd is `/data`, whose own safety-net repo **gitignores `platform/`** — so a bare `git commit` or `pm-commit` from there commits nothing of a platform edit (it exits 0 having staged nothing, a false "undo is safe" signal). `pm-commit` is for `/data/shared` memory/skills, not platform source. **Stage the source you changed — never `git add -A` that sweeps in build output.** The generated `frontend/dist/`, `.vite-cache/`, `__pycache__`, and compiled bundles are gitignored on purpose; committing them pollutes history and muddies your upstream diff.
-
----
-
-## Recovery URLs
-
-If you break a live copy, the partner recovers via `/recover` or a fresh you in the recovery chat at `/recover/chat` (its own minimal stack: separate auth, runner, per-chat storage — stays reachable when production chat code is broken).
-
-| Situation | URL | Action |
-|---|---|---|
-| Backend edit, main shell healthy | Settings -> Server | Click "Restart" (then "Restart now") |
-| Backend edit, main shell broken | `/recover/chat` | Click "Restart server" |
-| Agent stuck or unable to fix | `/recover` | Click "Restore platform" (or "Reset to baked floor" as the last resort) |
-| Lost ability to log in to main shell | `/recover` | Log in (owner password), then options above |
-
-The recovery chat uses the **same owner password** as the main shell, behind a separate login form. Restart takes ~5–15s; the page auto-reloads when healthy. Full backend-fix loop is in `recovery.md`.
+- Frontend source rebuilds automatically; backend Python and this constitution require a server restart; dependency/image changes require a container rebuild.
+- Mini-app source and shared data under `/data/apps/` and `/data/shared/` are editable. Never read or write `/data/cli-auth/` or `/data/.secret-key`.
+- Recovery is independent and remains available at `/recover` and `/recover/chat` if platform code breaks.
+- All writes to `Chat.messages` or `Chat.pending_messages` MUST use `chat_writer.py` domain commands; never assign either JSON column directly. Read that module's docstring before changing chat persistence.
+- Commit platform changes inside `/data/platform`, staging only the intended source paths. The separate `/data` safety-net repository ignores `platform/`; never rely on a bare `/data` commit or sweep platform source with `git add -A`.
+- Local edits are potentially contributable, but nothing may be pushed, published, or sent upstream without the partner's explicit approval for that action.
 
 ---
 
