@@ -27,7 +27,7 @@ cp "$ROOT/.gitignore" "$repo/.gitignore"
 cp "$ROOT/scripts/pre-commit.sh" "$repo/scripts/pre-commit.sh"
 cp "$ROOT/scripts/install-hooks.sh" "$repo/scripts/install-hooks.sh"
 cp "$ROOT/scripts/githooks/pre-push" "$repo/scripts/githooks/pre-push"
-cp "$ROOT/scripts/land.sh" "$repo/scripts/land.sh"
+cp "$ROOT/scripts/submit-pr.sh" "$repo/scripts/submit-pr.sh"
 cp "$ROOT/scripts/check-private-paths.sh" "$repo/scripts/check-private-paths.sh"
 chmod +x "$repo/scripts/"*.sh "$repo/scripts/githooks/pre-push"
 
@@ -75,9 +75,9 @@ git -C "$repo" add public.txt public.md
 (cd "$repo" && scripts/pre-commit.sh >/dev/null) || fail "pre-commit rejected a public path"
 git -C "$repo" commit -qm public
 
-# A seed-skill prose-only change must not pay for the seven-minute backend
-# suite on a direct main push. The hook still runs its privacy and syntax gates;
-# assert only that it does not classify this shipped Markdown as backend code.
+# A seed-skill prose-only change must not pay for the backend suite on a topic
+# push. The hook still runs its privacy and syntax gates; assert only that it
+# does not classify this shipped Markdown as backend code.
 mkdir -p "$repo/backend/scripts/seed-skills"
 printf '# Building apps\n' >"$repo/backend/scripts/seed-skills/building-apps.md"
 git -C "$repo" add backend/scripts/seed-skills/building-apps.md
@@ -85,7 +85,8 @@ git -C "$repo" commit -qm seed-skill-doc
 doc_sha="$(git -C "$repo" rev-parse HEAD)"
 doc_base="$(git -C "$repo" rev-parse HEAD^)"
 doc_push_output="$({
-  printf 'refs/heads/master %s refs/heads/main %s\n' "$doc_sha" "$doc_base"
+  printf 'refs/heads/master %s refs/heads/fix/privacy-fixture %s\n' \
+    "$doc_sha" "$doc_base"
 } | (cd "$repo" && scripts/githooks/pre-push) 2>&1)" \
   || fail "pre-push rejected a seed-skill documentation change"
 if printf '%s\n' "$doc_push_output" | grep -qE 'running backend pytest|backend changed,'; then
@@ -95,37 +96,15 @@ printf '%s\n' "$doc_push_output" \
   | grep -q 'backend seed-skill docs changed' \
   || fail "pre-push did not report its seed-skill documentation fast path"
 
-# land.sh may reuse a backend result only for the exact local object and remote
-# base that the preflight verified. The real push still invokes the hook; an
-# exact receipt avoids re-running the long suite with a remote transport open,
-# while any stale or forged receipt fails closed.
-mkdir -p "$repo/backend"
-printf 'VALUE = 1\n' >"$repo/backend/preflight_fixture.py"
-git -C "$repo" add backend/preflight_fixture.py
-git -C "$repo" commit -qm backend-preflight-fixture
-backend_sha="$(git -C "$repo" rev-parse HEAD)"
-backend_base="$(git -C "$repo" rev-parse HEAD^)"
-backend_push_output="$({
-  printf 'refs/heads/master %s refs/heads/main %s\n' "$backend_sha" "$backend_base"
-} | (cd "$repo" \
-  && MOBIUS_PREPUSH_VERIFIED_SHA="$backend_sha" \
-     MOBIUS_PREPUSH_VERIFIED_REMOTE_SHA="$backend_base" \
-     scripts/githooks/pre-push) 2>&1)" \
-  || fail "pre-push rejected an exact preflight receipt"
-printf '%s\n' "$backend_push_output" \
-  | grep -q 'backend pytest already passed' \
-  || fail "pre-push did not reuse the exact preflight result"
+# Direct main updates must be rejected before any expensive local suite starts.
 if {
-  printf 'refs/heads/master %s refs/heads/main %s\n' "$backend_sha" "$backend_base"
-} | (cd "$repo" \
-  && MOBIUS_PREPUSH_VERIFIED_SHA="$backend_sha" \
-     MOBIUS_PREPUSH_VERIFIED_REMOTE_SHA="$doc_base" \
-     scripts/githooks/pre-push >/dev/null 2>&1); then
-  fail "pre-push accepted a stale remote SHA receipt"
+  printf 'refs/heads/master %s refs/heads/main %s\n' "$doc_sha" "$doc_base"
+} | (cd "$repo" && scripts/githooks/pre-push >/dev/null 2>&1); then
+  fail "pre-push accepted a direct main update"
 fi
 
 # A committed private path must be rejected by the reusable CI check, the
-# pre-push hook, and land.sh before land.sh attempts any remote backup push.
+# pre-push hook, and submit-pr.sh before it publishes the topic branch.
 git -C "$repo" switch -qc private-fixture
 mkdir -p "$repo/.pm"
 printf 'private\n' >"$repo/.pm/private.md"
@@ -152,8 +131,8 @@ fi
 if (cd "$repo" && scripts/githooks/pre-push </dev/null >/dev/null 2>&1); then
   fail "pre-push accepted an add-then-delete private path"
 fi
-if (cd "$repo" && scripts/land.sh >/dev/null 2>&1); then
-  fail "land.sh accepted an add-then-delete private path"
+if (cd "$repo" && scripts/submit-pr.sh >/dev/null 2>&1); then
+  fail "submit-pr.sh accepted an add-then-delete private path"
 fi
 
 # The pushed object can differ from HEAD (`git push other:remote`). Verify the
