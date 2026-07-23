@@ -496,6 +496,46 @@ def test_active_codex_turn_interrupt_times_out_if_runner_never_finishes(caplog):
   )
 
 
+def test_active_codex_stop_timeout_preserves_runner_completion_future():
+  async def _scenario() -> None:
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), _FakeTurnHandle(), chat_id="timeout-identity",
+    )
+
+    assert await active.stop(timeout=0.01) is False
+    assert active._finished.done() is False
+    active.mark_finished()
+    assert active._finished.done() is True
+
+  asyncio.run(_scenario())
+
+
+def test_active_codex_force_stop_signals_group_only_once(monkeypatch):
+  calls: list[int] = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: calls.append(pgid) or True,
+  )
+
+  async def _scenario() -> None:
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(),
+      _FakeTurnHandle(),
+      chat_id="hard-stop",
+      process_group_id=4321,
+    )
+    first = asyncio.create_task(active.force_stop(timeout=1))
+    while not calls:
+      await asyncio.sleep(0)
+    active.mark_finished()
+    assert await first is True
+    assert await active.force_stop(timeout=1) is True
+
+  asyncio.run(_scenario())
+  assert calls == [4321]
+
+
 def test_is_closed_turn_error_matches_sdk_rpc_errors(monkeypatch):
   sdk = _fake_sdk(async_codex_cls=object)
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
