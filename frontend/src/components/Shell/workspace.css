@@ -14,15 +14,18 @@
    workspaceView.js (MODE_MOTION / deriveExit·EnterPlan); Shell writes each
    participant's duration/delay and projection-derived transform variables inline. */
 .shell {
-  --ease-mode-arrive: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-mode-leave: cubic-bezier(0.4, 0, 0.7, 0.2);
+  /* Quart-out keeps long edge travel visible across the beat instead of spending
+     ~80% of the distance in its first 50ms. The exit curve starts immediately and
+     distributes the inverse scatter through the whole shorter departure. */
+  --ease-mode-arrive: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-mode-leave: cubic-bezier(0.4, 0, 0.2, 1);
   /* Chrome (dividers + strips) leads the panes with a faster, front-loaded curve so
      structure simplifies first (exit) / resolves after the focused card (entry). */
   --ease-mode-chrome: cubic-bezier(0.2, 0.8, 0.2, 1);
   /* The promote FLIP reads with more MASS than the light deal-out cards: a slower
      middle and a clean, non-overshooting landing, so a half-pane grows to full-bleed
      without racing ahead of its still-opaque siblings. */
-  --ease-mode-promote: cubic-bezier(0.2, 0.82, 0.2, 1);
+  --ease-mode-promote: cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 /* A content wrapper (app iframe or PaneChatView) that is the active tab of a

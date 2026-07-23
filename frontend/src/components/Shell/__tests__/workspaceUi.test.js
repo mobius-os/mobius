@@ -540,6 +540,10 @@ test('entry assembles on keyed beat classes, compositor-only, instant under redu
   assert.match(dealIn, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
   assert.doesNotMatch(dealIn, /opacity:/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
+  assert.match(css, /--ease-mode-arrive:\s*cubic-bezier\(0\.25, 1, 0\.5, 1\)/,
+    'edge travel must remain visible across the short entry beat')
+  assert.match(css, /--ease-mode-promote:\s*cubic-bezier\(0\.25, 1, 0\.5, 1\)/,
+    'the shared pane settles with the same readable arrival curve')
   // The old dead .workspace--resizing selector is gone entirely.
   assert.doesNotMatch(css, /workspace--resizing/)
   assert.doesNotMatch(css, /shell-pane-deal|shell-strip-deal-in|shell-pane-settle/)
@@ -618,6 +622,8 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   assert.match(dealOut, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
   assert.match(dealOut, /opacity: 0/)
   assert.doesNotMatch(dealOut, /box-shadow|border-radius|filter|clip/)
+  assert.match(css, /--ease-mode-leave:\s*cubic-bezier\(0\.4, 0, 0\.2, 1\)/,
+    'scatter must move promptly instead of saving most travel for its last frames')
   // The parent-chrome opacity fade is DELETED (strips deal with their panes now).
   assert.doesNotMatch(css, /\.shell--builder-exiting \.workspace__chrome \{[\s\S]*?opacity: 0/)
   // Reduced motion drops any beat.
@@ -677,12 +683,18 @@ test('an active overflowing chat title cycles once, then becomes idle', () => {
   assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-shift'/)
   assert.match(paneStrip, /title\.style\.setProperty\('--tab-title-duration'/)
   assert.match(paneStrip, /Math\.round\(shift \* TITLE_CYCLE_MS_PER_PX\)/)
+  assert.doesNotMatch(paneStrip, /TITLE_CYCLE_MIN_MS/,
+    'clipped titles must not share a fixed duration; distance owns the cadence')
+  assert.match(paneStrip, /const TITLE_CYCLE_MAX_MS = 32000/)
+  assert.match(paneStrip, /const TITLE_CYCLE_MS_PER_PX = 1000 \/ 12/)
   assert.match(paneStrip, /className="shell__tab-text-inner"/)
   const cycle = shellCss.match(/\.shell__tabstrip:not\(\.workspace__strip\)[\s\S]*?shell-tab-title-cycle var\(--tab-title-duration\) linear 700ms 1 both/)?.[0] || ''
   assert.match(cycle, /\.workspace__strip--focused/)
   assert.doesNotMatch(cycle, /infinite/)
   const keyframes = shellCss.match(/@keyframes shell-tab-title-cycle\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(keyframes, /85%, 100% \{ transform: translate3d\(0, 0, 0\)/,
+  assert.match(keyframes, /0%, 5% \{ transform: translate3d\(0, 0, 0\)/,
+    'the opening rest stays short even when the travel duration scales')
+  assert.match(keyframes, /95%, 100% \{ transform: translate3d\(0, 0, 0\)/,
     'the one pass returns to the beginning and rests there')
   assert.match(shellCss, /\.shell__tab-text-inner \{ animation: none !important; \}/)
 })

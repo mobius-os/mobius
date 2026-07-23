@@ -371,9 +371,9 @@
   animation: shell-tab-title-cycle var(--tab-title-duration) linear 700ms 1 both;
 }
 @keyframes shell-tab-title-cycle {
-  0%, 25% { transform: translate3d(0, 0, 0); }
-  45%, 65% { transform: translate3d(var(--tab-title-shift), 0, 0); }
-  85%, 100% { transform: translate3d(0, 0, 0); }
+  0%, 5% { transform: translate3d(0, 0, 0); }
+  45%, 55% { transform: translate3d(var(--tab-title-shift), 0, 0); }
+  95%, 100% { transform: translate3d(0, 0, 0); }
 }
 .shell__tab-close {
   display: flex;
