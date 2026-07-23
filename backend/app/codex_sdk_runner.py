@@ -815,7 +815,11 @@ def _subagent_lifecycle_event(
     "parent_kind": "unknown",
     "event_type": event_type,
     "state": state,
-    "summary": getattr(item, "agent_path", None),
+    # agent_path is identity/role metadata, not an outcome summary. Keeping
+    # non-terminal Codex summaries empty gives the durable table a structural
+    # guarantee that delegated prompt/preview prose cannot enter through a
+    # start fact.
+    "agent_type": getattr(item, "agent_path", None),
     "occurred_at": occurred_at,
     "source": "runner",
     "source_event_id": getattr(item, "id", None),
@@ -850,8 +854,9 @@ def _thread_started_lifecycle_event(
     "parent_kind": "main" if parent_id == root_thread_id else "agent",
     "event_type": "agent_spawned",
     "state": "running",
+    # ``thread.preview`` derives from the delegated prompt. Role/nickname is
+    # sufficient lifecycle metadata; never copy the preview into persistence.
     "agent_type": role or nickname,
-    "summary": getattr(thread, "preview", None),
     "occurred_at": getattr(thread, "created_at", None),
     "source": "runner",
     "source_event_id": f"thread-started:{thread_id}",
@@ -914,7 +919,10 @@ def _collab_reactivation_events(
       "parent_provider_activation_id": active.get(str(sender)) if sender else None,
       "parent_kind": parent_kind,
       "event_type": "agent_started", "state": "running",
-      "summary": getattr(item, "prompt", None), "occurred_at": occurred_at,
+      # ``item.prompt`` is the delegated prompt body, not a lifecycle summary.
+      # It must not enter the durable observability table; the terminal agent
+      # state may later contribute a provider-authored result summary.
+      "occurred_at": occurred_at,
       "source": "runner", "source_event_id": f"{call_id}:{child_id}:started",
     })
   return events

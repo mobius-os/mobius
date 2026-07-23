@@ -127,6 +127,18 @@ def test_same_logical_agent_in_new_chat_run_has_distinct_activation():
   assert one["event_key"] != two["event_key"]
 
 
+def test_hashed_identifiers_fit_the_declared_cross_database_schema():
+  values = _start()
+
+  assert len(values["agent_id"]) <= models.AgentLifecycleEvent.agent_id.type.length
+  assert (
+    len(values["activation_id"])
+    <= models.AgentLifecycleEvent.activation_id.type.length
+  )
+  assert models.AgentLifecycleEvent.activation_id.type.length == 75
+  assert models.AgentLifecycleEvent.parent_activation_id.type.length == 75
+
+
 def test_explicit_main_and_agent_parent_kinds_are_not_conflated():
   main_child = normalize_chat_event(
     chat_id="chat-life", chat_run_id="run-life", event={

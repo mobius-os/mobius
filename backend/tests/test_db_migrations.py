@@ -1,9 +1,9 @@
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import String, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from app import models
-from app.database import run_migrations
+from app.database import _agent_lifecycle_width_migrations, run_migrations
 
 
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
@@ -83,6 +83,87 @@ def test_run_migrations_adds_park_columns_to_existing_chat_runs(tmp_path):
   cols = {c["name"] for c in inspector.get_columns("chat_runs")}
   assert "parked_until" in cols
   assert "park_reason" in cols
+
+
+def test_agent_lifecycle_width_migration_is_postgres_only_and_idempotent():
+  legacy = [
+    {"name": "activation_id", "type": String(70)},
+    {"name": "parent_activation_id", "type": String(70)},
+  ]
+  expected = [
+    "ALTER TABLE agent_lifecycle_events "
+    "ALTER COLUMN activation_id TYPE VARCHAR(75)",
+    "ALTER TABLE agent_lifecycle_events "
+    "ALTER COLUMN parent_activation_id TYPE VARCHAR(75)",
+  ]
+
+  assert _agent_lifecycle_width_migrations("postgresql", legacy) == expected
+  assert _agent_lifecycle_width_migrations("sqlite", legacy) == []
+  assert _agent_lifecycle_width_migrations("postgresql", [
+    {"name": "activation_id", "type": String(75)},
+    {"name": "parent_activation_id", "type": String(75)},
+  ]) == []
+
+
+def test_run_migrations_removes_only_persisted_codex_prompt_summaries(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'lifecycle-privacy.db'}")
+  models.Base.metadata.create_all(eng)
+  common = (
+    "INSERT INTO agent_lifecycle_events ("
+    "event_key, chat_id, provider, provider_agent_id, agent_id, activation_id, "
+    "parent_kind, event_type, state, observed_at, time_quality, source, "
+    "source_event_id, summary) VALUES ("
+    ":event_key, 'chat', :provider, :provider_agent_id, :agent_id, "
+    ":activation_id, 'unknown', :event_type, :state, CURRENT_TIMESTAMP, "
+    "'observed', 'runner', :source_event_id, :summary)"
+  )
+  rows = [
+    ("spawn", "codex", "agent_spawned", "running", "thread-started:child",
+     "private thread preview"),
+    ("resume", "codex", "agent_started", "running", "call:child:started",
+     "private delegated prompt"),
+    ("native", "codex", "agent_started", "running", "native-item-id",
+     "/root/scout"),
+    ("terminal", "codex", "agent_terminal", "done", "call:child:completed",
+     "provider result summary"),
+    ("claude", "claude", "agent_started", "running", "message-uuid",
+     "task description"),
+  ]
+  with eng.connect() as conn:
+    conn.execute(text(
+      "INSERT INTO chats (id, title, title_locked, messages, pending_messages, "
+      "uploads, provider) VALUES ('chat', 'Chat', 0, '[]', '[]', '[]', 'claude')"
+    ))
+    for index, (key, provider, event_type, state, source_id, summary) in enumerate(
+      rows,
+    ):
+      conn.execute(text(common), {
+        "event_key": key,
+        "provider": provider,
+        "provider_agent_id": f"provider-{index}",
+        "agent_id": f"agent-{index}",
+        "activation_id": f"activation-{index}",
+        "event_type": event_type,
+        "state": state,
+        "source_event_id": source_id,
+        "summary": summary,
+      })
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    summaries = dict(conn.execute(text(
+      "SELECT event_key, summary FROM agent_lifecycle_events ORDER BY event_key"
+    )).all())
+  assert summaries == {
+    "claude": "task description",
+    "native": None,
+    "resume": None,
+    "spawn": None,
+    "terminal": "provider result summary",
+  }
 
 
 def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):

@@ -319,9 +319,12 @@ class AgentLifecycleEvent(Base):
   provider_session_id = Column(String(160), nullable=True)
   provider_agent_id = Column(String(160), nullable=False)
   agent_id = Column(String(70), nullable=False, index=True)
-  activation_id = Column(String(70), nullable=False, index=True)
+  # ``stable_activation_id`` is ``activation-`` (11 chars) plus a 64-char
+  # SHA-256 digest. Keep the declared width exact: SQLite does not enforce a
+  # VARCHAR length, but PostgreSQL does.
+  activation_id = Column(String(75), nullable=False, index=True)
   parent_agent_id = Column(String(70), nullable=True, index=True)
-  parent_activation_id = Column(String(70), nullable=True, index=True)
+  parent_activation_id = Column(String(75), nullable=True, index=True)
   parent_kind = Column(String(16), nullable=False, default="unknown")
   parent_source_id = Column(String(160), nullable=True)
   event_type = Column(String(32), nullable=False)
