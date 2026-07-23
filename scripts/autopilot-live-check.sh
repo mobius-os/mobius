@@ -68,6 +68,16 @@ dex()  { docker exec -u mobius "$CONTAINER" bash -lc "$*"; }
 # /data/contrib (mobius can't mkdir/rmdir there itself).
 dexr() { docker exec -u root "$CONTAINER" bash -lc "$*"; }
 
+# Best-effort curl for the cleanup trap. It must NOT use api()/die(): a non-2xx
+# (e.g. a DELETE of an already-gone file) would exit the trap mid-way and leak
+# the rest. Cleanup swallows every status and always runs to completion.
+capi() {  # capi METHOD PATH [JSON]  → best-effort, prints nothing, never fails
+  local method="$1" path="$2" body="${3:-}"
+  local args=(-sS -o /dev/null -X "$method" -H "Authorization: Bearer ${APP_TOKEN}" "${API_BASE}${path}")
+  [ -n "$body" ] && args+=(-H 'Content-Type: application/json' -d "$body")
+  curl "${args[@]}" >/dev/null 2>&1 || true
+}
+
 cleanup() {
   [ "${KEEP:-}" = "1" ] && { say "KEEP=1 — leaving ${REC} / PR ${PR_NUMBER}"; return; }
   say "Cleanup"
@@ -76,12 +86,14 @@ cleanup() {
       "repos/${UPSTREAM_REPO}/pulls/${PR_NUMBER}" -f state=closed >/dev/null 2>&1 \
       && ok "closed PR #${PR_NUMBER}" || true
   fi
-  # Delete the fork branch + the record; run-job's cleanup-staging (which now
-  # calls autopilot.close_out) drops the DB row once the PR reads closed.
+  # Order matters: run cleanup-staging FIRST, while the ledger record still
+  # exists — it resolves the record to find the row and calls autopilot.close_out
+  # (dropping the DB row) now that the PR reads closed. Deleting the record before
+  # this would make cleanup-staging 404 and leak the DB row.
+  capi POST "/api/github/contributions/${APP_ID}/${REC}/cleanup-staging" '{}'
   dex "cd '${WORKTREE}' 2>/dev/null && git push fork --delete '${BRANCH}'" >/dev/null 2>&1 || true
-  api DELETE "/api/storage/apps/${APP_ID}/contributions/${REC}.json" >/dev/null 2>&1 || true
-  api DELETE "/api/storage/apps/${APP_ID}/contributions/${REC}.diff" >/dev/null 2>&1 || true
-  api POST "/api/github/contributions/${APP_ID}/${REC}/cleanup-staging" '{}' >/dev/null 2>&1 || true
+  capi DELETE "/api/storage/apps/${APP_ID}/contributions/${REC}.json"
+  capi DELETE "/api/storage/apps/${APP_ID}/contributions/${REC}.diff"
   dexr "rm -rf /data/contrib/${REC}" >/dev/null 2>&1 || true
   ok "removed ${REC}"
 }
