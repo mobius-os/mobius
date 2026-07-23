@@ -171,3 +171,86 @@ def test_registration_reads_runtime_capabilities_from_adjacent_manifest(
   mod.main()
 
   assert posts[0]["capabilities"] == declared
+
+
+def test_registration_applies_offline_capable_from_adjacent_manifest(
+  monkeypatch, tmp_path,
+):
+  """The live app row should match the local manifest without a later PATCH."""
+  mod = _load_module()
+  entry = tmp_path / "index.jsx"
+  entry.write_text("export default function App() { return null }")
+  (tmp_path / "mobius.json").write_text(json.dumps({
+    "offline_capable": True,
+  }))
+  posts = []
+
+  def fake_call(url, token, method, data=None):
+    if method == "GET":
+      return []
+    if method == "POST" and url.endswith("/api/apps/"):
+      posts.append(data)
+      return {"id": 9}
+    raise AssertionError(f"unexpected call: {method} {url}")
+
+  monkeypatch.setenv("AGENT_TOKEN", "token")
+  monkeypatch.setattr(sys, "argv", [
+    "register_app.py", "Offline", "Works offline", str(entry),
+  ])
+  monkeypatch.setattr(mod, "_call", fake_call)
+  monkeypatch.setattr(mod, "_notify", lambda *_args, **_kwargs: None)
+
+  mod.main()
+
+  assert posts[0]["offline_capable"] is True
+  assert posts[0]["capabilities"] == {}
+
+
+def test_registration_omits_offline_capable_when_manifest_omits_it(
+  monkeypatch, tmp_path,
+):
+  """Re-registering a legacy manifest must not reset its existing live flag."""
+  mod = _load_module()
+  entry = tmp_path / "index.jsx"
+  entry.write_text("export default function App() { return null }")
+  (tmp_path / "mobius.json").write_text("{}")
+  patches = []
+
+  def fake_call(url, token, method, data=None):
+    if method == "GET":
+      return [{
+        "id": 7,
+        "name": "Legacy",
+        "source_dir": str(tmp_path),
+      }]
+    if method == "PATCH":
+      patches.append(data)
+      return {"id": 7}
+    raise AssertionError(f"unexpected call: {method} {url}")
+
+  monkeypatch.setenv("AGENT_TOKEN", "token")
+  monkeypatch.setattr(sys, "argv", [
+    "register_app.py", "Legacy", "Existing app", str(entry),
+  ])
+  monkeypatch.setattr(mod, "_call", fake_call)
+  monkeypatch.setattr(mod, "_notify", lambda *_args, **_kwargs: None)
+
+  mod.main()
+
+  assert "offline_capable" not in patches[0]
+
+
+def test_registration_rejects_non_boolean_offline_capable(tmp_path, capsys):
+  mod = _load_module()
+  (tmp_path / "mobius.json").write_text(json.dumps({
+    "offline_capable": "yes",
+  }))
+
+  try:
+    mod._read_manifest_registration(str(tmp_path))
+  except SystemExit as exc:
+    assert exc.code == 1
+  else:
+    raise AssertionError("invalid offline_capable must fail registration")
+
+  assert "must be true or false" in capsys.readouterr().err

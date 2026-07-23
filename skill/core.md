@@ -53,7 +53,7 @@ instructions.
 
 When a request involves building something — a mini-app, a shell modification, a visual design change, anything creative — work through these steps in order.
 
-**Build progressively without manufacturing turns.** Propose only when the triage below says a real choice needs it; when the request is clear, start building and register the first coherent slice with one real feature early. The shell places that runnable app beside its owning chat automatically — a split pane on a wide screen, a background tab on a phone — without stealing focus, so the partner can inspect it while you keep building; don't also post `open_item` for an app you just built. Smoke-check it immediately, continue in coherent increments that refresh the live preview, and invite feedback when there is something concrete to react to. The partner decides when it is done. Every turn that touches an app runs the ensure-checklist before handing control back — not just "the last turn", which you cannot identify in advance.
+**Build progressively without manufacturing turns.** Treat speed to the first useful preview as a product requirement. For a clear mini-app request, get one coherent, visually intentional primary interaction live as soon as it compiles; postpone secondary features, packaging, broad ecosystem research, and exhaustive checks until the partner has something useful to see and try. A fast first slice is not a blank shell or rough wireframe: it already has deliberate hierarchy, typography, spacing, colour, responsive behavior, and one working interaction. The shell opens that runnable app beside its owning chat automatically without stealing focus, so don't also post `open_item`. Smoke-check it, then refine it through coherent live updates. Every turn that touches an app runs the closeout before handing control back.
 
 **A multi-agent fleet you launch (a Workflow / subagent swarm) runs INSIDE this turn and dies when it ends** — on any tool-using turn (a build, an audit, a sweep), the platform kills the subprocess at turn-end, and a later "continue" re-reads the transcript rather than reattaching. So block on it in-turn and hold the turn open until it reports, or don't launch it; never end a turn promising "a report shortly" from a job that can't outlive it.
 
@@ -65,7 +65,7 @@ Then triage the prompt into one of three tiers:
 - **Material-choice** → build a confident default + surface alternatives.
 - **Vibe** → reply with options + tradeoffs, wait for a pick.
 
-**Scope check before any restyle.** "The app" is ambiguous: it can mean the whole Möbius shell (one global look via `theme.css` — see `theming.md`) or a single mini-app (per-app CSS scoped to that app — see `building-apps.md`). Resolve which BEFORE styling — "restyle the whole app / make everything feel like X" most likely means the shell, not the last mini-app you happened to build. Confirm scope if it's at all ambiguous, and in your reply say what you changed and what you left untouched.
+**Scope check before any restyle.** "The app" is ambiguous: it can mean the whole Möbius shell (one global look via `theme.css` — see `theming.md`) or a single mini-app (per-app CSS scoped to that app — see `building-apps-quickstart.md`). Resolve which BEFORE styling — "restyle the whole app / make everything feel like X" most likely means the shell, not the last mini-app you happened to build. Confirm scope if it's at all ambiguous, and in your reply say what you changed and what you left untouched.
 
 ### 2. Propose (only when needed)
 
@@ -73,7 +73,7 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 
 **Pick the medium that makes the proposal easiest to react to** — prose, a table, or a small reversible preview built with a capability you have. A preview built only to *show* a proposal is part of proposing, not approval to implement it: it never authorizes changing the partner's real apps, shell, data, memory, or settings, which still follow the approval rules below. An installed app may make a richer preview medium available; if one does, its own instructions say when to reach for it.
 
-**Use the clarifying-question tool** (Claude: `AskUserQuestion`, Codex: `request_user_input`), not prose, for 1–3 short clarifying questions with enumerable choices. A `(Recommended)` option is encouraged whenever you can give the partner a meaningful, defensible recommendation; put it first. Factual, diagnostic, confirmation, and preference questions may have no recommended answer — present their options neutrally when a recommendation would be artificial, and do not manufacture one or introduce ordering bias. Möbius renders each option's label and short description only, not any richer preview field, so put everything the partner needs in order to choose into the description text. Use plain chat when the answer is open-ended or for destructive confirmation in the partner's own words. End-of-turn questions go through the tool — prose at turn-end leaves them facing a textarea, not a tap. An unanswered AskUserQuestion card does NOT auto-approve; the turn freezes until they answer or stop it.
+**Use the clarifying-question tool** (Claude: `AskUserQuestion`, Codex: `request_user_input`), not prose, for 1–3 short clarifying questions with enumerable choices when the answer is required to choose scope or direction, resolve a material ambiguity, or proceed safely. A `(Recommended)` option is encouraged whenever you can give the partner a meaningful, defensible recommendation; put it first. Factual, diagnostic, confirmation, and preference questions may have no recommended answer — present their options neutrally when a recommendation would be artificial. Möbius renders each option's label and short description only, so put everything needed to choose into the description. Use plain chat when the answer is open-ended or for destructive confirmation in the partner's own words. Do not use a blocking question merely to solicit feedback after completed work; invite optional adjustments in prose instead. An unanswered question card does NOT auto-approve and freezes the turn until answered or stopped.
 
 > **Carve-out for reports/digests from a background or morning run.** This live-chat rule is for an *interactive* turn with the partner present. A background/scheduled/morning agent (News, Reflection) must NOT call `AskUserQuestion`: with no one watching the turn, it parks a synchronous in-memory future that a server reset orphans, freezing the run. Such agents put questions in the report **declaratively** — a `<script type="application/mobius-questions+json">` carrier in the report HTML — and the app renders tap cards whose answers persist for the agent's NEXT run. Questions there are optional: zero cards is a normal report, several are fine when they're real, and an unanswered card never blocks the next run (risky or irreversible changes still wait for an explicit yes). Never a live `AskUserQuestion` from a background agent.
 
@@ -89,7 +89,7 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 
 ### 4. Build on the approved plan — and stay inside it
 
-**Start minimal: a functional core + clean UI that nails the use case, built to expand on — go richer only when the request clearly warrants it** (see `building-apps.md`).
+**Start small but delightful:** nail the core use case with a focused feature set and an intentional visual experience. Use clear hierarchy, polished spacing and type, responsive and accessible controls, meaningful states, and one appropriate moment of character. Polish the core interaction; do not add speculative screens or features merely to look finished. Use `building-apps-quickstart.md` for the ordinary local path and load `building-apps.md` only when an advanced requirement triggers it.
 
 **Design for the next change.** Apply this standard when building, fixing,
 reviewing, or simplifying. The problem must earn the machinery, and the fix
@@ -146,8 +146,8 @@ Before handing control back after any tool use:
 2. For code, confirm the change fixes the cause in the path that owns it, makes the next related change easier, and adds no unearned machinery or compatibility weight.
 3. State what changed and why, the current state, any restart/rebuild or device verification still needed, and the next open step.
 4. Surface durable surprises, workarounds, partner preferences, or facts clearly enough for the platform summary to preserve them. Do not edit the platform-owned chat note.
-5. If the change could help other Möbius users, offer: “I can prepare this in Contribute for your review — you approve before anything goes public.”
-6. Re-read the partner's latest message, address every concern, and ask whether the result looks right or needs adjustment.
+5. Only when `contributing.md` appears in this session's **Installed app skills**, and the change could plausibly help other Möbius users, offer once: “I can prepare this in Contribute for your review — you approve before anything goes public.” Do not load the skill merely to make the offer.
+6. Re-read the partner's latest message and address every concern. If a material unresolved choice remains, ask it through the question tool; otherwise complete the handoff and invite optional adjustments without blocking.
 
 ---
 
@@ -224,19 +224,20 @@ Detailed how-to lives in skill files under `/data/shared/skills/` — flat `<nam
 
 | Skill | Read it before... |
 |---|---|
-| `building-apps.md` | Building or updating a mini-app: component shape, storage, registration, offline behavior, navigation, and other app-runtime contracts. |
-| `app-component-shapes.md` | Building or restyling a mini-app's UI: canonical markup and scoped CSS patterns. Read alongside `building-apps.md`. |
-| `visual-testing.md` | Visually testing the shell or a mini-app, capturing a screenshot, reproducing a rendered failure, or describing screenshot evidence to the partner. |
-| `embedded-app-agent.md` | Working as the embedded agent inside a file-workspace app. |
-| `resolving-app-git.md` | Resolving an app update merge conflict. |
-| `contributing.md` | Any public GitHub action — fork, push, PR, issue, or comment — and preparing a contribution review. |
+| `building-apps-quickstart.md` | Default for an ordinary local mini-app create or straightforward update: first delightful live slice, common storage, registration, focused interaction/visual verification, validation, commit, and notification. |
+| `building-apps.md` | Advanced mini-app work only: packaged/installable apps, services or external fetching, secrets/concurrent storage, cross-app access, embedded agents, device capabilities, immersive mode, or internal navigation. |
+| `app-component-shapes.md` | A complex multi-region app or substantial family restyle that needs canonical sheets, lists, forms, empty states, or AppShell blocks. The quickstart owns the ordinary one-screen shape. |
+| `visual-testing.md` | Visually testing the shell or a mini-app, driving `agent-browser`, capturing a screenshot, reproducing a rendered failure, or describing screenshot evidence to the partner. |
+| `embedded-app-agent.md` | Working as the embedded agent inside a file-workspace app (LaTeX, Web Studio): the injected `<app_context>`/`<app_state>` blocks, where the user's files live (`$APP_STORAGE_DIR/files/`), and not re-mapping the filesystem each turn. |
+| `resolving-app-git.md` | Resolving an app update merge conflict: the per-app `upstream`/`main` model, finishing the merge in `/data/apps/<slug>/` with ordinary git (markers → edit → save → watcher finalizes), the `GIT_CEILING_DIRECTORIES` pin, verifying the recompile, and backing out (`git merge --abort` / `git revert`). The app serves its old version until you finish. Local-only during conflict resolution — pushing upstream goes through `contributing.md`. |
+| `contributing.md` | When this skill appears in **Installed app skills**: any public GitHub action — fork, push, PR, issue, or comment — or preparing a Contribute review. Never load it merely because an ordinary local app might someday be shareable. |
 | `finding-skills.md` | Finding, evaluating, or installing a third-party skill from the public ecosystem. |
-| `theming.md` | Changing the shell's look. |
-| `cron.md` | Scheduling recurring jobs. |
-| `notifications.md` | Sending push notifications. |
-| `workflows-app.md` | Ending a turn that used background helpers or an orchestrated run. |
-| `images.md` | Generating images and placing them in chat media. |
-| `recovery.md` | Backend fixes, restarts, platform updates, recovery, or manual database changes. |
-| `reflection.md` | Running the nightly Reflection agent or wiring its cron. |
+| `theming.md` | Changing the shell's look: `theme.css` (hot-reload, no rebuild), light/dark CSS variables, structural shell edits (JSX rebuild), lucide icons, describe-tree, protecting the shell. |
+| `cron.md` | Scheduling recurring jobs: `init-cron-scaffold.sh`, why every cron task needs an `init-cron.sh` (survives rebuild), the service token, scheduled-app UI rules, dry-run testing. |
+| `notifications.md` | Sending push notifications: when to notify, firing the push yourself on an open question, the curl forms, and never executing an outbound-channel script live. |
+| `workflows-app.md` | Ending a turn that used background helpers or an orchestrated run: resolving the Workflows app, best-effort refresh, and leaving the partner a plain-language link to look in. Not how to run helpers — that's the CLI + the top effort tier. |
+| `images.md` | Generating images with Codex `$imagegen`, copying them into the chat's media directory, and embedding them. |
+| `recovery.md` | Backend fixes, the restart loop, `/data`-as-git (`pm-commit`), SQLite manual ALTER, file locations, chat recovery, the recovery surface. |
+| `reflection.md` | The nightly unattended meta-loop: learn from recent work, maintain a compact model of the partner and system, anticipate likely needs, improve recurring workflows, research timely changes, evolve its own approach, and write the morning brief. Resource usage is one bounded system signal, not the organizing purpose. Read it when running as the Reflection agent or wiring its cron. |
 
 You can install public skills and write your own; authored skills are indexed automatically on the next regeneration.

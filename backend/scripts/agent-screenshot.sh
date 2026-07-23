@@ -126,6 +126,32 @@ if [ "$AUTH_OK" != "true" ]; then
   exit 1
 fi
 
+# A fresh phone-width shell can restore with the modal navigation drawer open
+# or still exiting, which makes an otherwise-correct app screenshot capture the
+# scrim/drawer transition. Close only the mobile modal form; the desktop docked
+# sidebar is part of the partner's actual layout and stays untouched.
+agent-browser eval \
+  "(() => { const b = document.querySelector('button[aria-label=\"Toggle navigation\"][aria-expanded=\"true\"]'); if (window.innerWidth < 768 && b) b.click(); return true })()" \
+  >/dev/null 2>&1 || true
+
+# `/app/<id>` has an exact readiness signal: AppCanvas removes its
+# `.canvas-loading` overlay only after the opaque iframe posts
+# `moebius:frame-mounted`, which itself fires after the app's first React commit.
+# Waiting for that state avoids successful-looking screenshots of the branded
+# loading skeleton. Keep the predicate as a simple boolean expression —
+# agent-browser's wait parser has timed out on equivalent IIFE forms.
+case "$ROUTE" in
+  /app/[0-9]*)
+    APP_ID="${ROUTE#/app/}"
+    APP_ID="${APP_ID%%[/?#]*}"
+    READY_EXPR="document.querySelector('iframe[data-app-id=\"${APP_ID}\"]') !== null && document.querySelector('iframe[data-app-id=\"${APP_ID}\"]')?.parentElement.querySelector('.canvas-loading') === null"
+    if ! agent-browser wait --fn "$READY_EXPR" >/dev/null 2>&1; then
+      echo "agent-screenshot.sh: app ${APP_ID} did not reach its mounted frame before capture" >&2
+      exit 1
+    fi
+    ;;
+esac
+
 agent-browser screenshot "${OUT}" >/dev/null
 echo "${OUT}"
 

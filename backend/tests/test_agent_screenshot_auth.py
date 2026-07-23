@@ -31,7 +31,9 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
   return browser, marker
 
 
-def _run_helper(tmp_path: Path, *, auth_ok: bool) -> tuple[subprocess.CompletedProcess, Path, Path, Path]:
+def _run_helper(
+  tmp_path: Path, *, auth_ok: bool, route: str = "/chat/example",
+) -> tuple[subprocess.CompletedProcess, Path, Path, Path]:
   _, marker = _fake_browser(tmp_path)
   output = tmp_path / "shot.png"
   browser_log = tmp_path / "browser.log"
@@ -47,7 +49,7 @@ def _run_helper(tmp_path: Path, *, auth_ok: bool) -> tuple[subprocess.CompletedP
     "FAKE_SCREENSHOT_MARKER": str(marker),
   }
   result = subprocess.run(
-    ["bash", str(SCRIPT), "/chat/example", str(output)],
+    ["bash", str(SCRIPT), route, str(output)],
     env=env,
     text=True,
     capture_output=True,
@@ -79,3 +81,42 @@ def test_helper_captures_after_authentication_is_confirmed(tmp_path: Path):
   screenshot_index = next(i for i, command in enumerate(commands) if command.startswith("screenshot "))
   assert settle_index < auth_index < screenshot_index
   assert all("test-token" not in command for command in commands)
+
+
+def test_app_capture_waits_for_frame_mounted_state(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path, auth_ok=True, route="/app/42",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  readiness_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("wait --fn ")
+    and 'iframe[data-app-id="42"]' in command
+    and ".canvas-loading" in command
+  )
+  screenshot_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("screenshot ")
+  )
+  assert readiness_index < screenshot_index
+
+
+def test_non_app_capture_skips_frame_readiness_wait(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path, auth_ok=True, route="/chat/example",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  assert not any(
+    command.startswith("wait --fn ")
+    and "iframe[data-app-id=" in command
+    for command in commands
+  )
