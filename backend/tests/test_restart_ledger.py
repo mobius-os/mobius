@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app import restart_ledger as platform_ledger
 
 
@@ -125,6 +127,29 @@ def test_second_boot_before_claim_retires_one_shot_ack(tmp_path, monkeypatch):
   assert supervisor.begin_boot("boot-repeated-1234", now=now + 3) is False
   assert _authorized(tmp_path, "boot-target-1234") == {}
   assert _authorized(tmp_path, "boot-repeated-1234") == {}
+
+
+def test_boot_does_not_ack_when_accepted_intent_cannot_be_consumed(
+  tmp_path, monkeypatch,
+):
+  supervisor = _load_supervisor()
+  _bind(supervisor, tmp_path, monkeypatch)
+  now = time.time()
+  source_boot = "boot-source-1234"
+  supervisor.begin_boot(source_boot, now=now)
+  _request(tmp_path, boot=source_boot, nonce="nonce-12345678", now=now)
+  assert supervisor.accept(source_boot, now=now + 1)
+  real_remove = supervisor._remove
+
+  def _refuse_accepted(path):
+    if path == supervisor.ACCEPTED_PATH:
+      return False
+    return real_remove(path)
+
+  monkeypatch.setattr(supervisor, "_remove", _refuse_accepted)
+  with pytest.raises(OSError, match="consume"):
+    supervisor.begin_boot("boot-target-1234", now=now + 2)
+  assert not supervisor.ACK_PATH.exists()
 
 
 def test_recovery_restart_without_chat_intent_never_authorizes(

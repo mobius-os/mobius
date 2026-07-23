@@ -54,7 +54,7 @@ def _valid_token(value: Any) -> bool:
   return isinstance(value, str) and bool(_TOKEN_RE.fullmatch(value))
 
 
-def _remove(path: Path) -> None:
+def _remove(path: Path) -> bool:
   try:
     if path.is_dir() and not path.is_symlink():
       shutil.rmtree(path)
@@ -62,6 +62,13 @@ def _remove(path: Path) -> None:
       path.unlink(missing_ok=True)
   except OSError:
     pass
+  try:
+    path.lstat()
+  except FileNotFoundError:
+    return True
+  except OSError:
+    return False
+  return False
 
 
 def _fsync_dir(path: Path) -> None:
@@ -213,8 +220,9 @@ def begin_boot(boot_id: str, *, now: float | None = None) -> bool:
   current = time.time() if now is None else now
   _prepare_ledger_dir()
   accepted = _read_bounded_json(ACCEPTED_PATH)
-  _remove(ACK_PATH)
-  authorized = False
+  if not _remove(ACK_PATH):
+    raise OSError("could not retire the prior boot acknowledgement")
+  authorized_payload: dict[str, Any] | None = None
   if accepted:
     try:
       accepted_at = float(accepted.get("accepted_at"))
@@ -230,13 +238,19 @@ def begin_boot(boot_id: str, *, now: float | None = None) -> bool:
       and accepted_at <= current + 5
       and current - accepted_at <= MAX_ACCEPTED_AGE_SECONDS
     ):
-      _write_json(ACK_PATH, {
+      authorized_payload = {
         **accepted,
         "runs": runs,
         "target_boot_id": boot_id,
-      }, 0o444)
-      authorized = True
-  _remove(ACCEPTED_PATH)
+      }
+  # Consume before acknowledging. If the volume refuses this deletion, the
+  # accepted record must not be reusable by another boot; fail closed without
+  # creating an acknowledgement for this one.
+  if not _remove(ACCEPTED_PATH):
+    raise OSError("could not consume the accepted restart intent")
+  authorized = authorized_payload is not None
+  if authorized_payload is not None:
+    _write_json(ACK_PATH, authorized_payload, 0o444)
   _atomic_write(BOOT_PATH, f"{boot_id}\n".encode("utf-8"), 0o444)
 
   # Any platform-authored request not already accepted by the supervisor
