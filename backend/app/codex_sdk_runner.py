@@ -453,11 +453,21 @@ class ActiveCodexTurn:
   Same shape as Claude's `ActiveClaudeClient`.
   """
 
-  def __init__(self, thread: Any, turn: Any, chat_id: str):
+  def __init__(
+    self,
+    thread: Any,
+    turn: Any,
+    chat_id: str,
+    process_group_id: int | None = None,
+  ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CODEX_SDK
     self.thread = thread
     self.turn = turn
+    self._process_group_id = process_group_id
+    # A retained PGID must never be signalled twice: after the first kill the
+    # kernel may eventually reuse that number for an unrelated process group.
+    self._force_stop_started = False
     # Admission flag shared with request_user_input on the runner loop. Set
     # synchronously before turn.steer's first await so a not-yet-registered
     # question cannot park the SDK reader ahead of the steer acknowledgement.
@@ -477,7 +487,7 @@ class ActiveCodexTurn:
     except Exception as exc:
       log.warning("codex interrupt() raised: %s", exc)
     try:
-      await asyncio.wait_for(self._finished, timeout=5.0)
+      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
     except asyncio.TimeoutError:
       log.warning(
         "codex active_turn._finished never resolved within 5s; runner is wedged"
@@ -499,6 +509,28 @@ class ActiveCodexTurn:
     except Exception:
       log.exception(
         "Codex SDK stop failed chat_id=%s", self.chat_id,
+      )
+      return False
+
+  async def force_stop(self, timeout: float = 5.0) -> bool:
+    """One-shot hard stop for this turn's verified private process group."""
+    if not self._force_stop_started:
+      if self._process_group_id is None:
+        return False
+      self._force_stop_started = True
+      await asyncio.to_thread(
+        _terminate_codex_process_group, self._process_group_id,
+      )
+    try:
+      await asyncio.wait_for(
+        asyncio.shield(self._finished), timeout=max(0.0, timeout),
+      )
+      return True
+    except asyncio.CancelledError:
+      raise
+    except asyncio.TimeoutError:
+      log.warning(
+        "Codex SDK hard stop did not finish chat_id=%s", self.chat_id,
       )
       return False
 
@@ -815,7 +847,11 @@ def _subagent_lifecycle_event(
     "parent_kind": "unknown",
     "event_type": event_type,
     "state": state,
-    "summary": getattr(item, "agent_path", None),
+    # agent_path is identity/role metadata, not an outcome summary. Keeping
+    # non-terminal Codex summaries empty gives the durable table a structural
+    # guarantee that delegated prompt/preview prose cannot enter through a
+    # start fact.
+    "agent_type": getattr(item, "agent_path", None),
     "occurred_at": occurred_at,
     "source": "runner",
     "source_event_id": getattr(item, "id", None),
@@ -850,8 +886,9 @@ def _thread_started_lifecycle_event(
     "parent_kind": "main" if parent_id == root_thread_id else "agent",
     "event_type": "agent_spawned",
     "state": "running",
+    # ``thread.preview`` derives from the delegated prompt. Role/nickname is
+    # sufficient lifecycle metadata; never copy the preview into persistence.
     "agent_type": role or nickname,
-    "summary": getattr(thread, "preview", None),
     "occurred_at": getattr(thread, "created_at", None),
     "source": "runner",
     "source_event_id": f"thread-started:{thread_id}",
@@ -914,7 +951,10 @@ def _collab_reactivation_events(
       "parent_provider_activation_id": active.get(str(sender)) if sender else None,
       "parent_kind": parent_kind,
       "event_type": "agent_started", "state": "running",
-      "summary": getattr(item, "prompt", None), "occurred_at": occurred_at,
+      # ``item.prompt`` is the delegated prompt body, not a lifecycle summary.
+      # It must not enter the durable observability table; the terminal agent
+      # state may later contribute a provider-authored result summary.
+      "occurred_at": occurred_at,
       "source": "runner", "source_event_id": f"{call_id}:{child_id}:started",
     })
   return events
@@ -1871,7 +1911,12 @@ async def run_codex_sdk_turn(
           )
         log.info("Codex turn aborted before stream registration chat_id=%s", chat_id)
         return aborted_result()
-      active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
+      active_turn = ActiveCodexTurn(
+        thread,
+        turn,
+        chat_id=chat_id,
+        process_group_id=process_group_id,
+      )
       registry.register(active_turn)
 
       # Persist the session id AFTER registering the live turn: this is a
@@ -2126,7 +2171,9 @@ async def run_codex_sdk_turn(
       except Exception as exc:
         log.warning("Codex process-group capture failed: %s", exc)
     current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
+    group_already_terminated = False
     if isinstance(current, ActiveCodexTurn) and current.turn is turn:
+      group_already_terminated = current._force_stop_started
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)
       current.mark_finished()
     # AsyncCodex.close() terminates only its direct Popen PID.  Reap the
@@ -2135,7 +2182,7 @@ async def run_codex_sdk_turn(
     # worker keeps the short grace period off the FastAPI event loop; shield
     # ensures task cancellation cannot prevent the SIGKILL backstop from
     # running in that worker once cleanup has started.
-    if process_group_id is not None:
+    if process_group_id is not None and not group_already_terminated:
       reap_task = asyncio.create_task(asyncio.to_thread(
         _terminate_codex_process_group, process_group_id,
       ))

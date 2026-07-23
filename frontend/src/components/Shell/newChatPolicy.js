@@ -112,6 +112,7 @@ export function createdChatDetailCache(created) {
       effective: detail.effective_agent_settings,
       has_assistant_turns: detail.has_assistant_turns,
       auto_resume_on_limit: !!detail.auto_resume_on_limit,
+      auto_resume_on_restart: !!detail.auto_resume_on_restart,
     },
   }
 }

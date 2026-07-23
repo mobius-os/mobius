@@ -387,6 +387,31 @@ test('v3 scatter is compositor-only: layout boxes constant while transforms anim
   await expect.poll(() => builderActive(page)).toBe(false)
 })
 
+test('focused pane retains its durable edge during a mode exit', async ({ page }) => {
+  // Standard targets left chat aaa; focus the right builder pane bbb before exit.
+  // The focused presentation is centred/full-size, but its durable pane identity
+  // is still RIGHT, so it must leave right and fully clear the viewport—not fall
+  // back to the old arbitrary top exit.
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
+  await expect.poll(() => builderActive(page)).toBe(true)
+  await page.locator('[data-pane-strip="p1"]')
+    .getByRole('button', { name: 'Focus pane' }).click()
+  await expect(page.locator('[data-pane-strip]')).toHaveCount(1)
+  const content = await page.locator('.shell__content').boundingBox()
+
+  const sampler = captureBeatPlan(page, 'shell--builder-exiting')
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+  expect(r.underlay, 'the left Standard chat is ready beneath the focused pane').toBe(true)
+  expect(r.participants).toHaveLength(1)
+  expect(r.participants[0].motion).toBe('deal-out')
+  expect(r.participants[0].x, 'a full-size focused pane clears beyond the right edge')
+    .toBeGreaterThan(content.width)
+  expect(r.participants[0].y).toBe(0)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+})
+
 test('v3 world-reveal scatter paints the mounted destination underlay beneath the panes', async ({ page }) => {
   // slot === a tree-absent chat → WORLD REVEAL: every painted pane deals out over the
   // mounted underlay (INV 3 honest destination), no false promotion.

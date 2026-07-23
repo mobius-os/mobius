@@ -246,6 +246,42 @@ def test_new_chat_inherits_last_auto_resume_selection(client, auth, chat):
   ).json()["auto_resume_on_limit"] is True
 
 
+def test_restart_resume_requires_separate_explicit_consent(
+  client, auth, chat,
+):
+  """Legacy limit consent stays on while every existing restart policy is off."""
+  initial = client.get(f"/api/chats/{chat.id}", headers=auth).json()
+  assert initial["auto_resume_on_limit"] is True
+  assert initial["auto_resume_on_restart"] is False
+
+  existing = client.post(
+    "/api/chats", headers=auth, json={"title": "existing off"},
+  ).json()
+  assert client.get(
+    f"/api/chats/{existing['id']}", headers=auth,
+  ).json()["auto_resume_on_restart"] is False
+
+  enabled = client.patch(
+    f"/api/chats/{chat.id}",
+    headers=auth,
+    json={"auto_resume_on_restart": True},
+  )
+  assert enabled.status_code == 200
+  assert enabled.json()["auto_resume_on_restart"] is True
+  assert enabled.json()["auto_resume_on_limit"] is True
+
+  inherited = client.post(
+    "/api/chats", headers=auth, json={"title": "explicitly inherited on"},
+  ).json()
+  assert client.get(
+    f"/api/chats/{inherited['id']}", headers=auth,
+  ).json()["auto_resume_on_restart"] is True
+  # Explicit consent seeds future chats only; it never rewrites older rows.
+  assert client.get(
+    f"/api/chats/{existing['id']}", headers=auth,
+  ).json()["auto_resume_on_restart"] is False
+
+
 def test_stale_global_auto_resume_setting_is_not_a_chat_default(
   client, auth, chat,
 ):

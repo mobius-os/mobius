@@ -162,6 +162,7 @@ test('a canonical create response becomes an authoritative empty detail cache', 
       effective_agent_settings: { model: 'gpt-current', effort: 'medium' },
       has_assistant_turns: false,
       auto_resume_on_limit: true,
+      auto_resume_on_restart: false,
       offset: 0,
     }),
   })
@@ -180,6 +181,7 @@ test('a canonical create response becomes an authoritative empty detail cache', 
       effective: { model: 'gpt-current', effort: 'medium' },
       has_assistant_turns: false,
       auto_resume_on_limit: true,
+      auto_resume_on_restart: false,
     },
   })
 })

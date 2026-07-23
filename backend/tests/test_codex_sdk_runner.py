@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import codex_sdk_runner, models
+from app.agent_lifecycle import normalize_chat_event
 from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
 
@@ -495,6 +496,46 @@ def test_active_codex_turn_interrupt_times_out_if_runner_never_finishes(caplog):
   )
 
 
+def test_active_codex_stop_timeout_preserves_runner_completion_future():
+  async def _scenario() -> None:
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), _FakeTurnHandle(), chat_id="timeout-identity",
+    )
+
+    assert await active.stop(timeout=0.01) is False
+    assert active._finished.done() is False
+    active.mark_finished()
+    assert active._finished.done() is True
+
+  asyncio.run(_scenario())
+
+
+def test_active_codex_force_stop_signals_group_only_once(monkeypatch):
+  calls: list[int] = []
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_terminate_codex_process_group",
+    lambda pgid: calls.append(pgid) or True,
+  )
+
+  async def _scenario() -> None:
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(),
+      _FakeTurnHandle(),
+      chat_id="hard-stop",
+      process_group_id=4321,
+    )
+    first = asyncio.create_task(active.force_stop(timeout=1))
+    while not calls:
+      await asyncio.sleep(0)
+    active.mark_finished()
+    assert await first is True
+    assert await active.force_stop(timeout=1) is True
+
+  asyncio.run(_scenario())
+  assert calls == [4321]
+
+
 def test_is_closed_turn_error_matches_sdk_rpc_errors(monkeypatch):
   sdk = _fake_sdk(async_codex_cls=object)
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
@@ -694,7 +735,8 @@ def test_subagent_activity_item_dispatch_stays_out_of_tool_stream():
   assert started["provider_agent_id"] == "thread-1"
   assert started["event_type"] == "agent_started"
   assert started["state"] == "running"
-  assert started["summary"] == "/root/scout"
+  assert started["agent_type"] == "/root/scout"
+  assert "summary" not in started
   assert started["occurred_at"] == 123_000
   assert started["provider_activation_id"] == "activation-1"
 
@@ -719,7 +761,7 @@ def test_codex_lifecycle_reactivation_and_terminal_state_mapping():
   item.tool = "resumeAgent"
   item.sender_thread_id = "root-thread"
   item.receiver_thread_ids = ["child-thread"]
-  item.prompt = "Continue the review"
+  item.prompt = "Read the confidential acquisition plan"
   item.agents_states = {}
   active = {}
   known = set()
@@ -735,6 +777,12 @@ def test_codex_lifecycle_reactivation_and_terminal_state_mapping():
   assert starts[0]["provider_activation_id"] == "call-resume:child-thread"
   assert starts[0]["parent_kind"] == "main"
   assert starts[0]["occurred_at"] == 123_000
+  assert "summary" not in starts[0]
+  normalized = normalize_chat_event(
+    chat_id="chat", chat_run_id="run", event=starts[0],
+  )
+  assert normalized["summary"] is None
+  assert "confidential acquisition" not in repr(normalized)
   assert active == {"child-thread": "call-resume:child-thread"}
 
   item.agents_states = {
@@ -865,7 +913,7 @@ def test_codex_input_to_running_child_is_progress_and_nested_spawn_uses_current_
 
   payload = SimpleNamespace(thread=SimpleNamespace(
     id="grandchild", parent_thread_id="child", agent_role="reviewer",
-    agent_nickname=None, preview="Review", created_at=301,
+    agent_nickname=None, preview="Confidential customer list", created_at=301,
   ))
   nested = codex_sdk_runner._thread_started_lifecycle_event(
     payload, root_thread_id="root",
@@ -873,6 +921,12 @@ def test_codex_input_to_running_child_is_progress_and_nested_spawn_uses_current_
   )
   assert nested["parent_kind"] == "agent"
   assert nested["parent_provider_activation_id"] == "resume-b:child"
+  assert "summary" not in nested
+  normalized = normalize_chat_event(
+    chat_id="chat", chat_run_id="run", event=nested,
+  )
+  assert normalized["summary"] is None
+  assert "Confidential customer list" not in repr(normalized)
 
 
 def test_run_codex_sdk_turn_dispatches_lifecycle_sequence_with_late_exact_fact(

@@ -1,9 +1,9 @@
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import String, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from app import models
-from app.database import run_migrations
+from app.database import _agent_lifecycle_width_migrations, run_migrations
 
 
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
@@ -83,6 +83,88 @@ def test_run_migrations_adds_park_columns_to_existing_chat_runs(tmp_path):
   cols = {c["name"] for c in inspector.get_columns("chat_runs")}
   assert "parked_until" in cols
   assert "park_reason" in cols
+  assert "restart_nonce" in cols
+
+
+def test_agent_lifecycle_width_migration_is_postgres_only_and_idempotent():
+  legacy = [
+    {"name": "activation_id", "type": String(70)},
+    {"name": "parent_activation_id", "type": String(70)},
+  ]
+  expected = [
+    "ALTER TABLE agent_lifecycle_events "
+    "ALTER COLUMN activation_id TYPE VARCHAR(75)",
+    "ALTER TABLE agent_lifecycle_events "
+    "ALTER COLUMN parent_activation_id TYPE VARCHAR(75)",
+  ]
+
+  assert _agent_lifecycle_width_migrations("postgresql", legacy) == expected
+  assert _agent_lifecycle_width_migrations("sqlite", legacy) == []
+  assert _agent_lifecycle_width_migrations("postgresql", [
+    {"name": "activation_id", "type": String(75)},
+    {"name": "parent_activation_id", "type": String(75)},
+  ]) == []
+
+
+def test_run_migrations_removes_only_persisted_codex_prompt_summaries(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'lifecycle-privacy.db'}")
+  models.Base.metadata.create_all(eng)
+  common = (
+    "INSERT INTO agent_lifecycle_events ("
+    "event_key, chat_id, provider, provider_agent_id, agent_id, activation_id, "
+    "parent_kind, event_type, state, observed_at, time_quality, source, "
+    "source_event_id, summary) VALUES ("
+    ":event_key, 'chat', :provider, :provider_agent_id, :agent_id, "
+    ":activation_id, 'unknown', :event_type, :state, CURRENT_TIMESTAMP, "
+    "'observed', 'runner', :source_event_id, :summary)"
+  )
+  rows = [
+    ("spawn", "codex", "agent_spawned", "running", "thread-started:child",
+     "private thread preview"),
+    ("resume", "codex", "agent_started", "running", "call:child:started",
+     "private delegated prompt"),
+    ("native", "codex", "agent_started", "running", "native-item-id",
+     "/root/scout"),
+    ("terminal", "codex", "agent_terminal", "done", "call:child:completed",
+     "provider result summary"),
+    ("claude", "claude", "agent_started", "running", "message-uuid",
+     "task description"),
+  ]
+  with eng.connect() as conn:
+    conn.execute(text(
+      "INSERT INTO chats (id, title, title_locked, messages, pending_messages, "
+      "uploads, provider) VALUES ('chat', 'Chat', 0, '[]', '[]', '[]', 'claude')"
+    ))
+    for index, (key, provider, event_type, state, source_id, summary) in enumerate(
+      rows,
+    ):
+      conn.execute(text(common), {
+        "event_key": key,
+        "provider": provider,
+        "provider_agent_id": f"provider-{index}",
+        "agent_id": f"agent-{index}",
+        "activation_id": f"activation-{index}",
+        "event_type": event_type,
+        "state": state,
+        "source_event_id": source_id,
+        "summary": summary,
+      })
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    summaries = dict(conn.execute(text(
+      "SELECT event_key, summary FROM agent_lifecycle_events ORDER BY event_key"
+    )).all())
+  assert summaries == {
+    "claude": "task description",
+    "native": None,
+    "resume": None,
+    "spawn": None,
+    "terminal": "provider result summary",
+  }
 
 
 def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
@@ -111,6 +193,9 @@ def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
   assert "auto_resume_on_limit" in cols
   assert cols["auto_resume_on_limit"]["nullable"] is False
   assert cols["auto_resume_on_limit"]["default"] is not None
+  assert "auto_resume_on_restart" in cols
+  assert cols["auto_resume_on_restart"]["nullable"] is False
+  assert cols["auto_resume_on_restart"]["default"] is not None
   assert "system_prompt_snapshot_id" in cols
   with eng.connect() as conn:
     value = conn.execute(text(
@@ -123,8 +208,12 @@ def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
       "SELECT auto_resume_on_limit FROM chats "
       "WHERE id = 'new-after-upgrade'"
     )).scalar_one()
+    restart_values = conn.execute(text(
+      "SELECT id, auto_resume_on_restart FROM chats ORDER BY id"
+    )).all()
   assert value in (True, 1)
   assert future_value in (True, 1)
+  assert all(restart in (False, 0) for _, restart in restart_values)
 
 
 def test_run_migrations_adds_bounded_live_assistant_snapshot(tmp_path):
@@ -155,6 +244,11 @@ def test_fresh_chat_schema_has_database_auto_resume_default():
   assert column.default is not None
   assert column.server_default is not None
   assert str(column.server_default.arg).lower() == "true"
+  restart = models.Chat.__table__.c.auto_resume_on_restart
+  assert restart.nullable is False
+  assert restart.default is not None
+  assert restart.server_default is not None
+  assert str(restart.server_default.arg).lower() == "false"
 
 
 def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
@@ -180,11 +274,17 @@ def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
   cols = {c["name"]: c for c in inspect(eng).get_columns("owner")}
   assert "auto_resume_on_limit_default" in cols
   assert cols["auto_resume_on_limit_default"]["nullable"] is False
+  assert "auto_resume_on_restart_default" in cols
+  assert cols["auto_resume_on_restart_default"]["nullable"] is False
   with eng.connect() as conn:
     value = conn.execute(text(
       "SELECT auto_resume_on_limit_default FROM owner WHERE id = 1"
     )).scalar_one()
+    restart_value = conn.execute(text(
+      "SELECT auto_resume_on_restart_default FROM owner WHERE id = 1"
+    )).scalar_one()
   assert value in (True, 1)
+  assert restart_value in (False, 0)
 
 
 def test_fresh_owner_schema_has_auto_resume_default():
@@ -194,3 +294,8 @@ def test_fresh_owner_schema_has_auto_resume_default():
   assert column.default is not None
   assert column.server_default is not None
   assert str(column.server_default.arg).lower() == "true"
+  restart = models.Owner.__table__.c.auto_resume_on_restart_default
+  assert restart.nullable is False
+  assert restart.default is not None
+  assert restart.server_default is not None
+  assert str(restart.server_default.arg).lower() == "false"

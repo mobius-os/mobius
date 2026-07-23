@@ -41,6 +41,11 @@ export function projectFocusedPane(baseProjection, workspace, paneId, contentRec
       },
     },
     dividers: [],
+    // Presentation geometry expands the selected pane, but mode motion still needs
+    // its durable position to know which outer edge owns it. Keeping that source
+    // rect beside the focused projection avoids a DOM read or a focus-only planner.
+    motionRects: baseProjection.rects,
+    focusedPaneView: true,
   }
 }
 
@@ -102,7 +107,7 @@ function flipTo(from, dest) {
 // top/bottom split vertically, and a corner pane diagonally. The resulting motion
 // reads as one assembled surface rather than four unrelated card transitions.
 // Values are projection-derived and latched with the plan — no DOM measurement.
-function edgeOffset(rect, bounds) {
+function edgeOffset(rect, bounds, directionRect = rect) {
   // Shell's live contentRect is intentionally just {w, h}; projection rects are
   // already content-local. Tests and other pure callers may include an origin,
   // so accept both shapes without ever emitting an invalid `NaNpx` CSS variable.
@@ -110,8 +115,10 @@ function edgeOffset(rect, bounds) {
   const boundsY = Number.isFinite(bounds.y) ? bounds.y : 0
   const left = rect.x - boundsX
   const top = rect.y - boundsY
-  const dx = (left + rect.w / 2) - bounds.w / 2
-  const dy = (top + rect.h / 2) - bounds.h / 2
+  const directionLeft = directionRect.x - boundsX
+  const directionTop = directionRect.y - boundsY
+  const dx = (directionLeft + directionRect.w / 2) - bounds.w / 2
+  const dy = (directionTop + directionRect.h / 2) - bounds.h / 2
   const gap = 24
   let x = 0
   let y = 0
@@ -122,6 +129,17 @@ function edgeOffset(rect, bounds) {
   // already establishes that spatial boundary.
   if (x === 0 && y === 0) y = -(top + rect.h + gap)
   return { x, y }
+}
+
+// A normal one-leaf builder uses the flow tab strip outside .shell__content, so
+// its wrapper already fills the content box. A focused pane is also a one-leaf
+// projection, but its WorkspaceChrome strip remains inside the pane. Projection
+// metadata makes that structural difference explicit instead of inferring it from
+// leaf count alone.
+function paintedContentRect(leaf, projection, leafCount) {
+  return (leafCount > 1 || projection.focusedPaneView)
+    ? contentRectOfPane(leaf.rect)
+    : leaf.rect
 }
 
 // The concrete surface key SINGLE mode will paint after this exit — the slot, the New
@@ -146,7 +164,15 @@ function visibleLeafDescriptors(workspace, projection) {
     const pane = workspace.panes[paneId]
     const rect = projection.rects[paneId]
     if (!pane || !pane.activeTabKey || !rect) continue
-    out.push({ paneId, activeKey: pane.activeTabKey, rect })
+    out.push({
+      paneId,
+      activeKey: pane.activeTabKey,
+      rect,
+      // A focused projection is full-size and centred, which erases the pane's
+      // original edge. Direction comes from the durable projection while travel
+      // distance comes from the rectangle that is actually painted.
+      motionRect: projection.motionRects?.[paneId] || rect,
+    })
   }
   return out
 }
@@ -178,7 +204,12 @@ export function transitionSignature(input) {
   const { workspace, projection, contentRect } = input
   const { target, immersiveInstant } = classifyExitDestination(input)
   const leaves = visibleLeafDescriptors(workspace, projection)
-    .map(l => `${l.paneId}=${l.activeKey}@${l.rect.x},${l.rect.y},${l.rect.w},${l.rect.h}`)
+    .map((l) => {
+      const painted = `${l.rect.x},${l.rect.y},${l.rect.w},${l.rect.h}`
+      if (l.motionRect === l.rect) return `${l.paneId}=${l.activeKey}@${painted}`
+      const motion = `${l.motionRect.x},${l.motionRect.y},${l.motionRect.w},${l.motionRect.h}`
+      return `${l.paneId}=${l.activeKey}@${painted}~${motion}`
+    })
   const x = Number.isFinite(contentRect.x) ? contentRect.x : 0
   const y = Number.isFinite(contentRect.y) ? contentRect.y : 0
   return `${target || ''}|${immersiveInstant ? 'i' : ''}|${leaves.join(',')}`
@@ -241,7 +272,8 @@ export function deriveExitPlan(input) {
     // sit INSIDE the pane rect, so the wrapper is inset by STRIP_H. Insetting the
     // single-leaf case (contentRectOfPane) overshot the FLIP (y:-STRIP_H, sy>1) and
     // snapped back when the strip unmounted (M4).
-    const fromRect = leaves.length === 1 ? promoteLeaf.rect : contentRectOfPane(promoteLeaf.rect)
+    const siblings = leaves.filter(l => l !== promoteLeaf).sort(byVisualOrder)
+    const fromRect = paintedContentRect(promoteLeaf, projection, leaves.length)
     participants.push({
       key: promoteLeaf.activeKey,
       paneId: promoteLeaf.paneId,
@@ -252,12 +284,11 @@ export function deriveExitPlan(input) {
     })
     completionNames.add(PROMOTE_NAME)
     // Siblings deal out in visual order beneath the promoting pane.
-    const siblings = leaves.filter(l => l !== promoteLeaf).sort(byVisualOrder)
     siblings.forEach((l) => {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
         delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
-        offset: edgeOffset(l.rect, contentRect),
+        offset: edgeOffset(l.rect, contentRect, l.motionRect),
       })
     })
     if (siblings.length) completionNames.add(DEAL_OUT_NAME)
@@ -276,7 +307,7 @@ export function deriveExitPlan(input) {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
         delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
-        offset: edgeOffset(l.rect, contentRect),
+        offset: edgeOffset(l.rect, contentRect, l.motionRect),
       })
     })
     completionNames.add(DEAL_OUT_NAME)
@@ -317,7 +348,7 @@ export function deriveEnterPlan(input) {
   let underlayKey = null
 
   if (settleLeaf) {
-    const fromRect = single ? settleLeaf.rect : contentRectOfPane(settleLeaf.rect)
+    const fromRect = paintedContentRect(settleLeaf, projection, leaves.length)
     participants.push({
       key: settleLeaf.activeKey,
       paneId: settleLeaf.paneId,
@@ -335,8 +366,9 @@ export function deriveEnterPlan(input) {
     if (l === settleLeaf) continue
     participants.push({
       key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
-      delayMs: 0, durationMs: duration,
-      offset: edgeOffset(l.rect, contentRect),
+      delayMs: 0,
+      durationMs: duration,
+      offset: edgeOffset(l.rect, contentRect, l.motionRect),
     })
     completionNames.add(DEAL_IN_NAME)
   }

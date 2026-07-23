@@ -513,6 +513,7 @@ test.describe('Drawer touch lifecycle', () => {
     box = await toggle.boundingBox()
     await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
     await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(drawer).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)')
 
     const gamma = navigation.getByRole('button', { name: NAV_CHATS[2].title, exact: true })
     box = await gamma.boundingBox()

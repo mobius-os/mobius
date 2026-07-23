@@ -943,12 +943,33 @@ test.describe('Workspace drag (PR3)', () => {
     const durationMs = Number.parseFloat(motion.duration) * 1000
     const expectedDurationMs = Math.min(
       32000,
-      Math.max(8000, Math.round(Math.abs(motion.shift) * (1000 / 6))),
+      Math.round(Math.abs(motion.shift) * (1000 / 12)),
     )
     expect(durationMs).toBeCloseTo(expectedDurationMs, -1)
     expect(durationMs).toBeGreaterThan(4800)
     expect(motion.delay).toBe('0.7s')
     expect(motion.shift).toBeLessThan(0)
+    if (expectedDurationMs < 32000) {
+      const travelPxPerSecond = Math.abs(motion.shift) / (durationMs * 0.4 / 1000)
+      expect(travelPxPerSecond).toBeCloseTo(30, 0)
+    }
+
+    // A long title must visibly advance soon after the fixed delay. The previous
+    // 25%-of-duration opening rest left a 32s title motionless for 8.7s while its
+    // animation object still reported `running`, which looked exactly like a dead
+    // marquee and escaped the implementation-only assertion above.
+    const underway = await title.evaluate((el, duration) => {
+      const animation = el.querySelector('.shell__tab-text-inner').getAnimations()[0]
+      animation.pause()
+      animation.currentTime = 700 + duration * 0.25
+      const x = new DOMMatrixReadOnly(
+        getComputedStyle(el.querySelector('.shell__tab-text-inner')).transform,
+      ).m41
+      animation.play()
+      return x
+    }, durationMs)
+    expect(underway).toBeLessThan(motion.shift * 0.2)
+    expect(underway).toBeGreaterThan(motion.shift * 0.8)
 
     // Jump the bounded animation to completion: its filled final frame is the
     // beginning of the title, and it remains finished rather than looping.

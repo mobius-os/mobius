@@ -560,6 +560,45 @@ async def test_stop_drops_buffered_steer_and_clears_flags(monkeypatch):
     registry.unregister("stop-chat", handle.kind)
 
 
+@pytest.mark.asyncio
+async def test_stop_timeout_preserves_runner_completion_future():
+  class _Client:
+    async def interrupt(self):
+      return None
+
+  handle = ActiveClaudeClient(_Client(), chat_id="timeout-identity")
+
+  assert await handle.stop(timeout=0.01) is False
+  assert handle._finished.done() is False
+  handle.mark_finished()
+  assert handle._finished.done() is True
+
+
+@pytest.mark.asyncio
+async def test_force_stop_signals_claude_group_only_once(monkeypatch):
+  calls: list[int] = []
+  monkeypatch.setattr(
+    claude_sdk_runner,
+    "_terminate_claude_process_group",
+    lambda pgid: calls.append(pgid) or True,
+  )
+
+  class _Client:
+    async def interrupt(self):
+      return None
+
+  handle = ActiveClaudeClient(_Client(), chat_id="hard-stop")
+  handle.set_process_group_id(4321)
+  first = asyncio.create_task(handle.force_stop(timeout=1))
+  while not calls:
+    await asyncio.sleep(0)
+  handle.mark_finished()
+
+  assert await first is True
+  assert await handle.force_stop(timeout=1) is True
+  assert calls == [4321]
+
+
 def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
   monkeypatch,
 ):

@@ -81,7 +81,7 @@ jobs:
         # validation values non-empty and production-shaped so both site
         # blocks and the cross-origin CSP are actually parsed.
         run: >-
-          docker run --rm
+          scripts/docker-probe.sh --timeout 30 --
           -e DOMAIN=mobius.example.test
           -e FRONTEND_ORIGIN=https://mobius.example.test
           -e MOBIUS_SERVICE_GATEWAY_ORIGIN=https://services.example.test
@@ -205,6 +205,9 @@ jobs:
           # built and loaded image into a red build. The image itself remains
           # authoritative; cache export is only a performance optimization.
           cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Verify timed Docker probe cleanup
+        run: scripts/test-docker-probe.sh
 
       - name: Start test container
         run: |

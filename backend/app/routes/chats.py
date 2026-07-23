@@ -324,6 +324,7 @@ def _chat_detail_response(
     "provider": provider,
     "created_by_app_id": chat.created_by_app_id,
     "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
+    "auto_resume_on_restart": bool(chat.auto_resume_on_restart),
     "agent_settings_json": settings_obj,
     "effective_agent_settings": effective_agent_settings(
       get_settings().data_dir,
@@ -676,6 +677,9 @@ def create_chat(
     auto_resume_on_limit=(
       bool(owner.auto_resume_on_limit_default) if owner else True
     ),
+    auto_resume_on_restart=(
+      bool(owner.auto_resume_on_restart_default) if owner else False
+    ),
   )
   db.add(chat)
   db.commit()
@@ -744,7 +748,11 @@ def _first_message_title(chat) -> str:
   """The 'first message' fallback name: the first user message's text trimmed
   to a sane length (mirrors the StartTurn initial-title behavior)."""
   for m in (chat.messages or []):
-    if not isinstance(m, dict) or m.get("role") != "user":
+    if (
+      not isinstance(m, dict)
+      or m.get("role") != "user"
+      or m.get("kind") == "auto_continuation"
+    ):
       continue
     c = m.get("content")
     if isinstance(c, list):
@@ -790,6 +798,7 @@ async def patch_chat(
     body.title is not None
     or body.pinned is not None
     or body.auto_resume_on_limit is not None
+    or body.auto_resume_on_restart is not None
     or body.by_agent
     or body.clear_title
   ):
@@ -851,6 +860,12 @@ async def patch_chat(
       # global at runtime.
       principal.owner.auto_resume_on_limit_default = body.auto_resume_on_limit
 
+    if body.auto_resume_on_restart is not None:
+      chat.auto_resume_on_restart = body.auto_resume_on_restart
+      principal.owner.auto_resume_on_restart_default = (
+        body.auto_resume_on_restart
+      )
+
     # Determine the effective target provider. The body may set it
     # explicitly, OR it may be implied by a model-only PATCH whose
     # `model` belongs to a different provider than the chat is
@@ -897,7 +912,7 @@ async def patch_chat(
     if provider_changing:
       active_run = db.query(models.ChatRun).filter(
         models.ChatRun.chat_id == chat_id,
-        models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
       ).first()
       if (
         is_chat_running(chat_id)
@@ -1008,6 +1023,7 @@ async def patch_chat(
       "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
       "provider": chat.provider or "claude",
       "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
+      "auto_resume_on_restart": bool(chat.auto_resume_on_restart),
       "effective": effective_agent_settings(
         data_dir,
         _coerce_agent_settings(chat.agent_settings_json) or None,
@@ -1603,7 +1619,7 @@ async def compact_chat(
       )
     active_run = db.query(models.ChatRun).filter(
       models.ChatRun.chat_id == chat_id,
-      models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+      models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
     ).first()
     if (
       is_chat_running(chat_id)
@@ -2000,7 +2016,7 @@ async def patch_app_chat(
     if body.system_prompt is not None:
       active_run = db.query(models.ChatRun).filter(
         models.ChatRun.chat_id == chat_id,
-        models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
       ).first()
       if (
         chat.system_prompt_snapshot_id
@@ -2034,7 +2050,7 @@ async def patch_app_chat(
       if chat.provider != body.provider:
         active_run = db.query(models.ChatRun).filter(
           models.ChatRun.chat_id == chat_id,
-          models.ChatRun.status.in_(("running", "parked", "resume_pending")),
+          models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
         ).first()
         if (
           is_chat_running(chat_id)

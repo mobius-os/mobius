@@ -18,11 +18,15 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text, event, true,
+  String, Text, event, false, true,
 )
 
 from app.database import Base
 from app.timeutil import now_naive_utc
+
+
+CONTINUATION_RUN_STATUSES = ("parked", "resume_pending")
+NONTERMINAL_RUN_STATUSES = ("running", *CONTINUATION_RUN_STATUSES)
 
 
 class Owner(Base):
@@ -40,6 +44,12 @@ class Owner(Base):
   # next chat without rewriting any existing conversation.
   auto_resume_on_limit_default = Column(
     Boolean, nullable=False, default=True, server_default=true()
+  )
+  # Separately consented planned-restart policy for newly created chats.
+  # Existing owners migrate to false: consenting to provider-limit recovery
+  # never silently opts them into replay after a process restart.
+  auto_resume_on_restart_default = Column(
+    Boolean, nullable=False, default=False, server_default=false()
   )
   # Per-owner model-picker preferences. Shape:
   #   {"hidden_ids": ["claude-haiku-4-5-20251001", ...]}
@@ -124,12 +134,15 @@ class Chat(Base):
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
-  # Per-chat policy for provider-limit recovery. Kept out of
-  # agent_settings_json because that blob is snapshotted/mirrored as SDK
-  # runtime configuration; mixing this policy into it can skip first-send
-  # model snapshots or overwrite the owner's global model defaults.
+  # Per-chat policy for automatic recovery after provider limits.
   auto_resume_on_limit = Column(
     Boolean, nullable=False, default=True, server_default=true()
+  )
+  # Planned restart continuation is materially broader than provider-limit
+  # recovery and therefore has separate, explicit consent. Existing and fresh
+  # chats start off until the owner enables it in that chat.
+  auto_resume_on_restart = Column(
+    Boolean, nullable=False, default=False, server_default=false()
   )
   # Vestigial: the named-agent feature was removed; column retained
   # nullable to avoid a prod migration. Nothing reads or writes it.
@@ -222,6 +235,8 @@ class ChatRun(Base):
   # turn, "failed" for a provider/setup error, "stopped" for an explicit user
   # Stop, and "interrupted" for crash/supersession/watchdog recovery. Provider
   # limits additionally use the parked/resume_pending/parked_notified states.
+  # A successfully drained planned restart reuses that retry path with
+  # park_reason="restart"; an unplanned crash remains "interrupted".
   status = Column(String(16), nullable=False, default="running", index=True)
   provider = Column(String(32), nullable=True, default=None)
   # App that initiated this turn under the app-attributed-chat contract
@@ -239,14 +254,19 @@ class ChatRun(Base):
   # provider limit, the run is PARKED instead of just cleared: `status` moves
   # to "parked", `parked_until` holds the reset time (naive UTC, matching every
   # other DateTime here), and `park_reason` a short label ("rate_limit" /
-  # "usage_limit" / …). This run row IS the provider-parked signal — no
-  # separate state enum. The liveness checks read it via
+  # "usage_limit" / …). Planned restarts also use this row with
+  # park_reason="restart" and a due time of now. No separate state enum is
+  # needed. The liveness checks read it via
   # `chat._parked_until_for_chat`; the periodic reset sweep notifies once at
   # `parked_until`; auto-resume may pass through the retryable
   # "resume_pending" state before the row becomes terminal. Null on every
   # non-parked run and on rows created before this column existed.
   parked_until = Column(DateTime, nullable=True, default=None)
   park_reason = Column(String(32), nullable=True, default=None)
+  # One-shot platform-authored intent identity for a planned restart. It only
+  # authorizes replay when the frozen supervisor's root-owned boot ledger binds
+  # the same nonce + exact run id to the current boot.
+  restart_nonce = Column(String(128), nullable=True, default=None)
 
 
 class ChatSessionLink(Base):
@@ -319,9 +339,12 @@ class AgentLifecycleEvent(Base):
   provider_session_id = Column(String(160), nullable=True)
   provider_agent_id = Column(String(160), nullable=False)
   agent_id = Column(String(70), nullable=False, index=True)
-  activation_id = Column(String(70), nullable=False, index=True)
+  # ``stable_activation_id`` is ``activation-`` (11 chars) plus a 64-char
+  # SHA-256 digest. Keep the declared width exact: SQLite does not enforce a
+  # VARCHAR length, but PostgreSQL does.
+  activation_id = Column(String(75), nullable=False, index=True)
   parent_agent_id = Column(String(70), nullable=True, index=True)
-  parent_activation_id = Column(String(70), nullable=True, index=True)
+  parent_activation_id = Column(String(75), nullable=True, index=True)
   parent_kind = Column(String(16), nullable=False, default="unknown")
   parent_source_id = Column(String(160), nullable=True)
   event_type = Column(String(32), nullable=False)

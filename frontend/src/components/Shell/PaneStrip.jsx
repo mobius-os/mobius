@@ -8,13 +8,12 @@ import X from 'lucide-react/dist/esm/icons/x.mjs'
 import * as tabModel from './tabModel.js'
 import { STRIP_H, WORKSPACE_SPLITS_ENABLED } from './paneModel.js'
 
-// Keep normal generated chat titles near a steady, readable 30px/s while the
-// existing one-shot cycle traverses each direction. The floor keeps small clips
-// unhurried; the cap prevents an extreme manual 500-character rename from
-// holding a compositor animation for minutes.
-const TITLE_CYCLE_MIN_MS = 8000
+// Each direction owns 40% of the one-shot cycle, so 1000/12 ms per clipped pixel
+// keeps travel at a readable 30px/s: longer titles take proportionally longer, not
+// move faster. The short 5% opening rest cannot make a running animation look dead
+// for almost nine seconds. Only extreme manual renames hit the resource-safety cap.
 const TITLE_CYCLE_MAX_MS = 32000
-const TITLE_CYCLE_MS_PER_PX = 1000 / 6
+const TITLE_CYCLE_MS_PER_PX = 1000 / 12
 
 // The ONE strip implementation, shared by the multi-pane chrome overlay AND the
 // single-pane top nav (design §2/§3.6). The two CONTAINERS differ by a scroll
@@ -89,7 +88,7 @@ export function PaneTab({
       if (shift > 3) {
         const duration = Math.min(
           TITLE_CYCLE_MAX_MS,
-          Math.max(TITLE_CYCLE_MIN_MS, Math.round(shift * TITLE_CYCLE_MS_PER_PX)),
+          Math.round(shift * TITLE_CYCLE_MS_PER_PX),
         )
         title.dataset.overflow = 'true'
         title.style.setProperty('--tab-title-shift', `-${shift}px`)
