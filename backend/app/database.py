@@ -194,6 +194,27 @@ class Base(DeclarativeBase):
   pass
 
 
+def _agent_lifecycle_width_migrations(
+  dialect_name: str, columns: list[dict],
+) -> list[str]:
+  """Return lossless ALTERs for the original undersized activation ids."""
+  if dialect_name != "postgresql":
+    # SQLite does not enforce VARCHAR lengths and cannot ALTER a column type in
+    # place. Its existing 75-character values are already stored losslessly.
+    return []
+  by_name = {column["name"]: column for column in columns}
+  statements = []
+  for column_name in ("activation_id", "parent_activation_id"):
+    column = by_name.get(column_name)
+    length = getattr(column.get("type"), "length", None) if column else None
+    if length is not None and length < 75:
+      statements.append(
+        "ALTER TABLE agent_lifecycle_events "
+        f"ALTER COLUMN {column_name} TYPE VARCHAR(75)"
+      )
+  return statements
+
+
 def run_migrations(eng) -> None:
   """Run schema migrations on startup.
 
@@ -664,6 +685,40 @@ def run_migrations(eng) -> None:
     if _add_runs:
       with eng.connect() as conn:
         for stmt in _add_runs:
+          conn.execute(text(stmt))
+        conn.commit()
+
+  # d6fae591 briefly copied Codex delegated prompts/thread previews into
+  # non-terminal lifecycle ``summary``. Remove all such already-persisted
+  # values on upgrade. The corrected emitter keeps identity/role on agent_type
+  # and reserves Codex summary for terminal provider-authored results, so this
+  # structural cleanup needs no brittle inference from clipped source ids.
+  if "agent_lifecycle_events" in tables:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "UPDATE agent_lifecycle_events SET summary = NULL "
+        "WHERE provider = 'codex' AND summary IS NOT NULL "
+        "AND event_type IN ('agent_spawned', 'agent_started')"
+      ))
+      conn.commit()
+
+  # The same commit introduced activation ids as ``activation-`` + SHA-256 (75
+  # characters) but declared both columns VARCHAR(70). SQLite ignores the
+  # declared VARCHAR length, so its already-deployed rows are intact and need no
+  # table rebuild. PostgreSQL enforces it and therefore needs an explicit widen:
+  # create_all never alters an existing table. Widening is lossless and each
+  # column is independently gated so a restart after one ALTER converges.
+  if (
+    eng.dialect.name == "postgresql"
+    and "agent_lifecycle_events" in tables
+  ):
+    _widen_lifecycle = _agent_lifecycle_width_migrations(
+      eng.dialect.name,
+      inspector.get_columns("agent_lifecycle_events"),
+    )
+    if _widen_lifecycle:
+      with eng.connect() as conn:
+        for stmt in _widen_lifecycle:
           conn.execute(text(stmt))
         conn.commit()
 
