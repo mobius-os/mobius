@@ -728,27 +728,24 @@ test('deriveExitPlan: M2 a builder Settings tab that IS the destination does not
   assert.ok(plan.participants.some(p => p.key === 'chat:5'), 'the sibling pane still deals out')
 })
 
-test('deriveEnterPlan: the shared surface settles while siblings assemble from their edges', () => {
+test('deriveEnterPlan: the shared Standard surface stays still while siblings assemble', () => {
   const two = twoPaneChatAndApp() // the app:42 pane is focused
   const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two), contentRect: CONTENT })
-  assert.deepEqual(twoPlan.completionNames, ['shell-mode-settle', 'shell-mode-deal-in'])
-  assert.equal(twoPlan.participants.length, 2)
+  assert.deepEqual(twoPlan.completionNames, ['shell-mode-deal-in'])
+  assert.equal(twoPlan.underlayKey, 'app:42')
+  assert.equal(twoPlan.participants.length, 1)
   assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.enterItemMs))
-  const settle = twoPlan.participants.find(p => p.motion === 'settle')
   const gather = twoPlan.participants.find(p => p.motion === 'deal-in')
-  assert.equal(settle.key, 'app:42')
-  assert.ok(settle.flip.sx > 1, 'the right pane starts at the single-world size')
   assert.equal(gather.key, 'chat:5')
   assert.ok(gather.offset.x < 0, 'the left pane assembles from the left edge')
-  assert.ok(twoPlan.participants.every(p => p.delayMs === 0),
-    'the shared surface and siblings assemble together')
+  assert.ok(twoPlan.participants.every(p => p.delayMs === 0))
   assert.equal(twoPlan.totalMs, MODE_MOTION.enterItemMs)
+
+  // There is no visible assembly when the Standard surface is the only leaf.
+  // Returning null makes the controller commit that world flip instantly.
   const one = paneModel.seedFromFlatTabs([makeTab('app', '42')])
   const onePlan = deriveEnterPlan({ workspace: one, projection: project(one), contentRect: CONTENT })
-  assert.equal(onePlan.participants.length, 1)
-  assert.equal(onePlan.participants[0].motion, 'settle')
-  assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.enterSingleMs)
-  assert.equal(onePlan.totalMs, MODE_MOTION.enterSingleMs)
+  assert.equal(onePlan, null)
 })
 
 test('focused-pane mode keeps its original edge and its in-pane strip geometry', () => {

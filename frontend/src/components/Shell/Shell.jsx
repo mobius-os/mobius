@@ -396,7 +396,7 @@ export default function Shell() {
     const p = beatParticipants.get(key)
     if (!p) return null
     const vars = { '--mode-duration': `${p.durationMs}ms`, '--mode-delay': `${p.delayMs}ms` }
-    if ((p.motion === 'promote' || p.motion === 'settle') && p.flip) {
+    if (p.motion === 'promote' && p.flip) {
       vars['--flip-x'] = `${p.flip.x}px`
       vars['--flip-y'] = `${p.flip.y}px`
       vars['--flip-sx'] = p.flip.sx
