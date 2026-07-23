@@ -209,6 +209,36 @@ def _agent_settings_payload(agent_settings) -> dict:
   return out
 
 
+def _autopilot_budget_view(data_dir: str) -> dict:
+  """The resolved (defaults-filled) autopilot budget for the settings UI."""
+  from app import agent_budget
+  return agent_budget.read_budget_setting(data_dir)
+
+
+def _autopilot_budget_payload(update, existing) -> dict:
+  """Merge an autopilot-budget update over the existing block, clamped.
+
+  Only fields the client actually sent are changed (partial update); the rest
+  fall back to the stored value or the module defaults.
+  """
+  from app import agent_budget
+  base = existing if isinstance(existing, dict) else {}
+  fields_set = getattr(update, "model_fields_set", set())
+  percent = base.get("percent", agent_budget.DEFAULT_PERCENT)
+  tokens = base.get("weekly_tokens", agent_budget.DEFAULT_WEEKLY_TOKENS)
+  if "percent" in fields_set and update.percent is not None:
+    try:
+      percent = max(0.0, min(100.0, float(update.percent)))
+    except (TypeError, ValueError):
+      pass
+  if "weekly_tokens" in fields_set and update.weekly_tokens is not None:
+    try:
+      tokens = max(0, int(update.weekly_tokens))
+    except (TypeError, ValueError):
+      pass
+  return {"percent": percent, "weekly_tokens": tokens}
+
+
 # Outer composer — this is what routes/__init__.py picks up. The
 # real surfaces live on the three child surfaces below.
 router = APIRouter()
@@ -277,6 +307,7 @@ def get_settings_view(
       data_dir, provider
     ),
     "skills_enabled": providers.skills_enabled(data_dir),
+    "autopilot_budget": _autopilot_budget_view(data_dir),
     "claude_version": _format_cli_version(_cli_version("claude")),
     "codex_version": _format_cli_version(_cli_version("codex")),
   }
@@ -299,6 +330,7 @@ def update_settings(
     body.skills_enabled is not None
     or body.background_agents is not None
     or body.agent_settings is not None
+    or body.autopilot_budget is not None
   ):
     data_dir = get_app_settings().data_dir
 
@@ -313,6 +345,10 @@ def update_settings(
         current["background_agents"] = _background_agents_payload(
           body.background_agents,
           existing,
+        )
+      if body.autopilot_budget is not None:
+        current["autopilot_budget"] = _autopilot_budget_payload(
+          body.autopilot_budget, current.get("autopilot_budget"),
         )
       return current
 

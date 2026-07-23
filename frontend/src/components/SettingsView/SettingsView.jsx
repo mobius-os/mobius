@@ -446,6 +446,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // React re-render per frame; render reads it for the same transform.
   const backgroundPointerYRef = useRef(0)
   const [manageModelsOpen, setManageModelsOpen] = useState(false)
+  // Contribute autopilot weekly-allowance cap. Local draft mirrors the saved
+  // value; persisted on change (debounced) so the slider feels live.
+  const [autopilotPercent, setAutopilotPercent] = useState(null)
+  const [autopilotBudgetError, setAutopilotBudgetError] = useState('')
+  const autopilotSaveRef = useRef(null)
   const setupFocusRefs = useRef({})
   const [attentionSection, setAttentionSection] = useState('')
   const configuredProvidersRef = useRef(configuredProviders)
@@ -465,6 +470,28 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     backgroundDraftRef.current = next
     setBackgroundDraft(next)
   }, [settingsQuery.data])
+
+  useEffect(() => {
+    if (!settingsQuery.data) return
+    const raw = settingsQuery.data.autopilot_budget
+    if (raw && typeof raw.percent === 'number' && autopilotPercent === null) {
+      setAutopilotPercent(raw.percent)
+    }
+  }, [settingsQuery.data, autopilotPercent])
+
+  const saveAutopilotBudget = useCallback((percent) => {
+    setAutopilotBudgetError('')
+    if (autopilotSaveRef.current) clearTimeout(autopilotSaveRef.current)
+    // Debounce: the range input fires continuously while dragging.
+    autopilotSaveRef.current = setTimeout(async () => {
+      try {
+        await api.settings.save({ autopilot_budget: { percent } })
+        settingsQueries.owner.invalidate(queryClient)
+      } catch (err) {
+        setAutopilotBudgetError(err.message || 'Could not save the autopilot budget.')
+      }
+    }, 400)
+  }, [queryClient])
 
   useEffect(() => {
     const requested = focusTarget?.section
@@ -1411,6 +1438,41 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                     color="danger"
                     variant="soft"
                     description={backgroundError}
+                  />
+                )}
+                <div className="settings-agent-group__head" style={{ marginTop: '1.25rem' }}>
+                  <div className="settings-agent-group__title-row">
+                    <h3 className="settings__agent-title">Contribute autopilot budget</h3>
+                  </div>
+                  <p className="settings__subtext settings__subtext--tight">
+                    The share of your weekly model allowance the Contribute app may
+                    spend responding to PR reviews in the background. Set to 0 to turn
+                    autopilot off.
+                  </p>
+                </div>
+                <div className="settings-autopilot-budget">
+                  <input
+                    type="range"
+                    min={0}
+                    max={50}
+                    step={1}
+                    value={autopilotPercent === null ? 10 : autopilotPercent}
+                    onChange={(e) => {
+                      const value = Number(e.target.value)
+                      setAutopilotPercent(value)
+                      saveAutopilotBudget(value)
+                    }}
+                    aria-label="Autopilot weekly allowance percent"
+                  />
+                  <span className="settings__subtext">
+                    {autopilotPercent === null ? 10 : autopilotPercent}% of your weekly allowance
+                  </span>
+                </div>
+                {autopilotBudgetError && (
+                  <Alert
+                    color="danger"
+                    variant="soft"
+                    description={autopilotBudgetError}
                   />
                 )}
               </div>
