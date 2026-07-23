@@ -2,8 +2,8 @@ export const AUTO_RESUME_REQUEST_TIMEOUT_MS = 15000
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 
-function policyValue(data) {
-  return !!data?.auto_resume_on_limit
+function policyValue(data, field) {
+  return !!data?.[field]
 }
 
 
@@ -30,14 +30,14 @@ function mutationErrorMessage(err) {
  * response is lost; treating that as a definite failure would leave an OFF
  * switch controlling an ON server policy.
  */
-export async function saveAutoResumePolicy({ chatId, next, request }) {
+async function saveBooleanPolicy({ chatId, next, request, field }) {
   const desired = !!next
   let mutationError = null
 
   try {
     const res = await request(`/chats/${encodeURIComponent(chatId)}`, {
       method: 'PATCH',
-      body: JSON.stringify({ auto_resume_on_limit: desired }),
+      body: JSON.stringify({ [field]: desired }),
       timeoutMs: AUTO_RESUME_REQUEST_TIMEOUT_MS,
     })
     if (!res.ok) {
@@ -45,7 +45,7 @@ export async function saveAutoResumePolicy({ chatId, next, request }) {
       throw new Error(detail || 'Could not save this chat setting.')
     }
     const data = await res.json()
-    return { value: policyValue(data), error: '' }
+    return { value: policyValue(data, field), error: '' }
   } catch (err) {
     mutationError = err
   }
@@ -56,7 +56,7 @@ export async function saveAutoResumePolicy({ chatId, next, request }) {
       { timeoutMs: AUTO_RESUME_REQUEST_TIMEOUT_MS },
     )
     if (!res.ok) throw new Error(`policy reconciliation failed (${res.status})`)
-    const value = policyValue(await res.json())
+    const value = policyValue(await res.json(), field)
     return {
       value,
       // A lost response after a successful commit is a success once GET proves
@@ -72,6 +72,16 @@ export async function saveAutoResumePolicy({ chatId, next, request }) {
       error: `${mutationErrorMessage(mutationError)} Current setting could not be verified.`,
     }
   }
+}
+
+
+export function saveAutoResumePolicy(args) {
+  return saveBooleanPolicy({...args, field: 'auto_resume_on_limit'})
+}
+
+
+export function saveRestartResumePolicy(args) {
+  return saveBooleanPolicy({...args, field: 'auto_resume_on_restart'})
 }
 
 

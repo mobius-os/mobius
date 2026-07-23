@@ -59,6 +59,56 @@ def test_stop_chat_for_timeout_leaves_chat_running():
   assert registry.is_alive(chat_id) is True
 
 
+def test_stop_chat_for_escalates_same_handle_and_closes_browser(monkeypatch):
+  chat_id = "chat-hard-stop"
+  calls: list[str] = []
+
+  class _EscalatingHandle(_FailingHandle):
+    async def force_stop(self, timeout: float = 5.0) -> bool:
+      del timeout
+      calls.append("force")
+      return True
+
+  async def _close_browser(closed_chat_id: str) -> None:
+    calls.append(f"browser:{closed_chat_id}")
+
+  monkeypatch.setattr(chat_mod, "_close_browser_session", _close_browser)
+  handle = _EscalatingHandle(chat_id)
+  registry.register(handle)
+
+  stopped, _ = asyncio.run(chat_mod.stop_chat_for(chat_id))
+
+  assert stopped is True
+  assert calls == ["force", f"browser:{chat_id}"]
+  assert registry.get_handle(chat_id, handle.kind) is None
+
+
+def test_stop_chat_for_never_escalates_replaced_handle(monkeypatch):
+  chat_id = "chat-successor-guard"
+  calls: list[str] = []
+
+  class _OldHandle(_FailingHandle):
+    async def stop(self, timeout: float = 2.0) -> bool:
+      del timeout
+      registry.register(successor)
+      return False
+
+    async def force_stop(self, timeout: float = 5.0) -> bool:
+      del timeout
+      calls.append("unsafe-force")
+      return True
+
+  successor = _FailingHandle(chat_id)
+  old = _OldHandle(chat_id)
+  registry.register(old)
+
+  stopped, _ = asyncio.run(chat_mod.stop_chat_for(chat_id))
+
+  assert stopped is False
+  assert calls == []
+  assert registry.get_handle(chat_id, old.kind) is successor
+
+
 def test_stop_on_orphaned_run_after_restart_succeeds(client, auth, db):
   """Stop on an orphaned run — run_status stuck 'running' with an EMPTY
   registry (the exact shape a prior restart leaves: the in-memory registry
