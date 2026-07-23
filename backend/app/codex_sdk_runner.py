@@ -72,6 +72,7 @@ from typing import Any, Callable
 from app.codex_appserver import _extract_bash_command
 from app.providers import get_skill_path
 from app.runtime_types import RunnerResult
+from app.usage_metrics import normalize_codex_usage
 from app.runner_registry import RunnerKind, registry
 from app.tool_sources import normalize_tool_sources
 
@@ -1892,6 +1893,8 @@ async def run_codex_sdk_turn(
   current_session_id = session_id
   completed_turn: Any | None = None
   completed_message_phases: list[str | None] = []
+  first_token_usage: Any | None = None
+  final_token_usage: Any | None = None
   process_group_id: int | None = None
   codex_context = sdk["AsyncCodex"](config=config)
   process_group_capture_stop: asyncio.Event | None = None
@@ -2193,9 +2196,9 @@ async def run_codex_sdk_turn(
           continue
 
         if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
-          # Token usage is reported but currently not surfaced; the
-          # SDK already exposes it via the thread handle for any
-          # consumer that needs it.
+          if first_token_usage is None:
+            first_token_usage = payload.token_usage
+          final_token_usage = payload.token_usage
           continue
 
         if isinstance(
@@ -2283,6 +2286,11 @@ async def run_codex_sdk_turn(
         "cost_usd": None,
         "error": error_text,
       }
+      if final_token_usage is not None:
+        result["usage"] = _model_dump(final_token_usage)
+        result["usage_metrics"] = normalize_codex_usage(
+          first_token_usage, final_token_usage,
+        )
       if terminal_status is not None:
         result["terminal_status"] = terminal_status
       if final_message_phase is not None:

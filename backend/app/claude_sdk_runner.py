@@ -115,6 +115,7 @@ from app.runtime_types import RunnerResult
 from app.sdk_emit import emit_unknown_enabled, unknown_event
 from app.tool_summaries import summarize_tool_input
 from app.tool_sources import normalize_tool_sources, sources_from_websearch_text
+from app.usage_metrics import normalize_claude_usage
 
 log = logging.getLogger(__name__)
 
@@ -1065,6 +1066,9 @@ def dispatch_sdk_message(
       "session_id": current_session_id,
       "cost_usd": sdk_msg.total_cost_usd,
       "usage": dict(sdk_msg.usage) if sdk_msg.usage else None,
+      "usage_metrics": normalize_claude_usage(
+        sdk_msg.usage, sdk_msg.model_usage,
+      ),
       "model_usage": (
         dict(sdk_msg.model_usage) if sdk_msg.model_usage else None
       ),

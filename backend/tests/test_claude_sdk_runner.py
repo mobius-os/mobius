@@ -1260,6 +1260,21 @@ def test_dispatch_result_message_returns_terminal():
   assert terminal["cost_usd"] == 0.05
   assert terminal["session_id"] == "sess-1"
   assert terminal["usage"] == {"input_tokens": 100, "output_tokens": 200}
+  assert terminal["usage_metrics"] == {
+    "provider": "claude",
+    "scope": "turn",
+    "calculation": "result_aggregate",
+    "input_tokens": 100,
+    "uncached_input_tokens": 100,
+    "output_tokens": 200,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "reasoning_output_tokens": 0,
+    "total_tokens": 300,
+    "model_context_window": None,
+    "provider_usage": {"input_tokens": 100, "output_tokens": 200},
+    "provider_model_usage": None,
+  }
   # ResultMessage also fires usage + stop_reason side-channels.
   types = [e["type"] for e in bus.events]
   assert "usage" in types

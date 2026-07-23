@@ -676,6 +676,99 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
 
 
+def test_run_codex_sdk_turn_reports_all_model_calls_in_turn(monkeypatch):
+  class TokenUsageUpdated:
+    def __init__(self, token_usage):
+      self.token_usage = token_usage
+
+  class Usage:
+    def __init__(self, last, total):
+      self.last = SimpleNamespace(**last)
+      self.total = SimpleNamespace(**total)
+      self.model_context_window = 200_000
+
+    def model_dump(self, **_kwargs):
+      return {
+        "last": vars(self.last),
+        "total": vars(self.total),
+        "modelContextWindow": self.model_context_window,
+      }
+
+  first = Usage(
+    last={
+      "input_tokens": 200, "cached_input_tokens": 100,
+      "output_tokens": 100, "reasoning_output_tokens": 50,
+      "total_tokens": 300,
+    },
+    total={
+      "input_tokens": 1_000, "cached_input_tokens": 400,
+      "output_tokens": 100, "reasoning_output_tokens": 50,
+      "total_tokens": 1_100,
+    },
+  )
+  final = Usage(
+    last={
+      "input_tokens": 300, "cached_input_tokens": 150,
+      "output_tokens": 100, "reasoning_output_tokens": 50,
+      "total_tokens": 400,
+    },
+    total={
+      "input_tokens": 1_700, "cached_input_tokens": 800,
+      "output_tokens": 200, "reasoning_output_tokens": 100,
+      "total_tokens": 1_900,
+    },
+  )
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="thread/tokenUsage/updated",
+      payload=TokenUsageUpdated(first),
+    ),
+    SimpleNamespace(
+      method="thread/tokenUsage/updated",
+      payload=TokenUsageUpdated(final),
+    ),
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ]
+  thread = _FakeThread("thread-usage", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk["ThreadTokenUsageUpdatedNotification"] = TokenUsageUpdated
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="measure this turn",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-usage",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+  ))
+
+  assert result["usage"]["total"]["total_tokens"] == 1_900
+  assert result["usage_metrics"]["calculation"] == "thread_delta"
+  assert result["usage_metrics"]["input_tokens"] == 900
+  assert result["usage_metrics"]["total_tokens"] == 1_100
+
+
 def test_run_codex_sdk_turn_resume_validation_error_now_propagates(monkeypatch, caplog):
   # Inverse of the old subAgentActivity resume test. The SDK now models
   # subAgentActivity natively, so thread_resume no longer raises on that

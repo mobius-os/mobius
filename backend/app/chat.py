@@ -54,6 +54,7 @@ from app.chat_writer import (
   PersistError,
   PersistTranscript,
   QuestionCommit,
+  RecordRunMetrics,
   ResolvePark,
   RollbackAutoResume,
   StashThinkingTrace,
@@ -1191,6 +1192,45 @@ async def _clear_run_status(
     _get_logger().warning(
       "ClearRunStatus did not persist chat_id=%s (reconciliation will "
       "repair)", chat_id, exc_info=True,
+    )
+
+
+async def _record_run_metrics(
+  *,
+  chat_id: str,
+  run_token: str,
+  provider_session_id: str | None,
+  cost_usd: float | None,
+  usage: dict | None,
+) -> None:
+  """Best-effort durable accounting for one provider run.
+
+  Usage must not be able to turn an otherwise successful chat response into a
+  failed turn. The exact run identity keeps a delayed completion from
+  attributing counters to a successor, and the writer actor keeps this scalar
+  update ordered with the later terminal transition.
+  """
+  if not chat_id or not run_token:
+    return
+  # A provider can legitimately omit usage (and Codex currently omits cost).
+  # With no accounting signal there is nothing to record; avoiding a no-op
+  # actor round-trip also preserves the runner's connection-release contract.
+  if usage is None and cost_usd in (None, 0):
+    return
+  try:
+    await _await_ack(get_writer().submit(RecordRunMetrics(
+      chat_id=chat_id,
+      run_token=run_token,
+      provider_session_id=provider_session_id,
+      cost_usd=cost_usd,
+      usage=usage,
+    )))
+  except Exception:
+    _get_logger().warning(
+      "RecordRunMetrics did not persist chat_id=%s run_token=%s",
+      chat_id,
+      run_token,
+      exc_info=True,
     )
 
 
@@ -3647,7 +3687,8 @@ async def _complete_turn(
   # legitimately-silent turn: a user Stop lands as stop_handoff_successor (or
   # disowns the generation above), a park sets limit_reached, an errored/refused
   # turn sets _last_error, and any real text/thinking/tool_use makes the blocks
-  # renderable. cost_usd is unusable (None for every run here) and not consulted.
+  # renderable. Provider usage/cost is accounting data, not proof of a reply,
+  # and is deliberately not consulted.
   lost_reply = (
     we_own_gen
     and not stop_handoff_successor
@@ -5144,6 +5185,14 @@ async def _run_chat_impl_with_db(
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
+      usage_metrics = runner_result.get("usage_metrics")
+      await _record_run_metrics(
+        chat_id=chat_id,
+        run_token=run_token or "",
+        provider_session_id=new_session_id or session_id,
+        cost_usd=runner_result.get("cost_usd"),
+        usage=usage_metrics,
+      )
       if not err and new_session_id and chat_id:
         chat_obj = db.query(models.Chat).filter(
           models.Chat.id == chat_id
@@ -5161,10 +5210,14 @@ async def _run_chat_impl_with_db(
         )
       else:
         log.info(
-          "chat done chat_id=%s cost_usd=%.4f sdk=codex status=%s phase=%s",
+          "chat done chat_id=%s cost_usd=%.4f sdk=codex status=%s phase=%s "
+          "input_tokens=%s output_tokens=%s total_tokens=%s",
           chat_id, runner_result.get("cost_usd") or 0.0,
           runner_result.get("terminal_status"),
           runner_result.get("final_message_phase"),
+          (usage_metrics or {}).get("input_tokens"),
+          (usage_metrics or {}).get("output_tokens"),
+          (usage_metrics or {}).get("total_tokens"),
         )
     except Exception as exc:
       log.exception("codex SDK turn failed chat_id=%s: %s", chat_id, exc)
@@ -5266,6 +5319,14 @@ async def _run_chat_impl_with_db(
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
+      usage_metrics = runner_result.get("usage_metrics")
+      await _record_run_metrics(
+        chat_id=chat_id,
+        run_token=run_token or "",
+        provider_session_id=new_session_id or claude_session_id,
+        cost_usd=runner_result.get("cost_usd"),
+        usage=usage_metrics,
+      )
       if not err and new_session_id and chat_id:
         chat_obj = db.query(models.Chat).filter(
           models.Chat.id == chat_id
@@ -5277,8 +5338,12 @@ async def _run_chat_impl_with_db(
         log.error("claude SDK error chat_id=%s: %s", chat_id, err)
       else:
         log.info(
-          "chat done chat_id=%s cost_usd=%.4f sdk=claude",
+          "chat done chat_id=%s cost_usd=%.4f sdk=claude "
+          "input_tokens=%s output_tokens=%s total_tokens=%s",
           chat_id, runner_result.get("cost_usd") or 0.0,
+          (usage_metrics or {}).get("input_tokens"),
+          (usage_metrics or {}).get("output_tokens"),
+          (usage_metrics or {}).get("total_tokens"),
         )
     except Exception as exc:
       log.exception("claude SDK turn failed chat_id=%s: %s", chat_id, exc)

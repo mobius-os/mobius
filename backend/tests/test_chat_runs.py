@@ -14,7 +14,7 @@ from app import chat as chat_mod
 from app import models
 from app.chat_writer import (
   AppendPending, Barrier, ClearRunStatus, PromotePending, StartTurn,
-  alloc_run_token, get_writer,
+  RecordRunMetrics, alloc_run_token, get_writer,
 )
 from app.database import SessionLocal
 
@@ -125,6 +125,49 @@ def test_clear_run_status_preserves_failed_outcome():
   _drain()
   assert _runs("r2-failed")["rt-2-failed"] == ("failed", True)
   assert _run_status("r2-failed") is None
+
+
+def test_record_run_metrics_updates_exact_run_without_touching_transcript():
+  _seed_chat("r-metrics", messages=[{
+    "role": "user", "content": "keep me", "ts": 1,
+  }])
+  _seed_run("rt-metrics", "r-metrics")
+
+  get_writer().submit(RecordRunMetrics(
+    chat_id="r-metrics",
+    run_token="rt-metrics",
+    provider_session_id="provider-thread",
+    cost_usd=0.125,
+    usage={
+      "provider": "codex",
+      "input_tokens": 900,
+      "output_tokens": 200,
+      "cache_read_input_tokens": 500,
+      "cache_creation_input_tokens": 0,
+      "reasoning_output_tokens": 100,
+      "total_tokens": 1_100,
+      "model_context_window": 200_000,
+    },
+  )).result(timeout=5)
+
+  db = SessionLocal()
+  try:
+    run = db.query(models.ChatRun).filter(
+      models.ChatRun.id == "rt-metrics",
+    ).one()
+    chat = db.query(models.Chat).filter(models.Chat.id == "r-metrics").one()
+    assert run.provider_session_id == "provider-thread"
+    assert run.cost_usd == 0.125
+    assert run.input_tokens == 900
+    assert run.output_tokens == 200
+    assert run.cache_read_input_tokens == 500
+    assert run.reasoning_output_tokens == 100
+    assert run.total_tokens == 1_100
+    assert run.model_context_window == 200_000
+    assert run.usage_json["provider"] == "codex"
+    assert chat.messages == [{"role": "user", "content": "keep me", "ts": 1}]
+  finally:
+    db.close()
 
 
 # -- continuation handoff -------------------------------------------------

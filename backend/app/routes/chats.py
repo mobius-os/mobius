@@ -1323,6 +1323,71 @@ def get_chat_agent_context(
   }
 
 
+@router.get("/{chat_id}/usage")
+def get_chat_usage(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Return provider-neutral token accounting for every durable chat run.
+
+  Historical rows created before usage capture remain visible with null
+  counters, so callers can distinguish zero usage from missing coverage.
+  This owner-only diagnostic is deliberately independent of the transcript:
+  benchmark tooling can read it without parsing user-visible messages.
+  """
+  get_active_chat_or_404(db, chat_id)
+  runs = (
+    db.query(models.ChatRun)
+    .filter(models.ChatRun.chat_id == chat_id)
+    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
+    .all()
+  )
+  count_fields = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+  )
+  totals = {}
+  for field in count_fields:
+    values = [
+      int(getattr(run, field))
+      for run in runs
+      if getattr(run, field) is not None
+    ]
+    totals[field] = sum(values) if values else None
+  costs = [float(run.cost_usd) for run in runs if run.cost_usd is not None]
+  totals["cost_usd"] = sum(costs) if costs else None
+
+  return {
+    "chat_id": chat_id,
+    "coverage": {
+      "runs": len(runs),
+      "runs_with_usage": sum(run.usage_json is not None for run in runs),
+      "runs_with_cost": len(costs),
+    },
+    "totals": totals,
+    "runs": [
+      {
+        "id": run.id,
+        "status": run.status,
+        "provider": run.provider,
+        "provider_session_id": run.provider_session_id,
+        "started_at": run.started_at,
+        "ended_at": run.ended_at,
+        "cost_usd": run.cost_usd,
+        **{field: getattr(run, field) for field in count_fields},
+        "model_context_window": run.model_context_window,
+        "usage": run.usage_json,
+      }
+      for run in runs
+    ],
+  }
+
+
 @router.delete(
   "/{chat_id}", status_code=204, dependencies=[Depends(reject_cross_site)],
 )

@@ -109,6 +109,17 @@ def test_run_migrations_adds_park_columns_to_existing_chat_runs(tmp_path):
   assert "parked_until" in cols
   assert "park_reason" in cols
   assert "restart_nonce" in cols
+  assert {
+    "provider_session_id",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+    "model_context_window",
+    "usage_json",
+  } <= cols
 
 
 def test_agent_lifecycle_width_migration_is_postgres_only_and_idempotent():
