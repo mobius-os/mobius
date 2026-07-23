@@ -2,12 +2,12 @@
 
 Locks in the four contracts that distinguish a restart-drain from a Stop:
 
-  (a) DrainForRestart PRESERVES pending_messages and moves the exact run to a
-      due restart park, while stop_chat_for CLEARS the queue (contrast).
+  (a) DrainForRestart PRESERVES pending_messages + the run marker, while
+      stop_chat_for CLEARS the queue (contrast).
   (b) The drain persists the "paused for a platform update" note WITHOUT losing
       the accumulated partial blocks.
-  (c) Generic boot reconciliation stays manual; display text alone never
-      manufactures planned-restart intent.
+  (c) Boot reconcile marks the paused note resumable (no double note) and the
+      boot notify fires exactly once.
   (d) A send arriving while draining QUEUES instead of starting a turn.
 """
 
@@ -83,23 +83,6 @@ def _chat(chat_id: str):
     db.close()
 
 
-def _run(chat_id: str):
-  db = SessionLocal()
-  try:
-    row = db.query(models.ChatRun).filter(
-      models.ChatRun.chat_id == chat_id,
-    ).order_by(models.ChatRun.started_at.desc()).first()
-    if row is None:
-      return None
-    return {
-      "status": row.status,
-      "parked_until": row.parked_until,
-      "park_reason": row.park_reason,
-    }
-  finally:
-    db.close()
-
-
 def _live_turn(chat_id: str, *, pending=None, partial="partial answer"):
   """A live turn with a registered handle + sink, mid-stream (a real partial
   accumulated INTO the sink so the drain's finalize can preserve it)."""
@@ -141,10 +124,6 @@ def test_drain_persists_paused_note_and_preserves_partials():
     and b.get("message") == chat_mod.PAUSED_FOR_RESTART_MESSAGE
     for b in blocks
   )
-  # The exact run, not the display text, is the durable restart intent.
-  assert _run("drain-note-1")["status"] == "parked"
-  assert _run("drain-note-1")["park_reason"] == "restart"
-  assert _run("drain-note-1")["parked_until"] is not None
 
 
 # -- (a) DrainForRestart preserves the queue; stop_chat_for clears it ---------
@@ -154,14 +133,12 @@ def test_drain_preserves_pending_while_stop_clears_it():
   _live_turn("drain-keep", pending=list(queued))
   _live_turn("stop-clear", pending=list(queued))
 
-  # Drain-for-restart: queue intact; exact run moved to a due restart park.
+  # Drain-for-restart: queue + run marker intact.
   _run_drain()
   _drain_writer()
   drained_state = _chat("drain-keep")
   assert drained_state["pending"] == queued
-  assert drained_state["run_status"] is None
-  assert _run("drain-keep")["status"] == "parked"
-  assert _run("drain-keep")["park_reason"] == "restart"
+  assert drained_state["run_status"] == "running"  # marker LEFT for reconcile
 
   # Stop: queue collapsed (frontend resends; backend clears). The drain above
   # left the process-wide gate set (in production only the restart ends it), so
@@ -199,40 +176,6 @@ def test_drain_does_not_promote_the_queue():
   assert "drain-nopromote" in chat_mod._restart_draining_chats
 
 
-def test_drain_park_failure_leaves_generic_marker_for_manual_recovery(
-  monkeypatch,
-):
-  cid = "drain-park-failure"
-  _live_turn(cid)
-
-  async def _fail_park(*args, **kwargs):
-    del args, kwargs
-    raise RuntimeError("writer unavailable")
-
-  monkeypatch.setattr(chat_mod, "_park_run_strict", _fail_park)
-  assert _run_drain() == [cid]
-  _drain_writer()
-
-  assert _chat(cid)["run_status"] == "running"
-  assert _run(cid)["status"] == "running"
-
-
-def test_drain_without_exact_run_token_stays_manual():
-  cid = "drain-no-token"
-  _seed(cid)
-  bc = create_broadcast(cid)
-  sink = chat_mod._ChatEventSink(bc, cid, run_token=None)
-  chat_mod.register_active_sink(cid, sink)
-  handle = _Handle(cid)
-  registry.register(handle)
-
-  assert _run_drain() == [cid]
-  _drain_writer()
-
-  assert _chat(cid)["run_status"] == "running"
-  assert _run(cid)["status"] == "running"
-
-
 # -- (c) boot reconcile marks the note resumable (no double note) + notify once
 
 
@@ -255,7 +198,6 @@ def test_reconcile_marks_paused_note_resumable_without_double_note():
   assert cid in reconciled
   state = _chat(cid)
   assert state["run_status"] is None
-  assert _run(cid)["status"] == "interrupted"
   blocks = state["messages"][-1]["blocks"]
   errors = [b for b in blocks if b.get("type") == "error"]
   # Exactly ONE error note (no second interrupted note stacked on the drain's),
@@ -281,7 +223,6 @@ def test_reconcile_crash_note_is_resumable():
     db.close()
 
   assert cid in reconciled
-  assert _run(cid)["status"] == "interrupted"
   blocks = _chat(cid)["messages"][-1]["blocks"]
   note = next(b for b in blocks if b.get("type") == "error")
   assert note["resumable"] is True
@@ -314,60 +255,6 @@ def test_reconcile_question_tail_note_is_not_resumable():
   note = next(b for b in blocks if b.get("type") == "error")
   assert "answer is still needed" in note["message"]
   assert not note.get("resumable")
-
-
-def test_reconcile_restart_note_normalizes_before_open_question():
-  """A fallback marker may contain either historical block ordering."""
-  cid = "reco-restart-question-order"
-  _seed(cid, messages=[
-    {"role": "user", "content": "hi", "ts": 1},
-    {"role": "assistant", "ts": 2, "content": "", "blocks": [
-      {"type": "text", "content": "thinking"},
-      {"type": "question", "questions": [{"question": "Which one?"}]},
-      {
-        "type": "error",
-        "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE,
-        "resumable": True,
-        "pause": {"kind": "restart"},
-      },
-    ]},
-  ])
-
-  db = SessionLocal()
-  try:
-    assert chat_mod.reconcile_interrupted_chats(db) == [cid]
-  finally:
-    db.close()
-
-  blocks = _chat(cid)["messages"][-1]["blocks"]
-  assert [block["type"] for block in blocks] == [
-    "text", "error", "question",
-  ]
-  assert not blocks[1].get("resumable")
-  assert blocks[1]["pause"] == {"kind": "restart"}
-
-
-def test_historical_restart_note_does_not_mask_a_newer_crash():
-  cid = "reco-historical-restart-note"
-  _seed(cid, messages=[
-    {"role": "user", "content": "hi", "ts": 1},
-    {"role": "assistant", "ts": 2, "content": "new work", "blocks": [
-      {"type": "error", "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE},
-      {"type": "text", "content": "new work after recovery"},
-    ]},
-  ])
-
-  db = SessionLocal()
-  try:
-    assert chat_mod.reconcile_interrupted_chats(db) == [cid]
-  finally:
-    db.close()
-
-  blocks = _chat(cid)["messages"][-1]["blocks"]
-  errors = [block for block in blocks if block.get("type") == "error"]
-  assert len(errors) == 2
-  assert errors[-1]["message"] != chat_mod.PAUSED_FOR_RESTART_MESSAGE
-  assert errors[-1]["resumable"] is True
 
 
 def test_notify_after_reconcile_fires_once(owner_token, monkeypatch):

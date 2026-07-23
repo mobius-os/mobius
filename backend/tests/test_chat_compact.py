@@ -586,18 +586,6 @@ def test_build_transcript_text_skips_handoffs_and_tail_caps():
   assert len(capped) == compaction._MAX_TRANSCRIPT_CHARS
 
 
-def test_build_transcript_text_labels_automatic_continuation_as_product_event():
-  text = compaction.build_transcript_text([{
-    "role": "user",
-    "kind": "auto_continuation",
-    "continuation_reason": "usage_limit",
-    "content": "continue",
-  }])
-
-  assert text == "AUTOMATIC CONTINUATION (USAGE_LIMIT): continue"
-  assert "USER: continue" not in text
-
-
 def test_cumulative_chat_summary_is_unbounded_compaction_source(tmp_path):
   note = tmp_path / "shared" / "memory" / "chats" / "c1" / "index.md"
   note.parent.mkdir(parents=True)

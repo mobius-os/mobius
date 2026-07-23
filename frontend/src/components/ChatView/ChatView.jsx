@@ -61,8 +61,6 @@ import {
   canFastForwardQueue,
   cidOf,
   continuationRowsFromPromotedMessage,
-  isAutoContinuationMessage,
-  isOwnerUserMessage,
   mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   shouldRetryStopAfterConfirm,
@@ -920,7 +918,9 @@ export default function ChatView({
   // messagesRef catches up, so state alone is not authoritative. A row is
   // first only when both the state mirror and rendered transcript are empty.
   function isFirstVisibleUserMessage() {
-    const stateHasUser = messagesRef.current.some(isOwnerUserMessage)
+    const stateHasUser = messagesRef.current.some(
+      m => m.role === 'user' && !m.hidden,
+    )
     const domHasUser = !!scrollRef.current?.querySelector('.chat__msg--user')
     return !stateHasUser && !domHasUser
   }
@@ -3311,9 +3311,7 @@ export default function ChatView({
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])
-  const lastUserIdx = messages.reduce((acc, m, i) => (
-    isOwnerUserMessage(m) ? i : acc
-  ), -1)
+  const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
   // The captured bridge partial enters the active row before catch-up emits a
   // single item. That is the load-bearing part of Lever 1: when SSE becomes the
   // selected source, React updates MsgContent props instead of replacing the
@@ -3328,7 +3326,7 @@ export default function ChatView({
   const bridgeMsg = bridgeMsgIdx >= 0 ? messages[bridgeMsgIdx] : null
   const bridgeFollowedByVisibleUser = bridgeMsgIdx >= 0 && messages
     .slice(bridgeMsgIdx + 1)
-    .some(isOwnerUserMessage)
+    .some(msg => msg?.role === 'user' && !msg.hidden)
   const trailingAssistantPartialMsg = trailingAssistantPartialIdx >= 0
     ? messages[trailingAssistantPartialIdx]
     : null
@@ -3728,7 +3726,6 @@ export default function ChatView({
 
           {messages.map((msg, i) => {
             if (msg.hidden) return null
-            const continuationMarker = isAutoContinuationMessage(msg)
             const isLastMsg = i === lastVisibleMessageIndex
             // The mirrored DB row is rendered below by the SAME active
             // MsgContent instance that consumes live payloads. Suppress only
@@ -3774,23 +3771,20 @@ export default function ChatView({
             // User rows key + pin on the stable cid so the optimistic→confirm
             // display-ts update never remounts the row (which would drop the
             // pin target mid-swap). data-ts stays for the timestamp tooltip only.
-            const ownerUserMessage = isOwnerUserMessage(msg)
-            const userCid = ownerUserMessage ? cidOf(msg) : null
+            const userCid = msg.role === 'user' ? cidOf(msg) : null
             return (
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
-              className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}`}
+              className={`chat__msg chat__msg--${msg.role}`}
               ref={i === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
               data-cid={userCid || undefined}
-              data-ts={ownerUserMessage && msg.ts ? String(msg.ts) : undefined}
-              onPointerDown={continuationMarker
-                ? undefined
-                : (event) => handleMessagePointerDown(event, msg, dataKey)}
-              onPointerMove={continuationMarker ? undefined : handleMessagePointerMove}
-              onPointerUp={continuationMarker ? undefined : cancelMessageHold}
-              onPointerCancel={continuationMarker ? undefined : cancelMessageHold}
-              onContextMenu={_isTouchPrimary && !continuationMarker
+              data-ts={msg.role === 'user' && msg.ts ? String(msg.ts) : undefined}
+              onPointerDown={(event) => handleMessagePointerDown(event, msg, dataKey)}
+              onPointerMove={handleMessagePointerMove}
+              onPointerUp={cancelMessageHold}
+              onPointerCancel={cancelMessageHold}
+              onContextMenu={_isTouchPrimary
                 ? (event) => {
                     if (event.target?.closest?.('button, a, input, textarea, summary, pre, code')) return
                     event.preventDefault()
@@ -3798,7 +3792,7 @@ export default function ChatView({
                     void copyMessage(msg, dataKey)
                   }
                 : undefined}
-              onClick={msg.ts && ownerUserMessage
+              onClick={msg.ts && msg.role === 'user'
                 ? (event) => showTimestamp(event, dataKey)
                 : undefined}
             >
@@ -3829,7 +3823,7 @@ export default function ChatView({
                 liveQuestionId={liveQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}
               />
-              {msg.ts && ownerUserMessage && (
+              {msg.ts && msg.role === 'user' && (
                 <time className={`chat__ts${visibleTimestampKey === dataKey ? ' chat__ts--visible' : ''}`}>
                   {new Date(msg.ts).toLocaleString([], {
                     month: 'short', day: 'numeric',

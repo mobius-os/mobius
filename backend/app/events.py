@@ -750,38 +750,6 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     extras = {
       key: event[key] for key in ERROR_PASSTHROUGH_FIELDS if key in event
     }
-    # A planned restart can interrupt a runner that is blocked on a durable
-    # AskUserQuestion. Keep that question as the transcript tail so it remains
-    # answerable after reload, and do not offer a competing Resume button: the
-    # answer is the continuation. Repeated restart events update the one marker
-    # immediately before the trailing question run.
-    restart_pause = (extras.get("pause") or {}).get("kind") == "restart"
-    trailing_open_start = len(assistant_blocks)
-    if restart_pause:
-      while trailing_open_start > 0:
-        block = assistant_blocks[trailing_open_start - 1]
-        if block.get("type") != "question" or block.get("answers"):
-          break
-        trailing_open_start -= 1
-    if restart_pause and trailing_open_start < len(assistant_blocks):
-      extras.pop("resumable", None)
-      marker = {
-        "type": "error",
-        "message": message,
-        **extras,
-      }
-      previous_idx = trailing_open_start - 1
-      if (
-        previous_idx >= 0
-        and assistant_blocks[previous_idx].get("type") == "error"
-        and (
-          assistant_blocks[previous_idx].get("pause") or {}
-        ).get("kind") == "restart"
-      ):
-        assistant_blocks[previous_idx] = marker
-      else:
-        assistant_blocks.insert(trailing_open_start, marker)
-      return True
     if (assistant_blocks
         and assistant_blocks[-1].get("type") == "error"):
       block = assistant_blocks[-1]

@@ -45,18 +45,6 @@ def test_hidden_user_message_is_dropped_entirely():
   ) is None
 
 
-def test_automatic_continuation_is_redacted_as_a_product_event():
-  assert r.redact_message({
-    "role": "user",
-    "content": "continue",
-    "kind": "auto_continuation",
-    "continuation_reason": "restart",
-  }) == {
-    "role": "system",
-    "text": "Automatic continuation (restart).",
-  }
-
-
 def test_pure_tool_turn_with_no_text_is_dropped():
   msg = {
     "role": "assistant",

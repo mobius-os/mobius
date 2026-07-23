@@ -4,17 +4,7 @@ Locks in the contract that the agent gets a clock every turn (issue: the
 agent only ever saw an IANA timezone NAME, and only on turn 1).
 """
 
-import time
-import uuid
-
-from app import models
-from app.chat import (
-  _build_time_context,
-  _human_elapsed,
-  _is_cli_slash_command,
-  _last_user_message_elapsed,
-)
-from app.database import SessionLocal
+from app.chat import _build_time_context, _human_elapsed, _is_cli_slash_command
 
 
 def test_includes_timezone_label_and_clock():
@@ -57,37 +47,6 @@ def test_elapsed_clause_only_when_present():
   assert "user's last message was" not in _build_time_context("UTC", None)
   out = _build_time_context("UTC", "3 days ago")
   assert "user's last message was 3 days ago" in out
-
-
-def test_elapsed_ignores_automatic_continuation_marker(monkeypatch):
-  now = 1_800_000_000.0
-  monkeypatch.setattr(time, "time", lambda: now)
-  cid = f"time-context-{uuid.uuid4()}"
-  db = SessionLocal()
-  try:
-    db.add(models.Chat(
-      id=cid,
-      title="time context",
-      messages=[
-        {
-          "role": "user", "content": "owner message",
-          "ts": (now - 3 * 86400) * 1000,
-        },
-        {"role": "assistant", "content": "reply"},
-        {
-          "role": "user", "content": "continue",
-          "kind": "auto_continuation",
-          "ts": (now - 5 * 60) * 1000,
-        },
-        {"role": "assistant", "content": "automatic reply"},
-        {"role": "user", "content": "current owner message", "ts": now * 1000},
-      ],
-    ))
-    db.commit()
-
-    assert _last_user_message_elapsed(db, cid) == "3 days ago"
-  finally:
-    db.close()
 
 
 def test_goal_slash_command_is_detected_without_matching_paths():

@@ -341,7 +341,6 @@
 }
 
 .chat__msg--user { align-items: flex-end; }
-.chat__msg--marker { align-items: stretch; }
 .chat__msg--assistant {
   --activity-block-gap: 8px;
   --activity-row-gap: 4px;
