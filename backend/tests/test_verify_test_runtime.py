@@ -1,3 +1,4 @@
+import fcntl
 import os
 from pathlib import Path
 import shutil
@@ -228,6 +229,9 @@ def test_local_browser_e2e_is_explicit_and_disposable():
   assert 'mobius-local-e2e-cache-${checkout_id}:test' in runner
   assert 'MOBIUS_LOCAL_E2E_MIN_FREE_GB' in runner
   assert 'MOBIUS_LOCAL_E2E_MIN_FREE_GB:-20' in runner
+  assert 'MOBIUS_LOCAL_E2E_ADMISSION_WAIT:-1800' in runner
+  assert 'mobius-local-e2e-admission-${UID}.lock' in runner
+  assert 'flock -w "$admission_wait" 8' in runner
   assert "docker system df" in runner
   assert 'docker image tag "$image_name" "$cache_image"' in runner
   assert 'docker image rm "$image_name"' in runner
@@ -325,6 +329,51 @@ def test_local_runner_refuses_uncommitted_edits_before_docker(tmp_path):
   )
   assert result.returncode == 2
   assert "requires a committed revision" in result.stderr
+
+
+def test_local_runner_serializes_worktrees_before_docker_probe(tmp_path):
+  repo = tmp_path / "repo"
+  _init_repo(repo)
+  (repo / "scripts").mkdir()
+  shutil.copy2(ROOT / "scripts" / "playwright-local.sh", repo / "scripts")
+  playwright = repo / "node_modules" / ".bin" / "playwright"
+  playwright.parent.mkdir(parents=True)
+  playwright.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+  playwright.chmod(0o755)
+  _git(repo, "add", ".")
+  _git(repo, "commit", "-qm", "fixture")
+
+  fake_bin = tmp_path / "bin"
+  fake_bin.mkdir()
+  docker_marker = tmp_path / "docker-called"
+  docker = fake_bin / "docker"
+  docker.write_text(
+    f"#!/bin/sh\ntouch {docker_marker}\nexit 99\n",
+    encoding="utf-8",
+  )
+  docker.chmod(0o755)
+  runtime_dir = tmp_path / "runtime"
+  runtime_dir.mkdir()
+  lock_path = runtime_dir / f"mobius-local-e2e-admission-{os.getuid()}.lock"
+
+  with lock_path.open("w", encoding="utf-8") as lock_file:
+    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    result = subprocess.run(
+      [str(repo / "scripts" / "playwright-local.sh"), "--allow-local-e2e"],
+      cwd=repo,
+      capture_output=True,
+      text=True,
+      env={
+        **_git_env(tmp_path),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "XDG_RUNTIME_DIR": str(runtime_dir),
+        "MOBIUS_LOCAL_E2E_ADMISSION_WAIT": "0",
+      },
+    )
+
+  assert result.returncode == 2
+  assert "timed out after 0s waiting for the local E2E build slot" in result.stderr
+  assert not docker_marker.exists()
 
 
 def test_no_local_clone_from_linked_worktree_has_standalone_git_dir(tmp_path):
