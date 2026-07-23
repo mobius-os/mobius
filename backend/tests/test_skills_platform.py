@@ -702,9 +702,11 @@ def test_crash_after_publish_reconciles_to_owned_and_uninstallable(
   d = skills_dir / "tips"
   d.mkdir()
   (d / "SKILL.md").write_text("# tips\n")
+  digest = skills_mod.tree_digest_from_files({"SKILL.md": b"# tips\n"})
   (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
     "tips": {
       "source": "o/r", "status": "installing", "staging": ".staging-gone",
+      "tree_digest": digest,
     },
   }))
 
@@ -821,6 +823,11 @@ def test_url_install_records_content_hash_and_api_exposes_identity(
   # identity of the exact reviewed bytes.
   assert rec["commit"] is None
   assert rec["skill_sha256"] == _hashlib.sha256(body).hexdigest()
+  # The record also carries the canonical full-tree digest recovery keys off.
+  assert rec["tree_digest"] == skills_mod.tree_digest_from_files(
+    {"SKILL.md": body},
+  )
+  assert rec["tree_digest"].startswith("sha256-tree-v1:")
 
   (row,) = client.get("/api/skills", headers=auth).json()["skills"]
   assert row["source_url"] == "https://x/tips.md"
@@ -917,18 +924,19 @@ def test_reconcile_does_not_adopt_unrelated_dir_when_staging_present(skills_dir)
   assert staging.is_dir()  # the intended tree is not stranded/deleted
 
 
-def test_reconcile_finalize_requires_matching_sha256(skills_dir):
-  """R1-2: a published dir whose SKILL.md hash != the record's is NOT adopted."""
-  import hashlib
-
+def test_reconcile_finalize_requires_matching_tree_digest(skills_dir):
+  """R3-1: a published dir whose SKILL.md bytes != the record's canonical
+  tree_digest is NOT adopted — the intent is left for deliberate repair."""
   target = skills_dir / "pdf"
   target.mkdir()
   (target / "SKILL.md").write_text("# tampered bytes\n")
+  original_digest = skills_mod.tree_digest_from_files(
+    {"SKILL.md": b"# the ORIGINAL bytes\n"},
+  )
   (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
     "pdf": {
       "source": "o/r", "status": "installing", "staging": ".staging-gone",
-      "skill_sha256": hashlib.sha256(b"# the ORIGINAL bytes\n").hexdigest(),
-      "files": ["SKILL.md"],
+      "tree_digest": original_digest,
     },
   }))
 
@@ -936,6 +944,59 @@ def test_reconcile_finalize_requires_matching_sha256(skills_dir):
 
   assert repaired == []
   assert _sidecar(skills_dir)["pdf"].get("status") == "installing"
+
+
+def test_reconcile_ignores_record_without_tree_digest(skills_dir):
+  """R3-1 (B1): an 'installing' record carrying NO canonical tree_digest is
+  corrupt state, not a legacy case to infer around: an arbitrary published dir
+  that merely shares the name is never adopted, and the intent is retained."""
+  target = skills_dir / "pdf"
+  target.mkdir()
+  (target / "SKILL.md").write_text("# unrelated dir squatting the name\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "pdf": {
+      # no skill_sha256, no files, no tree_digest — an incomplete record
+      "source": "o/r", "status": "installing", "staging": ".staging-gone",
+    },
+  }))
+
+  repaired = skills_mod.reconcile_installed(skills_dir)
+
+  assert repaired == []
+  assert _sidecar(skills_dir)["pdf"].get("status") == "installing"
+
+
+def test_reconcile_rejects_tampered_resource_bytes(skills_dir):
+  """R3-1 (B2): resource bytes are part of the identity. A valid SKILL.md with a
+  replaced `scripts/run.py` must NOT finalize — the digest spans every file, so
+  the sidecar can never claim the reviewed source while executable bytes differ."""
+  reviewed = {
+    "SKILL.md": b"---\nname: pdf\n---\nUse the helper.\n",
+    "scripts/run.py": b"print('reviewed')\n",
+  }
+  digest = skills_mod.tree_digest_from_files(reviewed)
+
+  target = skills_dir / "pdf"
+  (target / "scripts").mkdir(parents=True)
+  (target / "SKILL.md").write_bytes(reviewed["SKILL.md"])  # entry doc unchanged
+  (target / "scripts" / "run.py").write_bytes(b"print('SWAPPED')\n")  # tampered
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "pdf": {
+      "source": "o/r", "status": "installing", "staging": ".staging-gone",
+      "tree_digest": digest,
+    },
+  }))
+
+  repaired = skills_mod.reconcile_installed(skills_dir)
+
+  assert repaired == []
+  assert _sidecar(skills_dir)["pdf"].get("status") == "installing"
+
+  # The exact reviewed bytes DO finalize — proving the digest, not the name,
+  # is what gates adoption.
+  (target / "scripts" / "run.py").write_bytes(reviewed["scripts/run.py"])
+  assert skills_mod.reconcile_installed(skills_dir) == ["pdf"]
+  assert "status" not in _sidecar(skills_dir)["pdf"]
 
 
 def test_reconcile_gc_reclaims_only_aged_unreferenced_staging(skills_dir):
@@ -987,6 +1048,48 @@ def test_list_skills_redacts_source_url_for_app_but_not_owner(
   assert "secret" not in app_row["source_url"]
   assert "frag" not in app_row["source_url"]
   assert app_row["skill_sha256"] == "deadbeef"  # hash is safe for all callers
+
+
+def test_list_skills_survives_malformed_source_url_for_app_caller(
+  client, auth, db, skills_dir,
+):
+  """R3-3: damaged provenance (a URL whose port makes `.port` raise) must not
+  turn an app-scoped GET /api/skills into a 500 — it redacts to None and the
+  owner still sees the raw value."""
+  d = skills_dir / "priv"
+  d.mkdir()
+  (d / "SKILL.md").write_text("# priv\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(json.dumps({
+    "priv": {
+      "source": "example.com",
+      # A malformed port: urlparse doesn't raise, but reading `.port` does.
+      "url": "https://example.com:bad/path?token=secret",
+    },
+  }))
+
+  owner_row = client.get("/api/skills", headers=auth).json()["skills"][0]
+  assert owner_row["source_url"] == "https://example.com:bad/path?token=secret"
+
+  app_headers = _app_token(db, manage_skills=False)
+  r = client.get("/api/skills", headers=app_headers)
+  assert r.status_code == 200, r.text  # fails safe, never 500
+  assert r.json()["skills"][0]["source_url"] is None
+
+
+def test_redact_source_url_rejects_non_http_and_malformed():
+  """Unit: the one strict helper returns no URL on exotic scheme or bad port,
+  and never raises."""
+  from app.routes.skills import _redact_source_url
+
+  assert _redact_source_url("https://h.example/raw/x.md?t=1#f") == (
+    "https://h.example/raw/x.md"
+  )
+  assert _redact_source_url("https://example.com:bad/p") is None  # bad port
+  assert _redact_source_url("file:///etc/passwd") is None  # exotic scheme
+  assert _redact_source_url("ftp://h/x") is None
+  assert _redact_source_url("::::not a url") is None
+  assert _redact_source_url(None) is None
+  assert _redact_source_url("") == ""
 
 
 def test_corrupt_sidecar_fails_install_closed_and_preserves_ownership(

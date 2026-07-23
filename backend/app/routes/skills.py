@@ -475,12 +475,18 @@ def _snapshot_skill_dir(data_dir: Path, name: str) -> tuple[bool, str]:
 
 
 def _redact_source_url(url: str | None) -> str | None:
-  """Origin + path only — no userinfo, query, or fragment.
+  """Origin + path only, `http(s)` only — no userinfo, query, or fragment.
 
   Signed object links and private raw URLs commonly carry access tokens or
   signatures in the query string (and occasionally in userinfo); those must
   never cross the API boundary to an ordinary app token. The full submitted URL
   stays owner-only; every caller still gets the authoritative `skill_sha256`.
+
+  Anything that is not a well-formed http/https URL — an exotic scheme, a
+  malformed port (accessing `.port` raises), a hostless value, or an
+  unparseable string — redacts to None rather than raising: an app-scoped
+  ``GET /api/skills`` must fail SAFE on damaged provenance, never 500. All
+  parsing goes through this one strict helper.
   """
   if not url:
     return url
@@ -488,12 +494,17 @@ def _redact_source_url(url: str | None) -> str | None:
 
   try:
     parts = urlparse(url)
+    if parts.scheme not in ("http", "https"):
+      return None
+    host = parts.hostname or ""
+    port = parts.port  # property; raises ValueError on a malformed port
+    if not host:
+      return None
+    if port is not None:
+      host = f"{host}:{port}"
+    return urlunparse((parts.scheme, host, parts.path, "", "", ""))
   except ValueError:
     return None
-  host = parts.hostname or ""
-  if parts.port:
-    host = f"{host}:{parts.port}"
-  return urlunparse((parts.scheme, host, parts.path, "", "", ""))
 
 
 @router.get("")
@@ -614,8 +625,13 @@ async def install_skill(
       "ref": body.ref if body.repo else None,
       "commit": commit,
       "url": body.url,
-      # The immutable identity of the reviewed entry document — for raw-URL
-      # installs (no commit to pin) this is the only revision evidence.
+      # Canonical identity of the COMPLETE reviewed tree — every path and byte,
+      # not just SKILL.md. Recovery adopts a published dir only when it hashes to
+      # exactly this, so a tampered resource can never inherit the reviewed
+      # provenance. Computed from the very bytes about to be published.
+      "tree_digest": skills.tree_digest_from_files(files),
+      # The entry-document hash and inventory stay in the record purely as API
+      # surface (GET /api/skills exposes them); recovery keys off tree_digest.
       "skill_sha256": hashlib.sha256(files["SKILL.md"]).hexdigest(),
       "files": sorted(files.keys()),
       "installed_at": datetime.now(UTC).isoformat(),

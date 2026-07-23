@@ -234,6 +234,36 @@ _STAGING_GC_AGE_SECONDS = 3600
 # Cap the recovery inventory walk so a tampered target can't make it unbounded.
 _INVENTORY_FILE_CAP = 256
 
+# One canonical identity for a complete skill tree: SKILL.md plus every
+# resource, path AND bytes. Versioned so recovery can tell a recognized record
+# from a malformed/legacy one — which it treats as corrupt and never adopts,
+# rather than inferring ownership around missing fields.
+_TREE_DIGEST_VERSION = "sha256-tree-v1"
+_TREE_DIGEST_PREFIX = _TREE_DIGEST_VERSION + ":"
+
+
+def tree_digest_from_files(files: dict[str, bytes]) -> str:
+  """Canonical digest over a complete skill tree.
+
+  Folds every root-relative path AND its exact bytes into one SHA-256, framed
+  by length so no path/content boundary is ambiguous and no two distinct trees
+  collide by concatenation. The installer computes this from the bytes it is
+  about to publish; recovery recomputes it from the published tree — so a byte
+  changed in ANY file (not just SKILL.md) yields a different digest and a
+  tampered tree is never adopted as the reviewed one. The version tag is the
+  record's proof of a recognized shape.
+  """
+  digest = hashlib.sha256()
+  digest.update(_TREE_DIGEST_VERSION.encode("utf-8"))
+  for rel in sorted(files):
+    rel_bytes = rel.encode("utf-8")
+    data = files[rel]
+    digest.update(len(rel_bytes).to_bytes(8, "big"))
+    digest.update(rel_bytes)
+    digest.update(len(data).to_bytes(8, "big"))
+    digest.update(data)
+  return _TREE_DIGEST_PREFIX + digest.hexdigest()
+
 
 def _safe_child(root: Path, name: str) -> Path | None:
   """A single-component child of `root`, or None if `name` would escape it.
@@ -260,14 +290,14 @@ def _is_real_dir(path: Path) -> bool:
     return False
 
 
-def _relative_files(target: Path) -> set[str] | None:
-  """Root-relative regular-file paths under `target`, or None on any surprise.
+def _read_tree_bytes(target: Path) -> dict[str, bytes] | None:
+  """Root-relative path -> bytes for every regular file under `target`.
 
-  Bounded by `_INVENTORY_FILE_CAP`; returns None if the cap is exceeded or a
-  symlink/special file (never part of a clean install) is found — both treated
-  as a non-match by the caller, which fails closed.
+  Returns None on any surprise a clean install never contains — a symlink or
+  special file, an unreadable entry, or more than `_INVENTORY_FILE_CAP` files —
+  so the caller fails closed. Never follows a symlink (lstat-gated).
   """
-  out: set[str] = set()
+  out: dict[str, bytes] = {}
   stack = [target]
   while stack:
     cur = stack.pop()
@@ -283,42 +313,25 @@ def _relative_files(target: Path) -> set[str] | None:
       if stat.S_ISDIR(mode):
         stack.append(entry)
       elif stat.S_ISREG(mode):
-        out.add(entry.relative_to(target).as_posix())
-        if len(out) > _INVENTORY_FILE_CAP:
+        if len(out) >= _INVENTORY_FILE_CAP:
+          return None
+        try:
+          out[entry.relative_to(target).as_posix()] = entry.read_bytes()
+        except OSError:
           return None
       else:
         return None
   return out
 
 
-def _published_matches(target: Path, rec: dict) -> bool:
-  """Whether a published skill dir matches the identity its record claims.
-
-  Recovery grants ownership only after the published SKILL.md hashes to the
-  recorded ``skill_sha256`` and the on-disk file inventory equals the recorded
-  ``files`` set — so an unrelated directory that merely shares the target name
-  is never silently adopted.
+def _tree_digest_on_disk(target: Path) -> str | None:
+  """Canonical tree digest of a published skill dir, or None if the tree can't
+  be read wholly and safely (see `_read_tree_bytes`) — the caller fails closed.
   """
-  skill_md = target / "SKILL.md"
-  try:
-    if not stat.S_ISREG(skill_md.lstat().st_mode):
-      return False
-  except OSError:
-    return False
-  expected_hash = rec.get("skill_sha256")
-  if isinstance(expected_hash, str) and expected_hash:
-    try:
-      data = skill_md.read_bytes()
-    except OSError:
-      return False
-    if hashlib.sha256(data).hexdigest() != expected_hash:
-      return False
-  expected_files = rec.get("files")
-  if isinstance(expected_files, list):
-    actual = _relative_files(target)
-    if actual is None or actual != {str(f) for f in expected_files}:
-      return False
-  return True
+  files = _read_tree_bytes(target)
+  if files is None:
+    return None
+  return tree_digest_from_files(files)
 
 
 def _gc_orphan_staging(root: Path, referenced: set[str]) -> None:
@@ -359,9 +372,12 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
   AND staging absent*:
 
     target present, staging absent  -> the atomic rename happened; finalize the
-                                       record, but only after verifying the
-                                       published bytes match the recorded
-                                       identity (hash + inventory)
+                                       record, but only when the COMPLETE
+                                       published tree (every path and byte)
+                                       hashes to the record's canonical
+                                       ``tree_digest``. A missing/unversioned
+                                       digest is corrupt state — leave the
+                                       intent untouched, never infer ownership
     staging present, target absent  -> the crash preceded publish; discard the
                                        staging tree and the intent
     neither present                 -> nothing durable happened; drop the record
@@ -402,9 +418,16 @@ def reconcile_installed(skills_dir: Path | None = None) -> list[str]:
     staging_present = staging is not None and _is_real_dir(staging)
 
     if target_present and not staging_present:
-      # Post-rename invariant met. Adopt only if the published bytes match the
-      # recorded identity; otherwise leave the intent for deliberate cleanup.
-      if _published_matches(target, rec):
+      # Post-rename invariant met. Adopt only when the complete published tree
+      # hashes to exactly the digest the record committed before publishing. A
+      # missing or unversioned digest is a corrupt/legacy record, not a case to
+      # infer around: leave the intent untouched for deliberate repair.
+      expected = rec.get("tree_digest")
+      if (
+        isinstance(expected, str)
+        and expected.startswith(_TREE_DIGEST_PREFIX)
+        and _tree_digest_on_disk(target) == expected
+      ):
         rec.pop("status", None)
         rec.pop("staging", None)
         dirty = True
