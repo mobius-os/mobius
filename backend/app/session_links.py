@@ -29,6 +29,82 @@ from app.timeutil import now_naive_utc
 log = logging.getLogger(__name__)
 
 
+def backfill_current_session_links(db) -> int:
+  """Seeds links from each chat's current provider/session pointer.
+
+  Upgrade-only hygiene: releases predating ``ChatSessionLink`` can already
+  have a durable ``Chat.session_id``. The live runners record every future
+  sighting, but without this startup pass those historical current sessions
+  remain invisible until the chat runs again.
+
+  The pass is idempotent and append-only. Existing links always win. If two
+  chats claim the same provider/session pair and no link has established the
+  owner yet, the mapping is ambiguous, so neither claim is inserted. Commits
+  the supplied session only when at least one row is added.
+  """
+  if db is None:
+    return 0
+  candidates = (
+    db.query(
+      models.Chat.id,
+      models.Chat.provider,
+      models.Chat.session_id,
+    )
+    .filter(
+      models.Chat.provider.isnot(None),
+      models.Chat.provider != "",
+      models.Chat.session_id.isnot(None),
+      models.Chat.session_id != "",
+    )
+    .order_by(models.Chat.id.asc())
+    .all()
+  )
+  existing = {
+    (provider, session_id): chat_id
+    for provider, session_id, chat_id in db.query(
+      models.ChatSessionLink.provider,
+      models.ChatSessionLink.session_id,
+      models.ChatSessionLink.chat_id,
+    ).all()
+  }
+  claims: dict[tuple[str, str], set[str]] = {}
+  for chat_id, provider, session_id in candidates:
+    key = (provider, session_id)
+    claims.setdefault(key, set()).add(chat_id)
+
+  now = now_naive_utc()
+  added = 0
+  for (provider, session_id), chat_ids in claims.items():
+    bound_chat = existing.get((provider, session_id))
+    if bound_chat is not None:
+      if bound_chat not in chat_ids:
+        log.warning(
+          "session-link backfill conflict: (%s, %s) already maps to chat %s, "
+          "not current claimant(s) %s — keeping the first binding",
+          provider, session_id, bound_chat, sorted(chat_ids),
+        )
+      continue
+    if len(chat_ids) != 1:
+      log.warning(
+        "session-link backfill ambiguous: (%s, %s) is claimed by chats %s — "
+        "skipping until authoritative runner evidence arrives",
+        provider, session_id, sorted(chat_ids),
+      )
+      continue
+    chat_id = next(iter(chat_ids))
+    db.add(models.ChatSessionLink(
+      provider=provider,
+      session_id=session_id,
+      chat_id=chat_id,
+      first_seen_at=now,
+      last_seen_at=now,
+    ))
+    added += 1
+  if added:
+    db.commit()
+  return added
+
+
 async def record_session_link_async(
   provider: str, session_id: str, chat_id: str
 ) -> None:
