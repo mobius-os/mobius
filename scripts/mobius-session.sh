@@ -77,11 +77,10 @@ Next steps (run from the repo root or from inside the worktree):
   # owns its isolated containers and port; pass one or more focused specs:
   cd $worktree && scripts/playwright-local.sh --allow-local-e2e tests/bootstrap.spec.mjs
 
-  # When the branch is ready to ship (direct-to-main, no PR needed):
-  cd $worktree && scripts/land.sh
+  # When the branch is ready, publish/update its required-check PR:
+  cd $worktree && scripts/submit-pr.sh
 
-  # If a sibling lands first, land.sh prints the manual recovery loop:
-  # git fetch origin && git rebase origin/main && scripts/land.sh
+  # If the rebase conflicts, resolve it and rerun submit-pr.sh.
 
   # Remove the shared dependency symlinks, then tear down the worktree:
   unlink $worktree/node_modules 2>/dev/null || true

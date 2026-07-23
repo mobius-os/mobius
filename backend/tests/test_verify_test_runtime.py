@@ -161,15 +161,22 @@ def test_identity_verifier_allows_the_mobius_owned_platform_repo():
   assert 'f"safe.directory={PLATFORM_ROOT}"' in verifier
 
 
-def test_pre_push_defers_full_backend_suite_to_main_or_explicit_opt_in():
+def test_pre_push_rejects_main_and_defers_backend_to_pr_ci():
   hook = (ROOT / "scripts" / "githooks" / "pre-push").read_text(
     encoding="utf-8"
   )
   assert 'refs/heads/main)' in hook
-  assert 'PUSHES_MAIN=1' in hook
+  assert "direct updates to main are prohibited" in hook
+  assert "scripts/submit-pr.sh" in hook
   assert '${MOBIUS_PREPUSH_FULL:-0}' in hook
   assert 'this push does not update main' in hook
   assert 'full suite currently ~10m' in hook
+
+
+def test_git_doctor_compares_installed_hooks_to_landed_main():
+  doctor = (ROOT / "scripts" / "git-doctor.sh").read_text(encoding="utf-8")
+  assert 'origin/main:$source_path' in doctor
+  assert 'git show "origin/main:$source_path"' in doctor
 
 
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
@@ -362,17 +369,23 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
-def test_hosted_expensive_suites_run_for_prs_and_long_lived_branches_only():
+def test_hosted_suites_run_once_for_pull_requests_and_main():
   workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
+  triggers = workflow.split("\npermissions:\n", 1)[0]
   backend = workflow.split("\n  backend:\n", 1)[1].split(
     "\n  frontend-unit:\n", 1,
   )[0]
   e2e = workflow.split("\n  e2e:\n", 1)[1]
+
+  assert "push:\n" in triggers
+  assert "    branches: [main]\n" in triggers
+  assert "pull_request:\n" in triggers
+  assert "'feat/**'" not in triggers
+  assert "'fix/**'" not in triggers
   for job in (backend, e2e):
-    assert "github.event_name == 'pull_request'" in job
-    assert "github.ref == 'refs/heads/main'" in job
-    assert "refs/heads/integration/" in job
+    assert "github.event_name == 'pull_request'" not in job
+    assert "refs/heads/integration/" not in job
   assert "needs: privacy" in e2e
   assert "needs: backend" not in e2e
