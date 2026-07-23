@@ -10,8 +10,9 @@ never simply killed. The worker first sets the ``draining`` gate (new sends
 queue), interrupts each live turn so it finalizes its partials + a "paused for a
 platform update" note WITHOUT touching the pending queue, then restarts — SIGTERM
 for a graceful exit, with a SIGKILL backstop so a hung shutdown still cycles the
-container. Boot reconcile finalizes any marker left set and offers a one-tap
-Resume.
+container. A successfully stopped exact run is marked due for continuation before
+SIGTERM; boot reconcile handles only the fallback markers that could not make that
+transition.
 """
 
 from __future__ import annotations
@@ -44,10 +45,11 @@ async def restart_this_worker() -> None:
        worker dies no matter what, so a wedged drain or a hung graceful shutdown
        can never leave the container "Up" with a dead worker.
     3. Drain every live turn (interrupt → finalize partials + a "paused for a
-       platform update" note → LEAVE the run marker + pending queue intact for
-       boot reconcile + one-tap Resume). Bounded by ``DRAIN_TIMEOUT``;
-       best-effort — a turn that won't drain in time keeps today's contract (the
-       backstop kills the worker, boot reconcile finalizes the marker).
+       platform update" note → mark that exact run due now using the existing
+       continuation row; preserve the pending queue). Bounded by
+       ``DRAIN_TIMEOUT``; best-effort — a turn that won't drain, or whose exact
+       transition cannot commit, leaves its generic marker for manual boot
+       reconciliation.
     4. SIGTERM uvicorn for a graceful exit. If it drains and exits within the
        remaining window the backstop never fires (SIGKILL never runs); if it
        hangs on the open SSE stream, the backstop force-exits and the container
@@ -80,8 +82,8 @@ async def restart_this_worker() -> None:
     )
   except Exception:
     # Never let a drain failure block the restart — the backstop timer and the
-    # SIGTERM below still reboot the worker, and boot reconcile finalizes any
-    # turn whose marker was left set.
+    # SIGTERM below still reboots the worker. Exact runs already transitioned
+    # remain due; any marker left set falls back to manual boot reconciliation.
     log.warning("drain-for-restart failed; restarting anyway", exc_info=True)
 
   os.kill(pid, signal.SIGTERM)

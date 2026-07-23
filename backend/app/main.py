@@ -252,9 +252,10 @@ async def lifespan(app):
   # other lifespan steps: a failure here must not brick the recovery
   # surface. Runs single-threaded pre-serving, so no queue-lock
   # contention — see reconcile_interrupted_chats for the argument.
-  # Chats reconciled at boot (incl. any turn paused by a drain-gated restart),
-  # carried to the post-`init_vapid` notify below — VAPID must be initialized
-  # before a push can be delivered.
+  # Chats reconciled at boot (crashes plus a planned drain whose exact park did
+  # not commit) are carried to the post-`init_vapid` manual-recovery notify
+  # below. Exact planned-restart parks bypass this destructive reconciliation
+  # and are handled by the continuation sweep after the writer starts.
   _reconciled_chats: list[str] = []
   try:
     from app.chat import reconcile_interrupted_chats
@@ -333,9 +334,10 @@ async def lifespan(app):
     init_vapid()
   except Exception as exc:
     _log.error("init_vapid failed: %s", exc, exc_info=True)
-  # Boot resume notify (design §2.2 step 4). Runs AFTER init_vapid so the push
-  # can actually deliver: one "tap to resume" notification for any turn left
-  # paused by a drain-gated restart (or crash) that boot reconcile finalized.
+  # Boot manual-resume notify (design §2.2 step 4). Runs AFTER init_vapid so the
+  # push can actually deliver: one "tap to resume" notification for a crash or
+  # planned-drain fallback that boot reconciliation finalized. Exact restart
+  # parks notify through sweep_reset_parks instead.
   # Best-effort — the resumable note is already durable in the transcript, so a
   # notify failure never blocks boot.
   try:
@@ -549,22 +551,39 @@ async def lifespan(app):
 
     _stalled_live_task = _asyncio.create_task(_stalled_live_loop())
 
-    # Provider-limit reset sweep (design §2.4): notifies once when a parked
-    # turn's reset time arrives, and — when the owner opted in — starts the
-    # strictly-serial auto-resume. Same shape as the two loops above.
+    # Durable-continuation sweep (design §2.4): handles provider-limit resets
+    # and exact runs parked by a planned restart. It runs immediately on boot,
+    # then after a turn finishes or at the 60s fallback cadence. This is
+    # event-driven in the common path (one indexed query per completed turn),
+    # with no per-chat worker or short polling loop.
     async def _reset_park_loop():
-      while True:
-        await _asyncio.sleep(60)
-        try:
-          _rp_db = _SweepSession()
+      from app.broadcast import get_system_broadcast as _system_broadcast
+      _events = _system_broadcast().subscribe()
+      try:
+        while True:
           try:
-            await sweep_reset_parks(_rp_db)
-          finally:
-            _rp_db.close()
-        except _asyncio.CancelledError:
-          raise
-        except Exception as _exc:
-          _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
+            _rp_db = _SweepSession()
+            try:
+              await sweep_reset_parks(_rp_db)
+            finally:
+              _rp_db.close()
+          except _asyncio.CancelledError:
+            raise
+          except Exception as _exc:
+            _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
+
+          try:
+            # One absolute fallback window. Unrelated system events must not
+            # keep resetting a per-get timer and starve a future limit reset.
+            async with _asyncio.timeout(60):
+              while True:
+                _event = await _events.get()
+                if _event and _event.get("type") == "chat_run_finished":
+                  break
+          except _asyncio.TimeoutError:
+            pass
+      finally:
+        _system_broadcast().unsubscribe(_events)
 
     _reset_park_task = _asyncio.create_task(_reset_park_loop())
 
