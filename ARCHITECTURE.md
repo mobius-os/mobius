@@ -687,28 +687,28 @@ pins. Reservation lifetime and pin decisions are independent.
 
 ### Automatic continuation after limits and planned restarts
 
-Automatic continuation reuses one durable run transition but has two separate
-consent and cause boundaries. Provider-limit exits mark their exact `ChatRun` as
-`parked` until the parsed reset time. A planned restart creates a fresh nonce,
-stops and finalizes each exact live run, and parks it due-now with that nonce.
-The platform process then publishes an intent and restart request; it does not
-terminate itself on the normal path.
+Automatic continuation reuses one durable run transition and one chat-local
+policy while keeping distinct cause validation. Provider-limit exits mark their
+exact `ChatRun` as `parked` until the parsed reset time. A planned restart
+creates a fresh nonce, stops and finalizes each exact live run, and parks it
+due-now with that nonce. The platform process then publishes an intent and
+restart request; it does not terminate itself on the normal path.
 
 The frozen root-owned entrypoint poller validates and consumes the request,
 records its one-shot nonce in `/data/.restart-ledger`, and only then terminates
 pid 1. At the very start of the next entrypoint invocation, the ledger binds
 that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
 restart park when the root-owned boot acknowledgement matches the nonce on the
-latest exact DB run and the separately stored restart policy is on. The
-supervisor attests the boot transition; the database owns run identity. An
-intent merely written before a crash/OOM, an acknowledgement skipped by a
-failed handshake, or an acknowledgement left across another boot authorizes
-nothing. Transcript text is presentation, never restart-cause evidence.
+latest exact DB run and the chat's continuation policy is on. The supervisor
+attests the boot transition; the database owns run identity. An intent merely
+written before a crash/OOM, an acknowledgement skipped by a failed handshake,
+or an acknowledgement left across another boot authorizes nothing. Transcript
+text is presentation, never restart-cause evidence.
 
 | Event | Durable result | Boot/sweep result |
 |-------|----------------|-------------------|
 | Provider usage/rate limit | exact run `parked` until reset | notify; continue if the chat policy is on |
-| Accepted planned restart, exact park + boot nonce match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if separate restart consent is on |
+| Accepted planned restart, exact park + boot nonce match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if the chat policy is on |
 | Crash/OOM before supervisor acknowledgement | unacknowledged park or generic `running` evidence | resolve/reconcile to manual resumable interruption |
 | Repeated/unrelated boot before claim | acknowledgement is retired by boot-id mismatch | manual resumable interruption |
 | Policy off, unanswered question, app-owned run, or app-queued work | due park resolves without an automatic send | notify/manual owner action |
@@ -727,9 +727,9 @@ The sweep is cheap: one indexed due-row query immediately at boot, on
 `chat_run_finished`, and on a 60-second fallback, plus one bounded local ledger
 read when due rows exist. It does not create per-chat workers or poll at a short
 interval. `auto_resume_on_limit` keeps its legacy initial default of on.
-`auto_resume_on_restart` is a separate chat-local preference and migrates
-existing chats and owners to off; enabling it is explicit consent and only
-seeds future chats without rewriting existing conversations.
+Despite its historical storage name, it is the single chat-local policy for
+both provider-limit and planned-restart continuation. Changing it also seeds
+future chats without rewriting existing conversations.
 
 ### Tool output rendering
 

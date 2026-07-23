@@ -83,10 +83,6 @@ export default function ComposerPopover({
   autoResumeSaving,
   autoResumeError,
   onAutoResumeChange,
-  restartResumeEnabled,
-  restartResumeSaving,
-  restartResumeError,
-  onRestartResumeChange,
   providerSwitchState,
   onOpenInspector,
   onOpenSummary,
@@ -231,10 +227,6 @@ export default function ComposerPopover({
                 autoResumeSaving={autoResumeSaving}
                 autoResumeError={autoResumeError}
                 onAutoResumeChange={onAutoResumeChange}
-                restartResumeEnabled={restartResumeEnabled}
-                restartResumeSaving={restartResumeSaving}
-                restartResumeError={restartResumeError}
-                onRestartResumeChange={onRestartResumeChange}
                 onChange={onChangeChatInfo}
                 providerSwitchState={providerSwitchState}
                 reqIdRef={reqIdRef}

@@ -405,11 +405,8 @@ class ChatPatch(BaseModel):
   title: str | None = Field(default=None, max_length=500)
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
-  # Per-chat opt-in to continuing after a provider-limit reset.
+  # Per-chat automatic continuation after provider limits and planned restarts.
   auto_resume_on_limit: bool | None = None
-  # Separate explicit consent for a supervisor-authenticated planned restart.
-  # Existing chats migrate off; provider-limit consent never broadens into it.
-  auto_resume_on_restart: bool | None = None
   # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
   # only when the owner hasn't locked it via a manual rename. clear_title resets
   # the name (unlock + drop to the first-message default; re-derived next turn).
