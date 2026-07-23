@@ -60,6 +60,12 @@ docker compose -p mobius-test -f docker-compose.test.yml run --rm pytest
 CI runs the equivalent natively: from `backend/`, `pip install -r requirements.txt`,
 `npm install -g esbuild@0.25.12` (compile path shells out to it), then `pytest -q`.
 
+For one-off `docker run` probes, use `scripts/docker-probe.sh --timeout
+SECONDS -- ...`. It gives the container an exact identity and removes it at
+the daemon after a timeout, so killing the Docker client cannot leave a hidden
+CPU- or disk-consuming probe behind. `scripts/docker-probe.sh --list` shows
+the age, CPU, and memory of any active probes.
+
 **Frontend unit (node:test).** From `frontend/`, after `npm ci`:
 
 ```bash
