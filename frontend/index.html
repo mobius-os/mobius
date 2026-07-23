@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <!-- Möbius chrome is a fixed application surface: browser page zoom would
+         scale the toolbar/drawer along with an app. Apps that need zoom own it
+         locally (canvas/image/map gestures) so the surrounding shell stays put. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
     <!-- Default theme-color; applyTheme updates this to the active theme's --bg. -->
     <meta name="theme-color" content="#0d0d0d" />
     <!-- Android/Chrome consults color-scheme before JS/CSS fully applies.

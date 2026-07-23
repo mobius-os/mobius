@@ -381,7 +381,8 @@ test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', 
 
 test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 180° twist + tint + living halo', () => {
   const brand = shellCss.match(/\.shell__brand\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(brand, /touch-action:\s*pan-y pinch-zoom/)
+  assert.match(brand, /touch-action:\s*pan-y/)
+  assert.doesNotMatch(brand, /pinch-zoom/)
   assert.match(brand, /-webkit-touch-callout:\s*none/)
   // The conic hold RING is gone — the mark itself is the hold indicator.
   assert.doesNotMatch(shellCss, /\.shell__logo-ring/)
@@ -652,15 +653,17 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
-test('mobile tab bodies pan while the existing kind icon owns either-axis dragging', () => {
-  assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
-  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
+test('mobile tab bodies pan without page zoom while the existing kind icon owns either-axis dragging', () => {
+  assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x/)
+  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x/)
   assert.match(shellCss, /\.shell__tab-kind\[data-touch-drag-handle\]\s*\{[\s\S]*?touch-action:\s*none/)
   assert.match(paneStrip, /data-touch-drag-handle=\{dragKey\}/)
   assert.doesNotMatch(paneStrip, /GripVertical|shell__tab-drag-handle/)
   assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
     'the nested icon target must not duplicate the generic drag-source selector')
-  assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
+  assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y/)
+  assert.doesNotMatch(shellCss, /pinch-zoom/)
+  assert.doesNotMatch(drawerCss, /pinch-zoom/)
   assert.match(dragBinding, /downEvent\.target\?\.closest\?\.\('\[data-touch-drag-handle\]'\)/)
   assert.match(dragBinding, /touchMoveIntent\(dx, dy, touchIntentKind\)/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)

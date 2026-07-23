@@ -259,10 +259,13 @@ html {
   background-color: var(--bg, #0d0d0d);
 }
 
-/* Keep taps responsive while preserving native pinch zoom. Elements that own
-   a custom gesture (for example the image lightbox) override this locally. */
+/* The shell is fixed chrome: pan normally, but never let a page-level pinch
+   scale the toolbar, drawer, and app together. The viewport meta is the primary
+   lock; this closes the iOS gap where user-scalable=no may be ignored. Local
+   zoom surfaces (for example the image lightbox, or a map inside an app frame)
+   still own their gesture with touch-action:none and transform their content. */
 html, body {
-  touch-action: manipulation;
+  touch-action: pan-x pan-y;
 }
 
 /* Accessibility: respect prefers-reduced-motion. Collapses all
