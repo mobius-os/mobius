@@ -801,9 +801,8 @@ STALLED_TURN_MESSAGE = (
 # interrupt (the stalled-live watchdog exempts it via `_stall_exemption`; the
 # wedged-marker sweep returns early). `_restart_draining_chats` records the chats
 # whose live turn the drain interrupted, so each turn's terminal transition
-# (run_chat's finally) leaves its exact run intact long enough for the drain to
-# move it to the existing durable continuation state. If that transaction fails,
-# the still-set generic marker is deliberately left for manual boot recovery.
+# (run_chat's finally) LEAVES its run marker set (DRAINED_FOR_RESTART) instead of
+# clearing it — preserving it for boot reconcile + one-tap Resume.
 draining = False
 _restart_draining_chats: set[str] = set()
 
@@ -1341,46 +1340,28 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
         # and persist the finalized tool-block state. Only the drain's exact
         # note text qualifies, so a live provider error never gets a spurious
         # Resume button here.
-        trailing_open_start = len(blocks)
-        while trailing_open_start > 0:
-          block = blocks[trailing_open_start - 1]
-          if block.get("type") != "question" or block.get("answers"):
-            break
-          trailing_open_start -= 1
-        # Display text is never enough to prove planned-restart intent. It is
-        # used here only to avoid duplicating the terminal note for a generic
-        # marker fallback, so accept it solely at the actual tail or directly
-        # before trailing unanswered questions. A historical restart note with
-        # later output must not mask a newer crash.
-        candidate_indices = [len(blocks) - 1]
-        if trailing_open_start < len(blocks):
-          candidate_indices.append(trailing_open_start - 1)
-        paused_idx = next((
-          idx for idx in candidate_indices
-          if idx >= 0
-          and blocks[idx].get("type") == "error"
-          and blocks[idx].get("message") == PAUSED_FOR_RESTART_MESSAGE
-        ), None)
+        paused_idx = next(
+          (len(blocks) - 1 - i
+           for i, b in enumerate(reversed(blocks))
+           if b.get("type") == "error"
+           and b.get("message") == PAUSED_FOR_RESTART_MESSAGE),
+          None,
+        )
         if paused_idx is not None:
-          # Normalize both historical orderings around an open question. The
-          # drain marker belongs immediately BEFORE a trailing unanswered
-          # question so the card remains the tail affordance; in that shape it
-          # must not also offer Resume. With no question, the marker itself is
-          # the recovery affordance and remains resumable.
-          paused = dict(blocks.pop(paused_idx))
-          trailing_open_start = len(blocks)
-          while trailing_open_start > 0:
-            block = blocks[trailing_open_start - 1]
-            if block.get("type") != "question" or block.get("answers"):
-              break
-            trailing_open_start -= 1
-          paused["pause"] = {"kind": "restart"}
-          if trailing_open_start < len(blocks):
-            paused.pop("resumable", None)
-            blocks.insert(trailing_open_start, paused)
-          else:
-            paused["resumable"] = True
-            blocks.insert(min(paused_idx, len(blocks)), paused)
+          # The drain wrote the terminal note; just make it resumable — and
+          # carry `pause` so a note persisted before the descriptor existed
+          # (or one whose live event never landed) still renders in the calm
+          # "Paused" family — then fall through to the shared write-back below
+          # (no second note appended). Replace with a FRESH dict rather than
+          # mutating the ORM-loaded block in place: `Chat.messages` is a plain
+          # JSON column with no mutation tracking, so an in-place edit to a
+          # loaded block is not flushed — only a genuinely new value in the
+          # reassigned list persists (every other reconcile branch appends a
+          # fresh block for the same reason).
+          blocks[paused_idx] = {
+            **blocks[paused_idx], "resumable": True,
+            "pause": {"kind": "restart"},
+          }
         else:
           # Preserve a tail unanswered question. It is a durable human handoff,
           # not a disposable in-memory callback: the route can record the later
@@ -1882,8 +1863,7 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
   This is the DrainForRestart path from design §2.2 — distinct from
   `stop_chat_for`, which intentionally COLLAPSES the pending queue. A restart
   must NEVER touch `pending_messages`: every queued send is preserved and
-  joins the same continuation when an exact planned-restart park commits, or
-  remains available for the owner's next action on the manual fallback path.
+  self-heals on the owner's next action after the reboot.
 
   Sets the `draining` gate first (idempotent) so a send arriving mid-drain
   queues rather than starting, and both liveness sweeps stand down. Then, for
@@ -1898,17 +1878,13 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
     - mirrors the stalled-live watchdog's clean-interrupt handoff — bump the
       generation so the turn-end drain sees a stale generation and does NOT
       promote the queue — BUT records the chat in `_restart_draining_chats` so
-      the turn's finally does not clear the exact run before this drain can
-      transition it. After every handle stops, the same writer transaction used
-      by provider-limit recovery moves that exact run to ``parked`` with
-      ``park_reason='restart'`` and a due time of now. Startup therefore sees an
-      authoritative continuation signal instead of guessing from transcript
-      text. If that transition cannot commit, the generic run marker remains for
-      manual crash reconciliation.
+      the turn's finally LEAVES the durable run marker set (DRAINED_FOR_RESTART)
+      instead of clearing it. The preserved marker is what boot reconcile
+      finalizes and what the one-tap Resume affordance keys on.
 
   Best-effort and bounded: a handle that won't interrupt in time keeps today's
   contract — the restart utility's SIGKILL backstop kills the worker and boot
-  reconcile finalizes the marker for manual Resume. Handle
+  reconcile finalizes the marker (still with the resume affordance). Handle
   stops run serially at up to 2s each, so with many concurrent live turns the
   tail may not drain before the backstop — accepted for the single-owner
   reality (a handful of turns at most); parallelize the stops before this
@@ -1918,9 +1894,9 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
   log = _get_logger()
   drained: list[str] = []
   # `resumable` rides the event LIVE (events.process_event carries the
-  # whitelisted extras onto the persisted block), so a drained turn's manual
-  # Resume fallback renders immediately. The exact ChatRun transition below,
-  # not this display block, is the authority for automatic continuation.
+  # whitelisted extras onto the persisted block), so a drained turn's Resume
+  # button renders immediately; boot reconcile's text-keyed marking stays as
+  # the crash-path fallback for a note that never made it through the sink.
   # A drain-gated restart is a benign maintenance pause; `pause.kind='restart'`
   # lets the card render in the calm "Paused" family instead of the danger-red
   # error styling reserved for genuine failures.
@@ -1967,38 +1943,6 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
         all_interrupted = False
     if all_interrupted:
       drained.append(chat_id)
-      run_token = sink.run_token if sink is not None else None
-      if run_token:
-        try:
-          parked = await _park_run_strict(
-            chat_id,
-            run_token,
-            datetime.now(UTC).replace(tzinfo=None),
-            "restart",
-          )
-          if not parked:
-            log.warning(
-              "drain-for-restart could not park exact run; leaving manual "
-              "recovery chat_id=%s run_token=%s",
-              chat_id,
-              run_token,
-            )
-        except Exception:
-          # Restart must still proceed. ParkRun is transactional; on failure
-          # the generic running marker remains for safe manual reconciliation.
-          log.warning(
-            "drain-for-restart park failed; leaving manual recovery "
-            "chat_id=%s run_token=%s",
-            chat_id,
-            run_token,
-            exc_info=True,
-          )
-      else:
-        log.warning(
-          "drain-for-restart has no exact run token; leaving manual recovery "
-          "chat_id=%s",
-          chat_id,
-        )
   # Flush the writer so every paused note (the sink's fire-and-forget
   # PersistError above) is durably committed before the worker restarts.
   try:
@@ -2018,39 +1962,6 @@ async def drain_all_for_restart(timeout: float = DRAIN_TIMEOUT) -> list[str]:
 # (design §2.4 step "at parked_until, push-notify").
 LIMIT_RESET_NOTIFY_TITLE = "Your limit has reset"
 LIMIT_RESET_NOTIFY_BODY = "Your limit has reset."
-
-
-def _has_unanswered_question(chat: models.Chat | None) -> bool:
-  """Whether the durable tail is waiting for an owner answer.
-
-  A restart pause is appended after the question while draining, so ignore that
-  one product-owned tail block before applying the same tail-question invariant
-  as the transcript UI. This is read-only and bounded to the latest assistant
-  row; it never scans tool output or historical questions.
-  """
-  if chat is None:
-    return False
-  try:
-    from app.chat_transcript import materialized_messages
-    messages = materialized_messages(chat)
-  except Exception:
-    messages = list(chat.messages or [])
-  if not messages or messages[-1].get("role") != "assistant":
-    return False
-  blocks = list(messages[-1].get("blocks") or [])
-  while blocks:
-    tail = blocks[-1]
-    if not (
-      tail.get("type") == "error"
-      and (tail.get("pause") or {}).get("kind") == "restart"
-    ):
-      break
-    blocks.pop()
-  return bool(
-    blocks
-    and blocks[-1].get("type") == "question"
-    and not blocks[-1].get("answers")
-  )
 
 
 async def _auto_resume_chat(
@@ -2133,10 +2044,8 @@ async def _auto_resume_chat(
               chat is None
               or chat.deleted_at is not None
               or not chat.auto_resume_on_limit
-              or _has_unanswered_question(chat)
               or park is None
               or park.status != "resume_pending"
-              or park.initiated_by_app_id is not None
               or latest_id != park.id
               or any(
                 isinstance(msg, dict)
@@ -2146,9 +2055,6 @@ async def _auto_resume_chat(
             ):
               return False
             current_provider = chat.provider or "claude"
-            resume_reason = (
-              "restart" if park.park_reason == "restart" else "usage_limit"
-            )
           if not mark_starting(chat_id):
             return False
           claimed = True
@@ -2160,15 +2066,9 @@ async def _auto_resume_chat(
                 "role": "user",
                 "content": "continue",
                 "ts": int(time.time() * 1000),
-                "kind": "auto_continuation",
-                "continuation_reason": resume_reason,
                 # A retry after AppendPending succeeded but a later step failed
                 # must not enqueue a second synthetic continuation.
-                "cid": (
-                  f"restart-resume-{park_token or chat_id}"
-                  if resume_reason == "restart"
-                  else f"limit-resume-{park_token or chat_id}"
-                ),
+                "cid": f"limit-resume-{park_token or chat_id}",
               },
             )
           )
@@ -2224,14 +2124,12 @@ async def _auto_resume_chat(
 
 
 async def sweep_reset_parks(db: Session) -> list[str]:
-  """Notify and optionally continue due durable recovery rows.
+  """Notify (and optionally auto-resume) limit-parked chats at reset time.
 
   The third lifespan sweep (same 60s loop shape as the wedged-marker and
   stalled-live sweeps). A due park is a `chat_runs` row still
   ``status`` is ``parked`` or ``resume_pending`` and whose
-  `parked_until` has passed. Provider limits use their reset time; a planned
-  restart is parked by the drain itself with a due time of now. For each,
-  oldest due row first:
+  `parked_until` has passed. For each, oldest reset first:
 
     - Notify-only parks resolve first, then send one best-effort notification.
     - Auto-resume parks first become ``resume_pending``. That durable
@@ -2246,8 +2144,8 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       chats in the same due batch still resolve normally. App-attributed runs
       and queues never auto-resume.
 
-  Stands down while draining — a restart is in progress, and the fresh
-  process's immediate sweep picks everything up. Never raises.
+  Stands down while draining — a restart is in progress, and the boot
+  reconcile + this sweep's next tick pick everything up. Never raises.
   """
   log = _get_logger()
   resolved: list[str] = []
@@ -2269,28 +2167,23 @@ async def sweep_reset_parks(db: Session) -> list[str]:
   if not due:
     return resolved
 
-  def notify_due(chat_id: str, run: models.ChatRun) -> None:
+  def notify_reset(chat_id: str) -> None:
     try:
       owner = db.query(models.Owner).first()
       if owner is not None:
         from app import push
-        restarted = run.park_reason == "restart"
         push.notify_owner(
           db,
           owner.id,
-          title=("Möbius restarted" if restarted else LIMIT_RESET_NOTIFY_TITLE),
-          body=(
-            "Your paused turn is ready."
-            if restarted
-            else LIMIT_RESET_NOTIFY_BODY
-          ),
+          title=LIMIT_RESET_NOTIFY_TITLE,
+          body=LIMIT_RESET_NOTIFY_BODY,
           source_type="system",
           source_id=chat_id,
           target=f"/shell/?chat={chat_id}",
         )
     except Exception:
       log.warning(
-        "continuation notify failed chat_id=%s", chat_id, exc_info=True,
+        "limit-reset notify failed chat_id=%s", chat_id, exc_info=True,
       )
 
   def wants_auto_resume(chat, run) -> bool:
@@ -2304,7 +2197,6 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       and chat.deleted_at is None
       and run.initiated_by_app_id is None
       and not app_work_queued
-      and not _has_unanswered_question(chat)
       and chat.auto_resume_on_limit
     )
 
@@ -2368,11 +2260,11 @@ async def sweep_reset_parks(db: Session) -> list[str]:
           continue
         resolved.append(chat_id)
         if prepared.get("notify") and not chat_gone:
-          notify_due(chat_id, run)
+          notify_reset(chat_id)
         continue
 
       if prepared.get("notify"):
-        notify_due(chat_id, run)
+        notify_reset(chat_id)
       if _any_chat_turn_active():
         # The notification or refresh window admitted another turn. Keep the
         # durable pending state so the next sweep retries instead of silently
@@ -2403,10 +2295,10 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       continue
     resolved.append(chat_id)
     if should_notify and not chat_gone:
-      notify_due(chat_id, run)
+      notify_reset(chat_id)
   if resolved:
     log.info(
-      "continuation sweep resolved %d park(s): %s",
+      "limit-reset sweep resolved %d park(s): %s",
       len(resolved), ", ".join(resolved),
     )
   return resolved
@@ -3256,10 +3148,10 @@ async def _park_run_strict(
   run_token: str,
   parked_until: datetime,
   park_reason: str,
-) -> bool:
+) -> None:
   """Park the run via the actor (commit-before-return); raises on failure.
 
-  The continuation sibling of `_clear_run_status_strict`: same await-the-ack
+  The limit-exit sibling of `_clear_run_status_strict`: same await-the-ack
   discipline, same identity-keyed ownership inside the actor. A tokenless
   caller (legacy/test paths with no per-run row) degrades to the plain
   marker clear — there is no row to park on, so the chat keeps today's
@@ -3267,10 +3159,10 @@ async def _park_run_strict(
   notify-at-reset upgrade.
   """
   if not chat_id:
-    return False
+    return
   if not run_token:
     await _clear_run_status_strict(chat_id, "")
-    return False
+    return
   ack = get_writer().submit(
     ParkRun(
       chat_id=chat_id,
@@ -3279,7 +3171,7 @@ async def _park_run_strict(
       park_reason=park_reason,
     )
   )
-  return bool(await _await_ack(ack))
+  await _await_ack(ack)
 
 
 def _limit_exit(
@@ -3531,12 +3423,10 @@ async def _complete_turn(
       # lock can't burn it.
       async with asyncio.timeout(chat_queue.TERMINAL_LOCK_TIMEOUT_SECS):
         async with chat_queue.get_lock(chat_id):
-          parked = await _park_run_strict(
+          await _park_run_strict(
             chat_id, sink.run_token or "",
             parked_until, park_reason or "rate_limit",
           )
-          if not parked:
-            raise RuntimeError("exact limit run was not parked")
           # Release the send's `_starting` claim NOW, under the same lock —
           # not in run_chat's finally. The limit path skips drain_and_release
           # (which releases the claim for every other terminal), so without
@@ -3713,14 +3603,9 @@ def _last_user_message_elapsed(db, chat_id: str) -> str | None:
     msgs = (chat.messages if chat else None) or []
     now_ms = _time.time() * 1000.0
     for m in reversed(msgs[:-1]):  # skip the current (just-committed) message
-      # Only owner-authored USER messages count. Product-owned automatic
-      # continuation rows retain role=user for provider history but must not
-      # reset the owner's recency clock.
-      if (
-        not isinstance(m, dict)
-        or m.get("role") != "user"
-        or m.get("kind") == "auto_continuation"
-      ):
+      # Only USER messages count — the label is "user's last message", and
+      # assistant rows would otherwise report the gap since the agent spoke.
+      if not isinstance(m, dict) or m.get("role") != "user":
         continue
       ts = m.get("ts")
       if not isinstance(ts, (int, float)) or ts <= 0:
@@ -4062,11 +3947,7 @@ def _build_resumed_context(chat_row) -> str | None:
     content = msg.get("content")
     if not isinstance(content, str) or not content.strip():
       continue
-    if msg.get("kind") == "auto_continuation":
-      reason = msg.get("continuation_reason") or "automatic recovery"
-      speaker = f"Automatic continuation ({reason})"
-    else:
-      speaker = "User" if role == "user" else "Assistant"
+    speaker = "User" if role == "user" else "Assistant"
     line = f"{speaker}: {content.strip()}"
     if used + len(line) > _RESUME_CONTEXT_CHAR_BUDGET and lines:
       break
@@ -4198,13 +4079,14 @@ async def run_chat(
     if chat_id and clear_stopped_run and run_gen is not None:
       if chat_id in _restart_draining_chats:
         # Drain-for-restart handoff: this turn was interrupted for a graceful
-        # restart. Leave the exact running row and pending queue intact so
-        # drain_all_for_restart can move that row to the durable due-restart
-        # state after every handle reports stopped. The deliberate difference
-        # from Stop is that the else-branch below clears the exact row instead.
-        # `_complete_turn` already finalized the partials + paused note; the
-        # bumped generation prevented queue promotion. Discard the in-memory
-        # handoff flag once this dying wrapper has observed it.
+        # restart. LEAVE the durable run marker set (and the pending queue
+        # intact) so boot reconcile finalizes it and the one-tap Resume works —
+        # the deliberate difference from a Stop handoff, which CLEARS the marker
+        # in the else-branch below. `_complete_turn` already finalized the
+        # partials + the paused note above (stop-handoff-successor path); no
+        # queue was promoted (the bumped generation made the turn-end drain read
+        # STALE_NO_ACTION). Discard the per-chat flag so a hypothetical surviving
+        # process can't mis-tag a later turn.
         _restart_draining_chats.discard(chat_id)
         disposition = chat_queue.TerminalDisposition.DRAINED_FOR_RESTART
       else:

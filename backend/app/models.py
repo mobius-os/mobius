@@ -124,8 +124,7 @@ class Chat(Base):
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
-  # Per-chat policy for automatic recovery after provider limits and planned
-  # server restarts. The legacy column/API name stays compatible. Kept out of
+  # Per-chat policy for provider-limit recovery. Kept out of
   # agent_settings_json because that blob is snapshotted/mirrored as SDK
   # runtime configuration; mixing this policy into it can skip first-send
   # model snapshots or overwrite the owner's global model defaults.
@@ -223,8 +222,6 @@ class ChatRun(Base):
   # turn, "failed" for a provider/setup error, "stopped" for an explicit user
   # Stop, and "interrupted" for crash/supersession/watchdog recovery. Provider
   # limits additionally use the parked/resume_pending/parked_notified states.
-  # A successfully drained planned restart reuses that retry path with
-  # park_reason="restart"; an unplanned crash remains "interrupted".
   status = Column(String(16), nullable=False, default="running", index=True)
   provider = Column(String(32), nullable=True, default=None)
   # App that initiated this turn under the app-attributed-chat contract
@@ -242,9 +239,8 @@ class ChatRun(Base):
   # provider limit, the run is PARKED instead of just cleared: `status` moves
   # to "parked", `parked_until` holds the reset time (naive UTC, matching every
   # other DateTime here), and `park_reason` a short label ("rate_limit" /
-  # "usage_limit" / …). Planned restarts also use this row with
-  # park_reason="restart" and a due time of now. No separate state enum is
-  # needed. The liveness checks read it via
+  # "usage_limit" / …). This run row IS the provider-parked signal — no
+  # separate state enum. The liveness checks read it via
   # `chat._parked_until_for_chat`; the periodic reset sweep notifies once at
   # `parked_until`; auto-resume may pass through the retryable
   # "resume_pending" state before the row becomes terminal. Null on every

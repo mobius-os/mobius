@@ -744,11 +744,7 @@ def _first_message_title(chat) -> str:
   """The 'first message' fallback name: the first user message's text trimmed
   to a sane length (mirrors the StartTurn initial-title behavior)."""
   for m in (chat.messages or []):
-    if (
-      not isinstance(m, dict)
-      or m.get("role") != "user"
-      or m.get("kind") == "auto_continuation"
-    ):
+    if not isinstance(m, dict) or m.get("role") != "user":
       continue
     c = m.get("content")
     if isinstance(c, list):
