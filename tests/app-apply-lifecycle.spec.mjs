@@ -34,6 +34,21 @@ async function currentFrame(page, appId) {
   return frame
 }
 
+async function currentRevision(page, appId) {
+  try {
+    const frame = await currentFrame(page, appId)
+    return await frame.locator('#revision').textContent()
+  } catch (error) {
+    // AppCanvas promotes a buffered iframe by atomically removing the old
+    // frame. A poll can select that old frame immediately before removal; the
+    // next sample must inspect the replacement rather than fail the lifecycle.
+    if (String(error?.message || error).includes('Frame was detached')) {
+      return null
+    }
+    throw error
+  }
+}
+
 function source(label) {
   return `
 import { suffix } from './copy.js'
@@ -149,10 +164,10 @@ test('explicit apply owns draft, publication, iframe refresh, and rollback', asy
     const updated = await applySource(request, token, sourceDir)
     expect(updated.response.ok()).toBeTruthy()
     expect(updated.body.mode).toBe('updated')
-    await expect.poll(async () => {
-      frame = await currentFrame(page, app.id)
-      return frame.locator('#revision').textContent()
-    }).toBe('revision two multi-file')
+    await expect.poll(
+      () => currentRevision(page, app.id),
+    ).toBe('revision two multi-file')
+    frame = await currentFrame(page, app.id)
     await expect.poll(
       () => page.evaluate(() => window.__explicitApplyFrameAdds),
     ).toBe(1)
@@ -181,10 +196,9 @@ test('explicit apply owns draft, publication, iframe refresh, and rollback', asy
       files: { 'copy.js': "export const suffix = 'recovered'\n" },
     })
     expect(recovered.mode).toBe('updated')
-    await expect.poll(async () => {
-      frame = await currentFrame(page, app.id)
-      return frame.locator('#revision').textContent()
-    }).toBe('revision three recovered')
+    await expect.poll(
+      () => currentRevision(page, app.id),
+    ).toBe('revision three recovered')
     expect(git(slug, 'status', '--porcelain')).toBe('')
     expect(errors).toEqual([])
   } finally {

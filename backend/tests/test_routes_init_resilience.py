@@ -137,6 +137,7 @@ def test_broken_route_module_yields_stub_real_routers_unaffected(
 
 def test_lifespan_waits_for_initial_restart_resume_sweep(monkeypatch):
   """The server must not accept a manual send before restart recovery claims."""
+  from app import bootstrap as bootstrap_mod
   from app import chat as chat_mod
   from app.main import app as main_app
 
@@ -151,6 +152,18 @@ def test_lifespan_waits_for_initial_restart_resume_sweep(monkeypatch):
     await asyncio.to_thread(release_sweep.wait)
     return []
 
+  async def skip_external_bootstrap(db):
+    # This test owns startup ordering at the restart-resume seam. A first-boot
+    # Store clone/fallback can legitimately take longer than its 20-second
+    # assertion budget and must not turn the ordering contract into a network
+    # timing test.
+    del db
+
+  monkeypatch.setattr(
+    bootstrap_mod,
+    "ensure_bootstrap_apps_installed",
+    skip_external_bootstrap,
+  )
   monkeypatch.setattr(chat_mod, "sweep_reset_parks", held_sweep)
 
   def boot_app():

@@ -1,10 +1,9 @@
 # Mini-app quickstart — ordinary local apps
 
 Base workflow for every local Möbius mini-app create or update. Read it with
-`visual-testing.md` and `notifications.md` in the same initial call; add
-`building-apps.md` for advanced runtime needs, `cron.md` for scheduled jobs,
-and `app-component-shapes.md` only for a complex catalogued structure such as
-a sheet, tabs, chat, or split pane.
+`visual-testing.md` and `notifications.md` in the same initial call. Add
+`building-apps.md` for advanced runtime needs, `cron.md` for schedules, and
+`app-component-shapes.md` only for sheets, tabs, chat, or split panes.
 
 This is the complete workflow for a focused app with ordinary JSX,
 app-scoped storage, and no unusual host integration. Add `building-apps.md` to

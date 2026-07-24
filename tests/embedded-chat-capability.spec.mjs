@@ -212,7 +212,13 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
     await chooser.setFiles({ name: 'e2e.txt', mimeType: 'text/plain', buffer: Buffer.from('scoped upload') })
     await expect(chatFrame.getByRole('button', { name: 'Remove e2e.txt' })).toBeVisible()
 
-    await chatFrame.locator('textarea').fill('exercise embedded capability')
+    // This spec owns the capability transport, not agent task planning. Keep
+    // the child turn deterministic so a coding model does not infer a file
+    // edit from the injected app context and turn a transport assertion into
+    // a model-behavior benchmark.
+    await chatFrame.locator('textarea').fill(
+      'This is a transport test. Reply exactly `capability-ok`; do not call tools or edit files.',
+    )
     await chatFrame.getByRole('button', { name: /send/i }).click()
     await expect.poll(() => sendBody, { timeout: 10_000 }).not.toBeNull()
     expect(sendBody.content).toContain('<marker>opaque-context-ok</marker>')
