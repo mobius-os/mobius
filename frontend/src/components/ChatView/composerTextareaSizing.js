@@ -91,7 +91,7 @@ export function reconcileComposerTextarea(
   textarea,
   value = textarea?.value,
 ) {
-  if (!(textarea?.value || value)) {
+  if (!value) {
     resetComposerTextarea(textarea)
     return 0
   }

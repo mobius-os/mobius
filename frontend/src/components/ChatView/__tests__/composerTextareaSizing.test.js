@@ -78,7 +78,7 @@ test('reset collapses immediately before React commits the empty value', () => {
 
 test('authoritative empty state clears stale native inline geometry', () => {
   const { textarea, pill } = textareaStub({
-    value: '',
+    value: 'browser-restored stale value',
     scrollHeight: 280,
     tall: true,
   })
