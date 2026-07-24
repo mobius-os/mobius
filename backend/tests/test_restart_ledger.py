@@ -60,6 +60,7 @@ def _request(*, boot: str, nonce: str, now: float) -> None:
   platform_ledger.request_restart(
     boot_id=boot,
     nonce=nonce,
+    runs=[{"chat_id": "chat-12345678", "run_token": "run-12345678"}],
     now=now,
   )
 
@@ -90,6 +91,27 @@ def test_exact_accepted_restart_is_bound_to_immediately_following_boot(
 
   assert _authorized(tmp_path, target_boot) == nonce
   assert _authorized(tmp_path, source_boot) is None
+
+
+def test_restart_intent_keeps_exact_runs_for_older_frozen_supervisors(
+  tmp_path, monkeypatch,
+):
+  supervisor = _load_supervisor()
+  _bind(supervisor, tmp_path, monkeypatch)
+  now = time.time()
+  source_boot = "boot-source-1234"
+
+  assert supervisor.begin_boot(source_boot, now=now) is False
+  _request(boot=source_boot, nonce="nonce-12345678", now=now)
+
+  intent = json.loads(supervisor.INTENT_PATH.read_text(encoding="utf-8"))
+  assert intent["runs"] == [{
+    "chat_id": "chat-12345678",
+    "run_token": "run-12345678",
+  }]
+  # The current nonce-only supervisor accepts the same payload, proving the
+  # compatibility field does not alter the simplified authorization model.
+  assert supervisor.accept(source_boot, now=now + 1) is True
 
 
 def test_crash_after_intent_before_supervisor_acceptance_is_not_authorized(
