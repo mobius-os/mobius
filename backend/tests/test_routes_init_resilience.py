@@ -160,6 +160,58 @@ def test_main_boots_when_app_watcher_start_raises(monkeypatch):
     assert body["boot_id"]
 
 
+def test_lifespan_cannot_mutate_cron_for_a_low_id_test_app(
+  monkeypatch, db, tmp_path,
+):
+  """Reproduce the production-container leak and prove it fails closed.
+
+  Entering the real lifespan with a scheduled row used to invoke the baked
+  scaffold. Since the isolated test DB assigns low IDs, that could replace a
+  production Memory/Reflection crontab entry when pytest ran in the live
+  container.
+  """
+  from pathlib import Path
+
+  from app import install, models
+  from app.config import get_settings
+  from app.routes import apps as apps_module
+  from app.main import app as main_app
+
+  source_dir = Path(get_settings().data_dir) / "apps" / "memory"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "mobius.json").write_text(
+    '{"schedule":{"default":"30 5 * * *","job":"fetch.sh"}}',
+    encoding="utf-8",
+  )
+  app_row = models.App(
+    name="Memory",
+    slug="memory",
+    description="scheduled test app",
+    jsx_source="export default function App() { return <div/> }",
+    source_dir=str(source_dir),
+  )
+  db.add(app_row)
+  db.commit()
+  assert app_row.id < 10  # Preserve the low-id shape that caused the incident.
+
+  sentinel = tmp_path / "scaffold-was-called"
+  fake_scaffold = tmp_path / "init-cron-scaffold.sh"
+  fake_scaffold.write_text(
+    f"#!/bin/sh\ntouch {sentinel}\n",
+    encoding="utf-8",
+  )
+  fake_scaffold.chmod(0o755)
+  monkeypatch.setattr(install, "CRON_SCAFFOLD", fake_scaffold)
+  monkeypatch.setattr(apps_module, "_read_live_crontab", lambda: "")
+  monkeypatch.delenv("MOBIUS_ALLOW_TEST_CRON", raising=False)
+
+  with TestClient(main_app) as client:
+    assert client.get("/api/health").status_code == 200
+
+  assert not sentinel.exists()
+
+
 def test_lifespan_waits_for_initial_restart_resume_sweep(monkeypatch):
   """The server must not accept a manual send before restart recovery claims."""
   from app import chat as chat_mod

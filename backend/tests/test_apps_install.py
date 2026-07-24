@@ -10,6 +10,7 @@ and force failure modes.
 import asyncio
 import io
 import json
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -521,6 +522,7 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   # The inner CRON_SCAFFOLD patch overrides the autouse bypass so we reach
   # the subprocess call; subprocess.run is mocked so nothing shells out.
   with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
+       patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
        patch("app.install.subprocess.run") as mock_run:
     mock_run.return_value = MagicMock(returncode=0, stderr="")
     install._register_cron("reflection", "0 6 * * *", job_path, 42)
@@ -545,6 +547,7 @@ def test_register_cron_omits_app_id_when_none(tmp_path):
   fake_scaffold.write_text("#!/bin/bash\n")
 
   with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
+       patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
        patch("app.install.subprocess.run") as mock_run:
     mock_run.return_value = MagicMock(returncode=0, stderr="")
     install._register_cron("selfcontained", "0 6 * * *", job_path)
@@ -552,6 +555,41 @@ def test_register_cron_omits_app_id_when_none(tmp_path):
   assert mock_run.call_args.args[0] == [
     str(fake_scaffold), "selfcontained", "0 6 * * *", "job.sh",
   ]
+
+
+def test_register_cron_refuses_real_subprocess_in_test_runtime(
+  tmp_path, monkeypatch,
+):
+  """The Python boundary blocks the exact production-container pytest leak."""
+  from app import install
+
+  fake_scaffold = tmp_path / "init-cron-scaffold.sh"
+  fake_scaffold.write_text("#!/bin/sh\n")
+  monkeypatch.setattr(install, "CRON_SCAFFOLD", fake_scaffold)
+  monkeypatch.delenv("MOBIUS_ALLOW_TEST_CRON", raising=False)
+
+  with patch("app.install.subprocess.run") as mock_run, \
+       pytest.raises(install.HTTPException) as exc:
+    install._register_cron(
+      "memory", "30 5 * * *", tmp_path / "fetch.sh", 3,
+    )
+
+  assert exc.value.status_code == 500
+  assert "disabled in the test runtime" in exc.value.detail
+  mock_run.assert_not_called()
+
+
+def test_unregister_cron_refuses_real_subprocess_in_test_runtime(
+  tmp_path, monkeypatch,
+):
+  """Uninstall cleanup cannot rewrite a production crontab during pytest."""
+  from app import install
+
+  monkeypatch.delenv("MOBIUS_ALLOW_TEST_CRON", raising=False)
+  with patch("app.install.subprocess.run") as mock_run:
+    install._unregister_cron(tmp_path / "apps" / "memory")
+
+  mock_run.assert_not_called()
 
 
 def test_crontab_without_app_is_prefix_safe_and_preserves_header():
