@@ -180,6 +180,20 @@ def test_git_doctor_compares_installed_hooks_to_landed_main():
   assert 'git show "origin/main:$source_path"' in doctor
 
 
+def test_submit_pr_rechecks_landed_hooks_after_refresh():
+  submit = (ROOT / "scripts" / "submit-pr.sh").read_text(encoding="utf-8")
+  initial_doctor = submit.index("scripts/git-doctor.sh --fix")
+  fetch = submit.index("git fetch origin main")
+  rebase = submit.index("git rebase origin/main")
+  publish = submit.index('info "publishing ${branch}"')
+  refreshed_segment = submit[rebase:publish]
+
+  # The first doctor repairs pre-existing shared-repo corruption. The second
+  # enforces any hook policy that the fetch just landed.
+  assert initial_doctor < fetch < rebase < publish
+  assert "scripts/git-doctor.sh --fix" in refreshed_segment
+
+
 def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
@@ -456,3 +470,11 @@ def test_pull_requests_run_required_suites_and_main_only_refreshes_cache():
   assert "actions/checkout@v5" not in workflows
   assert "actions/setup-node@v5" not in workflows
   assert "actions/setup-python@v5" not in workflows
+
+def test_hosted_concurrency_is_scoped_to_the_pull_request():
+  workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
+    encoding="utf-8"
+  )
+  assert "group: tests-pr-${{ github.event.pull_request.number }}" in workflow
+  assert "github.event.pull_request.head.ref" not in workflow
+  assert "cancel-in-progress: true" in workflow
