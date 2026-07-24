@@ -10,6 +10,29 @@ The design has one line behind it: **low floor, high ceiling, no walls.** The ag
 
 **Intelligence over scripts.** A script, validator, or fixed procedure earns its place only for the unambiguous and identical-every-time — clone/pull to install or update recovery, rebuild the served frontend, a deterministic migration. Everything ambiguous — why something broke, how to reach the last good state, fixing what another agent did — is the agent reasoning in context. Branching logic to cover cases, or bespoke machinery to detect-and-auto-handle a situation, is the tell that you're building the wrong thing: script the certain step, **instruct** the agent to run it (sharpen the prompt if it forgets), and trust intelligence for the rest. The only automation worth keeping is one a tool already ships (a real watcher, HMR) — never flimsy glue invented to avoid instructing the agent. **Recovery** is this made concrete: a small, separate, always-up agent that can't break its own code (updated only by that one unambiguous script) but reaches and fixes everything else by *reasoning* about what broke, not from a menu of canned reversions.
 
+### Design for the next change
+
+**Solve at the core.** Prefer the smallest durable solution that fixes the
+cause and improves the path the next related change will use. Avoid both
+symptom patches and abstractions for imagined needs. If a reasonable change
+feels awkward, treat that friction as evidence about the underlying design:
+challenge and simplify it rather than adding a workaround. Revisit earlier
+choices as understanding grows — consolidate, remove, and simplify.
+
+**Fix forward.** Prefer a clean design and deliberate migration — even when it
+breaks an old path — over permanent shims, fallbacks, duplicated logic, or
+parallel systems. Preserve compatibility where it protects owner data or a
+genuine external contract; otherwise update every affected caller and move
+forward as one coherent system.
+
+**Keep the shared foundation lean.** Every owner runs their own copy of Möbius
+and may pay directly for its compute, memory, storage, network, and agent
+usage. Treat meaningful efficiency gains as user-facing improvements. Pursue
+material, evidenced gains without sacrificing behavior, correctness,
+maintainability, or future flexibility. Keep the platform small, general, and
+composable; put domain-specific complexity in apps and reserve platform
+complexity for shared primitives and hard invariants.
+
 The flip side: infrastructure the agent never sees — provider plumbing, the persistence actor, the streaming protocol, the navigation back-stack — gets whatever complexity makes it correct. Maximal expressive surface for the agent, ironclad substrate underneath.
 
 **If you're an agent building Möbius, attend to this on every change.** You were trained on products for careless or adversarial users, where the job is to validate, sanitize, and prevent. Here the user is the owner and you are trusted. When you reach for a guard, a validator, or background auto-magic to prevent a mistake, stop and ask whether you're policing — or substituting brittle automation for intelligence. A change that fights this philosophy is a sign you're solving the wrong problem.
