@@ -2685,7 +2685,7 @@ class ChatWriterActor:
     return True
 
   def _go_fatal(self) -> None:
-    """Mark the actor fatal and fail every queued ack — under `_fatal_lock`.
+    """Mark the actor fatal, wake an idle consumer, and fail every queued ack.
 
     Holding the lock across set-fatal + drain serializes with `submit`,
     which checks `_fatal` and enqueues under the same lock.  So a
@@ -2696,6 +2696,12 @@ class ChatWriterActor:
     ack is the submitter's, already failed by submit or by being in
     `_pending`), so failing them is a harmless no-op.  Also fail any
     pending coalesced snapshots so their acks don't hang.
+
+    A caller outside the consumer thread must also wake a consumer blocked
+    in `Queue.get()`. Enqueue one private `DrainAndStop` AFTER the drain so
+    it cannot be removed by a concurrent `stop()`/fatal race and no command
+    can queue behind it once `_fatal` is set. Fatal paths running on the
+    consumer itself return directly from `_run`, so they need no marker.
 
     Ack resolution is hoisted OUT of both locks: the queue is fully drained
     (and `_pending` snapshotted) under the lock — preserving the
@@ -2713,6 +2719,11 @@ class ChatWriterActor:
         except queue.Empty:
           break
         drained.append(cmd.ack)
+      if (
+        self._thread is not None
+        and threading.current_thread() is not self._thread
+      ):
+        self._q.put(DrainAndStop())
     with self._pending_lock:
       pending = list(self._pending.values())
       self._pending.clear()
