@@ -86,6 +86,8 @@ test('the rail scrolls freely with native touch and mouse or pen grabbing', () =
   assert.match(gallerySource, /if \(!drag\.captured\)/)
   assert.match(gallerySource, /drag\.captured = true[\s\S]*setPointerCapture/)
   assert.match(gallerySource, /scrollLeft = drag\.startScrollLeft - deltaX/)
+  assert.match(gallerySource, /onLostPointerCapture=\{endPointerDrag\}/)
+  assert.match(gallerySource, /clearTimeout\(suppressTimerRef\.current\)/)
   assert.match(gallerySource, /onClickCapture/)
   assert.match(markdownCss, /touch-action:\s*pan-x pan-y/)
   assert.match(markdownCss, /-webkit-overflow-scrolling:\s*touch/)

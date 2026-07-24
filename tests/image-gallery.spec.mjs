@@ -141,6 +141,19 @@ test('desktop filmstrip is compact and supports buttons, keyboard, and viewer na
   await page.keyboard.press('ArrowLeft')
   await expect.poll(() => rail.evaluate(element => element.scrollLeft)).toBeLessThan(20)
 
+  const railBox = await rail.boundingBox()
+  if (!railBox) throw new Error('Gallery rail did not render')
+  await page.mouse.move(railBox.x + railBox.width * 0.62, railBox.y + railBox.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(
+    railBox.x + railBox.width * 0.22,
+    railBox.y + railBox.height / 2,
+    { steps: 6 },
+  )
+  await page.mouse.up()
+  await expect.poll(() => rail.evaluate(element => element.scrollLeft)).toBeGreaterThan(100)
+  await expect(page.locator('.lightbox-overlay')).toHaveCount(0)
+
   await page.getByRole('button', { name: 'Open Forest path preview' }).click()
   await expect(page.getByRole('dialog', { name: /Image 2 of 4/ })).toBeVisible()
   await expect(page.locator('.lightbox-count')).toHaveText('2 / 4')

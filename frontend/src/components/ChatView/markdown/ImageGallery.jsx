@@ -104,6 +104,12 @@ export default function ImageGallery({ images }) {
     if (viewerKey !== null && viewerIndex < 0) setViewerKey(null)
   }, [viewerIndex, viewerKey])
 
+  useEffect(() => () => {
+    clearTimeout(suppressTimerRef.current)
+    dragRef.current = null
+    suppressClickRef.current = false
+  }, [])
+
   function beginPointerDrag(event) {
     if (!event.isPrimary || event.pointerType === 'touch') return
     if (event.pointerType === 'mouse' && event.button !== 0) return
@@ -170,6 +176,7 @@ export default function ImageGallery({ images }) {
         onPointerMove={movePointerDrag}
         onPointerUp={endPointerDrag}
         onPointerCancel={endPointerDrag}
+        onLostPointerCapture={endPointerDrag}
         onClickCapture={(event) => {
           if (!suppressClickRef.current) return
           suppressClickRef.current = false
