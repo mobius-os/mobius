@@ -154,6 +154,16 @@ def esbuild_command(
     "--format=esm",
     "--jsx=automatic",
     "--platform=browser",
+    # Mini-apps are runtime artifacts, not development builds. Without an
+    # explicit production define React selects its development branches and
+    # every app carries nearly a megabyte of validation/debug code that the
+    # opaque frame must copy, parse, and execute on every cold mount.
+    '--define:process.env.NODE_ENV="production"',
+    # Keep the one-module offline contract while reducing transfer, cache,
+    # parse, and evaluation cost. Preserve Function.name/Class.name for apps
+    # that use names in labels or diagnostics.
+    "--minify",
+    "--keep-names",
     f"--banner:js={COMPILED_RUNTIME_BANNER}",
     f"--inject:{runtime_inject_path()}",
     f"--alias:mobius-runtime={mobius_runtime_path()}",
