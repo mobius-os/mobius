@@ -118,7 +118,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # --no-deps so Docker keeps the exact runtime pin below explicit.
 # Pinned to commit SHA (not tag) for full reproducibility — tags are
 # mutable on GitHub. SHA corresponds to refs/tags/rust-v0.145.0
-# as of 2026-07-21, and is kept in lockstep with the npm @openai/codex
+# as of 2026-07-24, and is kept in lockstep with the npm @openai/codex
 # binary above (the SDK spawns it via codex_bin=shutil.which("codex")).
 # We moved from rust-v0.144.5 to this tag because the 0.144.x generated
 # ReasoningEffort enum was strict (none/minimal/low/medium/high/xhigh)
@@ -133,7 +133,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # it, so codex_sdk_runner.py installs the handler on the wrapped sync
 # client's `_approval_handler`.
 RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@1635de866c61d1b76e50b31928ee6d61482435a8#subdirectory=sdk/python' \
+      'openai-codex @ git+https://github.com/openai/codex.git@25af12f7e61572b0bc18ddb1008be543b91519b0#subdirectory=sdk/python' \
     && pip install --no-cache-dir 'openai-codex-cli-bin==0.144.4'
 
 # Capture each installed agent CLI's npm publish date into a small JSON the
