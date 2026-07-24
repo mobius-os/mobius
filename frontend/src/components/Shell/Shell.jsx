@@ -360,6 +360,10 @@ export default function Shell() {
   // preview holds the tiled world; the committed mode otherwise. The single source
   // (INV 4) — no scattered override.
   const effectiveViewMode = modeMachine.effectiveViewMode(modeState, { splitsEnabled: SPLITS })
+  const multiPaneBuilderVisible = effectiveViewMode === 'panes'
+    && paneModel.paneIdsInOrder(workspace).length > 1
+  const multiPaneBuilderVisibleRef = useRef(multiPaneBuilderVisible)
+  multiPaneBuilderVisibleRef.current = multiPaneBuilderVisible
   // The latched presentation plan for the live animated beat. Either direction may
   // carry a stationary single-world underlay while panes scatter or assemble over it.
   const beatPlan = modeMachine.transitionPresentation(modeState)
@@ -757,6 +761,7 @@ export default function Shell() {
       activeElement: document.activeElement,
       activeView: activeViewRef.current,
       activeChatId: activeChatIdRef.current,
+      multiPaneBuilderVisible: multiPaneBuilderVisibleRef.current,
       streamingChatIds: streamingChatIdsRef.current,
       passiveRebuild: passive,
       voiceDictationActive: voiceDictationActiveRef.current,
@@ -765,9 +770,10 @@ export default function Shell() {
     })
   }
 
-  function passiveChatReloadIsReadingHold(passive) {
+  function shellReloadHasStableVisibleHold(passive) {
+    if (document.visibilityState === 'hidden') return false
+    if (multiPaneBuilderVisibleRef.current) return true
     return passive
-      && document.visibilityState !== 'hidden'
       && activeViewRef.current === 'chat'
       && activeChatIdRef.current != null
   }
@@ -776,10 +782,10 @@ export default function Shell() {
     if (!pendingShellReloadRef.current) return
     const passive = pendingShellReloadPassiveRef.current
     if (shellReloadWouldDisruptUser({ passive })) {
-      // A passive watcher generation has no deadline while somebody is reading
-      // a visible chat. Wait for the view/visibility effects below instead of
-      // waking the page every six seconds for the whole reading session.
-      if (!passiveChatReloadIsReadingHold(passive)) scheduleShellReloadCheck()
+      // Stable visible holds (the whole Builder workspace, or a passive watcher
+      // while reading a chat) have no deadline. Wait for the view/mode/visibility
+      // effects below instead of waking the page every six seconds.
+      if (!shellReloadHasStableVisibleHold(passive)) scheduleShellReloadCheck()
     } else {
       performShellReload({ passive })
     }
@@ -798,7 +804,7 @@ export default function Shell() {
       ? (pendingShellReloadPassiveRef.current && passive)
       : passive
     pendingShellReloadRef.current = true
-    if (!passiveChatReloadIsReadingHold(pendingShellReloadPassiveRef.current)) {
+    if (!shellReloadHasStableVisibleHold(pendingShellReloadPassiveRef.current)) {
       scheduleShellReloadCheck()
     }
   }
@@ -834,11 +840,12 @@ export default function Shell() {
     }
   }, [])
 
-  // A passive generation held for a visible chat should land as soon as the
-  // owner leaves the chat surface. Switching between chats remains protected.
+  // Release a stable visible hold as soon as the owner leaves the chat surface
+  // or returns from Builder to Standard. Switching between chats remains
+  // protected for a passive generation.
   useEffect(() => {
     checkPendingShellReload()
-  }, [activeView, activeChatId])
+  }, [activeView, activeChatId, multiPaneBuilderVisible])
   // Global connectivity indicator. The composer already disables send when
   // offline (ChatView); this surfaces the state shell-wide so the user is
   // never tapping in the dark about whether they're connected.
