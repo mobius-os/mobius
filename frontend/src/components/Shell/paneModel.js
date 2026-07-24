@@ -510,6 +510,15 @@ export function singleScreenKey(ws) {
   return null
 }
 
+// The content currently selected by a mounted surface owner. Real builder
+// panes select through activeTabKey; the single world's stable synthetic owner
+// selects through its independent slot. Callers that bind lifecycle events to
+// an owner use this instead of assuming every owner exists in ws.panes.
+export function activeKeyForOwner(ws, ownerPaneId) {
+  if (String(ownerPaneId) === SINGLE_SLOT_PANE) return singleScreenKey(ws)
+  return ws.panes?.[ownerPaneId]?.activeTabKey ?? null
+}
+
 // Set the single-screen slot to a concrete item (or null for the empty/home
 // screen). Sanitized like the parse path — an invalid item collapses to null,
 // never to builder focus. Same reference on a no-op so React can bail. This is

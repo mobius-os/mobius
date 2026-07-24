@@ -78,6 +78,20 @@ test('singleScreenKey matches tabModel.tabKey shape', () => {
   assert.equal(paneModel.singleScreenKey({ ...base, singleScreen: null }), null, 'empty slot → null')
 })
 
+test('activeKeyForOwner resolves real panes and the synthetic single owner', () => {
+  const ws = {
+    ...tiledBuilder(),
+    singleScreen: { kind: 'chat', id: 'single-chat' },
+  }
+  const chatPane = paneModel.paneOf(ws, 'chat:5')
+  assert.equal(paneModel.activeKeyForOwner(ws, chatPane.id), 'chat:5')
+  assert.equal(
+    paneModel.activeKeyForOwner(ws, paneModel.SINGLE_SLOT_PANE),
+    'chat:single-chat',
+  )
+  assert.equal(paneModel.activeKeyForOwner(ws, 'missing-pane'), null)
+})
+
 // ── Seed-once on first builder→single switch ─────────────────────────────────
 
 test('SET_VIEW_MODE to single seeds the slot from the focused item, once', () => {
