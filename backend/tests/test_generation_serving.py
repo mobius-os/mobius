@@ -254,6 +254,27 @@ def test_first_build_has_no_outgoing_generation(fw_dirs):
   assert not attic.exists() or list(attic.glob("gen-*")) == []
 
 
+def test_post_commit_cleanup_failure_does_not_reject_published_generation(
+  fw_dirs, monkeypatch,
+):
+  dist, nxt, old = fw_dirs["dist"], fw_dirs["next"], fw_dirs["old"]
+  _fw_build(dist, "g1")
+  _fw_build(nxt, "g2")
+  real_rmtree = fw.shutil.rmtree
+
+  def fail_outgoing_cleanup(path, *args, **kwargs):
+    if Path(path) == old:
+      raise OSError("simulated cleanup failure")
+    return real_rmtree(path, *args, **kwargs)
+
+  monkeypatch.setattr(fw.shutil, "rmtree", fail_outgoing_cleanup)
+
+  fw._replace_dist()
+
+  assert (dist / "assets" / "index-g2.js").read_text() == "// g2"
+  assert old.exists()
+
+
 def test_attic_prunes_to_bounded_rapid_edit_window(fw_dirs):
   dist, nxt, attic = fw_dirs["dist"], fw_dirs["next"], fw_dirs["attic"]
   _fw_build(dist, "g1")

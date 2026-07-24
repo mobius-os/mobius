@@ -1747,9 +1747,9 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     # A limit-parked queue is NOT abandoned work: LIMIT_PARKED preserves
     # pending precisely so it is not fired back into the exhausted limit
     # (chat_queue.TerminalDisposition), and resuming it belongs to
-    # sweep_reset_parks (owner opt-in) or the user's own next send. The
-    # park row outlives run_status, so run_status IS NULL alone cannot
-    # distinguish "crashed drain" from "parked on purpose".
+    # sweep_reset_parks (when the chat policy is enabled) or the user's own
+    # next send. The park row outlives run_status, so run_status IS NULL alone
+    # cannot distinguish "crashed drain" from "parked on purpose".
     if _parked_until_for_chat(db, chat.id) is not None:
       continue
     if _restart_manual_hold_for_chat(db, chat.id):
@@ -2164,11 +2164,11 @@ def _has_unanswered_question(chat: models.Chat | None) -> bool:
 
 
 async def _auto_resume_chat(
-  chat_id: str, provider_id: str | None, park_token: str | None = None,
+  chat_id: str, park_token: str | None = None,
 ) -> bool:
   """Start one continuation for an eligible due park.
 
-  The opt-in half of design §2.4 — mirrors the stale-pending drain in
+  The policy-enabled half of design §2.4 — mirrors the stale-pending drain in
   chats_stream.send_message (the same claim → append → promote → schedule
   sequence), minus the HTTP request:
 
@@ -2200,12 +2200,9 @@ async def _auto_resume_chat(
   """
   from app.database import SessionLocal
 
-  # ``provider_id`` is retained in the private signature for compatibility
-  # with tests/extensions from the first auto-resume release.  Never trust
-  # that sweep-time snapshot: a provider handoff may have committed while the
-  # sweep was preparing this retry, so the authoritative provider is re-read
-  # under the same transition gate used by sends and provider switches.
-  del provider_id
+  # A provider handoff may have committed while the sweep was preparing this
+  # retry, so the authoritative provider is re-read under the same transition
+  # gate used by sends and provider switches.
   claimed = False
   try:
     # Lock order matches owner sends: provider transition, then queue.  The
@@ -2371,9 +2368,9 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       failure cannot silently consume the promised continuation. The narrow
       post-promote SIGKILL boundary is documented on `_auto_resume_chat`.
     - A park whose chat was deleted resolves silently.
-    - Auto-resume is a per-chat opt-in and STRICTLY SERIAL: at most one
-      opted-in park starts per tick, and none while any turn is live anywhere.
-      A blocked opted-in chat stays pending for a later tick, while notify-only
+    - Auto-resume is controlled per chat and STRICTLY SERIAL: at most one
+      enabled park starts per tick, and none while any turn is live anywhere.
+      A blocked enabled chat stays pending for a later tick, while notify-only
       chats in the same due batch still resolve normally. App-attributed runs
       and queues never auto-resume.
 
@@ -2497,7 +2494,7 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       auto_resume_started or _any_chat_turn_active()
     ):
       # Strictly-serial gate: a live turn (an earlier auto-resume, or the
-      # owner's own send) must settle before this opted-in park is processed.
+      # owner's own send) must settle before this enabled park is processed.
       # Leave this park untouched, but keep walking so a later notify-only
       # chat is not held hostage by another chat's auto-resume preference.
       continue
@@ -2558,7 +2555,7 @@ async def sweep_reset_parks(db: Session) -> list[str]:
         # dropping the promised continuation.
         continue
       auto_resume_started = await _auto_resume_chat(
-        chat_id, chat.provider, park_token=run.id,
+        chat_id, park_token=run.id,
       )
       if auto_resume_started:
         resolved.append(chat_id)
@@ -5140,11 +5137,19 @@ async def _run_chat_impl_with_db(
           chat_obj.session_id = new_session_id
           _safe_commit(db)
       if err:
-        log.error("codex SDK error chat_id=%s: %s", chat_id, err)
+        log.error(
+          "codex SDK error chat_id=%s status=%s phase=%s: %s",
+          chat_id,
+          runner_result.get("terminal_status"),
+          runner_result.get("final_message_phase"),
+          err,
+        )
       else:
         log.info(
-          "chat done chat_id=%s cost_usd=%.4f sdk=codex",
+          "chat done chat_id=%s cost_usd=%.4f sdk=codex status=%s phase=%s",
           chat_id, runner_result.get("cost_usd") or 0.0,
+          runner_result.get("terminal_status"),
+          runner_result.get("final_message_phase"),
         )
     except Exception as exc:
       log.exception("codex SDK turn failed chat_id=%s: %s", chat_id, exc)

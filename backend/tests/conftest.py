@@ -63,7 +63,7 @@ auth_limiter.enabled = False
 
 
 @pytest.fixture(autouse=True)
-def _isolate_git_env(monkeypatch):
+def _isolate_git_env(monkeypatch, tmp_path):
   """Keep the per-app-git tests' `git` subprocesses hermetic.
 
   app_git tests run `git init/commit/merge` against a repo in tmp_path via
@@ -72,15 +72,19 @@ def _isolate_git_env(monkeypatch):
   inside the pre-push hook, the tests' git ops silently operate on the
   enclosing mobius repo instead, flipping `core.bare` and committing stray
   "Initialize app repo" commits (and failing). Scrub the inherited git env
-  and pin global/system config to /dev/null + a ceiling so every test git
-  op is fully isolated, whether the suite runs from a shell or a git hook.
+  and pin global config to a per-test file plus system config to /dev/null,
+  with a ceiling so every test git op is fully isolated, whether the suite
+  runs from a shell or a git hook. The global config must be a regular
+  disposable path: ``git config --global`` uses an atomic lock-and-replace,
+  so pointing it at /dev/null can replace the device inside a privileged test
+  container and poison every later Git command in that process.
   """
   for var in (
     "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
   ):
     monkeypatch.delenv(var, raising=False)
-  monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+  monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
   monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
   repo_root = _Path(__file__).resolve().parents[2]
   monkeypatch.setenv(
@@ -89,13 +93,18 @@ def _isolate_git_env(monkeypatch):
   )
 
 
-@pytest.fixture(autouse=True)
-def fresh_db():
-  """Recreates all tables before each test and clears shared in-memory
-  state (broadcasts, starting guards, active procs) so tests don't
-  leak state into one another."""
+@pytest.fixture(scope="session", autouse=True)
+def _test_schema():
+  """Create the immutable schema once; per-test cleanup removes its rows."""
   Base.metadata.drop_all(bind=engine)
   Base.metadata.create_all(bind=engine)
+  yield
+  Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture(autouse=True)
+def fresh_db():
+  """Clears durable and in-memory state so tests don't leak into one another."""
   # Reset to empty dicts — the module declares both as `dict[str, ...]`
   # and the routes do per-username lookups. Setting them to scalar 0
   # (the prior reset, written before auth was rate-limited per-user)
@@ -208,7 +217,13 @@ def fresh_db():
   yield
   from app import chat_writer as _cw
   _cw.stop_writer(timeout=5)
-  Base.metadata.drop_all(bind=engine)
+  # The model schema is immutable during the suite. Delete rows in dependency
+  # order instead of dropping and rebuilding every table thousands of times.
+  # The writer is already stopped, so no background transaction can race this
+  # cleanup; the next test still gets a fresh actor and SQLAlchemy session.
+  with engine.begin() as connection:
+    for table in reversed(Base.metadata.sorted_tables):
+      connection.execute(table.delete())
 
 
 @pytest.fixture

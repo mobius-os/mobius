@@ -14,9 +14,9 @@ Locks in the six contracts of the limit-park feature:
       an opted park
       retryable until its continuation starts, skips future parks, stands down
       while draining, and resolves deleted chats silently.
-  (e) Auto-resume is opt-in (off = notify only) and strictly serial: one
-      park per tick, none while any turn is live; the resumed turn combines
-      the preserved queue + a "continue" into one continuation.
+  (e) Auto-resume is policy-controlled (off = notify only) and strictly
+      serial: one park per tick, none while any turn is live; the resumed turn
+      combines the preserved queue + a "continue" into one continuation.
   (f) The parks are observable: /api/debug/status lists parked runs.
   (g) A planned restart reuses the same exact-run state with a due-now time;
       crashes, unanswered questions, and app-owned work stay manual.
@@ -72,7 +72,7 @@ def _drain_writer():
 
 def _seed_chat(
   chat_id: str, *, pending=None, run_status=None, deleted=False,
-  auto_resume=False, auto_restart=False, messages=None,
+  auto_resume=False, auto_restart=True, messages=None,
 ):
   db = SessionLocal()
   try:
@@ -560,7 +560,7 @@ def test_park_run_strict_tokenless_falls_back_to_marker_clear():
 
 def _due_park(
   cid: str, token: str, *, pending=None, deleted=False, auto_resume=False,
-  auto_restart=False, park_reason=None, messages=None, restart_nonce=None,
+  auto_restart=True, park_reason=None, messages=None, restart_nonce=None,
 ):
   _seed_chat(
     cid, pending=pending, deleted=deleted, auto_resume=auto_resume,
@@ -761,7 +761,7 @@ def test_restart_park_auto_continues_with_product_marker(
     lambda: nonce,
   )
   _due_park(
-    cid, token, auto_resume=True, auto_restart=True,
+    cid, token, auto_restart=True,
     park_reason="restart", restart_nonce=nonce,
   )
 
@@ -806,7 +806,6 @@ def test_restart_park_waiting_on_question_stays_manual(
   _due_park(
     cid,
     token,
-    auto_resume=True,
     auto_restart=True,
     park_reason="restart",
     restart_nonce=nonce,
@@ -852,8 +851,8 @@ def test_restart_park_policy_off_resolves_to_manual_interruption(
     "app.restart_ledger.authorized_restart_nonce",
     lambda: nonce,
   )
-  # Provider-limit policy is deliberately ON. Separate restart consent remains
-  # off, proving the legacy preference cannot broaden into restart replay.
+  # Usage-limit continuation is deliberately on. The independent restart
+  # policy remains off, proving the causes do not share consent.
   _due_park(
     cid, token, auto_resume=True, auto_restart=False,
     park_reason="restart", restart_nonce=nonce,
@@ -1117,10 +1116,10 @@ def test_sweep_auto_resume_defers_while_any_turn_is_live(
   assert _run_row("rt-sweep-serial")["status"] == "parked"
 
 
-def test_live_turn_defers_opted_chat_but_not_notify_only_chat(
+def test_live_turn_defers_enabled_chat_but_not_notify_only_chat(
   owner_token, monkeypatch,
 ):
-  """One chat's opt-in must not hold another chat's reset notice hostage."""
+  """One enabled chat must not hold another chat's reset notice hostage."""
   del owner_token
   calls = []
   monkeypatch.setattr(
@@ -1324,7 +1323,7 @@ def test_auto_resume_global_idle_check_is_repeated_at_locked_claim():
     lock = chat_mod.chat_queue.get_lock(cid)
     await lock.acquire()
     task = asyncio.create_task(
-      chat_mod._auto_resume_chat(cid, "claude", park_token="rt-race")
+      chat_mod._auto_resume_chat(cid, park_token="rt-race")
     )
     await asyncio.sleep(0)
     registry.register(blocker)
@@ -1348,7 +1347,7 @@ def test_auto_resume_locked_claim_rejects_superseded_park():
   _seed_run(cid, f"newer-{cid}", status="completed", started_offset=-10)
 
   assert asyncio.run(
-    chat_mod._auto_resume_chat(cid, "claude", park_token=park_token)
+    chat_mod._auto_resume_chat(cid, park_token=park_token)
   ) is False
   assert _chat_row(cid)["pending"] == []
   assert not chat_mod.is_chat_running(cid)
@@ -1366,7 +1365,7 @@ def test_auto_resume_global_gate_includes_running_terminal_broadcast():
   broadcast = create_broadcast(other)
   try:
     assert asyncio.run(
-      chat_mod._auto_resume_chat(cid, "claude", park_token=park_token)
+      chat_mod._auto_resume_chat(cid, park_token=park_token)
     ) is False
   finally:
     broadcast.mark_completed()
@@ -1441,7 +1440,7 @@ def test_auto_resume_rechecks_app_work_inside_queue_handoff():
   _seed_chat(cid, auto_resume=True, pending=[app_msg])
 
   assert asyncio.run(
-    chat_mod._auto_resume_chat(cid, "claude", park_token="rt-final-check")
+    chat_mod._auto_resume_chat(cid, park_token="rt-final-check")
   ) is False
   state = _chat_row(cid)
   assert state["pending"] == [app_msg]
@@ -1463,7 +1462,7 @@ def test_auto_resume_rechecks_app_run_at_locked_handoff():
   )
 
   assert asyncio.run(
-    chat_mod._auto_resume_chat(cid, "claude", park_token=park_token)
+    chat_mod._auto_resume_chat(cid, park_token=park_token)
   ) is False
   assert _chat_row(cid)["pending"] == []
   assert _run_row(park_token)["status"] == "resume_pending"

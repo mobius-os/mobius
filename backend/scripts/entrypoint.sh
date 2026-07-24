@@ -1147,6 +1147,7 @@ platform.crashloop-prev.*
 .platform-apply-in-progress
 .platform-restart-requested
 .platform-rolled-back
+.platform-update-progress.json
 .platform-reconcile-pre
 .platform-reconcile.lock
 EOF

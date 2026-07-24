@@ -525,25 +525,28 @@ test('the living halo lifecycle: lit only in builder mode, one allocation-free r
   assert.match(livingHaloSrc, /clearHaloStyles\(el\)/)
 })
 
-test('entry assembles on keyed beat classes, compositor-only, instant under reduced motion (v3)', () => {
-  // v3: entry is an opaque transform-only DEAL-IN or inverse-FLIP SETTLE keyed to the transient
-  // .shell--builder-entering class, applied per-wrapper via data-mode-motion (never
-  // the permanent .shell__view--paned). No animated layout property, shadow, or radius.
+test('entry assembles over a stationary Standard surface, compositor-only, instant under reduced motion (v3)', () => {
+  // v3: entry is an opaque transform-only DEAL-IN keyed to the transient
+  // .shell--builder-entering class, applied per-wrapper via data-mode-motion
+  // (never the permanent .shell__view--paned). The Standard wrapper is the
+  // stationary underlay and carries no competing scale animation.
   const panedBase = css.match(/\.shell__view--paned \{[\s\S]*?\n\}/)?.[0] || ''
   assert.doesNotMatch(panedBase, /animation:/)
   assert.doesNotMatch(panedBase, /transition:/)
   assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="deal-in"\] \{[\s\S]*?animation:\s*\n?\s*shell-mode-deal-in/)
-  assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="settle"\] \{[\s\S]*?shell-mode-settle/)
+  assert.match(css, /\.shell--builder-entering\s*\n\.shell__view\[data-mode-motion="deal-in"\] \{[\s\S]*?z-index:\s*2/,
+    'every moving pane must paint above the stationary underlay regardless of app/chat DOM order')
+  assert.doesNotMatch(css, /shell-mode-settle/)
   // Deal-in is transform-only: an opaque pane physically covers the retained single
   // screen as it arrives instead of exposing pane structure before fading content in.
   const dealIn = css.match(/@keyframes shell-mode-deal-in\s*\{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(dealIn, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
   assert.doesNotMatch(dealIn, /opacity:/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
-  assert.match(css, /--ease-mode-arrive:\s*cubic-bezier\(0\.16, 1, 0\.3, 1\)/,
-    'entry keeps the accepted all-sides assembly curve')
+  assert.match(css, /--ease-mode-arrive:\s*cubic-bezier\(0\.33, 1, 0\.68, 1\)/,
+    'entry keeps readable cubic-out travel without braking into the shared seam')
   assert.match(css, /--ease-mode-promote:\s*cubic-bezier\(0\.2, 0\.82, 0\.2, 1\)/,
-    'the shared pane keeps its accepted weighted settle curve')
+    'the accepted exit promotion curve stays unchanged')
   // The old dead .workspace--resizing selector is gone entirely.
   assert.doesNotMatch(css, /workspace--resizing/)
   assert.doesNotMatch(css, /shell-pane-deal|shell-strip-deal-in|shell-pane-settle/)
@@ -1018,7 +1021,7 @@ test('N1: dead exit-presentation plumbing is removed', () => {
   assert.match(css, /--ease-mode-chrome: cubic-bezier/)
   assert.match(css, /--ease-mode-promote: cubic-bezier/)
   assert.match(css, /shell-mode-chrome-out 90ms var\(--ease-mode-chrome\)/)
-  assert.match(css, /shell-mode-chrome-in 70ms var\(--ease-mode-chrome\)[\s\S]*?calc\(var\(--mode-total, 210ms\) - 70ms\) both/)
+  assert.match(css, /shell-mode-chrome-in 70ms var\(--ease-mode-chrome\)[\s\S]*?calc\(var\(--mode-total, 240ms\) - 70ms\) both/)
   assert.match(css, /shell-mode-strip-clear 100ms var\(--ease-mode-chrome\)/)
   assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)/)
   // The unused excludeChatId param is gone; the helper is now the New Chat request

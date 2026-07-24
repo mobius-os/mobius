@@ -476,6 +476,21 @@ def test_coalesced_commit_baseexception_resolves_originating_ack_and_goes_fatal(
     actor.stop(timeout=5)
 
 
+def test_external_fatal_wakes_idle_writer_thread():
+  """A fatal transition must not leave an idle consumer blocked in get()."""
+  actor = ChatWriterActor(session_factory=lambda: _RecordingSession([]))
+  actor.start()
+  thread = actor._thread
+  try:
+    # The barrier proves startup completed and the consumer reached its loop.
+    actor.submit(Barrier()).result(timeout=5)
+    actor._go_fatal()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+  finally:
+    actor.stop(timeout=0.1)
+
+
 # -- CRITICAL 2: a stale pre-fence marker must not commit a post-fence snapshot
 def test_stale_marker_does_not_reorder_finalize_before_post_fence_snapshot():
   # Interleaving: submit S1 (marker M1 queued) -> consumer dequeues M1 but
