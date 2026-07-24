@@ -14,9 +14,9 @@
    workspaceView.js (MODE_MOTION / deriveExit·EnterPlan). Shell writes each
    participant's duration/delay and projection-derived transform variables inline. */
 .shell {
-  /* Quart-out keeps long edge travel readable across the beat instead of spending
-     most of the distance in its first few frames and braking into the shared seam. */
-  --ease-mode-arrive: cubic-bezier(0.25, 1, 0.5, 1);
+  /* Cubic-out keeps long edge travel readable without the ballistic first frames
+     that made panes appear to brake into the shared seam. */
+  --ease-mode-arrive: cubic-bezier(0.33, 1, 0.68, 1);
   --ease-mode-leave: cubic-bezier(0.4, 0, 0.7, 0.2);
   /* Chrome (dividers + strips) leads the panes with a faster, front-loaded curve so
      structure simplifies first (exit) / resolves after the focused card (entry). */
@@ -162,7 +162,7 @@
 .shell--builder-entering .workspace__divider {
   animation:
     shell-mode-chrome-in 70ms var(--ease-mode-chrome)
-    calc(var(--mode-total, 210ms) - 70ms) both;
+    calc(var(--mode-total, 240ms) - 70ms) both;
 }
 @keyframes shell-mode-chrome-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes shell-mode-chrome-in { from { opacity: 0; } to { opacity: 1; } }

@@ -491,17 +491,18 @@ class _JsxHandler(FileSystemEventHandler):
                     changed_path, exc,
                   )
             except RuntimeError as exc:
-              summary = _summarize_app_build_failure(exc)
-              failure = {
-                "app_id": app.id,
-                "app_name": app.name,
-                "summary": summary,
-              }
               log.warning(
                 "auto-recompile: compile failed for %s: %s", changed_path, exc,
               )
               db.rollback()
-              _publish_app_build_failed(**failure)
+              # Source saves are an agent/developer loop. A failed draft is
+              # commonly followed by a valid save, and the atomic compiler
+              # deliberately leaves the previous bundle running meanwhile.
+              # Keep the diagnostic in the log for the builder; broadcasting
+              # it to every shell view gives the owner a severe-looking alert
+              # with no action they can take. Durable update/reconciliation
+              # failures still use _publish_app_build_failed in the guarded
+              # paths above and below.
               return
           replay_app_id = app.id
           replay_app_name = app.name

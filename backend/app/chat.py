@@ -5137,11 +5137,19 @@ async def _run_chat_impl_with_db(
           chat_obj.session_id = new_session_id
           _safe_commit(db)
       if err:
-        log.error("codex SDK error chat_id=%s: %s", chat_id, err)
+        log.error(
+          "codex SDK error chat_id=%s status=%s phase=%s: %s",
+          chat_id,
+          runner_result.get("terminal_status"),
+          runner_result.get("final_message_phase"),
+          err,
+        )
       else:
         log.info(
-          "chat done chat_id=%s cost_usd=%.4f sdk=codex",
+          "chat done chat_id=%s cost_usd=%.4f sdk=codex status=%s phase=%s",
           chat_id, runner_result.get("cost_usd") or 0.0,
+          runner_result.get("terminal_status"),
+          runner_result.get("final_message_phase"),
         )
     except Exception as exc:
       log.exception("codex SDK turn failed chat_id=%s: %s", chat_id, exc)

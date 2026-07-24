@@ -7,6 +7,7 @@ const read = relative => readFileSync(new URL(relative, import.meta.url), 'utf8'
 const modal = read('../../components/SettingsView/UpdateReviewModal.jsx')
 const modalCss = read('../../components/SettingsView/UpdateReviewModal.css')
 const settingsView = read('../../components/SettingsView/SettingsView.jsx')
+const updateState = read('../platformUpdateState.js')
 const diffView = read('../../components/DiffView/DiffView.jsx')
 const diffStyles = read('../../components/DiffView/styles.js')
 
@@ -38,10 +39,10 @@ test('apply outcomes close only for explicit clean states and preserve actionabl
 })
 
 test('the apply response is a truthful fallback when status refresh fails', () => {
-  assert.match(settingsView, /function platformStatusFromApply\(previous, result\)/)
-  assert.match(settingsView, /available: state === 'rolled_back'/)
-  assert.match(settingsView, /conflict_paths: Array\.isArray\(result\.conflict_paths\)/)
-  assert.match(settingsView, /conflict_chat_id: state === 'conflict' \? \(result\.chat_id \|\| null\) : null/)
+  assert.match(updateState, /function platformStatusFromApply\(previous, result\)/)
+  assert.match(updateState, /available: state === 'rolled_back'/)
+  assert.match(updateState, /conflict_paths: Array\.isArray\(result\.conflict_paths\)/)
+  assert.match(updateState, /conflict_chat_id: state === 'conflict' \? \(result\.chat_id \|\| null\) : null/)
   assert.match(
     settingsView,
     /setPlatform\(current => platformStatusFromApply\(current, body\)\)[\s\S]*await refreshPlatform\(\)/,
@@ -59,6 +60,14 @@ test('result and close focus always land on live tabbable controls', () => {
   assert.doesNotMatch(modal, /resultHeadingRef|tabIndex=\{blocked/)
   assert.match(settingsView, /ref=\{platformActionRef\}/)
   assert.match(settingsView, /requestAnimationFrame\(\(\) => \{[\s\S]*platformActionRef\.current\?\.focus/)
+})
+
+test('a newly discovered update inherits focus from the replaced check action', () => {
+  assert.match(settingsView, /freshPlatform = await res\.json\(\)/)
+  assert.match(
+    settingsView,
+    /if \(freshPlatform\?\.available\) \{[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*platformActionRef\.current\?\.focus/,
+  )
 })
 
 test('DiffView stays generic, semantic, and keyboard-scrollable', () => {

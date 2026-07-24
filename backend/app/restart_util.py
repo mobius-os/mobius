@@ -79,8 +79,9 @@ async def restart_this_worker() -> None:
 
   boot_id = restart_ledger.current_boot_id()
   restart_nonce = restart_ledger.new_nonce()
+  parked_runs: list[dict[str, str]] = []
   try:
-    await asyncio.wait_for(
+    parked_runs = await asyncio.wait_for(
       chat.drain_all_for_restart(
         timeout=chat.DRAIN_TIMEOUT,
         restart_nonce=restart_nonce,
@@ -102,6 +103,7 @@ async def restart_this_worker() -> None:
     restart_ledger.request_restart(
       boot_id=boot_id,
       nonce=restart_nonce,
+      runs=parked_runs,
     )
   except Exception:
     # Restart reliability and continuation authorization are independent.
