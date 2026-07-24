@@ -39,7 +39,7 @@ COMPILED_RUNTIME_ABI = 1
 # compiled-runtime change that remains host-compatible. Keep ABI for actual
 # host/runtime incompatibilities: a revision-only rollout is safe while the
 # live checkout and backend process briefly run different generations.
-COMPILED_RUNTIME_ARTIFACT_REVISION = 3
+COMPILED_RUNTIME_ARTIFACT_REVISION = 4
 COMPILED_RUNTIME_GLOBAL = "__mobiusCompiledRuntime"
 COMPILED_RUNTIME_BANNER = (
   f"/* mobius-compiled-runtime-abi:{COMPILED_RUNTIME_ABI};"
@@ -107,11 +107,25 @@ def runtime_library_aliases() -> tuple[tuple[str, Path], ...]:
   package root is replaced with an absolute alias, esbuild no longer consults
   Three's package exports for that subpath. Pin the public addons spelling to
   its runtime-owned physical directory before adding the package roots.
+
+  Marked's ``browser`` field points at a UMD build that does not preserve its
+  documented named ESM export through this absolute-directory resolution.
+  Pin the public root spelling to the ESM entry instead; app source keeps using
+  the package's public import rather than a private file path.
   """
   node_path = runtime_node_path()
   roots = sorted({_package_root(specifier) for specifier in BUNDLED_RUNTIME_LIBS})
-  subpaths = (("three/addons", node_path / "three" / "examples" / "jsm"),)
-  return subpaths + tuple((root, node_path / root) for root in roots)
+  overrides = (
+    ("three/addons", node_path / "three" / "examples" / "jsm"),
+    # Marked's browser field is a UMD build. Point the public root import at
+    # its ESM entry so `import { marked } from "marked"` keeps the documented
+    # named export inside mini-app bundles.
+    ("marked", node_path / "marked" / "lib" / "marked.esm.js"),
+  )
+  overridden = {specifier for specifier, _path in overrides}
+  return overrides + tuple(
+    (root, node_path / root) for root in roots if root not in overridden
+  )
 
 
 NO_DEFAULT_EXPORT_ERROR = (
