@@ -38,12 +38,14 @@
  * that can lag behind the reader and contradict the current viewport.
  *
  * User-gesture detection: pointerdown/wheel/touchstart/touchmove/keydown hold
- * reader ownership until the first scroll event actually arrives, then keep a
- * 250ms momentum window in which scroll events are user-driven and can
- * transition the mode. Wheel input is released early only when its direction
- * is exactly clamped at the matching edge; elapsed frames cannot prove that an
- * in-range gesture was a no-op under renderer load. Outside that handoff/window,
- * scrolls come from our applyMode or browser clamps and are ignored.
+ * reader ownership until the first scroll event actually arrives. Real scrolls
+ * keep that ownership through a 250ms quiet-settle window: the hot event path
+ * records intent and current tail proximity only, then derives/persists the
+ * final anchor and resizes reservation once after momentum stops. Wheel input
+ * is released early only when its direction is exactly clamped at the matching
+ * edge; elapsed frames cannot prove that an in-range gesture was a no-op under
+ * renderer load. Outside that handoff/settle window, scrolls come from our
+ * applyMode or browser clamps and are ignored.
  *
  * See ARCHITECTURE.md "Chat scroll + steer contract" for the full design.
  */
@@ -61,12 +63,10 @@ import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 // renderers room to land before the chat becomes visible.
 const REVEAL_CAP_MS = 1500
 
-// User gesture momentum window — once the first scroll event lands, further
-// events inside this window are treated as part of the same reader gesture.
-// Before that first event the ref is Infinity, closing the input→scroll race;
-// outside both phases, scrolls are our own applyMode or browser clamps and
-// MUST NOT mutate mode.
-const GESTURE_WINDOW_MS = 250
+// Reader quiet-settle window. Input and momentum retain Infinity ownership;
+// every real scroll restarts this timer. Only its trailing edge derives the
+// final hold/follow mode and gives layout writes back to the controller.
+const GESTURE_SETTLE_MS = 250
 
 // A tap or non-scrolling key must not suspend layout ownership forever. This
 // cap is only a dead-man release for input that produces no scroll event; a
@@ -675,9 +675,9 @@ export function layoutMayOwnScroll(gestureWindowUntil, now) {
 }
 
 
-/** Return a retry delay only after the first scroll has converted reader
- * ownership into a finite momentum window. Infinity is an event handoff, not
- * a timer duration (browsers clamp an infinite setTimeout unpredictably). */
+/** Return a retry delay only once reader ownership has a finite release point.
+ * Infinity is the input/scroll/quiet-settle handoff, not a timer duration
+ * (browsers clamp an infinite setTimeout unpredictably). */
 export function gestureLayoutRetryDelay(gestureWindowUntil, now) {
   if (!Number.isFinite(gestureWindowUntil)) return null
   return Math.max(0, gestureWindowUntil - now) + 1
@@ -1676,7 +1676,74 @@ export default function useScrollMode({
     scrollEl.addEventListener('load', requestRevealOnQuiet, true)
     scrollEl.addEventListener('error', requestRevealOnQuiet, true)
 
-    // User-gesture detection.
+    // User-gesture detection. The scroll event itself stays intentionally
+    // cheap: it records ownership/intent and restarts one quiet-settle timer.
+    // Anchor discovery, spacer measurement, mode transition, and persistence
+    // run once at the trailing edge instead of on every compositor frame.
+    let readerScrollDirty = false
+    let readerScrollAtBottom = false
+    let readerSettleTimer = 0
+
+    const settleReaderScroll = () => {
+      clearTimeout(readerSettleTimer)
+      readerSettleTimer = 0
+      if (!readerScrollDirty) return
+      readerScrollDirty = false
+      const settledAtBottom = readerScrollAtBottom
+      readerScrollAtBottom = false
+
+      // The quiet edge is the gesture/layout ownership handoff. Compute the
+      // final semantic location before replaying any deferred layout observer;
+      // otherwise a stale FOLLOW_BOTTOM could write once just before the
+      // reader's settled ANCHOR_AT lands.
+      gestureWindowUntilRef.current = 0
+      clearTimeout(pendingGestureTimerRef.current)
+      pendingGestureTimerRef.current = 0
+      cancelAnimationFrame(pendingGestureReleaseRafRef.current)
+      pendingGestureReleaseRafRef.current = 0
+
+      if (!loadingOlderRef.current
+          && scrollEl.scrollHeight > scrollEl.clientHeight + 4) {
+        if (settledAtBottom) {
+          const spacerH = spacerEl.offsetHeight || 0
+          const lastUserEl = _lastUserRowEl(scrollEl) || lastUserMsgRef.current
+          const lastUserCid = lastUserEl?.dataset?.cid ?? null
+          transitionMode(
+            modeAfterReaderReachesBottom({
+              mode: modeRef.current,
+              spacerH,
+              turnRunning: turnRunningRef.current,
+              lastUserCid,
+            }),
+            'reader:physical-bottom',
+          )
+        } else {
+          // Moving away from the physical bottom always retires live follow.
+          // If the viewport is wholly inside reserved spacer there is no exact
+          // row anchor, so settle on the real-content tail instead of leaving a
+          // stale FOLLOW_BOTTOM armed for the next content resize.
+          const anchor = contentHoldModeFromScroll(scrollEl)
+          if (anchor) transitionMode(anchor, 'reader:hold-anchor')
+        }
+        persistMode()
+        // Visibility, not mode, owns reservation. Recompute once against the
+        // final viewport after momentum, never underneath the gesture itself.
+        sizeSpacer()
+      }
+
+      nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
+      recordTrace('events', 'reader:scroll-settled', { scrollEl })
+      resumeLayoutAfterGestureRef.current?.()
+    }
+
+    const scheduleReaderSettle = () => {
+      clearTimeout(readerSettleTimer)
+      readerSettleTimer = setTimeout(
+        settleReaderScroll,
+        GESTURE_SETTLE_MS,
+      )
+    }
+
     const releasePendingGesture = (sequence) => {
       if (gestureSequenceRef.current !== sequence
           || gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
@@ -1688,6 +1755,9 @@ export default function useScrollMode({
     }
     const scheduleNoScrollRelease = () => {
       if (gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
+      // Once a real scroll has landed, quiet-settlement (not pointer/touch end)
+      // owns the handoff so inertial momentum remains protected.
+      if (readerScrollDirty) return
       // Geometry has already proved this input is clamped at its matching edge
       // (or it is an unknown focus-navigation key). Yield one frame so any
       // synchronous scroll can still claim the viewport before release.
@@ -1707,9 +1777,15 @@ export default function useScrollMode({
       )
       if (!activatesDisclosure
           && !readerInputMayScroll(event?.type, event?.key)) return
-      recordTrace('events', `reader:input-${event?.type || 'unknown'}`, {
-        scrollEl,
-      })
+      const readerAlreadyOwns = !layoutMayOwnScroll(
+        gestureWindowUntilRef.current,
+        performance.now(),
+      )
+      if (!readerAlreadyOwns || activatesDisclosure) {
+        recordTrace('events', `reader:input-${event?.type || 'unknown'}`, {
+          scrollEl,
+        })
+      }
       if (activatesDisclosure) {
         // A disclosure tap obeys the mode the reader already chose. FOLLOW_BOTTOM
         // remains the sole tail authority; every other mode latches the visible
@@ -1723,10 +1799,10 @@ export default function useScrollMode({
         }
       }
       // Input and its first scroll event are ordered, but not guaranteed to be
-      // less than 250ms apart under a busy renderer. Keep layout ownership
-      // suspended until that first event actually lands; after it, the normal
-      // short window covers momentum/follow-up scroll events. A bounded
-      // fallback releases taps/keys that never produce any scroll at all.
+      // close under a busy renderer. Keep layout ownership suspended until that
+      // first event actually lands; real scrolling then owns the viewport until
+      // its quiet-settle edge. A bounded fallback releases taps/keys that never
+      // produce any scroll at all.
       const sequence = gestureSequenceRef.current + 1
       gestureSequenceRef.current = sequence
       gestureWindowUntilRef.current = Number.POSITIVE_INFINITY
@@ -1748,9 +1824,9 @@ export default function useScrollMode({
     const onGestureEndWithoutScroll = scheduleNoScrollRelease
     scrollEl.addEventListener('pointerdown', onUserInput, { passive: true })
     scrollEl.addEventListener('touchstart', onUserInput, { passive: true })
-    // A long touch can pause beyond the initial 250ms before moving. Refresh
-    // intent on touchmove so the pre-scroll race stays closed for the whole
-    // gesture rather than only quick flicks.
+    // A long touch can pause before moving. Refresh intent on touchmove so the
+    // pre-scroll race stays closed for the whole gesture rather than only quick
+    // flicks.
     scrollEl.addEventListener('touchmove', onUserInput, { passive: true })
     scrollEl.addEventListener('wheel', onUserInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
@@ -1759,63 +1835,44 @@ export default function useScrollMode({
     scrollEl.addEventListener('touchend', onGestureEndWithoutScroll, { passive: true })
     scrollEl.addEventListener('touchcancel', onGestureEndWithoutScroll, { passive: true })
 
-    // Scroll handler — only user-driven scrolls mutate mode.
+    // Scroll handler — user-driven scrolls only mark intent here. The expensive
+    // semantic location/mode work runs once in settleReaderScroll.
     const onScroll = () => {
-      nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
+      const distanceToBottom = scrollEl.scrollHeight
+        - scrollEl.scrollTop
+        - scrollEl.clientHeight
+      nearScrollBottomRef.current = distanceToBottom < NEAR_BOTTOM_PX
       const userDriven = performance.now() < gestureWindowUntilRef.current
       if (!userDriven) {
-        recordTrace('events', 'scroll:unowned', { scrollEl })
         return
       }
-      recordTrace('events', 'scroll:owned', { scrollEl })
-      if (gestureWindowUntilRef.current === Number.POSITIVE_INFINITY) {
+      if (loadingOlderRef.current) {
+        // Pagination owns its prepend anchor. Do not leave the gesture gate at
+        // Infinity when its reconciliation scroll lands during the load.
+        gestureWindowUntilRef.current = 0
         clearTimeout(pendingGestureTimerRef.current)
         pendingGestureTimerRef.current = 0
         cancelAnimationFrame(pendingGestureReleaseRafRef.current)
         pendingGestureReleaseRafRef.current = 0
-        gestureWindowUntilRef.current = performance.now() + GESTURE_WINDOW_MS
         resumeLayoutAfterGestureRef.current?.()
+        return
       }
-      if (loadingOlderRef.current) return
-      const overflows = scrollEl.scrollHeight > scrollEl.clientHeight + 4
-      if (!overflows) return
+      const firstOwnedScroll = !readerScrollDirty
+      if (firstOwnedScroll) {
+        recordTrace('events', 'reader:scroll-start', { scrollEl })
+        clearTimeout(pendingGestureTimerRef.current)
+        pendingGestureTimerRef.current = 0
+        cancelAnimationFrame(pendingGestureReleaseRafRef.current)
+        pendingGestureReleaseRafRef.current = 0
+      }
+      readerScrollDirty = true
+      // Capture the scroll event's own geometry. Output can grow during the
+      // quiet window; re-reading bottom later would erase the reader's explicit
+      // "I reached the tail" intent and incorrectly settle as ANCHOR_AT.
+      readerScrollAtBottom = distanceToBottom < PHYSICAL_BOTTOM_EPSILON_PX
       userScrollIntentVersionRef.current += 1
       readerLocationExplicitRef.current = true
-
-      // The scroll event's own geometry is the only bottom authority. The old
-      // sentinel + debounced IntersectionObserver could report the PREVIOUS
-      // position and contradict the viewport during a fast gesture.
-      const atBottom = isNearScrollBottom(
-        scrollEl,
-        PHYSICAL_BOTTOM_EPSILON_PX,
-      )
-
-      if (atBottom) {
-        const spacerH = spacerEl.offsetHeight || 0
-        const lastUserEl = _lastUserRowEl(scrollEl) || lastUserMsgRef.current
-        const lastUserCid = lastUserEl?.dataset?.cid ?? null
-        transitionMode(
-          modeAfterReaderReachesBottom({
-            mode: modeRef.current,
-            spacerH,
-            turnRunning: turnRunningRef.current,
-            lastUserCid,
-          }),
-          'reader:physical-bottom',
-        )
-      } else {
-        // Moving away from the physical bottom always retires live follow.
-        // If the viewport is wholly inside reserved spacer there is no exact
-        // row anchor, so settle on the real-content tail instead of leaving a
-        // stale FOLLOW_BOTTOM armed for the next content resize.
-        const anchor = contentHoldModeFromScroll(scrollEl)
-        if (anchor) transitionMode(anchor, 'reader:hold-anchor')
-      }
-      persistMode()
-      // Visibility, not mode, owns reservation. Recompute after the gesture
-      // yields so scrolling the latest user row on/off screen changes spacer
-      // without mutating geometry during the gesture itself.
-      sizeSpacer()
+      scheduleReaderSettle()
     }
     scrollEl.addEventListener('scroll', onScroll, { passive: true })
 
@@ -1837,6 +1894,12 @@ export default function useScrollMode({
     }
 
     return () => {
+      // A dependency change or chat exit can arrive inside the quiet window.
+      // Commit the reader's final DOM location while this effect still owns the
+      // mounted nodes rather than carrying a stale FOLLOW_BOTTOM/PIN mode into
+      // the next instance.
+      settleReaderScroll()
+      clearTimeout(readerSettleTimer)
       clearTimeout(revealTimer)
       clearTimeout(deferredGestureLayoutTimer)
       if (resumeLayoutAfterGestureRef.current === resumeLayoutAfterGesture) {
