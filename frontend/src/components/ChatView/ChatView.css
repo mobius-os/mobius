@@ -1480,17 +1480,17 @@
   padding: 2px 0 calc(var(--activity-row-gap, 4px) * 2);
 }
 
-/* Preserve the compact desktop timeline while giving touch users a dependable
-   target. These rows carry their disclosure state without a trailing chevron,
-   so the whole labeled line must be comfortably tappable. */
+/* Top-level transcript actions keep a dependable touch target. Nested activity
+   rows deliberately stay at their compact 28px base height: the parent
+   disclosure already establishes one bounded inspection surface, so making
+   every child match top-level chat spacing turns an expanded run back into a
+   full transcript. The rows remain full-width buttons along the timeline. */
 @media (pointer: coarse) {
   .chat__empty-action,
   .chat__quick-action-chip,
   .chat__activity-header:not(.chat__activity-header--static),
   .chat__activity-header--reserve-interactive,
-  .chat__activity-think-toggle,
-  .chat__tool-header:not(.chat__tool-header--static),
-  .chat__activity-timeline .chat__tool-header:not(.chat__tool-header--static),
+  .chat__tool--compact > .chat__tool-header:not(.chat__tool-header--static),
   .chat__tool-copy,
   .chat__lazy-retry {
     min-height: 44px;

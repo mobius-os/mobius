@@ -93,7 +93,7 @@ test('a single activity discloses directly without a redundant parent row', () =
   assert.match(activityStretch, /<ToolBlock[\s\S]*key=\{assistantBlockKey\(item, idx\)\}/)
 })
 
-test('lazy tool details and touch targets keep their accessibility contract', () => {
+test('lazy tool details keep top-level touch targets and compact nested rows', () => {
   const toolBlock = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
   const coarse = [...chatCss.matchAll(/@media \(pointer: coarse\) \{[\s\S]*?\n\}/g)]
     .map(match => match[0])
@@ -110,7 +110,12 @@ test('lazy tool details and touch targets keep their accessibility contract', ()
   assert.match(coarse, /\.chat__empty-action/)
   assert.match(coarse, /\.chat__quick-action-chip/)
   assert.match(coarse, /\.chat__lazy-retry/)
+  assert.match(coarse, /\.chat__tool--compact > \.chat__tool-header/)
   assert.match(coarse, /min-height:\s*44px/)
+  assert.doesNotMatch(coarse, /(?<!compact > )\.chat__tool-header:not/,
+    'nested tool rows should not inherit top-level transcript spacing')
+  assert.doesNotMatch(coarse, /\.chat__activity-think-toggle/,
+    'nested thought rows should keep the compact timeline rhythm')
 })
 
 test('activity spacing derives from one block gap and one row gap', () => {
