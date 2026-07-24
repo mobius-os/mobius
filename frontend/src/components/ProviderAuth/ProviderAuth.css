@@ -146,6 +146,54 @@
   line-height: 1.5;
 }
 
+.codex-auth__preflight {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: color-mix(in srgb, var(--accent, #8b6cf7) 7%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--accent, #8b6cf7) 20%, var(--border));
+  border-radius: 12px;
+}
+
+.codex-auth__preflight-head,
+.codex-auth__connect-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.codex-auth__preflight-head > div,
+.codex-auth__connect-step > div {
+  display: grid;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.codex-auth__preflight-head strong,
+.codex-auth__connect-step strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.codex-auth__settings-link {
+  justify-self: start;
+  margin-left: 32px;
+  text-decoration: none !important;
+}
+
+.codex-auth__privacy {
+  margin: 2px 0 0 32px;
+  padding-top: 11px;
+  border-top: 1px solid var(--border-light);
+  line-height: 1.5;
+}
+
+.codex-auth__connect-step > div > .pa__btn {
+  align-self: start;
+}
+
 .codex-auth__device {
   display: flex;
   flex-direction: column;
@@ -245,6 +293,13 @@
 .codex-auth__waiting {
   margin: 0;
   margin-right: auto;
+}
+
+@media (max-width: 520px) {
+  .codex-auth__settings-link,
+  .codex-auth__privacy {
+    margin-left: 0;
+  }
 }
 
 /* ── Unified provider rows (shared by Settings + Setup) ──── */
