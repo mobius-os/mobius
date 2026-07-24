@@ -27,7 +27,7 @@ Fetch listings and files with your normal web access. To enumerate every skill i
 
 Before offering a skill to the partner, actually `Read` its full `SKILL.md` (fetch it raw). Check:
 
-- **Does it teach something you don't already know?** Skills that duplicate an existing skill (check `shared/skills/skills-index.md`) or your own competence add token cost for nothing.
+- **Does it teach something you don't already know?** Skills that duplicate one already named in the session's injected `<available_skills>` inventory or your own competence add token cost for nothing.
 - **Does it fit Möbius?** A skill assuming another harness's tools (e.g. Hermes tool names, Claude Code plugin paths) may need adaptation — you can still install it and edit it afterwards; skills are yours to improve.
 - **License** — prefer skills whose repo or frontmatter carries a permissive license (MIT/Apache). Note it when offering.
 
@@ -61,7 +61,10 @@ curl -sS -X POST http://localhost:8000/api/skills/install \
 - The skill lands at `/data/shared/skills/<name>/SKILL.md`, is recorded in the installed-skills sidecar, and the index regenerates.
 - **409 on name collision** means a skill with that basename already exists — the error names its provenance. Resolve deliberately: uninstall the old one, choose a different `name`, or decide the existing one suffices. Never work around a collision by overwriting files directly.
 
-After installing, confirm it appears in `shared/skills/skills-index.md` and skim it once so you know when to reach for it.
+After installing, confirm it appears in `GET /api/skills`. Future sessions
+discover it automatically in the injected `<available_skills>` inventory; if
+the current task needs it immediately, read the installed entry path returned
+by the install response.
 
 ## Uninstalling
 
