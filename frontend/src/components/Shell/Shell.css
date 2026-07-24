@@ -87,12 +87,12 @@
   /* The rAF-written hold progress [0..1]; the hold ring reads it via the cascade
      (builder-mode control below). */
   --hold-progress: 0;
-  /* Keep vertical scrolling while the horizontal swipe remains owned here.
-     Page-level zoom is locked by the shell; local zoom surfaces implement their
-     own gesture without scaling this chrome. The callout/selection is suppressed
-     so a press-and-hold activates builder mode instead of raising a menu (the JS
-     also preventDefaults contextmenu during a hold). */
-  touch-action: pan-y;
+  /* Suppress the double-tap zoom on the logo while KEEPING vertical scroll and
+     pinch zoom — only the horizontal swipe is owned here; viewport zoom is never
+     disabled globally. The callout/selection is suppressed so a press-and-hold
+     activates builder mode instead of raising a menu (the JS also preventDefaults
+     contextmenu during a hold). */
+  touch-action: pan-y pinch-zoom;
   -webkit-touch-callout: none;
 }
 
@@ -288,7 +288,7 @@
   scrollbar-width: none;
   /* Empty strip space retains native horizontal panning; an actual draggable tab
      opts out below so Pointer Events can reorder it in either direction on touch. */
-  touch-action: pan-x;
+  touch-action: pan-x pinch-zoom;
   overscroll-behavior-inline: contain;
   z-index: 2;
 }
@@ -325,7 +325,7 @@
    can still lift the tab, while the EXISTING kind icon owns both axes for an
    intentional horizontal reorder. No separate grip or extra tab width is needed. */
 .shell__tab-open[data-drag-key] {
-  touch-action: pan-x;
+  touch-action: pan-x pinch-zoom;
 }
 .shell__tab-kind {
   display: grid;

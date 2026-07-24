@@ -61,7 +61,7 @@
      reserved for Drawer.jsx's swipe-to-close interaction. Keeping this modal
      boundary explicit also stops a pan begun on non-scrollable drawer chrome
      (a section label or gutter) from chaining into the app iframe beneath it. */
-  touch-action: pan-y;
+  touch-action: pan-y pinch-zoom;
   overscroll-behavior: contain;
 }
 
@@ -423,7 +423,7 @@
 /* Drawer rows scroll vertically. Gesture arbitration gives leftward movement to
    swipe-close and only a deliberate rightward pull to workspace drag-out. */
 .drawer__row .drawer__item[data-drag-key] {
-  touch-action: pan-y;
+  touch-action: pan-y pinch-zoom;
 }
 
 /* The ⋮ button matches the row height so its hit area aligns
