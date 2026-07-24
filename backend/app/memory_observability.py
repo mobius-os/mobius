@@ -31,6 +31,7 @@ log = logging.getLogger("moebius.memory")
 _CHECKPOINT_LIMIT = 128
 _checkpoints: deque[dict[str, Any]] = deque(maxlen=_CHECKPOINT_LIMIT)
 _checkpoint_lock = Lock()
+_checkpoint_once_labels: set[str] = set()
 _trace_status: dict[str, Any] = {
   "enabled": False,
   "frames": 0,
@@ -525,6 +526,25 @@ def record_memory_checkpoint(label: str, **context: Any) -> dict[str, Any]:
     cgroup.get("current_bytes"),
   )
   return entry
+
+
+def record_memory_checkpoint_once(
+  label: str,
+  **context: Any,
+) -> dict[str, Any] | None:
+  """Capture one process-lifetime boundary without recurring request cost.
+
+  These probes bracket first-use initialization: initial shell hydration,
+  initial chat materialization, and the first provider client. A lock-protected
+  reservation makes concurrent first requests collapse to one sample. Later
+  requests do only the small set lookup and never read procfs.
+  """
+  normalized = str(label)[:80]
+  with _checkpoint_lock:
+    if normalized in _checkpoint_once_labels:
+      return None
+    _checkpoint_once_labels.add(normalized)
+  return record_memory_checkpoint(normalized, **context)
 
 
 def memory_status(*, include_checkpoints: bool = False) -> dict[str, Any]:

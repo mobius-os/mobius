@@ -10,6 +10,7 @@ from app.memory_observability import (
   estimate_payload_bytes,
   memory_map_summary,
   process_memory_snapshot,
+  record_memory_checkpoint_once,
 )
 
 
@@ -156,3 +157,32 @@ def test_zero_allocation_limit_does_not_materialize_heap_snapshot(monkeypatch):
   monkeypatch.setattr(memory_observability, "tracing_status", lambda: status)
 
   assert allocation_report(limit=0) == status
+
+
+def test_checkpoint_once_collapses_repeated_boundary(monkeypatch):
+  process_calls = 0
+
+  def process_snapshot():
+    nonlocal process_calls
+    process_calls += 1
+    return {"available": True, "rss_bytes": 1}
+
+  monkeypatch.setattr(
+    memory_observability,
+    "process_memory_snapshot",
+    process_snapshot,
+  )
+  monkeypatch.setattr(
+    memory_observability,
+    "cgroup_memory_snapshot",
+    lambda: {"available": True, "current_bytes": 2},
+  )
+  label = "test_checkpoint_once_collapses_repeated_boundary"
+
+  first = record_memory_checkpoint_once(label, stage="first")
+  second = record_memory_checkpoint_once(label, stage="second")
+
+  assert first is not None
+  assert first["context"] == {"stage": "first"}
+  assert second is None
+  assert process_calls == 1

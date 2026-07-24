@@ -40,6 +40,7 @@ from app.providers import _load_agent_settings, resolve_default_provider
 from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
+from app.memory_observability import record_memory_checkpoint_once
 from app.deps import (
   Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, reject_cross_site,
@@ -743,6 +744,11 @@ async def _send_message_locked(
   duplicate = _duplicate_send_response(chat_id, chat, body.cid)
   if duplicate is not None:
     return duplicate
+  record_memory_checkpoint_once(
+    "chat_send_first_request",
+    chat_id=chat_id,
+    provider=chat.provider or "claude",
+  )
 
   # One choke point for every genuine user send (initial / queued / steered all
   # pass here, after the answer-delivery returns above). Skip force_steer —
@@ -1082,6 +1088,12 @@ async def _send_message_locked(
     msgs = result["history"]
     session_id = result["session_id"]
     provider = result["provider"]
+    record_memory_checkpoint_once(
+      "chat_history_first_prepared",
+      chat_id=chat_id,
+      provider=provider,
+      history_messages=len(msgs),
+    )
 
     if current_run_generation(chat_id) == start_gen:
       # No Stop raced during the StartTurn commit. Create the broadcast

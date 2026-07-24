@@ -27,6 +27,7 @@ from app.chat import (
 )
 from app.broadcast import get_system_broadcast
 from app.database import get_db
+from app.memory_observability import record_memory_checkpoint_once
 from app.deps import (
   Principal, get_owner_or_chat_embed_principal, get_current_owner, get_principal,
   reject_cross_site,
@@ -388,6 +389,7 @@ def list_chats(
   db: Session = Depends(get_db),
 ):
   """Returns all active chats ordered by most recently updated."""
+  record_memory_checkpoint_once("shell_chat_list_first_request")
   # Purge chats soft-deleted more than TTL ago.
   # Use naive datetime to match SQLite's naive UTC storage — comparing an
   # aware datetime against a naive DB value throws TypeError in Python 3.11+.
@@ -540,6 +542,10 @@ def list_chats(
     # embedded app panels and stay hidden; an app can opt a spawned, first-class
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
+  record_memory_checkpoint_once(
+    "shell_chat_list_first_response",
+    chat_count=len(chats),
+  )
   return [_owner_chat_summary_projection(c) for c in chats]
 
 
@@ -1099,8 +1105,14 @@ def get_chat(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:read")
+  record_memory_checkpoint_once(
+    "chat_detail_first_request",
+    chat_id=chat_id,
+    limit=limit,
+    compact=compact,
+  )
   chat = get_active_chat_for_principal(db, chat_id, principal)
-  return _chat_detail_response(
+  response = _chat_detail_response(
     chat,
     db=db,
     limit=limit,
@@ -1110,6 +1122,13 @@ def get_chat(
     # embedded participant surface.
     expose_session=principal.scope != "chat_embed",
   )
+  record_memory_checkpoint_once(
+    "chat_detail_first_response",
+    chat_id=chat_id,
+    total_messages=response.get("total"),
+    returned_messages=len(response.get("messages") or []),
+  )
+  return response
 
 
 @router.get("/{chat_id}/runtime")
