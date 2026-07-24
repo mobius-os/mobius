@@ -71,6 +71,22 @@ function twoPaneBuilder(slot) {
   return ws // viewMode stays 'panes' (builder)
 }
 
+// An intentionally asymmetric three-pane tree. Its natural edge vectors differ
+// enough to expose same-duration entry as visibly different pane velocities.
+function unevenThreePaneBuilder(slot) {
+  let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }])
+  ws = paneModel.splitPaneWithTab(ws, tabModel.makeTab('chat', 'bbb'), {
+    paneId: ws.focusedPaneId, edge: 'right',
+  })
+  const rightId = paneModel.paneOf(ws, 'chat:bbb').id
+  ws = paneModel.splitPaneWithTab(ws, tabModel.makeTab('chat', 'ccc'), {
+    paneId: rightId, edge: 'bottom',
+  })
+  ws = paneModel.setRatio(ws, ws.layout.id, 0.7)
+  ws = paneModel.setRatio(ws, ws.layout.b.id, 0.25)
+  return paneModel.setSingleScreen(ws, slot)
+}
+
 // Frame-sample the exit beat: on every animation frame while .shell--builder-exiting
 // is present, record each motion wrapper's LAYOUT box (offset*, transform-independent)
 // + its computed transform + a stable node marker. Start this BEFORE triggering the
@@ -142,6 +158,8 @@ async function captureBeatPlan(page, rootClass) {
             motion: el.dataset.modeMotion,
             x: parseFloat(el.style.getPropertyValue('--mode-offset-x')) || 0,
             y: parseFloat(el.style.getPropertyValue('--mode-offset-y')) || 0,
+            duration: parseFloat(el.style.getPropertyValue('--mode-duration')) || 0,
+            delay: parseFloat(el.style.getPropertyValue('--mode-delay')) || 0,
           }))
         if (participants.length) {
           return {
@@ -453,6 +471,33 @@ test('v3 panes assemble over the stationary single screen from their correspondi
   expect(paint.paneFrames).toBeGreaterThan(2)
   expect(paint.minPaneOpacity, 'pane content never fades in over visible structure').toBeGreaterThan(0.99)
   expect(paint.earlyChromeOpacity, 'structure waits until pane content has arrived').toBeLessThan(0.05)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(true)
+})
+
+test('uneven panes enter at one perceived velocity and land together', async ({ page }) => {
+  await bootSeededWorkspace(
+    page,
+    WIDE,
+    unevenThreePaneBuilder({ kind: 'chat', id: 'ghost' }),
+  )
+  await toggleMode(page)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(false)
+
+  const sampler = captureBeatPlan(page, 'shell--builder-entering')
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+
+  expect(r.participants).toHaveLength(3)
+  expect(r.participants.some(p => p.delay > 0),
+    'shorter vectors wait offscreen rather than rushing the seam').toBe(true)
+  const arrivals = r.participants.map(p => p.delay + p.duration)
+  expect(new Set(arrivals).size, 'all panes land on the same frame').toBe(1)
+  const speeds = r.participants.map(p => Math.hypot(p.x, p.y) / p.duration)
+  expect(Math.max(...speeds) / Math.min(...speeds),
+    'asymmetric panes keep a common average velocity').toBeLessThan(1.15)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
   await expect.poll(() => builderActive(page)).toBe(true)
 })
