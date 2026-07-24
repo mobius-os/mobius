@@ -9,6 +9,7 @@ import {
   detailIsUntouchedEmptyChat,
   enteredEmptySingleScreen,
   mergeChatListWithCreatedGuards,
+  mostRecentConcreteChatId,
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
@@ -80,6 +81,21 @@ test('drafts and force-new callers always require a fresh chat', () => {
   assert.equal(currentReusableEmptyChat([active], {
     activeChatId: 'active', forceNew: true,
   }), null)
+})
+
+test('the most recent concrete chat route can resume standard-mode composition', () => {
+  assert.equal(mostRecentConcreteChatId([
+    { view: 'chat', chatId: 'older' },
+    { view: 'canvas', appId: 4 },
+    { view: 'settings' },
+    { view: 'chat', chatId: 'draft' },
+    { view: 'canvas', appId: 7 },
+  ]), 'draft')
+  assert.equal(mostRecentConcreteChatId([
+    { view: 'chat', chatId: null, homeSeed: true },
+    { view: 'canvas', appId: 4 },
+  ]), null)
+  assert.equal(mostRecentConcreteChatId(null), null)
 })
 
 test('running, excluded, recovered, and populated active chats are rejected', () => {

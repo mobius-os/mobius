@@ -1003,8 +1003,12 @@ test('round4-3: materializeNewChatHome is stale-guarded and writes a history-fre
 
 test('round4-3: resolveNewChatId is the shared reuse-and-create policy; newChat + materialize both use it', () => {
   assert.match(shell, /async function resolveNewChatId\(\{ candidate, draft, forceNew, exclude \} = \{\}\)/)
-  // newChat consumes the shared resolver, not its own inline reuse/create.
-  assert.match(shell, /const \{ chatId, reason \} = await resolveNewChatId\(\{ draft, forceNew, exclude \}\)/)
+  // newChat consumes the shared resolver, optionally supplying the standard-mode
+  // resume candidate rather than growing a second create path.
+  const fn = shell.match(/async function newChat\([\s\S]*?\n  \}/)?.[0] || ''
+  assert.ok(fn.length > 0, 'found newChat')
+  assert.match(fn, /const \{ chatId, reason \} = await resolveNewChatId\(/)
+  assert.doesNotMatch(fn, /api\.chats\.create|apiFetch\(\s*['"`]\/chats/)
 })
 
 test('round4-3: the New Chat landing renders for a null slot / reveal underlay and reuses ChatView empty visuals', () => {

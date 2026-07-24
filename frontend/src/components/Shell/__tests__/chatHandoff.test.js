@@ -54,8 +54,19 @@ test('each pane holds one outgoing chat over one staging chat', () => {
   // gate is the EFFECTIVE-mode `settingsOverlay` (finding F3), not the committed one.
   assert.match(shell, /inert=\{settingsOverlay \|\| role !== 'active'/,
     'neither the held nor staging chat may accept interaction')
-  assert.match(shell, /composerFocusRequest=\{role === 'active' \? composerFocusRequest : null\}/,
-    'an inert staging composer must not consume the one-shot focus request')
+  assert.match(shell, /composerRequest=\{role === 'active' \? composerRequest : null\}/,
+    'an inert staging composer must not consume a one-shot composer request')
+})
+
+test('app-supplied drafts update retained composers as well as remounted chats', () => {
+  assert.match(shell,
+    /navTo\('chat', \{ chatId: e\.data\.chatId \}\)[\s\S]*requestComposer\(e\.data\.chatId, \{ draft: draftText \}\)/,
+    'the open-chat handoff must target the live composer after navigation')
+  assert.match(chatView,
+    /typeof composerRequest\.draft === 'string'[\s\S]*handleComposerInputChange\(composerRequest\.draft\)/,
+    'a retained ChatView must apply the requested draft to controlled state')
+  assert.match(chatView, /if \(!composerRequest\.focus\) \{[\s\S]*onComposerRequestHandled\?\.\(token\)/,
+    'a draft-only handoff must settle without stealing focus')
 })
 
 test('the held chat is an opaque layer above staging until the atomic swap', () => {
