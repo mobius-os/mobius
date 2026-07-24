@@ -57,6 +57,14 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 check_private_history
 
+# origin/main may have advanced the landed hook policy since the initial
+# doctor run. Re-check after the fetch and rebase so a stale installed hook
+# cannot approve a push under rules that main has already replaced.
+info "verifying landed git-hook policy"
+if [ -x scripts/git-doctor.sh ]; then
+  scripts/git-doctor.sh --fix
+fi
+
 # A rebase rewrites the topic branch. Lease protection rejects the update if a
 # collaborator moved the remote branch since the fetch above.
 info "publishing ${branch}"
