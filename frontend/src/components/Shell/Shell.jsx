@@ -1613,7 +1613,12 @@ export default function Shell() {
   // matter (rendering before resolution shows a flash for users who
   // are already past it).
   const walkthroughQuery = ownerQueries.walkthrough.useQuery()
-  const showWalkthrough = walkthroughQuery.isFetched
+  let visualContentOnly = false
+  try {
+    visualContentOnly = sessionStorage.getItem('mobius:visual-content-only') === '1'
+  } catch (_) {}
+  const showWalkthrough = !visualContentOnly
+    && walkthroughQuery.isFetched
     && walkthroughQuery.data
     && !walkthroughQuery.data.completed
 

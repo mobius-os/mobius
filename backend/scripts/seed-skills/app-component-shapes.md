@@ -1,9 +1,9 @@
 # Mini-app component shapes
 
-Optional UI-pattern catalog for Möbius mini-apps. Read only the relevant
-section, alongside `building-apps-quickstart.md` and `visual-testing.md`, when
-the app needs a recurring root, header, sheet, empty, card, form, tab, chat, or
-split-pane structure.
+Optional structural-pattern catalog for Möbius mini-apps. Read only a matching
+section alongside `building-apps-quickstart.md` and `visual-testing.md` when the
+brief needs a fixed app shell, modal sheet, tabs, chat, or split pane. Do not
+load it for an ordinary root, header, card, or form.
 
 Copy the selected markup + scoped CSS block into the app's `const CSS`, apply a
 per-app prefix, keep the kebab role suffix and structure recognizable, and

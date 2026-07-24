@@ -2,8 +2,8 @@
 
 Base workflow for every local Möbius mini-app create or update. Read it with
 `visual-testing.md`; add `building-apps.md` for advanced runtime needs,
-`cron.md` for scheduled jobs, and `app-component-shapes.md` only for a relevant
-catalogued UI structure.
+`cron.md` for scheduled jobs, and `app-component-shapes.md` only for a complex
+catalogued structure such as a sheet, tabs, chat, or split pane.
 
 This is the complete workflow for a focused app with ordinary JSX,
 app-scoped storage, and no unusual host integration. Add `building-apps.md` to
@@ -200,18 +200,24 @@ For interaction testing, switch the browser driver into the app frame, then
 snapshot there so the shell and drawer do not consume the context:
 
 ```bash
-agent-browser frame 'iframe[data-app-id="<app-id>"]'
+agent-browser snapshot -i -d 2
+# Find: Iframe "<app name>" [ref=eN]
+agent-browser frame @eN
 agent-browser snapshot -i
 # interact and re-snapshot inside the frame
 agent-browser frame main
 ```
 
-Use the returned refs, re-snapshot after any DOM change, and verify one complete
-primary flow plus persistence when the app saves data. Do not use
+The shallow parent snapshot creates the documented iframe ref without dumping
+the full shell. Use that ref rather than a CSS frame selector: response-sandboxed
+opaque frames can be absent from the selector resolver even though their browser
+frame and accessibility subtree are healthy. Use returned refs, re-snapshot
+after any DOM change, and verify one complete primary flow plus persistence when
+the app saves data. Do not use
 `wait --text` for iframe content; it observes the top-level document. The
-preview helper already gates the initial frame readiness and removes only
-product-owned top-document walkthrough/install overlays for this browser
-session; it does not mark onboarding complete.
+preview helper already gates the initial frame readiness and prevents
+product-owned top-document walkthrough/install overlays from mounting in this
+isolated browser session; it does not mark onboarding complete.
 
 Check the partner's actual viewport first. Add one phone-sized check only when
 the supplied viewport is not already phone-sized or the layout materially

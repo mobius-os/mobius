@@ -21,8 +21,8 @@ bash "$SCRIPTS_DIR/agent-screenshot.sh" <route> <out.png>
 `preview_app.sh <id>` and `preview_shell.sh [chat_id]` are thin wrappers over it
 for those two common cases. `preview_app.sh` is readiness-gated and uses
 ephemeral content-only mode: it waits for the real post-render frame-mounted
-state and removes product-owned walkthrough/install overlays from the current
-document without writing onboarding or dismissal state. Use the helper, then
+state and prevents product-owned walkthrough/install overlays from mounting in
+that isolated browser session without writing onboarding or dismissal state. Use the helper, then
 `Read`/`view_image` the PNG before describing it.
 
 Raw `agent-browser open <url>` is for **non-Möbius pages only** (an external site you're scraping or sanity-checking) — it has no auth dance, so it shows the login wall for any Möbius route.
@@ -33,18 +33,21 @@ For a mini-app, switch into its opaque iframe before taking the interaction
 snapshot rather than applying a parent-document selector:
 
 ```bash
-agent-browser frame 'iframe[data-app-id="<app-id>"]'
+agent-browser snapshot -i -d 2
+# Find: Iframe "<app name>" [ref=eN]
+agent-browser frame @eN
 agent-browser snapshot -i
 # interact and re-snapshot in this frame
 agent-browser frame main
 ```
 
-The explicit frame context keeps chats, tabs, and the app drawer out of model
-context while exposing the app's interactive descendants. A selector-scoped
-parent snapshot can return only the iframe node, because the app is an
-intentional opaque-origin security boundary; do not retry that form or weaken
-the iframe sandbox. Use returned refs, re-snapshot after state changes, and
-return to `frame main` before checking shell state.
+The shallow parent snapshot creates the documented iframe ref while keeping
+shell output small; the explicit frame context then exposes only the app's
+interactive descendants. Use the ref rather than a CSS frame selector:
+response-sandboxed opaque frames can be absent from the selector resolver even
+when their browser frame and accessibility subtree are healthy. Do not weaken
+the iframe sandbox. Re-snapshot after state changes and return to `frame main`
+before checking shell state.
 
 `agent-browser wait --text` observes the top-level document and is unreliable
 for text inside the opaque app iframe. For initial load, rely on

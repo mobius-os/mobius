@@ -103,7 +103,7 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
 def test_retired_image_provider_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
-  assert module.SEED_VERSION == "16"
+  assert module.SEED_VERSION == "17"
   assert module._UNMODIFIED_MIGRATIONS["images.md"] == {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
   }
@@ -114,12 +114,15 @@ def test_retired_image_provider_skills_have_fix_forward_migrations():
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps-quickstart.md"] == {
     "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",
+    "4c2b080bcc91626f761c5823ea00d324667b9710f6757931823e22e9c8b5c2b1",
   }
   assert module._UNMODIFIED_MIGRATIONS["app-component-shapes.md"] == {
     "0320609ff924a0954c20d5e5db91ed3681d421d76f6804b24552eb6e8fa5eb31",
+    "91243377242700acb5093165af58c372bed0005f358d3a4b26774aeb2ef8a365",
   }
   assert module._UNMODIFIED_MIGRATIONS["visual-testing.md"] == {
     "9525b36b945c2a0b4cb02806081bb674f38e865b6e1c3961226112e1dbbc16ec",
+    "a0648921b9c9ea2423e8abd52aa57e71e7bebfa1736073fcf3bfcaec3749ad19",
   }
   assert (
     "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87"

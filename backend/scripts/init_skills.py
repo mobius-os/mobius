@@ -34,7 +34,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "16"  # v16: explicit app-skill dependencies + stable test/finalize tools
+SEED_VERSION = "17"  # v17: inert-safe visual mode + ref-based iframe testing
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -65,12 +65,18 @@ _UNMODIFIED_MIGRATIONS = {
   },
   "building-apps-quickstart.md": {
     "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",
+    # v16 baked copy: replace the unreliable CSS iframe selector.
+    "4c2b080bcc91626f761c5823ea00d324667b9710f6757931823e22e9c8b5c2b1",
   },
   "app-component-shapes.md": {
     "0320609ff924a0954c20d5e5db91ed3681d421d76f6804b24552eb6e8fa5eb31",
+    # v16 baked copy: keep routine app builds from loading the catalog.
+    "91243377242700acb5093165af58c372bed0005f358d3a4b26774aeb2ef8a365",
   },
   "visual-testing.md": {
     "9525b36b945c2a0b4cb02806081bb674f38e865b6e1c3961226112e1dbbc16ec",
+    # v16 baked copy: use iframe refs and preserve React's inert cleanup.
+    "a0648921b9c9ea2423e8abd52aa57e71e7bebfa1736073fcf3bfcaec3749ad19",
   },
 }
 

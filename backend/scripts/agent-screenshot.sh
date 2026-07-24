@@ -108,6 +108,18 @@ agent-browser open "${API_BASE_URL}/" >/dev/null
 # and JSON-encodes it so any character is a safe JS string literal.
 AGENT_TOKEN="$AGENT_TOKEN" python3 -c 'import json,os; print("localStorage.setItem(\"token\", "+json.dumps(os.environ["AGENT_TOKEN"])+")")' | agent-browser eval --stdin >/dev/null
 
+# Content mode is a browser-session presentation flag, not onboarding or
+# install completion state. Set it before the target document mounts so React
+# never opens its modal (and therefore never inerts the app workspace). Clear it
+# for ordinary captures so a prior content-only preview cannot affect them.
+if [ "$CONTENT_ONLY" -eq 1 ]; then
+  agent-browser eval \
+    "sessionStorage.setItem('mobius:visual-content-only', '1')" >/dev/null
+else
+  agent-browser eval \
+    "sessionStorage.removeItem('mobius:visual-content-only')" >/dev/null
+fi
+
 # Now navigate to the actual target route, authenticated.
 agent-browser open "${API_BASE_URL}${ROUTE}" >/dev/null
 
@@ -134,20 +146,6 @@ AUTH_OK="$(agent-browser eval \
 if [ "$AUTH_OK" != "true" ]; then
   echo "agent-screenshot.sh: authentication failed; the token was rejected or the login page remained visible" >&2
   exit 1
-fi
-
-# App-content verification should not mutate first-run or install state merely
-# to expose the surface under test. Remove only product-owned top-document
-# overlays for this capture/session; app-owned dialogs inside the opaque frame
-# remain intact and testable.
-if [ "$CONTENT_ONLY" -eq 1 ]; then
-  OVERLAYS_CLEAR="$(agent-browser eval \
-    "(() => { document.querySelectorAll('.wt__overlay, #install-backdrop').forEach((node) => node.remove()); return !document.querySelector('.wt__overlay, #install-backdrop'); })()" \
-    2>/dev/null || true)"
-  if [ "$OVERLAYS_CLEAR" != "true" ]; then
-    echo "agent-screenshot.sh: could not establish overlay-free content mode" >&2
-    exit 1
-  fi
 fi
 
 # A fresh phone-width shell can restore with the modal navigation drawer open

@@ -1280,6 +1280,12 @@ def standalone_shell(slug: str, db: Session = Depends(get_db)):
     //     dismissed earlier this session.
     (function setupInstallCard() {{
       const platform = window.__mobiusPlatform || {{}};
+      let visualContentOnly = false;
+      try {{
+        visualContentOnly =
+          sessionStorage.getItem('mobius:visual-content-only') === '1';
+      }} catch (_) {{}}
+      if (visualContentOnly) return;
 
       // Element handles. All of these are rendered above in the same
       // template — a missing node here means the template was edited
