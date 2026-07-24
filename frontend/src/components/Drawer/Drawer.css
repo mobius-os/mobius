@@ -94,6 +94,47 @@
   box-shadow: none;
 }
 
+.drawer__resize-handle {
+  position: absolute;
+  top: 0;
+  right: -7px;
+  bottom: 0;
+  z-index: 2;
+  width: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.drawer__resize-handle > span {
+  width: 3px;
+  height: 44px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text) 42%, transparent);
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+@media (hover: hover) {
+  .drawer__resize-handle:hover > span {
+    background: var(--accent);
+    transform: scaleY(1.18);
+  }
+}
+
+.drawer__resize-handle:focus-visible > span,
+.drawer--resizing .drawer__resize-handle > span {
+  background: var(--accent);
+}
+
+.drawer--resizing,
+.drawer--resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 /* A responsive mode switch that is consuming the mobile history sentinel keeps
    the modal visible but temporarily prevents a second navigation gesture. */
 .drawer--locked {

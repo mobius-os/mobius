@@ -19,6 +19,12 @@ import {
   initialDrawerChatCount,
   nextDrawerChatCount,
 } from './drawerProgressiveRows.js'
+import {
+  clampDesktopSidebarWidth,
+  DESKTOP_SIDEBAR_DEFAULT_WIDTH,
+  DESKTOP_SIDEBAR_MAX_WIDTH,
+  DESKTOP_SIDEBAR_MIN_WIDTH,
+} from '../Shell/useDesktopSidebar.js'
 import './Drawer.css'
 
 // Module-level constant so default Set props are stable across renders.
@@ -29,6 +35,8 @@ const EMPTY_SET = new Set()
 export default function Drawer({
   open,
   persistent = false,
+  width = DESKTOP_SIDEBAR_DEFAULT_WIDTH,
+  onWidthChange,
   interactionLocked = false,
   onClose,
   apps,
@@ -73,6 +81,7 @@ export default function Drawer({
   const streamingSet = streamingChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
+  const resizeRef = useRef(null)
   // Pinned-first sort: pinned rows by pinned_at desc, then unpinned by
   // activity_at desc (owner-send), with updated_at as a fallback. Server
   // returns this order already (see routes/chats.py list_chats), but we
@@ -583,6 +592,55 @@ export default function Drawer({
     // It must never leave a click guard behind for a later destination tap.
   }
 
+  function applyResizeWidth(nextWidth) {
+    const next = clampDesktopSidebarWidth(nextWidth)
+    resizeRef.current.width = next
+    drawerRef.current?.closest('.shell')?.style.setProperty(
+      '--desktop-sidebar-width',
+      `${next}px`,
+    )
+  }
+
+  function onResizePointerDown(e) {
+    if (e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    resizeRef.current = {
+      pointerId: e.pointerId,
+      width: clampDesktopSidebarWidth(width),
+    }
+    e.currentTarget.setPointerCapture(e.pointerId)
+    drawerRef.current?.classList.add('drawer--resizing')
+  }
+
+  function onResizePointerMove(e) {
+    if (resizeRef.current?.pointerId !== e.pointerId) return
+    applyResizeWidth(e.clientX)
+  }
+
+  function finishResize(e) {
+    if (resizeRef.current?.pointerId !== e.pointerId) return
+    const next = resizeRef.current.width
+    resizeRef.current = null
+    drawerRef.current?.classList.remove('drawer--resizing')
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    }
+    onWidthChange?.(next)
+  }
+
+  function onResizeKeyDown(e) {
+    let next = width
+    const step = e.shiftKey ? 48 : 16
+    if (e.key === 'ArrowLeft') next -= step
+    else if (e.key === 'ArrowRight') next += step
+    else if (e.key === 'Home') next = DESKTOP_SIDEBAR_MIN_WIDTH
+    else if (e.key === 'End') next = DESKTOP_SIDEBAR_MAX_WIDTH
+    else return
+    e.preventDefault()
+    onWidthChange?.(next)
+  }
+
   rowActionInputsRef.current = {
     onChat,
     onApp,
@@ -630,6 +688,27 @@ export default function Drawer({
         onTouchCancel={onTouchCancel}
         onTransitionEnd={handleDrawerTransitionEnd}
       >
+        {persistent && (
+          <div
+            className="drawer__resize-handle"
+            role="separator"
+            tabIndex={0}
+            aria-label="Resize navigation drawer"
+            aria-orientation="vertical"
+            aria-valuemin={DESKTOP_SIDEBAR_MIN_WIDTH}
+            aria-valuemax={DESKTOP_SIDEBAR_MAX_WIDTH}
+            aria-valuenow={clampDesktopSidebarWidth(width)}
+            title="Drag to resize navigation"
+            onPointerDown={onResizePointerDown}
+            onPointerMove={onResizePointerMove}
+            onPointerUp={finishResize}
+            onPointerCancel={finishResize}
+            onKeyDown={onResizeKeyDown}
+            onDoubleClick={() => onWidthChange?.(DESKTOP_SIDEBAR_DEFAULT_WIDTH)}
+          >
+            <span aria-hidden="true" />
+          </div>
+        )}
         <div className="drawer__body">
           {/* Single scroll wrapper around New chat + Chats + Apps.
               Earlier each group held its own scrolling region with

@@ -45,6 +45,18 @@ def test_debug_status_shape_matches_golden(client, auth):
   browser_profiles = payload.pop("browser_profiles")
   assert browser_profiles["profile_count"] >= 0
   assert browser_profiles["reclaimed_bytes"] >= 0
+  memory = payload.pop("memory")
+  assert memory["process"]["available"] is True
+  assert memory["process"]["rss_bytes"] > 0
+  assert memory["tracing"]["source"]
+  runtime_memory = payload.pop("runtime_memory")
+  assert runtime_memory["runner_handles"]["claude_sdk"] == 1
+  assert runtime_memory["runner_handles"]["codex_sdk"] == 1
+  assert runtime_memory["starting_chats"] == 1
+  assert isinstance(runtime_memory["broadcasts"], list)
+  assert isinstance(runtime_memory["active_sinks"], list)
+  assert "present" in runtime_memory["writer"]
+  assert runtime_memory["questions"]["pending_count"] >= 0
   golden_path = Path(__file__).with_name("golden_debug_status.json")
   expected = json.loads(golden_path.read_text(encoding="utf-8"))
   assert payload == expected
@@ -59,3 +71,23 @@ def test_debug_status_surfaces_media_migration_failure(client, auth):
 
   assert response.status_code == 200
   assert response.json()["media_migration_failed"] is True
+
+
+def test_debug_memory_report_is_authenticated_and_bounded(client, auth):
+  assert client.get("/api/debug/memory").status_code == 401
+
+  response = client.get(
+    "/api/debug/memory?allocation_limit=3&process_limit=3",
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  payload = response.json()
+  assert payload["process"]["available"] is True
+  assert payload["process"]["rss_bytes"] > 0
+  assert payload["memory_maps"]["available"] is True
+  assert len(payload["processes"]["top_processes"]) <= 3
+  assert payload["gc"]["counts"]
+  assert "top_tracked_types" not in payload["gc"]
+  assert "enabled" in payload["allocations"]
+  assert "checkpoints" in payload

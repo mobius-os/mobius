@@ -79,6 +79,7 @@ from app.events import (
   undo_question_scrub,
 )
 from app.providers import effective_agent_settings, get_provider, get_skill_path
+from app.memory_observability import record_memory_checkpoint
 from app.runner_registry import registry
 from app.runtime_types import ChatEvent
 
@@ -203,6 +204,27 @@ def unregister_active_sink(chat_id: str, sink: "_ChatEventSink") -> None:
   """
   if _active_sinks.get(chat_id) is sink:
     _active_sinks.pop(chat_id, None)
+
+
+def active_sink_memory_diagnostics(*, include_payloads: bool = True) -> list[dict]:
+  """Describe live response payloads without exposing their content."""
+  from app.memory_observability import estimate_payload_bytes
+
+  diagnostics = []
+  for chat_id, sink in list(_active_sinks.items()):
+    payload_bytes = None
+    if include_payloads:
+      try:
+        payload_bytes = estimate_payload_bytes(sink.assistant_blocks)
+      except RuntimeError:
+        pass
+    diagnostics.append({
+      "chat_id": chat_id,
+      "assistant_block_count": len(sink.assistant_blocks),
+      "assistant_payload_bytes": payload_bytes,
+      "pending_lifecycle_writes": len(sink._lifecycle_writes),
+    })
+  return diagnostics
 
 
 class _ChatEventSink:
@@ -1590,17 +1612,17 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
   # Boot never starts markerless work; the age-gated runtime sweep claims it.
   try:
     markerless = (
-      db.query(models.Chat)
+      db.query(models.Chat.id, models.Chat.pending_messages)
       .filter(models.Chat.run_status.is_(None))
       .filter(models.Chat.deleted_at.is_(None))
       .all()
     )
-    for chat in markerless:
-      if chat.pending_messages:
+    for chat_id, pending_messages in markerless:
+      if pending_messages:
         log.warning(
           "reconcile_interrupted_chats: markerless pending queue chat_id=%s "
           "count=%d; left intact for the age-gated pending sweep",
-          chat.id, len(chat.pending_messages),
+          chat_id, len(pending_messages),
         )
   except Exception:
     log.exception("reconcile_interrupted_chats: markerless-queue scan failed")
@@ -4384,6 +4406,12 @@ async def run_chat(
   # (which `_run_chat_impl` doesn't catch) leaves the marker set for
   # reconciliation rather than silently wiping it — the safe default.
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
+  record_memory_checkpoint(
+    "turn_start",
+    chat_id=chat_id,
+    provider_id=provider_id,
+    run_generation=run_gen,
+  )
   try:
     disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
@@ -4502,6 +4530,16 @@ async def run_chat(
         )
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
+    # One terminal sample after provider teardown, browser cleanup, queue
+    # transition, and the settled-chat publisher. Comparing it with turn_start
+    # exposes memory that a completed turn failed to release without polling
+    # continuously during ordinary operation.
+    record_memory_checkpoint(
+      "turn_end",
+      chat_id=chat_id,
+      provider_id=provider_id,
+      disposition=disposition.value,
+    )
 
 
 def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
