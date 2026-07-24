@@ -543,8 +543,8 @@ test('entry assembles over a stationary Standard surface, compositor-only, insta
   assert.match(dealIn, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
   assert.doesNotMatch(dealIn, /opacity:/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
-  assert.match(css, /--ease-mode-arrive:\s*cubic-bezier\(0\.25, 1, 0\.5, 1\)/,
-    'entry keeps readable quart-out travel without braking into the shared seam')
+  assert.match(css, /--ease-mode-arrive:\s*cubic-bezier\(0\.33, 1, 0\.68, 1\)/,
+    'entry keeps readable cubic-out travel without braking into the shared seam')
   assert.match(css, /--ease-mode-promote:\s*cubic-bezier\(0\.2, 0\.82, 0\.2, 1\)/,
     'the accepted exit promotion curve stays unchanged')
   // The old dead .workspace--resizing selector is gone entirely.
@@ -1021,7 +1021,7 @@ test('N1: dead exit-presentation plumbing is removed', () => {
   assert.match(css, /--ease-mode-chrome: cubic-bezier/)
   assert.match(css, /--ease-mode-promote: cubic-bezier/)
   assert.match(css, /shell-mode-chrome-out 90ms var\(--ease-mode-chrome\)/)
-  assert.match(css, /shell-mode-chrome-in 70ms var\(--ease-mode-chrome\)[\s\S]*?calc\(var\(--mode-total, 210ms\) - 70ms\) both/)
+  assert.match(css, /shell-mode-chrome-in 70ms var\(--ease-mode-chrome\)[\s\S]*?calc\(var\(--mode-total, 240ms\) - 70ms\) both/)
   assert.match(css, /shell-mode-strip-clear 100ms var\(--ease-mode-chrome\)/)
   assert.match(css, /shell-mode-promote\s*\n?\s*var\(--mode-duration\)\s*\n?\s*var\(--ease-mode-promote\)/)
   // The unused excludeChatId param is gone; the helper is now the New Chat request
