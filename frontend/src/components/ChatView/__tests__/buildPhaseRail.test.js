@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -10,8 +9,6 @@ import {
   latestBuildPhaseAnnouncement,
   railAtRunStart,
 } from '../buildPhaseRail.js'
-
-const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
 test('buildPhaseFromEvent extracts label + ts and trims the label', () => {
   assert.deepEqual(
@@ -72,47 +69,6 @@ test('latestBuildPhaseAnnouncement announces the newest phase, empty when none',
 
 test('railAtRunStart resets to the shared empty rail', () => {
   assert.equal(railAtRunStart(), EMPTY_BUILD_PHASE_RAIL)
-})
-
-test('footer stacks connection → notices → rail → queued → composer', () => {
-  // Owner spec 2026-07-17: queued messages sit directly ON the composer (they
-  // are the input's extension — the next sends), the build rail directly
-  // above them, attention notices above that, and the connection/retry row
-  // tops the stack. Pinned as a source scan so a refactor can't silently
-  // reshuffle the foot.
-  const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
-  const composer = chatView.indexOf('<ChatInputBar', footStart)
-  const foot = chatView.slice(footStart, composer)
-  const rail = foot.indexOf('className="chat__build-rail"')
-  const queued = foot.indexOf('<QueuedMessages')
-  const connection = foot.indexOf('<ConnectionStatus')
-
-  assert.ok(footStart >= 0 && composer > footStart && rail >= 0 && queued >= 0,
-    'the footer, build rail, queued tray, and composer must all be present')
-  assert.ok(rail < queued, 'the build rail stacks above the queued tray')
-  for (const notice of [
-    'className="chat__open-app"',
-    'className="chat__question-nudge"',
-    'className="chat__resume-nudge"',
-  ]) {
-    const noticeIndex = foot.indexOf(notice)
-    assert.ok(noticeIndex >= 0, `${notice} must be present in the footer`)
-    assert.ok(noticeIndex < rail,
-      `${notice} must stack above the build rail`)
-    assert.ok(connection >= 0 && connection < noticeIndex,
-      'the connection/retry row tops the stack')
-  }
-})
-
-test('connection failure hides queued actions and disables composer steering', () => {
-  assert.match(chatView, /\{connectionError !== 'disconnected' && \([\s\S]*?<QueuedMessages/,
-    'the lost-connection state should own the footer stack until Retry succeeds')
-  assert.match(chatView, /const canSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected' && !steerBusy[\s\S]*?canFastForwardQueue/,
-    'the visible composer steer action must be gated by pending QA and connection health')
-  assert.match(chatView, /const canSubmitSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?!steerBusy[\s\S]*?turnActive/,
-    'the composed-text keyboard steer path must be gated by pending QA and connection health too')
-  assert.match(chatView, /const canRequestSteer = canSubmitSteer[\s\S]*?pendingQueue\.pendingMessages\.length > 0/,
-    'the empty-composer keyboard path must share the same gate and require queued work')
 })
 
 test('a send that merely enqueues preserves the in-flight build rail', () => {

@@ -3951,17 +3951,21 @@ export default function ChatView({
       )}
 
       <div ref={footRef} className="chat__foot">
-        {/* Foot order, top to bottom (owner spec, 2026-07-17):
-            connection/retry → attention actions (open-app CTA, question
-            and resume nudges) → build-progress rail → queued messages →
-            composer. Queued messages sit directly ON the composer — they
-            are the input's extension (your next sends) — and everything
-            transient stacks above them. */}
-        <ConnectionStatus
-          error={connectionError}
-          reconnecting={reconnecting}
-          onRetry={retry}
-        />
+        {/* Foot order, top to bottom:
+            offline explanation → attention actions → build-progress rail →
+            connection/retry → queued messages → composer. Queued messages are
+            the input's extension, and connection recovery belongs immediately
+            above that input area. */}
+        {!online && (
+          <div
+            className="chat__offline-note"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            You're offline — chat needs a connection.
+          </div>
+        )}
         {/* A LOST connection empties the stack: while the terminal
             'disconnected' state is set, nudges, rail, and the queued tray
             hide so the one thing on screen is the problem and its Retry
@@ -4026,6 +4030,14 @@ export default function ChatView({
               ))}
             </div>
           )}
+          </>
+        )}
+        <ConnectionStatus
+          error={connectionError}
+          reconnecting={reconnecting}
+          onRetry={retry}
+        />
+        {connectionError !== 'disconnected' && (
           <QueuedMessages
             items={pendingQueue.pendingMessages}
             onCancel={handleCancelPending}
@@ -4033,7 +4045,6 @@ export default function ChatView({
             steerActive={turnActive && !hasPendingQuestion}
             steerBusy={steerBusy}
           />
-          </>
         )}
         <ChatInputBar
           chatId={chatId}
