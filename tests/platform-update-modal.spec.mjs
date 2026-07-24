@@ -12,7 +12,7 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
 test.use({ serviceWorkers: 'block' })
 
-function platformStatus(state = 'available') {
+function platformStatus(state = 'available', overrides = {}) {
   return {
     state,
     available: state === 'available' || state === 'rolled_back',
@@ -23,6 +23,7 @@ function platformStatus(state = 'available') {
     seed_required: false,
     conflict_paths: state === 'conflict' ? ['frontend/src/example.js'] : [],
     conflict_chat_id: null,
+    ...overrides,
   }
 }
 
@@ -59,7 +60,7 @@ async function mockPlatform(page, stateRef) {
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(platformStatus(stateRef.current)),
+      body: JSON.stringify(platformStatus(stateRef.current, stateRef.overrides)),
     })
   })
   await page.route('**/api/platform/update-preview', route => route.fulfill({
@@ -140,6 +141,105 @@ test('a clean apply closes the review and exposes the restart step', async ({ pa
   const restart = page.getByRole('button', { name: 'Restart to finish' })
   await expect(restart).toBeVisible()
   await expect(restart).toBeFocused()
+})
+
+test('a staged update can check for and review another release before one restart', async ({ page }) => {
+  const state = {
+    current: 'restart_needed',
+    overrides: { available: false, needs_restart: true },
+  }
+  await mockPlatform(page, state)
+  await page.route('**/api/platform/check', route => {
+    state.overrides = { available: true, needs_restart: true }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(platformStatus('restart_needed', state.overrides)),
+    })
+  })
+  await page.route('**/api/platform/apply', route => {
+    state.overrides = { available: false, needs_restart: true }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        state: 'restart_needed',
+        needs_restart: true,
+        upstream_commit: preview.target_sha,
+        merge_commit: '3333333333333333333333333333333333333333',
+        conflict_paths: [],
+        chat_id: null,
+      }),
+    })
+  })
+
+  await page.setViewportSize({ width: 900, height: 800 })
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+      || document.querySelector('.chat__scroll')
+      || document.querySelector('.chat__form')),
+    { timeout: 10000 },
+  )
+  const navigationToggle = page.getByLabel('Toggle navigation')
+  if (await navigationToggle.getAttribute('aria-expanded') !== 'true') {
+    await navigationToggle.click()
+  }
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+
+  await expect(page.getByText('Ready to restart', { exact: true })).toBeVisible()
+  const check = page.getByRole('button', { name: 'Check for more' })
+  await expect(check).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeVisible()
+  await check.click()
+
+  await expect(page.getByText('More updates available', { exact: true })).toBeVisible()
+  const review = page.getByRole('button', { name: 'Review update' })
+  await expect(review).toBeVisible()
+  await expect(review).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeVisible()
+  await review.click()
+
+  const dialog = page.getByRole('dialog', { name: 'Review update' })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: 'Apply update' }).click()
+
+  await expect(dialog).toHaveCount(0)
+  await expect(page.getByText('Ready to restart', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Check for more' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
+})
+
+test('staged-update actions stack without overflow in a narrow settings pane', async ({ page }) => {
+  const state = {
+    current: 'restart_needed',
+    overrides: { available: true, needs_restart: true },
+  }
+  await mockPlatform(page, state)
+
+  await page.setViewportSize({ width: 360, height: 780 })
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+      || document.querySelector('.chat__scroll')
+      || document.querySelector('.chat__form')),
+    { timeout: 10000 },
+  )
+  const navigationToggle = page.getByLabel('Toggle navigation')
+  if (await navigationToggle.getAttribute('aria-expanded') !== 'true') {
+    await navigationToggle.click()
+  }
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+
+  const actions = page.getByRole('group', { name: 'Update ready actions' })
+  await expect(actions).toBeVisible()
+  const box = await actions.boundingBox()
+  const viewport = page.viewportSize()
+  expect(box).not.toBeNull()
+  expect(box.x).toBeGreaterThanOrEqual(0)
+  expect(box.x + box.width).toBeLessThanOrEqual(viewport.width)
+  await expect(page.getByRole('button', { name: 'Review update' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeVisible()
 })
 
 test('a blocked apply stays open, focuses its result, and shows resolver failures', async ({ page }) => {
@@ -262,7 +362,7 @@ test('a clean apply remains truthful when every follow-up status read fails', as
 
   await expect(review).toHaveCount(0)
   await expect(
-    page.locator('.settings__update').getByText('Restart to finish', { exact: true }),
+    page.locator('.settings__update').getByText('Ready to restart', { exact: true }),
   ).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
 })
