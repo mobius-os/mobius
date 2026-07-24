@@ -263,6 +263,13 @@
   scroll-padding-bottom: 16px;
 }
 
+.drawer__progressive-sentinel {
+  flex: 0 0 1px;
+  width: 100%;
+  height: 1px;
+  pointer-events: none;
+}
+
 /* ── Items ─────────────────────────────────────────── */
 
 .drawer__item {
