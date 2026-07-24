@@ -434,69 +434,12 @@
 }
 .workspace__drag-chip[hidden] { display: none; }
 
-/* First-use coachmark (design §7.2) — a quiet pill near the top that names the
-   gesture once. Anchored to the strip region; dismisses on drag / ✕ / 12s. */
-.workspace__coachmark {
-  position: fixed;
-  /* V3 (vizreview): anchor BELOW the strip row, never over it — a top:60px pill sat
-     across the tab strip and covered the third tab's label. This clears the bar
-     (58px + safe-area) + the strip (STRIP_H 34px) + an 8px gap, so it floats over
-     content and no tab label is occluded. */
-  top: calc(58px + env(safe-area-inset-top) + 42px);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 120;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  max-width: calc(100vw - 24px);
-  padding: 8px 8px 8px 14px;
-  border-radius: 999px;
-  border: 1px solid var(--border-light);
-  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 500;
-  box-shadow: 0 6px 16px color-mix(in srgb, #000 24%, transparent);
-  animation: workspace-coachmark-in 200ms ease-out;
-  /* The hint overlaps the strip by design, but must not make tabs inert for its
-     12-second lifetime. Only its explicit close control owns pointer input. */
-  pointer-events: none;
-}
-.workspace__coachmark-text { white-space: nowrap; }
-.workspace__coachmark-close {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  flex-shrink: 0;
-  pointer-events: auto;
-}
-.workspace__coachmark-close:hover {
-  background: color-mix(in srgb, var(--text) 10%, transparent);
-  color: var(--text);
-}
-.workspace__coachmark-close:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-@keyframes workspace-coachmark-in {
-  from { opacity: 0; transform: translate(-50%, -6px); }
-  to { opacity: 1; transform: translate(-50%, 0); }
-}
-
 @media (prefers-reduced-motion: reduce) {
   /* Instant swap — no draw-in flourish (design item 5, reduced-motion). */
   .workspace__divider-bar { transition: none; animation: none; }
   /* Reduced motion: instant geometry + color, no fade or morph (design §3.3). */
   .workspace__drop-preview { transition: none; }
   .workspace__drop-preglow { transition: none; }
-  .workspace__coachmark { animation: none; }
   /* Reduced motion never arms a mode descriptor (the controller commits directly),
      so nothing carries data-mode-motion; this is defensive parity — any element
      that somehow did gets no beat. Covers wrappers, strips, and dividers. */

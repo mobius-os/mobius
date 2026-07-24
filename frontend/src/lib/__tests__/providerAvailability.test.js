@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   PROVIDER_AVAILABILITY_PHASE,
+  configuredProviderOrder,
   configuredProviderSet,
   providerAvailabilityNeedsAttention,
   resolveProviderAvailability,
@@ -20,6 +21,17 @@ test('availability has explicit loading, ready, and error phases', () => {
   assert.equal(
     resolveProviderAvailability({ data: undefined, isError: true }).phase,
     PROVIDER_AVAILABILITY_PHASE.ERROR,
+  )
+})
+
+test('provider-specific settings list only connected providers', () => {
+  assert.deepEqual(
+    configuredProviderOrder(['claude', 'codex'], new Set(['codex'])),
+    ['codex'],
+  )
+  assert.deepEqual(
+    configuredProviderOrder(['claude', 'codex'], new Set()),
+    [],
   )
 })
 

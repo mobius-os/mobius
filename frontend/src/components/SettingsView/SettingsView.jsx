@@ -141,7 +141,8 @@ function BackgroundProviderRow({
 }) {
   const info = PROVIDER_INFO[row.provider]
   const Logo = info?.Logo
-  const enabled = row.enabled !== false
+  const configured = configuredProviders.has(row.provider)
+  const enabled = configured && row.enabled !== false
   const selectedModel = enabled ? (row.model || defaultModel(row.provider)) : ''
   const selectedRow = models.find((m) => m.id === selectedModel)
   const efforts = info?.efforts || []
@@ -164,7 +165,7 @@ function BackgroundProviderRow({
     key: row.provider,
     label: info?.label || row.provider,
     Logo,
-    models: orderSelectedFirst(models, enabled ? selectedModel : null),
+    models: configured ? orderSelectedFirst(models, enabled ? selectedModel : null) : [],
   }]
   const triggerLabel = enabled
     ? (selectedRow?.label || selectedModel || 'Choose model')
@@ -175,6 +176,7 @@ function BackgroundProviderRow({
       className={
         'settings-bg-row'
         + (enabled ? '' : ' settings-bg-row--off')
+        + (configured ? '' : ' settings-bg-row--disconnected')
         + (reorderMode ? ' settings-bg-row--reordering' : '')
         + (dragging ? ' settings-bg-row--dragging' : '')
         + (dropTarget ? ' settings-bg-row--drop-target' : '')
@@ -198,6 +200,7 @@ function BackgroundProviderRow({
             })
           }}
           onClick={(event) => event.preventDefault()}
+          disabled={!configured}
           onKeyDown={(event) => {
             if (event.key === 'ArrowUp') {
               event.preventDefault()
@@ -216,6 +219,7 @@ function BackgroundProviderRow({
           type="button"
           className={`model-trigger${enabled ? '' : ' model-trigger--off'}`}
           onClick={() => setSheetOpen(true)}
+          disabled={!configured}
           aria-haspopup="dialog"
           aria-label={`${info?.label || row.provider} background model${effortLabel ? `, ${effortLabel} effort` : ''}`}
         >
@@ -381,6 +385,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const claudeVersion = settingsQuery.data?.claude_version
   const codexVersion = settingsQuery.data?.codex_version
   const claudeAuthenticated = configuredProviders.has('claude')
+  const hasConfiguredProvider = configuredProviders.size > 0
   // Three-state gate for the AI-providers section, in priority order:
   //
   //   READY   — at least the cached data is present (data !== undefined).
@@ -1327,11 +1332,14 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
 
                 <ProviderRow
                   name="Chat model"
-                  connected
-                  subtitle="Choose which models appear. New chats use your last pick."
+                  connected={hasConfiguredProvider}
+                  disabled={!hasConfiguredProvider}
+                  subtitle={hasConfiguredProvider
+                    ? 'Choose which models appear. New chats use your last pick.'
+                    : 'Connect an AI provider to choose chat models.'}
                   statusNode={
                     <span className="provider-row__status-text settings__last-model">
-                      {lastModelLabel ? (
+                      {!hasConfiguredProvider ? 'No provider connected' : lastModelLabel ? (
                         <>
                           Last model: <span className="settings__standard-highlight">{lastModelLabel}</span>
                         </>
@@ -1345,7 +1353,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               </div>
 
               <div
-                className={`settings-agent-group${attentionSection === 'background-agents' ? ' settings-setup-target' : ''}`}
+                className={
+                  `settings-agent-group${hasConfiguredProvider ? '' : ' settings-agent-group--disabled'}`
+                  + (attentionSection === 'background-agents' ? ' settings-setup-target' : '')
+                }
                 id="settings-background-agents"
                 ref={(node) => setSetupFocusRef('background-agents', node)}
                 tabIndex={-1}
@@ -1355,7 +1366,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                     <h3 className="settings__agent-title">Background agents</h3>
                   </div>
                   <p className="settings__subtext settings__subtext--tight">
-                    Used for memory, reflection, and other automatic tasks. Tried in order.
+                    {hasConfiguredProvider
+                      ? 'Used for memory, reflection, and other automatic tasks. Tried in order.'
+                      : 'Connect an AI provider to configure automatic tasks.'}
                   </p>
                 </div>
                 <div
@@ -1408,6 +1421,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                   onClose={() => setManageModelsOpen(false)}
                   providerOrder={PROVIDER_ORDER}
                   providerInfo={PROVIDER_INFO}
+                  configuredProviders={configuredProviders}
                 />
               )}
             </>

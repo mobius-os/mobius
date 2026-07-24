@@ -27,12 +27,14 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { modelQueries } from '../../hooks/queries.js'
+import { configuredProviderOrder } from '../../lib/providerAvailability.js'
 import './ManageModelsModal.css'
 
 export default function ManageModelsModal({
   onClose,
   providerOrder,
   providerInfo,
+  configuredProviders,
 }) {
   const queryClient = useQueryClient()
   // Read straight from cache — by the time the modal opens, the
@@ -171,6 +173,10 @@ export default function ManageModelsModal({
   }, [queryClient])
 
   const ready = !!registry
+  const visibleProviderOrder = configuredProviderOrder(
+    providerOrder,
+    configuredProviders,
+  )
 
   return (
     <div
@@ -210,7 +216,7 @@ export default function ManageModelsModal({
               </div>
             )}
 
-            {ready && providerOrder.map(pid => {
+            {ready && visibleProviderOrder.map(pid => {
               const info = providerInfo[pid]
               const entries = registry[pid] || []
               if (entries.length === 0) return null

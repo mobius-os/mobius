@@ -270,6 +270,14 @@
   transition: border-color 0.15s;
 }
 
+.provider-row--disabled {
+  opacity: 0.56;
+}
+
+.provider-row__action:disabled {
+  cursor: not-allowed;
+}
+
 /* Light mode: subtle elevation so the row reads as a distinct
    card surface against the light page bg. Mirrors the
    .settings__section shadow contract — dark mode stays flat. */
