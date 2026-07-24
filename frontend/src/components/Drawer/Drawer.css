@@ -102,6 +102,7 @@
   z-index: 2;
   width: 14px;
   display: flex;
+  align-items: center;
   justify-content: center;
   cursor: col-resize;
   touch-action: none;
@@ -110,15 +111,16 @@
 
 .drawer__resize-handle > span {
   width: 3px;
-  height: 100%;
+  height: 44px;
   border-radius: 2px;
-  background: transparent;
-  transition: background 120ms ease;
+  background: color-mix(in srgb, var(--text) 42%, transparent);
+  transition: background 120ms ease, transform 120ms ease;
 }
 
 @media (hover: hover) {
   .drawer__resize-handle:hover > span {
-    background: color-mix(in srgb, var(--accent) 48%, transparent);
+    background: var(--accent);
+    transform: scaleY(1.18);
   }
 }
 
