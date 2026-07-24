@@ -4313,7 +4313,7 @@ async def run_chat(
   bypass the actor; production schedulers always pass one.
 
   The entire body is wrapped in a top-level try/finally so the
-  `_starting` guard is released even if setup code raises before we
+  `_starting` guard is released even if initialization raises before we
   reach the runner.  Without that, a crash during setup leaves the
   chat stuck 'starting' until process restart.
   """

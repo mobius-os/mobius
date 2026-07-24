@@ -325,7 +325,7 @@ test.describe('Unauthenticated startup', () => {
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ configured: true, claim_required: false }),
+        body: JSON.stringify({ configured: true }),
       })
     )
     await page.route(/\/api\/auth\/token$/, route =>
@@ -361,7 +361,7 @@ test.describe('Unauthenticated startup', () => {
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ configured: true, claim_required: false }),
+        body: JSON.stringify({ configured: true }),
       })
     )
     await page.route(/\/api\/auth\/token$/, route =>
@@ -396,7 +396,7 @@ test.describe('Unauthenticated startup', () => {
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ configured: false, claim_required: false }),
+        body: JSON.stringify({ configured: false }),
       })
     })
 

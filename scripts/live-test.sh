@@ -44,9 +44,6 @@ PROJECT_DIR="${MOBIUS_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-/tmp/mobius-live-test}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-admin}"
-# First-boot claim gate: the value docker-compose.test.yml presets as
-# MOBIUS_SETUP_CLAIM. Setup requires it (mobius-test only).
-SETUP_CLAIM="${SETUP_CLAIM:-${MOBIUS_SETUP_CLAIM:-mobius-test-setup-claim}}"
 
 # Per-session container/project/volume isolation. Defaults match the canonical
 # mobius-test; in an isolated per-slug session pass MOBIUS_CONTAINER (+ matching
@@ -139,7 +136,7 @@ setup_owner_and_creds() {
   log "Creating owner ${ADMIN_USER}..."
   api_noauth POST /api/auth/setup \
     -H 'Content-Type: application/json' \
-    -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\",\"claim\":\"${SETUP_CLAIM}\"}" >/dev/null
+    -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}" >/dev/null
 
   log "Copying Claude CLI credentials from host..."
   docker exec "${CTR}" mkdir -p /data/cli-auth/claude

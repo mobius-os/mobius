@@ -1,8 +1,7 @@
 /**
  * Global setup: create the test account if needed, log in, and save auth state.
  *
- * On a fresh container (CI), the setup endpoint creates the owner account
- * (presenting the fixed first-boot claim the test compose presets).
+ * On a fresh container (CI), the setup endpoint creates the owner account.
  * On an existing container, it 400s harmlessly (owner already configured).
  *
  * This setup must never enumerate or delete an owner's chats. Every
@@ -14,9 +13,6 @@ import { expect, test as setup } from '@playwright/test'
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const USER = process.env.MOBIUS_USER || 'admin'
 const PASS = process.env.MOBIUS_PASS || 'admin'
-// First-boot claim gate: the fixed value docker-compose.test.yml presets as
-// MOBIUS_SETUP_CLAIM. Overridable via env to match a custom compose value.
-const CLAIM = process.env.MOBIUS_SETUP_CLAIM || 'mobius-test-setup-claim'
 const AUTH_FILE = process.env.MOBIUS_AUTH_FILE || 'tests/.auth/state.json'
 
 // First guard: only local-family hosts on a non-production port.
@@ -49,7 +45,7 @@ setup('authenticate', async ({ page, request }) => {
 
   // Ensure the owner account exists (idempotent — 400 if already set up).
   const setupRes = await request.post(`${BASE}/api/auth/setup`, {
-    data: { username: USER, password: PASS, claim: CLAIM },
+    data: { username: USER, password: PASS },
     failOnStatusCode: false,
   })
   expect([200, 400], 'setup creates the owner or is already configured')

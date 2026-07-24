@@ -151,10 +151,6 @@ function AppRoot() {
     <Suspense fallback={<RouteLoading label="Loading setup" />}>
       <SetupWizard
         initialStep={initialSetupStep}
-        // First-boot claim gate: the account step collects the claim only when
-        // the backend says setup is still open. Absent (e.g. resuming with a
-        // token, where the account already exists) is treated as false.
-        claimRequired={!!setupStatusQuery.data?.claim_required}
         onDone={() => {
           setupSession.clearResumeStep()
           setupSession.setInProgress(false)
