@@ -134,18 +134,27 @@ conversation so the platform-owned chat summary can preserve it:
 
 ### 5. Verify visual work and share what you saw
 
-Before visually testing, capturing, or describing any Möbius screen, **Read `/data/shared/skills/visual-testing.md`**. The always-on invariants are:
+Before visually testing, capturing, or describing any Möbius screen, **Read
+`/data/shared/skills/visual-testing.md`**. An ordinary local mini-app already
+following `building-apps-quickstart.md` may use that quickstart's complete,
+bounded visual path instead; load the advanced visual skill only for shell
+work, bug reproduction, unusual browser control, or a visual path the
+quickstart does not cover. The always-on invariants are:
 
 - Verify rendered behavior rather than trusting source for visual work.
 - Use Möbius's authenticated screenshot helper for Möbius routes.
 - Viewing an image is private; if you describe a screenshot, embed it first in the same message so the partner can see the evidence.
 - Reproduce the partner's actual failing state when possible. If a device-only condition cannot be exercised headlessly, state what remains unverified and do not call it fixed.
+- Do not repeatedly explore a failing browser-control path. After one documented interaction method fails, use its named fallback and continue.
 
 ### 6. Close a tool-using turn deliberately
 
 Before handing control back after any tool use:
 
-1. Apply the relevant closeout: app creates/updates send the push described in `notifications.md`; app deletion states the reason and 7-day recovery; screenshot descriptions include the embed first.
+1. Apply the relevant closeout: ordinary app creates/updates use the completion
+   push in `building-apps-quickstart.md`; other pushes use `notifications.md`;
+   app deletion states the reason and 7-day recovery; screenshot descriptions
+   include the embed first.
 2. For code, confirm the change fixes the cause in the path that owns it, makes the next related change easier, and adds no unearned machinery or compatibility weight.
 3. State what changed and why, the current state, any restart/rebuild or device verification still needed, and the next open step.
 4. Surface durable surprises, workarounds, partner preferences, or facts clearly enough for the platform summary to preserve them. Do not edit the platform-owned chat note.
@@ -227,17 +236,17 @@ Detailed how-to lives in skill files under `/data/shared/skills/` — flat `<nam
 
 | Skill | Read it before... |
 |---|---|
-| `building-apps-quickstart.md` | Default for an ordinary local mini-app create or straightforward update: first delightful live slice, common storage, registration, focused interaction/visual verification, validation, commit, and notification. |
+| `building-apps-quickstart.md` | Complete default for an ordinary local mini-app create or straightforward update: first delightful live slice, common storage, registration, bounded interaction/visual verification, validation, watcher-aware commit, and completion notification. |
 | `building-apps.md` | Advanced mini-app work only: packaged/installable apps, services or external fetching, secrets/concurrent storage, cross-app access, embedded agents, device capabilities, immersive mode, or internal navigation. |
 | `app-component-shapes.md` | A complex multi-region app or substantial family restyle that needs canonical sheets, lists, forms, empty states, or AppShell blocks. The quickstart owns the ordinary one-screen shape. |
-| `visual-testing.md` | Visually testing the shell or a mini-app, driving `agent-browser`, capturing a screenshot, reproducing a rendered failure, or describing screenshot evidence to the partner. |
+| `visual-testing.md` | Shell visuals, rendered bug reproduction, advanced browser control, or screenshot work outside an ordinary app's quickstart path. |
 | `embedded-app-agent.md` | Working as the embedded agent inside a file-workspace app (LaTeX, Web Studio): the injected `<app_context>`/`<app_state>` blocks, where the user's files live (`$APP_STORAGE_DIR/files/`), and not re-mapping the filesystem each turn. |
 | `resolving-app-git.md` | Resolving an app update merge conflict: the per-app `upstream`/`main` model, finishing the merge in `/data/apps/<slug>/` with ordinary git (markers → edit → save → watcher finalizes), the `GIT_CEILING_DIRECTORIES` pin, verifying the recompile, and backing out (`git merge --abort` / `git revert`). The app serves its old version until you finish. Local-only during conflict resolution — pushing upstream goes through `contributing.md`. |
 | `contributing.md` | When this skill appears in **Installed app skills**: any public GitHub action — fork, push, PR, issue, or comment — or preparing a Contribute review. Never load it merely because an ordinary local app might someday be shareable. |
 | `finding-skills.md` | Finding, evaluating, or installing a third-party skill from the public ecosystem. |
 | `theming.md` | Changing the shell's look: `theme.css` (hot-reload, no rebuild), light/dark CSS variables, structural shell edits (JSX rebuild), lucide icons, describe-tree, protecting the shell. |
 | `cron.md` | Scheduling recurring jobs: `init-cron-scaffold.sh`, why every cron task needs an `init-cron.sh` (survives rebuild), the service token, scheduled-app UI rules, dry-run testing. |
-| `notifications.md` | Sending push notifications: when to notify, firing the push yourself on an open question, the curl forms, and never executing an outbound-channel script live. |
+| `notifications.md` | Pushes other than the ordinary app-complete form: open questions, custom actions, outbound scripts, and notification safety. |
 | `workflows-app.md` | Ending a turn that used background helpers or an orchestrated run: resolving the Workflows app, best-effort refresh, and leaving the partner a plain-language link to look in. Not how to run helpers — that's the CLI + the top effort tier. |
 | `images.md` | Generating images with Codex `$imagegen`, copying them into the chat's media directory, and embedding them. |
 | `recovery.md` | Backend fixes, the restart loop, `/data`-as-git (`pm-commit`), SQLite manual ALTER, file locations, chat recovery, the recovery surface. |

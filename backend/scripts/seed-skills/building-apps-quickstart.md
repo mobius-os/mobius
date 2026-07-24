@@ -105,8 +105,13 @@ const CSS = `
 Use Möbius theme variables (`--bg`, `--surface`, `--surface-2`, `--text`,
 `--muted`, `--border`, `--accent`, `--font`). Add a short app-specific prefix
 to classes. Prefer CSS classes over inline style objects except for truly
-computed values. Use lucide icons already supported by the app runtime rather
-than hand-drawn SVG.
+computed values. Prefer clear text labels for essential controls. Use a Lucide
+icon only when it adds clarity and the runtime import is already established;
+do not probe icon support for the ordinary first slice.
+
+When an interaction has nested clocks or progress measures, encode scope and
+units in state names (`sessionRemainingMs`, `phaseRemainingSeconds`) rather
+than reusing generic names such as `time`, `remaining`, or `progress`.
 
 For an ordinary app, make one strong visual decision—a calm breathing orb, a
 bright decision wheel, a tactile stack of cards—then support it with restrained
@@ -184,8 +189,9 @@ index or use `store.list()`. Do not use `localStorage`, IndexedDB, native
 
 ### 5. Verify the rendered app without exploring the whole shell
 
-Read `visual-testing.md` once before the first browser check. Use the
-readiness-gated helper:
+This section is the complete visual path for an ordinary app; do not also read
+`visual-testing.md` unless a shell issue, bug reproduction, or unusual browser
+control takes you outside it. Use the readiness-gated helper:
 
 ```bash
 bash "$SCRIPTS_DIR/preview_app.sh" <app-id>
@@ -206,10 +212,23 @@ primary flow plus persistence when the app saves data. Do not use
 `wait --text` for iframe content; it observes the top-level document. The
 preview helper already gates the initial frame readiness.
 
+If the scoped snapshot returns only the iframe node, stop using that path. Do
+not probe `contentDocument`, guess click coordinates, repeat equivalent
+snapshots, or call browser help. Open the authenticated standalone route with:
+
+```bash
+bash "$SCRIPTS_DIR/agent-screenshot.sh" /apps/<slug>/
+```
+
+Dismiss any host install prompt using the element ref from a fresh snapshot,
+then test with stable app-owned selectors or accessible labels. After a DOM
+change, take a fresh snapshot before reusing refs.
+
 Check the partner's actual viewport first. Add one phone-sized check only when
 the supplied viewport is not already phone-sized or the layout materially
-changes on small screens. Keep only screenshots that show a useful distinct
-state—never a loader, drawer transition, or redundant verification frame.
+changes on small screens. Keep at most one first useful render and one final
+materially changed state. If onboarding or a host overlay obscures the first
+capture, replace it after dismissal rather than treating it as app evidence.
 
 The default visual-test budget for an ordinary one-screen app is:
 
@@ -218,10 +237,8 @@ The default visual-test budget for an ordinary one-screen app is:
    console/error check;
 3. one responsive check when needed.
 
-Do not call browser `--help` during this path; the commands above and
-`visual-testing.md` are the contract. Do not test every secondary control or
-capture the same state twice. If a check exposes a real defect, fix it and
-repeat only the affected check.
+Do not test every secondary control or capture the same state twice. If a check
+exposes a real defect, fix it and repeat only the affected check.
 
 ### 6. Close in one pass
 
@@ -231,19 +248,40 @@ Run validation once:
 python "$SCRIPTS_DIR/validate-app.py" /data/apps/<slug>
 ```
 
-Commit only the app source you created:
+Check the app repository before committing:
 
 ```bash
-git -C /data/apps/<slug> add index.jsx mobius.json README.md icon.png .gitignore
-git -C /data/apps/<slug> commit -m "Build <short app purpose>"
+git -C /data/apps/<slug> status --short
 ```
 
-If the watcher already committed an edit, a clean app-repo status is success;
-inspect that app repo's log rather than the parent `/data` repository.
+If clean, inspect the latest app-repo commit and treat it as watcher success.
+If dirty, stage and commit only the intended app files. Never chain the
+completion notification after a commit command that may legitimately report
+nothing to commit.
 
-Send the app-complete notification using `notifications.md`, embed the useful
-render before describing it, state what the app does, and invite optional
-adjustments without blocking the completed turn.
+For an ordinary completed app, send the durable completion push directly:
+
+```bash
+curl -sS -X POST "$API_BASE_URL/api/notifications/send" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "App ready",
+    "body": "<Name> is ready to use.",
+    "source_id": "'"$CHAT_ID"'",
+    "target": "/shell/?app=<app-id>",
+    "actions": [
+      {"action":"open_app","title":"Open App","target":"/shell/?app=<app-id>"},
+      {"action":"open_chat","title":"View Chat","target":"/shell/?chat='"$CHAT_ID"'"}
+    ]
+  }'
+```
+
+Do not read `notifications.md` for this ordinary completion form. Read it for
+an open question, custom notification actions, or any app/script that sends
+notifications itself. Embed the useful render before describing it, state what
+the app does, and invite optional adjustments without blocking the completed
+turn.
 
 Only when `contributing.md` appears in the session's **Installed app skills**
 and the work is plausibly reusable by other Möbius users, offer to prepare it
