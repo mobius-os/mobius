@@ -166,6 +166,41 @@ export default function ThreeAddonsFixture() {
   assert output.is_file() and output.stat().st_size > 0
 
 
+def test_marked_root_import_uses_the_pinned_esm_entry(tmp_path):
+  """The documented named export must not collapse through Marked's UMD build."""
+  aliases = dict(runtime_library_aliases())
+  assert (
+    aliases["marked"]
+    == runtime_node_path() / "marked" / "lib" / "marked.esm.js"
+  )
+
+  entry = tmp_path / "marked.jsx"
+  output = tmp_path / "marked.js"
+  metafile = tmp_path / "marked-meta.json"
+  entry.write_text(
+    """import { marked } from 'marked'
+
+export default function MarkedFixture() {
+  return marked.parse('# Working')
+}
+"""
+  )
+
+  completed = subprocess.run(
+    esbuild_command(entry, output, metafile=metafile),
+    capture_output=True,
+    check=False,
+    env=esbuild_environment(),
+    text=True,
+    timeout=ESBUILD_TIMEOUT_SECS,
+  )
+  assert completed.returncode == 0, completed.stderr
+
+  inputs = json.loads(metafile.read_text())["inputs"]
+  assert any(path.endswith("/marked/lib/marked.esm.js") for path in inputs)
+  assert not any(path.endswith("/marked/lib/marked.umd.js") for path in inputs)
+
+
 def test_app_hosts_have_no_runtime_import_map_or_static_module_imports():
   frame = FRAME.read_text()
   standalone = STANDALONE.read_text()

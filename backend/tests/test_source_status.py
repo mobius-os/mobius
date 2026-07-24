@@ -164,7 +164,7 @@ def test_history_subject_boundary_cannot_be_forged_by_a_filename():
   assert {item["group"] for item in result["tree"]["paths"]} == {"authored"}
 
 
-def test_sanitized_origin_and_fork_topology_uses_last_fetched_refs():
+def test_installed_app_origin_does_not_compare_full_source_with_release_projection():
   repo = _repo()
   base = _git(repo, "rev-parse", "HEAD")
   _git(repo, "remote", "add", "origin", "https://github.com/example/demo.git")
@@ -180,9 +180,12 @@ def test_sanitized_origin_and_fork_topology_uses_last_fetched_refs():
   assert result["origin"]["repo"] == "example/demo"
   assert result["origin"]["ref"] == "origin/main"
   assert result["origin"]["sha"] == base
-  assert result["origin"]["local_ahead"] == 1
-  assert result["origin"]["local_behind"] == 0
-  assert result["origin"]["local_tree"]["files"] == 1
+  assert result["origin"]["local_ahead"] is None
+  assert result["origin"]["local_behind"] is None
+  assert result["origin"]["local_tree"] is None
+  # Local app work remains authoritative against the installer-owned baseline.
+  assert result["ahead"] == 1
+  assert result["tree"]["files"] == 1
   assert len(result["forks"]) == 1
   fork = result["forks"][0]
   assert fork["repo"] == "owner/demo"
@@ -194,6 +197,25 @@ def test_sanitized_origin_and_fork_topology_uses_last_fetched_refs():
   payload = repr(result)
   assert "git@github.com" not in payload
   assert "https://github.com" not in payload
+
+
+def test_full_checkout_can_request_local_origin_topology():
+  repo = _repo("full-checkout")
+  base = _git(repo, "rev-parse", "HEAD")
+  _git(repo, "remote", "add", "origin", "https://github.com/example/demo.git")
+  _git(repo, "update-ref", "refs/remotes/origin/main", base)
+  (repo / "local.js").write_text("local\n", encoding="utf-8")
+  _git(repo, "add", "local.js")
+  _commit(repo, "local source edit")
+
+  origin, forks = source_status._remote_topology(
+    repo, "example/demo", compare_local=True,
+  )
+
+  assert forks == []
+  assert origin["local_ahead"] == 1
+  assert origin["local_behind"] == 0
+  assert origin["local_tree"]["files"] == 1
 
 
 def test_diverged_counts_and_sanitized_github_identity():
