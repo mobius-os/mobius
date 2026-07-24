@@ -217,7 +217,35 @@ def test_unverifiable_image_state_keeps_identity_and_fails_closed():
   )
 
   assert result.returncode == 1
-  assert "refusing to forget its identity" in result.stdout
+  assert "sha256:unknown" in result.stdout
+  assert "refusing to build" in result.stdout
+
+
+def test_referenced_superseded_image_blocks_the_build():
+  harness = _helpers() + textwrap.dedent("""\
+    ok() { printf 'OK %s\n' "$1"; }
+    warn() { printf 'WARN %s\n' "$1"; }
+    docker() {
+      if [ "$1" = inspect ]; then
+        printf 'sha256:current\n'
+      elif [ "$1" = image ] && [ "$2" = ls ]; then
+        printf 'sha256:still-referenced\n'
+      elif [ "$1" = image ] && [ "$2" = rm ]; then
+        return 1
+      fi
+    }
+    CONTAINER=mobius
+    PREV_IMAGE=sha256:current
+    PREVIOUS_ROLLBACK_IMAGE=sha256:still-referenced
+    remove_superseded_rollback_image
+  """)
+  result = subprocess.run(
+    ["bash", "-c", harness], capture_output=True, text=True,
+  )
+
+  assert result.returncode == 1
+  assert "sha256:still-referenced" in result.stdout
+  assert "still present; refusing to build" in result.stdout
 
 
 def test_reflection_refresh_is_cheap_and_runs_after_success_cache_cleanup():

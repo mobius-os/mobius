@@ -610,7 +610,7 @@ remove_superseded_rollback_image() {
     return 0
   fi
   if [ "$state" -eq 2 ]; then
-    warn "could not verify the superseded rollback image; refusing to forget its identity."
+    warn "could not verify superseded rollback image $old_image; refusing to build."
     return 1
   fi
   current_image=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true)
@@ -629,10 +629,10 @@ remove_superseded_rollback_image() {
     return 0
   fi
   if [ "$state" -eq 0 ]; then
-    warn "superseded rollback image ${old_image:0:19}… is still referenced; left it untouched."
-    return 0
+    warn "superseded rollback image $old_image is still present; refusing to build."
+    return 1
   fi
-  warn "could not verify cleanup of superseded rollback image ${old_image:0:19}…"
+  warn "could not verify cleanup of superseded rollback image $old_image"
   return 1
 }
 
