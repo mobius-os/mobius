@@ -292,9 +292,11 @@ def _chat_detail_response(
   limit: int = 20,
   before: int | None = None,
   expose_session: bool = True,
+  compact: bool = False,
 ) -> dict:
   """Canonical paginated chat payload shared by create and detail reads."""
   from app.chat_transcript import (
+    compact_messages_for_detail,
     historical_tool_output_ids,
     materialized_messages,
     project_messages_for_detail,
@@ -338,6 +340,12 @@ def _chat_detail_response(
     fetchable_tool_output_ids=fetchable_tool_ids,
     live_message=live_message,
   )
+  if compact:
+    page = compact_messages_for_detail(
+      page,
+      message_offset=start,
+      live_message=live_message,
+    )
 
   provider = chat.provider or "claude"
   pending_question = questions.get(chat.id)
@@ -1073,6 +1081,7 @@ def get_chat(
   chat_id: str,
   limit: int = 20,
   before: int | None = None,
+  compact: bool = False,
   principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
@@ -1096,10 +1105,114 @@ def get_chat(
     db=db,
     limit=limit,
     before=before,
+    compact=compact,
     # Provider thread ids are backend continuity state, not part of the
     # embedded participant surface.
     expose_session=principal.scope != "chat_embed",
   )
+
+
+@router.get("/{chat_id}/runtime")
+def get_chat_runtime(
+  chat_id: str,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Return only the mutable runtime fields used by mounted chat controls."""
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:read")
+  chat = get_active_chat_for_principal(
+    db,
+    chat_id,
+    principal,
+    load_fields=(models.Chat.pending_messages,),
+  )
+  pending_question = questions.get(chat.id)
+  return {
+    "running": is_chat_running(chat.id),
+    "pending_messages": list(chat.pending_messages or []),
+    "pending_question_id": (
+      pending_question.question_id if pending_question is not None else None
+    ),
+  }
+
+
+@router.get("/{chat_id}/activity-detail")
+def get_chat_activity_detail(
+  chat_id: str,
+  message_index: int = Query(ge=0),
+  start: int = Query(ge=0),
+  end: int = Query(gt=0),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Return one deliberately expanded historical activity range.
+
+  The ordinary transcript read projects multi-step activity into collapsed
+  metadata. This endpoint resolves that metadata back to the exact stored
+  blocks only after the owner opens the line. It never rewrites the transcript.
+  """
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:read")
+  if end <= start or end - start > 2000:
+    raise HTTPException(status_code=422, detail="Invalid activity range.")
+
+  from app.chat_transcript import (
+    historical_tool_output_ids,
+    materialized_messages,
+    project_messages_for_detail,
+  )
+
+  chat = get_active_chat_for_principal(db, chat_id, principal)
+  messages = materialized_messages(chat)
+  if message_index >= len(messages):
+    raise HTTPException(status_code=404, detail="Activity message not found.")
+  message = messages[message_index]
+  blocks = message.get("blocks") if isinstance(message, dict) else None
+  if not isinstance(blocks, list) or end > len(blocks):
+    raise HTTPException(status_code=404, detail="Activity range not found.")
+
+  selected = [
+    (raw_index, block)
+    for raw_index, block in enumerate(blocks[start:end], start=start)
+    if isinstance(block, dict)
+    and block.get("type") in {"tool", "thinking"}
+    and not (
+      block.get("type") == "tool"
+      and block.get("tool") in {"AskUserQuestion", "request_user_input"}
+      and any(
+        isinstance(candidate, dict) and candidate.get("type") == "question"
+        for candidate in blocks
+      )
+    )
+  ]
+  detail_message = {
+    "role": "assistant",
+    "blocks": [block for _, block in selected],
+  }
+  candidate_tool_ids = historical_tool_output_ids([detail_message])
+  fetchable_tool_ids = (
+    {
+      row[0]
+      for row in db.query(models.ToolOutput.tool_use_id).filter(
+        models.ToolOutput.chat_id == chat.id,
+      ).all()
+    }
+    if candidate_tool_ids
+    else set()
+  )
+  projected = project_messages_for_detail(
+    [detail_message],
+    fetchable_tool_output_ids=fetchable_tool_ids,
+  )[0]["blocks"]
+  return {
+    "entries": [
+      {"item": block, "idx": raw_index}
+      for (raw_index, _), block in zip(selected, projected, strict=True)
+    ],
+  }
 
 
 @router.get("/{chat_id}/tool-output/{tool_use_id}", response_class=PlainTextResponse)

@@ -85,8 +85,9 @@ test('every thinking entry remains the same collapsed nested disclosure', () => 
     'reasoning remains available inside the nested disclosure')
 })
 
-test('a single activity discloses directly without a redundant parent row', () => {
-  assert.match(activityStretch, /if \(entries\.length === 1\)/)
+test('a single self-contained activity discloses directly without a redundant parent row', () => {
+  assert.match(activityStretch, /if \(entries\.length === 1 && !detailRef\)/,
+    'a one-entry lazy summary still owns its multi-step detail disclosure')
   assert.match(activityStretch, /<SingleActivity[\s\S]*entry=\{entries\[0\]\}/)
   assert.match(activityStretch,
     /item\.type === 'thinking'[\s\S]*<TimelineThought[\s\S]*direct[\s\S]*live=\{live\}/)

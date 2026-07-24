@@ -869,6 +869,19 @@ All chat-domain mutations — transcript writes, run-markers, question rows, ans
 
 Streaming state is physically bounded: `PersistTranscript`/`PersistError` replace `Chat.live_assistant`, never the historical `Chat.messages` JSON blob. Read routes overlay that current assistant on immutable history. `QuestionCommit` merges the card into history before broadcast, `Finalize` performs the terminal merge and clears the live value, and startup reconciliation performs the same merge after a crash. This keeps one-second crash-resilient snapshots without quadratic transcript rewrites as chats grow.
 
+Settled transcript reads have a separate bounded presentation contract.
+`GET /api/chats/{id}?compact=1` keeps prose, cards, distinctive image-view
+beats, and small collapsed activity metadata, but replaces each multi-step
+thinking/tool run with an `activity` reference into the immutable stored
+message. Repeated steps are bounded by activity variety rather than raw call
+count. Only an explicit disclosure resolves that exact range through
+`GET /api/chats/{id}/activity-detail`; the live assistant stays self-contained.
+Mounted runtime reconciliation uses `GET /api/chats/{id}/runtime`, whose ORM
+projection raiseloads every unrequested field so polling can never silently
+decode `Chat.messages`. These are read projections, never a second persistence
+format: provider context, recovery, export, and writer commands continue to
+use the full transcript.
+
 - **Commit-before-ack (strict paths):** the caller's `await` on `QuestionCommit`/`Finalize`/`AnswerQuestion`/`Barrier`/`DrainAndStop` doesn't unblock until the commit succeeds; `PersistTranscript` and `PersistError` are fire-and-forget (submitted without awaiting the ack).
 - **Questions commit-before-broadcast:** a question row is durable before its SSE push fires, so a reconnect's catch-up burst always finds it.
 - **Concurrency invariant:** ack `Future`s are NEVER resolved while a producer lock is held — collect `(ack, value)` under the lock, resolve after release — so even a synchronous done-callback that re-enters `submit()`/`stop()` can't deadlock. Do not move an ack resolution back inside a `with` block.

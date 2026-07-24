@@ -329,9 +329,9 @@ export default function ChatView({
   const offsetRef = useRef(offset)
   offsetRef.current = offset
   const [loading, setLoading] = useState(!cached)
-  // Warm cache content is useful immediately, but it is not authoritative for
-  // entry layout. The first refresh decides whether an already-running turn's
-  // catch-up must settle before the transcript can be revealed.
+  // A settled warm cache is a complete renderable transcript and may reveal
+  // while freshness loads. A cached running turn is different: its live bridge
+  // still needs the first refresh/catch-up handshake before takeover.
   const cachedEntryPhase = cached && !cached.running ? 'cached' : 'history'
   const [initialEntryPhase, setInitialEntryPhase] = useState(cachedEntryPhase)
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
@@ -1008,7 +1008,7 @@ export default function ChatView({
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
-        `/chats/${chatId}?limit=20`,
+        `/chats/${chatId}?limit=20&compact=1`,
         { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
       )
       if (!res.ok) throw new Error(`CHAT_FETCH_FAILED_${res.status}`)
@@ -1106,7 +1106,7 @@ export default function ChatView({
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
-        `/chats/${chatId}?limit=1`,
+        `/chats/${chatId}/runtime`,
         { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
       )
       const data = await jsonOrThrow(res, 'Runtime refresh failed')
@@ -1778,7 +1778,7 @@ export default function ChatView({
     setInitialEntryPhase(cachedEntryPhase)
 
     const gen = fetchGenRef.current
-    apiFetch(`/chats/${chatId}?limit=20`, {
+    apiFetch(`/chats/${chatId}?limit=20&compact=1`, {
       timeoutMs: CHAT_FETCH_TIMEOUT_MS,
       signal: initialLoadController.signal,
     })
@@ -1947,7 +1947,7 @@ export default function ChatView({
     // them at the new anchor; the next gesture (or send) writes a
     // fresh mode.
     apiFetch(
-      `/chats/${chatId}?limit=20&before=${offset}`,
+      `/chats/${chatId}?limit=20&before=${offset}&compact=1`,
       { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
     )
       .then(r => jsonOrThrow(r, 'Earlier messages failed to load'))
@@ -2728,7 +2728,7 @@ export default function ChatView({
       // response cannot overwrite unrelated queue mutations.
       try {
         const res = await apiFetch(
-          `/chats/${chatId}?limit=1`,
+          `/chats/${chatId}/runtime`,
           { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
         )
         const data = await jsonOrThrow(res, 'Queue refresh failed')
@@ -2864,7 +2864,7 @@ export default function ChatView({
       }
       const confirmStopIdle = async () => {
         try {
-          const res = await apiFetch(`/chats/${chatId}?limit=1`, { timeoutMs: 5000 })
+          const res = await apiFetch(`/chats/${chatId}/runtime`, { timeoutMs: 5000 })
           if (!res.ok) return { failed: true, running: null }
           const data = await res.json()
           return { failed: false, running: data?.running }
@@ -3393,11 +3393,15 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  // The scroll safety cap may reveal an otherwise empty DOM while the initial
-  // request is still in flight. That protects a standalone ChatView from being
-  // hidden forever, but it is not a valid shell handoff: keep the outgoing chat
-  // painted until this chat has authoritative content, emptiness, or an error.
-  const displayReady = !loading && (revealed || showEmpty || showLoadError)
+  // A settled cache is already a complete renderable transcript, so let the
+  // shell hand it over as soon as scroll restoration reveals it while the
+  // freshness request continues in the background. Running caches stay on the
+  // strict path: their bridge/catch-up handshake must settle before takeover.
+  // Cold loads likewise keep the outgoing chat painted until authoritative
+  // content, confirmed emptiness, or a real error exists.
+  const cachedDisplayReady = initialEntryPhase === 'cached' && revealed
+  const displayReady = cachedDisplayReady
+    || (!loading && (revealed || showEmpty || showLoadError))
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])

@@ -12,11 +12,16 @@ function ruleBody(selector) {
   return shellCss.match(new RegExp(`${escaped}\\s*\\{([\\s\\S]*?)\\}`))?.[1] || ''
 }
 
-test('chat display readiness preserves the existing transcript reveal gate', () => {
+test('chat display readiness trusts settled cache but keeps cold/running gates', () => {
   assert.match(
     chatView,
-    /const displayReady = !loading && \(revealed \|\| showEmpty \|\| showLoadError\)/,
-    'a transcript may hand off only after its initial load and reveal gate settle',
+    /const cachedDisplayReady = initialEntryPhase === 'cached' && revealed/,
+    'a settled cached transcript can hand off without waiting on network freshness',
+  )
+  assert.match(
+    chatView,
+    /const displayReady = cachedDisplayReady\s*\|\| \(!loading && \(revealed \|\| showEmpty \|\| showLoadError\)\)/,
+    'cold and running transcripts keep the authoritative load and reveal gates',
   )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
     'readiness must reach Shell before the browser paints the hidden transcript')
@@ -31,7 +36,7 @@ test('a staging chat cannot leave the outgoing transcript held on a wedged reque
   assert.match(chatView, /const CHAT_FETCH_TIMEOUT_MS = 15000/)
   assert.match(
     chatView,
-    /apiFetch\(`\/chats\/\$\{chatId\}\?limit=20`, \{\s*timeoutMs: CHAT_FETCH_TIMEOUT_MS,\s*signal: initialLoadController\.signal,\s*\}\)/,
+    /apiFetch\(`\/chats\/\$\{chatId\}\?limit=20&compact=1`, \{\s*timeoutMs: CHAT_FETCH_TIMEOUT_MS,\s*signal: initialLoadController\.signal,\s*\}\)/,
     'the initial load must share the bounded message-fetch deadline',
   )
   assert.match(chatView, /initialLoadController\.abort\(\)/,

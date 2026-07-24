@@ -137,6 +137,27 @@ function MsgContentInner({
     // are folded into an ActivityStretch below; this renders only the `single`
     // nodes — text, question, error.
     const renderBlock = (block, i) => {
+      if (block.type === 'activity' && Array.isArray(block.entries)) {
+        return (
+          <div
+            key={block.activity_id || `activity-${i}`}
+            className="chat__tools"
+          >
+            <ActivityStretch
+              entries={block.entries}
+              chatId={chatId}
+              live={false}
+              surfaceKey={messageKey}
+              detailRef={{
+                message_index: block.message_index,
+                start: block.start,
+                end: block.end,
+              }}
+              summaryToolCount={block.tool_count}
+            />
+          </div>
+        )
+      }
       if (block.type === 'text') {
         const text = msg.role === 'user'
           ? stripAugmentation(block.content) : block.content
