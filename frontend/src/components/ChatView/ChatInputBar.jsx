@@ -67,6 +67,13 @@
  * ║      turn when possible, otherwise it sends normally.            ║
  * ║      Shift+Enter always inserts a newline.                        ║
  * ║                                                                  ║
+ * ║   8. SENT-MESSAGE HISTORY                                        ║
+ * ║      Up recalls sent messages only after native textarea movement ║
+ * ║      has reached the visual top; once browsing, Up/Down walk       ║
+ * ║      history and Down past the newest restores the unfinished     ║
+ * ║      draft. Manual edits and sends exit history. Modifier chords   ║
+ * ║      and IME composition stay native.                              ║
+ * ║                                                                  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
 
@@ -74,6 +81,11 @@ import { useRef, useState, useEffect, useLayoutEffect } from 'react'
 import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
+import {
+  composerHistoryNativeProbe,
+  composerHistoryProbeReachedBoundary,
+  resolveComposerHistoryMove,
+} from './composerHistory.js'
 import { resolveComposerEnterAction } from './composerShortcuts.js'
 import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
 
@@ -362,6 +374,7 @@ function FileChips({ files, onRemove, chatId }) {
  *   submissionBlocked  — true while an atomic provider handoff owns the
  *                        chat; drafting stays available but send/mic-start do
  *                        not race the transition.
+ *   messageHistory     — visible owner-authored message text, oldest first.
  *
  * The bar does NOT own send state — ChatView's doSend handles that.
  * The bar's only job: composition + the Send/Stop/Mic resolution.
@@ -392,8 +405,13 @@ export default function ChatInputBar({
   leftButtons,
   rightButtons,
   attachTriggerRef,
+  messageHistory = [],
 }) {
   const fileInputRef = useRef(null)
+  const historyIndexRef = useRef(null)
+  const historyDraftRef = useRef('')
+  const historyCaretRef = useRef(null)
+  const historyProbeVersionRef = useRef(0)
   // Captures whether the textarea was focused at the moment the file
   // picker opened. Read by `handleFileSelect` to decide whether to
   // refocus the textarea after the picker closes — refocusing
@@ -425,6 +443,31 @@ export default function ChatInputBar({
     }
   }, [attachTriggerRef, inputRef])
 
+  function resetMessageHistory() {
+    historyProbeVersionRef.current += 1
+    historyIndexRef.current = null
+    historyDraftRef.current = ''
+    historyCaretRef.current = null
+  }
+
+  // Never carry a traversal or its saved draft into another chat. History
+  // list refreshes deliberately do not reset this: a queued message can move
+  // into the transcript while the owner is browsing, and that must not erase
+  // the draft that Down will restore.
+  useEffect(() => {
+    resetMessageHistory()
+  }, [chatId])
+
+  // History values arrive through the controlled composer boundary. Restore
+  // the caret after React commits that value without changing focus or scroll.
+  useLayoutEffect(() => {
+    const pending = historyCaretRef.current
+    const textarea = inputRef?.current
+    if (!pending || pending.value !== input || !textarea) return
+    try { textarea.setSelectionRange(pending.caret, pending.caret) } catch {}
+    historyCaretRef.current = null
+  }, [input, inputRef])
+
   const hasInput = !!input.trim()
   const hasUploading = pendingFiles?.some(c => c.status === 'uploading') ?? false
 
@@ -444,6 +487,7 @@ export default function ChatInputBar({
   }
 
   function handleTextareaChange(e) {
+    resetMessageHistory()
     if (listeningRef?.current) onManualVoiceEdit?.(e.target.value)
     onInputChange(e.target.value)
   }
@@ -458,6 +502,70 @@ export default function ChatInputBar({
   }
 
   function handleKeyDown(e) {
+    function applyHistoryMove(historyMove) {
+      historyIndexRef.current = historyMove.index
+      historyDraftRef.current = historyMove.draft
+      historyCaretRef.current = {
+        value: historyMove.value,
+        caret: historyMove.value.length,
+      }
+      if (listeningRef?.current) {
+        onManualVoiceEdit?.(historyMove.value)
+      }
+      onInputChange(historyMove.value)
+      // At the oldest entry another Up resolves to the same controlled value,
+      // so React may not commit a render for the layout effect above.
+      if (historyMove.value === input) {
+        try {
+          inputRef?.current?.setSelectionRange(
+            historyMove.value.length,
+            historyMove.value.length,
+          )
+        } catch {}
+        historyCaretRef.current = null
+      }
+    }
+
+    const historyMove = resolveComposerHistoryMove(e, {
+      history: messageHistory,
+      index: historyIndexRef.current,
+      draft: historyDraftRef.current,
+      value: input,
+    })
+    if (historyMove) {
+      e.preventDefault()
+      applyHistoryMove(historyMove)
+      return
+    }
+
+    const historyProbe = composerHistoryNativeProbe(e, {
+      history: messageHistory,
+      index: historyIndexRef.current,
+      value: input,
+    })
+    if (historyProbe) {
+      const probeVersion = ++historyProbeVersionRef.current
+      requestAnimationFrame(() => {
+        const textarea = inputRef?.current
+        if (
+          historyProbeVersionRef.current !== probeVersion
+          || !composerHistoryProbeReachedBoundary(historyProbe, textarea)
+        ) return
+        const deferredMove = resolveComposerHistoryMove({
+          key: 'ArrowUp',
+          target: textarea,
+        }, {
+          history: messageHistory,
+          index: historyIndexRef.current,
+          draft: historyDraftRef.current,
+          value: input,
+          nativeBoundary: true,
+        })
+        if (deferredMove) applyHistoryMove(deferredMove)
+      })
+      return
+    }
+
     const action = resolveComposerEnterAction(e, {
       hasInput,
       canSteer,
@@ -468,22 +576,34 @@ export default function ChatInputBar({
     if (!action) return
     e.preventDefault()
     if (action === 'steer') {
+      resetMessageHistory()
       onSteer()
       return
     }
     if (action === 'submit-steer') {
-      if (!submissionBlocked) onSubmitSteer(e)
+      if (!submissionBlocked) {
+        resetMessageHistory()
+        onSubmitSteer(e)
+      }
       return
     }
     if (action === 'submit') {
-      if (!submissionBlocked) onSubmit(e)
+      if (!submissionBlocked) {
+        resetMessageHistory()
+        onSubmit(e)
+      }
     }
+  }
+
+  function handleSubmit(e) {
+    resetMessageHistory()
+    onSubmit(e)
   }
 
   const hasFiles = !!pendingFiles?.length
 
   return (
-    <form className="chat__form" onSubmit={onSubmit}>
+    <form className="chat__form" onSubmit={handleSubmit}>
       <input
         type="file"
         multiple
@@ -534,7 +654,7 @@ export default function ChatInputBar({
               offline={offline}
               canSteer={canSteer}
               submissionBlocked={submissionBlocked}
-              onSubmit={onSubmit}
+              onSubmit={handleSubmit}
               onStop={onStop}
               onSteer={onSteer}
               onToggleVoice={onToggleVoice}

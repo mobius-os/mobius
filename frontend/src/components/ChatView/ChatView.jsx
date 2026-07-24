@@ -4,6 +4,7 @@ import {
   useEffect,
   useLayoutEffect,
   useCallback,
+  useMemo,
   useSyncExternalStore,
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -54,6 +55,7 @@ import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
 import { copyableMessageText, copyPlainText } from './messageCopy.js'
+import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
 import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
 import {
@@ -315,6 +317,10 @@ export default function ChatView({
   // back via `commitMessages`, so any miss self-heals on next remount.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
   const [messages, setMessages] = useState(() => cached?.messages ?? [])
+  const messageHistory = useMemo(
+    () => composerHistoryFromMessages(messages),
+    [messages],
+  )
   const [offset, setOffset] = useState(() => cached?.offset ?? 0)
   const offsetRef = useRef(offset)
   offsetRef.current = offset
@@ -4059,6 +4065,7 @@ export default function ChatView({
           onAddFiles={handleComposerAddFiles}
           onRemoveFile={handleComposerRemoveFile}
           attachTriggerRef={attachTriggerRef}
+          messageHistory={messageHistory}
           leftButtons={
             <>
               <ComposerPopover
