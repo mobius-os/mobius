@@ -79,6 +79,9 @@ cd "$ROOT/backend" || exit 1
 # of the enclosing repo, and the app-git tests use explicit -C <tmp_path>.
 exec env \
   GIT_CEILING_DIRECTORIES="$ROOT" \
+  MOBIUS_TEST_RUNTIME=1 \
+  MOEBIUS_SKIP_BOOTSTRAP=1 \
+  API_BASE_URL=http://127.0.0.1:9 \
   PATH="$ESB_DIR:${PATH:-}" \
   NODE_PATH="$NODE_MODULES${NODE_PATH:+:$NODE_PATH}" \
   SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}" \

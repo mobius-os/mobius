@@ -240,10 +240,26 @@ _HTTP_TIMEOUT = 15.0
 # different host.
 _MAX_REDIRECTS = 5
 
-# Cron scaffold lives at this path in the built image. Tests override
-# the module attribute to bypass the scaffold (which hardcodes
-# `/data/apps/<slug>/` and doesn't accept the test's `/tmp/testdata`).
+# Cron scaffold lives at this path in the built image. Tests normally override
+# the module attribute; the test-runtime mutation guard below is the backstop
+# when the baked scaffold is present (as it is inside the production image).
 CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
+_ALLOW_TEST_CRON_ENV = "MOBIUS_ALLOW_TEST_CRON"
+
+
+def _cron_mutation_blocked_in_test_runtime() -> bool:
+  """Whether host crontab writes must fail closed in this process.
+
+  Pytest is occasionally run from inside the production container, where the
+  real scaffold and crontab binary are both available. Its database and
+  DATA_DIR are isolated, but a low-id test app must never escape that boundary
+  and replace a production schedule. Narrow unit tests can opt in only while
+  their crontab/scaffold subprocess is explicitly faked.
+  """
+  return (
+    os.environ.get("MOBIUS_TEST_RUNTIME") == "1"
+    and os.environ.get(_ALLOW_TEST_CRON_ENV) != "1"
+  )
 
 
 def _validate_manifest(m: dict) -> None:
@@ -1121,6 +1137,11 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
   such a job runs with no id and exits early — which is exactly how a
   freshly-installed news app's cron lands dead on arrival.
   """
+  if _cron_mutation_blocked_in_test_runtime():
+    raise HTTPException(
+      500,
+      "Cron mutation is disabled in the test runtime.",
+    )
   scaffold = CRON_SCAFFOLD
   if not scaffold.exists():
     # In tests we mock this away; in containers it's always present.
@@ -1230,6 +1251,8 @@ def _unregister_cron(source_dir: Path) -> None:
   source-tree rmtree this accompanies. Runs `crontab -u mobius` (the
   server runs as mobius, which may edit its own crontab).
   """
+  if _cron_mutation_blocked_in_test_runtime():
+    return
   try:
     listing = subprocess.run(
       ["crontab", "-u", "mobius", "-l"],
