@@ -628,10 +628,7 @@ test('four-pane assemble/scatter preserves all four outer-edge vectors', () => {
   }
 })
 
-test('uneven entry normalizes pane velocity and lands every edge on one frame', () => {
-  // A deliberately asymmetric tree reproduces the production complaint: without
-  // distance-aware timing, the shortest and longest edge vectors differ by almost
-  // 2× while sharing one duration, so one pane visibly rushes into the seam.
+test('uneven entry uses one coordinated progress clock for every edge', () => {
   let ws = paneModel.seedFromFlatTabs([makeTab('chat', '1')])
   ws = paneModel.splitPaneWithTab(ws, makeTab('chat', '2'), {
     paneId: ws.focusedPaneId, edge: 'right',
@@ -646,17 +643,11 @@ test('uneven entry normalizes pane velocity and lands every edge on one frame', 
 
   const plan = deriveEnterPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
   assert.equal(plan.totalMs, MODE_MOTION.enterItemMs)
-  assert.ok(plan.participants.some(p => p.delayMs > 0),
-    'a shorter trip waits offscreen instead of racing a longer trip')
+  assert.ok(plan.participants.every(p => p.delayMs === 0),
+    'every pane starts on the same frame')
   assert.ok(plan.participants.every(
     p => p.delayMs + p.durationMs === MODE_MOTION.enterItemMs,
   ), 'every pane lands on the same terminal frame')
-
-  const speeds = plan.participants.map((p) => (
-    Math.hypot(p.offset.x, p.offset.y) / p.durationMs
-  ))
-  assert.ok(Math.max(...speeds) / Math.min(...speeds) < 1.15,
-    'average pane velocities stay perceptually aligned despite asymmetric geometry')
 })
 
 test('N1: MODE_MOTION drops the unused chromeMs constant', () => {

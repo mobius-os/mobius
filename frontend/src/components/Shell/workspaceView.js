@@ -59,12 +59,11 @@ export function projectFocusedPane(baseProjection, workspace, paneId, contentRec
 // Timing (ms). Constants live here, NOT in the machine, so the reconcile clock
 // (INV 14) and the missing-target fallback (INV 13) reason about the plan's own
 // totalMs rather than a fixed per-phase maximum. Mode changes are intentionally one
-// short beat using only compositor transforms + opacity. Entry participants may
-// start at different instants to normalize unequal travel, but land together; there
-// is no pane-count stagger or second destination phase to make the owner wait.
+// short beat using only compositor transforms + opacity. Every participant in a
+// direction shares one progress clock: coordinated interface motion matters more
+// than equalizing raw pixels-per-millisecond across differently sized panes.
 export const MODE_MOTION = Object.freeze({
   enterItemMs: 240,
-  enterMinItemMs: 120,
   exitItemMs: 180,
   promoteMs: 210,
   logoReleaseMs: 90,
@@ -327,11 +326,10 @@ export function deriveExitPlan(input) {
 }
 
 // deriveEnterPlan(input) → the latched entry plan, or null when there is nothing
-// to assemble. The single-screen surface remains a stationary full-bleed underlay
-// while every OTHER visible pane gathers from its nearest outer edge. When that
-// surface is also a builder leaf, completion simply crops the retained wrapper
-// into its pane. This keeps the Standard world visually still instead of scaling
-// it like a foreground card, and needs no duplicate ChatView/AppCanvas.
+// to assemble. The single-screen surface remains the live, stationary full-bleed
+// underlay while every OTHER visible pane gathers from its nearest outer edge.
+// That background never joins the motion plan or changes geometry during the beat;
+// completion alone hands it back to the tiled layout.
 //
 export function deriveEnterPlan(input) {
   const { workspace, projection, contentRect } = input
@@ -343,31 +341,14 @@ export function deriveEnterPlan(input) {
   const participants = []
   const completionNames = new Set()
   const underlayKey = target
-
-  const incoming = leaves
-    .filter(l => l.activeKey !== target)
-    .map(l => ({ leaf: l, offset: edgeOffset(l.rect, contentRect, l.motionRect) }))
+  const incoming = leaves.filter(l => l.activeKey !== target)
   if (incoming.length === 0) return null
-  const maxDistance = Math.max(...incoming.map(({ offset }) => Math.hypot(offset.x, offset.y)))
-
-  for (const { leaf: l, offset } of incoming) {
-    // Projection-derived travel can differ by nearly 2× in an uneven three-pane
-    // tree. Start shorter trips later and give them proportionally less time so
-    // every pane travels at the same perceived speed and lands on the same frame.
-    // The floor prevents a very small pane from becoming a one-frame flash.
-    const distance = Math.hypot(offset.x, offset.y)
-    const proportionalMs = maxDistance > 0
-      ? Math.round(MODE_MOTION.enterItemMs * distance / maxDistance)
-      : MODE_MOTION.enterItemMs
-    const durationMs = Math.min(
-      MODE_MOTION.enterItemMs,
-      Math.max(MODE_MOTION.enterMinItemMs, proportionalMs),
-    )
+  for (const l of incoming) {
     participants.push({
       key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
-      delayMs: MODE_MOTION.enterItemMs - durationMs,
-      durationMs,
-      offset,
+      delayMs: 0,
+      durationMs: MODE_MOTION.enterItemMs,
+      offset: edgeOffset(l.rect, contentRect, l.motionRect),
     })
     completionNames.add(DEAL_IN_NAME)
   }
