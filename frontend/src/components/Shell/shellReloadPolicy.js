@@ -71,6 +71,7 @@ export function shouldDeferShellReload({
   activeElement,
   activeView,
   activeChatId,
+  multiPaneBuilderVisible = false,
   streamingChatIds,
   passiveRebuild = false,
   voiceDictationActive = false,
@@ -79,6 +80,13 @@ export function shouldDeferShellReload({
   visibilityState = 'visible',
 } = {}) {
   if (visibilityState === 'hidden') return false
+  // Builder is one live workspace, not merely the focused route. Reloading it
+  // at the focused chat's idle boundary tears down every visible chat and app
+  // pane together, producing a workspace-wide blank/reload even when the other
+  // panes are actively being read or used. Keep all shell generations queued
+  // until the page is backgrounded or the owner returns to Standard. This is
+  // the multi-pane counterpart of the visible-canvas protection below.
+  if (multiPaneBuilderVisible) return true
   // Canvas apps may contain games, unsaved work, media, or nested fullscreen
   // documents whose state is opaque to the shell. Never tear down that visible
   // surface for a background shell generation. The existing active-view and
