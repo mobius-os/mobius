@@ -759,7 +759,8 @@
   padding-inline: 0;
 }
 
-.chat__tool--compact .chat__tool-detail {
+.chat__tool--compact .chat__tool-detail,
+.chat__activity-timeline .chat__tool-detail {
   margin-block-start: var(--activity-row-gap, 4px);
   margin-inline-start: 20px;
   padding: 8px 10px 10px;
@@ -1460,9 +1461,9 @@
   margin-top: var(--activity-row-gap, 4px);
 }
 
-/* Soften the ToolBlock shell inside the timeline: no card border/tint/fill — the
-   rail supplies structure, so a tool reads as a quiet row, not a nested card.
-   Scoped to the timeline so an out-of-timeline fixture keeps the base look. */
+/* Soften the ToolBlock's outer shell inside the timeline: the rail supplies
+   structure for each row. The disclosed command/output keeps the shared detail
+   boundary above so grouped and lone tools reveal the same inspection surface. */
 .chat__activity-timeline .chat__tool {
   border-radius: 0;
 }
@@ -1474,10 +1475,6 @@
 .chat__activity-timeline .chat__tool-header {
   min-height: 28px;
   padding: var(--activity-row-gap, 4px) 0;
-}
-.chat__activity-timeline .chat__tool-detail {
-  margin-inline-start: 20px;
-  padding: 2px 0 calc(var(--activity-row-gap, 4px) * 2);
 }
 
 /* Top-level transcript actions keep a dependable touch target. Nested activity
