@@ -1,9 +1,12 @@
 export function sendFailureMessage(error, { online = true } = {}) {
-  if (!online || error?.name === 'ChatTransportError') {
-    return 'Möbius couldn’t reach the server. Your message is back in the composer—check your connection and try again.'
+  if (!online) {
+    return 'You’re offline. Your message is back in the composer—send it when you reconnect.'
+  }
+  if (error?.name === 'ChatTransportError') {
+    return 'Möbius couldn’t confirm the send. Your message is back in the composer—retrying won’t send it twice.'
   }
   if (error?.name === 'AbortError') {
-    return 'Möbius took too long to respond. Your message is back in the composer—try again.'
+    return 'Möbius took too long to confirm the send. Your message is back in the composer—retrying won’t send it twice.'
   }
   const status = Number(error?.status)
   if (status === 503 || status >= 500) {
