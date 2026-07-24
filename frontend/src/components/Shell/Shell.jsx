@@ -42,7 +42,6 @@ import {
   ACTIVATE_FOREGROUND,
 } from './workspacePlacement.js'
 import {
-  appBuildFailureMessage,
   appUpdateStaleMessage,
   findAppStoreApp,
 } from '../../lib/appRecovery.js'
@@ -2478,12 +2477,12 @@ export default function Shell() {
         confirmAndPlace()
       }
     } else if (ev.type === 'app_build_failed') {
-      // System-bus-only (app_watcher publishes it there alone), so it arrives
-      // exactly once — no dedup stamp needed.
-      showToast(appBuildFailureMessage(ev), {
-        variant: 'error',
-        duration: 10000,
-      })
+      // A failed background build leaves the previous app version running.
+      // The owner has no useful action here, and a burst of watcher retries
+      // must never cover the composer. Keep the diagnostic in backend logs;
+      // actionable update drift uses app_update_stale below with a direct path
+      // back to the App Store.
+      return
     } else if (ev.type === 'app_update_stale') {
       // The reviewed candidate changed while a conflict was being resolved.
       // Keep the prior live version explicit and take the owner back to the
