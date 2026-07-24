@@ -16,12 +16,6 @@ class SetupRequest(BaseModel):
   # setup payloads before password hashing work. bcrypt receives a fixed-width
   # digest, so every character remains significant.
   password: str = Field(min_length=1, max_length=1024)
-  # First-boot claim gate: the one-time possession proof from the deploy logs
-  # / MOBIUS_SETUP_CLAIM. Optional-with-default on purpose — a missing field
-  # must NOT become a Pydantic 422 (an oracle exposing the mechanism); the
-  # route funnels missing/empty/malformed/wrong to one uniform 403. See
-  # app.setup_claim.
-  claim: str = ""
 
   @field_validator("username", mode="before")
   @classmethod
@@ -36,18 +30,8 @@ class SetupRequest(BaseModel):
       raise ValueError("Password cannot be blank.")
     return value
 
-  @field_validator("claim", mode="before")
-  @classmethod
-  def normalize_claim_type(cls, value):
-    """Route every non-string claim through the uniform invalid-claim path."""
-    return value if isinstance(value, str) else ""
-
-
 class SetupStatus(BaseModel):
   configured: bool
-  # True while setup is still open (no owner): the wizard must collect the
-  # claim. Never the token itself — the status endpoint never leaks it.
-  claim_required: bool = False
 
 
 class TokenResponse(BaseModel):
