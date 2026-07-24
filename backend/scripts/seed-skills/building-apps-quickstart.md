@@ -1,12 +1,13 @@
 # Mini-app quickstart — ordinary local apps
 
-Use this skill for the common case: creating or making a straightforward
-update to a local Möbius mini-app under `/data/apps/<slug>/`. It is the fast
-path for a focused app with ordinary JSX, app-scoped storage, and no unusual
-host integration.
+Base workflow for every local Möbius mini-app create or update. Read it with
+`visual-testing.md`; add `building-apps.md` for advanced runtime needs,
+`cron.md` for scheduled jobs, and `app-component-shapes.md` only for a complex
+catalogued structure such as a sheet, tabs, chat, or split pane.
 
-Do **not** read the full `building-apps.md` as well unless the request actually
-needs one of its advanced paths:
+This is the complete workflow for a focused app with ordinary JSX,
+app-scoped storage, and no unusual host integration. Add `building-apps.md` to
+the initial read only when the request already needs one of its advanced paths:
 
 - wrapping or packaging an existing site/game;
 - an installable or upstream-tracked app;
@@ -15,8 +16,12 @@ needs one of its advanced paths:
 - microphone/device capabilities;
 - an embedded agent, immersive mode, or internal navigation/back handling.
 
-For an ordinary one-screen or small multi-card app, this file is the complete
-workflow. Do not re-read it later in the same turn.
+Add `cron.md` instead for a scheduled/background job. Add the component catalog
+only when its summary names a structure the brief actually needs.
+
+For an ordinary one-screen or small multi-card app, do not load another build
+skill later in the turn unless a newly discovered requirement crosses one of
+those boundaries.
 
 ## Product target: fast, useful, and delightful
 
@@ -73,12 +78,9 @@ icon.png
 .gitignore
 ```
 
-Initialize the app directory as its own repository before any Git status or
-commit command:
-
-```bash
-git -C /data/apps/<slug> init -b main
-```
+Do not initialize or commit the app repository by hand. Registration creates
+the per-app repository and records the accepted initial source; the watcher
+records later successful saves.
 
 The entry shape is:
 
@@ -184,8 +186,8 @@ index or use `store.list()`. Do not use `localStorage`, IndexedDB, native
 
 ### 5. Verify the rendered app without exploring the whole shell
 
-Read `visual-testing.md` once before the first browser check. Use the
-readiness-gated helper:
+Use the already-loaded `visual-testing.md` workflow. Start with the
+readiness-gated, overlay-free app helper:
 
 ```bash
 bash "$SCRIPTS_DIR/preview_app.sh" <app-id>
@@ -194,17 +196,28 @@ bash "$SCRIPTS_DIR/preview_app.sh" <app-id>
 It waits for the app frame to mount, captures into the chat media directory,
 and prints the embed line. View that PNG before describing it.
 
-For interaction testing, scope the accessibility snapshot to the app frame so
-the shell and drawer do not consume the context:
+For interaction testing, switch the browser driver into the app frame, then
+snapshot there so the shell and drawer do not consume the context:
 
 ```bash
-agent-browser snapshot -i -s 'iframe[data-app-id="<app-id>"]'
+agent-browser snapshot -i -d 2
+# Find: Iframe "<app name>" [ref=eN]
+agent-browser frame @eN
+agent-browser snapshot -i
+# interact and re-snapshot inside the frame
+agent-browser frame main
 ```
 
-Use the returned refs, re-snapshot after any DOM change, and verify one complete
-primary flow plus persistence when the app saves data. Do not use
+The shallow parent snapshot creates the documented iframe ref without dumping
+the full shell. Use that ref rather than a CSS frame selector: response-sandboxed
+opaque frames can be absent from the selector resolver even though their browser
+frame and accessibility subtree are healthy. Use returned refs, re-snapshot
+after any DOM change, and verify one complete primary flow plus persistence when
+the app saves data. Do not use
 `wait --text` for iframe content; it observes the top-level document. The
-preview helper already gates the initial frame readiness.
+preview helper already gates the initial frame readiness and prevents
+product-owned top-document walkthrough/install overlays from mounting in this
+isolated browser session; it does not mark onboarding complete.
 
 Check the partner's actual viewport first. Add one phone-sized check only when
 the supplied viewport is not already phone-sized or the layout materially
@@ -231,15 +244,9 @@ Run validation once:
 python "$SCRIPTS_DIR/validate-app.py" /data/apps/<slug>
 ```
 
-Commit only the app source you created:
-
-```bash
-git -C /data/apps/<slug> add index.jsx mobius.json README.md icon.png .gitignore
-git -C /data/apps/<slug> commit -m "Build <short app purpose>"
-```
-
-If the watcher already committed an edit, a clean app-repo status is success;
-inspect that app repo's log rather than the parent `/data` repository.
+Do not run a second `git add` or `git commit`. `register_app.py` owns the
+initial source commit and treats an already-clean tree as success; the watcher
+owns later save commits. Repository status is not a build gate.
 
 Send the app-complete notification using `notifications.md`, embed the useful
 render before describing it, state what the app does, and invite optional

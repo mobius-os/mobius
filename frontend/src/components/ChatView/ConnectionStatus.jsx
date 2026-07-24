@@ -38,7 +38,11 @@ export default function ConnectionStatus({ error, reconnecting, onRetry }) {
       ) : (
         <>
           <span className="connection-status__text">Connection lost</span>
-          <button className="connection-status__retry" onClick={onRetry}>
+          <button
+            type="button"
+            className="connection-status__retry"
+            onClick={onRetry}
+          >
             Retry
           </button>
         </>

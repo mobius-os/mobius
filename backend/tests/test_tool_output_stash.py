@@ -9,7 +9,13 @@ import uuid
 from sqlalchemy import event as sqlalchemy_event
 
 from app import models
-from app.chat_writer import Barrier, StashToolOutput, get_writer
+from app.chat_transcript import project_messages_for_detail
+from app.chat_writer import (
+    Barrier,
+    ReplaceTranscript,
+    StashToolOutput,
+    get_writer,
+)
 from app.events import (
     TOOL_OUTPUT_INLINE_THRESHOLD,
     process_event,
@@ -167,6 +173,219 @@ def test_tool_output_by_id_endpoint_requires_owner(client, db):
     db.commit()
     r = client.get(f"/api/chats/{chat_id}/tool-output/tu_x")
     assert r.status_code == 401
+
+
+def test_settled_chat_detail_uses_lazy_sidecar_for_large_output(
+    client, auth, db,
+):
+    chat_id = str(uuid.uuid4())
+    db.add(models.Chat(id=chat_id, title="t", messages=[]))
+    db.commit()
+    block = {
+        "type": "tool",
+        "tool": "Bash",
+        "input": "long command",
+        "output": "bounded excerpt",
+        "status": "complete",
+        "tool_use_id": "tu_detail",
+        "output_truncated": True,
+        "output_full_len": 40000,
+        "output_exit_code": 0,
+    }
+    get_writer().submit(ReplaceTranscript(
+        chat_id=chat_id,
+        messages=[{"role": "assistant", "blocks": [block]}],
+    )).result(timeout=5)
+    get_writer().submit(StashToolOutput(
+        chat_id=chat_id,
+        tool_use_id="tu_detail",
+        output="complete output",
+    )).result(timeout=5)
+
+    statements = []
+    engine = db.get_bind()
+
+    def capture_sql(_, __, statement, *args):
+        statements.append(statement.lower())
+
+    sqlalchemy_event.listen(engine, "before_cursor_execute", capture_sql)
+    try:
+        detail = client.get(f"/api/chats/{chat_id}", headers=auth)
+    finally:
+        sqlalchemy_event.remove(engine, "before_cursor_execute", capture_sql)
+
+    assert detail.status_code == 200
+    sidecar_index_sql = next(
+        statement
+        for statement in statements
+        if "from tool_outputs" in statement
+    )
+    assert "tool_outputs.tool_use_id in" in sidecar_index_sql
+    projected = detail.json()["messages"][0]["blocks"][0]
+    assert "output" not in projected
+    assert projected["tool_use_id"] == "tu_detail"
+    assert projected["output_truncated"] is True
+    preview = client.get(
+        f"/api/chats/{chat_id}/tool-output/tu_detail?preview=1",
+        headers=auth,
+    )
+    assert preview.status_code == 200
+    assert preview.text == "complete output"
+
+
+def test_running_chat_detail_strips_history_but_keeps_live_excerpt(
+    client, auth, db, monkeypatch,
+):
+    chat_id = str(uuid.uuid4())
+    historical_block = {
+        "type": "tool",
+        "output": "historical excerpt",
+        "tool_use_id": "tu_history",
+        "output_truncated": True,
+    }
+    live_block = {
+        "type": "tool",
+        "output": "live excerpt",
+        "tool_use_id": "tu_live",
+        "output_truncated": True,
+    }
+    db.add(models.Chat(
+        id=chat_id,
+        title="t",
+        messages=[
+            {"role": "assistant", "blocks": [historical_block], "ts": 1},
+            {"role": "user", "content": "continue", "ts": 2},
+        ],
+        live_assistant={"role": "assistant", "blocks": [live_block], "ts": 3},
+    ))
+    db.commit()
+    get_writer().submit(StashToolOutput(
+        chat_id=chat_id,
+        tool_use_id="tu_history",
+        output="complete historical output",
+    )).result(timeout=5)
+    monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: True)
+
+    detail = client.get(f"/api/chats/{chat_id}", headers=auth)
+
+    assert detail.status_code == 200
+    messages = detail.json()["messages"]
+    assert "output" not in messages[0]["blocks"][0]
+    assert messages[-1]["blocks"][0]["output"] == "live excerpt"
+
+
+def test_settled_detail_omits_fetchable_large_output_excerpt_without_mutation():
+    messages = [{
+        "role": "assistant",
+        "blocks": [{
+            "type": "tool",
+            "tool": "Bash",
+            "input": "long command",
+            "output": "bounded excerpt",
+            "status": "complete",
+            "tool_use_id": "tu_large",
+            "output_truncated": True,
+            "output_full_len": 50000,
+            "output_exit_code": 1,
+        }],
+    }]
+
+    projected = project_messages_for_detail(
+        messages,
+        fetchable_tool_output_ids={"tu_large"},
+    )
+
+    assert projected is not messages
+    assert projected[0] is not messages[0]
+    assert projected[0]["blocks"] is not messages[0]["blocks"]
+    block = projected[0]["blocks"][0]
+    assert "output" not in block
+    assert block["input"] == "long command"
+    assert block["tool_use_id"] == "tu_large"
+    assert block["output_truncated"] is True
+    assert block["output_full_len"] == 50000
+    assert block["output_exit_code"] == 1
+    assert messages[0]["blocks"][0]["output"] == "bounded excerpt"
+
+
+def test_detail_projection_keeps_only_live_and_unfetchable_outputs_inline():
+    messages = [
+        {
+            "role": "assistant",
+            "blocks": [
+                {
+                    "type": "tool",
+                    "output": "historical excerpt",
+                    "tool_use_id": "tu_history",
+                    "output_truncated": True,
+                },
+                {"type": "tool", "output": "small", "tool_use_id": "tu_small"},
+                {
+                    "type": "tool",
+                    "output": "legacy excerpt",
+                    "output_truncated": True,
+                },
+            ],
+        },
+        {
+            "role": "assistant",
+            "blocks": [{
+                "type": "tool",
+                "output": "live excerpt",
+                "tool_use_id": "tu_live",
+                "output_truncated": True,
+            }],
+        },
+    ]
+
+    projected = project_messages_for_detail(
+        messages,
+        fetchable_tool_output_ids={"tu_history"},
+        live_message=messages[-1],
+    )
+
+    assert projected is not messages
+    assert "output" not in projected[0]["blocks"][0]
+    assert projected[0]["blocks"][1]["output"] == "small"
+    assert projected[0]["blocks"][2]["output"] == "legacy excerpt"
+    assert projected[1] is messages[1]
+    assert projected[1]["blocks"][0]["output"] == "live excerpt"
+
+
+def test_detail_projection_with_only_a_live_message_is_identity_stable():
+    live = {
+        "role": "assistant",
+        "blocks": [{
+            "type": "tool",
+            "output": "live excerpt",
+            "tool_use_id": "tu_live",
+            "output_truncated": True,
+        }],
+    }
+    messages = [live]
+
+    assert project_messages_for_detail(
+        messages,
+        fetchable_tool_output_ids={"tu_live"},
+        live_message=live,
+    ) is messages
+
+
+def test_detail_projection_keeps_excerpt_when_sidecar_is_missing():
+    messages = [{
+        "role": "assistant",
+        "blocks": [{
+            "type": "tool",
+            "output": "still useful excerpt",
+            "tool_use_id": "tu_missing",
+            "output_truncated": True,
+        }],
+    }]
+
+    assert project_messages_for_detail(
+        messages,
+        fetchable_tool_output_ids=set(),
+    ) is messages
 
 
 # -- sink reduction + stash ----------------------------------------------

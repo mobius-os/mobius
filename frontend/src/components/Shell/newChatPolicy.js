@@ -53,6 +53,25 @@ export function currentReusableEmptyChat(chats, {
 }
 
 /**
+ * Find the concrete chat route the single-screen world most recently left.
+ *
+ * The navigation stack is newest-last. Home seed entries intentionally carry
+ * no concrete id, so they are skipped along with app/settings routes. This is
+ * only a candidate source: callers must still run the normal empty-chat checks
+ * and authoritative detail probe before reusing the row.
+ */
+export function mostRecentConcreteChatId(routes) {
+  const rows = Array.isArray(routes) ? routes : []
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const route = rows[index]
+    if (route?.view !== 'chat' || route.chatId == null) continue
+    const id = String(route.chatId).trim()
+    if (id) return id
+  }
+  return null
+}
+
+/**
  * Validate the fresh detail response before keeping an active blank open.
  * Fail closed when the response is partial or unfamiliar: creating a fresh
  * row is preferable to navigating into a conversation that has started in

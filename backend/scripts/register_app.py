@@ -23,6 +23,7 @@ import urllib.request
 # script normally runs by absolute path, so add the backend package root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.app_capabilities import local_manifest_runtime_fields  # noqa: E402
+from app import app_git  # noqa: E402
 
 
 def _call(url: str, token: str, method: str, data: dict | None = None):
@@ -142,6 +143,26 @@ def _read_capabilities(source_dir: str) -> dict:
   return _read_manifest_registration(source_dir)["capabilities"]
 
 
+def _finalize_source(source_dir: str, *, created: bool) -> None:
+  """Record the source accepted by registration in the per-app repository.
+
+  Registration owns the initial commit; the watcher owns later save commits.
+  ``commit_local`` treats an already-clean tree as success, so a delayed
+  watcher event cannot turn successful registration into a failing empty
+  ``git commit``.
+  """
+  message = "create app" if created else "register app update"
+  try:
+    app_git.commit_local(source_dir, message)
+  except Exception as exc:  # noqa: BLE001 - surface an actionable CLI failure
+    print(
+      "App registration succeeded, but its source commit failed: "
+      f"{exc}. Re-run register_app.py to retry safely.",
+      file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def main() -> None:
   if len(sys.argv) != 4:
     print(
@@ -220,6 +241,7 @@ def main() -> None:
       },
     )
 
+  _finalize_source(source_dir, created=existing is None)
   print(json.dumps(app))
   _notify(token, base, "app_updated", appId=str(app["id"]))
 

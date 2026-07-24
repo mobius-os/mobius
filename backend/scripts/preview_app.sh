@@ -14,7 +14,9 @@
 # shell's `moebius:frame-init` postMessage before initializing — so we
 # go through /app/<id> in the authenticated shell. For the STANDALONE
 # PWA page of an app, call agent-screenshot.sh /apps/<slug>/ directly.
-# All auth/viewport/banner handling lives in agent-screenshot.sh.
+# All auth/viewport/banner handling lives in agent-screenshot.sh. App previews
+# use its ephemeral content-only mode so owner onboarding/install overlays do
+# not cover the app under test or mutate account completion state.
 
 set -euo pipefail
 
@@ -28,4 +30,4 @@ fi
 OUT="${2:-/data/chats/${CHAT_ID:-unknown}/media/app-${APP_ID}.png}"
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "${DIR}/agent-screenshot.sh" "/app/${APP_ID}" "${OUT}"
+exec "${DIR}/agent-screenshot.sh" --content-only "/app/${APP_ID}" "${OUT}"

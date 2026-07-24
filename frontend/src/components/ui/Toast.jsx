@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import X from 'lucide-react/dist/esm/icons/x.mjs'
 import './Toast.css'
 
 /**
@@ -8,8 +9,8 @@ import './Toast.css'
  *   message   — string to display, or null/undefined to hide
  *   variant   — 'info' (default) | 'error'
  *   duration  — auto-dismiss timeout in ms (default 4000); 0 = no auto-dismiss
- *   onDismiss — called when the toast should disappear (timeout, or undo action
- *               if provided)
+ *   onDismiss — called when the toast should disappear (timeout, explicit
+ *               dismiss, or undo action if provided)
  *   action    — optional { label: string, onAction: fn } for an inline button
  *               (e.g. "Undo"); clicking it calls onAction then onDismiss.
  *
@@ -53,6 +54,14 @@ export default function Toast({ message, variant = 'info', duration = 4000, onDi
     onDismiss?.()
   }
 
+  function handleDismiss() {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+    onDismiss?.()
+  }
+
   return (
     <div
       className={`toast toast--${variant}`}
@@ -62,8 +71,18 @@ export default function Toast({ message, variant = 'info', duration = 4000, onDi
     >
       <span className="toast__message">{message}</span>
       {action && (
-        <button className="toast__action" onClick={handleAction}>
+        <button className="toast__action" type="button" onClick={handleAction}>
           {action.label}
+        </button>
+      )}
+      {onDismiss && (
+        <button
+          className="toast__dismiss"
+          type="button"
+          aria-label="Dismiss notification"
+          onClick={handleDismiss}
+        >
+          <X size={16} aria-hidden="true" />
         </button>
       )}
     </div>

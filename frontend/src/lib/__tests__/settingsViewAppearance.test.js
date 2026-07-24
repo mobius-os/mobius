@@ -48,6 +48,15 @@ test('background agents are always draggable without reorder chrome or a trailin
   assert.doesNotMatch(css, /settings-bg-row--drop-before|settings-bg-row--drop-after/)
 })
 
+test('provider-dependent settings stay unavailable until a provider is connected', () => {
+  assert.match(view, /disabled=\{!hasConfiguredProvider\}/)
+  assert.match(view, /No provider connected/)
+  assert.match(view, /Connect an AI provider to choose chat models\./)
+  assert.match(view, /settings-agent-group--disabled/)
+  assert.match(view, /Connect an AI provider to configure automatic tasks\./)
+  assert.match(view, /configuredProviders=\{configuredProviders\}/)
+})
+
 test('new provider connections use the curated unattended defaults', () => {
   assert.match(view, /claude: 'claude-opus-4-8'/)
   assert.match(view, /codex: 'gpt-5\.6-terra'/)

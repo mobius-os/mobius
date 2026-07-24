@@ -4,6 +4,7 @@ import {
   useEffect,
   useLayoutEffect,
   useCallback,
+  useMemo,
   useSyncExternalStore,
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -22,11 +23,12 @@ import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
+import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
-import StreamingMessage from './StreamingMessage.jsx'
+import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
@@ -54,8 +56,10 @@ import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
 import { copyableMessageText, copyPlainText } from './messageCopy.js'
+import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
-import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
+import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
+import { deriveActiveAssistantSelection } from './activeAssistantSelection.js'
 import {
   answerKeepsCurrentTurn,
   builtAppPulseDecision,
@@ -86,6 +90,7 @@ import {
 } from './sendAttemptRecovery.js'
 import { persistComposerDraft, readComposerDraft } from './composerDraft.js'
 import {
+  reconcileComposerTextarea,
   resetComposerTextarea,
   resizeComposerTextarea,
 } from './composerTextareaSizing.js'
@@ -271,8 +276,8 @@ export default function ChatView({
   embedded = false,
   quickActions = null,
   getContext = null,
-  composerFocusRequest = null,
-  onComposerFocusHandled = null,
+  composerRequest = null,
+  onComposerRequestHandled = null,
   externalRunSignal = EMPTY_CHAT_RUN_SIGNAL,
   onExternalRunEvent = null,
   // Multi-pane workspace (design §2): when this chat renders inside a tiled
@@ -315,6 +320,10 @@ export default function ChatView({
   // back via `commitMessages`, so any miss self-heals on next remount.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
   const [messages, setMessages] = useState(() => cached?.messages ?? [])
+  const messageHistory = useMemo(
+    () => composerHistoryFromMessages(messages),
+    [messages],
+  )
   const [offset, setOffset] = useState(() => cached?.offset ?? 0)
   const offsetRef = useRef(offset)
   offsetRef.current = offset
@@ -726,23 +735,33 @@ export default function ChatView({
     chatEl.style.setProperty('--composer-h', `${footEl.offsetHeight}px`)
   }, [])
 
-  // A drawer "New chat" tap should leave desktop-web users ready to type.
-  // Keep this as an explicit one-shot request from Shell instead of a blanket
-  // autofocus-on-mount: selecting existing chats should not steal focus, and
-  // touch-primary devices should not pop the soft keyboard unexpectedly.
+  // One explicit Shell-to-composer handoff owns both New-chat focus and drafts
+  // supplied by app navigation. Storage restores unmounted chats; applying the
+  // same request here is what updates a retained ChatView without sacrificing
+  // its transcript, scroll, or stream identity through a forced remount.
   useEffect(() => {
-    const token = composerFocusRequest?.token
+    const token = composerRequest?.token
     if (token == null) return
-    const requestChatId = composerFocusRequest?.chatId
+    const requestChatId = composerRequest?.chatId
     if (requestChatId == null || String(requestChatId) !== String(chatId)) return
 
+    if (typeof composerRequest.draft === 'string'
+        && inputValueRef.current !== composerRequest.draft) {
+      handleComposerInputChange(composerRequest.draft)
+    }
+
+    if (!composerRequest.focus) {
+      onComposerRequestHandled?.(token)
+      return
+    }
+
     if (!shouldApplyComposerFocusRequest({
-      focusRequest: composerFocusRequest,
+      focusRequest: composerRequest,
       chatId,
       embedded,
       isTouchPrimary: _isTouchPrimary,
     })) {
-      onComposerFocusHandled?.(token)
+      onComposerRequestHandled?.(token)
       return
     }
 
@@ -750,13 +769,13 @@ export default function ChatView({
     const raf = requestAnimationFrame(() => {
       if (cancelled) return
       focusComposerElement(inputRef.current)
-      onComposerFocusHandled?.(token)
+      onComposerRequestHandled?.(token)
     })
     return () => {
       cancelled = true
       cancelAnimationFrame(raf)
     }
-  }, [chatId, composerFocusRequest, embedded, onComposerFocusHandled])
+  }, [chatId, composerRequest, embedded, onComposerRequestHandled])
 
   // Lifecycle guards. `hadMessagesRef` reflects the cached length so
   // doSend's "first message" branch doesn't fire spuriously.
@@ -1459,6 +1478,7 @@ export default function ChatView({
   })
 
   function clearFailedAttempt() {
+    if (!failedSendAttemptRef.current) return
     failedSendAttemptRef.current = null
     clearFailedSendAttempt(chatId)
   }
@@ -1633,14 +1653,6 @@ export default function ChatView({
     }
   }
 
-  // Persist draft so it survives leaving and re-entering the chat.
-  // This remains as a safety net for programmatic input changes (restores,
-  // voice transcription, send cleanup). Direct owner edits are saved
-  // synchronously in handleComposerInputChange above.
-  useEffect(() => {
-    persistComposerDraft(chatId, input, draftAttachmentsRef.current)
-  }, [input, chatId])
-
   // Text changes through input, restores, voice, send cleanup, and
   // authoritative foreground reconciliation. Reconcile after every committed
   // value — including the empty value — so no programmatic clear can retain a
@@ -1648,7 +1660,7 @@ export default function ChatView({
   // scrollHeight; they reconcile when `hidden` flips back to false.
   useLayoutEffect(() => {
     const el = inputRef.current
-    if (el && !hidden) resizeComposerTextarea(el, input)
+    if (el && !hidden) reconcileComposerTextarea(el, input)
   }, [chatId, hidden, input])
 
   // Publish `.chat__foot`'s rendered height as `--composer-h` on
@@ -1676,7 +1688,7 @@ export default function ChatView({
       // returns from background or the back-forward cache. Reconcile the
       // textarea first; measuring only the outer foot would preserve a stale
       // multi-line height on an empty composer.
-      resizeComposerTextarea(inputRef.current, inputValueRef.current)
+      reconcileComposerTextarea(inputRef.current, inputValueRef.current)
       applySoon()
     }
     const onVisible = () => {
@@ -2013,9 +2025,24 @@ export default function ChatView({
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return
-    const pin = opts.pin !== false  // default true
-    if (!text.trim()) return
+
+    // Callers can pre-supply attachments (e.g. handleStop collapsing
+    // a queue that had files attached to queued items). When provided,
+    // they replace the pendingFiles-derived list so data isn't lost.
+    // Resolve and validate the payload before ANY submit-time side effect:
+    // a stale callback or failed-file-only draft must not close the keyboard,
+    // claim scroll ownership, or freeze queue geometry when nothing will send.
+    const usesComposerFiles = !Array.isArray(opts.attachments)
+    const composerFileSnapshot = usesComposerFiles ? [...pendingFiles] : []
+    const attachments = Array.isArray(opts.attachments)
+      ? opts.attachments
+      : pendingFiles
+          .filter(f => f.status === 'done')
+          .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
     if (pendingFiles.some(c => c.status === 'uploading')) return
+    if (!hasSendablePayload(text, attachments)) return
+
+    const pin = opts.pin !== false  // default true
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -2060,17 +2087,6 @@ export default function ChatView({
     // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
     // focus so the cursor stays ready for the next message.
     if (_isTouchPrimary) inputRef.current?.blur()
-
-    // Callers can pre-supply attachments (e.g. handleStop collapsing
-    // a queue that had files attached to queued items). When provided,
-    // they replace the pendingFiles-derived list so data isn't lost.
-    const usesComposerFiles = !Array.isArray(opts.attachments)
-    const composerFileSnapshot = usesComposerFiles ? [...pendingFiles] : []
-    const attachments = Array.isArray(opts.attachments)
-      ? opts.attachments
-      : pendingFiles
-          .filter(f => f.status === 'done')
-          .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
 
     function clearComposerFilesForSend() {
       if (!usesComposerFiles) return
@@ -2923,7 +2939,7 @@ export default function ChatView({
         // genuine re-queue POST failure (doSend's catch) shows a block.
         const { text: resendText, attachments: resendAttachments } =
           resolveResend(clearedPendingCids)
-        if (resendText) {
+        if (hasSendablePayload(resendText, resendAttachments)) {
           doSend(resendText, {
             pin: false,
             attachments: resendAttachments.length > 0 ? resendAttachments : undefined,
@@ -2955,7 +2971,7 @@ export default function ChatView({
       const { text: resendText, attachments: resendAttachments } =
         resolveResend(clearedPendingCids)
 
-      if (resendText) {
+      if (hasSendablePayload(resendText, resendAttachments)) {
         // doSend's guard reads sendingRef/isStreamingRef (just synced to false
         // above) → fresh-send path. pin:false so the synthetic combined-from-
         // queue message doesn't yank the viewport to top, pushing the partial
@@ -3037,7 +3053,7 @@ export default function ChatView({
         }
       }
     }
-    if (!content) return
+    if (!hasSendablePayload(content, attachments)) return
 
     const fullConfirmedSnapshot = (pendingQueue.pendingMessagesRef.current || [])
       .filter(m => typeof m.ts === 'number' && m.serverTs === true)
@@ -3363,7 +3379,11 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  const displayReady = revealed || showEmpty || showLoadError
+  // The scroll safety cap may reveal an otherwise empty DOM while the initial
+  // request is still in flight. That protects a standalone ChatView from being
+  // hidden forever, but it is not a valid shell handoff: keep the outgoing chat
+  // painted until this chat has authoritative content, emptiness, or an error.
+  const displayReady = !loading && (revealed || showEmpty || showLoadError)
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])
@@ -3371,66 +3391,29 @@ export default function ChatView({
     isOwnerUserMessage(m) ? i : acc
   ), -1)
   // The captured bridge partial enters the active row before catch-up emits a
-  // single item. That is the load-bearing part of Lever 1: when SSE becomes the
-  // selected source, React updates MsgContent props instead of replacing the
-  // DB row with a different renderer subtree.
-  const bridgeMsgIdx = turnActive
-    ? bridgeHook.findBridgeIndex(messages)
-    : -1
-  const trailingAssistantPartialIdx = turnActive
-    ? findTrailingAssistantPartialIndex(messages)
-    : -1
-  const hasLiveAssistantPayload = turnActive && streamItems.length > 0
-  const bridgeMsg = bridgeMsgIdx >= 0 ? messages[bridgeMsgIdx] : null
-  const bridgeFollowedByVisibleUser = bridgeMsgIdx >= 0 && messages
-    .slice(bridgeMsgIdx + 1)
-    .some(isOwnerUserMessage)
-  const trailingAssistantPartialMsg = trailingAssistantPartialIdx >= 0
-    ? messages[trailingAssistantPartialIdx]
-    : null
-  // Select DATA, never a component tree. A mount-time bridge is only
-  // authoritative while the live payload still proves it is the same answer.
-  // A stale in-memory cache can otherwise nominate the completed PREVIOUS
-  // answer just as a new turn starts, suppressing that whole reply and showing
-  // only the question card that happened to be cached. If the bridge and live
-  // surfaces are unrelated, fall through to the real trailing DB partial.
-  const bridgeAssistantSurface = chooseActiveAssistantSurface(bridgeMsg, streamItems)
-  const trailingAssistantSurface = chooseActiveAssistantSurface(
-    trailingAssistantPartialMsg,
-    streamItems,
-  )
-  const activeMirrorMsgIdx = chooseActiveAssistantMirrorIndex({
+  // single item. Source comparison can walk and normalize the complete live
+  // block list several times, so memoize it on transcript/stream ownership:
+  // composer input cannot change which assistant source owns this row.
+  const {
+    activeMirrorMsg,
+    activeMirrorMsgIdx,
     bridgeMsgIdx,
+    hasLiveAssistantPayload,
+    showActiveAssistantSurface,
     trailingAssistantPartialIdx,
-    bridgeFollowedByVisibleUser,
-    hasLivePayload: hasLiveAssistantPayload,
-    bridgeSurface: bridgeAssistantSurface,
-    surface: trailingAssistantSurface,
-  })
-  const activeMirrorMsg = activeMirrorMsgIdx >= 0 ? messages[activeMirrorMsgIdx] : null
-  const activeAssistantSurface = activeMirrorMsgIdx === bridgeMsgIdx
-    ? bridgeAssistantSurface
-    : (activeMirrorMsgIdx === trailingAssistantPartialIdx
-        ? trailingAssistantSurface
-        : { hideMessage: false, suppressStream: false })
-  const useDbActivePayload = !!(
-    activeMirrorMsg
-    && (!hasLiveAssistantPayload || activeAssistantSurface.suppressStream)
-  )
-  const activeAssistantMsg = useDbActivePayload
-    ? activeMirrorMsg
-    : (hasLiveAssistantPayload
-        ? {
-            ...(activeMirrorMsg || {}),
-            role: 'assistant',
-            // Live rendering keeps running tool state and thinking clock
-            // anchors; final promotion uses the converter's default finalize
-            // mode and still seals running tools as done.
-            ...streamItemsToAssistantPayload(streamItems, { finalize: false }),
-          }
-        : null)
-  const showActiveAssistantSurface = !!activeAssistantMsg
-  const activeAssistantIsStreaming = !!(activeAssistantMsg && !useDbActivePayload)
+    useDbActivePayload,
+    activeAssistantIsStreaming,
+  } = useMemo(() => deriveActiveAssistantSelection({
+    turnActive,
+    messages,
+    streamItems,
+    findBridgeIndex: bridgeHook.findBridgeIndex,
+  }), [
+    bridgeMountInputs,
+    messages,
+    streamItems,
+    turnActive,
+  ])
 
   // ── Sticky "needs your answer" affordance ──────────────────────────
   // A pending AskUserQuestion freezes the turn until the user answers,
@@ -3898,9 +3881,12 @@ export default function ChatView({
           )})}
 
           {showActiveAssistantSurface && (
-            <StreamingMessage
+            <ActiveAssistantSurface
               key={streamingDataKey}
-              msg={activeAssistantMsg}
+              activeMirrorMsg={activeMirrorMsg}
+              useDbActivePayload={useDbActivePayload}
+              hasLivePayload={hasLiveAssistantPayload}
+              streamItems={streamItems}
               dataKey={streamingDataKey}
               chatId={chatId}
               onAnswer={doSendSilent}
@@ -3951,17 +3937,21 @@ export default function ChatView({
       )}
 
       <div ref={footRef} className="chat__foot">
-        {/* Foot order, top to bottom (owner spec, 2026-07-17):
-            connection/retry → attention actions (open-app CTA, question
-            and resume nudges) → build-progress rail → queued messages →
-            composer. Queued messages sit directly ON the composer — they
-            are the input's extension (your next sends) — and everything
-            transient stacks above them. */}
-        <ConnectionStatus
-          error={connectionError}
-          reconnecting={reconnecting}
-          onRetry={retry}
-        />
+        {/* Foot order, top to bottom:
+            offline explanation → attention actions → build-progress rail →
+            connection/retry → queued messages → composer. Queued messages are
+            the input's extension, and connection recovery belongs immediately
+            above that input area. */}
+        {!online && (
+          <div
+            className="chat__offline-note"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            You're offline — chat needs a connection.
+          </div>
+        )}
         {/* A LOST connection empties the stack: while the terminal
             'disconnected' state is set, nudges, rail, and the queued tray
             hide so the one thing on screen is the problem and its Retry
@@ -4026,6 +4016,14 @@ export default function ChatView({
               ))}
             </div>
           )}
+          </>
+        )}
+        <ConnectionStatus
+          error={connectionError}
+          reconnecting={reconnecting}
+          onRetry={retry}
+        />
+        {connectionError !== 'disconnected' && (
           <QueuedMessages
             items={pendingQueue.pendingMessages}
             onCancel={handleCancelPending}
@@ -4033,7 +4031,6 @@ export default function ChatView({
             steerActive={turnActive && !hasPendingQuestion}
             steerBusy={steerBusy}
           />
-          </>
         )}
         <ChatInputBar
           chatId={chatId}
@@ -4059,6 +4056,7 @@ export default function ChatView({
           onAddFiles={handleComposerAddFiles}
           onRemoveFile={handleComposerRemoveFile}
           attachTriggerRef={attachTriggerRef}
+          messageHistory={messageHistory}
           leftButtons={
             <>
               <ComposerPopover

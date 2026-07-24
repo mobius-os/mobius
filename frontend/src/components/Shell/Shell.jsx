@@ -1,12 +1,14 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
-import X from 'lucide-react/dist/esm/icons/x.mjs'
 import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
-import { api, apiFetch, jsonOrThrow, probeDeletion, BASE, clearAppRuntimeData } from '../../api/client.js'
+import {
+  api, apiFetch, jsonOrThrow, probeDeletion, BASE, clearAppRuntimeData,
+  invalidateShellListCache,
+} from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, {
   coldRestoredCanvasAppId,
@@ -42,7 +44,6 @@ import {
   ACTIVATE_FOREGROUND,
 } from './workspacePlacement.js'
 import {
-  appBuildFailureMessage,
   appUpdateStaleMessage,
   findAppStoreApp,
 } from '../../lib/appRecovery.js'
@@ -63,10 +64,17 @@ import {
   currentReusableEmptyChat,
   enteredEmptySingleScreen,
   mergeChatListWithCreatedGuards,
+  mostRecentConcreteChatId,
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
 } from './newChatPolicy.js'
+import {
+  forgetConfirmedDeletion,
+  forgetConfirmedDeletionIfExists,
+  rememberConfirmedDeletion,
+  withoutConfirmedDeletions,
+} from './confirmedDeletion.js'
 import {
   reloadWhenWorkerTakesOver,
   shouldRearmShellApply,
@@ -82,9 +90,7 @@ import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
 import useModeController from './useModeController.js'
 import * as modeMachine from './modeMachine.js'
-import {
-  HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
-} from './workspaceOnboarding.js'
+import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
@@ -524,15 +530,27 @@ export default function Shell() {
 
   const { loadTheme } = useTheme()
   const queryClient = useQueryClient()
-  const appsQuery = appQueries.list.useQuery()
+  // Confirmed writes outrank offline-capable list reads. These session-scoped
+  // tombstones filter every query completion (including an in-flight,
+  // pre-delete NetworkFirst fallback) until a recovery succeeds.
+  const deletedChatIdsRef = useRef(new Set())
+  const deletedAppIdsRef = useRef(new Set())
+  const reconcileApps = useCallback(
+    rows => withoutConfirmedDeletions(rows, deletedAppIdsRef.current),
+    [],
+  )
+  const appsQuery = appQueries.list.useQuery({ reconcile: reconcileApps })
   // Create responses are authoritative even when the next NetworkFirst list
   // request has to fall back to a just-stale service-worker copy. Reconcile at
   // the query function boundary so the protected row never disappears from
   // cache/render between fetch settlement and an after-the-fact patch.
   const recentlyCreatedChatsRef = useRef(new Map())
   const reconcileCreatedChats = useCallback(
-    rows => mergeChatListWithCreatedGuards(
-      rows, recentlyCreatedChatsRef.current,
+    rows => withoutConfirmedDeletions(
+      mergeChatListWithCreatedGuards(
+        rows, recentlyCreatedChatsRef.current,
+      ),
+      deletedChatIdsRef.current,
     ),
     [],
   )
@@ -598,12 +616,22 @@ export default function Shell() {
   const initialSlotReconciledRef = useRef(false)
   // toast state: null | { message, variant, duration, action }
   // variant: 'info' | 'error'  (see components/ui/Toast.jsx)
+  const toastSequenceRef = useRef(0)
   const [toast, setToast] = useState(null)
   const [settingsFocusTarget, setSettingsFocusTarget] = useState(null)
-  function showToast(message, { variant = 'info', duration = 4000, action } = {}) {
-    setToast({ message, variant, duration, action })
-  }
-  function dismissToast() { setToast(null) }
+  const showToast = useCallback((
+    message,
+    { variant = 'info', duration = 4000, action } = {},
+  ) => {
+    toastSequenceRef.current += 1
+    setToast({
+      message, variant, duration, action, sequence: toastSequenceRef.current,
+    })
+  }, [])
+  // Stable identity is part of Toast's timer contract. Recreating this callback
+  // on every Shell render resets the effect timer while chats stream, making a
+  // nominal five-second notice linger indefinitely.
+  const dismissToast = useCallback(() => { setToast(null) }, [])
   const handleAppIntentDelivered = useCallback((appId, delivered) => {
     setAppIntents((prev) => {
       const key = String(appId)
@@ -622,20 +650,23 @@ export default function Shell() {
   // Guards the once-per-mount deferred shell-update pickup effect below.
   const shellUpdatePickupRef = useRef(false)
   const shellUpdatePickupCheckStartedRef = useRef(false)
-  const [composerFocusRequest, setComposerFocusRequest] = useState(null)
-  const composerFocusTokenRef = useRef(0)
+  const [composerRequest, setComposerRequest] = useState(null)
+  const composerRequestTokenRef = useRef(0)
 
-  function requestComposerFocus(chatId) {
+  function requestComposer(chatId, { draft, focus = false } = {}) {
     if (chatId == null) return
-    composerFocusTokenRef.current += 1
-    setComposerFocusRequest({
+    if (draft == null && !focus) return
+    composerRequestTokenRef.current += 1
+    setComposerRequest({
       chatId,
-      token: composerFocusTokenRef.current,
+      token: composerRequestTokenRef.current,
+      draft: draft == null ? null : String(draft),
+      focus: focus === true,
     })
   }
 
-  const handleComposerFocusHandled = useCallback((token) => {
-    setComposerFocusRequest(prev => (
+  const handleComposerRequestHandled = useCallback((token) => {
+    setComposerRequest(prev => (
       prev?.token === token ? null : prev
     ))
   }, [])
@@ -1221,10 +1252,10 @@ export default function Shell() {
   const handlePaneChatDisplayReady = useCallback((paneId, readyChatId) => {
     const id = String(readyChatId)
     const paneKey = String(paneId)
-    const pane = workspaceStateRef.current.ws.panes[paneId]
-      || workspaceStateRef.current.ws.panes[paneKey]
     // Ignore a late ready signal from staging B after rapid navigation reached C.
-    if (pane?.activeTabKey !== `chat:${id}`) return
+    // Surface owners include both real builder panes and the single world's
+    // synthetic slot, so resolve the selected key through their shared boundary.
+    if (paneModel.activeKeyForOwner(workspaceStateRef.current.ws, paneKey) !== `chat:${id}`) return
     setPresentedChatByPane(prev => {
       if (String(prev.get(paneKey) ?? '') === id) return prev
       const next = new Map(prev)
@@ -1430,9 +1461,6 @@ export default function Shell() {
   labelForTabRef.current = labelForTab
   const openTabMenuAtRef = useRef(openTabMenuAt)
   openTabMenuAtRef.current = openTabMenuAt
-  // Filled by the first-use coachmark (§7); the first real drag dismisses it.
-  const coachmarkDismissRef = useRef(null)
-  const onWorkspaceDragStart = useCallback(() => { coachmarkDismissRef.current?.() }, [])
   // A single-mode drag previews the builder world through the ONE descriptor
   // (INV 5): arm is phase 'drag-preview', and the id it mints is carried to the
   // matching commit/cancel so a stale end-event from a superseded drag is
@@ -1516,42 +1544,14 @@ export default function Shell() {
     closeDrawer,
     openDrawer,
     openTabMenuAtRef,
-    onDragStart: onWorkspaceDragStart,
     onPreviewBuilder: onModeDragPreview,
   })
 
-  // ── Undo chord + first-use coachmark (design §3.5 / §7) ───────────────────
+  // ── Workspace undo chord (design §3.5) ────────────────────────────────────
   // Workspace mutations update the reducer's single undo slot SILENTLY; the
   // owner found the "Moved X · Undo" / "Agent arranged your workspace" toasts
-  // noise, so there is no per-mutation toast (owner call, live testing). Undo is
-  // the Cmd/Ctrl+Z chord below plus the discoverability coachmark.
-  const [wsCoachmarkDismissed, setWsCoachmarkDismissed] = useState(
-    () => coachmarkDismissed(typeof localStorage !== 'undefined'
-      ? localStorage
-      : { getItem: () => '1' }),
-  )
-  const dismissWorkspaceCoachmark = useCallback(() => {
-    setWsCoachmarkDismissed(true)
-    try { localStorage.setItem(HINT_KEY, '1') } catch { /* private mode — shows once in memory */ }
-  }, [])
-  // The first real drag dismisses it (wired through the ref the drag hook calls).
-  coachmarkDismissRef.current = dismissWorkspaceCoachmark
-  const workspaceCoachmarkVisible = coachmarkArmed({
-    enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
-    tabCount: openTabs.length,
-    dismissed: wsCoachmarkDismissed,
-    // M6: only where the tab strip actually exists — the EFFECTIVE builder world —
-    // and never over an immersive lease (z-120). Immersive may temporarily cover
-    // either durable world, so the explicit check keeps the hint with the chrome it
-    // teaches instead of painting it over the focused app.
-    builderWorld: effectiveViewMode === 'panes' && !immersiveActive,
-  })
-  // Auto-dismiss after 12s — deliberately NOT on an unrelated pointerdown (§7.2).
-  useEffect(() => {
-    if (!workspaceCoachmarkVisible) return undefined
-    const t = setTimeout(dismissWorkspaceCoachmark, 12000)
-    return () => clearTimeout(t)
-  }, [workspaceCoachmarkVisible, dismissWorkspaceCoachmark])
+  // noise, so there is no per-mutation toast (owner call, live testing). Undo
+  // remains available through Cmd/Ctrl+Z while focus is outside an editor.
   // Cmd/Ctrl+Z restores the single-slot pre-mutation snapshot while no input is
   // focused (design §3.5). Flag-gated; a text field's own undo always wins.
   // Documented limitation (PR3): key events do not cross the iframe boundary, so
@@ -1620,7 +1620,12 @@ export default function Shell() {
   // matter (rendering before resolution shows a flash for users who
   // are already past it).
   const walkthroughQuery = ownerQueries.walkthrough.useQuery()
-  const showWalkthrough = walkthroughQuery.isFetched
+  let visualContentOnly = false
+  try {
+    visualContentOnly = sessionStorage.getItem('mobius:visual-content-only') === '1'
+  } catch (_) {}
+  const showWalkthrough = !visualContentOnly
+    && walkthroughQuery.isFetched
     && walkthroughQuery.data
     && !walkthroughQuery.data.completed
 
@@ -2056,22 +2061,81 @@ export default function Shell() {
     return queryClient.cancelQueries({ queryKey: appQueries.keys.all })
       .then(() => queryClient.fetchQuery({
         queryKey: appQueries.keys.all,
-        queryFn: appQueries.list.fetch,
+        queryFn: async () => reconcileApps(await appQueries.list.fetch()),
         staleTime: 0,
       }))
       .then(data => data || [])
       .catch(() => queryClient.getQueryData(appQueries.keys.all) || [])
-  }, [queryClient])
+  }, [queryClient, reconcileApps])
   const refreshChats = useCallback(() => {
     return queryClient.refetchQueries({ queryKey: chatQueries.keys.all })
       .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
       .catch(() => [])
   }, [queryClient])
 
+  const confirmChatDeleted = useCallback((id) => {
+    const sid = String(id)
+    rememberConfirmedDeletion(deletedChatIdsRef.current, sid)
+    recentlyCreatedChatsRef.current.delete(sid)
+    queryClient.setQueryData(chatQueries.keys.all, current => {
+      const next = withoutConfirmedDeletions(
+        Array.isArray(current) ? current : [],
+        deletedChatIdsRef.current,
+      )
+      chatsRef.current = next
+      return next
+    })
+  }, [queryClient])
+
+  const confirmAppDeleted = useCallback((id) => {
+    const sid = String(id)
+    rememberConfirmedDeletion(deletedAppIdsRef.current, sid)
+    queryClient.setQueryData(appQueries.keys.all, current => {
+      const next = withoutConfirmedDeletions(
+        Array.isArray(current) ? current : [],
+        deletedAppIdsRef.current,
+      )
+      appsRef.current = next
+      return next
+    })
+  }, [queryClient])
+
+  const confirmChatRecovered = useCallback((id) => {
+    forgetConfirmedDeletion(deletedChatIdsRef.current, id)
+  }, [])
+
+  const confirmChatIdentityIsLive = useCallback((id) => (
+    forgetConfirmedDeletionIfExists(
+      deletedChatIdsRef.current,
+      id,
+      chatId => probeDeletion(`/chats/${encodeURIComponent(chatId)}`),
+    )
+  ), [])
+
+  const confirmAppRecovered = useCallback((id) => {
+    forgetConfirmedDeletion(deletedAppIdsRef.current, id)
+  }, [])
+
+  const confirmAppIdentityIsLive = useCallback((id) => (
+    forgetConfirmedDeletionIfExists(
+      deletedAppIdsRef.current,
+      id,
+      appId => probeDeletion(`/apps/${encodeURIComponent(appId)}`),
+    )
+  ), [])
+
+  const reconcileDeletedAppIdentities = useCallback(() => Promise.all(
+    [...deletedAppIdsRef.current].map(confirmAppIdentityIsLive),
+  ), [confirmAppIdentityIsLive])
+
+  const reconcileDeletedChatIdentities = useCallback(() => Promise.all(
+    [...deletedChatIdsRef.current].map(confirmChatIdentityIsLive),
+  ), [confirmChatIdentityIsLive])
+
   const { openAppWithIntent, handleChatInternalNav } = useAppIntentNavigation({
     appsRef,
     refreshApps,
-    setToast,
+    showToast,
     setAppIntents,
     navToRef,
   })
@@ -2409,15 +2473,41 @@ export default function Shell() {
       // The durable marker was committed with an app-attributed notification.
       // A refetch surfaces the dot; if the app is already visible, the effect
       // above immediately acknowledges it instead of leaving a stale nudge.
-      refreshApps()
+      void invalidateShellListCache('apps').then(refreshApps)
+    } else if (ev.type === 'chat_deleted') {
+      // Exact mutation evidence from this or another live tab. Update the
+      // in-memory drawer synchronously; the normal missing-active-chat effect
+      // owns any route/view repair in tabs that happened to have it open.
+      if (ev.chatId) confirmChatDeleted(ev.chatId)
+      void invalidateShellListCache('chats')
+    } else if (ev.type === 'chat_recovered') {
+      // Recovery is the sole operation allowed to clear the session tombstone.
+      if (ev.chatId) confirmChatRecovered(ev.chatId)
+      void invalidateShellListCache('chats').then(refreshChats)
+    } else if (ev.type === 'app_deleted') {
+      if (ev.appId) confirmAppDeleted(ev.appId)
+      void invalidateShellListCache('apps')
+    } else if (ev.type === 'app_recovered') {
+      if (ev.appId) confirmAppRecovered(ev.appId)
+      void invalidateShellListCache('apps').then(refreshApps)
     } else if (ev.type === 'app_updated' || ev.type === 'app_created') {
       const placementRequest = workspaceRequestFromSystemEvent(ev)
+      // app_updated is also the reinstall event for a tombstoned store app,
+      // while app_created may carry an integer id freed by TTL purge and reused
+      // for a different installation. A direct resource probe—not a staleable
+      // list—is the proof that either id is live again.
+      const reconcileIdentity = ev.appId
+        ? confirmAppIdentityIsLive(ev.appId)
+        : Promise.resolve(false)
       // Refresh server truth before warming or placing. app_updated is
       // refresh-only; app_created may additionally issue one background
       // workspace placement after the returned row confirms the relationship.
       // `updated_at` drives the iframe cache-buster and the derived built-app
       // CTA, so neither needs a separate client mirror.
-      refreshApps().then(updatedApps => {
+      Promise.all([
+        invalidateShellListCache('apps'),
+        reconcileIdentity,
+      ]).then(() => refreshApps()).then(updatedApps => {
         // Warm the SW cache for the updated app immediately — the edit
         // rotated the `?v=` cache key, so without this the next open pays
         // the network round trip. Every app's read path is cached now
@@ -2473,12 +2563,12 @@ export default function Shell() {
         confirmAndPlace()
       }
     } else if (ev.type === 'app_build_failed') {
-      // System-bus-only (app_watcher publishes it there alone), so it arrives
-      // exactly once — no dedup stamp needed.
-      showToast(appBuildFailureMessage(ev), {
-        variant: 'error',
-        duration: 10000,
-      })
+      // A failed background build leaves the previous app version running.
+      // The owner has no useful action here, and a burst of watcher retries
+      // must never cover the composer. Keep the diagnostic in backend logs;
+      // actionable update drift uses app_update_stale below with a direct path
+      // back to the App Store.
+      return
     } else if (ev.type === 'app_update_stale') {
       // The reviewed candidate changed while a conflict was being resolved.
       // Keep the prior live version explicit and take the owner back to the
@@ -2553,6 +2643,8 @@ export default function Shell() {
     // activeAppIdRef, activeChatIdRef, drawerOpenRef) so stale closure values
     // can't be serialized. Refs themselves don't need to be in deps (they're
     // stable objects whose .current is read at call time, not at capture time).
+    confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
+    confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished,
     markStreamingEnd, markStreamingStart,
     placeInWorkspace, refreshApps, refreshChats, warmAppCode,
@@ -2568,7 +2660,23 @@ export default function Shell() {
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_created events.
-  useSystemEventStream(handleSystemEvent, { onOpen: refreshApps })
+  const reconcileSystemStateOnOpen = useCallback(() => {
+    void Promise.all([
+      invalidateShellListCache('apps'),
+      invalidateShellListCache('chats'),
+      reconcileDeletedAppIdentities(),
+      reconcileDeletedChatIdentities(),
+    ]).then(() => {
+      refreshApps()
+      refreshChats()
+    })
+  }, [
+    reconcileDeletedAppIdentities,
+    reconcileDeletedChatIdentities,
+    refreshApps,
+    refreshChats,
+  ])
+  useSystemEventStream(handleSystemEvent, { onOpen: reconcileSystemStateOnOpen })
 
   // Listen for postMessage events from mini-app iframes:
   //   moebius:app-error — route crash report to the chat that built the app
@@ -2616,8 +2724,9 @@ export default function Shell() {
         })
       } else if (e.data?.type === 'moebius:open-chat') {
         if (typeof e.data.chatId !== 'string' || !e.data.chatId) return
+        let draftText = null
         if (e.data.draft) {
-          const draftText = String(e.data.draft)
+          draftText = String(e.data.draft)
           try {
             sessionStorage.setItem('pending-draft', draftText)
             sessionStorage.setItem(`draft:${e.data.chatId}`, draftText)
@@ -2626,6 +2735,10 @@ export default function Shell() {
           } catch {}
         }
         navTo('chat', { chatId: e.data.chatId })
+        // Storage covers an unmounted target. The explicit request also updates
+        // an already-retained ChatView, whose controlled composer state would
+        // otherwise keep showing its old value until a full remount.
+        if (draftText != null) requestComposer(e.data.chatId, { draft: draftText })
         refreshChats()
       } else if (e.data?.type === 'moebius:open-app') {
         // Match against installed apps by numeric id OR slug, so the
@@ -2902,7 +3015,38 @@ export default function Shell() {
     //
     // Resolve chatId BEFORE switching views — setting activeView='chat'
     // with the old chatId causes a visible flash of the previous chat.
-    const { chatId, reason } = await resolveNewChatId({ draft, forceNew, exclude })
+    // Standard mode has one foreground surface. If the owner temporarily
+    // replaced an unfinished blank chat with an app, "New chat" means return to
+    // that in-progress compose surface rather than silently allocate another
+    // blank and strand its saved draft. Builder mode deliberately does NOT take
+    // this branch: opening another chat there is additive by design.
+    //
+    // The history route only supplies a candidate id. The existing list guards
+    // plus fresh detail probe still prove that it is untouched before reuse, so
+    // a send from another browser cannot turn this convenience into reopening a
+    // conversation that has already started.
+    const ws = workspaceStateRef.current.ws
+    const resumeId = (
+      (!SPLITS || ws.viewMode === 'single')
+      && activeChatIdRef.current == null
+      && !draft
+      && !forceNew
+    )
+      ? mostRecentConcreteChatId(navStackRef.current)
+      : null
+    const resumeCandidate = resumeId == null
+      ? undefined
+      : currentReusableEmptyChat(chatsRef.current, {
+        activeChatId: resumeId,
+        exclude,
+        recoveredChatIds: recoveredChatIdsRef.current,
+        streamingChatIds: streamingChatIdsRef.current,
+      })
+    const { chatId, reason } = await resolveNewChatId(
+      resumeCandidate === undefined
+        ? { draft, forceNew, exclude }
+        : { candidate: resumeCandidate, draft, forceNew, exclude },
+    )
     if (chatId == null) {
       // Don't leave a dead, drawer-still-open tap. Offline / failed create surface a
       // toast; an in-flight second tap just closes the drawer (the first create lands).
@@ -2943,7 +3087,7 @@ export default function Shell() {
       const ws = workspaceStateRef.current.ws
       applyModeDestination({ view: 'chat', chatId, appId: null, paneId: ws.focusedPaneId })
     }
-    if (focusComposer) requestComposerFocus(chatId)
+    if (focusComposer) requestComposer(chatId, { focus: true })
   }
   // Keep the latest-newChat ref current so handleAppError's crash-report
   // fallback starts a chat with this render's live closure.
@@ -3004,7 +3148,10 @@ export default function Shell() {
       }
       // A 404 means the server row is already gone; remove the local phantom.
     }
-    recentlyCreatedChatsRef.current.delete(String(id))
+    // DELETE/404 is authoritative. Publish that fact into the drawer before
+    // any navigation work; every later list completion is filtered by the same
+    // session tombstone until recovery succeeds.
+    confirmChatDeleted(id)
     try { sessionStorage.removeItem(`draft:${id}`) } catch {}
     // Evict the cached messages so a future chat-ID collision (e.g.
     // recovery) can't surface stale content.
@@ -3051,6 +3198,7 @@ export default function Shell() {
           try {
             const recoverRes = await api.chats.recover(id)
             await jsonOrThrow(recoverRes, 'Chat recovery failed')
+            confirmChatRecovered(id)
             // Guard against the newChat() reuse scan picking up this
             // recovered chat before its has_messages=true propagates from
             // the server. The guard is cleared once ChatView fires
@@ -3089,6 +3237,7 @@ export default function Shell() {
       }
       // A 404 means the server row is already gone; remove the local phantom.
     }
+    confirmAppDeleted(id)
     // Retire this app's physical history + evict any warm frame before unmount
     // (contract §4.1.5), tombstone its route so Back can't recreate the tab
     // (§5.1.1), then scrub the nav-stack, then close its tab. The
@@ -3119,6 +3268,7 @@ export default function Shell() {
           try {
             const recoverRes = await api.apps.recover(id)
             await jsonOrThrow(recoverRes, 'App recovery failed')
+            confirmAppRecovered(id)
             await refreshApps()
           } catch {
             showToast("Couldn't undo — app may be gone.", { variant: 'error' })
@@ -3338,10 +3488,9 @@ export default function Shell() {
           inert={modalDrawerOpen || modeBeatActive}
           aria-label="Open tabs"
           // The single-pane strip is the PRIMARY drag source once the flag is on
-          // (the coachmark teaches "drag tabs to split" here). Tag it with the
-          // sole pane's id so the drag controller resolves a source pane exactly
-          // as it does for a WorkspaceChrome strip; dragging a tab out with ≥2
-          // tabs present splits the pane.
+          // Tag it with the sole pane's id so the drag controller resolves a
+          // source pane exactly as it does for a WorkspaceChrome strip; dragging
+          // a tab out with ≥2 tabs present splits the pane.
           data-pane-strip={paneModel.WORKSPACE_SPLITS_ENABLED ? workspace.focusedPaneId : undefined}
           data-mode-motion={navMotion ? navMotion.motion : undefined}
           style={navMotion ? navMotion.vars : undefined}
@@ -3520,9 +3669,9 @@ export default function Shell() {
               visible={chatPanesVisible && role !== 'held' && visibleChatKeys.has(`chat:${chatId}`)}
                 paneContentHeight={paned ? paned.h : null}
                 chatRunSignals={chatRunSignals}
-                composerFocusRequest={role === 'active' ? composerFocusRequest : null}
-                onComposerFocusHandled={role === 'active'
-                  ? handleComposerFocusHandled
+                composerRequest={role === 'active' ? composerRequest : null}
+                onComposerRequestHandled={role === 'active'
+                  ? handleComposerRequestHandled
                   : null}
                 onSystemEvent={handleSystemEvent}
                 markStreamingStart={markStreamingStart}
@@ -3674,26 +3823,8 @@ export default function Shell() {
           <Minimize2 size={18} aria-hidden="true" />
         </button>
       )}
-      {/* First-use coachmark (design §7.2) — the discoverability path for the
-          existing user base (the walkthrough never re-fires). Arms at ≥2 tabs
-          with the splits flag on; dismissed by a drag, its ✕, or 12s — never by
-          an unrelated tap. */}
-      {workspaceCoachmarkVisible && (
-        <div className="workspace__coachmark" role="status" aria-live="polite" inert={modalDrawerOpen}>
-          <span className="workspace__coachmark-text">
-            Drag a tab to move or split it
-          </span>
-          <button
-            type="button"
-            className="workspace__coachmark-close"
-            aria-label="Dismiss hint"
-            onClick={dismissWorkspaceCoachmark}
-          >
-            <X size={14} aria-hidden="true" />
-          </button>
-        </div>
-      )}
       <Toast
+        key={toast?.sequence || 'toast-empty'}
         message={toast?.message}
         variant={toast?.variant}
         duration={toast?.duration}

@@ -9,7 +9,7 @@ export function findAppForOpenTarget(list, target) {
 export default function useAppIntentNavigation({
   appsRef,
   refreshApps,
-  setToast,
+  showToast,
   setAppIntents,
   navToRef,
 }) {
@@ -25,8 +25,7 @@ export default function useAppIntentNavigation({
     }
     if (!shouldContinue()) return
     if (!app) {
-      setToast({
-        message: 'App is not installed yet.',
+      showToast('App is not installed yet.', {
         variant: 'info',
         duration: 6000,
       })
@@ -40,7 +39,7 @@ export default function useAppIntentNavigation({
       }))
     }
     navToRef.current('canvas', { appId: app.id })
-  }, [refreshApps])
+  }, [refreshApps, showToast])
 
   const handleChatInternalNav = useCallback((url) => {
     const app = url.searchParams.get('app')

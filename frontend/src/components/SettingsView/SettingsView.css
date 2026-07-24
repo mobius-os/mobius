@@ -243,6 +243,10 @@
   scroll-margin-top: 24px;
 }
 
+.settings-agent-group--disabled {
+  opacity: 0.56;
+}
+
 .settings__section:focus,
 .settings-agent-group:focus {
   outline: none;
@@ -363,6 +367,11 @@
 .settings-bg-row--off {
   background: transparent;
   opacity: 0.78;
+}
+
+.settings-bg-row--disconnected .settings-bg-row__drag-handle,
+.settings-bg-row--disconnected .model-trigger {
+  cursor: not-allowed;
 }
 
 .settings-bg-row__drag-handle {

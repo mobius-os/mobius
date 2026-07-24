@@ -8,6 +8,7 @@ import * as setupSession from '../lib/setupSession.js'
 import { clearLatchedTokens } from '../lib/appToken.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
 import { verifyConnectivity } from '../lib/connectivityStore.js'
+import { SHELL_DATA_CACHE } from '../sw-cache-policy.js'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
 
@@ -261,6 +262,46 @@ export async function apiFetch(path, options = {}) {
 }
 
 /**
+ * Evict one offline shell projection after a confirmed list-affecting write.
+ *
+ * `/api/chats` and `/api/apps/` are NetworkFirst so the drawer remains useful
+ * offline. That cache is intentionally allowed to be stale for a read, but a
+ * successful mutation is stronger evidence: keeping the pre-write cached GET
+ * lets the very next refetch resurrect a deleted row (or hide a recovered
+ * one). CacheStorage is shared by every tab on this device, so this also
+ * repairs their fallback layer. Best-effort by contract: a storage/quota
+ * failure must never turn a committed server mutation into a client failure.
+ */
+export async function invalidateShellListCache(kind, {
+  cacheStorage = typeof caches === 'undefined' ? null : caches,
+  origin = typeof location === 'undefined' ? null : location.origin,
+} = {}) {
+  if (!cacheStorage || !origin) return false
+  const pathname = kind === 'chats'
+    ? `${BASE}/api/chats`
+    : kind === 'apps'
+      ? `${BASE}/api/apps/`
+      : null
+  if (!pathname) return false
+  try {
+    const cache = await cacheStorage.open(SHELL_DATA_CACHE)
+    return await cache.delete(new URL(pathname, origin).href)
+  } catch {
+    return false
+  }
+}
+
+async function listAffectingMutation(kind, path, options) {
+  const response = await apiFetch(path, options)
+  // A 404 on DELETE is authoritative too: the local projection is stale and
+  // must not keep falling back to a cache that claims the row still exists.
+  if (response.ok || (options?.method === 'DELETE' && response.status === 404)) {
+    await invalidateShellListCache(kind)
+  }
+  return response
+}
+
+/**
  * Decode a JSON API response at the client boundary. Endpoints that expose a
  * data-object contract (rather than the raw Fetch Response contract used by
  * most existing query hooks) should use this helper so callers cannot confuse
@@ -353,7 +394,7 @@ export const api = {
   },
   chats: {
     list: (options = {}) => apiFetch('/chats', options),
-    create: (payload) => apiFetch('/chats', {
+    create: (payload) => listAffectingMutation('chats', '/chats', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
@@ -363,12 +404,16 @@ export const api = {
       const query = params.toString()
       return apiFetch(`/chats/${chatId}${query ? `?${query}` : ''}`)
     },
-    update: (chatId, payload) => apiFetch(`/chats/${chatId}`, {
+    update: (chatId, payload) => listAffectingMutation('chats', `/chats/${chatId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
-    remove: (chatId) => apiFetch(`/chats/${chatId}`, { method: 'DELETE' }),
-    recover: (chatId) => apiFetch(`/chats/${chatId}/recover`, { method: 'POST' }),
+    remove: (chatId) => listAffectingMutation(
+      'chats', `/chats/${chatId}`, { method: 'DELETE' },
+    ),
+    recover: (chatId) => listAffectingMutation(
+      'chats', `/chats/${chatId}/recover`, { method: 'POST' },
+    ),
   },
   apps: {
     list: () => apiFetch('/apps/'),
@@ -376,8 +421,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ activity_version: activityVersion }),
     }),
-    remove: (appId) => apiFetch(`/apps/${appId}`, { method: 'DELETE' }),
-    recover: (appId) => apiFetch(`/apps/${appId}/recover`, { method: 'POST' }),
+    update: (appId, payload) => listAffectingMutation('apps', `/apps/${appId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+    remove: (appId) => listAffectingMutation(
+      'apps', `/apps/${appId}`, { method: 'DELETE' },
+    ),
+    recover: (appId) => listAffectingMutation(
+      'apps', `/apps/${appId}/recover`, { method: 'POST' },
+    ),
     // Wipes the app's runtime storage back to empty while KEEPING it
     // installed — distinct from `remove` (which tombstones the whole app).
     deleteData: (appId) => apiFetch(`/apps/${appId}/data`, { method: 'DELETE' }),

@@ -67,16 +67,21 @@ test('ChatView only consumes methods returned by the scroll controller', () => {
     `ChatView consumes missing useScrollMode members: ${missing.join(', ')}`)
 })
 
-test('owner contract freezes question answers without changing active-row ownership', () => {
+test('owner contract freezes question answers with one transient reachability exception', () => {
   const architecture = readFileSync(
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.6 \(2026-07-22\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.7 \(2026-07-24\)/)
   assert.match(
     architecture,
     /In-process question is answered \| any \| `ANCHOR_AT` on current visible row; same active assistant row/,
     'question submission must freeze the reader while preserving the R6 row',
+  )
+  assert.match(
+    architecture,
+    /question-submit hold is the sole exception: it may reserve only the exact tail\s+deficit required to keep the answered card at its frozen offset/,
+    'question submission may reserve only its documented reachability deficit',
   )
 })
 
@@ -389,8 +394,8 @@ test('every predicate id is registered in CHAT_CONTRACT (registry is the map)', 
     cushionPresent(snapshotChatUX(pinnedEnv)),
     singleAssistantSurface(1),
     anchorHeldThroughToggle(
-      { anchorTop: 100, spacerH: 40 },
-      { anchorTop: 100, spacerH: 40 },
+      { anchorTop: 100, spacerH: 0 },
+      { anchorTop: 100, spacerH: 0 },
     ),
   ]
   for (const r of emitted) {

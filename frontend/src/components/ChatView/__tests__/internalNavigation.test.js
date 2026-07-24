@@ -33,7 +33,7 @@ test('shell intent callbacks keep identity while navTo changes per render', asyn
   const params = {
     appsRef: { current: [{ id: 42, slug: 'artifacts' }] },
     refreshApps: async () => refreshedApps,
-    setToast: (toast) => calls.push(['toast', toast]),
+    showToast: (...args) => calls.push(['toast', ...args]),
     setAppIntents: (update) => calls.push(['intent', update({})]),
     navToRef,
   }
@@ -57,6 +57,15 @@ test('shell intent callbacks keep identity while navTo changes per render', asyn
   refreshedApps = [{ id: 43, slug: 'delayed' }]
   await result.current.openAppWithIntent('delayed', null, () => false)
   assert.equal(calls.length, 2, 'cancelled delayed resolution must not navigate')
+
+  params.appsRef.current = []
+  refreshedApps = []
+  await result.current.openAppWithIntent('missing', null)
+  assert.deepEqual(calls.at(-1), [
+    'toast',
+    'App is not installed yet.',
+    { variant: 'info', duration: 6000 },
+  ])
 })
 
 test('internal navigation crosses stable markdown memo boundaries', () => {
@@ -82,7 +91,7 @@ test('shell resolves raw deep-link app targets through the intent rail', () => {
   assert.match(intentNavigation, /const openAppWithIntent = useCallback/)
   assert.match(intentNavigation, /findAppForOpenTarget\(updatedApps, target\)/)
   assert.match(intentNavigation, /navToRef\.current\('canvas'/)
-  assert.match(intentNavigation, /\}, \[refreshApps\]\)/)
+  assert.match(intentNavigation, /\}, \[refreshApps, showToast\]\)/)
   assert.match(intentNavigation, /\}, \[openAppWithIntent\]\)/)
   assert.match(shell, /if \(Number\.isFinite\(deepLink\.appId\)\)/)
   assert.match(shell, /navigationEpochRef\.current === startedAtEpoch/)

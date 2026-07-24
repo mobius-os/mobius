@@ -29,10 +29,11 @@ import './ProviderAuth.css'
  *   actionLabel     — optional override for the action button text
  *                     (e.g. "Reconfigure" / "Configure"); the default
  *                     is the Connect/Reconnect/Close verb below.
+ *   disabled        — greys the informational row and disables its action.
  */
 export default function ProviderRow({
   name, connected, expanded, onToggleExpand, children,
-  badge, version, subtitle, statusNode, actionLabel,
+  badge, version, subtitle, statusNode, actionLabel, disabled = false,
 }) {
   // Name + installed CLI/SDK version + status are informational. The explicit
   // action button is the only interactive target in the row.
@@ -63,12 +64,13 @@ export default function ProviderRow({
   )
 
   return (
-    <div className="provider-row">
+    <div className={`provider-row${disabled ? ' provider-row--disabled' : ''}`}>
       <div className="provider-row__main">{info}</div>
       <button
         type="button"
         className="provider-row__action"
         onClick={() => onToggleExpand?.()}
+        disabled={disabled}
         aria-expanded={expanded}
         aria-label={(() => {
           const verb = expanded

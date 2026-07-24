@@ -61,6 +61,7 @@ import {
   isOpaqueFramePublicAssetPath,
   withOpaqueFramePublicAssetCors,
   isCacheableAppAssetResponse,
+  SHELL_DATA_CACHE,
   isImmutableAppAsset,
   isPackagedAppAsset,
   packagedAppAssetCacheKey,
@@ -560,7 +561,7 @@ registerRoute(
   ({ url }) =>
     url.origin === self.location.origin &&
     url.pathname === '/api/theme',
-  new StaleWhileRevalidate({ cacheName: 'mobius-shell-data' }),
+  new StaleWhileRevalidate({ cacheName: SHELL_DATA_CACHE }),
 )
 
 // `/api/chats` — same cache bucket as above (one logical
@@ -595,7 +596,7 @@ registerRoute(
     url.origin === self.location.origin &&
     (url.pathname === '/api/chats' || url.pathname === '/api/apps/'),
   new NetworkFirst({
-    cacheName: 'mobius-shell-data',
+    cacheName: SHELL_DATA_CACHE,
     // KEPT at 5s deliberately. Workbox returns a cache fallback as a
     // successful fetch that TanStack can't distinguish from a confirmed live
     // response (isFetchedAfterMount), so a too-fast fallback of a stale `[]`

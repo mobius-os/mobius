@@ -2123,10 +2123,9 @@ def test_install_does_not_publish_when_install_fails(
   fake_sb.publish.assert_not_called()
 
 
-def test_delete_publishes_app_updated(client, auth):
-  """Uninstall must also refresh the drawer — Shell.jsx's app_updated
-  handler refetches /api/apps/, which then no longer contains the
-  deleted row, so the entry disappears without a page reload."""
+def test_delete_publishes_exact_app_deleted_event(client, auth):
+  """Uninstall publishes committed deletion evidence, not a staleable refetch
+  hint, so every live shell can remove the exact drawer row immediately."""
   r0 = client.post("/api/apps/", headers=auth, json={
     "name": "Doomed",
     "description": "",
@@ -2140,8 +2139,61 @@ def test_delete_publishes_app_updated(client, auth):
     r = client.delete(f"/api/apps/{app_id}", headers=auth)
   assert r.status_code == 204, r.text
   fake_sb.publish.assert_called_once_with({
-    "type": "app_updated", "appId": str(app_id),
+    "type": "app_deleted", "appId": str(app_id),
   })
+
+
+def test_delete_stays_successful_after_post_commit_job_cleanup_failure(
+  client, auth,
+):
+  """A committed tombstone remains a successful deletion when cleanup fails."""
+  r0 = client.post("/api/apps/", headers=auth, json={
+    "name": "Cleanup Failure",
+    "description": "",
+    "jsx_source": JSX,
+  })
+  assert r0.status_code == 201, r0.text
+  app_id = r0.json()["id"]
+
+  with (
+    patch(
+      "app.routes.apps.app_jobs.terminate_app_jobs",
+      side_effect=RuntimeError("cleanup failed"),
+    ),
+    patch("app.routes.apps.get_system_broadcast") as mock_get_sb,
+  ):
+    fake_sb = MagicMock()
+    mock_get_sb.return_value = fake_sb
+    deleted = client.delete(f"/api/apps/{app_id}", headers=auth)
+
+  assert deleted.status_code == 204, deleted.text
+  assert client.get(f"/api/apps/{app_id}", headers=auth).status_code == 404
+  fake_sb.publish.assert_called_once_with({
+    "type": "app_deleted", "appId": str(app_id),
+  })
+
+
+def test_recover_stays_successful_after_post_commit_skill_cleanup_failure(
+  client, auth,
+):
+  """Ancillary restoration cannot make a durably recovered app look failed."""
+  r0 = client.post("/api/apps/", headers=auth, json={
+    "name": "Recovery Cleanup Failure",
+    "description": "",
+    "jsx_source": JSX,
+  })
+  assert r0.status_code == 201, r0.text
+  app_id = r0.json()["id"]
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+
+  with patch(
+    "app.install.restore_app_skills",
+    new=AsyncMock(side_effect=RuntimeError("restore failed")),
+  ):
+    recovered = client.post(f"/api/apps/{app_id}/recover", headers=auth)
+
+  assert recovered.status_code == 200, recovered.text
+  assert client.get(f"/api/apps/{app_id}", headers=auth).status_code == 200
 
 
 # --- Per-app git model (feature 084) ---------------------------------

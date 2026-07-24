@@ -1,6 +1,9 @@
 # Visual testing and screenshots
 
-Use this workflow whenever you visually test a Möbius shell or mini-app, drive `agent-browser`, capture a screenshot, inspect a rendered state, or describe screenshot evidence to the partner. The core constitution owns the invariant that visual claims need visible evidence; this skill owns the commands and mechanics.
+Visual-testing extension for Möbius shell and app work. Read it alongside
+`building-apps-quickstart.md` for every mini-app build/update, or alongside
+`theming.md` for shell UI changes; it owns browser interaction, screenshots,
+and visible evidence.
 
 ## Drive the rendered page with agent-browser
 
@@ -15,23 +18,36 @@ bash "$SCRIPTS_DIR/agent-screenshot.sh" <route> <out.png>
 # /apps/<slug>/    → a mini-app's standalone PWA page (by slug)
 ```
 
-`preview_app.sh <id>` and `preview_shell.sh [chat_id]` are thin wrappers over it for those two common cases. `preview_app.sh` is readiness-gated: it waits for the shell's real post-render frame-mounted state, so a successful capture is not merely the loading skeleton. Use the helper, then `Read`/`view_image` the PNG before describing it.
+`preview_app.sh <id>` and `preview_shell.sh [chat_id]` are thin wrappers over it
+for those two common cases. `preview_app.sh` is readiness-gated and uses
+ephemeral content-only mode: it waits for the real post-render frame-mounted
+state and prevents product-owned walkthrough/install overlays from mounting in
+that isolated browser session without writing onboarding or dismissal state. Use the helper, then
+`Read`/`view_image` the PNG before describing it.
 
 Raw `agent-browser open <url>` is for **non-Möbius pages only** (an external site you're scraping or sanity-checking) — it has no auth dance, so it shows the login wall for any Möbius route.
 
 Core moves once a page is open: `set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT"` (the helper sets this for you; needed when driving raw), `snapshot` (a11y tree with `@eN` refs), `click/fill/type @eN`, `screenshot <path>`, `wait` (on a signal — `wait @eN` / `--text` / `--fn` / `--url` — not a guessed duration), `batch "cmd1" "cmd2"` (ordered, fewer round-trips), `diff snapshot` / `diff screenshot --baseline <before>.png`.
 
-For a mini-app, scope the interaction tree to its iframe rather than dumping the
-whole workspace:
+For a mini-app, switch into its opaque iframe before taking the interaction
+snapshot rather than applying a parent-document selector:
 
 ```bash
-agent-browser snapshot -i -s 'iframe[data-app-id="<app-id>"]'
+agent-browser snapshot -i -d 2
+# Find: Iframe "<app name>" [ref=eN]
+agent-browser frame @eN
+agent-browser snapshot -i
+# interact and re-snapshot in this frame
+agent-browser frame main
 ```
 
-This keeps chats, tabs, and the app drawer out of model context while retaining
-the app's interactive descendants. Do **not** use `--compact` with this iframe
-selector: current `agent-browser` can collapse it to the iframe node alone.
-Use the returned refs for interaction and re-snapshot after state changes.
+The shallow parent snapshot creates the documented iframe ref while keeping
+shell output small; the explicit frame context then exposes only the app's
+interactive descendants. Use the ref rather than a CSS frame selector:
+response-sandboxed opaque frames can be absent from the selector resolver even
+when their browser frame and accessibility subtree are healthy. Do not weaken
+the iframe sandbox. Re-snapshot after state changes and return to `frame main`
+before checking shell state.
 
 `agent-browser wait --text` observes the top-level document and is unreliable
 for text inside the opaque app iframe. For initial load, rely on

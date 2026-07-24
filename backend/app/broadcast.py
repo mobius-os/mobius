@@ -271,7 +271,7 @@ def remove_broadcast(chat_id: str):
 
 class SystemBroadcast:
   """Process-lifetime event bus for shell-level system events
-  (theme_updated, app_updated, shell_rebuild_*).
+  (theme/app updates, exact resource deletion/recovery, shell rebuilds).
 
   Why this exists separately from ChatBroadcast: shell-level state
   (which app version is current, which theme is active) needs to

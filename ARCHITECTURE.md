@@ -503,7 +503,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.6 (2026-07-22).** This section is the
+**Owner-authoritative contract — v1.7 (2026-07-24).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -527,12 +527,20 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   waits for the spacer-exhaustion handoff. A viewport /
   keyboard change, foreground return, mount, or chat restoration must never create
   auto-scroll.
-- **R1 — Permanent exact reservation.** Every non-empty chat keeps enough dynamic
-  bottom spacer for its latest visible user message to reach the viewport top,
-  including after leaving and reopening the chat. The reservation is exact — no
-  extra scrollable blank beyond that target — and shrinks as the reply fills it.
-  `FOLLOW_BOTTOM` follows real conversation content, excluding the reservation, so
-  a short restored chat cannot open on an empty viewport.
+- **R1 — Visible latest-user reservation.** Dynamic bottom spacer belongs only to
+  the latest visible user row. It reserves exactly enough room for that row to reach
+  the viewport top and shrinks as reply, tool, image, or other content fills the
+  deficit. The remaining room survives turn completion when the reply is short.
+  Expanding content consumes it; collapsing the same content restores the exact
+  deficit. Mode does not own its ordinary lifetime: `PIN_USER_MSG` may reserve
+  before a fresh row is placed, while `ANCHOR_AT`, `FOLLOW_BOTTOM`, mount/return,
+  and disclosure settlement reserve only when their real viewport contains the
+  latest user row. If that row leaves the viewport, ordinary spacer is zero;
+  seeing an older user row never qualifies. An otherwise unreachable anchor clamps
+  to real conversation content before visibility is decided. R6's transient
+  question-submit hold is the sole exception: it may reserve only the exact tail
+  deficit required to keep the answered card at its frozen offset through mobile
+  viewport growth, and that intent is never persisted.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
   pins when its submit-time DOM snapshot is at the real-content tail. Geometry is
@@ -569,6 +577,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   manufacture a top-of-chat location or engage live following. That automatic tail
   fallback is not a reader-chosen location and must not be persisted on pagehide or
   shell reload; only a deliberate scroll/send/pagination position earns restoration.
+  Exactness is bounded by real content: if a viewport growth or content collapse
+  makes the saved target unreachable, clamp it to the nearest real conversation
+  position, then apply R1 only if that viewport shows the latest user row.
 - **R5 — Reader owns gestures and layout-only sends.** From the first wheel/touch/key
   input until its scroll event lands, no layout path may write `scrollTop`: stream
   resize, spacer handoff, terminal promotion, catch-up, and viewport/keyboard resize
@@ -609,10 +620,11 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   currently visible message and its exact viewport offset as `ANCHOR_AT`. Resumed
   output grows without dragging the reader, even when the chat had been following
   the tail before Submit. If a mobile viewport grows before that output arrives,
-  the dynamic spacer temporarily reserves enough room to keep the anchor target
-  reachable; the reservation disappears as real content replaces it. A failed
-  answer keeps that settled reading anchor for the retryable card rather than
-  manufacturing follow intent again.
+  the dynamic spacer temporarily reserves exactly enough room to keep the anchor
+  target reachable; the reservation disappears as real content replaces it and
+  the transient reservation intent is stripped before persistence. A failed answer
+  keeps that settled reading anchor for the retryable card rather than manufacturing
+  follow intent again.
   The source handoff
   preserves the question, its answer, and every pre/post-answer thinking, tool, and
   text block in event order, without hiding, duplicating, or reordering them. Only a
@@ -633,14 +645,15 @@ path means routing it through the same entries rather than inventing another rul
 | First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted at real-content tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
-| Reader reaches physical bottom while live reservation remains | any | armed `PIN_USER_MSG` | User-owned; then keep prompt fixed |
-| Reader reaches physical bottom while idle reservation remains | any | settled `PIN_USER_MSG` | User-owned; keep prompt fixed |
+| Reader reaches physical bottom while latest-user reservation remains and turn is live | any | armed `PIN_USER_MSG` | User-owned; then keep prompt fixed |
+| Reader reaches physical bottom while latest-user reservation remains and turn is idle | any | settled `PIN_USER_MSG` | User-owned; keep prompt fixed |
 | Reader reaches bottom with no reservation remaining | any | `FOLLOW_BOTTOM` | User-owned |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
 | Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow real-content tail |
 | Short reply settles before consuming the reservation | armed pin hold | settled pin hold | Keep prompt fixed; retire automatic handoff |
-| Other layout grows while pinned or anchored | hold | same hold | Reapply only the held target |
+| Other layout grows/collapses while latest user is visible | any hold | same hold | Consume/restore exact R1 deficit |
+| Latest user leaves the viewport | any | same reader mode | Collapse spacer to zero |
 | Viewport/keyboard changes | `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply pin after resize; never infer intent from keyboard-open geometry |
 | Viewport/keyboard changes | follow or anchor hold | same follow if still at tail, otherwise hold anchor | Never creates follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
@@ -656,6 +669,10 @@ Controller structure is part of the contract, not an implementation detail:
 - Every live mode mutation goes through `transitionMode`; every mode-owned
   `scrollTop` write goes through `writeMode`. The exported `applyMode` executor
   is for the controller and pure unit tests, not a second live writer.
+- `useScrollMode` is the sole writer of `.spacer-dynamic` height. The write is
+  derived from the latest user row's visibility and exact content deficit;
+  disclosure helpers and renderers may preserve an on-screen anchor but may never
+  prime, enlarge, or unwind spacer themselves.
 - The gesture-gated `scroll` event reads physical-bottom geometry directly.
   Do not reintroduce a sentinel or asynchronous observer as a second bottom
   authority: its delayed state can contradict the viewport that caused the
@@ -679,8 +696,9 @@ but never backward. Do not derive a remounted timer solely from `Date.now()` or 
 client arrival time of replayed deltas: catch-up arrives as a burst and that makes a
 minutes-old turn visibly restart at one second.
 
-Every visible user row also makes R1's reservation current, whether or not that row
-pins. Reservation lifetime and pin decisions are independent.
+Only the latest visible user row makes R1's reservation current. Reservation
+lifetime follows that row's visibility and exact remaining deficit, not turn
+completion or a particular scroll mode.
 - **A restored send is one logical message.** The frontend scopes the draft
   identity to the chat and reuses its client-minted `cid` when an ambiguous
   failed POST restores an unchanged composer. The route checks that durable

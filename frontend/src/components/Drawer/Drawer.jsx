@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
-import { apiFetch } from '../../api/client.js'
+import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import {
   DRAWER_CLOSE_FALLBACK_MS,
@@ -14,6 +14,11 @@ import {
 } from '../../lib/drawerLifecycle.js'
 import { WORKSPACE_SPLITS_ENABLED } from '../Shell/paneModel.js'
 import InstallSheet from './InstallSheet.jsx'
+import {
+  clampDrawerChatCount,
+  initialDrawerChatCount,
+  nextDrawerChatCount,
+} from './drawerProgressiveRows.js'
 import './Drawer.css'
 
 // Module-level constant so default Set props are stable across renders.
@@ -94,6 +99,55 @@ export default function Drawer({
     if (ap && bp) return bp.localeCompare(ap)
     return (a.created_at || '').localeCompare(b.created_at || '')
   }), [apps])
+  const [visibleChatCount, setVisibleChatCount] = useState(
+    () => initialDrawerChatCount(allChats.length),
+  )
+  const chatScrollRef = useRef(null)
+  const chatSentinelRef = useRef(null)
+  const visibleChats = useMemo(
+    () => allChats.slice(0, visibleChatCount),
+    [allChats, visibleChatCount],
+  )
+
+  // Preserve the revealed window across recency reorders. Only clamp when
+  // deletion/reconciliation makes the list shorter, and always keep the first
+  // batch available. Resetting to one batch on every query-cache refresh would
+  // make rows disappear beneath someone who was already scrolling.
+  useEffect(() => {
+    setVisibleChatCount(current => clampDrawerChatCount(
+      current,
+      allChats.length,
+    ))
+  }, [allChats.length])
+
+  // One continuous list, progressively materialized as its sentinel nears the
+  // viewport. The chat summaries are already the shell's small navigation
+  // projection; this boundary avoids mounting hundreds of interactive menu
+  // trees before they can be seen. Browsers without IntersectionObserver keep
+  // the old fully-rendered behavior rather than making history unreachable.
+  useEffect(() => {
+    if (!open || visibleChatCount >= allChats.length) return undefined
+    const root = chatScrollRef.current
+    const sentinel = chatSentinelRef.current
+    if (!root || !sentinel) return undefined
+    if (typeof IntersectionObserver === 'undefined') {
+      setVisibleChatCount(allChats.length)
+      return undefined
+    }
+    const observer = new IntersectionObserver(entries => {
+      if (!entries.some(entry => entry.isIntersecting)) return
+      setVisibleChatCount(current => nextDrawerChatCount(
+        current,
+        allChats.length,
+      ))
+    }, {
+      root,
+      // Reveal the next rows before the sentinel itself reaches the fade.
+      rootMargin: '0px 0px 320px 0px',
+    })
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [allChats.length, open, visibleChatCount])
 
   // One row at a time can be in rename or open-menu mode. Tracking the
   // active id (rather than per-row state) lets a click on another row's
@@ -228,18 +282,12 @@ export default function Drawer({
   }
 
   async function renameChat(id, title) {
-    const res = await apiFetch(`/chats/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ title }),
-    })
+    const res = await api.chats.update(id, { title })
     if (res.ok) refreshChats()
   }
 
   async function renameApp(id, name) {
-    const res = await apiFetch(`/apps/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ name }),
-    })
+    const res = await api.apps.update(id, { name })
     if (res.ok) refreshApps()
   }
 
@@ -259,10 +307,7 @@ export default function Drawer({
       ),
     )
     try {
-      const res = await apiFetch(`/chats/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ pinned }),
-      })
+      const res = await api.chats.update(id, { pinned })
       if (res.ok) refreshChats()
       else queryClient.setQueryData(key, prev)
     } catch {
@@ -281,10 +326,7 @@ export default function Drawer({
       ),
     )
     try {
-      const res = await apiFetch(`/apps/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ pinned }),
-      })
+      const res = await api.apps.update(id, { pinned })
       if (res.ok) refreshApps()
       else queryClient.setQueryData(key, prev)
     } catch {
@@ -612,8 +654,8 @@ export default function Drawer({
               <Chats width={16} height={16} aria-hidden="true" />
               <span>Chats</span>
             </h2>
-            <div className="drawer__scroll">
-              {allChats.length > 0 ? allChats.map(chat => (
+            <div className="drawer__scroll" ref={chatScrollRef}>
+              {allChats.length > 0 ? visibleChats.map(chat => (
                 <DrawerRow
                   key={chat.id}
                   kind="chat"
@@ -631,6 +673,13 @@ export default function Drawer({
                     No conversations yet
                   </EmptyMessage.Description>
                 </EmptyMessage>
+              )}
+              {visibleChatCount < allChats.length && (
+                <div
+                  ref={chatSentinelRef}
+                  className="drawer__progressive-sentinel"
+                  aria-hidden="true"
+                />
               )}
             </div>
           </div>

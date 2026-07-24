@@ -48,7 +48,15 @@ preserving the brief and safety contracts.
 - **Be conservative and reversible.** You are operating on the partner's live platform while they sleep. Everything you change is in `/data`'s git history — but prefer changes you'd be comfortable explaining in the morning. **Never auto-apply anything risky** (security fixes with behavior change, destructive data ops, dependency major-bumps, anything that hits paid external APIs or notifies other people). Surface those in the brief as a proposal with a one-tap question, don't do them.
 - **Commit as you go.** After each discrete chunk — a skill edit, a system-improvement note, an app fix — `pm-commit '<area>: <what and why>'`. One green-on-green sweep is hard to undo; small commits are easy.
 - **Anti-noise is the whole game.** Every item that reaches the brief MUST carry **trigger** (what you observed), **why** (why it matters to the partner), and **next-action** (the one concrete thing — ideally a tap). An item without all three is noise; drop it or keep digging until it has them. The same rule applies to your own diagnostics: a command without a fresh trigger or an explicit due date is resource noise. A short brief the partner reads fully beats a long one they skim.
-- **Leverage the other skills — don't reinvent them.** `Read /data/shared/skills/<name>.md` and follow it for the work it owns: `building-apps.md` for any app fix/feature, `theming.md` for shell/visual work, `cron.md` for scheduled jobs, `notifications.md` for the morning push, `images.md` for any brief illustration, and `/data/shared/skills/memory.md` only when interpreting Memory's update log or proposing memory-system improvements. This skill orchestrates; those skills hold the per-task contracts.
+- **Leverage the other skills — don't reinvent them.** Batch-read the complete
+  set implied by the work: `building-apps-quickstart.md` +
+  `visual-testing.md` for any app fix/feature; add `building-apps.md`,
+  `cron.md`, or `app-component-shapes.md` only when their inventory
+  descriptions match. Use `theming.md` + `visual-testing.md` for shell/visual
+  work, `notifications.md` for the morning push, `images.md` for any brief
+  illustration, and `/data/shared/skills/memory.md` only when interpreting
+  Memory's update log or proposing memory-system improvements. This skill
+  orchestrates; those skills hold the per-task contracts.
 - **Time-box and bail safely.** If you're running long, finish the current chunk, commit it, skip ahead to "Write the brief" — a partial-but-shipped brief beats a perfect one that never posts. Note in the brief what you skipped.
 - **The deliverable is non-negotiable: write the brief.** Reflection may improve skills, apps, and system routines before that, but a partial night with a truthful brief beats a perfect investigation that never ships.
 
@@ -286,7 +294,11 @@ usage, prevented a risk, changed user-visible behavior, or needs a decision.
 
 **Only improve apps the partner actually touched.** This is the leading rule. The `per-app-digest.json` staged in `inputs/` is your first stop — read it before reviewing any app. It gives you: `opens_24h` (how many times the partner opened the app today), `signal_counts` (what events fired), `app_errors_24h` + `recent_app_errors` (UNCAUGHT crashes the browser caught), `last_5_errors` (errors the app EXPLICITLY reported via `signal('error')`), `request_errors_24h` + `top_request_errors` (bounded, query-free HTTP failure groups with counts), and `has_signals` (whether the app emits analytics at all). The digest's top-level `shell_errors_24h` and `shell_request_errors_24h` cover the owner shell. Sort by `opens_24h` descending, but never skip an app with a high repeated-request count: a fetch retry loop may consume CPU and disk without throwing JavaScript. An app with `opens_24h == 0` and no recent errors does not need attention tonight unless an interview specifically flagged it.
 
-`Read /data/shared/skills/building-apps.md` before touching any app; it owns the component shape, storage traps, and lifecycle. List what's installed if you need the full set:
+Before touching an app, batch-read
+`/data/shared/skills/building-apps-quickstart.md` and
+`/data/shared/skills/visual-testing.md`; add the advanced, cron, or component
+catalog skill only when its inventory description matches the issue. List
+what's installed if you need the full set:
 
 ```bash
 curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | python3 -m json.tool
@@ -475,7 +487,7 @@ Commit the brief + run artifacts: `pm-commit 'reflection: brief for <date>'`.
 
 The partner's taps on a brief's question cards don't reach a live agent — they're saved and surface at the **start of your NEXT run** as `inputs/prev-question-answers.json` (staged by `fetch.sh`). You read it in **phase 0** and **act on it in phase 2**. This is the most valuable signal you get; treat it as a first-class input, not an afterthought.
 
-- **Act.** Each answer is a decision: build the feature they picked, apply the security fix they approved, drop the ones they declined. Treat a card answer as approval for exactly what it offered — nothing more. Build/iterate following `building-apps.md`. Don't re-ask a question they already answered — `prev-question-answers.json` is the record of what's settled.
+- **Act.** Each answer is a decision: build the feature they picked, apply the security fix they approved, drop the ones they declined. Treat a card answer as approval for exactly what it offered — nothing more. Build/iterate with the quickstart + visual-testing base pair and only the matching extensions. Don't re-ask a question they already answered — `prev-question-answers.json` is the record of what's settled.
 - **Learn — update Memory.** Their pick is a fact about them (a confirmed preference, a priority, a thing they don't care about). Record it (`about-the-user`) so future briefs propose better and waste fewer of their taps. A declined suggestion is as informative as an accepted one.
 - **Learn — update the skills, including this one.** If the partner consistently declines a *kind* of suggestion, or always wants more/less detail, or a question landed wrong, that's a reflection-skill edit: change what you prioritize, prune, or how you phrase the next brief's questions. `pm-commit` it.
 

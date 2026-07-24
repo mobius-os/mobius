@@ -419,16 +419,31 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   db.delete(app)
   db.commit()
   get_system_broadcast().publish(
-    {"type": "app_updated", "appId": str(deleted_app_id)}
+    {"type": "app_deleted", "appId": str(deleted_app_id)}
   )
   from app.install import purge_app_skills
-  await purge_app_skills(deleted_app_id)
+  try:
+    await purge_app_skills(deleted_app_id)
+  except Exception:
+    # The id-keyed data is gone and the row has already been freed. Skill/source
+    # cleanup is no longer allowed to turn that committed state into an
+    # ambiguous failed deletion response.
+    log.exception(
+      "Hard-deleted app %s but could not purge all app skills",
+      deleted_app_id,
+    )
 
   resolved_source = _resolve_app_source_dir(app_source_dir, app_name, settings)
   if resolved_source is not None:
-    async with fs_locks.source_dir_lock(str(resolved_source)):
-      if _safe_to_rmtree_source(resolved_source, apps_root, db, deleted_app_id):
-        await asyncio.to_thread(_drop_cron_and_rmtree, resolved_source)
+    try:
+      async with fs_locks.source_dir_lock(str(resolved_source)):
+        if _safe_to_rmtree_source(resolved_source, apps_root, db, deleted_app_id):
+          await asyncio.to_thread(_drop_cron_and_rmtree, resolved_source)
+    except Exception:
+      log.exception(
+        "Hard-deleted app %s but could not remove its retired source tree",
+        deleted_app_id,
+      )
 
 
 def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) -> str:
@@ -2207,23 +2222,41 @@ async def delete_app(
     app_slug = app.slug
     app_source_dir = app.source_dir
     db.commit()
+    # Publish the durable tombstone before best-effort job/skill/cron cleanup.
+    # Cleanup errors must not leave live shells projecting a row the database
+    # has already removed from the drawer.
+    get_system_broadcast().publish(
+      {"type": "app_deleted", "appId": str(app_id)}
+    )
     # A job wrapper publishes its lease before checking the live row.  Now that
     # the tombstone is durable, terminate every verified group; a wrapper that
     # races in afterward observes the tombstone and exits before spawning work.
-    await asyncio.to_thread(app_jobs.terminate_app_jobs, app_id)
+    try:
+      await asyncio.to_thread(app_jobs.terminate_app_jobs, app_id)
+    except Exception:
+      log.exception(
+        "App %s was deleted but its supervised jobs could not be terminated",
+        app_id,
+      )
     from app.install import deactivate_app_skills
-    for warning in await deactivate_app_skills(app_id):
-      log.warning("uninstall: %s", warning)
+    try:
+      for warning in await deactivate_app_skills(app_id):
+        log.warning("uninstall: %s", warning)
+    except Exception:
+      log.exception(
+        "App %s was deleted but its app skills could not be deactivated",
+        app_id,
+      )
     # Logical uninstall — pairs with the app_install event so churn analysis
     # (and the nightly digest) sees removals, not just installs. Best-effort,
     # after the tombstone commit.
-    activity.log_event("app_uninstall", app_id=app_id, slug=app_slug)
-
-    # The Shell refetches /api/apps/ and the now-tombstoned app drops out
-    # (list_apps filters deleted_at IS NULL).
-    get_system_broadcast().publish(
-      {"type": "app_updated", "appId": str(app_id)}
-    )
+    try:
+      activity.log_event("app_uninstall", app_id=app_id, slug=app_slug)
+    except Exception:
+      log.exception(
+        "App %s was deleted but uninstall activity could not be recorded",
+        app_id,
+      )
 
     # Stop the tombstoned app's scheduled jobs WITHOUT touching its files — the
     # job.sh stays in the preserved source tree so a reinstall/recover can
@@ -2233,15 +2266,27 @@ async def delete_app(
     resolved_source = _resolve_app_source_dir(
       app_source_dir, app_name, settings
     )
-    if resolved_source is not None:
-      async with fs_locks.source_dir_lock(str(resolved_source)):
-        await asyncio.to_thread(_drop_cron_only, resolved_source)
+    try:
+      if resolved_source is not None:
+        async with fs_locks.source_dir_lock(str(resolved_source)):
+          await asyncio.to_thread(_drop_cron_only, resolved_source)
+    except Exception:
+      log.exception(
+        "App %s was deleted but its source cron could not be disabled",
+        app_id,
+      )
     runtime_dir = _legacy_platform_runtime_dir_for_app(app)
-    if runtime_dir is not None and (
-      resolved_source is None or runtime_dir.resolve() != resolved_source
-    ):
-      async with fs_locks.source_dir_lock(str(runtime_dir)):
-        await asyncio.to_thread(_drop_cron_only, runtime_dir)
+    try:
+      if runtime_dir is not None and (
+        resolved_source is None or runtime_dir.resolve() != resolved_source
+      ):
+        async with fs_locks.source_dir_lock(str(runtime_dir)):
+          await asyncio.to_thread(_drop_cron_only, runtime_dir)
+    except Exception:
+      log.exception(
+        "App %s was deleted but its legacy cron could not be disabled",
+        app_id,
+      )
 
 
 @router.delete(
@@ -2391,6 +2436,12 @@ async def recover_app(
     app_name = app.name
     app_source_dir = app.source_dir
     db.commit()
+    # Recovery is durable at this point. Publish before ancillary cron/skill
+    # restoration so a later best-effort failure cannot leave the live drawer
+    # hidden behind a stale deletion tombstone.
+    get_system_broadcast().publish(
+      {"type": "app_recovered", "appId": str(app_id)}
+    )
 
     # Restore the durable declaration the tombstone moved aside. Do not execute
     # preserved scripts here: an older one may run the job directly. Once all
@@ -2400,15 +2451,21 @@ async def recover_app(
     resolved_source = _resolve_app_source_dir(
       app_source_dir, app_name, settings
     )
-    if resolved_source is not None:
-      async with fs_locks.source_dir_lock(str(resolved_source)):
-        await asyncio.to_thread(_reenable_init_cron_replay, resolved_source)
-    runtime_dir = _legacy_platform_runtime_dir_for_app(app)
-    if runtime_dir is not None and (
-      resolved_source is None or runtime_dir.resolve() != resolved_source
-    ):
-      async with fs_locks.source_dir_lock(str(runtime_dir)):
-        await asyncio.to_thread(_reenable_init_cron_replay, runtime_dir)
+    try:
+      if resolved_source is not None:
+        async with fs_locks.source_dir_lock(str(resolved_source)):
+          await asyncio.to_thread(_reenable_init_cron_replay, resolved_source)
+      runtime_dir = _legacy_platform_runtime_dir_for_app(app)
+      if runtime_dir is not None and (
+        resolved_source is None or runtime_dir.resolve() != resolved_source
+      ):
+        async with fs_locks.source_dir_lock(str(runtime_dir)):
+          await asyncio.to_thread(_reenable_init_cron_replay, runtime_dir)
+    except Exception:
+      log.exception(
+        "App %s was recovered but its cron declaration could not be restored",
+        app_id,
+      )
     def _reconcile_recovered_cron():
       # The request Session belongs to FastAPI's dependency worker. Give the
       # blocking subprocess reconciliation its own Session in its own thread.
@@ -2419,20 +2476,28 @@ async def recover_app(
       finally:
         cron_db.close()
 
-    _cron_count, _cron_warnings = await asyncio.to_thread(
-      _reconcile_recovered_cron,
-    )
-    if _cron_count:
-      log.info("recover supervised %d app cron schedule(s)", _cron_count)
-    for warning in _cron_warnings:
-      log.warning("recover cron supervision skipped: %s", warning)
+    try:
+      _cron_count, _cron_warnings = await asyncio.to_thread(
+        _reconcile_recovered_cron,
+      )
+      if _cron_count:
+        log.info("recover supervised %d app cron schedule(s)", _cron_count)
+      for warning in _cron_warnings:
+        log.warning("recover cron supervision skipped: %s", warning)
+    except Exception:
+      log.exception(
+        "App %s was recovered but cron supervision could not be reconciled",
+        app_id,
+      )
     from app.install import restore_app_skills
-    for warning in await restore_app_skills(app_id):
-      log.warning("recover: %s", warning)
-  # Refetch the drawer (app reappears) and bust any cached iframe for it.
-  get_system_broadcast().publish(
-    {"type": "app_updated", "appId": str(app_id)}
-  )
+    try:
+      for warning in await restore_app_skills(app_id):
+        log.warning("recover: %s", warning)
+    except Exception:
+      log.exception(
+        "App %s was recovered but its app skills could not be restored",
+        app_id,
+      )
   return {"ok": True}
 
 

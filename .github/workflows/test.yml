@@ -15,9 +15,11 @@ env:
   # record duplicates that data for every image build and is not used here.
   DOCKER_BUILD_RECORD_UPLOAD: 'false'
 
-# Only the newest synthetic merge for a pull request can land.
+# Only the newest synthetic merge for one exact pull request can land. The PR
+# number is the canonical identity: unlike a source branch it is unique in this
+# repository, stable across head updates, and independent of fork naming.
 concurrency:
-  group: tests-${{ github.event.pull_request.head.ref }}
+  group: tests-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:

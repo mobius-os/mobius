@@ -450,7 +450,7 @@ test('v3 world-reveal scatter paints the mounted destination underlay beneath th
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
 })
 
-test('v3 panes assemble over the stationary single screen from their corresponding edges', async ({ page }) => {
+test('v3 panes assemble from their corresponding edges on one coordinated beat', async ({ page }) => {
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'ghost' }))
   await toggleMode(page)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
@@ -475,7 +475,7 @@ test('v3 panes assemble over the stationary single screen from their correspondi
   await expect.poll(() => builderActive(page)).toBe(true)
 })
 
-test('uneven panes enter at one perceived velocity and land together', async ({ page }) => {
+test('uneven panes start and land together on one coordinated progress clock', async ({ page }) => {
   await bootSeededWorkspace(
     page,
     WIDE,
@@ -491,13 +491,12 @@ test('uneven panes enter at one perceived velocity and land together', async ({ 
   const r = await sampler
 
   expect(r.participants).toHaveLength(3)
-  expect(r.participants.some(p => p.delay > 0),
-    'shorter vectors wait offscreen rather than rushing the seam').toBe(true)
+  expect(r.participants.every(p => p.delay === 0),
+    'every pane starts on the same frame').toBe(true)
   const arrivals = r.participants.map(p => p.delay + p.duration)
   expect(new Set(arrivals).size, 'all panes land on the same frame').toBe(1)
-  const speeds = r.participants.map(p => Math.hypot(p.x, p.y) / p.duration)
-  expect(Math.max(...speeds) / Math.min(...speeds),
-    'asymmetric panes keep a common average velocity').toBeLessThan(1.15)
+  expect(new Set(r.participants.map(p => p.duration)).size,
+    'every pane shares one progress duration').toBe(1)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
   await expect.poll(() => builderActive(page)).toBe(true)
 })

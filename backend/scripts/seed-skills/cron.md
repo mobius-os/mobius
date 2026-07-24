@@ -1,6 +1,9 @@
 # Scheduled tasks (cron)
 
-How to create recurring jobs that survive a rebuild: manifest schedules, supervised app jobs, the scaffold for owner-managed jobs, and the scheduled-app UI rule. `Read` this before scheduling anything.
+Scheduled-job extension for Möbius. Read it alongside
+`building-apps-quickstart.md` and `visual-testing.md` when work includes a
+scheduled mini-app UI; it owns manifest schedules, supervised jobs,
+owner-managed scaffolds, and cadence controls.
 
 The container has `cron` installed. Cron tasks run as `mobius` and get the app id as `$1`.
 
@@ -71,7 +74,7 @@ curl -fsS \
 
 ## Scheduled-app UI — never ship a dead time-picker
 
-A mini-app whose cadence is fixed must NOT render a time-picker that writes a file nothing reads. If the cadence is NOT user-editable, show it in words ("Updates daily") plus "ask the Möbius agent to reschedule." If it IS editable, ship a `sync-cron.sh` that actually rewrites the crontab (via the scaffold above). Lead with the cadence either way. (Full app design conventions: `building-apps.md`.)
+A mini-app whose cadence is fixed must NOT render a time-picker that writes a file nothing reads. If the cadence is NOT user-editable, show it in words ("Updates daily") plus "ask the Möbius agent to reschedule." If it IS editable, ship a `sync-cron.sh` that actually rewrites the crontab (via the scaffold above). Lead with the cadence either way. The base app/UI contract is already supplied by `building-apps-quickstart.md` plus `visual-testing.md`; load `app-component-shapes.md` only for a relevant recurring structure.
 
 ---
 

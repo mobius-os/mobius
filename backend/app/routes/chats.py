@@ -25,6 +25,7 @@ from app.chat import (
   recover_chat_generation,
   stop_chat_for,
 )
+from app.broadcast import get_system_broadcast
 from app.database import get_db
 from app.deps import (
   Principal, get_owner_or_chat_embed_principal, get_current_owner, get_principal,
@@ -287,15 +288,29 @@ def _owner_chat_summary_projection(chat) -> dict:
 def _chat_detail_response(
   chat: models.Chat,
   *,
+  db: Session,
   limit: int = 20,
   before: int | None = None,
   expose_session: bool = True,
 ) -> dict:
   """Canonical paginated chat payload shared by create and detail reads."""
-  from app.chat_transcript import materialized_messages
+  from app.chat_transcript import (
+    historical_tool_output_ids,
+    materialized_messages,
+    project_messages_for_detail,
+  )
   from app.providers import effective_agent_settings
 
   all_msgs = materialized_messages(chat)
+  running = is_chat_running(chat.id)
+  live_snapshot = chat.live_assistant
+  live_message = (
+    all_msgs[-1]
+    if running
+    and all_msgs
+    and all_msgs[-1] is live_snapshot
+    else None
+  )
   total = len(all_msgs)
   if before is not None:
     start = max(0, before - limit)
@@ -303,6 +318,26 @@ def _chat_detail_response(
   else:
     start = max(0, total - limit)
     page = all_msgs[start:]
+  candidate_tool_ids = historical_tool_output_ids(
+    page,
+    live_message=live_message,
+  )
+  fetchable_tool_ids = (
+    {
+      row[0]
+      for row in db.query(models.ToolOutput.tool_use_id).filter(
+        models.ToolOutput.chat_id == chat.id,
+        models.ToolOutput.tool_use_id.in_(candidate_tool_ids),
+      ).all()
+    }
+    if candidate_tool_ids
+    else set()
+  )
+  page = project_messages_for_detail(
+    page,
+    fetchable_tool_output_ids=fetchable_tool_ids,
+    live_message=live_message,
+  )
 
   provider = chat.provider or "claude"
   pending_question = questions.get(chat.id)
@@ -310,13 +345,14 @@ def _chat_detail_response(
   return {
     "id": chat.id,
     "title": chat.title,
-    # Persisted blocks are already bounded at the write funnel; the detail
-    # serializer returns them as stored instead of doing work on every read.
+    # Settled large-output excerpts are omitted here because the disclosure
+    # already fetches them from their durable sidecar on demand. Live turns
+    # retain excerpts so the in-progress surface remains self-contained.
     "messages": page,
     "pending_messages": list(chat.pending_messages or []),
     "total": total,
     "offset": start,
-    "running": is_chat_running(chat.id),
+    "running": running,
     "pending_question_id": (
       pending_question.question_id if pending_question is not None else None
     ),
@@ -687,7 +723,7 @@ def create_chat(
   activity.log_event("chat_created", chat_id=chat.id)
   # Preserve the flat summary + messages fields existing callers consume while
   # carrying the exact detail contract under its own forward-compatible key.
-  detail = _chat_detail_response(chat)
+  detail = _chat_detail_response(chat, db=db)
   return {
     **_owner_chat_summary(chat),
     "messages": detail["messages"],
@@ -1057,6 +1093,7 @@ def get_chat(
   chat = get_active_chat_for_principal(db, chat_id, principal)
   return _chat_detail_response(
     chat,
+    db=db,
     limit=limit,
     before=before,
     # Provider thread ids are backend continuity state, not part of the
@@ -1323,6 +1360,12 @@ async def delete_chat(
   if chat:
     chat.deleted_at = now_naive_utc()
     db.commit()
+    # Publish the committed tombstone before best-effort run cleanup. If that
+    # cleanup fails after the commit, every live shell must still project the
+    # durable deletion rather than retain a stale drawer row.
+    get_system_broadcast().publish(
+      {"type": "chat_deleted", "chatId": str(chat_id)}
+    )
   # Flag the chat soft-deleted in the registry (NOT forget_chat, which resets
   # the generation counter to a reusable 0). mark_chat_deleted preserves the
   # finite counter and makes `current_run_generation` return +inf, so a run
@@ -1340,7 +1383,17 @@ async def delete_chat(
   # run_status + drops the actor's _run_token_owner entry; it is best-effort
   # and safe on a soft-deleted row (clear commands don't resurrect), and
   # idempotent when the run state is already clean (the common idle delete).
-  await _clear_run_status(chat_id, terminal_status="stopped")
+  try:
+    await _clear_run_status(chat_id, terminal_status="stopped")
+  except Exception:
+    # The tombstone is already committed and published. Returning a 500 now
+    # would make the client treat an authoritative deletion as inconclusive,
+    # recreating the exact stale-row ambiguity this route must eliminate. Boot
+    # reconciliation can repair a residual run marker.
+    log.exception(
+      "Chat %s was deleted but its durable run marker could not be cleared",
+      chat_id,
+    )
 
 
 @router.post("/{chat_id}/recover", dependencies=[Depends(reject_cross_site)])
@@ -1363,6 +1416,9 @@ def recover_chat(
   # Clear the registry's deleted flag and bump to a generation newer than every
   # pre-delete run, so a resurrected stale run can't reclaim the recovered chat.
   recover_chat_generation(chat_id)
+  get_system_broadcast().publish(
+    {"type": "chat_recovered", "chatId": str(chat_id)}
+  )
   return {"ok": True}
 
 

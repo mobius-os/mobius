@@ -1,13 +1,14 @@
 # Mini-app component shapes
 
-The canonical shape for every recurring piece of mini-app UI — markup +
-scoped CSS — so each app holds its OWN copy of a block. Copy the block you need
-into your app's `const CSS`, apply your per-app prefix, keep the kebab ROLE
-suffix + structure recognizable, and diverge the shape wherever your app needs
-to. This catalog is a starting set, not a closed enum — if your app needs a
-shape that isn't here, build it in the same idiom (scoped CSS, theme tokens, a
-fence) and own it. `Read` this when building or restyling any app's UI,
-alongside [building-apps.md].
+Optional structural-pattern catalog for Möbius mini-apps. Read only a matching
+section alongside `building-apps-quickstart.md` and `visual-testing.md` when the
+brief needs a fixed app shell, modal sheet, tabs, chat, or split pane. Do not
+load it for an ordinary root, header, card, or form.
+
+Copy the selected markup + scoped CSS block into the app's `const CSS`, apply a
+per-app prefix, keep the kebab role suffix and structure recognizable, and
+diverge wherever the app needs to. This is a starting catalog, not a closed
+component API.
 
 Why copies and not a shared library yet: a shared component freezes an API
 before the shapes have proven stable, and then any app that needs something it
@@ -18,68 +19,17 @@ extraction into a real `@mobius/ui` you import — a `grep` of the fence names
 finds the kin. Until then, owning your fork is correct. This is the platform's
 "code empowers the agent; it does not police it," in CSS form.
 
-## The rules (read once, then copy blocks)
+## How to use this catalog
 
-- **One stylesheet, not inline objects.** Declare a module-level
-  ``const CSS = `...` `` and render it once at the app root as
-  `<style>{CSS}</style>`. Use the inline `style={}` prop ONLY for values
-  computed at render time (a measured height, a drag transform, a per-row
-  accent). Inline objects can't do `:hover`/`:focus`/`:active`, media
-  queries, `@keyframes`, or pseudo-elements — that's the friction wall this
-  avoids. The app runs in its own iframe, so the `<style>` is automatically
-  scoped to your app; no CSS Modules, no hashing, no BEM-for-isolation.
-- **GOTCHA — the CSS is a JS template literal.** A literal backtick or a `${`
-  anywhere in the CSS (an `url("data:image/svg+xml,…")`, a `content:` string, a
-  comment) breaks the esbuild compile. Keep backticks out of CSS, escape `${` as
-  `\${`, and quote inside `url()` / `content:`.
-- **Naming:** a short per-app prefix on every class (`mg-` memory, `cb-` atlas,
-  a 2–3-char mnemonic for yours — `ma-` is the placeholder below) + semantic
-  kebab role names (`ma-header`, `ma-sheet`, `ma-card`, `ma-btn`). States use
-  REAL pseudo-classes (`.ma-btn:hover`, `:disabled`, `:focus-visible`).
-  App-driven state CSS can't read uses an `is-`/`has-` modifier class
-  (`.ma-card.is-selected`). **Never** a `tab(active)` / `card(variant)`
-  JS-helper that returns a style object — that hides state in JS and blocks
-  extraction.
-- **Structural color is always a theme token** so the app follows light/dark:
-  `--bg --surface --surface2 --text --muted --accent --accent-fg --accent-hover
-  --accent-dim --border --border-light --danger --green --font --mono`. There
-  is **no `--red`** (use `--danger`) and **no `--fg`** (use `--text`).
-  Hardcoded hex only for an app-specific accent the theme can't express.
-- **`--accent-fg` is the ONLY legal foreground on an accent/danger FILL**
-  (a `.ma-btn-primary`, a `.ma-btn-danger`, an accent chip). It resolves a
-  prior three-way split — apps had been hardcoding `#fff` / `#0d0d0d` /
-  `#062016` for that foreground, so a custom theme broke one of them. Write
-  `color: var(--accent-fg)` with **NO fallback hex** (`var(--accent-fg, #fff)`
-  re-introduces the exact split the token exists to kill). Never hardcode the
-  foreground on a fill.
-- **Touch + radius:** every interactive control `min-height: 44px`; icon-only
-  buttons get an `aria-label`. Radius scale: 8px inputs/small, 10–12px
-  cards/primary buttons, 16px sheet top.
-- **Hard pre-ship checklist (don't skip — these are the gaps a grep found
-  recur in every app):**
-  - Every focusable input is `font-size: 16px` (anything smaller triggers
-    iOS Safari zoom-on-focus). Don't go lower on a field the user can tap into.
-  - Every tap target is `>= 44px`. A thin control (a resizer, a drag handle)
-    stays thin VISUALLY but gets a fat invisible hit-area (a transparent
-    `::before`/`::after` or padding that pushes the hit-box to 44px).
-  - No bare `outline: none` on an interactive control — keep a visible
-    `:focus-visible` ring (see the Focus shape) or the keyboard user is lost.
-  - One `mobius-ui:ReducedMotion` block per app (below); every `@keyframes`
-    animation also has a `prefers-reduced-motion` escape.
-  - Edge-pinned surfaces respect `env(safe-area-inset-*)` (below).
-- **No native `confirm/alert/prompt`** — the sandbox has no `allow-modals`,
-  so they silently no-op. Use the bottom-sheet (§3).
-- The app-frame already injects a global reset + the theme `:root`. **Do not
-  redeclare a reset.**
-- **Fence comments are harvest markers, not a sync contract.** Wrap each shared
-  block in its `/* mobius-ui:Name */` … `/* /mobius-ui:Name */` marker so a
-  `grep` finds every app on a shape when it's time to harvest a real library.
-  Your per-app prefix means class names legitimately differ — keep the kebab
-  ROLE suffix + markup recognizable and diverge the shape whenever your app needs
-  to; you owe no identical-name obligation. A rough block order reads well:
-  root → header → list → cards → empty → sheet → buttons/inputs → animations.
+The quickstart owns stylesheet, theme-token, accessibility, touch-target,
+reduced-motion, and native-dialog rules; do not duplicate them from here.
+Copy only the blocks the app actually needs and replace the `ma-` placeholder
+with a short app prefix.
 
-`app-latex` and `memory` are the cleanest on-standard references.
+Fence comments such as `/* mobius-ui:Card */` are harvest markers, not a sync
+contract. They make similar app-owned copies discoverable if a pattern later
+earns extraction into a real shared library. Until then, the app owns and may
+diverge its copy.
 
 ---
 
