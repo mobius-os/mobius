@@ -215,7 +215,7 @@ function AppRoot() {
   if (status === 'sso') return <RouteLoading label="Signing in to Möbius" />
   if (status === 'sso-error') return (
     <ManagedSignInError
-      onRetry={() => window.location.replace(api.auth.sso.startUrl('/'))}
+      onRetry={() => window.location.replace(api.auth.sso.startUrl('/shell/'))}
     />
   )
   if (status === 'setup-error') return (

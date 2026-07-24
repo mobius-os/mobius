@@ -433,11 +433,11 @@ test.describe('Unauthenticated startup', () => {
     )
 
     const started = page.waitForRequest(/\/api\/auth\/sso\/start(\?.*)?$/)
-    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
     const request = await started
 
     expect(setupChecks).toBe(1)
-    expect(new URL(request.url()).searchParams.get('return_path')).toBe('/')
+    expect(new URL(request.url()).searchParams.get('return_path')).toBe('/shell/')
     await expect(page.getByRole('heading', { name: 'Create your home key' }))
       .toHaveCount(0)
     await expect(page.locator('.login')).toHaveCount(0)
@@ -471,7 +471,7 @@ test.describe('Unauthenticated startup', () => {
       })
     )
 
-    await page.goto(`${BASE}/?mobius_sso=1`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${BASE}/shell/?mobius_sso=1`, { waitUntil: 'domcontentloaded' })
 
     await expect(page.getByRole('heading', { name: 'Wake up your AI' }))
       .toBeVisible({ timeout: 10000 })
@@ -481,7 +481,9 @@ test.describe('Unauthenticated startup', () => {
       .toBe('managed-owner-token')
     await expect(page.getByRole('heading', { name: 'Create your home key' }))
       .toHaveCount(0)
-    await expect(page).toHaveURL(new RegExp(`${BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`))
+    await expect(page).toHaveURL(
+      new RegExp(`${BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/shell/?$`)
+    )
   })
 })
 

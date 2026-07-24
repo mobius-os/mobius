@@ -235,7 +235,7 @@ def _sso_cookie_secure() -> bool:
 
 
 def _sso_error_redirect():
-  response = RedirectResponse(url="/?mobius_sso_error=1", status_code=303)
+  response = RedirectResponse(url="/shell/?mobius_sso_error=1", status_code=303)
   response.headers["Cache-Control"] = "no-store"
   response.headers["Referrer-Policy"] = "no-referrer"
   response.delete_cookie("mobius_sso_state", path="/api/auth/sso/callback")
@@ -381,7 +381,7 @@ async def complete_managed_sso(
     },
     expires_delta=timedelta(seconds=60),
   )
-  response = RedirectResponse(url="/?mobius_sso=1", status_code=303)
+  response = RedirectResponse(url="/shell/?mobius_sso=1", status_code=303)
   response.set_cookie(
     "mobius_sso_handoff",
     handoff,

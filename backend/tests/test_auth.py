@@ -123,7 +123,7 @@ def test_managed_sso_first_login_creates_bound_owner_and_one_time_handoff(
   )
 
   assert callback.status_code == 303
-  assert callback.headers["location"] == "/?mobius_sso=1"
+  assert callback.headers["location"] == "/shell/?mobius_sso=1"
   assert FakeSsoExchange.calls
   exchange_url, exchange_args = FakeSsoExchange.calls[-1]
   assert exchange_url == "http://launcher.test/sso/token"
@@ -171,7 +171,7 @@ def test_managed_sso_returning_owner_is_reused_and_subject_cannot_change(
     params={"code": "first-code", "state": first_query["state"][0]},
     follow_redirects=False,
   )
-  assert callback.headers["location"] == "/?mobius_sso=1"
+  assert callback.headers["location"] == "/shell/?mobius_sso=1"
   client.post("/api/auth/sso/session")
 
   FakeSsoExchange.response = {
@@ -190,7 +190,7 @@ def test_managed_sso_returning_owner_is_reused_and_subject_cannot_change(
   )
 
   assert denied.status_code == 303
-  assert denied.headers["location"] == "/?mobius_sso_error=1"
+  assert denied.headers["location"] == "/shell/?mobius_sso_error=1"
   owners = db.query(models.Owner).all()
   assert len(owners) == 1
   assert owners[0].sso_subject == "user_original"
@@ -218,7 +218,7 @@ def test_managed_sso_exchange_failure_does_not_create_owner(
   )
 
   assert callback.status_code == 303
-  assert callback.headers["location"] == "/?mobius_sso_error=1"
+  assert callback.headers["location"] == "/shell/?mobius_sso_error=1"
   assert db.query(models.Owner).count() == 0
 
 
