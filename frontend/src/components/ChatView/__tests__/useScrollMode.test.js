@@ -833,6 +833,37 @@ test('an unresolvable saved location falls back to a settled bottom anchor', () 
   assert.notEqual(mode.kind, 'FOLLOW_BOTTOM')
 })
 
+test('a product continuation marker cannot take ownership of a saved user pin', () => {
+  const messages = [
+    { role: 'user', cid: 'owner-cid', content: 'do work' },
+    {
+      role: 'user',
+      cid: 'restart-resume-token',
+      content: 'continue',
+      kind: 'auto_continuation',
+    },
+  ]
+
+  assert.deepEqual(
+    _validateSavedMode(
+      { kind: 'PIN_USER_MSG', cid: 'owner-cid', followWhenFilled: true },
+      messages,
+      null,
+    ),
+    { kind: 'PIN_USER_MSG', cid: 'owner-cid' },
+    'the preceding owner row remains the latest real user message',
+  )
+  assert.deepEqual(
+    _validateSavedMode(
+      { kind: 'PIN_USER_MSG', cid: 'restart-resume-token' },
+      messages,
+      null,
+    ),
+    { kind: 'INITIAL' },
+    'the provider-facing marker is never restored as an owner-authored pin',
+  )
+})
+
 test('a saved anchor wholly inside reserved blank space self-heals to real content', () => {
   const last = {
     offsetTop: 500,

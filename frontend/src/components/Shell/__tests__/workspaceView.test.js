@@ -508,8 +508,7 @@ test('deriveExitPlan: PROMOTE when the target is a visible pane active key (INV 
   assert.equal(plan.underlayKey, null, 'physical continuity — no world reveal')
   const promote = plan.participants.find(p => p.motion === 'promote')
   assert.equal(promote.key, 'app:42')
-  assert.equal(promote.delayMs, MODE_MOTION.sharedLagMs,
-    'siblings open a seam before the shared surface expands')
+  assert.equal(promote.delayMs, 0, 'the assembled world moves as one beat')
   assert.ok(plan.completionNames.includes('shell-mode-promote'))
   // The FLIP grows the promote pane's content rect to the full destination.
   assert.equal(promote.flip.sx > 1, true, 'a half-width pane scales up to full width')
@@ -564,8 +563,8 @@ test('deriveExitPlan: siblings deal out together in one short beat', () => {
   const delays = plan.participants.map(p => p.delayMs).sort((a, b) => a - b)
   assert.deepEqual(delays, [0, 0])
   assert.equal(MODE_MOTION.staggerMs, undefined)
-  assert.ok(plan.participants.every(p => p.durationMs === MODE_MOTION.itemMs))
-  assert.equal(plan.totalMs, MODE_MOTION.itemMs)
+  assert.ok(plan.participants.every(p => p.durationMs === MODE_MOTION.exitItemMs))
+  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
 })
 
 test('deriveExitPlan: a world reveal has no delayed destination phase', () => {
@@ -573,7 +572,7 @@ test('deriveExitPlan: a world reveal has no delayed destination phase', () => {
   const plan = deriveExitPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
   assert.deepEqual(plan.completionNames, ['shell-mode-deal-out'])
   assert.equal('destinationMotion' in plan, false)
-  assert.equal(plan.totalMs, MODE_MOTION.itemMs)
+  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
 })
 
 test('deriveExitPlan: a promote keeps its seamless continuity', () => {
@@ -600,7 +599,7 @@ test('deriveExitPlan: four panes cost the same 180ms beat as one pane', () => {
   ws = { ...ws, singleScreen: { kind: 'chat', id: 'ghost' } } // tree-absent → world reveal
   const plan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT })
   assert.ok(plan.participants.every(p => p.motion === 'deal-out'), 'all four deal out')
-  assert.equal(plan.totalMs, MODE_MOTION.itemMs)
+  assert.equal(plan.totalMs, MODE_MOTION.exitItemMs)
   assert.equal(plan.totalMs, 180)
 })
 
@@ -614,9 +613,9 @@ test('four-pane assemble/scatter preserves all four outer-edge vectors', () => {
   ws = { ...ws, singleScreen: { kind: 'chat', id: 'ghost' } }
   const projection = project(ws)
 
-  for (const plan of [
-    deriveExitPlan({ workspace: ws, projection, contentRect: CONTENT }),
-    deriveEnterPlan({ workspace: ws, projection, contentRect: CONTENT }),
+  for (const [plan, duration] of [
+    [deriveExitPlan({ workspace: ws, projection, contentRect: CONTENT }), MODE_MOTION.exitItemMs],
+    [deriveEnterPlan({ workspace: ws, projection, contentRect: CONTENT }), MODE_MOTION.enterItemMs],
   ]) {
     const offsets = new Map(plan.participants.map(p => [p.key, p.offset]))
     assert.ok(offsets.get('chat:1').x < 0 && offsets.get('chat:1').y < 0, 'top-left owns top+left')
@@ -625,14 +624,15 @@ test('four-pane assemble/scatter preserves all four outer-edge vectors', () => {
     assert.ok(offsets.get('chat:4').x > 0 && offsets.get('chat:4').y > 0, 'bottom-right owns bottom+right')
     assert.ok(plan.participants.every(p => p.delayMs === 0),
       'world-reveal edge panes move together; no pane-count stagger')
-    assert.equal(plan.totalMs, MODE_MOTION.itemMs)
+    assert.equal(plan.totalMs, duration)
   }
 })
 
 test('N1: MODE_MOTION drops the unused chromeMs constant', () => {
   assert.equal(MODE_MOTION.chromeMs, undefined)
   // The live timings the plan builders use are still present.
-  assert.equal(typeof MODE_MOTION.itemMs, 'number')
+  assert.equal(typeof MODE_MOTION.promoteMs, 'number')
+  assert.equal(typeof MODE_MOTION.exitItemMs, 'number')
 })
 
 // ── M4: the single-leaf promote FLIP must not overshoot ───────────────────────
@@ -728,29 +728,24 @@ test('deriveExitPlan: M2 a builder Settings tab that IS the destination does not
   assert.ok(plan.participants.some(p => p.key === 'chat:5'), 'the sibling pane still deals out')
 })
 
-test('deriveEnterPlan: the shared surface settles while siblings assemble from their edges', () => {
+test('deriveEnterPlan: the shared Standard surface stays still while siblings assemble', () => {
   const two = twoPaneChatAndApp() // the app:42 pane is focused
   const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two), contentRect: CONTENT })
-  assert.deepEqual(twoPlan.completionNames, ['shell-mode-settle', 'shell-mode-deal-in'])
-  assert.equal(twoPlan.participants.length, 2)
-  assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.itemMs))
-  const settle = twoPlan.participants.find(p => p.motion === 'settle')
+  assert.deepEqual(twoPlan.completionNames, ['shell-mode-deal-in'])
+  assert.equal(twoPlan.underlayKey, 'app:42')
+  assert.equal(twoPlan.participants.length, 1)
+  assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.enterItemMs))
   const gather = twoPlan.participants.find(p => p.motion === 'deal-in')
-  assert.equal(settle.key, 'app:42')
-  assert.ok(settle.flip.sx > 1, 'the right pane starts at the single-world size')
   assert.equal(gather.key, 'chat:5')
   assert.ok(gather.offset.x < 0, 'the left pane assembles from the left edge')
-  // This is one bounded handoff, not a pane-count stagger: the shared surface
-  // settles first, then every sibling starts together after the same short gap.
-  assert.equal(settle.delayMs, 0)
-  assert.equal(gather.delayMs, MODE_MOTION.sharedLagMs)
-  assert.equal(twoPlan.totalMs, MODE_MOTION.itemMs + MODE_MOTION.sharedLagMs)
+  assert.ok(twoPlan.participants.every(p => p.delayMs === 0))
+  assert.equal(twoPlan.totalMs, MODE_MOTION.enterItemMs)
+
+  // There is no visible assembly when the Standard surface is the only leaf.
+  // Returning null makes the controller commit that world flip instantly.
   const one = paneModel.seedFromFlatTabs([makeTab('app', '42')])
   const onePlan = deriveEnterPlan({ workspace: one, projection: project(one), contentRect: CONTENT })
-  assert.equal(onePlan.participants.length, 1)
-  assert.equal(onePlan.participants[0].motion, 'settle')
-  assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.itemMs)
-  assert.equal(onePlan.totalMs, MODE_MOTION.itemMs)
+  assert.equal(onePlan, null)
 })
 
 test('focused-pane mode keeps its original edge and its in-pane strip geometry', () => {
@@ -765,7 +760,7 @@ test('focused-pane mode keeps its original edge and its in-pane strip geometry',
   assert.ok(promote)
   assert.equal(promote.flip.y, -paneModel.STRIP_H)
   assert.ok(promote.flip.sy > 1)
-  assert.equal(promote.delayMs, 0, 'no sibling is painted, so no handoff gap is needed')
+  assert.equal(promote.delayMs, 0)
 
   // When Standard targets the left chat instead, the focused right pane scatters
   // right. Its full-size painted rect must clear the viewport completely; it must

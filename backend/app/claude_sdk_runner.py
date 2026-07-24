@@ -62,6 +62,7 @@ import inspect
 import json
 import logging
 import os
+import shutil
 import time
 from collections import deque
 from typing import Any
@@ -105,6 +106,10 @@ except ImportError:
 
 from app import activity
 from app.pending_questions import PendingQuestion
+from app.process_groups import (
+  isolated_process_group_id,
+  terminate_process_group,
+)
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult
 from app.sdk_emit import emit_unknown_enabled, unknown_event
@@ -112,6 +117,43 @@ from app.tool_summaries import summarize_tool_input
 from app.tool_sources import normalize_tool_sources, sources_from_websearch_text
 
 log = logging.getLogger(__name__)
+
+_CLAUDE_CLI = "/usr/local/bin/claude"
+_ISOLATED_CLAUDE_CLI = "/app/scripts/claude-isolated"
+
+
+def _claude_cli_path() -> str:
+  """Use the baked process-group wrapper when its runtime is available."""
+  if (
+    os.path.isfile(_ISOLATED_CLAUDE_CLI)
+    and os.access(_ISOLATED_CLAUDE_CLI, os.X_OK)
+    and shutil.which("setsid")
+  ):
+    return _ISOLATED_CLAUDE_CLI
+  return _CLAUDE_CLI
+
+
+def _claude_process_group_id(client: ClaudeSDKClient) -> int | None:
+  """Return the isolated Claude CLI PGID through the SDK transport."""
+  transport = getattr(client, "_transport", None)
+  process = getattr(transport, "_process", None)
+  pid = getattr(process, "pid", None)
+  pgid = isolated_process_group_id(pid)
+  if pgid is None and isinstance(pid, int):
+    log.error(
+      "Claude CLI process group is not isolated pid=%s; "
+      "descendant cleanup disabled",
+      pid,
+    )
+  return pgid
+
+
+def _terminate_claude_process_group(pgid: int | None) -> bool:
+  return terminate_process_group(
+    pgid,
+    logger=log,
+    label="Claude descendant",
+  )
 
 # The SDK's 1 MiB default is smaller than a single base64-encoded screenshot
 # tool result, so the subprocess transport can reject an otherwise healthy
@@ -258,6 +300,10 @@ class ActiveClaudeClient:
     self.chat_id = chat_id
     self.kind = RunnerKind.CLAUDE_SDK
     self._client = client
+    self._process_group_id: int | None = None
+    # Never signal a retained PGID twice; the kernel can eventually reuse it
+    # after the first hard stop.
+    self._force_stop_started = False
     # FIFO of mid-turn steer texts: two rapid sends must both reach Claude
     # (both are already persisted to the transcript), so a single slot would
     # silently drop the first. The runner drains the whole list on interrupt.
@@ -370,7 +416,7 @@ class ActiveClaudeClient:
     self._steer_requested = False
     await self._client.interrupt()
     try:
-      await asyncio.wait_for(self._finished, timeout=5.0)
+      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
     except asyncio.TimeoutError:
       import logging
       logging.getLogger("moebius.chat").warning(
@@ -393,6 +439,31 @@ class ActiveClaudeClient:
     except Exception:
       log.exception(
         "Claude SDK stop failed chat_id=%s", self.chat_id,
+      )
+      return False
+
+  def set_process_group_id(self, pgid: int | None) -> None:
+    self._process_group_id = pgid
+
+  async def force_stop(self, timeout: float = 5.0) -> bool:
+    """One-shot hard stop for this turn's verified private process group."""
+    if not self._force_stop_started:
+      if self._process_group_id is None:
+        return False
+      self._force_stop_started = True
+      await asyncio.to_thread(
+        _terminate_claude_process_group, self._process_group_id,
+      )
+    try:
+      await asyncio.wait_for(
+        asyncio.shield(self._finished), timeout=max(0.0, timeout),
+      )
+      return True
+    except asyncio.CancelledError:
+      raise
+    except asyncio.TimeoutError:
+      log.warning(
+        "Claude SDK hard stop did not finish chat_id=%s", self.chat_id,
       )
       return False
 
@@ -493,13 +564,18 @@ def _skill_file_read_name(
   """Returns the skill name when a Read targets a Möbius skill file.
 
   The in-product agent loads its skills by Reading
-  `<data_dir>/shared/skills/<name>.md` — on the default posture
+  `<data_dir>/shared/skills/<name>.md` (flat) or
+  `<data_dir>/shared/skills/<name>/SKILL.md` (the external
+  directory convention installed skills use) — on the default posture
   (skills_enabled off) the SDK Skill tool is never offered, so the
   Read input is the only place skill loads are actually observable.
   The match is purely lexical (normpath, no filesystem access) and
   returns "" for anything that isn't a direct skill-file read. A
   relative path is resolved against the turn's cwd: the agent runs
   with cwd=/data, so `shared/skills/example.md` is the same load.
+  Deeper resource reads inside a skill directory deliberately do NOT
+  count as loads — only the SKILL.md entry document does — and the
+  generated `skills-index.md` is the index, not a skill.
   """
   if tool_name != "Read" or not isinstance(input_data, dict):
     return ""
@@ -515,9 +591,15 @@ def _skill_file_read_name(
     os.path.join(get_settings().data_dir, "shared", "skills")
   )
   parent, filename = os.path.split(path)
-  if parent != skills_dir or not filename.endswith(".md"):
-    return ""
-  return filename[: -len(".md")]
+  if parent == skills_dir and filename.endswith(".md"):
+    from app.skills import GENERATED_INDEX_STEMS
+
+    name = filename[: -len(".md")]
+    return "" if name in GENERATED_INDEX_STEMS else name
+  grandparent, dirname = os.path.split(parent)
+  if grandparent == skills_dir and filename.upper() == "SKILL.MD" and dirname:
+    return dirname
+  return ""
 
 
 def observe_skill_file_read(
@@ -1272,7 +1354,7 @@ async def run_claude_sdk_turn(
       "include_partial_messages": True,
       "max_buffer_size": _CLAUDE_SDK_MAX_BUFFER_SIZE,
       "can_use_tool": can_use_tool,
-      "cli_path": "/usr/local/bin/claude",
+      "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
       "hooks": {
         "PreToolUse": [
@@ -1317,6 +1399,7 @@ async def run_claude_sdk_turn(
           "cost_usd": None,
           "error": "connect timeout",
         }
+      active_client.set_process_group_id(_claude_process_group_id(client))
       await client.query(turn_message)
 
       # At most one automatic re-query per turn (see the synthetic-resume
@@ -1498,7 +1581,34 @@ async def run_claude_sdk_turn(
       try:
         await client.disconnect()
       finally:
+        # The SDK closes only its direct CLI PID. Reap the verified private
+        # group as a bounded backstop for tool children, and do not let a
+        # repeated task cancellation skip the SIGKILL worker once it starts.
+        deferred_cancel: asyncio.CancelledError | None = None
+        if (
+          active_client._process_group_id is not None
+          and not active_client._force_stop_started
+        ):
+          reap_task = asyncio.create_task(asyncio.to_thread(
+            _terminate_claude_process_group,
+            active_client._process_group_id,
+          ))
+          while not reap_task.done():
+            try:
+              await asyncio.shield(reap_task)
+            except asyncio.CancelledError as exc:
+              deferred_cancel = deferred_cancel or exc
+          try:
+            reap_task.result()
+          except Exception:
+            log.warning(
+              "Claude process-group cleanup failed chat_id=%s",
+              chat_id,
+              exc_info=True,
+            )
         active_client.mark_finished()
+        if deferred_cancel is not None:
+          raise deferred_cancel
 
   result = await _run_once(_model)
   if _model and _should_retry_without_model(result.get("error")):

@@ -189,7 +189,7 @@ def test_switch_atomically_supersedes_park_and_stale_auto_resume(
     chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
   )
   resumed = asyncio.run(chat_mod._auto_resume_chat(
-    chat_id, "claude", park_token="park-before-switch",
+    chat_id, park_token="park-before-switch",
   ))
   assert resumed is False
   assert scheduled == []
@@ -584,6 +584,18 @@ def test_build_transcript_text_skips_handoffs_and_tail_caps():
   }]
   capped = compaction.build_transcript_text(big)
   assert len(capped) == compaction._MAX_TRANSCRIPT_CHARS
+
+
+def test_build_transcript_text_labels_automatic_continuation_as_product_event():
+  text = compaction.build_transcript_text([{
+    "role": "user",
+    "kind": "auto_continuation",
+    "continuation_reason": "usage_limit",
+    "content": "continue",
+  }])
+
+  assert text == "AUTOMATIC CONTINUATION (USAGE_LIMIT): continue"
+  assert "USER: continue" not in text
 
 
 def test_cumulative_chat_summary_is_unbounded_compaction_source(tmp_path):

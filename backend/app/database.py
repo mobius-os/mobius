@@ -305,14 +305,34 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
+  if "manage_skills" not in apps_cols:
+    # Skills-management authority — gates the /api/skills install/uninstall
+    # surface. Defaults to 0; apps gain it by declaring
+    # permissions.manage_skills=true in their manifest and reinstalling.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN manage_skills BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      ))
+      conn.commit()
   if "github_access" not in apps_cols:
-    # GitHub connection access — gates the whole /api/github surface
-    # (connection management + the read-only data proxy). Defaults to 0;
+    # GitHub data access — gates the read-only proxy and reviewed contribution
+    # submit surface. Connection management has its own stronger grant below.
     # apps gain it by declaring permissions.github_access=true in their
     # manifest and reinstalling.
     with eng.connect() as conn:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN github_access BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      ))
+      conn.commit()
+  if "github_connect" not in apps_cols:
+    # GitHub credential-management authority: device flow, PAT install, status,
+    # and disconnect. Kept separate so a future read-only GitHub consumer never
+    # inherits account mutation merely to inspect public repository state.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN github_connect BOOLEAN "
         "NOT NULL DEFAULT FALSE"
       ))
       conn.commit()
@@ -573,10 +593,15 @@ def run_migrations(eng) -> None:
         "ALTER TABLE chats ADD COLUMN system_prompt_snapshot_id VARCHAR(64) NULL"
       )
     if "auto_resume_on_limit" not in chats_cols:
-      # Chat-local provider-limit recovery policy. Automatic continuation is
-      # the initial default; any later owner selection remains stored per chat.
+      # Paid provider-limit retries start off until the owner enables them.
       _add.append(
         "ALTER TABLE chats ADD COLUMN auto_resume_on_limit BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      )
+    if "auto_resume_on_restart" not in chats_cols:
+      # Möbius-initiated planned restarts continue by default.
+      _add.append(
+        "ALTER TABLE chats ADD COLUMN auto_resume_on_restart BOOLEAN "
         "NOT NULL DEFAULT TRUE"
       )
     if "pinned_at" not in chats_cols:
@@ -628,10 +653,15 @@ def run_migrations(eng) -> None:
         "NOT NULL DEFAULT 'claude'"
       )
     if "auto_resume_on_limit_default" not in owner_cols:
-      # The initial choice is on. Later chat-level selections update this
+      # Paid provider-limit retries start off. Later chat selections update this
       # owner seed so new chats inherit the most recently chosen value.
       _add_owner.append(
         "ALTER TABLE owner ADD COLUMN auto_resume_on_limit_default BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      )
+    if "auto_resume_on_restart_default" not in owner_cols:
+      _add_owner.append(
+        "ALTER TABLE owner ADD COLUMN auto_resume_on_restart_default BOOLEAN "
         "NOT NULL DEFAULT TRUE"
       )
     if "model_prefs_json" not in owner_cols:
@@ -681,6 +711,10 @@ def run_migrations(eng) -> None:
     if "park_reason" not in chat_runs_cols:
       _add_runs.append(
         "ALTER TABLE chat_runs ADD COLUMN park_reason VARCHAR(32) NULL"
+      )
+    if "restart_nonce" not in chat_runs_cols:
+      _add_runs.append(
+        "ALTER TABLE chat_runs ADD COLUMN restart_nonce VARCHAR(128) NULL"
       )
     if _add_runs:
       with eng.connect() as conn:

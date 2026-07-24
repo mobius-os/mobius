@@ -1,6 +1,5 @@
 {
   "scripts": {
-    "test:core-apps": "node scripts/test-core-apps.mjs",
     "test:e2e-harness": "node --test tests/chat-fixture-registry.test.mjs",
     "test:packager": "node --test scripts/package-static-app.test.mjs"
   },

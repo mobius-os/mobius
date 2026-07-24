@@ -73,8 +73,10 @@ if [ -n "$PRIVATE_COMMITS" ]; then
   FAILS=$((FAILS + 1))
 fi
 
-# 6. Hooks must be installed and current. A copied hook deliberately survives
-#    worktree removal, but that also means a pull cannot update it in place.
+# 6. Hooks must match the landed origin/main policy. Comparing against the
+#    current topic branch makes every hook-changing PR report a false stale-hook
+#    failure before it can be submitted. Fall back to the working tree only in
+#    a fresh/local repository with no origin/main.
 HOOKS_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/hooks"
 ACTIVE_HOOKS_DIR="$(git rev-parse --path-format=absolute --git-path hooks 2>/dev/null)"
 STALE_HOOKS=0
@@ -83,7 +85,16 @@ for pair in \
   "scripts/githooks/pre-push:$HOOKS_DIR/pre-push"; do
   source_path="${pair%%:*}"
   installed_path="${pair#*:}"
-  if [ ! -x "$installed_path" ] || ! cmp -s "$source_path" "$installed_path"; then
+  if git cat-file -e "origin/main:$source_path" 2>/dev/null; then
+    source_matches() {
+      git show "origin/main:$source_path" 2>/dev/null | cmp -s - "$installed_path"
+    }
+  else
+    source_matches() {
+      cmp -s "$source_path" "$installed_path"
+    }
+  fi
+  if [ ! -x "$installed_path" ] || ! source_matches; then
     STALE_HOOKS=$((STALE_HOOKS + 1))
   fi
 done

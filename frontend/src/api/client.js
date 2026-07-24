@@ -450,7 +450,11 @@ export const api = {
     check: () => apiFetch('/platform/check', { method: 'POST' }),
     // Read-only preview of the incoming update, shown for review before Apply.
     updatePreview: () => apiFetch('/platform/update-preview'),
-    apply: () => apiFetch('/platform/apply', { method: 'POST' }),
+    updateProgress: () => apiFetch('/platform/update-progress'),
+    apply: (plan) => apiFetch('/platform/apply', {
+      method: 'POST',
+      body: JSON.stringify(plan),
+    }),
     conflictResolverChat: () => apiFetch('/platform/conflict-resolver-chat', {
       method: 'POST',
     }),

@@ -12,9 +12,8 @@
  * No dead-ends by contract:
  *   - a trivial update (no file changes) shows a one-line confirm, no empty diff
  *     panel;
- *   - a failed preview load shows a readable message with Try again + an
- *     "Update anyway" fallback (the owner could already apply without a preview,
- *     so we never take that capability away);
+ *   - a failed preview load shows a readable message with Try again; Apply
+ *     requires the immutable plan returned by a successful preview;
  *   - Not now / tap-outside / Escape leave the instance untouched.
  *
  * Design language mirrors SettingsView + ManageModelsModal: card-on-surface,
@@ -42,6 +41,15 @@ function commitCountLabel(count) {
   return `${count} ${count === 1 ? 'commit' : 'commits'}`
 }
 
+const UPDATE_PHASE_LABELS = {
+  preparing: 'Preparing update…',
+  fetching: 'Fetching the reviewed release…',
+  reconciling: 'Reconciling local changes…',
+  validating: 'Validating the backend…',
+  building: 'Building the frontend…',
+  finalizing: 'Finalizing the update…',
+}
+
 export default function UpdateReviewModal({
   onClose,
   onApply,
@@ -49,6 +57,7 @@ export default function UpdateReviewModal({
   applying,
   resolving,
   applyError,
+  applyProgress,
 }) {
   const [preview, setPreview] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -88,7 +97,11 @@ export default function UpdateReviewModal({
   })
 
   const handleApply = useCallback(async () => {
-    const result = await onApply()
+    const result = await onApply({
+      plan_id: preview?.plan_id,
+      current_sha: preview?.current_sha,
+      target_sha: preview?.target_sha,
+    })
     // A successful request can still mean the update was blocked. Keep the
     // reviewed sheet open and show that honest outcome in place; only a clean
     // apply closes automatically and advances Settings to its next step.
@@ -100,7 +113,7 @@ export default function UpdateReviewModal({
       result?.ok
       && (result.state === 'restart_needed' || result.state === 'up_to_date')
     ) onClose()
-  }, [onApply, onClose])
+  }, [onApply, onClose, preview])
 
   // Applying replaces the focused Apply button with a result surface. Focus a
   // real action in that surface so both Tab directions remain inside the
@@ -122,6 +135,14 @@ export default function UpdateReviewModal({
   // another surface between status and open) has nothing to apply.
   const notAvailable = preview && preview.available === false && !loadError
   const hasResult = resultState === 'conflict' || resultState === 'rolled_back'
+  const hasPlan = !!(
+    preview?.plan_id && preview?.current_sha && preview?.target_sha
+  )
+  const progressLabel = (
+    applyProgress?.plan_id === preview?.plan_id
+      ? UPDATE_PHASE_LABELS[applyProgress?.phase]
+      : null
+  ) || 'Preparing update…'
   const resultTitle = resultState === 'rolled_back'
     ? 'Update rolled back'
     : 'Update not applied'
@@ -190,8 +211,14 @@ export default function UpdateReviewModal({
 
           {!hasResult && !loading && loadError && (
             <div className="urm__notice" role="status">
-              Couldn’t load the change preview. You can try again, or apply the
-              update without reviewing it.
+              Couldn’t load the change preview. Try again to create a fresh,
+              immutable update plan.
+            </div>
+          )}
+
+          {!hasResult && applying && (
+            <div className="urm__notice" role="status">
+              {progressLabel}
             </div>
           )}
 
@@ -212,8 +239,13 @@ export default function UpdateReviewModal({
               {commits.length > 0 && (
                 <section className="urm__section">
                   <h3 className="urm__section-title">
-                    {commitCountLabel(commits.length)}
+                    {commitCountLabel(summary.commitCount)}
                   </h3>
+                  {summary.commitsTruncated && (
+                    <p className="urm__section-note">
+                      Showing the newest {commitCountLabel(commits.length)}.
+                    </p>
+                  )}
                   <ul className="urm__commits">
                     {commits.map((commit) => (
                       <li key={commit.sha} className="urm__commit">
@@ -274,30 +306,20 @@ export default function UpdateReviewModal({
               Done
             </button>
           ) : loadError ? (
-            <div className="urm__foot-actions">
-              <button
-                type="button"
-                className="urm__btn urm__btn--ghost"
-                onClick={loadPreview}
-                disabled={applying}
-              >
-                Try again
-              </button>
-              <button
-                type="button"
-                className="urm__btn"
-                onClick={handleApply}
-                disabled={applying}
-              >
-                {applying ? 'Applying…' : 'Update anyway'}
-              </button>
-            </div>
+            <button
+              type="button"
+              className="urm__btn"
+              onClick={loadPreview}
+              disabled={applying}
+            >
+              Try again
+            </button>
           ) : (
             <button
               type="button"
               className="urm__btn"
               onClick={handleApply}
-              disabled={applying || loading || notAvailable}
+              disabled={applying || loading || notAvailable || !hasPlan}
             >
               {applying ? 'Applying…' : 'Apply update'}
             </button>

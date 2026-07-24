@@ -231,6 +231,21 @@ def test_resumed_context_skips_non_conversation_rows():
   assert "ignored" not in block
 
 
+def test_resumed_context_labels_automatic_continuation_as_product_event():
+  from app.chat import _build_resumed_context
+
+  row = _FakeChatRow([{
+    "role": "user",
+    "kind": "auto_continuation",
+    "continuation_reason": "restart",
+    "content": "continue",
+  }])
+  block = _build_resumed_context(row)
+
+  assert "Automatic continuation (restart): continue" in block
+  assert "User: continue" not in block
+
+
 def test_resumed_context_none_when_empty():
   """A chat with no usable transcript yields no reseed block."""
   from app.chat import _build_resumed_context

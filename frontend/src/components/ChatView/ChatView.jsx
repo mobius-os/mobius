@@ -35,6 +35,7 @@ import {
   resetDeadlineDelay,
   resetDeadlineState,
   saveAutoResumePolicy,
+  saveRestartResumePolicy,
 } from './autoResumePolicy.js'
 import {
   EMPTY_CHAT_RUN_SIGNAL,
@@ -61,6 +62,8 @@ import {
   canFastForwardQueue,
   cidOf,
   continuationRowsFromPromotedMessage,
+  isAutoContinuationMessage,
+  isOwnerUserMessage,
   mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
   shouldRetryStopAfterConfirm,
@@ -398,6 +401,8 @@ export default function ChatView({
   const [autoResumeSaving, setAutoResumeSaving] = useState(false)
   const [autoResumeError, setAutoResumeError] = useState('')
   const [autoResumeErrorSource, setAutoResumeErrorSource] = useState('')
+  const [restartResumeSaving, setRestartResumeSaving] = useState(false)
+  const [restartResumeError, setRestartResumeError] = useState('')
   const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
     EMPTY_CHAT_RUN_SIGNAL,
   )
@@ -408,6 +413,8 @@ export default function ChatView({
   const [, setLimitResetClockTick] = useState(0)
   const autoResumeSavingRef = useRef(false)
   const autoResumeRequestRef = useRef(0)
+  const restartResumeSavingRef = useRef(false)
+  const restartResumeRequestRef = useRef(0)
   const armedEmbeddedResetRef = useRef(null)
   // This external per-chat state survives ChatView's keyed unmount/remount.
   // Send handlers also read the store directly, closing the same-frame gap
@@ -542,6 +549,10 @@ export default function ChatView({
     setAutoResumeSaving(false)
     setAutoResumeError('')
     setAutoResumeErrorSource('')
+    restartResumeRequestRef.current += 1
+    restartResumeSavingRef.current = false
+    setRestartResumeSaving(false)
+    setRestartResumeError('')
   }, [chatId])
 
   const handleAutoResumeChange = useCallback(async (next, source = 'card') => {
@@ -577,6 +588,34 @@ export default function ChatView({
     next => handleAutoResumeChange(next, 'settings'),
     [handleAutoResumeChange],
   )
+
+  const handleRestartResumeChange = useCallback(async next => {
+    if (restartResumeSavingRef.current) return
+    restartResumeSavingRef.current = true
+    const requestId = ++restartResumeRequestRef.current
+    setRestartResumeSaving(true)
+    setRestartResumeError('')
+    try {
+      const result = await saveRestartResumePolicy({
+        chatId,
+        next,
+        request: apiFetch,
+      })
+      if (requestId !== restartResumeRequestRef.current) return
+      if (result.value !== null) {
+        setChatInfo(prev => prev ? ({
+          ...prev,
+          auto_resume_on_restart: result.value,
+        }) : prev)
+      }
+      setRestartResumeError(result.error)
+    } finally {
+      if (requestId === restartResumeRequestRef.current) {
+        restartResumeSavingRef.current = false
+        setRestartResumeSaving(false)
+      }
+    }
+  }, [chatId])
 
   // Mirror `messages` in a ref so commitMessages can compute the next
   // value without putting a side-effect (setQueryData) inside a
@@ -918,9 +957,7 @@ export default function ChatView({
   // messagesRef catches up, so state alone is not authoritative. A row is
   // first only when both the state mirror and rendered transcript are empty.
   function isFirstVisibleUserMessage() {
-    const stateHasUser = messagesRef.current.some(
-      m => m.role === 'user' && !m.hidden,
-    )
+    const stateHasUser = messagesRef.current.some(isOwnerUserMessage)
     const domHasUser = !!scrollRef.current?.querySelector('.chat__msg--user')
     return !stateHasUser && !domHasUser
   }
@@ -1757,6 +1794,7 @@ export default function ChatView({
           effective: data.effective_agent_settings || {},
           has_assistant_turns: !!data.has_assistant_turns,
           auto_resume_on_limit: !!data.auto_resume_on_limit,
+          auto_resume_on_restart: !!data.auto_resume_on_restart,
         }
         setChatInfo(nextChatInfo)
         queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
@@ -3311,7 +3349,9 @@ export default function ChatView({
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])
-  const lastUserIdx = messages.reduce((acc, m, i) => (m.role === 'user' && !m.hidden) ? i : acc, -1)
+  const lastUserIdx = messages.reduce((acc, m, i) => (
+    isOwnerUserMessage(m) ? i : acc
+  ), -1)
   // The captured bridge partial enters the active row before catch-up emits a
   // single item. That is the load-bearing part of Lever 1: when SSE becomes the
   // selected source, React updates MsgContent props instead of replacing the
@@ -3326,7 +3366,7 @@ export default function ChatView({
   const bridgeMsg = bridgeMsgIdx >= 0 ? messages[bridgeMsgIdx] : null
   const bridgeFollowedByVisibleUser = bridgeMsgIdx >= 0 && messages
     .slice(bridgeMsgIdx + 1)
-    .some(msg => msg?.role === 'user' && !msg.hidden)
+    .some(isOwnerUserMessage)
   const trailingAssistantPartialMsg = trailingAssistantPartialIdx >= 0
     ? messages[trailingAssistantPartialIdx]
     : null
@@ -3425,6 +3465,7 @@ export default function ChatView({
   const hasPendingResume = !!pendingResumeBlock
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
   const autoResumeEnabled = !!chatInfo?.auto_resume_on_limit
+  const restartResumeEnabled = !!chatInfo?.auto_resume_on_restart
   useEffect(() => {
     if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
       if (!pendingLimitResetAt) armedEmbeddedResetRef.current = null
@@ -3456,7 +3497,7 @@ export default function ChatView({
     ))
   }, [])
   // Embedded chats do not have Shell's process stream. Subscribe only while
-  // an opted-in limit park is waiting (and through its observed run), rather
+  // an enabled limit park is waiting (and through its observed run), rather
   // than holding one permanent SSE connection per retained app iframe.
   useSystemEventStream(handleEmbeddedRunEvent, {
     enabled: !!(
@@ -3726,6 +3767,7 @@ export default function ChatView({
 
           {messages.map((msg, i) => {
             if (msg.hidden) return null
+            const continuationMarker = isAutoContinuationMessage(msg)
             const isLastMsg = i === lastVisibleMessageIndex
             // The mirrored DB row is rendered below by the SAME active
             // MsgContent instance that consumes live payloads. Suppress only
@@ -3771,20 +3813,23 @@ export default function ChatView({
             // User rows key + pin on the stable cid so the optimistic→confirm
             // display-ts update never remounts the row (which would drop the
             // pin target mid-swap). data-ts stays for the timestamp tooltip only.
-            const userCid = msg.role === 'user' ? cidOf(msg) : null
+            const ownerUserMessage = isOwnerUserMessage(msg)
+            const userCid = ownerUserMessage ? cidOf(msg) : null
             return (
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
-              className={`chat__msg chat__msg--${msg.role}`}
+              className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}`}
               ref={i === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
               data-cid={userCid || undefined}
-              data-ts={msg.role === 'user' && msg.ts ? String(msg.ts) : undefined}
-              onPointerDown={(event) => handleMessagePointerDown(event, msg, dataKey)}
-              onPointerMove={handleMessagePointerMove}
-              onPointerUp={cancelMessageHold}
-              onPointerCancel={cancelMessageHold}
-              onContextMenu={_isTouchPrimary
+              data-ts={ownerUserMessage && msg.ts ? String(msg.ts) : undefined}
+              onPointerDown={continuationMarker
+                ? undefined
+                : (event) => handleMessagePointerDown(event, msg, dataKey)}
+              onPointerMove={continuationMarker ? undefined : handleMessagePointerMove}
+              onPointerUp={continuationMarker ? undefined : cancelMessageHold}
+              onPointerCancel={continuationMarker ? undefined : cancelMessageHold}
+              onContextMenu={_isTouchPrimary && !continuationMarker
                 ? (event) => {
                     if (event.target?.closest?.('button, a, input, textarea, summary, pre, code')) return
                     event.preventDefault()
@@ -3792,7 +3837,7 @@ export default function ChatView({
                     void copyMessage(msg, dataKey)
                   }
                 : undefined}
-              onClick={msg.ts && msg.role === 'user'
+              onClick={msg.ts && ownerUserMessage
                 ? (event) => showTimestamp(event, dataKey)
                 : undefined}
             >
@@ -3823,7 +3868,7 @@ export default function ChatView({
                 liveQuestionId={liveQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}
               />
-              {msg.ts && msg.role === 'user' && (
+              {msg.ts && ownerUserMessage && (
                 <time className={`chat__ts${visibleTimestampKey === dataKey ? ' chat__ts--visible' : ''}`}>
                   {new Date(msg.ts).toLocaleString([], {
                     month: 'short', day: 'numeric',
@@ -4020,6 +4065,12 @@ export default function ChatView({
                 }
                 onAutoResumeChange={
                   embedded ? undefined : handleAutoResumeSettingsChange
+                }
+                restartResumeEnabled={restartResumeEnabled}
+                restartResumeSaving={restartResumeSaving}
+                restartResumeError={restartResumeError}
+                onRestartResumeChange={
+                  embedded ? undefined : handleRestartResumeChange
                 }
                 onChangeChatInfo={({ agent_settings_json, provider, effective }) => {
                   // Merge into chatInfo so the next render reflects the

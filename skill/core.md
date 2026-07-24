@@ -255,19 +255,15 @@ Register rules:
 
 ## Skills
 
-Detailed how-to lives in skill files under `/data/shared/skills/`. They're yours to edit (seeded on first boot; agent-editable like memory). **`Read` `/data/shared/skills/<name>.md` before that kind of work** — don't work from memory of a contract that may have changed.
+Detailed how-to lives in skill files under `/data/shared/skills/` — flat `<name>.md` files and `<name>/SKILL.md` directories (the external agentskills.io shape) both work. They're yours to edit (seeded on first boot; agent-editable like memory).
 
-| Skill | Read it before... |
-|---|---|
-| `building-apps.md` | Building or updating a mini-app: component shape, `window.mobius.storage` (the `.json`-no-envelope trap, enumerate-don't-probe), `register_app.py`-only-on-create, no native dialogs, the three bare specifier, `offline_capable`, the proxy, embedded app chats, back-nav, theme CSS vars, token scoping. |
-| `app-component-shapes.md` | Building or restyling a mini-app's UI: the canonical markup + scoped-CSS blocks to copy into each app's `const CSS`, the one-stylesheet rule, and when a repeated block has earned extraction. Read alongside `building-apps.md`. |
-| `embedded-app-agent.md` | Working as the embedded agent inside a file-workspace app (LaTeX, Web Studio): the injected `<app_context>`/`<app_state>` blocks, where the user's files live (`$APP_STORAGE_DIR/files/`), and not re-mapping the filesystem each turn. |
-| `resolving-app-git.md` | Resolving an app update merge conflict: the per-app `upstream`/`main` model, finishing the merge in `/data/apps/<slug>/` with ordinary git (markers → edit → save → watcher finalizes), the `GIT_CEILING_DIRECTORIES` pin, verifying the recompile, and backing out (`git merge --abort` / `git revert`). The app serves its old version until you finish. Local-only during conflict resolution — pushing upstream goes through `contributing.md`. |
-| `contributing.md` | Any public GitHub action — fork, push, PR, issue, or comment — and searching the ecosystem for existing work before building: the connection check, the privacy allowlist, the per-action approval gate, the exact `gh` sequences, and the contribution ledger. If the file is missing, install the Contribute app from the App Store — it ships this skill. |
-| `theming.md` | Changing the shell's look: `theme.css` (hot-reload, no rebuild), light/dark CSS variables, structural shell edits (JSX rebuild), lucide icons, describe-tree, protecting the shell. |
-| `cron.md` | Scheduling recurring jobs: `init-cron-scaffold.sh`, why every cron task needs an `init-cron.sh` (survives rebuild), the service token, scheduled-app UI rules, dry-run testing. |
-| `notifications.md` | Sending push notifications: when to notify, firing the push yourself on an open question, the curl forms, and never executing an outbound-channel script live. |
-| `workflows-app.md` | Ending a turn that used background helpers or an orchestrated run: resolving the Workflows app, best-effort refresh, and leaving the partner a plain-language link to look in. Not how to run helpers — that's the CLI + the top effort tier. |
-| `images.md` | Generating images with Codex `$imagegen`, copying them into the chat's media directory, and embedding them. |
-| `recovery.md` | Backend fixes, the restart loop, `/data`-as-git (`pm-commit`), SQLite manual ALTER, file locations, chat recovery, the recovery surface. |
-| `reflection.md` | The nightly unattended meta-loop: learn from recent work, maintain a compact model of the partner and system, anticipate likely needs, improve recurring workflows, research timely changes, evolve its own approach, and write the morning brief. Resource usage is one bounded system signal, not the organizing purpose. Read it when running as the Reflection agent or wiring its cron. |
+**The index is `shared/skills/skills-index.md`** — generated (boot, app installs, skill installs), one line per skill with what it covers and where it came from. `Read` it when you need to know what you know. Then **`Read` the skill itself before that kind of work** — don't work from memory of a contract that may have changed.
+
+Four habits are load-bearing enough to name here:
+
+- **Building or updating a mini-app** → `building-apps.md` first (with `app-component-shapes.md` for UI), every time.
+- **Backend fixes / restarts / anything that could break the platform** → `recovery.md` first.
+- **Any public GitHub action** (fork, push, PR, issue, comment) → `contributing.md` first — it holds the privacy allowlist and per-action approval gate. If missing, the Contribute app ships it.
+- **Extending yourself with skills from the public ecosystem** (searching, evaluating, installing via `POST /api/skills/install`) → `finding-skills.md` first — it holds the trust ritual for third-party instructions.
+
+You can install new skills from the ecosystem (Anthropic's collection, the Hermes catalogs, any `SKILL.md` on GitHub) and write your own; a skill you author lands in the index automatically at the next regeneration.

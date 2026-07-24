@@ -1555,15 +1555,10 @@ async def test_watcher_recompiles_when_imported_module_changes(
 
 
 @pytest.mark.asyncio
-async def test_watcher_publish_app_build_failed_is_system_bus_only(
+async def test_watcher_compile_failure_stays_diagnostic_only(
   client, owner_token,
 ):
-  """A watcher compile failure rides the system broadcast ALONE.
-
-  app_build_failed is catch-up-unsafe (a chat reconnect must not replay a
-  stale failure toast), so it is NOT fanned out to any per-chat broadcast —
-  the system bus reaches Shell.handleSystemEvent in every view, which is the
-  posture for a failed build (the owner went to look at the app)."""
+  """A transient source draft keeps the prior app live without owner alerts."""
   import asyncio
   import os
   import app.models as models
@@ -1600,15 +1595,8 @@ async def test_watcher_publish_app_build_failed_is_system_bus_only(
 
   try:
     await _JsxHandler(asyncio.get_running_loop())._recompile(jsx_path)
-    # The failure rides the system broadcast so the Shell's toast fires in
-    # every view.
-    sys_ev = await asyncio.wait_for(q_system.get(), timeout=1.0)
-    assert sys_ev["type"] == "app_build_failed"
-    assert sys_ev["appId"] == str(app_id)
-    assert sys_ev["appName"] == "Watch Fail"
-    assert "Expected" in sys_ev["summary"] or "Unexpected" in sys_ev["summary"]
-    # NEITHER the building chat NOR a bystander chat receives it — no per-chat
-    # fan-out for a catch-up-unsafe event.
+    # Ordinary save-time compiler feedback belongs in the diagnostic log for
+    # the builder, not in a global red toast for the owner.
     assert all(
       e.get("type") != "app_build_failed" for e in building.event_log
     ), building.event_log
@@ -1617,6 +1605,8 @@ async def test_watcher_publish_app_build_failed_is_system_bus_only(
     ), other.event_log
     with pytest.raises(asyncio.TimeoutError):
       await asyncio.wait_for(q_build.get(), timeout=0.2)
+    with pytest.raises(asyncio.TimeoutError):
+      await asyncio.wait_for(q_system.get(), timeout=0.2)
   finally:
     bc_mod.get_system_broadcast().unsubscribe(q_system)
     bc_mod.remove_broadcast("builder-chat")

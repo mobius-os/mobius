@@ -18,11 +18,15 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text, event, true,
+  String, Text, event, false, true,
 )
 
 from app.database import Base
 from app.timeutil import now_naive_utc
+
+
+CONTINUATION_RUN_STATUSES = ("parked", "resume_pending")
+NONTERMINAL_RUN_STATUSES = ("running", *CONTINUATION_RUN_STATUSES)
 
 
 class Owner(Base):
@@ -37,8 +41,14 @@ class Owner(Base):
   provider = Column(String(32), nullable=False, default="claude")
   # Default provider-limit recovery policy for newly-created chats. Each chat
   # stores its own copy; changing a chat's switch updates this seed for the
-  # next chat without rewriting any existing conversation.
+  # next chat without rewriting any existing conversation. Automatic provider
+  # retries are initially off because they can consume paid usage.
   auto_resume_on_limit_default = Column(
+    Boolean, nullable=False, default=False, server_default=false()
+  )
+  # Planned restarts are initiated by Möbius, so continuing interrupted work
+  # is initially on. This remains independently configurable per chat.
+  auto_resume_on_restart_default = Column(
     Boolean, nullable=False, default=True, server_default=true()
   )
   # Per-owner model-picker preferences. Shape:
@@ -124,11 +134,14 @@ class Chat(Base):
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
-  # Per-chat policy for provider-limit recovery. Kept out of
-  # agent_settings_json because that blob is snapshotted/mirrored as SDK
-  # runtime configuration; mixing this policy into it can skip first-send
-  # model snapshots or overwrite the owner's global model defaults.
+  # Per-chat policy for automatic recovery after provider limits. Initially
+  # off because another attempt can consume paid usage.
   auto_resume_on_limit = Column(
+    Boolean, nullable=False, default=False, server_default=false()
+  )
+  # Per-chat policy for continuing after a supervisor-authenticated planned
+  # restart. Initially on because Möbius interrupted the work itself.
+  auto_resume_on_restart = Column(
     Boolean, nullable=False, default=True, server_default=true()
   )
   # Vestigial: the named-agent feature was removed; column retained
@@ -222,6 +235,8 @@ class ChatRun(Base):
   # turn, "failed" for a provider/setup error, "stopped" for an explicit user
   # Stop, and "interrupted" for crash/supersession/watchdog recovery. Provider
   # limits additionally use the parked/resume_pending/parked_notified states.
+  # A successfully drained planned restart reuses that retry path with
+  # park_reason="restart"; an unplanned crash remains "interrupted".
   status = Column(String(16), nullable=False, default="running", index=True)
   provider = Column(String(32), nullable=True, default=None)
   # App that initiated this turn under the app-attributed-chat contract
@@ -239,14 +254,19 @@ class ChatRun(Base):
   # provider limit, the run is PARKED instead of just cleared: `status` moves
   # to "parked", `parked_until` holds the reset time (naive UTC, matching every
   # other DateTime here), and `park_reason` a short label ("rate_limit" /
-  # "usage_limit" / …). This run row IS the provider-parked signal — no
-  # separate state enum. The liveness checks read it via
+  # "usage_limit" / …). Planned restarts also use this row with
+  # park_reason="restart" and a due time of now. No separate state enum is
+  # needed. The liveness checks read it via
   # `chat._parked_until_for_chat`; the periodic reset sweep notifies once at
   # `parked_until`; auto-resume may pass through the retryable
   # "resume_pending" state before the row becomes terminal. Null on every
   # non-parked run and on rows created before this column existed.
   parked_until = Column(DateTime, nullable=True, default=None)
   park_reason = Column(String(32), nullable=True, default=None)
+  # One-shot platform-authored intent identity for a planned restart. It only
+  # authorizes replay when the frozen supervisor's root-owned boot ledger binds
+  # the same nonce + exact run id to the current boot.
+  restart_nonce = Column(String(128), nullable=True, default=None)
 
 
 class ChatSessionLink(Base):
@@ -541,15 +561,20 @@ class App(Base):
   # storage-write. The App Store mini-app is the canonical caller.
   # Default False — only granted by manifest declaration on install.
   manage_apps = Column(Boolean, nullable=False, default=False)
-  # GitHub connection access. When True, the app's token can call the
-  # whole /api/github surface: manage the connection (connect / poll /
-  # disconnect / status) and use the read-only data proxy (GET
-  # /api/github/api/* and POST /api/github/graphql, both read-only by
-  # construction, INV2). The connected token is never returned to the
-  # app. The Contribute mini-app is the canonical caller. A boolean gate
-  # like manage_apps, not a ladder. Default False — only granted by
-  # manifest declaration on install.
+  # Skills-management access. When True, the app's token can call the
+  # /api/skills surface (install a skill from an online source, uninstall an
+  # installed one) on the owner's behalf. Distinct from manage_apps so the
+  # skills-install consent is its own user-visible permission. The Skills
+  # mini-app is the canonical caller. Default False — only granted by manifest
+  # declaration on install.
+  manage_skills = Column(Boolean, nullable=False, default=False)
+  # GitHub data access. This covers the read-only proxy and the narrow reviewed
+  # contribution submit surface, never credential management or token export.
   github_access = Column(Boolean, nullable=False, default=False)
+  # GitHub credential-management authority. Device flow, PAT install, status,
+  # and disconnect are intentionally separate from github_access so read-only
+  # consumers cannot mutate the owner's account connection.
+  github_connect = Column(Boolean, nullable=False, default=False)
   # Owner filesystem capability. This is intentionally separate from storage
   # interop: it grants the app-scoped token access to the guarded /api/fs
   # surface (still path-confined and secret-denied there). The Editor is the

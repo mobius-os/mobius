@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import schemas
+from app import models, schemas
 from app.events import (
   TOOL_OUTPUT_INLINE_THRESHOLD,
   build_assistant_message,
@@ -518,15 +518,16 @@ class ClearRunStatus(_Command):
 
 @dataclass
 class ParkRun(_Command):
-  """Park a turn that died on a provider rate/usage limit (design §2.4).
+  """Park a turn for a due continuation (design §2.4).
 
   The identity-keyed sibling of `ClearRunStatus` for the limit exit: the
   turn is over, so the per-chat marker (`Chat.run_status`) is cleared the
   same way — but instead of closing the run's `chat_runs` row "completed",
-  the row moves to ``status="parked"`` carrying `parked_until` (the parsed
-  reset time, naive UTC) and `park_reason`. That parked row IS the
-  provider-parked signal the liveness exemptions and the reset sweep read;
-  no separate state enum exists. Same ownership discipline as
+  the row moves to ``status="parked"`` carrying `parked_until` (the due time,
+  naive UTC) and `park_reason`. Provider limits use their parsed reset time;
+  a successfully drained planned restart uses ``park_reason="restart"`` and
+  a due time of now. That parked row IS the durable continuation signal; no
+  separate state enum exists. Same ownership discipline as
   ClearRunStatus: a dying run whose marker was taken by a fresh turn still
   closes its OWN row (as "completed", NOT parked — the owner already moved
   on, so a stale park must not resurrect a notify) but leaves the fresh
@@ -537,16 +538,18 @@ class ParkRun(_Command):
   run_token: str = ""
   parked_until: object = None
   park_reason: str = ""
+  restart_nonce: str = ""
 
 
 @dataclass
 class ResolvePark(_Command):
-  """Move a parked/pending run to ``parked_notified``.
+  """Resolve a parked/pending run without starting a continuation.
 
   Submitted by the reset sweep AFTER `parked_until` elapses. Notify-only
   parks resolve before their at-most-once push attempt; auto-resume parks first
   pass through PrepareAutoResume so retries remain selectable without
-  re-notifying.
+  re-notifying. Provider parks become ``parked_notified``; restart parks become
+  ordinary ``interrupted`` history.
   Not identity-keyed against `_run_token_owner`: the parked turn ended long
   ago and ParkRun already dropped its ownership entry. Idempotent — a row
   no longer parked is a no-op.
@@ -585,6 +588,9 @@ class RollbackAutoResume(_Command):
   run_token: str = ""
   promoted_run_token: str = ""
   promoted_pending: list[dict] = field(default_factory=list)
+  # Provider-limit retries remain eligible after a task-creation failure.
+  # A restart authorization is one-shot, so that path resolves to manual.
+  retry_park: bool = True
 
 
 @dataclass
@@ -2123,10 +2129,11 @@ class ChatWriterActor:
     # chat.  Already-resolved ``parked_notified`` rows remain historical.
     for run in db.query(ChatRun).filter(
       ChatRun.chat_id == cmd.chat_id,
-      ChatRun.status.in_(("parked", "resume_pending")),
+      ChatRun.status.in_(models.CONTINUATION_RUN_STATUSES),
     ).all():
       run.status = "interrupted"
       run.ended_at = datetime.now(UTC)
+      run.restart_nonce = None
     if not _commit_or_rollback(db):
       raise _PersistFailed("SwitchProviderWithCompaction did not persist")
     return {
@@ -2148,7 +2155,7 @@ class ChatWriterActor:
     messages = list(chat.messages or [])
     has_active_run = db.query(ChatRun).filter(
       ChatRun.chat_id == cmd.chat_id,
-      ChatRun.status.in_(("running", "parked", "resume_pending")),
+      ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
     ).first() is not None
     if chat.run_status is not None or chat.pending_messages or has_active_run:
       return {"status": "conflict", "reason": "busy"}
@@ -2384,7 +2391,7 @@ class ChatWriterActor:
     # resolved and stay untouched.
     q = db.query(ChatRun).filter(
       ChatRun.chat_id == chat_id,
-      ChatRun.status.in_(("running", "parked", "resume_pending")),
+      ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
     )
     if except_token is not None:
       q = q.filter(ChatRun.id != except_token)
@@ -2392,6 +2399,7 @@ class ChatWriterActor:
     for run in q.all():
       run.status = status
       run.ended_at = datetime.now(UTC)
+      run.restart_nonce = None
       changed = True
     return changed
 
@@ -2439,6 +2447,7 @@ class ChatWriterActor:
       if run is not None and run.status == "running":
         run.status = cmd.terminal_status
         run.ended_at = datetime.now(UTC)
+        run.restart_nonce = None
         changed = True
     elif marker_is_ours:
       changed = self._close_running_runs(
@@ -2464,7 +2473,7 @@ class ChatWriterActor:
     return None
 
   def _park_run(self, db, cmd: ParkRun):
-    """Park the run's row on a provider limit + clear the per-chat marker.
+    """Park the run's row for continuation + clear the per-chat marker.
 
     Mirrors `_clear_run_status`'s ownership discipline exactly — the same
     identity-keyed compare against `_run_token_owner` — with one difference:
@@ -2487,23 +2496,42 @@ class ChatWriterActor:
       cmd.run_token and owner is not None and owner != cmd.run_token
     )
     changed = False
+    parked = False
     if cmd.run_token:
       run = (
         db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
       )
-      if run is not None and run.status == "running":
-        if marker_is_ours:
-          run.status = "parked"
-          run.parked_until = cmd.parked_until
-          run.park_reason = (cmd.park_reason or None)
-        else:
-          run.status = "completed"
-        run.ended_at = datetime.now(UTC)
-        changed = True
+      # A tokened transition is useful only when the exact running row exists.
+      # Do not clear the generic chat marker on a missing/terminal row: leaving
+      # it set lets startup reconciliation recover manually instead of losing
+      # the only durable evidence that work was interrupted.
+      if run is None or run.status != "running":
+        return bool(
+          run is not None
+          and run.status in ("parked", "resume_pending")
+          and run.park_reason == (cmd.park_reason or None)
+          and (
+            run.park_reason != "restart"
+            or run.restart_nonce == (cmd.restart_nonce or None)
+          )
+        )
+      if marker_is_ours:
+        run.status = "parked"
+        run.parked_until = cmd.parked_until
+        run.park_reason = (cmd.park_reason or None)
+        run.restart_nonce = (
+          cmd.restart_nonce if cmd.park_reason == "restart" else None
+        )
+        parked = True
+      else:
+        run.status = "completed"
+        run.restart_nonce = None
+      run.ended_at = datetime.now(UTC)
+      changed = True
     if not marker_is_ours:
       if changed and not _commit_or_rollback(db):
         raise _PersistFailed("ParkRun did not persist")
-      return None
+      return False
     chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
     if chat is not None and (
       chat.run_status is not None or chat.run_started_at is not None
@@ -2514,10 +2542,10 @@ class ChatWriterActor:
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("ParkRun did not persist")
     self._run_token_owner.pop(cmd.chat_id, None)
-    return None
+    return parked
 
   def _resolve_park(self, db, cmd: ResolvePark):
-    """Move a parked/pending row to ``parked_notified``; idempotent."""
+    """Resolve a parked/pending row without continuing; idempotent."""
     from datetime import UTC, datetime
 
     from app.models import ChatRun
@@ -2529,12 +2557,20 @@ class ChatWriterActor:
       # A newer run already superseded this park. Retire the stale signal but
       # report False so the sweep neither notifies nor claims it resolved.
       run.status = "completed"
+      run.restart_nonce = None
       if run.ended_at is None:
         run.ended_at = datetime.now(UTC)
       if not _commit_or_rollback(db):
         raise _PersistFailed("ResolvePark stale-run retire did not persist")
       return False
-    run.status = "parked_notified"
+    # A planned restart with automatic continuation disabled (or cancelled by
+    # a later policy/ownership check) is an ordinary manual interruption, not a
+    # provider park that was notified. Keep the historical run outcome honest.
+    run.status = (
+      "interrupted" if run.park_reason == "restart" else "parked_notified"
+    )
+    if run.park_reason == "restart":
+      run.restart_nonce = None
     if run.ended_at is None:
       run.ended_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -2552,6 +2588,7 @@ class ChatWriterActor:
       return {"active": False, "notify": False}
     if not self._run_is_latest(db, run):
       run.status = "completed"
+      run.restart_nonce = None
       if run.ended_at is None:
         run.ended_at = datetime.now(UTC)
       if not _commit_or_rollback(db):
@@ -2621,7 +2658,11 @@ class ChatWriterActor:
     chat.run_status = None
     chat.run_started_at = None
     db.delete(promoted_run)
-    park.status = "resume_pending"
+    if cmd.retry_park:
+      park.status = "resume_pending"
+    else:
+      park.status = "interrupted"
+      park.restart_nonce = None
     if not _commit_or_rollback(db):
       raise _PersistFailed("RollbackAutoResume did not persist")
     self._run_token_owner.pop(cmd.chat_id, None)
