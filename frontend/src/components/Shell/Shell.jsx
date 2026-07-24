@@ -106,7 +106,9 @@ import {
   PaneTab, panePanelDomId, paneTabDomId, scrollStripWheel, stripKeyDown,
 } from './PaneStrip.jsx'
 import useAppIntentNavigation from './useAppIntentNavigation.js'
-import useDesktopSidebar from './useDesktopSidebar.js'
+import useDesktopSidebar, {
+  desktopContentWidthAfterSidebarToggle,
+} from './useDesktopSidebar.js'
 import ShellBrand from './ShellBrand.jsx'
 
 const SHELL_RELOAD_RECHECK_MS = 6000
@@ -217,39 +219,47 @@ export default function Shell() {
   }, [setFocusedPaneViewId])
 
   // ── Multi-pane projection (design §2/§4) — computed BEFORE useNavigation so
-  // the adapter learns the committed visible pane set. A ResizeObserver on
-  // .shell__content drives the mode + geometry; projection is the single
-  // geometry authority (one visible leaf is the pixel-identical single-pane
-  // sentinel and the renderer emits today's DOM).
+  // the adapter learns the committed visible pane set. `contentRect` is the ONE
+  // geometry authority for projection. ResizeObserver keeps it aligned with
+  // external size changes; shell-owned desktop-sidebar toggles prime their target
+  // geometry before dispatch so CSS reservation + pane projection render once.
   const contentElRef = useRef(null)
   const [contentRect, setContentRect] = useState({ w: 0, h: 0 })
+  // A desktop-sidebar toggle can project the next rect before its CSS class
+  // commit. Hold that target across any already-queued ResizeObserver callback;
+  // the layout effect for the committed render settles it against real DOM.
+  const pendingContentRectRef = useRef(null)
   // Read at placement-dispatch time (below) so the resolver derives the current
   // device mode + pane rects without re-creating placeInWorkspace every resize.
   const contentRectRef = useRef(contentRect)
   contentRectRef.current = contentRect
+  const syncContentRect = useCallback(({ settlePending = false } = {}) => {
+    const el = contentElRef.current
+    if (!el) return
+    const w = Math.round(el.clientWidth)
+    const h = Math.round(el.clientHeight)
+    if (pendingContentRectRef.current && !settlePending) return
+    if (settlePending) pendingContentRectRef.current = null
+    setContentRect(prev => {
+      if (prev.w === w && prev.h === h) return prev
+      // Flag-off single-pane never tiles, so a content-size change would
+      // re-render Shell for a projection nothing reads. Skip it while the
+      // splits flag is off and the tree is a lone leaf (finding F).
+      if (!paneModel.WORKSPACE_SPLITS_ENABLED
+          && Object.keys(workspaceStateRef.current.ws.panes).length <= 1) return prev
+      return { w, h }
+    })
+  }, [])
   useEffect(() => {
     const el = contentElRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
-    // No layout-bloom transition to suppress anymore (v2 deleted it + its guard
-    // class + this 200ms timer): a resize rewrites pane rects, which now snap. A
-    // resize during an exit beat instead invalidates the latched plan's content
-    // dimensions and cancels the beat (the exit-signature watcher below).
-    const ro = new ResizeObserver(() => {
-      const w = Math.round(el.clientWidth)
-      const h = Math.round(el.clientHeight)
-      setContentRect(prev => {
-        if (prev.w === w && prev.h === h) return prev
-        // Flag-off single-pane never tiles, so a content-size change would
-        // re-render Shell for a projection nothing reads. Skip it while the
-        // splits flag is off and the tree is a lone leaf (finding F).
-        if (!paneModel.WORKSPACE_SPLITS_ENABLED
-            && Object.keys(workspaceStateRef.current.ws.panes).length <= 1) return prev
-        return { w, h }
-      })
-    })
+    // External layout changes (viewport, theme, browser chrome) still arrive
+    // through the observer. Shell-owned changes use the same commit helper in a
+    // layout effect, rather than waiting one painted frame for this callback.
+    const ro = new ResizeObserver(() => syncContentRect())
     ro.observe(el)
     return () => { ro.disconnect() }
-  }, [])
+  }, [syncContentRect])
   const workspaceMode = useMemo(() => paneModel.modeForRect(contentRect), [contentRect])
   const baseProjection = useMemo(
     () => paneModel.projectLayout(workspace, workspaceMode, contentRect),
@@ -294,6 +304,21 @@ export default function Shell() {
   const drawerModeTransitioning = desktopSidebarMode && drawerOpen
   const navigationOpen = persistentDrawer ? desktopSidebarOpen : drawerOpen
   const modalDrawerOpen = !persistentDrawer && drawerOpen
+  // This is the single semantic owner of reserved desktop navigation space.
+  // Both the root class and the content-geometry transaction below read it.
+  const desktopSidebarReserved = persistentDrawer && desktopSidebarOpen
+  const primeDesktopSidebarContentRect = useCallback((nextReserved) => {
+    const el = contentElRef.current
+    if (!el) return
+    const w = desktopContentWidthAfterSidebarToggle(el.clientWidth, {
+      currentReserved: desktopSidebarReserved,
+      nextReserved,
+      sidebarWidth: desktopSidebarWidth,
+    })
+    const h = Math.round(el.clientHeight)
+    pendingContentRectRef.current = { w, h }
+    setContentRect(prev => (prev.w === w && prev.h === h ? prev : { w, h }))
+  }, [desktopSidebarReserved, desktopSidebarWidth])
   const closeDrawerRef = useRef(closeDrawer)
   closeDrawerRef.current = closeDrawer
   useEffect(() => {
@@ -1116,6 +1141,20 @@ export default function Shell() {
   const tabStripVisible = !immersiveActive
     && (SPLITS ? effectiveViewMode === 'panes' : tabStripEngaged)
     && openTabs.length >= 1
+  const shellTabStripVisible = tabStripVisible && !workspaceChromeActive
+
+  // Reconcile other React-owned chrome changes from committed DOM. Desktop
+  // drawer toggles do not depend on this effect for atomicity: their event
+  // handler primes contentRect in the same state batch.
+  useLayoutEffect(() => {
+    syncContentRect({ settlePending: true })
+  }, [
+    desktopSidebarReserved,
+    desktopSidebarWidth,
+    immersiveActive,
+    shellTabStripVisible,
+    syncContentRect,
+  ])
 
   // tabKey -> { paneId, CONTENT rect } (pane rect minus its strip) of the active
   // tab of each visible pane. A content wrapper matching a key is positioned +
@@ -1557,11 +1596,21 @@ export default function Shell() {
   // handleToggleViewMode above, passed to ShellBrand as onToggleMode.
   const handleToggleNavigation = useCallback(() => {
     if (persistentDrawer) {
-      setDesktopSidebarOpen(!desktopSidebarOpen)
+      const nextOpen = !desktopSidebarOpen
+      primeDesktopSidebarContentRect(nextOpen)
+      setDesktopSidebarOpen(nextOpen)
       return
     }
     drawerOpen ? closeDrawer() : openDrawer()
-  }, [persistentDrawer, desktopSidebarOpen, setDesktopSidebarOpen, drawerOpen, closeDrawer, openDrawer])
+  }, [
+    persistentDrawer,
+    desktopSidebarOpen,
+    primeDesktopSidebarContentRect,
+    setDesktopSidebarOpen,
+    drawerOpen,
+    closeDrawer,
+    openDrawer,
+  ])
   useWorkspaceDrag({
     enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     contentElRef,
@@ -3427,7 +3476,7 @@ export default function Shell() {
       // this root completes the beat (the controller's listener). No separate
       // entering/exiting booleans emit here anymore.
       className={`shell${immersiveActive ? ' shell--immersive' : ''}`
-      + `${persistentDrawer && desktopSidebarOpen ? ' shell--drawer-docked' : ''}`
+      + `${desktopSidebarReserved ? ' shell--drawer-docked' : ''}`
       + `${modeMachine.transitionRootClass(modeState, { splitsEnabled: SPLITS })
         ? ` ${modeMachine.transitionRootClass(modeState, { splitsEnabled: SPLITS })}` : ''}`
       + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>

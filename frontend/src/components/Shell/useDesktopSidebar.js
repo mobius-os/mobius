@@ -16,6 +16,29 @@ export function clampDesktopSidebarWidth(width) {
   )
 }
 
+/**
+ * Project the content width for one desktop-sidebar open/close toggle.
+ *
+ * Shell uses this before dispatching the sidebar preference update so
+ * React receives the CSS reservation and the pane geometry in one render. The
+ * current content measurement is live DOM truth; adding back the current
+ * reservation recovers the shell width without duplicating viewport math.
+ */
+export function desktopContentWidthAfterSidebarToggle(currentContentWidth, {
+  currentReserved = false,
+  nextReserved = false,
+  sidebarWidth = DESKTOP_SIDEBAR_DEFAULT_WIDTH,
+} = {}) {
+  const measured = Number(currentContentWidth)
+  const contentWidth = Number.isFinite(measured) ? Math.max(0, measured) : 0
+  const width = clampDesktopSidebarWidth(sidebarWidth)
+  const shellWidth = contentWidth
+    + (currentReserved ? width : 0)
+  const projected = shellWidth
+    - (nextReserved ? width : 0)
+  return Math.max(0, Math.round(projected))
+}
+
 export function readDesktopSidebarOpen(storage) {
   try {
     return storage?.getItem(DESKTOP_SIDEBAR_STORAGE_KEY) !== 'false'
