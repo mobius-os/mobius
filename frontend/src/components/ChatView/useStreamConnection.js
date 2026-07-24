@@ -28,10 +28,12 @@ import {
 } from './streamSnapshotCache.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
-import {
-  TEXT_REVEAL_MIN_COMMIT_MS,
-  textRevealBudget,
-} from './streamCadence.js'
+
+// Characters revealed per frame at 60fps.
+// 3 chars/frame × 60fps = ~180 chars/sec — fast but smooth.
+// DO NOT increase beyond 5 — it defeats the typewriter effect.
+// DO NOT decrease below 2 — it makes streaming feel sluggish.
+const CHARS_PER_FRAME = 3
 
 // Hard cap on the send POST. It normally returns 202 immediately. Keep this
 // above every bounded backend wait: aborting at 20s while a request was still
@@ -376,8 +378,6 @@ export default function useStreamConnection(chatId, {
   const textBufferItemIdRef = useRef(null)
   const rafRef = useRef(null)
   const drainingRef = useRef(false)
-  const lastDrainAtRef = useRef(null)
-  const drainCarryRef = useRef(0)
   // Set by `text_boundary`: the next text chunk must create a new text item
   // instead of appending to the previous text item. This preserves provider
   // assistant-message boundaries even when the separator was hidden/internal
@@ -411,38 +411,16 @@ export default function useStreamConnection(chatId, {
     if (drainingRef.current) return
     drainingRef.current = true
 
-    function drain(now) {
+    function drain() {
       const buf = textBufferRef.current
       if (buf.length === 0) {
         drainingRef.current = false
-        lastDrainAtRef.current = null
-        drainCarryRef.current = 0
         return
       }
 
-      const frameAt = Number.isFinite(now) ? now : performance.now()
-      const previousAt = lastDrainAtRef.current
-      const elapsedMs = previousAt == null ? 1000 / 60 : frameAt - previousAt
-      if (previousAt != null && elapsedMs < TEXT_REVEAL_MIN_COMMIT_MS) {
-        rafRef.current = requestAnimationFrame(drain)
-        return
-      }
-
-      const budget = textRevealBudget({
-        elapsedMs,
-        carry: drainCarryRef.current,
-        bufferLength: buf.length,
-      })
-      if (budget.count === 0) {
-        rafRef.current = requestAnimationFrame(drain)
-        return
-      }
-
-      lastDrainAtRef.current = frameAt
-      drainCarryRef.current = budget.carry
-      const chunk = buf.slice(0, budget.count)
+      const chunk = buf.slice(0, CHARS_PER_FRAME)
       const textItemId = textBufferItemIdRef.current
-      textBufferRef.current = buf.slice(budget.count)
+      textBufferRef.current = buf.slice(CHARS_PER_FRAME)
 
       setStreamItems(prev => appendTextChunk(prev, chunk, textItemId))
 
@@ -463,8 +441,6 @@ export default function useStreamConnection(chatId, {
       rafRef.current = null
     }
     drainingRef.current = false
-    lastDrainAtRef.current = null
-    drainCarryRef.current = 0
 
     const remaining = textBufferRef.current
     if (!remaining) return

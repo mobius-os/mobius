@@ -503,7 +503,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.8 (2026-07-24).** This section is the
+**Owner-authoritative contract — v1.7 (2026-07-24).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -599,15 +599,8 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   input gets that early release only when its direction is exactly clamped at the
   matching scroll edge. An elapsed frame is not evidence that an in-range wheel was a
   no-op: renderer/compositor load can update geometry before the main-thread `scroll`
-  handler runs. After a real scroll lands, reader ownership remains active through a
-  short trailing-edge quiet window. The hot scroll handler records intent and current
-  tail proximity only; final anchor discovery, spacer sizing, mode transition, and
-  persistence run once when momentum settles. Exact physical-tail intent belongs to
-  the scroll event's geometry: reply growth during the quiet window cannot erase that
-  the reader reached bottom. Deferred layout work may resume only after that final
-  semantic location is committed, so a stale follow/pin cannot write in the handoff
-  frame. A bounded dead-man remains the final escape hatch for any interrupted
-  no-scroll gesture.
+  handler runs. Only after a real scroll lands does the short momentum window begin. A
+  bounded dead-man remains the final escape hatch for any interrupted gesture.
 - **R5a — Attention nudges reveal the usable tail.** Tapping an offscreen question
   or paused-turn nudge is an explicit one-shot reading action: it lands at the
   physical tail, including the list's composer-clearance padding, so the card's

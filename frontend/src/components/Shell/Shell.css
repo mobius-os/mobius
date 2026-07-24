@@ -561,11 +561,7 @@
     transparent 72%);
   translate: 0 0;
   scale: 1;
-  /* Stable builder drift writes --halo-opacity every frame. A base opacity
-     transition restarted on every write, keeping a permanent style/transition
-     workload alive across the whole shell. Entry/exit own their deliberate
-     opacity transitions in the more-specific rules above; settled drift applies
-     directly, matching its slowly-varying target without a retarget loop. */
+  transition: opacity 220ms ease;
 }
 .shell__brand--builder .shell__logo-halo {
   opacity: var(--halo-opacity, 0.85);
