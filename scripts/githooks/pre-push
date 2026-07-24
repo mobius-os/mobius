@@ -6,9 +6,8 @@
 # errors, and frontend-unit regressions — BEFORE they're pushed. Fast by
 # design: conflict + syntax checks are instant; frontend-unit (~6s) runs
 # when frontend changed (if its dependency tree is complete). The full backend
-# suite currently takes about ten minutes, so it runs before updates to main
-# (and on explicit MOBIUS_PREPUSH_FULL=1 requests), while topic/backup pushes
-# start the required PR CI immediately. CI is the backstop for anything skipped.
+# suite currently takes about ten minutes, so topic pushes leave it to required
+# PR CI unless MOBIUS_PREPUSH_FULL=1 is explicitly requested.
 #
 # Install: scripts/install-hooks.sh (copies this into the shared hooks
 # dir, so every worktree is covered). Privacy failures must never be bypassed.
@@ -55,14 +54,12 @@ ok()   { printf '%s[pre-push]%s %s\n' "$c_ok"  "$c_off" "$*"; }
 warn() { printf '%s[pre-push]%s %s\n' "$c_warn" "$c_off" "$*"; }
 err()  { printf '%s[pre-push]%s %s\n' "$c_err" "$c_off" "$*" >&2; }
 
-# Fast local feedback for the sibling-clobber class. This hook is bypassable;
-# the real guarantee is GitHub branch protection on main (owner-only).
+# Direct main updates bypass the PR's synthetic merge test and are prohibited.
+# Branch protection is the remote guarantee; this local rejection gives a fast,
+# actionable error before opening the transport.
 ZERO=0000000000000000000000000000000000000000
 PUSH_REFS="$PP_TMP/push-refs"
 HAS_PUSH_REFS=0
-PUSHES_MAIN=0
-MAIN_LOCAL_SHA=""
-MAIN_REMOTE_SHA=""
 if [ -t 0 ]; then
   : >"$PUSH_REFS"
 else
@@ -73,19 +70,9 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
   HAS_PUSH_REFS=1
   case "$remote_ref" in
     refs/heads/main)
-      PUSHES_MAIN=1
-      MAIN_LOCAL_SHA="$local_sha"
-      MAIN_REMOTE_SHA="$remote_sha"
-      if [ "$local_sha" = "$ZERO" ]; then
-        err "refusing to delete main"
-        err "recover: git fetch origin && git rebase origin/main && scripts/land.sh"
-        FAIL=1
-      elif [ "$remote_sha" != "$ZERO" ] &&
-           ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
-        err "refusing non-fast-forward update to main"
-        err "recover: git fetch origin && git rebase origin/main && scripts/land.sh"
-        FAIL=1
-      fi
+      err "direct updates to main are prohibited; publish a topic branch"
+      err "and run scripts/submit-pr.sh"
+      FAIL=1
       ;;
   esac
 done <"$PUSH_REFS"
@@ -94,34 +81,13 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-# A direct/manual hook invocation remains a full diagnostic. Real pushes only
-# pay for the seven-minute backend suite when they update main; topic branches
-# get the same full coverage from required PR CI without delaying publication.
-# The opt-in is useful before publishing a risky backend topic branch.
+# A direct/manual hook invocation remains a full diagnostic. Real topic pushes
+# get the full backend coverage from required PR CI without delaying
+# publication. The opt-in remains useful before publishing a risky branch.
 RUN_FULL_BACKEND=0
 if [ "$HAS_PUSH_REFS" -eq 0 ] \
-    || [ "$PUSHES_MAIN" -eq 1 ] \
     || [ "${MOBIUS_PREPUSH_FULL:-0}" = "1" ]; then
   RUN_FULL_BACKEND=1
-fi
-
-# land.sh runs this same hook against the exact main update before opening the
-# remote transport. The real push then supplies both verified object IDs. Only
-# an exact match may reuse that expensive backend result; a stale or malformed
-# receipt fails closed instead of holding a newly opened connection through a
-# second seven-minute suite. Privacy, history, syntax, and frontend checks below
-# still run on the real push.
-BACKEND_PREFLIGHT_VERIFIED=0
-if [ -n "${MOBIUS_PREPUSH_VERIFIED_SHA:-}" ] \
-    || [ -n "${MOBIUS_PREPUSH_VERIFIED_REMOTE_SHA:-}" ]; then
-  if [ "$PUSHES_MAIN" -ne 1 ] \
-      || [ -z "$MAIN_LOCAL_SHA" ] \
-      || [ "${MOBIUS_PREPUSH_VERIFIED_SHA:-}" != "$MAIN_LOCAL_SHA" ] \
-      || [ "${MOBIUS_PREPUSH_VERIFIED_REMOTE_SHA:-}" != "$MAIN_REMOTE_SHA" ]; then
-    err "preflight receipt does not match the main update; rerun scripts/land.sh"
-    exit 1
-  fi
-  BACKEND_PREFLIGHT_VERIFIED=1
 fi
 
 # Commits being pushed = everything on HEAD not yet on origin/main.
@@ -291,11 +257,9 @@ if changed_match '^(backend/scripts/package-static-app\.mjs|scripts/package-stat
   fi
 fi
 
-# 5. Backend pytest — required before main updates, optional on topic/backup
-#    pushes, and only possible when the shared local venv exists.
-if backend_needs_pytest && [ "$BACKEND_PREFLIGHT_VERIFIED" -eq 1 ]; then
-  ok "backend pytest already passed for ${MAIN_LOCAL_SHA:0:10} before transport opened"
-elif backend_needs_pytest && [ "$RUN_FULL_BACKEND" -eq 0 ]; then
+# 5. Backend pytest — explicit locally, required in PR CI, and only possible
+#    when the shared local venv exists.
+if backend_needs_pytest && [ "$RUN_FULL_BACKEND" -eq 0 ]; then
   warn "backend changed, but this push does not update main —"
   warn "  skipping full pytest (required PR CI runs it)."
   warn "  enable locally: MOBIUS_PREPUSH_FULL=1 git push …"

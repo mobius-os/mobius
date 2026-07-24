@@ -73,6 +73,7 @@ notifications_router = _load("notifications")
 debug_router = _load("debug")
 theme_router = _load("theme")
 self_reminders_router = _load("self_reminders")
+skills_router = _load("skills")
 standalone_router = _load("standalone")
 client_error_router = _load("client_error")
 client_signal_router = _load("client_signal")
@@ -103,6 +104,7 @@ __all__ = [
   "debug_router",
   "theme_router",
   "self_reminders_router",
+  "skills_router",
   "standalone_router",
   "client_error_router",
   "client_signal_router",

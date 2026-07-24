@@ -564,13 +564,18 @@ def _skill_file_read_name(
   """Returns the skill name when a Read targets a Möbius skill file.
 
   The in-product agent loads its skills by Reading
-  `<data_dir>/shared/skills/<name>.md` — on the default posture
+  `<data_dir>/shared/skills/<name>.md` (flat) or
+  `<data_dir>/shared/skills/<name>/SKILL.md` (the external
+  directory convention installed skills use) — on the default posture
   (skills_enabled off) the SDK Skill tool is never offered, so the
   Read input is the only place skill loads are actually observable.
   The match is purely lexical (normpath, no filesystem access) and
   returns "" for anything that isn't a direct skill-file read. A
   relative path is resolved against the turn's cwd: the agent runs
   with cwd=/data, so `shared/skills/example.md` is the same load.
+  Deeper resource reads inside a skill directory deliberately do NOT
+  count as loads — only the SKILL.md entry document does — and the
+  generated `skills-index.md` is the index, not a skill.
   """
   if tool_name != "Read" or not isinstance(input_data, dict):
     return ""
@@ -586,9 +591,15 @@ def _skill_file_read_name(
     os.path.join(get_settings().data_dir, "shared", "skills")
   )
   parent, filename = os.path.split(path)
-  if parent != skills_dir or not filename.endswith(".md"):
-    return ""
-  return filename[: -len(".md")]
+  if parent == skills_dir and filename.endswith(".md"):
+    from app.skills import GENERATED_INDEX_STEMS
+
+    name = filename[: -len(".md")]
+    return "" if name in GENERATED_INDEX_STEMS else name
+  grandparent, dirname = os.path.split(parent)
+  if grandparent == skills_dir and filename.upper() == "SKILL.MD" and dirname:
+    return dirname
+  return ""
 
 
 def observe_skill_file_read(

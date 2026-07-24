@@ -211,9 +211,40 @@ def test_run_migrations_adds_chat_auto_resume_policy(tmp_path):
     restart_values = conn.execute(text(
       "SELECT id, auto_resume_on_restart FROM chats ORDER BY id"
     )).all()
-  assert value in (True, 1)
-  assert future_value in (True, 1)
-  assert all(restart in (False, 0) for _, restart in restart_values)
+  assert value in (False, 0)
+  assert future_value in (False, 0)
+  assert all(restart in (True, 1) for _, restart in restart_values)
+
+
+def test_run_migrations_preserves_existing_continuation_choices(tmp_path):
+  """New defaults must not rewrite choices already stored on local installs."""
+  db_path = tmp_path / "existing-continuation-policies.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.connect() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats ("
+      "id VARCHAR(64) PRIMARY KEY, title VARCHAR(255), updated_at DATETIME, "
+      "auto_resume_on_limit BOOLEAN NOT NULL DEFAULT TRUE, "
+      "auto_resume_on_restart BOOLEAN NOT NULL DEFAULT FALSE"
+      ")"
+    ))
+    conn.execute(text(
+      "INSERT INTO chats (id, title, auto_resume_on_limit, "
+      "auto_resume_on_restart) VALUES ('chosen', 'Chosen', TRUE, FALSE)"
+    ))
+    conn.commit()
+
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    values = conn.execute(text(
+      "SELECT auto_resume_on_limit, auto_resume_on_restart "
+      "FROM chats WHERE id = 'chosen'"
+    )).one()
+  assert values == (1, 0)
 
 
 def test_run_migrations_adds_bounded_live_assistant_snapshot(tmp_path):
@@ -243,12 +274,12 @@ def test_fresh_chat_schema_has_database_auto_resume_default():
   assert column.nullable is False
   assert column.default is not None
   assert column.server_default is not None
-  assert str(column.server_default.arg).lower() == "true"
+  assert str(column.server_default.arg).lower() == "false"
   restart = models.Chat.__table__.c.auto_resume_on_restart
   assert restart.nullable is False
   assert restart.default is not None
   assert restart.server_default is not None
-  assert str(restart.server_default.arg).lower() == "false"
+  assert str(restart.server_default.arg).lower() == "true"
 
 
 def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
@@ -283,8 +314,8 @@ def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
     restart_value = conn.execute(text(
       "SELECT auto_resume_on_restart_default FROM owner WHERE id = 1"
     )).scalar_one()
-  assert value in (True, 1)
-  assert restart_value in (False, 0)
+  assert value in (False, 0)
+  assert restart_value in (True, 1)
 
 
 def test_fresh_owner_schema_has_auto_resume_default():
@@ -293,9 +324,9 @@ def test_fresh_owner_schema_has_auto_resume_default():
   assert column.nullable is False
   assert column.default is not None
   assert column.server_default is not None
-  assert str(column.server_default.arg).lower() == "true"
+  assert str(column.server_default.arg).lower() == "false"
   restart = models.Owner.__table__.c.auto_resume_on_restart_default
   assert restart.nullable is False
   assert restart.default is not None
   assert restart.server_default is not None
-  assert str(restart.server_default.arg).lower() == "false"
+  assert str(restart.server_default.arg).lower() == "true"

@@ -10,6 +10,29 @@ The design has one line behind it: **low floor, high ceiling, no walls.** The ag
 
 **Intelligence over scripts.** A script, validator, or fixed procedure earns its place only for the unambiguous and identical-every-time — clone/pull to install or update recovery, rebuild the served frontend, a deterministic migration. Everything ambiguous — why something broke, how to reach the last good state, fixing what another agent did — is the agent reasoning in context. Branching logic to cover cases, or bespoke machinery to detect-and-auto-handle a situation, is the tell that you're building the wrong thing: script the certain step, **instruct** the agent to run it (sharpen the prompt if it forgets), and trust intelligence for the rest. The only automation worth keeping is one a tool already ships (a real watcher, HMR) — never flimsy glue invented to avoid instructing the agent. **Recovery** is this made concrete: a small, separate, always-up agent that can't break its own code (updated only by that one unambiguous script) but reaches and fixes everything else by *reasoning* about what broke, not from a menu of canned reversions.
 
+### Design for the next change
+
+**Solve at the core.** Prefer the smallest durable solution that fixes the
+cause and improves the path the next related change will use. Avoid both
+symptom patches and abstractions for imagined needs. If a reasonable change
+feels awkward, treat that friction as evidence about the underlying design:
+challenge and simplify it rather than adding a workaround. Revisit earlier
+choices as understanding grows — consolidate, remove, and simplify.
+
+**Fix forward.** Prefer a clean design and deliberate migration — even when it
+breaks an old path — over permanent shims, fallbacks, duplicated logic, or
+parallel systems. Preserve compatibility where it protects owner data or a
+genuine external contract; otherwise update every affected caller and move
+forward as one coherent system.
+
+**Keep the shared foundation lean.** Every owner runs their own copy of Möbius
+and may pay directly for its compute, memory, storage, network, and agent
+usage. Treat meaningful efficiency gains as user-facing improvements. Pursue
+material, evidenced gains without sacrificing behavior, correctness,
+maintainability, or future flexibility. Keep the platform small, general, and
+composable; put domain-specific complexity in apps and reserve platform
+complexity for shared primitives and hard invariants.
+
 The flip side: infrastructure the agent never sees — provider plumbing, the persistence actor, the streaming protocol, the navigation back-stack — gets whatever complexity makes it correct. Maximal expressive surface for the agent, ironclad substrate underneath.
 
 **If you're an agent building Möbius, attend to this on every change.** You were trained on products for careless or adversarial users, where the job is to validate, sanitize, and prevent. Here the user is the owner and you are trusted. When you reach for a guard, a validator, or background auto-magic to prevent a mistake, stop and ask whether you're policing — or substituting brittle automation for intelligence. A change that fights this philosophy is a sign you're solving the wrong problem.
@@ -153,6 +176,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | File | Role |
 |------|------|
 | `memory.py` | `build_memory_block()` — assembles only bounded recent-chat Digests; graph/app data is never injected here |
+| `skills.py` | Skill enumeration (flat `<name>.md` + external-convention `<name>/SKILL.md` dirs), dependency-free frontmatter parsing, provenance labels (`seed`/`agent`/`app:<slug>`/`installed:<source>`), and `write_index()` — the generated `shared/skills/skills-index.md` both providers Read (regenerated on boot, app-skill sync, and skill install/uninstall) |
 | `reflection_checkpoint.py` | Reflection's last-run marker (what to review tonight) |
 | `activity.py` | Append-only JSONL platform-activity log (app_open, app_install, storage_write, …) |
 | `self_reminders.py` | Agent self-scheduling: append-only store of relational check-ins |
@@ -216,6 +240,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `settings.py` | Owner-level configuration |
 | `github.py` | GitHub connect status + read-only REST/GraphQL passthrough for in-product upstream contributions (pairs with `github_auth.py` + the `contributing.md` skill) |
 | `self_reminders.py` | Agent self-scheduling endpoints |
+| `skills.py` | `GET /api/skills` (installed skills + provenance + 30-day usage), `POST /install` (fetch a `SKILL.md` dir or single markdown from GitHub via the same SSRF-safe fetcher as app installs; `.installed-skills.json` provenance sidecar; basename collision ⇒ 409), `DELETE /{name}` (installed-provenance only, git-snapshot before removal). Install/uninstall gated owner-or-`manage_skills` (the Skills app's permission, pattern of `manage_apps`) |
 | `admin.py` | Admin / introspection endpoints (service-token gated) |
 | `debug.py` | Observability: active SDK clients/sessions, broadcasts, chat logs |
 | `client_error.py` | `POST /api/client-error` — record an uncaught client/app JS error |
@@ -367,7 +392,8 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Add a supported app package | Pin it in `frontend/package.json`, add it to `BUNDLED_RUNTIME_LIBS`, and run the compiler/offline-frame contracts |
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
 | Change the in-product agent's instructions | `skill/core.md` (constitution) or `backend/scripts/seed-skills/*.md` (per-task skills) — see below |
-| Change a built-in core app (Memory / Reflection) | The catalog repo (`mobius-os/app-<slug>`) is the source of truth — `core-apps/` is a committed snapshot, never hand-edited. Bump the pinned commit in `core-apps/SOURCES`, run `scripts/sync-core-apps.sh`, commit the diff; CI (`scripts/check-core-apps-sync.sh`) fails on drift. The snapshot is baked to `/app/core-apps` (Dockerfile) and installed at boot by `backend/scripts/install-core-apps.sh` (which prefers `/data/platform/core-apps` when the platform clone exists, falling back to the baked `/app/core-apps` floor) |
+| Add/install a skill | Ecosystem installs go through `POST /api/skills/install` (`routes/skills.py`; the Skills app + `finding-skills.md` seed drive it); new platform seeds go in `backend/scripts/seed-skills/` + a `SEED_VERSION` bump in `init_skills.py`; the index (`skills-index.md`) is generated — never hand-edit it |
+| Change a bootstrap app (Store / Memory / Reflection) | Change its catalog repository (`mobius-os/app-<slug>`). `backend/app/bootstrap.py` installs the canonical manifest on first boot; afterward the app is an ordinary owner-editable app under `/data/apps/<slug>` |
 | Theme CSS / tokens | `backend/app/theme.py` + `routes/theme.py` + `frontend/src/hooks/useTheme.js` |
 
 ## In-product agent context — three layers
@@ -424,17 +450,12 @@ stamp `entrypoint.sh` writes at boot), `platform_sha`, `platform_dirty`,
 (it also hard-blocks deploying a checkout strictly BEHIND
 `origin/main`).
 
-**Built-in apps (Memory, Reflection)** come from the tracked top-level
-`core-apps/<slug>/` trees — committed SNAPSHOTS of their catalog repos
-(`mobius-os/app-*`), pinned by commit in `core-apps/SOURCES`, baked to
-`/app/core-apps` (Dockerfile), and registered/re-synced at boot by
-`backend/scripts/install-core-apps.sh` (which prefers `/data/platform/core-apps`
-when the platform clone exists, else the baked `/app/core-apps` floor;
-backgrounded post-launch by the entrypoint; registration goes through the API
-with the service token). Never edit
-`core-apps/` directly: update the catalog repo, bump `SOURCES`, and run
-`scripts/sync-core-apps.sh`; CI (`scripts/check-core-apps-sync.sh`) fails the
-build on drift.
+**Bootstrap apps (Store, Memory, Reflection)** install from their canonical
+catalog manifests through `backend/app/bootstrap.py` on first boot. Each becomes
+an ordinary owner-editable app under `/data/apps/<slug>` and follows the same
+update and divergence rules as any other catalog app. The bootstrap path also
+migrates rows left by old images whose source still points at the retired
+platform-core tree; no app snapshot is baked into the platform image.
 
 **Recovery and self-heal.** Recovery is deliberately outside the editable
 platform. `recoveryd` is a separate `restart: unless-stopped` container with its
@@ -689,27 +710,28 @@ pins. Reservation lifetime and pin decisions are independent.
 
 ### Automatic continuation after limits and planned restarts
 
-Automatic continuation reuses one durable run transition but has two separate
-consent and cause boundaries. Provider-limit exits mark their exact `ChatRun` as
-`parked` until the parsed reset time. A planned restart creates a fresh nonce,
-stops and finalizes each exact live run, and parks it due-now with that nonce.
-The platform process then publishes an intent and restart request; it does not
-terminate itself on the normal path.
+Automatic continuation reuses one durable run transition with separate
+chat-local policies and cause validation. Provider-limit exits mark their exact
+`ChatRun` as `parked` until the parsed reset time. A planned restart
+creates a fresh nonce, stops and finalizes each exact live run, and parks it
+due-now with that nonce. The platform process then publishes an intent and
+restart request; it does not terminate itself on the normal path.
 
 The frozen root-owned entrypoint poller validates and consumes the request,
-records the exact `(chat_id, run_id, nonce)` set in `/data/.restart-ledger`, and
-only then terminates pid 1. At the very start of the next entrypoint invocation,
-the ledger binds that accepted intent to the new `MOBIUS_BOOT_ID`. The app only
-continues a restart park when this root-owned acknowledgement, the exact DB run
-and nonce, and the separately stored restart policy all match. An intent that
-was merely written before a crash/OOM, an acknowledgement skipped by a failed
-handshake, or an acknowledgement left across another boot authorizes nothing.
-Transcript text is presentation, never restart-cause evidence.
+records its one-shot nonce in `/data/.restart-ledger`, and only then terminates
+pid 1. At the very start of the next entrypoint invocation, the ledger binds
+that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
+restart park when the root-owned boot acknowledgement matches the nonce on the
+latest exact DB run and the restart policy is on. The supervisor
+attests the boot transition; the database owns run identity. An intent merely
+written before a crash/OOM, an acknowledgement skipped by a failed handshake,
+or an acknowledgement left across another boot authorizes nothing. Transcript
+text is presentation, never restart-cause evidence.
 
 | Event | Durable result | Boot/sweep result |
 |-------|----------------|-------------------|
-| Provider usage/rate limit | exact run `parked` until reset | notify; continue if the chat policy is on |
-| Accepted planned restart, exact park + ledger tuple match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if separate restart consent is on |
+| Provider usage/rate limit | exact run `parked` until reset | notify; continue if the usage policy is on |
+| Accepted planned restart, exact park + boot nonce match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if the restart policy is on |
 | Crash/OOM before supervisor acknowledgement | unacknowledged park or generic `running` evidence | resolve/reconcile to manual resumable interruption |
 | Repeated/unrelated boot before claim | acknowledgement is retired by boot-id mismatch | manual resumable interruption |
 | Policy off, unanswered question, app-owned run, or app-queued work | due park resolves without an automatic send | notify/manual owner action |
@@ -727,10 +749,10 @@ marker rather than owner speech.
 The sweep is cheap: one indexed due-row query immediately at boot, on
 `chat_run_finished`, and on a 60-second fallback, plus one bounded local ledger
 read when due rows exist. It does not create per-chat workers or poll at a short
-interval. `auto_resume_on_limit` keeps its legacy initial default of on.
-`auto_resume_on_restart` is a separate chat-local preference and migrates
-existing chats and owners to off; enabling it is explicit consent and only
-seeds future chats without rewriting existing conversations.
+interval. Paid provider-limit continuation (`auto_resume_on_limit`) initially
+defaults off; planned-restart continuation (`auto_resume_on_restart`) initially
+defaults on. Each chat stores both choices independently, and changing either
+choice seeds future chats without rewriting existing conversations.
 
 ### Tool output rendering
 

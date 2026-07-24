@@ -3497,7 +3497,7 @@ export default function ChatView({
     ))
   }, [])
   // Embedded chats do not have Shell's process stream. Subscribe only while
-  // an opted-in limit park is waiting (and through its observed run), rather
+  // an enabled limit park is waiting (and through its observed run), rather
   // than holding one permanent SSE connection per retained app iframe.
   useSystemEventStream(handleEmbeddedRunEvent, {
     enabled: !!(

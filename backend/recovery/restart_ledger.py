@@ -6,8 +6,8 @@ cause of the next boot by writing a transcript row or database flag itself. This
 helper runs from the baked, root-owned recovery bundle and maintains a
 root-owned ledger under ``/data/.restart-ledger``:
 
-* ``accept`` validates and consumes one untrusted platform request, records the
-  exact run identities, and is called immediately before the entrypoint poller
+* ``accept`` validates and consumes one untrusted platform request, records its
+  one-shot nonce, and is called immediately before the entrypoint poller
   terminates pid 1.
 * ``begin-boot`` binds that accepted request to exactly the next boot id.
 * ``harden`` restores root ownership after the entrypoint's broad compatibility
@@ -42,7 +42,6 @@ BOOT_PATH = LEDGER_DIR / "boot-id"
 
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 64 * 1024
-MAX_RUNS = 64
 MAX_REQUEST_AGE_SECONDS = 120
 MAX_ACCEPTED_AGE_SECONDS = 10 * 60
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:-]{8,160}$")
@@ -86,18 +85,22 @@ def _atomic_write(path: Path, payload: bytes, mode: int) -> None:
   tmp = path.parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
   flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
   flags |= getattr(os, "O_NOFOLLOW", 0)
-  fd = os.open(tmp, flags, mode)
   try:
-    offset = 0
-    while offset < len(payload):
-      offset += os.write(fd, payload[offset:])
-    os.fsync(fd)
-    os.fchmod(fd, mode)
-    if hasattr(os, "fchown"):
-      os.fchown(fd, SUPERVISOR_UID, SUPERVISOR_GID)
-  finally:
-    os.close(fd)
-  os.replace(tmp, path)
+    fd = os.open(tmp, flags, mode)
+    try:
+      offset = 0
+      while offset < len(payload):
+        offset += os.write(fd, payload[offset:])
+      os.fsync(fd)
+      os.fchmod(fd, mode)
+      if hasattr(os, "fchown"):
+        os.fchown(fd, SUPERVISOR_UID, SUPERVISOR_GID)
+    finally:
+      os.close(fd)
+    os.replace(tmp, path)
+  except Exception:
+    tmp.unlink(missing_ok=True)
+    raise
   _fsync_dir(path.parent)
 
 
@@ -155,26 +158,6 @@ def _prepare_ledger_dir() -> None:
     _recreate_ledger_dir()
 
 
-def _valid_runs(value: Any) -> list[dict[str, str]] | None:
-  if not isinstance(value, list) or len(value) > MAX_RUNS:
-    return None
-  seen: set[tuple[str, str]] = set()
-  runs: list[dict[str, str]] = []
-  for item in value:
-    if not isinstance(item, dict):
-      return None
-    chat_id = item.get("chat_id")
-    run_token = item.get("run_token")
-    if not _valid_token(chat_id) or not _valid_token(run_token):
-      return None
-    key = (chat_id, run_token)
-    if key in seen:
-      return None
-    seen.add(key)
-    runs.append({"chat_id": chat_id, "run_token": run_token})
-  return runs
-
-
 def _valid_intent(
   intent: dict[str, Any] | None,
   request: dict[str, Any] | None,
@@ -200,16 +183,12 @@ def _valid_intent(
     return None
   if created_at > now + 5 or now - created_at > MAX_REQUEST_AGE_SECONDS:
     return None
-  runs = _valid_runs(intent.get("runs"))
-  if runs is None:
-    return None
   return {
     "version": PROTOCOL_VERSION,
     "nonce": nonce,
     "source_boot_id": source_boot_id,
     "created_at": created_at,
     "accepted_at": now,
-    "runs": runs,
   }
 
 
@@ -228,19 +207,16 @@ def begin_boot(boot_id: str, *, now: float | None = None) -> bool:
       accepted_at = float(accepted.get("accepted_at"))
     except (TypeError, ValueError):
       accepted_at = 0
-    runs = _valid_runs(accepted.get("runs"))
     if (
       accepted.get("version") == PROTOCOL_VERSION
       and _valid_token(accepted.get("nonce"))
       and _valid_token(accepted.get("source_boot_id"))
       and accepted.get("source_boot_id") != boot_id
-      and runs is not None
       and accepted_at <= current + 5
       and current - accepted_at <= MAX_ACCEPTED_AGE_SECONDS
     ):
       authorized_payload = {
         **accepted,
-        "runs": runs,
         "target_boot_id": boot_id,
       }
   # Consume before acknowledging. If the volume refuses this deletion, the
@@ -288,7 +264,7 @@ def harden(boot_id: str) -> bool:
 
 
 def accept(boot_id: str, *, now: float | None = None) -> bool:
-  """Consume one restart request and record exact externally accepted runs."""
+  """Consume one restart request and record its externally accepted nonce."""
   current = time.time() if now is None else now
   _prepare_ledger_dir()
   try:

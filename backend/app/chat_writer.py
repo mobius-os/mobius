@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import schemas
+from app import models, schemas
 from app.events import (
   TOOL_OUTPUT_INLINE_THRESHOLD,
   build_assistant_message,
@@ -2129,7 +2129,7 @@ class ChatWriterActor:
     # chat.  Already-resolved ``parked_notified`` rows remain historical.
     for run in db.query(ChatRun).filter(
       ChatRun.chat_id == cmd.chat_id,
-      ChatRun.status.in_(("parked", "resume_pending")),
+      ChatRun.status.in_(models.CONTINUATION_RUN_STATUSES),
     ).all():
       run.status = "interrupted"
       run.ended_at = datetime.now(UTC)
@@ -2155,7 +2155,7 @@ class ChatWriterActor:
     messages = list(chat.messages or [])
     has_active_run = db.query(ChatRun).filter(
       ChatRun.chat_id == cmd.chat_id,
-      ChatRun.status.in_(("running", "parked", "resume_pending")),
+      ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
     ).first() is not None
     if chat.run_status is not None or chat.pending_messages or has_active_run:
       return {"status": "conflict", "reason": "busy"}
@@ -2391,7 +2391,7 @@ class ChatWriterActor:
     # resolved and stay untouched.
     q = db.query(ChatRun).filter(
       ChatRun.chat_id == chat_id,
-      ChatRun.status.in_(("running", "parked", "resume_pending")),
+      ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
     )
     if except_token is not None:
       q = q.filter(ChatRun.id != except_token)

@@ -54,6 +54,7 @@ const localChrome = isCI ? null : localChromeExecutable()
 export default defineConfig({
   testDir: './tests',
   timeout: 60000,
+  forbidOnly: isCI,
   // One retry both locally and on CI to absorb cascade-under-load
   // jitter on the single-instance test container — multiple workers
   // sharing one mobius-test sometimes produce ECONNRESET on cleanup

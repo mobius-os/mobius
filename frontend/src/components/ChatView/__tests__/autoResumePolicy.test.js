@@ -38,23 +38,23 @@ test('policy PATCH is time-boxed and returns the authoritative response', async 
 })
 
 
-test('restart policy uses a separate explicit wire field', async () => {
+test('restart policy uses its independent wire field', async () => {
   const calls = []
   const result = await saveRestartResumePolicy({
     chatId: 'chat-1',
-    next: true,
+    next: false,
     request: async (path, options) => {
       calls.push({ path, options })
       return jsonResponse({
-        auto_resume_on_limit: true,
-        auto_resume_on_restart: true,
+        auto_resume_on_limit: false,
+        auto_resume_on_restart: false,
       })
     },
   })
 
-  assert.deepEqual(result, { value: true, error: '' })
+  assert.deepEqual(result, { value: false, error: '' })
   assert.deepEqual(JSON.parse(calls[0].options.body), {
-    auto_resume_on_restart: true,
+    auto_resume_on_restart: false,
   })
 })
 

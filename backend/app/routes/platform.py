@@ -3,8 +3,10 @@
 Small endpoints behind ``get_current_owner`` + ``reject_cross_site``:
 ``GET /status`` (cheap, read-only, fetch-free — drives the Settings "Updates"
 line), ``POST /check`` (owner-triggered ``git fetch`` + fresh status, the
-on-demand refresh for the "Check for updates" button), ``POST /apply`` (fetch
-origin + rebase local edits onto the new version, or record a conflict),
+on-demand refresh for the "Check for updates" button), ``GET /update-preview``
+(an immutable exact-target plan), ``POST /apply`` (apply that reviewed target
+and rebase local edits, or record a conflict), ``GET /update-progress`` (the
+active Apply phase),
 ``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
 ``POST /restart`` (owner-confirmed self-restart, same SIGTERM pattern as the
 normal Settings restart). The status/check routes are wrapped so a transient git
@@ -19,6 +21,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
@@ -27,13 +30,21 @@ from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
 from app.platform_update import (
   PlatformApplyResult, PlatformConflictResolverChatOut, PlatformStatus,
-  PlatformUpdateError, PlatformUpdatePreview,
+  PlatformUpdateError, PlatformUpdatePreview, PlatformUpdateProgress,
 )
 from app.restart_util import restart_this_worker
 
 log = logging.getLogger("mobius.platform")
 
 router = APIRouter(prefix="/api/platform", tags=["platform"])
+
+
+class PlatformApplyIn(BaseModel):
+  """The immutable update plan returned by ``GET /update-preview``."""
+
+  plan_id: str = Field(min_length=64, max_length=64)
+  current_sha: str = Field(min_length=40, max_length=64)
+  target_sha: str = Field(min_length=40, max_length=64)
 
 
 @router.get("/status")
@@ -93,16 +104,28 @@ async def get_platform_update_preview(
     return platform_update.empty_platform_update_preview()
 
 
+@router.get("/update-progress")
+async def get_platform_update_progress(
+  _: models.Owner = Depends(get_current_owner),
+) -> PlatformUpdateProgress:
+  """Observable phase of the active or most recent owner-triggered Apply."""
+  return platform_update.platform_update_progress()
+
+
 @router.post("/apply", dependencies=[Depends(reject_cross_site)])
 async def apply_platform_update(
+  request: PlatformApplyIn,
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
 ) -> PlatformApplyResult:
-  """Fetch origin and rebase the local edits onto the new platform version, or
-  record a conflict for an owner-clicked resolver chat. A clean apply advances
-  the served tree on disk and marks a restart to load it."""
+  """Apply exactly the release represented by the reviewed immutable plan."""
   try:
-    return await platform_update.apply_platform_update(db)
+    return await platform_update.apply_platform_update(
+      db,
+      plan_id=request.plan_id,
+      current_sha=request.current_sha,
+      target_sha=request.target_sha,
+    )
   except PlatformUpdateError as exc:
     # A known, recoverable precondition failure (offline fetch, not a clone) —
     # tell the UI plainly; the instance is untouched.

@@ -129,41 +129,6 @@ async function sampleExitBeat(page) {
   })
 }
 
-// A shared left surface used to expand under its right sibling immediately. Their
-// boundary overlapped for most of the beat, so the departing pane looked glued to
-// the survivor instead of scattering independently. Sample the painted boxes, not
-// just animation metadata, to lock the visible seam open.
-async function sampleSharedExitSeam(page) {
-  return page.evaluate(async () => {
-    const root = document.querySelector('.shell')
-    let started = false
-    let samples = 0
-    let minGap = Infinity
-    await new Promise((resolve) => {
-      let frames = 0
-      const tick = () => {
-        const exiting = root.classList.contains('shell--builder-exiting')
-        if (exiting) {
-          started = true
-          const shared = document.querySelector('.shell__view[data-mode-motion="promote"]')
-          const departing = document.querySelector('.shell__view[data-mode-motion="deal-out"]')
-          if (shared && departing) {
-            const sharedBox = shared.getBoundingClientRect()
-            const departingBox = departing.getBoundingClientRect()
-            minGap = Math.min(minGap, departingBox.left - sharedBox.right)
-            samples += 1
-          }
-        }
-        frames += 1
-        if ((started && !exiting) || frames > 90) { resolve(); return }
-        requestAnimationFrame(tick)
-      }
-      requestAnimationFrame(tick)
-    })
-    return { started, samples, minGap: Number.isFinite(minGap) ? minGap : null }
-  })
-}
-
 // Capture the latched inline geometry on the first frame of either directional
 // beat. These are the pure projection outputs that tell each pane which edge owns it.
 async function captureBeatPlan(page, rootClass) {
@@ -399,10 +364,9 @@ test('v3 scatter is compositor-only: layout boxes constant while transforms anim
   await expect.poll(() => builderActive(page)).toBe(true)
   await expect(page.locator('.workspace__strip')).toHaveCount(2)
   const sampler = sampleExitBeat(page)
-  const seamSampler = sampleSharedExitSeam(page)
   await page.waitForTimeout(30) // let the rAF sampler install before the toggle
   await toggleMode(page)
-  const [r, seam] = await Promise.all([sampler, seamSampler])
+  const r = await sampler
   expect(r.started, 'an exit beat ran').toBe(true)
   expect(r.dualClass, 'INV 1: never both beat classes at once').toBe(false)
   expect(r.wrappers.length, 'the participant wrappers were sampled').toBeGreaterThanOrEqual(2)
@@ -416,10 +380,6 @@ test('v3 scatter is compositor-only: layout boxes constant while transforms anim
   const departing = r.wrappers.find(w => w.motion === 'deal-out')
   expect(departing.offsetX, 'the right sibling scatters toward the right edge').toBeGreaterThan(0)
   expect(departing.offsetY).toBe(0)
-  expect(seam.started).toBe(true)
-  expect(seam.samples).toBeGreaterThan(2)
-  expect(seam.minGap, 'the right pane separates instead of overlapping the shared left pane')
-    .toBeGreaterThanOrEqual(-1)
   // INV 4 (stable identity): the same DOM nodes survived completion.
   for (const w of r.wrappers) expect(w.survived, 'same node survives completion').toBe(true)
   // The beat settled clean.
@@ -493,6 +453,72 @@ test('v3 panes assemble over the stationary single screen from their correspondi
   expect(paint.paneFrames).toBeGreaterThan(2)
   expect(paint.minPaneOpacity, 'pane content never fades in over visible structure').toBeGreaterThan(0.99)
   expect(paint.earlyChromeOpacity, 'structure waits until pane content has arrived').toBeLessThan(0.05)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(true)
+})
+
+test('shared Standard chat stays still while its sibling pane assembles above it', async ({ page }) => {
+  // slot === the focused LEFT pane's chat. Exit still promotes that pane; entry
+  // deliberately does not shrink the Standard surface back into place. It stays
+  // full-bleed underneath while the right sibling arrives, then the completion
+  // commit crops it into the left pane.
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
+  await toggleMode(page)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(false)
+
+  const sampler = page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let started = false
+    let minUnderlayOpacity = 1
+    const underlayTransforms = new Set()
+    const participants = []
+    await new Promise(resolve => {
+      let frames = 0
+      const tick = () => {
+        const entering = root.classList.contains('shell--builder-entering')
+        if (entering) {
+          started = true
+          const underlay = document.querySelector('.shell__view--exit-underlay')
+          if (underlay) {
+            const style = getComputedStyle(underlay)
+            minUnderlayOpacity = Math.min(minUnderlayOpacity, parseFloat(style.opacity))
+            underlayTransforms.add(style.transform)
+          }
+          if (participants.length === 0) {
+            for (const pane of document.querySelectorAll(
+              '.shell__view[data-mode-motion="deal-in"]',
+            )) {
+              participants.push({
+                x: parseFloat(pane.style.getPropertyValue('--mode-offset-x')) || 0,
+                y: parseFloat(pane.style.getPropertyValue('--mode-offset-y')) || 0,
+              })
+            }
+          }
+        }
+        frames += 1
+        if ((started && !entering) || frames > 120) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return {
+      started,
+      minUnderlayOpacity,
+      underlayTransforms: [...underlayTransforms],
+      participants,
+    }
+  })
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+
+  expect(r.started).toBe(true)
+  expect(r.underlayTransforms, 'the Standard chat never scales or translates').toEqual(['none'])
+  expect(r.minUnderlayOpacity, 'the Standard chat never fades').toBeGreaterThanOrEqual(0.99)
+  expect(r.participants).toHaveLength(1)
+  expect(r.participants[0].x, 'the right sibling enters from the right edge').toBeGreaterThan(0)
+  expect(r.participants[0].y).toBe(0)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
   await expect.poll(() => builderActive(page)).toBe(true)
 })

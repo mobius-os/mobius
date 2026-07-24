@@ -189,7 +189,7 @@ def test_switch_atomically_supersedes_park_and_stale_auto_resume(
     chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
   )
   resumed = asyncio.run(chat_mod._auto_resume_chat(
-    chat_id, "claude", park_token="park-before-switch",
+    chat_id, park_token="park-before-switch",
   ))
   assert resumed is False
   assert scheduled == []

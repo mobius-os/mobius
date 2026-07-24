@@ -251,9 +251,20 @@ def _remote_topology(
   repo: Path,
   origin_repo: str | None,
   *,
+  compare_local: bool = True,
   classify_install: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-  """Return sanitized, last-fetched origin/fork positions."""
+  """Return sanitized, last-fetched origin/fork positions.
+
+  Installed app checkouts are release projections: their editable tree may
+  intentionally omit the shared repository's source modules, tests, docs, and
+  build inputs.  Comparing that projected checkout directly with
+  ``origin/main`` turns packaging omissions into apparent owner deletions and
+  produces meaningless ancestry counts when the installer history is
+  synthetic.  App-local work already has the authoritative ``upstream``
+  comparison at the project level, so callers disable the local/origin
+  comparison while retaining origin identity and fork topology.
+  """
   origin_ref = _remote_default_ref(repo, "origin")
   origin_sha = _rev(repo, origin_ref) if origin_ref else None
   origin: dict[str, Any] = {
@@ -264,7 +275,7 @@ def _remote_topology(
     "local_behind": None,
     "local_tree": None,
   }
-  if origin_ref and _rev(repo, "HEAD"):
+  if compare_local and origin_ref and _rev(repo, "HEAD"):
     local_ahead, local_behind = _comparison_counts(repo, origin_ref, "HEAD")
     origin.update({
       "local_ahead": local_ahead,
@@ -394,6 +405,7 @@ def _project_status(
   origin, forks = _remote_topology(
     repo,
     response["canonical_repo"],
+    compare_local=(kind == "platform"),
     classify_install=(kind == "app"),
   )
   response.update({"origin": origin, "forks": forks})

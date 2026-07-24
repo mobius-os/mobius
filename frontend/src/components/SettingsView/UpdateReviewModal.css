@@ -157,6 +157,12 @@
   margin: 0;
 }
 
+.urm__section-note {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .urm__commits {
   list-style: none;
   margin: 0;

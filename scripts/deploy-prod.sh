@@ -17,14 +17,20 @@
 #   scripts/deploy-prod.sh --allow-stale    # deliberate rollback: deploy a prod checkout BEHIND origin/main
 #                                           # (bypasses the behind-origin/main hard block — only for an
 #                                           #  intentional rollback to an older main; you are reverting newer work)
+#   scripts/deploy-prod.sh --allow-low-disk # proceed below the build free-space floor
 #   scripts/deploy-prod.sh --force-now      # skip the owner-presence gate (deploy even mid-conversation)
 #
-# Env knobs (seconds; both default 120):
+# Env knobs:
 #   PREFLIGHT_WAIT_SECONDS  how long the scratch-container preflight waits for boot
 #   CUTOVER_WAIT_SECONDS    how long the LIVE cutover health/ready checks wait
 #                           before rolling back. Raise it on a memory-thrashing
 #                           host so a slow-but-healthy boot doesn't false-fail
 #                           (e.g. CUTOVER_WAIT_SECONDS=240 scripts/deploy-prod.sh).
+#   DEPLOY_MIN_FREE_GB       minimum Docker-filesystem space before a prod build (15)
+#   DEPLOY_BUILD_CACHE_MAX_AGE_HOURS
+#                           prune unused build cache older than this after success (24)
+#   DEPLOY_BUILD_CACHE_MAX_GB
+#                           target maximum retained build cache after success (8)
 #
 # Safety: only the `docker compose build` step prompts (it's slow and
 # has OOM'd this 7.6GB host before). Everything else auto-proceeds.
@@ -56,9 +62,13 @@ ALLOW_UNPUSHED="${ALLOW_UNPUSHED:-0}"
 # is the escape hatch for a DELIBERATE rollback to an older main — same
 # empower-with-an-explicit-override shape as --allow-unpushed.
 ALLOW_STALE="${ALLOW_STALE:-0}"
+ALLOW_LOW_DISK="${ALLOW_LOW_DISK:-0}"
 BUILT_THIS_RUN=0  # set to 1 once we actually build, so the verify step only
                   # compares the served SHA when THIS run produced the image
 PREFLIGHT_WAIT_SECONDS="${PREFLIGHT_WAIT_SECONDS:-120}"
+DEPLOY_MIN_FREE_GB="${DEPLOY_MIN_FREE_GB:-15}"
+DEPLOY_BUILD_CACHE_MAX_AGE_HOURS="${DEPLOY_BUILD_CACHE_MAX_AGE_HOURS:-24}"
+DEPLOY_BUILD_CACHE_MAX_GB="${DEPLOY_BUILD_CACHE_MAX_GB:-8}"
 # How long the LIVE cutover health/ready checks wait before giving up and
 # rolling back. Same knob shape as PREFLIGHT_WAIT_SECONDS. On the memory-tight
 # 7.6GB host, a freshly-recreated container with a populated /data volume can
@@ -82,10 +92,14 @@ CRASH_RESTART_THRESHOLD="${CRASH_RESTART_THRESHOLD:-2}"
 # health probe is skipped entirely, and the deploy false-fails into an instant
 # rollback that looks like a boot failure. Reject anything that isn't a bare
 # positive integer up front, where the operator can see and fix it (card 116).
-for _knob in PREFLIGHT_WAIT_SECONDS CUTOVER_WAIT_SECONDS PRESENCE_WAIT_SECONDS; do
+for _knob in \
+  PREFLIGHT_WAIT_SECONDS CUTOVER_WAIT_SECONDS PRESENCE_WAIT_SECONDS \
+  DEPLOY_MIN_FREE_GB DEPLOY_BUILD_CACHE_MAX_AGE_HOURS \
+  DEPLOY_BUILD_CACHE_MAX_GB
+do
   case "${!_knob}" in
     ''|*[!0-9]*|0)
-      printf 'deploy-prod: %s=%q must be a positive integer (seconds)\n' \
+      printf 'deploy-prod: %s=%q must be a positive integer\n' \
         "$_knob" "${!_knob}" >&2
       exit 2
       ;;
@@ -101,6 +115,7 @@ for arg in "$@"; do
     --check)       CHECK_ONLY=1 ;;
     --allow-unpushed) ALLOW_UNPUSHED=1 ;;
     --allow-stale) ALLOW_STALE=1 ;;
+    --allow-low-disk) ALLOW_LOW_DISK=1 ;;
     --force-now)   FORCE_NOW=1 ;;
     -h|--help)
       sed -n '1,/^set -euo pipefail/p' "$0" | sed 's/^# \{0,1\}//'
@@ -518,26 +533,119 @@ install_edge_fragment() {
   rm -f "$rendered"
 }
 
-# Parse the build-cache size out of `docker system df` and return GB as
-# an integer (rounded down). Returns 0 on parse failure so we don't
-# accidentally prune on a malformed line.
-build_cache_gb() {
-  local line size unit
-  line=$(docker system df 2>/dev/null | awk '/^Build Cache/ {print; exit}') || true
-  if [ -z "$line" ]; then echo 0; return; fi
-  # Columns: "Build Cache  <total>  <active>  <size>  <reclaimable>"
-  # Size column is e.g. "9.669GB" or "512MB". Grab the 4th whitespace-token.
-  size=$(echo "$line" | awk '{print $4}')
-  unit=$(echo "$size" | grep -oE '[A-Za-z]+$' || echo "")
-  local num
-  num=$(echo "$size" | grep -oE '^[0-9.]+' || echo "0")
-  case "$unit" in
-    GB|GiB) printf '%.0f\n' "$num" ;;
-    TB|TiB) printf '%.0f\n' "$(echo "$num * 1024" | bc -l)" ;;
-    MB|MiB|KB|KiB|B) echo 0 ;;
-    *)      echo 0 ;;
-  esac
+# ── deploy disk policy helpers ────────────────────────────────────────
+docker_storage_path() {
+  local path
+  path=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+  printf '%s\n' "${path:-/}"
 }
+
+disk_available_bytes() {
+  df -PB1 "$1" 2>/dev/null | awk 'NR == 2 {print $4}' || true
+}
+
+format_gib() {
+  awk -v bytes="$1" 'BEGIN {printf "%.1f GiB", bytes / 1073741824}'
+}
+
+report_docker_disk_usage() {
+  local usage
+  if usage=$(docker system df 2>/dev/null); then
+    printf '%s\n' "$usage" | sed 's/^/    /'
+  else
+    warn "Docker disk usage is unavailable."
+  fi
+}
+
+check_build_disk() {
+  local storage free_bytes minimum_bytes
+  storage=$(docker_storage_path)
+  free_bytes=$(disk_available_bytes "$storage")
+  minimum_bytes=$((DEPLOY_MIN_FREE_GB * 1024 * 1024 * 1024))
+
+  if [[ ! "$free_bytes" =~ ^[0-9]+$ ]]; then
+    if [ "$ALLOW_LOW_DISK" = "1" ]; then
+      warn "could not read free space for Docker storage at $storage; proceeding by explicit override."
+      return 0
+    fi
+    fail "could not read free space for Docker storage at $storage."
+    fail "Fix the storage probe, or pass --allow-low-disk to proceed deliberately."
+    return 2
+  fi
+
+  info "Docker storage: $storage"
+  info "host free: $(format_gib "$free_bytes") (${free_bytes} bytes); required before build: ${DEPLOY_MIN_FREE_GB} GiB"
+  report_docker_disk_usage
+  if [ "$free_bytes" -ge "$minimum_bytes" ]; then
+    return 0
+  fi
+  if [ "$ALLOW_LOW_DISK" = "1" ]; then
+    warn "host free space is below the ${DEPLOY_MIN_FREE_GB} GiB build floor; proceeding by explicit override."
+    return 0
+  fi
+  fail "host free space is below the ${DEPLOY_MIN_FREE_GB} GiB build floor."
+  fail "Reclaim space first, or pass --allow-low-disk after verifying the build can complete safely."
+  return 1
+}
+
+rollback_tag_for_image() {
+  local repository="${1%@*}" leaf
+  leaf="${repository##*/}"
+  if [[ "$leaf" == *:* ]]; then
+    repository="${repository%:*}"
+  fi
+  printf '%s:rollback-prev\n' "$repository"
+}
+
+remove_superseded_rollback_image() {
+  local old_image="${PREVIOUS_ROLLBACK_IMAGE:-}" current_image
+  [ -n "$old_image" ] || return 0
+  current_image=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true)
+  if [ "$old_image" = "$PREV_IMAGE" ] || [ "$old_image" = "$current_image" ]; then
+    return 0
+  fi
+  if docker image rm "$old_image" >/dev/null 2>&1; then
+    ok "removed the superseded rollback image (${old_image:0:19}…)"
+  else
+    warn "superseded rollback image ${old_image:0:19}… is still referenced; left it untouched."
+  fi
+}
+
+prune_old_build_cache() {
+  local -a limit_args=()
+  if docker builder prune --help 2>&1 | grep -q -- '--max-used-space'; then
+    limit_args=(--max-used-space "${DEPLOY_BUILD_CACHE_MAX_GB}GB")
+  elif docker builder prune --help 2>&1 | grep -q -- '--keep-storage'; then
+    limit_args=(--keep-storage "${DEPLOY_BUILD_CACHE_MAX_GB}GB")
+  fi
+  info "pruning unused build cache older than ${DEPLOY_BUILD_CACHE_MAX_AGE_HOURS}h; retained-cache target: ${DEPLOY_BUILD_CACHE_MAX_GB} GiB"
+  if docker builder prune -f "${limit_args[@]}" \
+      --filter "until=${DEPLOY_BUILD_CACHE_MAX_AGE_HOURS}h" >/dev/null 2>&1; then
+    ok "old unused build cache pruned"
+  else
+    warn "build-cache cleanup failed; the successful deploy remains live."
+  fi
+}
+
+refresh_reflection_resource_snapshot() {
+  local monitor="/data/apps/reflection/resource_monitor.py"
+  if ! docker exec "$CONTAINER" test -r "$monitor" >/dev/null 2>&1; then
+    return 0
+  fi
+  if docker exec -u mobius -e REFLECTION_RESOURCE_DEEP_SCAN=skip \
+      "$CONTAINER" python3 "$monitor" snapshot \
+      --data-dir /data \
+      --runtime-root / \
+      --output /data/apps/reflection/inputs/resource-snapshot.json \
+      --history /data/apps/reflection/resource-history.jsonl \
+      --state /data/apps/reflection/resource-monitor-state.json \
+      >/dev/null 2>&1; then
+    ok "Reflection resource snapshot refreshed after deploy cleanup"
+  else
+    warn "could not refresh Reflection's resource snapshot; its next run will retry."
+  fi
+}
+# ── end deploy disk policy helpers ────────────────────────────────────
 
 # Pull the served frontend bundle filename out of the index.html the container
 # is currently serving. Empty if the container is down or has no bundle.
@@ -768,15 +876,13 @@ info "target: ${C_BOLD}${TARGET}${C_RESET} (${CONTAINER})"
 PREV_IMAGE=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || echo "")
 IMAGE_TAG=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo "")
 info "rollback image: ${IMAGE_TAG:-<unknown>} (${PREV_IMAGE:0:19}…)"
-
-# Pin the previous image under a stable tag BEFORE the build. A
-# `docker compose build` reuses IMAGE_TAG for the new image, which untags the
-# old one; that now-dangling image can then be pruned (by this run's cleanup,
-# a sibling, or earlyoom housekeeping) before a rollback needs it — the
-# 2026-06-06 "No such image: sha256:…" rollback failure. A tagged image is
-# never dangling, so this keeps PREV_IMAGE alive and resolvable for rollback.
-if [ -n "$PREV_IMAGE" ]; then
-  docker tag "$PREV_IMAGE" "${IMAGE_TAG%%:*}:rollback-prev" 2>/dev/null || true
+ROLLBACK_TAG=""
+PREVIOUS_ROLLBACK_IMAGE=""
+if [ -n "$IMAGE_TAG" ]; then
+  ROLLBACK_TAG=$(rollback_tag_for_image "$IMAGE_TAG")
+  PREVIOUS_ROLLBACK_IMAGE=$(
+    docker image inspect -f '{{.Id}}' "$ROLLBACK_TAG" 2>/dev/null || true
+  )
 fi
 
 # Best-effort restore of the previous image after a failed cutover. Called
@@ -1041,13 +1147,13 @@ else
     exit 1
   fi
   ok "build source is conflict-free"
-  cache_gb=$(build_cache_gb)
-  info "current build cache: ~${cache_gb}GB"
-  if [ "$cache_gb" -ge 6 ]; then
-    warn "build cache ≥ 6GB; prior runs have OOM'd this 7.6GB host."
-    intent "docker builder prune -af --filter \"until=24h\""
-    docker builder prune -af --filter "until=24h" >/dev/null
-    ok "build cache pruned"
+  if [ "$TARGET" = "prod" ]; then
+    if check_build_disk; then
+      ok "host has enough free space for the build"
+    else
+      disk_rc=$?
+      exit "$disk_rc"
+    fi
   fi
   # Bake the commit being deployed into the image (→ GET /api/version), so
   # the verify step + future --check can confirm the served backend matches.
@@ -1076,6 +1182,17 @@ else
   if ! confirm_yes "${C_YELLOW}slow step (5-15 min, has OOM'd before).${C_RESET} proceed?"; then
     fail "aborted by user at build step"
     exit 1
+  fi
+  # Keep exactly one last-known-good image before compose reuses IMAGE_TAG for
+  # the new build. The prior rollback target was captured above and is removed
+  # only after the new image has passed every deploy verification.
+  if [ -n "$PREV_IMAGE" ] && [ -n "$ROLLBACK_TAG" ]; then
+    intent "docker tag ${PREV_IMAGE} ${ROLLBACK_TAG}"
+    if ! docker tag "$PREV_IMAGE" "$ROLLBACK_TAG"; then
+      fail "could not pin the running image as ${ROLLBACK_TAG}; refusing to build without a rollback target."
+      exit 1
+    fi
+    ok "running image pinned as the one rollback target"
   fi
   docker compose "${COMPOSE_ARGS[@]}" build
   ok "image rebuilt"
@@ -1468,22 +1585,27 @@ else
   warn "unreachable). Deploy is healthy; open PWAs reload on next manual open."
 fi
 
-# Reclaim the image this deploy superseded. A cutover leaves the prior `latest`
-# untagged (rollback-prev just moved to the new previous), so without this every
-# deploy permanently accumulates a ~4.7GB dangling image on /mnt/data — the
-# recurring disk-full cause that crash-looped prod on 2026-06-08 (a full volume
-# fails SQLite WAL with "disk I/O error", which the auto-rollback can't escape
-# because both images share the full disk). Prune ONLY dangling (untagged)
-# images: never a tagged image (the current, the rollback-prev, or a sibling
-# mobius-test:ci), and shared base layers stay alive via the running container's
-# refcount. Best-effort — a prune failure must not fail a successful deploy.
-info "reclaiming the superseded image (dangling only)…"
-docker image prune -f >/dev/null 2>&1 || true
-
 if [ "${RECOVERYD_CUTOVER_FAILED:-0}" = "1" ]; then
   fail "deploy verified healthy, BUT the recovery floor cutover failed (see step 2 above)."
   fail "Fix mobius-recoveryd before walking away — a prod without recovery is one bug from unrecoverable."
   exit 1
+fi
+
+# Keep the running image plus one rollback image and remove only the exact
+# rollback target this successful build superseded. Never run a host-wide image
+# prune: a dangling sibling image may belong to another checkout or workload.
+if [ "$BUILT_THIS_RUN" = "1" ]; then
+  remove_superseded_rollback_image
+  prune_old_build_cache
+  storage=$(docker_storage_path)
+  free_bytes=$(disk_available_bytes "$storage")
+  if [[ "$free_bytes" =~ ^[0-9]+$ ]]; then
+    info "post-cleanup host free: $(format_gib "$free_bytes") (${free_bytes} bytes)"
+  fi
+  report_docker_disk_usage
+  if [ "$TARGET" = "prod" ]; then
+    refresh_reflection_resource_snapshot
+  fi
 fi
 
 printf '\n%sdeploy complete%s\n' "$C_GREEN$C_BOLD" "$C_RESET"
