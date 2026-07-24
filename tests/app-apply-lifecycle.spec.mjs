@@ -57,7 +57,16 @@ test('explicit apply owns draft, publication, iframe refresh, and rollback', asy
 }) => {
   const errors = []
   page.on('console', message => {
-    if (message.type() === 'error') errors.push(`console: ${message.text()}`)
+    const text = message.text()
+    // Chrome emits this browser-level warning as a console error in every
+    // Playwright incognito context. It is not produced by the shell or app.
+    const incognitoPushWarning = (
+      text.includes('does not support the Push API in incognito mode')
+      && text.includes('crbug.com/41124656')
+    )
+    if (message.type() === 'error' && !incognitoPushWarning) {
+      errors.push(`console: ${text}`)
+    }
   })
   page.on('pageerror', error => errors.push(`pageerror: ${error.message}`))
 
@@ -94,6 +103,14 @@ test('explicit apply owns draft, publication, iframe refresh, and rollback', asy
 
     await page.waitForTimeout(1_000)
     await page.evaluate(appId => {
+      const liveFrame = document.querySelector(
+        `iframe[data-app-id="${appId}"]`,
+      )
+      const canvasWrap = liveFrame?.closest('.canvas-wrap')
+      if (!liveFrame || !canvasWrap) {
+        throw new Error('live app frame was not mounted')
+      }
+      window.__explicitApplyInitialFrame = liveFrame
       window.__explicitApplyFrameAdds = 0
       window.__explicitApplyObserver?.disconnect()
       window.__explicitApplyObserver = new MutationObserver(records => {
@@ -101,14 +118,14 @@ test('explicit apply owns draft, publication, iframe refresh, and rollback', asy
           for (const node of record.addedNodes) {
             if (!(node instanceof Element)) continue
             const frames = [
-              ...(node.matches?.(`iframe[data-app-id="${appId}"]`) ? [node] : []),
-              ...node.querySelectorAll?.(`iframe[data-app-id="${appId}"]`) || [],
+              ...(node.matches?.('iframe.canvas') ? [node] : []),
+              ...node.querySelectorAll?.('iframe.canvas') || [],
             ]
             window.__explicitApplyFrameAdds += frames.length
           }
         }
       })
-      window.__explicitApplyObserver.observe(document.documentElement, {
+      window.__explicitApplyObserver.observe(canvasWrap, {
         childList: true,
         subtree: true,
       })
@@ -136,8 +153,13 @@ test('explicit apply owns draft, publication, iframe refresh, and rollback', asy
       frame = await currentFrame(page, app.id)
       return frame.locator('#revision').textContent()
     }).toBe('revision two multi-file')
-    await page.waitForTimeout(500)
-    expect(await page.evaluate(() => window.__explicitApplyFrameAdds)).toBe(1)
+    await expect.poll(
+      () => page.evaluate(() => window.__explicitApplyFrameAdds),
+    ).toBe(1)
+    expect(await page.evaluate(appId => (
+      document.querySelector(`iframe[data-app-id="${appId}"]`)
+        !== window.__explicitApplyInitialFrame
+    ), String(app.id))).toBe(true)
     expect(Number(git(slug, 'rev-list', '--count', 'main'))).toBe(firstCount + 1)
     expect(git(slug, 'status', '--porcelain')).toBe('')
 
