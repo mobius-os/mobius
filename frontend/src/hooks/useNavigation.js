@@ -538,11 +538,17 @@ export default function useNavigation({
     // skip past the drawer's sentinel before the first traversal settles.
     if (!drawerOpenRef.current || drawerClosePendingRef.current) return
     if (drawerPushedRef.current) {
+      drawerClosePendingRef.current = true
+      // A tap/swipe close should acknowledge immediately. Keep the logical ref
+      // true until Back consumes the drawer sentinel (so handleBack still owns
+      // navigation correctness), but begin the visual close before that async
+      // traversal and its anti-stutter rAF settle. Real browser Back gestures
+      // still enter through handleBack and retain the deferred close path.
+      setDrawerOpen(false)
       // Funnel through history.back() so handleBack handles the state
       // transition. This makes back-gesture and overlay-tap follow
       // exactly the same code path through handleBack, with the
       // drawer-first guard there preventing navStack over-pop.
-      drawerClosePendingRef.current = true
       history.back()
     } else {
       // Defensive: drawer open without a sentinel (shouldn't happen

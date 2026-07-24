@@ -1,10 +1,10 @@
 // Drawer lifecycle helpers keep imperative swipe styling subordinate to the
 // shell's authoritative open/closed state.
 
-// Slightly longer than Drawer.css's 250ms transform transition. This is only
+// Longer than Drawer.css's 100ms close transition. This is only
 // a fallback for reduced-motion / interrupted transitions where transitionend
 // does not fire; the normal path releases on the real transform event.
-export const DRAWER_CLOSE_FALLBACK_MS = 350
+export const DRAWER_CLOSE_FALLBACK_MS = 180
 export const DRAWER_SWIPE_THRESHOLD_PX = 10
 export const DRAWER_SWIPE_DOMINANCE = 1.15
 

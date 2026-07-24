@@ -39,6 +39,12 @@ export const DRAWER_HOLD_MS = 450
 // Movement past this before the hold resolves is enough to classify the gesture
 // against the source scroller's axis (touchMoveIntent below).
 export const PRE_HOLD_MOVE_PX = 8
+// A drawer row only lifts when it is deliberately pulled TOWARD the workspace.
+// The opposite (leftward) direction is the drawer's swipe-to-close gesture, so
+// it must never arm row dragging. The larger threshold also lets ordinary thumb
+// jitter settle before a rightward drag-out takes ownership.
+export const DRAWER_DRAG_INTENT_PX = 18
+export const DRAWER_DRAG_DOMINANCE = 1.2
 // After a touch lift, a release that never moved past this opens the context
 // menu instead of dropping (lift → release-in-place = menu; lift → move = drag).
 export const RELEASE_IN_PLACE_PX = 5
@@ -95,16 +101,23 @@ export function passedSlop(dx, dy, slop = POINTER_SLOP) {
   return hypot(dx, dy) > slop
 }
 
-// Drawer rows live in a vertical list, so vertical movement stays native scrolling
-// and a horizontal pull becomes a drag. Tab bodies live in a horizontal strip: a
-// horizontal move stays native scrolling, while a vertical pull lifts the tab. The
-// dedicated tab handle owns its pointer stream in CSS and can therefore reorder on
-// either axis without taking horizontal scrolling away from the tab body.
+// Drawer rows live in a vertical list: vertical movement stays native scrolling,
+// a LEFTWARD pull belongs to the drawer's swipe-close handler, and only a
+// deliberate RIGHTWARD pull toward the workspace becomes a row drag. Tab bodies
+// live in a horizontal strip: a horizontal move stays native scrolling, while a
+// vertical pull lifts the tab. The dedicated tab handle owns its pointer stream in
+// CSS and can therefore reorder on either axis without taking horizontal scrolling
+// away from the tab body.
 export function touchMoveIntent(dx, dy, sourceKind, limit = PRE_HOLD_MOVE_PX) {
   if (hypot(dx, dy) <= limit) return 'pending'
   const x = Math.abs(dx)
   const y = Math.abs(dy)
-  if (sourceKind === 'drawer') return x > y ? 'drag' : 'scroll'
+  if (sourceKind === 'drawer') {
+    if (dx < 0 && x > y) return 'swipe-close'
+    if (dx > DRAWER_DRAG_INTENT_PX && x > y * DRAWER_DRAG_DOMINANCE) return 'drag'
+    if (y >= x) return 'scroll'
+    return 'pending'
+  }
   if (sourceKind === 'tab-handle') return 'drag'
   return y > x ? 'drag' : 'scroll'
 }
