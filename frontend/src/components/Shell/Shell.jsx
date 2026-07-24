@@ -2579,6 +2579,8 @@ export default function Shell() {
   //     Payload may include autoSend:true, which sends that exact draft after
   //     ChatView mounts. Used only for explicit app approval flows.
   //   moebius:open-chat — open an existing chat, optionally pre-filling a draft.
+  //     A direct 404 falls back to a fresh chat carrying that draft; apps can
+  //     safely link durable records to chats that the owner may later delete.
   //   moebius:open-app — switch the shell to an installed app. Payload
   //     {appId} accepts either the numeric DB id or the slug; we match
   //     against the installed apps list and silently ignore unknown ids
@@ -2616,8 +2618,26 @@ export default function Shell() {
         })
       } else if (e.data?.type === 'moebius:open-chat') {
         if (typeof e.data.chatId !== 'string' || !e.data.chatId) return
+        let draftText = null
         if (e.data.draft) {
-          const draftText = String(e.data.draft)
+          draftText = String(e.data.draft)
+        }
+        // Do not stage a dead chat and wait for ChatView's later 404 repair:
+        // that briefly paints a destination which immediately disappears. The
+        // direct resource probe is the shell's authoritative deletion signal.
+        // Unknown (offline/timeout/auth) is deliberately not deletion evidence.
+        const targetState = await probeDeletion(
+          `/chats/${encodeURIComponent(e.data.chatId)}?limit=1&compact=1`,
+        )
+        if (targetState === 'deleted') {
+          await newChatRef.current?.({
+            draft: draftText || undefined,
+            forceNew: true,
+          })
+          refreshChats()
+          return
+        }
+        if (draftText != null) {
           try {
             sessionStorage.setItem('pending-draft', draftText)
             sessionStorage.setItem(`draft:${e.data.chatId}`, draftText)
