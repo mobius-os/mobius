@@ -1069,6 +1069,32 @@ test('leaving the physical bottom inside blank reservation retires follow', () =
   })
 })
 
+test('reader hold preserves exact position inside transient unkeyed content', () => {
+  const lastKeyed = {
+    offsetTop: 100,
+    offsetHeight: 100,
+    dataset: { key: 'user-before-transient-content' },
+  }
+  const scrollEl = {
+    scrollHeight: 2000,
+    scrollTop: 600,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 0 }
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [lastKeyed] : []
+    },
+  }
+
+  assert.deepEqual(contentHoldModeFromScroll(scrollEl), {
+    kind: 'ANCHOR_AT',
+    key: 'user-before-transient-content',
+    offset: -500,
+  })
+})
+
 test('applyMode PIN is a no-op when the cid resolves no row (strict, no fallback)', () => {
   // The ts-swap that once forced a last-row fallback cannot happen: the row
   // carries its final cid from mint. An unresolved cid pins nothing (the

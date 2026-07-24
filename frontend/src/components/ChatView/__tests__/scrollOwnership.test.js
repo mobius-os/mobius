@@ -91,3 +91,21 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
   assert.match(settlePath, /persistMode\(\)/)
   assert.match(settlePath, /sizeSpacer\(\)/)
 })
+
+test('newer semantic actions cannot be overwritten by an older quiet settlement', () => {
+  const closeStart = ownerSource.indexOf('const closePreSendGestureWindow =')
+  const closeEnd = ownerSource.indexOf('useLayoutEffect(() => () => {', closeStart)
+  const closePath = ownerSource.slice(closeStart, closeEnd)
+  assert.ok(closeStart >= 0 && closeEnd > closeStart,
+    'pre-send ownership handoff must remain discoverable')
+  assert.match(closePath, /discardPendingReaderSettleRef\.current\?\.\(\)/)
+
+  const hotStart = ownerSource.indexOf('const onScroll = () => {')
+  const hotEnd = ownerSource.indexOf(
+    "scrollEl.addEventListener('scroll', onScroll",
+    hotStart,
+  )
+  const hotPath = ownerSource.slice(hotStart, hotEnd)
+  assert.match(hotPath, /if \(disclosureInputOwnsGesture\) return/,
+    'layout scrolls caused by a disclosure must not create a stale reader settle')
+})

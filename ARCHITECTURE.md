@@ -503,7 +503,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.8 (2026-07-24).** This section is the
+**Owner-authoritative contract — v1.9 (2026-07-24).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -606,8 +606,11 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   the scroll event's geometry: reply growth during the quiet window cannot erase that
   the reader reached bottom. Deferred layout work may resume only after that final
   semantic location is committed, so a stale follow/pin cannot write in the handoff
-  frame. A bounded dead-man remains the final escape hatch for any interrupted
-  no-scroll gesture.
+  frame. A newer semantic action supersedes the pending settlement: Send and
+  attention navigation discard the older decision after snapshotting current
+  geometry, while a disclosure first settles any preceding gesture and then owns
+  layout caused by its own expansion/collapse. A bounded dead-man remains the final
+  escape hatch for any interrupted no-scroll gesture.
 - **R5a — Attention nudges reveal the usable tail.** Tapping an offscreen question
   or paused-turn nudge is an explicit one-shot reading action: it lands at the
   physical tail, including the list's composer-clearance padding, so the card's
