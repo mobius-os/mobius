@@ -67,7 +67,7 @@ test('ChatView only consumes methods returned by the scroll controller', () => {
     `ChatView consumes missing useScrollMode members: ${missing.join(', ')}`)
 })
 
-test('owner contract freezes question answers without changing row or spacer ownership', () => {
+test('owner contract freezes question answers with one transient reachability exception', () => {
   const architecture = readFileSync(
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
@@ -80,8 +80,8 @@ test('owner contract freezes question answers without changing row or spacer own
   )
   assert.match(
     architecture,
-    /The answer anchor does not independently own spacer/,
-    'question submission must use the latest-user visibility rule',
+    /question-submit hold is the sole exception: it may reserve only the exact tail\s+deficit required to keep the answered card at its frozen offset/,
+    'question submission may reserve only its documented reachability deficit',
   )
 })
 
