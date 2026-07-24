@@ -14,7 +14,7 @@ pywebpush>=2.0.0
 pytest>=8.0
 pytest-asyncio>=0.23
 watchdog>=4.0.0
-claude-agent-sdk>=0.2.124
+claude-agent-sdk==0.2.126
 # openai-codex is installed in a separate Dockerfile step:
 # its upstream pyproject pins a specific openai-codex-cli-bin, so Docker
 # installs --no-deps and pins the cli-bin explicitly there.

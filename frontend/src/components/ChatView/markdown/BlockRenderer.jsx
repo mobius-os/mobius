@@ -2,6 +2,8 @@ import { useMemo } from 'react'
 import { Marked } from 'marked'
 import { MemoBlock, BlockToken, MathBlock } from './blocks.jsx'
 import { mathTokens } from './mathTokens.js'
+import { groupMarkdownImages } from './imageGallery.js'
+import ImageGallery from './ImageGallery.jsx'
 import '../markdown.css'
 
 /**
@@ -29,7 +31,7 @@ export function ProgressiveMarkdown({
   isStreaming = false,
   onInternalNav,
 }) {
-  const tokens = useMemo(() => tokenize(text), [text])
+  const tokens = useMemo(() => groupMarkdownImages(tokenize(text)), [text])
 
   return (
     <>
@@ -43,7 +45,9 @@ export function ProgressiveMarkdown({
           if (token.type === 'blockKatex') {
             return <MathBlock key={i} tex={token.text} />
           }
-          if (token.type === 'space') return null
+          if (token.type === 'imageGallery') {
+            return <ImageGallery key={i} images={token.images} />
+          }
           return (
             <MemoBlock
               key={i}
@@ -64,7 +68,7 @@ export function ProgressiveMarkdown({
  * One-shot render, no memoization overhead.
  */
 export function StandardMarkdown({ text, onInternalNav }) {
-  const tokens = useMemo(() => tokenize(text), [text])
+  const tokens = useMemo(() => groupMarkdownImages(tokenize(text)), [text])
 
   return (
     <div className="standard-markdown md-blocks">
@@ -72,7 +76,9 @@ export function StandardMarkdown({ text, onInternalNav }) {
         if (token.type === 'blockKatex') {
           return <MathBlock key={i} tex={token.text} />
         }
-        if (token.type === 'space') return null
+        if (token.type === 'imageGallery') {
+          return <ImageGallery key={i} images={token.images} />
+        }
         return (
           <BlockToken
             key={i}

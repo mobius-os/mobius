@@ -201,7 +201,7 @@ async function sampleEnterPaint(page) {
             const progress = panes[0].getAnimations()[0]?.effect?.getComputedTiming?.().progress
             if (progress != null && progress < 0.5) {
               for (const chrome of document.querySelectorAll(
-                '.workspace__divider, .workspace__pane-chip',
+                '.workspace__divider',
               )) {
                 earlyChromeOpacity = Math.max(
                   earlyChromeOpacity,

@@ -350,6 +350,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // (check/review another release + restart), so this is no longer a single
   // conditional action slot.
   const platformActionRef = useRef(null)
+  const restorePlatformActionFocusRef = useRef(false)
   // 'idle' | 'checking' | 'checked' | 'error' — the "Check for updates" button
   // asks the service worker to re-check cached frontend assets and re-reads
   // /api/version. 'checked' is a short-lived success label when no update is
@@ -1119,14 +1120,30 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   }
 
   function closeUpdateReview() {
+    restorePlatformActionFocusRef.current = true
     setReviewOpen(false)
-    // useDialogFocus first restores the opener captured at mount. A successful
-    // apply can replace that node during refreshPlatform, so focus the live
-    // conditional action after React commits the close and replacement.
-    requestAnimationFrame(() => {
-      platformActionRef.current?.focus({ preventScroll: true })
-    })
   }
+
+  useEffect(() => {
+    if (
+      reviewOpen
+      || platformPhase !== 'idle'
+      || !restorePlatformActionFocusRef.current
+    ) return undefined
+
+    // useDialogFocus first restores the opener captured at mount. A successful
+    // apply replaces that opener with "Restart to finish", so wait for the
+    // parent state and its live ref to commit before moving focus. Scheduling
+    // directly inside closeUpdateReview raced that commit and repeatedly left
+    // focus on <body> under CI/browser load.
+    const frame = window.requestAnimationFrame(() => {
+      const action = platformActionRef.current
+      if (!action?.isConnected || action.disabled) return
+      restorePlatformActionFocusRef.current = false
+      action.focus({ preventScroll: true })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [platform, platformPhase, reviewOpen, updatePhase])
 
   // Poll until the restart is actually safe to navigate. A plain successful
   // /api/health response can still be the OLD worker answering before its

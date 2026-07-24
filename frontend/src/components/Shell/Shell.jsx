@@ -92,7 +92,9 @@ import {
   transitionSignature, MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
-import { PaneTab, scrollStripWheel, stripKeyDown } from './PaneStrip.jsx'
+import {
+  PaneTab, panePanelDomId, paneTabDomId, scrollStripWheel, stripKeyDown,
+} from './PaneStrip.jsx'
 import useAppIntentNavigation from './useAppIntentNavigation.js'
 import useDesktopSidebar from './useDesktopSidebar.js'
 import ShellBrand from './ShellBrand.jsx'
@@ -358,6 +360,10 @@ export default function Shell() {
   // preview holds the tiled world; the committed mode otherwise. The single source
   // (INV 4) — no scattered override.
   const effectiveViewMode = modeMachine.effectiveViewMode(modeState, { splitsEnabled: SPLITS })
+  const multiPaneBuilderVisible = effectiveViewMode === 'panes'
+    && paneModel.paneIdsInOrder(workspace).length > 1
+  const multiPaneBuilderVisibleRef = useRef(multiPaneBuilderVisible)
+  multiPaneBuilderVisibleRef.current = multiPaneBuilderVisible
   // The latched presentation plan for the live animated beat. Either direction may
   // carry a stationary single-world underlay while panes scatter or assemble over it.
   const beatPlan = modeMachine.transitionPresentation(modeState)
@@ -755,6 +761,7 @@ export default function Shell() {
       activeElement: document.activeElement,
       activeView: activeViewRef.current,
       activeChatId: activeChatIdRef.current,
+      multiPaneBuilderVisible: multiPaneBuilderVisibleRef.current,
       streamingChatIds: streamingChatIdsRef.current,
       passiveRebuild: passive,
       voiceDictationActive: voiceDictationActiveRef.current,
@@ -763,9 +770,10 @@ export default function Shell() {
     })
   }
 
-  function passiveChatReloadIsReadingHold(passive) {
+  function shellReloadHasStableVisibleHold(passive) {
+    if (document.visibilityState === 'hidden') return false
+    if (multiPaneBuilderVisibleRef.current) return true
     return passive
-      && document.visibilityState !== 'hidden'
       && activeViewRef.current === 'chat'
       && activeChatIdRef.current != null
   }
@@ -774,10 +782,10 @@ export default function Shell() {
     if (!pendingShellReloadRef.current) return
     const passive = pendingShellReloadPassiveRef.current
     if (shellReloadWouldDisruptUser({ passive })) {
-      // A passive watcher generation has no deadline while somebody is reading
-      // a visible chat. Wait for the view/visibility effects below instead of
-      // waking the page every six seconds for the whole reading session.
-      if (!passiveChatReloadIsReadingHold(passive)) scheduleShellReloadCheck()
+      // Stable visible holds (the whole Builder workspace, or a passive watcher
+      // while reading a chat) have no deadline. Wait for the view/mode/visibility
+      // effects below instead of waking the page every six seconds.
+      if (!shellReloadHasStableVisibleHold(passive)) scheduleShellReloadCheck()
     } else {
       performShellReload({ passive })
     }
@@ -796,7 +804,7 @@ export default function Shell() {
       ? (pendingShellReloadPassiveRef.current && passive)
       : passive
     pendingShellReloadRef.current = true
-    if (!passiveChatReloadIsReadingHold(pendingShellReloadPassiveRef.current)) {
+    if (!shellReloadHasStableVisibleHold(pendingShellReloadPassiveRef.current)) {
       scheduleShellReloadCheck()
     }
   }
@@ -832,11 +840,12 @@ export default function Shell() {
     }
   }, [])
 
-  // A passive generation held for a visible chat should land as soon as the
-  // owner leaves the chat surface. Switching between chats remains protected.
+  // Release a stable visible hold as soon as the owner leaves the chat surface
+  // or returns from Builder to Standard. Switching between chats remains
+  // protected for a passive generation.
   useEffect(() => {
     checkPendingShellReload()
-  }, [activeView, activeChatId])
+  }, [activeView, activeChatId, multiPaneBuilderVisible])
   // Global connectivity indicator. The composer already disables send when
   // offline (ChatView); this surfaces the state shell-wide so the user is
   // never tapping in the dark about whether they're connected.
@@ -3283,6 +3292,15 @@ export default function Shell() {
 
       {showWalkthrough && (
         <WalkthroughOverlay
+          onOpenSettings={() => {
+            setSettingsFocusTarget({ section: 'ai-providers', nonce: Date.now() })
+            navTo('settings')
+          }}
+          onExploreApps={() => {
+            const appStore = findAppStoreApp(apps)
+            if (appStore) navTo('canvas', { appId: appStore.id })
+            else openDrawer()
+          }}
           onDone={() => {
             // Query invalidation inside WalkthroughOverlay flips
             // `showWalkthrough` to false on the next render. Nothing
@@ -3382,6 +3400,9 @@ export default function Shell() {
           return (
           <div
             key={id}
+            id={paned ? panePanelDomId(paned.paneId, tabKey) : undefined}
+            role={paned ? 'tabpanel' : undefined}
+            aria-labelledby={paned ? paneTabDomId(paned.paneId, tabKey) : undefined}
             data-tab-key={(multiPane || focusedPaneViewId != null) && !underlay ? tabKey : undefined}
             // COMPOSITOR-ONLY beat motion (v2): the wrapper HOLDS its tiled content
             // rect and animates only transform/opacity via data-mode-motion + the
@@ -3458,6 +3479,7 @@ export default function Shell() {
           const paned = !underlay && workspaceChromeActive ? visibleTabRects.get(paneActiveKey) : null
           const fullBleed = !underlay && !paned && paneActiveKey === fullBleedKey
           const motion = isActiveLayer ? wrapperMotion(paneActiveKey) : null
+          const tabPanel = role !== 'held' && paned
           const handoffClass = !settingsOverlay && role !== 'active'
             ? ` shell__chat-view--${role}`
             : ''
@@ -3465,6 +3487,9 @@ export default function Shell() {
           return (
             <div
               key={chatId}
+              id={tabPanel ? panePanelDomId(paneId, tabKey) : undefined}
+              role={tabPanel ? 'tabpanel' : undefined}
+              aria-labelledby={tabPanel ? paneTabDomId(paneId, tabKey) : undefined}
               data-tab-key={(multiPane || focusedPaneViewId != null) && role !== 'held' && !underlay
                 ? tabKey : undefined}
               // Compositor-only beat motion (v2): see the app wrapper. The world-
@@ -3535,9 +3560,17 @@ export default function Shell() {
           const settingsPos = (!settingsUnderlay && settingsPaned)
             ? { top: settingsPaned.y, left: settingsPaned.x, width: settingsPaned.w, height: settingsPaned.h }
             : null
+          const settingsTabPanel = !settingsUnderlay && settingsPaned
           return (
           <div
             key="settings"
+            id={settingsTabPanel
+              ? panePanelDomId(settingsPaned.paneId, SETTINGS_KEY)
+              : undefined}
+            role={settingsTabPanel ? 'tabpanel' : undefined}
+            aria-labelledby={settingsTabPanel
+              ? paneTabDomId(settingsPaned.paneId, SETTINGS_KEY)
+              : undefined}
             data-tab-key={(!settingsUnderlay && settingsPaned) ? SETTINGS_KEY : undefined}
             data-mode-motion={settingsMotion ? settingsMotion.motion : undefined}
             className={settingsUnderlay
@@ -3595,8 +3628,8 @@ export default function Shell() {
         })()}
         {/* Chrome layer — sibling AFTER the content wrappers, over the whole
             content box, carrying its own inert. Only at ≥2 visible leaves and
-            never while Settings overlays. Draws per-pane strips, dividers, and
-            the phone overflow chip; no content lives here. */}
+            never while Settings overlays. Draws per-pane strips and dividers;
+            no content lives here. */}
         {workspaceChromeActive && (
           <WorkspaceChrome
             // INV 9 / finding 10: during the exit deal the chrome is not just
@@ -3621,9 +3654,6 @@ export default function Shell() {
             onTogglePaneFocus={toggleFocusedPaneView}
             revealKey={tabRevealRevision}
             stripMotion={wrapperMotion}
-            streamingChatIds={streamingChatIds}
-            attentionChatIds={attentionChatIds}
-            newAppIds={appAttentionSet}
           />
         )}
       </main>

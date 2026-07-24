@@ -19,11 +19,6 @@ const walkthrough = readFileSync(
   new URL('../../Walkthrough/WalkthroughOverlay.jsx', import.meta.url), 'utf8',
 )
 
-test('the phone pane switcher keeps a 44px touch target', () => {
-  const rule = css.match(/\.workspace__pane-chip\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(rule, /min-height:\s*44px/)
-})
-
 test('the workspace menu avoids an oversized border-and-shadow card', () => {
   const rule = css.match(/\.workspace__menu\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(rule, /border:\s*1px/)
@@ -38,10 +33,6 @@ test('the workspace menu is labeled, edge-clamped, and arrow-key navigable', () 
   assert.match(shell, /querySelector\('\[role="menuitem"\]'\)\?\.focus\(\)/)
   assert.match(shell, /tabMenuReturnFocusRef\.current = e\.currentTarget/)
   assert.match(shell, /returnTarget\?\.focus\?\.\(\{ preventScroll: true \}\)/)
-})
-
-test('the compact pane switcher describes its visible pane count', () => {
-  assert.match(chrome, /aria-label=\{`Show panes, \$\{projection\.visibleLeaves\.length\} of \$\{allLeaves\.length\} visible`\}/)
 })
 
 test('an implicit home tab does not engage the single-pane tab strip', () => {
@@ -62,13 +53,6 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   // single. The ONE unified close takes a tab object + opts (INV 13).
   assert.doesNotMatch(shell, /openTabs\.length === 1 && kind !== 'settings'/)
   assert.match(shell, /const closeTab = useCallback\(\(tab, \{ reason \} = \{\}\)/)
-})
-
-test('the pane switcher uses the shared modal focus and dismissal contract', () => {
-  assert.match(chrome, /useDialogFocus\(\{[\s\S]*?open: sheetOpen/)
-  assert.match(chrome, /initialFocusRef: sheetCloseRef/)
-  assert.match(chrome, /aria-modal="true"/)
-  assert.match(chrome, /aria-label="Close pane switcher"/)
 })
 
 test('the drop preview reads as an 18% accent fill with a 2px border and morph', () => {
@@ -145,12 +129,11 @@ test('the undo chord is flag-gated and defers to focused inputs', () => {
 })
 
 test('the first-run walkthrough stays short and action-first', () => {
-  assert.match(walkthrough, /const STEPS = \['intro', 'home', 'first-chat'\]/)
-  assert.doesNotMatch(walkthrough, /step === 'workspace'/)
-  // The recovery net is named next to the capability it backstops; a future
-  // trim of the walkthrough must not silently drop it.
-  assert.match(walkthrough, /\/recover runs outside Möbius/)
-  assert.match(walkthrough, /Meet my Möbius/)
+  assert.doesNotMatch(walkthrough, /const STEPS/)
+  assert.match(walkthrough, /Your Möbius is ready/)
+  assert.match(walkthrough, /Connect an agent/)
+  assert.match(walkthrough, /Open the App Store/)
+  assert.match(walkthrough, /I’ll explore/)
   assert.match(walkthrough, /mobius:walkthrough-completed/)
 })
 
@@ -204,10 +187,28 @@ test('strips sit above dividers so the 44px grab never occludes a tab', () => {
   assert.match(rule, /z-index:\s*5/)
 })
 
-test('the strips are roving-tabindex toolbars (one shared implementation)', () => {
+test('divider hover feedback stays compositor-only', () => {
+  const rule = css.match(/\.workspace__divider-bar\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /transition:\s*background 120ms ease, transform 120ms ease/)
+  assert.doesNotMatch(rule, /transition:[^;]*(?:width|height)/)
+  assert.match(css, /workspace__divider--v:focus-visible \.workspace__divider-bar \{ transform: scaleX\(3\); \}/)
+  assert.match(css, /workspace__divider--h:focus-visible \.workspace__divider-bar \{ transform: scaleY\(3\); \}/)
+})
+
+test('pane strips use a complete horizontal tab keyboard and ownership contract', () => {
   assert.match(paneStrip, /export function stripKeyDown/)
   assert.match(paneStrip, /tabIndex=\{active \? 0 : -1\}/)
-  assert.match(paneStrip, /e\.key === 'ArrowRight'/)
+  assert.match(paneStrip, /\(i \+ 1\) % buttons\.length/)
+  assert.match(paneStrip, /\(i - 1 \+ buttons\.length\) % buttons\.length/)
+  assert.doesNotMatch(paneStrip, /e\.key === 'ArrowDown'/)
+  assert.doesNotMatch(paneStrip, /e\.key === 'ArrowUp'/)
+  assert.match(paneStrip, /if \(neighbour\) neighbour\.focus\(\)/)
+  assert.match(paneStrip, /document\.querySelector\('\.shell__brand'\)\?\.focus\(\)/)
+  assert.match(paneStrip, /aria-controls=\{role === 'tab' \? controlsId : undefined\}/)
+  assert.match(paneStrip, /export function paneTabDomId/)
+  assert.match(paneStrip, /export function panePanelDomId/)
+  assert.match(shell, /role=\{paned \? 'tabpanel' : undefined\}/)
+  assert.match(shell, /aria-labelledby=\{paned \? paneTabDomId\(paned\.paneId, tabKey\) : undefined\}/)
   // Both containers route their keydown through the shared roving helper.
   assert.match(paneStrip, /stripKeyDown\(e, pane\.tabs, onClose\)/)
   assert.match(shell, /stripKeyDown\(e, openTabs,/)
@@ -232,11 +233,9 @@ test('the single-pane strip derives active from the workspace, retiring isTabAct
   assert.doesNotMatch(paneStrip, /isTabActive\(/)
 })
 
-test('the pane chip and sheet rows carry an activity dot for hidden panes', () => {
-  assert.match(chrome, /function paneHasActivity/)
-  assert.match(chrome, /workspace__pane-chip-dot/)
-  assert.match(chrome, /workspace__sheet-row-dot/)
-  assert.match(shell, /streamingChatIds=\{streamingChatIds\}/)
+test('builder mode has no extra top-right pane affordance', () => {
+  assert.doesNotMatch(chrome, /Layers|Show panes|workspace__pane-chip|workspace__sheet/)
+  assert.doesNotMatch(css, /\.workspace__pane-chip|\.workspace__sheet/)
 })
 
 test('workspace mutations update the undo slot silently, with no toast', () => {
@@ -688,7 +687,8 @@ test('an active overflowing chat title cycles once, then becomes idle', () => {
   assert.match(paneStrip, /Math\.round\(shift \* TITLE_CYCLE_MS_PER_PX\)/)
   assert.doesNotMatch(paneStrip, /TITLE_CYCLE_MIN_MS/,
     'clipped titles must not share a fixed duration; distance owns the cadence')
-  assert.match(paneStrip, /const TITLE_CYCLE_MAX_MS = 32000/)
+  assert.doesNotMatch(paneStrip, /TITLE_CYCLE_MAX_MS|Math\.min/,
+    'long titles must not accelerate through a duration cap')
   assert.match(paneStrip, /const TITLE_CYCLE_MS_PER_PX = 1000 \/ 12/)
   assert.match(paneStrip, /className="shell__tab-text-inner"/)
   const cycle = shellCss.match(/\.shell__tabstrip:not\(\.workspace__strip\)[\s\S]*?shell-tab-title-cycle var\(--tab-title-duration\) linear 700ms 1 both/)?.[0] || ''
@@ -766,10 +766,11 @@ test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient
   const urmCss = readFileSync(
     new URL('../../SettingsView/UpdateReviewModal.css', import.meta.url), 'utf8',
   )
-  // The walkthrough is a dismissible dialog (skip + onClose:skip) — reloading it
-  // over a builder workspace can never trap; and the update-review modal stays fixed.
-  assert.match(walkthrough, /const skip = useCallback/)
-  assert.match(walkthrough, /onClose: skip/)
+  // First-use guidance is now a non-modal region layered over the live shell,
+  // with an explicit dismiss action; update review remains a fixed modal.
+  assert.match(walkthrough, /role="region"/)
+  assert.match(walkthrough, /aria-label="Dismiss welcome"/)
+  assert.doesNotMatch(walkthrough, /aria-modal="true"/)
   assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
 })
 
@@ -857,7 +858,7 @@ test('the splits kill-switch forces the single-pane fallback so a rolled-back pa
   assert.match(paneModelSrc, /function coerceViewMode\(mode\) \{\s*\n\s*if \(!WORKSPACE_SPLITS_ENABLED\) return 'single'/)
 })
 
-test('visual nits V3-V6: coachmark clears the strip, focus underline reads, chip clamps, cancel blurs', () => {
+test('visual nits V3-V6: coachmark clears the strip, focus underline reads, drag label clamps, cancel blurs', () => {
   // V3: the first-use coachmark anchors BELOW the strip (bar 58px + safe-area + strip
   // 34px + 8px gap), so its pill never covers a tab label.
   const coach = css.match(/\.workspace__coachmark \{[\s\S]*?\n\}/)?.[0] || ''
@@ -870,11 +871,23 @@ test('visual nits V3-V6: coachmark clears the strip, focus underline reads, chip
   assert.match(focused, /border-color: color-mix\(in srgb, var\(--accent\) 45%, var\(--border-light\)\)/)
   // V5: the drag chip clamps within the viewport so its label never clips at the
   // right edge (measured offsetWidth + an 8px margin).
-  assert.match(dragBinding, /const maxLeft = Math\.max\(margin, window\.innerWidth - w - margin\)/)
+  assert.match(dragBinding, /const maxLeft = Math\.max\(margin, window\.innerWidth - chipWidth - margin\)/)
   assert.match(dragBinding, /Math\.max\(margin, Math\.min\(left, maxLeft\)\)/)
   // V6: a CANCELLED drag blurs the drag-origin row so its focus ring clears; a
   // committed drop keeps focus (the tab moved).
   assert.match(dragBinding, /if \(suppressClick && !committed\) srcEl\.blur\?\.\(\)/)
+})
+
+test('workspace drag batches geometry reads before frame writes', () => {
+  assert.match(dragBinding, /chipWidth = chipEl\.offsetWidth \|\| 0/,
+    'the drag label width is measured once when it becomes visible')
+  const frame = dragBinding.match(/const doMoveWork = \(\) => \{[\s\S]*?\n      \}/)?.[0] || ''
+  assert.ok(frame.indexOf('const box = contentBox()') >= 0)
+  assert.ok(frame.indexOf('const box = contentBox()') < frame.lastIndexOf('positionChip(cx, cy, isTouch, key)'))
+  assert.match(frame, /updateAutoScroll\(cx, cy, box\)/)
+  assert.match(frame, /toLocal\(cx, cy, box\)/)
+  assert.match(dragBinding, /measureTabs\(autoPaneId, box\)/,
+    'auto-scroll shares its content rect across strip and pointer measurements')
 })
 
 // ── H1 (was M5): a slot app uninstalled while closed must not survive the first

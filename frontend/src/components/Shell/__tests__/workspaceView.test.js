@@ -657,6 +657,20 @@ test('uneven entry normalizes pane velocity and lands every edge on one frame', 
   ))
   assert.ok(Math.max(...speeds) / Math.min(...speeds) < 1.15,
     'average pane velocities stay perceptually aligned despite asymmetric geometry')
+
+  // The valid 10/90 extreme used to fall through the 120ms duration floor:
+  // one pane then moved more than 2× slower than its siblings. Short trips now
+  // begin farther beyond their same edge, preserving both the readable floor
+  // and the velocity contract.
+  ws = paneModel.setRatio(ws, ws.layout.id, 0.1)
+  ws = paneModel.setRatio(ws, ws.layout.b.id, 0.1)
+  const extreme = deriveEnterPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  const extremeSpeeds = extreme.participants.map((p) => (
+    Math.hypot(p.offset.x, p.offset.y) / p.durationMs
+  ))
+  assert.ok(extreme.participants.every(p => p.durationMs >= MODE_MOTION.enterMinItemMs))
+  assert.ok(Math.max(...extremeSpeeds) / Math.min(...extremeSpeeds) < 1.15,
+    'the minimum readable duration must not reintroduce velocity spread')
 })
 
 test('N1: MODE_MOTION drops the unused chromeMs constant', () => {

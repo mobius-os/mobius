@@ -691,6 +691,14 @@ def run_migrations(eng) -> None:
       _add_owner.append(
         "ALTER TABLE owner ADD COLUMN token_epoch INTEGER NOT NULL DEFAULT 0"
       )
+    if "sso_subject" not in owner_cols:
+      _add_owner.append(
+        "ALTER TABLE owner ADD COLUMN sso_subject VARCHAR(128)"
+      )
+    if "sso_email" not in owner_cols:
+      _add_owner.append(
+        "ALTER TABLE owner ADD COLUMN sso_email VARCHAR(320)"
+      )
     if _add_owner:
       with eng.connect() as conn:
         for stmt in _add_owner:

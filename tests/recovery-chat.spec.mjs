@@ -23,19 +23,15 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 // recoveryd. In the e2e compose recoveryd is exposed on 8011 (RECOVERY_TEST_PORT).
 const RECOVER = process.env.MOBIUS_RECOVER_URL || 'http://localhost:8011'
 
-
-// First-boot claim gate: the fixed value docker-compose.test.yml presets as
-// MOBIUS_SETUP_CLAIM. Overridable to match a custom compose value.
-const SETUP_CLAIM = process.env.MOBIUS_SETUP_CLAIM || 'mobius-test-setup-claim'
-
 async function ensureOwner(page) {
-  // Idempotent setup — first run creates admin/admin (presenting the claim),
-  // later runs 400 (owner already exists). Anything else is a harness failure.
+  // Idempotent setup — first run creates admin/admin, later runs return 400
+  // (owner already exists) or 429 when parallel workers have already exercised
+  // the deliberately rate-limited first-setup endpoint.
   const response = await page.request.post(`${BASE}/api/auth/setup`, {
-    data: { username: 'admin', password: 'admin', claim: SETUP_CLAIM },
+    data: { username: 'admin', password: 'admin' },
     failOnStatusCode: false,
   })
-  expect([200, 400], 'setup creates the owner or is already configured')
+  expect([200, 400, 429], 'setup creates the owner or is already configured')
     .toContain(response.status())
 }
 

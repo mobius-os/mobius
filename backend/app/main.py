@@ -178,29 +178,6 @@ async def lifespan(app):
     # Observability must never block the recovery surface. A failed link is
     # retried on the next boot and the runner still records future sightings.
     _log.error("session-link backfill failed: %s", exc, exc_info=True)
-  # First-boot claim gate (card 261). Publish/reconcile the one-time setup
-  # claim now — after _init_db() so the owner state is readable, and before
-  # `yield` so no request can reach POST /api/auth/setup before the gate
-  # exists. Verification remains disabled until reconciliation succeeds this
-  # boot, even if a filesystem error prevents deletion of an old claim. We
-  # still keep the recovery surface reachable and log the failure for the
-  # operator.
-  try:
-    from app import setup_claim
-    setup_claim.begin_initialization()
-    with SessionLocal() as _claim_db:
-      _owner_exists = _claim_db.query(models.Owner).first() is not None
-    _claim_code = setup_claim.ensure_claim(
-      get_settings().data_dir, owner_exists=_owner_exists,
-    )
-    if _claim_code:
-      _log.warning(
-        "SETUP CLAIM (first-boot owner gate): POST /api/auth/setup requires "
-        'claim="%s". It is single-use; preset it with MOBIUS_SETUP_CLAIM.',
-        _claim_code,
-      )
-  except Exception as exc:
-    _log.error("setup claim init failed: %s", exc, exc_info=True)
   # One-time semantic migration for the per-chat prompt boundary. Existing
   # chats were started before the snapshot column existed, so freeze their
   # currently effective base + system-app prompt now, before serving requests.
