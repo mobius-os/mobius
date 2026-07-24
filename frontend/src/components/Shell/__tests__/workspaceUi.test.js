@@ -543,8 +543,8 @@ test('entry assembles over a stationary Standard surface, compositor-only, insta
   assert.match(dealIn, /translate3d\(var\(--mode-offset-x\), var\(--mode-offset-y\), 0\)/)
   assert.doesNotMatch(dealIn, /opacity:/)
   assert.doesNotMatch(dealIn, /box-shadow|border-radius|filter|clip/)
-  assert.match(css, /--ease-mode-arrive:\s*cubic-bezier\(0\.16, 1, 0\.3, 1\)/,
-    'entry keeps the accepted all-sides assembly curve')
+  assert.match(css, /--ease-mode-arrive:\s*cubic-bezier\(0\.25, 1, 0\.5, 1\)/,
+    'entry keeps readable quart-out travel without braking into the shared seam')
   assert.match(css, /--ease-mode-promote:\s*cubic-bezier\(0\.2, 0\.82, 0\.2, 1\)/,
     'the accepted exit promotion curve stays unchanged')
   // The old dead .workspace--resizing selector is gone entirely.
