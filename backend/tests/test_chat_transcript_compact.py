@@ -115,6 +115,37 @@ def test_repeated_activity_metadata_is_bounded_by_variety():
   ] == ["Bash", "Bash", "Edit"]
 
 
+def test_long_activity_runs_are_split_into_fetchable_ranges():
+  blocks = [
+    {
+      "type": "tool",
+      "tool": "Bash",
+      "status": "done",
+      "output": f"step {index}",
+    }
+    for index in range(2001)
+  ]
+
+  compact = compact_messages_for_detail(
+    [{"role": "assistant", "blocks": blocks}],
+    message_offset=4,
+  )
+
+  assert compact[0]["blocks"] == [
+    {
+      **compact[0]["blocks"][0],
+      "activity_id": "4:0:2000",
+      "message_index": 4,
+      "start": 0,
+      "end": 2000,
+      "tool_count": 2000,
+    },
+    blocks[2000],
+  ]
+  assert compact[0]["blocks"][0]["type"] == "activity"
+  assert compact[0]["blocks"][0]["end"] - compact[0]["blocks"][0]["start"] == 2000
+
+
 def test_single_activity_and_live_message_remain_self_contained():
   single = {
     "role": "assistant",
@@ -218,6 +249,57 @@ def test_compact_route_defers_activity_detail_until_expansion(client, auth):
   entries = detail.json()["entries"]
   assert entries[0]["item"]["content"] == "private trace"
   assert entries[1]["item"]["output"] == "hello"
+
+
+def test_activity_detail_queries_only_candidate_tool_sidecars(
+  client,
+  auth,
+  db,
+):
+  messages = [{
+    "role": "assistant",
+    "blocks": [
+      {"type": "thinking", "content": "trace"},
+      {
+        "type": "tool",
+        "tool": "Bash",
+        "tool_use_id": "tool-candidate",
+        "status": "done",
+        "output": "preview",
+        "output_truncated": True,
+      },
+    ],
+  }]
+  created = client.post(
+    "/api/chats",
+    headers=auth,
+    json={"title": "Scoped sidecars", "messages": messages},
+  )
+  chat_id = created.json()["id"]
+  statements = []
+  engine = db.get_bind()
+
+  def capture_sql(_, __, statement, *args):
+    statements.append(statement.lower())
+
+  event.listen(engine, "before_cursor_execute", capture_sql)
+  try:
+    detail = client.get(
+      f"/api/chats/{chat_id}/activity-detail"
+      "?message_index=0&start=0&end=2",
+      headers=auth,
+    )
+  finally:
+    event.remove(engine, "before_cursor_execute", capture_sql)
+
+  assert detail.status_code == 200
+  sidecar_select = next(
+    statement
+    for statement in statements
+    if "from tool_outputs" in statement
+  )
+  assert "tool_outputs.chat_id =" in sidecar_select
+  assert "tool_outputs.tool_use_id in (" in sidecar_select
 
 
 def test_runtime_route_does_not_select_transcript_json(

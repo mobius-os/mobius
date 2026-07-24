@@ -11,6 +11,7 @@ _IMAGE_PATH_RE = re.compile(
   re.IGNORECASE,
 )
 _MAX_COMPACT_SOURCES = 24
+MAX_ACTIVITY_DETAIL_BLOCKS = 2000
 
 
 def materialized_messages(chat) -> list[dict]:
@@ -294,14 +295,17 @@ def compact_messages_for_detail(
 
     def flush() -> None:
       nonlocal changed
-      if len(run) >= 2:
-        next_blocks.append(_compact_activity_run(
-          run,
-          message_index=message_offset + page_index,
-        ))
-        changed = True
-      else:
-        next_blocks.extend(block for _, block in run)
+      while run:
+        chunk = run[:MAX_ACTIVITY_DETAIL_BLOCKS]
+        del run[:MAX_ACTIVITY_DETAIL_BLOCKS]
+        if len(chunk) >= 2:
+          next_blocks.append(_compact_activity_run(
+            chunk,
+            message_index=message_offset + page_index,
+          ))
+          changed = True
+        else:
+          next_blocks.extend(block for _, block in chunk)
       run.clear()
 
     for raw_index, block in enumerate(blocks):

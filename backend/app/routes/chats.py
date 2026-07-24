@@ -1153,17 +1153,18 @@ def get_chat_activity_detail(
   metadata. This endpoint resolves that metadata back to the exact stored
   blocks only after the owner opens the line. It never rewrites the transcript.
   """
-  if principal.scope == "app":
-    raise HTTPException(status_code=403, detail="App token is not valid here.")
-  require_chat_embed_operation(principal, "chat:read")
-  if end <= start or end - start > 2000:
-    raise HTTPException(status_code=422, detail="Invalid activity range.")
-
   from app.chat_transcript import (
+    MAX_ACTIVITY_DETAIL_BLOCKS,
     historical_tool_output_ids,
     materialized_messages,
     project_messages_for_detail,
   )
+
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:read")
+  if end <= start or end - start > MAX_ACTIVITY_DETAIL_BLOCKS:
+    raise HTTPException(status_code=422, detail="Invalid activity range.")
 
   chat = get_active_chat_for_principal(db, chat_id, principal)
   messages = materialized_messages(chat)
@@ -1198,6 +1199,7 @@ def get_chat_activity_detail(
       row[0]
       for row in db.query(models.ToolOutput.tool_use_id).filter(
         models.ToolOutput.chat_id == chat.id,
+        models.ToolOutput.tool_use_id.in_(candidate_tool_ids),
       ).all()
     }
     if candidate_tool_ids
