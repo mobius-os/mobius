@@ -453,7 +453,7 @@ def gc_diagnostics(*, deep: bool = False, limit: int = 25) -> dict[str, Any]:
 def allocation_report(*, limit: int = 25) -> dict[str, Any]:
   """Attribute live traced Python allocations without retaining a snapshot."""
   status = tracing_status()
-  if not status.get("enabled"):
+  if not status.get("enabled") or limit <= 0:
     return status
   import tracemalloc
   snapshot = tracemalloc.take_snapshot()
@@ -488,11 +488,6 @@ def record_memory_checkpoint(label: str, **context: Any) -> dict[str, Any]:
     },
     "tracing": tracing_status(),
   }
-  if _trace_status["enabled"]:
-    # Diagnostic mode only: retain a bounded source summary at the exact
-    # lifecycle boundary. Comparing startup_ready → turn_start → turn_end is
-    # what distinguishes a live owner from allocator/native RSS.
-    entry["allocation_summary"] = allocation_report(limit=100)
   if context:
     entry["context"] = {
       str(key)[:80]: value

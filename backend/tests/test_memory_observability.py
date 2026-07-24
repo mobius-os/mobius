@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
+import app.memory_observability as memory_observability
 from app.memory_observability import (
+  allocation_report,
   cgroup_memory_snapshot,
   estimate_payload_bytes,
   memory_map_summary,
@@ -125,3 +127,10 @@ def test_memory_map_summary_keeps_heap_distinct_from_native_mappings(
   assert groups["heap"]["pss_bytes"] == 90 * 1024
   assert groups["anonymous_mappings"]["anonymous_bytes"] == 50 * 1024
   assert groups["file_mappings"]["rss_bytes"] == 20 * 1024
+
+
+def test_zero_allocation_limit_does_not_materialize_heap_snapshot(monkeypatch):
+  status = {"enabled": True, "current_bytes": 123, "peak_bytes": 456}
+  monkeypatch.setattr(memory_observability, "tracing_status", lambda: status)
+
+  assert allocation_report(limit=0) == status

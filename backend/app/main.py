@@ -164,6 +164,7 @@ async def lifespan(app):
     # report cleanup failure without making the whole service unbootable.
     _log.error("legacy global auto-resume cleanup failed: %s", exc, exc_info=True)
   _init_db()
+  record_memory_checkpoint("startup_database_initialized")
   # Upgrade hygiene for lifecycle observability. The append-only link table is
   # new, but older chats can already carry a current provider session pointer.
   # Seed those once after create_all has made the table; future sightings are
@@ -250,6 +251,7 @@ async def lifespan(app):
     # tests can detect it without tailing logs. The never-crash-boot
     # contract is preserved: we only set a flag, never raise.
     app.state.reconciliation_failed = True
+  record_memory_checkpoint("startup_state_reconciled")
   # Discard any `*.js.staging` bundle left by an interrupted compile. Staging
   # paths are never stored on App rows or served.
   try:
@@ -293,6 +295,7 @@ async def lifespan(app):
       _bn_db.close()
   except Exception as exc:
     _log.error("compiled-bundle reconcile wiring failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_bundles_reconciled")
   # Start the single-writer chat-persistence actor AFTER db init and
   # crash reconciliation. Order is load-bearing: reconcile_interrupted_chats
   # must run BEFORE the actor exists — recovery has to work even when
@@ -343,6 +346,7 @@ async def lifespan(app):
       _bs_db.close()
   except Exception as exc:
     _log.error("bootstrap app install wiring failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_apps_bootstrapped")
   # Reconcile the DB-independent recovery credential seed with the current
   # owner. Backfills instances that completed setup before the seed
   # existed and keeps it current; idempotent (no write when unchanged) and
@@ -423,6 +427,7 @@ async def lifespan(app):
       _cron_ready.write_text(f"{_BOOT_ID}\n", encoding="utf-8")
   except Exception as exc:
     _log.error("app cron supervision wiring failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_metadata_reconciled")
   # Route the app-watcher and provider model-registry diagnostics to the
   # durable rotating chat.log handler. Both loggers otherwise land only on
   # stdout (via lastResort), which evaporates on container recreation — that
@@ -460,6 +465,7 @@ async def lifespan(app):
     _observer, _handler = start_watcher(_asyncio.get_running_loop())
   except Exception as exc:
     _log.error("start_watcher failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_app_watcher_started")
   # Start the whole-repo frontend watcher when /data/platform is active.
   # Wrapped separately from app_watcher: a broken frontend build path must not
   # disable mini-app recompiles or crash lifespan.
@@ -473,6 +479,7 @@ async def lifespan(app):
       )
   except Exception as exc:
     _log.error("start_frontend_watcher failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_frontend_watcher_started")
   # Runtime liveness watchdog. reconcile_interrupted_chats only runs at boot,
   # so a turn that leaves its run marker set without a process restart (a
   # FAILED_LEAVE_MARKER terminal, or the late-promote gap) would hold the chat
