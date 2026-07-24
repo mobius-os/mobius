@@ -33,12 +33,6 @@ the app's interactive descendants. Do **not** use `--compact` with this iframe
 selector: current `agent-browser` can collapse it to the iframe node alone.
 Use the returned refs for interaction and re-snapshot after state changes.
 
-If the scoped snapshot still returns only the iframe node, do not probe
-`contentDocument`, guess coordinates, or repeat equivalent snapshots. Open the
-authenticated standalone `/apps/<slug>/` route with
-`agent-screenshot.sh`, dismiss any host install prompt from a fresh snapshot,
-and use stable app-owned selectors or accessible labels.
-
 `agent-browser wait --text` observes the top-level document and is unreliable
 for text inside the opaque app iframe. For initial load, rely on
 `preview_app.sh`'s mounted-frame gate. For an in-app transition, use a fresh
