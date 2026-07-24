@@ -17,6 +17,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import re
 import time
 from collections import Counter, defaultdict, deque
 from datetime import UTC, datetime
@@ -288,23 +289,41 @@ def estimate_payload_bytes(value: Any, _seen: set[int] | None = None) -> int:
   return sum(estimate_payload_bytes(item, seen) for item in value)
 
 
-def _process_category(pid: int, comm: str, cmdline: str) -> str:
+def _process_identity(
+  pid: int,
+  comm: str,
+  cmdline: str,
+) -> tuple[str, str | None]:
+  """Return a stable category and a safe, useful owner label.
+
+  Executable names alone are not ownership: installed services commonly run
+  behind generic hosts such as gunicorn, and browser workers are only useful
+  when tied back to their profile. Keep the label deliberately derived from
+  known local paths rather than exposing arbitrary command lines, which can
+  contain credentials.
+  """
   if pid == os.getpid():
-    return "mobius_server"
+    return "mobius_server", "platform"
   value = f"{comm} {cmdline}".lower()
   if any(token in value for token in ("chromium", "chrome", "headless_shell")):
-    return "browser"
+    match = re.search(r"agent-browser-profiles/([^/\\s]+)", cmdline)
+    return "browser", match.group(1) if match else None
   if "codex" in value:
-    return "codex"
+    return "codex", None
   if "claude" in value:
-    return "claude"
+    return "claude", None
   if any(token in value for token in ("node", "npm", "esbuild", "vite")):
-    return "frontend_tools"
+    return "frontend_tools", None
   if "caddy" in value:
-    return "proxy"
+    return "proxy", "platform"
   if "tandoor" in value:
-    return "recovery"
-  return "other"
+    return "app_service", "tandoor"
+  match = re.search(r"/data/apps/([^/\\s]+)", cmdline)
+  if match:
+    return "app_service", match.group(1)
+  if "recover" in value:
+    return "recovery", "platform"
+  return "other", None
 
 
 def process_inventory(
@@ -335,11 +354,12 @@ def process_inventory(
     cmdline = (
       _read_text(proc_root / str(pid) / "cmdline") or ""
     ).replace("\x00", " ")
-    category = _process_category(pid, comm, cmdline)
+    category, owner = _process_identity(pid, comm, cmdline)
     row = {
       "pid": pid,
       "name": comm[:80],
       "category": category,
+      "owner": owner,
       "rss_bytes": snapshot.get("rss_bytes") or 0,
       "pss_bytes": snapshot.get("pss_bytes") or 0,
       "anonymous_bytes": snapshot.get("anonymous_bytes") or 0,

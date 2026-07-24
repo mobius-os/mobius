@@ -4,12 +4,34 @@ from pathlib import Path
 
 import app.memory_observability as memory_observability
 from app.memory_observability import (
+  _process_identity,
   allocation_report,
   cgroup_memory_snapshot,
   estimate_payload_bytes,
   memory_map_summary,
   process_memory_snapshot,
 )
+
+
+def test_process_identity_uses_command_ownership_not_generic_host_name():
+  assert _process_identity(
+    123,
+    "gunicorn",
+    "/data/tandoor/venv/bin/gunicorn recipes.wsgi",
+  ) == ("app_service", "tandoor")
+  assert _process_identity(
+    124,
+    "chrome",
+    "--user-data-dir=/data/agent-browser-profiles/chat-example",
+  ) == ("browser", "chat-example")
+
+
+def test_process_identity_does_not_expose_arbitrary_command_arguments():
+  assert _process_identity(
+    125,
+    "worker",
+    "worker --api-key secret-value",
+  ) == ("other", None)
 
 
 def test_process_memory_snapshot_reads_current_linux_process():
