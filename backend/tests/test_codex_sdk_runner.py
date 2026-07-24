@@ -1,6 +1,7 @@
 import asyncio
 import signal
 import threading
+from enum import Enum
 from types import SimpleNamespace
 
 import pytest
@@ -54,6 +55,18 @@ class _FakeReasoningSummary:
   """Callable enum/model stand-in so `ReasoningSummary(str)` works in tests."""
   def __call__(self, value):
     return value
+
+
+class _FakeMessagePhase(Enum):
+  commentary = "commentary"
+  final_answer = "final_answer"
+
+
+class _FakeTurnStatus(Enum):
+  completed = "completed"
+  interrupted = "interrupted"
+  failed = "failed"
+  in_progress = "inProgress"
 
 
 class _FakeTurnCompletedNotification:
@@ -159,11 +172,13 @@ def _fake_sdk(async_codex_cls):
     "ItemGuardianApprovalReviewCompletedNotification": _Dummy,
     "ItemGuardianApprovalReviewStartedNotification": _Dummy,
     "ItemStartedNotification": _Dummy,
+    "MessagePhase": _FakeMessagePhase,
     "McpToolCallThreadItem": _Dummy,
     "ReasoningSummaryTextDeltaNotification": _Dummy,
     "ReasoningTextDeltaNotification": _Dummy,
     "ThreadTokenUsageUpdatedNotification": _Dummy,
     "TurnCompletedNotification": _FakeTurnCompletedNotification,
+    "TurnStatus": _FakeTurnStatus,
     "WebSearchThreadItem": _Dummy,
   }
 
@@ -445,9 +460,11 @@ def test_active_codex_turn_interrupt_waits_for_runner_finish():
     active_turn = codex_sdk_runner.ActiveCodexTurn(
       object(), turn, chat_id="chat-1"
     )
+    assert active_turn.interrupt_requested is False
     task = asyncio.create_task(active_turn.interrupt())
     await asyncio.sleep(0)
     assert turn.interrupt_calls == 1
+    assert active_turn.interrupt_requested is True
     assert task.done() is False
     active_turn.mark_finished()
     await asyncio.wait_for(task, timeout=1)
@@ -1462,10 +1479,10 @@ def test_run_codex_sdk_turn_error_notification_fatal_raises(monkeypatch):
   assert "fatal error" in result["error"]
 
 
-def test_run_codex_sdk_turn_stream_exhaustion_relies_on_sdk_terminal_contract(
+def test_run_codex_sdk_turn_rejects_stream_exhaustion_without_terminal(
   monkeypatch,
 ):
-  """SDK turn streams are expected to end via TurnCompleted, not fall-through."""
+  """A drained stream without TurnCompleted must not masquerade as success."""
   thread = _FakeThread("thread-1", _FakeTurnHandle([]))
 
   class FakeAsyncCodex:
@@ -1500,7 +1517,223 @@ def test_run_codex_sdk_turn_stream_exhaustion_relies_on_sdk_terminal_contract(
     )
   )
 
-  assert result["error"] is None
+  assert result["error"] == (
+    "Codex turn stream ended without a turn/completed notification."
+  )
+  assert result.get("terminal_status") is None
+
+
+@pytest.mark.parametrize(
+  ("status", "sdk_error", "interrupt_requested", "expected"),
+  [
+    (
+      _FakeTurnStatus.failed,
+      None,
+      False,
+      "Codex turn failed without an error message.",
+    ),
+    (
+      _FakeTurnStatus.interrupted,
+      None,
+      False,
+      "Codex turn was interrupted unexpectedly.",
+    ),
+    (_FakeTurnStatus.interrupted, None, True, None),
+    (_FakeTurnStatus.completed, None, False, None),
+  ],
+)
+def test_codex_terminal_status_is_validated(
+  status,
+  sdk_error,
+  interrupt_requested,
+  expected,
+):
+  sdk = _fake_sdk(object)
+  turn = SimpleNamespace(
+    status=status,
+    error=sdk_error,
+    items=[],
+  )
+  message_phases = (
+    [_FakeMessagePhase.final_answer.value]
+    if status == _FakeTurnStatus.completed
+    else []
+  )
+
+  error, terminal_status, final_phase = (
+    codex_sdk_runner._codex_terminal_error(
+      turn,
+      sdk,
+      interrupt_requested=interrupt_requested,
+      completed_message_phases=message_phases,
+    )
+  )
+
+  assert error == expected
+  assert terminal_status == status.value
+  assert final_phase == (
+    _FakeMessagePhase.final_answer.value
+    if status == _FakeTurnStatus.completed
+    else None
+  )
+
+
+def test_codex_completed_turn_without_agent_message_is_not_success():
+  sdk = _fake_sdk(object)
+  turn = SimpleNamespace(
+    status=_FakeTurnStatus.completed,
+    error=None,
+    items=[],
+  )
+
+  error, terminal_status, final_phase = (
+    codex_sdk_runner._codex_terminal_error(
+      turn,
+      sdk,
+      interrupt_requested=False,
+      completed_message_phases=[],
+    )
+  )
+
+  assert error == "Codex turn completed without an agent final answer."
+  assert terminal_status == "completed"
+  assert final_phase is None
+
+
+def test_codex_commentary_only_completion_is_not_a_final_answer():
+  sdk = _fake_sdk(object)
+  turn = SimpleNamespace(
+    status=_FakeTurnStatus.completed,
+    error=None,
+    items=[],
+  )
+
+  error, terminal_status, final_phase = (
+    codex_sdk_runner._codex_terminal_error(
+      turn,
+      sdk,
+      interrupt_requested=False,
+      completed_message_phases=[_FakeMessagePhase.commentary.value],
+    )
+  )
+
+  assert error == (
+    "Codex turn completed after commentary without a final answer."
+  )
+  assert terminal_status == "completed"
+  assert final_phase == "commentary"
+
+
+def test_codex_completed_turn_items_recover_a_dropped_message_notification():
+  class AgentMessage:
+    def __init__(self, phase):
+      self.phase = phase
+
+  sdk = _fake_sdk(object)
+  sdk["AgentMessageThreadItem"] = AgentMessage
+  turn = SimpleNamespace(
+    status=_FakeTurnStatus.completed,
+    error=None,
+    items=[AgentMessage(_FakeMessagePhase.commentary)],
+  )
+
+  error, terminal_status, final_phase = (
+    codex_sdk_runner._codex_terminal_error(
+      turn,
+      sdk,
+      interrupt_requested=False,
+      completed_message_phases=[],
+    )
+  )
+
+  assert error == (
+    "Codex turn completed after commentary without a final answer."
+  )
+  assert terminal_status == "completed"
+  assert final_phase == "commentary"
+
+
+def test_codex_completed_turn_items_override_notification_order():
+  class AgentMessage:
+    def __init__(self, phase):
+      self.phase = phase
+
+  sdk = _fake_sdk(object)
+  sdk["AgentMessageThreadItem"] = AgentMessage
+  turn = SimpleNamespace(
+    status=_FakeTurnStatus.completed,
+    error=None,
+    items=[
+      AgentMessage(_FakeMessagePhase.final_answer),
+      AgentMessage(_FakeMessagePhase.commentary),
+    ],
+  )
+
+  error, terminal_status, final_phase = (
+    codex_sdk_runner._codex_terminal_error(
+      turn,
+      sdk,
+      interrupt_requested=False,
+      # A duplicated earlier notification must not rescue a non-final tail.
+      completed_message_phases=[_FakeMessagePhase.final_answer.value],
+    )
+  )
+
+  assert error == (
+    "Codex turn completed after commentary without a final answer."
+  )
+  assert terminal_status == "completed"
+  assert final_phase == "commentary"
+
+
+def test_codex_earlier_final_followed_by_commentary_is_not_complete():
+  sdk = _fake_sdk(object)
+  turn = SimpleNamespace(
+    status=_FakeTurnStatus.completed,
+    error=None,
+    items=[],
+  )
+
+  error, _, final_phase = codex_sdk_runner._codex_terminal_error(
+    turn,
+    sdk,
+    interrupt_requested=False,
+    completed_message_phases=[
+      _FakeMessagePhase.final_answer.value,
+      _FakeMessagePhase.commentary.value,
+    ],
+  )
+
+  assert error == (
+    "Codex turn completed after commentary without a final answer."
+  )
+  assert final_phase == "commentary"
+
+
+@pytest.mark.parametrize("phase", [_FakeMessagePhase.final_answer.value, None])
+def test_codex_explicit_and_legacy_final_messages_are_accepted(phase):
+  sdk = _fake_sdk(object)
+  turn = SimpleNamespace(
+    status=_FakeTurnStatus.completed,
+    error=None,
+    items=[],
+  )
+
+  error, terminal_status, final_phase = (
+    codex_sdk_runner._codex_terminal_error(
+      turn,
+      sdk,
+      interrupt_requested=False,
+      completed_message_phases=[
+        _FakeMessagePhase.commentary.value,
+        phase,
+      ],
+    )
+  )
+
+  assert error is None
+  assert terminal_status == "completed"
+  assert final_phase == phase
 
 
 # ---------------------------------------------------------------------------

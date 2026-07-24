@@ -12,6 +12,8 @@ class RunnerResult(TypedDict):
   cost_usd: float | None
   error: str | None
   usage: NotRequired[dict | None]
+  terminal_status: NotRequired[str | None]
+  final_message_phase: NotRequired[str | None]
 
 
 class ChatEventBase(TypedDict):

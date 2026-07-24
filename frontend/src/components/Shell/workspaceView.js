@@ -59,10 +59,12 @@ export function projectFocusedPane(baseProjection, workspace, paneId, contentRec
 // Timing (ms). Constants live here, NOT in the machine, so the reconcile clock
 // (INV 14) and the missing-target fallback (INV 13) reason about the plan's own
 // totalMs rather than a fixed per-phase maximum. Mode changes are intentionally one
-// short beat: every pane moves together, using only compositor transforms + opacity.
-// There is no per-pane stagger or second destination phase to make the owner wait.
+// short beat using only compositor transforms + opacity. Entry participants may
+// start at different instants to normalize unequal travel, but land together; there
+// is no pane-count stagger or second destination phase to make the owner wait.
 export const MODE_MOTION = Object.freeze({
-  enterItemMs: 210,
+  enterItemMs: 240,
+  enterMinItemMs: 120,
   exitItemMs: 180,
   promoteMs: 210,
   logoReleaseMs: 90,
@@ -337,23 +339,38 @@ export function deriveEnterPlan(input) {
   if (leaves.length === 0) return null
   const { target, immersiveInstant } = classifyExitDestination(input)
   if (immersiveInstant) return null
-  const duration = MODE_MOTION.enterItemMs
   const destinationRect = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
   const participants = []
   const completionNames = new Set()
   const underlayKey = target
 
-  for (const l of leaves) {
-    if (l.activeKey === target) continue
+  const incoming = leaves
+    .filter(l => l.activeKey !== target)
+    .map(l => ({ leaf: l, offset: edgeOffset(l.rect, contentRect, l.motionRect) }))
+  if (incoming.length === 0) return null
+  const maxDistance = Math.max(...incoming.map(({ offset }) => Math.hypot(offset.x, offset.y)))
+
+  for (const { leaf: l, offset } of incoming) {
+    // Projection-derived travel can differ by nearly 2× in an uneven three-pane
+    // tree. Start shorter trips later and give them proportionally less time so
+    // every pane travels at the same perceived speed and lands on the same frame.
+    // The floor prevents a very small pane from becoming a one-frame flash.
+    const distance = Math.hypot(offset.x, offset.y)
+    const proportionalMs = maxDistance > 0
+      ? Math.round(MODE_MOTION.enterItemMs * distance / maxDistance)
+      : MODE_MOTION.enterItemMs
+    const durationMs = Math.min(
+      MODE_MOTION.enterItemMs,
+      Math.max(MODE_MOTION.enterMinItemMs, proportionalMs),
+    )
     participants.push({
       key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
-      delayMs: 0,
-      durationMs: duration,
-      offset: edgeOffset(l.rect, contentRect, l.motionRect),
+      delayMs: MODE_MOTION.enterItemMs - durationMs,
+      durationMs,
+      offset,
     })
     completionNames.add(DEAL_IN_NAME)
   }
-  if (participants.length === 0) return null
   const totalMs = participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
   return {
     kind: 'enter',
