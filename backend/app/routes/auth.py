@@ -5,14 +5,16 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from base64 import urlsafe_b64encode
 from datetime import UTC, datetime, timedelta
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -132,8 +134,12 @@ def _extract_provider_code_and_state(raw_code: str) -> tuple[str, str | None]:
 @router.get("/setup/status", response_model=schemas.SetupStatus)
 def setup_status(db: Session = Depends(get_db)):
   """Returns whether the owner account has been configured."""
+  settings = get_settings()
   configured = db.query(models.Owner).first() is not None
-  return schemas.SetupStatus(configured=configured)
+  return schemas.SetupStatus(
+    configured=configured,
+    auth_mode="mobius_sso" if settings.mobius_sso_enabled else "local",
+  )
 
 
 def _write_service_token(username: str, token_epoch: int) -> None:
@@ -159,12 +165,10 @@ def _write_service_token(username: str, token_epoch: int) -> None:
     f.write(token)
 
 
-# Deployment ownership contract: the generated instance URL is delivered to
-# the person who created the deployment, and possession of that link is the
-# security boundary for this short first-setup window. The first successful
-# setup becomes the sole owner. If an instance link is exposed and an
-# unexpected owner appears before setup, discard that deployment and create a
-# fresh one instead of adding another onboarding credential.
+# Self-hosted ownership contract: without managed SSO, possession of the
+# instance URL is the security boundary for the short first-setup window. A
+# Railway-managed instance never reaches this path: injected SSO configuration
+# closes local setup and binds the owner through the launcher's one-time code.
 @router.post("/setup", response_model=schemas.TokenResponse,
              dependencies=[Depends(reject_cross_site)])
 @_limiter.limit("3/minute")
@@ -173,6 +177,11 @@ def setup(
   body: schemas.SetupRequest, db: Session = Depends(get_db)
 ):
   """Creates the owner account on first boot and returns a JWT."""
+  if get_settings().mobius_sso_enabled:
+    raise HTTPException(
+      status_code=403,
+      detail="Managed sign-in is enabled for this deployment.",
+    )
   if db.query(models.Owner).first():
     raise HTTPException(status_code=400, detail="Already configured.")
   owner = models.Owner(
@@ -201,6 +210,210 @@ def setup(
     {"sub": owner.username}, token_epoch=owner.token_epoch
   )
   return schemas.TokenResponse(access_token=token)
+
+
+def _safe_sso_return_path(raw: str | None) -> str:
+  """Keep the post-login destination on this exact instance origin."""
+  value = (raw or "/").strip()
+  if (
+    not value.startswith("/")
+    or value.startswith("//")
+    or "\\" in value
+    or "%5c" in value.lower()
+  ):
+    return "/"
+  parsed = urlparse(value)
+  if parsed.scheme or parsed.netloc:
+    return "/"
+  return parsed.path + (
+    ("?" + parsed.query) if parsed.query else ""
+  ) + (("#" + parsed.fragment) if parsed.fragment else "")
+
+
+def _sso_cookie_secure() -> bool:
+  return get_settings().frontend_origin.startswith("https://")
+
+
+def _sso_error_redirect():
+  response = RedirectResponse(url="/?mobius_sso_error=1", status_code=303)
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Referrer-Policy"] = "no-referrer"
+  response.delete_cookie("mobius_sso_state", path="/api/auth/sso/callback")
+  return response
+
+
+@router.get("/sso/start")
+def start_managed_sso(return_path: str = "/"):
+  settings = get_settings()
+  if not settings.mobius_sso_enabled:
+    raise HTTPException(status_code=404, detail="Managed sign-in is not configured.")
+  state = secrets.token_urlsafe(32)
+  verifier, challenge = _generate_pkce()
+  redirect_uri = settings.frontend_origin.rstrip("/") + "/api/auth/sso/callback"
+  context = auth.create_access_token(
+    {
+      "scope": "mobius_sso_state",
+      "state": state,
+      "code_verifier": verifier,
+      "redirect_uri": redirect_uri,
+      "return_path": _safe_sso_return_path(return_path),
+    },
+    expires_delta=timedelta(minutes=10),
+  )
+  authorize_url = settings.mobius_sso_issuer + "/sso/authorize?" + urlencode(
+    {
+      "instance_id": settings.mobius_sso_instance_id,
+      "state": state,
+      "redirect_uri": redirect_uri,
+      "code_challenge": challenge,
+    }
+  )
+  response = RedirectResponse(url=authorize_url, status_code=303)
+  response.set_cookie(
+    "mobius_sso_state",
+    context,
+    httponly=True,
+    secure=_sso_cookie_secure(),
+    samesite="lax",
+    max_age=10 * 60,
+    path="/api/auth/sso/callback",
+  )
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Referrer-Policy"] = "no-referrer"
+  return response
+
+
+@router.get("/sso/callback")
+async def complete_managed_sso(
+  request: Request,
+  code: str = "",
+  state: str = "",
+  db: Session = Depends(get_db),
+):
+  settings = get_settings()
+  if not settings.mobius_sso_enabled:
+    raise HTTPException(status_code=404, detail="Managed sign-in is not configured.")
+  context_token = request.cookies.get("mobius_sso_state", "")
+  context = auth.decode_access_token(context_token) if context_token else None
+  if (
+    not context
+    or context.get("scope") != "mobius_sso_state"
+    or not code
+    or not state
+    or not secrets.compare_digest(str(context.get("state") or ""), state)
+  ):
+    return _sso_error_redirect()
+
+  redirect_uri = str(context.get("redirect_uri") or "")
+  code_verifier = str(context.get("code_verifier") or "")
+  try:
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+      exchange = await client.post(
+        settings.mobius_sso_issuer + "/sso/token",
+        json={
+          "instance_id": settings.mobius_sso_instance_id,
+          "client_secret": settings.mobius_sso_client_secret,
+          "code": code,
+          "code_verifier": code_verifier,
+          "redirect_uri": redirect_uri,
+        },
+        headers={"Accept": "application/json"},
+      )
+    if exchange.status_code != 200:
+      return _sso_error_redirect()
+    identity = exchange.json()
+  except (httpx.HTTPError, ValueError):
+    return _sso_error_redirect()
+
+  subject = str(identity.get("sub") or "").strip()
+  email = str(identity.get("email") or "").strip().lower()
+  display_name = str(identity.get("name") or "").strip()
+  if (
+    not re.fullmatch(r"user_[A-Za-z0-9_-]{3,80}", subject)
+    or not email
+    or len(email) > 320
+  ):
+    return _sso_error_redirect()
+
+  owner = db.query(models.Owner).first()
+  created_owner = owner is None
+  if owner is None:
+    username = (display_name or email.split("@", 1)[0] or "Owner").strip()[:64]
+    if not username:
+      username = "Owner"
+    owner = models.Owner(
+      username=username,
+      # Managed accounts have no default local password. A random unreachable
+      # hash keeps the legacy non-null schema and password endpoint inert until
+      # an explicit recovery credential is added in Settings.
+      hashed_password=auth.hash_password(secrets.token_urlsafe(64)),
+      sso_subject=subject,
+      sso_email=email,
+    )
+    db.add(owner)
+  elif owner.sso_subject and not secrets.compare_digest(owner.sso_subject, subject):
+    return _sso_error_redirect()
+  else:
+    owner.sso_subject = subject
+    owner.sso_email = email
+
+  try:
+    db.commit()
+  except (IntegrityError, SQLAlchemyError):
+    db.rollback()
+    return _sso_error_redirect()
+  db.refresh(owner)
+  if created_owner:
+    try:
+      _write_service_token(owner.username, owner.token_epoch)
+    except OSError as exc:
+      log.warning("Could not write service token: %s", exc)
+
+  access_token = auth.create_access_token(
+    {"sub": owner.username}, token_epoch=owner.token_epoch
+  )
+  handoff = auth.create_access_token(
+    {
+      "scope": "mobius_sso_handoff",
+      "access_token": access_token,
+      "new_owner": created_owner,
+      "return_path": _safe_sso_return_path(context.get("return_path")),
+    },
+    expires_delta=timedelta(seconds=60),
+  )
+  response = RedirectResponse(url="/?mobius_sso=1", status_code=303)
+  response.set_cookie(
+    "mobius_sso_handoff",
+    handoff,
+    httponly=True,
+    secure=_sso_cookie_secure(),
+    samesite="lax",
+    max_age=60,
+    path="/api/auth/sso/session",
+  )
+  response.delete_cookie("mobius_sso_state", path="/api/auth/sso/callback")
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Referrer-Policy"] = "no-referrer"
+  return response
+
+
+@router.post("/sso/session", dependencies=[Depends(reject_cross_site)])
+def consume_managed_sso_session(request: Request):
+  handoff = request.cookies.get("mobius_sso_handoff", "")
+  payload = auth.decode_access_token(handoff) if handoff else None
+  if not payload or payload.get("scope") != "mobius_sso_handoff":
+    raise HTTPException(status_code=401, detail="Managed sign-in expired.")
+  response = JSONResponse(
+    {
+      "access_token": payload.get("access_token"),
+      "token_type": "bearer",
+      "new_owner": payload.get("new_owner") is True,
+      "return_path": _safe_sso_return_path(payload.get("return_path")),
+    }
+  )
+  response.delete_cookie("mobius_sso_handoff", path="/api/auth/sso/session")
+  response.headers["Cache-Control"] = "no-store"
+  return response
 
 
 # Bcrypt-verifying against this dummy hash when the username is unknown makes the

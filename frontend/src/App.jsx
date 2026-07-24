@@ -2,7 +2,7 @@ import { lazy, Suspense, useState, useEffect } from 'react'
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
 import { QueryClientProvider, useIsRestoring } from '@tanstack/react-query'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
-import { beginEphemeralAuth, getToken, BASE } from './api/client.js'
+import { api, beginEphemeralAuth, getToken, setToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
@@ -91,11 +91,72 @@ function AppRoot() {
   // Read BEFORE the token fast path so we don't briefly mount Shell.
   const hasToken = !!getToken()
   const resumeStep = hasToken ? setupSession.getResumeStep() : null
-  const initialStatus = resumeStep ? 'setup' : (hasToken ? 'shell' : 'loading')
+  let ssoSignal = ''
+  try {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('mobius_sso') === '1') ssoSignal = 'handoff'
+    if (params.get('mobius_sso_error') === '1') ssoSignal = 'error'
+  } catch { /* ignore */ }
+  const initialStatus = resumeStep
+    ? 'setup'
+    : (hasToken
+        ? 'shell'
+        : (ssoSignal === 'handoff'
+            ? 'sso'
+            : (ssoSignal === 'error' ? 'sso-error' : 'loading')))
   const [status, setStatus] = useState(initialStatus)
-  const setupStatusQuery = setupQueries.status.useQuery({ enabled: !hasToken })
+  const setupStatusQuery = setupQueries.status.useQuery({
+    enabled: !hasToken && !ssoSignal,
+  })
   // Stable across renders — we only need the value captured on mount.
-  const [initialSetupStep] = useState(resumeStep || 'account')
+  const [initialSetupStep, setInitialSetupStep] = useState(resumeStep || 'account')
+
+  useEffect(() => {
+    if (status !== 'sso') return undefined
+    let cancelled = false
+    async function finishSignIn() {
+      try {
+        const response = await api.auth.sso.consume()
+        if (!response.ok) throw new Error('SSO_HANDOFF_FAILED')
+        const data = await response.json()
+        if (!data?.access_token) throw new Error('SSO_HANDOFF_FAILED')
+        setToken(data.access_token)
+        removeSplash()
+        try {
+          const current = new URL(window.location.href)
+          current.searchParams.delete('mobius_sso')
+          window.history.replaceState(null, '', current.pathname + current.search + current.hash)
+        } catch { /* ignore */ }
+        if (cancelled) return
+        if (data.new_owner) {
+          setupSession.setInProgress(true)
+          setupSession.saveStep('provider')
+          setInitialSetupStep('provider')
+          setStatus('setup')
+          return
+        }
+        const ret = safeReturnPath(data.return_path)
+        if (ret && ret !== '/') {
+          window.location.replace(ret)
+          return
+        }
+        setStatus('shell')
+      } catch {
+        if (!cancelled) {
+          removeSplash()
+          setStatus('sso-error')
+        }
+      }
+    }
+    void finishSignIn()
+    return () => {
+      cancelled = true
+    }
+  }, [status])
+
+  useEffect(() => {
+    if (status === 'sso-error') removeSplash()
+  }, [status])
 
   // Honor a ?return= target. An installed standalone app (its own PWA,
   // often a SEPARATE storage partition with no token) redirects here for
@@ -132,6 +193,16 @@ function AppRoot() {
       return
     }
     if (setupStatusQuery.isSuccess) {
+      if (setupStatusQuery.data.auth_mode === 'mobius_sso') {
+        let returnPath = '/'
+        try {
+          returnPath = (
+            window.location.pathname + window.location.search + window.location.hash
+          )
+        } catch { /* ignore */ }
+        window.location.replace(api.auth.sso.startUrl(returnPath))
+        return
+      }
       setStatus(setupStatusQuery.data.configured ? 'login' : 'setup')
       removeSplash()
     } else if (setupStatusQuery.isError) {
@@ -141,6 +212,12 @@ function AppRoot() {
   }, [hasToken, setupStatusQuery.isError, setupStatusQuery.isSuccess, setupStatusQuery.data])
 
   if (status === 'loading' || isRestoring) return null
+  if (status === 'sso') return <RouteLoading label="Signing in to Möbius" />
+  if (status === 'sso-error') return (
+    <ManagedSignInError
+      onRetry={() => window.location.replace(api.auth.sso.startUrl('/'))}
+    />
+  )
   if (status === 'setup-error') return (
     <SetupStatusError
       retrying={setupStatusQuery.isFetching}
@@ -198,6 +275,28 @@ function SetupStatusError({ retrying, onRetry }) {
             disabled={retrying}
           >
             {retrying ? 'Trying again…' : 'Try again'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ManagedSignInError({ onRetry }) {
+  return (
+    <div className="errbound" role="alert">
+      <div className="errbound__card">
+        <h1 className="errbound__title">Couldn’t sign in</h1>
+        <p className="errbound__body">
+          Your Möbius account could not be confirmed. Try again from this browser.
+        </p>
+        <div className="errbound__actions">
+          <button
+            type="button"
+            className="errbound__btn errbound__btn--primary"
+            onClick={onRetry}
+          >
+            Try again
           </button>
         </div>
       </div>
