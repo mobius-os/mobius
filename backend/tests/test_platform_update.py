@@ -18,6 +18,7 @@ aborted on the next pass.
 """
 
 import subprocess
+import stat
 import textwrap
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -109,6 +110,15 @@ def _served_sha(platform: Path) -> str:
   return _git(platform, "rev-parse", "HEAD").stdout.strip()
 
 
+def _apply_plan(current_sha: str, target_sha: str, repo: Path) -> dict:
+  return {
+    "plan_id": pu._update_plan_id(current_sha, target_sha),
+    "current_sha": current_sha,
+    "target_sha": target_sha,
+    "repo": repo,
+  }
+
+
 @pytest.fixture
 def clone_env(tmp_path, monkeypatch):
   """A bare origin + a platform clone of it, with platform_update's flag paths
@@ -122,6 +132,11 @@ def clone_env(tmp_path, monkeypatch):
   monkeypatch.setattr(pu, "RECONCILE_PRE_FLAG", tmp_path / ".reconcile-pre")
   monkeypatch.setattr(pu, "OFFLINE_FLAG", tmp_path / ".offline")
   monkeypatch.setattr(pu, "RECONCILE_LOCK", tmp_path / ".reconcile.lock")
+  monkeypatch.setattr(
+    pu,
+    "UPDATE_PROGRESS_PATH",
+    tmp_path / ".update-progress.json",
+  )
   monkeypatch.setenv("BUILD_SHA", "test-sha")
   origin = _make_origin(tmp_path)
   platform = _clone_platform(tmp_path, origin)
@@ -146,6 +161,25 @@ def test_clean_update_fast_forwards(clone_env):
   assert pu.recorded_upstream_sha(platform) == new
   # A second boot with no new deploy is a no-op.
   assert pu.reconcile_clone(platform, at_boot=True).status == "up_to_date"
+
+
+def test_clean_shallow_fast_forward_does_not_fetch_full_history(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  new = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_C = 3", "LINE_C = 301")})
+  monkeypatch.setattr(pu, "_is_shallow", lambda _repo: True)
+
+  def fail_unshallow(_repo):
+    raise AssertionError("a provable fast-forward must not fetch full history")
+
+  monkeypatch.setattr(pu, "_fetch_unshallow", fail_unshallow)
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "updated"
+  assert _served_sha(platform) == new
 
 
 # --- V-B2: disjoint local edit preserved via rebase -------------------------
@@ -475,19 +509,27 @@ async def test_apply_rebuilds_frontend_but_no_restart_when_update_is_frontend_on
   calls = []
   hook_calls = []
 
-  async def fake_rebuild(repo, res):
+  def fake_rebuild(repo, res):
     calls.append((repo, res.new_sha))
 
-  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
-    pu.ReconcileResult("updated", served, new, new, hook_source_sha=new)
-  ))
+  def fake_reconcile(repo, at_boot, **kwargs):
+    result = pu.ReconcileResult(
+      "updated", served, new, new, hook_source_sha=new,
+    )
+    if kwargs.get("prepare_frontend"):
+      pu._rebuild_frontend_after_update_if_needed(repo, result)
+    return result
+
+  monkeypatch.setattr(pu, "_reconcile_under_lock", fake_reconcile)
   monkeypatch.setattr(
     pu, "_refresh_git_hooks",
     lambda repo, source_oid: hook_calls.append((repo, source_oid)) or "",
   )
   monkeypatch.setattr(pu, "_rebuild_frontend_after_update_if_needed", fake_rebuild)
 
-  res = await pu.apply_platform_update(SimpleNamespace(), platform)
+  res = await pu.apply_platform_update(
+    SimpleNamespace(), **_apply_plan(served, new, platform),
+  )
 
   # The frontend rebuilds into dist (served per-request), but the served uvicorn
   # imports no frontend — so no restart is prompted. Owner's exact complaint.
@@ -530,10 +572,15 @@ def test_reconcile_pins_upstream_hook_source_before_unlock(monkeypatch, tmp_path
     yield
     events.append("unlocked")
 
-  def fake_reconcile(repo_path, *, at_boot):
+  def fake_reconcile(
+    repo_path, *, at_boot, target_ref, fetch_remote, progress,
+  ):
     assert events == ["locked"]
     assert repo_path == repo
     assert at_boot is True
+    assert target_ref == pu.DEFAULT_TARGET_REF
+    assert fetch_remote is True
+    assert progress is None
     return pu.ReconcileResult("up_to_date", "pre", "pre", "target")
 
   def fake_rev(repo_path, ref):
@@ -743,15 +790,21 @@ async def test_apply_restarts_and_rebuilds_when_update_touches_backend(
   })
   calls = []
 
-  async def fake_rebuild(repo, res):
+  def fake_rebuild(repo, res):
     calls.append((repo, res.new_sha))
 
-  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
-    pu.ReconcileResult("updated", served, new, new)
-  ))
+  def fake_reconcile(repo, at_boot, **kwargs):
+    result = pu.ReconcileResult("updated", served, new, new)
+    if kwargs.get("prepare_frontend"):
+      pu._rebuild_frontend_after_update_if_needed(repo, result)
+    return result
+
+  monkeypatch.setattr(pu, "_reconcile_under_lock", fake_reconcile)
   monkeypatch.setattr(pu, "_rebuild_frontend_after_update_if_needed", fake_rebuild)
 
-  res = await pu.apply_platform_update(SimpleNamespace(), platform)
+  res = await pu.apply_platform_update(
+    SimpleNamespace(), **_apply_plan(served, new, platform),
+  )
 
   # A backend change (mixed with frontend) still restarts AND rebuilds.
   assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
@@ -771,14 +824,17 @@ async def test_apply_conflict_waits_for_owner_before_opening_chat(
     raise AssertionError("apply must not start a resolver chat")
 
   monkeypatch.setattr(pu, "spawn_platform_conflict_chat", fail_spawn)
-  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
+  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot, **kwargs: (
     pu.ReconcileResult(
       "conflict", _served_sha(platform), _served_sha(platform), target,
       ["backend/app/main.py"],
     )
   ))
 
-  res = await pu.apply_platform_update(SimpleNamespace(), platform)
+  current = _served_sha(platform)
+  res = await pu.apply_platform_update(
+    SimpleNamespace(), **_apply_plan(current, target, platform),
+  )
 
   assert res["state"] == pu.PlatformUpdateState.CONFLICT.value
   assert res["needs_restart"] is False
@@ -863,11 +919,14 @@ async def test_apply_marks_restart_when_disk_already_ahead_of_running_backend(
   pu.SERVING_SOURCE_FILE.write_text("platform\n")
   pu.SERVING_SHA_FILE.write_text(served + "\n")
 
-  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot: (
+  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot, **kwargs: (
     pu.ReconcileResult("up_to_date", head, head, pu.recorded_upstream_sha(platform))
   ))
 
-  res = await pu.apply_platform_update(SimpleNamespace(), platform)
+  target = pu.recorded_upstream_sha(platform)
+  res = await pu.apply_platform_update(
+    SimpleNamespace(), **_apply_plan(head, target, platform),
+  )
 
   assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
   assert res["needs_restart"] is True
@@ -1055,6 +1114,36 @@ def test_rolled_back_flag_roundtrips(clone_env):
   assert "ModuleNotFoundError" in got["error"]
 
 
+def test_update_progress_is_durable_across_worker_memory(clone_env):
+  _, platform = clone_env
+  target = _served_sha(platform)
+  original = dict(pu._UPDATE_PROGRESS)
+  try:
+    pu._set_update_progress(
+      pu.PlatformUpdatePhase.BUILDING,
+      plan_id="a" * 64,
+      target_sha=target,
+      active=True,
+    )
+    pu._UPDATE_PROGRESS.update(
+      plan_id=None,
+      target_sha=None,
+      phase=pu.PlatformUpdatePhase.IDLE.value,
+      active=False,
+      error=None,
+      updated_at=0.0,
+    )
+
+    recovered = pu.platform_update_progress()
+
+    assert recovered["phase"] == pu.PlatformUpdatePhase.BUILDING.value
+    assert recovered["active"] is True
+    assert recovered["plan_id"] == "a" * 64
+    assert stat.S_IMODE(pu.UPDATE_PROGRESS_PATH.stat().st_mode) == 0o600
+  finally:
+    pu._UPDATE_PROGRESS.update(original)
+
+
 # --- update preview: the read-only "review before Apply" surface ------------
 # platform_update_preview is fetch-free (it reads the origin/main left by the
 # last fetch), so each test fetches first to mirror the real order: Check
@@ -1068,10 +1157,34 @@ def test_update_preview_up_to_date_is_empty(clone_env):
   preview = pu.platform_update_preview(platform)
 
   assert preview["available"] is False
+  assert preview["plan_id"] is None
+  assert preview["total_commits"] == 0
+  assert preview["commits_truncated"] is False
   assert preview["commits"] == []
   assert preview["files"] == []
   assert preview["diff"] is None
   assert preview["diff_truncated"] is False
+
+
+def test_update_preview_holds_reconcile_lock_for_consistent_snapshot(
+  clone_env, monkeypatch,
+):
+  _, platform = clone_env
+  events = []
+
+  @contextmanager
+  def observed_lock():
+    events.append("entered")
+    try:
+      yield
+    finally:
+      events.append("exited")
+
+  monkeypatch.setattr(pu, "_reconcile_flock", observed_lock)
+
+  pu.platform_update_preview(platform)
+
+  assert events == ["entered", "exited"]
 
 
 def test_update_preview_clean_fast_forward(clone_env):
@@ -1084,6 +1197,11 @@ def test_update_preview_clean_fast_forward(clone_env):
 
   assert preview["available"] is True
   assert preview["target_sha"] == new
+  assert preview["plan_id"] == pu._update_plan_id(
+    preview["current_sha"], preview["target_sha"],
+  )
+  assert preview["total_commits"] == 1
+  assert preview["commits_truncated"] is False
   assert [c["subject"] for c in preview["commits"]] == ["bump line c"]
   changed = {f["path"] for f in preview["files"]}
   assert "backend/app/main.py" in changed
@@ -1137,11 +1255,170 @@ def test_update_preview_caps_large_diff(clone_env):
   assert len(preview["diff"]) == pu.MAX_PREVIEW_DIFF_CHARS
 
 
-def test_update_preview_degrades_when_not_a_clone(tmp_path):
+def test_update_preview_reports_exact_total_beyond_rendered_commit_cap(clone_env):
+  origin, platform = clone_env
+  work = origin.parent / "origin-work"
+  total = pu._PREVIEW_COMMIT_LIMIT + 7
+  for index in range(total):
+    (work / "release-counter.txt").write_text(f"{index}\n")
+    _git(work, "add", "release-counter.txt")
+    _git(work, "commit", "-q", "-m", f"release {index}")
+  _git(work, "push", "-q", "origin", "main")
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+
+  assert preview["total_commits"] == total
+  assert len(preview["commits"]) == pu._PREVIEW_COMMIT_LIMIT
+  assert preview["commits_truncated"] is True
+
+
+def test_update_preview_degrades_when_not_a_clone(tmp_path, monkeypatch):
   # A non-git directory must degrade to an empty preview, never raise, so the
-  # route + Settings can't break on a missing/odd platform tree.
+  # route + Settings can't break on a missing/odd platform tree. It also has no
+  # source snapshot to protect and therefore must not need the durable /data
+  # reconcile lock (which may be unavailable on a recovery/read-only surface).
+  @contextmanager
+  def fail_if_locked():
+    raise AssertionError("non-clone preview attempted to acquire reconcile lock")
+    yield
+
+  monkeypatch.setattr(pu, "_reconcile_flock", fail_if_locked)
   preview = pu.platform_update_preview(tmp_path)
 
   assert preview["available"] is False
   assert preview["diff"] is None
   assert preview["commits"] == []
+
+
+@pytest.mark.asyncio
+async def test_apply_installs_exact_preview_target_without_refetching_moving_origin(
+  monkeypatch, clone_env,
+):
+  origin, platform = clone_env
+  reviewed = _advance_origin(
+    origin,
+    edits={"backend/app/main.py":
+      _MAIN_PY.replace("LINE_C = 3", "LINE_C = 301")},
+    msg="reviewed release",
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+  newer = _advance_origin(
+    origin,
+    edits={"backend/app/main.py":
+      _MAIN_PY.replace("LINE_C = 301", "LINE_C = 302")},
+    msg="newer release",
+  )
+  def fail_fetch(_repo):
+    raise AssertionError("immutable Apply must not fetch the moving remote")
+
+  monkeypatch.setattr(pu, "_fetch", fail_fetch)
+
+  result = await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  )
+
+  assert result["upstream_commit"] == reviewed
+  assert _served_sha(platform) == reviewed
+  assert "LINE_C = 301" in (platform / "backend/app/main.py").read_text()
+  assert "LINE_C = 302" not in (platform / "backend/app/main.py").read_text()
+  # The canonical remote really advanced, but Apply used the already-reviewed
+  # object without moving this clone's tracking ref or incurring another fetch.
+  assert newer != reviewed
+  assert pu._rev(platform, pu.DEFAULT_TARGET_REF) == reviewed
+
+
+@pytest.mark.asyncio
+async def test_apply_rejects_plan_when_local_tip_changed_after_preview(clone_env):
+  origin, platform = clone_env
+  _advance_origin(
+    origin,
+    edits={"backend/app/main.py":
+      _MAIN_PY.replace("LINE_C = 3", "LINE_C = 303")},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+  changed = _local_commit(
+    platform,
+    edits={"backend/app/local.py": "LOCAL = True\n"},
+  )
+
+  with pytest.raises(pu.PlatformUpdateError, match="update_plan_stale"):
+    await pu.apply_platform_update(
+      SimpleNamespace(),
+      plan_id=preview["plan_id"],
+      current_sha=preview["current_sha"],
+      target_sha=preview["target_sha"],
+      repo=platform,
+    )
+
+  assert _served_sha(platform) == changed
+  progress = pu.platform_update_progress()
+  assert progress["phase"] == pu.PlatformUpdatePhase.FAILED.value
+  assert progress["active"] is False
+  assert progress["error"] == "update_plan_stale"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("started_with_upstream_marker", [True, False])
+async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
+  monkeypatch, clone_env, started_with_upstream_marker,
+):
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  if not started_with_upstream_marker:
+    pu._clear_upstream(platform)
+  previous_upstream = pu.recorded_upstream_sha(platform)
+  pu.RESTART_NEEDED_FLAG.write_text("preexisting-restart")
+  target = _advance_origin(
+    origin,
+    edits={"frontend/src/App.jsx": "export default 'broken candidate'\n"},
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+
+  def fail_build(_repo, _result):
+    raise RuntimeError("vite exploded")
+
+  monkeypatch.setattr(
+    pu, "_rebuild_frontend_after_update_if_needed", fail_build,
+  )
+
+  result = await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  )
+
+  assert result["state"] == pu.PlatformUpdateState.ROLLED_BACK.value
+  assert result["phase"] == pu.PlatformUpdatePhase.BLOCKED.value
+  assert result["needs_restart"] is False
+  assert result["upstream_commit"] == target
+  assert result["merge_commit"] is None
+  assert _served_sha(platform) == before
+  assert pu.recorded_upstream_sha(platform) == previous_upstream
+  assert pu.RESTART_NEEDED_FLAG.read_text() == "preexisting-restart"
+  assert not (platform / "frontend/src/App.jsx").exists()
+  rollback = pu._read_rolled_back_flag()
+  assert rollback["target"] == target
+  assert "frontend_build_failed" in rollback["error"]
+  assert "vite exploded" in rollback["error"]
+  progress = pu.platform_update_progress()
+  assert progress["phase"] == pu.PlatformUpdatePhase.BLOCKED.value
+  assert progress["active"] is False
+  assert "frontend_build_failed" in progress["error"]
+
+
+def test_entrypoint_ignores_durable_update_progress_from_outer_data_repo():
+  entrypoint = (
+    Path(__file__).resolve().parents[1] / "scripts" / "entrypoint.sh"
+  ).read_text(encoding="utf-8")
+
+  assert ".platform-update-progress.json" in entrypoint

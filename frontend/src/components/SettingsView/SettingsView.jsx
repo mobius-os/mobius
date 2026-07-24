@@ -7,6 +7,10 @@ import Sun from 'lucide-react/dist/esm/icons/sun.mjs'
 import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
+import {
+  platformStatusFromApply,
+  platformUpdateStatusLabel,
+} from '../../lib/platformUpdateState.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
 import {
   PROVIDER_AVAILABILITY_PHASE,
@@ -60,32 +64,6 @@ const FALLBACK_MODEL_ROWS = {
 const DEFAULT_BACKGROUND_MODELS = {
   claude: 'claude-opus-4-8',
   codex: 'gpt-5.6-terra',
-}
-
-// POST /platform/apply is the authoritative outcome of the mutation it just
-// performed. Project that result into the status shape immediately so a failed
-// follow-up GET /status cannot leave Settings claiming the old state. A fresh
-// successful status response still replaces this fallback in refreshPlatform.
-function platformStatusFromApply(previous, result) {
-  const state = result.state
-  const upstream = result.upstream_commit || previous?.recorded_upstream_sha || null
-  const clean = state === 'restart_needed' || state === 'up_to_date'
-  return {
-    ...(previous || {}),
-    state,
-    available: state === 'rolled_back',
-    needs_restart: state === 'restart_needed' || !!result.needs_restart,
-    current_build_sha: previous?.current_build_sha || null,
-    recorded_upstream_sha: upstream,
-    contained_upstream_sha: clean
-      ? (result.upstream_commit || previous?.contained_upstream_sha || null)
-      : (previous?.contained_upstream_sha || null),
-    seed_required: false,
-    conflict_paths: Array.isArray(result.conflict_paths)
-      ? result.conflict_paths
-      : [],
-    conflict_chat_id: state === 'conflict' ? (result.chat_id || null) : null,
-  }
 }
 
 function defaultEffort(provider) {
@@ -361,14 +339,16 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // 'idle' | 'applying' | 'resolving' | 'restarting'.
   const [platform, setPlatform] = useState(null)
   const [platformPhase, setPlatformPhase] = useState('idle')
+  const [platformProgress, setPlatformProgress] = useState(null)
   const [platformError, setPlatformError] = useState('')
   // Whether the update-review sheet is open. The "Update" button routes through
   // it so the owner reviews the incoming changes before applying, rather than
   // Apply firing on the first click.
   const [reviewOpen, setReviewOpen] = useState(false)
-  // Every update-row action occupies the same conditional slot. Keep one ref
-  // on that slot so closing the review can focus the live replacement button
-  // after refreshPlatform swaps Review for Restart/Resolve/Check.
+  // Keep one ref on the recommended next action so closing the review can
+  // focus its live replacement. A restart-pending row can now have TWO actions
+  // (check/review another release + restart), so this is no longer a single
+  // conditional action slot.
   const platformActionRef = useRef(null)
   // 'idle' | 'checking' | 'checked' | 'error' — the "Check for updates" button
   // asks the service worker to re-check cached frontend assets and re-reads
@@ -915,6 +895,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   async function checkForUpdates() {
     if (updatePhase === 'checking') return
     setUpdatePhase('checking')
+    let freshPlatform = null
     const frontendP = (async () => {
       if ('serviceWorker' in navigator) {
         const reg = await navigator.serviceWorker.getRegistration()
@@ -935,10 +916,19 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       // resolved probe as success, so a swallowed !ok let updateCheckOutcome
       // report "No updates found" on a real 500 (feature 20).
       if (!res.ok) throw new Error(`platform check failed: ${res.status}`)
-      setPlatform(await res.json())
+      freshPlatform = await res.json()
+      setPlatform(freshPlatform)
     })()
     const results = await Promise.allSettled([frontendP, platformP])
     setUpdatePhase(updateCheckOutcome(results))
+    // Discovering an update replaces the focused Check button with Review.
+    // Carry focus across that state transition instead of dropping keyboard
+    // users back onto the page body.
+    if (freshPlatform?.available) {
+      requestAnimationFrame(() => {
+        platformActionRef.current?.focus({ preventScroll: true })
+      })
+    }
   }
 
   // Reload onto the FRESH service worker so the new precache — including the
@@ -980,6 +970,34 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   }, [])
   useEffect(() => { refreshPlatform() }, [refreshPlatform])
 
+  // Apply is currently one synchronous request, but the server publishes its
+  // real fetch/reconcile/validate/build phases while that request is running.
+  // Poll only for the short in-flight window; the future supervisor-owned
+  // updater can preserve this response shape behind SSE or durable job polling.
+  useEffect(() => {
+    if (platformPhase !== 'applying') return undefined
+    let cancelled = false
+    let timer = null
+
+    const poll = async () => {
+      try {
+        const res = await api.platform.updateProgress()
+        if (res.ok) {
+          const body = await res.json()
+          if (!cancelled) setPlatformProgress(body)
+        }
+      } catch {
+        // Progress is explanatory; the Apply response remains authoritative.
+      }
+      if (!cancelled) timer = window.setTimeout(poll, 350)
+    }
+    poll()
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [platformPhase])
+
   // Silent freshen on opening Settings: ask the SW for a newer cache manifest
   // and re-read /api/version so the Möbius row's served identity is current the
   // moment it renders. This is the cheap on-open pass (no git fetch) — it
@@ -1011,17 +1029,29 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // chat. Returns the domain outcome (not merely HTTP success) so the review
   // sheet closes only for a clean apply and becomes an explicit result when
   // the update was blocked.
-  async function applyPlatformUpdate() {
+  async function applyPlatformUpdate(plan) {
     if (platformPhase !== 'idle') return { ok: false }
+    if (!plan?.plan_id || !plan?.current_sha || !plan?.target_sha) {
+      setPlatformError('The update plan is incomplete. Refresh the preview and try again.')
+      return { ok: false }
+    }
     setPlatformError('')
+    setPlatformProgress(null)
     setPlatformPhase('applying')
     try {
-      const res = await api.platform.apply()
+      const res = await api.platform.apply(plan)
       let body = null
       try { body = await res.json() } catch {}
       if (!res.ok) {
         const detail = body?.detail || ''
-        setPlatformError(detail ? `Update failed: ${detail}` : 'Update failed — the instance is unchanged.')
+        await refreshPlatform()
+        setPlatformError(
+          detail === 'update_plan_stale'
+            ? 'Möbius changed since this preview. Close it and review the refreshed update before applying.'
+            : detail
+              ? `Update stopped: ${detail}`
+              : 'Update stopped before completion. Check the current status before trying again.',
+        )
         return { ok: false }
       }
       const state = typeof body?.state === 'string' ? body.state : ''
@@ -1040,7 +1070,10 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       )
       return { ok: false, state }
     } catch {
-      setPlatformError('Update failed — the instance is unchanged.')
+      await refreshPlatform()
+      setPlatformError(
+        'Update stopped before completion. Check the current status before trying again.',
+      )
       return { ok: false }
     } finally {
       setPlatformPhase('idle')
@@ -1442,16 +1475,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           )}
         </section>
 
-        {/* ONE honest "Möbius" update surface. Folds platform availability,
-            conflict repair, and restart-to-finish into a single row: one status
-            line, one action. Priority: an in-progress conflict, then a pending
-            restart, then an available update, then up to date. Per-layer
-            mechanics stay invisible (the SW + platform_update.py). Always
-            renders (it carries the Möbius build identity), so there is no second
-            surface. The action slot holds exactly one contextual button; when
-            up to date that button is an explicit "Check for updates" (git fetch
-            + SW re-check) with its own "Checking…" text — it never mutates the
-            status label beside it. */}
+        {/* ONE honest "Möbius" update surface. Restart readiness and update
+            availability are independent: once an update is staged, the owner
+            can still check for or review a newer release and fold it into the
+            SAME eventual restart. A conflict remains the sole blocking state.
+            Per-layer mechanics stay invisible (the SW + platform_update.py).
+            The row always carries the current build identity. */}
         <section className="settings__section settings__section--compact">
           <h2 className="settings__section-title">Möbius</h2>
           <div className="settings__row settings__row--top">
@@ -1459,15 +1488,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
               <StatusDot
                 color={platformConflict || platformRolledBack || platformRestart || updateAvailable ? '--accent' : '--green'}
               >
-                {platformConflict
-                  ? 'Update blocked'
-                  : platformRolledBack
-                    ? 'Update needs repair'
-                    : platformRestart
-                      ? 'Restart to finish'
-                      : updateAvailable
-                        ? 'New update available'
-                        : 'Up to date'}
+                {platformUpdateStatusLabel(platform)}
               </StatusDot>
               {mobiusVersion.primarySha && (
                 <p className="settings__build">
@@ -1494,19 +1515,44 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
                 </button>
               ) : null
             ) : platformRestart ? (
-              <button
-                ref={platformActionRef}
-                className="settings__btn settings__btn--sm settings__btn--nowrap"
-                type="button"
-                onClick={restartToFinish}
-                disabled={platformPhase === 'restarting'}
+              <div
+                className="settings__update-actions"
+                role="group"
+                aria-label="Update ready actions"
               >
-                {/* "Restart to finish", not bare "Restart" — the Server section's
-                    standalone "Restart" sits in the same view, so the word
-                    "Restart" must mean exactly one thing. This one completes a
-                    pending update; the label says so. */}
-                {platformPhase === 'restarting' ? 'Restarting…' : 'Restart to finish'}
-              </button>
+                {updateAvailable ? (
+                  <button
+                    ref={platformActionRef}
+                    className="settings__btn settings__btn--sm settings__btn--nowrap"
+                    type="button"
+                    onClick={openUpdateReview}
+                    disabled={mobiusUpdating || platformPhase !== 'idle'}
+                  >
+                    {mobiusUpdating ? 'Updating…' : 'Review update'}
+                  </button>
+                ) : (
+                  <button
+                    className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
+                    type="button"
+                    onClick={checkForUpdates}
+                    disabled={updatePhase === 'checking' || platformPhase !== 'idle'}
+                  >
+                    {updatePhase === 'idle' ? 'Check for more' : checkUpdatesLabel}
+                  </button>
+                )}
+                <button
+                  ref={updateAvailable ? null : platformActionRef}
+                  className={`settings__btn settings__btn--sm settings__btn--nowrap${updateAvailable ? ' settings__btn--outline' : ''}`}
+                  type="button"
+                  onClick={restartToFinish}
+                  disabled={platformPhase !== 'idle' || updatePhase === 'checking'}
+                >
+                  {/* This completes every release staged since the last boot.
+                      A second update joins this same restart instead of forcing
+                      an intermediate one. */}
+                  {platformPhase === 'restarting' ? 'Restarting…' : 'Restart to finish'}
+                </button>
+              </div>
             ) : updateAvailable ? (
               <button
                 ref={platformActionRef}
@@ -1552,6 +1598,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
             applying={platformPhase === 'applying'}
             resolving={platformPhase === 'resolving'}
             applyError={platformError}
+            applyProgress={platformProgress}
           />
         )}
 

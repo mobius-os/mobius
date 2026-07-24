@@ -202,7 +202,11 @@ def validate_manifest_contract(manifest) -> None:
       "none/summary/full."
     )
   for field in (
-    "manage_apps", "manage_skills", "github_access", "filesystem_access",
+    "manage_apps",
+    "manage_skills",
+    "github_access",
+    "github_connect",
+    "filesystem_access",
     "background_agent",
   ):
     if field in permissions and not isinstance(permissions[field], bool):

@@ -42,13 +42,9 @@ function navChatDetail(id) {
 
 /** Click the Settings entry in the drawer; assumes drawer is open. */
 async function navigateToSettings(page) {
-  await page.evaluate(() => {
-    const buttons = document.querySelectorAll('.drawer button')
-    for (const b of buttons) {
-      if (b.textContent.trim() === 'Settings') { b.click(); return }
-    }
-  })
-  await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
+  const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+  await navigation.getByRole('button', { name: 'Settings', exact: true }).click()
+  await expect(page.locator('.settings')).toBeVisible()
 }
 
 // ---------------------------------------------------------------------------
@@ -145,14 +141,16 @@ async function navigateToChat(page, index = 0) {
 
 /** Navigate to an app by clicking in the drawer. */
 async function navigateToApp(page, index = 0) {
-  await page.evaluate((idx) => {
+  const clicked = await page.evaluate((idx) => {
     const appSection = document.querySelector('.drawer__group:last-of-type .drawer__scroll')
       || document.querySelectorAll('.drawer__scroll')[1]
-    if (!appSection) return
+    if (!appSection) return false
     const items = appSection.querySelectorAll('button')
-    if (items[idx]) items[idx].click()
+    if (!items[idx]) return false
+    items[idx].click()
+    return true
   }, index)
-  await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+  if (clicked) await expect(page.locator('.canvas')).toBeVisible()
 }
 
 /** Open the drawer via the toggle button (aria-expanded attribute). */
@@ -180,11 +178,13 @@ async function closeDrawerButton(page) {
 
 /** Close the drawer via the toggle button (without navigating). */
 async function closeDrawerToggle(page) {
+  const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+  const wasOpen = await toggle.getAttribute('aria-expanded') === 'true'
   await page.evaluate(() => {
     const btn = document.querySelector('[aria-expanded]')
     if (btn && btn.getAttribute('aria-expanded') === 'true') btn.click()
   })
-  await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
+  if (wasOpen) await expect(toggle).toHaveAttribute('aria-expanded', 'false')
 }
 
 /** Trigger browser back via history.back().
@@ -633,11 +633,9 @@ test.describe('Back button edge cases', () => {
 })
 
 test.describe('Drawer state machine — extended invariants', () => {
-  // These tests pin down each state transition of the simplified
-  // navigation/drawer state machine. State variables: activeView,
-  // drawerOpen, navStack (pushed by navTo, popped by popstate
-  // handler). Drawer is NOT in browser history — that's the
-  // post-rewrite design.
+  // These tests pin down each transition of the navigation/drawer state
+  // machine. A modal drawer owns one history sentinel; destination navigation
+  // retags that entry, and every close is consumed by the popstate handler.
 
   test('11. Repeated openDrawer clicks while open are toggle-guarded no-ops', async ({ page }) => {
     // The toggle button calls openDrawer only when aria-expanded is
@@ -793,10 +791,10 @@ test.describe('Drawer state machine — extended invariants', () => {
     expect((await getNavState(page)).activeChatId).toBe(startId)
   })
 
-  test('19. closeDrawer via toggle leaves history unchanged; back from open navigates', async ({ page }) => {
-    // Post-rewrite: the brand-toggle close and the OS back-gesture from
-    // drawer-open are no longer equivalent. Toggle is pure state;
-    // back is a real navigation. Document the difference.
+  test('19. closeDrawer via toggle consumes its sentinel without growing history', async ({ page }) => {
+    // A toggle close and OS Back both traverse the drawer sentinel. History
+    // length remains stable because closing moves the active index; it does not
+    // push another entry.
     await setup(page)
     await openDrawer(page)
     const beforeToggle = await page.evaluate(() => history.length)
@@ -899,6 +897,9 @@ test.describe('Drawer state machine — extended invariants', () => {
     const appFrame = page.frames().find(frame => /\/api\/apps\/\d+\/frame/.test(frame.url()))
     if (!appFrame) test.skip(true, 'app frame did not load')
 
+    await expect.poll(
+      () => appFrame.evaluate(() => typeof window.mobius?.nav?.open === 'function')
+    ).toBe(true)
     await appFrame.evaluate(() => {
       window.__mobiusBackCount = 0
       window.__mobiusForwardCount = 0

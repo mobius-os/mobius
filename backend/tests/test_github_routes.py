@@ -18,11 +18,13 @@ import json
 import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import parse_qs
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.responses import Response
 
 from app import github_auth, source_status
@@ -95,9 +97,14 @@ def _write_token(
   return token
 
 
-def _app_token(client, owner_token, *, github_access=False):
-  """Creates an app (optionally granting github_access on the row) and
-  returns (app_id, app_scoped_token)."""
+def _app_token(
+  client,
+  owner_token,
+  *,
+  github_access=False,
+  github_connect=False,
+):
+  """Create an app with independently reviewable GitHub grants."""
   r = client.post("/api/apps/", json={
     "name": "contribute-test",
     "description": "t",
@@ -105,7 +112,7 @@ def _app_token(client, owner_token, *, github_access=False):
   }, headers={"Authorization": f"Bearer {owner_token}"})
   assert r.status_code == 201, r.text
   app_id = r.json()["id"]
-  if github_access:
+  if github_access or github_connect:
     # Set the column directly — the plain create path doesn't parse the
     # permission (that's the install path); the gate reads the row at
     # request time regardless (deps.get_owner_or_app_with_github_access).
@@ -114,7 +121,8 @@ def _app_token(client, owner_token, *, github_access=False):
     s = SessionLocal()
     try:
       app = s.query(models.App).filter(models.App.id == app_id).first()
-      app.github_access = True
+      app.github_access = bool(github_access)
+      app.github_connect = bool(github_connect)
       s.commit()
     finally:
       s.close()
@@ -135,6 +143,22 @@ def _fail(request):
   return httpx.Response(591, json={"unexpected": str(request.url)})
 
 
+def _poll(client, auth, attempt_id):
+  return client.post(
+    "/api/github/connect/poll",
+    headers=auth,
+    json={"attempt_id": attempt_id},
+  )
+
+
+def _patch_device_flow(**changes):
+  flow = github_auth.get_device_flow()
+  assert flow is not None
+  flow.update(changes)
+  github_auth.set_device_flow(flow)
+  return flow
+
+
 # --- connect/start ----------------------------------------------------
 
 
@@ -143,6 +167,19 @@ def test_connect_start_requires_client_id(client, auth, monkeypatch):
   r = client.post("/api/github/connect/start", headers=auth)
   assert r.status_code == 409
   assert "GITHUB_OAUTH_CLIENT_ID" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_disconnected_start_never_publishes_attempt():
+  class GoneRequest:
+    async def is_disconnected(self):
+      return True
+
+  with pytest.raises(HTTPException) as caught:
+    await github_routes._start_device_attempt(GoneRequest(), None)
+
+  assert getattr(caught.value, "status_code", None) == 499
+  assert github_auth.get_device_flow() is None
 
 
 def test_connect_start_returns_user_code(client, auth, monkeypatch):
@@ -164,7 +201,34 @@ def test_connect_start_returns_user_code(client, auth, monkeypatch):
   assert body["user_code"] == "WXYZ-1234"
   assert body["verification_uri"] == "https://github.com/login/device"
   assert body["interval"] == 5
+  assert body["attempt_id"]
+  assert body["expires_at"] > 0
   assert github_auth.get_device_flow()["device_code"] == "DEV"
+
+
+def test_connect_start_bounds_invalid_provider_durations(
+  client, auth, monkeypatch,
+):
+  _set_client_id(monkeypatch, "cid-123")
+
+  def handler(request):
+    if str(request.url) == _DEVICE_CODE_URL:
+      return httpx.Response(200, json={
+        "device_code": "DEV",
+        "user_code": "WXYZ-1234",
+        "verification_uri": "https://github.com/login/device",
+        "interval": "not-a-number",
+        "expires_in": 999999,
+      })
+    return _fail(request)
+
+  _install_mock_transport(monkeypatch, handler)
+  response = client.post("/api/github/connect/start", headers=auth)
+
+  assert response.status_code == 200
+  assert response.json()["interval"] == 5
+  assert response.json()["expires_in"] == 1800
+  assert github_auth.get_device_flow()["interval"] == 5
 
 
 def test_connect_start_can_explicitly_request_workflow_scope(
@@ -193,13 +257,18 @@ def test_connect_start_can_explicitly_request_workflow_scope(
   assert r.json()["requested_scopes"] == ["public_repo", "workflow"]
 
 
-def test_connect_start_app_with_github_access(
+def test_connect_start_app_with_github_connect(
   client, owner_token, monkeypatch,
 ):
-  """The Contribute app drives connect from its own UI: a github_access
+  """The Contribute app drives connect from its own UI: a github_connect
   app token is accepted on the connect flow, not just the owner JWT."""
   _set_client_id(monkeypatch, "cid-123")
-  _, app_token = _app_token(client, owner_token, github_access=True)
+  _, app_token = _app_token(
+    client,
+    owner_token,
+    github_access=True,
+    github_connect=True,
+  )
 
   def handler(request):
     if str(request.url) == _DEVICE_CODE_URL:
@@ -217,24 +286,24 @@ def test_connect_start_app_with_github_access(
   assert r.json()["user_code"] == "WXYZ-1234"
 
 
-def test_connect_start_app_without_github_access_forbidden(
+def test_connect_start_app_with_data_only_grant_forbidden(
   client, owner_token, monkeypatch,
 ):
   _set_client_id(monkeypatch, "cid-123")
-  _, app_token = _app_token(client, owner_token, github_access=False)
+  _, app_token = _app_token(client, owner_token, github_access=True)
   r = client.post("/api/github/connect/start",
                   headers={"Authorization": f"Bearer {app_token}"})
   assert r.status_code == 403
-  assert "github_access" in r.json()["detail"]
+  assert "github_connect" in r.json()["detail"]
 
 
 # --- connect/poll -----------------------------------------------------
 
 
-def test_poll_no_flow_returns_none(client, auth):
-  r = client.post("/api/github/connect/poll", headers=auth)
-  assert r.status_code == 200
-  assert r.json() == {"status": "none"}
+def test_poll_unknown_attempt_is_explicit(client, auth):
+  r = _poll(client, auth, "missing-attempt")
+  assert r.status_code == 404
+  assert "no longer exists" in r.json()["detail"]
 
 
 def test_device_flow_happy_path(client, auth, monkeypatch, tmp_path):
@@ -274,35 +343,41 @@ def test_device_flow_happy_path(client, auth, monkeypatch, tmp_path):
 
   _install_mock_transport(monkeypatch, handler)
 
-  assert client.post("/api/github/connect/start", headers=auth).status_code == 200
+  start = client.post("/api/github/connect/start", headers=auth)
+  assert start.status_code == 200
+  attempt_id = start.json()["attempt_id"]
 
   # Poll before GitHub's interval elapses — answered pending WITHOUT hitting
   # the token endpoint (the server paces so an eager frontend can't trip
   # slow_down escalation).
-  r = client.post("/api/github/connect/poll", headers=auth)
-  assert r.json() == {"status": "pending"}
+  r = _poll(client, auth, attempt_id)
+  assert r.json()["status"] == "pending"
+  assert r.json()["attempt_id"] == attempt_id
+  assert r.json()["retry_after"] > 0
   assert calls["access_token"] == 0
 
   # authorization_pending — interval unchanged.
-  github_auth.get_device_flow()["next_poll_at"] = 0
-  r = client.post("/api/github/connect/poll", headers=auth)
-  assert r.json() == {"status": "pending"}
+  _patch_device_flow(next_poll_at=0)
+  r = _poll(client, auth, attempt_id)
+  assert r.json()["status"] == "pending"
   assert calls["access_token"] == 1
   assert github_auth.get_device_flow()["interval"] == 5
 
   # slow_down — interval bumps to max(payload 7, prev 5 + 5) = 10.
-  github_auth.get_device_flow()["next_poll_at"] = 0
-  r = client.post("/api/github/connect/poll", headers=auth)
-  assert r.json() == {"status": "pending"}
+  _patch_device_flow(next_poll_at=0)
+  r = _poll(client, auth, attempt_id)
+  assert r.json()["status"] == "pending"
   assert calls["access_token"] == 2
   assert github_auth.get_device_flow()["interval"] == 10
 
-  # success — credentials persisted, flow cleared.
-  github_auth.get_device_flow()["next_poll_at"] = 0
-  r = client.post("/api/github/connect/poll", headers=auth)
-  assert r.json() == {"status": "complete", "login": "octocat"}
+  # success — credentials and terminal attempt state are persisted.
+  _patch_device_flow(next_poll_at=0)
+  r = _poll(client, auth, attempt_id)
+  assert r.json()["status"] == "complete"
+  assert r.json()["login"] == "octocat"
   assert calls["user"] == 1
-  assert github_auth.get_device_flow() is None
+  assert github_auth.get_device_flow()["status"] == "complete"
+  assert "device_code" not in github_auth.get_device_flow()
 
   # Both credential files exist at 0600.
   for path in (github_auth.STATE_PATH, github_auth.HOSTS_PATH):
@@ -325,8 +400,61 @@ def test_device_flow_happy_path(client, auth, monkeypatch, tmp_path):
   assert _git_get("user.email") == "42+octocat@users.noreply.github.com"
 
 
+def test_device_token_survives_user_lookup_retry(
+  client, auth, monkeypatch,
+):
+  _set_client_id(monkeypatch, "cid-123")
+  calls = {"token": 0, "user": 0}
+
+  def handler(request):
+    url = str(request.url)
+    if url == _DEVICE_CODE_URL:
+      return httpx.Response(200, json={
+        "device_code": "DEV", "user_code": "AB-12",
+        "verification_uri": "https://github.com/login/device",
+        "interval": 5, "expires_in": 900,
+      })
+    if url == _ACCESS_TOKEN_URL:
+      calls["token"] += 1
+      return httpx.Response(200, json={"access_token": "gh-recoverable"})
+    if url == "https://api.github.com/user":
+      calls["user"] += 1
+      if calls["user"] == 1:
+        return httpx.Response(503, json={"message": "temporarily unavailable"})
+      return httpx.Response(
+        200,
+        json={"login": "octocat", "id": 42},
+        headers={"x-oauth-scopes": "public_repo"},
+      )
+    return _fail(request)
+
+  _install_mock_transport(monkeypatch, handler)
+  attempt_id = client.post(
+    "/api/github/connect/start", headers=auth,
+  ).json()["attempt_id"]
+  flow = github_auth.get_device_flow()
+  flow["next_poll_at"] = 0
+  github_auth.set_device_flow(flow)
+
+  failed_lookup = _poll(client, auth, attempt_id)
+  assert failed_lookup.status_code == 502
+  flow = github_auth.get_device_flow()
+  assert flow["pending_token"] == "gh-recoverable"
+  assert "device_code" not in flow
+
+  flow["next_poll_at"] = 0
+  github_auth.set_device_flow(flow)
+  completed = _poll(client, auth, attempt_id)
+
+  assert completed.status_code == 200
+  assert completed.json()["status"] == "complete"
+  assert calls == {"token": 1, "user": 2}
+  assert github_auth.read_state()["token"] == "gh-recoverable"
+  assert "pending_token" not in github_auth.get_device_flow()
+
+
 @pytest.mark.parametrize("reason", ["expired_token", "access_denied"])
-def test_poll_failure_clears_state(client, auth, monkeypatch, reason):
+def test_poll_failure_preserves_terminal_state(client, auth, monkeypatch, reason):
   _set_client_id(monkeypatch, "cid-123")
 
   def handler(request):
@@ -342,11 +470,135 @@ def test_poll_failure_clears_state(client, auth, monkeypatch, reason):
     return _fail(request)
 
   _install_mock_transport(monkeypatch, handler)
-  assert client.post("/api/github/connect/start", headers=auth).status_code == 200
-  github_auth.get_device_flow()["next_poll_at"] = 0
-  r = client.post("/api/github/connect/poll", headers=auth)
-  assert r.json() == {"status": "failed", "reason": reason}
-  assert github_auth.get_device_flow() is None
+  start = client.post("/api/github/connect/start", headers=auth)
+  assert start.status_code == 200
+  attempt_id = start.json()["attempt_id"]
+  _patch_device_flow(next_poll_at=0)
+  r = _poll(client, auth, attempt_id)
+  assert r.json()["status"] == "failed"
+  assert r.json()["reason"] == reason
+  assert github_auth.get_device_flow()["status"] == "failed"
+  assert "device_code" not in github_auth.get_device_flow()
+
+
+def test_device_attempt_is_reloaded_from_durable_state(
+  client, auth, monkeypatch,
+):
+  _set_client_id(monkeypatch, "cid-123")
+
+  def handler(request):
+    if str(request.url) == _DEVICE_CODE_URL:
+      return httpx.Response(200, json={
+        "device_code": "DEV", "user_code": "AB-12",
+        "verification_uri": "https://github.com/login/device",
+        "interval": 5, "expires_in": 900,
+      })
+    return _fail(request)
+
+  _install_mock_transport(monkeypatch, handler)
+  start = client.post("/api/github/connect/start", headers=auth)
+  attempt_id = start.json()["attempt_id"]
+  assert stat.S_IMODE(github_auth.DEVICE_FLOW_PATH.stat().st_mode) == 0o600
+
+  recovered = github_auth.get_device_flow()
+  assert recovered["attempt_id"] == attempt_id
+  assert recovered["device_code"] == "DEV"
+  assert recovered["status"] == "waiting"
+
+  recovered["user_code"] = "UPDATED-BY-OTHER-WORKER"
+  github_auth._write_0600(
+    github_auth.DEVICE_FLOW_PATH,
+    json.dumps(recovered),
+  )
+  assert (
+    github_auth.get_device_flow()["user_code"]
+    == "UPDATED-BY-OTHER-WORKER"
+  )
+
+
+def test_new_attempt_supersedes_stale_tab(client, auth, monkeypatch):
+  _set_client_id(monkeypatch, "cid-123")
+  device_codes = iter(("DEV-OLD", "DEV-NEW"))
+
+  def handler(request):
+    if str(request.url) == _DEVICE_CODE_URL:
+      device_code = next(device_codes)
+      return httpx.Response(200, json={
+        "device_code": device_code, "user_code": "AB-12",
+        "verification_uri": "https://github.com/login/device",
+        "interval": 5, "expires_in": 900,
+      })
+    return _fail(request)
+
+  _install_mock_transport(monkeypatch, handler)
+  old_id = client.post(
+    "/api/github/connect/start", headers=auth,
+  ).json()["attempt_id"]
+  new_id = client.post(
+    "/api/github/connect/start", headers=auth,
+  ).json()["attempt_id"]
+
+  stale = _poll(client, auth, old_id)
+  assert stale.status_code == 404
+  assert github_auth.get_device_flow()["attempt_id"] == new_id
+  assert github_auth.get_device_flow()["device_code"] == "DEV-NEW"
+
+
+def test_cancel_targets_exact_attempt(client, auth, monkeypatch):
+  _set_client_id(monkeypatch, "cid-123")
+
+  def handler(request):
+    if str(request.url) == _DEVICE_CODE_URL:
+      return httpx.Response(200, json={
+        "device_code": "DEV", "user_code": "AB-12",
+        "verification_uri": "https://github.com/login/device",
+        "interval": 5, "expires_in": 900,
+      })
+    return _fail(request)
+
+  _install_mock_transport(monkeypatch, handler)
+  attempt_id = client.post(
+    "/api/github/connect/start", headers=auth,
+  ).json()["attempt_id"]
+
+  cancelled = client.post(
+    "/api/github/connect/cancel",
+    headers=auth,
+    json={"attempt_id": attempt_id},
+  )
+
+  assert cancelled.status_code == 200
+  assert cancelled.json()["status"] == "cancelled"
+  assert github_auth.get_device_flow()["status"] == "cancelled"
+  assert "device_code" not in github_auth.get_device_flow()
+
+
+def test_expired_attempt_never_calls_github(client, auth, monkeypatch):
+  _set_client_id(monkeypatch, "cid-123")
+
+  def handler(request):
+    if str(request.url) == _DEVICE_CODE_URL:
+      return httpx.Response(200, json={
+        "device_code": "DEV", "user_code": "AB-12",
+        "verification_uri": "https://github.com/login/device",
+        "interval": 5, "expires_in": 900,
+      })
+    return _fail(request)
+
+  _install_mock_transport(monkeypatch, handler)
+  attempt_id = client.post(
+    "/api/github/connect/start", headers=auth,
+  ).json()["attempt_id"]
+  flow = github_auth.get_device_flow()
+  flow["expires_at"] = 0
+  github_auth.set_device_flow(flow)
+
+  expired = _poll(client, auth, attempt_id)
+
+  assert expired.status_code == 200
+  assert expired.json()["status"] == "expired"
+  assert expired.json()["reason"] == "expired_token"
+  assert "device_code" not in github_auth.get_device_flow()
 
 
 # --- connect/token (classic PAT) --------------------------------------
@@ -389,6 +641,11 @@ def test_connect_token_happy_path(client, auth, monkeypatch):
     return _fail(request)
 
   _install_mock_transport(monkeypatch, handler)
+  github_auth.set_device_flow({
+    "attempt_id": "superseded-by-pat",
+    "status": "waiting",
+    "device_code": "DEV",
+  })
   r = client.post("/api/github/connect/token",
                   json={"token": "ghp_classic123"}, headers=auth)
   assert r.status_code == 200, r.text
@@ -397,6 +654,51 @@ def test_connect_token_happy_path(client, auth, monkeypatch):
   assert state["token"] == "ghp_classic123"
   assert state["token_source"] == "pat"
   assert stat.S_IMODE(github_auth.STATE_PATH.stat().st_mode) == 0o600
+  hosts = github_auth.HOSTS_PATH.read_text()
+  assert 'user: "octocat"' in hosts
+  assert 'oauth_token: "ghp_classic123"' in hosts
+  assert github_auth.get_device_flow() is None
+
+
+def test_connection_mutation_lock_is_exclusive_and_survives_disconnect():
+  first = github_auth.try_acquire_connection_lock()
+  assert first is not None
+  try:
+    assert github_auth.try_acquire_connection_lock() is None
+    github_auth.clear_credentials()
+    assert github_auth.CONNECTION_LOCK_PATH.exists()
+  finally:
+    github_auth.release_connection_lock(first)
+
+  second = github_auth.try_acquire_connection_lock()
+  assert second is not None
+  github_auth.release_connection_lock(second)
+
+
+def test_credential_state_is_committed_only_after_cli_view(
+  monkeypatch,
+):
+  real_write = github_auth._write_0600
+
+  def fail_canonical(path, content):
+    if path == github_auth.STATE_PATH:
+      raise OSError("state disk failure")
+    real_write(path, content)
+
+  monkeypatch.setattr(github_auth, "_write_0600", fail_canonical)
+
+  with pytest.raises(OSError, match="state disk failure"):
+    github_auth.write_credentials(
+      token="gh-not-committed",
+      login="octocat",
+      user_id=42,
+      scopes=["public_repo"],
+      source="pat",
+    )
+
+  assert github_auth.HOSTS_PATH.exists()
+  assert github_auth.read_state() is None
+  assert github_auth.get_token() is None
 
 
 # --- status -----------------------------------------------------------
@@ -415,7 +717,63 @@ def test_status_disconnected(client, auth, monkeypatch):
   assert "scopes=public_repo" in body["classic_token_url"]
   assert "workflow" in body["classic_workflow_token_url"]
   assert "gh_version" in body
+  assert body["active_attempt"] is None
   assert "token" not in body
+
+
+def test_status_requires_connection_grant_not_data_grant(
+  client, owner_token, monkeypatch,
+):
+  _set_client_id(monkeypatch, "cid-123")
+  _, data_token = _app_token(
+    client,
+    owner_token,
+    github_access=True,
+  )
+  denied = client.get(
+    "/api/github/status",
+    headers={"Authorization": f"Bearer {data_token}"},
+  )
+  assert denied.status_code == 403
+  assert "github_connect" in denied.json()["detail"]
+
+  _, connect_token = _app_token(
+    client,
+    owner_token,
+    github_connect=True,
+  )
+  allowed = client.get(
+    "/api/github/status",
+    headers={"Authorization": f"Bearer {connect_token}"},
+  )
+  assert allowed.status_code == 200
+
+
+def test_status_exposes_resumable_attempt_without_secrets(client, auth):
+  github_auth.set_device_flow({
+    "attempt_id": "resume-123",
+    "status": "waiting",
+    "device_code": "device-secret",
+    "pending_token": "token-secret",
+    "interval": 5,
+    "next_poll_at": time.time() + 5,
+    "created_at": time.time(),
+    "expires_at": time.time() + 300,
+    "requested_scopes": ["public_repo"],
+    "user_code": "ABCD-EFGH",
+    "verification_uri": "https://github.com/login/device",
+  })
+
+  body = client.get("/api/github/status", headers=auth).json()
+
+  assert body["connected"] is False
+  assert body["active_attempt"]["attempt_id"] == "resume-123"
+  assert body["active_attempt"]["user_code"] == "ABCD-EFGH"
+  assert body["active_attempt"]["verification_uri"].endswith("/device")
+  assert body["active_attempt"]["expires_in"] > 0
+  serialized = json.dumps(body)
+  assert "device-secret" not in serialized
+  assert "token-secret" not in serialized
 
 
 def test_status_device_flow_unavailable_without_client_id(
@@ -556,11 +914,17 @@ def test_source_status_keeps_healthy_apps_when_one_checkout_fails(
 
 def test_disconnect_removes_dir(client, auth):
   _write_token()
+  github_auth.set_device_flow({
+    "attempt_id": "pending-disconnect",
+    "status": "waiting",
+    "device_code": "DEV",
+  })
   assert github_auth.GH_AUTH_DIR.exists()
   r = client.delete("/api/github/connect", headers=auth)
   assert r.status_code == 200
   assert r.json() == {"ok": True}
   assert not github_auth.GH_AUTH_DIR.exists()
+  assert github_auth.get_device_flow() is None
 
 
 # --- REST passthrough (GET-only, read-only by construction) -----------

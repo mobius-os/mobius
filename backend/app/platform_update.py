@@ -7,8 +7,9 @@ commit the clone was last reconciled to (set to HEAD at clone time). A deploy
 ships a new image AND advances canonical ``origin/main``; this module makes that
 deploy actually REACH a running instance by fetching origin and replaying the
 local edits onto the new upstream — on boot (before uvicorn imports the code, so
-the update goes live automatically) and on owner-triggered Apply (which then
-needs a restart to load).
+the update goes live automatically) and on owner-triggered Apply. Owner Apply
+pins the exact target returned by the review plan even if its fetch observes a
+newer remote head; backend changes then need a restart to load.
 
 The reconcile is built to be non-destructive above all else:
 
@@ -42,16 +43,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import hashlib
+import json
 import logging
 import os
+import re
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Callable, Literal, TypedDict
 
 from sqlalchemy.orm import Session
 
@@ -96,6 +102,9 @@ RECONCILE_PRE_FLAG = Path("/data/.platform-reconcile-pre")
 # reconcile runs in a throwaway ``python3 -c`` process, so an in-process lock
 # could not serialise it against uvicorn.
 RECONCILE_LOCK = Path("/data/.platform-reconcile.lock")
+# Durable, browser-safe phase record. Unlike the old process-only dictionary,
+# this is visible when status/progress requests land on another worker.
+UPDATE_PROGRESS_PATH = Path("/data/.platform-update-progress.json")
 
 UPSTREAM_BRANCH = "upstream"
 LOCAL_BRANCH = "main"
@@ -131,6 +140,48 @@ _PREVIEW_COMMIT_LIMIT = 100
 # Serialise Apply in-process (uvicorn is single-worker; belt-and-braces against a
 # double-click racing two reconciles). The cross-process guard is RECONCILE_LOCK.
 _APPLY_LOCK = asyncio.Lock()
+_PROGRESS_LOCK = threading.Lock()
+
+
+class PlatformUpdatePhase(str, Enum):
+  """Observable phases of the one active owner-triggered update operation."""
+
+  IDLE = "idle"
+  PREPARING = "preparing"
+  FETCHING = "fetching"
+  RECONCILING = "reconciling"
+  VALIDATING = "validating"
+  BUILDING = "building"
+  FINALIZING = "finalizing"
+  COMPLETE = "complete"
+  BLOCKED = "blocked"
+  FAILED = "failed"
+
+
+class PlatformUpdateProgress(TypedDict):
+  """Response shape for ``GET /api/platform/update-progress``.
+
+  This in-process record makes today's synchronous Apply request observable.
+  A future supervisor-owned generation updater should persist the same shape
+  beside the staged generation so it survives a worker restart.
+  """
+
+  plan_id: str | None
+  target_sha: str | None
+  phase: str
+  active: bool
+  error: str | None
+  updated_at: float
+
+
+_UPDATE_PROGRESS = PlatformUpdateProgress(
+  plan_id=None,
+  target_sha=None,
+  phase=PlatformUpdatePhase.IDLE.value,
+  active=False,
+  error=None,
+  updated_at=0.0,
+)
 
 
 class PlatformUpdateError(RuntimeError):
@@ -178,6 +229,7 @@ class PlatformApplyResult(TypedDict):
   merge_commit: str | None
   conflict_paths: list[str]
   chat_id: str | None
+  phase: str
 
 
 class PlatformRestartResponse(TypedDict):
@@ -223,6 +275,12 @@ class PlatformUpdatePreview(TypedDict):
   available: bool
   current_sha: str | None
   target_sha: str | None
+  # Stable identity for this exact current->target review. Apply recomputes it
+  # and rejects a changed local tip or substituted target instead of silently
+  # installing bytes other than the ones represented by this preview.
+  plan_id: str | None
+  total_commits: int
+  commits_truncated: bool
   commits: list[PlatformCommitSummary]
   files: list[PlatformFileChange]
   diff: str | None
@@ -256,6 +314,97 @@ class ReconcileResult:
   # still held. Hook refresh reads every allowlisted blob from this immutable
   # generation rather than trusting replayed local HEAD or a moving ref.
   hook_source_sha: str | None = None
+
+
+def platform_update_progress() -> PlatformUpdateProgress:
+  """Return a snapshot of the current/recent owner-triggered update operation."""
+  with _PROGRESS_LOCK:
+    try:
+      payload = json.loads(UPDATE_PROGRESS_PATH.read_text())
+      if not isinstance(payload, dict):
+        raise ValueError("progress is not an object")
+      return PlatformUpdateProgress(
+        plan_id=(
+          payload.get("plan_id")
+          if isinstance(payload.get("plan_id"), str)
+          else None
+        ),
+        target_sha=(
+          payload.get("target_sha")
+          if isinstance(payload.get("target_sha"), str)
+          else None
+        ),
+        phase=(
+          payload.get("phase")
+          if payload.get("phase") in {phase.value for phase in PlatformUpdatePhase}
+          else PlatformUpdatePhase.IDLE.value
+        ),
+        active=bool(payload.get("active", False)),
+        error=(
+          payload.get("error")
+          if isinstance(payload.get("error"), str)
+          else None
+        ),
+        updated_at=float(payload.get("updated_at", 0.0)),
+      )
+    except (OSError, ValueError, TypeError):
+      return PlatformUpdateProgress(**_UPDATE_PROGRESS)
+
+
+def _set_update_progress(
+  phase: PlatformUpdatePhase,
+  *,
+  plan_id: str | None,
+  target_sha: str | None,
+  active: bool,
+  error: str | None = None,
+) -> None:
+  """Publish one phase transition from either the event loop or worker thread."""
+  with _PROGRESS_LOCK:
+    _UPDATE_PROGRESS.update(
+      plan_id=plan_id,
+      target_sha=target_sha,
+      phase=phase.value,
+      active=active,
+      error=error,
+      updated_at=time.time(),
+    )
+    _atomic_write_text(
+      UPDATE_PROGRESS_PATH,
+      json.dumps(_UPDATE_PROGRESS, sort_keys=True),
+    )
+
+
+def _update_plan_id(current_sha: str, target_sha: str) -> str:
+  """Deterministic identity for the exact local tip + reviewed release pair."""
+  material = f"mobius-platform-update-v1\0{current_sha}\0{target_sha}".encode()
+  return hashlib.sha256(material).hexdigest()
+
+
+def _validate_update_plan(
+  repo: Path,
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+) -> None:
+  """Reject a stale or substituted preview before reconcile mutates the tree."""
+  if not re.fullmatch(r"[0-9a-f]{40,64}", current_sha or ""):
+    raise PlatformUpdateError("update_plan_invalid")
+  if not re.fullmatch(r"[0-9a-f]{40,64}", target_sha or ""):
+    raise PlatformUpdateError("update_plan_invalid")
+  if plan_id != _update_plan_id(current_sha, target_sha):
+    raise PlatformUpdateError("update_plan_invalid")
+
+  local = _local_branch(repo)
+  if _rev(repo, local) != current_sha:
+    raise PlatformUpdateError("update_plan_stale")
+  # The reviewed target must still resolve to that exact commit object. Passing
+  # the full oid onward (rather than origin/main) pins Apply even if its fetch
+  # observes a newer remote head.
+  resolved = _rev(repo, target_sha)
+  if resolved != target_sha:
+    raise PlatformUpdateError("update_plan_target_missing")
 
 
 def _scrubbed_git_env(repo: Path) -> dict:
@@ -365,10 +514,7 @@ def _abort_interrupted(repo: Path = PLATFORM_REPO) -> None:
 
 
 def _write_reconcile_pre(sha: str) -> None:
-  tmp = RECONCILE_PRE_FLAG.with_name(
-    RECONCILE_PRE_FLAG.name + f".tmp-{os.getpid()}")
-  tmp.write_text(sha + "\n")
-  os.replace(tmp, RECONCILE_PRE_FLAG)
+  _atomic_write_text(RECONCILE_PRE_FLAG, sha + "\n")
 
 
 def _clear_reconcile_pre() -> None:
@@ -482,6 +628,14 @@ def _set_upstream(repo: Path, target: str) -> None:
   _git("branch", "-f", UPSTREAM_BRANCH, target, repo=repo, check=False)
 
 
+def _clear_upstream(repo: Path) -> None:
+  """Remove the marker when a failed Apply started without one."""
+  _git(
+    "update-ref", "-d", f"refs/heads/{UPSTREAM_BRANCH}",
+    repo=repo, check=False,
+  )
+
+
 def _import_probe(repo: Path = PLATFORM_REPO, timeout: int = _PROBE_TIMEOUT):
   """Run ``import app.main`` as a fresh subprocess with cwd the served backend.
 
@@ -532,6 +686,29 @@ def _reconcile_flock():
       os.close(fd)
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+  """Atomically publish one internal marker with owner-only permissions."""
+  path.parent.mkdir(parents=True, exist_ok=True)
+  fd, temporary = tempfile.mkstemp(
+    dir=path.parent,
+    prefix=f".{path.name}.",
+    suffix=".tmp",
+  )
+  try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+      handle.write(content)
+      handle.flush()
+      os.fsync(handle.fileno())
+    os.replace(temporary, path)
+  except BaseException:
+    try:
+      os.unlink(temporary)
+    except OSError:
+      pass
+    raise
+
+
 def _write_conflict_flag(
   target: str | None, paths: list[str], chat_id: str | None = None
 ) -> None:
@@ -546,7 +723,7 @@ def _write_conflict_flag(
   if chat_id:
     body.append(f"chat:{chat_id}")
   body.extend(paths)
-  CONFLICT_FLAG.write_text("\n".join(body))
+  _atomic_write_text(CONFLICT_FLAG, "\n".join(body))
 
 
 def _read_conflict_flag() -> dict | None:
@@ -572,14 +749,14 @@ def _read_conflict_flag() -> dict | None:
 
 
 def _write_offline_flag(error: str) -> None:
-  OFFLINE_FLAG.write_text(error or "offline")
+  _atomic_write_text(OFFLINE_FLAG, error or "offline")
 
 
 def _write_rolled_back_flag(target: str | None, error: str | None) -> None:
   """Persist a rollback so Settings can show "needs repair". Line 0 is the target
   sha; the rest is the import error (truncated) for the log/UI."""
   body = (target or "") + "\n" + (error or "")
-  ROLLED_BACK_FLAG.write_text(body)
+  _atomic_write_text(ROLLED_BACK_FLAG, body)
 
 
 def _read_rolled_back_flag() -> dict | None:
@@ -616,10 +793,7 @@ def recorded_upstream_sha(repo: Path = PLATFORM_REPO) -> str | None:
 def mark_restart_needed(target_sha: str) -> None:
   """Record that a restart is needed to load an owner-applied update, stamping
   the reconciled commit the running uvicorn does NOT yet import."""
-  tmp = RESTART_NEEDED_FLAG.with_name(
-    RESTART_NEEDED_FLAG.name + f".tmp-{os.getpid()}")
-  tmp.write_text(target_sha or "")
-  os.replace(tmp, RESTART_NEEDED_FLAG)
+  _atomic_write_text(RESTART_NEEDED_FLAG, target_sha or "")
 
 
 def _served_platform_sha() -> str | None:
@@ -908,7 +1082,7 @@ def _refresh_git_hooks(repo: Path, source_oid: str | None) -> str | None:
     return repr(exc)[:500]
 
 
-async def _rebuild_frontend_after_update_if_needed(
+def _rebuild_frontend_after_update_if_needed(
   repo: Path, res: ReconcileResult,
 ) -> None:
   """Rebuild served frontend assets after a clean update that changed them.
@@ -923,15 +1097,46 @@ async def _rebuild_frontend_after_update_if_needed(
   try:
     from app.frontend_watcher import rebuild_frontend_now
   except Exception as exc:
-    log.warning("frontend rebuild unavailable after platform update: %r", exc)
-    return
-  try:
-    await asyncio.to_thread(
-      rebuild_frontend_now,
-      f"platform update {_short(res.pre_sha)}->{_short(res.new_sha)}",
-    )
-  except Exception as exc:
-    log.warning("frontend rebuild failed after platform update: %r", exc)
+    raise RuntimeError("frontend rebuild is unavailable") from exc
+  rebuild_frontend_now(
+    f"platform update {_short(res.pre_sha)}->{_short(res.new_sha)}",
+  )
+
+
+def _roll_back_failed_frontend_build(
+  repo: Path,
+  res: ReconcileResult,
+  previous_upstream_sha: str | None,
+  error: Exception,
+) -> ReconcileResult:
+  """Restore the pre-Apply source generation when its frontend cannot build.
+
+  ``reconcile`` and this rollback run under the same cross-process flock, so no
+  boot update/check can observe or mutate the intermediate source tree. The
+  frontend publisher already keeps the previously served ``dist`` on a failed
+  candidate build; resetting the source closes the other half of that invariant.
+  """
+  _abort_interrupted(repo)
+  if res.pre_sha:
+    _reset_hard_to(repo, _local_branch(repo), res.pre_sha)
+  if previous_upstream_sha:
+    _set_upstream(repo, previous_upstream_sha)
+  else:
+    _clear_upstream(repo)
+  # Apply does not create/replace the restart marker until preparation succeeds.
+  # A marker already present before this attempt belongs to earlier on-disk
+  # backend changes and must survive this failed frontend candidate.
+  CONFLICT_FLAG.unlink(missing_ok=True)
+  message = f"frontend_build_failed: {error!r}"[:2000]
+  _write_rolled_back_flag(res.target_sha, message)
+  _clear_reconcile_pre()
+  return replace(
+    res,
+    status="rolled_back",
+    new_sha=res.pre_sha,
+    error=message,
+    hook_source_sha=previous_upstream_sha,
+  )
 
 
 def reconcile_clone(
@@ -939,16 +1144,20 @@ def reconcile_clone(
   *,
   target_ref: str = DEFAULT_TARGET_REF,
   at_boot: bool = False,
+  fetch_remote: bool = True,
+  progress: Callable[[PlatformUpdatePhase], None] | None = None,
 ) -> ReconcileResult:
-  """Fetch origin and reconcile the served clone onto ``target_ref``, safely.
+  """Reconcile the served clone onto ``target_ref``, safely.
 
   The one entry point for both boot and owner Apply. At boot (``at_boot=True``)
-  the reconciled code IS what uvicorn imports moments later, so a success needs
-  no restart and the restart flag is cleared; an owner Apply runs inside the live
-  uvicorn, so the caller marks a restart. Never raises for an operational failure
-  (offline, conflict, import-broken) — it returns a :class:`ReconcileResult`
-  describing the outcome and always leaves ``/data/platform`` in a clean, served
-  state (either the update, or the pre-reconcile code).
+  ``fetch_remote`` refreshes the moving release ref before the fresh uvicorn
+  imports it. Owner Apply passes a full reviewed oid with ``fetch_remote=False``
+  so it neither repeats network work nor changes the selected release. A success
+  that changes backend code still needs a restart. Never raises for an
+  operational failure (offline, conflict, import-broken) — it returns a
+  :class:`ReconcileResult` describing the outcome and always leaves
+  ``/data/platform`` in a clean, served state (either the update, or the pre-
+  reconcile code).
   """
   if not (repo / ".git").exists():
     return ReconcileResult("skipped", None, None, None, error="no_git")
@@ -969,11 +1178,14 @@ def reconcile_clone(
   if not _has_origin(repo):
     return ReconcileResult("skipped", pre, pre, None, error="no_origin")
 
-  if not _fetch(repo):
-    # Offline is non-fatal: keep serving the current clone, retry next boot.
-    _write_offline_flag("fetch_failed")
-    return ReconcileResult("offline", pre, pre, None, error="fetch_failed")
-  OFFLINE_FLAG.unlink(missing_ok=True)
+  if fetch_remote:
+    if progress:
+      progress(PlatformUpdatePhase.FETCHING)
+    if not _fetch(repo):
+      # Offline is non-fatal: keep serving the current clone, retry next boot.
+      _write_offline_flag("fetch_failed")
+      return ReconcileResult("offline", pre, pre, None, error="fetch_failed")
+    OFFLINE_FLAG.unlink(missing_ok=True)
 
   target = _rev(repo, target_ref)
   if not target:
@@ -992,6 +1204,8 @@ def reconcile_clone(
       RESTART_NEEDED_FLAG.unlink(missing_ok=True)
     return ReconcileResult("up_to_date", pre, pre, target, error=None)
 
+  if progress:
+    progress(PlatformUpdatePhase.RECONCILING)
   # A deploy advanced origin beyond committed main. Commit any uncommitted edits
   # FIRST so neither the fast-forward reset nor the rebase can discard them.
   _reattach_detached_head(repo, local)
@@ -1006,12 +1220,21 @@ def reconcile_clone(
   # (The conflict/rollback branches below return normally; only a real error
   # reaches the except.)
   try:
-    # A shallow clone lacks the merge base a reliable ancestry check AND a rebase
-    # both need — deepen FIRST so the fast-forward-vs-rebase decision is correct.
-    if _is_shallow(repo):
+    # Do not unshallow a clean instance merely because it is many releases
+    # behind. The normal fetch has already transferred the new first-parent
+    # chain, so Git can prove the overwhelmingly common fast-forward directly.
+    # Only a shallow clone whose ancestry is still ambiguous needs the expensive
+    # full-history fallback before we choose between reset and rebase.
+    fast_forward = bool(pre) and _is_ancestor(repo, pre, target)
+    if _is_shallow(repo) and not fast_forward:
+      if progress:
+        progress(PlatformUpdatePhase.FETCHING)
       _fetch_unshallow(repo)
+      if progress:
+        progress(PlatformUpdatePhase.RECONCILING)
+      fast_forward = bool(pre) and _is_ancestor(repo, pre, target)
     _git("checkout", "-q", local, repo=repo, check=False)
-    if pre and _is_ancestor(repo, pre, target):
+    if fast_forward:
       # main is fully contained in target (every commit on main is in target), so
       # a fast-forward is PROVABLY loss-free. This is decided by ANCESTRY, never by
       # an `upstream` marker that could drift and let `reset --hard` silently
@@ -1042,6 +1265,8 @@ def reconcile_clone(
     # Constitution-only changes need a real server restart to refresh the
     # process cache, but cannot break Python imports, so they skip this probe.
     if _tree_change_needs_import_probe(repo, pre, _rev(repo, local)):
+      if progress:
+        progress(PlatformUpdatePhase.VALIDATING)
       ok, err = _import_probe(repo)
       if not ok:
         _reset_hard_to(repo, local, pre)
@@ -1070,11 +1295,63 @@ def reconcile_clone(
   return ReconcileResult("updated", pre, new_sha, target, error=None)
 
 
-def _reconcile_under_lock(repo: Path, at_boot: bool) -> ReconcileResult:
+def _reconcile_under_lock(
+  repo: Path,
+  at_boot: bool,
+  *,
+  target_ref: str = DEFAULT_TARGET_REF,
+  plan_id: str | None = None,
+  current_sha: str | None = None,
+  progress: Callable[[PlatformUpdatePhase], None] | None = None,
+  prepare_frontend: bool = False,
+) -> ReconcileResult:
   """Hold :data:`RECONCILE_LOCK` around one reconcile so the boot subprocess and
-  the running uvicorn's Apply can never run two reconciles on the same repo."""
+  the running uvicorn's Apply can never run two reconciles on the same repo.
+
+  Owner Apply additionally validates its immutable review plan and prepares the
+  frontend while the same lock is held. This is still a live-tree updater; the
+  future supervisor/generation implementation should move this transaction out
+  of uvicorn while preserving the exact-target + phase contract.
+  """
   with _reconcile_flock():
-    result = reconcile_clone(repo, at_boot=at_boot)
+    if plan_id is not None:
+      if current_sha is None:
+        raise PlatformUpdateError("update_plan_invalid")
+      _validate_update_plan(
+        repo,
+        plan_id=plan_id,
+        current_sha=current_sha,
+        target_sha=target_ref,
+      )
+    previous_upstream_sha = _rev(repo, UPSTREAM_BRANCH) or None
+    result = reconcile_clone(
+      repo,
+      target_ref=target_ref,
+      at_boot=at_boot,
+      # A reviewed Apply already proved the immutable object exists. Fetching a
+      # moving remote again adds latency and was the original TOCTOU bug; boot
+      # keeps the normal refresh path. A shallow rebase may still deepen below.
+      fetch_remote=plan_id is None,
+      progress=progress,
+    )
+    if (
+      result.status == "updated"
+      and prepare_frontend
+      and _touched_frontend(repo, result.pre_sha, result.new_sha)
+    ):
+      if progress:
+        progress(PlatformUpdatePhase.BUILDING)
+      try:
+        _rebuild_frontend_after_update_if_needed(repo, result)
+      except Exception as exc:
+        log.warning(
+          "frontend build rejected platform update %s: %r",
+          _short(result.target_sha),
+          exc,
+        )
+        result = _roll_back_failed_frontend_build(
+          repo, result, previous_upstream_sha, exc,
+        )
     # `upstream` is moved only by a successful/contained reconcile to the
     # fetched release target. Capture its immutable oid before releasing the
     # cross-process lock; local replay commits on main are intentionally not a
@@ -1215,7 +1492,8 @@ def empty_platform_update_preview(
   rather than an empty diff panel."""
   return PlatformUpdatePreview(
     state=PlatformUpdateState.UP_TO_DATE.value, available=False,
-    current_sha=current_sha, target_sha=target_sha,
+    current_sha=current_sha, target_sha=target_sha, plan_id=None,
+    total_commits=0, commits_truncated=False,
     commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[],
   )
 
@@ -1237,6 +1515,19 @@ def _preview_commits(
     sha, subject = line.split("\x1f", 1)
     commits.append(PlatformCommitSummary(sha=sha.strip(), subject=subject.strip()))
   return commits
+
+
+def _preview_commit_count(repo: Path, base: str, target: str) -> int:
+  """Exact incoming commit count, independent of the rendered-list cap."""
+  proc = _git(
+    "rev-list", "--count", f"{base}..{target}", repo=repo, check=False,
+  )
+  if proc.returncode != 0:
+    return 0
+  try:
+    return max(0, int(proc.stdout.strip()))
+  except ValueError:
+    return 0
 
 
 def _preview_files(repo: Path, base: str, target: str) -> list[PlatformFileChange]:
@@ -1305,6 +1596,21 @@ def platform_update_preview(repo: Path = PLATFORM_REPO) -> PlatformUpdatePreview
   uses; an up-to-date instance returns an empty preview. Degrades to an empty
   preview (never raises) when the clone or ancestry can't be read, so it can never
   break Settings."""
+  # A missing/non-clone tree has no source snapshot to protect. Return before
+  # touching the durable /data lock so read-only diagnostics and recovery
+  # surfaces still degrade cleanly when DATA_DIR itself is unavailable.
+  # Actual clones take the lock below; the unlocked builder repeats this check
+  # after acquisition, which closes a removal/reseed race.
+  if not (repo / ".git").exists():
+    return empty_platform_update_preview()
+  with _reconcile_flock():
+    return _platform_update_preview_unlocked(repo)
+
+
+def _platform_update_preview_unlocked(
+  repo: Path,
+) -> PlatformUpdatePreview:
+  """Build one preview while the reconcile lock holds its source snapshot."""
   if not (repo / ".git").exists() or not _has_origin(repo):
     return empty_platform_update_preview()
   local = _local_branch(repo)
@@ -1323,15 +1629,22 @@ def platform_update_preview(repo: Path = PLATFORM_REPO) -> PlatformUpdatePreview
     # without a diff rather than raising.
     return PlatformUpdatePreview(
       state=PlatformUpdateState.AVAILABLE.value, available=True,
-      current_sha=local_sha, target_sha=target, commits=[], files=[],
+      current_sha=local_sha, target_sha=target,
+      plan_id=_update_plan_id(local_sha, target) if local_sha else None,
+      total_commits=0, commits_truncated=False, commits=[], files=[],
       diff=None, diff_truncated=False, conflict_paths=[],
     )
   diff, truncated = _preview_diff(repo, base, target)
+  commits = _preview_commits(repo, base, target)
+  total_commits = _preview_commit_count(repo, base, target)
   conflict = _read_conflict_flag() or {}
   return PlatformUpdatePreview(
     state=PlatformUpdateState.AVAILABLE.value, available=True,
     current_sha=local_sha, target_sha=target,
-    commits=_preview_commits(repo, base, target),
+    plan_id=_update_plan_id(local_sha, target) if local_sha else None,
+    total_commits=total_commits,
+    commits_truncated=total_commits > len(commits),
+    commits=commits,
     files=_preview_files(repo, base, target),
     diff=diff, diff_truncated=truncated,
     conflict_paths=conflict.get("paths") or [],
@@ -1339,7 +1652,12 @@ def platform_update_preview(repo: Path = PLATFORM_REPO) -> PlatformUpdatePreview
 
 
 async def apply_platform_update(
-  db: Session, repo: Path = PLATFORM_REPO,
+  db: Session,
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  repo: Path = PLATFORM_REPO,
 ) -> PlatformApplyResult:
   """Owner-triggered reconcile. Clean/updated -> ``restart_needed`` (the running
   uvicorn must restart to load the new code). Conflict -> the conflict is
@@ -1347,66 +1665,109 @@ async def apply_platform_update(
   the tree stayed on the old code and the state says so. Offline/skipped -> a
   ``409`` via :class:`PlatformUpdateError`. Never restarts on its own."""
   async with _APPLY_LOCK:
-    existing_conflict = await asyncio.to_thread(_read_conflict_flag) or {}
-    res = await asyncio.to_thread(_reconcile_under_lock, repo, False)
-    chat_id: str | None = None
-
-    if res.status == "updated":
-      hook_refresh = await asyncio.to_thread(
-        _refresh_git_hooks, repo, res.hook_source_sha,
-      )
-      if hook_refresh:
-        log.warning("git hook refresh failed after platform update: %s", hook_refresh)
-      # Frontend changes rebuild into dist (served per-request, no restart);
-      # only a served-backend or constitution change requires restarting
-      # uvicorn. Path-aware so test/docs/frontend-only updates finish without a
-      # spurious restart prompt.
-      await _rebuild_frontend_after_update_if_needed(repo, res)
-      # Compare the SERVED sha (what the running uvicorn imported) to the new
-      # head, not just this reconcile's delta: a backend edit committed locally
-      # while the server ran would otherwise be missed if the incoming update
-      # only touched the frontend, leaving apply and status disagreeing.
-      if _tree_change_needs_restart(repo, _served_platform_sha(), res.new_sha):
-        mark_restart_needed(res.new_sha or "")
-        state = PlatformUpdateState.RESTART_NEEDED
-      else:
-        state = PlatformUpdateState.UP_TO_DATE
-    elif res.status == "conflict":
-      # Keep the resolver gated behind the owner's next click. A conflict pass
-      # rewrites the flag with target + paths, so preserve a previously opened
-      # chat only when it belongs to this same target.
-      target = res.target_sha or existing_conflict.get("upstream")
-      existing_chat_id = (
-        existing_conflict.get("chat_id")
-        if target and existing_conflict.get("upstream") == target
-        else None
-      )
-      chat_id = existing_chat_id
-      _write_conflict_flag(
-        target,
-        res.conflict_paths or existing_conflict.get("paths") or [],
-        existing_chat_id,
-      )
-      state = PlatformUpdateState.CONFLICT
-    elif res.status == "rolled_back":
-      state = PlatformUpdateState.ROLLED_BACK
-    elif res.status == "up_to_date":
-      if _platform_tree_needs_restart(repo):
-        mark_restart_needed(_rev(repo, _local_branch(repo)) or res.pre_sha or "")
-        state = PlatformUpdateState.RESTART_NEEDED
-      else:
-        state = PlatformUpdateState.UP_TO_DATE
-    else:  # offline / skipped — nothing changed; tell the UI plainly.
-      raise PlatformUpdateError(res.error or res.status)
-
-    return PlatformApplyResult(
-      state=state.value,
-      needs_restart=(state is PlatformUpdateState.RESTART_NEEDED),
-      upstream_commit=res.target_sha,
-      merge_commit=res.new_sha if res.status == "updated" else None,
-      conflict_paths=res.conflict_paths,
-      chat_id=chat_id,
+    _set_update_progress(
+      PlatformUpdatePhase.PREPARING,
+      plan_id=plan_id,
+      target_sha=target_sha,
+      active=True,
     )
+
+    def publish_progress(phase: PlatformUpdatePhase) -> None:
+      _set_update_progress(
+        phase,
+        plan_id=plan_id,
+        target_sha=target_sha,
+        active=True,
+      )
+
+    try:
+      existing_conflict = await asyncio.to_thread(_read_conflict_flag) or {}
+      res = await asyncio.to_thread(
+        _reconcile_under_lock,
+        repo,
+        False,
+        target_ref=target_sha,
+        plan_id=plan_id,
+        current_sha=current_sha,
+        progress=publish_progress,
+        prepare_frontend=True,
+      )
+      chat_id: str | None = None
+
+      if res.status == "updated":
+        publish_progress(PlatformUpdatePhase.FINALIZING)
+        hook_refresh = await asyncio.to_thread(
+          _refresh_git_hooks, repo, res.hook_source_sha,
+        )
+        if hook_refresh:
+          log.warning("git hook refresh failed after platform update: %s", hook_refresh)
+        # Compare the SERVED sha (what the running uvicorn imported) to the new
+        # head, not just this reconcile's delta: a backend edit committed locally
+        # while the server ran would otherwise be missed if the incoming update
+        # only touched the frontend, leaving apply and status disagreeing.
+        if _tree_change_needs_restart(repo, _served_platform_sha(), res.new_sha):
+          mark_restart_needed(res.new_sha or "")
+          state = PlatformUpdateState.RESTART_NEEDED
+        else:
+          state = PlatformUpdateState.UP_TO_DATE
+      elif res.status == "conflict":
+        # Keep the resolver gated behind the owner's next click. A conflict pass
+        # rewrites the flag with target + paths, so preserve a previously opened
+        # chat only when it belongs to this same target.
+        target = res.target_sha or existing_conflict.get("upstream")
+        existing_chat_id = (
+          existing_conflict.get("chat_id")
+          if target and existing_conflict.get("upstream") == target
+          else None
+        )
+        chat_id = existing_chat_id
+        _write_conflict_flag(
+          target,
+          res.conflict_paths or existing_conflict.get("paths") or [],
+          existing_chat_id,
+        )
+        state = PlatformUpdateState.CONFLICT
+      elif res.status == "rolled_back":
+        state = PlatformUpdateState.ROLLED_BACK
+      elif res.status == "up_to_date":
+        if _platform_tree_needs_restart(repo):
+          mark_restart_needed(_rev(repo, _local_branch(repo)) or res.pre_sha or "")
+          state = PlatformUpdateState.RESTART_NEEDED
+        else:
+          state = PlatformUpdateState.UP_TO_DATE
+      else:  # offline / skipped — nothing changed; tell the UI plainly.
+        raise PlatformUpdateError(res.error or res.status)
+
+      final_phase = (
+        PlatformUpdatePhase.BLOCKED
+        if state in {PlatformUpdateState.CONFLICT, PlatformUpdateState.ROLLED_BACK}
+        else PlatformUpdatePhase.COMPLETE
+      )
+      _set_update_progress(
+        final_phase,
+        plan_id=plan_id,
+        target_sha=target_sha,
+        active=False,
+        error=res.error if state is PlatformUpdateState.ROLLED_BACK else None,
+      )
+      return PlatformApplyResult(
+        state=state.value,
+        needs_restart=(state is PlatformUpdateState.RESTART_NEEDED),
+        upstream_commit=res.target_sha,
+        merge_commit=res.new_sha if res.status == "updated" else None,
+        conflict_paths=res.conflict_paths,
+        chat_id=chat_id,
+        phase=final_phase.value,
+      )
+    except Exception as exc:
+      _set_update_progress(
+        PlatformUpdatePhase.FAILED,
+        plan_id=plan_id,
+        target_sha=target_sha,
+        active=False,
+        error=str(exc)[:500] or exc.__class__.__name__,
+      )
+      raise
 
 
 async def create_platform_conflict_resolver_chat(

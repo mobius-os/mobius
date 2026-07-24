@@ -41,15 +41,15 @@ class Owner(Base):
   provider = Column(String(32), nullable=False, default="claude")
   # Default provider-limit recovery policy for newly-created chats. Each chat
   # stores its own copy; changing a chat's switch updates this seed for the
-  # next chat without rewriting any existing conversation.
+  # next chat without rewriting any existing conversation. Automatic provider
+  # retries are initially off because they can consume paid usage.
   auto_resume_on_limit_default = Column(
-    Boolean, nullable=False, default=True, server_default=true()
-  )
-  # Separately consented planned-restart policy for newly created chats.
-  # Existing owners migrate to false: consenting to provider-limit recovery
-  # never silently opts them into replay after a process restart.
-  auto_resume_on_restart_default = Column(
     Boolean, nullable=False, default=False, server_default=false()
+  )
+  # Planned restarts are initiated by Möbius, so continuing interrupted work
+  # is initially on. This remains independently configurable per chat.
+  auto_resume_on_restart_default = Column(
+    Boolean, nullable=False, default=True, server_default=true()
   )
   # Per-owner model-picker preferences. Shape:
   #   {"hidden_ids": ["claude-haiku-4-5-20251001", ...]}
@@ -134,15 +134,15 @@ class Chat(Base):
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
-  # Per-chat policy for automatic recovery after provider limits.
+  # Per-chat policy for automatic recovery after provider limits. Initially
+  # off because another attempt can consume paid usage.
   auto_resume_on_limit = Column(
-    Boolean, nullable=False, default=True, server_default=true()
-  )
-  # Planned restart continuation is materially broader than provider-limit
-  # recovery and therefore has separate, explicit consent. Existing and fresh
-  # chats start off until the owner enables it in that chat.
-  auto_resume_on_restart = Column(
     Boolean, nullable=False, default=False, server_default=false()
+  )
+  # Per-chat policy for continuing after a supervisor-authenticated planned
+  # restart. Initially on because Möbius interrupted the work itself.
+  auto_resume_on_restart = Column(
+    Boolean, nullable=False, default=True, server_default=true()
   )
   # Vestigial: the named-agent feature was removed; column retained
   # nullable to avoid a prod migration. Nothing reads or writes it.
@@ -568,15 +568,13 @@ class App(Base):
   # mini-app is the canonical caller. Default False — only granted by manifest
   # declaration on install.
   manage_skills = Column(Boolean, nullable=False, default=False)
-  # GitHub connection access. When True, the app's token can call the
-  # whole /api/github surface: manage the connection (connect / poll /
-  # disconnect / status) and use the read-only data proxy (GET
-  # /api/github/api/* and POST /api/github/graphql, both read-only by
-  # construction, INV2). The connected token is never returned to the
-  # app. The Contribute mini-app is the canonical caller. A boolean gate
-  # like manage_apps, not a ladder. Default False — only granted by
-  # manifest declaration on install.
+  # GitHub data access. This covers the read-only proxy and the narrow reviewed
+  # contribution submit surface, never credential management or token export.
   github_access = Column(Boolean, nullable=False, default=False)
+  # GitHub credential-management authority. Device flow, PAT install, status,
+  # and disconnect are intentionally separate from github_access so read-only
+  # consumers cannot mutate the owner's account connection.
+  github_connect = Column(Boolean, nullable=False, default=False)
   # Owner filesystem capability. This is intentionally separate from storage
   # interop: it grants the app-scoped token access to the guarded /api/fs
   # surface (still path-confined and secret-denied there). The Editor is the
@@ -752,3 +750,81 @@ class ThinkingTrace(Base):
   revision = Column(Integer, nullable=False, default=0)
   complete = Column(Boolean, nullable=False, default=False)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class ContributionAutopilot(Base):
+  """Platform-owned authorization + claim state for one contribution's autopilot.
+
+  The Contribute mini-app's ledger (``contributions/<id>.json`` in app storage)
+  is AGENT-WRITABLE, so nothing there can be trusted as consent or as claim
+  truth. This table is the trust anchor: one row per (app_id, record_id), written
+  ONLY by platform code — the submit endpoints stamp the grant when the owner
+  clicks Send, and the autopilot endpoints move the claim/round state. A forged
+  ``autopilot`` block in the ledger changes nothing; every enforcement path reads
+  this row. The ledger block is a one-way MIRROR of these fields for the UI/cron.
+
+  ``create_all`` builds this table on the next boot — a new table needs no ALTER
+  migration (see ``database.run_migrations``, which only ALTERs existing tables).
+  """
+
+  __tablename__ = "contribution_autopilot"
+
+  # (app_id, record_id) — the same identity the ledger file uses, but held here
+  # where only the platform can write it. record_id is the ledger record's `id`.
+  app_id = Column(
+    Integer, ForeignKey("apps.id"), primary_key=True
+  )
+  record_id = Column(String(128), primary_key=True)
+  # The grant: True once Send stamped consent, flipped False by an owner Pause.
+  # Absent row = classic manual flow; this is the only authorization autopilot
+  # ever consults.
+  enabled = Column(Boolean, nullable=False, default=True)
+  granted_at = Column(DateTime, nullable=True, default=None)
+  # The reviewed head the grant was issued against — a re-send refreshes it.
+  granted_head_sha = Column(String(64), nullable=True, default=None)
+  # Immutable public/local target stamped from the successful owner-approved
+  # submission. The contribution ledger is agent-writable, so follow-up routes
+  # must never recover these authority-bearing values from it.
+  target_repo = Column(String(256), nullable=True, default=None)
+  target_pr_number = Column(Integer, nullable=True, default=None)
+  target_head_repository = Column(String(256), nullable=True, default=None)
+  target_branch = Column(String(256), nullable=True, default=None)
+  target_repo_path = Column(String(1024), nullable=True, default=None)
+  # "idle" between rounds; "responding" while a round holds the claim.
+  state = Column(String(16), nullable=False, default="idle")
+  # The live claim. run_id is a fresh uuid per round and is the round's whole
+  # identity: /update, /reply, /complete, /escalate require the caller to
+  # present it, so a zombie agent from a reclaimed round holds a dead id.
+  run_id = Column(String(64), nullable=True, default=None)
+  attention_key = Column(String(256), nullable=True, default=None)
+  # Canonical timestamp copied from the claimed attention. Completion advances
+  # the cursor to this value; an agent cannot choose its own future cursor.
+  claimed_event_at = Column(String(40), nullable=True, default=None)
+  # Successful server-mediated actions recorded during this claim. Completion
+  # derives productivity from these fields instead of trusting agent prose.
+  round_action = Column(String(16), nullable=True, default=None)
+  round_head_sha = Column(String(64), nullable=True, default=None)
+  # Exact GitHub URLs returned by recent server-mediated replies. Mirrored for
+  # the scheduler so it ignores only Autopilot's own activity—not every comment
+  # written by the owner's GitHub account.
+  ignored_event_urls_json = Column(JSON, nullable=True, default=None)
+  claimed_at = Column(DateTime, nullable=True, default=None)
+  lease_expires_at = Column(DateTime, nullable=True, default=None)
+  # The dedicated owner-visible chat where every round for this record runs.
+  followup_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=True, default=None
+  )
+  rounds_used = Column(Integer, nullable=False, default=0)
+  max_rounds = Column(Integer, nullable=False, default=5)
+  # Consecutive non-productive rounds (stale/failed); 2 in a row auto-escalates.
+  consecutive_failures = Column(Integer, nullable=False, default=0)
+  # Cursor: attention whose event timestamp is <= this is already settled, so a
+  # re-posted event (incl. the agent's own reply seen by the next cron pass)
+  # cannot re-trigger. Stored as the ISO string the ledger/GraphQL use.
+  last_handled_event_at = Column(String(40), nullable=True, default=None)
+  last_handled_attention_key = Column(String(256), nullable=True, default=None)
+  # Capped audit log (newest last, trimmed to 30 entries): each entry is
+  # {attention_key, run_id, started_at, finished_at, outcome, summary, head_sha}.
+  rounds_json = Column(JSON, nullable=True, default=None)
+  created_at = Column(DateTime, default=lambda: now_naive_utc())
+  updated_at = Column(DateTime, default=lambda: now_naive_utc())

@@ -153,7 +153,7 @@ def test_patch_chat_clear_reverts_to_default(client, auth, chat):
 def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   client, auth, chat, db,
 ):
-  """The limit preference is chat-local and independent of model settings."""
+  """The continuation preference is chat-local and independent of models."""
   from app import models
 
   chat.agent_settings_json = {"model": "historical-model", "effort": "high"}
@@ -174,6 +174,7 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   )
   assert enabled.status_code == 200
   assert enabled.json()["auto_resume_on_limit"] is True
+  assert enabled.json()["auto_resume_on_restart"] is True
   assert enabled.json()["agent_settings_json"] == {
     "model": "historical-model", "effort": "high",
   }
@@ -185,7 +186,8 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   assert db.query(models.Owner).first().provider == "claude"
 
   sibling = client.get(f"/api/chats/{other['id']}", headers=auth).json()
-  assert sibling["auto_resume_on_limit"] is True
+  assert sibling["auto_resume_on_limit"] is False
+  assert sibling["auto_resume_on_restart"] is True
 
   cleared = client.patch(
     f"/api/chats/{chat.id}",
@@ -214,7 +216,7 @@ def test_new_chat_inherits_last_auto_resume_selection(client, auth, chat):
   ).json()
   assert client.get(
     f"/api/chats/{initial['id']}", headers=auth,
-  ).json()["auto_resume_on_limit"] is True
+  ).json()["auto_resume_on_limit"] is False
 
   client.patch(
     f"/api/chats/{chat.id}", headers=auth,
@@ -246,40 +248,38 @@ def test_new_chat_inherits_last_auto_resume_selection(client, auth, chat):
   ).json()["auto_resume_on_limit"] is True
 
 
-def test_restart_resume_requires_separate_explicit_consent(
-  client, auth, chat,
-):
-  """Legacy limit consent stays on while every existing restart policy is off."""
+def test_restart_resume_is_separate_and_defaults_on(client, auth, chat):
+  """Restart recovery starts on while paid usage retries remain off."""
   initial = client.get(f"/api/chats/{chat.id}", headers=auth).json()
-  assert initial["auto_resume_on_limit"] is True
-  assert initial["auto_resume_on_restart"] is False
+  assert initial["auto_resume_on_limit"] is False
+  assert initial["auto_resume_on_restart"] is True
 
-  existing = client.post(
-    "/api/chats", headers=auth, json={"title": "existing off"},
+  existing_on = client.post(
+    "/api/chats", headers=auth, json={"title": "existing on"},
   ).json()
   assert client.get(
-    f"/api/chats/{existing['id']}", headers=auth,
-  ).json()["auto_resume_on_restart"] is False
+    f"/api/chats/{existing_on['id']}", headers=auth,
+  ).json()["auto_resume_on_restart"] is True
 
-  enabled = client.patch(
+  disabled = client.patch(
     f"/api/chats/{chat.id}",
     headers=auth,
-    json={"auto_resume_on_restart": True},
+    json={"auto_resume_on_restart": False},
   )
-  assert enabled.status_code == 200
-  assert enabled.json()["auto_resume_on_restart"] is True
-  assert enabled.json()["auto_resume_on_limit"] is True
+  assert disabled.status_code == 200
+  assert disabled.json()["auto_resume_on_restart"] is False
+  assert disabled.json()["auto_resume_on_limit"] is False
 
-  inherited = client.post(
-    "/api/chats", headers=auth, json={"title": "explicitly inherited on"},
+  inherited_off = client.post(
+    "/api/chats", headers=auth, json={"title": "inherits restart off"},
   ).json()
   assert client.get(
-    f"/api/chats/{inherited['id']}", headers=auth,
-  ).json()["auto_resume_on_restart"] is True
-  # Explicit consent seeds future chats only; it never rewrites older rows.
-  assert client.get(
-    f"/api/chats/{existing['id']}", headers=auth,
+    f"/api/chats/{inherited_off['id']}", headers=auth,
   ).json()["auto_resume_on_restart"] is False
+  # Changing the seed never rewrites older conversations.
+  assert client.get(
+    f"/api/chats/{existing_on['id']}", headers=auth,
+  ).json()["auto_resume_on_restart"] is True
 
 
 def test_stale_global_auto_resume_setting_is_not_a_chat_default(
@@ -290,7 +290,7 @@ def test_stale_global_auto_resume_setting_is_not_a_chat_default(
     "model": "claude-opus-4-7",
   })
   detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
-  assert detail["auto_resume_on_limit"] is True
+  assert detail["auto_resume_on_limit"] is False
   # Reads ignore the removed owner-global key. The one-way file cleanup is a
   # boot migration (covered in test_settings), not a racy write from GET.
   assert _read_global_settings() == {

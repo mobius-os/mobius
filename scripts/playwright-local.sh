@@ -17,6 +17,10 @@ MOBIUS_LOCAL_E2E_WORKERS=2 to reproduce hosted-CI concurrency.
 The runner deletes its test image by default. Set
 MOBIUS_LOCAL_E2E_KEEP_CACHE=1 only for an intentionally retained per-checkout
 image; BuildKit already owns the ordinary build cache.
+
+Runs are serialized across this user's worktrees because concurrent full-stack
+builds can exhaust the Docker host. A second run waits for the shared slot;
+MOBIUS_LOCAL_E2E_ADMISSION_WAIT (default 1800s) bounds that wait.
 EOF
   exit 2
 fi
@@ -59,6 +63,34 @@ if ! flock -n 9; then
   echo "error: another isolated local E2E run is active for $ROOT" >&2
   exit 2
 fi
+
+# The checkout-scoped lock above prevents duplicate runs in one tree. This
+# second gate closes the cross-worktree race: without it, several checkouts can
+# all pass the same free-space snapshot and then consume multiple GiB in
+# parallel. Keep the lock outside TMPDIR because per-session temp directories
+# would give each run an independent gate. XDG_RUNTIME_DIR is private to the
+# current user; the UID suffix keeps the /tmp fallback isolated on multi-user
+# hosts.
+admission_lock="${XDG_RUNTIME_DIR:-/tmp}/mobius-local-e2e-admission-${UID}.lock"
+admission_wait="${MOBIUS_LOCAL_E2E_ADMISSION_WAIT:-1800}"
+if [[ ! "$admission_wait" =~ ^[0-9]+$ ]]; then
+  echo "error: MOBIUS_LOCAL_E2E_ADMISSION_WAIT must be a non-negative integer" >&2
+  exit 2
+fi
+exec 8>"$admission_lock"
+if ! flock -n 8; then
+  echo "another checkout holds the local E2E build slot; waiting up to ${admission_wait}s..."
+  if ! flock -w "$admission_wait" 8; then
+    cat >&2 <<EOF
+error: timed out after ${admission_wait}s waiting for the local E2E build slot.
+Another checkout is still building. Wait for it to finish, or raise
+MOBIUS_LOCAL_E2E_ADMISSION_WAIT. Runs are serialized to protect shared Docker
+disk capacity.
+EOF
+    exit 2
+  fi
+fi
+
 run_id="$(date +%s)-$$"
 project="mobius-local-e2e-${run_id}"
 image_name="${project}:test"

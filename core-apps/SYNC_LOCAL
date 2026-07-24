@@ -1,2 +1,0 @@
-# No local files are preserved into catalog-synced core apps because catalog apps
-# are no longer materialized under core-apps/.

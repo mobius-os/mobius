@@ -2,7 +2,7 @@
 
 The owner connects GitHub from the Contribute app; the token lives on
 disk under /data/cli-auth/gh/ (mirroring /data/cli-auth/claude/) in two
-files:
+credential files:
 
 - mobius-github.json — the backend's own record (token, login, user_id,
   scopes, token_source, connected_at). This is the ONLY read source for
@@ -13,18 +13,25 @@ files:
   `git push` (via the `gh auth git-credential` helper) authenticate
   without any extra plumbing.
 
-Both files are written 0o600 inside a 0o700 dir: the token is readable
-only by the mobius user and never reaches the browser — status
+The short-lived device authorization attempt is also stored there as
+device-flow.json. Persisting it means a backend restart cannot silently lose
+the browser's active attempt, while the attempt id prevents an older tab from
+polling or cancelling a newer one.
+
+All files are written atomically with mode 0o600 inside a 0o700 dir: the token
+is readable only by the mobius user and never reaches the browser — status
 endpoints echo metadata, never the token (INV1).
 
 No FastAPI imports here — routes/github.py owns the HTTP surface.
 """
 
+import fcntl
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -33,23 +40,64 @@ from app.config import get_settings
 GH_AUTH_DIR = Path(get_settings().data_dir) / "cli-auth" / "gh"
 STATE_PATH = GH_AUTH_DIR / "mobius-github.json"
 HOSTS_PATH = GH_AUTH_DIR / "hosts.yml"
+DEVICE_FLOW_PATH = GH_AUTH_DIR / "device-flow.json"
+CONNECTION_LOCK_PATH = GH_AUTH_DIR.parent / ".github-connection.lock"
 
-# Single in-flight device flow (mirrors routes/auth.py's _active_pkce —
-# single-owner app, one connect attempt at a time). Shape:
-# {device_code, interval, next_poll_at}. Expiry comes from GitHub's
-# expires_in (900s default), not the PKCE 300s.
-_device_flow: dict | None = None
+# One owner-scoped attempt is active at a time. Unlike the old process-only
+# dictionary, the attempt is persisted so a backend restart during GitHub's
+# authorization window does not strand the UI. The opaque attempt_id keeps a
+# stale tab from polling or cancelling a newer attempt.
 
 
 def get_device_flow() -> dict | None:
-  """Returns the in-flight device flow state, or None."""
-  return _device_flow
+  """Returns the current durable device-flow attempt.
+
+  Read the tiny atomic file every time. A process cache would make another
+  worker's poll/cancel invisible and could reuse a one-shot GitHub device code.
+  """
+  try:
+    with DEVICE_FLOW_PATH.open(encoding="utf-8") as handle:
+      payload = json.load(handle)
+  except (OSError, ValueError):
+    return None
+  return payload if isinstance(payload, dict) else None
 
 
 def set_device_flow(flow: dict | None) -> None:
-  """Replaces the in-flight device flow state (None clears it)."""
-  global _device_flow
-  _device_flow = flow
+  """Persists the current attempt atomically (None clears it)."""
+  if flow is None:
+    try:
+      DEVICE_FLOW_PATH.unlink()
+    except FileNotFoundError:
+      pass
+    return
+  os.makedirs(GH_AUTH_DIR, mode=0o700, exist_ok=True)
+  os.chmod(GH_AUTH_DIR, 0o700)
+  _write_0600(DEVICE_FLOW_PATH, json.dumps(flow, indent=2))
+
+
+def try_acquire_connection_lock() -> int | None:
+  """Try to acquire the owner-wide GitHub mutation lock without blocking."""
+  CONNECTION_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+  fd = os.open(CONNECTION_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
+  try:
+    os.fchmod(fd, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  except BlockingIOError:
+    os.close(fd)
+    return None
+  except BaseException:
+    os.close(fd)
+    raise
+  return fd
+
+
+def release_connection_lock(fd: int) -> None:
+  """Release a descriptor returned by :func:`try_acquire_connection_lock`."""
+  try:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+  finally:
+    os.close(fd)
 
 
 def read_state() -> dict | None:
@@ -97,12 +145,24 @@ def _set_git_identity(name: str, email: str) -> None:
 
 
 def _write_0600(path: Path, content: str) -> None:
-  """Writes `content` to `path` created with mode 0600 (same idiom as
-  routes/auth.py's _write_credentials — credentials never pass through
-  a default-umask open)."""
-  fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-  with os.fdopen(fd, "w") as f:
-    f.write(content)
+  """Atomically writes `content` with mode 0600 in the target directory."""
+  path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+  fd, temporary = tempfile.mkstemp(
+    dir=path.parent, prefix=f".{path.name}.", suffix=".tmp",
+  )
+  try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+      handle.write(content)
+      handle.flush()
+      os.fsync(handle.fileno())
+    os.replace(temporary, path)
+  except BaseException:
+    try:
+      os.unlink(temporary)
+    except OSError:
+      pass
+    raise
 
 
 def write_credentials(
@@ -126,6 +186,18 @@ def write_credentials(
   # makedirs only applies the mode on creation; tighten a pre-existing dir.
   os.chmod(GH_AUTH_DIR, 0o700)
 
+  # hosts.yml is a derived CLI view. Publish it before the canonical state so
+  # /status cannot report a newly connected account whose gh credential file
+  # failed to materialize. Backend GitHub/git subprocesses also inject GH_TOKEN
+  # from STATE_PATH, so a later gh rewrite cannot desynchronize those actions.
+  _write_0600(HOSTS_PATH, (
+    "github.com:\n"
+    f"    user: {json.dumps(login)}\n"
+    f"    oauth_token: {json.dumps(token)}\n"
+    "    git_protocol: https\n"
+  ))
+
+  # Canonical commit point: get_token()/status read only this atomic record.
   _write_0600(STATE_PATH, json.dumps({
     "token": token,
     "login": login,
@@ -134,15 +206,6 @@ def write_credentials(
     "token_source": source,
     "connected_at": datetime.now(UTC).isoformat(),
   }, indent=2))
-
-  # gh's flat hosts.yml shape. login/token come from GitHub's own API
-  # ([A-Za-z0-9-] logins, opaque token strings) — no YAML quoting needed.
-  _write_0600(HOSTS_PATH, (
-    "github.com:\n"
-    f"    user: {login}\n"
-    f"    oauth_token: {token}\n"
-    "    git_protocol: https\n"
-  ))
 
   # Explicit argv list — never shell interpolation — so a hostile login
   # string could at worst become a weird config value, not a command.
@@ -156,7 +219,10 @@ def clear_credentials() -> None:
   a stale name/email on local commits is harmless, and the entrypoint
   resets it to the defaults on the next boot.
   """
-  shutil.rmtree(GH_AUTH_DIR, ignore_errors=True)
+  try:
+    shutil.rmtree(GH_AUTH_DIR)
+  except FileNotFoundError:
+    pass
 
 
 _gh_version_cache: str | None = None

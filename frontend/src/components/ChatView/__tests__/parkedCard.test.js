@@ -119,9 +119,9 @@ test('auto-resume is a chat-local switch shown only on the active rate-limit car
   assert.doesNotMatch(settingsView, /auto_resume_on_limit|Auto.?resume/i,
     'the removed global automatic option must not reappear in Settings')
   assert.match(chatSettingsPanel, /Continue after usage limits/,
-    'the durable limit policy remains manageable in chat settings')
+    'the paid-usage policy remains manageable in chat settings')
   assert.match(chatSettingsPanel, /Continue after planned restarts/,
-    'restart continuation requires separate explicit consent')
+    'restart continuation has an independent switch')
   assert.doesNotMatch(chatSettingsPanel, /On for this chat|Off for this chat/,
     'the switch color communicates state without redundant state copy')
   assert.match(chatSettingsPanel, /className="chat-policy-switch"/,

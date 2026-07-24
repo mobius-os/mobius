@@ -71,6 +71,22 @@ function twoPaneBuilder(slot) {
   return ws // viewMode stays 'panes' (builder)
 }
 
+// An intentionally asymmetric three-pane tree. Its natural edge vectors differ
+// enough to expose same-duration entry as visibly different pane velocities.
+function unevenThreePaneBuilder(slot) {
+  let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }])
+  ws = paneModel.splitPaneWithTab(ws, tabModel.makeTab('chat', 'bbb'), {
+    paneId: ws.focusedPaneId, edge: 'right',
+  })
+  const rightId = paneModel.paneOf(ws, 'chat:bbb').id
+  ws = paneModel.splitPaneWithTab(ws, tabModel.makeTab('chat', 'ccc'), {
+    paneId: rightId, edge: 'bottom',
+  })
+  ws = paneModel.setRatio(ws, ws.layout.id, 0.7)
+  ws = paneModel.setRatio(ws, ws.layout.b.id, 0.25)
+  return paneModel.setSingleScreen(ws, slot)
+}
+
 // Frame-sample the exit beat: on every animation frame while .shell--builder-exiting
 // is present, record each motion wrapper's LAYOUT box (offset*, transform-independent)
 // + its computed transform + a stable node marker. Start this BEFORE triggering the
@@ -142,6 +158,8 @@ async function captureBeatPlan(page, rootClass) {
             motion: el.dataset.modeMotion,
             x: parseFloat(el.style.getPropertyValue('--mode-offset-x')) || 0,
             y: parseFloat(el.style.getPropertyValue('--mode-offset-y')) || 0,
+            duration: parseFloat(el.style.getPropertyValue('--mode-duration')) || 0,
+            delay: parseFloat(el.style.getPropertyValue('--mode-delay')) || 0,
           }))
         if (participants.length) {
           return {
@@ -453,6 +471,99 @@ test('v3 panes assemble over the stationary single screen from their correspondi
   expect(paint.paneFrames).toBeGreaterThan(2)
   expect(paint.minPaneOpacity, 'pane content never fades in over visible structure').toBeGreaterThan(0.99)
   expect(paint.earlyChromeOpacity, 'structure waits until pane content has arrived').toBeLessThan(0.05)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(true)
+})
+
+test('uneven panes enter at one perceived velocity and land together', async ({ page }) => {
+  await bootSeededWorkspace(
+    page,
+    WIDE,
+    unevenThreePaneBuilder({ kind: 'chat', id: 'ghost' }),
+  )
+  await toggleMode(page)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(false)
+
+  const sampler = captureBeatPlan(page, 'shell--builder-entering')
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+
+  expect(r.participants).toHaveLength(3)
+  expect(r.participants.some(p => p.delay > 0),
+    'shorter vectors wait offscreen rather than rushing the seam').toBe(true)
+  const arrivals = r.participants.map(p => p.delay + p.duration)
+  expect(new Set(arrivals).size, 'all panes land on the same frame').toBe(1)
+  const speeds = r.participants.map(p => Math.hypot(p.x, p.y) / p.duration)
+  expect(Math.max(...speeds) / Math.min(...speeds),
+    'asymmetric panes keep a common average velocity').toBeLessThan(1.15)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(true)
+})
+
+test('shared Standard chat stays still while its sibling pane assembles above it', async ({ page }) => {
+  // slot === the focused LEFT pane's chat. Exit still promotes that pane; entry
+  // deliberately does not shrink the Standard surface back into place. It stays
+  // full-bleed underneath while the right sibling arrives, then the completion
+  // commit crops it into the left pane.
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
+  await toggleMode(page)
+  await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
+  await expect.poll(() => builderActive(page)).toBe(false)
+
+  const sampler = page.evaluate(async () => {
+    const root = document.querySelector('.shell')
+    let started = false
+    let minUnderlayOpacity = 1
+    const underlayTransforms = new Set()
+    const participants = []
+    await new Promise(resolve => {
+      let frames = 0
+      const tick = () => {
+        const entering = root.classList.contains('shell--builder-entering')
+        if (entering) {
+          started = true
+          const underlay = document.querySelector('.shell__view--exit-underlay')
+          if (underlay) {
+            const style = getComputedStyle(underlay)
+            minUnderlayOpacity = Math.min(minUnderlayOpacity, parseFloat(style.opacity))
+            underlayTransforms.add(style.transform)
+          }
+          if (participants.length === 0) {
+            for (const pane of document.querySelectorAll(
+              '.shell__view[data-mode-motion="deal-in"]',
+            )) {
+              participants.push({
+                x: parseFloat(pane.style.getPropertyValue('--mode-offset-x')) || 0,
+                y: parseFloat(pane.style.getPropertyValue('--mode-offset-y')) || 0,
+              })
+            }
+          }
+        }
+        frames += 1
+        if ((started && !entering) || frames > 120) { resolve(); return }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    return {
+      started,
+      minUnderlayOpacity,
+      underlayTransforms: [...underlayTransforms],
+      participants,
+    }
+  })
+  await page.waitForTimeout(30)
+  await toggleMode(page)
+  const r = await sampler
+
+  expect(r.started).toBe(true)
+  expect(r.underlayTransforms, 'the Standard chat never scales or translates').toEqual(['none'])
+  expect(r.minUnderlayOpacity, 'the Standard chat never fades').toBeGreaterThanOrEqual(0.99)
+  expect(r.participants).toHaveLength(1)
+  expect(r.participants[0].x, 'the right sibling enters from the right edge').toBeGreaterThan(0)
+  expect(r.participants[0].y).toBe(0)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
   await expect.poll(() => builderActive(page)).toBe(true)
 })

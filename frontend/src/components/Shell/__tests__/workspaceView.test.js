@@ -628,6 +628,37 @@ test('four-pane assemble/scatter preserves all four outer-edge vectors', () => {
   }
 })
 
+test('uneven entry normalizes pane velocity and lands every edge on one frame', () => {
+  // A deliberately asymmetric tree reproduces the production complaint: without
+  // distance-aware timing, the shortest and longest edge vectors differ by almost
+  // 2× while sharing one duration, so one pane visibly rushes into the seam.
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', '1')])
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', '2'), {
+    paneId: ws.focusedPaneId, edge: 'right',
+  })
+  const rightId = paneModel.paneOf(ws, 'chat:2').id
+  ws = paneModel.splitPaneWithTab(ws, makeTab('chat', '3'), {
+    paneId: rightId, edge: 'bottom',
+  })
+  ws = paneModel.setRatio(ws, ws.layout.id, 0.7)
+  ws = paneModel.setRatio(ws, ws.layout.b.id, 0.25)
+  ws = { ...ws, singleScreen: { kind: 'chat', id: 'ghost' } }
+
+  const plan = deriveEnterPlan({ workspace: ws, projection: project(ws), contentRect: CONTENT })
+  assert.equal(plan.totalMs, MODE_MOTION.enterItemMs)
+  assert.ok(plan.participants.some(p => p.delayMs > 0),
+    'a shorter trip waits offscreen instead of racing a longer trip')
+  assert.ok(plan.participants.every(
+    p => p.delayMs + p.durationMs === MODE_MOTION.enterItemMs,
+  ), 'every pane lands on the same terminal frame')
+
+  const speeds = plan.participants.map((p) => (
+    Math.hypot(p.offset.x, p.offset.y) / p.durationMs
+  ))
+  assert.ok(Math.max(...speeds) / Math.min(...speeds) < 1.15,
+    'average pane velocities stay perceptually aligned despite asymmetric geometry')
+})
+
 test('N1: MODE_MOTION drops the unused chromeMs constant', () => {
   assert.equal(MODE_MOTION.chromeMs, undefined)
   // The live timings the plan builders use are still present.
@@ -728,27 +759,24 @@ test('deriveExitPlan: M2 a builder Settings tab that IS the destination does not
   assert.ok(plan.participants.some(p => p.key === 'chat:5'), 'the sibling pane still deals out')
 })
 
-test('deriveEnterPlan: the shared surface settles while siblings assemble from their edges', () => {
+test('deriveEnterPlan: the shared Standard surface stays still while siblings assemble', () => {
   const two = twoPaneChatAndApp() // the app:42 pane is focused
   const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two), contentRect: CONTENT })
-  assert.deepEqual(twoPlan.completionNames, ['shell-mode-settle', 'shell-mode-deal-in'])
-  assert.equal(twoPlan.participants.length, 2)
+  assert.deepEqual(twoPlan.completionNames, ['shell-mode-deal-in'])
+  assert.equal(twoPlan.underlayKey, 'app:42')
+  assert.equal(twoPlan.participants.length, 1)
   assert.ok(twoPlan.participants.every(p => p.durationMs === MODE_MOTION.enterItemMs))
-  const settle = twoPlan.participants.find(p => p.motion === 'settle')
   const gather = twoPlan.participants.find(p => p.motion === 'deal-in')
-  assert.equal(settle.key, 'app:42')
-  assert.ok(settle.flip.sx > 1, 'the right pane starts at the single-world size')
   assert.equal(gather.key, 'chat:5')
   assert.ok(gather.offset.x < 0, 'the left pane assembles from the left edge')
-  assert.ok(twoPlan.participants.every(p => p.delayMs === 0),
-    'the shared surface and siblings assemble together')
+  assert.ok(twoPlan.participants.every(p => p.delayMs === 0))
   assert.equal(twoPlan.totalMs, MODE_MOTION.enterItemMs)
+
+  // There is no visible assembly when the Standard surface is the only leaf.
+  // Returning null makes the controller commit that world flip instantly.
   const one = paneModel.seedFromFlatTabs([makeTab('app', '42')])
   const onePlan = deriveEnterPlan({ workspace: one, projection: project(one), contentRect: CONTENT })
-  assert.equal(onePlan.participants.length, 1)
-  assert.equal(onePlan.participants[0].motion, 'settle')
-  assert.equal(onePlan.participants[0].durationMs, MODE_MOTION.enterSingleMs)
-  assert.equal(onePlan.totalMs, MODE_MOTION.enterSingleMs)
+  assert.equal(onePlan, null)
 })
 
 test('focused-pane mode keeps its original edge and its in-pane strip geometry', () => {

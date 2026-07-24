@@ -38,12 +38,12 @@ BOOTSTRAP_STORE_MANIFEST_URL = (
 # never a mutable branch: core and app releases pair explicitly — this pin
 # names the newest app revision reviewed against THIS platform's API surface,
 # and bumping it is a deliberate platform commit that rides the same release.
-# (Currently v1.1.2, which needs no skills API and works on any core; the v2
-# app — compat badges, catalog browser — requires this platform's skills API
-# and gets pinned here only once both sides have merged.)
+# (Now v2.0.0 — compat badges, catalog browser — which requires this platform's
+# skills API; pinned here as core #146 and app #4 merged together in this
+# release. The prior v1.1.2 pin needed no skills API and ran on any core.)
 BOOTSTRAP_SKILLS_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-skills/"
-  "fd09c995d943cb23bf2215be128fc68851750ebf/mobius.json"
+  "113210883ddab380a01da1443e61600439d23b2a/mobius.json"
 )
 
 LEGACY_PLATFORM_APP_MANIFEST_URLS = legacy_platform_apps.MANIFEST_URLS
