@@ -244,12 +244,7 @@ test.describe('Input behavior', () => {
 
     // Type something — send button should appear
     await page.getByRole('textbox', { name: 'Message Möbius…' }).fill('hello')
-    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
-
-    const hasSendAfter = await page.evaluate(
-      () => !!document.querySelector('.chat__send')
-    )
-    expect(hasSendAfter).toBe(true)
+    await expect(page.locator('.chat__send')).toBeVisible()
   })
 })
 
@@ -1208,13 +1203,8 @@ test.describe('Enter key — desktop (no touch)', () => {
     await input.fill('Desktop send test')
     await page.keyboard.press('Enter')
 
-    await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
-
     // Should NOT be on empty state — message was sent.
-    const hasScroll = await page.evaluate(
-      () => !!document.querySelector('.chat__scroll')
-    )
-    expect(hasScroll).toBe(true)
+    await expect(page.locator('.chat__scroll')).toBeVisible()
   })
 
   test('10c. Shift+Enter inserts newline on desktop', async ({ page }) => {
@@ -1292,21 +1282,21 @@ test.describe('Scroll after stream end', () => {
       () => !document.querySelector('.chat__stop'),
       { timeout: 10000 }
     )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
 
     // Verify content overflows.
-    const overflows = await page.evaluate(() => {
+    await expect.poll(() => page.evaluate(() => {
       const s = document.querySelector('.chat__scroll')
       return s ? s.scrollHeight > s.clientHeight + 100 : false
-    })
-    expect(overflows).toBe(true)
+    })).toBe(true)
 
     // Scroll up to ~1/3 of the way (user reading earlier content).
     await page.evaluate(() => {
       const s = document.querySelector('.chat__scroll')
       if (s) s.scrollTop = Math.max(0, s.scrollHeight / 3)
     })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 200)))
+    await expect.poll(() => page.evaluate(
+      () => document.querySelector('.chat__scroll')?.scrollTop || 0
+    )).toBeGreaterThan(0)
 
     const scrollBefore = await page.evaluate(() => {
       const s = document.querySelector('.chat__scroll')
@@ -1449,7 +1439,7 @@ test.describe('Connection recovery', () => {
       () => !document.querySelector('.chat__stop'),
       { timeout: 10000 }
     )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+    await expect(page.locator('.chat__msg--assistant')).toContainText('Agent response.')
     expect(streamCallCount).toBe(1)
 
     // Simulate visibility change — should not reconnect because the
