@@ -1,13 +1,14 @@
 """GitHub connection routes: device flow, PAT fallback, read surface, submit.
 
 Connect endpoints persist a token via app.github_auth (owner OR a
-github_access app — so the Contribute app can drive connect from its
-own UI — CSRF-guarded, rate-limited — INV4). github_access is a
-connection-management grant, not a read scope: an app with it can
-start/complete the connect flow, submit a PAT, and disconnect. A
+github_connect app — so the Contribute app can drive connect from its
+own UI — CSRF-guarded, rate-limited — INV4). github_connect is the
+credential-management grant: an app with it can start/complete the connect
+flow, submit a PAT, inspect connection status, and disconnect. A
 normal connect still needs the owner to authorize on github.com or
 paste their own token, but the grant itself is powerful — see the
-get_owner_or_app_with_github_access docstring. The remote read surface
+get_owner_or_app_with_github_connect docstring. The separate github_access
+grant gates the remote read and reviewed-submit surface.
 (/api/{path}, /graphql) is read-only by construction (INV2): the REST
 passthrough registers GET only, and the GraphQL endpoint rejects any
 document containing a mutation or subscription operation. GitHub writes are
@@ -34,11 +35,12 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
 import time
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
@@ -58,6 +60,7 @@ from app.deps import (
   Principal,
   get_principal,
   get_owner_or_app_with_github_access,
+  get_owner_or_app_with_github_connect,
   reject_cross_site,
 )
 from app.push import notify_owner
@@ -102,6 +105,8 @@ _COAUTHOR_TRAILER = (
 _SUBMIT_TIMEOUT = 90
 _PUSH_RETRIES = 3
 _PUSH_RETRY_BASE_SECONDS = 0.5
+_device_flow_poll_lock = asyncio.Lock()
+_CONNECTION_LOCK_TIMEOUT = 70.0
 
 # The classic-token creation URL with the required scope + description
 # pre-filled. Fine-grained tokens (github_pat_…) can't push to or open PRs
@@ -123,6 +128,10 @@ class GithubTokenRequest(BaseModel):
 
 class GithubConnectStartRequest(BaseModel):
   workflow: bool = False
+
+
+class GithubConnectAttemptRequest(BaseModel):
+  attempt_id: str
 
 
 class GraphqlRequest(BaseModel):
@@ -154,6 +163,46 @@ class ContributionSubmitError(Exception):
 
 def _now_iso() -> str:
   return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _bounded_provider_int(
+  value: object,
+  *,
+  default: int,
+  minimum: int,
+  maximum: int,
+) -> int:
+  """Parse an untrusted provider duration without allowing a wedged attempt."""
+  try:
+    parsed = int(value)
+  except (TypeError, ValueError):
+    return default
+  return max(minimum, min(maximum, parsed))
+
+
+@asynccontextmanager
+async def _github_connection_transaction():
+  """Serialize every credential/attempt mutation across workers.
+
+  The asyncio lock handles tasks in this worker. The non-blocking flock makes
+  the same state machine safe if the platform later runs multiple workers,
+  without blocking an event loop while another worker waits on GitHub.
+  """
+  async with _device_flow_poll_lock:
+    deadline = asyncio.get_running_loop().time() + _CONNECTION_LOCK_TIMEOUT
+    fd = github_auth.try_acquire_connection_lock()
+    while fd is None:
+      if asyncio.get_running_loop().time() >= deadline:
+        raise HTTPException(
+          status_code=503,
+          detail="The GitHub connection is busy. Please try again.",
+        )
+      await asyncio.sleep(0.05)
+      fd = github_auth.try_acquire_connection_lock()
+    try:
+      yield
+    finally:
+      github_auth.release_connection_lock(fd)
 
 
 def _record_paths(app_id: int, record_id: str) -> tuple[Path, Path]:
@@ -324,6 +373,9 @@ def _git_env(repo: Path) -> dict:
   env["GIT_CEILING_DIRECTORIES"] = str(repo.resolve().parent)
   env["GIT_TERMINAL_PROMPT"] = "0"
   env["GH_PROMPT_DISABLED"] = "1"
+  token = github_auth.get_token()
+  if token:
+    env["GH_TOKEN"] = token
   if github_auth.GH_AUTH_DIR.exists():
     env["GH_CONFIG_DIR"] = str(github_auth.GH_AUTH_DIR)
   return env
@@ -2058,17 +2110,24 @@ async def _github_user(token: str) -> tuple[int, str, int | None, list[str]]:
   if r.status_code != 200:
     return r.status_code, "", None, scopes
   data = r.json()
-  return r.status_code, data.get("login") or "", data.get("id"), scopes
+  if not isinstance(data, dict):
+    return r.status_code, "", None, scopes
+  login = data.get("login")
+  return (
+    r.status_code,
+    login if isinstance(login, str) else "",
+    data.get("id"),
+    scopes,
+  )
 
 
-@router.post("/connect/start", dependencies=[Depends(reject_cross_site)])
-@_limiter.limit("3/minute")
-async def connect_start(
+async def _start_device_attempt(
   request: Request,
-  body: GithubConnectStartRequest | None = None,
-  _: models.Owner = Depends(get_owner_or_app_with_github_access),
-):
-  """Starts the GitHub device flow; returns the code the owner enters."""
+  body: GithubConnectStartRequest | None,
+) -> dict:
+  """Request and persist one device code while the connection lock is held."""
+  if await request.is_disconnected():
+    raise HTTPException(status_code=499, detail="GitHub sign-in was cancelled.")
   client_id = get_settings().github_oauth_client_id
   if not client_id:
     raise HTTPException(
@@ -2107,100 +2166,246 @@ async def connect_start(
       status_code=502, detail="GitHub device flow could not be started.",
     )
   now = time.time()
-  interval = int(payload.get("interval", 5))
-  expires_in = int(payload.get("expires_in", 900))
+  interval = _bounded_provider_int(
+    payload.get("interval"),
+    default=5,
+    minimum=1,
+    maximum=60,
+  )
+  expires_in = _bounded_provider_int(
+    payload.get("expires_in"),
+    default=900,
+    minimum=60,
+    maximum=1800,
+  )
+  attempt_id = secrets.token_urlsafe(18)
+  expires_at = now + expires_in
+  # A browser that timed out or unmounted while waiting behind the serialized
+  # connection lock must not publish an invisible attempt over a newer tab.
+  if await request.is_disconnected():
+    raise HTTPException(status_code=499, detail="GitHub sign-in was cancelled.")
   github_auth.set_device_flow({
+    "attempt_id": attempt_id,
+    "status": "waiting",
     "device_code": payload["device_code"],
     "interval": interval,
     "next_poll_at": now + interval,
+    "created_at": now,
+    "expires_at": expires_at,
+    "requested_scopes": scopes.split(),
+    "user_code": payload["user_code"],
+    "verification_uri": payload["verification_uri"],
   })
   return {
+    "attempt_id": attempt_id,
     "user_code": payload["user_code"],
     "verification_uri": payload["verification_uri"],
     "expires_in": expires_in,
+    "expires_at": expires_at,
     "interval": interval,
     "requested_scopes": scopes.split(),
   }
+
+
+@router.post("/connect/start", dependencies=[Depends(reject_cross_site)])
+@_limiter.limit("3/minute")
+async def connect_start(
+  request: Request,
+  body: GithubConnectStartRequest | None = None,
+  _: models.Owner = Depends(get_owner_or_app_with_github_connect),
+):
+  """Starts exactly one GitHub device flow and returns its user code."""
+  # All credential/attempt mutations share this lock. In particular, a start
+  # cannot publish a ghost attempt after its client timed out behind an older
+  # poll, PAT connection, or Disconnect.
+  async with _github_connection_transaction():
+    return await _start_device_attempt(request, body)
+
+
+def _device_attempt_result(flow: dict, *, now: float | None = None) -> dict:
+  """Returns the browser-safe state for one persisted device attempt."""
+  response = {
+    "attempt_id": flow["attempt_id"],
+    "status": flow.get("status", "waiting"),
+    "expires_at": flow.get("expires_at"),
+  }
+  if flow.get("reason"):
+    response["reason"] = flow["reason"]
+  if flow.get("login"):
+    response["login"] = flow["login"]
+  if response["status"] == "waiting":
+    current = time.time() if now is None else now
+    response["status"] = "pending"
+    response["expires_in"] = max(
+      0, round(float(flow.get("expires_at", current)) - current, 3),
+    )
+    response["retry_after"] = max(
+      0, round(float(flow.get("next_poll_at", current)) - current, 3),
+    )
+    if flow.get("last_error"):
+      response["last_error"] = flow["last_error"]
+    response["interval"] = flow.get("interval")
+    response["user_code"] = flow.get("user_code")
+    response["verification_uri"] = flow.get("verification_uri")
+  return response
+
+
+def _current_device_attempt(attempt_id: str) -> dict:
+  flow = github_auth.get_device_flow()
+  if not flow or flow.get("attempt_id") != attempt_id:
+    raise HTTPException(
+      status_code=404,
+      detail="This GitHub connection attempt no longer exists.",
+    )
+  return flow
 
 
 @router.post("/connect/poll", dependencies=[Depends(reject_cross_site)])
 @_limiter.limit("30/minute")
 async def connect_poll(
   request: Request,
-  _: models.Owner = Depends(get_owner_or_app_with_github_access),
+  body: GithubConnectAttemptRequest,
+  _: models.Owner = Depends(get_owner_or_app_with_github_connect),
 ):
-  """Polls the in-flight device flow once.
+  """Advances one identified device attempt at most once.
 
-  Statuses: none (no flow), pending (keep polling), failed (flow
-  cleared; `reason` says why), complete (credentials stored). Polls
-  arriving before GitHub's requested interval are answered pending
-  WITHOUT an upstream call — the server enforces the pacing so an
-  eager frontend can't trip GitHub's slow_down escalation.
+  Polls arriving before GitHub's requested interval are answered pending
+  without an upstream call. Terminal states remain addressable so the UI can
+  explain the actual outcome rather than translating every failure to expiry.
   """
-  flow = github_auth.get_device_flow()
-  if not flow:
-    return {"status": "none"}
-  now = time.time()
-  if now < flow["next_poll_at"]:
-    return {"status": "pending"}
-  try:
-    async with httpx.AsyncClient(timeout=15.0) as client:
-      r = await client.post(
-        _ACCESS_TOKEN_URL,
-        data={
-          "client_id": get_settings().github_oauth_client_id,
-          "device_code": flow["device_code"],
-          "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-        },
-        headers={"Accept": "application/json"},
-      )
-  except httpx.HTTPError:
-    raise HTTPException(status_code=502, detail="Could not reach GitHub.")
-  try:
-    payload = r.json()
-  except ValueError:
-    payload = {}
-  error = payload.get("error")
-  if error == "authorization_pending":
-    flow["next_poll_at"] = now + flow["interval"]
-    return {"status": "pending"}
-  if error == "slow_down":
-    # GitHub sends the new minimum interval; honor it, never shrink,
-    # and always back off at least 5s beyond the previous pace.
-    flow["interval"] = max(
-      int(payload.get("interval", 0)), flow["interval"] + 5,
+  async with _github_connection_transaction():
+    flow = _current_device_attempt(body.attempt_id)
+    if flow.get("status") != "waiting":
+      return _device_attempt_result(flow)
+
+    now = time.time()
+    if now >= float(flow["expires_at"]) and not flow.get("pending_token"):
+      flow.update(status="expired", reason="expired_token")
+      flow.pop("device_code", None)
+      github_auth.set_device_flow(flow)
+      return _device_attempt_result(flow, now=now)
+    if now < float(flow["next_poll_at"]):
+      return _device_attempt_result(flow, now=now)
+
+    # Claim the interval before waiting on GitHub. A concurrent worker that
+    # reloads the persisted attempt will observe the future next_poll_at and
+    # return pending instead of issuing a second provider request.
+    flow["next_poll_at"] = now + int(flow["interval"])
+    flow.pop("last_error", None)
+    github_auth.set_device_flow(flow)
+    token = flow.get("pending_token")
+    if not token:
+      try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+          r = await client.post(
+            _ACCESS_TOKEN_URL,
+            data={
+              "client_id": get_settings().github_oauth_client_id,
+              "device_code": flow["device_code"],
+              "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            },
+            headers={"Accept": "application/json"},
+          )
+      except httpx.HTTPError:
+        flow["last_error"] = "github_unreachable"
+        github_auth.set_device_flow(flow)
+        raise HTTPException(status_code=502, detail="Could not reach GitHub.")
+
+      try:
+        payload = r.json()
+      except ValueError:
+        payload = {}
+      error = payload.get("error")
+      if error == "authorization_pending":
+        github_auth.set_device_flow(flow)
+        return _device_attempt_result(flow, now=now)
+      if error == "slow_down":
+        # GitHub sends the new minimum interval; honor it, never shrink,
+        # and always back off at least 5s beyond the previous pace.
+        flow["interval"] = max(
+          _bounded_provider_int(
+            payload.get("interval"),
+            default=0,
+            minimum=0,
+            maximum=60,
+          ),
+          _bounded_provider_int(
+            flow.get("interval"),
+            default=5,
+            minimum=1,
+            maximum=60,
+          ) + 5,
+        )
+        flow["interval"] = min(60, flow["interval"])
+        flow["next_poll_at"] = now + flow["interval"]
+        github_auth.set_device_flow(flow)
+        return _device_attempt_result(flow, now=now)
+      if error:
+        flow.update(status="failed", reason=error)
+        flow.pop("device_code", None)
+        github_auth.set_device_flow(flow)
+        return _device_attempt_result(flow, now=now)
+
+      token = payload.get("access_token")
+      if not token:
+        flow.update(status="failed", reason="no_access_token")
+        flow.pop("device_code", None)
+        github_auth.set_device_flow(flow)
+        return _device_attempt_result(flow, now=now)
+      # GitHub device codes are single-use. Persist the exchanged token before
+      # user lookup so a network failure or worker restart resumes validation
+      # instead of retrying a consumed code.
+      flow["pending_token"] = token
+      flow.pop("device_code", None)
+      github_auth.set_device_flow(flow)
+    try:
+      status, login, user_id, scopes = await _github_user(token)
+    except (httpx.HTTPError, ValueError):
+      flow["last_error"] = "github_unreachable"
+      github_auth.set_device_flow(flow)
+      raise HTTPException(status_code=502, detail="Could not reach GitHub.")
+    if status == 429 or status >= 500:
+      # The device code has already been consumed, so dropping this token on a
+      # transient /user response would make the attempt unrecoverable. Keep the
+      # private pending token and retry only the user lookup on the next poll.
+      flow["last_error"] = "github_unreachable"
+      github_auth.set_device_flow(flow)
+      raise HTTPException(status_code=502, detail="Could not reach GitHub.")
+    if status != 200 or not _GITHUB_LOGIN.fullmatch(login):
+      flow.update(status="failed", reason="user_lookup_failed")
+      flow.pop("pending_token", None)
+      github_auth.set_device_flow(flow)
+      return _device_attempt_result(flow, now=now)
+    github_auth.write_credentials(
+      token=token, login=login, user_id=user_id, scopes=scopes,
+      source="device",
     )
-    flow["next_poll_at"] = now + flow["interval"]
-    return {"status": "pending"}
-  if error:
-    # expired_token / access_denied / anything unexpected: the flow is
-    # dead either way — clear it so the frontend can offer a restart.
-    github_auth.set_device_flow(None)
-    return {"status": "failed", "reason": error}
-  token = payload.get("access_token")
-  if not token:
-    github_auth.set_device_flow(None)
-    return {"status": "failed", "reason": "no_access_token"}
-  status, login, user_id, scopes = await _github_user(token)
-  if status != 200 or not login:
-    github_auth.set_device_flow(None)
-    return {"status": "failed", "reason": "user_lookup_failed"}
-  github_auth.write_credentials(
-    token=token, login=login, user_id=user_id, scopes=scopes,
-    source="device",
-  )
-  github_auth.set_device_flow(None)
-  return {"status": "complete", "login": login}
+    flow.update(status="complete", login=login)
+    flow.pop("pending_token", None)
+    github_auth.set_device_flow(flow)
+    return _device_attempt_result(flow, now=now)
 
 
-@router.post("/connect/token", dependencies=[Depends(reject_cross_site)])
-@_limiter.limit("5/minute")
-async def connect_token(
+@router.post("/connect/cancel", dependencies=[Depends(reject_cross_site)])
+@_limiter.limit("10/minute")
+async def connect_cancel(
   request: Request,
-  body: GithubTokenRequest,
-  _: models.Owner = Depends(get_owner_or_app_with_github_access),
+  body: GithubConnectAttemptRequest,
+  _: models.Owner = Depends(get_owner_or_app_with_github_connect),
 ):
-  """Connects GitHub with a pasted classic personal access token."""
+  """Cancels exactly one attempt without affecting a newer browser tab."""
+  async with _github_connection_transaction():
+    flow = _current_device_attempt(body.attempt_id)
+    if flow.get("status") == "waiting":
+      flow.update(status="cancelled", reason="cancelled")
+      flow.pop("device_code", None)
+      flow.pop("pending_token", None)
+      github_auth.set_device_flow(flow)
+    return _device_attempt_result(flow)
+
+
+async def _connect_token_locked(body: GithubTokenRequest) -> dict:
+  """Validate and install a PAT while the connection lock is held."""
   token = body.token.strip()
   if token.startswith("github_pat_"):
     raise HTTPException(
@@ -2217,7 +2422,7 @@ async def connect_token(
   if not token:
     raise HTTPException(status_code=400, detail="Token is empty.")
   status, login, user_id, scopes = await _github_user(token)
-  if status != 200 or not login:
+  if status != 200 or not _GITHUB_LOGIN.fullmatch(login):
     raise HTTPException(
       status_code=400, detail="GitHub rejected the token.",
     )
@@ -2233,24 +2438,48 @@ async def connect_token(
   github_auth.write_credentials(
     token=token, login=login, user_id=user_id, scopes=scopes, source="pat",
   )
+  # PAT success supersedes any device attempt. Clearing both disk and cache
+  # ensures an older tab cannot later complete and overwrite these credentials.
+  github_auth.set_device_flow(None)
   return {"login": login}
+
+
+@router.post("/connect/token", dependencies=[Depends(reject_cross_site)])
+@_limiter.limit("5/minute")
+async def connect_token(
+  request: Request,
+  body: GithubTokenRequest,
+  _: models.Owner = Depends(get_owner_or_app_with_github_connect),
+):
+  """Connects GitHub with a pasted classic personal access token."""
+  async with _github_connection_transaction():
+    return await _connect_token_locked(body)
 
 
 @router.get("/status")
 async def github_status(
-  _: models.Owner = Depends(get_owner_or_app_with_github_access),
+  _: models.Owner = Depends(get_owner_or_app_with_github_connect),
 ):
   """Connection metadata for the Contribute app's UI. Never the token
   (INV1).
 
-  Gated on github_access like the rest of the surface: status still discloses
-  the owner's GitHub login + scope list, so an app without the grant shouldn't
-  read it. The owner (Settings) always passes; the Contribute app holds the
-  grant. (A malicious same-origin app can already read the owner JWT and call
-  the granted endpoints directly — this is least-privilege consistency, not a
-  new boundary.)"""
+  Gated on github_connect: status discloses the owner's GitHub login, scope
+  list, and any resumable device attempt. Read-only GitHub consumers do not
+  inherit those credential-management details."""
   state = github_auth.read_state() or {}
   connected = bool(state.get("token"))
+  flow = github_auth.get_device_flow()
+  active_attempt = None
+  if (
+    not connected
+    and flow
+    and flow.get("status") == "waiting"
+    and (
+      flow.get("pending_token")
+      or time.time() < float(flow.get("expires_at", 0))
+    )
+  ):
+    active_attempt = _device_attempt_result(dict(flow))
   return {
     "connected": connected,
     "login": state.get("login") if connected else None,
@@ -2260,6 +2489,7 @@ async def github_status(
     "classic_token_url": _CLASSIC_TOKEN_URL,
     "classic_workflow_token_url": _CLASSIC_WORKFLOW_TOKEN_URL,
     "gh_version": github_auth.gh_version(),
+    "active_attempt": active_attempt,
   }
 
 
@@ -2335,12 +2565,14 @@ async def github_source_status(
 
 @router.delete("/connect", dependencies=[Depends(reject_cross_site)])
 @_limiter.limit("5/minute")
-def github_disconnect(
+async def github_disconnect(
   request: Request,
-  _: models.Owner = Depends(get_owner_or_app_with_github_access),
+  _: models.Owner = Depends(get_owner_or_app_with_github_connect),
 ):
-  """Disconnects GitHub — removes the stored credentials."""
-  github_auth.clear_credentials()
+  """Disconnects GitHub and invalidates every pending connection attempt."""
+  async with _github_connection_transaction():
+    github_auth.set_device_flow(None)
+    github_auth.clear_credentials()
   return {"ok": True}
 
 

@@ -25,6 +25,10 @@ from app.database import Base
 from app.timeutil import now_naive_utc
 
 
+CONTINUATION_RUN_STATUSES = ("parked", "resume_pending")
+NONTERMINAL_RUN_STATUSES = ("running", *CONTINUATION_RUN_STATUSES)
+
+
 class Owner(Base):
   """Single owner account for this installation."""
 
@@ -37,15 +41,15 @@ class Owner(Base):
   provider = Column(String(32), nullable=False, default="claude")
   # Default provider-limit recovery policy for newly-created chats. Each chat
   # stores its own copy; changing a chat's switch updates this seed for the
-  # next chat without rewriting any existing conversation.
+  # next chat without rewriting any existing conversation. Automatic provider
+  # retries are initially off because they can consume paid usage.
   auto_resume_on_limit_default = Column(
-    Boolean, nullable=False, default=True, server_default=true()
-  )
-  # Separately consented planned-restart policy for newly created chats.
-  # Existing owners migrate to false: consenting to provider-limit recovery
-  # never silently opts them into replay after a process restart.
-  auto_resume_on_restart_default = Column(
     Boolean, nullable=False, default=False, server_default=false()
+  )
+  # Planned restarts are initiated by Möbius, so continuing interrupted work
+  # is initially on. This remains independently configurable per chat.
+  auto_resume_on_restart_default = Column(
+    Boolean, nullable=False, default=True, server_default=true()
   )
   # Per-owner model-picker preferences. Shape:
   #   {"hidden_ids": ["claude-haiku-4-5-20251001", ...]}
@@ -130,15 +134,15 @@ class Chat(Base):
   # start afterwards. Nullable is the migration/empty-chat state: the first
   # turn snapshots it atomically before invoking a provider.
   system_prompt_snapshot_id = Column(String(64), nullable=True, default=None)
-  # Per-chat policy for automatic recovery after provider limits.
+  # Per-chat policy for automatic recovery after provider limits. Initially
+  # off because another attempt can consume paid usage.
   auto_resume_on_limit = Column(
-    Boolean, nullable=False, default=True, server_default=true()
-  )
-  # Planned restart continuation is materially broader than provider-limit
-  # recovery and therefore has separate, explicit consent. Existing and fresh
-  # chats start off until the owner enables it in that chat.
-  auto_resume_on_restart = Column(
     Boolean, nullable=False, default=False, server_default=false()
+  )
+  # Per-chat policy for continuing after a supervisor-authenticated planned
+  # restart. Initially on because Möbius interrupted the work itself.
+  auto_resume_on_restart = Column(
+    Boolean, nullable=False, default=True, server_default=true()
   )
   # Vestigial: the named-agent feature was removed; column retained
   # nullable to avoid a prod migration. Nothing reads or writes it.
@@ -557,15 +561,20 @@ class App(Base):
   # storage-write. The App Store mini-app is the canonical caller.
   # Default False — only granted by manifest declaration on install.
   manage_apps = Column(Boolean, nullable=False, default=False)
-  # GitHub connection access. When True, the app's token can call the
-  # whole /api/github surface: manage the connection (connect / poll /
-  # disconnect / status) and use the read-only data proxy (GET
-  # /api/github/api/* and POST /api/github/graphql, both read-only by
-  # construction, INV2). The connected token is never returned to the
-  # app. The Contribute mini-app is the canonical caller. A boolean gate
-  # like manage_apps, not a ladder. Default False — only granted by
-  # manifest declaration on install.
+  # Skills-management access. When True, the app's token can call the
+  # /api/skills surface (install a skill from an online source, uninstall an
+  # installed one) on the owner's behalf. Distinct from manage_apps so the
+  # skills-install consent is its own user-visible permission. The Skills
+  # mini-app is the canonical caller. Default False — only granted by manifest
+  # declaration on install.
+  manage_skills = Column(Boolean, nullable=False, default=False)
+  # GitHub data access. This covers the read-only proxy and the narrow reviewed
+  # contribution submit surface, never credential management or token export.
   github_access = Column(Boolean, nullable=False, default=False)
+  # GitHub credential-management authority. Device flow, PAT install, status,
+  # and disconnect are intentionally separate from github_access so read-only
+  # consumers cannot mutate the owner's account connection.
+  github_connect = Column(Boolean, nullable=False, default=False)
   # Owner filesystem capability. This is intentionally separate from storage
   # interop: it grants the app-scoped token access to the guarded /api/fs
   # surface (still path-confined and secret-denied there). The Editor is the

@@ -17,6 +17,8 @@ test('shortSha truncates and tolerates junk', () => {
 
 test('summarizePreview totals files/commits and skips binary counts', () => {
   const preview = {
+    total_commits: 132,
+    commits_truncated: true,
     commits: [{ sha: 'a', subject: 'one' }, { sha: 'b', subject: 'two' }],
     files: [
       { path: 'a.py', status: 'M', insertions: 3, deletions: 1 },
@@ -27,7 +29,9 @@ test('summarizePreview totals files/commits and skips binary counts', () => {
     diff_truncated: true,
   }
   const s = summarizePreview(preview)
-  assert.equal(s.commitCount, 2)
+  assert.equal(s.commitCount, 132)
+  assert.equal(s.listedCommitCount, 2)
+  assert.equal(s.commitsTruncated, true)
   assert.equal(s.fileCount, 3)
   assert.equal(s.insertions, 3)
   assert.equal(s.deletions, 13)
@@ -39,6 +43,8 @@ test('summarizePreview is safe on empty/absent fields', () => {
   const s = summarizePreview({})
   assert.deepEqual(s, {
     commitCount: 0,
+    listedCommitCount: 0,
+    commitsTruncated: false,
     fileCount: 0,
     insertions: 0,
     deletions: 0,

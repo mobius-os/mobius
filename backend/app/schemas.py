@@ -106,6 +106,11 @@ class AppUpdate(BaseModel):
   cross_app_access: ShareLevel | None = None
   share_with_apps: ShareLevel | None = None
   offline_capable: bool | None = None
+  # Owner-only DOWNGRADE of skills authority: False revokes immediately (the
+  # request gate reads the live row, so already-minted app JWTs lose access on
+  # their next call). Granting (True) is rejected — that path stays with the
+  # reviewed manifest install.
+  manage_skills: bool | None = None
   # None preserves the declaration. An object replaces it ({} removes all
   # runtime capabilities). Store-installed apps remain manifest-review owned.
   capabilities: dict | None = None
@@ -130,8 +135,13 @@ class AppOut(BaseModel):
   embeds_agent: bool = False
   # Install authority — see models.App.manage_apps for the contract.
   manage_apps: bool = False
-  # GitHub connection access — see models.App.github_access.
+  # GitHub data/reviewed-submit access — see models.App.github_access.
   github_access: bool = False
+  # Skills lifecycle authority (install/uninstall/catalog refresh) — see
+  # models.App.manage_skills.
+  manage_skills: bool = False
+  # GitHub credential management — see models.App.github_connect.
+  github_connect: bool = False
   # Guarded owner-filesystem access — see models.App.filesystem_access.
   filesystem_access: bool = False
   # URL slug for the standalone PWA install at /apps/<slug>/. Null
@@ -397,10 +407,9 @@ class ChatPatch(BaseModel):
   title: str | None = Field(default=None, max_length=500)
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
-  # Per-chat opt-in to continuing after a provider-limit reset.
+  # Per-chat automatic continuation after a paid provider limit.
   auto_resume_on_limit: bool | None = None
-  # Separate explicit consent for a supervisor-authenticated planned restart.
-  # Existing chats migrate off; provider-limit consent never broadens into it.
+  # Per-chat automatic continuation after a supervisor-authenticated restart.
   auto_resume_on_restart: bool | None = None
   # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
   # only when the owner hasn't locked it via a manual rename. clear_title resets

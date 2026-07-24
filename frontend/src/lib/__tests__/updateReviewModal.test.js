@@ -34,6 +34,7 @@ test('apply outcomes close only for explicit clean states and preserve actionabl
   assert.match(modal, /result\?\.state === 'conflict' \|\| result\?\.state === 'rolled_back'/)
   assert.match(modal, /result\.state === 'restart_needed' \|\| result\.state === 'up_to_date'/)
   assert.doesNotMatch(modal, /if \(result\?\.ok\) onClose\(\)/)
+  assert.match(modal, /applyProgress\?\.plan_id === preview\?\.plan_id/)
 })
 
 test('the apply response is a truthful fallback when status refresh fails', () => {

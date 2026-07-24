@@ -133,22 +133,6 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting()
 })
 
-// Self-hosted d3 + PixiJS for the Memory graph. Unlike packages imported by
-// app source (which the compiler now embeds in the app's single module), these
-// are CLASSIC script-tag loads
-// (the app's loadScriptOnce expects window.d3 / window.PIXI globals); they
-// were previously fetched from cdn.jsdelivr.net, which the prod CSP
-// (script-src 'self' ... https://esm.sh) blocks — the graph silently
-// degraded to the list view and could never work offline. The files are
-// committed at frontend/public/vendor/ (Vite copies public/ verbatim, so no
-// Dockerfile npm-install step); the version in the path is the cache-bust.
-// Bumping a version here means bumping the dir under frontend/public/vendor/
-// + the D3_URL / PIXI_URL constants in core-apps/memory/index.jsx in lockstep.
-const VENDORED_MEMORY_GRAPH = [
-  '/vendor/d3@7.9.0/d3.min.js',
-  '/vendor/pixi.js@8.19.0/pixi.min.js',
-].map(url => ({ url, revision: null }))
-
 // PDF.js's worker plus KaTeX's stylesheet/fonts are the other deliberate URL
 // assets left after the compiler began embedding app dependency graphs. Runtime
 // CacheFirst alone only helps after each URL has been requested online, which
@@ -165,7 +149,6 @@ const VENDORED_MEMORY_GRAPH = [
 addPlugins([opaqueFramePublicAssetCorsPlugin])
 precacheAndRoute([
   ...self.__WB_MANIFEST,
-  ...VENDORED_MEMORY_GRAPH,
   ...RETAINED_RUNTIME_ASSETS,
 ])
 cleanupOutdatedCaches()

@@ -7,25 +7,22 @@
    The mode beat is COMPOSITOR-ONLY: every keyframe touches transform + opacity
    and NOTHING that forces layout on the live iframe/ChatView surfaces (no
    box-shadow, border-radius, filter, clip, or animated top/left/width/height).
-   Panes hold their tiled content rect through the beat; promote/settle use inverse
-   FLIP transforms, while siblings travel to/from their corresponding outer edge.
+   Panes hold their tiled content rect through the beat; exit promotion uses a
+   FLIP transform, while siblings travel to/from their corresponding outer edge.
    clears in one commit that snaps the destination to ordinary full-bleed at
    visually identical bounds. Timing constants + the per-beat plan live in
-   workspaceView.js (MODE_MOTION / deriveExit·EnterPlan); Shell writes each
+   workspaceView.js (MODE_MOTION / deriveExit·EnterPlan). Shell writes each
    participant's duration/delay and projection-derived transform variables inline. */
 .shell {
-  /* Quart-out keeps long edge travel visible across the beat instead of spending
-     ~80% of the distance in its first 50ms. The exit curve starts immediately and
-     distributes the inverse scatter through the whole shorter departure. */
-  --ease-mode-arrive: cubic-bezier(0.25, 1, 0.5, 1);
-  --ease-mode-leave: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-mode-arrive: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-mode-leave: cubic-bezier(0.4, 0, 0.7, 0.2);
   /* Chrome (dividers + strips) leads the panes with a faster, front-loaded curve so
      structure simplifies first (exit) / resolves after the focused card (entry). */
   --ease-mode-chrome: cubic-bezier(0.2, 0.8, 0.2, 1);
   /* The promote FLIP reads with more MASS than the light deal-out cards: a slower
      middle and a clean, non-overshooting landing, so a half-pane grows to full-bleed
      without racing ahead of its still-opaque siblings. */
-  --ease-mode-promote: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-mode-promote: cubic-bezier(0.2, 0.82, 0.2, 1);
 }
 
 /* A content wrapper (app iframe or PaneChatView) that is the active tab of a
@@ -52,19 +49,6 @@
   z-index: 0;
 }
 
-/* Assemble continuity: the single-world surface is already laid out in its final
-   pane rect, so an inverse FLIP makes its first frame look full-bleed and settles it
-   into place. This is the reverse of promote and touches only transform. */
-.shell--builder-entering
-.shell__view[data-mode-motion="settle"] {
-  z-index: 1;
-  transform-origin: 0 0;
-  animation:
-    shell-mode-settle
-    var(--mode-duration)
-    var(--ease-mode-promote)
-    both;
-}
 /* Promote: the survivor pane keeps its tiled content rect and FLIPs to cover the
    full destination (transform-origin at its own top-left; Shell latches --flip-*
    from the projection, never a DOM read). Its OWN curve (--ease-mode-promote) gives
@@ -78,7 +62,6 @@
     shell-mode-promote
     var(--mode-duration)
     var(--ease-mode-promote)
-    var(--mode-delay, 0ms)
     both;
 }
 
@@ -102,6 +85,7 @@
    two worlds look like separate transitions. */
 .shell--builder-entering
 .shell__view[data-mode-motion="deal-in"] {
+  z-index: 2;
   animation:
     shell-mode-deal-in
     var(--mode-duration)
@@ -118,17 +102,6 @@
     transform:
       translate3d(var(--flip-x), var(--flip-y), 0)
       scale(var(--flip-sx), var(--flip-sy));
-  }
-}
-
-@keyframes shell-mode-settle {
-  from {
-    transform:
-      translate3d(var(--flip-x), var(--flip-y), 0)
-      scale(var(--flip-sx), var(--flip-sy));
-  }
-  to {
-    transform: translate3d(0, 0, 0) scale(1, 1);
   }
 }
 
@@ -172,9 +145,9 @@
 }
 
 /* Dividers + the overflow chip simplify first on exit, then resolve only over the
-   LAST 70ms of entry. A settling strip follows the same rule: structure cannot appear
-   over the old screen before the panes themselves arrive. Opacity-only; small
-   elements. The chip selector is
+   LAST 70ms of entry. The stationary underlay's strip follows the same rule:
+   structure cannot appear over the old screen before the panes themselves arrive.
+   Opacity-only; small elements. The chip selector is
    listed FIRST (before the divider) so it is followed by a comma, never a brace — a
    css-shape test that greps the base chip rule still finds it. */
 .shell--builder-exiting .workspace__pane-chip,
@@ -182,12 +155,12 @@
   pointer-events: none;
   animation: shell-mode-chrome-out 90ms var(--ease-mode-chrome) both;
 }
-.shell--builder-entering .shell__tabstrip[data-mode-motion="settle"],
+.shell--builder-entering .shell__tabstrip:not([data-mode-motion]),
 .shell--builder-entering .workspace__pane-chip,
 .shell--builder-entering .workspace__divider {
   animation:
     shell-mode-chrome-in 70ms var(--ease-mode-chrome)
-    calc(var(--mode-total, 220ms) - 70ms) both;
+    calc(var(--mode-total, 210ms) - 70ms) both;
 }
 @keyframes shell-mode-chrome-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes shell-mode-chrome-in { from { opacity: 0; } to { opacity: 1; } }

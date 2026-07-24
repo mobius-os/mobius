@@ -74,7 +74,8 @@ check_backend_prereqs() {
 
   local expected actual
   expected="$("${PROJECT_DIR}/scripts/test-image-fingerprint.sh")"
-  actual="$(docker run --rm --entrypoint sh "${TEST_IMAGE}" -c \
+  actual="$("${PROJECT_DIR}/scripts/docker-probe.sh" --timeout 15 -- \
+    --entrypoint sh "${TEST_IMAGE}" -c \
     'test -r /app/test-image-fingerprint && cat /app/test-image-fingerprint' \
     2>/dev/null || true)"
   if [ "${actual}" != "${expected}" ]; then

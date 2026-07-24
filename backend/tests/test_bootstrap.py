@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from app import models
 from app.bootstrap import (
+  BOOTSTRAP_SKILLS_MANIFEST_URL,
   BOOTSTRAP_STORE_MANIFEST_URL,
   LEGACY_PLATFORM_APP_MANIFEST_URLS,
   _migrate_legacy_platform_apps,
@@ -28,6 +29,7 @@ def _install_result(name="App", slug="app", app_id=1, mode="install"):
 def _bootstrap_urls():
   return [
     BOOTSTRAP_STORE_MANIFEST_URL,
+    BOOTSTRAP_SKILLS_MANIFEST_URL,
     LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"],
     LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"],
   ]
@@ -42,7 +44,7 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  assert install_mock.await_count == 3
+  assert install_mock.await_count == 4
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
   ] == _bootstrap_urls()
@@ -54,7 +56,7 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
-  """Store returns after uninstall; Memory stays gone; live Reflection skips."""
+  """Store returns after uninstall; Skills/Memory stay gone; live Reflection skips."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.install import _canonical_identity_key
 
@@ -67,6 +69,16 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       slug="store",
       manifest_url=_canonical_identity_key(
         BOOTSTRAP_STORE_MANIFEST_URL, "store",
+      ),
+      deleted_at=deleted_at,
+    ),
+    models.App(
+      name="Skills",
+      description="owner uninstalled",
+      jsx_source="export default function App() {}",
+      slug="skills",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_SKILLS_MANIFEST_URL, "skills",
       ),
       deleted_at=deleted_at,
     ),
@@ -96,11 +108,12 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  install_mock.assert_awaited_once()
-  assert (
-    install_mock.await_args.kwargs["manifest_url"]
-    == BOOTSTRAP_STORE_MANIFEST_URL
-  )
+  # Only the Store (the recovery surface) returns after an owner uninstall;
+  # Skills and Memory (policy False) stay gone; live Reflection is skipped.
+  assert install_mock.await_count == 1
+  assert [
+    call.kwargs["manifest_url"] for call in install_mock.await_args_list
+  ] == [BOOTSTRAP_STORE_MANIFEST_URL]
 
 
 @pytest.mark.asyncio
@@ -116,6 +129,15 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       jsx_source="export default function App() {}",
       slug="app-store",
       manifest_url=_canonical_identity_key(BOOTSTRAP_STORE_MANIFEST_URL, "store"),
+    ),
+    models.App(
+      name="Skills",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="skills-custom",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_SKILLS_MANIFEST_URL, "skills",
+      ),
     ),
     models.App(
       name="Memory",
@@ -224,13 +246,14 @@ async def test_bootstrap_failure_doesnt_block_remaining_apps(
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   install_mock = AsyncMock(side_effect=[
     HTTPException(502, "upstream down"),
+    _install_result("Skills", "skills", app_id=4),
     _install_result("Memory", "memory", app_id=2),
     _install_result("Reflection", "reflection", app_id=3),
   ])
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  assert install_mock.await_count == 3
+  assert install_mock.await_count == 4
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
   ] == _bootstrap_urls()
@@ -252,3 +275,58 @@ async def test_bootstrap_respects_skip_env_var(db, monkeypatch):
     await ensure_bootstrap_apps_installed(db)
   install_mock.assert_not_awaited()
   migration_mock.assert_not_awaited()
+
+
+_SKILLS_MAIN_MANIFEST = (
+  "https://raw.githubusercontent.com/mobius-os/app-skills/main/mobius.json"
+)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_recognizes_skills_row_installed_at_other_ref(
+  db, monkeypatch,
+):
+  """F-1: the pinned bootstrap URL names a COMMIT, but a skills row installed at
+  `main` is the SAME app (identity is the repo, not the ref) — bootstrap must
+  recognize it and never reinstall a duplicate."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.install import _canonical_identity_key, _trusted_catalog_repo_base
+
+  # Guard: this test is only meaningful while the pin is a non-`main` ref.
+  assert _trusted_catalog_repo_base(BOOTSTRAP_SKILLS_MANIFEST_URL) == (
+    "https://raw.githubusercontent.com/mobius-os/app-skills"
+  )
+  db.add(models.App(
+    id=50, name="Skills", slug="skills",
+    manifest_url=_canonical_identity_key(_SKILLS_MAIN_MANIFEST, "skills"),
+  ))
+  db.commit()
+
+  install_mock = AsyncMock(return_value=_install_result())
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  urls = [c.kwargs["manifest_url"] for c in install_mock.await_args_list]
+  assert BOOTSTRAP_SKILLS_MANIFEST_URL not in urls  # skills already present
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_honors_skills_tombstone_at_other_ref(db, monkeypatch):
+  """F-1: an owner uninstalled skills (a tombstone) at `main`; a commit-pinned
+  bootstrap must still see it and NOT silently reinstall past the uninstall."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.install import _canonical_identity_key
+
+  db.add(models.App(
+    id=51, name="Skills", slug="skills",
+    manifest_url=_canonical_identity_key(_SKILLS_MAIN_MANIFEST, "skills"),
+    deleted_at=datetime.now(timezone.utc),
+  ))
+  db.commit()
+
+  install_mock = AsyncMock(return_value=_install_result())
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  urls = [c.kwargs["manifest_url"] for c in install_mock.await_args_list]
+  assert BOOTSTRAP_SKILLS_MANIFEST_URL not in urls  # tombstone respected
