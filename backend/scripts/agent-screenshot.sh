@@ -18,21 +18,31 @@
 #   /settings              owner settings, etc.
 #
 # Usage:
-#   agent-screenshot.sh <route> <out.png>
+#   agent-screenshot.sh [--content-only] <route> <out.png>
 #   <route> is path-absolute (starts with /); it is appended to
 #   $API_BASE_URL.
+#
+# --content-only removes product-owned walkthrough/install overlays from this
+# browser document after auth. It is deliberately ephemeral: no completion or
+# dismissal state is written to the owner's account or browser storage.
 #
 # Prints the output path on stdout, or non-zero if the auth dance
 # fails (no token, no API_BASE_URL, no viewport, no agent-browser).
 
 set -euo pipefail
 
+CONTENT_ONLY=0
+if [ "${1:-}" = "--content-only" ]; then
+  CONTENT_ONLY=1
+  shift
+fi
+
 ROUTE="${1:-}"
 OUT="${2:-}"
 
 if [ -z "$ROUTE" ]; then
   echo "agent-screenshot.sh: route required" >&2
-  echo "Usage: agent-screenshot.sh <route> [out.png]" >&2
+  echo "Usage: agent-screenshot.sh [--content-only] <route> [out.png]" >&2
   exit 1
 fi
 
@@ -97,6 +107,18 @@ agent-browser open "${API_BASE_URL}/" >/dev/null
 # appear in /proc/<pid>/cmdline. python reads it from the env (not argv)
 # and JSON-encodes it so any character is a safe JS string literal.
 AGENT_TOKEN="$AGENT_TOKEN" python3 -c 'import json,os; print("localStorage.setItem(\"token\", "+json.dumps(os.environ["AGENT_TOKEN"])+")")' | agent-browser eval --stdin >/dev/null
+
+# Content mode is a browser-session presentation flag, not onboarding or
+# install completion state. Set it before the target document mounts so React
+# never opens its modal (and therefore never inerts the app workspace). Clear it
+# for ordinary captures so a prior content-only preview cannot affect them.
+if [ "$CONTENT_ONLY" -eq 1 ]; then
+  agent-browser eval \
+    "sessionStorage.setItem('mobius:visual-content-only', '1')" >/dev/null
+else
+  agent-browser eval \
+    "sessionStorage.removeItem('mobius:visual-content-only')" >/dev/null
+fi
 
 # Now navigate to the actual target route, authenticated.
 agent-browser open "${API_BASE_URL}${ROUTE}" >/dev/null

@@ -34,7 +34,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "15"  # v15: native skill discovery + app quickstart split
+SEED_VERSION = "17"  # v17: inert-safe visual mode + ref-based iframe testing
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -44,9 +44,12 @@ _UNMODIFIED_MIGRATIONS = {
     # Resource-stewardship predecessor: propagate the adaptive analytics
     # and self-throttling contract only to untouched copies.
     "865dd241a99668b026cd9be90c472cfde562210df51f729b2c25929f6b3bd60a",
+    # v15 baked copy: route app work through the base + matching extensions.
+    "cba6c0c7dd97384bbe3bfa19e78707bfa272085843bab5102279a937467e5d17",
   },
   "cron.md": {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
+    "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
   },
   "recovery.md": {
     "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
@@ -58,6 +61,22 @@ _UNMODIFIED_MIGRATIONS = {
   "building-apps.md": {
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
     "91b655952d55b37fda0be82e3914c3b09e67ca7c5f5a575d315fb2ca75ef08f1",
+    "563dcd7bfa1ff7cbad074d98462eb9755a010a15bf340c7f594fc7f6825a6a86",
+  },
+  "building-apps-quickstart.md": {
+    "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",
+    # v16 baked copy: replace the unreliable CSS iframe selector.
+    "4c2b080bcc91626f761c5823ea00d324667b9710f6757931823e22e9c8b5c2b1",
+  },
+  "app-component-shapes.md": {
+    "0320609ff924a0954c20d5e5db91ed3681d421d76f6804b24552eb6e8fa5eb31",
+    # v16 baked copy: keep routine app builds from loading the catalog.
+    "91243377242700acb5093165af58c372bed0005f358d3a4b26774aeb2ef8a365",
+  },
+  "visual-testing.md": {
+    "9525b36b945c2a0b4cb02806081bb674f38e865b6e1c3961226112e1dbbc16ec",
+    # v16 baked copy: use iframe refs and preserve React's inert cleanup.
+    "a0648921b9c9ea2423e8abd52aa57e71e7bebfa1736073fcf3bfcaec3749ad19",
   },
 }
 

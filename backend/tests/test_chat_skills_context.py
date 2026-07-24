@@ -119,3 +119,37 @@ def test_core_prompt_has_no_static_skill_catalog():
     assert path.name not in core
   assert "skills-index.md" not in core
   assert "<available_skills>" in core
+
+
+def test_owned_app_skill_summaries_expose_complete_initial_read_sets():
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+
+  def summary(name: str) -> str:
+    text = (seed_dir / name).read_text(encoding="utf-8")
+    return next(
+      paragraph.replace("\n", " ")
+      for paragraph in text.split("\n\n")
+      if paragraph.strip() and not paragraph.startswith("#")
+    )
+
+  quickstart = summary("building-apps-quickstart.md")
+  advanced = summary("building-apps.md")
+  shapes = summary("app-component-shapes.md")
+  visual = summary("visual-testing.md")
+  cron = summary("cron.md")
+
+  assert len(quickstart) <= 300
+  assert "visual-testing.md" in quickstart
+  assert "building-apps.md" in quickstart
+  assert "cron.md" in quickstart
+  assert "app-component-shapes.md" in quickstart
+
+  for extension in (advanced, shapes, cron):
+    assert len(extension) <= 300
+    assert "building-apps-quickstart.md" in extension
+    assert "visual-testing.md" in extension
+
+  assert len(visual) <= 300
+  assert "building-apps-quickstart.md" in visual
+  assert "theming.md" in visual
