@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app import activity, auth
+from test_app_fixtures import create_local_app
 
 
 def _activity_lines() -> list[dict]:
@@ -14,17 +15,11 @@ def _activity_lines() -> list[dict]:
 
 
 def _make_app(client, owner_token) -> int:
-  response = client.post(
-    "/api/apps/",
-    json={
-      "name": "signalling-app",
-      "description": "x",
-      "jsx_source": "export default function App(){ return <div/> }",
-    },
-    headers={"Authorization": f"Bearer {owner_token}"},
-  )
-  assert response.status_code == 201, response.text
-  return response.json()["id"]
+  return create_local_app(
+    client,
+    {"Authorization": f"Bearer {owner_token}"},
+    name="signalling-app",
+  )["id"]
 
 
 def _app_token(client, owner_token, app_id) -> str:

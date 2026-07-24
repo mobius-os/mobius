@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from app.config import get_settings
+from test_app_fixtures import create_local_app
 
 
 JSX = "export default function App() { return <div>ok</div> }"
@@ -30,14 +31,10 @@ def _app_source(name):
 
 def _make_app(client, auth, source_dir):
   """Creates an app row with source_dir set to the given path."""
-  r = client.post("/api/apps/", json={
-    "name": "News",
-    "description": "test",
-    "jsx_source": JSX,
-    "source_dir": str(source_dir),
-  }, headers=auth)
-  assert r.status_code == 201, r.text
-  return r.json()["id"]
+  return create_local_app(
+    client, auth, name="News", description="test", jsx_source=JSX,
+    source_dir=source_dir,
+  )["id"]
 
 
 def test_run_job_spawns_fetch_sh(client, auth, tmp_path):

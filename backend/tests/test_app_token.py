@@ -3,6 +3,7 @@
 import io
 
 from app import auth as token_auth
+from test_app_fixtures import create_local_app
 
 
 def test_app_token_rejects_cross_site_request(client, auth):
@@ -20,14 +21,9 @@ def test_app_token_rejects_cross_site_request(client, auth):
 
 
 def test_create_app_token(client, owner_token):
-  # First create an app.
-  r = client.post("/api/apps/", json={
-    "name": "test-app",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name="test-app",
+  )["id"]
 
   # Request scoped token.
   r = client.post("/api/auth/app-token", json={
@@ -40,12 +36,9 @@ def test_create_app_token(client, owner_token):
 
 
 def test_app_token_cannot_access_settings(client, owner_token):
-  r = client.post("/api/apps/", json={
-    "name": "test-app",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name="test-app",
+  )["id"]
 
   r = client.post("/api/auth/app-token", json={
     "app_id": app_id,
@@ -60,12 +53,9 @@ def test_app_token_cannot_access_settings(client, owner_token):
 
 
 def test_app_token_can_access_storage(client, owner_token):
-  r = client.post("/api/apps/", json={
-    "name": "test-app",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name="test-app",
+  )["id"]
 
   r = client.post("/api/auth/app-token", json={
     "app_id": app_id,
@@ -114,13 +104,9 @@ def test_app_token_cannot_write_settings(client, owner_token):
 
 
 def test_app_token_cannot_create_apps(client, owner_token):
-  # Create an app first to get a valid app token.
-  r = client.post("/api/apps/", json={
-    "name": "test-app",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name="test-app",
+  )["id"]
 
   r = client.post("/api/auth/app-token", json={
     "app_id": app_id,
@@ -128,11 +114,11 @@ def test_app_token_cannot_create_apps(client, owner_token):
   app_token = r.json()["token"]
 
   # App token should not be able to create new apps.
-  r = client.post("/api/apps/", json={
-    "name": "another-app",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>no</div> }",
-  }, headers={"Authorization": f"Bearer {app_token}"})
+  r = client.post(
+    "/api/apps/apply",
+    json={"source_dir": "/data/apps/another-app"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
   assert r.status_code == 403
 
 
@@ -152,12 +138,9 @@ def test_app_token_invalid_app(client, owner_token):
 
 def _make_app_and_token(client, owner_token):
   """Helper: creates an app and returns (app_id, app_token)."""
-  r = client.post("/api/apps/", json={
-    "name": "test-app",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name="test-app",
+  )["id"]
   r = client.post("/api/auth/app-token", json={
     "app_id": app_id,
   }, headers={"Authorization": f"Bearer {owner_token}"})
@@ -205,21 +188,13 @@ def test_app_token_can_read_shared_storage(client, owner_token):
 
 
 def _create_app(client, owner_token, name, cross=None, share=None):
-  body = {
-    "name": name,
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>x</div> }",
-  }
-  if cross is not None:
-    body["cross_app_access"] = cross
-  if share is not None:
-    body["share_with_apps"] = share
-  r = client.post(
-    "/api/apps/", json=body,
-    headers={"Authorization": f"Bearer {owner_token}"},
-  )
-  assert r.status_code == 201, r.text
-  return r.json()["id"]
+  return create_local_app(
+    client,
+    {"Authorization": f"Bearer {owner_token}"},
+    name=name,
+    cross_app_access=cross or "none",
+    share_with_apps=share or "none",
+  )["id"]
 
 
 def _make_app_token(client, owner_token, app_id):

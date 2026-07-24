@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from app import auth, models
 from app.timeutil import now_naive_utc
+from test_app_fixtures import create_local_app
 
 
 OPAQUE_HEADERS = {"Origin": "null", "Sec-Fetch-Site": "cross-site"}
@@ -12,17 +13,9 @@ OPAQUE_HEADERS = {"Origin": "null", "Sec-Fetch-Site": "cross-site"}
 
 def _make_app(client, owner_token, name):
   owner_headers = {"Authorization": f"Bearer {owner_token}"}
-  response = client.post(
-    "/api/apps/",
-    json={
-      "name": name,
-      "description": "embed test",
-      "jsx_source": "export default () => null",
-    },
-    headers=owner_headers,
-  )
-  assert response.status_code == 201, response.text
-  app_id = response.json()["id"]
+  app_id = create_local_app(
+    client, owner_headers, name=name, description="embed test",
+  )["id"]
   response = client.post(
     "/api/auth/app-token",
     json={"app_id": app_id},

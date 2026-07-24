@@ -119,9 +119,9 @@ def normalize_runtime_capabilities(manifest: dict[str, Any]) -> dict[str, Any]:
 def local_manifest_runtime_fields(manifest: dict[str, Any]) -> dict[str, Any]:
   """Return the local-manifest fields owned by the live app runtime.
 
-  Registration and the source watcher both consume this projection. Keeping
-  one parser prevents a newly created app from accepting a declaration that a
-  later ordinary source save interprets differently.
+  Explicit local apply consumes this projection for both creation and updates,
+  so one parser prevents those paths interpreting the same declaration
+  differently.
   """
   if not isinstance(manifest, dict):
     raise ValueError("mobius.json must contain a JSON object.")

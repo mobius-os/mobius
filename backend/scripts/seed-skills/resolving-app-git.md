@@ -22,9 +22,8 @@ An update records the new version on `upstream`. A clean merge applies. A
 conflict first surfaces to the partner without touching live source; once they
 click Resolve, `main`'s working tree is left mid-merge: conflict markers in the
 files + a `MERGE_HEAD`. **The app keeps serving its previous (working) version
-the whole time** — the marker-bearing source won't compile, so the file watcher
-holds the last good bundle. Nothing is broken for the partner while you work;
-you're just finishing the merge.
+the whole time.** Nothing is published merely because conflict files were
+saved; you're preparing one explicit, complete resolution.
 
 ## Look at the conflict
 
@@ -85,17 +84,20 @@ Edit each conflicted file (usually `index.jsx`, sometimes sibling modules) to th
 result you decided on, **deleting the `<<<<<<<`, `=======`, `>>>>>>>` lines**.
 Re-read the surrounding code so the result is coherent, not just marker-free.
 
-**Finish by saving — the watcher does the rest.** Once every file is
-marker-free, just save. The watcher first records the resolved source as a
-single-parent replay while the previous app remains live. It then verifies the
-pending release's exact fetched-artifact digest and runs the normal installer,
-which promotes source, bundle, static assets, version/capabilities, icon, seeds,
-cron, and skills as one lifecycle. It deliberately refuses to finalize while
-ANY tracked file still holds markers — the conflict can live in a non-entry
-file (a job script, a sibling module), so resolve them all, not just
-`index.jsx`. (An earlier watcher silently missed edits on the data volume and
-stalled here routinely; that bug is fixed — a memory note saying
-hand-finalizing is the norm predates the fix.)
+Once every file is marker-free, run the explicit resolver:
+
+```bash
+python "$SCRIPTS_DIR/resolve_app_update.py" /data/apps/<slug>
+```
+
+The command first records the resolved source as a single-parent replay while
+the previous app remains live. It then verifies the pending release's exact
+fetched-artifact digest and runs the normal installer, which promotes source,
+bundle, static assets, version/capabilities, icon, seeds, cron, and skills as
+one lifecycle. It refuses to finalize while ANY tracked file still holds
+markers—the conflict can live in a job script or sibling module, so resolve
+them all, not just `index.jsx`. On a synchronous failure, fix the named issue
+and run the same command again; do not hand-finalize Git.
 
 **Confirm the whole update took.** `MERGE_HEAD` disappearing proves the source
 resolution committed; the pending receipt disappearing proves the complete app
@@ -112,13 +114,14 @@ test ! -e /data/apps/<slug>/.git/mobius-pending-update/receipt.json; echo "pendi
 leftover markers in SOME tracked file. Hunt across the whole repo, not just the
 file you edited
 (`GIT_CEILING_DIRECTORIES=/data/apps git -C /data/apps/<slug> grep -n '<<<<<<<'`),
-fix, save again. If `MERGE_HEAD` is gone but the receipt remains, the resolved
+fix, then rerun the resolver. If `MERGE_HEAD` is gone but the receipt remains, the resolved
 source is safe and the previous app is still served; the exact installer replay
 failed (usually a transient fetch or a publisher changed bytes under a moving
-URL). Re-run Update or restart after checking the build-failure event/log. Do
-not delete the receipt.
+URL). Run the resolver again for a transient failure. If it reports that the
+candidate changed, the partner must review the new update. Do not delete the
+receipt.
 
-**Don't be alarmed the finalizing commit isn't a merge commit.** The watcher
+**Don't be alarmed the finalizing commit isn't a merge commit.** The resolver
 finalizes as a *single-parent replay* — it parents the new commit directly on
 the **upstream tip** and squashes the local side, so history stays linear
 (`A → B → X`) instead of fanning into a 2-parent merge. So `git log -1
@@ -128,30 +131,9 @@ what advances the base so the next update won't re-conflict — a 2-parent merge
 here would mean something finalized it with a plain `git merge`, which is *not*
 what the platform wants.
 
-Optional eyeball that the app rebuilt: read `compiled_path` from `GET /api/apps/<id>`, then `stat` that exact content-addressed path.
-should be fresh and the file a real bundle, not the compile-failed stub (`<id>`
-from `curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/"
-| python3 -c 'import sys,json;[print(a["id"],a["slug"]) for a in json.load(sys.stdin)]'`).
-A nice-to-have, not a gate.
-
-If a merge is still in progress (`MERGE_HEAD` exists) or the recompile failed
-(`/data/logs/chat.log` shows `compile failed`) after a clean re-save, the fix is
-almost always leftover markers or a syntax error from the merge — open the file,
-fix it, and **save again**: re-saving is the normal finalizer, because the
-watcher runs the correct single-parent replay for you. Only reach for a manual
-finalize if the watcher is genuinely wedged — and do NOT use `git commit
---no-edit` (with `MERGE_HEAD` set that makes exactly the 2-parent merge the
-platform avoids). Replicate the single-parent replay instead:
-
-```bash
-cd /data/apps/<slug>
-export GIT_CEILING_DIRECTORIES=/data/apps
-git grep -n '<<<<<<<' && { echo "markers remain — fix first"; exit 1; }
-tree=$(git write-tree)
-sha=$(git commit-tree "$tree" -p "$(cat .git/MERGE_HEAD)" -m 'agent edit')
-git update-ref refs/heads/main "$sha"
-rm -f .git/MERGE_HEAD .git/MERGE_MSG .git/MERGE_MODE
-```
+The resolver's successful JSON response is the primary completion signal. The
+checks above are useful when diagnosing a retry, not extra mandatory work after
+success.
 
 ## Backing out (it's always reversible)
 
@@ -166,15 +148,16 @@ You never have to force a resolution you're unsure about.
   (reversible, keeps history — do NOT use `git revert -m 1`, which errors on a
   non-merge commit) or `git reset --hard <pre-replay-sha>` from the reflog
   (erases the attempt; the pre-replay tip is unreachable after the squash but
-  the reflog still has it). Save/touch the source so the watcher recompiles the
-  reverted version. `upstream` is untouched, so a retry still works.
+  the reflog still has it). Run the explicit resolver again to promote a
+  coherent reverted state. `upstream` is untouched, so a retry still works.
 
 ## Don't
 
 - Don't `git push` while resolving — whether or not this repo has an
   `origin`, pushing upstream is a separate, approval-gated flow
   (`contributing.md`), never part of conflict resolution.
-- Don't commit conflict markers (a failed recompile is the tell — fix and save).
+- Don't commit conflict markers or run Git plumbing by hand; the resolver gates
+  the whole tracked tree.
 - Don't edit the `upstream` branch.
 
 When done, leave a one-line note in the chat of what you merged and any

@@ -48,57 +48,38 @@ class TokenResponse(BaseModel):
 ShareLevel = Literal["none", "read", "write"]
 
 
-class AppCreate(BaseModel):
-  name: str
-  description: str = ""
-  # Required — the full JSX source of the app's default export.
-  # Prefer `register_app.py`, which handles schema + compile + DB
-  # writes in one call. Hitting this endpoint directly is only
-  # needed for copying apps between instances.
-  jsx_source: str
-  chat_id: str | None = None
-  # Absolute directory where this app's index.jsx lives. Editable app source
-  # lives under /data/apps/<slug>. Passed by register_app.py so the file watcher
-  # can resolve file events to apps without slugify-guessing the name.
-  source_dir: str | None = None
-  cross_app_access: ShareLevel = "none"
-  share_with_apps: ShareLevel = "none"
-  offline_capable: bool = False
-  # Host-mediated browser capabilities declared by the adjacent mobius.json.
-  # register_app.py reads this automatically. The server normalizes it into the
-  # owner-readable capability contract; callers never submit that contract.
-  capabilities: dict = Field(default_factory=dict)
-  # Note: `manifest_url` is NOT accepted here. It is the identity key
-  # the install endpoint uses to discriminate install-vs-update — a
-  # caller spoofing it via direct POST could trick a later legitimate
-  # install of the same URL into update-mode (clobbering the spoofed
-  # app's jsx_source + permissions). Only `POST /api/apps/install`
-  # may set `manifest_url`; this route always leaves it NULL.
+class AppApply(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  source_dir: str = Field(min_length=1, max_length=512)
+  chat_id: str | None = Field(default=None, max_length=64)
+
+
+class AppResolveUpdate(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  source_dir: str = Field(min_length=1, max_length=512)
 
 
 class AppUpdate(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
   # Drawer rename uses `name`; 500-char cap matches ChatPatch.title
   # so a runaway agent can't bloat the apps list response.
   name: str | None = Field(default=None, max_length=500)
   description: str | None = None
-  jsx_source: str | None = None
   # None means "omit from update" (the field is not changed).
   # To explicitly clear chat_id, pass an empty string ("").
   chat_id: str | None = None
-  source_dir: str | None = None
   # Drawer pin toggle. True sets pinned_at = now, False clears it.
   pinned: bool | None = None
   cross_app_access: ShareLevel | None = None
   share_with_apps: ShareLevel | None = None
-  offline_capable: bool | None = None
   # Owner-only DOWNGRADE of skills authority: False revokes immediately (the
   # request gate reads the live row, so already-minted app JWTs lose access on
   # their next call). Granting (True) is rejected — that path stays with the
   # reviewed manifest install.
   manage_skills: bool | None = None
-  # None preserves the declaration. An object replaces it ({} removes all
-  # runtime capabilities). Store-installed apps remain manifest-review owned.
-  capabilities: dict | None = None
 
 
 class AppOut(BaseModel):
@@ -168,6 +149,18 @@ class AppOut(BaseModel):
   updated_at: datetime
 
   model_config = {"from_attributes": True}
+
+
+class AppApplyOut(BaseModel):
+  mode: Literal["created", "updated", "unchanged"]
+  app: AppOut
+
+
+class AppResolveUpdateOut(BaseModel):
+  mode: Literal["updated", "conflict"]
+  app: AppOut
+  warnings: list[str] = Field(default_factory=list)
+  conflict_paths: list[str] = Field(default_factory=list)
 
 
 class AppInstall(BaseModel):

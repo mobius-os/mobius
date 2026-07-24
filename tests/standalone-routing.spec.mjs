@@ -4,6 +4,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/standalone-routing.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { applyApp } from './app-source.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const CUBERUN_SOURCE = `
@@ -23,31 +24,13 @@ async function ensureCubeRun(request, token) {
   const headers = { Authorization: `Bearer ${token}` }
   const list = await request.get(`${BASE}/api/apps/`, { headers })
   expect(list.ok()).toBeTruthy()
-  const apps = await list.json()
-  const existing = apps.find(app => app.slug === 'cuberun')
-  if (existing) {
-    const updated = await request.patch(`${BASE}/api/apps/${existing.id}`, {
-      headers,
-      data: {
-        name: 'CubeRun',
-        description: 'Standalone routing regression app',
-        jsx_source: CUBERUN_SOURCE,
-      },
-    })
-    expect(updated.ok()).toBeTruthy()
-    return updated.json()
-  }
-
-  const created = await request.post(`${BASE}/api/apps/`, {
-    headers,
-    data: {
-      name: 'CubeRun',
-      description: 'Standalone routing regression app',
-      jsx_source: CUBERUN_SOURCE,
-    },
+  const result = await applyApp(request, token, {
+    slug: 'cuberun',
+    name: 'CubeRun',
+    description: 'Standalone routing regression app',
+    jsxSource: CUBERUN_SOURCE,
   })
-  expect(created.status()).toBe(201)
-  const app = await created.json()
+  const app = result.app
   expect(app.slug).toBe('cuberun')
   return app
 }

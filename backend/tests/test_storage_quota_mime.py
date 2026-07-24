@@ -22,6 +22,7 @@ import pytest
 
 from app import storage_io
 from app.config import get_settings
+from test_app_fixtures import create_local_app
 
 
 # A small per-app cap for quota tests so they exercise the limit without
@@ -42,12 +43,9 @@ def small_app_cap(monkeypatch):
 
 
 def _make_app(client, owner_token, name="store-test"):
-  r = client.post("/api/apps/", json={
-    "name": name,
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  return r.json()["id"]
+  return create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name=name,
+  )["id"]
 
 
 # --- MIME sidecar ---------------------------------------------------------

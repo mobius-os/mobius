@@ -22,6 +22,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.storage_io import atomic_write
 from app.timeutil import now_naive_utc
+from test_app_fixtures import create_local_app
 
 from app.routes.github import _limiter as _github_limiter
 from app.routes.github import ContributionSubmitBody
@@ -328,13 +329,10 @@ def test_round_log_capped(db):
 
 
 def _app_with_github_access(client, owner_token, *, connect=False):
-  r = client.post("/api/apps/", json={
-    "name": "contribute-test",
-    "description": "t",
-    "jsx_source": "export default function App(){ return <div/> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"},
+    name="contribute-test", description="t",
+  )["id"]
   s = SessionLocal()
   try:
     app = s.query(models.App).filter(models.App.id == app_id).first()

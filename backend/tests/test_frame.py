@@ -1,14 +1,20 @@
 """Tests for the mini-app frame endpoint."""
 
+from test_app_fixtures import create_local_app
+
+
+def _make_app(client, headers, name, jsx_source=None):
+  kwargs = {"name": name, "description": "test"}
+  if jsx_source is not None:
+    kwargs["jsx_source"] = jsx_source
+  return create_local_app(client, headers, **kwargs)["id"]
+
 
 def test_frame_injects_app_id(client, owner_token):
   """GET /api/apps/{id}/frame replaces the placeholder app ID."""
-  r = client.post("/api/apps/", json={
-    "name": "frame-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "frame-test",
+  )
 
   r = client.get(f"/api/apps/{app_id}/frame")
   assert r.status_code == 200
@@ -26,12 +32,9 @@ def test_frame_has_no_unset_origin(client, owner_token):
   server no longer substitutes. postMessage(..., 'UNSET') silently fails,
   so "Tell agent to fix" was broken for crashed apps.
   """
-  r = client.post("/api/apps/", json={
-    "name": "origin-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "origin-test",
+  )
 
   r = client.get(f"/api/apps/{app_id}/frame")
   html = r.text
@@ -41,12 +44,9 @@ def test_frame_has_no_unset_origin(client, owner_token):
 
 def test_frame_report_error_uses_location_origin(client, owner_token):
   """reportError() must postMessage with window.location.origin."""
-  r = client.post("/api/apps/", json={
-    "name": "report-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "report-test",
+  )
 
   r = client.get(f"/api/apps/{app_id}/frame")
   html = r.text
@@ -55,12 +55,9 @@ def test_frame_report_error_uses_location_origin(client, owner_token):
 
 def test_frame_is_public(client, owner_token):
   """Frame endpoint does not require authentication."""
-  r = client.post("/api/apps/", json={
-    "name": "public-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "public-test",
+  )
 
   # No auth header — should still work.
   r = client.get(f"/api/apps/{app_id}/frame")
@@ -70,12 +67,9 @@ def test_frame_is_public(client, owner_token):
 def test_frame_returns_etag_and_cache_control(client, owner_token):
   """Frame response carries an ETag derived from app.updated_at and
   `Cache-Control: no-cache` so the browser revalidates on every load."""
-  r = client.post("/api/apps/", json={
-    "name": "etag-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "etag-test",
+  )
 
   r = client.get(f"/api/apps/{app_id}/frame")
   assert r.status_code == 200
@@ -93,12 +87,9 @@ def test_frame_returns_etag_and_cache_control(client, owner_token):
 def test_frame_304_on_matching_if_none_match(client, owner_token):
   """Repeated GET with the previous ETag returns 304 + empty body —
   closes the round-trip without re-sending the frame HTML."""
-  r = client.post("/api/apps/", json={
-    "name": "etag-304-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "etag-304-test",
+  )
 
   r1 = client.get(f"/api/apps/{app_id}/frame")
   etag = r1.headers["etag"]
@@ -132,12 +123,10 @@ def test_frame_etag_changes_after_app_update(client, auth, db):
 
   from app import models
 
-  r = client.post("/api/apps/", json={
-    "name": "etag-bump-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>old</div> }",
-  }, headers=auth)
-  app_id = r.json()["id"]
+  app_id = _make_app(
+    client, auth, "etag-bump-test",
+    "export default function App() { return <div>old</div> }",
+  )
 
   r1 = client.get(f"/api/apps/{app_id}/frame")
   old_etag = r1.headers["etag"]
@@ -184,12 +173,7 @@ def test_frame_self_themes_no_server_style_injection(client, auth):
   (shared / "theme.css").write_text(":root { --bg: #f0eeeb; --text: #1c1b1a; }")
   (shared / "theme-mode").write_text('"light"')
   try:
-    r = client.post("/api/apps/", json={
-      "name": "self-theme-test",
-      "description": "test",
-      "jsx_source": "export default function App() { return <div>hi</div> }",
-    }, headers=auth)
-    app_id = r.json()["id"]
+    app_id = _make_app(client, auth, "self-theme-test")
 
     html = client.get(f"/api/apps/{app_id}/frame").text
     # The pre-paint IIFE is present (shared with index.html / PREPAINT_SRC).
@@ -217,12 +201,7 @@ def test_frame_prepaint_sets_color_scheme_client_side(client, auth):
   Replaces test_frame_dark_theme_pins_color_scheme: the color-scheme pin
   moved from a server <style> to the shared client IIFE.
   """
-  r = client.post("/api/apps/", json={
-    "name": "scheme-iife-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers=auth)
-  app_id = r.json()["id"]
+  app_id = _make_app(client, auth, "scheme-iife-test")
 
   html = client.get(f"/api/apps/{app_id}/frame").text
   # The IIFE sets color-scheme from the resolved mode (mirrors applyTheme.js).
@@ -251,12 +230,7 @@ def test_frame_etag_theme_independent(client, auth):
   shared = data_dir / "shared"
   shared.mkdir(parents=True, exist_ok=True)
 
-  r = client.post("/api/apps/", json={
-    "name": "theme-indep-etag-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers=auth)
-  app_id = r.json()["id"]
+  app_id = _make_app(client, auth, "theme-indep-etag-test")
 
   # Default (dark) theme.
   (shared / "theme.css").unlink(missing_ok=True)

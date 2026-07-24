@@ -29,6 +29,14 @@ Raw `agent-browser open <url>` is for **non-Möbius pages only** (an external si
 
 Core moves once a page is open: `set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT"` (the helper sets this for you; needed when driving raw), `snapshot` (a11y tree with `@eN` refs), `click/fill/type @eN`, `screenshot <path>`, `wait` (on a signal — `wait @eN` / `--text` / `--fn` / `--url` — not a guessed duration), `batch "cmd1" "cmd2"` (ordered, fewer round-trips), `diff snapshot` / `diff screenshot --baseline <before>.png`.
 
+For textboxes, use `fill @eN "value"` directly. Do not split that into
+`click`, `Control+A`, and a selector-less `type`; the extra commands add
+round-trips and the final `type` has no target. Batch independent operations
+with stable selectors, then take one verification snapshot. A sequence of
+React toggles is not independent when each click changes labels, disabled
+states, or the rendered control tree: keep it in one shell tool call, but
+re-snapshot between clicks and use the newly returned refs.
+
 For a mini-app, switch into its opaque iframe before taking the interaction
 snapshot rather than applying a parent-document selector:
 
@@ -49,11 +57,12 @@ when their browser frame and accessibility subtree are healthy. Do not weaken
 the iframe sandbox. Re-snapshot after state changes and return to `frame main`
 before checking shell state.
 
-`agent-browser wait --text` observes the top-level document and is unreliable
-for text inside the opaque app iframe. For initial load, rely on
-`preview_app.sh`'s mounted-frame gate. For an in-app transition, use a fresh
-iframe-scoped snapshot or wait on a returned element ref rather than spending a
-full timeout on top-level text.
+`agent-browser wait --text` and `wait --fn` can observe the top-level document
+rather than the opaque app iframe. For initial load, rely on
+`preview_app.sh`'s mounted-frame gate. For an in-app transition, do not invent
+a CSS state class for a wait. Use a fresh iframe-scoped snapshot; when the app
+has a known bounded animation, one matching bounded wait followed immediately
+by that snapshot is preferable to a 25-second timeout.
 
 Two gotchas every session:
 

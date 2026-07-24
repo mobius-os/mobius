@@ -12,7 +12,7 @@ round-7 #1, #2):
   - a per-app storage write that pauses to read its body, then recreates
     ``/data/apps/<id>`` AFTER an interleaved uninstall removed it (or a write
     against a freed-then-reused id whose tree the old uninstall is removing),
-  - a create/patch that assigns a ``source_dir`` in the window between
+  - a first explicit apply that claims a ``source_dir`` in the window between
     uninstall's "is this dir shared?" check and its ``rmtree``, and
   - an install that materializes a source tree / storage seeds / cron entry an
     interleaved uninstall is tearing down.
@@ -44,15 +44,11 @@ Multi-lock holders, all acquiring left-to-right:
   - ``delete_app`` holds all three.
   - ``recover_app`` holds lifecycle -> app while it refreshes a stale bundle,
     then may take source and shared-skills locks further inside that span.
-  - ``update_app`` (PATCH) and the app watcher's auto-recompile hold
-    lifecycle -> app -> source (PATCH takes the source lock only when the
-    source_dir actually changes). Both recompile a bundle, so they take the
-    app lock to serialize against each other and the lifecycle lock to block
-    a concurrent uninstall + SQLite id reuse.
+  - explicit app source apply holds lifecycle -> app -> source for an existing
+    app; first apply holds lifecycle -> source until the new row commits.
 
 Single-lock holders: ``write_app_file`` / ``delete_app_file`` take only the
-app lock; ``create_app`` takes only the source lock; the install endpoint
-takes only the lifecycle lock.
+app lock; the install endpoint takes only the lifecycle lock.
 """
 
 import asyncio
@@ -113,9 +109,9 @@ def app_storage_lock(app_id: int) -> asyncio.Lock:
 def source_dir_lock(source_dir: str) -> asyncio.Lock:
   """Serializes source_dir assignment with uninstall's source-tree cleanup.
 
-  Held by ``create_app``/``patch_app``/installer around assigning a source_dir
-  + commit, and by ``delete_app`` around its shared-dir dedup check + ``rmtree``
-  for the same directory, so a concurrent create can't claim a directory in the
+  Held by explicit first apply / installer around assigning a source_dir +
+  commit, and by ``delete_app`` around its shared-dir dedup check + ``rmtree``
+  for the same directory, so a concurrent apply can't claim a directory in the
   window between the dedup check and the delete.
 
   The key is CANONICALIZED here (``Path(...).resolve()``) so callers that pass a

@@ -19,20 +19,13 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.install import _manifest_display
 from app.theme import get_bg_color
+from test_app_fixtures import create_local_app
 
 
 def _create_app(client, owner_token, name):
-  r = client.post(
-    "/api/apps/",
-    json={
-      "name": name,
-      "description": "x",
-      "jsx_source": "export default function App() { return <div>hi</div> }",
-    },
-    headers={"Authorization": f"Bearer {owner_token}"},
+  return create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name=name,
   )
-  assert r.status_code == 201, r.text
-  return r.json()
 
 
 def _spa_active(client):

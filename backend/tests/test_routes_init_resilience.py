@@ -135,31 +135,6 @@ def test_broken_route_module_yields_stub_real_routers_unaffected(
   ), f"auth_router looks like a stub: {auth_paths}"
 
 
-def test_main_boots_when_app_watcher_start_raises(monkeypatch):
-  """A failure inside lifespan's `start_watcher` call must NOT crash
-  uvicorn boot — it should be logged and the app should still serve
-  /api/health (and therefore /recover/chat) normally."""
-  # Re-import main with a patched start_watcher that raises.
-  import app.app_watcher as watcher_mod
-
-  def boom(loop):
-    raise RuntimeError("simulated watcher crash")
-
-  monkeypatch.setattr(watcher_mod, "start_watcher", boom)
-
-  from app.main import app as main_app
-  client = TestClient(main_app)
-  with client:
-    # The `with` block enters lifespan; if start_watcher's failure
-    # weren't caught, this would raise before yielding a usable
-    # client.
-    resp = client.get("/api/health")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "ok"
-    assert body["boot_id"]
-
-
 def test_lifespan_cannot_mutate_cron_for_a_low_id_test_app(
   monkeypatch, db, tmp_path,
 ):
@@ -214,6 +189,7 @@ def test_lifespan_cannot_mutate_cron_for_a_low_id_test_app(
 
 def test_lifespan_waits_for_initial_restart_resume_sweep(monkeypatch):
   """The server must not accept a manual send before restart recovery claims."""
+  from app import bootstrap as bootstrap_mod
   from app import chat as chat_mod
   from app.main import app as main_app
 
@@ -228,6 +204,18 @@ def test_lifespan_waits_for_initial_restart_resume_sweep(monkeypatch):
     await asyncio.to_thread(release_sweep.wait)
     return []
 
+  async def skip_external_bootstrap(db):
+    # This test owns startup ordering at the restart-resume seam. A first-boot
+    # Store clone/fallback can legitimately take longer than its 20-second
+    # assertion budget and must not turn the ordering contract into a network
+    # timing test.
+    del db
+
+  monkeypatch.setattr(
+    bootstrap_mod,
+    "ensure_bootstrap_apps_installed",
+    skip_external_bootstrap,
+  )
   monkeypatch.setattr(chat_mod, "sweep_reset_parks", held_sweep)
 
   def boot_app():

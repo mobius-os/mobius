@@ -1,7 +1,7 @@
 // The built-app CTA row is DERIVED from server truth — the apps query's own
 // `chat_id` column plus its durable preview acknowledgement — never mirrored
 // in ad-hoc component state. Every app row carries the chat_id of the turn that
-// built it (register_app.py stamps it), so the CTA list for a chat is exactly
+// built it (the apply endpoint stamps it), so the CTA list for a chat is exactly
 // "the apps this chat owns," durably, across sessions and devices. A chat can
 // build several apps in one turn ("a notes app and a habit tracker"), so it is
 // a LIST, newest last, capped so the chat foot can't grow without bound.

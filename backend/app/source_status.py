@@ -498,8 +498,8 @@ def build_source_status(apps: list[dict[str, Any]]) -> dict[str, Any]:
   """Return the platform plus every live app source repo in one snapshot.
 
   Routes should hold ``source_dir_lock`` around each :func:`build_app_status`
-  call.  This aggregate remains useful to tests and non-serving callers where
-  no watcher can race the inspection.
+  call. This aggregate remains useful to tests and non-serving callers where
+  no source writer can race the inspection.
   """
   platform = build_platform_status()
   app_results: list[dict[str, Any]] = []

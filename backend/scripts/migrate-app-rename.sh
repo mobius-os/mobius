@@ -9,9 +9,9 @@
 # /data/apps/<numeric-id>, so report history and id-keyed storage stay attached
 # to the same app row.
 #
-# source_dir is load-bearing because register_app.py's _find_existing matches an
-# existing app by source_dir, not name. A migrated row with the old source_dir
-# would make install-core-apps register a duplicate and strand brief history.
+# source_dir is load-bearing because explicit apply matches an existing app by
+# source_dir, not name. A migrated row with the old source_dir would make a
+# later apply create a duplicate and strand brief history.
 #
 # Reflection owns real data under its numeric app id, so this must be an
 # in-place rename rather than install-core-apps' "register new and archive old"

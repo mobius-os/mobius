@@ -205,8 +205,7 @@ def _resolve(base: Path, rel: str) -> Path:
   validate_path_within_base check. The whitelist rejects spaces,
   quotes, control bytes, and other shell-metacharacters before the
   resolution step ever sees them, which keeps mini-app storage paths
-  to the same shape (`[\\w.\\-/]+`) the file watcher and slug logic
-  elsewhere already assume.
+  to the same shape (`[\\w.\\-/]+`) the app source and slug contracts use.
   """
   if not _SAFE_RE.match(rel):
     raise HTTPException(status_code=400, detail="Invalid path.")

@@ -16,12 +16,13 @@ from types import SimpleNamespace
 
 from app import compiler
 from app.routes.apps import _frame_etag
+from test_app_fixtures import create_local_app
 
 
 def test_recompile_bumps_updated_at_so_etag_changes(monkeypatch, tmp_path):
-  """A watcher/PATCH recompile must advance app.updated_at, or the /module +
-  /frame ETags (derived from it) never change and a warm browser 304s to the
-  stale bundle even though the compiled file was rewritten."""
+  """A bundle promotion must advance app.updated_at, or the /module + /frame
+  ETags (derived from it) never change and a warm browser 304s to the stale
+  bundle even though the compiled file was rewritten."""
   monkeypatch.setattr(compiler, "_compiled_dir", lambda: tmp_path)
   monkeypatch.setattr(compiler, "_entry_source_path", lambda app: None)
 
@@ -78,17 +79,9 @@ def test_frame_etag_none_without_any_signal(tmp_path):
 
 
 def _create_app(client, owner_token, name="frame-etag-demo"):
-  r = client.post(
-    "/api/apps/",
-    json={
-      "name": name,
-      "description": "x",
-      "jsx_source": "export default function App() { return <div>hi</div> }",
-    },
-    headers={"Authorization": f"Bearer {owner_token}"},
+  return create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name=name,
   )
-  assert r.status_code == 201, r.text
-  return r.json()
 
 
 def test_frame_route_serves_compound_etag(client, owner_token):
