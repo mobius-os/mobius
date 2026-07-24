@@ -14,6 +14,7 @@ const dir = dirname(fileURLToPath(import.meta.url))
 const chatViewDir = join(dir, '..')
 
 const OWNER = 'useScrollMode.js'
+const ownerSource = readFileSync(join(chatViewDir, OWNER), 'utf8')
 
 // A line that assigns a height to the dynamic spacer. Matches
 // `spacer.style.height = ...` / `spacerEl.style.height = ...` on any variable,
@@ -54,4 +55,57 @@ test('the sole spacer owner still exists (guard is not vacuous)', () => {
     return src.includes('.spacer-dynamic') && SPACER_HEIGHT_WRITE.test(src)
   }).map(f => f.name).sort()
   assert.deepEqual(writers, [OWNER])
+})
+
+test('gesture scroll frames defer anchor, spacer, and persistence work until settle', () => {
+  const start = ownerSource.indexOf('const onScroll = () => {')
+  const end = ownerSource.indexOf(
+    "scrollEl.addEventListener('scroll', onScroll",
+    start,
+  )
+  const hotPath = ownerSource.slice(start, end)
+  assert.ok(start >= 0 && end > start, 'scroll hot path must remain discoverable')
+  assert.doesNotMatch(
+    hotPath,
+    /persistMode|sizeSpacer|contentHoldModeFromScroll|_lastUserRowEl|querySelector/,
+    'per-frame scroll handling must not traverse messages, resize layout, or persist',
+  )
+  assert.match(hotPath, /scheduleReaderSettle\(\)/,
+    'scroll frames should hand final semantic work to one trailing-edge settle')
+  assert.match(
+    hotPath,
+    /readerScrollAtBottom\s*=\s*distanceToBottom\s*<\s*PHYSICAL_BOTTOM_EPSILON_PX/,
+    'the event must preserve explicit tail intent before live output can move it',
+  )
+
+  const settleStart = ownerSource.indexOf('const settleReaderScroll = () => {')
+  const settleEnd = ownerSource.indexOf(
+    'const scheduleReaderSettle = () => {',
+    settleStart,
+  )
+  const settlePath = ownerSource.slice(settleStart, settleEnd)
+  assert.ok(settleStart >= 0 && settleEnd > settleStart,
+    'reader settlement path must remain discoverable')
+  assert.match(settlePath, /contentHoldModeFromScroll/)
+  assert.match(settlePath, /if \(settledAtBottom\)/)
+  assert.match(settlePath, /persistMode\(\)/)
+  assert.match(settlePath, /sizeSpacer\(\)/)
+})
+
+test('newer semantic actions cannot be overwritten by an older quiet settlement', () => {
+  const closeStart = ownerSource.indexOf('const closePreSendGestureWindow =')
+  const closeEnd = ownerSource.indexOf('useLayoutEffect(() => () => {', closeStart)
+  const closePath = ownerSource.slice(closeStart, closeEnd)
+  assert.ok(closeStart >= 0 && closeEnd > closeStart,
+    'pre-send ownership handoff must remain discoverable')
+  assert.match(closePath, /discardPendingReaderSettleRef\.current\?\.\(\)/)
+
+  const hotStart = ownerSource.indexOf('const onScroll = () => {')
+  const hotEnd = ownerSource.indexOf(
+    "scrollEl.addEventListener('scroll', onScroll",
+    hotStart,
+  )
+  const hotPath = ownerSource.slice(hotStart, hotEnd)
+  assert.match(hotPath, /if \(disclosureInputOwnsGesture\) return/,
+    'layout scrolls caused by a disclosure must not create a stale reader settle')
 })

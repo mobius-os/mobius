@@ -72,7 +72,7 @@ test('owner contract freezes question answers with one transient reachability ex
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.7 \(2026-07-24\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.9 \(2026-07-24\)/)
   assert.match(
     architecture,
     /In-process question is answered \| any \| `ANCHOR_AT` on current visible row; same active assistant row/,

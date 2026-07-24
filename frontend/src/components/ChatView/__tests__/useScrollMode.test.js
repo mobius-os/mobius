@@ -159,9 +159,9 @@ test('shouldPinSend trusts bottom geometry even when mode is a stale hold', () =
   }), true)
 })
 
-test('layout writes yield from the first input event until its gesture window closes', () => {
+test('layout writes yield from first input through gesture settlement', () => {
   assert.equal(layoutMayOwnScroll(Number.POSITIVE_INFINITY, 999_999), false,
-    'a delayed first scroll keeps reader ownership without a 250ms race')
+    'a delayed first scroll or active momentum keeps reader ownership')
   assert.equal(layoutMayOwnScroll(1250, 1000), false)
   assert.equal(layoutMayOwnScroll(1250, 1249), false)
   assert.equal(layoutMayOwnScroll(1250, 1250), true)
@@ -1066,6 +1066,32 @@ test('leaving the physical bottom inside blank reservation retires follow', () =
     key: 'assistant-question',
     offset: 500,
     defaultTail: true,
+  })
+})
+
+test('reader hold preserves exact position inside transient unkeyed content', () => {
+  const lastKeyed = {
+    offsetTop: 100,
+    offsetHeight: 100,
+    dataset: { key: 'user-before-transient-content' },
+  }
+  const scrollEl = {
+    scrollHeight: 2000,
+    scrollTop: 600,
+    clientHeight: 700,
+    querySelector(selector) {
+      if (selector === '.spacer-dynamic') return { offsetHeight: 0 }
+      return null
+    },
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [lastKeyed] : []
+    },
+  }
+
+  assert.deepEqual(contentHoldModeFromScroll(scrollEl), {
+    kind: 'ANCHOR_AT',
+    key: 'user-before-transient-content',
+    offset: -500,
   })
 })
 
