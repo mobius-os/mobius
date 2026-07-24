@@ -121,6 +121,8 @@ export default function Shell() {
     desktop: desktopSidebarMode,
     open: desktopSidebarOpen,
     setOpen: setDesktopSidebarOpen,
+    width: desktopSidebarWidth,
+    setWidth: setDesktopSidebarWidth,
   } = useDesktopSidebar()
 
   // ── Workspace reducer — the single live authority for pane contents, per-pane
@@ -399,6 +401,10 @@ export default function Shell() {
       '--logo-release-delay': `${Math.max(0, total - MODE_MOTION.logoReleaseMs)}ms`,
     }
   }, [beatPlan])
+  const shellRootStyle = useMemo(() => ({
+    ...(beatRootVars || {}),
+    '--desktop-sidebar-width': `${desktopSidebarWidth}px`,
+  }), [beatRootVars, desktopSidebarWidth])
   // The key SINGLE mode paints beneath / within either directional beat. It drives
   // destination AppCanvas insets before the first frame so neither direction jumps.
   const beatTargetKey = beatPlan ? beatPlan.target : null
@@ -3409,7 +3415,7 @@ export default function Shell() {
       ref={shellRootRef}
       // The logo-release timing vars for the live beat (round 4 item 1); absent when
       // idle so the .shell__logo rotate/scale transitions fall back to their defaults.
-      style={beatRootVars || undefined}
+      style={shellRootStyle}
       // The live transition phase + epoch, surfaced for observability + tests: the
       // completion is epoch-keyed in the controller closure (INV 12/15), and this
       // data-epoch documents which beat the DOM belongs to (a drag preview has no
@@ -3459,6 +3465,8 @@ export default function Shell() {
       <Drawer
         open={navigationOpen}
         persistent={persistentDrawer}
+        width={desktopSidebarWidth}
+        onWidthChange={setDesktopSidebarWidth}
         interactionLocked={drawerModeTransitioning}
         onClose={drawerModeTransitioning ? undefined : closeDrawer}
         apps={apps}
