@@ -2321,6 +2321,7 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
     ("timeout", "absent"),
     ("launch-error", "absent"),
     ("timeout", "wrong-head"),
+    ("timeout", "wrong-owner"),
   ],
 )
 def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
@@ -2410,10 +2411,14 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
     if args[:2] == ("pr", "list"):
       if existing_mode == "absent":
         return _cp("[]")
-      found_head = head if existing_mode == "match" else "c" * 40
+      found_head = head if existing_mode != "wrong-head" else "c" * 40
       return _cp(json.dumps([{
         "url": "https://github.com/mobius-os/app-demo/pull/42",
+        "headRefName": "fix/demo-polish",
         "headRefOid": found_head,
+        "headRepositoryOwner": {
+          "login": "someone-else" if existing_mode == "wrong-owner" else "octocat",
+        },
       }]))
     if args[:2] == ("api", "--paginate"):
       return _cp("bug\n")
@@ -2434,8 +2439,9 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
   assert len(creates) == 1, "an ambiguous response must never trigger a second create"
   assert len(probes) == 1
   assert creates[0][-2:] == ("--base", "main")
-  assert "url,headRefOid" in probes[0]
-  assert "octocat:fix/demo-polish" in probes[0]
+  assert "url,headRefName,headRefOid,headRepositoryOwner" in probes[0]
+  assert probes[0][probes[0].index("--head") + 1] == "fix/demo-polish"
+  assert "octocat:fix/demo-polish" not in probes[0]
   assert probes[0][probes[0].index("--base") + 1] == "main"
   assert ("checkout", "-q", "develop") in git_calls
 
