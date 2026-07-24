@@ -1,9 +1,9 @@
 # Mini-app quickstart — ordinary local apps
 
 Base workflow for every local Möbius mini-app create or update. Read it with
-`visual-testing.md`; add `building-apps.md` for advanced runtime needs,
-`cron.md` for scheduled jobs, and `app-component-shapes.md` only for a complex
-catalogued structure such as a sheet, tabs, chat, or split pane.
+`visual-testing.md` and `notifications.md` in the same initial call. Add
+`building-apps.md` for advanced runtime needs, `cron.md` for schedules, and
+`app-component-shapes.md` only for sheets, tabs, chat, or split panes.
 
 This is the complete workflow for a focused app with ordinary JSX,
 app-scoped storage, and no unusual host integration. Add `building-apps.md` to
@@ -26,7 +26,7 @@ those boundaries.
 ## Product target: fast, useful, and delightful
 
 Speed to the first usable preview is part of the product. Build one coherent,
-visually intentional primary interaction and register it as soon as it works.
+visually intentional primary interaction and apply it as soon as it works.
 Then refine it while the partner can see and try the live app.
 
 The first slice is not a blank shell or wireframe. It should already have:
@@ -41,25 +41,26 @@ The first slice is not a blank shell or wireframe. It should already have:
 Polish the core interaction; do not delay the preview for secondary features,
 packaging research, speculative screens, or exhaustive checks.
 
-For a one-screen app, keep the first registered draft compact. If it is growing
+For a one-screen app, keep the first applied revision compact. If it is growing
 toward roughly 500 lines before the partner can see it, cut secondary controls,
 extra presets, elaborate completion effects, and nonessential saved settings.
 One beautiful working interaction visible sooner is better than a complete
 product hidden for another minute. Add only the refinements that materially
-improve the requested experience after registration.
+improve the requested experience after the first apply.
 
 ## The common sequence
 
 ### 1. Check only what can change the decision
 
-Read the live app list once and update an existing app with the same purpose
-instead of duplicating it:
+Read the compact live app list once and update an existing app with the same
+purpose instead of duplicating it:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $AGENT_TOKEN" \
-  "$API_BASE_URL/api/apps/" |
-  python3 -c 'import json,sys; print([(a["id"],a["name"],a.get("slug")) for a in json.load(sys.stdin)])'
+python "$SCRIPTS_DIR/list_apps.py"
 ```
+
+Use this helper instead of rebuilding a `curl | python` quoting pipeline or
+printing the full capability payload.
 
 Do not search GitHub or the App Store for a uniquely named personal app.
 Search the wider ecosystem only when the partner asked for something
@@ -78,9 +79,9 @@ icon.png
 .gitignore
 ```
 
-Do not initialize or commit the app repository by hand. Registration creates
-the per-app repository and records the accepted initial source; the watcher
-records later successful saves.
+Do not initialize, stage, or commit the app repository by hand. The explicit
+apply operation creates the per-app repository and records each accepted
+source revision.
 
 The entry shape is:
 
@@ -134,24 +135,26 @@ offline-safe app uses:
 
 List every imported sibling source file in `source_files`. Set
 `offline_capable` to `true` only when every required read and write works
-without the network. The registration helper applies this flag and the
+without the network. The apply helper applies this flag and the
 versioned `capabilities` object; do not patch the app row separately.
 
-### 3. Register once, early
+### 3. Apply once early, then after each coherent revision
 
 As soon as the first slice compiles and contains one real feature:
 
 ```bash
-python "$SCRIPTS_DIR/register_app.py" \
-  "<Name>" "<Description>" /data/apps/<slug>/index.jsx
+python "$SCRIPTS_DIR/apply_app.py" /data/apps/<slug>
 ```
 
-The helper returns the app JSON, including its numeric ID, and opens the live
-preview beside the owning chat. Do not send a separate `open_item`.
+The helper validates the manifest and complete source tree, compiles and
+commits that exact revision, returns the app JSON (including its numeric ID),
+and opens the live preview beside the owning chat. Do not send a separate
+`open_item`.
 
-Registration is for creation only. Afterward, edit source files normally; the
-watcher recompiles and refreshes the open preview. Never re-register routine
-edits.
+Afterward, edit source files normally and run the same command once the change
+is coherent enough to preview. A failed apply keeps the prior version live and
+returns the compiler or validation error directly. Saving alone deliberately
+does not publish a half-written draft.
 
 The visible intent sentence at the start of the turn is the first progress
 cue. Use `build_phase.py` only when the partner benefits from a real milestone:
@@ -244,13 +247,14 @@ Run validation once:
 python "$SCRIPTS_DIR/validate-app.py" /data/apps/<slug>
 ```
 
-Do not run a second `git add` or `git commit`. `register_app.py` owns the
-initial source commit and treats an already-clean tree as success; the watcher
-owns later save commits. Repository status is not a build gate.
+Do not run `git add` or `git commit`. `apply_app.py` owns every accepted source
+commit and leaves later edits as an unpublished draft until the next apply.
+Repository status is diagnostic: a clean tree confirms the applied revision,
+while a dirty tree means an edit still awaits apply.
 
-Send the app-complete notification using `notifications.md`, embed the useful
-render before describing it, state what the app does, and invite optional
-adjustments without blocking the completed turn.
+Send the app-complete notification using the already-loaded `notifications.md`,
+embed the useful render before describing it, state what the app does, and
+invite optional adjustments without blocking the completed turn.
 
 Only when `contributing.md` appears in the session's **Installed app skills**
 and the work is plausibly reusable by other Möbius users, offer to prepare it

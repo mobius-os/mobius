@@ -52,10 +52,9 @@ _LABEL_MAX = 80
 # fanned out to per-chat broadcasts, because a chat reconnect replaying an old
 # copy from its event log would fire a spurious shell apply (or a stale
 # failure signal). SystemBroadcast has no replay, so one delivery per client —
-# no frontend dedup needed. The app watcher's live failure/review producers
-# already publish system-bus-only and never hit this route, but both are listed
-# here so a hypothetical POST stays consistent with that classification (the
-# frontend also never recognizes them on a chat stream).
+# no frontend dedup needed. These diagnostics remain classified here so every
+# producer uses the same system-bus-only contract (the frontend also never
+# recognizes them on a chat stream).
 _SYSTEM_BUS_ONLY_EVENTS = frozenset({
   "shell_rebuilding",
   "shell_rebuilt",

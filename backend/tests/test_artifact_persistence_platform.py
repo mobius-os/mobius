@@ -20,6 +20,7 @@ from app.config import get_settings
 from app.publication import read_publication_record, registry_path
 from app.routes import apps as apps_route
 from app.timeutil import now_naive_utc
+from test_app_fixtures import create_local_app
 
 
 @pytest.fixture(autouse=True)
@@ -30,13 +31,9 @@ def _clean_publication_roots():
 
 
 def _create_app(client, auth, name="artifact-platform") -> int:
-  response = client.post("/api/apps/", headers=auth, json={
-    "name": name,
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-  })
-  assert response.status_code == 201, response.text
-  return response.json()["id"]
+  return create_local_app(
+    client, auth, name=name, description="test",
+  )["id"]
 
 
 def _seed_app_row(db, app_id: int, name: str) -> models.App:

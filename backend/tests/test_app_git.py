@@ -38,6 +38,78 @@ def test_git_env_disables_every_interactive_credential_prompt(
   assert env["SSH_ASKPASS"] == "/bin/false"
 
 
+def test_worktree_snapshot_uses_git_inventory_without_mutating_real_index(
+  tmp_path,
+):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  _write(repo, "export default () => 'candidate'\n")
+  (repo / "helper.js").write_text("export const value = 1\n")
+  job = repo / "job.sh"
+  job.write_text("#!/bin/sh\nexit 0\n")
+  job.chmod(0o755)
+  (repo / "node_modules").mkdir()
+  (repo / "node_modules" / "ignored.js").write_text("ignored\n")
+  (repo / "link").symlink_to("/data/service-token.txt")
+
+  real_index_before = app_git._run(repo, "write-tree").stdout.strip()
+  snapshot = app_git.snapshot_worktree(repo)
+  real_index_after = app_git._run(repo, "write-tree").stdout.strip()
+
+  assert real_index_after == real_index_before
+  tree = app_git.read_merged_tree(repo, snapshot.tree_oid)
+  assert tree["index.jsx"] == b"export default () => 'candidate'\n"
+  assert tree["helper.js"] == b"export const value = 1\n"
+  assert tree["job.sh"].startswith(b"#!/bin/sh")
+  assert tree["link"] == b"/data/service-token.txt"
+  assert "node_modules/ignored.js" not in tree
+
+  materialized = tmp_path / "materialized"
+  app_git.materialize_tree(repo, snapshot.tree_oid, materialized)
+  assert (materialized / "index.jsx").read_bytes() == tree["index.jsx"]
+  assert stat.S_IMODE((materialized / "job.sh").stat().st_mode) == 0o755
+  assert not (materialized / "link").is_symlink()
+  assert (materialized / "link").read_text() == "/data/service-token.txt"
+
+
+def test_commit_worktree_tree_commits_candidate_and_leaves_later_edit_draft(
+  tmp_path,
+):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  _write(repo, "export default () => 'accepted'\n")
+  snapshot = app_git.snapshot_worktree(repo)
+
+  _write(repo, "export default () => 'later draft'\n")
+  committed = app_git.commit_worktree_tree(repo, snapshot, "apply app")
+
+  assert committed
+  assert app_git.read_ref_tree(repo, app_git.LOCAL_BRANCH)["index.jsx"] == (
+    b"export default () => 'accepted'\n"
+  )
+  assert (repo / "index.jsx").read_text() == (
+    "export default () => 'later draft'\n"
+  )
+  assert "index.jsx" in app_git._run(
+    repo, "status", "--porcelain",
+  ).stdout
+
+
+def test_commit_worktree_tree_rejects_changed_parent(tmp_path):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  _write(repo, "export default () => 'candidate'\n")
+  snapshot = app_git.snapshot_worktree(repo)
+  _write(repo, "export default () => 'other accepted revision'\n")
+  assert app_git.commit_local(repo, "other apply")
+
+  with pytest.raises(app_git.SourceTreeChanged):
+    app_git.commit_worktree_tree(repo, snapshot, "stale apply")
+
+
 def _commit_all(repo: Path, msg: str) -> str:
   subprocess.run(
     [
@@ -1014,8 +1086,7 @@ def test_fetch_upstream_repairs_same_tip_depth_one_regraft(tmp_path):
 def test_resolved_conflict_commit_advances_base(tmp_path):
   """After start_conflict_merge, resolving the markers + commit_local
   finalizes a single-parent replay (linear) so upstream becomes an ancestor
-  of main — the next update merges clean (the B1 base-advance the watcher
-  gives for free)."""
+  of main, so the next update merges clean."""
   repo = tmp_path / "app"
   _install(repo, b"l1\nshared\nl3\n")
   _write(repo, "l1\nshared LOCAL\nl3\n")
@@ -1325,13 +1396,13 @@ def test_has_unresolved_conflicts_false_for_resolved_file_with_separator(tmp_pat
 def test_commit_local_refuses_to_finalize_non_entry_marker_conflict(tmp_path):
   """The invariant: an update must NEVER finalize while ANY tracked file has
   unresolved conflict markers. A conflict in a NON-entry file (fetch.sh) does
-  not break index.jsx's compile, so the watcher would happily call
-  commit_local — which must REFUSE, leaving the prior version entirely intact
-  (HEAD unmoved, markers never committed, no MERGE_HEAD finalization)."""
+  not break index.jsx's compile, so commit_local itself must REFUSE, leaving
+  the prior version entirely intact (HEAD unmoved, markers never committed,
+  no MERGE_HEAD finalization)."""
   repo = tmp_path / "app"
   _stage_non_entry_conflict(repo)
   head_before = app_git.head_sha(repo, app_git.LOCAL_BRANCH)
-  # Agent (or watcher) stages the marker-bearing file and tries to commit.
+  # A caller stages the marker-bearing file and tries to commit.
   app_git._run(repo, "add", "fetch.sh")
 
   result = app_git.commit_local(repo, "agent edit")
@@ -1624,9 +1695,10 @@ def test_commit_local_refuses_during_in_progress_cherry_pick(tmp_path):
   """commit_local must REFUSE (before staging) while a rebase/cherry-pick is
   mid-flight — no MERGE_HEAD, but CHERRY_PICK_HEAD + unmerged index entries.
 
-  A watcher's commit-on-save calling `git add` there would mark the conflicted
-  paths resolved in the index, and a later commit could bake conflict markers
-  into tracked source. The refusal must leave the operation entirely intact:
+  An unconditional source commit calling `git add` there would mark the
+  conflicted paths resolved in the index, and a later commit could bake
+  conflict markers into tracked source. The refusal must leave the operation
+  entirely intact:
   HEAD unmoved, CHERRY_PICK_HEAD still present, the paths still unmerged, and
   the marker-bearing working tree untouched.
   """
@@ -1652,7 +1724,7 @@ def test_commit_local_refuses_during_in_progress_cherry_pick(tmp_path):
   body_before = (repo / "index.jsx").read_text()
   assert "<<<<<<<" in body_before
 
-  result = app_git.commit_local(repo, "watcher save mid-cherry-pick")
+  result = app_git.commit_local(repo, "source apply mid-cherry-pick")
 
   # Refused before staging: no commit, HEAD unmoved, cherry-pick still in
   # progress, conflicted paths NOT staged/resolved, working tree untouched.

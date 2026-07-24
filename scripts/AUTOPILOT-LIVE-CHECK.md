@@ -33,8 +33,9 @@ counterpart that also exercises real GitHub and a real agent.
    default `8001`).
 
 2. **Install the Contribute app from the `feat/autopilot` working tree** (so it
-   ships the new `job.sh`, `autopilot.js`, `review-followup.md`). Use
-   `register_app.py` against the running stack, then note the app's numeric id.
+   ships the new `job.sh`, `autopilot.js`, `review-followup.md`). Run
+   `apply_app.py <source-dir>` against the running stack, then note the app's
+   numeric id.
 
 3. **Connect the scratch GitHub account** in the Contribute app's Connect card
    (or via the device flow), and mint an **app-scoped token** with

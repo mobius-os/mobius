@@ -2642,11 +2642,9 @@ export default function Shell() {
         confirmAndPlace()
       }
     } else if (ev.type === 'app_build_failed') {
-      // A failed background build leaves the previous app version running.
-      // The owner has no useful action here, and a burst of watcher retries
-      // must never cover the composer. Keep the diagnostic in backend logs;
-      // actionable update drift uses app_update_stale below with a direct path
-      // back to the App Store.
+      // Explicit apply reports compile failures synchronously to its caller and
+      // keeps the previous app version live. A legacy/external diagnostic must
+      // not cover the composer; actionable update drift uses app_update_stale.
       return
     } else if (ev.type === 'app_update_stale') {
       // The reviewed candidate changed while a conflict was being resolved.

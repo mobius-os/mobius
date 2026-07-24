@@ -10,17 +10,13 @@ status code each actor gets), which is decided before any runner work.
 """
 
 from app import models
+from test_app_fixtures import create_local_app
 
 
 def _make_app(client, owner_token, name):
-  r = client.post(
-    "/api/apps/",
-    json={"name": name, "description": "t",
-          "jsx_source": "export default () => null"},
-    headers={"Authorization": f"Bearer {owner_token}"},
-  )
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name=name,
+  )["id"]
   tok = client.post(
     "/api/auth/app-token", json={"app_id": app_id},
     headers={"Authorization": f"Bearer {owner_token}"},

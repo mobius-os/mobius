@@ -8,6 +8,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { applyApp } from './app-source.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -589,55 +590,33 @@ test.describe('Theme switching', () => {
 })
 
 test.describe('App canvas', () => {
-  test('9. Apps API returns a list', async ({ page }) => {
+  test('9. Apps API returns a list', async ({ page, request }) => {
     await setup(page)
 
-    const result = await page.evaluate(async () => {
-      const token = localStorage.getItem('token')
-      const headers = {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      }
-      const created = await fetch('/api/apps/', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          name: `E2E List Smoke ${Date.now()}`,
-          description: 'Temporary app for the apps-list API smoke test.',
-          jsx_source: 'export default function App() { return <div>list smoke</div> }',
-        }),
-      })
-      if (!created.ok) {
-        return {
-          ok: false,
-          phase: 'create',
-          status: created.status,
-          body: await created.text(),
-        }
-      }
-      const app = await created.json()
-
-      // Origin-relative — the shell now lives under `/shell/` so a
-      // `./api/...` reference resolves to `/shell/api/...` and gets
-      // caught by the SPA index instead of the API router.
-      const res = await fetch('/api/apps/', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (!res.ok) return { ok: false, phase: 'list', status: res.status }
-      const data = await res.json()
-      await fetch(`/api/apps/${app.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      return {
-        ok: true,
-        isArray: Array.isArray(data),
-        foundCreatedApp: Array.isArray(data) && data.some(item => item.id === app.id),
-      }
+    const token = await page.evaluate(() => localStorage.getItem('token'))
+    expect(token).toBeTruthy()
+    const stamp = Date.now()
+    const { app } = await applyApp(request, token, {
+      slug: `e2e-list-smoke-${stamp}`,
+      name: `E2E List Smoke ${stamp}`,
+      description: 'Temporary app for the apps-list API smoke test.',
+      jsxSource: 'export default function App() { return <div>list smoke</div> }',
     })
-    expect(result.ok).toBe(true)
-    expect(result.isArray).toBe(true)
-    expect(result.foundCreatedApp).toBe(true)
+    const headers = { Authorization: `Bearer ${token}` }
+    try {
+      // Origin-relative paths are intentionally avoided because the shell
+      // lives under `/shell/`.
+      const response = await request.get(`${BASE}/api/apps/`, { headers })
+      expect(response.ok()).toBeTruthy()
+      const data = await response.json()
+      expect(Array.isArray(data)).toBe(true)
+      expect(data.some(item => item.id === app.id)).toBe(true)
+    } finally {
+      await request.delete(`${BASE}/api/apps/${app.id}`, {
+        headers,
+        failOnStatusCode: false,
+      })
+    }
   })
 })
 

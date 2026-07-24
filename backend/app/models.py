@@ -544,8 +544,8 @@ class App(Base):
   # separate file store + cleanup path.
   icon_png = Column(LargeBinary, nullable=True, default=None)
   # Absolute directory holding this app's source files. Editable app source lives
-  # under `/data/apps/<dirname>`. Stored explicitly so the file watcher can map a
-  # modified `index.jsx` back to its DB row without slugify-guessing the name.
+  # under `/data/apps/<dirname>`. Stored explicitly so source apply can map a
+  # directory back to its DB row without slugify-guessing the name.
   # Null for apps created before this column existed.
   source_dir = Column(String(512), nullable=True, default=None)
   # Chat that last created or modified this app.  Null for apps created
@@ -639,6 +639,12 @@ class App(Base):
   # base an update diverges from. Null for an app with no tracked source
   # dir (it never enters the git path).
   upstream_commit = Column(String(64), nullable=True, default=None)
+  # Exact local `main` commit selected by the durable App row. This closes the
+  # Git/SQLite recovery boundary for explicit apply: a boot-time bundle rebuild
+  # can compile the accepted tree without reading or rewriting a newer draft in
+  # the editable worktree. Null for legacy rows until their next successful
+  # install or explicit apply.
+  source_commit = Column(String(64), nullable=True, default=None)
   # Owner-visible update-conflict resolver chats are keyed on upstream_commit.
   conflict_resolver_chat_id = Column(String(64), nullable=True, default=None)
   conflict_resolver_upstream_commit = Column(

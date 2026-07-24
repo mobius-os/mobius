@@ -12,6 +12,7 @@ from app import models
 from app import chat as chat_module
 from app.agent_lifecycle import normalize_chat_event, record_event
 from app.chat import _ChatEventSink
+from test_app_fixtures import create_local_app
 
 
 def _chat_run(db, chat_id="chat-life", run_id="run-life", *, deleted=False):
@@ -368,15 +369,13 @@ def test_owner_endpoint_paginates_events_and_run_updates_independently(
 
 
 def test_owner_endpoint_rejects_app_token(client, owner_token):
-  created = client.post("/api/apps/", json={
-    "name": "lifecycle-reader",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div /> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  assert created.status_code == 201, created.text
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  created = create_local_app(
+    client, headers, name="lifecycle-reader", description="test",
+  )
   token = client.post(
-    "/api/auth/app-token", json={"app_id": created.json()["id"]},
-    headers={"Authorization": f"Bearer {owner_token}"},
+    "/api/auth/app-token", json={"app_id": created["id"]},
+    headers=headers,
   ).json()["token"]
 
   response = client.get(

@@ -2592,8 +2592,8 @@ async def github_source_status(
   Returns refs, diff magnitudes, and working-tree metadata for the platform and
   every live app source repository.  It deliberately does not fetch remotes,
   expose source contents/absolute paths, or grant Contribute the much broader
-  filesystem capability.  App reads take the same per-source lock as the
-  watcher and installer, so a commit/update cannot split one status snapshot.
+  filesystem capability. App reads take the same per-source lock as explicit
+  apply and Store install, so a commit/update cannot split one status snapshot.
   """
   rows = (
     db.query(models.App)

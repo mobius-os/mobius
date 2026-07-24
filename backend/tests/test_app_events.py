@@ -19,20 +19,13 @@ from app.broadcast import get_system_broadcast
 from app.deps import Principal
 from app.events import SYSTEM_EVENT_TYPES
 from app.routes.apps import _app_stream_should_forward, stream_app_events
+from test_app_fixtures import create_local_app
 
 
 def _make_app(client, owner_token, name="evt-app"):
-  r = client.post(
-    "/api/apps/",
-    json={
-      "name": name,
-      "description": "test",
-      "jsx_source": "export default function App() { return <div>hi</div> }",
-    },
-    headers={"Authorization": f"Bearer {owner_token}"},
-  )
-  assert r.status_code == 201, r.text
-  return r.json()["id"]
+  return create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name=name,
+  )["id"]
 
 
 def _app_token(client, owner_token, app_id):

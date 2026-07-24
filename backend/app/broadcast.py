@@ -324,8 +324,8 @@ class SystemBroadcast:
 
   def publish(self, event: dict) -> None:
     """Push an event to every live subscriber. Failures (queue full,
-    closed) are logged + dropped — the publisher is the file watcher
-    or the agent's POST /api/notify, neither of which can usefully
+    closed) are logged + dropped — publishers such as explicit app apply
+    or the agent's POST /api/notify cannot usefully
     block on a stuck subscriber."""
     for q in self.subscribers:
       try:

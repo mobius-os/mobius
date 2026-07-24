@@ -104,15 +104,14 @@ separate backend/database/credential set on random ports, uses one browser
 worker, and tears the stack down. It intentionally refuses uncommitted source
 changes so the browser tests and served runtime cannot drift apart.
 
-## Dev loop: live app rebuild
+## Dev loop: explicit app apply
 
-You rarely restart anything to iterate on a mini-app. Edit
-`/data/apps/<slug>/index.jsx` (inside the container's `/data` volume) and
-`backend/app/app_watcher.py` picks it up: a `PollingObserver` watches the apps
-tree, debounces 1s, recompiles the entry via esbuild, persists the bundle, and
-publishes an `app_updated` event so the shell reloads the iframe without a
-manual register step. Polling (not inotify) is used because the Docker volume
-drops inotify events. Note: editing the **shell** in the served platform clone
+Edit the complete mini-app source tree under `/data/apps/<slug>/`, then run
+`python3 /app/scripts/apply_app.py /data/apps/<slug>`. Apply snapshots one exact
+Git tree, validates its manifest, compiles that tree, and publishes it as the
+live app. A failed or partial draft leaves the previous live bundle unchanged.
+There is no mini-app source watcher: saving files changes the draft, and apply
+is the deliberate acceptance boundary. Editing the **shell** in the served platform clone
 (`/data/platform/frontend/src`) IS live — `backend/app/frontend_watcher.py` runs
 a debounced `vite build` into the served `dist/` (git operations fire no edit
 events; `touch` a changed file to force a rebuild).

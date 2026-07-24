@@ -10,6 +10,7 @@ from unittest.mock import patch
 from urllib.parse import urlparse
 
 import pytest
+from test_app_fixtures import create_local_app
 
 from app import activity
 from app.config import get_settings
@@ -307,13 +308,7 @@ def test_create_chat_emits_chat_created(client, auth):
 def test_delete_app_emits_app_uninstall(client, auth):
   """DELETE /api/apps/{id} records an app_uninstall event (the missing half
   of the install/uninstall pair the churn digest needs)."""
-  src = "export default function App(){ return null }"
-  made = client.post(
-    "/api/apps/", headers=auth,
-    json={"name": "Churn Test", "description": "x", "jsx_source": src},
-  )
-  assert made.status_code in (200, 201), made.text
-  app_id = made.json()["id"]
+  app_id = create_local_app(client, auth, name="Churn Test")["id"]
   res = client.delete(f"/api/apps/{app_id}", headers=auth)
   assert res.status_code in (200, 204)
   uninstalls = [e for e in _read_lines() if e["ev"] == "app_uninstall"]
@@ -642,13 +637,7 @@ def test_emit_endpoint_requires_auth(client):
 
 
 def _make_app(client, auth):
-  r = client.post("/api/apps/", json={
-    "name": "wiretest",
-    "description": "x",
-    "jsx_source": "export default function App() { return <div/> }",
-  }, headers=auth)
-  assert r.status_code == 201, r.text
-  return r.json()["id"]
+  return create_local_app(client, auth, name="wiretest")["id"]
 
 
 def test_frame_fetch_emits_app_open(client, auth):

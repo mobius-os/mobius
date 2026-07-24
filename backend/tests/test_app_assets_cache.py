@@ -18,20 +18,13 @@ from pathlib import Path
 from app import models
 from app.database import SessionLocal
 from app.main import _STATIC_EMBED_CSP
+from test_app_fixtures import create_local_app
 
 
 def _create_app(client, owner_token, name="CubeRun"):
-  r = client.post(
-    "/api/apps/",
-    json={
-      "name": name,
-      "description": "x",
-      "jsx_source": "export default function App() { return <div>hi</div> }",
-    },
-    headers={"Authorization": f"Bearer {owner_token}"},
+  return create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name=name,
   )
-  assert r.status_code == 201, r.text
-  return r.json()
 
 
 def _write_static(app_id, relpath, content):
@@ -382,18 +375,13 @@ _MODULE_JSX = "export default function App() { return null }"
 
 
 def _create_module_app(client, owner_token, offline=False):
-  r = client.post(
-    "/api/apps/",
-    json={
-      "name": "ModApp",
-      "description": "x",
-      "jsx_source": _MODULE_JSX,
-      "offline_capable": offline,
-    },
-    headers={"Authorization": f"Bearer {owner_token}"},
+  return create_local_app(
+    client,
+    {"Authorization": f"Bearer {owner_token}"},
+    name="ModApp",
+    jsx_source=_MODULE_JSX,
+    offline_capable=offline,
   )
-  assert r.status_code == 201, r.text
-  return r.json()
 
 
 def test_module_range_probe_gets_full_body_200(client, owner_token):

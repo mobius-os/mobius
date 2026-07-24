@@ -34,7 +34,7 @@ is a permission boundary, not a substitute for origin-bound browser features.
 
 ## How this extends the base workflow
 
-Keep the quickstart's product scope, visible-first sequence, registration,
+Keep the quickstart's product scope, visible-first sequence, explicit apply,
 validation, and browser workflow. This extension changes only the mechanism
 required by the advanced feature below. An installable app starts as a
 root-level repository package and is installed from its raw `mobius.json` URL;
@@ -71,7 +71,7 @@ The packager writes `mobius.json` and an iframe `index.jsx`, enumerates every bu
 node /app/scripts/package-static-app.mjs --help
 ```
 
-Install it through the app installer (it registers the local package — no public repo or GitHub push), not by hand-copying into `/data`:
+Install it through the app installer (no public repo or GitHub push), not by hand-copying into `/data`:
 
 ```bash
 curl -s -X POST "$API_BASE_URL/api/apps/install" \
@@ -199,7 +199,7 @@ imports `index.jsx`):
 
 - **Keep the literal `export default` in `index.jsx`** — the compiler entry
   point. Siblings import relatively (`./storage.js`, `./ui/Chrome.jsx`) and the
-  watcher recompiles when any source sibling changes.
+  explicit apply recompiles when any accepted source sibling changes.
 - **Split the stylesheet as a `.js` exporting a CSS string** (`export const
   CSS = \`...\``), NOT a sibling `.css` import — esbuild emits a `.css` import
   as a separate artifact the single-module serving path won't deliver, so the
@@ -751,7 +751,7 @@ Online-only apps may still use an explicit `https://esm.sh/...` dynamic import w
 
 ## Offline-capable apps (opt-in)
 
-Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior are designed for offline use. Set it in `mobius.json`; `register_app.py` applies it on create/update. Use a direct PATCH only for legacy apps without a source manifest, and set it true only after testing a cold offline reload.
+Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior are designed for offline use. Set it in `mobius.json`; `apply_app.py` applies it with the accepted source revision. Set it true only after testing a cold offline reload.
 
 Separately, and automatically for EVERY app (no flag), the shell's service worker keeps an installed PWA out of the browser's native "no internet" page: a non-offline-capable app shows a branded offline screen when opened offline, never browser chrome. So the flag is the difference between "the real app runs offline" (set it) and "a branded you're-offline screen" (the automatic default) — neither ever drops to the browser error page.
 

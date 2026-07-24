@@ -7,9 +7,9 @@ two branches:
     Only the installer commits here, via `record_upstream`. It is the
     merge base that lets an update tell "did the user diverge from what
     upstream shipped" without guessing from a sha.
-  - `main` is the local working branch. The file watcher and the agent
-    commit their edits here (via `commit_local`); it is the branch the
-    working tree actually checks out.
+  - `main` is the local working branch. Explicit app apply and Store update
+    resolution commit accepted edits here; it is the branch the working tree
+    actually checks out.
 
 Update is `record_upstream` (commit the new upstream source TREE) then
 `merge_upstream`, which computes a clean-vs-conflict verdict with
@@ -44,8 +44,8 @@ primitive that makes the no-clobber verdict possible — is a porcelain we
 get for free without a libgit2 binding to pin and maintain.
 
 CONCURRENCY: callers MUST hold `fs_locks.source_dir_lock(<source_dir>)`
-around every entry point here, so the watcher's commit-on-save can't race
-the installer's merge on the same repo. This module does not take the
+around every entry point here, so explicit apply cannot race the installer's
+merge on the same repo. This module does not take the
 lock itself — the lock is keyed on the source dir, which only the caller
 knows, and nesting lock acquisition inside would hide the ordering the
 rest of install.py reasons about.
@@ -63,10 +63,10 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Branch names. `upstream` is installer-only pristine history; `main` is
-# the local working branch the watcher/agent commit to and the working
+# the local working branch explicit apply commits to and the working
 # tree checks out.
 UPSTREAM_BRANCH = "upstream"
 LOCAL_BRANCH = "main"
@@ -79,7 +79,7 @@ LOCAL_BRANCH = "main"
 # and those ARE hand-written source — a blanket `*.js` silently dropped them
 # from per-app history, breaking the merge/conflict-resolution model for any
 # modular app. So the ignore is scoped to genuine generated/vendored output
-# (mirrors the watcher's recompile-ignore set) plus install artifacts and the
+# (mirrors compiler generated-output exclusions) plus install artifacts and the
 # integer-id storage tree.
 _GITIGNORE = "\n".join([
   "# Generated build output and vendored deps are not hand-written source.",
@@ -180,6 +180,23 @@ class MergeResult:
   merged_tree_oid: str | None = None
 
 
+@dataclass(frozen=True)
+class WorktreeTree:
+  """Immutable candidate captured from an app working tree.
+
+  ``tree_oid`` names the exact bytes and modes staged through the app repo's
+  canonical ignore rules. ``parent_sha`` is the local branch tip against which
+  a later commit must compare-and-swap.
+  """
+
+  tree_oid: str
+  parent_sha: str
+
+
+class SourceTreeChanged(RuntimeError):
+  """The app source or accepted branch moved during an explicit apply."""
+
+
 def _git_env(repo: Path | str) -> dict:
   """Isolated env for a per-app git op so it can never bleed into an
   enclosing repo. `/data` is itself a git repo (the agent's pm-commit
@@ -198,7 +215,7 @@ def _git_env(repo: Path | str) -> dict:
   ):
     env.pop(var, None)
   env["GIT_CEILING_DIRECTORIES"] = str(Path(repo).resolve().parent)
-  # App installs, updates, watcher commits, and cron work are unattended. A
+  # App installs, explicit applies, updates, and cron work are unattended. A
   # missing/private origin must fail within the subprocess timeout and fall back
   # through the caller's normal error path; it must never wait on an inherited
   # terminal or desktop credential prompt. Configured credential helpers and
@@ -230,6 +247,28 @@ def _run(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
   return subprocess.run(
     cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
     check=check, env=_git_env(repo),
+  )
+
+
+def _run_with_index(
+  repo: Path,
+  index_file: Path,
+  *args: str,
+  check: bool = True,
+) -> subprocess.CompletedProcess:
+  """Run Git against a temporary index while sharing this repo's object DB."""
+  env = _git_env(repo)
+  env["GIT_INDEX_FILE"] = str(index_file)
+  cmd = [
+    "git",
+    "-c", f"user.name={_GIT_NAME}",
+    "-c", f"user.email={_GIT_EMAIL}",
+    "-C", str(repo),
+    *args,
+  ]
+  return subprocess.run(
+    cmd, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+    check=check, env=env,
   )
 
 
@@ -291,7 +330,11 @@ def _looks_like_managed_gitignore(text: str) -> bool:
   )
 
 
-def _drop_stale_managed_gitignore_from_origin_repo(repo: Path) -> None:
+def _drop_stale_managed_gitignore_from_origin_repo(
+  repo: Path,
+  *,
+  index_file: Path | None = None,
+) -> None:
   """Remove old synthetic Mobius .gitignore files from real-origin repos.
 
   Real-origin apps own their committed `.gitignore`; Mobius rules belong in
@@ -309,11 +352,22 @@ def _drop_stale_managed_gitignore_from_origin_repo(repo: Path) -> None:
     return
   if not _looks_like_managed_gitignore(text):
     return
-  _run(repo, "rm", "--cached", "--ignore-unmatch", "--", ".gitignore", check=False)
+  runner = (
+    (lambda *args, **kwargs: _run_with_index(
+      repo, index_file, *args, **kwargs,
+    ))
+    if index_file is not None
+    else (lambda *args, **kwargs: _run(repo, *args, **kwargs))
+  )
+  runner("rm", "--cached", "--ignore-unmatch", "--", ".gitignore", check=False)
   gitignore.unlink(missing_ok=True)
 
 
-def _refresh_ignore_rules(source_dir: str | Path) -> None:
+def _refresh_ignore_rules(
+  source_dir: str | Path,
+  *,
+  index_file: Path | None = None,
+) -> None:
   """Refresh Mobius-managed ignore rules for a per-app repo.
 
   Synthetic installer repos own their committed `.gitignore`, so old repos are
@@ -327,20 +381,38 @@ def _refresh_ignore_rules(source_dir: str | Path) -> None:
     exclude = repo / ".git" / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     _write_managed_exclude(exclude)
-    _drop_stale_managed_gitignore_from_origin_repo(repo)
+    _drop_stale_managed_gitignore_from_origin_repo(
+      repo, index_file=index_file,
+    )
   else:
     gitignore = repo / ".gitignore"
     if not gitignore.exists() or gitignore.read_text(encoding="utf-8") != _GITIGNORE:
       gitignore.write_text(_GITIGNORE, encoding="utf-8")
-  _run(
-    repo, "rm", "-r", "--cached", "--ignore-unmatch", "--",
-    *_MANAGED_RUNTIME_PATHS, check=False,
-  )
+  if index_file is None:
+    _run(
+      repo, "rm", "-r", "--cached", "--ignore-unmatch", "--",
+      *_MANAGED_RUNTIME_PATHS, check=False,
+    )
+  else:
+    _run_with_index(
+      repo, index_file,
+      "rm", "-r", "--cached", "--ignore-unmatch", "--",
+      *_MANAGED_RUNTIME_PATHS, check=False,
+    )
 
 
 def is_repo(source_dir: str | Path) -> bool:
   """Whether `source_dir` already holds a git repo."""
   return (Path(source_dir) / ".git").exists()
+
+
+def worktree_dirty(source_dir: str | Path) -> bool:
+  """Whether tracked/untracked accepted-source paths differ from ``main``."""
+  if not is_repo(source_dir):
+    return False
+  return bool(_run(
+    Path(source_dir), "status", "--porcelain",
+  ).stdout.strip())
 
 
 def head_sha(source_dir: str | Path, branch: str) -> str:
@@ -571,6 +643,70 @@ def ensure_repo(source_dir: str | Path) -> None:
   _run(repo, "checkout", "-q", LOCAL_BRANCH)
 
 
+def snapshot_worktree(source_dir: str | Path) -> WorktreeTree:
+  """Capture accepted app-source candidates without mutating the real index.
+
+  Git is the canonical source inventory: the temporary index starts at
+  ``main``, applies the same managed ignore migration and pathspec as ordinary
+  commits, then writes one immutable tree. Repeating this function is the
+  caller's optimistic stability check around validation/compilation.
+  """
+  repo = Path(source_dir)
+  ensure_repo(repo)
+  parent = head_sha(repo, LOCAL_BRANCH)
+  with tempfile.TemporaryDirectory(prefix="mobius-app-index-") as tmp:
+    index_file = Path(tmp) / "index"
+    _run_with_index(repo, index_file, "read-tree", parent)
+    _refresh_ignore_rules(repo, index_file=index_file)
+    _run_with_index(repo, index_file, "add", *_tracked_source(repo))
+    tree = _run_with_index(repo, index_file, "write-tree").stdout.strip()
+  return WorktreeTree(tree_oid=tree, parent_sha=parent)
+
+
+def commit_worktree_tree(
+  source_dir: str | Path,
+  snapshot: WorktreeTree,
+  msg: str,
+) -> str | None:
+  """Commit exactly ``snapshot.tree_oid`` if ``main`` still has its parent.
+
+  The candidate was compiled from this same immutable tree. Updating the ref
+  with Git's expected-old-value argument is the compare-and-swap that prevents
+  another accepted revision from being overwritten. The real index is updated
+  only after a successful ref move; failed validation/compile paths never use
+  it as scratch state.
+  """
+  repo = Path(source_dir)
+  current = head_sha(repo, LOCAL_BRANCH)
+  if current != snapshot.parent_sha:
+    raise SourceTreeChanged(
+      "App source history changed while the revision was being applied."
+    )
+  current_tree = _run(
+    repo, "rev-parse", f"{LOCAL_BRANCH}^{{tree}}",
+  ).stdout.strip()
+  if current_tree == snapshot.tree_oid:
+    return None
+  sha = _run(
+    repo, "commit-tree", snapshot.tree_oid,
+    "-p", snapshot.parent_sha,
+    "-m", msg,
+  ).stdout.strip()
+  moved = _run(
+    repo, "update-ref", f"refs/heads/{LOCAL_BRANCH}",
+    sha, snapshot.parent_sha, check=False,
+  )
+  if moved.returncode != 0:
+    raise SourceTreeChanged(
+      "App source history changed while the revision was being applied."
+    )
+  # The checked-out branch moved without checkout. Make the ordinary index
+  # describe the accepted commit while preserving any later worktree edits as
+  # an unapplied draft.
+  _run(repo, "read-tree", sha)
+  return sha
+
+
 def align_local_to_upstream(source_dir: str | Path) -> None:
   """Resets the local `main` branch to the current `upstream` tip.
 
@@ -621,7 +757,7 @@ def record_upstream(
   index, not by patching the previous upstream tip, so a file DROPPED from the
   new version is correctly removed from `upstream` too. Staged into a temp view
   of the shared index and restored to `main` afterwards, so the live working
-  tree the watcher may be compiling stays put.
+  tree an explicit apply may be snapshotting stays put.
   """
   repo = Path(source_dir)
   ensure_repo(repo)
@@ -783,7 +919,7 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   conflict markers — without this gate a conflict in a NON-entry file (a
   job script like `fetch.sh`) would sail through, because the only other
   resolution signal is "does index.jsx compile", which stays true. So no
-  caller (watcher or install) can commit a marker-bearing tree as source.
+  caller can commit a marker-bearing tree as source.
 
   If a merge is in progress and FULLY resolved (no unmerged entries, no
   markers), this finalizes it as a SINGLE-parent replay commit parented on
@@ -969,8 +1105,8 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
   conflict the conflicting paths are returned and `merged_tree_oid` is None —
   the caller leaves the local edits untouched.
 
-  The caller is responsible for advancing `main` to the merged tree (by
-  writing it and letting the watcher/`commit_local` commit it). We deliberately
+  The caller is responsible for advancing `main` to the merged tree through
+  the explicit resolution transaction. We deliberately
   do NOT fast-forward `main` here: the merged source has to be recompiled and
   committed as one transactional unit on the caller's side, and moving the
   branch before that would briefly point `main` at a tree the compiled bundle
@@ -1045,6 +1181,59 @@ def read_ref_tree(source_dir: str | Path, ref: str) -> dict[str, bytes]:
   return read_merged_tree(repo, tree_oid)
 
 
+def materialize_tree(
+  source_dir: str | Path,
+  tree_oid: str,
+  target_dir: str | Path,
+) -> None:
+  """Write an immutable Git tree into an empty compile directory.
+
+  Catalog repositories are untrusted input. Paths are confined to
+  ``target_dir`` and Git symlinks are written as plain files containing their
+  link text, matching ``clone_upstream``'s ``core.symlinks=false`` policy.
+  Submodules and other non-blob entries are rejected.
+  """
+  repo = Path(source_dir)
+  target = Path(target_dir)
+  target.mkdir(parents=True, exist_ok=True)
+  listing = subprocess.run(
+    ["git", "-C", str(repo), "ls-tree", "-r", "-z", tree_oid],
+    capture_output=True, timeout=_GIT_TIMEOUT, check=True, env=_git_env(repo),
+  ).stdout
+  for raw_entry in listing.split(b"\0"):
+    if not raw_entry:
+      continue
+    raw_meta, separator, raw_path = raw_entry.partition(b"\t")
+    if not separator:
+      raise RuntimeError("Invalid Git tree entry.")
+    try:
+      mode, object_type, object_oid = raw_meta.decode("ascii").split(" ", 2)
+      rel = raw_path.decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as exc:
+      raise RuntimeError("Invalid Git tree entry.") from exc
+    pure = PurePosixPath(rel)
+    if (
+      pure.is_absolute()
+      or not pure.parts
+      or any(part in ("", ".", "..") for part in pure.parts)
+      or pure.parts[0] == ".git"
+    ):
+      raise RuntimeError(f"Unsafe Git tree path: {rel!r}")
+    if object_type != "blob" or mode not in ("100644", "100755", "120000"):
+      raise RuntimeError(
+        f"Unsupported Git tree entry {rel!r} ({mode} {object_type})."
+      )
+    output = target.joinpath(*pure.parts)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    blob = subprocess.run(
+      ["git", "-C", str(repo), "cat-file", "blob", object_oid],
+      capture_output=True, timeout=_GIT_TIMEOUT, check=True,
+      env=_git_env(repo),
+    ).stdout
+    output.write_bytes(blob)
+    output.chmod(0o755 if mode == "100755" else 0o644)
+
+
 def read_tree_exec_paths(
   source_dir: str | Path, tree_ish: str
 ) -> frozenset[str]:
@@ -1078,13 +1267,11 @@ def start_conflict_merge(source_dir: str | Path) -> list[str]:
   Unlike `merge_upstream` (an in-memory verdict that never touches the tree),
   this MUTATES the working tree: `git merge --no-commit --no-ff upstream`
   writes conflict markers into the conflicting files and records `MERGE_HEAD`,
-  leaving exactly the state a human's `git pull` would — so the agent resolves
-  it with ordinary git. The caller must NOT recompile afterward: the
-  marker-bearing source won't compile, so the file watcher keeps serving the
-  prior good bundle until the agent resolves the markers and finishes the merge
-  (`git add` + `git commit` / `git merge --continue`), at which point
-  `commit_local` finalizes a single-parent replay (linear) on the upstream
-  tip and the base advances.
+  leaving exactly the state a human's `git pull` would. The caller must NOT
+  publish afterward: explicit update resolution keeps the prior good bundle
+  live until every marker is reconciled, then ``commit_local`` finalizes a
+  single-parent replay (linear) on the upstream tip and the installer promotes
+  the complete update.
 
   To back out, the agent runs `git merge --abort`, restoring `main` to its
   pre-merge (committed local) state. Call only after `merge_upstream` verdicted
@@ -1330,8 +1517,8 @@ def resolve_version_only_conflict(
 # - record_upstream stages the new blob into the SHARED index (read-tree
 #   upstream -> update-index -> write-tree) then read-tree's it back to
 #   `main`. That borrows the working index for a write-tree, which is safe
-#   only because the caller holds source_dir_lock so the watcher can't be
-#   committing on `main` concurrently. The lock contract is documented at
+#   only because the caller holds source_dir_lock so no other writer can commit
+#   on `main` concurrently. The lock contract is documented at
 #   the module top; flagged here because the index-borrow is the spot that
 #   relies on it. A conflict-free alternative is a bare temp index
 #   (GIT_INDEX_FILE), deferred until a non-locked caller needs it.

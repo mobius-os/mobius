@@ -8,7 +8,7 @@
 # This removes the single most-repeated bit of friction — the long
 # PATH=... SECRET_KEY=... venv-python incantation — and sidesteps the
 # esbuild-PATH-from-worktree trap that has caused a ~70-test false alarm
-# (an empty PATH makes POST /api/apps/ 422 "esbuild not installed", which
+# (an empty PATH makes explicit app apply return "esbuild not installed", which
 # cascades and looks exactly like a mass regression).
 #
 # Usage (from anywhere inside a worktree or the main checkout):
