@@ -61,6 +61,7 @@ def test_restart_drains_then_requests_supervisor_and_arms_force_kill(monkeypatch
   assert requests == [{
     "boot_id": "boot-12345678",
     "nonce": "nonce-12345678",
+    "runs": [{"chat_id": "chat-12345678", "run_token": "run-12345678"}],
   }]
   # A single force-kill fallback, armed as a daemon and started, so a hung
   # graceful shutdown can't leave the container "Up" with a dead worker. Its
@@ -101,6 +102,7 @@ def test_restart_request_survives_drain_failure(monkeypatch):
   assert requests == [{
     "boot_id": "boot-12345678",
     "nonce": "nonce-12345678",
+    "runs": [],
   }]
   assert len(_FakeTimer.instances) == 1
 
