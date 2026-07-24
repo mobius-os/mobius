@@ -272,8 +272,8 @@ export default function ChatView({
   embedded = false,
   quickActions = null,
   getContext = null,
-  composerFocusRequest = null,
-  onComposerFocusHandled = null,
+  composerRequest = null,
+  onComposerRequestHandled = null,
   externalRunSignal = EMPTY_CHAT_RUN_SIGNAL,
   onExternalRunEvent = null,
   // Multi-pane workspace (design §2): when this chat renders inside a tiled
@@ -727,23 +727,33 @@ export default function ChatView({
     chatEl.style.setProperty('--composer-h', `${footEl.offsetHeight}px`)
   }, [])
 
-  // A drawer "New chat" tap should leave desktop-web users ready to type.
-  // Keep this as an explicit one-shot request from Shell instead of a blanket
-  // autofocus-on-mount: selecting existing chats should not steal focus, and
-  // touch-primary devices should not pop the soft keyboard unexpectedly.
+  // One explicit Shell-to-composer handoff owns both New-chat focus and drafts
+  // supplied by app navigation. Storage restores unmounted chats; applying the
+  // same request here is what updates a retained ChatView without sacrificing
+  // its transcript, scroll, or stream identity through a forced remount.
   useEffect(() => {
-    const token = composerFocusRequest?.token
+    const token = composerRequest?.token
     if (token == null) return
-    const requestChatId = composerFocusRequest?.chatId
+    const requestChatId = composerRequest?.chatId
     if (requestChatId == null || String(requestChatId) !== String(chatId)) return
 
+    if (typeof composerRequest.draft === 'string'
+        && inputValueRef.current !== composerRequest.draft) {
+      handleComposerInputChange(composerRequest.draft)
+    }
+
+    if (!composerRequest.focus) {
+      onComposerRequestHandled?.(token)
+      return
+    }
+
     if (!shouldApplyComposerFocusRequest({
-      focusRequest: composerFocusRequest,
+      focusRequest: composerRequest,
       chatId,
       embedded,
       isTouchPrimary: _isTouchPrimary,
     })) {
-      onComposerFocusHandled?.(token)
+      onComposerRequestHandled?.(token)
       return
     }
 
@@ -751,13 +761,13 @@ export default function ChatView({
     const raf = requestAnimationFrame(() => {
       if (cancelled) return
       focusComposerElement(inputRef.current)
-      onComposerFocusHandled?.(token)
+      onComposerRequestHandled?.(token)
     })
     return () => {
       cancelled = true
       cancelAnimationFrame(raf)
     }
-  }, [chatId, composerFocusRequest, embedded, onComposerFocusHandled])
+  }, [chatId, composerRequest, embedded, onComposerRequestHandled])
 
   // Lifecycle guards. `hadMessagesRef` reflects the cached length so
   // doSend's "first message" branch doesn't fire spuriously.

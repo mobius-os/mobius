@@ -64,6 +64,7 @@ import {
   currentReusableEmptyChat,
   enteredEmptySingleScreen,
   mergeChatListWithCreatedGuards,
+  mostRecentConcreteChatId,
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
@@ -649,20 +650,23 @@ export default function Shell() {
   // Guards the once-per-mount deferred shell-update pickup effect below.
   const shellUpdatePickupRef = useRef(false)
   const shellUpdatePickupCheckStartedRef = useRef(false)
-  const [composerFocusRequest, setComposerFocusRequest] = useState(null)
-  const composerFocusTokenRef = useRef(0)
+  const [composerRequest, setComposerRequest] = useState(null)
+  const composerRequestTokenRef = useRef(0)
 
-  function requestComposerFocus(chatId) {
+  function requestComposer(chatId, { draft, focus = false } = {}) {
     if (chatId == null) return
-    composerFocusTokenRef.current += 1
-    setComposerFocusRequest({
+    if (draft == null && !focus) return
+    composerRequestTokenRef.current += 1
+    setComposerRequest({
       chatId,
-      token: composerFocusTokenRef.current,
+      token: composerRequestTokenRef.current,
+      draft: draft == null ? null : String(draft),
+      focus: focus === true,
     })
   }
 
-  const handleComposerFocusHandled = useCallback((token) => {
-    setComposerFocusRequest(prev => (
+  const handleComposerRequestHandled = useCallback((token) => {
+    setComposerRequest(prev => (
       prev?.token === token ? null : prev
     ))
   }, [])
@@ -2702,8 +2706,9 @@ export default function Shell() {
         })
       } else if (e.data?.type === 'moebius:open-chat') {
         if (typeof e.data.chatId !== 'string' || !e.data.chatId) return
+        let draftText = null
         if (e.data.draft) {
-          const draftText = String(e.data.draft)
+          draftText = String(e.data.draft)
           try {
             sessionStorage.setItem('pending-draft', draftText)
             sessionStorage.setItem(`draft:${e.data.chatId}`, draftText)
@@ -2712,6 +2717,10 @@ export default function Shell() {
           } catch {}
         }
         navTo('chat', { chatId: e.data.chatId })
+        // Storage covers an unmounted target. The explicit request also updates
+        // an already-retained ChatView, whose controlled composer state would
+        // otherwise keep showing its old value until a full remount.
+        if (draftText != null) requestComposer(e.data.chatId, { draft: draftText })
         refreshChats()
       } else if (e.data?.type === 'moebius:open-app') {
         // Match against installed apps by numeric id OR slug, so the
@@ -2988,7 +2997,38 @@ export default function Shell() {
     //
     // Resolve chatId BEFORE switching views — setting activeView='chat'
     // with the old chatId causes a visible flash of the previous chat.
-    const { chatId, reason } = await resolveNewChatId({ draft, forceNew, exclude })
+    // Standard mode has one foreground surface. If the owner temporarily
+    // replaced an unfinished blank chat with an app, "New chat" means return to
+    // that in-progress compose surface rather than silently allocate another
+    // blank and strand its saved draft. Builder mode deliberately does NOT take
+    // this branch: opening another chat there is additive by design.
+    //
+    // The history route only supplies a candidate id. The existing list guards
+    // plus fresh detail probe still prove that it is untouched before reuse, so
+    // a send from another browser cannot turn this convenience into reopening a
+    // conversation that has already started.
+    const ws = workspaceStateRef.current.ws
+    const resumeId = (
+      (!SPLITS || ws.viewMode === 'single')
+      && activeChatIdRef.current == null
+      && !draft
+      && !forceNew
+    )
+      ? mostRecentConcreteChatId(navStackRef.current)
+      : null
+    const resumeCandidate = resumeId == null
+      ? undefined
+      : currentReusableEmptyChat(chatsRef.current, {
+        activeChatId: resumeId,
+        exclude,
+        recoveredChatIds: recoveredChatIdsRef.current,
+        streamingChatIds: streamingChatIdsRef.current,
+      })
+    const { chatId, reason } = await resolveNewChatId(
+      resumeCandidate === undefined
+        ? { draft, forceNew, exclude }
+        : { candidate: resumeCandidate, draft, forceNew, exclude },
+    )
     if (chatId == null) {
       // Don't leave a dead, drawer-still-open tap. Offline / failed create surface a
       // toast; an in-flight second tap just closes the drawer (the first create lands).
@@ -3029,7 +3069,7 @@ export default function Shell() {
       const ws = workspaceStateRef.current.ws
       applyModeDestination({ view: 'chat', chatId, appId: null, paneId: ws.focusedPaneId })
     }
-    if (focusComposer) requestComposerFocus(chatId)
+    if (focusComposer) requestComposer(chatId, { focus: true })
   }
   // Keep the latest-newChat ref current so handleAppError's crash-report
   // fallback starts a chat with this render's live closure.
@@ -3611,9 +3651,9 @@ export default function Shell() {
               visible={chatPanesVisible && role !== 'held' && visibleChatKeys.has(`chat:${chatId}`)}
                 paneContentHeight={paned ? paned.h : null}
                 chatRunSignals={chatRunSignals}
-                composerFocusRequest={role === 'active' ? composerFocusRequest : null}
-                onComposerFocusHandled={role === 'active'
-                  ? handleComposerFocusHandled
+                composerRequest={role === 'active' ? composerRequest : null}
+                onComposerRequestHandled={role === 'active'
+                  ? handleComposerRequestHandled
                   : null}
                 onSystemEvent={handleSystemEvent}
                 markStreamingStart={markStreamingStart}

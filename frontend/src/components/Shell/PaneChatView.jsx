@@ -27,8 +27,8 @@ function PaneChatView({
   visible = true,
   paneContentHeight,
   chatRunSignals,
-  composerFocusRequest,
-  onComposerFocusHandled,
+  composerRequest,
+  onComposerRequestHandled,
   onSystemEvent,
   markStreamingStart,
   markStreamingEnd,
@@ -99,8 +99,8 @@ function PaneChatView({
         onMessageStart={handleMessageStart}
         onQuestionAnswered={refreshChats}
         onVoiceListeningChange={markVoiceListening}
-        composerFocusRequest={composerFocusRequest}
-        onComposerFocusHandled={onComposerFocusHandled}
+        composerRequest={composerRequest}
+        onComposerRequestHandled={onComposerRequestHandled}
         onDisplayReady={onDisplayReady ? handleDisplayReady : null}
       />
     </ErrorBoundary>
