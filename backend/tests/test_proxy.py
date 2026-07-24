@@ -14,6 +14,7 @@ from fastapi.responses import Response
 
 from app.net_utils import validate_url_safe
 from app.routes.proxy import _capped_response
+from test_app_fixtures import create_local_app
 
 
 # ---------------------------------------------------------------------------
@@ -132,15 +133,13 @@ def test_proxy_get_allows_opaque_app_frame_request(
   client, owner_token, monkeypatch
 ):
   """Opaque app frames may use the authenticated, read-only GET proxy."""
-  created = client.post("/api/apps/", json={
-    "name": "proxy-frame",
-    "description": "test",
-    "jsx_source": "export default function App() { return null }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  assert created.status_code == 201, created.text
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  created = create_local_app(
+    client, owner_auth, name="proxy-frame", description="test",
+  )
   token_response = client.post("/api/auth/app-token", json={
-    "app_id": created.json()["id"],
-  }, headers={"Authorization": f"Bearer {owner_token}"})
+    "app_id": created["id"],
+  }, headers=owner_auth)
   assert token_response.status_code == 200, token_response.text
 
   def fake_validate_url_safe(url):
@@ -183,14 +182,13 @@ def test_proxy_post_allows_opaque_app_frame_request(
   client, owner_token, monkeypatch
 ):
   """Scoped Bearer auth distinguishes a real app fetch from foreign CSRF."""
-  created = client.post("/api/apps/", json={
-    "name": "proxy-post-frame",
-    "description": "test",
-    "jsx_source": "export default function App() { return null }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  created = create_local_app(
+    client, owner_auth, name="proxy-post-frame", description="test",
+  )
   token_response = client.post("/api/auth/app-token", json={
-    "app_id": created.json()["id"],
-  }, headers={"Authorization": f"Bearer {owner_token}"})
+    "app_id": created["id"],
+  }, headers=owner_auth)
 
   monkeypatch.setattr(
     "app.routes.proxy.validate_url_safe",

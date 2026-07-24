@@ -223,7 +223,12 @@ def _restore_entry_source(
     pass
 
 
-def _remove_unsupported_outputs(out: Path, metafile: dict) -> None:
+def _remove_unsupported_outputs(
+  out: Path,
+  metafile: dict,
+  *,
+  metadata_cwd: str | Path | None = None,
+) -> None:
   """Remove outputs esbuild wrote before metadata exposed a contract error."""
   out.unlink(missing_ok=True)
   outputs = metafile.get("outputs")
@@ -234,7 +239,10 @@ def _remove_unsupported_outputs(out: Path, metafile: dict) -> None:
       continue
     css_bundle = details.get("cssBundle")
     if isinstance(css_bundle, str):
-      Path(css_bundle).unlink(missing_ok=True)
+      css_path = Path(css_bundle)
+      if not css_path.is_absolute() and metadata_cwd is not None:
+        css_path = Path(metadata_cwd) / css_path
+      css_path.unlink(missing_ok=True)
 
 
 async def compile_jsx(
@@ -270,13 +278,14 @@ async def compile_jsx(
   if not jsx_source or not jsx_source.strip():
     message = (
       "JSX source is empty. Write your component to "
-      "apps/<name>/index.jsx before registering."
+      "apps/<name>/index.jsx before applying."
     )
     raise CompileError(message, stderr=message, source_path=source_path)
   out = Path(out_path)
 
   entry_path = Path(source_path) if source_path is not None else None
   tmp_path = None
+  compile_cwd = None
   if entry_path is None:
     with tempfile.NamedTemporaryFile(
       suffix=".jsx", mode="w", delete=False, encoding="utf-8"
@@ -284,6 +293,14 @@ async def compile_jsx(
       f.write(jsx_source)
       tmp_path = f.name
     entry_path = Path(tmp_path)
+  else:
+    # Compile real source trees from their root with a relative entry name.
+    # Besides keeping sibling imports natural, this makes output deterministic:
+    # esbuild's generated module comments no longer embed a random temporary
+    # snapshot path (explicit apply compiles from one such snapshot).
+    entry_path = entry_path.resolve()
+    compile_cwd = str(entry_path.parent)
+  command_entry = entry_path.name if compile_cwd is not None else entry_path
 
   metadata_fd, metadata_name = tempfile.mkstemp(
     prefix="mobius-esbuild-", suffix=".json",
@@ -293,8 +310,9 @@ async def compile_jsx(
   try:
     try:
       proc = await asyncio.create_subprocess_exec(
-        *esbuild_command(entry_path, out, metafile=metadata_path),
+        *esbuild_command(command_entry, out, metafile=metadata_path),
         env=esbuild_environment(),
+        cwd=compile_cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
       )
@@ -315,8 +333,8 @@ async def compile_jsx(
         f"esbuild timed out after {ESBUILD_TIMEOUT_SECS} seconds"
       )
     except asyncio.CancelledError:
-      # The awaiting task was cancelled (a superseded debounced watcher
-      # recompile, or shutdown). Kill the child so it can't keep running and
+      # The awaiting task was cancelled (for example, during shutdown). Kill
+      # the child so it can't keep running and
       # writing out_path after we've returned and released our locks.
       proc.kill()
       try:
@@ -337,7 +355,9 @@ async def compile_jsx(
       raise RuntimeError(f"Could not read esbuild metadata: {exc}") from exc
     contract_error = esbuild_metafile_contract_error(metadata)
     if contract_error:
-      _remove_unsupported_outputs(out, metadata)
+      _remove_unsupported_outputs(
+        out, metadata, metadata_cwd=compile_cwd,
+      )
       raise CompileError(
         "Compilation failed.", stderr=contract_error, source_path=entry_path,
       )
@@ -370,10 +390,9 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
 
   The caller MUST ensure the app's bundle path (keyed by app id) can't be
   concurrently reused while this runs, or publication/cleanup could touch a
-  different app's artifacts. PATCH and the watcher satisfy this by holding the
-  lifecycle + per-app lock with ``app`` loaded fresh under it; ``create_app``
-  satisfies it trivially because the id is brand-new and uncommitted, so no
-  other operation can reference it yet.
+  different app's artifacts. Explicit apply holds the lifecycle + per-app lock
+  with ``app`` loaded fresh under it; a newly allocated id is uncommitted, so
+  no other operation can reference it yet.
 
   Raises:
     RuntimeError: from ``compile_jsx`` on invalid JSX (committed path untouched).

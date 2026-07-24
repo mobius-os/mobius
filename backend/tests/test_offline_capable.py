@@ -6,14 +6,18 @@ to cache. These move together — the flag is the source of truth, the header
 is its wire form.
 """
 
+import json
+from pathlib import Path
+
+from test_app_fixtures import create_local_app
+
 JSX = "export default function A(){ return null }"
 
 
 def _create(client, auth, **extra):
-  body = {"name": "App", "jsx_source": JSX, **extra}
-  r = client.post("/api/apps/", headers=auth, json=body)
-  assert r.status_code == 201, r.text
-  return r.json()
+  return create_local_app(
+    client, auth, name="App", jsx_source=JSX, **extra,
+  )
 
 
 def test_create_defaults_offline_capable_false(client, auth):
@@ -24,14 +28,20 @@ def test_create_can_set_offline_capable(client, auth):
   assert _create(client, auth, offline_capable=True)["offline_capable"] is True
 
 
-def test_patch_offline_capable_toggles_and_persists(client, auth):
-  app_id = _create(client, auth)["id"]
-  r = client.patch(f"/api/apps/{app_id}", headers=auth,
-                   json={"offline_capable": True})
+def test_manifest_apply_toggles_offline_capable_and_persists(client, auth):
+  app = _create(client, auth)
+  source_dir = Path(app["source_dir"])
+  manifest_path = source_dir / "mobius.json"
+  manifest = json.loads(manifest_path.read_text())
+  manifest["offline_capable"] = True
+  manifest_path.write_text(json.dumps(manifest))
+  r = client.post(
+    "/api/apps/apply", headers=auth, json={"source_dir": str(source_dir)},
+  )
   assert r.status_code == 200, r.text
-  assert r.json()["offline_capable"] is True
-  # A patch that omits the field must leave it unchanged.
-  r2 = client.patch(f"/api/apps/{app_id}", headers=auth, json={"name": "X"})
+  assert r.json()["app"]["offline_capable"] is True
+  # A metadata patch cannot accidentally alter the manifest-owned field.
+  r2 = client.patch(f"/api/apps/{app['id']}", headers=auth, json={"name": "X"})
   assert r2.json()["offline_capable"] is True
 
 

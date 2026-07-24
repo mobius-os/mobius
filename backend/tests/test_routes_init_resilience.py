@@ -135,31 +135,6 @@ def test_broken_route_module_yields_stub_real_routers_unaffected(
   ), f"auth_router looks like a stub: {auth_paths}"
 
 
-def test_main_boots_when_app_watcher_start_raises(monkeypatch):
-  """A failure inside lifespan's `start_watcher` call must NOT crash
-  uvicorn boot — it should be logged and the app should still serve
-  /api/health (and therefore /recover/chat) normally."""
-  # Re-import main with a patched start_watcher that raises.
-  import app.app_watcher as watcher_mod
-
-  def boom(loop):
-    raise RuntimeError("simulated watcher crash")
-
-  monkeypatch.setattr(watcher_mod, "start_watcher", boom)
-
-  from app.main import app as main_app
-  client = TestClient(main_app)
-  with client:
-    # The `with` block enters lifespan; if start_watcher's failure
-    # weren't caught, this would raise before yielding a usable
-    # client.
-    resp = client.get("/api/health")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "ok"
-    assert body["boot_id"]
-
-
 def test_lifespan_waits_for_initial_restart_resume_sweep(monkeypatch):
   """The server must not accept a manual send before restart recovery claims."""
   from app import chat as chat_mod

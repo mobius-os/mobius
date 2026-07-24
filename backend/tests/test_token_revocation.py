@@ -10,20 +10,18 @@ routes/admin.py:sign_out_everywhere.
 from datetime import timedelta
 
 from app import auth, models
+from test_app_fixtures import create_local_app
 
 
 def _app_token(client, owner_token):
   """Creates an app and returns an 8h app-scoped token for it."""
-  r = client.post("/api/apps/", json={
-    "name": "revocation-app",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  app_id = create_local_app(
+    client, owner_auth, name="revocation-app", description="test",
+  )["id"]
   r = client.post(
     "/api/auth/app-token", json={"app_id": app_id},
-    headers={"Authorization": f"Bearer {owner_token}"},
+    headers=owner_auth,
   )
   return r.json()["token"]
 
@@ -150,12 +148,10 @@ def test_bump_revokes_query_param_token_on_module_route(client, owner_token):
   """The module route takes the token on `?token=` (iframe import can't
   set headers) and used to skip the revocation check. After the bump,
   a stale query-param token must be rejected there too."""
-  r = client.post("/api/apps/", json={
-    "name": "mod-app",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"},
+    name="mod-app", description="test",
+  )["id"]
 
   # Token works as a query param first.
   r = client.get(f"/api/apps/{app_id}/module?token={owner_token}")

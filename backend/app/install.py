@@ -3,7 +3,7 @@
 The store mini-app (and future bootstrap hook) hands the backend a
 `mobius.json` URL or inline manifest. This module does the rest:
 fetch entry JSX, create/update the App row, compile, write
-source_dir for the file watcher, seed storage, upload icon, register
+source_dir for explicit source apply, seed storage, upload icon, register
 cron. Wrapped in a single SQLAlchemy transaction with on-failure
 filesystem cleanup so partial installs don't land.
 
@@ -12,9 +12,8 @@ Why this is server-side, not in the store mini-app:
     seeds another app's scope (target's `/data/apps/<new_id>/`).
   - Mini-apps can't shell out to `init-cron-scaffold.sh`; cron needs
     a subprocess + crontab access that lives only in the container.
-  - Mini-apps can't write `/data/apps/<slug>/index.jsx` (source_dir),
-    so the file-watcher never picks up edits — apps land in a
-    "runs but uneditable" state.
+  - Mini-apps can't write `/data/apps/<slug>/index.jsx` (source_dir), so they
+    cannot prepare source for the explicit apply lifecycle.
   - 4-step client-side flow (POST app, PUT seeds, PUT icon, mark cron)
     can leave the DB row with missing seeds + missing source_dir on a
     mid-flight failure. One transaction here makes that all-or-nothing.
@@ -890,7 +889,7 @@ def stage_pending_conflict_update(
   capability_digest: str,
   candidate_digest: str,
 ) -> None:
-  """Persist everything the watcher needs to finish a resolved update.
+  """Persist everything explicit resolution needs to finish an update.
 
   A conflict deliberately returns before install materialization. The resolver
   may run minutes later (or after a restart), so its exact identity must
@@ -2353,9 +2352,9 @@ async def install_from_manifest(
   # phase consumes this explicit diff so local-only tracked siblings are not
   # mistaken for files the manifest intentionally removed.
   dropped_source_paths: set[str] = set()
-  # One canonical entry identity across fetched and origin-backed trees. The
-  # editor and watcher use the same path, so compilation never branches on
-  # package provenance.
+  # One canonical entry identity across fetched and origin-backed trees.
+  # Explicit apply and Store install use the same path, so compilation never
+  # branches on package provenance.
   entry_key = "index.jsx"
   # True once `source_tree` is the MERGED tree (a clean merge or forced
   # take-upstream): the post-write commit then replays the result on the
@@ -2435,7 +2434,7 @@ async def install_from_manifest(
       # Identity migration after an ADOPTION (rename or legacy). The adopted row
       # still carries the predecessor's slug + on-disk source tree, but its new
       # identity is `manifest_id` — move the tree to the new id's path and
-      # re-stamp the row so the app is fully consistent. The watcher resolves
+      # re-stamp the row so the app is fully consistent. Explicit apply resolves
       # source_dir from this row, and the per-app .git rides along inside the
       # directory, so an atomic same-filesystem os.rename keeps git history +
       # working tree intact. The numeric id (and thus /data/apps/<id> storage)
@@ -2564,7 +2563,7 @@ async def install_from_manifest(
     # --- Per-app git: record upstream + (on update) merge into local ---
     # Engaged whenever the app has a real source_dir. The merge decision AND the
     # disk write below run under ONE held span of source_dir_lock — not two
-    # separate critical sections — so the file watcher (which takes the same lock
+    # separate critical sections — so explicit apply (which takes the same lock
     # before its own commit_local) cannot commit an agent edit in the gap and
     # have the write then clobber it (the edit would be lost from the live tree,
     # the bundle, and app.jsx_source, recoverable only from git history). We do
@@ -2642,10 +2641,9 @@ async def install_from_manifest(
             await asyncio.to_thread(
               app_git.abort_in_progress_merge, git_source_dir,
             )
-          # Update of an app already on the git model. First capture any
-          # uncommitted on-disk local edits onto `main` (the watcher may
-          # not have committed the agent's latest save yet) so the
-          # divergence check and any merge see the real local source.
+          # Update of an app already on the Git model. First capture any
+          # unapplied on-disk draft onto `main` so the divergence check and any
+          # merge see the real local source.
           await asyncio.to_thread(
             app_git.commit_local, git_source_dir,
             "local edits before update",
@@ -2901,8 +2899,8 @@ async def install_from_manifest(
             candidate_digest=candidate_digest,
           )
 
-      # The disk-write phase runs INSIDE the same held lock for the git path so
-      # no watcher commit interleaves between the merge decision and the write; a
+      # The disk-write phase runs INSIDE the same held lock for the Git path so
+      # no source commit interleaves between the merge decision and the write; a
       # conflict skips it (the source stays the local edits, served by the prior
       # bundle). The no-source_dir legacy path falls through with no lock.
       if mode != "conflict":
@@ -2972,7 +2970,7 @@ async def install_from_manifest(
         # The actual compile happens below, AFTER the source files are on disk,
         # so esbuild can bundle a multi-file app's sibling imports from the real
         # source tree — a syntax error there raises and the outer except rolls
-        # everything back. Same transition the PATCH and watcher use.
+        # everything back. Explicit apply uses the same artifact transaction.
         staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
 
         # Guard on the raw string, not the Path: Path("") is PosixPath('.'),
@@ -2981,11 +2979,10 @@ async def install_from_manifest(
         source_dir_path = Path(app.source_dir) if app.source_dir else None
         if source_dir_path is not None:
           # The per-source-dir lock is ALREADY held (acquired above for the merge
-          # decision and kept across this write), so a watcher commit can't
+          # decision and kept across this write), so another source commit can't
           # interleave and the merge result we computed is exactly what lands.
           # Every file is written atomically, and on an UPDATE the prior copy is
-          # snapshotted to a .bak so a later rollback restores it — otherwise the
-          # watcher would compile the rolled-back (broken) update. A multi-file
+          # snapshotted to a .bak so a later rollback restores it. A multi-file
           # app's siblings must be on disk before esbuild bundles them.
           _reject_if_source_dir_taken(
             db, str(source_dir_path), exclude_id=app.id
@@ -3073,8 +3070,8 @@ async def install_from_manifest(
           _publish_install_bundle(
             app, staged_bundle, rollback_actions, commit_actions,
           )
-          # On the git path, commit the working-tree source onto the local
-          # `main` branch so the watcher's future commits build on a known base.
+          # On the Git path, commit the working-tree source onto the local
+          # `main` branch so future explicit applies build on a known base.
           # When this update folded upstream into the served source, record it
           # as a single-parent replay on the upstream tip (commit_replay) so the
           # merge base advances and history stays linear — otherwise the NEXT

@@ -16,6 +16,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/sw-pwa.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { applyApp } from './app-source.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const HOSTILE_ORIGIN = process.env.MOBIUS_TEST_HOSTILE_ORIGIN || null
@@ -141,17 +142,14 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     const source = marker => (
       `export default function App(){return <main id="standalone-revision">${marker}</main>}`
     )
-    const created = await request.post(`${BASE}/api/apps/`, {
-      headers,
-      data: {
-        name: `Standalone freshness ${stamp}`,
-        description: 'Disposable standalone update-cache fixture.',
-        offline_capable: true,
-        jsx_source: source(firstMarker),
-      },
-    })
-    expect(created.status()).toBe(201)
-    const app = await created.json()
+    const options = {
+      slug: `standalone-freshness-${stamp}`,
+      name: `Standalone freshness ${stamp}`,
+      description: 'Disposable standalone update-cache fixture.',
+      offlineCapable: true,
+      jsxSource: source(firstMarker),
+    }
+    const { app } = await applyApp(request, token, options)
     const standaloneUrl = `${BASE}/apps/${app.slug}/`
 
     try {
@@ -176,11 +174,11 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       // Close the standalone page before applying the edit, so its SSE cannot
       // observe app_updated and mask a stale-navigation-cache regression.
       await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
-      const updated = await request.patch(`${BASE}/api/apps/${app.id}`, {
-        headers,
-        data: { jsx_source: source(secondMarker) },
+      const updated = await applyApp(request, token, {
+        ...options,
+        jsxSource: source(secondMarker),
       })
-      expect(updated.ok()).toBeTruthy()
+      expect(updated.mode).toBe('updated')
 
       // This FIRST navigation after the edit must be authoritative. A
       // cache-first standalone route serves revision one here and only refreshes
@@ -212,18 +210,15 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     page.on('pageerror', error => runtimeErrors.push(`pageerror: ${sanitize(error.message)}`))
     const token = await ownerToken(page)
     const headers = { Authorization: `Bearer ${token}` }
-    const marker = `offline module broker ${Date.now()}`
-    const created = await request.post(`${BASE}/api/apps/`, {
-      headers,
-      data: {
-        name: `Offline broker ${Date.now()}`,
-        description: 'Disposable opaque-frame offline module fixture.',
-        offline_capable: true,
-        jsx_source: `export default function App(){return <main id="offline-module-marker">${marker}</main>}`,
-      },
+    const stamp = Date.now()
+    const marker = `offline module broker ${stamp}`
+    const { app } = await applyApp(request, token, {
+      slug: `offline-broker-${stamp}`,
+      name: `Offline broker ${stamp}`,
+      description: 'Disposable opaque-frame offline module fixture.',
+      offlineCapable: true,
+      jsxSource: `export default function App(){return <main id="offline-module-marker">${marker}</main>}`,
     })
-    expect(created.status()).toBe(201)
-    const app = await created.json()
 
     try {
       await page.evaluate(async () => {
@@ -331,16 +326,13 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
   test('controlled SW serves sandboxed app-embed documents, never shell HTML', async ({ page, request, context, browser }) => {
     const token = await ownerToken(page)
     const headers = { Authorization: `Bearer ${token}` }
-    const created = await request.post(`${BASE}/api/apps/`, {
-      headers,
-      data: {
-        name: `Opaque static SW ${Date.now()}`,
-        description: 'Disposable controlled-service-worker fixture.',
-        jsx_source: 'export default function App(){return <main>fixture</main>}',
-      },
+    const stamp = Date.now()
+    const { app } = await applyApp(request, token, {
+      slug: `opaque-static-sw-${stamp}`,
+      name: `Opaque static SW ${stamp}`,
+      description: 'Disposable controlled-service-worker fixture.',
+      jsxSource: 'export default function App(){return <main>fixture</main>}',
     })
-    expect(created.status()).toBe(201)
-    const app = await created.json()
     const prefix = `apps/${app.slug}/static`
     const write = (path, body) => request.put(
       `${BASE}/api/fs/write?path=${encodeURIComponent(`${prefix}/${path}`)}`,

@@ -26,7 +26,7 @@ those boundaries.
 ## Product target: fast, useful, and delightful
 
 Speed to the first usable preview is part of the product. Build one coherent,
-visually intentional primary interaction and register it as soon as it works.
+visually intentional primary interaction and apply it as soon as it works.
 Then refine it while the partner can see and try the live app.
 
 The first slice is not a blank shell or wireframe. It should already have:
@@ -41,12 +41,12 @@ The first slice is not a blank shell or wireframe. It should already have:
 Polish the core interaction; do not delay the preview for secondary features,
 packaging research, speculative screens, or exhaustive checks.
 
-For a one-screen app, keep the first registered draft compact. If it is growing
+For a one-screen app, keep the first applied revision compact. If it is growing
 toward roughly 500 lines before the partner can see it, cut secondary controls,
 extra presets, elaborate completion effects, and nonessential saved settings.
 One beautiful working interaction visible sooner is better than a complete
 product hidden for another minute. Add only the refinements that materially
-improve the requested experience after registration.
+improve the requested experience after the first apply.
 
 ## The common sequence
 
@@ -78,9 +78,9 @@ icon.png
 .gitignore
 ```
 
-Do not initialize or commit the app repository by hand. Registration creates
-the per-app repository and records the accepted initial source; the watcher
-records later successful saves.
+Do not initialize, stage, or commit the app repository by hand. The explicit
+apply operation creates the per-app repository and records each accepted
+source revision.
 
 The entry shape is:
 
@@ -134,24 +134,26 @@ offline-safe app uses:
 
 List every imported sibling source file in `source_files`. Set
 `offline_capable` to `true` only when every required read and write works
-without the network. The registration helper applies this flag and the
+without the network. The apply helper applies this flag and the
 versioned `capabilities` object; do not patch the app row separately.
 
-### 3. Register once, early
+### 3. Apply once early, then after each coherent revision
 
 As soon as the first slice compiles and contains one real feature:
 
 ```bash
-python "$SCRIPTS_DIR/register_app.py" \
-  "<Name>" "<Description>" /data/apps/<slug>/index.jsx
+python "$SCRIPTS_DIR/apply_app.py" /data/apps/<slug>
 ```
 
-The helper returns the app JSON, including its numeric ID, and opens the live
-preview beside the owning chat. Do not send a separate `open_item`.
+The helper validates the manifest and complete source tree, compiles and
+commits that exact revision, returns the app JSON (including its numeric ID),
+and opens the live preview beside the owning chat. Do not send a separate
+`open_item`.
 
-Registration is for creation only. Afterward, edit source files normally; the
-watcher recompiles and refreshes the open preview. Never re-register routine
-edits.
+Afterward, edit source files normally and run the same command once the change
+is coherent enough to preview. A failed apply keeps the prior version live and
+returns the compiler or validation error directly. Saving alone deliberately
+does not publish a half-written draft.
 
 The visible intent sentence at the start of the turn is the first progress
 cue. Use `build_phase.py` only when the partner benefits from a real milestone:
@@ -244,9 +246,10 @@ Run validation once:
 python "$SCRIPTS_DIR/validate-app.py" /data/apps/<slug>
 ```
 
-Do not run a second `git add` or `git commit`. `register_app.py` owns the
-initial source commit and treats an already-clean tree as success; the watcher
-owns later save commits. Repository status is not a build gate.
+Do not run `git add` or `git commit`. `apply_app.py` owns every accepted source
+commit and leaves later edits as an unpublished draft until the next apply.
+Repository status is diagnostic: a clean tree confirms the applied revision,
+while a dirty tree means an edit still awaits apply.
 
 Send the app-complete notification using `notifications.md`, embed the useful
 render before describing it, state what the app does, and invite optional

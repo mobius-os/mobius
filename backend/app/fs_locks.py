@@ -44,7 +44,7 @@ Multi-lock holders, all acquiring left-to-right:
   - ``delete_app`` holds all three.
   - ``recover_app`` holds lifecycle -> app while it refreshes a stale bundle,
     then may take source and shared-skills locks further inside that span.
-  - ``update_app`` (PATCH) and the app watcher's auto-recompile hold
+  - ``update_app`` (PATCH) and explicit app source apply hold
     lifecycle -> app -> source (PATCH takes the source lock only when the
     source_dir actually changes). Both recompile a bundle, so they take the
     app lock to serialize against each other and the lifecycle lock to block

@@ -55,7 +55,7 @@ def test_build_sha_falls_back_to_railway_git_sha(monkeypatch):
   assert Settings(**_KW).build_sha == "d0beb8f5c55b36df7d674d55965a23b8d54ad69b"
 
 
-def test_version_exposes_build_date(client, monkeypatch):
+def test_version_exposes_build_date(client, monkeypatch, tmp_path):
   # The commit date powering the Settings "version · date" line. Always a
   # string ("unknown" when unstamped); reads BUILD_DATE from the env.
   body = client.get("/api/version").json()
@@ -63,6 +63,9 @@ def test_version_exposes_build_date(client, monkeypatch):
   monkeypatch.setenv("BUILD_DATE", "2026-06-25")
   assert Settings(**_KW).build_date == "2026-06-25"
   monkeypatch.delenv("BUILD_DATE", raising=False)
+  monkeypatch.setenv(
+    "MOBIUS_BUILD_INFO_PATH", str(tmp_path / "no-build-info.json"),
+  )
   assert Settings(**_KW).build_date == "unknown"
 
 

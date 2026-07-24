@@ -10,15 +10,15 @@ import pytest
 from app import models
 from app.config import get_settings
 from app.routes import storage as storage_routes
+from test_app_fixtures import create_local_app, write_local_source
 
 
 def _make_app(client, owner_token):
-  r = client.post("/api/apps/", json={
-    "name": "store-test",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  return r.json()["id"]
+  return create_local_app(
+    client,
+    {"Authorization": f"Bearer {owner_token}"},
+    name="store-test",
+  )["id"]
 
 
 def _bundle_path(db, app_id: int) -> Path:
@@ -746,91 +746,74 @@ def test_numeric_slug_is_prefixed():
   assert _slugify_for_source_dir("Snake 2") == "snake-2"
 
 
-def test_create_app_rejects_unsafe_source_dir(client, owner_token):
+def test_apply_app_rejects_unsafe_source_dir(client, owner_token):
   """A caller-supplied source_dir must stay inside an approved source root."""
   import os
   data_dir = os.environ["DATA_DIR"]
   auth = {"Authorization": f"Bearer {owner_token}"}
   with open(os.path.join(data_dir, "service-token.txt"), encoding="utf-8") as f:
     service_auth = {"Authorization": f"Bearer {f.read()}"}
-  jsx = "export default function App(){ return <div/> }"
+  def apply(path, headers=auth):
+    write_local_source(path, name=Path(path).name)
+    return client.post(
+      "/api/apps/apply", json={"source_dir": path}, headers=headers,
+    )
+
   # Bare-integer dir directly under /data/apps → 400 (storage collision).
-  assert client.post("/api/apps/", json={
-    "name": "evil", "description": "x", "jsx_source": jsx,
-    "source_dir": os.path.join(data_dir, "apps", "123"),
-  }, headers=auth).status_code == 400
+  assert apply(os.path.join(data_dir, "apps", "123")).status_code == 400
   # Not an immediate child of /data/apps → 400 (traversal / arbitrary path).
-  assert client.post("/api/apps/", json={
-    "name": "evil2", "description": "x", "jsx_source": jsx,
-    "source_dir": os.path.join(data_dir, "apps", "sub", "deep"),
-  }, headers=auth).status_code == 400
-  assert client.post("/api/apps/", json={
-    "name": "evil3", "description": "x", "jsx_source": jsx,
-    "source_dir": os.path.join(data_dir, "apps", "..", "etc"),
-  }, headers=auth).status_code == 400
+  assert apply(
+    os.path.join(data_dir, "apps", "sub", "deep"),
+  ).status_code == 400
+  assert apply(
+    os.path.join(data_dir, "apps", "..", "etc"),
+  ).status_code == 400
   # A normal slug dir under /data/apps is accepted.
-  assert client.post("/api/apps/", json={
-    "name": "fine", "description": "x", "jsx_source": jsx,
-    "source_dir": os.path.join(data_dir, "apps", "fine"),
-  }, headers=auth).status_code == 201
+  assert apply(os.path.join(data_dir, "apps", "fine")).status_code == 200
   # Platform core dirs are legacy-only now; even the service token cannot
   # register new apps there. All editable app source lives under /data/apps.
   core_dir = os.path.join(data_dir, "platform", "core-apps", "memory")
   os.makedirs(core_dir, exist_ok=True)
-  assert client.post("/api/apps/", json={
-    "name": "Memory", "description": "x", "jsx_source": jsx,
-    "source_dir": core_dir,
-  }, headers=auth).status_code == 400
-  assert client.post("/api/apps/", json={
-    "name": "Memory", "description": "x", "jsx_source": jsx,
-    "source_dir": core_dir,
-  }, headers=service_auth).status_code == 400
+  assert apply(core_dir).status_code == 400
+  assert apply(core_dir, service_auth).status_code == 400
   non_core_dir = os.path.join(data_dir, "platform", "core-apps", "notes")
   os.makedirs(non_core_dir, exist_ok=True)
-  assert client.post("/api/apps/", json={
-    "name": "Notes", "description": "x", "jsx_source": jsx,
-    "source_dir": non_core_dir,
-  }, headers=auth).status_code == 400
+  assert apply(non_core_dir).status_code == 400
   mismatch_dir = os.path.join(data_dir, "platform", "core-apps", "reflection")
   os.makedirs(mismatch_dir, exist_ok=True)
-  assert client.post("/api/apps/", json={
-    "name": "Not Reflection", "description": "x", "jsx_source": jsx,
-    "source_dir": mismatch_dir,
-  }, headers=auth).status_code == 400
+  assert apply(mismatch_dir).status_code == 400
 
 
-def test_create_rejects_duplicate_source_dir(client, auth, owner_token):
-  """Two apps can't claim the same source_dir — sharing a source tree is
-  ambiguous for the watcher and forces conservative uninstall cleanup (Codex
-  review round-9 #3)."""
+def test_apply_same_source_dir_updates_the_existing_app(client, auth, owner_token):
+  """A source directory has one durable app identity across explicit applies."""
   import os
   data_dir = os.environ["DATA_DIR"]
-  jsx = "export default function App(){ return <div/> }"
   d = os.path.join(data_dir, "apps", "dup-src")
-  assert client.post("/api/apps/", json={
-    "name": "dup-a", "description": "x", "jsx_source": jsx, "source_dir": d,
-  }, headers=auth).status_code == 201
-  r = client.post("/api/apps/", json={
-    "name": "dup-b", "description": "x", "jsx_source": jsx, "source_dir": d,
-  }, headers=auth)
-  assert r.status_code == 409
+  first = create_local_app(
+    client, auth, name="dup-a", description="x", source_dir=d,
+  )
+  write_local_source(d, name="dup-b", description="x")
+  second = client.post(
+    "/api/apps/apply", json={"source_dir": d}, headers=auth,
+  )
+  assert second.status_code == 200, second.text
+  assert second.json()["mode"] == "updated"
+  assert second.json()["app"]["id"] == first["id"]
+  assert second.json()["app"]["name"] == "dup-b"
 
 
-def test_patch_conflicting_source_dir_keeps_bundle(client, auth, owner_token):
-  """A PATCH with new JSX + a source_dir another app claims is rejected 409
-  WITHOUT overwriting the live bundle — validation precedes the recompile
-  (Codex review round-12)."""
+def test_metadata_patch_rejects_source_fields_and_keeps_bundle(
+  client, auth, owner_token,
+):
+  """The metadata endpoint cannot mutate source or its live bundle."""
   import os
   data_dir = os.environ["DATA_DIR"]
-  jsx = "export default function App(){ return <div>A</div> }"
   da = os.path.join(data_dir, "apps", "patch-a")
-  client.post("/api/apps/", json={
-    "name": "pa", "description": "x", "jsx_source": jsx, "source_dir": da,
-  }, headers=auth)
+  create_local_app(client, auth, name="pa", description="x", source_dir=da)
   db_dir = os.path.join(data_dir, "apps", "patch-b")
-  b = client.post("/api/apps/", json={
-    "name": "pb", "description": "x", "jsx_source": jsx, "source_dir": db_dir,
-  }, headers=auth).json()["id"]
+  b = create_local_app(
+    client, auth, name="pb", description="x", source_dir=db_dir,
+  )["id"]
   from app.database import SessionLocal
   session = SessionLocal()
   try:
@@ -840,9 +823,9 @@ def test_patch_conflicting_source_dir_keeps_bundle(client, auth, owner_token):
   before = bundle.read_bytes()
   r = client.patch(f"/api/apps/{b}", json={
     "jsx_source": "export default function App(){ return <div>NEW</div> }",
-    "source_dir": da,   # already claimed by app pa -> 409 before compile
+    "source_dir": da,   # both fields are outside the metadata-only schema
   }, headers=auth)
-  assert r.status_code == 409
+  assert r.status_code == 422
   assert bundle.read_bytes() == before   # bundle untouched
 
 
@@ -899,8 +882,8 @@ def test_uninstall_skips_nested_and_shared_source_dir(client, auth, owner_token,
   assert os.path.isdir(shared)  # a3 still references it
 
 
-# Transactional bundle recompile — PATCH and the watcher compile out-of-place,
-# publish an immutable content path, then commit the row that selects it.
+# Transactional bundle recompile — compile out-of-place, publish an immutable
+# content path, then commit the row that selects it.
 
 
 @pytest.mark.asyncio
@@ -1408,14 +1391,11 @@ def test_create_app_compiles_relative_source_import(client, owner_token):
     "import { Widget } from './Widget.jsx';\n"
     "export default function App(){ return <Widget /> }"
   )
-  r = client.post("/api/apps/", json={
-    "name": "modular-create",
-    "description": "x",
-    "jsx_source": jsx,
-    "source_dir": src,
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  write_local_source(src, name="modular-create", description="x", jsx_source=jsx)
+  r = client.post("/api/apps/apply", json={"source_dir": src}, headers=headers)
+  assert r.status_code == 200, r.text
+  app_id = r.json()["app"]["id"]
   from app.database import SessionLocal
   session = SessionLocal()
   try:
@@ -1424,299 +1404,6 @@ def test_create_app_compiles_relative_source_import(client, owner_token):
     session.close()
   assert "MODULAR_WIDGET" in live.read_text(encoding="utf-8")
   assert open(os.path.join(src, "index.jsx"), encoding="utf-8").read() == jsx
-
-
-@pytest.mark.asyncio
-async def test_watcher_recompiles_registered_app(client, owner_token):
-  """An on-disk source edit, resolved to its app by source_dir, recompiles the
-  live bundle through the locked transactional path."""
-  import asyncio
-  import os
-  import app.models as models
-  from app.app_watcher import _JsxHandler
-  from app.database import SessionLocal
-  data_dir = os.environ["DATA_DIR"]
-  src = os.path.join(data_dir, "apps", "watch-me")
-  os.makedirs(src, exist_ok=True)
-  app_id = client.post("/api/apps/", json={
-    "name": "watchme", "description": "x",
-    "jsx_source": "export default function App(){ return <div>V0</div> }",
-    "source_dir": src,
-  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
-  jsx_path = os.path.join(src, "index.jsx")
-  new_jsx = "export default function App(){ return <div>V1</div> }"
-  with open(jsx_path, "w", encoding="utf-8") as f:
-    f.write(new_jsx)
-  await _JsxHandler(asyncio.get_running_loop())._recompile(jsx_path)
-  s = SessionLocal()
-  try:
-    row = s.query(models.App).filter(models.App.id == app_id).first()
-    assert row.jsx_source == new_jsx
-  finally:
-    s.close()
-  session = SessionLocal()
-  try:
-    live = _bundle_path(session, app_id)
-  finally:
-    session.close()
-  assert "V1" in live.read_text(encoding="utf-8")
-
-
-@pytest.mark.asyncio
-async def test_watcher_atomically_syncs_local_manifest_capabilities(
-  client, owner_token,
-):
-  """Editing mobius.json is enough; local apps need no manual re-register."""
-  import asyncio
-  import os
-  from app.app_watcher import _JsxHandler, _source_dir_for_changed_path
-  data_dir = os.environ["DATA_DIR"]
-  src = os.path.join(data_dir, "apps", "watch-capability")
-  os.makedirs(src, exist_ok=True)
-  created = client.post("/api/apps/", json={
-    "name": "watch-capability",
-    "description": "x",
-    "jsx_source": "export default function App(){ return <div>V0</div> }",
-    "source_dir": src,
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  assert created.status_code == 201, created.text
-  manifest_path = os.path.join(src, "mobius.json")
-  with open(manifest_path, "w", encoding="utf-8") as f:
-    json.dump({
-      "offline_capable": True,
-      "capabilities": {
-        "media.microphone.capture": {
-          "version": 1,
-          "reason": "Record a sound",
-          "limits": {"max_duration_ms": 8000},
-        },
-      },
-    }, f)
-
-  assert _source_dir_for_changed_path(manifest_path) is not None
-  await _JsxHandler(asyncio.get_running_loop())._recompile(manifest_path)
-
-  response = client.get(
-    f"/api/apps/{created.json()['id']}",
-    headers={"Authorization": f"Bearer {owner_token}"},
-  )
-  assert response.status_code == 200
-  runtime = response.json()["capability_contract"]["runtime"]
-  assert runtime["media.microphone.capture"]["reason"] == "Record a sound"
-  assert response.json()["offline_capable"] is True
-  assert response.json()["capability_contract"]["offline"]["capable"] is True
-
-  with open(manifest_path, "w", encoding="utf-8") as f:
-    json.dump({"offline_capable": False, "capabilities": {}}, f)
-  await _JsxHandler(asyncio.get_running_loop())._recompile(manifest_path)
-  response = client.get(
-    f"/api/apps/{created.json()['id']}",
-    headers={"Authorization": f"Bearer {owner_token}"},
-  )
-  assert response.status_code == 200
-  assert response.json()["offline_capable"] is False
-  assert response.json()["capability_contract"]["offline"]["capable"] is False
-
-  # Omission on a later source edit preserves the established flag, matching
-  # registration and installed-app update semantics.
-  with open(manifest_path, "w", encoding="utf-8") as f:
-    json.dump({"capabilities": {}}, f)
-  await _JsxHandler(asyncio.get_running_loop())._recompile(manifest_path)
-  response = client.get(
-    f"/api/apps/{created.json()['id']}",
-    headers={"Authorization": f"Bearer {owner_token}"},
-  )
-  assert response.status_code == 200
-  assert response.json()["offline_capable"] is False
-  assert response.json()["capability_contract"]["offline"]["capable"] is False
-
-
-@pytest.mark.asyncio
-async def test_watcher_recompiles_when_imported_module_changes(
-  client, owner_token,
-):
-  """A sibling source edit rebuilds even when index.jsx bytes are unchanged."""
-  import asyncio
-  import os
-  import app.models as models
-  from app.app_watcher import _JsxHandler
-  from app.database import SessionLocal
-  data_dir = os.environ["DATA_DIR"]
-  src = os.path.join(data_dir, "apps", "watch-module")
-  os.makedirs(src, exist_ok=True)
-  component = os.path.join(src, "Widget.jsx")
-  with open(component, "w", encoding="utf-8") as f:
-    f.write("export function Widget(){ return <span>MODULE_V0</span> }")
-  jsx = (
-    "import { Widget } from './Widget.jsx';\n"
-    "export default function App(){ return <Widget /> }"
-  )
-  app_id = client.post("/api/apps/", json={
-    "name": "watch-module", "description": "x",
-    "jsx_source": jsx,
-    "source_dir": src,
-  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
-  initial_session = SessionLocal()
-  try:
-    live_v0 = _bundle_path(initial_session, app_id)
-  finally:
-    initial_session.close()
-  assert "MODULE_V0" in live_v0.read_text(encoding="utf-8")
-
-  with open(component, "w", encoding="utf-8") as f:
-    f.write("export function Widget(){ return <span>MODULE_V1</span> }")
-  await _JsxHandler(asyncio.get_running_loop())._recompile(component)
-
-  s = SessionLocal()
-  try:
-    row = s.query(models.App).filter(models.App.id == app_id).first()
-    assert row.jsx_source == jsx
-    live_v1 = Path(row.compiled_path)
-  finally:
-    s.close()
-  assert live_v1 != live_v0
-  assert not live_v0.exists()
-  compiled = live_v1.read_text(encoding="utf-8")
-  assert "MODULE_V1" in compiled
-  assert "MODULE_V0" not in compiled
-
-
-@pytest.mark.asyncio
-async def test_watcher_compile_failure_stays_diagnostic_only(
-  client, owner_token,
-):
-  """A transient source draft keeps the prior app live without owner alerts."""
-  import asyncio
-  import os
-  import app.models as models
-  from app import broadcast as bc_mod
-  from app.app_watcher import _JsxHandler
-  from app.database import SessionLocal
-
-  data_dir = os.environ["DATA_DIR"]
-  src = os.path.join(data_dir, "apps", "watch-fail")
-  os.makedirs(src, exist_ok=True)
-  initial = "export default function App(){ return <div>V0</div> }"
-  app_id = client.post("/api/apps/", json={
-    "name": "Watch Fail",
-    "description": "x",
-    "jsx_source": initial,
-    "source_dir": src,
-  }, headers={"Authorization": f"Bearer {owner_token}"}).json()["id"]
-
-  s = SessionLocal()
-  try:
-    row = s.query(models.App).filter(models.App.id == app_id).first()
-    row.chat_id = "builder-chat"
-    s.commit()
-  finally:
-    s.close()
-
-  building = bc_mod.create_broadcast("builder-chat")
-  other = bc_mod.create_broadcast("bystander-chat")
-  q_build = building.subscribe()[1]
-  q_system = bc_mod.get_system_broadcast().subscribe()
-  jsx_path = os.path.join(src, "index.jsx")
-  with open(jsx_path, "w", encoding="utf-8") as f:
-    f.write("export default function App(){ return <div>Broken</div")
-
-  try:
-    await _JsxHandler(asyncio.get_running_loop())._recompile(jsx_path)
-    # Ordinary save-time compiler feedback belongs in the diagnostic log for
-    # the builder, not in a global red toast for the owner.
-    assert all(
-      e.get("type") != "app_build_failed" for e in building.event_log
-    ), building.event_log
-    assert all(
-      e.get("type") != "app_build_failed" for e in other.event_log
-    ), other.event_log
-    with pytest.raises(asyncio.TimeoutError):
-      await asyncio.wait_for(q_build.get(), timeout=0.2)
-    with pytest.raises(asyncio.TimeoutError):
-      await asyncio.wait_for(q_system.get(), timeout=0.2)
-  finally:
-    bc_mod.get_system_broadcast().unsubscribe(q_system)
-    bc_mod.remove_broadcast("builder-chat")
-    bc_mod.remove_broadcast("bystander-chat")
-
-  s = SessionLocal()
-  try:
-    row = s.query(models.App).filter(models.App.id == app_id).first()
-    assert row.jsx_source == initial
-  finally:
-    s.close()
-
-
-def test_summarize_app_build_failure_extracts_esbuild_error_line():
-  """Owner-facing app build summaries skip esbuild framing."""
-  from app.app_watcher import _summarize_app_build_failure
-
-  output = "\n".join([
-    "✘ [ERROR] Expected \">\" but found end of file",
-    "",
-    "    /data/apps/demo/index.jsx:1:46:",
-    "      1 │ export default function App(){ return <div>Broken</div",
-    "        ╵                                               ^",
-    "",
-    "1 error",
-  ])
-  assert (
-    _summarize_app_build_failure(output)
-    == 'Expected ">" but found end of file'
-  )
-
-
-@pytest.mark.asyncio
-async def test_watcher_ignores_platform_core_source():
-  """Only /data/apps source edits are watched."""
-  import os
-  from app.app_watcher import _source_dir_for_changed_path
-
-  data_dir = os.environ["DATA_DIR"]
-  src = os.path.join(data_dir, "platform", "core-apps", "beat-machine")
-  os.makedirs(src, exist_ok=True)
-  component = os.path.join(src, "Widget.jsx")
-  with open(component, "w", encoding="utf-8") as f:
-    f.write("export function Widget(){ return <span>LEGACY</span> }")
-
-  assert _source_dir_for_changed_path(component) is None
-
-
-@pytest.mark.asyncio
-async def test_watcher_debounce_keeps_module_rebuild_signal():
-  """A later index event must not erase an earlier module-change rebuild."""
-  import asyncio
-  import os
-  from app.app_watcher import _JsxHandler
-  data_dir = os.environ["DATA_DIR"]
-  src = os.path.join(data_dir, "apps", "debounce-module")
-  index_path = os.path.join(src, "index.jsx")
-  module_path = os.path.join(src, "Widget.jsx")
-  handler = _JsxHandler(asyncio.get_running_loop())
-  await handler._reschedule(src, module_path, True)
-  await handler._reschedule(src, index_path, False)
-  try:
-    _, force_rebuild = handler._pending[src]
-    assert force_rebuild is True
-  finally:
-    handler.close()
-
-
-@pytest.mark.asyncio
-async def test_watcher_skips_unclaimed_source_dir():
-  """A source file in a directory no app row claims is a no-op (the create-then-
-  register gap) — the watcher must not crash or guess an owner."""
-  import asyncio
-  import os
-  from app.app_watcher import _JsxHandler
-  data_dir = os.environ["DATA_DIR"]
-  orphan = os.path.join(data_dir, "apps", "orphan-dir")
-  os.makedirs(orphan, exist_ok=True)
-  jsx_path = os.path.join(orphan, "index.jsx")
-  with open(jsx_path, "w", encoding="utf-8") as f:
-    f.write("export default function App(){ return <div/> }")
-  # Must return without raising (and without compiling anything).
-  await _JsxHandler(asyncio.get_running_loop())._recompile(jsx_path)
 
 
 def test_create_app_publishes_content_bundle_without_staging(

@@ -31,6 +31,7 @@ from app import github_auth, source_status
 from app.config import get_settings
 from app.database import checked_out_connections
 from app.storage_io import atomic_write
+from test_app_fixtures import create_local_app
 
 # The github router's Limiter is a separate instance from app.state.limiter,
 # so conftest's disable doesn't reach it (see module docstring).
@@ -105,13 +106,10 @@ def _app_token(
   github_connect=False,
 ):
   """Create an app with independently reviewable GitHub grants."""
-  r = client.post("/api/apps/", json={
-    "name": "contribute-test",
-    "description": "t",
-    "jsx_source": "export default function App(){ return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"},
+    name="contribute-test", description="t",
+  )["id"]
   if github_access or github_connect:
     # Set the column directly — the plain create path doesn't parse the
     # permission (that's the install path); the gate reads the row at

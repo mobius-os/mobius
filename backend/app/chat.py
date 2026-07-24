@@ -89,8 +89,8 @@ _chat_log_handler: RotatingFileHandler | None = None
 def get_chat_log_handler() -> RotatingFileHandler:
   """Returns the process-wide rotating handler for `/data/logs/chat.log`.
 
-  Exposed so subsystems OUTSIDE the `moebius.chat` logger tree (the app
-  watcher's merge-replay path, the provider model-registry fetch) can attach
+  Exposed so subsystems OUTSIDE the `moebius.chat` logger tree (Store update
+  replay, the provider model-registry fetch) can attach
   the SAME handler instance and have their diagnostics survive container
   recreation. Sharing one handler — never a second `RotatingFileHandler` on
   the same path — is load-bearing: two handlers rotating one file race and

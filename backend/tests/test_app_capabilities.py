@@ -1,11 +1,14 @@
 """Owner-reviewable app capability contracts and install binding."""
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 from app import models
 from app.app_capabilities import contract_and_digest
 from app.app_capabilities import normalize_runtime_capabilities
+from app.config import get_settings
+from test_app_fixtures import create_local_app, write_local_source
 from tests.test_apps_install import (  # noqa: F401
   JSX,
   _bypass_cron_scaffold,
@@ -116,21 +119,19 @@ def test_runtime_capability_rejects_unknown_name_version_and_limits():
 
 
 def test_local_app_create_normalizes_runtime_capability(client, auth):
-  response = client.post("/api/apps/", headers=auth, json={
-    "name": "Recorder",
-    "description": "Records one sound",
-    "jsx_source": "export default function App(){ return <div/> }",
-    "capabilities": {
+  app = create_local_app(
+    client, auth,
+    name="Recorder",
+    description="Records one sound",
+    capabilities={
       "media.microphone.capture": {
         "version": 1,
         "reason": "Record a custom sound",
         "limits": {"max_duration_ms": 8000},
       },
     },
-  })
-
-  assert response.status_code == 201, response.text
-  runtime = response.json()["capability_contract"]["runtime"]
+  )
+  runtime = app["capability_contract"]["runtime"]
   assert runtime["media.microphone.capture"]["version"] == 1
   assert runtime["media.microphone.capture"]["limits"] == {
     "max_duration_ms": 8000,
@@ -138,33 +139,34 @@ def test_local_app_create_normalizes_runtime_capability(client, auth):
 
 
 def test_local_app_capability_replacement_is_explicit(client, auth):
-  created = client.post("/api/apps/", headers=auth, json={
-    "name": "Recorder",
-    "jsx_source": "export default function App(){ return <div/> }",
-    "capabilities": {
-      "media.microphone.capture": {"version": 1},
-    },
-  })
-  assert created.status_code == 201, created.text
-
-  response = client.patch(
-    f"/api/apps/{created.json()['id']}", headers=auth,
-    json={"capabilities": {}},
+  created = create_local_app(
+    client, auth, name="Recorder",
+    capabilities={"media.microphone.capture": {"version": 1}},
   )
-
+  manifest_path = Path(created["source_dir"]) / "mobius.json"
+  manifest = json.loads(manifest_path.read_text())
+  manifest["capabilities"] = {}
+  manifest_path.write_text(json.dumps(manifest))
+  response = client.post(
+    "/api/apps/apply", headers=auth,
+    json={"source_dir": created["source_dir"]},
+  )
   assert response.status_code == 200, response.text
-  assert response.json()["capability_contract"]["runtime"] == {}
+  assert response.json()["app"]["capability_contract"]["runtime"] == {}
 
 
 def test_local_app_rejects_unknown_runtime_capability(client, auth):
-  response = client.post("/api/apps/", headers=auth, json={
-    "name": "Unsafe declaration",
-    "jsx_source": "export default function App(){ return <div/> }",
-    "capabilities": {"device.telepathy": {"version": 1}},
-  })
+  source = write_local_source(
+    Path(get_settings().data_dir) / "apps" / "unsafe-declaration",
+    name="Unsafe declaration",
+    capabilities={"device.telepathy": {"version": 1}},
+  )
+  response = client.post(
+    "/api/apps/apply", headers=auth, json={"source_dir": str(source)},
+  )
 
   assert response.status_code == 422
-  assert "Unknown capability" in response.json()["detail"]
+  assert "Unknown capability" in response.json()["detail"]["message"]
 
 
 def test_digest_mismatch_rejects_before_fetching_code_or_mutating(

@@ -5,6 +5,7 @@ import time
 import urllib.parse
 
 import bcrypt
+from test_app_fixtures import create_local_app
 
 
 def configure_managed_sso(monkeypatch):
@@ -339,13 +340,9 @@ def test_providers_models_accepts_app_token(client, auth):
   already visible to every running mini-app via the CLI runtime,
   so loosening the auth here doesn't widen the surface."""
   # Need a real App row for the app-scoped JWT to resolve.
-  r0 = client.post("/api/apps/", headers=auth, json={
-    "name": "Picker host",
-    "description": "x",
-    "jsx_source": "export default function App() { return null }",
-  })
-  assert r0.status_code == 201, r0.text
-  app_id = r0.json()["id"]
+  app_id = create_local_app(
+    client, auth, name="Picker host", description="x",
+  )["id"]
 
   from app.auth import create_access_token
   from app.providers import DEFAULT_VISIBLE_MODELS, invalidate_model_cache
@@ -368,13 +365,9 @@ def test_providers_models_accepts_app_token(client, auth):
 def test_providers_status_accepts_app_token(client, auth):
   """Mini-app setup screens need provider connection status with the same
   app-scoped token they use for the model registry."""
-  r0 = client.post("/api/apps/", headers=auth, json={
-    "name": "Status host",
-    "description": "x",
-    "jsx_source": "export default function App() { return null }",
-  })
-  assert r0.status_code == 201, r0.text
-  app_id = r0.json()["id"]
+  app_id = create_local_app(
+    client, auth, name="Status host", description="x",
+  )["id"]
 
   from app.auth import create_access_token
   app_token = create_access_token({

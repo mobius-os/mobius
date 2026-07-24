@@ -544,8 +544,8 @@ class App(Base):
   # separate file store + cleanup path.
   icon_png = Column(LargeBinary, nullable=True, default=None)
   # Absolute directory holding this app's source files. Editable app source lives
-  # under `/data/apps/<dirname>`. Stored explicitly so the file watcher can map a
-  # modified `index.jsx` back to its DB row without slugify-guessing the name.
+  # under `/data/apps/<dirname>`. Stored explicitly so source apply can map a
+  # directory back to its DB row without slugify-guessing the name.
   # Null for apps created before this column existed.
   source_dir = Column(String(512), nullable=True, default=None)
   # Chat that last created or modified this app.  Null for apps created

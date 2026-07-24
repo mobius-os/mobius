@@ -8,6 +8,7 @@
  * nevertheless blank without a server grant.
  */
 import { test, expect } from '@playwright/test'
+import { applyApp } from './app-source.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -103,16 +104,13 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
 
   const token = await ownerToken(page)
   const ownerHeaders = { Authorization: `Bearer ${token}` }
-  const created = await request.post(`${BASE}/api/apps/`, {
-    headers: ownerHeaders,
-    data: {
-      name: `Embedded capability E2E ${Date.now()}`,
-      description: 'Disposable three-frame regression fixture.',
-      jsx_source: APP_SOURCE,
-    },
+  const stamp = Date.now()
+  const { app } = await applyApp(request, token, {
+    slug: `embedded-capability-e2e-${stamp}`,
+    name: `Embedded capability E2E ${stamp}`,
+    description: 'Disposable three-frame regression fixture.',
+    jsxSource: APP_SOURCE,
   })
-  expect(created.status()).toBe(201)
-  const app = await created.json()
   const appTokenResponse = await request.post(`${BASE}/api/auth/app-token`, {
     headers: ownerHeaders,
     data: { app_id: app.id },

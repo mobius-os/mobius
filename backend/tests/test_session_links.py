@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from app import models
 from app.session_links import backfill_current_session_links, record_session_link
+from test_app_fixtures import create_local_app
 
 
 def _chat(db, chat_id: str, *, provider: str = "claude", session_id=None):
@@ -201,13 +202,10 @@ def test_session_links_endpoint_returns_links_newest_first(
 
 def test_session_links_endpoint_rejects_app_token(client, owner_token):
   """Owner-only surface: an app-scoped token is 403, never the map."""
-  r = client.post("/api/apps/", json={
-    "name": "test-app",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div>hi</div> }",
-  }, headers={"Authorization": f"Bearer {owner_token}"})
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"},
+    name="test-app", description="test",
+  )["id"]
 
   r = client.post(
     "/api/auth/app-token", json={"app_id": app_id},

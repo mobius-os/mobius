@@ -1,6 +1,7 @@
 /** Shared service-gateway topology: shell -> adapter -> same-origin service. */
 import { test, expect } from '@playwright/test'
 import { readFileSync } from 'node:fs'
+import { applyApp } from './app-source.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const baseUrl = new URL(BASE)
@@ -195,15 +196,13 @@ test('shared gateway stays branded until heartbeat, preserves cookies, and rejec
       expect(blocked.status(), path).toBe(404)
     }
 
-    const created = await request.post(`${BASE}/api/apps/`, {
-      headers,
-      data: {
-        name: 'Tandoor', description: 'Disposable shared-gateway service fixture.',
-        jsx_source: TANDOOR_WRAPPER,
-      },
+    const applied = await applyApp(request, token, {
+      slug: 'tandoor',
+      name: 'Tandoor',
+      description: 'Disposable shared-gateway service fixture.',
+      jsxSource: TANDOOR_WRAPPER,
     })
-    expect(created.status()).toBe(201)
-    app = await created.json()
+    app = applied.app
     expect(app.slug).toBe('tandoor')
 
     if (TRACKED_TANDOOR_SOURCE) {

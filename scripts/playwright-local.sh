@@ -280,6 +280,7 @@ cd "$snapshot_dir"
 if CI= \
    MOBIUS_LOCAL_E2E=1 \
    MOBIUS_AUTH_FILE="$auth_file" \
+   MOBIUS_CONTAINER="$app_container" \
    MOBIUS_URL="http://localhost:${test_port}" \
    MOBIUS_RECOVER_URL="http://localhost:${recovery_test_port}" \
    MOBIUS_TEST_INTERNAL_API="http://127.0.0.1:${internal_test_port}" \

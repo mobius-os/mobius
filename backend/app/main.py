@@ -355,11 +355,10 @@ async def lifespan(app):
       _seed_db.close()
   except Exception as exc:
     _log.error("recovery owner seed sync wiring failed: %s", exc, exc_info=True)
-  # Backfill source_dir for legacy app rows. The file watcher resolves
-  # /data/apps/<slug>/index.jsx → app.id via exact source_dir match;
-  # rows with NULL (older builds, or apps imported without going
-  # through register_app.py) would silently never auto-recompile.
-  # Derive the same slug shape register_app.py uses and persist it.
+  # Backfill source_dir for legacy app rows. Explicit source application resolves
+  # /data/apps/<slug> → app.id via exact source_dir match; rows with NULL from
+  # older builds could otherwise be mistaken for a new app. Derive the same
+  # historical storage slug and persist it.
   #
   # Wrapped: app/routes/apps.py is on the agent's write surface. The
   # routes/__init__.py _load() scaffold stubs apps_router on import
@@ -421,20 +420,17 @@ async def lifespan(app):
       _cron_ready.write_text(f"{_BOOT_ID}\n", encoding="utf-8")
   except Exception as exc:
     _log.error("app cron supervision wiring failed: %s", exc, exc_info=True)
-  # Route the app-watcher and provider model-registry diagnostics to the
-  # durable rotating chat.log handler. Both loggers otherwise land only on
+  # Route provider model-registry diagnostics to the durable rotating chat.log
+  # handler. The logger otherwise lands only on
   # stdout (via lastResort), which evaporates on container recreation — that
   # is exactly what erased the forensic trail for the beat-machine app-update
   # incident. Keep stdout too: the handler is ADDED, propagation stays on. The
   # SAME shared handler instance is attached (never a second RotatingFileHandler
-  # on the same path, which would race on rotation). app_watcher runs at INFO
-  # so the merge-replay wait-states are captured; the model-registry child logs
-  # only its warning.
+  # on the same path, which would race on rotation).
   try:
     from app.chat import get_chat_log_handler
     _diag_handler = get_chat_log_handler()
     for _diag_name, _diag_level in (
-      ("app.app_watcher", logging.INFO),
       ("app.providers.models", logging.WARNING),
     ):
       _diag_logger = logging.getLogger(_diag_name)
@@ -443,23 +439,10 @@ async def lifespan(app):
       _diag_logger.setLevel(_diag_level)
   except Exception as exc:
     _log.error("chat.log diagnostic routing failed: %s", exc, exc_info=True)
-  # Start the JSX file watcher so direct edits to /data/apps/*/index.jsx
-  # auto-recompile and refresh the served bundle — agents don't need to
-  # re-run register_app.py just to push a code change.
-  # Wrapped: app/app_watcher.py is on the agent's write surface; a
-  # failure must not crash lifespan.
-  _observer = None
-  _handler = None
   _frontend_observer = None
   _frontend_handler = None
-  try:
-    from app.app_watcher import start_watcher
-    _observer, _handler = start_watcher(_asyncio.get_running_loop())
-  except Exception as exc:
-    _log.error("start_watcher failed: %s", exc, exc_info=True)
   # Start the whole-repo frontend watcher when /data/platform is active.
-  # Wrapped separately from app_watcher: a broken frontend build path must not
-  # disable mini-app recompiles or crash lifespan.
+  # A broken frontend build path must not crash lifespan.
   try:
     from pathlib import Path as _Path
     _frontend_src = _Path("/data/platform/frontend/src")
@@ -650,13 +633,6 @@ async def lifespan(app):
       stop_writer()
     except Exception as exc:
       _log.error("chat writer stop failed: %s", exc, exc_info=True)
-    # Drain pending debounce timers first so they can't post coroutines
-    # to a loop that's about to close, then stop+join the observer.
-    if _handler is not None:
-      try:
-        _handler.close()
-      except Exception as exc:
-        _log.error("watcher handler.close failed: %s", exc, exc_info=True)
     if _frontend_handler is not None:
       try:
         _frontend_handler.close()
@@ -664,20 +640,6 @@ async def lifespan(app):
         _log.error(
           "frontend watcher handler.close failed: %s", exc, exc_info=True,
         )
-    if _observer is not None:
-      # Split stop/join into independent try blocks so a stop()
-      # failure doesn't skip join() — otherwise the watchdog thread
-      # would never be reaped on shutdown. In practice both are very
-      # unlikely to raise, but structurally a shared try would let
-      # one fault swallow the other.
-      try:
-        _observer.stop()
-      except Exception as exc:
-        _log.error("watcher observer.stop failed: %s", exc, exc_info=True)
-      try:
-        _observer.join(timeout=2)
-      except Exception as exc:
-        _log.error("watcher observer.join failed: %s", exc, exc_info=True)
     if _frontend_observer is not None:
       try:
         _frontend_observer.stop()

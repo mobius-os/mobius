@@ -14,9 +14,8 @@ import * as setupSession from '../lib/setupSession.js'
  *
  * Why a separate stream from useStreamConnection: that hook is
  * scoped to a single chat's broadcast. Per-chat broadcasts close
- * 30s after the agent finishes, and many events (especially the
- * file-watcher's app_updated debounce) fire AFTER the chat is
- * already done — leaving nowhere for the event to land. The
+ * 30s after the agent finishes, and lifecycle events can fire after
+ * the chat is already done — leaving nowhere for the event to land. The
  * shell-level stream stays open for the lifetime of the Shell.
  *
  * EventSource isn't used because it can't send custom Authorization

@@ -19,6 +19,7 @@ import pytest
 
 from app import app_git
 from app.config import get_settings
+from test_app_fixtures import create_local_app
 
 
 @pytest.fixture(autouse=True)
@@ -222,7 +223,7 @@ def test_install_fresh_app_writes_everything(client, auth, tmp_path, bypass_url_
   app_id = payload["id"]
 
   data_dir = Path(get_settings().data_dir)
-  # source_dir/index.jsx written for the file watcher
+  # The installer materializes the accepted source tree.
   jsx_file = data_dir / "apps" / "test-news" / "index.jsx"
   assert jsx_file.read_text() == JSX
   assert (
@@ -1808,13 +1809,10 @@ def test_install_with_same_slug_different_manifest_keeps_both(
   manifest_url, so the store install must NOT clobber the user app —
   it lands as a fresh row with slug='news-2' (or similar) instead."""
   # 1. User builds an app named "News" via the regular create path.
-  r0 = client.post("/api/apps/", headers=auth, json={
-    "name": "News",
-    "description": "user-built news reader",
-    "jsx_source": JSX,
-  })
-  assert r0.status_code == 201, r0.text
-  user_app = r0.json()
+  user_app = create_local_app(
+    client, auth, name="News", description="user-built news reader",
+    jsx_source=JSX,
+  )
   user_id = user_app["id"]
   assert user_app["slug"] == "news"
   assert user_app["manifest_url"] is None
@@ -2087,7 +2085,7 @@ def test_install_publishes_app_updated_on_success(
   assert r.status_code == 201, r.text
   app_id = r.json()["id"]
   # Exactly one publish for this install — and it carries the new
-  # app's id as a string (matches the file-watcher's payload shape).
+  # app's id as a string (the stable app lifecycle event shape).
   fake_sb.publish.assert_called_once_with({
     "type": "app_updated", "appId": str(app_id),
   })
@@ -2126,13 +2124,9 @@ def test_install_does_not_publish_when_install_fails(
 def test_delete_publishes_exact_app_deleted_event(client, auth):
   """Uninstall publishes committed deletion evidence, not a staleable refetch
   hint, so every live shell can remove the exact drawer row immediately."""
-  r0 = client.post("/api/apps/", headers=auth, json={
-    "name": "Doomed",
-    "description": "",
-    "jsx_source": JSX,
-  })
-  assert r0.status_code == 201, r0.text
-  app_id = r0.json()["id"]
+  app_id = create_local_app(
+    client, auth, name="Doomed", description="", jsx_source=JSX,
+  )["id"]
   with patch("app.routes.apps.get_system_broadcast") as mock_get_sb:
     fake_sb = MagicMock()
     mock_get_sb.return_value = fake_sb
@@ -2147,13 +2141,9 @@ def test_delete_stays_successful_after_post_commit_job_cleanup_failure(
   client, auth,
 ):
   """A committed tombstone remains a successful deletion when cleanup fails."""
-  r0 = client.post("/api/apps/", headers=auth, json={
-    "name": "Cleanup Failure",
-    "description": "",
-    "jsx_source": JSX,
-  })
-  assert r0.status_code == 201, r0.text
-  app_id = r0.json()["id"]
+  app_id = create_local_app(
+    client, auth, name="Cleanup Failure", description="", jsx_source=JSX,
+  )["id"]
 
   with (
     patch(
@@ -2177,13 +2167,13 @@ def test_recover_stays_successful_after_post_commit_skill_cleanup_failure(
   client, auth,
 ):
   """Ancillary restoration cannot make a durably recovered app look failed."""
-  r0 = client.post("/api/apps/", headers=auth, json={
-    "name": "Recovery Cleanup Failure",
-    "description": "",
-    "jsx_source": JSX,
-  })
-  assert r0.status_code == 201, r0.text
-  app_id = r0.json()["id"]
+  app_id = create_local_app(
+    client,
+    auth,
+    name="Recovery Cleanup Failure",
+    description="",
+    jsx_source=JSX,
+  )["id"]
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
 
   with patch(
@@ -2700,10 +2690,10 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
     headers=auth,
     json={"jsx_source": "export default function App(){return <div>bypass</div>}"},
   )
-  assert bypass.status_code == 409, bypass.text
+  assert bypass.status_code == 422, bypass.text
 
-  # One Resolve click materializes a real merge. Saving marker-free text (no
-  # manual git add/commit) must run the complete installer replay exactly once.
+  # One Resolve click materializes a real merge. Saving marker-free text only
+  # prepares the draft; explicit resolution owns the complete installer replay.
   resolver = client.post(
     f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
   )
@@ -2740,16 +2730,17 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
     base + "fetch.sh": (200, b""),
   }
 
-  async def _run_watcher():
-    from app.app_watcher import _JsxHandler
-    handler = _JsxHandler(asyncio.get_running_loop())
-    await handler._recompile(str(jsx_file), force_rebuild=True)
-
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(replay_responses),
   ):
-    asyncio.run(_run_watcher())
+    replayed = client.post(
+      "/api/apps/resolve-update",
+      headers=auth,
+      json={"source_dir": str(app_dir)},
+    )
+  assert replayed.status_code == 200, replayed.text
+  assert replayed.json()["mode"] == "updated"
 
   db = SessionLocal()
   try:
@@ -2836,17 +2827,17 @@ def test_resolved_conflict_changed_candidate_fails_closed_and_stays_retryable(
     base + "fetch.sh": (200, b""),
   }
 
-  async def _run_watcher():
-    from app.app_watcher import _JsxHandler
-    await _JsxHandler(asyncio.get_running_loop())._recompile(
-      str(jsx_file), force_rebuild=True,
-    )
-
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(changed_responses),
   ):
-    asyncio.run(_run_watcher())
+    replayed = client.post(
+      "/api/apps/resolve-update",
+      headers=auth,
+      json={"source_dir": str(app_dir)},
+    )
+  assert replayed.status_code == 409, replayed.text
+  assert replayed.json()["detail"]["code"] == "pending_update_changed"
 
   db = SessionLocal()
   try:
@@ -2934,17 +2925,17 @@ def test_resolved_conflict_converges_static_metadata_and_bundle_once(
     base + "build/new.js": (200, b"window.release='v2'"),
   }
 
-  async def _run_watcher():
-    from app.app_watcher import _JsxHandler
-    await _JsxHandler(asyncio.get_running_loop())._recompile(
-      str(jsx_file), force_rebuild=True,
-    )
-
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(replay_responses),
   ):
-    asyncio.run(_run_watcher())
+    replayed = client.post(
+      "/api/apps/resolve-update",
+      headers=auth,
+      json={"source_dir": str(app_dir)},
+    )
+  assert replayed.status_code == 200, replayed.text
+  assert replayed.json()["mode"] == "updated"
 
   db = SessionLocal()
   try:
@@ -3342,7 +3333,7 @@ def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
 def test_deferred_replay_reports_changed_candidate_as_structured_recovery(
   db, bypass_url_validation,
 ):
-  """The watcher can distinguish a stale receipt from a compile failure."""
+  """Explicit replay distinguishes a stale receipt from a compile failure."""
   from fastapi import HTTPException
   from app import install
 
@@ -3654,15 +3645,15 @@ def test_rename_adopts_predecessor_row_and_moves_source_dir(
 def test_legacy_slug_adoption_of_no_manifest_url_row(
   client, auth, db, bypass_url_validation,
 ):
-  """(b) a baked/register_app predecessor (slug='reflection-old',
+  """(b) a baked legacy predecessor (slug='reflection-old',
   manifest_url=None) is ADOPTED by a catalog manifest id='reflection' that
   declares previous_id='reflection-old': same numeric id, manifest_url now set,
   source moved to the new slug, NO duplicate.
 
   Legacy adoption is opt-in via `previous_id` BY DESIGN. A baked predecessor
-  created through register_app.py is byte-for-byte indistinguishable from a
-  user-built app (both go through POST /api/apps/ → manifest_url=None,
-  source_dir set), so adopting on slug-match ALONE would hijack a user's app —
+  row is intentionally indistinguishable from a local user-built app
+  (manifest_url=None with source_dir set), so adopting on slug-match ALONE
+  would hijack a user's app —
   forbidden by test_install_with_same_slug_different_manifest_keeps_both. The
   manifest declaring previous_id is the author's explicit takeover intent."""
   from app import models

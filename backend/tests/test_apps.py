@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app import models
 from app.config import get_settings
+from test_app_fixtures import create_local_app
 
 
 def _service_auth():
@@ -12,36 +13,25 @@ def _service_auth():
   return {"Authorization": f"Bearer {token}"}
 
 
-def test_create_app_rejects_cross_site_request(client, auth):
+def test_apply_app_rejects_cross_site_request(client, auth):
   cross = client.post(
-    "/api/apps/",
-    json={
-      "name": "blocked-app",
-      "description": "test",
-      "jsx_source": "export default function App() { return <div/> }",
-    },
+    "/api/apps/apply",
+    json={"source_dir": str(Path(get_settings().data_dir) / "apps" / "blocked-app")},
     headers={**auth, "Sec-Fetch-Site": "cross-site"},
   )
   assert cross.status_code == 403
 
 
-def test_create_app_publishes_pane_neutral_ready_relationship(client, auth):
+def test_apply_app_publishes_pane_neutral_ready_relationship(client, auth):
   with patch("app.routes.apps.get_system_broadcast") as mock_get_broadcast:
-    response = client.post(
-      "/api/apps/",
-      json={
-        "name": "Trip planner",
-        "description": "test",
-        "jsx_source": "export default function App() { return <div/> }",
-        "chat_id": "building-chat",
-      },
-      headers=auth,
+    app = create_local_app(
+      client, auth, name="Trip planner", description="test",
+      chat_id="building-chat",
     )
 
-  assert response.status_code == 201, response.text
   mock_get_broadcast.return_value.publish.assert_called_once_with({
     "type": "app_created",
-    "appId": str(response.json()["id"]),
+    "appId": str(app["id"]),
     "chatId": "building-chat",
   })
 
@@ -68,14 +58,16 @@ def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):
     encoding="utf-8",
   )
 
-  r = client.post("/api/apps/", json={
-    "name": "My App (draft)",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-    "source_dir": str(source_dir),
-  }, headers=auth)
-  assert r.status_code == 201
-  app_id = r.json()["id"]
+  app = models.App(
+    name="My App (draft)",
+    description="legacy non-slug source",
+    jsx_source="export default function App() { return <div/> }",
+    source_dir=str(source_dir),
+    slug="my-app-draft",
+  )
+  db.add(app)
+  db.commit()
+  app_id = app.id
 
   # Soft delete tombstones the app but preserves its source tree.
   r = client.delete(f"/api/apps/{app_id}", headers=auth)
@@ -141,14 +133,10 @@ def test_delete_scheduled_app_disables_own_cron_replay(
   replay = source_dir / "init-cron.sh"
   replay.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
-  r = client.post("/api/apps/", json={
-    "name": "Reflection",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-    "source_dir": str(source_dir),
-  }, headers=auth)
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, auth, name="Reflection", description="test",
+    source_dir=source_dir,
+  )["id"]
 
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
 
@@ -202,14 +190,9 @@ def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
   source_dir.mkdir(parents=True, exist_ok=True)
   (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
 
-  r = client.post("/api/apps/", json={
-    "name": "News",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-    "source_dir": str(source_dir),
-  }, headers=auth)
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, auth, name="News", description="test", source_dir=source_dir,
+  )["id"]
 
   token = client.post(
     "/api/auth/app-token", json={"app_id": app_id}, headers=auth,
@@ -264,7 +247,7 @@ def test_platform_source_patch_rejected_and_store_identity_preserved(client, aut
     json={"source_dir": str(source_dir)},
     headers=_service_auth(),
   )
-  assert r.status_code == 400, r.text
+  assert r.status_code == 422, r.text
   db.refresh(app)
   assert app.source_dir == str(old_source)
   assert app.manifest_url == "https://raw.githubusercontent.com/mobius-os/app-memory/main/mobius.json"
@@ -280,19 +263,12 @@ def test_app_schedules_are_readable_by_app_tokens(client, auth):
     encoding="utf-8",
   )
 
-  r = client.post("/api/apps/", json={
-    "name": "News",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-    "source_dir": str(source_dir),
-  }, headers=auth)
-  assert r.status_code == 201, r.text
+  create_local_app(
+    client, auth, name="News", description="test", source_dir=source_dir,
+    manifest_extra={"schedule": {"default": "0 10 * * *", "job": "fetch.sh"}},
+  )
 
-  tasks = client.post("/api/apps/", json={
-    "name": "Tasks",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-  }, headers=auth).json()
+  tasks = create_local_app(client, auth, name="Tasks", description="test")
   token = client.post(
     "/api/auth/app-token", json={"app_id": tasks["id"]}, headers=auth,
   ).json()["token"]
@@ -325,13 +301,11 @@ def test_app_schedules_prefer_init_cron_over_manifest(client, auth):
     encoding="utf-8",
   )
 
-  r = client.post("/api/apps/", json={
-    "name": "Reflection",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-    "source_dir": str(source_dir),
-  }, headers=_service_auth())
-  assert r.status_code == 201, r.text
+  create_local_app(
+    client, _service_auth(), name="Reflection", description="test",
+    source_dir=source_dir,
+    manifest_extra={"schedule": {"default": "0 10 * * *", "job": "fetch.sh"}},
+  )
 
   r = client.get("/api/apps/schedules", headers=auth)
   assert r.status_code == 200, r.text
@@ -345,14 +319,10 @@ def test_app_schedules_resolve_supervised_runner_job(client, auth):
   source_dir.mkdir(parents=True)
   (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
 
-  r = client.post("/api/apps/", json={
-    "name": "Memory",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-    "source_dir": str(source_dir),
-  }, headers=_service_auth())
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, _service_auth(), name="Memory", description="test",
+    source_dir=source_dir,
+  )["id"]
 
   from app.routes import apps as apps_module
   supervised = (
@@ -403,13 +373,9 @@ def _make_icon_app(client, auth, db):
   import io
   from PIL import Image
   from app import models
-  r = client.post("/api/apps/", json={
-    "name": "Iconic",
-    "description": "test",
-    "jsx_source": "export default function App() { return <div/> }",
-  }, headers=auth)
-  assert r.status_code == 201, r.text
-  app_id = r.json()["id"]
+  app_id = create_local_app(
+    client, auth, name="Iconic", description="test",
+  )["id"]
   buf = io.BytesIO()
   # RGBA with varied pixels so optimize=True can't collapse it to a few bytes.
   img = Image.new("RGBA", (512, 512))

@@ -180,8 +180,8 @@ def validate_manifest_contract(manifest) -> None:
   validate_repo_relative_path(manifest["entry"], "entry")
   if manifest["entry"] != "index.jsx":
     _fail(
-      "Manifest `entry` must be `index.jsx`; the editor, watcher, and "
-      "recompile lifecycle use that canonical entrypoint."
+      "Manifest `entry` must be `index.jsx`; the editor and explicit "
+      "app-apply lifecycle use that canonical entrypoint."
     )
   if manifest.get("icon") is not None:
     validate_repo_relative_path(manifest["icon"], "icon")

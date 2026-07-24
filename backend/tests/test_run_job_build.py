@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from app.config import get_settings
+from test_app_fixtures import create_local_app
 
 
 JSX = "export default function App() { return <div>ok</div> }"
@@ -24,16 +25,12 @@ def _app_source(name):
   return d
 
 
-def _make_app(client, auth, source_dir):
+def _make_app(client, auth, source_dir, *, manifest_extra=None):
   """Creates an app row with source_dir set to the given path."""
-  r = client.post("/api/apps/", json={
-    "name": "LaTeX",
-    "description": "test",
-    "jsx_source": JSX,
-    "source_dir": str(source_dir),
-  }, headers=auth)
-  assert r.status_code == 201, r.text
-  return r.json()["id"]
+  return create_local_app(
+    client, auth, name="LaTeX", description="test", jsx_source=JSX,
+    source_dir=source_dir, manifest_extra=manifest_extra,
+  )["id"]
 
 
 def test_run_job_resolves_build_sh(client, auth):
@@ -80,11 +77,12 @@ def test_run_job_honors_manifest_over_stale_sibling(client, auth):
   stale = source_dir / "job.sh"
   stale.write_text("#!/bin/bash\necho stale\n")
   stale.chmod(0o755)
-  (source_dir / "mobius.json").write_text(
-    '{"schedule": {"default": "0 * * * *", "job": "generate.sh"}}'
+  app_id = _make_app(
+    client, auth, source_dir,
+    manifest_extra={
+      "schedule": {"default": "0 * * * *", "job": "generate.sh"},
+    },
   )
-
-  app_id = _make_app(client, auth, source_dir)
 
   with patch("app.routes.apps.subprocess.Popen") as mock_popen:
     mock_popen.return_value = MagicMock()
@@ -107,6 +105,7 @@ def test_run_job_falls_back_to_probe_for_manifestless_app(client, auth):
   assert not (source_dir / "mobius.json").exists()
 
   app_id = _make_app(client, auth, source_dir)
+  (source_dir / "mobius.json").unlink()
 
   with patch("app.routes.apps.subprocess.Popen") as mock_popen:
     mock_popen.return_value = MagicMock()
