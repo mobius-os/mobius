@@ -47,6 +47,31 @@ test('a failed newer release does not forget an earlier staged update', () => {
   assert.equal(projected.contained_upstream_sha, 'staged')
 })
 
+test('a conflicting newer release also preserves an earlier staged restart', () => {
+  const projected = platformStatusFromApply(
+    {
+      state: 'restart_needed',
+      available: true,
+      needs_restart: true,
+      current_build_sha: 'served',
+      contained_upstream_sha: 'staged',
+    },
+    {
+      state: 'conflict',
+      needs_restart: false,
+      upstream_commit: 'newer',
+      conflict_paths: ['frontend/src/example.js'],
+      chat_id: 'resolver-chat',
+    },
+  )
+
+  assert.equal(projected.available, false)
+  assert.equal(projected.needs_restart, true)
+  assert.equal(projected.contained_upstream_sha, 'staged')
+  assert.deepEqual(projected.conflict_paths, ['frontend/src/example.js'])
+  assert.equal(projected.conflict_chat_id, 'resolver-chat')
+})
+
 test('update-row copy represents restart and availability independently', () => {
   assert.equal(
     platformUpdateStatusLabel({

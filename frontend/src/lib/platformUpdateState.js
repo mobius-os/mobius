@@ -9,8 +9,9 @@ export function platformStatusFromApply(previous, result) {
   const state = result.state
   const upstream = result.upstream_commit || previous?.recorded_upstream_sha || null
   const clean = state === 'restart_needed' || state === 'up_to_date'
-  const rolledBackOntoStagedUpdate = (
-    state === 'rolled_back' && !!previous?.needs_restart
+  const failedOntoStagedUpdate = (
+    (state === 'rolled_back' || state === 'conflict')
+    && !!previous?.needs_restart
   )
   return {
     ...(previous || {}),
@@ -22,7 +23,7 @@ export function platformStatusFromApply(previous, result) {
     needs_restart:
       state === 'restart_needed'
       || !!result.needs_restart
-      || rolledBackOntoStagedUpdate,
+      || failedOntoStagedUpdate,
     current_build_sha: previous?.current_build_sha || null,
     recorded_upstream_sha: upstream,
     contained_upstream_sha: clean
