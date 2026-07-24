@@ -40,6 +40,7 @@ from app.database import (
   set_database_request_label,
 )
 from app.http_caching import strip_range
+from app.memory_observability import record_memory_checkpoint
 from app import activity, models
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
@@ -141,6 +142,7 @@ async def lifespan(app):
   import asyncio as _asyncio
   import logging as _logging
   _log = _logging.getLogger(__name__)
+  record_memory_checkpoint("lifespan_start")
   # Wrapped: providers.py is on the agent's write surface. A broken
   # providers.py shouldn't take down the server — log and skip the
   # defaults check so the recovery surface stays reachable.
@@ -162,6 +164,7 @@ async def lifespan(app):
     # report cleanup failure without making the whole service unbootable.
     _log.error("legacy global auto-resume cleanup failed: %s", exc, exc_info=True)
   _init_db()
+  record_memory_checkpoint("startup_database_initialized")
   # Upgrade hygiene for lifecycle observability. The append-only link table is
   # new, but older chats can already carry a current provider session pointer.
   # Seed those once after create_all has made the table; future sightings are
@@ -248,6 +251,7 @@ async def lifespan(app):
     # tests can detect it without tailing logs. The never-crash-boot
     # contract is preserved: we only set a flag, never raise.
     app.state.reconciliation_failed = True
+  record_memory_checkpoint("startup_state_reconciled")
   # Discard any `*.js.staging` bundle left by an interrupted compile. Staging
   # paths are never stored on App rows or served.
   try:
@@ -291,6 +295,7 @@ async def lifespan(app):
       _bn_db.close()
   except Exception as exc:
     _log.error("compiled-bundle reconcile wiring failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_bundles_reconciled")
   # Start the single-writer chat-persistence actor AFTER db init and
   # crash reconciliation. Order is load-bearing: reconcile_interrupted_chats
   # must run BEFORE the actor exists — recovery has to work even when
@@ -341,6 +346,7 @@ async def lifespan(app):
       _bs_db.close()
   except Exception as exc:
     _log.error("bootstrap app install wiring failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_apps_bootstrapped")
   # Reconcile the DB-independent recovery credential seed with the current
   # owner. Backfills instances that completed setup before the seed
   # existed and keeps it current; idempotent (no write when unchanged) and
@@ -420,8 +426,9 @@ async def lifespan(app):
       _cron_ready.write_text(f"{_BOOT_ID}\n", encoding="utf-8")
   except Exception as exc:
     _log.error("app cron supervision wiring failed: %s", exc, exc_info=True)
-  # Route provider model-registry diagnostics to the durable rotating chat.log
-  # handler. The logger otherwise lands only on
+  record_memory_checkpoint("startup_metadata_reconciled")
+  # Route provider model-registry and memory diagnostics to the durable
+  # rotating chat.log handler. These loggers otherwise land only on
   # stdout (via lastResort), which evaporates on container recreation — that
   # is exactly what erased the forensic trail for the beat-machine app-update
   # incident. Keep stdout too: the handler is ADDED, propagation stays on. The
@@ -432,6 +439,7 @@ async def lifespan(app):
     _diag_handler = get_chat_log_handler()
     for _diag_name, _diag_level in (
       ("app.providers.models", logging.WARNING),
+      ("moebius.memory", logging.INFO),
     ):
       _diag_logger = logging.getLogger(_diag_name)
       if _diag_handler not in _diag_logger.handlers:
@@ -439,6 +447,7 @@ async def lifespan(app):
       _diag_logger.setLevel(_diag_level)
   except Exception as exc:
     _log.error("chat.log diagnostic routing failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_app_source_ready")
   _frontend_observer = None
   _frontend_handler = None
   # Start the whole-repo frontend watcher when /data/platform is active.
@@ -453,6 +462,7 @@ async def lifespan(app):
       )
   except Exception as exc:
     _log.error("start_frontend_watcher failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_frontend_watcher_started")
   # Runtime liveness watchdog. reconcile_interrupted_chats only runs at boot,
   # so a turn that leaves its run marker set without a process restart (a
   # FAILED_LEAVE_MARKER terminal, or the late-promote gap) would hold the chat
@@ -608,9 +618,11 @@ async def lifespan(app):
     _browser_profile_task = _asyncio.create_task(_browser_profile_loop())
   except Exception as exc:
     _log.error("chat liveness sweep wiring failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_ready")
   try:
     yield
   finally:
+    record_memory_checkpoint("shutdown_begin")
     # Preserve the final partial request-error windows across graceful restarts.
     # This is one bounded batch append, not one write per response.
     activity.flush_request_errors()

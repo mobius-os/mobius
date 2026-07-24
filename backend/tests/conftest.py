@@ -6,6 +6,23 @@ import tempfile
 import pytest
 from fastapi.testclient import TestClient
 
+# Never turn a live application process into a test runner. This check must
+# happen before the test overrides below: docker exec inherits production's
+# DATA_DIR/DATABASE_URL, while the disposable test services declare
+# MOBIUS_TEST_RUNTIME=1 before pytest starts.
+_inherited_data_dir = os.environ.get("DATA_DIR", "").rstrip("/")
+_inherited_database_url = os.environ.get("DATABASE_URL", "")
+if (
+  os.environ.get("MOBIUS_TEST_RUNTIME") != "1"
+  and _inherited_data_dir == "/data"
+  and "/data/db/" in _inherited_database_url
+):
+  pytest.exit(
+    "Refusing to run pytest against the live Mobius runtime. "
+    "Use scripts/test.sh or docker-compose.test.yml.",
+    returncode=2,
+  )
+
 # Set env vars before importing app modules.
 _tmp = tempfile.mkdtemp()
 os.environ["SECRET_KEY"] = "test-secret-key-at-least-32-characters-long"
@@ -13,6 +30,12 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["DATA_DIR"] = _tmp
 os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
 os.environ["MOBIUS_TEST_RUNTIME"] = "1"
+# Fail closed when pytest is launched from inside a running production
+# container. DATA_DIR isolates Python file writes, but subprocess-facing
+# defaults historically still pointed at the live service and /data/apps.
+os.environ["MOBIUS_APP_BASE"] = f"{_tmp}/apps"
+os.environ["API_BASE_URL"] = "http://127.0.0.1:9"
+os.environ["MOEBIUS_SKIP_BOOTSTRAP"] = "1"
 
 # Ensure the baked static dir exists with an index.html carrying the
 # __mobius-theme__ slot BEFORE importing app.main — main.py registers the SPA

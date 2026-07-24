@@ -36,6 +36,17 @@
 
 set -euo pipefail
 
+# Pytest may be launched from inside the production container, where this
+# script and the real crontab binary are available. The Python test database is
+# isolated, but cron is process-external host state; refuse before writing
+# either the durable declaration or the live crontab. The scaffold's own
+# hermetic unit tests opt in while supplying a fake crontab and temp app base.
+if [ "${MOBIUS_TEST_RUNTIME:-}" = "1" ] \
+    && [ "${MOBIUS_ALLOW_TEST_CRON:-}" != "1" ]; then
+  echo "ERROR: cron mutation is disabled in the test runtime" >&2
+  exit 78
+fi
+
 if [ $# -lt 2 ]; then
   echo "Usage: $0 <slug> \"<cron-schedule>\" [job-filename] [app-id]" >&2
   echo "Example: $0 news \"0 9 * * *\" fetch.sh 12" >&2

@@ -191,6 +191,36 @@ async function waitTiled(page) {
     requestAnimationFrame(() => requestAnimationFrame(r))))
 }
 
+/** Sample the first three pre-paint frames after toggling the persistent drawer.
+ *  A correct atomic geometry commit keeps the projected pane area aligned with
+ *  the content box in every sample. The old two-phase path exposed one frame
+ *  where the content box had moved but the panes still used its previous width. */
+async function sampleDesktopDrawerToggle(page) {
+  return page.evaluate(async () => {
+    const toggle = document.querySelector('button[aria-label="Toggle navigation"]')
+    const read = () => {
+      const content = document.querySelector('.shell__content')?.getBoundingClientRect()
+      const panes = [...document.querySelectorAll('.shell__view--paned')]
+        .map(el => el.getBoundingClientRect())
+        .sort((a, b) => a.left - b.left)
+      if (!content || panes.length < 2) return null
+      return {
+        contentLeft: content.left,
+        contentRight: content.right,
+        firstPaneLeft: panes[0].left,
+        lastPaneRight: panes[panes.length - 1].right,
+      }
+    }
+    toggle?.click()
+    const frames = []
+    for (let i = 0; i < 3; i += 1) {
+      await new Promise(requestAnimationFrame)
+      frames.push(read())
+    }
+    return frames
+  })
+}
+
 /** Send a message inside a specific pane's own composer (multi-pane mounts one
  *  composer per pane, so the textbox must be scoped to the pane wrapper). */
 async function sendInPane(page, chatId, text) {
@@ -271,6 +301,30 @@ async function moveOnlyTabToOtherPane(page, paneId) {
 }
 
 test.describe('Workspace panes (PR2 gate)', () => {
+  test('desktop drawer open/close commits content and pane geometry in one frame', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'wpDrawerA')
+    const b = await createTaggedChat(page, 'wpDrawerB')
+    await mockApps(page, [])
+    await seedWorkspace(page, twoChatPanes(a.id, b.id))
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    for (const frames of [
+      await sampleDesktopDrawerToggle(page), // close
+      await sampleDesktopDrawerToggle(page), // open
+    ]) {
+      expect(frames.every(Boolean), 'every sampled frame has two projected panes').toBe(true)
+      for (const frame of frames) {
+        // Wide projection owns an 8px outer margin on both sides. If the content
+        // box and projection land in separate renders, one of these gaps differs
+        // by exactly the desktop drawer width for the first sampled frame.
+        expect(Math.abs((frame.firstPaneLeft - frame.contentLeft) - 8)).toBeLessThanOrEqual(1)
+        expect(Math.abs((frame.contentRight - frame.lastPaneRight) - 8)).toBeLessThanOrEqual(1)
+      }
+    }
+  })
+
   test('(a) a pinned user message keeps its position across a divider drag', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'wpA')

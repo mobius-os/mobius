@@ -244,6 +244,36 @@ def get_all_active_broadcasts() -> list["ChatBroadcast"]:
   return [bc for bc in _broadcasts.values() if bc.running]
 
 
+def broadcast_memory_diagnostics(*, include_payloads: bool = True) -> list[dict]:
+  """Describe payload owned by every live or reconnect-TTL broadcast.
+
+  Payload size is calculated only when the authenticated debug surface asks
+  for it. Publishing remains a constant-cost append/push path.
+  """
+  from app.memory_observability import estimate_payload_bytes
+
+  diagnostics = []
+  for bc in list(_broadcasts.values()):
+    payload_bytes = None
+    if include_payloads:
+      try:
+        payload_bytes = estimate_payload_bytes(bc.event_log)
+      except RuntimeError:
+        # A sync debug request can run in FastAPI's worker thread while the
+        # event loop appends. Observability may be momentarily approximate; it
+        # must never disrupt the stream it is observing.
+        pass
+    diagnostics.append({
+      "chat_id": bc.chat_id,
+      "running": bc.running,
+      "event_count": len(bc.event_log),
+      "event_payload_bytes": payload_bytes,
+      "subscriber_count": len(bc.subscribers),
+      "subscriber_queue_items": sum(q.qsize() for q in bc.subscribers),
+    })
+  return diagnostics
+
+
 def get_broadcast(chat_id: str) -> Optional["ChatBroadcast"]:
   """Returns the active broadcast for a chat, or None."""
   bc = _broadcasts.get(chat_id)

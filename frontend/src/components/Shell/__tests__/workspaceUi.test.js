@@ -652,7 +652,7 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
-test('mobile tab bodies pan while the existing kind icon owns either-axis dragging', () => {
+test('mobile tab bodies pan while preserving pinch zoom and the kind icon owns either-axis dragging', () => {
   assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
   assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
   assert.match(shellCss, /\.shell__tab-kind\[data-touch-drag-handle\]\s*\{[\s\S]*?touch-action:\s*none/)
