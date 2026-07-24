@@ -133,6 +133,14 @@ fi
 agent-browser eval \
   "(() => { const b = document.querySelector('button[aria-label=\"Toggle navigation\"][aria-expanded=\"true\"]'); if (window.innerWidth < 768 && b) b.click(); return true })()" \
   >/dev/null 2>&1 || true
+if [ "$VIEWPORT_WIDTH" -lt 768 ]; then
+  if ! agent-browser wait --fn \
+    "!document.querySelector('.drawer-overlay--blocking') && !document.querySelector('.drawer:not(.drawer--persistent).drawer--open')" \
+    >/dev/null 2>&1; then
+    echo "agent-screenshot.sh: mobile navigation did not finish closing before capture" >&2
+    exit 1
+  fi
+fi
 
 # `/app/<id>` has an exact readiness signal: AppCanvas removes its
 # `.canvas-loading` overlay only after the opaque iframe posts

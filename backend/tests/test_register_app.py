@@ -254,3 +254,20 @@ def test_registration_rejects_non_boolean_offline_capable(tmp_path, capsys):
     raise AssertionError("invalid offline_capable must fail registration")
 
   assert "must be true or false" in capsys.readouterr().err
+
+
+def test_registration_rejects_empty_capability_array(tmp_path, capsys):
+  """Falsey non-object declarations must not silently become no capabilities."""
+  mod = _load_module()
+  (tmp_path / "mobius.json").write_text(json.dumps({
+    "capabilities": [],
+  }))
+
+  try:
+    mod._read_manifest_registration(str(tmp_path))
+  except SystemExit as exc:
+    assert exc.code == 1
+  else:
+    raise AssertionError("capabilities must remain an object")
+
+  assert "must be an object" in capsys.readouterr().err

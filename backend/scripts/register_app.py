@@ -13,10 +13,16 @@ Prints the created or updated app JSON to stdout.
 
 import json
 import os
+from pathlib import Path
 import re
 import sys
 import urllib.error
 import urllib.request
+
+# Reuse the same local-manifest projection as the live source watcher. The
+# script normally runs by absolute path, so add the backend package root.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.app_capabilities import local_manifest_runtime_fields  # noqa: E402
 
 
 def _call(url: str, token: str, method: str, data: dict | None = None):
@@ -124,24 +130,11 @@ def _read_manifest_registration(source_dir: str) -> dict:
   except (OSError, json.JSONDecodeError) as exc:
     print(f"Cannot read mobius.json: {exc}", file=sys.stderr)
     sys.exit(1)
-  if not isinstance(manifest, dict):
-    print("mobius.json must contain a JSON object.", file=sys.stderr)
+  try:
+    return local_manifest_runtime_fields(manifest)
+  except ValueError as exc:
+    print(str(exc), file=sys.stderr)
     sys.exit(1)
-  capabilities = manifest.get("capabilities") or {}
-  if not isinstance(capabilities, dict):
-    print("mobius.json `capabilities` must be an object.", file=sys.stderr)
-    sys.exit(1)
-  registration = {"capabilities": capabilities}
-  if "offline_capable" in manifest:
-    offline_capable = manifest["offline_capable"]
-    if not isinstance(offline_capable, bool):
-      print(
-        "mobius.json `offline_capable` must be true or false.",
-        file=sys.stderr,
-      )
-      sys.exit(1)
-    registration["offline_capable"] = offline_capable
-  return registration
 
 
 def _read_capabilities(source_dir: str) -> dict:
