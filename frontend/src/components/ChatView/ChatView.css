@@ -1781,6 +1781,18 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+/* Let current browsers own textarea growth. The JavaScript fallback remains
+   for older Safari/Firefox builds that do not support field-sizing. This
+   removes the per-character height:auto → scrollHeight forced-layout cycle;
+   max-height and overflow preserve the existing 280px cap. */
+@supports (field-sizing: content) {
+  .chat__input {
+    field-sizing: content;
+    height: auto;
+    min-width: 0;
+  }
+}
+
 .chat__input::placeholder { color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */ }
 .chat__input:disabled { opacity: 0.5; }
 

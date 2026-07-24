@@ -3,8 +3,10 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
+  composerUsesNativeSizing,
   resetComposerTextarea,
   resizeComposerTextarea,
+  syncComposerTallClass,
 } from '../composerTextareaSizing.js'
 
 function textareaStub({ value = '', scrollHeight = 31, tall = false } = {}) {
@@ -73,6 +75,24 @@ test('reset collapses immediately before React commits the empty value', () => {
   assert.equal(pill.classList.contains('chat__pill--tall'), false)
 })
 
+test('native content sizing is capability-gated without browser sniffing', () => {
+  assert.equal(composerUsesNativeSizing({
+    supports: (property, value) => (
+      property === 'field-sizing' && value === 'content'
+    ),
+  }), true)
+  assert.equal(composerUsesNativeSizing({ supports: () => false }), false)
+  assert.equal(composerUsesNativeSizing(null), false)
+})
+
+test('native resize observation owns only the tall alignment class', () => {
+  const { textarea, pill } = textareaStub()
+  assert.equal(syncComposerTallClass(textarea, 31), 31)
+  assert.equal(pill.classList.contains('chat__pill--tall'), false)
+  assert.equal(syncComposerTallClass(textarea, 55), 55)
+  assert.equal(pill.classList.contains('chat__pill--tall'), true)
+})
+
 test('ChatView reconciles textarea geometry on value commits and foreground return', () => {
   const source = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
   const inputBarSource = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
@@ -80,7 +100,8 @@ test('ChatView reconciles textarea geometry on value commits and foreground retu
   assert.match(source, /useLayoutEffect\(\(\) => \{[\s\S]*resizeComposerTextarea\(el, input\)[\s\S]*\}, \[chatId, hidden, input\]\)/)
   assert.match(source, /const reconcileForegroundGeometry = \(\) => \{[\s\S]*resizeComposerTextarea\(inputRef\.current, inputValueRef\.current\)[\s\S]*applySoon\(\)/)
   assert.match(source, /window\.addEventListener\('pageshow', reconcileForegroundGeometry\)/)
-  assert.doesNotMatch(inputBarSource, /resizeComposerTextarea/)
+  assert.match(inputBarSource, /new ResizeObserver\(/)
+  assert.match(inputBarSource, /syncComposerTallClass\(/)
   assert.doesNotMatch(voiceSource, /resizeComposerTextarea/)
   const resets = source.match(/resetComposerTextarea\(inputRef\.current\)/g) || []
   assert.equal(resets.length, 2, 'both queued and immediate sends collapse stale textarea geometry')

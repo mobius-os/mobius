@@ -16,6 +16,10 @@ const chatViewSource = readFileSync(new URL('../ChatView.jsx', import.meta.url),
 const streamHookSource = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const msgContentSource = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const streamingMessageSource = readFileSync(new URL('../StreamingMessage.jsx', import.meta.url), 'utf8')
+const activeAssistantSource = readFileSync(
+  new URL('../ActiveAssistantSurface.jsx', import.meta.url),
+  'utf8',
+)
 const blockRendererSource = readFileSync(new URL('../markdown/BlockRenderer.jsx', import.meta.url), 'utf8')
 
 test('active DB and live sources share one row shell and one block renderer', () => {
@@ -23,7 +27,7 @@ test('active DB and live sources share one row shell and one block renderer', ()
     'the stable active <li> must always delegate its selected payload to MsgContent')
   assert.doesNotMatch(streamingMessageSource, /ToolBlock|QuestionCard|ErrorCard|ProgressiveMarkdown/,
     'StreamingMessage must not mount a competing assistant block tree')
-  assert.match(chatViewSource, /streamItemsToAssistantPayload\(streamItems, \{ finalize: false \}\)/,
+  assert.match(activeAssistantSource, /streamItemsToAssistantPayload\(streamItems, \{ finalize: false \}\)/,
     'the live source must feed the same DB-shaped payload consumed by MsgContent')
   assert.match(chatViewSource, /key=\{streamingDataKey\}[\s\S]*dataKey=\{streamingDataKey\}/,
     'the active row key and scroll-anchor data-key must remain stable across source selection')

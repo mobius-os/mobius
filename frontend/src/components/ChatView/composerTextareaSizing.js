@@ -1,8 +1,34 @@
 export const COMPOSER_TEXTAREA_MAX_HEIGHT = 280
 export const COMPOSER_TEXTAREA_TALL_THRESHOLD = 45
+let nativeSizingSupport
 
 function composerPill(textarea) {
   return textarea?.closest?.('.chat__pill') || null
+}
+
+export function composerUsesNativeSizing(css = globalThis.CSS) {
+  // An injected CSS object keeps the capability boundary directly testable.
+  // Cache only the real browser verdict; tests and non-browser runtimes should
+  // not freeze a synthetic result for later calls.
+  if (css !== globalThis.CSS) {
+    return !!css?.supports?.('field-sizing', 'content')
+  }
+  if (nativeSizingSupport === undefined) {
+    nativeSizingSupport = !!css?.supports?.('field-sizing', 'content')
+  }
+  return nativeSizingSupport
+}
+
+export function syncComposerTallClass(
+  textarea,
+  height = textarea?.offsetHeight,
+) {
+  const measured = Number(height) || 0
+  composerPill(textarea)?.classList?.toggle(
+    'chat__pill--tall',
+    measured > COMPOSER_TEXTAREA_TALL_THRESHOLD,
+  )
+  return measured
 }
 
 /**
@@ -15,6 +41,12 @@ function composerPill(textarea) {
  */
 export function resizeComposerTextarea(textarea, value = textarea?.value) {
   if (!textarea?.style) return 0
+  // Current browsers can own content sizing entirely in CSS. Avoid touching
+  // height or reading scrollHeight on the keystroke path: that read forces a
+  // document layout, whose cost grows with every mounted drawer/transcript
+  // row. ResizeObserver in ChatInputBar updates the tall alignment only when
+  // the browser reports an actual size change.
+  if (composerUsesNativeSizing()) return 0
 
   // Empty is a semantic one-line state, not a geometry question. During a
   // multi-pane mount / foreground transition Chromium can briefly report an
@@ -36,16 +68,13 @@ export function resizeComposerTextarea(textarea, value = textarea?.value) {
 
   const height = Math.min(measured, COMPOSER_TEXTAREA_MAX_HEIGHT)
   textarea.style.height = `${height}px`
-  composerPill(textarea)?.classList?.toggle(
-    'chat__pill--tall',
-    height > COMPOSER_TEXTAREA_TALL_THRESHOLD,
-  )
+  syncComposerTallClass(textarea, height)
   return height
 }
 
 /** Collapse immediately while React is still committing an empty value. */
 export function resetComposerTextarea(textarea) {
   if (!textarea?.style) return
-  textarea.style.height = 'auto'
+  textarea.style.height = composerUsesNativeSizing() ? '' : 'auto'
   composerPill(textarea)?.classList?.remove?.('chat__pill--tall')
 }

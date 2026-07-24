@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useCallback,
   useSyncExternalStore,
+  useMemo,
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
@@ -26,7 +27,7 @@ import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
-import StreamingMessage from './StreamingMessage.jsx'
+import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
@@ -55,7 +56,8 @@ import { focusComposerElement, shouldApplyComposerFocusRequest } from './compose
 import { sameMessageList } from './chatMessageList.js'
 import { copyableMessageText, copyPlainText } from './messageCopy.js'
 import { sendFailureMessage } from './sendFailure.js'
-import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, chooseActiveAssistantMirrorIndex, chooseActiveAssistantSurface, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent, streamItemsToAssistantPayload } from './streamPromotion.js'
+import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
+import { deriveActiveAssistantSelection } from './activeAssistantSelection.js'
 import {
   answerKeepsCurrentTurn,
   builtAppPulseDecision,
@@ -1459,6 +1461,7 @@ export default function ChatView({
   })
 
   function clearFailedAttempt() {
+    if (!failedSendAttemptRef.current) return
     failedSendAttemptRef.current = null
     clearFailedSendAttempt(chatId)
   }
@@ -1632,14 +1635,6 @@ export default function ChatView({
       promotedRef.current = false
     }
   }
-
-  // Persist draft so it survives leaving and re-entering the chat.
-  // This remains as a safety net for programmatic input changes (restores,
-  // voice transcription, send cleanup). Direct owner edits are saved
-  // synchronously in handleComposerInputChange above.
-  useEffect(() => {
-    persistComposerDraft(chatId, input, draftAttachmentsRef.current)
-  }, [input, chatId])
 
   // Text changes through input, restores, voice, send cleanup, and
   // authoritative foreground reconciliation. Reconcile after every committed
@@ -3371,66 +3366,29 @@ export default function ChatView({
     isOwnerUserMessage(m) ? i : acc
   ), -1)
   // The captured bridge partial enters the active row before catch-up emits a
-  // single item. That is the load-bearing part of Lever 1: when SSE becomes the
-  // selected source, React updates MsgContent props instead of replacing the
-  // DB row with a different renderer subtree.
-  const bridgeMsgIdx = turnActive
-    ? bridgeHook.findBridgeIndex(messages)
-    : -1
-  const trailingAssistantPartialIdx = turnActive
-    ? findTrailingAssistantPartialIndex(messages)
-    : -1
-  const hasLiveAssistantPayload = turnActive && streamItems.length > 0
-  const bridgeMsg = bridgeMsgIdx >= 0 ? messages[bridgeMsgIdx] : null
-  const bridgeFollowedByVisibleUser = bridgeMsgIdx >= 0 && messages
-    .slice(bridgeMsgIdx + 1)
-    .some(isOwnerUserMessage)
-  const trailingAssistantPartialMsg = trailingAssistantPartialIdx >= 0
-    ? messages[trailingAssistantPartialIdx]
-    : null
-  // Select DATA, never a component tree. A mount-time bridge is only
-  // authoritative while the live payload still proves it is the same answer.
-  // A stale in-memory cache can otherwise nominate the completed PREVIOUS
-  // answer just as a new turn starts, suppressing that whole reply and showing
-  // only the question card that happened to be cached. If the bridge and live
-  // surfaces are unrelated, fall through to the real trailing DB partial.
-  const bridgeAssistantSurface = chooseActiveAssistantSurface(bridgeMsg, streamItems)
-  const trailingAssistantSurface = chooseActiveAssistantSurface(
-    trailingAssistantPartialMsg,
-    streamItems,
-  )
-  const activeMirrorMsgIdx = chooseActiveAssistantMirrorIndex({
+  // single item. Source comparison can walk and normalize the complete live
+  // block list several times, so memoize it on transcript/stream ownership:
+  // composer input cannot change which assistant source owns this row.
+  const {
+    activeMirrorMsg,
+    activeMirrorMsgIdx,
     bridgeMsgIdx,
+    hasLiveAssistantPayload,
+    showActiveAssistantSurface,
     trailingAssistantPartialIdx,
-    bridgeFollowedByVisibleUser,
-    hasLivePayload: hasLiveAssistantPayload,
-    bridgeSurface: bridgeAssistantSurface,
-    surface: trailingAssistantSurface,
-  })
-  const activeMirrorMsg = activeMirrorMsgIdx >= 0 ? messages[activeMirrorMsgIdx] : null
-  const activeAssistantSurface = activeMirrorMsgIdx === bridgeMsgIdx
-    ? bridgeAssistantSurface
-    : (activeMirrorMsgIdx === trailingAssistantPartialIdx
-        ? trailingAssistantSurface
-        : { hideMessage: false, suppressStream: false })
-  const useDbActivePayload = !!(
-    activeMirrorMsg
-    && (!hasLiveAssistantPayload || activeAssistantSurface.suppressStream)
-  )
-  const activeAssistantMsg = useDbActivePayload
-    ? activeMirrorMsg
-    : (hasLiveAssistantPayload
-        ? {
-            ...(activeMirrorMsg || {}),
-            role: 'assistant',
-            // Live rendering keeps running tool state and thinking clock
-            // anchors; final promotion uses the converter's default finalize
-            // mode and still seals running tools as done.
-            ...streamItemsToAssistantPayload(streamItems, { finalize: false }),
-          }
-        : null)
-  const showActiveAssistantSurface = !!activeAssistantMsg
-  const activeAssistantIsStreaming = !!(activeAssistantMsg && !useDbActivePayload)
+    useDbActivePayload,
+    activeAssistantIsStreaming,
+  } = useMemo(() => deriveActiveAssistantSelection({
+    turnActive,
+    messages,
+    streamItems,
+    findBridgeIndex: bridgeHook.findBridgeIndex,
+  }), [
+    bridgeMountInputs,
+    messages,
+    streamItems,
+    turnActive,
+  ])
 
   // ── Sticky "needs your answer" affordance ──────────────────────────
   // A pending AskUserQuestion freezes the turn until the user answers,
@@ -3898,9 +3856,12 @@ export default function ChatView({
           )})}
 
           {showActiveAssistantSurface && (
-            <StreamingMessage
+            <ActiveAssistantSurface
               key={streamingDataKey}
-              msg={activeAssistantMsg}
+              activeMirrorMsg={activeMirrorMsg}
+              useDbActivePayload={useDbActivePayload}
+              hasLivePayload={hasLiveAssistantPayload}
+              streamItems={streamItems}
               dataKey={streamingDataKey}
               chatId={chatId}
               onAnswer={doSendSilent}

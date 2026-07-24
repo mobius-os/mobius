@@ -76,6 +76,10 @@ import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import { resolveComposerEnterAction } from './composerShortcuts.js'
 import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
+import {
+  composerUsesNativeSizing,
+  syncComposerTallClass,
+} from './composerTextareaSizing.js'
 
 
 // Detect touch-primary once (same heuristic ChatView uses).
@@ -424,6 +428,31 @@ export default function ChatInputBar({
       if (attachTriggerRef.current) attachTriggerRef.current = null
     }
   }, [attachTriggerRef, inputRef])
+
+  // Modern browsers size the textarea from CSS (`field-sizing: content`).
+  // Observe the resulting box rather than measuring scrollHeight on every
+  // character; the pill alignment changes only when the textarea really
+  // crosses from one visual line to multiple lines.
+  useLayoutEffect(() => {
+    const textarea = inputRef?.current
+    if (
+      !textarea
+      || !composerUsesNativeSizing()
+      || typeof ResizeObserver === 'undefined'
+    ) return undefined
+    const observer = new ResizeObserver(entries => {
+      const entry = entries[0]
+      const borderSize = Array.isArray(entry?.borderBoxSize)
+        ? entry.borderBoxSize[0]?.blockSize
+        : entry?.borderBoxSize?.blockSize
+      syncComposerTallClass(
+        textarea,
+        borderSize ?? entry?.target?.getBoundingClientRect?.().height,
+      )
+    })
+    observer.observe(textarea)
+    return () => observer.disconnect()
+  }, [chatId, inputRef])
 
   const hasInput = !!input.trim()
   const hasUploading = pendingFiles?.some(c => c.status === 'uploading') ?? false
