@@ -146,19 +146,15 @@
   to { transform: translate3d(0, -6px, 0); opacity: 0; }
 }
 
-/* Dividers + the overflow chip simplify first on exit, then resolve only over the
-   LAST 70ms of entry. The stationary underlay's strip follows the same rule:
+/* Dividers simplify first on exit, then resolve only over the LAST 70ms of
+   entry. The stationary underlay's strip follows the same rule:
    structure cannot appear over the old screen before the panes themselves arrive.
-   Opacity-only; small elements. The chip selector is
-   listed FIRST (before the divider) so it is followed by a comma, never a brace — a
-   css-shape test that greps the base chip rule still finds it. */
-.shell--builder-exiting .workspace__pane-chip,
+   Opacity-only; small elements. */
 .shell--builder-exiting .workspace__divider {
   pointer-events: none;
   animation: shell-mode-chrome-out 90ms var(--ease-mode-chrome) both;
 }
 .shell--builder-entering .shell__tabstrip:not([data-mode-motion]),
-.shell--builder-entering .workspace__pane-chip,
 .shell--builder-entering .workspace__divider {
   animation:
     shell-mode-chrome-in 70ms var(--ease-mode-chrome)
@@ -283,10 +279,18 @@
 .workspace__divider-bar {
   background: var(--border-light);
   border-radius: 2px;
-  transition: background 120ms ease, width 120ms ease, height 120ms ease;
+  transition: background 120ms ease, transform 120ms ease;
 }
-.workspace__divider--v .workspace__divider-bar { width: 1px; height: 100%; }
-.workspace__divider--h .workspace__divider-bar { height: 1px; width: 100%; }
+.workspace__divider--v .workspace__divider-bar {
+  width: 1px;
+  height: 100%;
+  transform: scaleX(1);
+}
+.workspace__divider--h .workspace__divider-bar {
+  height: 1px;
+  width: 100%;
+  transform: scaleY(1);
+}
 
 /* PROPOSED builder power-chrome (design item 6, default OFF — gated by
    .shell--builder-power on the shell root). Accent-energized resting dividers. */
@@ -295,151 +299,12 @@
 }
 
 .workspace__divider--v:hover .workspace__divider-bar,
-.workspace__divider--v:focus-visible .workspace__divider-bar { width: 3px; }
+.workspace__divider--v:focus-visible .workspace__divider-bar { transform: scaleX(3); }
 .workspace__divider--h:hover .workspace__divider-bar,
-.workspace__divider--h:focus-visible .workspace__divider-bar { height: 3px; }
+.workspace__divider--h:focus-visible .workspace__divider-bar { transform: scaleY(3); }
 .workspace__divider:hover .workspace__divider-bar,
 .workspace__divider:focus-visible .workspace__divider-bar {
   background: var(--accent);
-}
-
-/* Phone/compact overflow chip — opens the pane switcher sheet. */
-.workspace__pane-chip {
-  position: absolute;
-  pointer-events: auto;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 44px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid var(--border-light);
-  background: color-mix(in srgb, var(--bg) 88%, var(--text) 6%);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  z-index: 5;
-  -webkit-tap-highlight-color: transparent;
-}
-.workspace__pane-chip:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* Activity dot: a hidden pane whose chat finished streaming / drew attention or
-   whose app is new gets a small accent dot on the chip and its sheet row, so a
-   background change is visible without opening the sheet (design §4). */
-.workspace__pane-chip-dot,
-.workspace__sheet-row-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  flex: 0 0 auto;
-}
-/* The dot + count sit together at the row's trailing edge. */
-.workspace__sheet-row-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-/* Bottom sheet: pane switcher. */
-.workspace__sheet-scrim {
-  position: absolute;
-  inset: 0;
-  pointer-events: auto;
-  background: color-mix(in srgb, #000 40%, transparent);
-  display: flex;
-  align-items: flex-end;
-  z-index: 6;
-}
-.workspace__sheet {
-  width: 100%;
-  max-height: 60%;
-  overflow-y: auto;
-  background: var(--bg);
-  border-top: 1px solid var(--border-light);
-  border-radius: 16px 16px 0 0;
-  padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
-  /* Match the shell's named scrollers: coarse pointers must not render a
-     persistent scrollbar track (Chromium Android). */
-  scrollbar-width: none;
-  animation: workspace-sheet-in 180ms ease-out;
-}
-.workspace__sheet::-webkit-scrollbar { width: 0; height: 0; }
-
-@keyframes workspace-sheet-in {
-  from { transform: translateY(100%); }
-  to { transform: translateY(0); }
-}
-
-.workspace__sheet-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 44px;
-}
-.workspace__sheet-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--muted);
-  padding: 4px 8px;
-}
-.workspace__sheet-close {
-  display: grid;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.workspace__sheet-close:hover {
-  background: color-mix(in srgb, var(--text) 8%, transparent);
-  color: var(--text);
-}
-.workspace__sheet-close:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-.workspace__sheet-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  gap: 10px;
-  padding: 12px;
-  border: none;
-  background: none;
-  border-radius: 10px;
-  color: var(--text);
-  cursor: pointer;
-  font-size: 14px;
-  text-align: left;
-  -webkit-tap-highlight-color: transparent;
-}
-.workspace__sheet-row--visible {
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
-}
-.workspace__sheet-row-title {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.workspace__sheet-row-count {
-  flex-shrink: 0;
-  min-width: 20px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--muted);
-  background: color-mix(in srgb, var(--bg) 80%, var(--text) 8%);
-  border-radius: 999px;
-  padding: 1px 6px;
 }
 
 /* Tab context menu — the split path. Fixed at the pointer. */
@@ -626,7 +491,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workspace__sheet { animation: none; }
   /* Instant swap — no draw-in flourish (design item 5, reduced-motion). */
   .workspace__divider-bar { transition: none; animation: none; }
   /* Reduced motion: instant geometry + color, no fade or morph (design §3.3). */
@@ -635,10 +499,8 @@
   .workspace__coachmark { animation: none; }
   /* Reduced motion never arms a mode descriptor (the controller commits directly),
      so nothing carries data-mode-motion; this is defensive parity — any element
-     that somehow did gets no beat. Covers wrappers, strips, dividers, and chip. */
+     that somehow did gets no beat. Covers wrappers, strips, and dividers. */
   .shell [data-mode-motion] { animation: none !important; }
   .shell--builder-exiting .workspace__divider,
-  .shell--builder-exiting .workspace__pane-chip,
-  .shell--builder-entering .workspace__divider,
-  .shell--builder-entering .workspace__pane-chip { animation: none; }
+  .shell--builder-entering .workspace__divider { animation: none; }
 }

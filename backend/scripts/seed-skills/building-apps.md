@@ -1,6 +1,6 @@
 # Building mini-apps
 
-The full mini-app contract: component shape, `window.mobius.storage` and its traps, the app lifecycle (register-on-create only), offline, fetching, embedded app chats, back-navigation, and theming. `Read` this before building or updating any mini-app.
+The advanced mini-app contract: packaged/installable apps, services and fetching, secrets/concurrent storage, cross-app access, embedded agents, device capabilities, immersive mode, navigation, and uncommon runtime boundaries. For an ordinary local app create or straightforward update, read `building-apps-quickstart.md` instead and do not load this file.
 
 Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and an app-scoped `token`, and persists through `window.mobius.storage`. Shell-mounted app frames intentionally omit `allow-same-origin`: their effective origin is opaque (`null`), they cannot read the shell's localStorage/owner JWT, and origin-bound browser stores such as IndexedDB/OPFS are unavailable. Root-relative API fetches still work when they present the scoped bearer; `window.mobius.storage` owns that transport and its offline fallbacks.
 
@@ -60,7 +60,7 @@ it while the partner can watch and try it:
 2. Register as soon as that first layer should compile and contains one real feature. In a live building chat, registration opens the app as a tab beside its owning chat without stealing focus, so the partner can keep talking while the preview becomes available. They can switch to that tab and watch it take shape while you keep working — every save the file watcher recompiles and refreshes it live. That makes registering the first coherent layer promptly worth even more: it is the moment the app becomes something to watch, not just a promise.
 3. Immediately smoke-check the shell preview before continuing: it renders coherently, has no missing imports/assets, and any storage-backed path used by the slice works.
 4. Continue in visible increments. Each save should leave the app in a coherent state; the file watcher recompiles source edits and an app open in the shell preview/canvas refreshes to the latest compiled bundle. Standalone `/apps/<slug>/` PWAs may need a manual refresh/reopen.
-5. Signal each milestone with the build-phase helper so the chat renders a live progress rail — `python "$SCRIPTS_DIR/build_phase.py" "Storage wired"` as each lands ("first layer is openable", "storage is wired", "mobile layout is fixed", "review pass running"). The helper is best-effort (a failed signal never breaks a build) and carries the structure; a one-line prose note is now secondary, welcome for color, so the partner feels progress without reading raw tool logs.
+5. Signal only milestones the partner benefits from: the first preview is available; verification/refinement is underway when substantial work remains; and completion. Combine `build_phase.py` with a tool call doing real work when possible—never add a separate call solely to announce a routine internal step.
 6. If the first visible layer will take more than a few minutes because of packaging, auth, data migration, or a risky dependency, say that early and explain the gating reason.
 
 Layered does **not** mean under-building. It means the first useful slice becomes
@@ -78,7 +78,7 @@ curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | pyth
 
 If an app with the same purpose exists, update it instead of duplicating. If the partner says "build X" and X already exists, confirm whether they want to update or replace it.
 
-Check the wider ecosystem too: the catalog (`https://raw.githubusercontent.com/mobius-os/app-store/main/catalog.json`) may already ship an installable app, and an upstream issue or PR may already cover the fix you're about to write. The search moves — `gh search issues/prs --owner mobius-os`, reading the catalog — live in `contributing.md` ("Search before building"); a one-minute check beats rebuilding what exists. If `contributing.md` is missing from the skills dir, install the Contribute app from the App Store — it ships that skill.
+Search the wider ecosystem only when the partner asked to find, install, share, or upstream something; named an existing product; or the request is likely to match a shipped app exactly. Do not load `contributing.md`, query GitHub, or search the catalog for a uniquely named personal local build.
 
 ---
 
@@ -838,7 +838,7 @@ Online-only apps may still use an explicit `https://esm.sh/...` dynamic import w
 
 ## Offline-capable apps (opt-in)
 
-Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior are designed for offline use. Set it in the create or PATCH body for apps such as notes, trackers, or games only after testing a cold offline reload.
+Storage already works offline via `window.mobius.storage` (above), and the shell caches every in-shell app's frame + self-contained module after an online open. `offline_capable: true` is the separate promise that the app's standalone PWA surface and product behavior are designed for offline use. Set it in `mobius.json`; `register_app.py` applies it on create/update. Use a direct PATCH only for legacy apps without a source manifest, and set it true only after testing a cold offline reload.
 
 Separately, and automatically for EVERY app (no flag), the shell's service worker keeps an installed PWA out of the browser's native "no internet" page: a non-offline-capable app shows a branded offline screen when opened offline, never browser chrome. So the flag is the difference between "the real app runs offline" (set it) and "a branded you're-offline screen" (the automatic default) — neither ever drops to the browser error page.
 

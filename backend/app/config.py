@@ -13,8 +13,10 @@ don't need code changes.
 
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -74,6 +76,15 @@ class Settings(BaseSettings):
   # is sent, so it adds no user-facing latency. No chat agent writes these files.
   ensure_chat_note: bool = True
 
+  # Managed deployments receive this complete triplet from their provisioning
+  # layer. When absent, Möbius is an ordinary self-hosted installation and
+  # keeps the local username/password setup flow. Partial configuration is a
+  # startup error: silently falling back to first-owner setup would reopen the
+  # ownership race managed sign-in exists to close.
+  mobius_sso_issuer: str = ""
+  mobius_sso_instance_id: str = ""
+  mobius_sso_client_secret: str = ""
+
   model_config = SettingsConfigDict(env_file=".env")
 
   @model_validator(mode="after")
@@ -120,7 +131,46 @@ class Settings(BaseSettings):
         "Set DOMAIN=your-domain.com in .env, or set FRONTEND_ORIGIN "
         "explicitly for HTTP-only deployments."
       )
+    sso_values = (
+      self.mobius_sso_issuer.strip(),
+      self.mobius_sso_instance_id.strip(),
+      self.mobius_sso_client_secret,
+    )
+    if any(sso_values) and not all(sso_values):
+      raise ValueError(
+        "MOBIUS_SSO_ISSUER, MOBIUS_SSO_INSTANCE_ID, and "
+        "MOBIUS_SSO_CLIENT_SECRET must be configured together."
+      )
+    if all(sso_values):
+      issuer = urlparse(sso_values[0])
+      is_local_http = (
+        issuer.scheme == "http"
+        and issuer.hostname in {"localhost", "127.0.0.1", "::1"}
+      )
+      if (
+        (issuer.scheme != "https" and not is_local_http)
+        or not issuer.netloc
+        or issuer.path not in {"", "/"}
+        or issuer.params
+        or issuer.query
+        or issuer.fragment
+      ):
+        raise ValueError("MOBIUS_SSO_ISSUER must be an HTTPS origin.")
+      if not re.fullmatch(r"mob_[A-Za-z0-9_-]{3,80}", sso_values[1]):
+        raise ValueError("MOBIUS_SSO_INSTANCE_ID is invalid.")
+      if len(sso_values[2]) < 32:
+        raise ValueError("MOBIUS_SSO_CLIENT_SECRET must be at least 32 characters.")
+      self.mobius_sso_issuer = sso_values[0].rstrip("/")
+      self.mobius_sso_instance_id = sso_values[1]
     return self
+
+  @property
+  def mobius_sso_enabled(self) -> bool:
+    return bool(
+      self.mobius_sso_issuer
+      and self.mobius_sso_instance_id
+      and self.mobius_sso_client_secret
+    )
 
 
 @lru_cache

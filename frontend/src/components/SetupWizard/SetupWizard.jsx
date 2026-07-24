@@ -21,7 +21,7 @@ const PROVIDERS = [
   { id: 'claude', label: 'Claude Code' },
 ]
 
-export default function SetupWizard({ onDone, initialStep = 'account', claimRequired = false }) {
+export default function SetupWizard({ onDone, initialStep = 'account' }) {
   const [step, setStep] = useState(initialStep)
   // Hoisted from ProviderStep so ProviderAuth (which is a
   // grandchild) doesn't need to re-run the same query. Gated on
@@ -58,10 +58,6 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
-  // First-boot claim code — the one-time setup token from the deploy logs
-  // (or the MOBIUS_SETUP_CLAIM the deployer preset). Only collected when the
-  // backend reports the gate is open.
-  const [claim, setClaim] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -101,7 +97,7 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
     }
     setLoading(true)
     try {
-      const res = await api.auth.setup.create({ username: normalizedUsername, password, claim })
+      const res = await api.auth.setup.create({ username: normalizedUsername, password })
       if (!res.ok) {
         const data = await res.json()
         const detail = Array.isArray(data.detail)
@@ -147,11 +143,16 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
           This account unlocks your private Möbius. Your agent, apps, and data
           live in the container you just made.
         </p>
-        <form className="setup__form" onSubmit={handleAccountSubmit}>
+        <form
+          className="setup__form"
+          onSubmit={handleAccountSubmit}
+          autoComplete="on"
+        >
           <label className="setup__label">
             Username
             <input
               className="setup__input"
+              type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               name="username"
@@ -191,23 +192,6 @@ export default function SetupWizard({ onDone, initialStep = 'account', claimRequ
               autoComplete="new-password"
             />
           </label>
-          {claimRequired && (
-            <label className="setup__label">
-              Setup code
-              <input
-                className="setup__input"
-                value={claim}
-                onChange={(e) => setClaim(e.target.value)}
-                name="setup-code"
-                required
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <span className="setup__hint">
-                Find this in your deploy logs (or the MOBIUS_SETUP_CLAIM you set).
-              </span>
-            </label>
-          )}
           {error && <p className="setup__error" role="alert">{error}</p>}
           <button
             className="setup__btn"

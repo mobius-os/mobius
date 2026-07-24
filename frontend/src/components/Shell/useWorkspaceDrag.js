@@ -97,6 +97,7 @@ export default function useWorkspaceDrag({
     // ── Reusable overlay DOM (created lazily on the first arm) ────────────────
     let shieldEl = null
     let chipEl = null
+    let chipWidth = 0
     let previewEl = null
     // The one in-flight session's teardown, so an unmount / disable can tear a
     // live drag down cleanly — no orphaned shield. activePointerId / activeSrcEl
@@ -115,8 +116,7 @@ export default function useWorkspaceDrag({
     function contentBox() {
       return contentElRef.current?.getBoundingClientRect() || { left: 0, top: 0 }
     }
-    function toLocal(clientX, clientY) {
-      const box = contentBox()
+    function toLocal(clientX, clientY, box = contentBox()) {
       return { x: clientX - box.left, y: clientY - box.top }
     }
 
@@ -153,7 +153,7 @@ export default function useWorkspaceDrag({
 
     function removeOverlays() {
       shieldEl?.remove(); shieldEl = null
-      chipEl?.remove(); chipEl = null
+      chipEl?.remove(); chipEl = null; chipWidth = 0
       previewEl?.remove(); previewEl = null
       clearPreGlow()
     }
@@ -166,13 +166,13 @@ export default function useWorkspaceDrag({
         const label = (labelForTabRef.current && tab) ? labelForTabRef.current(tab) : ''
         chipEl.textContent = label
         chipEl.hidden = false
+        chipWidth = chipEl.offsetWidth || 0
       }
       const { left, top } = chipOffset({ x: clientX, y: clientY }, isTouch)
       // V5 (vizreview): clamp the chip within the viewport so its label never clips
       // at the right edge (the +12 offset pushed a right-edge drag off-screen).
       const margin = 8
-      const w = chipEl.offsetWidth || 0
-      const maxLeft = Math.max(margin, window.innerWidth - w - margin)
+      const maxLeft = Math.max(margin, window.innerWidth - chipWidth - margin)
       chipEl.style.left = `${Math.max(margin, Math.min(left, maxLeft))}px`
       chipEl.style.top = `${top}px`
     }
@@ -215,11 +215,10 @@ export default function useWorkspaceDrag({
     }
 
     // Measure a pane's strip tab rects (content-local) for the caret index.
-    function measureTabs(paneId) {
+    function measureTabs(paneId, box = contentBox()) {
       const host = contentElRef.current
       const strip = host?.querySelector(`[data-pane-strip="${cssEscape(paneId)}"]`)
       if (!strip) return []
-      const box = contentBox()
       return [...strip.querySelectorAll('.shell__tab')].map((el) => {
         const r = el.getBoundingClientRect()
         return { left: r.left - box.left, right: r.right - box.left }
@@ -329,8 +328,7 @@ export default function useWorkspaceDrag({
       }
       // Strip auto-scroll (§3.2): near an overflowing strip's edge, scroll it
       // 6px/frame and re-measure so the caret keeps tracking under the pointer.
-      function updateAutoScroll(clientX, clientY) {
-        const box = contentBox()
+      function updateAutoScroll(clientX, clientY, box = contentBox()) {
         const xL = clientX - box.left
         const yL = clientY - box.top
         let stripEl = null
@@ -358,32 +356,34 @@ export default function useWorkspaceDrag({
       function autoStep() {
         if (!armed || autoDir === 0 || !autoStripEl) { autoRAF = null; return }
         autoStripEl.scrollLeft += autoDir * AUTO_SCROLL_STEP
+        const box = contentBox()
         const p = scene?.panes.find(pp => pp.paneId === autoPaneId)
-        if (p) p.tabs = measureTabs(autoPaneId) // re-measure the scrolled strip
-        const next = hitTest(toLocal(lastPoint.x, lastPoint.y), scene, curZone)
+        if (p) p.tabs = measureTabs(autoPaneId, box) // re-measure the scrolled strip
+        const next = hitTest(toLocal(lastPoint.x, lastPoint.y, box), scene, curZone)
         renderPreview(next)
         curZone = next
         autoRAF = requestAnimationFrame(autoStep)
       }
 
-      // The per-frame drag work (chip follow, hit-test, preview, auto-scroll) is
-      // rAF-coalesced: a pointermove fires several times per frame, and each pass
-      // writes the fixed chip, forces a layout read (contentBox), allocates a
-      // fresh hit-test result, and writes preview styles. Batching to one pass per
-      // frame drops the forced-reflow + GC churn to at most one per frame.
+      // The per-frame drag work is rAF-coalesced and batches geometry reads before
+      // style writes. A pointermove can fire several times per frame; one content
+      // rect feeds both auto-scroll and hit-testing, while the chip width is
+      // measured only once when the drag arms.
       let moveRAF = 0
       const doMoveWork = () => {
         moveRAF = 0
         if (!armed || cleaned) return
         const { x: cx, y: cy } = lastPoint
-        positionChip(cx, cy, isTouch, key)
         // While the drawer still covers the panes, show no preview (the glide-close
         // crossing is handled synchronously in onMove).
         if (sourceKind === 'drawer' && drawerOpenRef.current && !glided) {
+          positionChip(cx, cy, isTouch, key)
           curZone = null; renderPreview(null); stopAutoScroll(); return
         }
-        updateAutoScroll(cx, cy)
-        const next = hitTest(toLocal(cx, cy), scene, curZone)
+        const box = contentBox()
+        updateAutoScroll(cx, cy, box)
+        const next = hitTest(toLocal(cx, cy, box), scene, curZone)
+        positionChip(cx, cy, isTouch, key)
         renderPreview(next)
         curZone = next
       }

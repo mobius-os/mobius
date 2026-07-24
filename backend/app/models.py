@@ -37,6 +37,11 @@ class Owner(Base):
   id = Column(Integer, primary_key=True)
   username = Column(String(64), nullable=False, unique=True)
   hashed_password = Column(String(255), nullable=False)
+  # Managed Railway deployments bind the local single-owner row to the stable
+  # launcher user id. Null is the ordinary self-hosted/password-only mode.
+  # The email is informational and never used as an authorization key.
+  sso_subject = Column(String(128), nullable=True)
+  sso_email = Column(String(320), nullable=True)
   # Must stay in sync with providers.PROVIDER_NAMES.
   provider = Column(String(32), nullable=False, default="claude")
   # Default provider-limit recovery policy for newly-created chats. Each chat

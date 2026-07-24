@@ -124,7 +124,6 @@ EXCLUDE_NAMES = {
   "lost+found",
   ".recover-pending",        # transient recovery marker
   "recovery_chat.jsonl",     # transient recovery-chat scratch
-  ".setup-claim",            # first-boot claim secret / stale runtime state
 }
 # Transient marker files at the /data root — runtime signals, not data.
 # Deliberately NOT ".recover" (that would also match the SECRET files
@@ -135,7 +134,6 @@ EXCLUDE_PREFIXES = (".platform", ".boot", ".last-successful", ".pm-commit")
 # and this run's own transient restore staging/rollback dirs.
 EXCLUDE_STARTSWITH = (
   "platform.", ".restore-staging.", ".restore-rollback.",
-  ".setup-claim.",           # crash-left claim temp files
 )
 
 # Top-level entries routed into the ENCRYPTED secrets archive. Everything

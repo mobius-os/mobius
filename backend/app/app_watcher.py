@@ -469,13 +469,19 @@ class _JsxHandler(FileSystemEventHandler):
                     raise RuntimeError(f"Invalid mobius.json: {exc}") from exc
                   if not isinstance(manifest, dict):
                     raise RuntimeError("Invalid mobius.json: expected an object")
-                  capabilities = manifest.get("capabilities") or {}
                 else:
-                  capabilities = {}
-                from app.app_capabilities import contract_from_app_state
+                  manifest = {}
+                from app.app_capabilities import (
+                  contract_from_app_state,
+                  local_manifest_runtime_fields,
+                )
                 try:
+                  manifest_runtime = local_manifest_runtime_fields(manifest)
+                  if "offline_capable" in manifest_runtime:
+                    app.offline_capable = manifest_runtime["offline_capable"]
                   app.capability_contract = contract_from_app_state(
-                    app, capabilities=capabilities,
+                    app,
+                    capabilities=manifest_runtime["capabilities"],
                   )
                 except ValueError as exc:
                   raise RuntimeError(f"Invalid mobius.json: {exc}") from exc

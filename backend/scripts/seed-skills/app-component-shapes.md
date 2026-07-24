@@ -500,6 +500,66 @@ Default active is the subtle raised chip (theme-safe on any accent). Opt into
 `aria-selected` when it switches views; `flex: 1` per button for a full-width
 tab bar.
 
+### Image rail (`mobius-ui:ImageRail`)
+
+For two or more related photos, prefer a compact filmstrip over a wrapping
+thumbnail grid. The narrow layout deliberately shows part of the next image so
+the horizontal gesture is discoverable; wide layouts settle into a quiet
+three-up row. A tap should open the original image in the app's focused viewer.
+
+Keep touch and trackpad scrolling NATIVE. Do not translate pointer movement
+into `scrollLeft`: that removes mobile momentum and competes with the app's
+vertical scroll. If desktop mouse users need an alternative, add 44px
+previous/next buttons that call `scrollBy({ behavior: "smooth" })`; keep Arrow
+keys on the focusable rail as the keyboard equivalent.
+
+```jsx
+<section className="ma-image-gallery" aria-label={`Related images, ${images.length} items`}>
+  <div
+    className="ma-image-rail"
+    role="group"
+    aria-label="Related images. Swipe or use arrow keys to browse."
+    tabIndex={0}
+  >
+    {images.map((image) => (
+      <button
+        type="button"
+        className="ma-image-tile"
+        aria-label={`Open ${image.alt || "image"} preview`}
+        onClick={() => openImage(image)}
+        key={image.src}
+      >
+        <img src={image.src} alt={image.alt || ""} loading="lazy" />
+      </button>
+    ))}
+  </div>
+</section>
+```
+
+```css
+/* mobius-ui:ImageRail — app-owned; a future-library candidate (no sync owed). */
+.ma-image-gallery { container-type: inline-size; min-width: 0; }
+.ma-image-rail {
+  display: grid; grid-auto-flow: column; grid-auto-columns: 78cqi; gap: 4px;
+  min-width: 0; overflow-x: auto; overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity; scroll-padding-inline: 4px;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y; padding: 0 0 4px;
+}
+.ma-image-rail::-webkit-scrollbar { display: none; }
+.ma-image-rail:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 12px; }
+.ma-image-tile {
+  min-height: 44px; min-width: 0; aspect-ratio: 4 / 3; padding: 0;
+  overflow: hidden; scroll-snap-align: start; border: 0; border-radius: 10px;
+  background: var(--surface); cursor: pointer;
+}
+.ma-image-tile img { display: block; width: 100%; height: 100%; object-fit: cover; }
+@container (min-width: 30rem) {
+  .ma-image-rail { grid-auto-columns: calc((100cqi - 8px) / 3); }
+}
+/* /mobius-ui:ImageRail */
+```
+
 ---
 
 ## 9. Agent-chat mount (`ma-chat-embed`)
