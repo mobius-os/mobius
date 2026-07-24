@@ -129,12 +129,11 @@ test('the undo chord is flag-gated and defers to focused inputs', () => {
 })
 
 test('the first-run walkthrough stays short and action-first', () => {
-  assert.match(walkthrough, /const STEPS = \['intro', 'home', 'first-chat'\]/)
-  assert.doesNotMatch(walkthrough, /step === 'workspace'/)
-  // The recovery net is named next to the capability it backstops; a future
-  // trim of the walkthrough must not silently drop it.
-  assert.match(walkthrough, /\/recover runs outside Möbius/)
-  assert.match(walkthrough, /Meet my Möbius/)
+  assert.doesNotMatch(walkthrough, /const STEPS/)
+  assert.match(walkthrough, /Your Möbius is ready/)
+  assert.match(walkthrough, /Connect an agent/)
+  assert.match(walkthrough, /Open the App Store/)
+  assert.match(walkthrough, /I’ll explore/)
   assert.match(walkthrough, /mobius:walkthrough-completed/)
 })
 
@@ -767,10 +766,11 @@ test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient
   const urmCss = readFileSync(
     new URL('../../SettingsView/UpdateReviewModal.css', import.meta.url), 'utf8',
   )
-  // The walkthrough is a dismissible dialog (skip + onClose:skip) — reloading it
-  // over a builder workspace can never trap; and the update-review modal stays fixed.
-  assert.match(walkthrough, /const skip = useCallback/)
-  assert.match(walkthrough, /onClose: skip/)
+  // First-use guidance is now a non-modal region layered over the live shell,
+  // with an explicit dismiss action; update review remains a fixed modal.
+  assert.match(walkthrough, /role="region"/)
+  assert.match(walkthrough, /aria-label="Dismiss welcome"/)
+  assert.doesNotMatch(walkthrough, /aria-modal="true"/)
   assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
 })
 
