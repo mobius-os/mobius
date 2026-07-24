@@ -32,6 +32,7 @@ class SetupRequest(BaseModel):
 
 class SetupStatus(BaseModel):
   configured: bool
+  auth_mode: Literal["local", "mobius_sso"] = "local"
 
 
 class TokenResponse(BaseModel):

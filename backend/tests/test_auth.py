@@ -2,8 +2,53 @@
 
 import json
 import time
+import urllib.parse
 
 import bcrypt
+
+
+def configure_managed_sso(monkeypatch):
+  from app.config import get_settings
+
+  settings = get_settings()
+  monkeypatch.setattr(settings, "mobius_sso_issuer", "http://launcher.test")
+  monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_testinstance")
+  monkeypatch.setattr(settings, "mobius_sso_client_secret", "s" * 48)
+  monkeypatch.setattr(settings, "frontend_origin", "http://testserver")
+  return settings
+
+
+class FakeSsoExchange:
+  response = {
+    "sub": "user_managed123",
+    "email": "owner@example.com",
+    "name": "Managed Owner",
+  }
+  status_code = 200
+  calls = []
+
+  def __init__(self, *args, **kwargs):
+    self.args = args
+    self.kwargs = kwargs
+
+  async def __aenter__(self):
+    return self
+
+  async def __aexit__(self, *_args):
+    return None
+
+  async def post(self, url, **kwargs):
+    type(self).calls.append((url, kwargs))
+    payload = type(self).response
+
+    class Result:
+      status_code = type(self).status_code
+
+      @staticmethod
+      def json():
+        return payload
+
+    return Result()
 
 
 def test_setup_creates_owner(client):
@@ -13,6 +58,168 @@ def test_setup_creates_owner(client):
   })
   assert r.status_code == 200
   assert "access_token" in r.json()
+
+
+def test_self_hosted_setup_status_stays_local(client):
+  status = client.get("/api/auth/setup/status")
+
+  assert status.status_code == 200
+  assert status.json() == {"configured": False, "auth_mode": "local"}
+
+
+def test_managed_mode_closes_local_first_owner_setup(client, monkeypatch):
+  configure_managed_sso(monkeypatch)
+
+  status = client.get("/api/auth/setup/status")
+  setup = client.post("/api/auth/setup", json={
+    "username": "attacker",
+    "password": "not-the-owner",
+  })
+
+  assert status.json() == {"configured": False, "auth_mode": "mobius_sso"}
+  assert setup.status_code == 403
+  assert "Managed sign-in" in setup.json()["detail"]
+
+
+def test_managed_sso_first_login_creates_bound_owner_and_one_time_handoff(
+  client, db, monkeypatch,
+):
+  from app import auth as auth_util, models
+  from app.routes import auth as auth_routes
+
+  configure_managed_sso(monkeypatch)
+  FakeSsoExchange.calls = []
+  FakeSsoExchange.response = {
+    "sub": "user_managed123",
+    "email": "owner@example.com",
+    "name": "Managed Owner",
+  }
+  FakeSsoExchange.status_code = 200
+  monkeypatch.setattr(auth_routes.httpx, "AsyncClient", FakeSsoExchange)
+
+  start = client.get(
+    "/api/auth/sso/start",
+    params={"return_path": "/shell/?chat=first#tail"},
+    follow_redirects=False,
+  )
+
+  assert start.status_code == 303
+  authorize = urllib.parse.urlparse(start.headers["location"])
+  assert authorize.scheme == "http"
+  assert authorize.netloc == "launcher.test"
+  assert authorize.path == "/sso/authorize"
+  query = urllib.parse.parse_qs(authorize.query)
+  assert query["instance_id"] == ["mob_testinstance"]
+  assert query["redirect_uri"] == [
+    "http://testserver/api/auth/sso/callback"
+  ]
+  assert query["code_challenge"][0]
+  assert "s" * 48 not in start.headers["location"]
+
+  callback = client.get(
+    "/api/auth/sso/callback",
+    params={"code": "opaque-code", "state": query["state"][0]},
+    follow_redirects=False,
+  )
+
+  assert callback.status_code == 303
+  assert callback.headers["location"] == "/shell/?mobius_sso=1"
+  assert FakeSsoExchange.calls
+  exchange_url, exchange_args = FakeSsoExchange.calls[-1]
+  assert exchange_url == "http://launcher.test/sso/token"
+  assert exchange_args["json"]["client_secret"] == "s" * 48
+  assert exchange_args["json"]["code"] == "opaque-code"
+  owner = db.query(models.Owner).one()
+  assert owner.username == "Managed Owner"
+  assert owner.sso_subject == "user_managed123"
+  assert owner.sso_email == "owner@example.com"
+  assert auth_util.verify_password("anything", owner.hashed_password) is False
+
+  session = client.post("/api/auth/sso/session")
+
+  assert session.status_code == 200
+  body = session.json()
+  assert body["new_owner"] is True
+  assert body["return_path"] == "/shell/?chat=first#tail"
+  assert auth_util.decode_access_token(body["access_token"])["sub"] == owner.username
+  replay = client.post("/api/auth/sso/session")
+  assert replay.status_code == 401
+
+
+def test_managed_sso_returning_owner_is_reused_and_subject_cannot_change(
+  client, db, monkeypatch,
+):
+  from app import models
+  from app.routes import auth as auth_routes
+
+  configure_managed_sso(monkeypatch)
+  FakeSsoExchange.calls = []
+  FakeSsoExchange.response = {
+    "sub": "user_original",
+    "email": "owner@example.com",
+    "name": "Owner",
+  }
+  FakeSsoExchange.status_code = 200
+  monkeypatch.setattr(auth_routes.httpx, "AsyncClient", FakeSsoExchange)
+
+  first = client.get("/api/auth/sso/start", follow_redirects=False)
+  first_query = urllib.parse.parse_qs(
+    urllib.parse.urlparse(first.headers["location"]).query
+  )
+  callback = client.get(
+    "/api/auth/sso/callback",
+    params={"code": "first-code", "state": first_query["state"][0]},
+    follow_redirects=False,
+  )
+  assert callback.headers["location"] == "/shell/?mobius_sso=1"
+  client.post("/api/auth/sso/session")
+
+  FakeSsoExchange.response = {
+    "sub": "user_different",
+    "email": "other@example.com",
+    "name": "Other",
+  }
+  second = client.get("/api/auth/sso/start", follow_redirects=False)
+  second_query = urllib.parse.parse_qs(
+    urllib.parse.urlparse(second.headers["location"]).query
+  )
+  denied = client.get(
+    "/api/auth/sso/callback",
+    params={"code": "second-code", "state": second_query["state"][0]},
+    follow_redirects=False,
+  )
+
+  assert denied.status_code == 303
+  assert denied.headers["location"] == "/shell/?mobius_sso_error=1"
+  owners = db.query(models.Owner).all()
+  assert len(owners) == 1
+  assert owners[0].sso_subject == "user_original"
+
+
+def test_managed_sso_exchange_failure_does_not_create_owner(
+  client, db, monkeypatch,
+):
+  from app import models
+  from app.routes import auth as auth_routes
+
+  configure_managed_sso(monkeypatch)
+  FakeSsoExchange.calls = []
+  FakeSsoExchange.status_code = 400
+  monkeypatch.setattr(auth_routes.httpx, "AsyncClient", FakeSsoExchange)
+  start = client.get("/api/auth/sso/start", follow_redirects=False)
+  query = urllib.parse.parse_qs(
+    urllib.parse.urlparse(start.headers["location"]).query
+  )
+
+  callback = client.get(
+    "/api/auth/sso/callback",
+    params={"code": "rejected-code", "state": query["state"][0]},
+    follow_redirects=False,
+  )
+
+  assert callback.status_code == 303
+  assert callback.headers["location"] == "/shell/?mobius_sso_error=1"
+  assert db.query(models.Owner).count() == 0
 
 
 def test_setup_rejects_duplicate(client):

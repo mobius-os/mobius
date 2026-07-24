@@ -318,6 +318,12 @@ export const api = {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ username, password }),
     }),
+    sso: {
+      startUrl: (returnPath = '/') => (
+        `${BASE}/api/auth/sso/start?return_path=${encodeURIComponent(returnPath)}`
+      ),
+      consume: () => apiFetch('/auth/sso/session', { method: 'POST' }),
+    },
     setup: {
       status: () => apiFetch('/auth/setup/status'),
       create: (payload) => apiFetch('/auth/setup', {
