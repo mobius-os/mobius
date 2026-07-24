@@ -103,8 +103,8 @@ export const CHAT_CONTRACT = [
     title: 'Hold the reader through disclosure toggles',
     summary:
       'Collapsing or expanding thinking, tool, and activity disclosures keeps '
-      + 'the reader anchor fixed and never stacks provisional spacer '
-      + 'reservations across rapid toggles.',
+      + 'the reader anchor fixed. The helper never writes spacer; the sole '
+      + 'owner recomputes room only for the visible latest user row.',
   },
 ]
 
@@ -231,31 +231,29 @@ export function cushionPresent(snap, { min = PIN_BOTTOM_ROOM, pinOffset = PIN_OF
 
 /** C7 anchor-held-through-toggle: collapsing/expanding a disclosure (a thinking
  *  block, tool card, or activity stretch) must not move the reader. The anchor's
- *  viewport-top stays put across the toggle (±tolerance), AND the dynamic spacer
- *  must not accumulate reservation across repeated toggles: after a collapse it
- *  may grow by at most the one removed body's height, never a stacked multiple
- *  (the "spacer over-reserves across rapid toggles" regression). This is the
- *  disclosure seam where preserveTogglePosition and useScrollMode share the
- *  spacer — the interaction that regressed repeatedly. `bodyH` is the collapsed
- *  body's outer height; pass 0 for an expand (spacer must not exceed baseline). */
+ *  viewport-top stays put across the toggle (±tolerance). The disclosure helper
+ *  never writes spacer; the scroll owner may independently consume/restore an
+ *  exact deficit only when the latest user row remains visible. */
 export function anchorHeldThroughToggle(
-  before, after, { tolerance = 2, bodyH = 0, spacerBaseline = null } = {}) {
+  before, after, { tolerance = 2 } = {}) {
   const id = 'anchor-held-through-toggle'
-  const expected = `anchor top drift <= ${tolerance}; spacer <= baseline + bodyH`
+  const expected = `anchor top drift <= ${tolerance}; positive spacer requires visible latest user`
   if (!before || !after || before.anchorTop == null || after.anchorTop == null) {
     return indeterminate(id, expected,
       'no anchorTop in before/after (missing disclosure anchor)')
   }
   const drift = after.anchorTop - before.anchorTop
-  const baseline = spacerBaseline ?? before.spacerH
-  // Spacer accumulation check only when both sides expose a spacer height.
-  const spacerOk = after.spacerH == null || baseline == null
-    ? true
-    : after.spacerH <= baseline + Math.max(0, bodyH) + tolerance
+  const spacerOk = after.spacerH == null
+    || after.spacerH <= tolerance
+    || after.latestUserVisible === true
   return {
     ok: Math.abs(drift) <= tolerance && spacerOk,
     id, expected,
-    measured: { drift, spacerBefore: baseline, spacerAfter: after.spacerH },
+    measured: {
+      drift,
+      spacerBefore: before.spacerH,
+      spacerAfter: after.spacerH,
+    },
   }
 }
 

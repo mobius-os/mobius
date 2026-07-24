@@ -585,7 +585,7 @@ test('reader reaching the reserved physical bottom keeps the live pin armed', ()
   }), livePin, 'the existing pin identity stays intact')
 })
 
-test('reader reaching reserved bottom repairs a lost live pin instead of following immediately', () => {
+test('reader reaching visible latest-user reservation creates a live pin', () => {
   assert.deepEqual(modeAfterReaderReachesBottom({
     mode: { kind: 'FOLLOW_BOTTOM' },
     spacerH: 320,
@@ -605,24 +605,13 @@ test('reader reaches ordinary bottom only after reservation is exhausted', () =>
   }), { kind: 'FOLLOW_BOTTOM' })
 })
 
-test('idle reserved bottom is a settled pin and cannot manufacture follow', () => {
+test('reader reaching visible latest-user reservation creates a settled pin', () => {
   assert.deepEqual(modeAfterReaderReachesBottom({
     mode: { kind: 'ANCHOR_AT', key: 'user-c-123', offset: 4 },
     spacerH: 320,
     turnRunning: false,
     lastUserCid: 'c-123',
   }), { kind: 'PIN_USER_MSG', cid: 'c-123' })
-})
-
-test('a bottom edge created by anchor reservation keeps the reader anchor', () => {
-  const anchor = { kind: 'ANCHOR_AT', key: 'assistant-question', offset: 60 }
-  assert.equal(modeAfterReaderReachesBottom({
-    mode: anchor,
-    spacerH: 180,
-    anchorReservation: true,
-    turnRunning: true,
-    lastUserCid: 'c-123',
-  }), anchor)
 })
 
 test('a short settled pin retires automatic follow but keeps its identity', () => {
@@ -1080,6 +1069,8 @@ test('applyMode PIN resolves the row by its exact data-cid', () => {
 function makeSpacerScrollEl({ clientHeight, queuedTray = null }) {
   return {
     clientHeight,
+    scrollTop: 0,
+    querySelector: () => null,
     parentElement: {
       querySelector(selector) {
         if (selector === '.queued') return queuedTray
@@ -1089,15 +1080,172 @@ function makeSpacerScrollEl({ clientHeight, queuedTray = null }) {
   }
 }
 
-test('spacer reservation is independent from pin mode', () => {
+test('spacer reservation belongs to the visible latest user row in any mode', () => {
   const scrollEl = makeSpacerScrollEl({ clientHeight: 600 })
+  scrollEl.scrollTop = 500
   const listEl = { offsetHeight: 900 }
-  const lastUserMsgEl = { offsetTop: 700 }
+  const lastUserMsgEl = {
+    offsetTop: 700,
+    offsetHeight: 80,
+    dataset: { cid: 'c-1' },
+  }
 
   assert.equal(
-    _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 600),
+    _computeSpacerH(
+      scrollEl,
+      listEl,
+      lastUserMsgEl,
+      600,
+      { kind: 'PIN_USER_MSG', cid: 'c-1' },
+    ),
     396,
   )
+  assert.equal(
+    _computeSpacerH(
+      scrollEl,
+      listEl,
+      lastUserMsgEl,
+      600,
+      { kind: 'ANCHOR_AT', key: 'a-1', offset: 0 },
+    ),
+    396,
+    'mode does not retire room while the latest user row is visible',
+  )
+  assert.equal(
+    _computeSpacerH(
+      scrollEl,
+      listEl,
+      lastUserMsgEl,
+      600,
+      { kind: 'PIN_USER_MSG', cid: 'different-row' },
+    ),
+    396,
+    'visibility, not stale mode identity, owns the latest row reservation',
+  )
+})
+
+test('spacer disappears when only an older user row is visible', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 600 })
+  scrollEl.scrollTop = 0
+  const listEl = { offsetHeight: 1400 }
+  const latestUserMsgEl = {
+    offsetTop: 900,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+
+  assert.equal(
+    _computeSpacerH(
+      scrollEl,
+      listEl,
+      latestUserMsgEl,
+      600,
+      { kind: 'ANCHOR_AT', key: 'older-user', offset: 0 },
+    ),
+    0,
+    'a visible older row cannot borrow reservation from the off-screen latest row',
+  )
+})
+
+test('applied anchor viewport outranks stale current visibility', () => {
+  const anchor = { offsetTop: 100, offsetHeight: 80 }
+  const scrollEl = {
+    clientHeight: 600,
+    scrollTop: 500,
+    querySelector(selector) {
+      return selector === '[data-key="older-anchor"]' ? anchor : null
+    },
+  }
+  const latestUserMsgEl = {
+    offsetTop: 700,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+
+  assert.equal(
+    _computeSpacerH(
+      scrollEl,
+      { offsetHeight: 1000 },
+      latestUserMsgEl,
+      600,
+      { kind: 'ANCHOR_AT', key: 'older-anchor', offset: 0 },
+    ),
+    0,
+    'a pending anchor that hides the latest row must not carry stale room into its applied viewport',
+  )
+})
+
+test('applied anchor may reserve before current geometry reaches its visible latest row', () => {
+  const anchor = { offsetTop: 600, offsetHeight: 80 }
+  const scrollEl = {
+    clientHeight: 600,
+    scrollTop: 0,
+    querySelector(selector) {
+      return selector === '[data-key="latest-anchor"]' ? anchor : null
+    },
+  }
+  const latestUserMsgEl = {
+    offsetTop: 700,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+
+  assert.equal(
+    _computeSpacerH(
+      scrollEl,
+      { offsetHeight: 900 },
+      latestUserMsgEl,
+      600,
+      { kind: 'ANCHOR_AT', key: 'latest-anchor', offset: 100 },
+    ),
+    396,
+    'mount can establish exact room before applying the saved visible-row anchor',
+  )
+})
+
+test('keyboard-closed height cannot make an actually hidden row visible', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 400 })
+  const latestUserMsgEl = {
+    offsetTop: 500,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+
+  assert.equal(
+    _computeSpacerH(
+      scrollEl,
+      { offsetHeight: 700 },
+      latestUserMsgEl,
+      800,
+      { kind: 'INITIAL' },
+    ),
+    0,
+    'fullViewH sizes eligible room but actual clientHeight decides visibility',
+  )
+})
+
+test('tool expansion consumes reservation and collapse restores the exact deficit', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 915 })
+  const lastUserMsgEl = {
+    offsetTop: 200,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+  const mode = { kind: 'ANCHOR_AT', key: 'latest-user', offset: 4 }
+
+  const collapsed = _computeSpacerH(
+    scrollEl, { offsetHeight: 500 }, lastUserMsgEl, 915, mode,
+  )
+  const expanded = _computeSpacerH(
+    scrollEl, { offsetHeight: 1300 }, lastUserMsgEl, 915, mode,
+  )
+  const collapsedAgain = _computeSpacerH(
+    scrollEl, { offsetHeight: 500 }, lastUserMsgEl, 915, mode,
+  )
+
+  assert.equal(collapsed, 611)
+  assert.equal(expanded, 0)
+  assert.equal(collapsedAgain, collapsed)
 })
 
 test('spacer reservation returns zero before there is a user message', () => {
@@ -1107,34 +1255,8 @@ test('spacer reservation returns zero before there is a user message', () => {
   assert.equal(_computeSpacerH(scrollEl, listEl, null, 600), 0)
 })
 
-test('viewport growth keeps a question-answer anchor reachable before output resumes', () => {
-  const anchor = { offsetTop: 1320, offsetHeight: 220 }
-  const scrollEl = {
-    clientHeight: 960,
-    querySelector(selector) {
-      return selector === '[data-key="assistant-question"]' ? anchor : null
-    },
-  }
-  const listEl = { offsetHeight: 1500 }
-  const lastUserMsgEl = { offsetTop: 900 }
-  const mode = {
-    kind: 'ANCHOR_AT',
-    key: 'assistant-question',
-    offset: 60,
-  }
-
-  const spacerH = _computeSpacerH(
-    scrollEl, listEl, lastUserMsgEl, 960, mode,
-  )
-  const target = anchor.offsetTop - mode.offset
-  const maxScrollTop = listEl.offsetHeight + spacerH - scrollEl.clientHeight
-
-  assert.equal(maxScrollTop, target,
-    'the frozen card position is reachable in the first grown-viewport frame')
-})
-
-test('anchor reservation disappears once real content makes the target reachable', () => {
-  const anchor = { offsetTop: 1320, offsetHeight: 220 }
+test('question-answer anchor gets no room when the latest user row is off-screen', () => {
+  const anchor = { offsetTop: 60, offsetHeight: 220 }
   const scrollEl = {
     clientHeight: 960,
     querySelector(selector) {
@@ -1144,15 +1266,23 @@ test('anchor reservation disappears once real content makes the target reachable
   const mode = { kind: 'ANCHOR_AT', key: 'assistant-question', offset: 60 }
 
   assert.equal(
-    _computeSpacerH(scrollEl, { offsetHeight: 2300 }, { offsetTop: 900 }, 960, mode),
+    _computeSpacerH(
+      scrollEl,
+      { offsetHeight: 1500 },
+      { offsetTop: 1100, offsetHeight: 80, dataset: { cid: 'c-1' } },
+      960,
+      mode,
+    ),
     0,
+    'an unreachable anchor clamps to conversation content instead',
   )
 })
 
-test('a live off-content anchor reserves its exact reader-owned position', () => {
+test('an off-content legacy anchor clamps to content then reserves for its visible latest user', () => {
   const anchor = { offsetTop: 500, offsetHeight: 220 }
   const scrollEl = {
     clientHeight: 700,
+    scrollTop: 1400,
     querySelector(selector) {
       return selector === '[data-key="assistant-question"]' ? anchor : null
     },
@@ -1161,9 +1291,14 @@ test('a live off-content anchor reserves its exact reader-owned position', () =>
     kind: 'ANCHOR_AT', key: 'assistant-question', offset: -900,
   }
   assert.equal(
-    _computeSpacerH(scrollEl, { offsetHeight: 700 }, { offsetTop: 100 }, 700, mode),
-    1400,
-    'live reader ownership survives in reserved room; persistence rejects it',
+    _computeSpacerH(
+      scrollEl,
+      { offsetHeight: 700 },
+      { offsetTop: 100, offsetHeight: 80, dataset: { cid: 'c-1' } },
+      700,
+      mode,
+    ),
+    96,
   )
 })
 
@@ -1176,10 +1311,20 @@ test('queued tray does not shorten spacer reservation', () => {
   }
   const scrollEl = makeSpacerScrollEl({ clientHeight: 600, queuedTray })
   const listEl = { offsetHeight: 900 }
-  const lastUserMsgEl = { offsetTop: 700 }
+  const lastUserMsgEl = {
+    offsetTop: 700,
+    offsetHeight: 80,
+    dataset: { cid: 'c-1' },
+  }
 
   assert.equal(
-    _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 600),
+    _computeSpacerH(
+      scrollEl,
+      listEl,
+      lastUserMsgEl,
+      600,
+      { kind: 'PIN_USER_MSG', cid: 'c-1' },
+    ),
     396,
   )
 })
@@ -1199,8 +1344,17 @@ function pinReachable({ fullViewH, clientHeight, listH, lastUserTop }) {
     scrollHeight: 0, scrollTop: 0, clientHeight,
   })
   const listEl = { offsetHeight: listH }
-  const lastUserMsgEl = { offsetTop: lastUserTop }
-  const spacerH = _computeSpacerH(scrollEl, listEl, lastUserMsgEl, fullViewH)
+  const lastUserMsgEl = {
+    offsetTop: lastUserTop,
+    dataset: { cid: 'pin-row' },
+  }
+  const spacerH = _computeSpacerH(
+    scrollEl,
+    listEl,
+    lastUserMsgEl,
+    fullViewH,
+    { kind: 'PIN_USER_MSG', cid: 'pin-row' },
+  )
   const scrollHeight = listH + spacerH
   const maxScrollTop = scrollHeight - clientHeight
   const pinTarget = Math.max(0, lastUserTop - 4) // PIN_OFFSET = 4
@@ -1313,33 +1467,43 @@ test('F1: a collapse-clamped pin is recovered by the settle once the spacer rest
 
 
 // ---------------------------------------------------------------------------
-// F2 — spacer reservation survives remount. FOLLOW_BOTTOM must ignore that
-// reservable room rather than deleting it to avoid an empty restored viewport.
+// F2 — remount reservation follows whether the latest user row is visible.
 // ---------------------------------------------------------------------------
 
-test('F2: an idle-mounted chat still reserves exactly enough room for its last user row to reach the top', () => {
+test('F2: an idle-mounted short chat reserves for its visible latest user', () => {
   const scrollEl = makeSpacerScrollEl({ clientHeight: 915 })
   const listEl = { offsetHeight: 260 }        // 2-message short chat, fits the viewport
-  const lastUserMsgEl = { offsetTop: 200 }
-  const spacerH = _computeSpacerH(scrollEl, listEl, lastUserMsgEl, 915)
-  const maxScrollTop = listEl.offsetHeight + spacerH - scrollEl.clientHeight
-  assert.equal(maxScrollTop, lastUserMsgEl.offsetTop - PIN_OFFSET,
-    'remount keeps exactly enough room to lift the last user row, with no excess')
+  const lastUserMsgEl = {
+    offsetTop: 200,
+    offsetHeight: 60,
+    dataset: { cid: 'c-1' },
+  }
+  const spacerH = _computeSpacerH(
+    scrollEl,
+    listEl,
+    lastUserMsgEl,
+    915,
+    { kind: 'ANCHOR_AT', key: 'a-1', offset: 0 },
+  )
+  assert.equal(spacerH, 851)
 })
 
-test('F2: FOLLOW_BOTTOM ignores permanent spacer room so a short restored chat stays on-screen', () => {
-  const userTop = 8
+test('F2: a deliberately restored pin owns exact room and keeps its user row visible', () => {
   const shortList = 260
   const clientHeight = 915
   const lowUserTop = 200
   const spacerH = _computeSpacerH(
-    { clientHeight }, { offsetHeight: shortList }, { offsetTop: lowUserTop }, clientHeight,
+    { clientHeight },
+    { offsetHeight: shortList },
+    { offsetTop: lowUserTop, offsetHeight: 60, dataset: { cid: 'c-1' } },
+    clientHeight,
+    { kind: 'PIN_USER_MSG', cid: 'c-1' },
   )
   const restored = makePinnableScrollEl({ listH: shortList, spacerH, clientHeight, userTop: lowUserTop, cid: 'c-1' })
-  applyMode(restored, { kind: 'FOLLOW_BOTTOM' })
-  assert.equal(restored.scrollTop, 0,
-    'short real content does not scroll merely because reservable room exists')
-  assert.ok(userTop - restored.scrollTop >= 0, 'the restored conversation is on-screen')
+  applyMode(restored, { kind: 'PIN_USER_MSG', cid: 'c-1' })
+  assert.equal(restored.scrollTop, lowUserTop - PIN_OFFSET)
+  assert.equal(restored.scrollHeight - restored.clientHeight, restored.scrollTop,
+    'the reservation ends exactly at the visible pin target')
 })
 
 
