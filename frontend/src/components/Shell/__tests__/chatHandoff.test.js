@@ -12,16 +12,11 @@ function ruleBody(selector) {
   return shellCss.match(new RegExp(`${escaped}\\s*\\{([\\s\\S]*?)\\}`))?.[1] || ''
 }
 
-test('chat display readiness trusts settled cache but keeps cold/running gates', () => {
+test('chat display readiness preserves the authoritative transcript reveal gate', () => {
   assert.match(
     chatView,
-    /const cachedDisplayReady = initialEntryPhase === 'cached' && revealed/,
-    'a settled cached transcript can hand off without waiting on network freshness',
-  )
-  assert.match(
-    chatView,
-    /const displayReady = cachedDisplayReady\s*\|\| \(!loading && \(revealed \|\| showEmpty \|\| showLoadError\)\)/,
-    'cold and running transcripts keep the authoritative load and reveal gates',
+    /const displayReady = !loading && \(revealed \|\| showEmpty \|\| showLoadError\)/,
+    'a cached transcript cannot paint before the live chat read confirms it',
   )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
     'readiness must reach Shell before the browser paints the hidden transcript')

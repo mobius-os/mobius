@@ -100,12 +100,11 @@ def _job_context(app_id: int, token: str) -> dict | None:
 def _job_matches_context(resolved: Path, context: dict) -> bool:
   """Bind a scheduled script to the exact app whose authority it receives.
 
-  Older backends omit ``source_dir``; accept that response during a rolling
-  platform/image update. Once the field is present, malformed, missing, or
-  mismatched paths fail closed before the app token reaches a child process.
+  Missing, malformed, or mismatched identity fails closed before the app token
+  reaches a child process. During a platform-update window, an older backend
+  may omit ``source_dir``; skipping that run is safer than retaining a
+  permanent compatibility path around this capability boundary.
   """
-  if "source_dir" not in context:
-    return True
   source_dir = context.get("source_dir")
   if not isinstance(source_dir, str) or not source_dir:
     return False

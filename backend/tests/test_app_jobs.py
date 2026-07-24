@@ -155,7 +155,11 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
     runner, "_app_is_live", lambda app_id, token=None: True,
   )
   monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
-  monkeypatch.setattr(runner, "_job_context", lambda app_id, token: {})
+  monkeypatch.setattr(
+    runner,
+    "_job_context",
+    lambda app_id, token: {"source_dir": str(source)},
+  )
   popen = types.SimpleNamespace(wait=lambda: 0)
   calls = []
   monkeypatch.setattr(
@@ -195,6 +199,35 @@ def test_wrapper_rejects_a_job_from_another_live_app(tmp_path, monkeypatch):
     "_job_context",
     lambda app_id, token: {"source_dir": str(reflection_source)},
   )
+  monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
+  calls = []
+  monkeypatch.setattr(
+    runner.subprocess,
+    "Popen",
+    lambda *args, **kwargs: calls.append((args, kwargs)),
+  )
+  monkeypatch.setattr(runner.sys, "argv", [
+    "app-job-runner.py", "56", str(job),
+  ])
+
+  assert runner.run() == 4
+  assert calls == []
+
+
+def test_wrapper_rejects_job_context_without_exact_app_identity(
+  tmp_path, monkeypatch,
+):
+  runner = _load_runner()
+  source = tmp_path / "data" / "apps" / "memory"
+  source.mkdir(parents=True)
+  job = source / "fetch.sh"
+  job.write_text("#!/bin/sh\nexit 0\n")
+  monkeypatch.setattr(runner, "DATA_DIR", tmp_path / "data")
+  monkeypatch.setattr(runner, "_mint_app_token", lambda app_id: "app-token")
+  monkeypatch.setattr(
+    runner, "_app_is_live", lambda app_id, token=None: True,
+  )
+  monkeypatch.setattr(runner, "_job_context", lambda app_id, token: {})
   monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
   calls = []
   monkeypatch.setattr(

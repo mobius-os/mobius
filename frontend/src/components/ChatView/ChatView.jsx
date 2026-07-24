@@ -329,9 +329,9 @@ export default function ChatView({
   const offsetRef = useRef(offset)
   offsetRef.current = offset
   const [loading, setLoading] = useState(!cached)
-  // A settled warm cache is a complete renderable transcript and may reveal
-  // while freshness loads. A cached running turn is different: its live bridge
-  // still needs the first refresh/catch-up handshake before takeover.
+  // Warm cache content is useful immediately, but it is not authoritative for
+  // entry layout. The first refresh decides whether an already-running turn's
+  // catch-up must settle before the transcript can be revealed.
   const cachedEntryPhase = cached && !cached.running ? 'cached' : 'history'
   const [initialEntryPhase, setInitialEntryPhase] = useState(cachedEntryPhase)
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
@@ -3393,15 +3393,11 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  // A settled cache is already a complete renderable transcript, so let the
-  // shell hand it over as soon as scroll restoration reveals it while the
-  // freshness request continues in the background. Running caches stay on the
-  // strict path: their bridge/catch-up handshake must settle before takeover.
-  // Cold loads likewise keep the outgoing chat painted until authoritative
-  // content, confirmed emptiness, or a real error exists.
-  const cachedDisplayReady = initialEntryPhase === 'cached' && revealed
-  const displayReady = cachedDisplayReady
-    || (!loading && (revealed || showEmpty || showLoadError))
+  // The scroll safety cap may reveal an otherwise empty DOM while the initial
+  // request is still in flight. That protects a standalone ChatView from being
+  // hidden forever, but it is not a valid shell handoff: keep the outgoing chat
+  // painted until this chat has authoritative content, emptiness, or an error.
+  const displayReady = !loading && (revealed || showEmpty || showLoadError)
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])
