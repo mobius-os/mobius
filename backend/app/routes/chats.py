@@ -25,6 +25,7 @@ from app.chat import (
   recover_chat_generation,
   stop_chat_for,
 )
+from app.broadcast import get_system_broadcast
 from app.database import get_db
 from app.deps import (
   Principal, get_owner_or_chat_embed_principal, get_current_owner, get_principal,
@@ -1323,6 +1324,12 @@ async def delete_chat(
   if chat:
     chat.deleted_at = now_naive_utc()
     db.commit()
+    # Publish the committed tombstone before best-effort run cleanup. If that
+    # cleanup fails after the commit, every live shell must still project the
+    # durable deletion rather than retain a stale drawer row.
+    get_system_broadcast().publish(
+      {"type": "chat_deleted", "chatId": str(chat_id)}
+    )
   # Flag the chat soft-deleted in the registry (NOT forget_chat, which resets
   # the generation counter to a reusable 0). mark_chat_deleted preserves the
   # finite counter and makes `current_run_generation` return +inf, so a run
@@ -1340,7 +1347,17 @@ async def delete_chat(
   # run_status + drops the actor's _run_token_owner entry; it is best-effort
   # and safe on a soft-deleted row (clear commands don't resurrect), and
   # idempotent when the run state is already clean (the common idle delete).
-  await _clear_run_status(chat_id, terminal_status="stopped")
+  try:
+    await _clear_run_status(chat_id, terminal_status="stopped")
+  except Exception:
+    # The tombstone is already committed and published. Returning a 500 now
+    # would make the client treat an authoritative deletion as inconclusive,
+    # recreating the exact stale-row ambiguity this route must eliminate. Boot
+    # reconciliation can repair a residual run marker.
+    log.exception(
+      "Chat %s was deleted but its durable run marker could not be cleared",
+      chat_id,
+    )
 
 
 @router.post("/{chat_id}/recover", dependencies=[Depends(reject_cross_site)])
@@ -1363,6 +1380,9 @@ def recover_chat(
   # Clear the registry's deleted flag and bump to a generation newer than every
   # pre-delete run, so a resurrected stale run can't reclaim the recovered chat.
   recover_chat_generation(chat_id)
+  get_system_broadcast().publish(
+    {"type": "chat_recovered", "chatId": str(chat_id)}
+  )
   return {"ok": True}
 
 

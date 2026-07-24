@@ -525,12 +525,12 @@ test('builder mode + FOREGROUND: unchanged tree placement (no slot write)', () =
 
 // ── the durable-list reconnect wiring is still in place ─────────────────────
 
-test('shell reconciles the durable app list whenever the system stream reconnects', () => {
+test('shell reconciles both durable drawer lists whenever the system stream reconnects', () => {
   const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
-  assert.match(
-    shellSource,
-    /useSystemEventStream\(handleSystemEvent, \{ onOpen: refreshApps \}\)/,
-  )
+  assert.match(shellSource, /const reconcileSystemStateOnOpen = useCallback/)
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*refreshApps\(\)/)
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*refreshChats\(\)/)
+  assert.match(shellSource, /useSystemEventStream\(handleSystemEvent, \{ onOpen: reconcileSystemStateOnOpen \}\)/)
 })
 
 test('stale pending updates offer the canonical review surface', () => {

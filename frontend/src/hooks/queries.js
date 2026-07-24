@@ -91,10 +91,13 @@ async function fetchApps() {
   return Array.isArray(data) ? data : []
 }
 
-function useAppsQuery() {
+function useAppsQuery({ reconcile } = {}) {
   return useQuery({
     queryKey: appsKey,
-    queryFn: fetchApps,
+    queryFn: async () => {
+      const rows = await fetchApps()
+      return reconcile ? reconcile(rows) : rows
+    },
   })
 }
 

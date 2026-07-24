@@ -6,7 +6,10 @@ import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
-import { api, apiFetch, jsonOrThrow, probeDeletion, BASE, clearAppRuntimeData } from '../../api/client.js'
+import {
+  api, apiFetch, jsonOrThrow, probeDeletion, BASE, clearAppRuntimeData,
+  invalidateShellListCache,
+} from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, {
   coldRestoredCanvasAppId,
@@ -67,6 +70,12 @@ import {
   rememberCreatedChat,
   reusableChatDetailVerdict,
 } from './newChatPolicy.js'
+import {
+  forgetConfirmedDeletion,
+  forgetConfirmedDeletionIfExists,
+  rememberConfirmedDeletion,
+  withoutConfirmedDeletions,
+} from './confirmedDeletion.js'
 import {
   reloadWhenWorkerTakesOver,
   shouldRearmShellApply,
@@ -520,15 +529,27 @@ export default function Shell() {
 
   const { loadTheme } = useTheme()
   const queryClient = useQueryClient()
-  const appsQuery = appQueries.list.useQuery()
+  // Confirmed writes outrank offline-capable list reads. These session-scoped
+  // tombstones filter every query completion (including an in-flight,
+  // pre-delete NetworkFirst fallback) until a recovery succeeds.
+  const deletedChatIdsRef = useRef(new Set())
+  const deletedAppIdsRef = useRef(new Set())
+  const reconcileApps = useCallback(
+    rows => withoutConfirmedDeletions(rows, deletedAppIdsRef.current),
+    [],
+  )
+  const appsQuery = appQueries.list.useQuery({ reconcile: reconcileApps })
   // Create responses are authoritative even when the next NetworkFirst list
   // request has to fall back to a just-stale service-worker copy. Reconcile at
   // the query function boundary so the protected row never disappears from
   // cache/render between fetch settlement and an after-the-fact patch.
   const recentlyCreatedChatsRef = useRef(new Map())
   const reconcileCreatedChats = useCallback(
-    rows => mergeChatListWithCreatedGuards(
-      rows, recentlyCreatedChatsRef.current,
+    rows => withoutConfirmedDeletions(
+      mergeChatListWithCreatedGuards(
+        rows, recentlyCreatedChatsRef.current,
+      ),
+      deletedChatIdsRef.current,
     ),
     [],
   )
@@ -594,12 +615,22 @@ export default function Shell() {
   const initialSlotReconciledRef = useRef(false)
   // toast state: null | { message, variant, duration, action }
   // variant: 'info' | 'error'  (see components/ui/Toast.jsx)
+  const toastSequenceRef = useRef(0)
   const [toast, setToast] = useState(null)
   const [settingsFocusTarget, setSettingsFocusTarget] = useState(null)
-  function showToast(message, { variant = 'info', duration = 4000, action } = {}) {
-    setToast({ message, variant, duration, action })
-  }
-  function dismissToast() { setToast(null) }
+  const showToast = useCallback((
+    message,
+    { variant = 'info', duration = 4000, action } = {},
+  ) => {
+    toastSequenceRef.current += 1
+    setToast({
+      message, variant, duration, action, sequence: toastSequenceRef.current,
+    })
+  }, [])
+  // Stable identity is part of Toast's timer contract. Recreating this callback
+  // on every Shell render resets the effect timer while chats stream, making a
+  // nominal five-second notice linger indefinitely.
+  const dismissToast = useCallback(() => { setToast(null) }, [])
   const handleAppIntentDelivered = useCallback((appId, delivered) => {
     setAppIntents((prev) => {
       const key = String(appId)
@@ -2049,22 +2080,69 @@ export default function Shell() {
     return queryClient.cancelQueries({ queryKey: appQueries.keys.all })
       .then(() => queryClient.fetchQuery({
         queryKey: appQueries.keys.all,
-        queryFn: appQueries.list.fetch,
+        queryFn: async () => reconcileApps(await appQueries.list.fetch()),
         staleTime: 0,
       }))
       .then(data => data || [])
       .catch(() => queryClient.getQueryData(appQueries.keys.all) || [])
-  }, [queryClient])
+  }, [queryClient, reconcileApps])
   const refreshChats = useCallback(() => {
     return queryClient.refetchQueries({ queryKey: chatQueries.keys.all })
       .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
       .catch(() => [])
   }, [queryClient])
 
+  const confirmChatDeleted = useCallback((id) => {
+    const sid = String(id)
+    rememberConfirmedDeletion(deletedChatIdsRef.current, sid)
+    recentlyCreatedChatsRef.current.delete(sid)
+    queryClient.setQueryData(chatQueries.keys.all, current => {
+      const next = withoutConfirmedDeletions(
+        Array.isArray(current) ? current : [],
+        deletedChatIdsRef.current,
+      )
+      chatsRef.current = next
+      return next
+    })
+  }, [queryClient])
+
+  const confirmAppDeleted = useCallback((id) => {
+    const sid = String(id)
+    rememberConfirmedDeletion(deletedAppIdsRef.current, sid)
+    queryClient.setQueryData(appQueries.keys.all, current => {
+      const next = withoutConfirmedDeletions(
+        Array.isArray(current) ? current : [],
+        deletedAppIdsRef.current,
+      )
+      appsRef.current = next
+      return next
+    })
+  }, [queryClient])
+
+  const confirmChatRecovered = useCallback((id) => {
+    forgetConfirmedDeletion(deletedChatIdsRef.current, id)
+  }, [])
+
+  const confirmAppRecovered = useCallback((id) => {
+    forgetConfirmedDeletion(deletedAppIdsRef.current, id)
+  }, [])
+
+  const confirmAppIdentityIsLive = useCallback((id) => (
+    forgetConfirmedDeletionIfExists(
+      deletedAppIdsRef.current,
+      id,
+      appId => probeDeletion(`/apps/${encodeURIComponent(appId)}`),
+    )
+  ), [])
+
+  const reconcileDeletedAppIdentities = useCallback(() => Promise.all(
+    [...deletedAppIdsRef.current].map(confirmAppIdentityIsLive),
+  ), [confirmAppIdentityIsLive])
+
   const { openAppWithIntent, handleChatInternalNav } = useAppIntentNavigation({
     appsRef,
     refreshApps,
-    setToast,
+    showToast,
     setAppIntents,
     navToRef,
   })
@@ -2402,15 +2480,41 @@ export default function Shell() {
       // The durable marker was committed with an app-attributed notification.
       // A refetch surfaces the dot; if the app is already visible, the effect
       // above immediately acknowledges it instead of leaving a stale nudge.
-      refreshApps()
+      void invalidateShellListCache('apps').then(refreshApps)
+    } else if (ev.type === 'chat_deleted') {
+      // Exact mutation evidence from this or another live tab. Update the
+      // in-memory drawer synchronously; the normal missing-active-chat effect
+      // owns any route/view repair in tabs that happened to have it open.
+      if (ev.chatId) confirmChatDeleted(ev.chatId)
+      void invalidateShellListCache('chats')
+    } else if (ev.type === 'chat_recovered') {
+      // Recovery is the sole operation allowed to clear the session tombstone.
+      if (ev.chatId) confirmChatRecovered(ev.chatId)
+      void invalidateShellListCache('chats').then(refreshChats)
+    } else if (ev.type === 'app_deleted') {
+      if (ev.appId) confirmAppDeleted(ev.appId)
+      void invalidateShellListCache('apps')
+    } else if (ev.type === 'app_recovered') {
+      if (ev.appId) confirmAppRecovered(ev.appId)
+      void invalidateShellListCache('apps').then(refreshApps)
     } else if (ev.type === 'app_updated' || ev.type === 'app_created') {
       const placementRequest = workspaceRequestFromSystemEvent(ev)
+      // app_updated is also the reinstall event for a tombstoned store app,
+      // while app_created may carry an integer id freed by TTL purge and reused
+      // for a different installation. A direct resource probe—not a staleable
+      // list—is the proof that either id is live again.
+      const reconcileIdentity = ev.appId
+        ? confirmAppIdentityIsLive(ev.appId)
+        : Promise.resolve(false)
       // Refresh server truth before warming or placing. app_updated is
       // refresh-only; app_created may additionally issue one background
       // workspace placement after the returned row confirms the relationship.
       // `updated_at` drives the iframe cache-buster and the derived built-app
       // CTA, so neither needs a separate client mirror.
-      refreshApps().then(updatedApps => {
+      Promise.all([
+        invalidateShellListCache('apps'),
+        reconcileIdentity,
+      ]).then(() => refreshApps()).then(updatedApps => {
         // Warm the SW cache for the updated app immediately — the edit
         // rotated the `?v=` cache key, so without this the next open pays
         // the network round trip. Every app's read path is cached now
@@ -2546,6 +2650,8 @@ export default function Shell() {
     // activeAppIdRef, activeChatIdRef, drawerOpenRef) so stale closure values
     // can't be serialized. Refs themselves don't need to be in deps (they're
     // stable objects whose .current is read at call time, not at capture time).
+    confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
+    confirmChatDeleted, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished,
     markStreamingEnd, markStreamingStart,
     placeInWorkspace, refreshApps, refreshChats, warmAppCode,
@@ -2561,7 +2667,17 @@ export default function Shell() {
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_created events.
-  useSystemEventStream(handleSystemEvent, { onOpen: refreshApps })
+  const reconcileSystemStateOnOpen = useCallback(() => {
+    void Promise.all([
+      invalidateShellListCache('apps'),
+      invalidateShellListCache('chats'),
+      reconcileDeletedAppIdentities(),
+    ]).then(() => {
+      refreshApps()
+      refreshChats()
+    })
+  }, [reconcileDeletedAppIdentities, refreshApps, refreshChats])
+  useSystemEventStream(handleSystemEvent, { onOpen: reconcileSystemStateOnOpen })
 
   // Listen for postMessage events from mini-app iframes:
   //   moebius:app-error — route crash report to the chat that built the app
@@ -2997,7 +3113,10 @@ export default function Shell() {
       }
       // A 404 means the server row is already gone; remove the local phantom.
     }
-    recentlyCreatedChatsRef.current.delete(String(id))
+    // DELETE/404 is authoritative. Publish that fact into the drawer before
+    // any navigation work; every later list completion is filtered by the same
+    // session tombstone until recovery succeeds.
+    confirmChatDeleted(id)
     try { sessionStorage.removeItem(`draft:${id}`) } catch {}
     // Evict the cached messages so a future chat-ID collision (e.g.
     // recovery) can't surface stale content.
@@ -3044,6 +3163,7 @@ export default function Shell() {
           try {
             const recoverRes = await api.chats.recover(id)
             await jsonOrThrow(recoverRes, 'Chat recovery failed')
+            confirmChatRecovered(id)
             // Guard against the newChat() reuse scan picking up this
             // recovered chat before its has_messages=true propagates from
             // the server. The guard is cleared once ChatView fires
@@ -3082,6 +3202,7 @@ export default function Shell() {
       }
       // A 404 means the server row is already gone; remove the local phantom.
     }
+    confirmAppDeleted(id)
     // Retire this app's physical history + evict any warm frame before unmount
     // (contract §4.1.5), tombstone its route so Back can't recreate the tab
     // (§5.1.1), then scrub the nav-stack, then close its tab. The
@@ -3112,6 +3233,7 @@ export default function Shell() {
           try {
             const recoverRes = await api.apps.recover(id)
             await jsonOrThrow(recoverRes, 'App recovery failed')
+            confirmAppRecovered(id)
             await refreshApps()
           } catch {
             showToast("Couldn't undo — app may be gone.", { variant: 'error' })
@@ -3678,6 +3800,7 @@ export default function Shell() {
         </div>
       )}
       <Toast
+        key={toast?.sequence || 'toast-empty'}
         message={toast?.message}
         variant={toast?.variant}
         duration={toast?.duration}
