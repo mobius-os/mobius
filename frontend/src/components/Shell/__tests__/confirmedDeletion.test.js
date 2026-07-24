@@ -34,7 +34,7 @@ test('only confirmed recovery clears the tombstone', () => {
   )
 })
 
-test('a reusable app id clears only after direct live-resource evidence', async () => {
+test('a confirmed deletion clears only after direct live-resource evidence', async () => {
   const deleted = new Set(['42'])
   const verdicts = []
 
@@ -82,6 +82,13 @@ test('Shell reconciles both query completion and direct mutation paths', () => {
   assert.match(shell, /confirmChatDeleted\(id\)[\s\S]*showToast\('Chat deleted'/)
   assert.match(shell, /confirmAppDeleted\(id\)[\s\S]*showToast\('App deleted'/)
   assert.match(shell, /app_updated[\s\S]*confirmAppIdentityIsLive\(ev\.appId\)/)
-  assert.match(shell, /reconcileSystemStateOnOpen[\s\S]*reconcileDeletedAppIdentities\(\)/)
+  assert.match(
+    shell,
+    /reconcileSystemStateOnOpen[\s\S]*reconcileDeletedAppIdentities\(\)[\s\S]*reconcileDeletedChatIdentities\(\)/,
+  )
+  assert.match(
+    shell,
+    /confirmChatIdentityIsLive[\s\S]*probeDeletion\(`\/chats\/\$\{encodeURIComponent\(chatId\)\}`\)/,
+  )
   assert.match(queries, /function useAppsQuery\(\{ reconcile \} = \{\}\)/)
 })

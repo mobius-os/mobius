@@ -2104,6 +2104,14 @@ export default function Shell() {
     forgetConfirmedDeletion(deletedChatIdsRef.current, id)
   }, [])
 
+  const confirmChatIdentityIsLive = useCallback((id) => (
+    forgetConfirmedDeletionIfExists(
+      deletedChatIdsRef.current,
+      id,
+      chatId => probeDeletion(`/chats/${encodeURIComponent(chatId)}`),
+    )
+  ), [])
+
   const confirmAppRecovered = useCallback((id) => {
     forgetConfirmedDeletion(deletedAppIdsRef.current, id)
   }, [])
@@ -2119,6 +2127,10 @@ export default function Shell() {
   const reconcileDeletedAppIdentities = useCallback(() => Promise.all(
     [...deletedAppIdsRef.current].map(confirmAppIdentityIsLive),
   ), [confirmAppIdentityIsLive])
+
+  const reconcileDeletedChatIdentities = useCallback(() => Promise.all(
+    [...deletedChatIdsRef.current].map(confirmChatIdentityIsLive),
+  ), [confirmChatIdentityIsLive])
 
   const { openAppWithIntent, handleChatInternalNav } = useAppIntentNavigation({
     appsRef,
@@ -2632,7 +2644,7 @@ export default function Shell() {
     // can't be serialized. Refs themselves don't need to be in deps (they're
     // stable objects whose .current is read at call time, not at capture time).
     confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
-    confirmChatDeleted, confirmChatRecovered,
+    confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished,
     markStreamingEnd, markStreamingStart,
     placeInWorkspace, refreshApps, refreshChats, warmAppCode,
@@ -2653,11 +2665,17 @@ export default function Shell() {
       invalidateShellListCache('apps'),
       invalidateShellListCache('chats'),
       reconcileDeletedAppIdentities(),
+      reconcileDeletedChatIdentities(),
     ]).then(() => {
       refreshApps()
       refreshChats()
     })
-  }, [reconcileDeletedAppIdentities, refreshApps, refreshChats])
+  }, [
+    reconcileDeletedAppIdentities,
+    reconcileDeletedChatIdentities,
+    refreshApps,
+    refreshChats,
+  ])
   useSystemEventStream(handleSystemEvent, { onOpen: reconcileSystemStateOnOpen })
 
   // Listen for postMessage events from mini-app iframes:
