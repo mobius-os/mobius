@@ -2253,10 +2253,12 @@ async def _auto_resume_chat(
         # Share the queue lock with owner/app sends. The outer sweep check can
         # go stale while this task waits, so re-check global liveness, policy,
         # attribution, the exact latest park, and provider ownership at the
-        # actual claim point.
+        # actual claim point. Provider-limit retries are globally serial to
+        # avoid a reset storm. Planned-restart continuations are different:
+        # they are the exact, owner-opted set that was already live together
+        # before the restart, so each chat may reclaim its own slot
+        # independently.
         async with chat_queue.get_lock(chat_id):
-          if _any_chat_turn_active():
-            return False
           with SessionLocal() as check_db:
             chat = check_db.query(models.Chat).filter(
               models.Chat.id == chat_id,
@@ -2315,6 +2317,11 @@ async def _auto_resume_chat(
             resume_reason = (
               "restart" if park.park_reason == "restart" else "usage_limit"
             )
+          if (
+            resume_reason != "restart"
+            and _any_chat_turn_active()
+          ):
+            return False
           if not mark_starting(chat_id):
             return False
           claimed = True
@@ -2409,11 +2416,13 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       failure cannot silently consume the promised continuation. The narrow
       post-promote SIGKILL boundary is documented on `_auto_resume_chat`.
     - A park whose chat was deleted resolves silently.
-    - Auto-resume is controlled per chat and STRICTLY SERIAL: at most one
-      enabled park starts per tick, and none while any turn is live anywhere.
-      A blocked enabled chat stays pending for a later tick, while notify-only
-      chats in the same due batch still resolve normally. App-attributed runs
-      and queues never auto-resume.
+    - Auto-resume is controlled per chat. Provider-limit retries are strictly
+      serial: at most one starts per tick, and none while any turn is live
+      anywhere. Planned-restart continuations reclaim the exact set that was
+      already live before the restart, so every eligible chat in the batch may
+      resume independently. A blocked enabled chat stays pending for a later
+      tick, while notify-only chats in the same due batch still resolve
+      normally. App-attributed runs and queues never auto-resume.
 
   Stands down while draining — a restart is in progress, and the fresh
   process's immediate sweep picks everything up. Never raises.
@@ -2525,14 +2534,15 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       and restart_authorized
     )
 
-  auto_resume_started = False
+  limit_resume_started = False
   for run in due:
     chat_id = run.chat_id
     chat = chats.get(chat_id)
     chat_gone = chat is None or chat.deleted_at is not None
     auto_resume = wants_auto_resume(chat, run)
-    if auto_resume and (
-      auto_resume_started or _any_chat_turn_active()
+    restart_auto_resume = auto_resume and run.park_reason == "restart"
+    if auto_resume and not restart_auto_resume and (
+      limit_resume_started or _any_chat_turn_active()
     ):
       # Strictly-serial gate: a live turn (an earlier auto-resume, or the
       # owner's own send) must settle before this enabled park is processed.
@@ -2590,16 +2600,18 @@ async def sweep_reset_parks(db: Session) -> list[str]:
 
       if prepared.get("notify"):
         notify_due(chat_id, run)
-      if _any_chat_turn_active():
+      if not restart_auto_resume and _any_chat_turn_active():
         # The notification or refresh window admitted another turn. Keep the
         # durable pending state so the next sweep retries instead of silently
         # dropping the promised continuation.
         continue
-      auto_resume_started = await _auto_resume_chat(
+      resume_started = await _auto_resume_chat(
         chat_id, park_token=run.id,
       )
-      if auto_resume_started:
+      if resume_started:
         resolved.append(chat_id)
+        if not restart_auto_resume:
+          limit_resume_started = True
       continue
 
     # Notify-only/app/deleted path: resolve before the best-effort push so a

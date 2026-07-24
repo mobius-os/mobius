@@ -529,38 +529,45 @@ async def lifespan(app):
     _stalled_live_task = _asyncio.create_task(_stalled_live_loop())
 
     # Durable-continuation sweep (design §2.4): handles provider-limit resets
-    # and exact runs parked by a planned restart. It runs immediately on boot,
-    # then after a turn finishes or at the 60s fallback cadence. This is
-    # event-driven in the common path (one indexed query per completed turn),
-    # with no per-chat worker or short polling loop.
+    # and exact runs parked by a planned restart. The first pass is awaited
+    # BEFORE lifespan yields, so a reconnecting client cannot win the startup
+    # race and turn an opted-in restart into manual recovery. Later passes run
+    # after a turn finishes or at the 60s fallback cadence. This is event-
+    # driven in the common path (one indexed query per completed turn), with
+    # no per-chat worker or short polling loop.
+    from app.broadcast import get_system_broadcast as _system_broadcast
+    _reset_park_events = _system_broadcast().subscribe()
+
+    async def _sweep_reset_parks_once():
+      try:
+        _rp_db = _SweepSession()
+        try:
+          await sweep_reset_parks(_rp_db)
+        finally:
+          _rp_db.close()
+      except _asyncio.CancelledError:
+        raise
+      except Exception as _exc:
+        _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
+
+    await _sweep_reset_parks_once()
+
     async def _reset_park_loop():
-      from app.broadcast import get_system_broadcast as _system_broadcast
-      _events = _system_broadcast().subscribe()
       try:
         while True:
-          try:
-            _rp_db = _SweepSession()
-            try:
-              await sweep_reset_parks(_rp_db)
-            finally:
-              _rp_db.close()
-          except _asyncio.CancelledError:
-            raise
-          except Exception as _exc:
-            _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
-
           try:
             # One absolute fallback window. Unrelated system events must not
             # keep resetting a per-get timer and starve a future limit reset.
             async with _asyncio.timeout(60):
               while True:
-                _event = await _events.get()
+                _event = await _reset_park_events.get()
                 if _event and _event.get("type") == "chat_run_finished":
                   break
           except _asyncio.TimeoutError:
             pass
+          await _sweep_reset_parks_once()
       finally:
-        _system_broadcast().unsubscribe(_events)
+        _system_broadcast().unsubscribe(_reset_park_events)
 
     _reset_park_task = _asyncio.create_task(_reset_park_loop())
 

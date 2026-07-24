@@ -12,8 +12,10 @@ These tests lock in the stub contract + verify the scaffold doesn't
 collapse when a real route module is forced to fail.
 """
 
+import asyncio
 import importlib
 import sys
+import threading
 
 import pytest
 from fastapi import APIRouter, FastAPI
@@ -156,6 +158,47 @@ def test_main_boots_when_app_watcher_start_raises(monkeypatch):
     body = resp.json()
     assert body["status"] == "ok"
     assert body["boot_id"]
+
+
+def test_lifespan_waits_for_initial_restart_resume_sweep(monkeypatch):
+  """The server must not accept a manual send before restart recovery claims."""
+  from app import chat as chat_mod
+  from app.main import app as main_app
+
+  sweep_entered = threading.Event()
+  release_sweep = threading.Event()
+  lifespan_ready = threading.Event()
+  boot_errors = []
+
+  async def held_sweep(db):
+    del db
+    sweep_entered.set()
+    await asyncio.to_thread(release_sweep.wait)
+    return []
+
+  monkeypatch.setattr(chat_mod, "sweep_reset_parks", held_sweep)
+
+  def boot_app():
+    try:
+      with TestClient(main_app):
+        lifespan_ready.set()
+    except BaseException as exc:  # surface a lifespan-thread failure below
+      boot_errors.append(exc)
+
+  thread = threading.Thread(target=boot_app, daemon=True)
+  thread.start()
+  try:
+    assert sweep_entered.wait(timeout=20)
+    # The old fire-and-forget startup reached the usable server while this
+    # sweep was still blocked. The fixed lifecycle awaits it before yielding.
+    assert not lifespan_ready.wait(timeout=1.0)
+  finally:
+    release_sweep.set()
+
+  thread.join(timeout=30)
+  assert not thread.is_alive()
+  assert boot_errors == []
+  assert lifespan_ready.is_set()
 
 
 def test_lifespan_does_not_shadow_module_session_factory():
