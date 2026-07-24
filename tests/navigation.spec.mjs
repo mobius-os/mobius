@@ -376,7 +376,7 @@ test.describe('Desktop sidebar navigation', () => {
     await expect.poll(() => page.evaluate(() => history.state?.kind)).not.toBe('drawer')
   })
 
-  test('31. breakpoint cleanup stays modal and seeks through phantom history', async ({ page }) => {
+  test('31. breakpoint cleanup closes visually while seeking through phantom history', async ({ page }) => {
     await page.addInitScript(() => {
       localStorage.setItem('mobius:desktop-sidebar-open:v1', 'true')
     })
@@ -399,10 +399,12 @@ test.describe('Desktop sidebar navigation', () => {
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.waitForFunction(() => typeof window.__releaseBreakpointBack === 'function')
 
-    // Desktop mode is requested, but the still-open mobile sentinel retains its
-    // complete modal boundary until the traversal is allowed to finish.
-    await expect(page.locator('.drawer-overlay')).toBeVisible()
-    await expect(page.locator('.shell__content')).toHaveAttribute('inert', '')
+    // Desktop mode is requested immediately even while the mobile sentinel's
+    // history traversal is held. History ownership remains pending internally,
+    // but it must not keep a stale modal overlay painted over desktop content.
+    await expect(page.locator('.drawer.drawer--persistent')).toBeVisible()
+    await expect(page.locator('.drawer-overlay')).toHaveCount(0)
+    await expect(page.locator('.shell__content')).not.toHaveAttribute('inert', '')
 
     await page.evaluate(() => window.__releaseBreakpointBack())
     await expect(page.locator('.drawer.drawer--persistent')).toBeVisible()
