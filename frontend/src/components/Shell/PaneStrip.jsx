@@ -9,11 +9,22 @@ import * as tabModel from './tabModel.js'
 import { STRIP_H, WORKSPACE_SPLITS_ENABLED } from './paneModel.js'
 
 // Each direction owns 40% of the one-shot cycle, so 1000/12 ms per clipped pixel
-// keeps travel at a readable 30px/s: longer titles take proportionally longer, not
-// move faster. The short 5% opening rest cannot make a running animation look dead
-// for almost nine seconds. Only extreme manual renames hit the resource-safety cap.
-const TITLE_CYCLE_MAX_MS = 32000
+// keeps travel at a readable 30px/s. The cycle runs once, returns to the beginning,
+// and stops; duration therefore scales with distance instead of making long manual
+// titles accelerate.
 const TITLE_CYCLE_MS_PER_PX = 1000 / 12
+
+function paneDomToken(value) {
+  return encodeURIComponent(String(value))
+}
+
+export function paneTabDomId(paneId, tabKey) {
+  return `pane-tab-${paneDomToken(paneId)}-${paneDomToken(tabKey)}`
+}
+
+export function panePanelDomId(paneId, tabKey) {
+  return `pane-panel-${paneDomToken(paneId)}-${paneDomToken(tabKey)}`
+}
 
 // The ONE strip implementation, shared by the multi-pane chrome overlay AND the
 // single-pane top nav (design §2/§3.6). The two CONTAINERS differ by a scroll
@@ -22,24 +33,28 @@ const TITLE_CYCLE_MS_PER_PX = 1000 / 12
 // the workspace's own active tab, never a legacy nav triple) are identical, so
 // they live here once instead of being hand-rolled twice.
 
-// Roving-tabindex keyboard navigation (WAI-ARIA toolbar): a strip is one tab
-// stop, and arrows move focus between its tab buttons, Home/End jump to the ends,
-// Delete/Backspace closes the focused tab. `tabs` is the strip's tab list in
-// render order (the i-th `.shell__tab-open` button is the i-th tab); `onClose`
-// closes one. Works for either container because it keys on the shared class, not
-// a role.
+// Roving-tabindex keyboard navigation: a strip is one tab stop; Left/Right wrap,
+// Home/End jump to the ends, and Delete/Backspace closes the focused tab after
+// moving focus to its neighbour. Up/Down stay native in this horizontal widget.
+// `tabs` is the strip's tab list in render order (the i-th `.shell__tab-open`
+// button is the i-th tab); `onClose` closes one.
 export function stripKeyDown(e, tabs, onClose) {
   const buttons = [...e.currentTarget.querySelectorAll('.shell__tab-open')]
   const i = buttons.indexOf(document.activeElement)
   if (i === -1) return
   let next = -1
-  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = Math.min(i + 1, buttons.length - 1)
-  else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = Math.max(i - 1, 0)
+  if (e.key === 'ArrowRight') next = (i + 1) % buttons.length
+  else if (e.key === 'ArrowLeft') next = (i - 1 + buttons.length) % buttons.length
   else if (e.key === 'Home') next = 0
   else if (e.key === 'End') next = buttons.length - 1
   else if (e.key === 'Delete' || e.key === 'Backspace') {
     e.preventDefault()
-    if (tabs[i]) onClose(tabs[i])
+    if (tabs[i]) {
+      const neighbour = buttons[i + 1] || buttons[i - 1]
+      if (neighbour) neighbour.focus()
+      else document.querySelector('.shell__brand')?.focus()
+      onClose(tabs[i])
+    }
     return
   } else return
   e.preventDefault()
@@ -63,7 +78,8 @@ export function scrollStripWheel(e) {
 // (tabIndex 0); the rest and every close button are reached via stripKeyDown.
 export function PaneTab({
   tab, label, active, focused = true, revealKey = 0,
-  tabIndex, dragKey, role, onActivate, onClose, onContextMenu,
+  tabIndex, dragKey, role, tabId, controlsId,
+  onActivate, onClose, onContextMenu,
 }) {
   const tabRef = useRef(null)
   const titleRef = useRef(null)
@@ -86,10 +102,7 @@ export function PaneTab({
     const measure = () => {
       const shift = Math.ceil(text.scrollWidth - title.clientWidth)
       if (shift > 3) {
-        const duration = Math.min(
-          TITLE_CYCLE_MAX_MS,
-          Math.round(shift * TITLE_CYCLE_MS_PER_PX),
-        )
+        const duration = Math.round(shift * TITLE_CYCLE_MS_PER_PX)
         title.dataset.overflow = 'true'
         title.style.setProperty('--tab-title-shift', `-${shift}px`)
         title.style.setProperty('--tab-title-duration', `${duration}ms`)
@@ -126,6 +139,8 @@ export function PaneTab({
         type="button"
         className="shell__tab-open"
         role={role}
+        id={tabId}
+        aria-controls={role === 'tab' ? controlsId : undefined}
         aria-selected={role === 'tab' ? (active ? 'true' : 'false') : undefined}
         aria-current={role !== 'tab' && active ? 'true' : undefined}
         tabIndex={tabIndex}
@@ -233,6 +248,8 @@ export function PaneStrip({
             focused={focused}
             revealKey={revealKey}
             role="tab"
+            tabId={paneTabDomId(pane.id, key)}
+            controlsId={panePanelDomId(pane.id, key)}
             tabIndex={active ? 0 : -1}
             dragKey={WORKSPACE_SPLITS_ENABLED ? key : undefined}
             onActivate={() => onActivate(pane.id, tab)}
