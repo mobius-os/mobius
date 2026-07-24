@@ -176,6 +176,40 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   assert "AGENT_TOKEN" not in child_env
 
 
+def test_wrapper_rejects_a_job_from_another_live_app(tmp_path, monkeypatch):
+  runner = _load_runner()
+  data_dir = tmp_path / "data"
+  memory_source = data_dir / "apps" / "memory"
+  reflection_source = data_dir / "apps" / "reflection"
+  memory_source.mkdir(parents=True)
+  reflection_source.mkdir()
+  job = memory_source / "fetch.sh"
+  job.write_text("#!/bin/sh\nexit 0\n")
+  monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  monkeypatch.setattr(runner, "_mint_app_token", lambda app_id: "app-token")
+  monkeypatch.setattr(
+    runner, "_app_is_live", lambda app_id, token=None: True,
+  )
+  monkeypatch.setattr(
+    runner,
+    "_job_context",
+    lambda app_id, token: {"source_dir": str(reflection_source)},
+  )
+  monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
+  calls = []
+  monkeypatch.setattr(
+    runner.subprocess,
+    "Popen",
+    lambda *args, **kwargs: calls.append((args, kwargs)),
+  )
+  monkeypatch.setattr(runner.sys, "argv", [
+    "app-job-runner.py", "56", str(job),
+  ])
+
+  assert runner.run() == 4
+  assert calls == []
+
+
 def test_background_agent_command_masks_platform_data_and_mounts_declared_scope(
   tmp_path, monkeypatch,
 ):
@@ -321,6 +355,7 @@ def test_job_context_is_nonsecret_and_self_scoped(client, owner_token, db):
   assert response.status_code == 200, response.text
   body = response.json()
   assert body["app_id"] == own.id
+  assert body["source_dir"] == own.source_dir
   serialized = json.dumps(body).lower()
   assert "token" not in serialized
   assert "credential" not in serialized

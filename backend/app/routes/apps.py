@@ -2677,6 +2677,10 @@ def get_app_job_context(
   choices = resolve_background_agents(get_settings().data_dir, {})
   return {
     "app_id": app_id,
+    # The supervisor binds the scheduled script to this exact app before
+    # granting its token and filesystem contract. This is non-secret durable
+    # identity, not owner configuration.
+    "source_dir": app.source_dir,
     "primary": choices.get("primary"),
     "fallback": choices.get("fallback"),
     # This is the same normalized, non-secret receipt the owner reviewed.
