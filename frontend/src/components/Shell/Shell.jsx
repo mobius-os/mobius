@@ -3285,6 +3285,15 @@ export default function Shell() {
 
       {showWalkthrough && (
         <WalkthroughOverlay
+          onOpenSettings={() => {
+            setSettingsFocusTarget({ section: 'ai-providers', nonce: Date.now() })
+            navTo('settings')
+          }}
+          onExploreApps={() => {
+            const appStore = findAppStoreApp(apps)
+            if (appStore) navTo('canvas', { appId: appStore.id })
+            else openDrawer()
+          }}
           onDone={() => {
             // Query invalidation inside WalkthroughOverlay flips
             // `showWalkthrough` to false on the next render. Nothing

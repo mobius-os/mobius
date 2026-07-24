@@ -4,6 +4,9 @@ import { api } from '../../api/client.js'
 import { authQueries } from '../../hooks/queries.js'
 import { closeAuthWindow, navigateAuthWindow, reserveAuthWindow } from '../../utils/authWindow.js'
 
+const CHATGPT_SECURITY_URL = 'https://chatgpt.com/#settings/Security'
+const OPENAI_DATA_CONTROLS_URL = 'https://help.openai.com/en/articles/7730893-data-controls-faq'
+
 /**
  * Codex device-auth flow. Lifted out of SettingsView so SetupWizard
  * can reuse the same component instead of duplicating the polling
@@ -303,21 +306,49 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   return (
     <div className="codex-auth">
       {showSetupHint && (
-        <p className="pa__muted codex-auth__hint">
-          First time? In your ChatGPT account, open
-          {' '}<strong>Settings → Security</strong> and turn on
-          {' '}<strong>Enable device code authorization for Codex</strong>.
-          Without it, sign-in below will fail with a "contact your
-          workspace admin" message.
-        </p>
+        <div className="codex-auth__preflight">
+          <div className="codex-auth__preflight-head">
+            <span className="codex-auth__step-num" aria-hidden="true">1</span>
+            <div>
+              <strong>Allow device access</strong>
+              <p className="pa__muted codex-auth__hint">
+                In ChatGPT, open <strong>Settings → Security</strong> and turn on
+                {' '}<strong>Enable device code authorization for Codex</strong>.
+                This is a one-time account setting.
+              </p>
+            </div>
+          </div>
+          <a
+            className="pa__btn pa__btn--sm codex-auth__settings-link"
+            href={CHATGPT_SECURITY_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Open ChatGPT security
+          </a>
+          <p className="pa__muted codex-auth__privacy">
+            Prefer not to have new conversations used to improve OpenAI’s
+            models? In ChatGPT, open <strong>Settings → Data Controls</strong>
+            {' '}and turn off <strong>Improve the model for everyone</strong>.
+            {' '}<a href={OPENAI_DATA_CONTROLS_URL} target="_blank" rel="noopener noreferrer">
+              OpenAI’s data-controls guide
+            </a>
+          </p>
+        </div>
       )}
-      <button
-        className="pa__btn"
-        onClick={startLogin}
-        disabled={status === 'connecting'}
-      >
-        {status === 'connecting' ? 'Starting…' : 'Connect to Codex'}
-      </button>
+      <div className="codex-auth__connect-step">
+        {showSetupHint && <span className="codex-auth__step-num" aria-hidden="true">2</span>}
+        <div>
+          {showSetupHint && <strong>Connect Codex</strong>}
+          <button
+            className="pa__btn"
+            onClick={startLogin}
+            disabled={status === 'connecting'}
+          >
+            {status === 'connecting' ? 'Starting…' : 'Continue with ChatGPT'}
+          </button>
+        </div>
+      </div>
       {error && <p className="pa__error" role="alert">{error}</p>}
     </div>
   )
