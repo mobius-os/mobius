@@ -237,9 +237,9 @@ export function ExpandableImage({
 
   useEffect(() => {
     if (resolvedSrc && onResolved) {
-      onResolved(imageIndex, { src: resolvedSrc, alt })
+      onResolved(imageIndex, { href, src: resolvedSrc, alt })
     }
-  }, [alt, imageIndex, onResolved, resolvedSrc])
+  }, [alt, href, imageIndex, onResolved, resolvedSrc])
 
   // A blocked/empty href (javascript:, data:, "") renders nothing. But a valid
   // href whose token has not resolved yet still reserves its frame (lever 3):
@@ -256,7 +256,7 @@ export function ExpandableImage({
         disabled={!resolvedSrc}
         onClick={() => {
           if (!resolvedSrc) return
-          if (onOpen) onOpen(imageIndex, { src: resolvedSrc, alt })
+          if (onOpen) onOpen(imageIndex, { href, src: resolvedSrc, alt })
           else setOpen(true)
         }}
       >

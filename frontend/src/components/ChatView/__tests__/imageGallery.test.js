@@ -1,7 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { groupMarkdownImages } from '../markdown/imageGallery.js'
+import {
+  gallerySwipeTarget,
+  groupMarkdownImages,
+  projectResolvedGalleryItems,
+} from '../markdown/imageGallery.js'
 
 const gallerySource = readFileSync(
   new URL('../markdown/ImageGallery.jsx', import.meta.url),
@@ -98,8 +102,72 @@ test('gallery navigation has explicit keyboard and lightbox alternatives', () =>
   assert.match(gallerySource, /aria-label="Next images"/)
   assert.match(lightboxSource, /event\.key === 'ArrowLeft'/)
   assert.match(lightboxSource, /event\.key === 'ArrowRight'/)
-  assert.match(lightboxSource, /Math\.abs\(deltaX\) >= 48/)
+  assert.match(lightboxSource, /gallerySwipeTarget/)
+  assert.match(lightboxSource, /\[baseCenter, galleryItems, index, metrics, toggleZoomAt\]/)
   assert.match(lightboxSource, /\{index \+ 1\} \/ \{galleryItems\.length\}/)
+})
+
+test('resolved images follow their URL rather than a streamed array position', () => {
+  const sources = new Map([
+    ['/one.png', '/resolved/one.png'],
+    ['/two.png', '/resolved/two.png'],
+  ])
+  const projected = projectResolvedGalleryItems([
+    image('/new.png', 'New'),
+    image('/two.png', 'Two revised'),
+  ], sources)
+
+  assert.deepEqual(projected, [
+    {
+      key: '["/new.png","New"]:0',
+      href: '/new.png',
+      src: null,
+      alt: 'New',
+    },
+    {
+      key: '["/two.png","Two revised"]:0',
+      href: '/two.png',
+      src: '/resolved/two.png',
+      alt: 'Two revised',
+    },
+  ])
+})
+
+test('viewer identities survive insertions and distinguish exact duplicates', () => {
+  const before = projectResolvedGalleryItems([
+    image('/one.png', 'One'),
+    image('/same.png', 'Repeated'),
+    image('/same.png', 'Repeated'),
+  ])
+  const after = projectResolvedGalleryItems([
+    image('/new.png', 'New'),
+    image('/one.png', 'One'),
+    image('/same.png', 'Repeated'),
+    image('/same.png', 'Repeated'),
+  ])
+
+  assert.equal(after[1].key, before[0].key)
+  assert.equal(after[2].key, before[1].key)
+  assert.equal(after[3].key, before[2].key)
+  assert.notEqual(after[2].key, after[3].key)
+})
+
+test('viewer swipes use the latest adjacent-image readiness', () => {
+  const pending = [{ src: '/one.png' }, { src: null }]
+  const ready = [{ src: '/one.png' }, { src: '/two.png' }]
+
+  assert.equal(gallerySwipeTarget({
+    deltaX: -80, deltaY: 4, index: 0, items: pending,
+  }), null)
+  assert.equal(gallerySwipeTarget({
+    deltaX: -80, deltaY: 4, index: 0, items: ready,
+  }), 1)
+  assert.equal(gallerySwipeTarget({
+    deltaX: -20, deltaY: 0, index: 0, items: ready,
+  }), null)
+  assert.equal(gallerySwipeTarget({
+    deltaX: -80, deltaY: 80, index: 0, items: ready,
+  }), null)
 })
 
 test('the compact strip has no gallery label, dots, borders, or card shadows', () => {

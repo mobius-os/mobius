@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ChevronLeft from 'lucide-react/dist/esm/icons/chevron-left.mjs'
 import ChevronRight from 'lucide-react/dist/esm/icons/chevron-right.mjs'
 import { ExpandableImage } from './InlineContent.jsx'
 import ImageLightbox from './ImageLightbox.jsx'
+import { projectResolvedGalleryItems } from './imageGallery.js'
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
 
@@ -24,10 +25,12 @@ export default function ImageGallery({ images }) {
   const railRef = useRef(null)
   const [canPrevious, setCanPrevious] = useState(false)
   const [canNext, setCanNext] = useState(false)
-  const [viewerIndex, setViewerIndex] = useState(null)
-  const [resolvedItems, setResolvedItems] = useState(() => (
-    images.map(image => ({ src: null, alt: image.text || '' }))
-  ))
+  const [viewerKey, setViewerKey] = useState(null)
+  const [resolvedSources, setResolvedSources] = useState(() => new Map())
+  const resolvedItems = useMemo(
+    () => projectResolvedGalleryItems(images, resolvedSources),
+    [images, resolvedSources],
+  )
 
   const syncOverflow = useCallback(() => {
     const rail = railRef.current
@@ -46,17 +49,26 @@ export default function ImageGallery({ images }) {
     return () => observer.disconnect()
   }, [count, syncOverflow])
 
-  const registerResolved = useCallback((index, item) => {
-    setResolvedItems(current => {
-      if (
-        current[index]?.src === item.src
-        && current[index]?.alt === item.alt
-      ) return current
-      const next = [...current]
-      next[index] = item
+  const registerResolved = useCallback((_index, item) => {
+    if (!item.href || !item.src) return
+    setResolvedSources(current => {
+      if (current.get(item.href) === item.src) return current
+      const next = new Map(current)
+      next.set(item.href, item.src)
       return next
     })
   }, [])
+
+  // Progressive Markdown can replace or remove images while this component
+  // remains mounted. Keep readiness attached to the image URL rather than its
+  // transient array position, and release entries that left the current rail.
+  useEffect(() => {
+    const currentHrefs = new Set(images.map(image => image.href))
+    setResolvedSources(current => {
+      if ([...current.keys()].every(href => currentHrefs.has(href))) return current
+      return new Map([...current].filter(([href]) => currentHrefs.has(href)))
+    })
+  }, [images])
 
   const scrollByItem = useCallback((direction) => {
     const rail = railRef.current
@@ -77,10 +89,17 @@ export default function ImageGallery({ images }) {
 
   const openViewer = useCallback((index, item) => {
     registerResolved(index, item)
-    setViewerIndex(index)
-  }, [registerResolved])
+    setViewerKey(resolvedItems[index]?.key || null)
+  }, [registerResolved, resolvedItems])
 
-  const viewerItem = viewerIndex === null ? null : resolvedItems[viewerIndex]
+  const viewerIndex = viewerKey === null
+    ? -1
+    : resolvedItems.findIndex(item => item.key === viewerKey)
+  const viewerItem = viewerIndex < 0 ? null : resolvedItems[viewerIndex]
+
+  useEffect(() => {
+    if (viewerKey !== null && viewerIndex < 0) setViewerKey(null)
+  }, [viewerIndex, viewerKey])
 
   return (
     <section
@@ -97,7 +116,7 @@ export default function ImageGallery({ images }) {
         onKeyDown={handleKeyDown}
       >
         {images.map((image, index) => (
-          <div className="md-image-gallery__item" key={`${image.href}-${index}`}>
+          <div className="md-image-gallery__item" key={resolvedItems[index].key}>
             <ExpandableImage
               href={image.href}
               alt={image.text || ''}
@@ -135,8 +154,8 @@ export default function ImageGallery({ images }) {
           alt={viewerItem.alt}
           items={resolvedItems}
           index={viewerIndex}
-          onNavigate={setViewerIndex}
-          onClose={() => setViewerIndex(null)}
+          onNavigate={(nextIndex) => setViewerKey(resolvedItems[nextIndex]?.key || null)}
+          onClose={() => setViewerKey(null)}
         />,
         document.body,
       )}

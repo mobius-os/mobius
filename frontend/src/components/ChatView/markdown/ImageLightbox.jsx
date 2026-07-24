@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from 'react'
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import ChevronLeft from 'lucide-react/dist/esm/icons/chevron-left.mjs'
 import ChevronRight from 'lucide-react/dist/esm/icons/chevron-right.mjs'
 import Download from 'lucide-react/dist/esm/icons/download.mjs'
@@ -9,6 +9,7 @@ import {
   clampImageTransform,
   zoomImageAround,
 } from './imageTransform.js'
+import { gallerySwipeTarget } from './imageGallery.js'
 
 /**
  * Full-screen image viewer with pointer-centred wheel/pinch zoom, drag pan,
@@ -27,7 +28,10 @@ export default function ImageLightbox({
   const [dragging, setDragging] = useState(false)
   const [downloadError, setDownloadError] = useState(false)
 
-  const galleryItems = items?.length ? items : [{ src, alt }]
+  const galleryItems = useMemo(
+    () => (items?.length ? items : [{ src, alt }]),
+    [alt, items, src],
+  )
   const activeItem = galleryItems[index]?.src ? galleryItems[index] : { src, alt }
   const activeSrc = activeItem.src
   const activeAlt = activeItem.alt || ''
@@ -254,17 +258,10 @@ export default function ImageLightbox({
         if (swipe) {
           const deltaX = swipe.x - swipe.startX
           const deltaY = swipe.y - swipe.startY
-          if (Math.abs(deltaX) >= 48 && Math.abs(deltaX) > Math.abs(deltaY) * 1.2) {
-            if (deltaX > 0 && index > 0 && galleryItems[index - 1]?.src) {
-              navigateRef.current?.(index - 1)
-            } else if (
-              deltaX < 0
-              && index < galleryItems.length - 1
-              && galleryItems[index + 1]?.src
-            ) {
-              navigateRef.current?.(index + 1)
-            }
-          }
+          const nextIndex = gallerySwipeTarget({
+            deltaX, deltaY, index, items: galleryItems,
+          })
+          if (nextIndex !== null) navigateRef.current?.(nextIndex)
         }
         const tap = tapStartRef.current
         if (tap && !tap.moved) {
@@ -294,7 +291,7 @@ export default function ImageLightbox({
       el.removeEventListener('touchend', onTouchEnd)
       el.removeEventListener('touchcancel', onTouchEnd)
     }
-  }, [baseCenter, galleryItems.length, index, metrics, toggleZoomAt])
+  }, [baseCenter, galleryItems, index, metrics, toggleZoomAt])
 
   // Keep the image reachable if the viewport changes while it is enlarged.
   useEffect(() => {

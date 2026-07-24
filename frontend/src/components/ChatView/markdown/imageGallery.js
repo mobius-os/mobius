@@ -58,3 +58,29 @@ export function groupMarkdownImages(tokens = []) {
   flushRun()
   return blocks
 }
+
+export function projectResolvedGalleryItems(images = [], resolvedSources = new Map()) {
+  const occurrences = new Map()
+  return images.map((image) => {
+    const identity = JSON.stringify([image.href || '', image.text || ''])
+    const occurrence = occurrences.get(identity) || 0
+    occurrences.set(identity, occurrence + 1)
+    return {
+      key: `${identity}:${occurrence}`,
+      href: image.href,
+      src: resolvedSources.get(image.href) || null,
+      alt: image.text || '',
+    }
+  })
+}
+
+export function gallerySwipeTarget({ deltaX, deltaY, index, items = [] }) {
+  if (Math.abs(deltaX) < 48 || Math.abs(deltaX) <= Math.abs(deltaY) * 1.2) {
+    return null
+  }
+  const nextIndex = deltaX > 0 ? index - 1 : index + 1
+  if (nextIndex < 0 || nextIndex >= items.length || !items[nextIndex]?.src) {
+    return null
+  }
+  return nextIndex
+}
