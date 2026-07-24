@@ -1,6 +1,6 @@
 # Explicit mini-app source application
 
-Status: implemented; release verification is in progress.
+Status: implemented and release-verified.
 
 ## Decision
 
@@ -22,8 +22,8 @@ remain separate operations.
 
 ## Why change
 
-`backend/app/app_watcher.py` currently does much more than observe files. A
-source event can:
+Before this change, `backend/app/app_watcher.py` did much more than observe
+files. A source event could:
 
 - find an app row;
 - synchronize local manifest authority;
@@ -70,9 +70,9 @@ ambiguous recovery to the agent.
   A person using a terminal runs the same explicit command as an agent.
 - Do not make local manifest edits grant reviewed Store capabilities.
 
-## Current writers and their future authority
+## Prior writers and final authority
 
-| Current path | Current behavior | Future authority |
+| Prior path | Prior behavior | Final authority |
 |---|---|---|
 | `register_app.py` | POST/PATCH, then Git commit | Replaced by `apply_app.py` |
 | `POST /api/apps/` | Creates row and compiles inline JSX | Removed after callers migrate |
@@ -494,3 +494,150 @@ The review changed the proposed design in six material ways:
 The remaining irreducible boundary is Git versus SQLite: they cannot commit
 atomically. The accepted-ahead state is therefore deliberate, derived from
 existing durable Git state, and requires no new status column or reconciler.
+
+## Release verification (2026-07-24)
+
+### Architecture and failure boundaries
+
+The implementation was checked against the transition table and every source
+writer:
+
+- ordinary local source has one publication authority:
+  `POST /api/apps/apply`, called by `apply_app.py`;
+- Store conflict resolution remains a distinct installer replay:
+  `POST /api/apps/resolve-update`, called by `resolve_app_update.py`;
+- the mini-app watcher, its boot/retry lifecycle, `register_app.py`, inline
+  create, and source-bearing generic PATCH are removed rather than retained as
+  compatibility paths;
+- compilation and the accepted Git commit consume the same immutable Git tree;
+- the expected-parent update is a compare-and-swap, so a competing Git writer
+  cannot be overwritten;
+- Git/manifest/compile/source-change failures return synchronously, publish no
+  event, and preserve the prior live bundle;
+- a database failure after Git acceptance remains an idempotent retry rather
+  than requiring a reconciler;
+- an unapplied edit stays both live-invisible and Git-dirty; successful apply
+  makes accepted source, live bundle, database row, and clean Git `main`
+  agree; and
+- AppCanvas acknowledges the incoming frame before swapping it, producing one
+  buffered replacement instead of a blank interval or duplicate refresh.
+
+A deliberate root-owned repository failure also returned the structured
+`409 source_repository_error` contract rather than leaking an unhandled Git or
+filesystem exception.
+
+### Skills and tool path
+
+Only the Möbius-owned app skills were changed. Third-party/installable skill
+summaries remain their own metadata. The owned summaries now expose a complete
+initial read set:
+
+- ordinary app work reads `building-apps-quickstart.md`,
+  `visual-testing.md`, and `notifications.md` together;
+- advanced runtime, cron, and component-shape extensions say which base skills
+  must be co-read and contain only their delta;
+- the component-shape catalog remains opt-in for a matching complex structure;
+- the quickstart summary is 296 characters, below the session inventory's
+  300-character bound without losing any extension names; and
+- `list_apps.py` returns compact app identity metadata without a full
+  capability payload or a fragile quoted curl/Python pipeline.
+
+Visual instructions use iframe references for the opaque sandbox, re-snapshot
+after React rerenders, and avoid selector-less typing and top-level waits that
+cannot observe iframe state. The preview helper's overlay-free mode only keeps
+shell onboarding/install overlays out of the ephemeral screenshot session; it
+does not persist dismissal state or weaken the app sandbox.
+
+### Automated and live verification
+
+The release-focused clean-database Playwright matrix passed **46/46** in
+1.3 minutes with retries disabled. It covered:
+
+- create, multi-file draft, explicit apply, exactly one buffered iframe swap,
+  compile rejection, rollback, recovery, and clean/dirty repository state;
+- AppCanvas mount, navigation, retry, stale-list, and live-vs-incoming error
+  behavior;
+- opaque app-frame capability exchange, upload, message, SSE completion,
+  remount, chat rotation, and hostile boundary assertions;
+- the shared service gateway and cookie/security topology;
+- standalone routing and service-worker/PWA update and offline behavior; and
+- the broader shell input, rendering, theme, scrolling, and recovery paths.
+
+The capability test now asks the child agent for a deterministic no-tool reply.
+Its previous vague text caused a coding model to infer a workspace edit from
+the injected app context, turning a transport assertion into a model-behavior
+benchmark and getting interrupted at the test's 30-second boundary. With the
+test scoped to the transport it owns, the complete case finishes in about
+11 seconds.
+
+The first broad backend pass likewise exposed a test-boundary problem: the
+restart-resume ordering test could spend its entire 20-second assertion budget
+performing an unrelated first-boot Store clone. The test now stubs only that
+external bootstrap and reaches the ordering seam in about 1.3 seconds. The
+complete suite was then rerun on the finished tree.
+
+Additional checks passed:
+
+- full backend suite: **3,006 passed, 7 skipped, 0 failed** in 11m42s;
+- focused app-apply and Git suites: 79 tests;
+- owned-skill discovery, migration, and compact-list helper: 18 tests after
+  the final summary edit;
+- frontend unit suite: 1,880 library checks and all 47 hook checks;
+- production frontend build and all Docker source/build stages;
+- a real CLI/restart lifecycle: revision one applied and clean, revision two
+  stayed dirty and live-invisible across restart, then explicit reapply made it
+  live and clean;
+- independent agent-browser desktop (1440×900) and mobile (390×844) flows,
+  including edits, a custom choice, sequential React toggles, spin/result, and
+  reset, with no page or console errors; and
+- exact runtime identity: source, served platform, served frontend, and baked
+  SHA all reported `6d60d7274e0256c1e1a0eaa38c31507e0b21ec61`,
+  with a clean platform checkout.
+
+The full production image reached every compilation and final frontend stage.
+Docker could not export the resulting approximately 5.6 GB image because the
+host had only about 8 GB free and export temporarily needs both build cache and
+the loaded image. No user or long-running baseline images were deleted to hide
+that infrastructure limit. Runtime identity, production frontend output, and
+the source/build stages were verified independently.
+
+### Live-agent benchmark
+
+The final run started from a fresh clone of the original benchmark data and
+served the exact clean source revision above. It loaded the quickstart, visual,
+and notification policies in one initial tool call and used the compact app
+listing helper successfully.
+
+| Metric | Historical watcher flow | Explicit apply R3 | Change |
+|---|---:|---:|---:|
+| Completion | 255.459 s | 127.184 s | 50.2% faster |
+| First live app | 122.249 s | 29.620 s | 75.8% faster (4.13×) |
+| First real PNG | 175.990 s | 36.904 s | 79.0% faster (4.77×) |
+| Tool calls | 12 | 13 | +1 |
+| Tool failures/timeouts | 1 | 0 | eliminated |
+| Questions | 0 | 0 | unchanged |
+
+The extra final tool call is not lifecycle overhead: R3 found and explicitly
+applied a real reduced-motion accessibility polish before closing. It used two
+coherent applies, two previews, two visible screenshots, four browser calls,
+four progress/final text updates, and no failed tool call.
+
+The historical telemetry predates durable token accounting, so no token number
+is invented for it. Comparing the first explicit-apply run with the fully
+polished R3 run:
+
+| Metric | Explicit apply R1 | Explicit apply R3 | Change |
+|---|---:|---:|---:|
+| Provider duration | 400.799 s | 127.184 s | 68.3% lower |
+| Tool calls | 32 | 13 | 59.4% lower |
+| Total tokens | 1,594,225 | 542,736 | 66.0% lower |
+| Cached input | 1,502,464 | 490,496 | 67.4% lower |
+| Uncached input | 78,929 | 48,329 | 38.8% lower |
+| Output | 12,832 | 3,911 | 69.5% lower |
+| Failed tool calls | 3 | 0 | eliminated |
+
+R3's first visible intent/tool event arrived at 9.805 seconds, compact app
+discovery at 12.312 seconds, first apply at 29.118 seconds, first preview at
+34.640 seconds, first browser action at 44.185 seconds, and completion
+notification at 117.028 seconds. The accepted app repository was clean with
+three intentional commits (root, create, polish).
