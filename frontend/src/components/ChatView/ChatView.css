@@ -674,11 +674,16 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 6px 16px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto 6px;
+  padding: 4px 10px;
   font-size: 12px;
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
-  border-top: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
+  border-radius: 999px;
 }
 
 .connection-status__text { opacity: 0.8; }
@@ -695,6 +700,11 @@
 
 .connection-status__retry:hover {
   background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
+}
+
+.connection-status__retry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ── Tool activity blocks ──────────────────────────── */
@@ -1697,9 +1707,10 @@
 }
 
 .chat__offline-note {
-  max-width: min(680px, calc(100vw - 32px));
-  align-self: center;
-  margin: 0 0 6px;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: min(680px, 100%);
+  margin: 0 auto 6px;
   padding: 4px 10px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--surface) 82%, transparent);

@@ -491,14 +491,14 @@ export default function ChatInputBar({
         onChange={handleFileSelect}
         style={{ display: 'none' }}
       />
-      {(sendFailure || offline) && (
+      {sendFailure && (
         <div
-          className={`chat__offline-note${sendFailure ? ' chat__offline-note--error' : ''}`}
+          className="chat__offline-note chat__offline-note--error"
           role="status"
           aria-live="polite"
           aria-atomic="true"
         >
-          {sendFailure || "You're offline — chat needs a connection."}
+          {sendFailure}
         </div>
       )}
       <div className="chat__input-row">
