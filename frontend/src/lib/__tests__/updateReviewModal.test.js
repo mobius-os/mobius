@@ -59,7 +59,11 @@ test('result and close focus always land on live tabbable controls', () => {
   assert.match(modal, /tabIndex=\{-1\}/)
   assert.doesNotMatch(modal, /resultHeadingRef|tabIndex=\{blocked/)
   assert.match(settingsView, /ref=\{platformActionRef\}/)
-  assert.match(settingsView, /requestAnimationFrame\(\(\) => \{[\s\S]*platformActionRef\.current\?\.focus/)
+  assert.match(settingsView, /restorePlatformActionFocusRef\.current = true/)
+  assert.match(
+    settingsView,
+    /if \([\s\S]*reviewOpen[\s\S]*platformPhase !== 'idle'[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*platformActionRef\.current/,
+  )
 })
 
 test('a newly discovered update inherits focus from the replaced check action', () => {

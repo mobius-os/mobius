@@ -407,7 +407,7 @@ test.describe('Unauthenticated startup', () => {
 
     await page.getByRole('button', { name: 'Try again' }).click()
     await expect.poll(() => checks).toBe(2)
-    await expect(page.getByRole('heading', { name: 'Create your home key' }))
+    await expect(page.getByRole('heading', { name: 'Set up your Möbius' }))
       .toBeVisible({ timeout: 10000 })
   })
 
@@ -438,12 +438,25 @@ test.describe('Unauthenticated startup', () => {
 
     expect(setupChecks).toBe(1)
     expect(new URL(request.url()).searchParams.get('return_path')).toBe('/shell/')
-    await expect(page.getByRole('heading', { name: 'Create your home key' }))
+    await expect(page.getByRole('heading', { name: 'Set up your Möbius' }))
       .toHaveCount(0)
     await expect(page.locator('.login')).toHaveCount(0)
   })
 
   test('managed handoff signs in and skips separate account setup', async ({ page }) => {
+    // The handoff response must carry a token the real test backend accepts.
+    // A made-up token used to work only because the retired provider wizard
+    // delayed the first authenticated API request; opening the shell
+    // immediately correctly exercises the token now.
+    const storageState = await page.context().storageState()
+    const ownerOrigin = storageState.origins.find(
+      origin => origin.origin === new URL(BASE).origin,
+    )
+    const ownerToken = ownerOrigin?.localStorage.find(
+      entry => entry.name === 'token',
+    )?.value
+    expect(ownerToken).toBeTruthy()
+
     let handoffCalls = 0
     let setupChecks = 0
     await page.route(/\/api\/auth\/setup\/status$/, route => {
@@ -456,7 +469,7 @@ test.describe('Unauthenticated startup', () => {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          access_token: 'managed-owner-token',
+          access_token: ownerToken,
           token_type: 'bearer',
           new_owner: true,
           return_path: '/',
@@ -473,13 +486,14 @@ test.describe('Unauthenticated startup', () => {
 
     await page.goto(`${BASE}/shell/?mobius_sso=1`, { waitUntil: 'domcontentloaded' })
 
-    await expect(page.getByRole('heading', { name: 'Wake up your AI' }))
-      .toBeVisible({ timeout: 10000 })
+    await waitForShell(page)
     expect(handoffCalls).toBe(1)
     expect(setupChecks).toBe(0)
     expect(await page.evaluate(() => localStorage.getItem('token')))
-      .toBe('managed-owner-token')
-    await expect(page.getByRole('heading', { name: 'Create your home key' }))
+      .toBe(ownerToken)
+    await expect(page.getByRole('heading', { name: 'Set up your Möbius' }))
+      .toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Wake up your AI' }))
       .toHaveCount(0)
     await expect(page).toHaveURL(
       new RegExp(`${BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/shell/?$`)

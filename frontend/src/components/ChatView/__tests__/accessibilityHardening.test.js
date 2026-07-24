@@ -24,7 +24,6 @@ test('full-screen dialogs share one focus, inerting, and Escape contract', () =>
     read('../ManageModelsModal.jsx'),
     read('../../SettingsView/UpdateReviewModal.jsx'),
     read('../markdown/ImageLightbox.jsx'),
-    read('../../Walkthrough/WalkthroughOverlay.jsx'),
     read('../AgentContextInspector.jsx'),
     read('../ChatSummaryViewer.jsx'),
   ]
@@ -39,6 +38,14 @@ test('full-screen dialogs share one focus, inerting, and Escape contract', () =>
   const updateReview = dialogs[2]
   assert.match(manageModels, /ref=\{keepEditingRef\}/)
   assert.match(updateReview, /closeOnEscape: !applying/)
+})
+
+test('first-use guidance is a labeled non-modal region with a dismiss action', () => {
+  const source = read('../../Walkthrough/WalkthroughOverlay.jsx')
+  assert.match(source, /role="region"/)
+  assert.match(source, /aria-labelledby="wt-title"/)
+  assert.match(source, /aria-label="Dismiss welcome"/)
+  assert.doesNotMatch(source, /aria-modal="true"/)
 })
 
 test('chat image preview actions use labeled buttons', () => {
