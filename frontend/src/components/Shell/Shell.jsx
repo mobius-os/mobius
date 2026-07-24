@@ -1214,10 +1214,10 @@ export default function Shell() {
   const handlePaneChatDisplayReady = useCallback((paneId, readyChatId) => {
     const id = String(readyChatId)
     const paneKey = String(paneId)
-    const pane = workspaceStateRef.current.ws.panes[paneId]
-      || workspaceStateRef.current.ws.panes[paneKey]
     // Ignore a late ready signal from staging B after rapid navigation reached C.
-    if (pane?.activeTabKey !== `chat:${id}`) return
+    // Surface owners include both real builder panes and the single world's
+    // synthetic slot, so resolve the selected key through their shared boundary.
+    if (paneModel.activeKeyForOwner(workspaceStateRef.current.ws, paneKey) !== `chat:${id}`) return
     setPresentedChatByPane(prev => {
       if (String(prev.get(paneKey) ?? '') === id) return prev
       const next = new Map(prev)

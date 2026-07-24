@@ -287,15 +287,29 @@ def _owner_chat_summary_projection(chat) -> dict:
 def _chat_detail_response(
   chat: models.Chat,
   *,
+  db: Session,
   limit: int = 20,
   before: int | None = None,
   expose_session: bool = True,
 ) -> dict:
   """Canonical paginated chat payload shared by create and detail reads."""
-  from app.chat_transcript import materialized_messages
+  from app.chat_transcript import (
+    historical_tool_output_ids,
+    materialized_messages,
+    project_messages_for_detail,
+  )
   from app.providers import effective_agent_settings
 
   all_msgs = materialized_messages(chat)
+  running = is_chat_running(chat.id)
+  live_snapshot = chat.live_assistant
+  live_message = (
+    all_msgs[-1]
+    if running
+    and all_msgs
+    and all_msgs[-1] is live_snapshot
+    else None
+  )
   total = len(all_msgs)
   if before is not None:
     start = max(0, before - limit)
@@ -303,6 +317,25 @@ def _chat_detail_response(
   else:
     start = max(0, total - limit)
     page = all_msgs[start:]
+  candidate_tool_ids = historical_tool_output_ids(
+    page,
+    live_message=live_message,
+  )
+  fetchable_tool_ids = (
+    {
+      row[0]
+      for row in db.query(models.ToolOutput.tool_use_id).filter(
+        models.ToolOutput.chat_id == chat.id,
+      ).all()
+    }
+    if candidate_tool_ids
+    else set()
+  )
+  page = project_messages_for_detail(
+    page,
+    fetchable_tool_output_ids=fetchable_tool_ids,
+    live_message=live_message,
+  )
 
   provider = chat.provider or "claude"
   pending_question = questions.get(chat.id)
@@ -310,13 +343,14 @@ def _chat_detail_response(
   return {
     "id": chat.id,
     "title": chat.title,
-    # Persisted blocks are already bounded at the write funnel; the detail
-    # serializer returns them as stored instead of doing work on every read.
+    # Settled large-output excerpts are omitted here because the disclosure
+    # already fetches them from their durable sidecar on demand. Live turns
+    # retain excerpts so the in-progress surface remains self-contained.
     "messages": page,
     "pending_messages": list(chat.pending_messages or []),
     "total": total,
     "offset": start,
-    "running": is_chat_running(chat.id),
+    "running": running,
     "pending_question_id": (
       pending_question.question_id if pending_question is not None else None
     ),
@@ -687,7 +721,7 @@ def create_chat(
   activity.log_event("chat_created", chat_id=chat.id)
   # Preserve the flat summary + messages fields existing callers consume while
   # carrying the exact detail contract under its own forward-compatible key.
-  detail = _chat_detail_response(chat)
+  detail = _chat_detail_response(chat, db=db)
   return {
     **_owner_chat_summary(chat),
     "messages": detail["messages"],
@@ -1057,6 +1091,7 @@ def get_chat(
   chat = get_active_chat_for_principal(db, chat_id, principal)
   return _chat_detail_response(
     chat,
+    db=db,
     limit=limit,
     before=before,
     # Provider thread ids are backend continuity state, not part of the

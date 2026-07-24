@@ -3363,7 +3363,11 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  const displayReady = revealed || showEmpty || showLoadError
+  // The scroll safety cap may reveal an otherwise empty DOM while the initial
+  // request is still in flight. That protects a standalone ChatView from being
+  // hidden forever, but it is not a valid shell handoff: keep the outgoing chat
+  // painted until this chat has authoritative content, emptiness, or an error.
+  const displayReady = !loading && (revealed || showEmpty || showLoadError)
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])

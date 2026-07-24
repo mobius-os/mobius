@@ -13,8 +13,11 @@ function ruleBody(selector) {
 }
 
 test('chat display readiness preserves the existing transcript reveal gate', () => {
-  assert.match(chatView, /const displayReady = revealed \|\| showEmpty \|\| showLoadError/,
-    'a transcript may hand off only after useScrollMode reveals it')
+  assert.match(
+    chatView,
+    /const displayReady = !loading && \(revealed \|\| showEmpty \|\| showLoadError\)/,
+    'a transcript may hand off only after its initial load and reveal gate settle',
+  )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
     'readiness must reach Shell before the browser paints the hidden transcript')
   assert.match(chatView,
@@ -46,8 +49,11 @@ test('each pane holds one outgoing chat over one staging chat', () => {
     'the transition keeps only the last painted chat in its pane')
   assert.match(shell, /role: transitioning \? 'staging' : 'active'/,
     'the destination stages only while a different painted chat exists')
-  assert.match(shell, /pane\?\.activeTabKey !== `chat:\$\{id\}`/,
-    'a stale ready signal from rapid navigation must not complete the handoff')
+  assert.match(
+    shell,
+    /paneModel\.activeKeyForOwner\(workspaceStateRef\.current\.ws, paneKey\) !== `chat:\$\{id\}`/,
+    'late readiness must be validated against either a real pane or the synthetic single owner',
+  )
   // A held/staging chat is inert (the takeover is PAINTING OR not the active role);
   // the condition now also folds in a leaving pane during the exit beat (INV 9), so
   // match the leading clause rather than the exact full expression. The takeover
