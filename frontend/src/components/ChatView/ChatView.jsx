@@ -22,6 +22,7 @@ import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import ChatInputBar from './ChatInputBar.jsx'
+import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
@@ -2013,9 +2014,24 @@ export default function ChatView({
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return
-    const pin = opts.pin !== false  // default true
-    if (!text.trim()) return
+
+    // Callers can pre-supply attachments (e.g. handleStop collapsing
+    // a queue that had files attached to queued items). When provided,
+    // they replace the pendingFiles-derived list so data isn't lost.
+    // Resolve and validate the payload before ANY submit-time side effect:
+    // a stale callback or failed-file-only draft must not close the keyboard,
+    // claim scroll ownership, or freeze queue geometry when nothing will send.
+    const usesComposerFiles = !Array.isArray(opts.attachments)
+    const composerFileSnapshot = usesComposerFiles ? [...pendingFiles] : []
+    const attachments = Array.isArray(opts.attachments)
+      ? opts.attachments
+      : pendingFiles
+          .filter(f => f.status === 'done')
+          .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
     if (pendingFiles.some(c => c.status === 'uploading')) return
+    if (!hasSendablePayload(text, attachments)) return
+
+    const pin = opts.pin !== false  // default true
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -2060,17 +2076,6 @@ export default function ChatView({
     // On touch devices, blur to dismiss the soft keyboard. Desktop keeps
     // focus so the cursor stays ready for the next message.
     if (_isTouchPrimary) inputRef.current?.blur()
-
-    // Callers can pre-supply attachments (e.g. handleStop collapsing
-    // a queue that had files attached to queued items). When provided,
-    // they replace the pendingFiles-derived list so data isn't lost.
-    const usesComposerFiles = !Array.isArray(opts.attachments)
-    const composerFileSnapshot = usesComposerFiles ? [...pendingFiles] : []
-    const attachments = Array.isArray(opts.attachments)
-      ? opts.attachments
-      : pendingFiles
-          .filter(f => f.status === 'done')
-          .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
 
     function clearComposerFilesForSend() {
       if (!usesComposerFiles) return
@@ -2923,7 +2928,7 @@ export default function ChatView({
         // genuine re-queue POST failure (doSend's catch) shows a block.
         const { text: resendText, attachments: resendAttachments } =
           resolveResend(clearedPendingCids)
-        if (resendText) {
+        if (hasSendablePayload(resendText, resendAttachments)) {
           doSend(resendText, {
             pin: false,
             attachments: resendAttachments.length > 0 ? resendAttachments : undefined,
@@ -2955,7 +2960,7 @@ export default function ChatView({
       const { text: resendText, attachments: resendAttachments } =
         resolveResend(clearedPendingCids)
 
-      if (resendText) {
+      if (hasSendablePayload(resendText, resendAttachments)) {
         // doSend's guard reads sendingRef/isStreamingRef (just synced to false
         // above) → fresh-send path. pin:false so the synthetic combined-from-
         // queue message doesn't yank the viewport to top, pushing the partial
@@ -3037,7 +3042,7 @@ export default function ChatView({
         }
       }
     }
-    if (!content) return
+    if (!hasSendablePayload(content, attachments)) return
 
     const fullConfirmedSnapshot = (pendingQueue.pendingMessagesRef.current || [])
       .filter(m => typeof m.ts === 'number' && m.serverTs === true)
