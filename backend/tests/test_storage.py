@@ -1483,6 +1483,7 @@ async def test_watcher_atomically_syncs_local_manifest_capabilities(
   manifest_path = os.path.join(src, "mobius.json")
   with open(manifest_path, "w", encoding="utf-8") as f:
     json.dump({
+      "offline_capable": True,
       "capabilities": {
         "media.microphone.capture": {
           "version": 1,
@@ -1502,6 +1503,32 @@ async def test_watcher_atomically_syncs_local_manifest_capabilities(
   assert response.status_code == 200
   runtime = response.json()["capability_contract"]["runtime"]
   assert runtime["media.microphone.capture"]["reason"] == "Record a sound"
+  assert response.json()["offline_capable"] is True
+  assert response.json()["capability_contract"]["offline"]["capable"] is True
+
+  with open(manifest_path, "w", encoding="utf-8") as f:
+    json.dump({"offline_capable": False, "capabilities": {}}, f)
+  await _JsxHandler(asyncio.get_running_loop())._recompile(manifest_path)
+  response = client.get(
+    f"/api/apps/{created.json()['id']}",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 200
+  assert response.json()["offline_capable"] is False
+  assert response.json()["capability_contract"]["offline"]["capable"] is False
+
+  # Omission on a later source edit preserves the established flag, matching
+  # registration and installed-app update semantics.
+  with open(manifest_path, "w", encoding="utf-8") as f:
+    json.dump({"capabilities": {}}, f)
+  await _JsxHandler(asyncio.get_running_loop())._recompile(manifest_path)
+  response = client.get(
+    f"/api/apps/{created.json()['id']}",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 200
+  assert response.json()["offline_capable"] is False
+  assert response.json()["capability_contract"]["offline"]["capable"] is False
 
 
 @pytest.mark.asyncio

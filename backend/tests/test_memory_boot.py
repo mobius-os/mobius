@@ -103,11 +103,12 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
 def test_retired_image_provider_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
-  assert module.SEED_VERSION == "14"  # v14: finding-skills seed
+  assert module.SEED_VERSION == "15"  # v15: native skill discovery + app quickstart split
   assert module._UNMODIFIED_MIGRATIONS["images.md"] == {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps.md"] == {
+    "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
     "91b655952d55b37fda0be82e3914c3b09e67ca7c5f5a575d315fb2ca75ef08f1",
   }
   assert (
