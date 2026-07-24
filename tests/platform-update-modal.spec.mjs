@@ -362,7 +362,7 @@ test('a clean apply remains truthful when every follow-up status read fails', as
 
   await expect(review).toHaveCount(0)
   await expect(
-    page.locator('.settings__update').getByText('Restart to finish', { exact: true }),
+    page.locator('.settings__update').getByText('Ready to restart', { exact: true }),
   ).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart to finish' })).toBeFocused()
 })
