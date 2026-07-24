@@ -639,6 +639,12 @@ class App(Base):
   # base an update diverges from. Null for an app with no tracked source
   # dir (it never enters the git path).
   upstream_commit = Column(String(64), nullable=True, default=None)
+  # Exact local `main` commit selected by the durable App row. This closes the
+  # Git/SQLite recovery boundary for explicit apply: a boot-time bundle rebuild
+  # can compile the accepted tree without reading or rewriting a newer draft in
+  # the editable worktree. Null for legacy rows until their next successful
+  # install or explicit apply.
+  source_commit = Column(String(64), nullable=True, default=None)
   # Owner-visible update-conflict resolver chats are keyed on upstream_commit.
   conflict_resolver_chat_id = Column(String(64), nullable=True, default=None)
   conflict_resolver_upstream_commit = Column(

@@ -406,6 +406,15 @@ def is_repo(source_dir: str | Path) -> bool:
   return (Path(source_dir) / ".git").exists()
 
 
+def worktree_dirty(source_dir: str | Path) -> bool:
+  """Whether tracked/untracked accepted-source paths differ from ``main``."""
+  if not is_repo(source_dir):
+    return False
+  return bool(_run(
+    Path(source_dir), "status", "--porcelain",
+  ).stdout.strip())
+
+
 def head_sha(source_dir: str | Path, branch: str) -> str:
   """The commit sha at the tip of `branch` (e.g. the merge base an
   update will diverge from). Assumes the repo + branch exist."""

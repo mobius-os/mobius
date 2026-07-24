@@ -231,6 +231,7 @@ async def apply_source_revision(
         app.chat_id,
         app.jsx_source,
         app.compiled_path,
+        app.source_commit,
       )
 
       staged = _compiled_dir() / f"app-{app.id}.js.staging"
@@ -272,6 +273,10 @@ async def apply_source_revision(
         candidate,
         "create app" if created else "apply app source",
       )
+      # Bind SQLite to the exact accepted Git revision before publication. On
+      # the accepted-ahead retry, ``committed`` is None and the candidate
+      # parent is the already-accepted tip.
+      app.source_commit = committed or candidate.parent_sha
       published = publish_staged_bundle(app.id, staged)
       staged = None
 
@@ -286,6 +291,7 @@ async def apply_source_revision(
           app.chat_id,
           source,
           str(published),
+          app.source_commit,
         )
       )
       if not changed:

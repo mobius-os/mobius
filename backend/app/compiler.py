@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -169,8 +170,8 @@ def purge_app_bundles(app_id: int) -> None:
     unlink_app_bundle(app_id, candidate)
 
 
-def _entry_source_path(app) -> Path | None:
-  source_dir = getattr(app, "source_dir", None)
+def _entry_source_path(app, *, source_root: Path | None = None) -> Path | None:
+  source_dir = source_root or getattr(app, "source_dir", None)
   if not source_dir:
     return None
   source_root = Path(source_dir)
@@ -194,33 +195,31 @@ def _entry_source_path(app) -> Path | None:
   return candidate
 
 
-def _atomic_write(path: Path, data: str) -> None:
-  path.parent.mkdir(parents=True, exist_ok=True)
-  fd, tmp = tempfile.mkstemp(
-    prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent),
-  )
-  try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-      f.write(data)
-    os.replace(tmp, path)
-  except Exception:
-    try:
-      os.unlink(tmp)
-    except OSError:
-      pass
-    raise
-
-
-def _restore_entry_source(
-  path: Path, previous_source: str | None, source_existed: bool,
-) -> None:
-  if source_existed:
-    _atomic_write(path, previous_source if previous_source is not None else "")
+def _copy_managed_static_assets(source_root: Path, snapshot_root: Path) -> None:
+  """Copy installer-managed static assets without following filesystem links."""
+  source_static = source_root / "static"
+  if not source_static.is_dir() or source_static.is_symlink():
     return
-  try:
-    path.unlink()
-  except FileNotFoundError:
-    pass
+  target_static = snapshot_root / "static"
+  for current, dirs, files in os.walk(source_static, followlinks=False):
+    current_path = Path(current)
+    if current_path.is_symlink():
+      raise RuntimeError("Managed static asset directory is a symlink.")
+    safe_dirs = []
+    for name in dirs:
+      child = current_path / name
+      if child.is_symlink():
+        raise RuntimeError("Managed static asset directory contains a symlink.")
+      safe_dirs.append(name)
+    dirs[:] = safe_dirs
+    relative = current_path.relative_to(source_static)
+    destination = target_static / relative
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in files:
+      source = current_path / name
+      if source.is_symlink() or not source.is_file():
+        raise RuntimeError("Managed static asset is not a regular file.")
+      shutil.copy2(source, destination / name)
 
 
 def _remove_unsupported_outputs(
@@ -377,12 +376,12 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
   ``compiled_path`` to that immutable file. The previous row keeps pointing at
   its previous bundle until commit. Thus a crash before commit leaves the old
   row/bundle coherent, while a crash after commit cannot expose a row whose
-  bundle was not promoted. When the app has a ``source_dir``,
-  the declared entry source is synced before compile so esbuild can resolve
-  relative imports from that real source tree; compile or commit failure
-  restores the previous entry file. A commit failure removes the newly
-  published orphan and rolls back, so there is no window where an old DB row
-  serves new code.
+  bundle was not promoted. When the row has an accepted ``source_commit``, its
+  exact Git tree is materialized away from the editable worktree so relative
+  imports resolve without reading or rewriting an unapplied draft. Legacy rows
+  are only rebuilt from a byte-identical entry. A commit failure removes the
+  newly published orphan and rolls back, so there is no window where an old DB
+  row serves new code.
 
   ``db.commit()`` here also flushes any other changes the caller staged on
   the session (e.g. a PATCH's name/description), so the whole update lands
@@ -403,34 +402,82 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
     app.id, getattr(app, "compiled_path", None),
   )
   source_path = _entry_source_path(app)
-  previous_source = None
-  source_existed = False
-  if source_path is not None:
+  compile_source_path = source_path
+  snapshot = None
+  source_commit = getattr(app, "source_commit", None)
+  source_dir = getattr(app, "source_dir", None)
+  if source_commit and source_dir:
+    # Bundle recovery is not a source publication authority. Compile the exact
+    # Git revision selected by SQLite in a temporary tree so an unapplied draft
+    # survives boot/recovery byte-for-byte. Static assets are installer-managed
+    # and deliberately excluded from Git, so copy that validated sidecar
+    # without following links.
+    from app import app_git
+    snapshot = tempfile.TemporaryDirectory(prefix="mobius-app-recompile-")
+    snapshot_root = Path(snapshot.name)
     try:
-      previous_source = source_path.read_text(encoding="utf-8")
-      source_existed = True
+      await asyncio.to_thread(
+        app_git.materialize_tree,
+        Path(source_dir),
+        source_commit,
+        snapshot_root,
+      )
+      await asyncio.to_thread(
+        _copy_managed_static_assets, Path(source_dir), snapshot_root,
+      )
+      compile_source_path = _entry_source_path(
+        app, source_root=snapshot_root,
+      )
+      if compile_source_path is None:
+        raise RuntimeError("Accepted app source has no entry path.")
+      accepted_source = compile_source_path.read_text(encoding="utf-8")
+      if accepted_source != jsx_source:
+        raise RuntimeError(
+          "Stored app source does not match its accepted Git revision."
+        )
+    except Exception:
+      snapshot.cleanup()
+      raise
+  elif source_path is not None:
+    # Legacy rows have no durable source commit. Never repair them by writing
+    # into the editable tree: that was a hidden source mutation and could
+    # destroy an unapplied draft. Only a byte-identical entry is safe to use.
+    try:
+      current_source = source_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-      pass
-    if previous_source != jsx_source:
-      _atomic_write(source_path, jsx_source)
+      current_source = None
+    if current_source != jsx_source:
+      raise RuntimeError(
+        "Editable app source differs from the stored revision; apply the "
+        "draft explicitly before rebuilding its bundle."
+      )
+    from app import app_git
+
+    if await asyncio.to_thread(app_git.worktree_dirty, Path(source_dir)):
+      raise RuntimeError(
+        "Editable app source has an unapplied draft; apply it explicitly "
+        "before rebuilding its bundle."
+      )
   published = None
   try:
     await compile_jsx(
       app.id,
       jsx_source,
       out_path=staged,
-      source_path=source_path if source_path is not None else None,
+      source_path=(
+        compile_source_path if compile_source_path is not None else None
+      ),
     )
   except Exception:
-    if source_path is not None and previous_source != jsx_source:
-      _restore_entry_source(source_path, previous_source, source_existed)
+    if snapshot is not None:
+      snapshot.cleanup()
     raise
+  if snapshot is not None:
+    snapshot.cleanup()
   try:
     published = publish_staged_bundle(app.id, staged)
   except Exception:
     staged.unlink(missing_ok=True)
-    if source_path is not None and previous_source != jsx_source:
-      _restore_entry_source(source_path, previous_source, source_existed)
     raise
   app.jsx_source = jsx_source
   app.compiled_path = str(published)
@@ -447,8 +494,6 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
     staged.unlink(missing_ok=True)
     if published != previous_bundle:
       unlink_app_bundle(app.id, published)
-    if source_path is not None and previous_source != jsx_source:
-      _restore_entry_source(source_path, previous_source, source_existed)
     raise
   if previous_bundle != published:
     unlink_app_bundle(app.id, previous_bundle)

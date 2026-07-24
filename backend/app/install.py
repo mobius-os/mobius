@@ -3093,6 +3093,9 @@ async def install_from_manifest(
               await asyncio.to_thread(
                 app_git.commit_local, source_dir_path, commit_msg,
               )
+            app.source_commit = await asyncio.to_thread(
+              app_git.head_sha, source_dir_path, app_git.LOCAL_BRANCH,
+            )
         else:
           # No source_dir (legacy app): there is no sibling tree on disk, so
           # compile the bare entry string with no source_path — esbuild writes it

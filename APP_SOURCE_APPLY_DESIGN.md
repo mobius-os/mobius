@@ -94,6 +94,8 @@ For a local or locally modified app:
 
 - The app directory is the editable draft.
 - The per-app Git `main` commit is the accepted source revision.
+- `App.source_commit` selects the exact accepted `main` revision used by the
+  durable row and by bundle recovery.
 - `App.jsx_source` mirrors `index.jsx` from that accepted revision.
 - `App.compiled_path` names the immutable bundle compiled from that revision.
 - The local app's normalized capabilities and `offline_capable` value come
@@ -456,6 +458,8 @@ code with no accepted Git revision. Git acceptance must precede DB publication.
 - [x] No success depends on a polling event.
 - [x] No local apply can grant reviewed Store capabilities.
 - [x] Live code always corresponds to accepted Git source.
+- [x] Bundle recovery compiles the row's exact accepted Git commit and never
+      reads or rewrites an unapplied draft.
 - [x] Failures keep the prior bundle live.
 - [x] Retry is idempotent at every crash boundary.
 - [x] Lock acquisition follows the global order.

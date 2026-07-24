@@ -896,6 +896,8 @@ async def test_recompile_app_bundle_promotes_after_commit(client, owner_token, d
   app_id = _make_app(client, owner_token)
   data_dir = os.environ["DATA_DIR"]
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.source_dir = None
+  row.source_commit = None
   previous = Path(row.compiled_path)
   new_jsx = "export default function App(){ return <div>PROMOTED</div> }"
   await recompile_app_bundle(db, row, new_jsx)
@@ -919,6 +921,8 @@ async def test_recompile_publishes_before_commit_without_replacing_previous(
   import app.compiler as compiler
   app_id = _make_app(client, owner_token)
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.source_dir = None
+  row.source_commit = None
   previous = Path(row.compiled_path)
   observed = {}
   real_sync = compiler._sync_published_bundle
@@ -967,6 +971,8 @@ async def test_recompile_app_bundle_commit_failure_keeps_live_bundle(
   app_id = _make_app(client, owner_token)
   data_dir = os.environ["DATA_DIR"]
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.source_dir = None
+  row.source_commit = None
   live = Path(row.compiled_path)
   before = live.read_bytes()
 
@@ -996,6 +1002,8 @@ async def test_recompile_app_bundle_bad_jsx_keeps_live_bundle(
   from app.compiler import recompile_app_bundle
   app_id = _make_app(client, owner_token)
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.source_dir = None
+  row.source_commit = None
   live = Path(row.compiled_path)
   before = live.read_bytes()
   # Has `export default` (passes the cheap guard) but the JSX is unclosed, so
@@ -1026,6 +1034,8 @@ async def test_reconcile_missing_bundles_recompiles_missing_file(
   live = _bundle_path(db, app_id)
   # Simulate a legacy interrupted row or incomplete compiled-volume restore.
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.source_dir = None
+  row.source_commit = None
   row.jsx_source = "export default function App(){ return <div>HEALED</div> }"
   db.commit()
   live.unlink()
@@ -1102,6 +1112,8 @@ async def test_reconcile_missing_bundles_isolates_one_apps_failure(
   broken = _bundle_path(db, broken_id)
   good = _bundle_path(db, good_id)
   broken_row = db.query(models.App).filter(models.App.id == broken_id).first()
+  broken_row.source_dir = None
+  broken_row.source_commit = None
   broken_row.jsx_source = "export default function App(){ return <div> }"
   db.commit()
   broken.unlink()
@@ -1130,6 +1142,8 @@ async def test_reconcile_outdated_bundles_recompiles_legacy_bundle(
   from app.compiler import reconcile_outdated_bundles
   app_id = _make_app(client, owner_token)
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.source_dir = None
+  row.source_commit = None
   Path(row.compiled_path).unlink()
   legacy = Path(os.environ["DATA_DIR"], "compiled", f"app-{app_id}.js")
   row.compiled_path = str(legacy)
@@ -1165,6 +1179,8 @@ async def test_reconcile_outdated_bundles_recompiles_old_artifact_revision(
 
   app_id = _make_app(client, owner_token)
   row = db.query(models.App).filter(models.App.id == app_id).first()
+  row.source_dir = None
+  row.source_commit = None
   current = Path(row.compiled_path)
   current_bytes = current.read_bytes()
   current_banner = COMPILED_RUNTIME_BANNER.encode("ascii")
@@ -1232,6 +1248,10 @@ async def test_reconcile_outdated_bundles_isolates_compile_failure(
   good_id = _make_app(client, owner_token)
   broken_row = db.query(models.App).filter(models.App.id == broken_id).first()
   good_row = db.query(models.App).filter(models.App.id == good_id).first()
+  broken_row.source_dir = None
+  broken_row.source_commit = None
+  good_row.source_dir = None
+  good_row.source_commit = None
   Path(broken_row.compiled_path).unlink()
   Path(good_row.compiled_path).unlink()
   compiled = Path(os.environ["DATA_DIR"], "compiled")

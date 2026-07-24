@@ -52,6 +52,9 @@ def test_apply_creates_from_manifest_and_commits_exact_source(
   row = db.query(models.App).populate_existing().one()
   assert row.jsx_source.endswith("<div>first</div> }\n")
   assert Path(row.compiled_path).is_file()
+  assert row.source_commit == app_git.head_sha(
+    source, app_git.LOCAL_BRANCH,
+  )
   assert app_git.read_ref_tree(source, app_git.LOCAL_BRANCH)["index.jsx"] == (
     source / "index.jsx"
   ).read_bytes()
@@ -209,6 +212,36 @@ def test_edit_without_apply_remains_a_dirty_invisible_draft(client, auth, db):
   assert row.updated_at == previous_updated_at
   assert "first" in row.jsx_source
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == previous_head
+  assert app_git._run(source, "status", "--porcelain").stdout
+
+
+@pytest.mark.asyncio
+async def test_bundle_recovery_uses_accepted_commit_without_touching_draft(
+  client, auth, db,
+):
+  from app.compiler import reconcile_missing_bundles
+
+  source = _source()
+  created = _apply(client, auth, source)
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  accepted_commit = row.source_commit
+  old_bundle = Path(row.compiled_path)
+  old_bundle.unlink()
+  draft = (
+    "export default function App() { return <div>unapplied draft</div> }\n"
+  )
+  (source / "index.jsx").write_text(draft)
+
+  healed = await reconcile_missing_bundles(db)
+
+  assert healed == [app_id]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.source_commit == accepted_commit
+  assert "first" in row.jsx_source
+  assert Path(row.compiled_path).is_file()
+  assert "first" in Path(row.compiled_path).read_text(encoding="utf-8")
+  assert (source / "index.jsx").read_text() == draft
   assert app_git._run(source, "status", "--porcelain").stdout
 
 
