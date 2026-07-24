@@ -75,6 +75,7 @@ from app.runtime_types import RunnerResult
 from app.usage_metrics import normalize_codex_usage
 from app.runner_registry import RunnerKind, registry
 from app.tool_sources import normalize_tool_sources
+from app.memory_observability import record_memory_checkpoint_once
 
 log = logging.getLogger("moebius.chat")
 
@@ -1807,7 +1808,13 @@ async def run_codex_sdk_turn(
   Returns:
     Dict with `session_id`, `cost_usd`, and `error`.
   """
+  record_memory_checkpoint_once(
+    "codex_first_runner_enter",
+    chat_id=chat_id,
+    resuming=session_id is not None,
+  )
   sdk = _sdk_imports()
+  record_memory_checkpoint_once("codex_first_sdk_loaded", chat_id=chat_id)
   # chat.py always pre-merges the per-chat overrides on top of the
   # global file defaults; treat a missing dict as empty rather than
   # re-reading the file here. Standalone callers (tests) pass `{}`.
@@ -1920,6 +1927,10 @@ async def run_codex_sdk_turn(
   try:
     codex, entry_cancel = await _enter_codex_context_owned(codex_context)
     async with _EnteredCodexContext(codex_context, codex) as codex:
+      record_memory_checkpoint_once(
+        "codex_first_client_connected",
+        chat_id=chat_id,
+      )
       process_group_id = _codex_process_group_id(codex)
       if process_group_capture_stop is not None:
         process_group_capture_stop.set()
@@ -2008,6 +2019,11 @@ async def run_codex_sdk_turn(
           cwd=cwd,
           model=model,
         )
+      record_memory_checkpoint_once(
+        "codex_first_thread_ready",
+        chat_id=chat_id,
+        resumed=session_id is not None,
+      )
 
       current_session_id = thread.id
       if abort_requested():
@@ -2061,6 +2077,10 @@ async def run_codex_sdk_turn(
         process_group_id=process_group_id,
       )
       registry.register(active_turn)
+      record_memory_checkpoint_once(
+        "codex_first_turn_ready",
+        chat_id=chat_id,
+      )
 
       # Persist the session id AFTER registering the live turn: this is a
       # best-effort write (the actor persist + the append-only session-link

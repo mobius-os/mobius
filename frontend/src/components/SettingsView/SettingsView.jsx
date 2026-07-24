@@ -16,7 +16,10 @@ import {
   PROVIDER_AVAILABILITY_PHASE,
   resolveProviderAvailability,
 } from '../../lib/providerAvailability.js'
-import { restartCanReload } from '../../lib/restartReadiness.js'
+import {
+  restartCanReload,
+  restartPollDecision,
+} from '../../lib/restartReadiness.js'
 import { updateCheckOutcome, updateCheckLabel } from '../../lib/updateCheckPhase.js'
 import * as themeService from '../../lib/themeService.js'
 import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
@@ -47,8 +50,6 @@ function orderSelectedFirst(models, selectedId) {
 
 const UPDATE_CHECKED_RESET_MS = 2200
 const RETURN_VIEW_KEY = 'mobius:return-view'
-const RESTART_POLL_INTERVAL_MS = 1500
-const RESTART_POLL_MAX = 40
 const RESTART_SHELL_READY_PATH = '/shell/'
 const PLATFORM_APPLY_STATES = new Set([
   'restart_needed', 'up_to_date', 'conflict', 'rolled_back',
@@ -334,6 +335,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [themeError, setThemeError] = useState('')
   const [restartPhase, setRestartPhase] = useState('idle')
   const [restartError, setRestartError] = useState('')
+  const [restartSlow, setRestartSlow] = useState(false)
   // A manual restart interrupts any live chat, so it's a deliberate two-step:
   // the first tap arms the confirm, the second actually restarts.
   const [restartConfirm, setRestartConfirm] = useState(false)
@@ -345,6 +347,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   const [platformPhase, setPlatformPhase] = useState('idle')
   const [platformProgress, setPlatformProgress] = useState(null)
   const [platformError, setPlatformError] = useState('')
+  const [platformRestartSlow, setPlatformRestartSlow] = useState(false)
   // Whether the update-review sheet is open. The "Update" button routes through
   // it so the owner reviews the incoming changes before applying, rather than
   // Apply firing on the first click.
@@ -856,6 +859,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     if (restartPhase === 'restarting') return
     setRestartPhase('restarting')
     setRestartError('')
+    setRestartSlow(false)
     try {
       const previousBootId = await readRestartBootId()
       const res = await api.admin.restart()
@@ -867,8 +871,12 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       returnToSettingsAfterReload()
       pollRestartThenReload({
         previousBootId,
-        onTimeout: () => {
-          setRestartError("Server hasn't come back yet — check the container.")
+        onSlow: () => setRestartSlow(true),
+        onTimeout: ({ freshServerSeen }) => {
+          setRestartSlow(false)
+          setRestartError(freshServerSeen
+            ? 'The server restarted, but Möbius couldn’t reload the shell. Refresh the page or open Recovery.'
+            : 'Möbius still can’t confirm the restart. Open Recovery if the container needs attention.')
           setRestartPhase('idle')
           setRestartConfirm(false)
         },
@@ -876,6 +884,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     } catch (err) {
       setRestartPhase('idle')
       setRestartConfirm(false)
+      setRestartSlow(false)
       setRestartError(err.message || 'Restart request failed.')
     }
   }
@@ -1155,11 +1164,17 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
   // BackgroundTask sends SIGTERM, so prefer a changed boot id. When updating
   // from an older server that does not expose boot ids, require either a
   // down/up cycle or a conservative wait before trying to reload.
-  function pollRestartThenReload({ previousBootId = '', onTimeout }) {
+  function pollRestartThenReload({
+    previousBootId = '',
+    onSlow = () => {},
+    onTimeout,
+  }) {
     clearRestartPoll()
     const startedAt = Date.now()
     let attempts = 0
     let sawUnavailable = false
+    let freshServerSeen = false
+    let slowNotified = false
 
     const poll = async () => {
       restartPollRef.current = null
@@ -1174,20 +1189,29 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           sawUnavailable,
           elapsedMs: Date.now() - startedAt,
         })) {
+          freshServerSeen = true
           const reloaded = await reloadOntoFreshSW()
           if (reloaded) return
         }
       } catch {
         sawUnavailable = true
       }
-      if (attempts >= RESTART_POLL_MAX) {
-        onTimeout()
+      const decision = restartPollDecision(attempts)
+      if (decision.slow && !slowNotified) {
+        slowNotified = true
+        onSlow({ freshServerSeen })
+      }
+      if (decision.timedOut) {
+        onTimeout({ freshServerSeen })
         return
       }
-      restartPollRef.current = window.setTimeout(poll, RESTART_POLL_INTERVAL_MS)
+      restartPollRef.current = window.setTimeout(poll, decision.delayMs)
     }
 
-    restartPollRef.current = window.setTimeout(poll, RESTART_POLL_INTERVAL_MS)
+    restartPollRef.current = window.setTimeout(
+      poll,
+      restartPollDecision(0).delayMs,
+    )
   }
 
   // The owner's explicit confirmation that finishes a platform update: clicking
@@ -1196,6 +1220,7 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     if (platformPhase === 'restarting') return
     setPlatformError('')
     setPlatformPhase('restarting')
+    setPlatformRestartSlow(false)
     try {
       const previousBootId = await readRestartBootId()
       // apiFetch resolves for any non-401, so a 5xx is NOT a thrown error —
@@ -1212,12 +1237,17 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       returnToSettingsAfterReload()
       pollRestartThenReload({
         previousBootId,
-        onTimeout: () => {
-          setPlatformError("Server hasn't come back yet — check the container.")
+        onSlow: () => setPlatformRestartSlow(true),
+        onTimeout: ({ freshServerSeen }) => {
+          setPlatformRestartSlow(false)
+          setPlatformError(freshServerSeen
+            ? 'The server restarted, but Möbius couldn’t reload the shell. Refresh the page or open Recovery.'
+            : 'Möbius still can’t confirm the restart. Open Recovery if the container needs attention.')
           setPlatformPhase('idle')
         },
       })
     } catch {
+      setPlatformRestartSlow(false)
       setPlatformError('Restart signal failed.')
       setPlatformPhase('idle')
     }
@@ -1613,7 +1643,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           </div>
           {platformPhase === 'restarting' && (
             <div className="settings__notice" role="status">
-              Restart signal sent. The page will reload shortly.
+              {platformRestartSlow
+                ? 'This is taking longer than usual. Möbius is still checking.'
+                : 'Restart signal sent. The page will reload shortly.'}
             </div>
           )}
           {platformError && (
@@ -1673,7 +1705,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
           )}
           {restartPhase === 'restarting' && (
             <div className="settings__notice" role="status">
-              Restart signal sent. The page will reload shortly.
+              {restartSlow
+                ? 'This is taking longer than usual. Möbius is still checking.'
+                : 'Restart signal sent. The page will reload shortly.'}
             </div>
           )}
           {restartError && (

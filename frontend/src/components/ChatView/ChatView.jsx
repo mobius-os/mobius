@@ -19,6 +19,7 @@ import useScrollMode, {
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
+import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
@@ -2329,7 +2330,7 @@ export default function ChatView({
           attachments: composerFileSnapshot,
         })
         restoreComposerAfterFailedSend()
-        setSendFailure(sendFailureMessage(err, { online }))
+        setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
       }
       return
     }
@@ -2499,17 +2500,17 @@ export default function ChatView({
         attachments: composerFileSnapshot,
       })
       restoreComposerAfterFailedSend()
-      // The POST never reached/finished on the server, so remove the optimistic
-      // user bubble and keep the text in the composer. Otherwise a transient
-      // "Failed to fetch" looks like the message was accepted locally but
-      // silently disappears from the durable chat after refresh.
+      // Ambiguity recovery already verified reachability and safely replayed
+      // this exact cid once. If even that acknowledgement was lost, keep the
+      // same cid with the restored draft so a manual retry can only reconcile
+      // the existing server row, never create a duplicate turn.
       commitMessages(prev => {
         const next = [...prev]
         const idx = findUserIndexByCid(next, cid)
         if (idx >= 0) next.splice(idx, 1)
         return next
       })
-      setSendFailure(sendFailureMessage(err, { online }))
+      setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
       onStreamEndRef.current?.({ continues: false })
     }
     // doSend doesn't need `sending` / `isStreaming` in deps anymore —

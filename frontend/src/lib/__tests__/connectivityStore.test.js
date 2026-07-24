@@ -128,6 +128,21 @@ test('verification without subscribers is bounded and never starts a monitor', a
   assert.equal(h.documentTarget.listenerCount('visibilitychange'), 0)
 })
 
+test('a live mutation response repairs a stale offline verdict immediately', async () => {
+  const h = harness(async () => { throw new TypeError('offline') })
+  let notifications = 0
+  const stop = h.store.subscribe(() => { notifications += 1 })
+  await flushMicrotasks()
+  h.timers.runTimeout(AMBIGUOUS_FAILURE_CONFIRM_MS)
+  await flushMicrotasks()
+  assert.equal(h.store.getSnapshot(), false)
+
+  h.store.reportReachable()
+  assert.equal(h.store.getSnapshot(), true)
+  assert.equal(notifications, 2)
+  stop()
+})
+
 test('the hook and API client consume the shared store contract', () => {
   const hook = readFileSync(new URL('../../hooks/useOnlineStatus.js', import.meta.url), 'utf8')
   const client = readFileSync(new URL('../../api/client.js', import.meta.url), 'utf8')

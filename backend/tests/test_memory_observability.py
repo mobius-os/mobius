@@ -4,12 +4,35 @@ from pathlib import Path
 
 import app.memory_observability as memory_observability
 from app.memory_observability import (
+  _process_identity,
   allocation_report,
   cgroup_memory_snapshot,
   estimate_payload_bytes,
   memory_map_summary,
   process_memory_snapshot,
+  record_memory_checkpoint_once,
 )
+
+
+def test_process_identity_uses_command_ownership_not_generic_host_name():
+  assert _process_identity(
+    123,
+    "gunicorn",
+    "/data/tandoor/venv/bin/gunicorn recipes.wsgi",
+  ) == ("app_service", "tandoor")
+  assert _process_identity(
+    124,
+    "chrome",
+    "--user-data-dir=/data/agent-browser-profiles/chat-example",
+  ) == ("browser", "chat-example")
+
+
+def test_process_identity_does_not_expose_arbitrary_command_arguments():
+  assert _process_identity(
+    125,
+    "worker",
+    "worker --api-key secret-value",
+  ) == ("other", None)
 
 
 def test_process_memory_snapshot_reads_current_linux_process():
@@ -134,3 +157,32 @@ def test_zero_allocation_limit_does_not_materialize_heap_snapshot(monkeypatch):
   monkeypatch.setattr(memory_observability, "tracing_status", lambda: status)
 
   assert allocation_report(limit=0) == status
+
+
+def test_checkpoint_once_collapses_repeated_boundary(monkeypatch):
+  process_calls = 0
+
+  def process_snapshot():
+    nonlocal process_calls
+    process_calls += 1
+    return {"available": True, "rss_bytes": 1}
+
+  monkeypatch.setattr(
+    memory_observability,
+    "process_memory_snapshot",
+    process_snapshot,
+  )
+  monkeypatch.setattr(
+    memory_observability,
+    "cgroup_memory_snapshot",
+    lambda: {"available": True, "current_bytes": 2},
+  )
+  label = "test_checkpoint_once_collapses_repeated_boundary"
+
+  first = record_memory_checkpoint_once(label, stage="first")
+  second = record_memory_checkpoint_once(label, stage="second")
+
+  assert first is not None
+  assert first["context"] == {"stage": "first"}
+  assert second is None
+  assert process_calls == 1

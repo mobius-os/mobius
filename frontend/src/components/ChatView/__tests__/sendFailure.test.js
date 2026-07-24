@@ -11,7 +11,7 @@ import {
 test('send failures distinguish connection, timeout, service, and generic errors', () => {
   assert.match(
     sendFailureMessage(new ChatTransportError(new TypeError('Failed to fetch'))),
-    /check your connection/,
+    /couldn’t confirm the send/,
   )
 
   const timeout = new Error('aborted')
@@ -37,7 +37,7 @@ test('an unrelated programming TypeError is not mislabeled as offline', () => {
 test('known offline state wins over the transport error shape', () => {
   assert.match(
     sendFailureMessage(new Error('anything'), { online: false }),
-    /check your connection/,
+    /You’re offline/,
   )
 })
 

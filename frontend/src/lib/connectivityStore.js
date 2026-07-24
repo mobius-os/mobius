@@ -86,6 +86,19 @@ export function createConnectivityStore({
     return connectivityState
   }
 
+  // An uncached mutation response is stronger evidence than navigator.onLine
+  // or a cacheable health probe: it could only have come from the live server.
+  // Let owning write paths repair a stale offline verdict immediately instead
+  // of waiting for the next poll or Android's delayed `online` event.
+  function reportReachable() {
+    connectivityState = {
+      successStreak: Math.max(1, connectivityState.successStreak),
+      failureStreak: 0,
+      online: true,
+    }
+    publish(true)
+  }
+
   function startMonitor() {
     if (monitor) return monitor
     if (!windowTarget?.addEventListener || !documentTarget?.addEventListener) return null
@@ -196,7 +209,7 @@ export function createConnectivityStore({
     return verificationCheck
   }
 
-  return { getSnapshot, subscribe, verify }
+  return { getSnapshot, subscribe, verify, reportReachable }
 }
 
 const connectivityStore = createConnectivityStore()
@@ -204,3 +217,4 @@ const connectivityStore = createConnectivityStore()
 export const getOnlineSnapshot = connectivityStore.getSnapshot
 export const subscribeOnline = connectivityStore.subscribe
 export const verifyConnectivity = connectivityStore.verify
+export const reportNetworkReachable = connectivityStore.reportReachable

@@ -29,6 +29,11 @@ import {
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
 import {
+  reportNetworkReachable,
+  verifyConnectivity,
+} from '../../lib/connectivityStore.js'
+import { sendWithAmbiguityRecovery } from './sendTransportRecovery.js'
+import {
   TEXT_REVEAL_MIN_COMMIT_MS,
   textRevealBudget,
 } from './streamCadence.js'
@@ -1328,27 +1333,39 @@ export default function useStreamConnection(chatId, {
       // never settles, leaving the composer optimistically locked in Stop mode
       // forever (its catch below resets streaming state on the abort). No
       // in-flight guard needed here: doSend already gates re-entry.
-      const sendCtrl = new AbortController()
-      const sendTimer = setTimeout(() => sendCtrl.abort(), SEND_POST_TIMEOUT_MS)
       let res
-      const requestInit = {
-        method: 'POST',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify(body),
-        signal: sendCtrl.signal,
-      }
-      try {
+      const sendOnce = async () => {
+        // Each ambiguity retry needs a fresh controller. Reusing the aborted
+        // first attempt's signal would make the idempotent replay fail before
+        // it reached the server.
+        const sendCtrl = new AbortController()
+        const sendTimer = setTimeout(() => sendCtrl.abort(), SEND_POST_TIMEOUT_MS)
         try {
-          res = await fetch(
-            `${BASE}/api/chats/${chatIdRef.current}/messages`, requestInit,
+          return await fetch(
+            `${BASE}/api/chats/${chatIdRef.current}/messages`,
+            {
+              method: 'POST',
+              headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+              body: JSON.stringify(body),
+              signal: sendCtrl.signal,
+            },
           )
         } catch (error) {
           if (error?.name === 'AbortError') throw error
           throw new ChatTransportError(error)
+        } finally {
+          clearTimeout(sendTimer)
         }
-      } finally {
-        clearTimeout(sendTimer)
       }
+      res = await sendWithAmbiguityRecovery({
+        send: sendOnce,
+        verifyReachability: verifyConnectivity,
+        reportReachable: reportNetworkReachable,
+        isAmbiguousError: error => (
+          error?.name === 'ChatTransportError'
+          || error?.name === 'AbortError'
+        ),
+      })
       if (!res.ok) {
         throw await chatHttpError(res)
       }
