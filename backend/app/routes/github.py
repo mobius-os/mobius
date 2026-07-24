@@ -41,7 +41,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
 
@@ -144,13 +144,15 @@ class ContributionStackSubmitRequest(BaseModel):
 
 
 class ContributionSubmitBody(BaseModel):
-  # The one-click grant: when true (default) a successful submit stamps the
+  # The one-click grant: when true a successful submit stamps the
   # autopilot grant so the background loop may respond to reviews on this PR.
-  autopilot: bool = True
+  # Omitted/legacy request bodies stay on the classic manual path: the backend
+  # lands before the UI that explains this authority and asks for it.
+  autopilot: bool = False
 
 
 class AutopilotRespondBody(BaseModel):
-  # The attention payload job.sh (or the app's "Retry now") detected. `key`
+  # The attention payload job.sh detected. `key`
   # dedupes rounds; `event_at` is the cursor guard against re-triggering on the
   # agent's own replies.
   attention: dict = {}
@@ -162,9 +164,6 @@ class AutopilotUpdateBody(BaseModel):
   # (CAS) before calling; the endpoint re-verifies both against the branch.
   head_sha: str
   diff_sha256: str
-  # Rebase/conflict rounds rewrite published history: ancestry is waived but the
-  # diff-vs-new-base must still touch only source-allowlisted paths.
-  rewrite: bool = False
   summary: str = ""
 
 
@@ -181,7 +180,6 @@ class AutopilotCompleteBody(BaseModel):
   outcome: str
   summary: str = ""
   head_sha: str | None = None
-  event_at: str | None = None
 
 
 class AutopilotEscalateBody(BaseModel):
@@ -1814,6 +1812,7 @@ def _submit_prepared_pr(
   diff_path: Path,
   *,
   direct_base_branch: str | None = None,
+  expected_existing_pr_number: int | None = None,
 ) -> tuple[str, int | None, dict]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
@@ -1958,6 +1957,28 @@ def _submit_prepared_pr(
         record_patch=pushed_patch,
       )
     pushed_patch["last_submit_push_sha"] = pushed_sha
+
+    if expected_existing_pr_number is not None:
+      existing = _find_existing_pr(
+        repo,
+        upstream_repo,
+        login,
+        branch,
+        expected_head_sha=pushed_sha,
+        base_branch=submit_base,
+        same_repo=bool(direct_base),
+      )
+      if (
+        not existing
+        or _parse_pr_number(existing) != expected_existing_pr_number
+      ):
+        raise ContributionSubmitError(
+          "The approved pull request is no longer open on this exact branch. "
+          f"The reviewed branch was pushed to {pushed_branch_url}, but no new "
+          "pull request was created.",
+          record_patch=pushed_patch,
+        )
+      return existing, expected_existing_pr_number, pushed_patch
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
       f.write(body)
@@ -2933,7 +2954,7 @@ async def submit_contribution(
   # agent-writable ledger), written only here on the owner's Send. Best-effort:
   # a grant-write failure degrades to the classic manual flow, never fails the
   # submit that already opened the PR. Stack members never get a grant.
-  want_autopilot = body.autopilot if body is not None else True
+  want_autopilot = body.autopilot if body is not None else False
   if want_autopilot and not isinstance(
     (submitted.get("plan") or {}).get("stack"), dict
   ):
@@ -2943,7 +2964,23 @@ async def submit_contribution(
       head_sha = str(
         record_patch.get("last_submit_push_sha") if record_patch else ""
       ) or str(plan.get("head_sha") or "")
-      autopilot.stamp_grant(db, app_id, record_id, head_sha=head_sha or None)
+      autopilot.stamp_grant(
+        db, app_id, record_id,
+        head_sha=head_sha or None,
+        target_repo=_validate_repo_slug(
+          plan.get("repo") or submitted.get("repo")
+        ),
+        target_pr_number=int(number) if number is not None else None,
+        target_head_repository=str(
+          submitted.get("head_repository")
+          or (record_patch or {}).get("head_repository")
+          or ""
+        ) or None,
+        target_branch=_validate_branch(
+          plan.get("branch") or submitted.get("branch")
+        ),
+        target_repo_path=str(_safe_repo_path(plan.get("repo_path"))),
+      )
       await autopilot.mirror_to_ledger(app_id, record_id)
       submitted = _read_record(record_path)
     except Exception:
@@ -3603,34 +3640,86 @@ async def refresh_contribution_checks(
 _HUMAN_REQUIRED_TITLE = "Your contribution needs you"
 
 
-def _autopilot_source_allowlisted(paths: list[str]) -> bool:
+def _require_autopilot_agent(principal: Principal) -> None:
+  """Mutation rounds run under the owner's agent credential, never an app JWT."""
+  if principal.app_id is not None:
+    raise HTTPException(
+      status_code=403,
+      detail="An app token cannot perform an autopilot agent action.",
+    )
+
+
+def _autopilot_assert_bound_target(
+  row: models.ContributionAutopilot, record: dict,
+) -> None:
+  """Fail closed if the agent-writable ledger moved off the granted PR."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  try:
+    repo = _validate_repo_slug(plan.get("repo") or record.get("repo"))
+    branch = _validate_branch(plan.get("branch") or record.get("branch"))
+    repo_path = str(_safe_repo_path(plan.get("repo_path")))
+  except ContributionSubmitError as exc:
+    raise HTTPException(status_code=409, detail=exc.message) from exc
+  number = record.get("number") or _parse_pr_number(str(record.get("url") or ""))
+  head_repository = str(
+    record.get("head_repository") or plan.get("head_repository") or ""
+  )
+  expected = (
+    row.target_repo,
+    row.target_pr_number,
+    row.target_head_repository,
+    row.target_branch,
+    row.target_repo_path,
+  )
+  actual = (repo, number, head_repository or None, branch, repo_path)
+  if any(value in (None, "") for value in expected) or actual != expected:
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "This contribution no longer matches the PR target approved at Send."
+      ),
+    )
+
+
+def _autopilot_source_allowlisted(
+  paths: list[str], *, target_repo: str | None = None,
+) -> bool:
   """Every changed path must be source code (mirrors contributing.md Hard stop
   #2 — only source leaves the instance). Rejects anything under memory/storage/
   data dirs the allowlist never covers."""
-  denied_prefixes = (
-    "/data/", "data/shared/", ".git/", "contributions/",
-  )
+  if not paths:
+    return False
+  denied_roots = {
+    ".git", ".pm", ".claude", "AGENTS.md", "CLAUDE.md",
+  }
+  if target_repo == "mobius-os/mobius":
+    denied_roots.update({"docs", "demo-logs"})
   for raw in paths:
-    p = str(raw or "").strip()
-    if not p or p.startswith("/") and not p.startswith("/data/"):
-      # Absolute paths outside the checkout are always suspect.
+    p = str(raw or "")
+    if not p or p.startswith("/") or "\x00" in p:
       return False
-    if any(seg in p for seg in ("..",)):
+    parts = Path(p).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
       return False
-    if p.startswith(denied_prefixes):
+    if parts[0] in denied_roots:
+      return False
+    if parts[:2] == ("data", "shared"):
+      return False
+    if parts[0] == "contributions":
       return False
   return True
 
 
-def _autopilot_escalate_and_notify(
+async def _autopilot_escalate_and_notify(
   db: Session, app_id: int, record_id: str, owner_id: int, message: str,
-) -> None:
+) -> bool:
   """Release the claim, write the human_required attention to the ledger, and
   fire the single owner notification. The ONLY notification autopilot sends
   besides merged/closed (which job.sh owns)."""
   from app import contribution_autopilot as autopilot
 
-  autopilot.escalate(db, app_id, record_id)
+  if not autopilot.escalate(db, app_id, record_id):
+    return False
   record_path, _ = _record_paths(app_id, record_id)
   try:
     record = _read_record(record_path)
@@ -3646,7 +3735,7 @@ def _autopilot_escalate_and_notify(
     "url": (record or {}).get("url") or "",
     "detected_at": _now_iso(),
   }
-  autopilot.set_ledger_attention(
+  await autopilot.set_ledger_attention(
     app_id, record_id, attention, needs_attention=True,
   )
   try:
@@ -3660,6 +3749,7 @@ def _autopilot_escalate_and_notify(
   except Exception:
     log.warning("human_required notify failed %s/%s", app_id, record_id,
                 exc_info=True)
+  return True
 
 
 @router.post(
@@ -3677,7 +3767,7 @@ async def autopilot_respond(
 ):
   """Claim a record for one background response round and spawn the agent.
 
-  Caller: job.sh (service/app token) or the app's "Retry now". Order — dedupe on
+  Caller: job.sh (service/app token). Order — dedupe on
   attention key + cursor, DB claim, ensure the dedicated chat, spawn the round.
   Every non-spawn outcome is a normal state job.sh re-tries next pass, so events
   queue rather than drop.
@@ -3691,12 +3781,29 @@ async def autopilot_respond(
   attention_key = str(attention.get("key") or "").strip()
   if not attention_key:
     raise HTTPException(status_code=400, detail="attention.key is required.")
+  if len(attention_key) > 256:
+    raise HTTPException(status_code=400, detail="attention.key is too long.")
   event_at = attention.get("event_at") or attention.get("detected_at")
+  try:
+    event_at = autopilot.canonical_event_at(event_at)
+  except ValueError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+  if event_at:
+    event_dt = datetime.fromisoformat(event_at.replace("Z", "+00:00"))
+    if event_dt > datetime.now(UTC) + timedelta(minutes=5):
+      raise HTTPException(
+        status_code=400,
+        detail="attention event timestamp cannot be in the future.",
+      )
 
   row = autopilot.get_row(db, app_id, record_id)
   if row is None or not row.enabled:
     # No grant / paused — the app should notify the owner the classic way.
     return {"status": "not_granted"}
+
+  # Use the owner's existing background-agent choice; no Contribute-specific
+  # resource policy lives here.
+  provider = autopilot.resolve_round_provider(db)
 
   verdict = autopilot.claim_for_round(
     db, app_id, record_id, attention_key=attention_key, event_at=event_at,
@@ -3707,10 +3814,10 @@ async def autopilot_respond(
   if status == "not_granted":
     return {"status": "not_granted"}
   if status == "escalate":
-    _autopilot_escalate_and_notify(
+    await _autopilot_escalate_and_notify(
       db, app_id, record_id, owner_id,
-      "Autopilot reached its round budget without resolving the reviews."
-      if verdict.get("reason") == "budget_exhausted"
+      "Autopilot reached its five-round limit without resolving the reviews."
+      if verdict.get("reason") == "round_limit"
       else "Autopilot's follow-up rounds keep failing to complete.",
     )
     await autopilot.mirror_to_ledger(app_id, record_id)
@@ -3723,32 +3830,36 @@ async def autopilot_respond(
     record_path, _ = _record_paths(app_id, record_id)
     record = _read_record(record_path)
     title = str(record.get("title") or "contribution")[:80]
-    provider = autopilot.resolve_round_provider(db)
     chat_id = autopilot.ensure_followup_chat(
       db, app_id, record_id, title=f"Autopilot: {title}", provider=provider,
     )
     if not chat_id:
-      autopilot.release_for_retry(db, app_id, record_id)
+      autopilot.release_for_retry(
+        db, app_id, record_id, run_id=run_id,
+      )
       return {"status": "no_chat"}
     brief = _autopilot_round_brief(
-      app_id, record_id, record, attention, run_id,
+      app_id, record_id, row, attention, run_id,
     )
     started = await autopilot.spawn_round_turn(
       db, chat_id, title=f"Autopilot: {title}", content=brief, provider=provider,
     )
     if not started:
       # Chat busy — drop the claim cleanly and let the next cron pass retry.
-      autopilot.release_for_retry(db, app_id, record_id)
+      autopilot.release_for_retry(
+        db, app_id, record_id, run_id=run_id,
+      )
       return {"status": "busy_retry"}
     await autopilot.mirror_to_ledger(app_id, record_id)
     return {"status": "responding", "chat_id": chat_id, "run_id": run_id}
   except Exception:
     log.exception("autopilot spawn failed %s/%s", app_id, record_id)
     escalate = autopilot.record_spawn_failure(
-      db, app_id, record_id, summary="Could not start the follow-up round.",
+      db, app_id, record_id, run_id=run_id,
+      summary="Could not start the follow-up round.",
     )
     if escalate:
-      _autopilot_escalate_and_notify(
+      await _autopilot_escalate_and_notify(
         db, app_id, record_id, owner_id,
         "Autopilot could not start a follow-up round.",
       )
@@ -3757,7 +3868,11 @@ async def autopilot_respond(
 
 
 def _autopilot_round_brief(
-  app_id: int, record_id: str, record: dict, attention: dict, run_id: str,
+  app_id: int,
+  record_id: str,
+  row: models.ContributionAutopilot,
+  attention: dict,
+  run_id: str,
 ) -> str:
   """The drafted user message that opens a round.
 
@@ -3765,13 +3880,18 @@ def _autopilot_round_brief(
   stays out of the brief), and carries no secrets — the agent uses its own
   AGENT_TOKEN. The endpoint paths + run_id are the round's whole action surface.
   """
-  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-  repo = record.get("repo") or plan.get("repo") or "the repo"
-  url = record.get("url") or ""
+  repo = row.target_repo or "the repo"
+  url = (
+    f"https://github.com/{repo}/pull/{row.target_pr_number}"
+    if row.target_pr_number else ""
+  )
   base = f"/api/github/contributions/{app_id}/{record_id}"
-  att_type = attention.get("type") or "review activity"
-  att_msg = str(attention.get("message") or "")[:300]
-  att_url = attention.get("url") or url
+  att_type = str(attention.get("type") or "review_activity")
+  if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", att_type):
+    att_type = "review_activity"
+  att_id = str(attention.get("id") or attention.get("key") or "")
+  if not re.fullmatch(r"[A-Za-z0-9:_-]{1,256}", att_id):
+    att_id = "untrusted-id-omitted"
   return (
     "Follow the `review-followup` skill to handle new review activity on a "
     "contribution you shipped.\n\n"
@@ -3779,8 +3899,9 @@ def _autopilot_round_brief(
     f"Pull request: {url}\n"
     f"Record id: {record_id}\n"
     f"Run id (present this on every autopilot call): {run_id}\n"
-    f"Detected event: {att_type} — {att_msg}\n"
-    f"Where to look: {att_url}\n\n"
+    f"Detected event type: {att_type}\n"
+    f"Detected event id: {att_id}\n"
+    f"Where to look: {url}\n\n"
     "Action endpoints (owner-mediated; call with your AGENT_TOKEN):\n"
     f"  POST {base}/update   — push a validated fix to this PR's branch\n"
     f"  POST {base}/reply    — reply to a review thread / comment on this PR\n"
@@ -3813,65 +3934,126 @@ async def autopilot_reply(
   """
   from app import contribution_autopilot as autopilot
 
+  _require_autopilot_agent(principal)
   _validate_submit_app(app_id, principal, db)
   row = autopilot.get_row(db, app_id, record_id)
   if not autopilot.verify_claim(row, body.run_id):
     raise HTTPException(status_code=409, detail="No live round with this run_id.")
   record_path, _ = _record_paths(app_id, record_id)
   record = _read_record(record_path)
+  _autopilot_assert_bound_target(row, record)
   if record.get("type") != "pr":
     raise HTTPException(status_code=400, detail="Replies apply to PRs only.")
-  pr_url = str(record.get("url") or "")
-  number = _parse_pr_number(pr_url)
-  repo = _validate_repo_slug(
-    (record.get("plan") or {}).get("repo") or record.get("repo")
-  )
-  if not number:
-    raise HTTPException(status_code=409, detail="This PR has no number yet.")
+  number = int(row.target_pr_number)
+  repo = str(row.target_repo)
 
   db.close()
   text = str(body.body or "").strip()
+  if not text:
+    raise HTTPException(status_code=400, detail="Reply body is required.")
+  if body.re_request_review:
+    raise HTTPException(
+      status_code=422,
+      detail=(
+        "Re-requesting review needs an explicitly selected reviewer and is not "
+        "part of the current autopilot action surface."
+      ),
+    )
   result = await asyncio.to_thread(
     _autopilot_post_reply, repo, number, text, body.in_reply_to,
-    body.re_request_review,
+    str(row.target_head_repository), str(row.target_branch),
   )
   if not result.get("ok"):
     raise HTTPException(status_code=502, detail=result.get("error") or "gh failed.")
+  if not autopilot.record_action(
+    db, app_id, record_id, run_id=body.run_id, action="replied",
+    public_event_url=result.get("url"),
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail="The reply was posted, but this autopilot round has expired.",
+    )
+  # Publish the exact self-authored event immediately. If the agent crashes
+  # before /complete, the next background scan still cannot mistake its own
+  # public reply for fresh reviewer activity.
+  await autopilot.mirror_to_ledger(app_id, record_id)
   return {"status": "ok"}
+
+
+def _autopilot_live_target_error(
+  repo: str, number: int, head_repository: str, branch: str,
+) -> str | None:
+  if not shutil.which("gh"):
+    return "gh is not installed."
+  token = github_auth.get_token()
+  if not token:
+    return "GitHub not connected."
+  env = dict(os.environ)
+  env["GH_TOKEN"] = token
+  try:
+    viewed = subprocess.run(
+      ["gh", "api", f"repos/{repo}/pulls/{number}"],
+      capture_output=True, text=True, timeout=30, env=env,
+    )
+    if viewed.returncode != 0:
+      return (viewed.stderr or "gh failed.")[:300]
+    try:
+      live = json.loads(viewed.stdout)
+    except json.JSONDecodeError:
+      return "GitHub returned invalid PR metadata."
+    if not isinstance(live, dict):
+      return "GitHub returned invalid PR metadata."
+    live_head = (
+      ((live.get("head") or {}).get("repo") or {}).get("full_name")
+    )
+    live_branch = (live.get("head") or {}).get("ref")
+    if (
+      live.get("state") != "open"
+      or live_head != head_repository
+      or live_branch != branch
+    ):
+      return "The live pull request no longer matches the approved target."
+  except (subprocess.TimeoutExpired, OSError) as exc:
+    return str(exc)[:300]
+  return None
 
 
 def _autopilot_post_reply(
   repo: str, number: int, text: str, in_reply_to: int | None,
-  re_request_review: bool,
+  head_repository: str, branch: str,
 ) -> dict:
-  if not shutil.which("gh"):
-    return {"ok": False, "error": "gh is not installed."}
+  target_error = _autopilot_live_target_error(
+    repo, number, head_repository, branch,
+  )
+  if target_error:
+    return {"ok": False, "error": target_error}
   token = github_auth.get_token()
-  if not token:
-    return {"ok": False, "error": "GitHub not connected."}
   env = dict(os.environ)
   env["GH_TOKEN"] = token
+  posted_url = None
   try:
     if text:
-      args = [
-        "gh", "api", f"repos/{repo}/issues/{number}/comments",
-        "-f", f"body={text}",
-      ]
+      endpoint = (
+        f"repos/{repo}/pulls/{number}/comments/{in_reply_to}/replies"
+        if in_reply_to is not None
+        else f"repos/{repo}/issues/{number}/comments"
+      )
+      args = ["gh", "api", endpoint, "-f", f"body={text}"]
       out = subprocess.run(
         args, capture_output=True, text=True, timeout=30, env=env,
       )
       if out.returncode != 0:
         return {"ok": False, "error": (out.stderr or "gh failed.")[:300]}
-    if re_request_review:
-      # Best-effort: re-requesting review is not always available; ignore a
-      # non-zero here so a productive push+reply isn't reported as failed.
-      subprocess.run(
-        ["gh", "pr", "ready", str(number), "-R", repo],
-        capture_output=True, text=True, timeout=30, env=env, check=False,
+      try:
+        posted = json.loads(out.stdout or "{}")
+      except json.JSONDecodeError:
+        posted = {}
+      posted_url = (
+        posted.get("html_url") if isinstance(posted, dict) else None
       )
   except (subprocess.TimeoutExpired, OSError) as exc:
     return {"ok": False, "error": str(exc)[:300]}
-  return {"ok": True}
+  return {"ok": True, "url": posted_url or None}
 
 
 @router.post(
@@ -3890,19 +4072,24 @@ async def autopilot_complete(
   """Finish a round (agent-called). Requires the live run_id."""
   from app import contribution_autopilot as autopilot
 
+  _require_autopilot_agent(principal)
   _validate_submit_app(app_id, principal, db)
   owner_id = principal.owner.id
   result = autopilot.complete_round(
     db, app_id, record_id,
     run_id=body.run_id, outcome=body.outcome, summary=body.summary,
-    head_sha=body.head_sha, event_at=body.event_at,
+    head_sha=body.head_sha,
   )
   if result["status"] == "stale":
     raise HTTPException(status_code=409, detail="No live round with this run_id.")
   if result["escalate"]:
-    _autopilot_escalate_and_notify(
+    await _autopilot_escalate_and_notify(
       db, app_id, record_id, owner_id,
       "Autopilot's follow-up rounds keep failing to complete.",
+    )
+  elif result["productive"]:
+    await autopilot.set_ledger_attention(
+      app_id, record_id, None, needs_attention=False,
     )
   await autopilot.mirror_to_ledger(app_id, record_id)
   return {"status": "ok"}
@@ -3924,12 +4111,13 @@ async def autopilot_escalate(
   """Hand a round back to the human (agent-called). Requires the live run_id."""
   from app import contribution_autopilot as autopilot
 
+  _require_autopilot_agent(principal)
   _validate_submit_app(app_id, principal, db)
   owner_id = principal.owner.id
   row = autopilot.get_row(db, app_id, record_id)
   if not autopilot.verify_claim(row, body.run_id):
     raise HTTPException(status_code=409, detail="No live round with this run_id.")
-  _autopilot_escalate_and_notify(
+  await _autopilot_escalate_and_notify(
     db, app_id, record_id, owner_id,
     body.message or "Autopilot needs your input to continue.",
   )
@@ -3961,30 +4149,26 @@ async def autopilot_toggle(
     raise HTTPException(status_code=404, detail="No autopilot grant for this record.")
   if body.enabled:
     # Resume clears any human_required flag the owner is acting on.
-    autopilot.set_ledger_attention(
+    await autopilot.set_ledger_attention(
       app_id, record_id, None, needs_attention=False,
     )
   await autopilot.mirror_to_ledger(app_id, record_id)
   return {"status": "ok", "enabled": row.enabled}
 
 
-def _autopilot_changed_paths(diff_path: Path) -> list[str]:
-  """Parse the changed file paths from a stored unified diff (for the source
-  allowlist). Reads the `+++ b/<path>` headers; tolerant of a missing file."""
-  paths: list[str] = []
-  try:
-    text = diff_path.read_text(encoding="utf-8", errors="replace")
-  except OSError:
-    return paths
-  for line in text.splitlines():
-    if line.startswith("+++ ") or line.startswith("--- "):
-      target = line[4:].strip()
-      if target in ("/dev/null", ""):
-        continue
-      if target.startswith(("a/", "b/")):
-        target = target[2:]
-      paths.append(target)
-  return paths
+def _autopilot_changed_paths(
+  repo: Path, base_sha: str, head_sha: str,
+) -> list[str]:
+  """Read exact changed paths from git, including rename-only/special names."""
+  proc = _git(
+    repo, "-c", "core.quotePath=false", "diff", "--name-only", "-z",
+    f"{base_sha}..{head_sha}",
+  )
+  return [
+    raw.decode("utf-8", errors="strict")
+    for raw in proc.stdout.encode("utf-8").split(b"\0")
+    if raw
+  ]
 
 
 @router.post(
@@ -4014,6 +4198,7 @@ async def autopilot_update(
   """
   expected_nonce = _validate_submit_app(app_id, principal, db)
   from app import contribution_autopilot as autopilot
+  _require_autopilot_agent(principal)
 
   row = autopilot.get_row(db, app_id, record_id)
   if not autopilot.verify_claim(row, body.run_id):
@@ -4021,6 +4206,7 @@ async def autopilot_update(
 
   record_path, diff_path = _record_paths(app_id, record_id)
   record = _read_record(record_path)
+  _autopilot_assert_bound_target(row, record)
   if record.get("type") != "pr" or record.get("status") not in ("open", "draft"):
     raise HTTPException(
       status_code=409, detail="Autopilot updates apply to open PRs only.",
@@ -4036,20 +4222,46 @@ async def autopilot_update(
       status_code=409,
       detail="The record's reviewed head/diff does not match this update.",
     )
-  # Source-only allowlist — the same boundary the skill states, enforced server
-  # side so no reviewer text can widen the diff's reach.
-  if not _autopilot_source_allowlisted(_autopilot_changed_paths(diff_path)):
+  try:
+    repo_path = _safe_repo_path(plan.get("repo_path"))
+    base_sha = _resolve_reviewed_commit(
+      repo_path, plan.get("base_sha"), "base sha",
+    )
+    head_sha = _resolve_reviewed_commit(
+      repo_path, plan.get("head_sha"), "head sha",
+    )
+    changed_paths = _autopilot_changed_paths(repo_path, base_sha, head_sha)
+  except (ContributionSubmitError, UnicodeError) as exc:
+    message = (
+      exc.message if isinstance(exc, ContributionSubmitError)
+      else "A changed path is not valid UTF-8."
+    )
+    raise HTTPException(status_code=409, detail=message) from exc
+  # Source-only boundary is derived from the exact reviewed commits, not parsed
+  # from an agent-writable patch. Empty/unparseable diffs fail closed.
+  if not _autopilot_source_allowlisted(
+    changed_paths, target_repo=str(row.target_repo),
+  ):
     raise HTTPException(
       status_code=422,
       detail="This update touches paths outside the source allowlist.",
     )
+  target_error = await asyncio.to_thread(
+    _autopilot_live_target_error,
+    str(row.target_repo),
+    int(row.target_pr_number),
+    str(row.target_head_repository),
+    str(row.target_branch),
+  )
+  if target_error:
+    raise HTTPException(status_code=409, detail=target_error)
 
   db.close()
   try:
-    repo_path = _safe_repo_path(plan.get("repo_path"))
     async with fs_locks.source_dir_lock(str(repo_path)):
       pr_url, number, record_patch = await asyncio.to_thread(
         _submit_prepared_pr, record, diff_path,
+        expected_existing_pr_number=int(row.target_pr_number),
       )
   except ContributionSubmitError as exc:
     raise HTTPException(
@@ -4070,6 +4282,14 @@ async def autopilot_update(
     if number is not None:
       updated["number"] = number
     _write_record(record_path, updated)
+  if not autopilot.record_action(
+    db, app_id, record_id,
+    run_id=body.run_id, action="pushed", head_sha=body.head_sha,
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail="The branch was pushed, but this autopilot round has expired.",
+    )
   return {"status": "ok", "url": pr_url, "number": number}
 
 

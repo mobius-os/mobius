@@ -782,6 +782,14 @@ class ContributionAutopilot(Base):
   granted_at = Column(DateTime, nullable=True, default=None)
   # The reviewed head the grant was issued against — a re-send refreshes it.
   granted_head_sha = Column(String(64), nullable=True, default=None)
+  # Immutable public/local target stamped from the successful owner-approved
+  # submission. The contribution ledger is agent-writable, so follow-up routes
+  # must never recover these authority-bearing values from it.
+  target_repo = Column(String(256), nullable=True, default=None)
+  target_pr_number = Column(Integer, nullable=True, default=None)
+  target_head_repository = Column(String(256), nullable=True, default=None)
+  target_branch = Column(String(256), nullable=True, default=None)
+  target_repo_path = Column(String(1024), nullable=True, default=None)
   # "idle" between rounds; "responding" while a round holds the claim.
   state = Column(String(16), nullable=False, default="idle")
   # The live claim. run_id is a fresh uuid per round and is the round's whole
@@ -789,14 +797,23 @@ class ContributionAutopilot(Base):
   # present it, so a zombie agent from a reclaimed round holds a dead id.
   run_id = Column(String(64), nullable=True, default=None)
   attention_key = Column(String(256), nullable=True, default=None)
+  # Canonical timestamp copied from the claimed attention. Completion advances
+  # the cursor to this value; an agent cannot choose its own future cursor.
+  claimed_event_at = Column(String(40), nullable=True, default=None)
+  # Successful server-mediated actions recorded during this claim. Completion
+  # derives productivity from these fields instead of trusting agent prose.
+  round_action = Column(String(16), nullable=True, default=None)
+  round_head_sha = Column(String(64), nullable=True, default=None)
+  # Exact GitHub URLs returned by recent server-mediated replies. Mirrored for
+  # the scheduler so it ignores only Autopilot's own activity—not every comment
+  # written by the owner's GitHub account.
+  ignored_event_urls_json = Column(JSON, nullable=True, default=None)
   claimed_at = Column(DateTime, nullable=True, default=None)
   lease_expires_at = Column(DateTime, nullable=True, default=None)
   # The dedicated owner-visible chat where every round for this record runs.
   followup_chat_id = Column(
     String(64), ForeignKey("chats.id"), nullable=True, default=None
   )
-  # Rounds cap: the primary bound on how much work one contribution can drive.
-  # Exhausting it escalates to the owner rather than continuing silently.
   rounds_used = Column(Integer, nullable=False, default=0)
   max_rounds = Column(Integer, nullable=False, default=5)
   # Consecutive non-productive rounds (stale/failed); 2 in a row auto-escalates.
@@ -805,6 +822,7 @@ class ContributionAutopilot(Base):
   # re-posted event (incl. the agent's own reply seen by the next cron pass)
   # cannot re-trigger. Stored as the ISO string the ledger/GraphQL use.
   last_handled_event_at = Column(String(40), nullable=True, default=None)
+  last_handled_attention_key = Column(String(256), nullable=True, default=None)
   # Capped audit log (newest last, trimmed to 30 entries): each entry is
   # {attention_key, run_id, started_at, finished_at, outcome, summary, head_sha}.
   rounds_json = Column(JSON, nullable=True, default=None)

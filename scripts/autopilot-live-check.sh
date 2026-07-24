@@ -5,12 +5,13 @@
 # GitHub connection. Proves the parts the stubbed unit/integration tests can't:
 # the REAL git push updating a REAL PR, and job.sh detecting a REAL review.
 #
-# It plays the follow-up agent MECHANICALLY (no reasoning, no agent tokens):
-# seeds a fresh contribution, opens a PR, posts a review from the reviewer
-# account, drives /respond → /update → /reply → /complete with the app token,
-# verifies the PR advanced on GitHub, checks the no-self-retrigger guard, then
-# closes the PR and removes everything it created. Re-runnable: every run uses a
-# unique branch/record id and cleans up after itself.
+# It seeds a fresh contribution, opens a PR, posts a review from the reviewer
+# account, triggers the real scheduled detector, and then OBSERVES the spawned
+# follow-up agent drive /update → /reply → /complete with its live run claim.
+# The app token cannot call those mutation routes. The harness verifies that the
+# PR advanced on GitHub, checks the no-self-retrigger guard, then closes the PR
+# and removes everything it created. Re-runnable: every run uses a unique
+# branch/record id and cleans up after itself.
 #
 # It is NOT wired into CI (needs live creds + a running stack); it's an on-demand
 # command. See scripts/AUTOPILOT-LIVE-CHECK.md for the full runbook.
@@ -180,7 +181,7 @@ for _ in $(seq 1 10); do
   [ "$ST" = "responding" ] && { SPAWNED=1; break; }
 done
 [ -n "$SPAWNED" ] && ok "job.sh detected the review → claimed a round (state=responding)" \
-  || die "job.sh did not claim a round (check the provider is authed)"
+  || die "job.sh did not claim a round (check the provider is authenticated)"
 
 # ── 5. Observe the real agent complete the round ─────────────────────────────
 say "5. Watch the review-followup agent fix + push + reply + complete"

@@ -1,10 +1,10 @@
 """Stage-1 integration test: the whole autopilot loop through real HTTP.
 
 Unit coverage lives in test_contribution_autopilot.py (state machine + trust).
-This drives the loop END TO END across the real
-endpoints — submit stamps the grant, /respond claims + creates the dedicated chat
-+ writes the ledger mirror, /update runs the submit push path, /reply, /complete
-advances the cursor, and a second /respond proves the self-re-trigger guard.
+This drives the loop END TO END across the real endpoints — submit stamps the
+grant, /respond claims + creates the dedicated chat + writes the ledger mirror,
+/update runs the submit push path, /reply, /complete advances the cursor, and a
+second /respond proves the self-re-trigger guard.
 
 git/gh are stubbed at the command boundary exactly like the existing submit tests
 (_submit_preflight_response + a fake _git/_gh), and the background turn spawn is
@@ -109,6 +109,11 @@ def _make_fakes(state):
       f"{_BASE}..{head}",
     ):
       return _cp(diff_text)
+    if args == (
+      "-c", "core.quotePath=false", "diff", "--name-only", "-z",
+      f"{_BASE}..{head}",
+    ):
+      return _cp("index.jsx\0")
     if args == ("log", "-1", "--format=%B", _BRANCH):
       return _cp(
         "Polish demo\n\n"
@@ -131,8 +136,14 @@ def _make_fakes(state):
       state["fork_ready"] = True
       return _cp("")
     if args[:2] == ("pr", "list"):
+      if state.get("pr_open"):
+        return _cp(json.dumps([{
+          "url": "https://github.com/mobius-os/app-demo/pull/42",
+          "headRefOid": state["head"],
+        }]))
       return _cp("[]")
     if args[:2] == ("pr", "create"):
+      state["pr_open"] = True
       return _cp("https://github.com/mobius-os/app-demo/pull/42\n")
     return _cp("")
 
@@ -165,6 +176,7 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
   _write_token(login="octocat")
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   headers = {"Authorization": f"Bearer {app_token}"}
+  agent_headers = {"Authorization": f"Bearer {owner_token}"}
   record_id = "rec-loop"
   repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
@@ -183,6 +195,10 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
   monkeypatch.setattr(
     github_routes, "_autopilot_post_reply",
     lambda *a, **k: {"ok": True},
+  )
+  monkeypatch.setattr(
+    github_routes, "_autopilot_live_target_error",
+    lambda *a, **k: None,
   )
 
   # 1. Submit with autopilot → PR opened + grant stamped + mirror written.
@@ -227,6 +243,8 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
   rec = _read(app_id, record_id)
   rec["plan"]["head_sha"] = _HEAD2
   rec["plan"]["diff_sha256"] = hashlib.sha256(_DIFF2.encode()).hexdigest()
+  rec["needs_attention"] = True
+  rec["attention"] = attention
   _write_contribution(app_id, record_id, rec, _DIFF2)
   state["head"] = _HEAD2
   state["diff_text"] = _DIFF2
@@ -234,34 +252,35 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
     f"/api/github/contributions/{app_id}/{record_id}/update",
     json={"run_id": run_id, "head_sha": _HEAD2,
           "diff_sha256": hashlib.sha256(_DIFF2.encode()).hexdigest()},
-    headers=headers,
+    headers=agent_headers,
   )
   assert r.status_code == 200, r.text
 
   # 4. Reply + complete → idle, one round, cursor advanced.
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/reply",
-    json={"run_id": run_id, "body": "Addressed the review.",
-          "re_request_review": True}, headers=headers,
+    json={"run_id": run_id, "body": "Addressed the review."},
+    headers=agent_headers,
   )
   assert r.status_code == 200, r.text
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/complete",
     json={"run_id": run_id, "outcome": "pushed",
-          "summary": "Fixed the reordering.",
-          "event_at": "2026-07-10T00:00:00Z"}, headers=headers,
+          "summary": "Fixed the reordering."}, headers=agent_headers,
   )
   assert r.status_code == 200, r.text
   db = SessionLocal()
   try:
     row = autopilot.get_row(db, app_id, record_id)
     assert row.state == "idle" and row.rounds_used == 1
-    assert row.last_handled_event_at == "2026-07-10T00:00:00Z"
+    assert row.last_handled_event_at == "2026-07-10T00:00:00.000000Z"
   finally:
     db.close()
   mirror = _read(app_id, record_id)["autopilot"]
   assert mirror["state"] == "idle" and mirror["rounds_used"] == 1
   assert mirror["last_round"]["outcome"] == "pushed"
+  assert _read(app_id, record_id)["needs_attention"] is False
+  assert _read(app_id, record_id)["attention"] is None
 
   # 5. The same event must NOT re-trigger (cursor guards the self-reply loop).
   r = client.post(
@@ -278,11 +297,15 @@ def test_injection_diff_outside_allowlist_is_rejected(
   _write_token(login="octocat")
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   headers = {"Authorization": f"Bearer {app_token}"}
+  agent_headers = {"Authorization": f"Bearer {owner_token}"}
   record_id = "rec-injection"
   repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   rec = _record(record_id, repo)
   rec["status"] = "open"  # already shipped
+  rec["number"] = 42
+  rec["url"] = "https://github.com/mobius-os/app-demo/pull/42"
+  rec["head_repository"] = "octocat/app-demo-1"
   evil_diff = (
     "diff --git a/data/shared/memory/secret b/data/shared/memory/secret\n"
     "--- a/data/shared/memory/secret\n+++ b/data/shared/memory/secret\n"
@@ -291,10 +314,23 @@ def test_injection_diff_outside_allowlist_is_rejected(
   rec["plan"]["head_sha"] = _HEAD2
   rec["plan"]["diff_sha256"] = hashlib.sha256(evil_diff.encode()).hexdigest()
   _write_contribution(app_id, record_id, rec, evil_diff)
+  monkeypatch.setattr(
+    github_routes, "_autopilot_changed_paths",
+    lambda *args: ["data/shared/memory/secret"],
+  )
+  monkeypatch.setattr(
+    github_routes, "_resolve_reviewed_commit",
+    lambda repo_path, value, label: str(value),
+  )
 
   db = SessionLocal()
   try:
-    autopilot.stamp_grant(db, app_id, record_id, head_sha=_HEAD1)
+    autopilot.stamp_grant(
+      db, app_id, record_id, head_sha=_HEAD1,
+      target_repo="mobius-os/app-demo", target_pr_number=42,
+      target_head_repository="octocat/app-demo-1",
+      target_branch=_BRANCH, target_repo_path=str(repo.resolve()),
+    )
     verdict = autopilot.claim_for_round(
       db, app_id, record_id, attention_key="k", event_at="2026-07-10T00:00:00Z",
     )
@@ -306,7 +342,7 @@ def test_injection_diff_outside_allowlist_is_rejected(
     f"/api/github/contributions/{app_id}/{record_id}/update",
     json={"run_id": run_id, "head_sha": _HEAD2,
           "diff_sha256": hashlib.sha256(evil_diff.encode()).hexdigest()},
-    headers=headers,
+    headers=agent_headers,
   )
   assert r.status_code == 422
 

@@ -12,8 +12,8 @@ The lifecycle, per (app_id, record_id):
   grant (submit)  ─▶  idle
   /respond  ─▶  claim (state=responding, fresh run_id, 45-min lease) ─▶ spawn round
   agent  ─▶  /update (validated push) / /reply ─▶ /complete ─▶ idle, round logged
-  crash   ─▶  lease expires ─▶ sweep marks a stale round, back to idle
-  2 consecutive stale/failed rounds, or rounds budget exhausted ─▶ escalate
+  crash   ─▶  lease expires ─▶ next retry marks it stale and reclaims it
+  2 consecutive stale/failed rounds, or five-round limit reached ─▶ escalate
   escalate ─▶ human_required attention + owner notification, claim released
   merged / closed ─▶ close_out, autopilot ends
 
@@ -30,9 +30,10 @@ import json
 import logging
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from sqlalchemy import and_, update
 from sqlalchemy.orm import Session
 
 from app import fs_locks, models
@@ -48,9 +49,10 @@ DEFAULT_MAX_ROUNDS = 5
 FAILURE_ESCALATION_THRESHOLD = 2
 # Cap the mirrored/audit round log so a record can't grow without bound.
 MAX_ROUND_LOG = 30
+MAX_IGNORED_EVENT_URLS = 20
 
 # Outcomes that mean the round did useful work (resets the failure counter and
-# advances the budget/cursor). Anything else is a non-productive round.
+# advances the round count/cursor). Anything else is a non-productive round.
 PRODUCTIVE_OUTCOMES = frozenset({"pushed", "replied"})
 
 
@@ -76,6 +78,11 @@ def stamp_grant(
   record_id: str,
   *,
   head_sha: str | None,
+  target_repo: str | None = None,
+  target_pr_number: int | None = None,
+  target_head_repository: str | None = None,
+  target_branch: str | None = None,
+  target_repo_path: str | None = None,
   max_rounds: int = DEFAULT_MAX_ROUNDS,
 ) -> models.ContributionAutopilot:
   """Idempotent grant upsert — the ONLY authorization autopilot consults.
@@ -93,6 +100,11 @@ def stamp_grant(
       enabled=True,
       granted_at=now,
       granted_head_sha=head_sha,
+      target_repo=target_repo,
+      target_pr_number=target_pr_number,
+      target_head_repository=target_head_repository,
+      target_branch=target_branch,
+      target_repo_path=target_repo_path,
       state="idle",
       max_rounds=max_rounds,
       rounds_json=[],
@@ -104,6 +116,11 @@ def stamp_grant(
     row.enabled = True
     row.granted_at = now
     row.granted_head_sha = head_sha
+    row.target_repo = target_repo
+    row.target_pr_number = target_pr_number
+    row.target_head_repository = target_head_repository
+    row.target_branch = target_branch
+    row.target_repo_path = target_repo_path
     row.updated_at = now
   db.commit()
   return row
@@ -117,23 +134,107 @@ def _lease_expired(row: models.ContributionAutopilot) -> bool:
   )
 
 
-def _append_round(row: models.ContributionAutopilot, entry: dict) -> None:
-  log_list = list(row.rounds_json or [])
-  log_list.append(entry)
-  if len(log_list) > MAX_ROUND_LOG:
-    log_list = log_list[-MAX_ROUND_LOG:]
-  row.rounds_json = log_list
-
-
 def _release_claim(row: models.ContributionAutopilot) -> None:
   row.state = "idle"
   row.run_id = None
   row.attention_key = None
+  row.claimed_event_at = None
+  row.round_action = None
+  row.round_head_sha = None
   row.claimed_at = None
   row.lease_expires_at = None
 
 
 # ─────────────────────────── claim / rounds ─────────────────────────
+
+
+def canonical_event_at(value: object) -> str | None:
+  """Return one UTC representation suitable for chronological string compare."""
+  raw = str(value or "").strip()
+  if not raw:
+    return None
+  try:
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+  except ValueError as exc:
+    raise ValueError("event_at must be an ISO-8601 timestamp") from exc
+  if parsed.tzinfo is None:
+    parsed = parsed.replace(tzinfo=timezone.utc)
+  parsed = parsed.astimezone(timezone.utc)
+  return parsed.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _claim_match(
+  app_id: int, record_id: str, run_id: str,
+):
+  return and_(
+    models.ContributionAutopilot.app_id == app_id,
+    models.ContributionAutopilot.record_id == record_id,
+    models.ContributionAutopilot.enabled.is_(True),
+    models.ContributionAutopilot.state == "responding",
+    models.ContributionAutopilot.run_id == run_id,
+  )
+
+
+def _release_values() -> dict:
+  return {
+    "state": "idle",
+    "run_id": None,
+    "attention_key": None,
+    "claimed_event_at": None,
+    "round_action": None,
+    "round_head_sha": None,
+    "claimed_at": None,
+    "lease_expires_at": None,
+  }
+
+
+def _append_round_value(row: models.ContributionAutopilot, entry: dict) -> list:
+  rounds = list(row.rounds_json or [])
+  rounds.append(entry)
+  return rounds[-MAX_ROUND_LOG:]
+
+
+def _nonproductive_entry(
+  row: models.ContributionAutopilot, *, outcome: str, summary: str,
+) -> dict:
+  return {
+    "attention_key": row.attention_key,
+    "run_id": row.run_id,
+    "started_at": row.claimed_at.isoformat() if row.claimed_at else None,
+    "finished_at": now_naive_utc().isoformat(),
+    "outcome": outcome,
+    "summary": summary,
+    "head_sha": row.granted_head_sha,
+  }
+
+
+def _reclaim_expired(
+  db: Session, row: models.ContributionAutopilot,
+) -> tuple[bool, int]:
+  """CAS-release one exact expired claim and record its failed round."""
+  failures = int(row.consecutive_failures or 0) + 1
+  values = {
+    **_release_values(),
+    "rounds_json": _append_round_value(
+      row, _nonproductive_entry(
+        row, outcome="stale", summary="Round lease expired.",
+      ),
+    ),
+    "consecutive_failures": failures,
+    "updated_at": now_naive_utc(),
+  }
+  result = db.execute(
+    update(models.ContributionAutopilot)
+    .where(
+      _claim_match(row.app_id, row.record_id, str(row.run_id or "")),
+      models.ContributionAutopilot.lease_expires_at
+      == row.lease_expires_at,
+      models.ContributionAutopilot.lease_expires_at <= now_naive_utc(),
+    )
+    .values(**values)
+  )
+  db.commit()
+  return result.rowcount == 1, failures
 
 
 def claim_for_round(
@@ -151,71 +252,86 @@ def claim_for_round(
     - ``"not_granted"``: no active grant (no row / paused) — classic flow.
     - ``"duplicate"``: this attention was already handled or is in flight.
     - ``"busy"``: a live (non-expired) round holds the claim.
-    - ``"escalate"`` (+ ``reason``): rounds budget exhausted — caller escalates.
+    - ``"escalate"`` (+ ``reason``): five-round limit reached — caller escalates.
 
   A crashed round (expired lease) is reclaimed here: its stale round is logged
   and the failure counter advanced before the fresh claim is taken.
   """
-  row = get_row(db, app_id, record_id)
-  if row is None or not row.enabled:
-    return {"status": "not_granted"}
+  claimed_event = canonical_event_at(event_at)
+  for _attempt in range(4):
+    db.expire_all()
+    row = get_row(db, app_id, record_id)
+    if row is None or not row.enabled:
+      return {"status": "not_granted"}
+    if row.last_handled_attention_key == attention_key:
+      return {"status": "duplicate"}
+    if (
+      claimed_event
+      and row.last_handled_event_at
+      and claimed_event <= row.last_handled_event_at
+    ):
+      return {"status": "duplicate"}
+    if row.state == "responding":
+      if not _lease_expired(row):
+        return {
+          "status": "duplicate"
+          if row.attention_key == attention_key else "busy"
+        }
+      reclaimed, failures = _reclaim_expired(db, row)
+      if not reclaimed:
+        continue
+      if failures >= FAILURE_ESCALATION_THRESHOLD:
+        return {"status": "escalate", "reason": "stale_rounds"}
+      continue
+    if row.rounds_used >= row.max_rounds:
+      return {"status": "escalate", "reason": "round_limit"}
 
-  # Cursor dedupe: an event at/older than the last handled one (incl. the
-  # agent's own reply seen by the next cron pass) never re-triggers.
-  if (
-    event_at
-    and row.last_handled_event_at
-    and str(event_at) <= str(row.last_handled_event_at)
-  ):
-    return {"status": "duplicate"}
-
-  if row.state == "responding":
-    if not _lease_expired(row):
-      # Same attention already in flight is a benign duplicate; a different one
-      # arriving mid-round waits for the current round to finish.
-      if row.attention_key == attention_key:
-        return {"status": "duplicate"}
-      return {"status": "busy"}
-    # Expired lease → the round crashed. Log a stale round and reclaim.
-    _record_nonproductive(row, outcome="stale", summary="Round lease expired.")
-    if row.consecutive_failures >= FAILURE_ESCALATION_THRESHOLD:
-      _release_claim(row)
-      row.updated_at = now_naive_utc()
-      db.commit()
-      return {"status": "escalate", "reason": "stale_rounds"}
-
-  if row.rounds_used >= row.max_rounds:
-    _release_claim(row)
-    row.updated_at = now_naive_utc()
+    now = now_naive_utc()
+    run_id = uuid.uuid4().hex
+    cursor_match = (
+      models.ContributionAutopilot.last_handled_event_at.is_(None)
+      if row.last_handled_event_at is None
+      else models.ContributionAutopilot.last_handled_event_at
+      == row.last_handled_event_at
+    )
+    key_match = (
+      models.ContributionAutopilot.last_handled_attention_key.is_(None)
+      if row.last_handled_attention_key is None
+      else models.ContributionAutopilot.last_handled_attention_key
+      == row.last_handled_attention_key
+    )
+    result = db.execute(
+      update(models.ContributionAutopilot)
+      .where(
+        models.ContributionAutopilot.app_id == app_id,
+        models.ContributionAutopilot.record_id == record_id,
+        models.ContributionAutopilot.enabled.is_(True),
+        models.ContributionAutopilot.state == "idle",
+        cursor_match,
+        key_match,
+        models.ContributionAutopilot.rounds_used
+        < models.ContributionAutopilot.max_rounds,
+      )
+      .values(
+        state="responding",
+        run_id=run_id,
+        attention_key=attention_key,
+        claimed_event_at=claimed_event,
+        round_action=None,
+        round_head_sha=None,
+        claimed_at=now,
+        lease_expires_at=now + timedelta(seconds=LEASE_SECONDS),
+        updated_at=now,
+      )
+    )
     db.commit()
-    return {"status": "escalate", "reason": "budget_exhausted"}
-
-  run_id = uuid.uuid4().hex
-  row.state = "responding"
-  row.run_id = run_id
-  row.attention_key = attention_key
-  row.claimed_at = now_naive_utc()
-  row.lease_expires_at = now_naive_utc() + timedelta(seconds=LEASE_SECONDS)
-  row.updated_at = now_naive_utc()
-  db.commit()
-  return {"status": "granted", "run_id": run_id, "row": row}
-
-
-def _record_nonproductive(
-  row: models.ContributionAutopilot, *, outcome: str, summary: str
-) -> None:
-  """Append a stale/failed round and advance the failure counter (no reset)."""
-  _append_round(row, {
-    "attention_key": row.attention_key,
-    "run_id": row.run_id,
-    "started_at": row.claimed_at.isoformat() if row.claimed_at else None,
-    "finished_at": now_naive_utc().isoformat(),
-    "outcome": outcome,
-    "summary": summary,
-    "head_sha": row.granted_head_sha,
-  })
-  row.consecutive_failures = int(row.consecutive_failures or 0) + 1
-  _release_claim(row)
+    if result.rowcount == 1:
+      db.expire_all()
+      return {
+        "status": "granted", "run_id": run_id,
+        "row": get_row(db, app_id, record_id),
+      }
+  return {"status": "busy"}
 
 
 def verify_claim(
@@ -232,6 +348,71 @@ def verify_claim(
   )
 
 
+def record_action(
+  db: Session,
+  app_id: int,
+  record_id: str,
+  *,
+  run_id: str,
+  action: str,
+  head_sha: str | None = None,
+  public_event_url: str | None = None,
+) -> bool:
+  """Bind a successful server-mediated public action to the live claim."""
+  if action not in PRODUCTIVE_OUTCOMES:
+    return False
+  # The agent normally calls action endpoints serially, but the public boundary
+  # must not depend on that courtesy. Compare the fields we read so concurrent
+  # replies append both exact event URLs and a reply can never overwrite the
+  # stronger ``pushed`` outcome. The loser refreshes and retries.
+  for _attempt in range(4):
+    db.expire_all()
+    row = get_row(db, app_id, record_id)
+    if not verify_claim(row, run_id):
+      return False
+    old_action = row.round_action
+    old_ignored = row.ignored_event_urls_json
+    recorded = (
+      "pushed" if action == "pushed" or old_action == "pushed"
+      else "replied"
+    )
+    values = {
+      "round_action": recorded,
+      "updated_at": now_naive_utc(),
+    }
+    if head_sha and action == "pushed":
+      values["round_head_sha"] = head_sha
+    if public_event_url and action == "replied":
+      ignored = list(old_ignored or [])
+      if public_event_url not in ignored:
+        ignored.append(public_event_url)
+      values["ignored_event_urls_json"] = ignored[-MAX_IGNORED_EVENT_URLS:]
+    action_match = (
+      models.ContributionAutopilot.round_action.is_(None)
+      if old_action is None
+      else models.ContributionAutopilot.round_action == old_action
+    )
+    ignored_match = (
+      models.ContributionAutopilot.ignored_event_urls_json.is_(None)
+      if old_ignored is None
+      else models.ContributionAutopilot.ignored_event_urls_json == old_ignored
+    )
+    result = db.execute(
+      update(models.ContributionAutopilot)
+      .where(
+        _claim_match(app_id, record_id, run_id),
+        models.ContributionAutopilot.lease_expires_at == row.lease_expires_at,
+        action_match,
+        ignored_match,
+      )
+      .values(**values)
+    )
+    db.commit()
+    if result.rowcount == 1:
+      return True
+  return False
+
+
 def complete_round(
   db: Session,
   app_id: int,
@@ -245,6 +426,8 @@ def complete_round(
 ) -> dict:
   """Finalize a round the agent claims to have completed.
 
+  ``event_at`` is accepted for compatibility but deliberately ignored: the
+  cursor advances only to the canonical timestamp stored by the claim.
   Requires the live claim's run_id. Productive outcomes reset the failure
   counter, bump ``rounds_used``, and advance the handled-event cursor; a
   non-productive ``failed`` counts toward escalation. Returns
@@ -252,90 +435,107 @@ def complete_round(
   """
   row = get_row(db, app_id, record_id)
   if not verify_claim(row, run_id):
-    return {"status": "stale", "escalate": False}
+    return {"status": "stale", "escalate": False, "productive": False}
 
-  productive = outcome in PRODUCTIVE_OUTCOMES
-  _append_round(row, {
+  # Public action endpoints, not the caller, decide whether the round did work.
+  recorded_outcome = (
+    row.round_action if row.round_action in PRODUCTIVE_OUTCOMES else "failed"
+  )
+  productive = recorded_outcome in PRODUCTIVE_OUTCOMES
+  entry = {
     "attention_key": row.attention_key,
     "run_id": run_id,
     "started_at": row.claimed_at.isoformat() if row.claimed_at else None,
     "finished_at": now_naive_utc().isoformat(),
-    "outcome": outcome if outcome in ("pushed", "replied", "failed") else "failed",
+    "outcome": recorded_outcome,
     "summary": str(summary or "")[:2000],
-    "head_sha": head_sha or row.granted_head_sha,
-  })
+    "head_sha": row.round_head_sha or row.granted_head_sha,
+  }
   escalate = False
+  values = {
+    **_release_values(),
+    "rounds_json": _append_round_value(row, entry),
+    "updated_at": now_naive_utc(),
+  }
   if productive:
-    row.consecutive_failures = 0
-    row.rounds_used = int(row.rounds_used or 0) + 1
-    if head_sha:
-      row.granted_head_sha = head_sha
-    if event_at:
-      row.last_handled_event_at = str(event_at)
+    values["consecutive_failures"] = 0
+    values["rounds_used"] = int(row.rounds_used or 0) + 1
+    if row.round_head_sha:
+      values["granted_head_sha"] = row.round_head_sha
+    if row.claimed_event_at:
+      values["last_handled_event_at"] = row.claimed_event_at
+    values["last_handled_attention_key"] = row.attention_key
   else:
-    row.consecutive_failures = int(row.consecutive_failures or 0) + 1
-    escalate = row.consecutive_failures >= FAILURE_ESCALATION_THRESHOLD
-  _release_claim(row)
-  row.updated_at = now_naive_utc()
+    failures = int(row.consecutive_failures or 0) + 1
+    values["consecutive_failures"] = failures
+    escalate = failures >= FAILURE_ESCALATION_THRESHOLD
+  result = db.execute(
+    update(models.ContributionAutopilot)
+    .where(
+      _claim_match(app_id, record_id, run_id),
+      models.ContributionAutopilot.lease_expires_at
+      == row.lease_expires_at,
+    )
+    .values(**values)
+  )
   db.commit()
-  return {"status": "ok", "escalate": escalate}
+  if result.rowcount != 1:
+    return {"status": "stale", "escalate": False, "productive": False}
+  return {
+    "status": "ok", "escalate": escalate, "productive": productive,
+  }
 
 
 def record_spawn_failure(
-  db: Session, app_id: int, record_id: str, *, summary: str
+  db: Session, app_id: int, record_id: str, *, run_id: str, summary: str
 ) -> bool:
   """A round that could not start (chat busy, provider down). Returns escalate?"""
   row = get_row(db, app_id, record_id)
-  if row is None:
+  if not verify_claim(row, run_id):
     return False
-  _record_nonproductive(row, outcome="failed", summary=summary)
-  escalate = row.consecutive_failures >= FAILURE_ESCALATION_THRESHOLD
-  row.updated_at = now_naive_utc()
+  failures = int(row.consecutive_failures or 0) + 1
+  result = db.execute(
+    update(models.ContributionAutopilot)
+    .where(
+      _claim_match(app_id, record_id, run_id),
+      models.ContributionAutopilot.lease_expires_at == row.lease_expires_at,
+    )
+    .values(
+      **_release_values(),
+      rounds_json=_append_round_value(
+        row, _nonproductive_entry(row, outcome="failed", summary=summary),
+      ),
+      consecutive_failures=failures,
+      updated_at=now_naive_utc(),
+    )
+  )
   db.commit()
-  return escalate
+  return result.rowcount == 1 and failures >= FAILURE_ESCALATION_THRESHOLD
 
 
-def release_for_retry(db: Session, app_id: int, record_id: str) -> None:
+def release_for_retry(
+  db: Session, app_id: int, record_id: str, *, run_id: str,
+) -> bool:
   """Drop a just-taken claim without logging a round (spawn declined cleanly)."""
   row = get_row(db, app_id, record_id)
-  if row is None:
-    return
-  _release_claim(row)
-  row.updated_at = now_naive_utc()
-  db.commit()
-
-
-def sweep_stale(db: Session) -> list[tuple[int, str, bool]]:
-  """Reclaim every crashed round across all records (cron reconciliation).
-
-  Returns (app_id, record_id, escalate) for each reclaimed row so the caller can
-  fire escalation notifications for the ones that crossed the threshold.
-  """
-  now = now_naive_utc()
-  rows = (
-    db.query(models.ContributionAutopilot)
-    .filter(
-      models.ContributionAutopilot.state == "responding",
-      models.ContributionAutopilot.lease_expires_at.isnot(None),
-      models.ContributionAutopilot.lease_expires_at <= now,
+  if not verify_claim(row, run_id):
+    return False
+  result = db.execute(
+    update(models.ContributionAutopilot)
+    .where(
+      _claim_match(app_id, record_id, run_id),
+      models.ContributionAutopilot.lease_expires_at == row.lease_expires_at,
     )
-    .all()
+    .values(**_release_values(), updated_at=now_naive_utc())
   )
-  results: list[tuple[int, str, bool]] = []
-  for row in rows:
-    _record_nonproductive(row, outcome="stale", summary="Round lease expired.")
-    escalate = row.consecutive_failures >= FAILURE_ESCALATION_THRESHOLD
-    row.updated_at = now
-    results.append((row.app_id, row.record_id, escalate))
-  if rows:
-    db.commit()
-  return results
+  db.commit()
+  return result.rowcount == 1
 
 
 def set_enabled(
   db: Session, app_id: int, record_id: str, enabled: bool
 ) -> models.ContributionAutopilot | None:
-  """Owner Pause/Resume. Resume clears escalation state and resets the budget."""
+  """Owner Pause/Resume. Resume clears escalation state and the round count."""
   row = get_row(db, app_id, record_id)
   if row is None:
     return None
@@ -344,9 +544,10 @@ def set_enabled(
     row.rounds_used = 0
     row.consecutive_failures = 0
   else:
-    # Pausing does not abort an in-flight round (it finishes under its claim);
-    # it only stops /respond from starting new ones.
-    pass
+    # Pause revokes future calls under the live run_id. A public request already
+    # executing may still finish, but resume always starts with fresh authority
+    # and a zombie round can never become valid again.
+    _release_claim(row)
   row.updated_at = now_naive_utc()
   db.commit()
   return row
@@ -363,16 +564,24 @@ def close_out(db: Session, app_id: int, record_id: str) -> None:
   db.commit()
 
 
-def escalate(db: Session, app_id: int, record_id: str) -> None:
-  """Release the claim on escalation. The attention + notification are the
-  caller's (they need the owner id + ledger write)."""
-  row = get_row(db, app_id, record_id)
-  if row is None:
-    return
-  _release_claim(row)
-  row.consecutive_failures = 0
-  row.updated_at = now_naive_utc()
+def escalate(db: Session, app_id: int, record_id: str) -> bool:
+  """Atomically pause on escalation; True only for the winning notifier."""
+  result = db.execute(
+    update(models.ContributionAutopilot)
+    .where(
+      models.ContributionAutopilot.app_id == app_id,
+      models.ContributionAutopilot.record_id == record_id,
+      models.ContributionAutopilot.enabled.is_(True),
+    )
+    .values(
+      **_release_values(),
+      enabled=False,
+      consecutive_failures=0,
+      updated_at=now_naive_utc(),
+    )
+  )
   db.commit()
+  return result.rowcount == 1
 
 
 # ─────────────────────────── ledger mirror ──────────────────────────
@@ -394,6 +603,7 @@ def mirror_block(row: models.ContributionAutopilot) -> dict:
     "max_rounds": int(row.max_rounds or DEFAULT_MAX_ROUNDS),
     "last_round": last,
     "rounds": rounds,
+    "ignored_event_urls": list(row.ignored_event_urls_json or []),
   }
 
 
@@ -439,26 +649,29 @@ async def mirror_to_ledger(app_id: int, record_id: str) -> None:
               exc_info=True)
 
 
-def set_ledger_attention(
+async def set_ledger_attention(
   app_id: int, record_id: str, attention: dict | None, *, needs_attention: bool,
 ) -> dict | None:
-  """Overlay a ``human_required`` attention onto the ledger (sync, lock held by
-  caller). Returns the updated record or None if it could not be written."""
+  """Atomically overlay ``human_required`` attention onto the ledger."""
   from app.routes import github as gh
 
-  record_path, _ = gh._record_paths(app_id, record_id)
-  try:
-    record = gh._read_record(record_path)
-  except Exception:
-    return None
-  record["needs_attention"] = bool(needs_attention)
-  record["attention"] = attention
-  record["updated_at"] = gh._now_iso()
-  try:
-    gh._write_record(record_path, record)
-  except Exception:
-    return None
-  return record
+  def _write() -> dict | None:
+    record_path, _ = gh._record_paths(app_id, record_id)
+    try:
+      record = gh._read_record(record_path)
+    except Exception:
+      return None
+    record["needs_attention"] = bool(needs_attention)
+    record["attention"] = attention
+    record["updated_at"] = gh._now_iso()
+    try:
+      gh._write_record(record_path, record)
+    except Exception:
+      return None
+    return record
+
+  async with fs_locks.app_storage_lock(app_id):
+    return await asyncio.to_thread(_write)
 
 
 # ─────────────────────────── chat spawn ─────────────────────────────
@@ -487,6 +700,9 @@ def ensure_followup_chat(
       .first()
     )
     if existing is not None:
+      if existing.provider != provider:
+        existing.provider = provider
+        db.commit()
       return existing.id
   chat = models.Chat(
     id=str(uuid.uuid4()),
