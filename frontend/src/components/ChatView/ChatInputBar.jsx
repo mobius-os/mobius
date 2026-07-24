@@ -76,6 +76,7 @@ import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import { resolveComposerEnterAction } from './composerShortcuts.js'
 import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
+import { hasSendablePayload } from './composerSubmission.js'
 
 
 // Detect touch-primary once (same heuristic ChatView uses).
@@ -425,7 +426,10 @@ export default function ChatInputBar({
     }
   }, [attachTriggerRef, inputRef])
 
-  const hasInput = !!input.trim()
+  // A completed attachment is a complete message in its own right. Feed that
+  // through the same primary-action and keyboard-shortcut gate as typed text
+  // so an image/file-only draft exposes Send instead of Mic.
+  const hasInput = hasSendablePayload(input, pendingFiles)
   const hasUploading = pendingFiles?.some(c => c.status === 'uploading') ?? false
 
   function handleFileSelect(e) {
