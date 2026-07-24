@@ -97,32 +97,48 @@ CLIENT_PID=""
 WATCHDOG_PID=""
 
 container_ref() {
-  local details ref token
+  local candidates details escaped_name ref token
   if [ -s "$CID_FILE" ]; then
-    head -n 1 "$CID_FILE"
+    ref="$(head -n 1 "$CID_FILE")" || return 2
+    [ -n "$ref" ] || return 2
+    printf '%s\n' "$ref"
     return 0
   fi
   # Docker can create the container before a cidfile write fails. Recover that
-  # narrow case by resolving the requested name to an immutable ID and checking
-  # this invocation's unique ownership label in the same inspect. Never return
-  # the name itself: a failed `docker run --name X` may mean X belongs to an
-  # unrelated service, and names can be reused between inspection and removal.
+  # narrow case by resolving the requested name to an immutable ID, then
+  # checking this invocation's unique ownership label. Keep "no such name"
+  # distinct from "Docker could not answer": only the former proves there is
+  # nothing to clean up.
+  escaped_name="${PROBE_NAME//./\\.}"
+  candidates="$(
+    docker ps -aq --no-trunc \
+      --filter "name=^/${escaped_name}$" 2>/dev/null
+  )" || return 2
+  [ -n "$candidates" ] || return 1
+  ref="${candidates%%$'\n'*}"
   details="$(
     docker inspect \
       --format '{{.Id}} {{index .Config.Labels "io.mobius.probe.owner_token"}}' \
-      "$PROBE_NAME" 2>/dev/null
-  )" || return 1
-  ref="${details%% *}"
+      "$ref" 2>/dev/null
+  )" || return 2
+  [ "${details%% *}" = "$ref" ] || return 2
   token="${details#* }"
-  [ -n "$ref" ] && [ "$token" = "$OWNER_TOKEN" ] || return 1
+  [ "$token" = "$OWNER_TOKEN" ] || return 1
   printf '%s\n' "$ref"
 }
 
 remove_container() {
   local ref attempt ids state
-  if ! ref="$(container_ref)"; then
-    return 0  # no container owned by this invocation
-  fi
+  ref="$(container_ref)"
+  state="$?"
+  case "$state" in
+    0) ;;
+    1) return 0 ;;  # the exact name is absent or belongs to another owner
+    *)
+      echo "docker-probe: could not determine owned container identity" >&2
+      return 1
+      ;;
+  esac
   docker rm -f "$ref" >/dev/null 2>&1 || true
   for attempt in 1 2 3; do
     if ids="$(docker ps -aq --no-trunc --filter "id=$ref" 2>/dev/null)"; then
@@ -185,13 +201,18 @@ CLIENT_PID="$!"
 (
   sleep "$TIMEOUT_SECONDS"
   : >"$TIMED_OUT"
-  remove_container
+  cleanup_ok=0
+  if remove_container; then
+    cleanup_ok=1
+  fi
   kill -TERM "$CLIENT_PID" >/dev/null 2>&1 || true
   sleep 2
   kill -KILL "$CLIENT_PID" >/dev/null 2>&1 || true
   # SIGKILL bypasses the wrapper's EXIT trap. Once it is definitely gone, the
-  # watchdog owns disposal of its tiny private state directory too.
-  if ! kill -0 "$WRAPPER_PID" >/dev/null 2>&1; then
+  # watchdog owns disposal of its tiny private state directory too — but only
+  # after cleanup was verified. On uncertainty, retain the CID/tombstone so the
+  # failed ownership operation remains inspectable instead of being forgotten.
+  if [ "$cleanup_ok" -eq 1 ] && ! kill -0 "$WRAPPER_PID" >/dev/null 2>&1; then
     rm -f "$CID_FILE" "$TIMED_OUT"
     rmdir "$STATE_DIR" 2>/dev/null || true
   fi

@@ -34,6 +34,8 @@ def test_helper_owns_exact_container_identity_and_cleanup():
   assert '--cidfile "$CID_FILE"' in helper
   assert '--name "$PROBE_NAME"' in helper
   assert 'docker rm -f "$ref"' in helper
+  assert 'escaped_name="${PROBE_NAME//./\\\\.}"' in helper
+  assert '--filter "name=^/${escaped_name}$"' in helper
   assert 'docker ps -aq --no-trunc --filter "id=$ref"' in helper
   assert "trap cleanup EXIT" in helper
   assert "trap 'exit 143' TERM" in helper
@@ -60,6 +62,10 @@ case "$1" in
   run)
     exit 125
     ;;
+  ps)
+    printf '%s\\n' 'unrelated-container-id'
+    exit 0
+    ;;
   inspect)
     if [ "${2:-}" = "--format" ]; then
       printf '%s\\n' 'unrelated-container-id unrelated-owner-token'
@@ -83,7 +89,7 @@ exit 0
   }
 
   result = subprocess.run(
-    [str(HELPER), "--timeout", "5", "--name", "production-db", "--", "image"],
+    [str(HELPER), "--timeout", "5", "--name", "production.db", "--", "image"],
     env=env,
     timeout=10,
     stdout=subprocess.DEVNULL,
@@ -92,8 +98,48 @@ exit 0
 
   assert result.returncode == 125
   calls = log.read_text(encoding="utf-8").splitlines()
+  assert any(
+    "ps -aq --no-trunc --filter name=^/production\\.db$" in call
+    for call in calls
+  )
   assert any(call.startswith("inspect --format ") for call in calls)
   assert not any(call.startswith("rm ") for call in calls)
+
+
+def test_unknown_identity_is_not_reported_as_success(tmp_path):
+  """A missing cidfile plus an unavailable daemon is unknown, not absent."""
+  fake_bin = tmp_path / "bin"
+  fake_bin.mkdir()
+  docker = fake_bin / "docker"
+  docker.write_text(
+    """#!/usr/bin/env bash
+case "$1" in
+  run)
+    exit 0
+    ;;
+  ps)
+    exit 1
+    ;;
+esac
+exit 1
+""",
+    encoding="utf-8",
+  )
+  docker.chmod(0o755)
+  env = {
+    **os.environ,
+    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+  }
+
+  result = subprocess.run(
+    [str(HELPER), "--timeout", "5", "--name", "uncertain-probe", "--", "image"],
+    env=env,
+    timeout=10,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+  )
+
+  assert result.returncode == 125
 
 
 def test_cleanup_verification_failure_is_not_reported_as_success(tmp_path):
@@ -139,3 +185,13 @@ exit 1
   )
 
   assert result.returncode == 125
+
+
+def test_watchdog_retires_state_only_after_verified_cleanup():
+  helper = HELPER.read_text(encoding="utf-8")
+  watchdog = helper[helper.index("# Keep the deadline in a child"):]
+  assert 'if remove_container; then\n    cleanup_ok=1' in watchdog
+  assert (
+    'if [ "$cleanup_ok" -eq 1 ] '
+    '&& ! kill -0 "$WRAPPER_PID"' in watchdog
+  )
