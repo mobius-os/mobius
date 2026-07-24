@@ -41,6 +41,12 @@ test('a lone tool activity uses the borderless compact disclosure surface', () =
   assert.match(chatCss,
     /\.chat__tool--compact\.chat__tool--done\s*\{[^}]*background:\s*none;[^}]*border:\s*0;/s)
   assert.match(chatCss,
-    /\.chat__tool--compact \.chat__tool-detail\s*\{[^}]*border:\s*1px solid var\(--border-light\);[^}]*background:\s*var\(--surface\);/s,
+    /\.chat__tool--compact \.chat__tool-detail,\s*\.chat__activity-timeline \.chat__tool-detail\s*\{[^}]*border:\s*1px solid var\(--border-light\);[^}]*background:\s*var\(--surface\);/s,
     'expanding the quiet row reveals a nested output panel rather than restoring an outer card')
+})
+
+test('lone and grouped tools share the same disclosed detail boundary', () => {
+  assert.match(chatCss,
+    /\.chat__tool--compact \.chat__tool-detail,\s*\.chat__activity-timeline \.chat__tool-detail\s*\{[^}]*border:\s*1px solid var\(--border-light\);[^}]*border-radius:\s*10px;[^}]*background:\s*var\(--surface\);/s,
+    'a completed grouped command should not lose the panel used by a lone live command')
 })
