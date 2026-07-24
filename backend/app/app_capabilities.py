@@ -46,7 +46,9 @@ def normalize_runtime_capabilities(manifest: dict[str, Any]) -> dict[str, Any]:
   provider/plugin capability catalogs can extend this registry in the future;
   they must supply the same stable definition shape before install review.
   """
-  requested = manifest.get("capabilities") or {}
+  requested = manifest.get("capabilities")
+  if requested is None:
+    requested = {}
   if not isinstance(requested, dict):
     raise ValueError("Manifest `capabilities` must be an object.")
 
@@ -112,6 +114,34 @@ def normalize_runtime_capabilities(manifest: dict[str, Any]) -> dict[str, Any]:
       "limits": limits,
     }
   return normalized
+
+
+def local_manifest_runtime_fields(manifest: dict[str, Any]) -> dict[str, Any]:
+  """Return the local-manifest fields owned by the live app runtime.
+
+  Registration and the source watcher both consume this projection. Keeping
+  one parser prevents a newly created app from accepting a declaration that a
+  later ordinary source save interprets differently.
+  """
+  if not isinstance(manifest, dict):
+    raise ValueError("mobius.json must contain a JSON object.")
+  capabilities = manifest.get("capabilities")
+  if capabilities is None:
+    capabilities = {}
+  if not isinstance(capabilities, dict):
+    raise ValueError("mobius.json `capabilities` must be an object.")
+  # Validate names, versions, reasons, and limits now; callers still need the
+  # author declaration rather than the host-enriched normalized contract.
+  normalize_runtime_capabilities(manifest)
+  fields: dict[str, Any] = {"capabilities": capabilities}
+  if "offline_capable" in manifest:
+    offline_capable = manifest["offline_capable"]
+    if not isinstance(offline_capable, bool):
+      raise ValueError(
+        "mobius.json `offline_capable` must be true or false."
+      )
+    fields["offline_capable"] = offline_capable
+  return fields
 
 
 def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:

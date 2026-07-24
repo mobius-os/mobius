@@ -13,10 +13,16 @@ Prints the created or updated app JSON to stdout.
 
 import json
 import os
+from pathlib import Path
 import re
 import sys
 import urllib.error
 import urllib.request
+
+# Reuse the same local-manifest projection as the live source watcher. The
+# script normally runs by absolute path, so add the backend package root.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.app_capabilities import local_manifest_runtime_fields  # noqa: E402
 
 
 def _call(url: str, token: str, method: str, data: dict | None = None):
@@ -102,25 +108,38 @@ def _notify(token: str, base: str, event_type: str, **kwargs):
     pass  # notify is best-effort; don't abort on failure
 
 
-def _read_capabilities(source_dir: str) -> dict:
-  """Read the one runtime-capability declaration beside index.jsx."""
+def _read_manifest_registration(source_dir: str) -> dict:
+  """Read safe local-registration fields from the manifest beside index.jsx.
+
+  `mobius.json` is the source of truth for local app capabilities. Registration
+  used to read only the nested `capabilities` object while silently ignoring
+  top-level `offline_capable`; every ordinary app then needed a diagnostic
+  PATCH to make the live row match its manifest. Keep the create/update payload
+  aligned here instead.
+
+  A missing manifest preserves the historical bare-app behavior. When the
+  manifest exists, omitted optional fields remain omitted on PATCH rather than
+  resetting an existing row.
+  """
   manifest_path = os.path.join(source_dir, "mobius.json")
   try:
     with open(manifest_path, encoding="utf-8") as f:
       manifest = json.load(f)
   except FileNotFoundError:
-    return {}
+    return {"capabilities": {}}
   except (OSError, json.JSONDecodeError) as exc:
     print(f"Cannot read mobius.json: {exc}", file=sys.stderr)
     sys.exit(1)
-  if not isinstance(manifest, dict):
-    print("mobius.json must contain a JSON object.", file=sys.stderr)
+  try:
+    return local_manifest_runtime_fields(manifest)
+  except ValueError as exc:
+    print(str(exc), file=sys.stderr)
     sys.exit(1)
-  capabilities = manifest.get("capabilities") or {}
-  if not isinstance(capabilities, dict):
-    print("mobius.json `capabilities` must be an object.", file=sys.stderr)
-    sys.exit(1)
-  return capabilities
+
+
+def _read_capabilities(source_dir: str) -> dict:
+  """Backward-compatible helper used by older callers and focused tests."""
+  return _read_manifest_registration(source_dir)["capabilities"]
 
 
 def main() -> None:
@@ -144,7 +163,7 @@ def main() -> None:
   # watcher can resolve `<app_dir>/index.jsx` change events back to
   # this app's DB row exactly, without slugify-guessing the name.
   source_dir = os.path.dirname(os.path.abspath(jsx_path))
-  capabilities = _read_capabilities(source_dir)
+  manifest_registration = _read_manifest_registration(source_dir)
 
   token = os.environ.get("AGENT_TOKEN")
   if not token:
@@ -183,7 +202,7 @@ def main() -> None:
         "jsx_source": jsx_source,
         "chat_id": chat_id,
         "source_dir": source_dir,
-        "capabilities": capabilities,
+        **manifest_registration,
       },
     )
   else:
@@ -197,7 +216,7 @@ def main() -> None:
         "jsx_source": jsx_source,
         "chat_id": chat_id,
         "source_dir": source_dir,
-        "capabilities": capabilities,
+        **manifest_registration,
       },
     )
 
