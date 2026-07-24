@@ -1,20 +1,17 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
-import Layers from 'lucide-react/dist/esm/icons/layers.mjs'
-import X from 'lucide-react/dist/esm/icons/x.mjs'
+import { useCallback } from 'react'
 import * as tabModel from './tabModel.js'
 import {
-  projectLayout, STRIP_H, WORKSPACE_SPLITS_ENABLED,
+  projectLayout, STRIP_H,
 } from './paneModel.js'
 import { ARROW_STEP_RATIO } from '../../lib/splitHelper.js'
-import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { PaneStrip } from './PaneStrip.jsx'
 
 // The chrome layer for a tiled (≥2 visible leaves) workspace (design §2). It is
 // a sibling AFTER the flat content wrappers, absolute inset:0, pointer-events
 // none except its own children, and carries its OWN `inert` (Shell passes it).
 // Nothing here reparents content — panes are rectangles the content wrappers are
-// positioned into; this layer only draws the strips, dividers, and the phone
-// overflow chip/sheet over them. There is no always-on focused-pane ring: which
+// positioned into; this layer only draws the strips and dividers. There is no
+// always-on focused-pane ring: which
 // tab each pane shows and which pane has focus both read from the strips' active
 // tab (see workspace.css), so no chrome frames any pane's content.
 //
@@ -24,20 +21,6 @@ import { PaneStrip } from './PaneStrip.jsx'
 // No reducer dispatch happens per move.
 
 const HIT = 44 // divider hit target (the visible hairline is 1px inside it)
-
-// A shared empty set so the default props don't mint a new one each render.
-const EMPTY_SET = new Set()
-
-// A pane "has activity" if any of its tabs is a streaming/attention chat or a
-// newly-built app — the cue the phone chip + sheet surface for a HIDDEN pane so a
-// background change is visible without opening the sheet (design §4).
-function paneHasActivity(pane, streaming, attention, newApps) {
-  if (!pane) return false
-  return pane.tabs.some((t) => {
-    if (t.kind === 'chat') return streaming.has(String(t.id)) || attention.has(String(t.id))
-    return newApps.has(Number(t.id)) || newApps.has(String(t.id))
-  })
-}
 
 function cssEsc(v) {
   return (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(v)) : String(v)
@@ -113,21 +96,7 @@ export default function WorkspaceChrome({
   // key → { motion, vars } for the live mode beat, so each strip deals WITH its pane
   // (Shell's wrapperMotion). Null/absent when no beat is live.
   stripMotion = null,
-  streamingChatIds = EMPTY_SET,
-  attentionChatIds = EMPTY_SET,
-  newAppIds = EMPTY_SET,
 }) {
-  const [sheetOpen, setSheetOpen] = useState(false)
-  const sheetRef = useRef(null)
-  const sheetCloseRef = useRef(null)
-  const closeSheet = useCallback(() => setSheetOpen(false), [])
-  useDialogFocus({
-    open: sheetOpen,
-    containerRef: sheetRef,
-    initialFocusRef: sheetCloseRef,
-    onClose: closeSheet,
-  })
-
   const focusPane = useCallback((paneId) => {
     dispatchWorkspace({ type: 'FOCUS', paneId })
   }, [dispatchWorkspace])
@@ -267,38 +236,7 @@ export default function WorkspaceChrome({
     dispatchWorkspace({ type: 'SET_RATIO', splitId: divider.splitId, ratio: 0.5 })
   }, [dispatchWorkspace])
 
-  // ── Phone/compact overflow: the pane chip + bottom sheet (design §4) ──────
-  const allLeaves = useMemo(
-    () => Object.keys(workspace.panes),
-    [workspace.panes],
-  )
-  const hasOverflow = allLeaves.length > projection.visibleLeaves.length
-  // Overflow can occur in ANY mode: a wide viewport too small to fit every pane
-  // at its minimum degrades to the compact focused-pair projection, so the chip
-  // must reach the hidden panes regardless of the raw mode (finding: wide
-  // min-width degrade would otherwise strand them).
-  const showChip = WORKSPACE_SPLITS_ENABLED && hasOverflow && focusedPaneViewId == null
-  const hiddenActivity = useMemo(() => {
-    const visible = new Set(projection.visibleLeaves)
-    return allLeaves.some(id => !visible.has(id)
-      && paneHasActivity(workspace.panes[id], streamingChatIds, attentionChatIds, newAppIds))
-  }, [allLeaves, projection.visibleLeaves, workspace.panes,
-    streamingChatIds, attentionChatIds, newAppIds])
-
-  const pickPane = useCallback((paneId) => {
-    closeSheet()
-    const pane = workspace.panes[paneId]
-    const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
-    if (active) {
-      const { view, opts } = tabModel.tabNavTarget(active)
-      navTo(view, { ...opts, paneId })
-    } else {
-      dispatchWorkspace({ type: 'FOCUS', paneId })
-    }
-  }, [closeSheet, dispatchWorkspace, navTo, workspace.panes])
-
-  const focusRect = projection.rects[workspace.focusedPaneId]
-  const chipHostRect = focusRect || projection.rects[projection.visibleLeaves[0]]
+  const canFocusPane = Object.keys(workspace.panes).length > 1
 
   return (
     <div className="workspace__chrome" data-workspace-chrome inert={inert || undefined}>
@@ -317,7 +255,7 @@ export default function WorkspaceChrome({
             onClose={onCloseTab}
             onFocus={focusPane}
             onTabContextMenu={onTabContextMenu}
-            canFocusPane={allLeaves.length > 1}
+            canFocusPane={canFocusPane}
             paneFocused={focusedPaneViewId === paneId}
             onTogglePaneFocus={onTogglePaneFocus}
             revealKey={revealKey}
@@ -336,69 +274,6 @@ export default function WorkspaceChrome({
           onDoubleClick={resetDivider}
         />
       ))}
-
-      {showChip && chipHostRect && (
-        <button
-          type="button"
-          className="workspace__pane-chip"
-          style={{ left: chipHostRect.x + chipHostRect.w - 60, top: chipHostRect.y + 5 }}
-          aria-haspopup="dialog"
-          aria-expanded={sheetOpen}
-          aria-label={`Show panes, ${projection.visibleLeaves.length} of ${allLeaves.length} visible`}
-          onClick={() => setSheetOpen(true)}
-        >
-          <Layers size={13} aria-hidden="true" />
-          <span>{projection.visibleLeaves.length}/{allLeaves.length}</span>
-          {hiddenActivity && <span className="workspace__pane-chip-dot" aria-hidden="true" />}
-        </button>
-      )}
-
-      {showChip && sheetOpen && (
-        <div className="workspace__sheet-scrim" onPointerDown={closeSheet}>
-          <div
-            ref={sheetRef}
-            className="workspace__sheet"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Switch pane"
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            <div className="workspace__sheet-head">
-              <div className="workspace__sheet-title">Panes</div>
-              <button
-                ref={sheetCloseRef}
-                type="button"
-                className="workspace__sheet-close"
-                aria-label="Close pane switcher"
-                onClick={closeSheet}
-              >
-                <X size={16} aria-hidden="true" />
-              </button>
-            </div>
-            {allLeaves.map(paneId => {
-              const pane = workspace.panes[paneId]
-              const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
-              const label = active ? labelForTab(active) : 'Empty'
-              const visible = projection.visibleLeaves.includes(paneId)
-              return (
-                <button
-                  key={paneId}
-                  type="button"
-                  className={`workspace__sheet-row${visible ? ' workspace__sheet-row--visible' : ''}`}
-                  onClick={() => pickPane(paneId)}
-                >
-                  <span className="workspace__sheet-row-title">{label}</span>
-                  <span className="workspace__sheet-row-meta">
-                    {paneHasActivity(pane, streamingChatIds, attentionChatIds, newAppIds)
-                      && <span className="workspace__sheet-row-dot" aria-hidden="true" />}
-                    <span className="workspace__sheet-row-count">{pane?.tabs.length || 0}</span>
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      )}
     </div>
   )
 }

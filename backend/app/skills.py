@@ -26,9 +26,11 @@ installer-owned sidecars plus the baked seed name set:
   seed                ships in the platform seed tree
   agent               written or renamed by the agent/owner in place
 
-`write_index()` renders `skills-index.md` — the cheap, progressive-disclosure
-tier-1 list both providers Read (the Hermes `skills_list()` idea, file-shaped),
-replacing the hand-maintained table that used to live in `skill/core.md`.
+Chat startup enumerates this model directly and injects bounded routing metadata
+after the system prompt, replacing the hand-maintained table that used to live
+in `skill/core.md`. `write_index()` keeps a file-shaped inspection surface for
+management, recovery, and explicit skill-install workflows; agents do not need
+to read it for ordinary discovery.
 """
 
 from __future__ import annotations
@@ -52,9 +54,9 @@ log = logging.getLogger(__name__)
 APP_SKILLS_SIDECAR = ".app-skills.json"
 INSTALLED_SKILLS_SIDECAR = ".installed-skills.json"
 
-# The generated tier-1 index. Written into the skills dir so the agent Reads it
-# by a stable relative path (`shared/skills/skills-index.md`). Excluded from
-# enumeration so the index never lists itself.
+# The generated inspection index. Written into the skills dir for management
+# and recovery flows. Runtime discovery enumerates skills directly, and this
+# file is excluded so the native injected inventory never lists itself.
 INDEX_FILENAME = "skills-index.md"
 
 # The generated catalog cache (`app.catalog_index` writes it; defined here so

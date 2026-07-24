@@ -203,16 +203,21 @@ export async function apiFetch(path, options = {}) {
   )
 
   // Opt-in timeout: callers that must not hang forever (e.g. the background
-  // reconcile poll and the message fetch — see ChatView) pass `timeoutMs`.
-  // Existing callers omit it and keep the un-timed behaviour, so this can't
-  // regress a legitimately-slow endpoint. A caller-supplied `signal` wins.
+  // reconcile poll and message fetches — see ChatView) pass `timeoutMs`.
+  // Compose it with a caller-owned lifecycle signal instead of making the two
+  // mutually exclusive: a visible request is time-boxed, while hiding/unmounting
+  // its owner can still release the connection immediately.
   const { timeoutMs, ...fetchOptions } = options
   let signal = fetchOptions.signal
   let timeoutTimer
-  if (timeoutMs && !signal) {
+  if (timeoutMs) {
     const ctrl = new AbortController()
-    timeoutTimer = setTimeout(() => ctrl.abort(), timeoutMs)
-    signal = ctrl.signal
+    timeoutTimer = setTimeout(() => {
+      const error = new Error('Request timed out')
+      error.name = 'TimeoutError'
+      ctrl.abort(error)
+    }, timeoutMs)
+    signal = signal ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal
   }
 
   let res
@@ -221,8 +226,11 @@ export async function apiFetch(path, options = {}) {
   } catch (error) {
     // The request is evidence, not a verdict. Ask the shared reachability store
     // to verify promptly; its hysteresis still prevents one transient failure
-    // from flapping every retained chat offline.
-    void verifyConnectivity()
+    // from flapping every retained chat offline. A caller-owned lifecycle abort
+    // is not network evidence; checking connectivity for routine pane switches
+    // would add needless requests. Our deadline aborts with TimeoutError and does
+    // still enter the verification path.
+    if (error?.name !== 'AbortError') void verifyConnectivity()
     throw error
   } finally {
     if (timeoutTimer) clearTimeout(timeoutTimer)
@@ -310,6 +318,12 @@ export const api = {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ username, password }),
     }),
+    sso: {
+      startUrl: (returnPath = '/') => (
+        `${BASE}/api/auth/sso/start?return_path=${encodeURIComponent(returnPath)}`
+      ),
+      consume: () => apiFetch('/auth/sso/session', { method: 'POST' }),
+    },
     setup: {
       status: () => apiFetch('/auth/setup/status'),
       create: (payload) => apiFetch('/auth/setup', {

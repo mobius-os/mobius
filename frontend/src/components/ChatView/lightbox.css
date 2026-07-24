@@ -30,6 +30,11 @@
   touch-action: none;
   user-select: none;
   will-change: transform;
+  animation: lightbox-image-in 160ms ease-out;
+}
+@keyframes lightbox-image-in {
+  from { opacity: 0.7; }
+  to { opacity: 1; }
 }
 .lightbox-actions {
   position: absolute;
@@ -38,6 +43,59 @@
   right: max(12px, env(safe-area-inset-right));
   display: flex;
   gap: 8px;
+}
+.lightbox-count {
+  position: absolute;
+  z-index: 2;
+  top: max(18px, env(safe-area-inset-top));
+  left: max(18px, env(safe-area-inset-left));
+  min-width: 48px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.42);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: center;
+}
+.lightbox-nav {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s, transform 0.15s;
+}
+.lightbox-nav--previous {
+  left: max(12px, env(safe-area-inset-left));
+}
+.lightbox-nav--next {
+  right: max(12px, env(safe-area-inset-right));
+}
+.lightbox-nav:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+.lightbox-nav:active {
+  transform: translateY(-50%) scale(0.96);
+}
+.lightbox-nav:focus-visible,
+.lightbox-btn:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+.lightbox-nav:disabled {
+  pointer-events: none;
+  opacity: 0;
 }
 .lightbox-btn {
   background: rgba(255, 255, 255, 0.12);
@@ -66,4 +124,24 @@
   font-weight: 700;
   line-height: 1;
   color: #ff6b6b;
+}
+
+@media (max-width: 34rem) {
+  .lightbox-image {
+    max-width: calc(100vw - 16px);
+    max-height: calc(100dvh - 96px);
+  }
+
+  .lightbox-nav {
+    top: auto;
+    bottom: max(16px, env(safe-area-inset-bottom));
+  }
+
+  .lightbox-nav--previous {
+    left: max(16px, env(safe-area-inset-left));
+  }
+
+  .lightbox-nav--next {
+    right: max(16px, env(safe-area-inset-right));
+  }
 }
