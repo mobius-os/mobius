@@ -209,6 +209,22 @@ def test_lifecycle_notification_fields_and_status_enums_are_pinned():
   }
 
 
+def test_turn_terminal_status_and_message_phase_contracts_are_pinned():
+  """The runner must not confuse a terminal envelope with a final answer."""
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+
+  assert {item.value for item in v2_all.TurnStatus} == {
+    "completed", "interrupted", "failed", "inProgress",
+  }
+  assert {item.value for item in v2_all.MessagePhase} == {
+    "commentary", "final_answer",
+  }
+  assert v2_all.Turn.model_fields["status"].annotation is v2_all.TurnStatus
+  phase_annotation = v2_all.AgentMessageThreadItem.model_fields["phase"].annotation
+  assert v2_all.MessagePhase in getattr(phase_annotation, "__args__", ())
+
+
 def test_reasoning_effort_enum_tolerates_unknown_efforts():
   """Lock in the forgiving ReasoningEffort enum that unblocked models()/resume.
 
