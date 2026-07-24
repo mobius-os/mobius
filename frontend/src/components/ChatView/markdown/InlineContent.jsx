@@ -194,7 +194,14 @@ function resolveStaticImageSrc(href) {
   return src
 }
 
-function ExpandableImage({ href, alt }) {
+export function ExpandableImage({
+  href,
+  alt,
+  imageIndex,
+  loading,
+  onOpen,
+  onResolved,
+}) {
   const [open, setOpen] = useState(false)
   const [resolvedSrc, setResolvedSrc] = useState(null)
 
@@ -228,6 +235,12 @@ function ExpandableImage({ href, alt }) {
     return () => { cancelled = true }
   }, [rawSrc, mediaChatId])
 
+  useEffect(() => {
+    if (resolvedSrc && onResolved) {
+      onResolved(imageIndex, { src: resolvedSrc, alt })
+    }
+  }, [alt, imageIndex, onResolved, resolvedSrc])
+
   // A blocked/empty href (javascript:, data:, "") renders nothing. But a valid
   // href whose token has not resolved yet still reserves its frame (lever 3):
   // returning null until resolvedSrc let the whole box insert late and shove the
@@ -241,13 +254,19 @@ function ExpandableImage({ href, alt }) {
         style={imageVars || undefined}
         aria-label={`Open ${alt || 'image'} preview`}
         disabled={!resolvedSrc}
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          if (!resolvedSrc) return
+          if (onOpen) onOpen(imageIndex, { src: resolvedSrc, alt })
+          else setOpen(true)
+        }}
       >
         {resolvedSrc && (
           <img
             src={resolvedSrc}
             alt={alt}
             className="md-image"
+            loading={loading}
+            decoding="async"
             onLoad={(e) => {
               const img = e.currentTarget
               if (img.naturalWidth && img.naturalHeight) {
@@ -262,7 +281,7 @@ function ExpandableImage({ href, alt }) {
           />
         )}
       </button>
-      {open && resolvedSrc && createPortal(
+      {!onOpen && open && resolvedSrc && createPortal(
         <ImageLightbox src={resolvedSrc} alt={alt} onClose={() => setOpen(false)} />,
         document.body,
       )}

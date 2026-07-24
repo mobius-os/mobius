@@ -237,7 +237,10 @@ Partner-facing messages describe what the app does and how it feels, not how it'
 
 - **Math**: `$...$` (inline) and `$$...$$` (block) render KaTeX.
 - **Currency**: escape dollar signs used as currency (for example, `\$62.5k`) so they are not interpreted as math delimiters.
-- **Images**: any `/api/` image URL in markdown renders inline.
+- **Images**: any `/api/` image URL in markdown renders inline. Two or more
+  adjacent image-only Markdown blocks automatically render as a horizontally
+  scrollable filmstrip; use that form for a related set and keep a lone image
+  separate.
 - **Sources**: when a web search hands back its result links, the shell renders them as source pills under your answer on its own — so don't also close the message with a hand-written "Sources" list repeating those same links. Citing a page inline, where a sentence actually needs it, is always right: not every provider's search exposes its results, so an inline link is sometimes the only citation the partner gets.
 
 ### Agent settings
