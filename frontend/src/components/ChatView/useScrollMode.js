@@ -19,11 +19,14 @@
  * first visible user message always pins; every later message pins when the
  * reader is at the real-content tail at submit time. DOM geometry is the
  * authority; ScrollMode is only a fallback when no scroll element exists.
- * A live pin leaves FOLLOW_BOTTOM while its dynamic spacer is
- * being consumed, then hands off to FOLLOW_BOTTOM exactly when that
- * reservation reaches zero. A short reply never reaches the handoff and
- * remains pinned after settle. The dynamic pin spacer is reserved room, not
- * message content.
+ * A live pin leaves FOLLOW_BOTTOM while its dynamic spacer is being consumed,
+ * then hands off to FOLLOW_BOTTOM exactly when that reservation reaches zero.
+ * A short reply never reaches the handoff and remains pinned after settle.
+ * The dynamic spacer belongs exclusively to the latest visible user row.
+ * It is independent of turn completion: short replies keep the remaining
+ * room, while reply/tool expansion consumes it and collapse restores it.
+ * PIN_USER_MSG may reserve before its row lands so a fresh send can pin in
+ * one frame; every other mode reserves only while that latest row is visible.
  * Gesture-driven bottom detection reads the scroll container's geometry in
  * the scroll event itself. There is no second sentinel/observer authority
  * that can lag behind the reader and contradict the current viewport.
@@ -157,11 +160,9 @@ function _topmostVisibleMsg(scrollEl) {
  *  no anchorable message.
  *
  *  Why this exists: a non-pinning send must not leave a stale PIN_USER_MSG
- *  behind. The bottom spacer is always reserved for the latest user message,
- *  but the scrollTop write is still mode-driven. The send sites call this to
- *  convert a stale PIN into the reader's actual position, so the reader stays
- *  exactly where they were while the new message still gets bottom room below
- *  it if they later scroll to the tail. */
+ *  behind. The send sites call this to convert a stale PIN into the reader's
+ *  actual position. Reservation then follows whether that held viewport still
+ *  shows the latest user row; mode alone neither grants nor retires it. */
 export function anchorModeFromScroll(scrollEl) {
   if (!scrollEl) return null
   const anchorEl = _topmostVisibleMsg(scrollEl)
@@ -201,6 +202,8 @@ export function bottomAnchorModeFromScroll(scrollEl) {
   const last = items[items.length - 1]
   const key = last?.dataset?.key
   if (!last || !key) return null
+  // Exclude reservation from the anchor calculation. Whether the resulting
+  // held viewport qualifies for latest-user room is decided separately.
   const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
   const realContentH = scrollEl.scrollHeight - spacerH
   const targetScrollTop = Math.max(0, realContentH - scrollEl.clientHeight)
@@ -245,10 +248,10 @@ export function physicalBottomAnchorModeFromScroll(scrollEl) {
 
 /** Freeze a viewport to real conversation content.
  *
- * A reader can move away from the physical bottom while the viewport is
- * wholly inside dynamic spacer. There is no exact visible row to anchor in
- * that case, but the gesture must still retire live follow. Settle at the
- * latest real-content tail rather than leaving FOLLOW_BOTTOM armed. */
+ * A reader can begin moving through latest-user reservation. There may be no
+ * exact visible row in that region, but the gesture must still retire live
+ * follow. Settle at the latest real-content tail; spacer is then recomputed
+ * from whether the held viewport still shows the latest user row. */
 export function contentHoldModeFromScroll(scrollEl) {
   return _contentAnchorModeFromScroll(scrollEl)
     || bottomAnchorModeFromScroll(scrollEl)
@@ -292,12 +295,8 @@ export function applyMode(scrollEl, mode) {
       return
     }
     case 'FOLLOW_BOTTOM':
-      // Follow the bottom of REAL conversation content, not the reservable
-      // spacer below it. The spacer exists so the latest user row can be
-      // lifted to the top; treating that blank reservation as content made a
-      // short restored chat open on an empty viewport. Long content normally
-      // has a zero-height spacer, so this is identical to the usual bottom
-      // follow there.
+      // Mode never owns reservation. Follow the bottom of real content while
+      // excluding any latest-user room; visibility sizing remains independent.
       {
         const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
         const realContentH = scrollEl.scrollHeight - spacerH
@@ -414,8 +413,8 @@ export function _validateSavedMode(saved, messages, scrollEl) {
  *
  * FOLLOW_BOTTOM and PIN_USER_MSG are useful while this mount is active and
  * are already converted to settled restore modes by `_validateSavedMode` on
- * the next mount. ANCHOR_AT is the only mode whose stored geometry can point
- * wholly into spacer, so validate that location before every write. */
+ * the next mount. ANCHOR_AT can still carry legacy off-content geometry, so
+ * validate that location before every write. */
 export function _modeForPersistence(mode, messages, scrollEl) {
   return mode?.kind === 'ANCHOR_AT'
     ? _validateSavedMode(mode, messages, scrollEl)
@@ -423,12 +422,62 @@ export function _modeForPersistence(mode, messages, scrollEl) {
 }
 
 
-/** Spacer height needed so the latest user message can sit near the
- *  top of the viewport, with the PIN_OFFSET breathing room above it. While an
- *  ANCHOR_AT hold is active, also reserve enough room to keep that exact target
- *  reachable if a mobile viewport grows before new response content arrives.
- *  The spacer's only job is reserving bottom room — it does NOT touch
- *  scrollTop and it does NOT decide whether a send pins.
+function _rowIntersectsViewport(rowEl, scrollTop, viewH) {
+  if (!rowEl || !Number.isFinite(scrollTop) || !(viewH > 0)) return false
+  const rowTop = rowEl.offsetTop
+  const rowHeight = rowEl.offsetHeight
+  if (!Number.isFinite(rowTop) || !Number.isFinite(rowHeight)) return false
+  return rowTop + rowHeight > scrollTop && rowTop < scrollTop + viewH
+}
+
+
+/** Whether the latest user row owns reservation in the viewport represented by
+ *  current geometry/mode. A matching PIN_USER_MSG is allowed to reserve before
+ *  the browser can place the fresh row. Other modes must actually show the
+ *  latest user row — either now or at the real-content target they are about to
+ *  apply. Older user rows never participate because the caller passes only the
+ *  DOM tail user row.
+ */
+function _latestUserOwnsSpacer(scrollEl, listEl, lastUserMsgEl, mode, viewH) {
+  const rowCid = lastUserMsgEl?.dataset?.cid
+  if (mode?.kind === 'PIN_USER_MSG'
+      && rowCid != null
+      && String(rowCid) === String(mode.cid)) {
+    return true
+  }
+
+  let targetScrollTop = null
+  if (mode?.kind === 'ANCHOR_AT') {
+    const anchorEl = _anchorEl(scrollEl, mode.key)
+    if (anchorEl) targetScrollTop = anchorEl.offsetTop - mode.offset
+  } else if (mode?.kind === 'FOLLOW_BOTTOM') {
+    targetScrollTop = listEl.offsetHeight - scrollEl.clientHeight
+  }
+  if (targetScrollTop == null) {
+    return _rowIntersectsViewport(lastUserMsgEl, scrollEl.scrollTop, viewH)
+  }
+
+  // Project against real content only. Spacer cannot make its own owner
+  // visible; it may only realize room for a row that the held viewport shows.
+  const maxRealScrollTop = Math.max(
+    0,
+    listEl.offsetHeight - scrollEl.clientHeight,
+  )
+  const clampedTarget = Math.min(
+    maxRealScrollTop,
+    Math.max(0, targetScrollTop),
+  )
+  return _rowIntersectsViewport(lastUserMsgEl, clampedTarget, viewH)
+}
+
+
+/** Spacer height needed so the latest visible user message can sit near the
+ *  top of the viewport, with the PIN_OFFSET breathing room above it.
+ *
+ *  Visibility is the defining invariant. The matching latest user pin may
+ *  reserve before placement; every other mode gets room only while its real
+ *  viewport contains that latest row. Turn completion does not retire room.
+ *  Content growth consumes the exact deficit and content collapse restores it.
  *
  *  Formula:
  *    max(0, viewH + (lastUserMsgTop − PIN_OFFSET) − listH
@@ -444,10 +493,8 @@ export function _modeForPersistence(mode, messages, scrollEl) {
  *  the pre-cushion behavior; a >0 value re-adds breathing room if the exact
  *  end-of-scroll rest ever feels cramped.)
  *
- *  The permanent pin reservation is intentionally independent from pin mode
- *  and component lifetime. The anchor addition exists only while ANCHOR_AT
- *  needs more room than that permanent baseline, and disappears as soon as
- *  real content makes the anchor naturally reachable.
+ *  Once the latest user row leaves the viewport, reservation collapses. An
+ *  older visible user row never receives it.
  */
 const PIN_OFFSET = 4
 const PIN_BOTTOM_ROOM = 0
@@ -458,20 +505,20 @@ export function _computeSpacerH(
   fullViewH,
   mode = null,
 ) {
-  if (!scrollEl || !listEl) return 0
+  if (!scrollEl || !listEl || !lastUserMsgEl) return 0
   const viewH = fullViewH || scrollEl.clientHeight
-  const pinTarget = lastUserMsgEl
-    ? Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
-    : 0
-  let target = pinTarget
-  if (mode?.kind === 'ANCHOR_AT') {
-    const anchorEl = _anchorEl(scrollEl, mode.key)
-    if (anchorEl) {
-      target = Math.max(target, Math.max(0, anchorEl.offsetTop - mode.offset))
-    }
-  }
-  if (!lastUserMsgEl && target === 0) return 0
-  return Math.max(0, viewH + target - listEl.offsetHeight + PIN_BOTTOM_ROOM)
+  if (!_latestUserOwnsSpacer(
+    scrollEl,
+    listEl,
+    lastUserMsgEl,
+    mode,
+    scrollEl.clientHeight || viewH,
+  )) return 0
+  const pinTarget = Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
+  return Math.max(
+    0,
+    viewH + pinTarget - listEl.offsetHeight + PIN_BOTTOM_ROOM,
+  )
 }
 
 
@@ -575,33 +622,18 @@ export function modeAfterTerminalLayout(mode, spacerH, layoutStable) {
 
 /** Resolve a reader-owned scroll that reaches the physical bottom.
  *
- * The physical bottom sits AFTER the dynamic reservation. While that spacer
- * still exists, reaching it means the latest user row is at its exact pin
- * target; it does NOT mean the reader asked to follow the real-content tail
- * above the spacer. Conflating those two bottoms made the next ResizeObserver
- * tick jump back to the response and follow every token immediately.
- *
- * During a live turn, reaching the reserved bottom (re-)arms the ordinary
- * spacer-exhaustion handoff. In an idle chat it is a settled pin, so a later
- * image/font/layout change cannot manufacture live-follow intent.
+ * Positive spacer means the latest user row is visible (or already pinned).
+ * Reaching its reserved bottom makes that visible row the explicit pin;
+ * an ordinary bottom with no reservation enters FOLLOW_BOTTOM.
  */
 export function modeAfterReaderReachesBottom({
   mode,
   spacerH,
-  anchorReservation = false,
   turnRunning,
   lastUserCid,
 }) {
-  // An ANCHOR_AT reservation makes that exact reader-owned position the
-  // physical bottom while the viewport is temporarily taller than the content
-  // beneath it. Reaching this synthetic edge is not a request to reinterpret
-  // the position as the latest-user pin; keep the anchor until real content
-  // makes its target naturally reachable and the extra reservation disappears.
-  if (anchorReservation && mode?.kind === 'ANCHOR_AT') return mode
   if (spacerH > 1 && lastUserCid != null) {
-    if (mode?.kind === 'PIN_USER_MSG'
-        && mode.cid === lastUserCid
-        && (!!mode.followWhenFilled || !turnRunning)) {
+    if (mode?.kind === 'PIN_USER_MSG' && mode.cid === lastUserCid) {
       return mode
     }
     return {
@@ -844,8 +876,8 @@ export function mountMediaSettled(scrollEl) {
  * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
  *   When true, scroll events from pagination shouldn't mutate mode.
  * @param {boolean} args.turnRunning
- *   Whether a live turn can consume an existing reservation. Used only when
- *   the reader reaches the physical bottom while spacer room remains.
+ *   Whether a reader-owned move to the latest user's reserved bottom should
+ *   arm the ordinary spacer-exhaustion handoff while output is still live.
  * @param {boolean} args.initialEntryCanReveal
  *   Whether entry has a trustworthy idle cache or settled server history.
  * @param {boolean} args.initialEntrySettled
@@ -888,6 +920,11 @@ export default function useScrollMode({
   initialEntrySettled,
 }) {
   const [revealed, setRevealed] = useState(false)
+  // A tiny React mirror reruns the layout effect when a semantic transition
+  // enters/leaves PIN_USER_MSG before message props necessarily change.
+  // modeRef remains the synchronous source of truth; visibility still owns
+  // spacer and this state is not a second mode machine.
+  const [pinModeActive, setPinModeActive] = useState(false)
   // Synchronous mirror of `revealed` for reapplyActiveMode, which is called
   // from a ChatView layout effect (a closure that may pre-date the reveal
   // flip). Set inline at every setRevealed(true) so the read is never stale.
@@ -997,6 +1034,11 @@ export default function useScrollMode({
     const previousMode = modeRef.current
     if (nextMode === previousMode) return previousMode
     modeRef.current = nextMode
+    const pinOwnedBefore = previousMode?.kind === 'PIN_USER_MSG'
+    const pinOwnedAfter = nextMode?.kind === 'PIN_USER_MSG'
+    if (pinOwnedBefore !== pinOwnedAfter) {
+      setPinModeActive(pinOwnedAfter)
+    }
     const scrollEl = scrollRef.current
     if (scrollEl) scrollEl.dataset.scrollMode = nextMode.kind
     recordTrace('transitions', event, {
@@ -1333,8 +1375,10 @@ export default function useScrollMode({
       // reply arrives ("subsequent messages don't get enough space"). The DOM's
       // last user row is the same element the ref points at once it re-attaches,
       // so reserving from it keeps the pin target reachable the instant the row
-      // exists. Null only when there is genuinely no user message → spacer 0.
-      const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
+      // exists. `_computeSpacerH` still requires the latest row to be visible
+      // at the current/applied viewport, so this fallback cannot grant room to
+      // an older row or an unrelated reading location.
+      const lastUserEl = _lastUserRowEl(scrollEl) || lastUserMsgRef.current
       const h = _computeSpacerH(
         scrollEl, listEl, lastUserEl, fullViewHRef.current, modeRef.current,
       )
@@ -1727,18 +1771,12 @@ export default function useScrollMode({
 
       if (atBottom) {
         const spacerH = spacerEl.offsetHeight || 0
-        const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
+        const lastUserEl = _lastUserRowEl(scrollEl) || lastUserMsgRef.current
         const lastUserCid = lastUserEl?.dataset?.cid ?? null
-        const pinSpacerH = _computeSpacerH(
-          scrollEl, listEl, lastUserEl, fullViewHRef.current,
-        )
-        const anchorReservation = modeRef.current?.kind === 'ANCHOR_AT'
-          && spacerH > pinSpacerH + 1
         transitionMode(
           modeAfterReaderReachesBottom({
             mode: modeRef.current,
             spacerH,
-            anchorReservation,
             turnRunning: turnRunningRef.current,
             lastUserCid,
           }),
@@ -1753,6 +1791,10 @@ export default function useScrollMode({
         if (anchor) transitionMode(anchor, 'reader:hold-anchor')
       }
       persistMode()
+      // Visibility, not mode, owns reservation. Recompute after the gesture
+      // yields so scrolling the latest user row on/off screen changes spacer
+      // without mutating geometry during the gesture itself.
+      sizeSpacer()
     }
     scrollEl.addEventListener('scroll', onScroll, { passive: true })
 
@@ -1806,6 +1848,7 @@ export default function useScrollMode({
     chatId,
     initialEntryCanReveal,
     initialEntrySettled,
+    pinModeActive,
     syncComposerGeometry,
   ])
 
@@ -1878,7 +1921,7 @@ export default function useScrollMode({
 
       const listEl = scrollEl.querySelector('.chat__list')
       const spacerEl = spacerRef.current
-      const lastUserEl = lastUserMsgRef.current || _lastUserRowEl(scrollEl)
+      const lastUserEl = _lastUserRowEl(scrollEl) || lastUserMsgRef.current
       if (!listEl || !spacerEl || !lastUserEl) {
         transitionMode(settledPinMode(mode), 'terminal:missing-layout-settle')
         persistMode()
@@ -1886,7 +1929,7 @@ export default function useScrollMode({
       }
 
       const spacerH = _computeSpacerH(
-        scrollEl, listEl, lastUserEl, fullViewHRef.current,
+        scrollEl, listEl, lastUserEl, fullViewHRef.current, mode,
       )
       const signature = [
         Math.round(listEl.offsetHeight),

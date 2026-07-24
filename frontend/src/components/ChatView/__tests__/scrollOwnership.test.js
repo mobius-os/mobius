@@ -4,21 +4,16 @@ import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-// Sole-ownership guard for the dynamic bottom spacer — the resource the chat
-// scroll contract fights over. useScrollMode.js's sizeSpacer and
-// preserveTogglePosition.js's collapse-prime are the ONLY sanctioned writers of
-// `.spacer-dynamic` height; they coordinate the pin/anchor geometry. A third
-// component writing that height directly is exactly how the collapse-bounce and
-// spacer-over-reservation regressions entered — it mutates the contested
-// quantity without going through (or informing) the mode machine. This
-// source-scan makes a new writer trip a red test instead of shipping a scroll
-// bug. (When preserveTogglePosition is folded into useScrollMode — ARCHITECTURE
-// "one owner" hardening — drop it from ALLOWED and this proves single ownership.)
+// Sole-writer guard for the dynamic bottom spacer. useScrollMode derives its
+// exact height from the latest user row's visibility and content deficit. A
+// disclosure, renderer, or component writing the same height independently can
+// strand provisional blank room after QA/tool/image layout changes, so any
+// second writer is a contract bug.
 
 const dir = dirname(fileURLToPath(import.meta.url))
 const chatViewDir = join(dir, '..')
 
-const ALLOWED = new Set(['useScrollMode.js', 'preserveTogglePosition.js'])
+const OWNER = 'useScrollMode.js'
 
 // A line that assigns a height to the dynamic spacer. Matches
 // `spacer.style.height = ...` / `spacerEl.style.height = ...` on any variable,
@@ -40,23 +35,23 @@ function sourceFiles(root) {
 test('only sanctioned modules write the dynamic spacer height', () => {
   const offenders = []
   for (const { name, full } of sourceFiles(chatViewDir)) {
-    if (ALLOWED.has(name)) continue
+    if (name === OWNER) continue
     const src = readFileSync(full, 'utf8')
     if (!src.includes('.spacer-dynamic')) continue
     if (SPACER_HEIGHT_WRITE.test(src)) offenders.push(name)
   }
   assert.deepEqual(offenders, [],
-    `these modules write .spacer-dynamic height outside the sanctioned owners `
-    + `(${[...ALLOWED].join(', ')}): ${offenders.join(', ')}. Route spacer sizing `
+    `these modules write .spacer-dynamic height outside its sole owner `
+    + `(${OWNER}): ${offenders.join(', ')}. Route spacer sizing `
     + `through useScrollMode's sizeSpacer instead of mutating it directly.`)
 })
 
-test('the two sanctioned spacer owners still exist (guard is not vacuous)', () => {
+test('the sole spacer owner still exists (guard is not vacuous)', () => {
   // If a refactor renames these files the guard above would silently pass with
   // nothing to check; assert the owners are present so the guard stays live.
   const writers = sourceFiles(chatViewDir).filter(({ full }) => {
     const src = readFileSync(full, 'utf8')
     return src.includes('.spacer-dynamic') && SPACER_HEIGHT_WRITE.test(src)
   }).map(f => f.name).sort()
-  assert.deepEqual(writers, ['preserveTogglePosition.js', 'useScrollMode.js'])
+  assert.deepEqual(writers, [OWNER])
 })

@@ -1,20 +1,3 @@
-// A fast close→open can happen before ResizeObserver replaces the provisional
-// collapse reservation. Remember the exact baseline so the next toggle can
-// unwind only OUR still-present write instead of stacking another body height
-// on top. WeakMap keeps the bookkeeping DOM-lifetime scoped.
-const provisionalSpacer = new WeakMap()
-
-function unwindProvisionalSpacer(spacer) {
-  const pending = provisionalSpacer.get(spacer)
-  if (!pending) return
-  // If normal layout already wrote a different value, it owns the spacer now;
-  // never roll that authoritative calculation back to our stale baseline.
-  if (Math.abs((spacer.offsetHeight || 0) - pending.primedHeight) <= 1) {
-    spacer.style.height = `${pending.baselineHeight}px`
-  }
-  provisionalSpacer.delete(spacer)
-}
-
 export function preserveTogglePosition(anchorEl, bodyEl = anchorEl?.nextElementSibling) {
   if (!anchorEl || typeof requestAnimationFrame !== 'function') return
   const scroller = anchorEl.closest?.('.chat__scroll')
@@ -26,34 +9,6 @@ export function preserveTogglePosition(anchorEl, bodyEl = anchorEl?.nextElementS
   // identical toggles sometimes hold and sometimes move. Outside follow mode,
   // preserve the reader's exact header position below.
   if (scroller.dataset?.scrollMode === 'FOLLOW_BOTTOM') return
-
-  // Closing a disclosure at the physical tail removes height before the chat's
-  // ResizeObserver can grow its dynamic bottom reservation. The browser clamps
-  // scrollTop in that gap, paints the header lower for one frame, then the
-  // observer restores it — the visible down/up twitch. Reserve the body's exact
-  // outer height synchronously so total scroll height stays constant across the
-  // React commit; the observer replaces this provisional value with its normal
-  // spacer calculation on the next layout pass.
-  const spacer = scroller.querySelector?.('.spacer-dynamic')
-  if (spacer) unwindProvisionalSpacer(spacer)
-
-  if (anchorEl.getAttribute?.('aria-expanded') === 'true') {
-    if (spacer && bodyEl) {
-      const rectHeight = bodyEl.getBoundingClientRect?.().height || 0
-      const styles = typeof getComputedStyle === 'function'
-        ? getComputedStyle(bodyEl)
-        : null
-      const marginTop = Number.parseFloat(styles?.marginTop) || 0
-      const marginBottom = Number.parseFloat(styles?.marginBottom) || 0
-      const removedHeight = rectHeight + marginTop + marginBottom
-      if (removedHeight > 0) {
-        const baselineHeight = spacer.offsetHeight || 0
-        const primedHeight = baselineHeight + removedHeight
-        spacer.style.height = `${primedHeight}px`
-        provisionalSpacer.set(spacer, { baselineHeight, primedHeight })
-      }
-    }
-  }
 
   const before = anchorEl.getBoundingClientRect().top
 

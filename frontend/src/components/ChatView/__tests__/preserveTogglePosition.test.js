@@ -124,19 +124,20 @@ test('FOLLOW_BOTTOM leaves toggle movement entirely to the scroll controller', (
   }
 })
 
-test('closing a disclosure primes the bottom spacer before React removes its body', () => {
+test('disclosure preservation never reads or writes the dynamic spacer', () => {
   const originalMutationObserver = globalThis.MutationObserver
   const originalRaf = globalThis.requestAnimationFrame
-  const originalGetComputedStyle = globalThis.getComputedStyle
   globalThis.MutationObserver = undefined
   globalThis.requestAnimationFrame = () => 1
-  globalThis.getComputedStyle = () => ({ marginTop: '4px', marginBottom: '2px' })
 
   try {
-    const spacer = { offsetHeight: 100, style: {} }
+    let queried = false
     const scroller = {
       scrollTop: 50,
-      querySelector: selector => selector === '.spacer-dynamic' ? spacer : null,
+      querySelector: () => {
+        queried = true
+        throw new Error('disclosures do not own reservation geometry')
+      },
     }
     const body = { getBoundingClientRect: () => ({ height: 60 }) }
     const anchor = {
@@ -148,127 +149,10 @@ test('closing a disclosure primes the bottom spacer before React removes its bod
     }
 
     preserveTogglePosition(anchor)
-    assert.equal(spacer.style.height, '166px')
+    assert.equal(queried, false)
   }
   finally {
     globalThis.MutationObserver = originalMutationObserver
     globalThis.requestAnimationFrame = originalRaf
-    globalThis.getComputedStyle = originalGetComputedStyle
-  }
-})
-
-test('opening a disclosure leaves normal spacer sizing alone', () => {
-  const originalMutationObserver = globalThis.MutationObserver
-  const originalRaf = globalThis.requestAnimationFrame
-  globalThis.MutationObserver = undefined
-  globalThis.requestAnimationFrame = () => 1
-
-  try {
-    const spacer = { offsetHeight: 100, style: {} }
-    const scroller = {
-      scrollTop: 50,
-      querySelector: () => spacer,
-    }
-    const anchor = {
-      parentElement: {},
-      nextElementSibling: null,
-      closest: () => scroller,
-      getAttribute: () => 'false',
-      getBoundingClientRect: () => ({ top: 120 }),
-    }
-
-    preserveTogglePosition(anchor)
-    assert.equal(spacer.style.height, undefined)
-  }
-  finally {
-    globalThis.MutationObserver = originalMutationObserver
-    globalThis.requestAnimationFrame = originalRaf
-  }
-})
-
-test('a fast close-open-close cycle unwinds provisional space instead of accumulating it', () => {
-  const originalMutationObserver = globalThis.MutationObserver
-  const originalRaf = globalThis.requestAnimationFrame
-  const originalGetComputedStyle = globalThis.getComputedStyle
-  globalThis.MutationObserver = undefined
-  globalThis.requestAnimationFrame = () => 1
-  globalThis.getComputedStyle = () => ({ marginTop: '4px', marginBottom: '2px' })
-
-  try {
-    const spacer = {
-      style: { height: '100px' },
-      get offsetHeight() { return Number.parseFloat(this.style.height) },
-    }
-    const scroller = {
-      scrollTop: 50,
-      querySelector: () => spacer,
-    }
-    const body = { getBoundingClientRect: () => ({ height: 60 }) }
-    let expanded = 'true'
-    const anchor = {
-      parentElement: {},
-      nextElementSibling: body,
-      closest: () => scroller,
-      getAttribute: () => expanded,
-      getBoundingClientRect: () => ({ top: 120 }),
-    }
-
-    preserveTogglePosition(anchor)
-    assert.equal(spacer.style.height, '166px')
-
-    // Re-open before ResizeObserver has replaced the provisional value.
-    expanded = 'false'
-    preserveTogglePosition(anchor)
-    assert.equal(spacer.style.height, '100px')
-
-    // A second fast close reserves one body height, not two.
-    expanded = 'true'
-    preserveTogglePosition(anchor)
-    assert.equal(spacer.style.height, '166px')
-  }
-  finally {
-    globalThis.MutationObserver = originalMutationObserver
-    globalThis.requestAnimationFrame = originalRaf
-    globalThis.getComputedStyle = originalGetComputedStyle
-  }
-})
-
-test('provisional cleanup never overwrites a newer authoritative spacer value', () => {
-  const originalMutationObserver = globalThis.MutationObserver
-  const originalRaf = globalThis.requestAnimationFrame
-  const originalGetComputedStyle = globalThis.getComputedStyle
-  globalThis.MutationObserver = undefined
-  globalThis.requestAnimationFrame = () => 1
-  globalThis.getComputedStyle = () => ({ marginTop: '0px', marginBottom: '0px' })
-
-  try {
-    const spacer = {
-      style: { height: '100px' },
-      get offsetHeight() { return Number.parseFloat(this.style.height) },
-    }
-    const scroller = { scrollTop: 0, querySelector: () => spacer }
-    const body = { getBoundingClientRect: () => ({ height: 60 }) }
-    let expanded = 'true'
-    const anchor = {
-      parentElement: {},
-      nextElementSibling: body,
-      closest: () => scroller,
-      getAttribute: () => expanded,
-      getBoundingClientRect: () => ({ top: 80 }),
-    }
-
-    preserveTogglePosition(anchor)
-    assert.equal(spacer.style.height, '160px')
-
-    // Simulate ResizeObserver publishing new settled geometry.
-    spacer.style.height = '112px'
-    expanded = 'false'
-    preserveTogglePosition(anchor)
-    assert.equal(spacer.style.height, '112px')
-  }
-  finally {
-    globalThis.MutationObserver = originalMutationObserver
-    globalThis.requestAnimationFrame = originalRaf
-    globalThis.getComputedStyle = originalGetComputedStyle
   }
 })
