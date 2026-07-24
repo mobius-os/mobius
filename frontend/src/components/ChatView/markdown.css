@@ -211,6 +211,141 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   opacity: 0.85;
 }
 
+/* mobius-ui:ImageRail — app-owned, copy-friendly filmstrip.
+   Adjacent image-only Markdown blocks become one quiet horizontal strip.
+   Browser-native overflow owns touch and trackpad momentum; the next image
+   peeks on narrow surfaces, while wider surfaces settle into the compact
+   three-up rhythm used by modern chat products. */
+.md-image-gallery {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  margin: 0.25rem 0;
+  container-type: inline-size;
+}
+
+/* Assistant rows use align-items:flex-start so ordinary prose stays only as
+   wide as its contents. An image-only reply has no intrinsic text width,
+   though, and a percentage-sized rail would otherwise collapse to 0px (or to
+   the width of a short lead-in sentence). Stretch only gallery-bearing reply
+   blocks so the rail can use the transcript's available width. */
+.chat__text--assistant:has(.md-image-gallery) {
+  align-self: stretch;
+  width: 100%;
+}
+
+.md-image-gallery__rail {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 78cqi;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scroll-padding-inline: 4px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y;
+  padding: 0 0 4px;
+}
+
+.md-image-gallery__rail::-webkit-scrollbar {
+  display: none;
+}
+
+.md-image-gallery__rail:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+
+.md-image-gallery__item {
+  min-width: 0;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  scroll-snap-align: start;
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.md-image-gallery__item .md-image-frame {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  aspect-ratio: 4 / 3;
+  border-radius: inherit;
+}
+
+.md-image-gallery__item .md-image {
+  border-radius: inherit;
+  object-fit: cover;
+}
+
+.md-image-gallery__nav {
+  position: absolute;
+  top: calc(50% - 2px);
+  width: 44px;
+  height: 44px;
+  transform: translateY(-50%);
+  display: none;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  color: var(--text);
+  box-shadow: 0 1px 6px color-mix(in srgb, #000 24%, transparent);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 160ms ease-out, background 160ms ease-out;
+}
+
+.md-image-gallery__nav--previous { left: 8px; }
+.md-image-gallery__nav--next { right: 8px; }
+
+.md-image-gallery__nav:hover {
+  background: color-mix(in srgb, var(--bg) 96%, transparent);
+}
+
+.md-image-gallery__nav:active {
+  transform: translateY(-50%) scale(0.96);
+}
+
+.md-image-gallery__nav:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+.md-image-gallery__nav:disabled {
+  pointer-events: none;
+  opacity: 0;
+}
+
+@container (min-width: 30rem) {
+  .md-image-gallery--2 .md-image-gallery__rail {
+    grid-auto-columns: calc((100cqi - 4px) / 2);
+  }
+
+  .md-image-gallery--3 .md-image-gallery__rail {
+    grid-auto-columns: calc((100cqi - 8px) / 3);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .md-image-gallery__nav {
+    display: grid;
+  }
+
+  .md-image-gallery:hover .md-image-gallery__nav:not(:disabled),
+  .md-image-gallery:focus-within .md-image-gallery__nav:not(:disabled) {
+    opacity: 1;
+  }
+}
+/* /mobius-ui:ImageRail */
+
 /* Links in markdown */
 .md-blocks a {
   color: var(--accent);

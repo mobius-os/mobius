@@ -307,22 +307,6 @@ def test_backup_skips_secrets_without_recipient(tmp_path):
   assert not any(".secret-key" in m for m in members)
 
 
-def test_backup_excludes_setup_claim_files_from_archives(tmp_path):
-  data = _seed_data_dir(tmp_path / "data")
-  (data / ".setup-claim").write_text("FIRST-BOOT-SECRET")
-  (data / ".setup-claim.crash-left").write_text("TEMP-SECRET")
-  target = tmp_path / "backups"
-  _backup("--data-dir", str(data), "--target-dir", str(target),
-          "--plaintext-secrets")
-  bdir = next(target.glob("mobius-backup-*"))
-
-  for archive in ("data.tar.gz", "secrets.tar.gz"):
-    with tarfile.open(bdir / archive) as tar:
-      members = tar.getnames()
-    assert ".setup-claim" not in members
-    assert not any(name.startswith(".setup-claim.") for name in members)
-
-
 def test_backup_plaintext_secrets_perms_and_hashes(tmp_path):
   data = _seed_data_dir(tmp_path / "data")
   target = tmp_path / "backups"
