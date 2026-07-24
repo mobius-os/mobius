@@ -284,6 +284,18 @@
   min-width: 0;
 }
 
+/* A staged update is not a dead end: the owner can check/review another release
+   and still restart once. Keep both choices together, with the batching action
+   first when another release exists and the restart action visually primary
+   when there is nothing else waiting. */
+.settings__update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 /* The build sha as a quiet, monospaced identity line — tabular glyphs make a
    hex sha read AS a build id rather than stray text. */
 .settings__build {
@@ -488,6 +500,16 @@
   .settings__row {
     flex-wrap: wrap;
     gap: 8px;
+  }
+
+  .settings__update-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings__update-actions .settings__btn {
+    width: 100%;
   }
 }
 
