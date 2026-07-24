@@ -34,7 +34,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "18"  # v18: explicit, transactional mini-app source apply
+SEED_VERSION = "19"  # v19: compact app discovery and bounded visual checks
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -71,6 +71,8 @@ _UNMODIFIED_MIGRATIONS = {
     "4c2b080bcc91626f761c5823ea00d324667b9710f6757931823e22e9c8b5c2b1",
     # v17 baked copy: teach the coherent apply/retry lifecycle.
     "85a4b5ce5b47c81fa53bec90d530adfe433c0d2f7f31363427b6c792bd332e05",
+    # v18 baked copy: co-read completion policy and use compact app discovery.
+    "02fda2ea04f3c0ce808ef0db4b1fe4e893924bd019a5bf102a46749ef9142510",
   },
   "resolving-app-git.md": {
     # v17 baked copy: resolution is an explicit installer replay.
@@ -85,6 +87,8 @@ _UNMODIFIED_MIGRATIONS = {
     "9525b36b945c2a0b4cb02806081bb674f38e865b6e1c3961226112e1dbbc16ec",
     # v16 baked copy: use iframe refs and preserve React's inert cleanup.
     "a0648921b9c9ea2423e8abd52aa57e71e7bebfa1736073fcf3bfcaec3749ad19",
+    # v18 baked copy: avoid measured textbox and opaque-frame wait failures.
+    "5db160b2d796d54ec320119cbdbbb2860a78cfd703cfe37667626d23abc8e4d9",
   },
 }
 

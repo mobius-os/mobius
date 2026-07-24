@@ -1,9 +1,10 @@
 # Mini-app quickstart — ordinary local apps
 
 Base workflow for every local Möbius mini-app create or update. Read it with
-`visual-testing.md`; add `building-apps.md` for advanced runtime needs,
-`cron.md` for scheduled jobs, and `app-component-shapes.md` only for a complex
-catalogued structure such as a sheet, tabs, chat, or split pane.
+`visual-testing.md` and `notifications.md` in the same initial call; add
+`building-apps.md` for advanced runtime needs, `cron.md` for scheduled jobs,
+and `app-component-shapes.md` only for a complex catalogued structure such as
+a sheet, tabs, chat, or split pane.
 
 This is the complete workflow for a focused app with ordinary JSX,
 app-scoped storage, and no unusual host integration. Add `building-apps.md` to
@@ -52,14 +53,15 @@ improve the requested experience after the first apply.
 
 ### 1. Check only what can change the decision
 
-Read the live app list once and update an existing app with the same purpose
-instead of duplicating it:
+Read the compact live app list once and update an existing app with the same
+purpose instead of duplicating it:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $AGENT_TOKEN" \
-  "$API_BASE_URL/api/apps/" |
-  python3 -c 'import json,sys; print([(a["id"],a["name"],a.get("slug")) for a in json.load(sys.stdin)])'
+python "$SCRIPTS_DIR/list_apps.py"
 ```
+
+Use this helper instead of rebuilding a `curl | python` quoting pipeline or
+printing the full capability payload.
 
 Do not search GitHub or the App Store for a uniquely named personal app.
 Search the wider ecosystem only when the partner asked for something
@@ -251,9 +253,9 @@ commit and leaves later edits as an unpublished draft until the next apply.
 Repository status is diagnostic: a clean tree confirms the applied revision,
 while a dirty tree means an edit still awaits apply.
 
-Send the app-complete notification using `notifications.md`, embed the useful
-render before describing it, state what the app does, and invite optional
-adjustments without blocking the completed turn.
+Send the app-complete notification using the already-loaded `notifications.md`,
+embed the useful render before describing it, state what the app does, and
+invite optional adjustments without blocking the completed turn.
 
 Only when `contributing.md` appears in the session's **Installed app skills**
 and the work is plausibly reusable by other Möbius users, offer to prepare it
