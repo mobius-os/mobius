@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
-import { apiFetch } from '../../api/client.js'
+import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import {
   DRAWER_CLOSE_FALLBACK_MS,
@@ -228,18 +228,12 @@ export default function Drawer({
   }
 
   async function renameChat(id, title) {
-    const res = await apiFetch(`/chats/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ title }),
-    })
+    const res = await api.chats.update(id, { title })
     if (res.ok) refreshChats()
   }
 
   async function renameApp(id, name) {
-    const res = await apiFetch(`/apps/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ name }),
-    })
+    const res = await api.apps.update(id, { name })
     if (res.ok) refreshApps()
   }
 
@@ -259,10 +253,7 @@ export default function Drawer({
       ),
     )
     try {
-      const res = await apiFetch(`/chats/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ pinned }),
-      })
+      const res = await api.chats.update(id, { pinned })
       if (res.ok) refreshChats()
       else queryClient.setQueryData(key, prev)
     } catch {
@@ -281,10 +272,7 @@ export default function Drawer({
       ),
     )
     try {
-      const res = await apiFetch(`/apps/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ pinned }),
-      })
+      const res = await api.apps.update(id, { pinned })
       if (res.ok) refreshApps()
       else queryClient.setQueryData(key, prev)
     } catch {

@@ -14,6 +14,11 @@
 // names are stable so vendor/esm aren't re-fetched every release.
 export const VENDOR_CACHE = 'mobius-vendor-v2'
 export const ESM_CACHE = 'mobius-esm-v2'
+// Owner-scoped shell projections (theme, chat drawer, app drawer). Keep this
+// name shared with the page-side mutation boundary: after a confirmed
+// list-affecting write, the page evicts the corresponding cached GET so a
+// NetworkFirst fallback cannot resurrect the pre-mutation projection.
+export const SHELL_DATA_CACHE = 'mobius-shell-data'
 // Bumped -v2 → -v3 (2026-06-18): a one-time eviction of app-frame entries
 // cached under the pre-fix, un-revved key (`?v=<updated_at>` with NO
 // `-<frameRev>` suffix, because the SW-precached index.html lacked the
@@ -50,6 +55,7 @@ export const APP_ASSETS_MAX_ENTRIES = 600
 const KEEP_RUNTIME_CACHES = new Set([
   VENDOR_CACHE,
   ESM_CACHE,
+  SHELL_DATA_CACHE,
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
   APP_ASSETS_CACHE,

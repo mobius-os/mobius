@@ -1,6 +1,7 @@
 """Chat route regression tests."""
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from app import memory, models, questions
@@ -31,6 +32,47 @@ def test_delete_chat_cancels_orphan_pending_question(client, auth, chat):
     assert pending.future.done()
 
   asyncio.run(go())
+
+
+def test_delete_and_recover_publish_exact_projection_events(
+  client, auth, chat,
+):
+  """Shells receive authoritative ids for both sides of the tombstone."""
+  with patch("app.routes.chats.get_system_broadcast") as mock_get_sb:
+    fake_sb = MagicMock()
+    mock_get_sb.return_value = fake_sb
+
+    deleted = client.delete(f"/api/chats/{chat.id}", headers=auth)
+    recovered = client.post(f"/api/chats/{chat.id}/recover", headers=auth)
+
+  assert deleted.status_code == 204, deleted.text
+  assert recovered.status_code == 200, recovered.text
+  assert fake_sb.publish.call_args_list == [
+    (({"type": "chat_deleted", "chatId": str(chat.id)},), {}),
+    (({"type": "chat_recovered", "chatId": str(chat.id)},), {}),
+  ]
+
+
+def test_delete_response_stays_authoritative_after_cleanup_failure(
+  client, auth, chat,
+):
+  """Post-commit cleanup cannot turn a durable deletion into a false failure."""
+  with (
+    patch(
+      "app.routes.chats._clear_run_status",
+      new=AsyncMock(side_effect=RuntimeError("cleanup failed")),
+    ),
+    patch("app.routes.chats.get_system_broadcast") as mock_get_sb,
+  ):
+    fake_sb = MagicMock()
+    mock_get_sb.return_value = fake_sb
+    deleted = client.delete(f"/api/chats/{chat.id}", headers=auth)
+
+  assert deleted.status_code == 204, deleted.text
+  assert client.get(f"/api/chats/{chat.id}", headers=auth).status_code == 404
+  fake_sb.publish.assert_called_once_with({
+    "type": "chat_deleted", "chatId": str(chat.id),
+  })
 
 
 def test_agent_context_includes_evolving_chat_summary(

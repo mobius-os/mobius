@@ -9,6 +9,10 @@
    surface that paints it. */
 .shell {
   --desktop-sidebar-width: 320px;
+  /* Shared geometry contract for fixed shell-level overlays. The notice rail
+     reads these instead of guessing at chrome height from the root font size. */
+  --shell-bar-height: 58px;
+  --shell-tabstrip-height: 41px;
   position: fixed;
   inset: 0;
   display: flex;
@@ -42,7 +46,7 @@
 
 .shell__bar {
   flex-shrink: 0;
-  height: calc(58px + env(safe-area-inset-top));
+  height: calc(var(--shell-bar-height) + env(safe-area-inset-top));
   padding-top: env(safe-area-inset-top);
   display: flex;
   align-items: center;
@@ -272,6 +276,7 @@
 /* ── Tab strip: pinned chats/apps to swap between ─────────────────── */
 .shell__tabstrip {
   flex-shrink: 0;
+  height: var(--shell-tabstrip-height);
   display: flex;
   gap: 4px;
   align-items: stretch;

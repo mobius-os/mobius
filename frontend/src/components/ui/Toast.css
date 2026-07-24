@@ -1,22 +1,27 @@
-/* Toast notification — surface at the bottom-center of the viewport.
+/* Toast notification — clear of the primary composer interaction.
    Sits above all content (z-index 9000, matching the old inline toast).
    Two variants: info (neutral surface) and error (danger color). */
 
 .toast {
   position: fixed;
-  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
-  left: 50%;
-  transform: translateX(-50%);
+  top: calc(
+    var(--shell-bar-height, 58px)
+    + var(--shell-tabstrip-height, 41px)
+    + 0.5rem
+    + env(safe-area-inset-top, 0px)
+  );
+  right: max(1rem, env(safe-area-inset-right, 0px));
   z-index: 9000;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0.75rem 1.25rem;
+  gap: 10px;
+  padding: 0.75rem;
+  padding-left: 1rem;
   border-radius: 10px;
   font-size: 0.875rem;
   font-family: var(--font);
-  max-width: 90vw;
-  text-align: center;
+  max-width: min(30rem, calc(100vw - 1.5rem));
+  text-align: left;
   /* Subtle entrance — short fade+slide from below. Reduced-motion
      rule in index.css collapses this to 1ms without removing it. */
   animation: toast-in 0.18s var(--ease-out-soft, cubic-bezier(0.16, 1, 0.3, 1));
@@ -26,8 +31,8 @@
 }
 
 @keyframes toast-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
-  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 .toast--info {
@@ -62,7 +67,8 @@
 .toast__action {
   background: transparent;
   border: none;
-  padding: 0 4px;
+  min-height: 36px;
+  padding: 0 8px;
   font-size: inherit;
   font-family: inherit;
   font-weight: 600;
@@ -94,4 +100,43 @@
 .toast__action:focus-visible {
   outline: 2px solid currentColor;
   outline-offset: 2px;
+}
+
+.toast__dismiss {
+  width: 36px;
+  height: 36px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.58;
+  cursor: pointer;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+@media (hover: hover) {
+  .toast__dismiss:hover {
+    opacity: 1;
+    background: color-mix(in srgb, currentColor 10%, transparent);
+  }
+}
+
+.toast__dismiss:focus { outline: none; }
+.toast__dismiss:focus-visible {
+  opacity: 1;
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+
+/* Keep the narrower inset on phones, but preserve the same below-chrome rail:
+   mobile still has both the shell bar and its tab strip. */
+@media (max-width: 700px) {
+  .toast {
+    right: max(0.75rem, env(safe-area-inset-right, 0px));
+  }
 }
