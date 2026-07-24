@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import app.chat_media as chat_media
 from app import models
 from app.chat_media import fix_forward_chat_media
 from app.config import get_settings
@@ -34,6 +35,40 @@ def test_fix_forward_chat_media_is_idempotent(db, chat):
   second = fix_forward_chat_media(db, get_settings().data_dir)
   assert first == 0
   assert second == 0
+
+
+def test_fix_forward_chat_media_skips_unrelated_transcripts(
+  db, chat, monkeypatch,
+):
+  chat.messages = [{
+    "role": "assistant",
+    "content": (
+      "Discussing /api/chats/someone-else/generated/example.png "
+      "must not make this chat a migration candidate."
+    ),
+    "blocks": [{"type": "text", "content": "x" * 100_000}],
+  }]
+  db.commit()
+
+  def unexpected_copy(*_args):
+    raise AssertionError("unrelated transcript was materialized for rewrite")
+
+  monkeypatch.setattr(chat_media, "_replace_media_path", unexpected_copy)
+
+  assert fix_forward_chat_media(db, get_settings().data_dir) == 0
+
+
+def test_fix_forward_chat_media_rewrites_legacy_url_without_old_directory(
+  db, chat,
+):
+  old_url = f"/api/chats/{chat.id}/generated/already-moved.png"
+  new_url = f"/api/chats/{chat.id}/media/already-moved.png"
+  chat.messages = [{"role": "assistant", "content": old_url}]
+  db.commit()
+
+  assert fix_forward_chat_media(db, get_settings().data_dir) == 1
+  db.refresh(chat)
+  assert chat.messages[0]["content"] == new_url
 
 
 def test_fix_forward_chat_media_preflights_conflicts(db, chat):

@@ -1612,17 +1612,17 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
   # Boot never starts markerless work; the age-gated runtime sweep claims it.
   try:
     markerless = (
-      db.query(models.Chat)
+      db.query(models.Chat.id, models.Chat.pending_messages)
       .filter(models.Chat.run_status.is_(None))
       .filter(models.Chat.deleted_at.is_(None))
       .all()
     )
-    for chat in markerless:
-      if chat.pending_messages:
+    for chat_id, pending_messages in markerless:
+      if pending_messages:
         log.warning(
           "reconcile_interrupted_chats: markerless pending queue chat_id=%s "
           "count=%d; left intact for the age-gated pending sweep",
-          chat.id, len(chat.pending_messages),
+          chat_id, len(pending_messages),
         )
   except Exception:
     log.exception("reconcile_interrupted_chats: markerless-queue scan failed")
