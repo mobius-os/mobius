@@ -538,7 +538,7 @@ export default function useNavigation({
     setDrawerVisible(true)
   }
 
-  function closeDrawer() {
+  function closeDrawer({ preserveModalUntilTraversal = false } = {}) {
     // A modal close owns one serialized traversal. Escape, overlay, toggle, and
     // breakpoint cleanup can arrive in the same frame; a second back() would
     // skip past the drawer's sentinel before the first traversal settles.
@@ -548,9 +548,10 @@ export default function useNavigation({
       // A tap/swipe close should acknowledge immediately. Keep the logical ref
       // true until Back consumes the drawer sentinel (so handleBack still owns
       // navigation correctness), but begin the visual close before that async
-      // traversal and its anti-stutter rAF settle. Real browser Back gestures
-      // still enter through handleBack and retain the deferred close path.
-      setDrawerVisible(false)
+      // traversal and its anti-stutter rAF settle. A breakpoint transition is
+      // different: desktop content must remain behind the complete mobile
+      // modal boundary until the sentinel is actually consumed.
+      if (!preserveModalUntilTraversal) setDrawerVisible(false)
       // Funnel through history.back() so handleBack handles the state
       // transition. This makes back-gesture and overlay-tap follow
       // exactly the same code path through handleBack, with the

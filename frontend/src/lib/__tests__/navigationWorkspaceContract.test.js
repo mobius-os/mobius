@@ -20,7 +20,7 @@ test('one open drawer owns at most one physical sentinel', () => {
 
 test('an explicit drawer close starts visually before consuming its history sentinel', () => {
   const close = navigation.slice(
-    navigation.indexOf('function closeDrawer()'),
+    navigation.indexOf('function closeDrawer('),
     navigation.indexOf('/**\n   * Mini-app nav-bridge'),
   )
   const visualClose = close.indexOf('setDrawerVisible(false)')
@@ -28,7 +28,14 @@ test('an explicit drawer close starts visually before consuming its history sent
   assert.ok(visualClose >= 0)
   assert.ok(traversal > visualClose,
     'tap/swipe dismissal must acknowledge before the asynchronous Back traversal')
-  assert.match(close, /drawerClosePendingRef\.current = true[\s\S]*setDrawerVisible\(false\)[\s\S]*history\.back\(\)/)
+  assert.match(close, /drawerClosePendingRef\.current = true[\s\S]*if \(!preserveModalUntilTraversal\) setDrawerVisible\(false\)[\s\S]*history\.back\(\)/)
+})
+
+test('a breakpoint close preserves the mobile modal boundary until history settles', () => {
+  assert.match(
+    shell,
+    /desktopSidebarMode && drawerOpen[\s\S]*closeDrawerRef\.current\(\{ preserveModalUntilTraversal: true \}\)/,
+  )
 })
 
 test('drawer visual visibility cannot overwrite logical history ownership during render', () => {

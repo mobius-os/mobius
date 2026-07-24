@@ -295,7 +295,9 @@ export default function Shell() {
   const closeDrawerRef = useRef(closeDrawer)
   closeDrawerRef.current = closeDrawer
   useEffect(() => {
-    if (desktopSidebarMode && drawerOpen) closeDrawerRef.current()
+    if (desktopSidebarMode && drawerOpen) {
+      closeDrawerRef.current({ preserveModalUntilTraversal: true })
+    }
   }, [desktopSidebarMode, drawerOpen])
 
   const brandButtonRef = useRef(null)
