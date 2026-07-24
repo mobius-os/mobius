@@ -81,7 +81,6 @@ export default function useWorkspaceDrag({
   closeDrawer,
   openDrawer,
   openTabMenuAtRef, // ref → (clientX, clientY, tab, paneId) => void
-  onDragStart, // dismiss the coachmark on the first real drag
   onPreviewBuilder, // (active, { committed }) => void — enter/leave the LIVE
   // builder preview a single-mode drag unfolds (point 15: dragging IS
   // building). Render-only: the reducer viewMode stays 'single' until the drop
@@ -290,7 +289,6 @@ export default function useWorkspaceDrag({
         // mutation, and a committed drop flips 'panes' via OPEN_TAB_AT (one undo
         // reverts both). There is no drag-deny anymore — dragging is always allowed.
         if (workspaceStateRef.current.ws.viewMode === 'single') onPreviewBuilder?.(true)
-        onDragStart?.() // dismiss the coachmark
         try { srcEl.setPointerCapture?.(pointerId) } catch { /* capture optional */ }
         if (!isTouch) {
           prevBodySelect = document.body.style.userSelect

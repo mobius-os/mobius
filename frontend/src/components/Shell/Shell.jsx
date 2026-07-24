@@ -1,7 +1,6 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
-import X from 'lucide-react/dist/esm/icons/x.mjs'
 import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
@@ -81,9 +80,7 @@ import WorkspaceChrome from './WorkspaceChrome.jsx'
 import useWorkspaceDrag from './useWorkspaceDrag.js'
 import useModeController from './useModeController.js'
 import * as modeMachine from './modeMachine.js'
-import {
-  HINT_KEY, coachmarkArmed, coachmarkDismissed, undoKeyPressed, isEditableTarget,
-} from './workspaceOnboarding.js'
+import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
@@ -1429,9 +1426,6 @@ export default function Shell() {
   labelForTabRef.current = labelForTab
   const openTabMenuAtRef = useRef(openTabMenuAt)
   openTabMenuAtRef.current = openTabMenuAt
-  // Filled by the first-use coachmark (§7); the first real drag dismisses it.
-  const coachmarkDismissRef = useRef(null)
-  const onWorkspaceDragStart = useCallback(() => { coachmarkDismissRef.current?.() }, [])
   // A single-mode drag previews the builder world through the ONE descriptor
   // (INV 5): arm is phase 'drag-preview', and the id it mints is carried to the
   // matching commit/cancel so a stale end-event from a superseded drag is
@@ -1515,42 +1509,14 @@ export default function Shell() {
     closeDrawer,
     openDrawer,
     openTabMenuAtRef,
-    onDragStart: onWorkspaceDragStart,
     onPreviewBuilder: onModeDragPreview,
   })
 
-  // ── Undo chord + first-use coachmark (design §3.5 / §7) ───────────────────
+  // ── Workspace undo chord (design §3.5) ────────────────────────────────────
   // Workspace mutations update the reducer's single undo slot SILENTLY; the
   // owner found the "Moved X · Undo" / "Agent arranged your workspace" toasts
-  // noise, so there is no per-mutation toast (owner call, live testing). Undo is
-  // the Cmd/Ctrl+Z chord below plus the discoverability coachmark.
-  const [wsCoachmarkDismissed, setWsCoachmarkDismissed] = useState(
-    () => coachmarkDismissed(typeof localStorage !== 'undefined'
-      ? localStorage
-      : { getItem: () => '1' }),
-  )
-  const dismissWorkspaceCoachmark = useCallback(() => {
-    setWsCoachmarkDismissed(true)
-    try { localStorage.setItem(HINT_KEY, '1') } catch { /* private mode — shows once in memory */ }
-  }, [])
-  // The first real drag dismisses it (wired through the ref the drag hook calls).
-  coachmarkDismissRef.current = dismissWorkspaceCoachmark
-  const workspaceCoachmarkVisible = coachmarkArmed({
-    enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
-    tabCount: openTabs.length,
-    dismissed: wsCoachmarkDismissed,
-    // M6: only where the tab strip actually exists — the EFFECTIVE builder world —
-    // and never over an immersive lease (z-120). Immersive may temporarily cover
-    // either durable world, so the explicit check keeps the hint with the chrome it
-    // teaches instead of painting it over the focused app.
-    builderWorld: effectiveViewMode === 'panes' && !immersiveActive,
-  })
-  // Auto-dismiss after 12s — deliberately NOT on an unrelated pointerdown (§7.2).
-  useEffect(() => {
-    if (!workspaceCoachmarkVisible) return undefined
-    const t = setTimeout(dismissWorkspaceCoachmark, 12000)
-    return () => clearTimeout(t)
-  }, [workspaceCoachmarkVisible, dismissWorkspaceCoachmark])
+  // noise, so there is no per-mutation toast (owner call, live testing). Undo
+  // remains available through Cmd/Ctrl+Z while focus is outside an editor.
   // Cmd/Ctrl+Z restores the single-slot pre-mutation snapshot while no input is
   // focused (design §3.5). Flag-gated; a text field's own undo always wins.
   // Documented limitation (PR3): key events do not cross the iframe boundary, so
@@ -3342,10 +3308,9 @@ export default function Shell() {
           inert={modalDrawerOpen || modeBeatActive}
           aria-label="Open tabs"
           // The single-pane strip is the PRIMARY drag source once the flag is on
-          // (the coachmark teaches "drag tabs to split" here). Tag it with the
-          // sole pane's id so the drag controller resolves a source pane exactly
-          // as it does for a WorkspaceChrome strip; dragging a tab out with ≥2
-          // tabs present splits the pane.
+          // Tag it with the sole pane's id so the drag controller resolves a
+          // source pane exactly as it does for a WorkspaceChrome strip; dragging
+          // a tab out with ≥2 tabs present splits the pane.
           data-pane-strip={paneModel.WORKSPACE_SPLITS_ENABLED ? workspace.focusedPaneId : undefined}
           data-mode-motion={navMotion ? navMotion.motion : undefined}
           style={navMotion ? navMotion.vars : undefined}
@@ -3677,25 +3642,6 @@ export default function Shell() {
         >
           <Minimize2 size={18} aria-hidden="true" />
         </button>
-      )}
-      {/* First-use coachmark (design §7.2) — the discoverability path for the
-          existing user base (the walkthrough never re-fires). Arms at ≥2 tabs
-          with the splits flag on; dismissed by a drag, its ✕, or 12s — never by
-          an unrelated tap. */}
-      {workspaceCoachmarkVisible && (
-        <div className="workspace__coachmark" role="status" aria-live="polite" inert={modalDrawerOpen}>
-          <span className="workspace__coachmark-text">
-            Drag a tab to move or split it
-          </span>
-          <button
-            type="button"
-            className="workspace__coachmark-close"
-            aria-label="Dismiss hint"
-            onClick={dismissWorkspaceCoachmark}
-          >
-            <X size={14} aria-hidden="true" />
-          </button>
-        </div>
       )}
       <Toast
         message={toast?.message}

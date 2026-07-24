@@ -97,20 +97,9 @@ test('reduced motion makes the drop preview instant', () => {
   assert.match(block, /\.workspace__drop-preview\s*\{\s*transition:\s*none/)
 })
 
-test('the coachmark gives one direct drag instruction and dismisses without a stray tap', () => {
-  assert.match(shell, /workspaceCoachmarkVisible/)
-  // M6: gated to the effective builder world + non-immersive, so it never shows in
-  // single mode (no tabs) or over an immersive-solo (z-120).
-  assert.match(shell, /builderWorld: effectiveViewMode === 'panes' && !immersiveActive/)
-  assert.match(shell, /Drag a tab to move or split it/)
-  assert.match(shell, /onClick=\{dismissWorkspaceCoachmark\}/)
-  // 12s auto-dismiss, never an unrelated pointerdown.
-  assert.match(shell, /setTimeout\(dismissWorkspaceCoachmark, 12000\)/)
-  assert.doesNotMatch(shell, /coachmark[\s\S]{0,80}addEventListener\('pointerdown'/)
-  const hintRule = css.match(/\.workspace__coachmark\s*\{[\s\S]*?\}/)?.[0] || ''
-  const closeRule = css.match(/\.workspace__coachmark-close\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(hintRule, /pointer-events:\s*none/)
-  assert.match(closeRule, /pointer-events:\s*auto/)
+test('the retired first-use drag hint cannot reappear in the shell', () => {
+  assert.doesNotMatch(shell, /workspaceCoachmarkVisible|Drag a tab to move or split it/)
+  assert.doesNotMatch(css, /\.workspace__coachmark/)
 })
 
 test('post-drag click suppression is source-scoped and expires on fresh input', () => {
@@ -858,12 +847,7 @@ test('the splits kill-switch forces the single-pane fallback so a rolled-back pa
   assert.match(paneModelSrc, /function coerceViewMode\(mode\) \{\s*\n\s*if \(!WORKSPACE_SPLITS_ENABLED\) return 'single'/)
 })
 
-test('visual nits V3-V6: coachmark clears the strip, focus underline reads, drag label clamps, cancel blurs', () => {
-  // V3: the first-use coachmark anchors BELOW the strip (bar 58px + safe-area + strip
-  // 34px + 8px gap), so its pill never covers a tab label.
-  const coach = css.match(/\.workspace__coachmark \{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(coach, /top: calc\(58px \+ env\(safe-area-inset-top\) \+ 42px\)/)
-  assert.doesNotMatch(coach, /top: 60px/)
+test('workspace focus, drag label, and cancel visuals remain coherent', () => {
   // V4: the FOCUSED pane's active pill softens the base full-accent border so the 2px
   // underline is what carries focus (the border used to mask it).
   const focused = css.match(/\.workspace__strip--focused \.shell__tab--active \{[\s\S]*?\n\}/)?.[0] || ''

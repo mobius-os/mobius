@@ -25,6 +25,14 @@ export function configuredProviderSet(statusByProvider) {
   )
 }
 
+export function configuredProviderOrder(providerOrder, configuredProviders) {
+  const configured = configuredProviders instanceof Set
+    ? configuredProviders
+    : new Set()
+  return (Array.isArray(providerOrder) ? providerOrder : [])
+    .filter(providerId => configured.has(providerId))
+}
+
 export function resolveProviderAvailability(statusQuery) {
   if (statusQuery?.data !== undefined) {
     return {
