@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 
 import {
   composerUsesNativeSizing,
+  reconcileComposerTextarea,
   resetComposerTextarea,
   resizeComposerTextarea,
   syncComposerTallClass,
@@ -75,6 +76,18 @@ test('reset collapses immediately before React commits the empty value', () => {
   assert.equal(pill.classList.contains('chat__pill--tall'), false)
 })
 
+test('authoritative empty state clears stale native inline geometry', () => {
+  const { textarea, pill } = textareaStub({
+    value: '',
+    scrollHeight: 280,
+    tall: true,
+  })
+
+  assert.equal(reconcileComposerTextarea(textarea, ''), 0)
+  assert.equal(textarea.style.height, 'auto')
+  assert.equal(pill.classList.contains('chat__pill--tall'), false)
+})
+
 test('native content sizing is capability-gated without browser sniffing', () => {
   assert.equal(composerUsesNativeSizing({
     supports: (property, value) => (
@@ -97,8 +110,8 @@ test('ChatView reconciles textarea geometry on value commits and foreground retu
   const source = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
   const inputBarSource = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
   const voiceSource = readFileSync(new URL('../useVoiceInput.js', import.meta.url), 'utf8')
-  assert.match(source, /useLayoutEffect\(\(\) => \{[\s\S]*resizeComposerTextarea\(el, input\)[\s\S]*\}, \[chatId, hidden, input\]\)/)
-  assert.match(source, /const reconcileForegroundGeometry = \(\) => \{[\s\S]*resizeComposerTextarea\(inputRef\.current, inputValueRef\.current\)[\s\S]*applySoon\(\)/)
+  assert.match(source, /useLayoutEffect\(\(\) => \{[\s\S]*reconcileComposerTextarea\(el, input\)[\s\S]*\}, \[chatId, hidden, input\]\)/)
+  assert.match(source, /const reconcileForegroundGeometry = \(\) => \{[\s\S]*reconcileComposerTextarea\(inputRef\.current, inputValueRef\.current\)[\s\S]*applySoon\(\)/)
   assert.match(source, /window\.addEventListener\('pageshow', reconcileForegroundGeometry\)/)
   assert.match(inputBarSource, /new ResizeObserver\(/)
   assert.match(inputBarSource, /syncComposerTallClass\(/)

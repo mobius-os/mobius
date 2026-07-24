@@ -90,6 +90,7 @@ import {
 } from './sendAttemptRecovery.js'
 import { persistComposerDraft, readComposerDraft } from './composerDraft.js'
 import {
+  reconcileComposerTextarea,
   resetComposerTextarea,
   resizeComposerTextarea,
 } from './composerTextareaSizing.js'
@@ -1659,7 +1660,7 @@ export default function ChatView({
   // scrollHeight; they reconcile when `hidden` flips back to false.
   useLayoutEffect(() => {
     const el = inputRef.current
-    if (el && !hidden) resizeComposerTextarea(el, input)
+    if (el && !hidden) reconcileComposerTextarea(el, input)
   }, [chatId, hidden, input])
 
   // Publish `.chat__foot`'s rendered height as `--composer-h` on
@@ -1687,7 +1688,7 @@ export default function ChatView({
       // returns from background or the back-forward cache. Reconcile the
       // textarea first; measuring only the outer foot would preserve a stale
       // multi-line height on an empty composer.
-      resizeComposerTextarea(inputRef.current, inputValueRef.current)
+      reconcileComposerTextarea(inputRef.current, inputValueRef.current)
       applySoon()
     }
     const onVisible = () => {

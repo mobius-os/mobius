@@ -78,3 +78,22 @@ export function resetComposerTextarea(textarea) {
   textarea.style.height = composerUsesNativeSizing() ? '' : 'auto'
   composerPill(textarea)?.classList?.remove?.('chat__pill--tall')
 }
+
+/**
+ * Reconcile authoritative composer state with browser-owned geometry.
+ *
+ * Native `field-sizing` removes the per-keystroke measurement path, but it
+ * cannot clear stale inline form geometry restored by Chromium. Empty remains
+ * a semantic one-line state, so clear it explicitly; non-empty content can use
+ * the native or measured sizing path above.
+ */
+export function reconcileComposerTextarea(
+  textarea,
+  value = textarea?.value,
+) {
+  if (!(textarea?.value || value)) {
+    resetComposerTextarea(textarea)
+    return 0
+  }
+  return resizeComposerTextarea(textarea, value)
+}
