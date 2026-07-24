@@ -139,7 +139,9 @@ def _make_fakes(state):
       if state.get("pr_open"):
         return _cp(json.dumps([{
           "url": "https://github.com/mobius-os/app-demo/pull/42",
+          "headRefName": _BRANCH,
           "headRefOid": state["head"],
+          "headRepositoryOwner": {"login": "octocat"},
         }]))
       return _cp("[]")
     if args[:2] == ("pr", "create"):

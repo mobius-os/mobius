@@ -1291,16 +1291,23 @@ def _find_existing_pr(
 ) -> str | None:
   if not _GIT_SHA.match(str(expected_head_sha or "")):
     return None
-  head = branch if same_repo else f"{login}:{branch}"
+  # `gh pr create --head` accepts owner:branch for a fork, but `gh pr list
+  # --head` only matches the branch name. Passing owner:branch here returns an
+  # empty list even when GitHub's create response says that exact PR already
+  # exists. Query by branch, then prove the expected repository owner and
+  # pushed commit from the returned metadata.
+  expected_owner = upstream_repo.split("/", 1)[0] if same_repo else login
   args = [
     "pr", "list",
     "-R", upstream_repo,
-    "--head", head,
+    "--head", branch,
   ]
   if base_branch:
     args.extend(("--base", _validate_branch(base_branch)))
   args.extend((
-    "--state", "open", "--json", "url,headRefOid", "--limit", "10",
+    "--state", "open",
+    "--json", "url,headRefName,headRefOid,headRepositoryOwner",
+    "--limit", "10",
   ))
   try:
     proc = _gh(
@@ -1319,6 +1326,12 @@ def _find_existing_pr(
   if isinstance(rows, list):
     for row in rows:
       if not isinstance(row, dict):
+        continue
+      owner = row.get("headRepositoryOwner")
+      owner_login = owner.get("login") if isinstance(owner, dict) else ""
+      if str(owner_login or "").casefold() != expected_owner.casefold():
+        continue
+      if str(row.get("headRefName") or "") != branch:
         continue
       if str(row.get("headRefOid") or "") != expected_head_sha:
         continue
