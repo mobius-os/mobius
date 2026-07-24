@@ -18,21 +18,31 @@
 #   /settings              owner settings, etc.
 #
 # Usage:
-#   agent-screenshot.sh <route> <out.png>
+#   agent-screenshot.sh [--content-only] <route> <out.png>
 #   <route> is path-absolute (starts with /); it is appended to
 #   $API_BASE_URL.
+#
+# --content-only removes product-owned walkthrough/install overlays from this
+# browser document after auth. It is deliberately ephemeral: no completion or
+# dismissal state is written to the owner's account or browser storage.
 #
 # Prints the output path on stdout, or non-zero if the auth dance
 # fails (no token, no API_BASE_URL, no viewport, no agent-browser).
 
 set -euo pipefail
 
+CONTENT_ONLY=0
+if [ "${1:-}" = "--content-only" ]; then
+  CONTENT_ONLY=1
+  shift
+fi
+
 ROUTE="${1:-}"
 OUT="${2:-}"
 
 if [ -z "$ROUTE" ]; then
   echo "agent-screenshot.sh: route required" >&2
-  echo "Usage: agent-screenshot.sh <route> [out.png]" >&2
+  echo "Usage: agent-screenshot.sh [--content-only] <route> [out.png]" >&2
   exit 1
 fi
 
@@ -124,6 +134,20 @@ AUTH_OK="$(agent-browser eval \
 if [ "$AUTH_OK" != "true" ]; then
   echo "agent-screenshot.sh: authentication failed; the token was rejected or the login page remained visible" >&2
   exit 1
+fi
+
+# App-content verification should not mutate first-run or install state merely
+# to expose the surface under test. Remove only product-owned top-document
+# overlays for this capture/session; app-owned dialogs inside the opaque frame
+# remain intact and testable.
+if [ "$CONTENT_ONLY" -eq 1 ]; then
+  OVERLAYS_CLEAR="$(agent-browser eval \
+    "(() => { document.querySelectorAll('.wt__overlay, #install-backdrop').forEach((node) => node.remove()); return !document.querySelector('.wt__overlay, #install-backdrop'); })()" \
+    2>/dev/null || true)"
+  if [ "$OVERLAYS_CLEAR" != "true" ]; then
+    echo "agent-screenshot.sh: could not establish overlay-free content mode" >&2
+    exit 1
+  fi
 fi
 
 # A fresh phone-width shell can restore with the modal navigation drawer open

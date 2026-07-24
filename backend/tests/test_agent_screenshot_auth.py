@@ -6,6 +6,7 @@ import subprocess
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "agent-screenshot.sh"
+PREVIEW_APP = Path(__file__).parents[1] / "scripts" / "preview_app.sh"
 
 
 def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
@@ -34,6 +35,7 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
 def _run_helper(
   tmp_path: Path, *, auth_ok: bool, route: str = "/chat/example",
   viewport_width: int = 412, viewport_height: int = 915,
+  content_only: bool = False,
 ) -> tuple[subprocess.CompletedProcess, Path, Path, Path]:
   _, marker = _fake_browser(tmp_path)
   output = tmp_path / "shot.png"
@@ -49,8 +51,12 @@ def _run_helper(
     "FAKE_BROWSER_LOG": str(browser_log),
     "FAKE_SCREENSHOT_MARKER": str(marker),
   }
+  args = ["bash", str(SCRIPT)]
+  if content_only:
+    args.append("--content-only")
+  args.extend([route, str(output)])
   result = subprocess.run(
-    ["bash", str(SCRIPT), route, str(output)],
+    args,
     env=env,
     text=True,
     capture_output=True,
@@ -143,3 +149,49 @@ def test_non_app_capture_skips_frame_readiness_wait(tmp_path: Path):
     and "iframe[data-app-id=" in command
     for command in commands
   )
+
+
+def test_content_only_mode_removes_product_overlays_before_capture(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    route="/app/42",
+    content_only=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  overlay_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("eval ")
+    and ".wt__overlay, #install-backdrop" in command
+  )
+  readiness_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("wait --fn ")
+    and 'iframe[data-app-id="42"]' in command
+  )
+  screenshot_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("screenshot ")
+  )
+  assert overlay_index < readiness_index < screenshot_index
+
+
+def test_default_mode_preserves_product_overlays(tmp_path: Path):
+  _, _, _, browser_log = _run_helper(tmp_path, auth_ok=True)
+
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  assert not any(
+    command.startswith("eval ")
+    and ".wt__overlay, #install-backdrop" in command
+    for command in commands
+  )
+
+
+def test_app_preview_requests_ephemeral_content_only_mode():
+  source = PREVIEW_APP.read_text(encoding="utf-8")
+
+  assert 'agent-screenshot.sh" --content-only "/app/${APP_ID}"' in source

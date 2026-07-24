@@ -1,6 +1,13 @@
 # Building mini-apps
 
-The advanced mini-app contract: packaged/installable apps, services and fetching, secrets/concurrent storage, cross-app access, embedded agents, device capabilities, immersive mode, navigation, and uncommon runtime boundaries. For an ordinary local app create or straightforward update, read `building-apps-quickstart.md` instead and do not load this file.
+Advanced extension for Möbius mini-apps. Read it alongside
+`building-apps-quickstart.md` and `visual-testing.md` when work needs packaging,
+services/fetching, privileged storage, embedded agents, device capabilities,
+immersive mode, or navigation.
+
+This file contains only the advanced contract and deltas from the base
+workflow. For an ordinary local create or straightforward update, the
+quickstart plus visual-testing pair is complete.
 
 Mini-apps are JSX components in sandboxed iframes. Each gets `appId` and an app-scoped `token`, and persists through `window.mobius.storage`. Shell-mounted app frames intentionally omit `allow-same-origin`: their effective origin is opaque (`null`), they cannot read the shell's localStorage/owner JWT, and origin-bound browser stores such as IndexedDB/OPFS are unavailable. Root-relative API fetches still work when they present the scoped bearer; `window.mobius.storage` owns that transport and its offline fallbacks.
 
@@ -25,60 +32,13 @@ is a permission boundary, not a substitute for origin-bound browser features.
 
 ---
 
-## Which path: local-first or installable
+## How this extends the base workflow
 
-Two shapes of app ship through different entry points, but both should be
-repo-ready from day one:
-
-- **A local-first app for this instance** (the common case, and what you build when the partner asks for "an app"): write source under `/data/apps/<slug>/` and run `register_app.py` once (see *Lifecycle* below). The helper reads `index.jsx` plus the `capabilities` declaration from an adjacent `mobius.json`; later manifest edits synchronize through the same watcher as source. Keep a valid `mobius.json`, README, icon, and source `.gitignore` beside the source unless the app is truly throwaway; that makes "turn this into a repo/share it" a packaging step instead of archaeology.
-- **An installable app from a repo** (when the partner already wants to share/install it elsewhere): author `mobius.json` plus `index.jsx` in a root-level repo package, push it, then install with `POST /api/apps/install` and the raw manifest URL (see *Packaging / wrapping* above). The installer creates the `/data/apps/<slug>` repo and tracks upstream/local history.
-
-When unsure, build local-first, but leave the app repo-ready.
-
----
-
-## Start minimal — a functional core, designed to grow
-
-**Default to the smallest app that fully nails the core use case: a minimal set of functional features and a minimal, clean UI — then hand it back for the partner to expand on.** A first build is a starting point, not a finished product. Ship the feature that makes the app worth opening (the habit tracker tracks habits; the notes app captures and lists notes), styled to the design conventions, and stop there. The partner drives what comes next — richer views, more entry types, automation — and you add it when they ask. Deliver progressively, but do not manufacture extra conversational turns when the request is already clear.
-
-This is a default, **not a ceiling**. Möbius apps are low-floor / high-ceiling: a small first cut keeps the floor low and reversible (less surface to break, easy to reshape), and the architecture here — split-on-concept modules, scoped CSS, a storage layer — exists so that ceiling stays open. Build for the expansion you can't see yet; don't wall it off with a sprawling v1.
-
-So don't over-build, and don't artificially under-build either:
-
-- **The default is minimal-functional.** When the request is broad or vague ("make me a notes app"), build the clean core and let the partner pull it richer. Resist gold-plating a v1 with features nobody asked for — every speculative screen is more to get wrong and more to undo.
-- **Build richer when the request clearly warrants it.** If the partner spells out scope ("a reading tracker with covers, a star rating, a yearly goal, and a stats page"), build *that* — don't strip a detailed ask back to a toy to satisfy "minimal." Minimal-first governs your default for an under-specified request; it never overrides an explicit one.
-- **When unsure which it is, the clarify turn decides.** That's what the propose step is for — name the minimal core you'd ship and ask whether they want more, rather than guessing big and over-building.
-
----
-
-## Build in visible layers
-
-For new mini-apps, get to an openable first layer quickly, then keep improving
-it while the partner can watch and try it:
-
-1. Create a coherent first layer: themed shell, primary layout, empty/loading/error states, storage paths, and one real functional slice. Do not register a blank "coming soon" stub unless the partner explicitly asked for a placeholder.
-2. Register as soon as that first layer should compile and contains one real feature. In a live building chat, registration opens the app as a tab beside its owning chat without stealing focus, so the partner can keep talking while the preview becomes available. They can switch to that tab and watch it take shape while you keep working — every save the file watcher recompiles and refreshes it live. That makes registering the first coherent layer promptly worth even more: it is the moment the app becomes something to watch, not just a promise.
-3. Immediately smoke-check the shell preview before continuing: it renders coherently, has no missing imports/assets, and any storage-backed path used by the slice works.
-4. Continue in visible increments. Each save should leave the app in a coherent state; the file watcher recompiles source edits and an app open in the shell preview/canvas refreshes to the latest compiled bundle. Standalone `/apps/<slug>/` PWAs may need a manual refresh/reopen.
-5. Signal only milestones the partner benefits from: the first preview is available; verification/refinement is underway when substantial work remains; and completion. Combine `build_phase.py` with a tool call doing real work when possible—never add a separate call solely to announce a routine internal step.
-6. If the first visible layer will take more than a few minutes because of packaging, auth, data migration, or a risky dependency, say that early and explain the gating reason.
-
-Layered does **not** mean under-building. It means the first useful slice becomes
-interactive early, then the richer pieces land while the app is alive.
-
----
-
-## Before building: check existing apps
-
-Default to checking what already exists before creating a new one:
-
-```bash
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/apps/" | python3 -m json.tool
-```
-
-If an app with the same purpose exists, update it instead of duplicating. If the partner says "build X" and X already exists, confirm whether they want to update or replace it.
-
-Search the wider ecosystem only when the partner asked to find, install, share, or upstream something; named an existing product; or the request is likely to match a shipped app exactly. Do not load `contributing.md`, query GitHub, or search the catalog for a uniquely named personal local build.
+Keep the quickstart's product scope, visible-first sequence, registration,
+validation, and browser workflow. This extension changes only the mechanism
+required by the advanced feature below. An installable app starts as a
+root-level repository package and is installed from its raw `mobius.json` URL;
+an ordinary local app stays on the quickstart path.
 
 ---
 
@@ -171,54 +131,7 @@ The wrapper is a thin Möbius app around someone else's build. The gotchas, lear
 
 ---
 
-## Component shape
-
-```jsx
-export default function MyApp({ appId, token }) {
-  return <div>...</div>
-}
-```
-
----
-
-## Lifecycle — source folder, register on create, just save to edit
-
-1. Create a source folder at `/data/apps/<name>/`.
-2. Put the app entrypoint at `/data/apps/<name>/index.jsx`.
-3. Split larger apps into sibling `.js`, `.jsx`, `.ts`, or `.tsx` modules inside that same folder and import them relatively from `index.jsx`.
-4. Add repo-ready package files when the app might live beyond this instance: `mobius.json`, `README.md`, `icon.png`, and `.gitignore`.
-5. Keep durable static build assets under `static/`; keep runtime data in storage, not in the source folder.
-
-Example:
-
-```text
-/data/apps/mood-board/
-  mobius.json
-  README.md
-  icon.png
-  .gitignore
-  index.jsx
-  Board.jsx
-  cards.js
-  static/
-    sample.png
-```
-
-On first create only, register + compile as soon as the first usable layer has
-one real feature and should compile (mints the id + DB row and, in a live
-building chat, gives the partner an openable shell preview):
-
-```bash
-python "$SCRIPTS_DIR/register_app.py" "<name>" "<description>" /data/apps/<name>/index.jsx
-```
-
-`register_app.py` reads `$CHAT_ID` from the environment and stores it with the app so crash reports route back to this chat. It also reads the versioned `capabilities` block from the adjacent `mobius.json`, has the backend normalize it into the runtime contract, and emits the app-update signal that lets a live building chat surface the open-preview affordance.
-
-**For edits, just write source files — do NOT re-run `register_app.py`.** A file watcher recompiles when `index.jsx`, source-like modules, or `mobius.json` under `/data/apps/<slug>/` change (ignoring generated/static dirs such as `static/`, `.build/`, `dist/`, `node_modules/`, and `.git/`). For local apps, a manifest edit and its normalized capability contract land atomically with the rebuilt bundle; an invalid or unknown declaration leaves the prior app live. Store-installed capability changes remain gated by the reviewed update flow. If the partner already has the app open in the shell preview/canvas, each successful recompile refreshes them onto the newest compiled bundle; standalone PWAs may need refresh/reopen. The helper patches the existing row when the `source_dir` is the same, but registering from a different folder or bypassing the helper can still create duplicates. If the partner says it didn't change, read the App row's `compiled_path` from `GET /api/apps/<id>`, confirm that content-addressed file exists, and look for `compile failed for` in `/data/logs/chat.log` — a JSX syntax error, broken import, or invalid capability declaration blocks the recompile. If a duplicate appears, `DELETE /api/apps/<dup-id>`. **Don't be fooled by a clean git tree:** the watcher auto-commits each recompile as an `agent edit` commit, so right after you save, `git -C /data/apps/<slug> status` is clean and `git add`/`git diff` show nothing — that is your edit having *landed*, not lost. Use `git log` to see the source commit and the App row's changed `compiled_path` to confirm the new bundle landed; there is nothing to stage.
-
-**Use `register_app.py`, not raw `curl POST /api/apps/`.** The raw endpoint requires an undocumented `jsx_source` field (422 without it); updates are `PATCH` not `PUT` (405). The helper handles all of this — skipping it burns tool calls rediscovering the schema from error responses.
-
-### Share Later Checklist
+## Sharing a local app later
 
 When the partner asks to share a local-first app as a repo, make the existing source tree installable instead of rebuilding it elsewhere:
 

@@ -9,6 +9,7 @@ rename) is the fix.
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -271,3 +272,69 @@ def test_registration_rejects_empty_capability_array(tmp_path, capsys):
     raise AssertionError("capabilities must remain an object")
 
   assert "must be an object" in capsys.readouterr().err
+
+
+def test_registration_finalizes_source_and_clean_is_success(monkeypatch, tmp_path):
+  mod = _load_module()
+  calls = []
+  monkeypatch.setattr(
+    mod.app_git,
+    "commit_local",
+    lambda source_dir, message: calls.append((source_dir, message)) or None,
+  )
+
+  mod._finalize_source(str(tmp_path), created=True)
+
+  assert calls == [(str(tmp_path), "create app")]
+
+
+def test_registration_creates_clean_per_app_history(tmp_path):
+  mod = _load_module()
+  (tmp_path / "index.jsx").write_text(
+    "export default function App() { return null }\n",
+    encoding="utf-8",
+  )
+  (tmp_path / "mobius.json").write_text(
+    '{"id":"clean-app","name":"Clean App","entry":"index.jsx"}\n',
+    encoding="utf-8",
+  )
+
+  mod._finalize_source(str(tmp_path), created=True)
+  mod._finalize_source(str(tmp_path), created=True)
+
+  status = subprocess.run(
+    ["git", "-C", str(tmp_path), "status", "--porcelain"],
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+  subject = subprocess.run(
+    ["git", "-C", str(tmp_path), "log", "-1", "--pretty=%s"],
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+  assert status.stdout == ""
+  assert subject.stdout.strip() == "create app"
+
+
+def test_registration_reports_retryable_source_commit_failure(
+  monkeypatch, tmp_path, capsys,
+):
+  mod = _load_module()
+
+  def fail(_source_dir, _message):
+    raise RuntimeError("git busy")
+
+  monkeypatch.setattr(mod.app_git, "commit_local", fail)
+
+  try:
+    mod._finalize_source(str(tmp_path), created=False)
+  except SystemExit as exc:
+    assert exc.code == 1
+  else:
+    raise AssertionError("source commit failure must fail the helper")
+
+  error = capsys.readouterr().err
+  assert "registration succeeded" in error
+  assert "Re-run register_app.py" in error
