@@ -135,11 +135,13 @@ class AppOut(BaseModel):
   embeds_agent: bool = False
   # Install authority — see models.App.manage_apps for the contract.
   manage_apps: bool = False
-  # GitHub connection access — see models.App.github_access.
+  # GitHub data/reviewed-submit access — see models.App.github_access.
   github_access: bool = False
   # Skills lifecycle authority (install/uninstall/catalog refresh) — see
   # models.App.manage_skills.
   manage_skills: bool = False
+  # GitHub credential management — see models.App.github_connect.
+  github_connect: bool = False
   # Guarded owner-filesystem access — see models.App.filesystem_access.
   filesystem_access: bool = False
   # URL slug for the standalone PWA install at /apps/<slug>/. Null

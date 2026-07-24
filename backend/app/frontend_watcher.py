@@ -422,7 +422,13 @@ def _replace_dist() -> None:
     except Exception:
       log.exception("attic hardlink of outgoing generation failed")
   if _OLD_DIST_DIR.exists():
-    shutil.rmtree(_OLD_DIST_DIR)
+    try:
+      shutil.rmtree(_OLD_DIST_DIR)
+    except Exception:
+      # The new dist is already the committed served generation. Cleanup must
+      # not report the publish as failed: the platform updater would otherwise
+      # roll source back while clients keep receiving the new frontend.
+      log.exception("outgoing frontend generation cleanup failed")
 
 
 def _tree_signature(root: Path) -> tuple[tuple[str, int, int], ...] | None:

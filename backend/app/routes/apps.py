@@ -839,6 +839,7 @@ async def install_app(
     manage_apps=app.manage_apps,
     github_access=app.github_access,
     manage_skills=app.manage_skills,
+    github_connect=app.github_connect,
     filesystem_access=app.filesystem_access,
     slug=app.slug,
     manifest_url=app.manifest_url,

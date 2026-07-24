@@ -568,15 +568,13 @@ class App(Base):
   # mini-app is the canonical caller. Default False — only granted by manifest
   # declaration on install.
   manage_skills = Column(Boolean, nullable=False, default=False)
-  # GitHub connection access. When True, the app's token can call the
-  # whole /api/github surface: manage the connection (connect / poll /
-  # disconnect / status) and use the read-only data proxy (GET
-  # /api/github/api/* and POST /api/github/graphql, both read-only by
-  # construction, INV2). The connected token is never returned to the
-  # app. The Contribute mini-app is the canonical caller. A boolean gate
-  # like manage_apps, not a ladder. Default False — only granted by
-  # manifest declaration on install.
+  # GitHub data access. This covers the read-only proxy and the narrow reviewed
+  # contribution submit surface, never credential management or token export.
   github_access = Column(Boolean, nullable=False, default=False)
+  # GitHub credential-management authority. Device flow, PAT install, status,
+  # and disconnect are intentionally separate from github_access so read-only
+  # consumers cannot mutate the owner's account connection.
+  github_connect = Column(Boolean, nullable=False, default=False)
   # Owner filesystem capability. This is intentionally separate from storage
   # interop: it grants the app-scoped token access to the guarded /api/fs
   # surface (still path-confined and secret-denied there). The Editor is the

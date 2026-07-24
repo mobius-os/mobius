@@ -63,7 +63,7 @@ auth_limiter.enabled = False
 
 
 @pytest.fixture(autouse=True)
-def _isolate_git_env(monkeypatch):
+def _isolate_git_env(monkeypatch, tmp_path):
   """Keep the per-app-git tests' `git` subprocesses hermetic.
 
   app_git tests run `git init/commit/merge` against a repo in tmp_path via
@@ -72,15 +72,19 @@ def _isolate_git_env(monkeypatch):
   inside the pre-push hook, the tests' git ops silently operate on the
   enclosing mobius repo instead, flipping `core.bare` and committing stray
   "Initialize app repo" commits (and failing). Scrub the inherited git env
-  and pin global/system config to /dev/null + a ceiling so every test git
-  op is fully isolated, whether the suite runs from a shell or a git hook.
+  and pin global config to a per-test file plus system config to /dev/null,
+  with a ceiling so every test git op is fully isolated, whether the suite
+  runs from a shell or a git hook. The global config must be a regular
+  disposable path: ``git config --global`` uses an atomic lock-and-replace,
+  so pointing it at /dev/null can replace the device inside a privileged test
+  container and poison every later Git command in that process.
   """
   for var in (
     "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
   ):
     monkeypatch.delenv(var, raising=False)
-  monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+  monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
   monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
   repo_root = _Path(__file__).resolve().parents[2]
   monkeypatch.setenv(

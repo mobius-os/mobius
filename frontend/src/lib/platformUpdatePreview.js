@@ -15,6 +15,10 @@ export function shortSha(sha) {
 export function summarizePreview(preview) {
   const files = Array.isArray(preview?.files) ? preview.files : []
   const commits = Array.isArray(preview?.commits) ? preview.commits : []
+  const totalCommits = Number.isInteger(preview?.total_commits)
+    && preview.total_commits >= commits.length
+    ? preview.total_commits
+    : commits.length
   let insertions = 0
   let deletions = 0
   for (const file of files) {
@@ -23,7 +27,10 @@ export function summarizePreview(preview) {
   }
   const diff = typeof preview?.diff === 'string' ? preview.diff : ''
   return {
-    commitCount: commits.length,
+    commitCount: totalCommits,
+    listedCommitCount: commits.length,
+    commitsTruncated: !!preview?.commits_truncated
+      || totalCommits > commits.length,
     fileCount: files.length,
     insertions,
     deletions,
