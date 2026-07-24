@@ -60,16 +60,29 @@ def request_restart(
   *,
   boot_id: str,
   nonce: str,
+  runs: list[dict[str, str]],
   now: float | None = None,
 ) -> None:
-  """Publish intent first, then the sentinel the frozen poller consumes."""
+  """Publish intent first, then the sentinel the frozen poller consumes.
+
+  ``runs`` is retained in protocol v1 for supervisors baked before the
+  nonce-only simplification. Newer supervisors ignore the extra field and
+  attest only the nonce; older supervisors require it before accepting the
+  restart. Keeping the field lets a platform-only update cross either frozen
+  image generation safely.
+  """
   intent_path, request_path, _ = _paths()
   created_at = time.time() if now is None else now
+  normalized = [
+    {"chat_id": str(item["chat_id"]), "run_token": str(item["run_token"])}
+    for item in runs
+  ]
   _atomic_json(intent_path, {
     "version": PROTOCOL_VERSION,
     "nonce": nonce,
     "source_boot_id": boot_id,
     "created_at": created_at,
+    "runs": normalized,
   })
   _atomic_json(request_path, {
     "nonce": nonce,
