@@ -16,12 +16,24 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.allocator import allocator_status
-from app.broadcast import get_all_active_broadcasts
+from app.broadcast import (
+  broadcast_memory_diagnostics,
+  get_all_active_broadcasts,
+)
 from app.browser_profiles import browser_profile_status
-from app.chat import live_run_health_fields
+from app.chat import active_sink_memory_diagnostics, live_run_health_fields
+from app.chat_writer import writer_memory_diagnostics
 from app.config import get_settings
 from app.database import database_pool_snapshot, get_db
 from app.deps import get_current_owner
+from app.memory_observability import (
+  allocation_report,
+  gc_diagnostics,
+  memory_map_summary,
+  memory_status,
+  process_inventory,
+)
+from app.questions import question_memory_diagnostics
 from app.runner_registry import RunnerKind, registry
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
@@ -34,6 +46,25 @@ router = APIRouter(prefix="/api/debug", tags=["debug"])
 _SECRET_KEY_CHANGED_FLAG = Path(
   os.environ.get("DATA_DIR", "/data")
 ) / ".secret-key-changed"
+
+
+def _runtime_memory_ownership(*, include_payloads: bool = True) -> dict:
+  """Cheap cardinality/payload diagnostics from each long-lived owner."""
+  return {
+    "runner_handles": {
+      kind.value: len(registry.handles_by_kind(kind))
+      for kind in RunnerKind
+    },
+    "starting_chats": len(registry.starting_chat_ids()),
+    "broadcasts": broadcast_memory_diagnostics(
+      include_payloads=include_payloads,
+    ),
+    "active_sinks": active_sink_memory_diagnostics(
+      include_payloads=include_payloads,
+    ),
+    "writer": writer_memory_diagnostics(),
+    "questions": question_memory_diagnostics(),
+  }
 
 
 @router.get("/status")
@@ -146,6 +177,10 @@ def debug_status(
     result["frontend_watcher"] = {"status": "unavailable", "running": False}
   result["allocator"] = allocator_status()
   result["browser_profiles"] = browser_profile_status()
+  # These are on-demand /proc reads plus bounded owner counters. Nothing
+  # samples continuously merely because observability exists.
+  result["memory"] = memory_status()
+  result["runtime_memory"] = _runtime_memory_ownership(include_payloads=False)
   if reconciliation_failed:
     result["reconciliation_failed"] = True
   if media_migration_failed:
@@ -198,6 +233,30 @@ def debug_status(
 
 
   return result
+
+
+@router.get("/memory")
+def debug_memory(
+  _owner: models.Owner = Depends(get_current_owner),
+  deep: bool = Query(default=False),
+  allocation_limit: int = Query(default=25, ge=0, le=100),
+  process_limit: int = Query(default=20, ge=0, le=100),
+):
+  """Return an explicit memory investigation report.
+
+  Ordinary status reads stay cheap. This endpoint additionally walks cgroup
+  processes and, when requested, GC-tracked object types. If opt-in
+  tracemalloc was enabled before process import, ``allocation_limit`` source
+  locations are included; otherwise its report explains that tracing is off.
+  """
+  return {
+    **memory_status(include_checkpoints=True),
+    "memory_maps": memory_map_summary(),
+    "processes": process_inventory(limit=process_limit),
+    "runtime_memory": _runtime_memory_ownership(),
+    "gc": gc_diagnostics(deep=deep),
+    "allocations": allocation_report(limit=allocation_limit),
+  }
 
 
 @router.get("/logs")

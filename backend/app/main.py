@@ -40,6 +40,7 @@ from app.database import (
   set_database_request_label,
 )
 from app.http_caching import strip_range
+from app.memory_observability import record_memory_checkpoint
 from app import activity, models
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
@@ -141,6 +142,7 @@ async def lifespan(app):
   import asyncio as _asyncio
   import logging as _logging
   _log = _logging.getLogger(__name__)
+  record_memory_checkpoint("lifespan_start")
   # Wrapped: providers.py is on the agent's write surface. A broken
   # providers.py shouldn't take down the server — log and skip the
   # defaults check so the recovery surface stays reachable.
@@ -436,6 +438,7 @@ async def lifespan(app):
     for _diag_name, _diag_level in (
       ("app.app_watcher", logging.INFO),
       ("app.providers.models", logging.WARNING),
+      ("moebius.memory", logging.INFO),
     ):
       _diag_logger = logging.getLogger(_diag_name)
       if _diag_handler not in _diag_logger.handlers:
@@ -625,9 +628,11 @@ async def lifespan(app):
     _browser_profile_task = _asyncio.create_task(_browser_profile_loop())
   except Exception as exc:
     _log.error("chat liveness sweep wiring failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_ready")
   try:
     yield
   finally:
+    record_memory_checkpoint("shutdown_begin")
     # Preserve the final partial request-error windows across graceful restarts.
     # This is one bounded batch append, not one write per response.
     activity.flush_request_errors()

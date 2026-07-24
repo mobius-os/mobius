@@ -42,6 +42,14 @@ _pending: dict[str, PendingQuestion] = {}
 _cancelled: dict[str, str | None] = {}
 
 
+def question_memory_diagnostics() -> dict[str, int]:
+  """Return registry cardinalities without exposing answers or futures."""
+  return {
+    "pending_count": len(_pending),
+    "cancelled_count": len(_cancelled),
+  }
+
+
 def register(chat_id: str, pending: PendingQuestion) -> None:
   """Inserts a pending question, replacing any existing entry.
 

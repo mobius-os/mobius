@@ -3664,6 +3664,29 @@ def get_writer() -> ChatWriterActor:
   return _writer
 
 
+def writer_memory_diagnostics() -> dict[str, object]:
+  """Expose bounded actor ownership counters for memory investigations."""
+  writer = _writer
+  if writer is None:
+    return {"present": False}
+  with writer._pending_lock:
+    pending_snapshots = len(writer._pending)
+    outstanding_snapshots = len(writer._outstanding)
+    generation_keys = len(writer._generation)
+  thread = writer._thread
+  return {
+    "present": True,
+    "queue_depth": writer._q.qsize(),
+    "pending_snapshots": pending_snapshots,
+    "outstanding_snapshots": outstanding_snapshots,
+    "generation_keys": generation_keys,
+    "run_token_owners": len(writer._run_token_owner),
+    "thread_alive": bool(thread and thread.is_alive()),
+    "fatal": writer._fatal,
+    "stopping": writer._stopping,
+  }
+
+
 def stop_writer(timeout: float = 10.0) -> None:
   """Drain + join the process writer if it exists."""
   global _writer
