@@ -174,10 +174,10 @@ test('bundled app packages are not duplicated in the shell install precache', ()
     'VENDORED_RECHARTS',
     'VENDORED_DATE_FNS',
     'VENDORED_ATLAS_NOTES',
+    'VENDORED_MEMORY_GRAPH',
   ]) {
     assert.doesNotMatch(worker, new RegExp(stale))
   }
-  assert.match(worker, /VENDORED_MEMORY_GRAPH/)
   assert.match(worker, /RETAINED_RUNTIME_ASSETS/)
 })
 

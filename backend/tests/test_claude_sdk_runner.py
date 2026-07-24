@@ -560,6 +560,45 @@ async def test_stop_drops_buffered_steer_and_clears_flags(monkeypatch):
     registry.unregister("stop-chat", handle.kind)
 
 
+@pytest.mark.asyncio
+async def test_stop_timeout_preserves_runner_completion_future():
+  class _Client:
+    async def interrupt(self):
+      return None
+
+  handle = ActiveClaudeClient(_Client(), chat_id="timeout-identity")
+
+  assert await handle.stop(timeout=0.01) is False
+  assert handle._finished.done() is False
+  handle.mark_finished()
+  assert handle._finished.done() is True
+
+
+@pytest.mark.asyncio
+async def test_force_stop_signals_claude_group_only_once(monkeypatch):
+  calls: list[int] = []
+  monkeypatch.setattr(
+    claude_sdk_runner,
+    "_terminate_claude_process_group",
+    lambda pgid: calls.append(pgid) or True,
+  )
+
+  class _Client:
+    async def interrupt(self):
+      return None
+
+  handle = ActiveClaudeClient(_Client(), chat_id="hard-stop")
+  handle.set_process_group_id(4321)
+  first = asyncio.create_task(handle.force_stop(timeout=1))
+  while not calls:
+    await asyncio.sleep(0)
+  handle.mark_finished()
+
+  assert await first is True
+  assert await handle.force_stop(timeout=1) is True
+  assert calls == [4321]
+
+
 def test_run_claude_sdk_turn_persists_session_id_before_terminal_result(
   monkeypatch,
 ):
@@ -1327,6 +1366,25 @@ def test_skill_file_read_name_rejects_non_matches():
   ]
   for tool, input_data in cases:
     assert _skill_file_read_name(tool, input_data, "/data") == ""
+
+
+def test_skill_file_read_name_matches_dir_shaped_skill():
+  """`<skills>/<name>/SKILL.md` (the installed-skill convention) is a load."""
+  from app.claude_sdk_runner import _skill_file_read_name
+
+  path = os.path.join(_skills_dir(), "pdf-tools", "SKILL.md")
+  assert _skill_file_read_name("Read", {"file_path": path}, "/data") == "pdf-tools"
+  # A resource file inside the skill dir is NOT a load — only the entry doc.
+  res = os.path.join(_skills_dir(), "pdf-tools", "reference.md")
+  assert _skill_file_read_name("Read", {"file_path": res}, "/data") == ""
+
+
+def test_skill_file_read_name_ignores_generated_index():
+  """Reading skills-index.md is browsing the index, not loading a skill."""
+  from app.claude_sdk_runner import _skill_file_read_name
+
+  path = os.path.join(_skills_dir(), "skills-index.md")
+  assert _skill_file_read_name("Read", {"file_path": path}, "/data") == ""
 
 
 def test_observe_skill_file_read_publishes_chip_and_activity(monkeypatch):

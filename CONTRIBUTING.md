@@ -14,7 +14,7 @@ guide gets a fresh clone to a running dev/test loop.
 | `frontend/src/` | React 19 + Vite shell (chat UI, drawer, mini-app iframe canvas). |
 | `skill/core.md` | The agent's system prompt (the "constitution"); read from the live checkout after restart, with an image-baked degraded-boot fallback. |
 | `backend/scripts/seed-skills/` | Per-topic agent skills (building-apps, theming, cron, …), seeded into `/data/shared/skills/` create-if-absent on first boot. |
-| `core-apps/` | Legacy snapshots only. Memory and Reflection ship from `mobius-os/app-memory` and `mobius-os/app-reflection`: they are auto-installed on first boot, then remain editable and updatable like any catalog app. |
+| `backend/app/bootstrap.py` | First-boot installation of the Store, Memory, and Reflection from their catalog repositories. Installed apps remain locally editable and updatable like every other catalog app. |
 | `tests/` | Playwright end-to-end suite (repo root). |
 | `backend/tests/` | pytest backend suite. |
 
@@ -24,9 +24,11 @@ any non-trivial change.
 
 ## Tests
 
-CI is `.github/workflows/test.yml`; the commands below mirror it.
+Required PR CI is `.github/workflows/test.yml`; the commands below mirror it.
+After protected merges, `.github/workflows/image-cache.yml` refreshes the
+shared Docker cache without repeating the test suite.
 
-## Landing a session branch
+## Submitting a session branch
 
 Install the repository's shared privacy and quality gates once after cloning,
 and re-run the installer after pulling hook changes:
@@ -39,14 +41,14 @@ The roots `docs`, `demo-logs`, `.claude`, `.pm`, `AGENTS.md`, and `CLAUDE.md`
 are private workspace state. Keep them outside the public clone (local symlinks
 are ignored), never force-add them, and never bypass a privacy hook failure.
 
-Parallel work should land through `scripts/land.sh` from the session worktree.
-It refuses dirty or detached checkouts, backs up the branch tip under
-`origin/preserve/session-*`, rebases onto the latest `origin/main`, then pushes
-to `main` without force or hook bypass flags. If a sibling lands first, follow
-the recovery loop it prints:
+Publish work through `scripts/submit-pr.sh` from the session worktree. It
+refuses dirty, detached, `main`, or privacy-unsafe checkouts; rebases onto the
+latest `origin/main`; updates the topic branch with lease protection; and opens
+or reports its pull request. Required GitHub checks test the synthetic merge
+before the PR can land.
 
 ```bash
-git fetch origin && git rebase origin/main && scripts/land.sh
+scripts/submit-pr.sh
 ```
 
 **Backend (pytest).** Hermetic Docker path (no local venv, tests current source
@@ -57,8 +59,15 @@ docker compose -p mobius-test -f docker-compose.test.yml build   # image must ex
 docker compose -p mobius-test -f docker-compose.test.yml run --rm pytest
 ```
 
-CI runs the equivalent natively: from `backend/`, `pip install -r requirements.txt`,
-`npm install -g esbuild@0.25.12` (compile path shells out to it), then `pytest -q`.
+CI runs the equivalent natively: install `frontend/package-lock.json`, put its
+locked `node_modules/.bin` on `PATH`, install `backend/requirements.txt`, then
+run `pytest -q` from `backend/`.
+
+For one-off `docker run` probes, use `scripts/docker-probe.sh --timeout
+SECONDS -- ...`. It gives the container an exact identity and removes it at
+the daemon after a timeout, so killing the Docker client cannot leave a hidden
+CPU- or disk-consuming probe behind. `scripts/docker-probe.sh --list` shows
+the age, CPU, and memory of any active probes.
 
 **Frontend unit (node:test).** From `frontend/`, after `npm ci`:
 

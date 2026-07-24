@@ -212,6 +212,21 @@ def test_render_transcript_keeps_visible_blocks_and_excludes_tool_secrets():
   assert "SECRET" not in rendered
 
 
+def test_render_transcript_labels_automatic_continuation_as_product_event():
+  cn = _load_chat_note()
+  raw = json.dumps([{
+    "role": "user",
+    "kind": "auto_continuation",
+    "continuation_reason": "restart",
+    "content": "continue",
+  }])
+
+  rendered = cn._render_transcript(raw)
+
+  assert rendered == "automatic continuation (restart): continue"
+  assert "user: continue" not in rendered
+
+
 def test_claude_summary_prompt_receives_complete_transcript(monkeypatch):
   cn = _load_chat_note()
   monkeypatch.setattr(cn, "_configured_provider", lambda: "claude")

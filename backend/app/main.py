@@ -50,13 +50,13 @@ from app.routes import (
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   debug_router, fs_router, github_router, media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
-  secrets_router, self_reminders_router, settings_router,
+  secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
   published_router,
 )
 
-_BOOT_ID = f"{os.getpid()}-{time.time_ns()}"
+_BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
 
 
 def _init_db():
@@ -162,6 +162,22 @@ async def lifespan(app):
     # report cleanup failure without making the whole service unbootable.
     _log.error("legacy global auto-resume cleanup failed: %s", exc, exc_info=True)
   _init_db()
+  # Upgrade hygiene for lifecycle observability. The append-only link table is
+  # new, but older chats can already carry a current provider session pointer.
+  # Seed those once after create_all has made the table; future sightings are
+  # recorded by the runners. Ambiguous historical claims remain unlinked.
+  try:
+    from app.session_links import backfill_current_session_links
+    with SessionLocal() as _session_link_db:
+      _backfilled_links = backfill_current_session_links(_session_link_db)
+    if _backfilled_links:
+      _log.info(
+        "backfilled %s historical chat session link(s)", _backfilled_links,
+      )
+  except Exception as exc:
+    # Observability must never block the recovery surface. A failed link is
+    # retried on the next boot and the runner still records future sightings.
+    _log.error("session-link backfill failed: %s", exc, exc_info=True)
   # First-boot claim gate (card 261). Publish/reconcile the one-time setup
   # claim now — after _init_db() so the owner state is readable, and before
   # `yield` so no request can reach POST /api/auth/setup before the gate
@@ -236,9 +252,10 @@ async def lifespan(app):
   # other lifespan steps: a failure here must not brick the recovery
   # surface. Runs single-threaded pre-serving, so no queue-lock
   # contention — see reconcile_interrupted_chats for the argument.
-  # Chats reconciled at boot (incl. any turn paused by a drain-gated restart),
-  # carried to the post-`init_vapid` notify below — VAPID must be initialized
-  # before a push can be delivered.
+  # Chats reconciled at boot (crashes plus a planned drain whose exact park did
+  # not commit) are carried to the post-`init_vapid` manual-recovery notify
+  # below. Exact planned-restart parks bypass this destructive reconciliation
+  # and are handled by the continuation sweep after the writer starts.
   _reconciled_chats: list[str] = []
   try:
     from app.chat import reconcile_interrupted_chats
@@ -317,9 +334,10 @@ async def lifespan(app):
     init_vapid()
   except Exception as exc:
     _log.error("init_vapid failed: %s", exc, exc_info=True)
-  # Boot resume notify (design §2.2 step 4). Runs AFTER init_vapid so the push
-  # can actually deliver: one "tap to resume" notification for any turn left
-  # paused by a drain-gated restart (or crash) that boot reconcile finalized.
+  # Boot manual-resume notify (design §2.2 step 4). Runs AFTER init_vapid so the
+  # push can actually deliver: one "tap to resume" notification for a crash or
+  # planned-drain fallback that boot reconciliation finalized. Exact restart
+  # parks notify through sweep_reset_parks instead.
   # Best-effort — the resumable note is already durable in the transcript, so a
   # notify failure never blocks boot.
   try:
@@ -533,22 +551,39 @@ async def lifespan(app):
 
     _stalled_live_task = _asyncio.create_task(_stalled_live_loop())
 
-    # Provider-limit reset sweep (design §2.4): notifies once when a parked
-    # turn's reset time arrives, and — when the owner opted in — starts the
-    # strictly-serial auto-resume. Same shape as the two loops above.
+    # Durable-continuation sweep (design §2.4): handles provider-limit resets
+    # and exact runs parked by a planned restart. It runs immediately on boot,
+    # then after a turn finishes or at the 60s fallback cadence. This is
+    # event-driven in the common path (one indexed query per completed turn),
+    # with no per-chat worker or short polling loop.
     async def _reset_park_loop():
-      while True:
-        await _asyncio.sleep(60)
-        try:
-          _rp_db = _SweepSession()
+      from app.broadcast import get_system_broadcast as _system_broadcast
+      _events = _system_broadcast().subscribe()
+      try:
+        while True:
           try:
-            await sweep_reset_parks(_rp_db)
-          finally:
-            _rp_db.close()
-        except _asyncio.CancelledError:
-          raise
-        except Exception as _exc:
-          _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
+            _rp_db = _SweepSession()
+            try:
+              await sweep_reset_parks(_rp_db)
+            finally:
+              _rp_db.close()
+          except _asyncio.CancelledError:
+            raise
+          except Exception as _exc:
+            _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
+
+          try:
+            # One absolute fallback window. Unrelated system events must not
+            # keep resetting a per-get timer and starve a future limit reset.
+            async with _asyncio.timeout(60):
+              while True:
+                _event = await _events.get()
+                if _event and _event.get("type") == "chat_run_finished":
+                  break
+          except _asyncio.TimeoutError:
+            pass
+      finally:
+        _system_broadcast().unsubscribe(_events)
 
     _reset_park_task = _asyncio.create_task(_reset_park_loop())
 
@@ -1070,6 +1105,7 @@ app.include_router(debug_router)
 app.include_router(theme_router)
 app.include_router(admin_router)
 app.include_router(self_reminders_router)
+app.include_router(skills_router)
 # Standalone PWA surface at /apps/<slug>/{,manifest.json,icon-N.png}.
 # Registered AFTER the API routers but BEFORE the SPA catch-all
 # (which mounts conditionally below at /{path:path}) so its explicit

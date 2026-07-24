@@ -290,7 +290,6 @@ RUN printf 'mobius ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
 COPY skill/ ./skill/
-COPY core-apps/ ./core-apps/
 COPY protected-files.txt ./protected-files.txt
 
 # Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs in

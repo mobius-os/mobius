@@ -1,0 +1,38 @@
+name: Image cache
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Keep the useful build summary without retaining an unused Buildx record.
+  DOCKER_BUILD_RECORD_UPLOAD: 'false'
+
+# A newer main contains every older merge, so an obsolete cache refresh has no
+# value once the next one starts.
+concurrency:
+  group: image-cache-main
+  cancel-in-progress: true
+
+jobs:
+  image-cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Refresh shared image cache
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          outputs: type=cacheonly
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true

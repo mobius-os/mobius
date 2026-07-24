@@ -453,11 +453,21 @@ class ActiveCodexTurn:
   Same shape as Claude's `ActiveClaudeClient`.
   """
 
-  def __init__(self, thread: Any, turn: Any, chat_id: str):
+  def __init__(
+    self,
+    thread: Any,
+    turn: Any,
+    chat_id: str,
+    process_group_id: int | None = None,
+  ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CODEX_SDK
     self.thread = thread
     self.turn = turn
+    self._process_group_id = process_group_id
+    # A retained PGID must never be signalled twice: after the first kill the
+    # kernel may eventually reuse that number for an unrelated process group.
+    self._force_stop_started = False
     # Admission flag shared with request_user_input on the runner loop. Set
     # synchronously before turn.steer's first await so a not-yet-registered
     # question cannot park the SDK reader ahead of the steer acknowledgement.
@@ -477,7 +487,7 @@ class ActiveCodexTurn:
     except Exception as exc:
       log.warning("codex interrupt() raised: %s", exc)
     try:
-      await asyncio.wait_for(self._finished, timeout=5.0)
+      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
     except asyncio.TimeoutError:
       log.warning(
         "codex active_turn._finished never resolved within 5s; runner is wedged"
@@ -499,6 +509,28 @@ class ActiveCodexTurn:
     except Exception:
       log.exception(
         "Codex SDK stop failed chat_id=%s", self.chat_id,
+      )
+      return False
+
+  async def force_stop(self, timeout: float = 5.0) -> bool:
+    """One-shot hard stop for this turn's verified private process group."""
+    if not self._force_stop_started:
+      if self._process_group_id is None:
+        return False
+      self._force_stop_started = True
+      await asyncio.to_thread(
+        _terminate_codex_process_group, self._process_group_id,
+      )
+    try:
+      await asyncio.wait_for(
+        asyncio.shield(self._finished), timeout=max(0.0, timeout),
+      )
+      return True
+    except asyncio.CancelledError:
+      raise
+    except asyncio.TimeoutError:
+      log.warning(
+        "Codex SDK hard stop did not finish chat_id=%s", self.chat_id,
       )
       return False
 
@@ -1224,21 +1256,33 @@ def _skill_names_in_command(command: str, data_dir: str) -> list[str]:
 
   Codex has no Read tool and no `can_use_tool` hook — its closest
   interception point is the command-execution item stream, where a
-  skill load looks like `cat /data/shared/skills/<name>.md` (or a
-  sed/head/grep over the same path). Any reference to a skill file in
-  a command counts as a load; that over-counts an edit-in-place,
-  which is acceptable for an aggregate most-used signal. Returns
-  deduped names in first-mention order.
+  skill load looks like `cat /data/shared/skills/<name>.md` (flat) or
+  `cat /data/shared/skills/<id>/SKILL.md` (the directory shape installed
+  skills use), possibly via sed/head/grep over the same path. Any
+  reference to a skill file in a command counts as a load; that
+  over-counts an edit-in-place, which is acceptable for an aggregate
+  most-used signal. A directory skill is keyed by its DIRECTORY name —
+  the on-disk id — matching the Claude Read observer and the usage
+  aggregation; a deeper resource read inside the directory is not a
+  load. Returns deduped names in first-mention order.
   """
   if not command:
     return []
+  from app.skills import GENERATED_INDEX_STEMS
+
   prefix = re.escape(
     os.path.normpath(os.path.join(data_dir, "shared", "skills"))
   )
   names: list[str] = []
-  for match in re.finditer(prefix + r"/([A-Za-z0-9._-]+)\.md\b", command):
+  # Either `<id>/SKILL.md` (directory skill, id = the dir name, SKILL.md
+  # case-insensitive) or a flat `<name>.md` directly under skills/. The two
+  # alternatives are disjoint (a flat match can't span a `/`), so one pass in
+  # command order preserves first-mention order without double counting.
+  pattern = prefix + r"/([A-Za-z0-9._-]+)(?:/(?i:SKILL\.md)|\.md)\b"
+  for match in re.finditer(pattern, command):
     name = match.group(1)
-    if name not in names:
+    # Reading a generated index is consulting a listing, not loading a skill.
+    if name not in names and name not in GENERATED_INDEX_STEMS:
       names.append(name)
   return names
 
@@ -1867,7 +1911,12 @@ async def run_codex_sdk_turn(
           )
         log.info("Codex turn aborted before stream registration chat_id=%s", chat_id)
         return aborted_result()
-      active_turn = ActiveCodexTurn(thread, turn, chat_id=chat_id)
+      active_turn = ActiveCodexTurn(
+        thread,
+        turn,
+        chat_id=chat_id,
+        process_group_id=process_group_id,
+      )
       registry.register(active_turn)
 
       # Persist the session id AFTER registering the live turn: this is a
@@ -2122,7 +2171,9 @@ async def run_codex_sdk_turn(
       except Exception as exc:
         log.warning("Codex process-group capture failed: %s", exc)
     current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
+    group_already_terminated = False
     if isinstance(current, ActiveCodexTurn) and current.turn is turn:
+      group_already_terminated = current._force_stop_started
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)
       current.mark_finished()
     # AsyncCodex.close() terminates only its direct Popen PID.  Reap the
@@ -2131,7 +2182,7 @@ async def run_codex_sdk_turn(
     # worker keeps the short grace period off the FastAPI event loop; shield
     # ensures task cancellation cannot prevent the SIGKILL backstop from
     # running in that worker once cleanup has started.
-    if process_group_id is not None:
+    if process_group_id is not None and not group_already_terminated:
       reap_task = asyncio.create_task(asyncio.to_thread(
         _terminate_codex_process_group, process_group_id,
       ))

@@ -31,6 +31,9 @@ const preview = {
   available: true,
   current_sha: '1111111111111111111111111111111111111111',
   target_sha: '2222222222222222222222222222222222222222',
+  plan_id: 'a'.repeat(64),
+  total_commits: 1,
+  commits_truncated: false,
   commits: [{ sha: '22222222', subject: 'Incoming platform change' }],
   files: [],
   diff: null,
@@ -64,6 +67,18 @@ async function mockPlatform(page, stateRef) {
     contentType: 'application/json',
     body: JSON.stringify(preview),
   }))
+  await page.route('**/api/platform/update-progress', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      plan_id: preview.plan_id,
+      target_sha: preview.target_sha,
+      phase: 'building',
+      active: true,
+      error: null,
+      updated_at: Date.now() / 1000,
+    }),
+  }))
 }
 
 async function openUpdateReview(page) {
@@ -95,7 +110,9 @@ async function openUpdateReview(page) {
 test('a clean apply closes the review and exposes the restart step', async ({ page }) => {
   const state = { current: 'available' }
   await mockPlatform(page, state)
+  let appliedPlan = null
   await page.route('**/api/platform/apply', route => {
+    appliedPlan = route.request().postDataJSON()
     state.current = 'restart_needed'
     return route.fulfill({
       status: 200,
@@ -115,6 +132,11 @@ test('a clean apply closes the review and exposes the restart step', async ({ pa
   await dialog.getByRole('button', { name: 'Apply update' }).click()
 
   await expect(dialog).toHaveCount(0)
+  expect(appliedPlan).toEqual({
+    plan_id: preview.plan_id,
+    current_sha: preview.current_sha,
+    target_sha: preview.target_sha,
+  })
   const restart = page.getByRole('button', { name: 'Restart to finish' })
   await expect(restart).toBeVisible()
   await expect(restart).toBeFocused()
@@ -373,6 +395,7 @@ test('Escape and dismissal stay gated while Apply is pending', async ({ page }) 
   const dialog = await openUpdateReview(page)
   await dialog.getByRole('button', { name: 'Apply update' }).click()
   await expect(dialog.getByRole('button', { name: 'Applying…' })).toBeDisabled()
+  await expect(dialog.getByText('Building the frontend…')).toBeVisible()
   await expect(dialog.getByRole('button', { name: 'Not now' })).toBeDisabled()
   await expect(dialog.getByRole('button', { name: 'Close' })).toBeDisabled()
 

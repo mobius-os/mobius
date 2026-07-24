@@ -59,14 +59,12 @@ export function projectFocusedPane(baseProjection, workspace, paneId, contentRec
 // Timing (ms). Constants live here, NOT in the machine, so the reconcile clock
 // (INV 14) and the missing-target fallback (INV 13) reason about the plan's own
 // totalMs rather than a fixed per-phase maximum. Mode changes are intentionally one
-// short beat using only compositor transforms + opacity. Edge panes share one
-// duration; the only offset is the fixed shared-surface handoff below, independent
-// of pane count (never a growing stagger or second destination phase).
+// short beat: every pane moves together, using only compositor transforms + opacity.
+// There is no per-pane stagger or second destination phase to make the owner wait.
 export const MODE_MOTION = Object.freeze({
-  itemMs: 180,
-  // Let departing panes clear a small gap before the shared surface expands;
-  // reverse that order on entry. This is still one compositor-only beat.
-  sharedLagMs: 40,
+  enterItemMs: 210,
+  exitItemMs: 180,
+  promoteMs: 210,
   logoReleaseMs: 90,
 })
 
@@ -80,7 +78,6 @@ export const RECONCILE_SLACK_MS = 250
 // keyframes so a name typo is caught by one grep. Strip-clear + chrome fades are
 // deliberately ABSENT: they are shorter and must not gate completion.
 export const PROMOTE_NAME = 'shell-mode-promote'
-export const SETTLE_NAME = 'shell-mode-settle'
 export const DEAL_OUT_NAME = 'shell-mode-deal-out'
 export const DEAL_IN_NAME = 'shell-mode-deal-in'
 
@@ -279,10 +276,8 @@ export function deriveExitPlan(input) {
       key: promoteLeaf.activeKey,
       paneId: promoteLeaf.paneId,
       motion: 'promote',
-      // Open a visible seam before the shared surface grows beneath a sibling.
-      // With no sibling there is nothing to separate, so keep the direct beat.
-      delayMs: siblings.length ? MODE_MOTION.sharedLagMs : 0,
-      durationMs: MODE_MOTION.itemMs,
+      delayMs: 0,
+      durationMs: MODE_MOTION.promoteMs,
       flip: flipTo(fromRect, dest),
     })
     completionNames.add(PROMOTE_NAME)
@@ -290,7 +285,7 @@ export function deriveExitPlan(input) {
     siblings.forEach((l) => {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
-        delayMs: 0, durationMs: MODE_MOTION.itemMs,
+        delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
         offset: edgeOffset(l.rect, contentRect, l.motionRect),
       })
     })
@@ -309,7 +304,7 @@ export function deriveExitPlan(input) {
     ordered.forEach((l) => {
       participants.push({
         key: l.activeKey, paneId: l.paneId, motion: 'deal-out',
-        delayMs: 0, durationMs: MODE_MOTION.itemMs,
+        delayMs: 0, durationMs: MODE_MOTION.exitItemMs,
         offset: edgeOffset(l.rect, contentRect, l.motionRect),
       })
     })
@@ -330,11 +325,11 @@ export function deriveExitPlan(input) {
 }
 
 // deriveEnterPlan(input) → the latched entry plan, or null when there is nothing
-// to assemble. The single-screen surface keeps physical continuity when it is an
-// active builder leaf: it starts full-bleed and settles into its pane via the inverse
-// FLIP. Every sibling gathers from its nearest outer edge. If the single-screen
-// surface is absent/inactive in the tree, it remains a stationary underlay while all
-// visible panes assemble over it. This is the exact inverse of deriveExitPlan.
+// to assemble. The single-screen surface remains a stationary full-bleed underlay
+// while every OTHER visible pane gathers from its nearest outer edge. When that
+// surface is also a builder leaf, completion simply crops the retained wrapper
+// into its pane. This keeps the Standard world visually still instead of scaling
+// it like a foreground card, and needs no duplicate ChatView/AppCanvas.
 //
 export function deriveEnterPlan(input) {
   const { workspace, projection, contentRect } = input
@@ -342,40 +337,23 @@ export function deriveEnterPlan(input) {
   if (leaves.length === 0) return null
   const { target, immersiveInstant } = classifyExitDestination(input)
   if (immersiveInstant) return null
-  const duration = MODE_MOTION.itemMs
+  const duration = MODE_MOTION.enterItemMs
   const destinationRect = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
-  const settleLeaf = target ? leaves.find(l => l.activeKey === target) : null
   const participants = []
   const completionNames = new Set()
-  let underlayKey = null
-
-  if (settleLeaf) {
-    const fromRect = paintedContentRect(settleLeaf, projection, leaves.length)
-    participants.push({
-      key: settleLeaf.activeKey,
-      paneId: settleLeaf.paneId,
-      motion: 'settle',
-      delayMs: 0,
-      durationMs: duration,
-      flip: flipTo(fromRect, destinationRect),
-    })
-    completionNames.add(SETTLE_NAME)
-  } else {
-    underlayKey = target
-  }
+  const underlayKey = target
 
   for (const l of leaves) {
-    if (l === settleLeaf) continue
+    if (l.activeKey === target) continue
     participants.push({
       key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
-      // Reverse the exit order: settle the shared live surface first, then let
-      // siblings arrive. A world reveal has no shared surface and no delay.
-      delayMs: settleLeaf ? MODE_MOTION.sharedLagMs : 0,
+      delayMs: 0,
       durationMs: duration,
       offset: edgeOffset(l.rect, contentRect, l.motionRect),
     })
     completionNames.add(DEAL_IN_NAME)
   }
+  if (participants.length === 0) return null
   const totalMs = participants.reduce((m, p) => Math.max(m, p.delayMs + p.durationMs), 0)
   return {
     kind: 'enter',

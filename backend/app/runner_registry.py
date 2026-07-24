@@ -28,6 +28,9 @@ class RunnerHandle(Protocol):
     log and return False on failure or timeout.
     """
 
+  async def force_stop(self, timeout: float = 5.0) -> bool:
+    """Hard-stops only this handle's verified private runtime identity."""
+
 
 class RunnerRegistry:
   """Single source of truth for per-chat runner state."""

@@ -25,7 +25,8 @@ test('chat context actions follow model selection and continuation policy', () =
   assert.ok(picker !== -1 && summary !== -1 && inspector !== -1)
   assert.ok(picker < summary)
   assert.ok(summary < inspector)
-  assert.match(settingsSource, /Continue after rate limits/)
+  assert.match(settingsSource, /Continue after usage limits/)
+  assert.match(settingsSource, /Continue after planned restarts/)
   assert.doesNotMatch(settingsSource, /Chat summar(?:y|ies)/)
 })
 

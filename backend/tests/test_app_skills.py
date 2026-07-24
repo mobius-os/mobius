@@ -593,3 +593,62 @@ def test_cloned_job_with_exec_bit_is_executable(
   assert not any(
     "not executable" in w for w in r.json()["warnings"]
   ), r.json()["warnings"]
+
+
+# --- exact-head re-review: cross-writer collision + permission revocation ---
+
+
+def test_update_omitting_manage_skills_revokes_it(
+  client, auth, db, bypass_url_validation,
+):
+  """F-2: a privileged grant present in v1 but OMITTED in v2 is REVOKED on
+  update — retaining it diverged the durable row from its capability contract
+  and left authorization trusting a capability the new manifest never asked
+  for."""
+  from app import models
+
+  r1 = _install(client, auth, _skill_manifest(
+    permissions={
+      "cross_app_access": "none", "share_with_apps": "none",
+      "manage_skills": True,
+    },
+  ), {"index.jsx": JSX, "contributing.md": SKILL_V1})
+  assert r1.status_code == 201, r1.text
+  app_id = r1.json()["id"]
+  row = db.query(models.App).filter(models.App.id == app_id).first()
+  db.refresh(row)
+  assert row.manage_skills is True
+
+  r2 = _install(client, auth, _skill_manifest(
+    version="2.0.0",
+    permissions={"cross_app_access": "none", "share_with_apps": "none"},
+  ), {"index.jsx": JSX, "contributing.md": SKILL_V2})
+  assert r2.status_code == 201, r2.text
+  db.refresh(row)
+  assert row.manage_skills is False  # omission revokes
+
+
+def test_app_skill_skipped_when_id_held_by_installed_dir_skill(
+  client, auth, bypass_url_validation,
+):
+  """F-3: a flat app skill `foo.md` must not coexist with an install-provenance
+  directory skill `foo/` — the app-sync writer honors the same both-shape
+  collision rule as the direct install path."""
+  shutil.rmtree(_skills_dir(), ignore_errors=True)
+  dir_skill = _skills_dir() / "contributing"
+  dir_skill.mkdir(parents=True, exist_ok=True)
+  (dir_skill / "SKILL.md").write_text("# installed dir skill\n")
+
+  r = _install(client, auth, _skill_manifest(), {
+    "index.jsx": JSX, "contributing.md": SKILL_V1,
+  })
+  assert r.status_code == 201, r.text
+  assert any(
+    "already holds id 'contributing'" in w for w in r.json()["warnings"]
+  )
+  # The flat app skill was NOT written; the directory skill is untouched.
+  assert not (_skills_dir() / "contributing.md").exists()
+  assert (dir_skill / "SKILL.md").read_text() == "# installed dir skill\n"
+  sidecar_path = _skills_dir() / ".app-skills.json"
+  if sidecar_path.exists():
+    assert "contributing.md" not in json.loads(sidecar_path.read_text())
