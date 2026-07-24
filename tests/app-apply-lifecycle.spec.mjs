@@ -8,7 +8,10 @@ const CONTAINER = process.env.MOBIUS_CONTAINER || 'mobius-test'
 function git(slug, ...args) {
   return execFileSync(
     'docker',
-    ['exec', CONTAINER, 'git', '-C', `/data/apps/${slug}`, ...args],
+    [
+      'exec', '--user', 'mobius', CONTAINER,
+      'git', '-C', `/data/apps/${slug}`, ...args,
+    ],
     { encoding: 'utf8' },
   ).trim()
 }

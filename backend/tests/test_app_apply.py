@@ -140,9 +140,10 @@ def test_git_failure_keeps_previous_live_revision(
     raise RuntimeError("simulated Git failure")
 
   monkeypatch.setattr(app_git, "commit_worktree_tree", fail_commit)
-  with pytest.raises(RuntimeError, match="simulated Git failure"):
-    _apply(client, auth, source)
+  failed = _apply(client, auth, source)
 
+  assert failed.status_code == 409
+  assert failed.json()["detail"]["code"] == "source_repository_error"
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
   assert row.compiled_path == previous_bundle
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == previous_head

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +50,29 @@ class AppApplyError(RuntimeError):
 class ApplyResult:
   app: models.App
   mode: Literal["created", "updated", "unchanged"]
+
+
+async def _git_operation(label: str, fn, *args):
+  """Run one app-repository operation with a stable client-facing failure.
+
+  Git failures are usually actionable source state (ownership, corruption, or
+  an unsupported tree entry), not an ASGI bug. Preserve the dedicated
+  compare-and-swap exception so the route can return its narrower
+  ``source_changed`` response; normalize the remaining expected filesystem and
+  subprocess failures so agents see what to fix instead of an opaque 500.
+  """
+  try:
+    return await asyncio.to_thread(fn, *args)
+  except app_git.SourceTreeChanged:
+    raise
+  except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+    detail = str(getattr(exc, "stderr", "") or "").strip()
+    suffix = f" {detail[-1000:]}" if detail else ""
+    raise AppApplyError(
+      "source_repository_error",
+      f"Could not {label} the app source revision.{suffix}",
+      status_code=409,
+    ) from exc
 
 
 def _read_manifest(snapshot_dir: Path) -> dict:
@@ -161,7 +185,9 @@ async def apply_source_revision(
         status_code=409,
       )
 
-  candidate = await asyncio.to_thread(app_git.snapshot_worktree, source_path)
+  candidate = await _git_operation(
+    "snapshot", app_git.snapshot_worktree, source_path,
+  )
   previous_bundle = None
   published = None
   staged = None
@@ -169,7 +195,8 @@ async def apply_source_revision(
   try:
     with tempfile.TemporaryDirectory(prefix="mobius-app-source-") as tmp:
       snapshot_dir = Path(tmp)
-      await asyncio.to_thread(
+      await _git_operation(
+        "materialize",
         app_git.materialize_tree,
         source_path,
         candidate.tree_oid,
@@ -214,7 +241,9 @@ async def apply_source_revision(
         source_path=snapshot_dir / manifest["entry"],
       )
 
-      stable = await asyncio.to_thread(app_git.snapshot_worktree, source_path)
+      stable = await _git_operation(
+        "re-snapshot", app_git.snapshot_worktree, source_path,
+      )
       if stable != candidate:
         raise AppApplyError(
           "source_changed",
@@ -236,7 +265,8 @@ async def apply_source_revision(
         app.chat_id = chat_id
 
       previous_bundle = owned_bundle_path(app.id, app.compiled_path)
-      committed = await asyncio.to_thread(
+      committed = await _git_operation(
+        "commit",
         app_git.commit_worktree_tree,
         source_path,
         candidate,

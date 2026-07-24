@@ -167,7 +167,7 @@ def _reject_if_source_dir_taken(
   """Reject (409) if another app already claims this source dir.
 
   The caller holds ``fs_locks.source_dir_lock(source_dir)``, so the check +
-  the subsequent assignment are atomic against a concurrent create/patch.
+  the subsequent assignment are atomic against a concurrent first apply.
   Two apps sharing one source tree makes explicit application ambiguous and
   uninstall cleanup conservative (it must refuse to rmtree a shared dir), so
   forbid the duplicate at assignment time. Compared

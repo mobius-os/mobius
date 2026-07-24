@@ -69,7 +69,10 @@ export function writeAppSource({
   }
   execFileSync(
     'docker',
-    ['exec', '-i', CONTAINER, 'python3', '-c', WRITE_SOURCE],
+    [
+      'exec', '-i', '--user', 'mobius', CONTAINER,
+      'python3', '-c', WRITE_SOURCE,
+    ],
     {
       input: JSON.stringify(payload),
       encoding: 'utf8',
