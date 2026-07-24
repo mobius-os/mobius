@@ -213,7 +213,10 @@ export default function useNavigation({
     initialNav.view === 'settings'
     && !(paneModel.BUILDER_SETTINGS_ENABLED && workspace.viewMode === 'panes'),
   )
-  const [drawerOpen, setDrawerOpen] = useState(false)
+  // Visual visibility is intentionally separate from history ownership.
+  // An explicit tap/swipe close can start the panel transition immediately
+  // while drawerOpenRef remains true until Back consumes the drawer sentinel.
+  const [drawerVisible, setDrawerVisible] = useState(false)
 
   // ── Derived legacy triple (the projection, design §1) ────────────────────
   // World-aware (two-worlds design): the single world's slot in single mode, the
@@ -269,8 +272,11 @@ export default function useNavigation({
   activeAppIdRef.current = activeAppId
   const settingsOpenRef = useRef(settingsOpen)
   settingsOpenRef.current = settingsOpen
-  const drawerOpenRef = useRef(drawerOpen)
-  drawerOpenRef.current = drawerOpen
+  // Logical/history ownership — never mirror drawerVisible during render.
+  // Every history transition advances this ref synchronously at its owning
+  // boundary; coupling it back to the visual state made an early close render
+  // turn the subsequent drawer-sentinel Back into ordinary navigation.
+  const drawerOpenRef = useRef(false)
   // The PAINTED Settings takeover for a given workspace snapshot — the render-time
   // `overlayShowing` above, generalized to any `ws` and read from the ref for the
   // async callbacks below. The takeover only PAINTS where the world is single (or
@@ -529,7 +535,7 @@ export default function useNavigation({
     // Advance the ref synchronously so a same-batch open→close sees "open" and
     // does not leave the just-pushed sentinel dangling (§5.3.2).
     drawerOpenRef.current = true
-    setDrawerOpen(true)
+    setDrawerVisible(true)
   }
 
   function closeDrawer() {
@@ -544,7 +550,7 @@ export default function useNavigation({
       // navigation correctness), but begin the visual close before that async
       // traversal and its anti-stutter rAF settle. Real browser Back gestures
       // still enter through handleBack and retain the deferred close path.
-      setDrawerOpen(false)
+      setDrawerVisible(false)
       // Funnel through history.back() so handleBack handles the state
       // transition. This makes back-gesture and overlay-tap follow
       // exactly the same code path through handleBack, with the
@@ -555,7 +561,7 @@ export default function useNavigation({
       // in normal flow). Just close it directly.
       drawerOpenRef.current = false
       drawerClosePendingRef.current = false
-      setDrawerOpen(false)
+      setDrawerVisible(false)
     }
   }
 
@@ -921,7 +927,7 @@ export default function useNavigation({
     }
     navStackRef.current.push(previousRoute)
     drawerOpenRef.current = false
-    setDrawerOpen(false)
+    setDrawerVisible(false)
 
     // One reducer action makes payload+view atomic (§1.3.2). The ONE decision
     // point applies the destination to the correct world: a chat/app nav in single
@@ -1177,11 +1183,11 @@ export default function useNavigation({
       if (destination?.kind === 'drawer') {
         drawerPushedRef.current = true
         drawerOpenRef.current = true
-        setDrawerOpen(true)
+        setDrawerVisible(true)
       } else {
         drawerPushedRef.current = false
         drawerOpenRef.current = false
-        setDrawerOpen(false)
+        setDrawerVisible(false)
       }
     }
 
@@ -1226,9 +1232,9 @@ export default function useNavigation({
       setTimeout(() => { backFiredRef.current = false }, 400)
       const closeDrawerNextFrame = () => {
         if (typeof requestAnimationFrame === 'function') {
-          requestAnimationFrame(() => setDrawerOpen(false))
+          requestAnimationFrame(() => setDrawerVisible(false))
         } else {
-          setDrawerOpen(false)
+          setDrawerVisible(false)
         }
       }
       // (1) Drawer-first: a back that consumes the drawer's own sentinel closes
@@ -1353,7 +1359,7 @@ export default function useNavigation({
       drawerPushedRef.current = false
       drawerClosePendingRef.current = false
       drawerOpenRef.current = false
-      setDrawerOpen(false)
+      setDrawerVisible(false)
       const entry = navStackRef.current.pop()
       if (entry) restoreRoute(entry)
       else if (isRestorableRoute(destination?.route)) restoreRoute(destination.route)
@@ -1551,7 +1557,7 @@ export default function useNavigation({
     activeView,
     activeAppId,
     activeChatId,
-    drawerOpen,
+    drawerOpen: drawerVisible,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
     // is Settings" (a builder tab is the latter without the overlay). The render
     // gates pane suppression on THIS, never on activeView, so builder Settings

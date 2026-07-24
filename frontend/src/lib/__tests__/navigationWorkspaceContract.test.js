@@ -23,12 +23,19 @@ test('an explicit drawer close starts visually before consuming its history sent
     navigation.indexOf('function closeDrawer()'),
     navigation.indexOf('/**\n   * Mini-app nav-bridge'),
   )
-  const visualClose = close.indexOf('setDrawerOpen(false)')
+  const visualClose = close.indexOf('setDrawerVisible(false)')
   const traversal = close.indexOf('history.back()')
   assert.ok(visualClose >= 0)
   assert.ok(traversal > visualClose,
     'tap/swipe dismissal must acknowledge before the asynchronous Back traversal')
-  assert.match(close, /drawerClosePendingRef\.current = true[\s\S]*setDrawerOpen\(false\)[\s\S]*history\.back\(\)/)
+  assert.match(close, /drawerClosePendingRef\.current = true[\s\S]*setDrawerVisible\(false\)[\s\S]*history\.back\(\)/)
+})
+
+test('drawer visual visibility cannot overwrite logical history ownership during render', () => {
+  assert.match(navigation, /const \[drawerVisible, setDrawerVisible\] = useState\(false\)/)
+  assert.match(navigation, /const drawerOpenRef = useRef\(false\)/)
+  assert.doesNotMatch(navigation, /drawerOpenRef\.current = drawerVisible/)
+  assert.match(navigation, /drawerOpen: drawerVisible/)
 })
 
 test('ordinary Back restores a hidden sentinel owner before messaging it', () => {
