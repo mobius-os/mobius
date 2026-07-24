@@ -250,9 +250,24 @@ class ChatRun(Base):
   initiated_by_app_id = Column(
     Integer, ForeignKey("apps.id"), nullable=True, default=None
   )
-  # Reserved for per-run cost attribution (Capability B). No code path writes
-  # this yet, so reads are NULL until the Step-3b follow-up wires a producer.
+  # Per-run provider cost. Rows created before usage telemetry remain NULL.
   cost_usd = Column(Float, nullable=True, default=None)
+  # Provider session/thread id active for this run. This lets diagnostics
+  # distinguish a fresh provider context from a resumed one without relying on
+  # Chat.session_id, which is only the latest pointer.
+  provider_session_id = Column(String(128), nullable=True, default=None)
+  # Provider-neutral per-turn totals. `input_tokens` means total context
+  # processed for the turn, including cached input; the cache columns split
+  # that total where the provider exposes the distinction. Raw/provider-
+  # specific cumulative detail stays in usage_json for forward compatibility.
+  input_tokens = Column(Integer, nullable=True, default=None)
+  output_tokens = Column(Integer, nullable=True, default=None)
+  cache_read_input_tokens = Column(Integer, nullable=True, default=None)
+  cache_creation_input_tokens = Column(Integer, nullable=True, default=None)
+  reasoning_output_tokens = Column(Integer, nullable=True, default=None)
+  total_tokens = Column(Integer, nullable=True, default=None)
+  model_context_window = Column(Integer, nullable=True, default=None)
+  usage_json = Column(JSON, nullable=True, default=None)
   started_at = Column(DateTime, default=lambda: datetime.now(UTC))
   ended_at = Column(DateTime, nullable=True, default=None)
   # Provider rate/usage-limit parking (design §2.4). When a turn dies on a
@@ -672,6 +687,25 @@ class AppActivityState(Base):
   activity_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
   activity_version = Column(Integer, nullable=False, default=1, server_default="1")
   unseen = Column(Boolean, nullable=False, default=True, server_default=true())
+
+
+class AppPreviewState(Base):
+  """Durable acknowledgement of the exact app build opened from its chat CTA.
+
+  This is separate from ``apps`` so acknowledging a preview never advances
+  ``App.updated_at`` — the executable-bundle version the acknowledgement is
+  meant to record. ``seen_as_final`` distinguishes opening a live preview from
+  opening the settled result: finishing the turn may surface the same build one
+  last time even when no final source write was needed.
+  """
+
+  __tablename__ = "app_preview_state"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  seen_updated_at = Column(DateTime, nullable=False)
+  seen_as_final = Column(
+    Boolean, nullable=False, default=False, server_default=false()
+  )
 
 
 class PushSubscription(Base):

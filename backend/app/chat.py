@@ -54,6 +54,7 @@ from app.chat_writer import (
   PersistError,
   PersistTranscript,
   QuestionCommit,
+  RecordRunMetrics,
   ResolvePark,
   RollbackAutoResume,
   StashThinkingTrace,
@@ -1194,6 +1195,45 @@ async def _clear_run_status(
     )
 
 
+async def _record_run_metrics(
+  *,
+  chat_id: str,
+  run_token: str,
+  provider_session_id: str | None,
+  cost_usd: float | None,
+  usage: dict | None,
+) -> None:
+  """Best-effort durable accounting for one provider run.
+
+  Usage must not be able to turn an otherwise successful chat response into a
+  failed turn. The exact run identity keeps a delayed completion from
+  attributing counters to a successor, and the writer actor keeps this scalar
+  update ordered with the later terminal transition.
+  """
+  if not chat_id or not run_token:
+    return
+  # A provider can legitimately omit usage (and Codex currently omits cost).
+  # With no accounting signal there is nothing to record; avoiding a no-op
+  # actor round-trip also preserves the runner's connection-release contract.
+  if usage is None and cost_usd in (None, 0):
+    return
+  try:
+    await _await_ack(get_writer().submit(RecordRunMetrics(
+      chat_id=chat_id,
+      run_token=run_token,
+      provider_session_id=provider_session_id,
+      cost_usd=cost_usd,
+      usage=usage,
+    )))
+  except Exception:
+    _get_logger().warning(
+      "RecordRunMetrics did not persist chat_id=%s run_token=%s",
+      chat_id,
+      run_token,
+      exc_info=True,
+    )
+
+
 async def _clear_run_status_strict(
   chat_id: str,
   run_token: str = "",
@@ -2213,10 +2253,12 @@ async def _auto_resume_chat(
         # Share the queue lock with owner/app sends. The outer sweep check can
         # go stale while this task waits, so re-check global liveness, policy,
         # attribution, the exact latest park, and provider ownership at the
-        # actual claim point.
+        # actual claim point. Provider-limit retries are globally serial to
+        # avoid a reset storm. Planned-restart continuations are different:
+        # they are the exact, owner-opted set that was already live together
+        # before the restart, so each chat may reclaim its own slot
+        # independently.
         async with chat_queue.get_lock(chat_id):
-          if _any_chat_turn_active():
-            return False
           with SessionLocal() as check_db:
             chat = check_db.query(models.Chat).filter(
               models.Chat.id == chat_id,
@@ -2275,6 +2317,11 @@ async def _auto_resume_chat(
             resume_reason = (
               "restart" if park.park_reason == "restart" else "usage_limit"
             )
+          if (
+            resume_reason != "restart"
+            and _any_chat_turn_active()
+          ):
+            return False
           if not mark_starting(chat_id):
             return False
           claimed = True
@@ -2369,11 +2416,13 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       failure cannot silently consume the promised continuation. The narrow
       post-promote SIGKILL boundary is documented on `_auto_resume_chat`.
     - A park whose chat was deleted resolves silently.
-    - Auto-resume is controlled per chat and STRICTLY SERIAL: at most one
-      enabled park starts per tick, and none while any turn is live anywhere.
-      A blocked enabled chat stays pending for a later tick, while notify-only
-      chats in the same due batch still resolve normally. App-attributed runs
-      and queues never auto-resume.
+    - Auto-resume is controlled per chat. Provider-limit retries are strictly
+      serial: at most one starts per tick, and none while any turn is live
+      anywhere. Planned-restart continuations reclaim the exact set that was
+      already live before the restart, so every eligible chat in the batch may
+      resume independently. A blocked enabled chat stays pending for a later
+      tick, while notify-only chats in the same due batch still resolve
+      normally. App-attributed runs and queues never auto-resume.
 
   Stands down while draining — a restart is in progress, and the fresh
   process's immediate sweep picks everything up. Never raises.
@@ -2485,14 +2534,15 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       and restart_authorized
     )
 
-  auto_resume_started = False
+  limit_resume_started = False
   for run in due:
     chat_id = run.chat_id
     chat = chats.get(chat_id)
     chat_gone = chat is None or chat.deleted_at is not None
     auto_resume = wants_auto_resume(chat, run)
-    if auto_resume and (
-      auto_resume_started or _any_chat_turn_active()
+    restart_auto_resume = auto_resume and run.park_reason == "restart"
+    if auto_resume and not restart_auto_resume and (
+      limit_resume_started or _any_chat_turn_active()
     ):
       # Strictly-serial gate: a live turn (an earlier auto-resume, or the
       # owner's own send) must settle before this enabled park is processed.
@@ -2550,16 +2600,18 @@ async def sweep_reset_parks(db: Session) -> list[str]:
 
       if prepared.get("notify"):
         notify_due(chat_id, run)
-      if _any_chat_turn_active():
+      if not restart_auto_resume and _any_chat_turn_active():
         # The notification or refresh window admitted another turn. Keep the
         # durable pending state so the next sweep retries instead of silently
         # dropping the promised continuation.
         continue
-      auto_resume_started = await _auto_resume_chat(
+      resume_started = await _auto_resume_chat(
         chat_id, park_token=run.id,
       )
-      if auto_resume_started:
+      if resume_started:
         resolved.append(chat_id)
+        if not restart_auto_resume:
+          limit_resume_started = True
       continue
 
     # Notify-only/app/deleted path: resolve before the best-effort push so a
@@ -3647,7 +3699,8 @@ async def _complete_turn(
   # legitimately-silent turn: a user Stop lands as stop_handoff_successor (or
   # disowns the generation above), a park sets limit_reached, an errored/refused
   # turn sets _last_error, and any real text/thinking/tool_use makes the blocks
-  # renderable. cost_usd is unusable (None for every run here) and not consulted.
+  # renderable. Provider usage/cost is accounting data, not proof of a reply,
+  # and is deliberately not consulted.
   lost_reply = (
     we_own_gen
     and not stop_handoff_successor
@@ -5144,6 +5197,14 @@ async def _run_chat_impl_with_db(
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
+      usage_metrics = runner_result.get("usage_metrics")
+      await _record_run_metrics(
+        chat_id=chat_id,
+        run_token=run_token or "",
+        provider_session_id=new_session_id or session_id,
+        cost_usd=runner_result.get("cost_usd"),
+        usage=usage_metrics,
+      )
       if not err and new_session_id and chat_id:
         chat_obj = db.query(models.Chat).filter(
           models.Chat.id == chat_id
@@ -5161,10 +5222,14 @@ async def _run_chat_impl_with_db(
         )
       else:
         log.info(
-          "chat done chat_id=%s cost_usd=%.4f sdk=codex status=%s phase=%s",
+          "chat done chat_id=%s cost_usd=%.4f sdk=codex status=%s phase=%s "
+          "input_tokens=%s output_tokens=%s total_tokens=%s",
           chat_id, runner_result.get("cost_usd") or 0.0,
           runner_result.get("terminal_status"),
           runner_result.get("final_message_phase"),
+          (usage_metrics or {}).get("input_tokens"),
+          (usage_metrics or {}).get("output_tokens"),
+          (usage_metrics or {}).get("total_tokens"),
         )
     except Exception as exc:
       log.exception("codex SDK turn failed chat_id=%s: %s", chat_id, exc)
@@ -5266,6 +5331,14 @@ async def _run_chat_impl_with_db(
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
+      usage_metrics = runner_result.get("usage_metrics")
+      await _record_run_metrics(
+        chat_id=chat_id,
+        run_token=run_token or "",
+        provider_session_id=new_session_id or claude_session_id,
+        cost_usd=runner_result.get("cost_usd"),
+        usage=usage_metrics,
+      )
       if not err and new_session_id and chat_id:
         chat_obj = db.query(models.Chat).filter(
           models.Chat.id == chat_id
@@ -5277,8 +5350,12 @@ async def _run_chat_impl_with_db(
         log.error("claude SDK error chat_id=%s: %s", chat_id, err)
       else:
         log.info(
-          "chat done chat_id=%s cost_usd=%.4f sdk=claude",
+          "chat done chat_id=%s cost_usd=%.4f sdk=claude "
+          "input_tokens=%s output_tokens=%s total_tokens=%s",
           chat_id, runner_result.get("cost_usd") or 0.0,
+          (usage_metrics or {}).get("input_tokens"),
+          (usage_metrics or {}).get("output_tokens"),
+          (usage_metrics or {}).get("total_tokens"),
         )
     except Exception as exc:
       log.exception("claude SDK turn failed chat_id=%s: %s", chat_id, exc)

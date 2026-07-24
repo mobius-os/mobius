@@ -67,6 +67,9 @@ def test_supported_runtime_packages_are_production_dependencies():
 def test_compile_command_bundles_the_complete_runtime_graph():
   command = esbuild_command("entry.jsx", "app.js")
   assert "--bundle" in command
+  assert '--define:process.env.NODE_ENV="production"' in command
+  assert "--minify" in command
+  assert "--keep-names" in command
   assert not any(arg.startswith("--external:") for arg in command)
   assert f"--banner:js={COMPILED_RUNTIME_BANNER}" in command
   assert f"--inject:{runtime_inject_path()}" in command
@@ -77,6 +80,48 @@ def test_compile_command_bundles_the_complete_runtime_graph():
     assert f"--alias:{specifier}={path}" in command
   assert runtime_inject_path().is_file()
   assert mobius_runtime_path().is_file()
+
+
+def test_compile_command_selects_production_react_and_keeps_one_module(tmp_path):
+  """The size win must come from the real production graph, not externals."""
+  entry = tmp_path / "entry.jsx"
+  output = tmp_path / "app.js"
+  metafile = tmp_path / "app-meta.json"
+  entry.write_text(
+    """import { useState } from 'react'
+
+export default function NamedFixture() {
+  const [value] = useState('ready')
+  return <div>{value}</div>
+}
+"""
+  )
+
+  completed = subprocess.run(
+    esbuild_command(entry, output, metafile=metafile),
+    capture_output=True,
+    check=False,
+    env=esbuild_environment(),
+    text=True,
+    timeout=ESBUILD_TIMEOUT_SECS,
+  )
+  assert completed.returncode == 0, completed.stderr
+
+  metadata = json.loads(metafile.read_text())
+  inputs = set(metadata["inputs"])
+  react_inputs = {name for name in inputs if "/react" in name}
+  assert react_inputs
+  assert not any(".development.js" in name for name in react_inputs)
+  assert any(".production.js" in name for name in react_inputs)
+
+  entry_outputs = [
+    details for details in metadata["outputs"].values()
+    if details.get("entryPoint")
+  ]
+  assert len(entry_outputs) == 1
+  assert entry_outputs[0].get("imports") == []
+  assert output.stat().st_size < 400_000
+  assert "NamedFixture" in output.read_text()
 
 
 def test_app_local_or_transitive_react_cannot_shadow_platform_runtime(tmp_path):

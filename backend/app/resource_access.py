@@ -16,14 +16,18 @@ every caller.
 """
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app import models
 from app.deps import Principal
 
 
 def get_active_chat_for_principal(
-  db: Session, chat_id: str, principal: Principal,
+  db: Session,
+  chat_id: str,
+  principal: Principal,
+  *,
+  load_fields: tuple | None = None,
 ) -> models.Chat:
   """Fetches an active chat the principal may DRIVE, else 404/403.
 
@@ -44,7 +48,12 @@ def get_active_chat_for_principal(
       the owner sees, so an app can't probe existence of chats it can't
       reach); 403 when an app token targets a chat it doesn't own.
   """
-  chat = get_active_chat_or_404(db, chat_id)
+  required_fields = (
+    (models.Chat.id, models.Chat.created_by_app_id, *load_fields)
+    if load_fields
+    else None
+  )
+  chat = get_active_chat_or_404(db, chat_id, load_fields=required_fields)
   if principal.scope == "chat_embed" and principal.chat_id != chat_id:
     raise HTTPException(
       status_code=403,
@@ -61,7 +70,10 @@ def get_active_chat_for_principal(
 
 
 def get_active_chat_or_404(
-  db: Session, chat_id: str,
+  db: Session,
+  chat_id: str,
+  *,
+  load_fields: tuple | None = None,
 ) -> models.Chat:
   """Fetches a non-soft-deleted Chat by id, raising 404 otherwise.
 
@@ -84,7 +96,13 @@ def get_active_chat_or_404(
   Raises:
     HTTPException: 404 when no row matches OR the row is soft-deleted.
   """
-  chat = db.query(models.Chat).filter(
+  query = db.query(models.Chat)
+  if load_fields:
+    # A narrow read must stay narrow. ``raiseload`` turns an accidental future
+    # field access into a test-visible failure rather than silently decoding a
+    # multi-megabyte transcript and erasing the endpoint's reason to exist.
+    query = query.options(load_only(*load_fields, raiseload=True))
+  chat = query.filter(
     models.Chat.id == chat_id,
     models.Chat.deleted_at.is_(None),
   ).first()

@@ -28,6 +28,18 @@ test('collects sources across every tool block in the message', () => {
   assert.deepEqual(messageSources(blocks).map(s => s.title), ['A', 'B'])
 })
 
+test('compact activity summaries preserve message-level source chips', () => {
+  const blocks = [{
+    type: 'activity',
+    entries: [],
+    sources: [{ title: 'Compact', url: 'https://compact.example/source' }],
+  }]
+  assert.deepEqual(messageSources(blocks), [{
+    title: 'Compact',
+    url: 'https://compact.example/source',
+  }])
+})
+
 test('dedupes across searches, first occurrence wins so search order is kept', () => {
   const blocks = [
     tool([{ title: 'First', url: 'https://x.example/p' }]),

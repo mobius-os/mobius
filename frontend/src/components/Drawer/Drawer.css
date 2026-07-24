@@ -5,8 +5,6 @@
   inset: 0;
   z-index: 90;
   background: rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
   opacity: 0;
   pointer-events: none;
   /* The scrim is a modal boundary, not a transparent continuation of the
@@ -17,11 +15,15 @@
      panel sits above this element and has its own scroll containers. */
   touch-action: none;
   overscroll-behavior: none;
-  transition: opacity var(--transition-duration-basic, 220ms) var(--cubic-exit, ease);
+  /* A plain dim scrim avoids compositing a live full-screen blur on every
+     phone frame. Closing is intentionally a touch quicker than opening. */
+  transition: opacity 90ms cubic-bezier(0.3, 0.6, 0.6, 1);
 }
 
 .drawer-overlay--visible {
   opacity: 1;
+  transition-duration: 110ms;
+  transition-timing-function: cubic-bezier(0, 0, 0.2, 1);
 }
 
 /* `open` becomes false when the close transition STARTS, not when the panel
@@ -51,10 +53,10 @@
      main thread with the synchronous Navigation-API state write in
      handleBack, and the first frame of the close stuttered. */
   will-change: transform;
-  /* Use the apps-sdk-ui motion tokens so all platform transitions
-     read as part of the same design system. --cubic-move is the
-     ease curve the SDK uses for sliding panels. */
-  transition: transform var(--transition-duration-basic, 250ms) var(--cubic-move, cubic-bezier(0.4, 0, 0.2, 1));
+  /* Drawer motion is deliberately quicker than the generic design-system
+     transition. The old shared curve barely moved at first, so a logically
+     immediate tap still felt hesitant. Closing is the shorter path. */
+  transition: transform 100ms cubic-bezier(0.3, 0.6, 0.6, 1);
   /* Vertical gestures belong to the drawer list; horizontal gestures are
      reserved for Drawer.jsx's swipe-to-close interaction. Keeping this modal
      boundary explicit also stops a pan begun on non-scrollable drawer chrome
@@ -74,6 +76,8 @@
 .drawer--open {
   transform: translateX(0);
   box-shadow: 8px 0 48px rgba(0, 0, 0, 0.5);
+  transition-duration: 120ms;
+  transition-timing-function: cubic-bezier(0, 0, 0.2, 1);
 }
 
 /* Semantic desktop mode: Shell owns the breakpoint and only applies this class
@@ -375,8 +379,8 @@
   min-width: 0;
 }
 
-/* Drawer rows scroll vertically. Horizontal touch movement stays available to the
-   workspace controller as an immediate drag-out gesture. */
+/* Drawer rows scroll vertically. Gesture arbitration gives leftward movement to
+   swipe-close and only a deliberate rightward pull to workspace drag-out. */
 .drawer__row .drawer__item[data-drag-key] {
   touch-action: pan-y pinch-zoom;
 }

@@ -23,8 +23,11 @@ test('the stretch restores saved user state and open is exactly userOpen', () =>
   assert.match(body, /\n\s*const open = userOpen\n/,
     'open derives from userOpen alone — no force-open expression')
   // No `open = running || userOpen` / `userOpen || live` style force-open.
-  assert.doesNotMatch(body, /\|\|\s*userOpen/, 'nothing ORs into userOpen to force it open')
-  assert.doesNotMatch(body, /userOpen\s*\|\|/, 'userOpen does not OR with a liveness flag')
+  assert.doesNotMatch(
+    body,
+    /const open\s*=\s*[^\n]*\|\|/,
+    'the rendered open state does not OR user intent with a liveness flag',
+  )
   assert.doesNotMatch(body, /defaultOpen/, 'no defaultOpen escape hatch')
 })
 
@@ -38,10 +41,17 @@ test('the only open-state write is the user toggle, guarded by preserveTogglePos
     'the toggle preserves the anchor before flipping open state')
 })
 
-test('no effect derives open state from running/live/props', () => {
-  // Since the 1Hz thinking ticker was retired (bare "Thinking" has no clock),
-  // the component has NO effects at all — the strongest possible form of the
-  // no-auto-open guarantee: nothing can flip `open` outside the user's tap.
-  assert.doesNotMatch(src, /useEffect/,
-    'ActivityStretch has no effects; open state can only change in the tap handler')
+test('background detail loading cannot derive or write open state', () => {
+  assert.match(src, /useEffect/,
+    'historical activity detail is fetched only after the user opens it')
+  assert.match(
+    body,
+    /if \(!userOpen \|\| !detailRef \|\| detailEntries \|\| detailError\) return undefined/,
+    'the compact transcript stays closed and network-free until the user opens it',
+  )
+  assert.doesNotMatch(
+    body.slice(0, body.indexOf('onToggle={() =>')),
+    /setUserOpen\(/,
+    'loading/reset effects never write the disclosure state',
+  )
 })

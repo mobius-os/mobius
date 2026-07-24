@@ -1,6 +1,7 @@
 """Chat route regression tests."""
 
 import asyncio
+from datetime import UTC, datetime
 import io
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -128,6 +129,63 @@ def test_agent_context_includes_evolving_chat_summary(
     "digest": "A bounded digest.",
   }]
   assert payload["system_prompt_origin"] == "platform"
+
+
+def test_chat_usage_reports_totals_and_historic_coverage(
+  client, auth, chat, db,
+):
+  db.add_all([
+    models.ChatRun(
+      id="historic-run",
+      chat_id=chat.id,
+      status="completed",
+      provider="claude",
+      started_at=datetime.now(UTC),
+    ),
+    models.ChatRun(
+      id="measured-run",
+      chat_id=chat.id,
+      status="completed",
+      provider="codex",
+      provider_session_id="thread-1",
+      cost_usd=0.125,
+      input_tokens=900,
+      output_tokens=200,
+      cache_read_input_tokens=500,
+      cache_creation_input_tokens=0,
+      reasoning_output_tokens=100,
+      total_tokens=1_100,
+      model_context_window=200_000,
+      usage_json={"provider": "codex", "calculation": "thread_delta"},
+      started_at=datetime.now(UTC),
+    ),
+  ])
+  db.commit()
+
+  response = client.get(f"/api/chats/{chat.id}/usage", headers=auth)
+
+  assert response.status_code == 200
+  payload = response.json()
+  assert payload["coverage"] == {
+    "runs": 2,
+    "runs_with_usage": 1,
+    "runs_with_cost": 1,
+  }
+  assert payload["totals"] == {
+    "input_tokens": 900,
+    "output_tokens": 200,
+    "cache_read_input_tokens": 500,
+    "cache_creation_input_tokens": 0,
+    "reasoning_output_tokens": 100,
+    "total_tokens": 1_100,
+    "cost_usd": 0.125,
+  }
+  measured = next(
+    run for run in payload["runs"] if run["id"] == "measured-run"
+  )
+  assert measured["provider_session_id"] == "thread-1"
+  assert measured["model_context_window"] == 200_000
+  assert measured["usage"]["calculation"] == "thread_delta"
 
 
 def test_create_chat_rejects_cross_site_request(client, auth):

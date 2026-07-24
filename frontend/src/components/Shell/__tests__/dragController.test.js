@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   POINTER_SLOP, TAB_HOLD_MS, DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX, RELEASE_IN_PLACE_PX,
+  DRAWER_DRAG_INTENT_PX, DRAWER_DRAG_DOMINANCE,
   HYSTERESIS_PX, ROOT_EDGE_PX, CARET_W, CARET_H, CENTER_INSET, DRAWER_EXIT_PX,
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
@@ -48,10 +49,19 @@ test('touchMoveIntent preserves tab-body scrolling and gives the kind icon eithe
   assert.equal(touchMoveIntent(8.1, 0, 'tab'), 'scroll', 'horizontal pull scrolls over a tab body')
   assert.equal(touchMoveIntent(8.1, 0, 'tab-handle'), 'drag', 'the icon reorders horizontally')
   assert.equal(touchMoveIntent(0, 8.1, 'tab-handle'), 'drag', 'the icon can move across panes')
-  assert.equal(touchMoveIntent(8.1, 0, 'drawer'), 'drag', 'horizontal pull drags a vertical drawer row')
+  assert.equal(touchMoveIntent(-8.1, 0, 'drawer'), 'swipe-close',
+    'leftward pull belongs exclusively to drawer close')
+  assert.equal(touchMoveIntent(18, 0, 'drawer'), 'pending',
+    'a small rightward thumb movement does not lift a row')
+  assert.equal(touchMoveIntent(18.1, 0, 'drawer'), 'drag',
+    'a deliberate rightward pull toward the workspace lifts the row')
+  assert.equal(touchMoveIntent(24, 21, 'drawer'), 'pending',
+    'a shallow rightward diagonal remains undecided rather than latching')
   assert.equal(touchMoveIntent(0, 8.1, 'drawer'), 'scroll', 'vertical pull scrolls the drawer')
   assert.equal(touchMoveIntent(10, 10, 'drawer'), 'scroll', 'ambiguous diagonals favor native scroll')
   assert.equal(PRE_HOLD_MOVE_PX, 8)
+  assert.equal(DRAWER_DRAG_INTENT_PX, 18)
+  assert.equal(DRAWER_DRAG_DOMINANCE, 1.2)
 })
 
 test('releasedInPlace is true only within the release radius', () => {

@@ -14,9 +14,10 @@ Locks in the six contracts of the limit-park feature:
       an opted park
       retryable until its continuation starts, skips future parks, stands down
       while draining, and resolves deleted chats silently.
-  (e) Auto-resume is policy-controlled (off = notify only) and strictly
-      serial: one park per tick, none while any turn is live; the resumed turn
-      combines the preserved queue + a "continue" into one continuation.
+  (e) Auto-resume is policy-controlled (off = notify only). Provider-limit
+      retries are strictly serial, while an accepted planned restart resumes
+      the exact previously-live set together. Each resumed turn combines its
+      preserved queue + a "continue" into one continuation.
   (f) The parks are observable: /api/debug/status lists parked runs.
   (g) A planned restart reuses the same exact-run state with a due-now time;
       crashes, unanswered questions, and app-owned work stay manual.
@@ -1201,6 +1202,39 @@ def test_sweep_starts_only_one_of_two_opted_chats(owner_token, monkeypatch):
     assert _run_row(f"rt-{untouched}")["status"] == "parked"
   finally:
     for cid in ("sweep-auto-a", "sweep-auto-b"):
+      chat_mod.discard_starting(cid)
+
+
+def test_sweep_restarts_every_opted_chat_in_the_accepted_batch(
+  owner_token, monkeypatch,
+):
+  """A restart restores the exact set that was already concurrent."""
+  del owner_token
+  nonce = "restart-nonce-batch"
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_restart_nonce", lambda: nonce,
+  )
+  monkeypatch.setattr(
+    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  chat_ids = ("restart-batch-a", "restart-batch-b", "restart-batch-c")
+  for cid in chat_ids:
+    _due_park(
+      cid, f"rt-{cid}", auto_restart=True,
+      park_reason="restart", restart_nonce=nonce,
+    )
+
+  try:
+    assert set(_run_sweep()) == set(chat_ids)
+    assert {item["chat_id"] for item in scheduled} == set(chat_ids)
+    for cid in chat_ids:
+      assert _run_row(f"rt-{cid}")["status"] == "completed"
+  finally:
+    for cid in chat_ids:
       chat_mod.discard_starting(cid)
 
 

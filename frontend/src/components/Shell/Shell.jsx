@@ -92,6 +92,10 @@ import useModeController from './useModeController.js'
 import * as modeMachine from './modeMachine.js'
 import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
+import {
+  acknowledgeAppPreview,
+  withAppPreviewSeen,
+} from './builtAppState.js'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
   deriveContentVisibility, deriveExitPlan, deriveEnterPlan, projectFocusedPane,
@@ -291,7 +295,9 @@ export default function Shell() {
   const closeDrawerRef = useRef(closeDrawer)
   closeDrawerRef.current = closeDrawer
   useEffect(() => {
-    if (desktopSidebarMode && drawerOpen) closeDrawerRef.current()
+    if (desktopSidebarMode && drawerOpen) {
+      closeDrawerRef.current({ preserveModalUntilTraversal: true })
+    }
   }, [desktopSidebarMode, drawerOpen])
 
   const brandButtonRef = useRef(null)
@@ -559,6 +565,24 @@ export default function Shell() {
   })
   const apps = appsQuery.data ?? []
   const chats = chatsQuery.data ?? []
+  const appPreviewAckRef = useRef(new Set())
+  const handleAppPreviewSeen = useCallback((app, final) => {
+    acknowledgeAppPreview({
+      app,
+      final,
+      inFlight: appPreviewAckRef.current,
+      request: api.apps.markPreviewSeen,
+      clearCached: (appId, updatedAt, seenAsFinal) => {
+        queryClient.setQueryData(
+          appQueries.keys.all,
+          rows => withAppPreviewSeen(
+            rows, appId, updatedAt, seenAsFinal,
+          ),
+        )
+      },
+      restoreServerTruth: () => appQueries.list.invalidate(queryClient),
+    })
+  }, [queryClient])
   // Warm the model registry as soon as a chat is open so the composer's
   // model picker is instant on the first '+'. The /api/models fetch
   // otherwise runs cold on the first picker open (it's 5-min cached after
@@ -3697,6 +3721,7 @@ export default function Shell() {
                 markStreamingEnd={markStreamingEnd}
                 markVoiceListening={markVoiceListening}
                 refreshApps={refreshApps}
+                acknowledgeAppPreview={handleAppPreviewSeen}
                 refreshChats={refreshChats}
                 loadTheme={loadTheme}
                 navTo={navTo}

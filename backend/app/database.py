@@ -724,6 +724,28 @@ def run_migrations(eng) -> None:
       _add_runs.append(
         "ALTER TABLE chat_runs ADD COLUMN restart_nonce VARCHAR(128) NULL"
       )
+    if "provider_session_id" not in chat_runs_cols:
+      _add_runs.append(
+        "ALTER TABLE chat_runs ADD COLUMN provider_session_id "
+        "VARCHAR(128) NULL"
+      )
+    for column in (
+      "input_tokens",
+      "output_tokens",
+      "cache_read_input_tokens",
+      "cache_creation_input_tokens",
+      "reasoning_output_tokens",
+      "total_tokens",
+      "model_context_window",
+    ):
+      if column not in chat_runs_cols:
+        _add_runs.append(
+          f"ALTER TABLE chat_runs ADD COLUMN {column} INTEGER NULL"
+        )
+    if "usage_json" not in chat_runs_cols:
+      _add_runs.append(
+        "ALTER TABLE chat_runs ADD COLUMN usage_json JSON NULL"
+      )
     if _add_runs:
       with eng.connect() as conn:
         for stmt in _add_runs:

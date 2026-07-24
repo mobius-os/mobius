@@ -113,6 +113,11 @@ class AppOut(BaseModel):
   # opened. The shell renders the same quiet activity dot used for chats.
   has_unseen_activity: bool = False
   unseen_activity_version: int | None = None
+  # Exact executable build last opened from the owning chat's CTA. Opening a
+  # live preview and opening the settled result are separate acknowledgements:
+  # the same build may surface once more when its agent turn finishes.
+  preview_seen_updated_at: datetime | None = None
+  preview_seen_final: bool = False
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
   offline_capable: bool = False

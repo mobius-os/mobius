@@ -161,7 +161,7 @@ test.describe('Stream reconnection', () => {
     let streamRequestCount = 0
     let refreshReady = false
 
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20$/, route => {
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20&compact=1$/, route => {
       if (!refreshReady || route.request().method() !== 'GET') {
         route.continue()
         return
@@ -749,7 +749,7 @@ test.describe('Stream reconnection', () => {
     // all of them with DB state that does NOT contain the resent turn,
     // so if the bug path clobbers, the live response visibly disappears.
     const dbRefetchTimes = []
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20$/, route => {
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20&compact=1$/, route => {
       if (route.request().method() !== 'GET') { route.continue(); return }
       dbRefetchTimes.push(Date.now())
       route.fulfill({
@@ -983,7 +983,7 @@ test.describe('Stream reconnection', () => {
     // frozen on an unanswered question. Crucially `pending_question_id`
     // is null (the live in-process registry hint is absent — the path
     // that used to wedge), forcing the durable fallback.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20$/, route => {
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20&compact=1$/, route => {
       if (route.request().method() !== 'GET') { route.continue(); return }
       route.fulfill({
         status: 200,

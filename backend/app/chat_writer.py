@@ -224,6 +224,23 @@ class PersistSessionId(_Command):
 
 
 @dataclass
+class RecordRunMetrics(_Command):
+  """Persist provider-neutral usage/cost counters on one ChatRun.
+
+  This is separate from transcript Finalize because a stale/stop handoff may
+  intentionally skip transcript mutation while its own run row still deserves
+  the provider usage reported for it. Identity is the run token; this command
+  never reads or mutates Chat.messages.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  provider_session_id: str | None = None
+  cost_usd: float | None = None
+  usage: dict | None = None
+
+
+@dataclass
 class RecordAgentLifecycle(_Command):
   """Append one normalized helper lifecycle milestone.
 
@@ -1352,6 +1369,8 @@ class ChatWriterActor:
       return self._answer_question(db, cmd)
     if isinstance(cmd, PersistSessionId):
       return self._persist_session_id(db, cmd)
+    if isinstance(cmd, RecordRunMetrics):
+      return self._record_run_metrics(db, cmd)
     if isinstance(cmd, RecordAgentLifecycle):
       from app.agent_lifecycle import record_event
       return record_event(db, cmd.values)
@@ -1540,6 +1559,45 @@ class ChatWriterActor:
     chat.session_id = cmd.session_id
     if not _commit_or_rollback(db):
       raise _PersistFailed("PersistSessionId did not persist")
+    return True
+
+  def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
+    """Attach provider usage/cost to the exact durable run row."""
+    if not cmd.chat_id or not cmd.run_token:
+      return False
+    from app.models import ChatRun
+
+    run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.run_token,
+      ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if run is None:
+      raise _PersistFailed("RecordRunMetrics: run not found")
+
+    if cmd.provider_session_id:
+      run.provider_session_id = cmd.provider_session_id
+    if cmd.cost_usd is not None:
+      run.cost_usd = float(cmd.cost_usd)
+    usage = copy.deepcopy(cmd.usage) if cmd.usage else None
+    if usage is not None:
+      run.usage_json = usage
+      for field_name in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "model_context_window",
+      ):
+        value = usage.get(field_name)
+        setattr(
+          run,
+          field_name,
+          int(value) if value is not None else None,
+        )
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RecordRunMetrics did not persist")
     return True
 
   def _stash_tool_output(self, db, cmd: "StashToolOutput") -> bool:

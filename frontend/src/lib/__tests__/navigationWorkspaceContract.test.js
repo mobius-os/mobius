@@ -18,6 +18,33 @@ test('one open drawer owns at most one physical sentinel', () => {
   )
 })
 
+test('an explicit drawer close starts visually before consuming its history sentinel', () => {
+  const close = navigation.slice(
+    navigation.indexOf('function closeDrawer('),
+    navigation.indexOf('/**\n   * Mini-app nav-bridge'),
+  )
+  const visualClose = close.indexOf('setDrawerVisible(false)')
+  const traversal = close.indexOf('history.back()')
+  assert.ok(visualClose >= 0)
+  assert.ok(traversal > visualClose,
+    'tap/swipe dismissal must acknowledge before the asynchronous Back traversal')
+  assert.match(close, /drawerClosePendingRef\.current = true[\s\S]*if \(!preserveModalUntilTraversal\) setDrawerVisible\(false\)[\s\S]*history\.back\(\)/)
+})
+
+test('a breakpoint close preserves the mobile modal boundary until history settles', () => {
+  assert.match(
+    shell,
+    /desktopSidebarMode && drawerOpen[\s\S]*closeDrawerRef\.current\(\{ preserveModalUntilTraversal: true \}\)/,
+  )
+})
+
+test('drawer visual visibility cannot overwrite logical history ownership during render', () => {
+  assert.match(navigation, /const \[drawerVisible, setDrawerVisible\] = useState\(false\)/)
+  assert.match(navigation, /const drawerOpenRef = useRef\(false\)/)
+  assert.doesNotMatch(navigation, /drawerOpenRef\.current = drawerVisible/)
+  assert.match(navigation, /drawerOpen: drawerVisible/)
+})
+
 test('ordinary Back restores a hidden sentinel owner before messaging it', () => {
   const ordinaryBack = navigation.slice(
     navigation.indexOf('// (4) Ordinary app sentinel'),

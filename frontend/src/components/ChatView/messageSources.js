@@ -105,7 +105,11 @@ export function messageSources(blocks) {
   let scannedRows = 0
   outer:
   for (const block of blocks) {
-    if (block?.type !== 'tool' || !Array.isArray(block.sources)) continue
+    // Compact historical activity carries the same bounded source metadata on
+    // its summary block, so citations remain visible without loading the full
+    // tool timeline merely to rediscover them.
+    if (!['tool', 'activity'].includes(block?.type)
+        || !Array.isArray(block.sources)) continue
     for (const rawSource of block.sources) {
       scannedRows += 1
       if (scannedRows > MAX_SOURCE_ROWS_SCANNED) break outer

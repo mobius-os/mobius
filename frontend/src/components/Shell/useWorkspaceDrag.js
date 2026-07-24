@@ -306,10 +306,12 @@ export default function useWorkspaceDrag({
         }
       }
 
-      // A vertical tab-body move, either-axis kind-icon move, or cross-axis drawer-row
-      // move arms immediately. A stationary hold is the alternate path to the
-      // tab/row menu; it deliberately does not unfold the workspace just because
-      // time passed.
+      // A vertical tab-body move, either-axis kind-icon move, or deliberate
+      // RIGHTWARD drawer-row pull arms immediately. A leftward drawer movement is
+      // reserved for swipe-to-close and retires this controller before it can set
+      // dragActiveRef (which would otherwise make Drawer stand down). A stationary
+      // hold is the alternate path to the tab/row menu; it deliberately does not
+      // unfold the workspace just because time passed.
       if (isTouch) {
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
@@ -393,7 +395,11 @@ export default function useWorkspaceDrag({
         if (!armed) {
           if (isTouch) {
             const intent = touchMoveIntent(dx, dy, touchIntentKind)
-            if (intent === 'scroll') { cancelled = true; cleanup(); return }
+            if (intent === 'scroll' || intent === 'swipe-close') {
+              cancelled = true
+              cleanup()
+              return
+            }
             if (intent === 'drag') {
               clearTimeout(holdTimer)
               arm()

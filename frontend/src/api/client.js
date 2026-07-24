@@ -421,6 +421,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ activity_version: activityVersion }),
     }),
+    markPreviewSeen: (appId, updatedAt, final = false) => apiFetch(`/apps/${appId}/preview/seen`, {
+      method: 'POST',
+      body: JSON.stringify({ updated_at: updatedAt, final }),
+    }),
     update: (appId, payload) => listAffectingMutation('apps', `/apps/${appId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),

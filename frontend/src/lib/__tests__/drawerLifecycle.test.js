@@ -36,8 +36,8 @@ test('drawer cleanup is safe before the panel ref mounts', () => {
   assert.doesNotThrow(() => clearDrawerGestureStyles(null))
 })
 
-test('close fallback outlasts the 250ms panel transition', () => {
-  assert.ok(DRAWER_CLOSE_FALLBACK_MS > 250)
+test('close fallback outlasts the 100ms panel transition', () => {
+  assert.ok(DRAWER_CLOSE_FALLBACK_MS > 100)
 })
 
 test('drawer swipe classification rejects vertical and ambiguous movement', () => {

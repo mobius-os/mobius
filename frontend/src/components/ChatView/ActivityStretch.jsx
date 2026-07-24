@@ -1,6 +1,7 @@
-import { useId, useMemo, useRef } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
+import { apiFetch, jsonOrThrow } from '../../api/client.js'
 import {
   activityStreamState,
   activityDisplayState,
@@ -175,7 +176,22 @@ function SingleActivity({ entry, chatId, live, surfaceKey }) {
   )
 }
 
-function GroupedActivityStretch({ entries, chatId, live = false, surfaceKey }) {
+export function activityDetailUrl(chatId, detailRef) {
+  const messageIndex = encodeURIComponent(detailRef.message_index)
+  const start = encodeURIComponent(detailRef.start)
+  const end = encodeURIComponent(detailRef.end)
+  return `/chats/${encodeURIComponent(chatId)}/activity-detail`
+    + `?message_index=${messageIndex}&start=${start}&end=${end}`
+}
+
+function GroupedActivityStretch({
+  entries,
+  chatId,
+  live = false,
+  surfaceKey,
+  detailRef = null,
+  summaryToolCount = null,
+}) {
   const stretchKey = assistantBlockKey(entries[0]?.item, entries[0]?.idx)
   const [userOpen, setUserOpen] = useDisclosureState(
     chatId,
@@ -184,6 +200,56 @@ function GroupedActivityStretch({ entries, chatId, live = false, surfaceKey }) {
   const headerRef = useRef(null)
   const timelineRef = useRef(null)
   const timelineId = useId()
+  const [detailEntries, setDetailEntries] = useState(null)
+  const [detailError, setDetailError] = useState(false)
+  const [detailAttempt, setDetailAttempt] = useState(0)
+  const detailMessageIndex = detailRef?.message_index
+  const detailStart = detailRef?.start
+  const detailEnd = detailRef?.end
+  const detailKey = detailRef
+    ? `${detailMessageIndex}:${detailStart}:${detailEnd}`
+    : ''
+
+  useEffect(() => {
+    setDetailEntries(null)
+    setDetailError(false)
+  }, [detailKey])
+
+  useEffect(() => {
+    if (!userOpen || !detailRef || detailEntries || detailError) return undefined
+    const controller = new AbortController()
+    let current = true
+    apiFetch(activityDetailUrl(chatId, {
+      message_index: detailMessageIndex,
+      start: detailStart,
+      end: detailEnd,
+    }), {
+      signal: controller.signal,
+    })
+      .then(res => jsonOrThrow(res, 'Activity detail failed'))
+      .then(data => {
+        if (!current) return
+        setDetailEntries(Array.isArray(data.entries) ? data.entries : [])
+      })
+      .catch(error => {
+        if (!current || error?.name === 'AbortError') return
+        setDetailError(true)
+      })
+    return () => {
+      current = false
+      controller.abort()
+    }
+  }, [
+    chatId,
+    detailAttempt,
+    detailEntries,
+    detailError,
+    detailEnd,
+    detailKey,
+    detailMessageIndex,
+    detailStart,
+    userOpen,
+  ])
 
   const lastItem = entries[entries.length - 1]?.item
   const liveThinkingTail = live && lastItem?.type === 'thinking'
@@ -245,8 +311,15 @@ function GroupedActivityStretch({ entries, chatId, live = false, surfaceKey }) {
         if (code != null && code !== 0) exitCode = code
       }
     }
-    return { state, exitCode, toolCount: tools.length, thinkingOnly: tools.length === 0 }
-  }, [sig]) // eslint-disable-line react-hooks/exhaustive-deps
+    return {
+      state,
+      exitCode,
+      toolCount: Number.isInteger(summaryToolCount)
+        ? summaryToolCount
+        : tools.length,
+      thinkingOnly: tools.length === 0,
+    }
+  }, [sig, summaryToolCount]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const { state, exitCode, toolCount, thinkingOnly } = meta
   // The one presentation authority for icon, chip, and state class: a live
@@ -278,6 +351,7 @@ function GroupedActivityStretch({ entries, chatId, live = false, surfaceKey }) {
       ? ', in progress'
       : ''
   const iconKind = thinkingOnly ? 'reasoning' : leadToolIcon
+  const timelineEntries = detailRef ? detailEntries : entries
 
   return (
     <div className={
@@ -316,7 +390,29 @@ function GroupedActivityStretch({ entries, chatId, live = false, surfaceKey }) {
         />
       ))}
       <div ref={timelineRef} id={timelineId} className="chat__activity-timeline" hidden={!open}>
-        {open && entries.map(({ item, idx }) => {
+        {open && detailRef && !timelineEntries && !detailError && (
+          <span className="chat__reasoning-load" role="status" aria-live="polite">
+            Loading activity…
+          </span>
+        )}
+        {open && detailError && (
+          <div className="chat__lazy-status">
+            <span className="chat__reasoning-load" role="status" aria-live="polite">
+              Activity details unavailable.
+            </span>
+            <button
+              type="button"
+              className="chat__lazy-retry"
+              onClick={() => {
+                setDetailError(false)
+                setDetailAttempt(attempt => attempt + 1)
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {open && timelineEntries?.map(({ item, idx }) => {
           if (item.type === 'thinking') {
             const key = assistantBlockKey(item, idx)
             return (
@@ -345,8 +441,15 @@ function GroupedActivityStretch({ entries, chatId, live = false, surfaceKey }) {
   )
 }
 
-export default function ActivityStretch({ entries, chatId, live = false, surfaceKey }) {
-  if (entries.length === 1) {
+export default function ActivityStretch({
+  entries,
+  chatId,
+  live = false,
+  surfaceKey,
+  detailRef = null,
+  summaryToolCount = null,
+}) {
+  if (entries.length === 1 && !detailRef) {
     return (
       <SingleActivity
         entry={entries[0]}
@@ -362,6 +465,8 @@ export default function ActivityStretch({ entries, chatId, live = false, surface
       chatId={chatId}
       live={live}
       surfaceKey={surfaceKey}
+      detailRef={detailRef}
+      summaryToolCount={summaryToolCount}
     />
   )
 }

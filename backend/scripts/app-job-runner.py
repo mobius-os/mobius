@@ -97,6 +97,24 @@ def _job_context(app_id: int, token: str) -> dict | None:
     return None
 
 
+def _job_matches_context(resolved: Path, context: dict) -> bool:
+  """Bind a scheduled script to the exact app whose authority it receives.
+
+  Missing, malformed, or mismatched identity fails closed before the app token
+  reaches a child process. During a platform-update window, an older backend
+  may omit ``source_dir``; skipping that run is safer than retaining a
+  permanent compatibility path around this capability boundary.
+  """
+  source_dir = context.get("source_dir")
+  if not isinstance(source_dir, str) or not source_dir:
+    return False
+  try:
+    expected = Path(source_dir).resolve(strict=True)
+  except (OSError, RuntimeError):
+    return False
+  return expected == resolved.parent
+
+
 def _mint_app_token(app_id: int) -> str | None:
   """Exchange the owner service credential for one short-lived app token."""
   try:
@@ -280,6 +298,9 @@ def run() -> int:
     context = _job_context(app_id, app_token)
     if context is None:
       _log(app_id, "failed: job-context fetch")
+      return 4
+    if not _job_matches_context(resolved, context):
+      _log(app_id, f"rejected: job does not belong to app: {resolved}")
       return 4
     command = _sandboxed_command(app_id, resolved, context)
     if command is None:
