@@ -327,6 +327,7 @@ def _chat_detail_response(
       row[0]
       for row in db.query(models.ToolOutput.tool_use_id).filter(
         models.ToolOutput.chat_id == chat.id,
+        models.ToolOutput.tool_use_id.in_(candidate_tool_ids),
       ).all()
     }
     if candidate_tool_ids

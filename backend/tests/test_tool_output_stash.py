@@ -202,9 +202,25 @@ def test_settled_chat_detail_uses_lazy_sidecar_for_large_output(
         output="complete output",
     )).result(timeout=5)
 
-    detail = client.get(f"/api/chats/{chat_id}", headers=auth)
+    statements = []
+    engine = db.get_bind()
+
+    def capture_sql(_, __, statement, *args):
+        statements.append(statement.lower())
+
+    sqlalchemy_event.listen(engine, "before_cursor_execute", capture_sql)
+    try:
+        detail = client.get(f"/api/chats/{chat_id}", headers=auth)
+    finally:
+        sqlalchemy_event.remove(engine, "before_cursor_execute", capture_sql)
 
     assert detail.status_code == 200
+    sidecar_index_sql = next(
+        statement
+        for statement in statements
+        if "from tool_outputs" in statement
+    )
+    assert "tool_outputs.tool_use_id in" in sidecar_index_sql
     projected = detail.json()["messages"][0]["blocks"][0]
     assert "output" not in projected
     assert projected["tool_use_id"] == "tu_detail"
