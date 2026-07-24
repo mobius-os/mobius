@@ -92,7 +92,9 @@ import {
   transitionSignature, MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
-import { PaneTab, scrollStripWheel, stripKeyDown } from './PaneStrip.jsx'
+import {
+  PaneTab, panePanelDomId, paneTabDomId, scrollStripWheel, stripKeyDown,
+} from './PaneStrip.jsx'
 import useAppIntentNavigation from './useAppIntentNavigation.js'
 import useDesktopSidebar from './useDesktopSidebar.js'
 import ShellBrand from './ShellBrand.jsx'
@@ -3382,6 +3384,9 @@ export default function Shell() {
           return (
           <div
             key={id}
+            id={paned ? panePanelDomId(paned.paneId, tabKey) : undefined}
+            role={paned ? 'tabpanel' : undefined}
+            aria-labelledby={paned ? paneTabDomId(paned.paneId, tabKey) : undefined}
             data-tab-key={(multiPane || focusedPaneViewId != null) && !underlay ? tabKey : undefined}
             // COMPOSITOR-ONLY beat motion (v2): the wrapper HOLDS its tiled content
             // rect and animates only transform/opacity via data-mode-motion + the
@@ -3458,6 +3463,7 @@ export default function Shell() {
           const paned = !underlay && workspaceChromeActive ? visibleTabRects.get(paneActiveKey) : null
           const fullBleed = !underlay && !paned && paneActiveKey === fullBleedKey
           const motion = isActiveLayer ? wrapperMotion(paneActiveKey) : null
+          const tabPanel = role !== 'held' && paned
           const handoffClass = !settingsOverlay && role !== 'active'
             ? ` shell__chat-view--${role}`
             : ''
@@ -3465,6 +3471,9 @@ export default function Shell() {
           return (
             <div
               key={chatId}
+              id={tabPanel ? panePanelDomId(paneId, tabKey) : undefined}
+              role={tabPanel ? 'tabpanel' : undefined}
+              aria-labelledby={tabPanel ? paneTabDomId(paneId, tabKey) : undefined}
               data-tab-key={(multiPane || focusedPaneViewId != null) && role !== 'held' && !underlay
                 ? tabKey : undefined}
               // Compositor-only beat motion (v2): see the app wrapper. The world-
@@ -3535,9 +3544,17 @@ export default function Shell() {
           const settingsPos = (!settingsUnderlay && settingsPaned)
             ? { top: settingsPaned.y, left: settingsPaned.x, width: settingsPaned.w, height: settingsPaned.h }
             : null
+          const settingsTabPanel = !settingsUnderlay && settingsPaned
           return (
           <div
             key="settings"
+            id={settingsTabPanel
+              ? panePanelDomId(settingsPaned.paneId, SETTINGS_KEY)
+              : undefined}
+            role={settingsTabPanel ? 'tabpanel' : undefined}
+            aria-labelledby={settingsTabPanel
+              ? paneTabDomId(settingsPaned.paneId, SETTINGS_KEY)
+              : undefined}
             data-tab-key={(!settingsUnderlay && settingsPaned) ? SETTINGS_KEY : undefined}
             data-mode-motion={settingsMotion ? settingsMotion.motion : undefined}
             className={settingsUnderlay
@@ -3595,8 +3612,8 @@ export default function Shell() {
         })()}
         {/* Chrome layer — sibling AFTER the content wrappers, over the whole
             content box, carrying its own inert. Only at ≥2 visible leaves and
-            never while Settings overlays. Draws per-pane strips, dividers, and
-            the phone overflow chip; no content lives here. */}
+            never while Settings overlays. Draws per-pane strips and dividers;
+            no content lives here. */}
         {workspaceChromeActive && (
           <WorkspaceChrome
             // INV 9 / finding 10: during the exit deal the chrome is not just
@@ -3621,9 +3638,6 @@ export default function Shell() {
             onTogglePaneFocus={toggleFocusedPaneView}
             revealKey={tabRevealRevision}
             stripMotion={wrapperMotion}
-            streamingChatIds={streamingChatIds}
-            attentionChatIds={attentionChatIds}
-            newAppIds={appAttentionSet}
           />
         )}
       </main>

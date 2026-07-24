@@ -249,9 +249,6 @@ jobs:
           MOBIUS_TEST_INTERNAL_API: http://localhost:8012
           MOBIUS_USER: admin
           MOBIUS_PASS: admin
-          # First-boot claim gate: match the value docker-compose.test.yml
-          # presets so the Playwright setup can complete owner creation.
-          MOBIUS_SETUP_CLAIM: mobius-test-setup-claim
 
       - name: Container logs
         if: failure() || (steps.pw.outcome != 'skipped' && steps.pw.outputs.exit != '0')

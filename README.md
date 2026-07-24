@@ -137,7 +137,7 @@ sed -i 's/^DOMAIN=.*/DOMAIN=mobius.example.com/' .env
 docker compose up -d
 ```
 
-Caddy configures HTTPS. Open `https://mobius.example.com` and follow the setup wizard. The wizard asks for a one-time setup code so a stranger can't claim your instance first: read it from the container logs (`docker compose logs | grep "SETUP CLAIM"`), or preset your own via `MOBIUS_SETUP_CLAIM` in `.env` (see [.env.example](.env.example)). Bookmark `/recover` before asking the agent to change the platform.
+Caddy configures HTTPS. Open `https://mobius.example.com` and follow the setup wizard. Bookmark `/recover` before asking the agent to change the platform.
 
 Update a self-hosted instance with:
 

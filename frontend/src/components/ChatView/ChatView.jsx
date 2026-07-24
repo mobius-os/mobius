@@ -107,6 +107,7 @@ let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
+const CHAT_FETCH_TIMEOUT_MS = 15000
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -986,7 +987,10 @@ export default function ChatView({
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
     try {
-      const res = await apiFetch(`/chats/${chatId}?limit=20`, { timeoutMs: 15000 })
+      const res = await apiFetch(
+        `/chats/${chatId}?limit=20`,
+        { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
+      )
       if (!res.ok) throw new Error(`CHAT_FETCH_FAILED_${res.status}`)
       const data = await res.json()
       if (chatIdStaleRef.current) return
@@ -1081,7 +1085,10 @@ export default function ChatView({
   const reconcileRuntimeState = useCallback(async () => {
     const gen = fetchGenRef.current
     try {
-      const res = await apiFetch(`/chats/${chatId}?limit=1`, { timeoutMs: 15000 })
+      const res = await apiFetch(
+        `/chats/${chatId}?limit=1`,
+        { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
+      )
       const data = await jsonOrThrow(res, 'Runtime refresh failed')
       if (chatIdStaleRef.current) return
       if (fetchGenRef.current !== gen) return
@@ -1752,12 +1759,16 @@ export default function ChatView({
     // the pane's DOM identity.
     if (hidden) return
     let cancelled = false
+    const initialLoadController = new AbortController()
     chatIdStaleRef.current = false
     setLoadError(false)
     setInitialEntryPhase(cachedEntryPhase)
 
     const gen = fetchGenRef.current
-    apiFetch(`/chats/${chatId}?limit=20`)
+    apiFetch(`/chats/${chatId}?limit=20`, {
+      timeoutMs: CHAT_FETCH_TIMEOUT_MS,
+      signal: initialLoadController.signal,
+    })
       .then(r => {
         if (r.status === 404) throw new Error('CHAT_NOT_FOUND')
         if (!r.ok) throw new Error(`CHAT_LOAD_FAILED_${r.status}`)
@@ -1886,6 +1897,7 @@ export default function ChatView({
         // cleanup, so modeRef is captured for the chat we're leaving.)
       } catch {}
       cancelled = true
+      initialLoadController.abort()
       chatIdStaleRef.current = true
       loadingOlder.current = false
       disconnect()
@@ -1921,7 +1933,10 @@ export default function ChatView({
     // them to the bottom, undoing the pagination. Pagination leaves
     // them at the new anchor; the next gesture (or send) writes a
     // fresh mode.
-    apiFetch(`/chats/${chatId}?limit=20&before=${offset}`, { timeoutMs: 15000 })
+    apiFetch(
+      `/chats/${chatId}?limit=20&before=${offset}`,
+      { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
+    )
       .then(r => jsonOrThrow(r, 'Earlier messages failed to load'))
       .then(data => {
         if (chatIdStaleRef.current) return
@@ -2680,7 +2695,7 @@ export default function ChatView({
     try {
       const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
         method: 'DELETE',
-        timeoutMs: 15000,
+        timeoutMs: CHAT_FETCH_TIMEOUT_MS,
       })
       await jsonOrThrow(res, 'Queued-message cancellation failed')
     } catch {
@@ -2688,7 +2703,10 @@ export default function ChatView({
       // Read server truth, but restore only this operation's row so an older
       // response cannot overwrite unrelated queue mutations.
       try {
-        const res = await apiFetch(`/chats/${chatId}?limit=1`, { timeoutMs: 15000 })
+        const res = await apiFetch(
+          `/chats/${chatId}?limit=1`,
+          { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
+        )
         const data = await jsonOrThrow(res, 'Queue refresh failed')
         const serverQueue = Array.isArray(data.pending_messages) ? data.pending_messages : []
         const serverIndex = serverQueue.findIndex(row => cidOf(row) === cid)

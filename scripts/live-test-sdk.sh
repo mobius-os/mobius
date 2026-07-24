@@ -69,13 +69,11 @@ for i in $(seq 1 30); do
 done
 [ "$hc" = "200" ] && ok "health=200" || fail "health=$hc after 30s"
 
-# First-boot claim gate: docker-compose.test.yml presets MOBIUS_SETUP_CLAIM.
-SETUP_CLAIM="${SETUP_CLAIM:-${MOBIUS_SETUP_CLAIM:-mobius-test-setup-claim}}"
 setup_body="$LOG_DIR/setup-response.json"
 setup_status=$(curl -s -o "$setup_body" -w '%{http_code}' \
   -X POST "$BASE/api/auth/setup" \
   -H 'Content-Type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"admin\",\"claim\":\"${SETUP_CLAIM}\"}")
+  -d '{"username":"admin","password":"admin"}')
 if [ "$setup_status" = "200" ] || [ "$setup_status" = "400" ]; then
   ok "owner setup status=$setup_status"
 else
