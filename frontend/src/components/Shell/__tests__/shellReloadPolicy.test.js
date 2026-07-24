@@ -95,12 +95,12 @@ test('passive watcher rebuilds coalesce while an idle chat is visible', () => {
   }), false, 'a hidden page is a safe apply boundary')
 })
 
-test('builder holds every shell generation until the workspace is not visible', () => {
+test('multi-pane builder holds every shell generation until the workspace is not visible', () => {
   const base = {
     activeElement: el('body'),
     activeView: 'chat',
     activeChatId: 'focused',
-    builderWorkspaceVisible: true,
+    multiPaneBuilderVisible: true,
     streamingChatIds: new Set(),
     lastUserInteractionAt: 0,
     now: 10000,
@@ -122,6 +122,10 @@ test('builder holds every shell generation until the workspace is not visible', 
     ...base,
     visibilityState: 'hidden',
   }), false, 'backgrounding the page remains a safe apply boundary')
+  assert.equal(shouldDeferShellReload({
+    ...base,
+    multiPaneBuilderVisible: false,
+  }), false, 'a one-pane Builder keeps the existing deliberate idle-apply path')
 })
 
 test('hidden pages can reload without disrupting focus', () => {

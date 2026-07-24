@@ -71,7 +71,7 @@ export function shouldDeferShellReload({
   activeElement,
   activeView,
   activeChatId,
-  builderWorkspaceVisible = false,
+  multiPaneBuilderVisible = false,
   streamingChatIds,
   passiveRebuild = false,
   voiceDictationActive = false,
@@ -86,7 +86,7 @@ export function shouldDeferShellReload({
   // panes are actively being read or used. Keep all shell generations queued
   // until the page is backgrounded or the owner returns to Standard. This is
   // the multi-pane counterpart of the visible-canvas protection below.
-  if (builderWorkspaceVisible) return true
+  if (multiPaneBuilderVisible) return true
   // Canvas apps may contain games, unsaved work, media, or nested fullscreen
   // documents whose state is opaque to the shell. Never tear down that visible
   // surface for a background shell generation. The existing active-view and

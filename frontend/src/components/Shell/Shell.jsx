@@ -360,9 +360,10 @@ export default function Shell() {
   // preview holds the tiled world; the committed mode otherwise. The single source
   // (INV 4) — no scattered override.
   const effectiveViewMode = modeMachine.effectiveViewMode(modeState, { splitsEnabled: SPLITS })
-  const builderWorkspaceVisible = effectiveViewMode === 'panes'
-  const builderWorkspaceVisibleRef = useRef(builderWorkspaceVisible)
-  builderWorkspaceVisibleRef.current = builderWorkspaceVisible
+  const multiPaneBuilderVisible = effectiveViewMode === 'panes'
+    && paneModel.paneIdsInOrder(workspace).length > 1
+  const multiPaneBuilderVisibleRef = useRef(multiPaneBuilderVisible)
+  multiPaneBuilderVisibleRef.current = multiPaneBuilderVisible
   // The latched presentation plan for the live animated beat. Either direction may
   // carry a stationary single-world underlay while panes scatter or assemble over it.
   const beatPlan = modeMachine.transitionPresentation(modeState)
@@ -760,7 +761,7 @@ export default function Shell() {
       activeElement: document.activeElement,
       activeView: activeViewRef.current,
       activeChatId: activeChatIdRef.current,
-      builderWorkspaceVisible: builderWorkspaceVisibleRef.current,
+      multiPaneBuilderVisible: multiPaneBuilderVisibleRef.current,
       streamingChatIds: streamingChatIdsRef.current,
       passiveRebuild: passive,
       voiceDictationActive: voiceDictationActiveRef.current,
@@ -771,7 +772,7 @@ export default function Shell() {
 
   function shellReloadHasStableVisibleHold(passive) {
     if (document.visibilityState === 'hidden') return false
-    if (builderWorkspaceVisibleRef.current) return true
+    if (multiPaneBuilderVisibleRef.current) return true
     return passive
       && activeViewRef.current === 'chat'
       && activeChatIdRef.current != null
@@ -844,7 +845,7 @@ export default function Shell() {
   // protected for a passive generation.
   useEffect(() => {
     checkPendingShellReload()
-  }, [activeView, activeChatId, builderWorkspaceVisible])
+  }, [activeView, activeChatId, multiPaneBuilderVisible])
   // Global connectivity indicator. The composer already disables send when
   // offline (ChatView); this surfaces the state shell-wide so the user is
   // never tapping in the dark about whether they're connected.
