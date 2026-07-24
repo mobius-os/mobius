@@ -56,6 +56,31 @@ def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
   assert "system_prompt_file" in cols
 
 
+def test_run_migrations_adds_managed_sign_in_identity_to_existing_owner(tmp_path):
+  db_path = tmp_path / "legacy-owner.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.connect() as conn:
+    # Production migrations are gated on the pre-existing apps table.
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE owner ("
+      "id INTEGER PRIMARY KEY, "
+      "username VARCHAR(64) NOT NULL, "
+      "password_hash VARCHAR(255) NOT NULL"
+      ")"
+    ))
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  cols = {c["name"] for c in inspect(eng).get_columns("owner")}
+  assert "sso_subject" in cols
+  assert "sso_email" in cols
+
+
 def test_run_migrations_adds_park_columns_to_existing_chat_runs(tmp_path):
   """A deployed DB has `chat_runs` WITHOUT the provider-park columns
   (design §2.4) — create_all only covers fresh installs, so the ALTER path

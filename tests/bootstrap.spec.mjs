@@ -325,7 +325,7 @@ test.describe('Unauthenticated startup', () => {
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ configured: true, claim_required: false }),
+        body: JSON.stringify({ configured: true }),
       })
     )
     await page.route(/\/api\/auth\/token$/, route =>
@@ -361,7 +361,7 @@ test.describe('Unauthenticated startup', () => {
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ configured: true, claim_required: false }),
+        body: JSON.stringify({ configured: true }),
       })
     )
     await page.route(/\/api\/auth\/token$/, route =>
@@ -396,7 +396,7 @@ test.describe('Unauthenticated startup', () => {
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ configured: false, claim_required: false }),
+        body: JSON.stringify({ configured: false }),
       })
     })
 
@@ -407,8 +407,97 @@ test.describe('Unauthenticated startup', () => {
 
     await page.getByRole('button', { name: 'Try again' }).click()
     await expect.poll(() => checks).toBe(2)
-    await expect(page.getByRole('heading', { name: 'Create your home key' }))
+    await expect(page.getByRole('heading', { name: 'Set up your Möbius' }))
       .toBeVisible({ timeout: 10000 })
+  })
+
+  test('managed deployment goes straight to Möbius sign-in', async ({ page }) => {
+    let setupChecks = 0
+    await page.route(/\/api\/auth\/setup\/status$/, route => {
+      setupChecks += 1
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          configured: false,
+          auth_mode: 'mobius_sso',
+        }),
+      })
+    })
+    await page.route(/\/api\/auth\/sso\/start(\?.*)?$/, route =>
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/html' },
+        body: '<!doctype html><title>Managed sign-in</title>',
+      })
+    )
+
+    const started = page.waitForRequest(/\/api\/auth\/sso\/start(\?.*)?$/)
+    await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
+    const request = await started
+
+    expect(setupChecks).toBe(1)
+    expect(new URL(request.url()).searchParams.get('return_path')).toBe('/shell/')
+    await expect(page.getByRole('heading', { name: 'Set up your Möbius' }))
+      .toHaveCount(0)
+    await expect(page.locator('.login')).toHaveCount(0)
+  })
+
+  test('managed handoff signs in and skips separate account setup', async ({ page }) => {
+    // The handoff response must carry a token the real test backend accepts.
+    // A made-up token used to work only because the retired provider wizard
+    // delayed the first authenticated API request; opening the shell
+    // immediately correctly exercises the token now.
+    const storageState = await page.context().storageState()
+    const ownerOrigin = storageState.origins.find(
+      origin => origin.origin === new URL(BASE).origin,
+    )
+    const ownerToken = ownerOrigin?.localStorage.find(
+      entry => entry.name === 'token',
+    )?.value
+    expect(ownerToken).toBeTruthy()
+
+    let handoffCalls = 0
+    let setupChecks = 0
+    await page.route(/\/api\/auth\/setup\/status$/, route => {
+      setupChecks += 1
+      return route.fulfill({ status: 500, body: '{}' })
+    })
+    await page.route(/\/api\/auth\/sso\/session$/, route => {
+      handoffCalls += 1
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          access_token: ownerToken,
+          token_type: 'bearer',
+          new_owner: true,
+          return_path: '/',
+        }),
+      })
+    })
+    await page.route(/\/api\/auth\/providers\/status$/, route =>
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+    )
+
+    await page.goto(`${BASE}/shell/?mobius_sso=1`, { waitUntil: 'domcontentloaded' })
+
+    await waitForShell(page)
+    expect(handoffCalls).toBe(1)
+    expect(setupChecks).toBe(0)
+    expect(await page.evaluate(() => localStorage.getItem('token')))
+      .toBe(ownerToken)
+    await expect(page.getByRole('heading', { name: 'Set up your Möbius' }))
+      .toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Wake up your AI' }))
+      .toHaveCount(0)
+    await expect(page).toHaveURL(
+      new RegExp(`${BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/shell/?$`)
+    )
   })
 })
 

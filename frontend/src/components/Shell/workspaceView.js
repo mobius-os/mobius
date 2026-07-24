@@ -346,18 +346,32 @@ export function deriveEnterPlan(input) {
 
   const incoming = leaves
     .filter(l => l.activeKey !== target)
-    .map(l => ({ leaf: l, offset: edgeOffset(l.rect, contentRect, l.motionRect) }))
+    .map((l) => {
+      const offset = edgeOffset(l.rect, contentRect, l.motionRect)
+      return {
+        leaf: l,
+        offset,
+        distance: Math.hypot(offset.x, offset.y),
+      }
+    })
   if (incoming.length === 0) return null
-  const maxDistance = Math.max(...incoming.map(({ offset }) => Math.hypot(offset.x, offset.y)))
+  const maxDistance = Math.max(...incoming.map(({ distance }) => distance))
+  const minDistance = maxDistance * MODE_MOTION.enterMinItemMs / MODE_MOTION.enterItemMs
 
-  for (const { leaf: l, offset } of incoming) {
+  for (const { leaf: l, offset, distance } of incoming) {
     // Projection-derived travel can differ by nearly 2× in an uneven three-pane
     // tree. Start shorter trips later and give them proportionally less time so
     // every pane travels at the same perceived speed and lands on the same frame.
-    // The floor prevents a very small pane from becoming a one-frame flash.
-    const distance = Math.hypot(offset.x, offset.y)
+    // A very short natural vector still gets the readability floor: extend its
+    // start farther beyond the SAME edge instead of slowing it down. That keeps
+    // the common average velocity even at valid 10/90 split extremes.
+    const travelDistance = Math.max(distance, minDistance)
+    const offsetScale = distance > 0 ? travelDistance / distance : 1
+    const timedOffset = offsetScale === 1
+      ? offset
+      : { x: offset.x * offsetScale, y: offset.y * offsetScale }
     const proportionalMs = maxDistance > 0
-      ? Math.round(MODE_MOTION.enterItemMs * distance / maxDistance)
+      ? Math.round(MODE_MOTION.enterItemMs * travelDistance / maxDistance)
       : MODE_MOTION.enterItemMs
     const durationMs = Math.min(
       MODE_MOTION.enterItemMs,
@@ -367,7 +381,7 @@ export function deriveEnterPlan(input) {
       key: l.activeKey, paneId: l.paneId, motion: 'deal-in',
       delayMs: MODE_MOTION.enterItemMs - durationMs,
       durationMs,
-      offset,
+      offset: timedOffset,
     })
     completionNames.add(DEAL_IN_NAME)
   }

@@ -41,6 +41,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -141,6 +142,26 @@ async function gotoEmptyChat(page) {
   await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
   await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
   return chat
+}
+
+async function seedTwoPaneBuilder(page, firstChatId, secondChatId) {
+  let workspace = paneModel.seedFromFlatTabs([
+    { kind: 'chat', id: firstChatId },
+    { kind: 'chat', id: secondChatId },
+  ])
+  workspace = paneModel.moveTab(workspace, `chat:${secondChatId}`, {
+    root: true,
+    edge: 'right',
+  })
+  workspace = paneModel.focusPane(workspace, 'p0')
+  const blob = paneModel.serializeWorkspace(workspace)
+  const legacy = JSON.stringify(paneModel.flatten(workspace)
+    .map(tab => ({ kind: tab.kind, id: tab.id })))
+  await page.addInitScript(([workspaceKey, workspaceBlob, openTabs]) => {
+    localStorage.setItem('mobius:workspace-splits', '1')
+    sessionStorage.setItem(workspaceKey, workspaceBlob)
+    sessionStorage.setItem('mobius-open-tabs', openTabs)
+  }, [paneModel.STORAGE_KEY, blob, legacy])
 }
 
 async function sendMessage(page, text) {
@@ -264,6 +285,38 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // hello (no replay), so nothing re-applies.
     await page.waitForTimeout(2000)
     expect(await loadCount(page)).toBe(1)
+  })
+
+  test('a deliberate apply waits for a visible multi-pane Builder and releases in the background', async ({ page }) => {
+    let armApply
+    const armed = new Promise(resolve => { armApply = resolve })
+    await setup(page, {
+      streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
+      systemRoute: oneShotSystemEventRoute('shell_apply_now', armed),
+    })
+    const first = await createTaggedChat(page)
+    const second = await createTaggedChat(page)
+    await seedTwoPaneBuilder(page, first.id, second.id)
+    await page.goto(`${BASE}/shell/?chat=${first.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.workspace__chrome')).toBeVisible({ timeout: 8000 })
+    await expect(page.locator('.shell__view--paned')).toHaveCount(2)
+    await resetLoadCount(page)
+
+    armApply()
+    await page.waitForTimeout(1000)
+    expect(await loadCount(page)).toBe(0)
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'hidden',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await page.waitForFunction(
+      () => Number(sessionStorage.getItem('__load_count') || '0') === 1,
+      { timeout: 8000 },
+    )
   })
 
   test('passive shell_rebuilt stays queued while an idle chat is visible', async ({ page }) => {

@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
+const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
 function ruleBody(selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -21,6 +22,23 @@ test('chat display readiness preserves the existing transcript reveal gate', () 
     'an already-ready chat must re-announce when a cross-pane move changes its handoff owner')
   assert.doesNotMatch(chatView, /onDisplayReadyRef/,
     'the callback dependency is the owner-change signal; a parallel mutable ref would obscure it')
+})
+
+test('a staging chat cannot leave the outgoing transcript held on a wedged request', () => {
+  assert.match(chatView, /const CHAT_FETCH_TIMEOUT_MS = 15000/)
+  assert.match(
+    chatView,
+    /apiFetch\(`\/chats\/\$\{chatId\}\?limit=20`, \{\s*timeoutMs: CHAT_FETCH_TIMEOUT_MS,\s*signal: initialLoadController\.signal,\s*\}\)/,
+    'the initial load must share the bounded message-fetch deadline',
+  )
+  assert.match(chatView, /initialLoadController\.abort\(\)/,
+    'hiding or unmounting a staging chat must release its request immediately')
+  assert.match(apiClient, /AbortSignal\.any\(\[signal, ctrl\.signal\]\)/,
+    'apiFetch must compose lifecycle cancellation with its deadline')
+  assert.match(apiClient, /error\.name = 'TimeoutError'\s*ctrl\.abort\(error\)/,
+    'a deadline remains distinguishable from routine lifecycle cancellation')
+  assert.match(apiClient, /if \(error\?\.name !== 'AbortError'\) void verifyConnectivity\(\)/,
+    'switching panes must not trigger a redundant connectivity probe')
 })
 
 test('each pane holds one outgoing chat over one staging chat', () => {
