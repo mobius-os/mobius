@@ -298,7 +298,8 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     const second = await createTaggedChat(page)
     await seedTwoPaneBuilder(page, first.id, second.id)
     await page.goto(`${BASE}/shell/?chat=${first.id}`, { waitUntil: 'domcontentloaded' })
-    await expect(page.locator('.workspace__divider')).toBeVisible({ timeout: 8000 })
+    await expect(page.locator('.workspace__chrome')).toBeVisible({ timeout: 8000 })
+    await expect(page.locator('.shell__view--paned')).toHaveCount(2)
     await resetLoadCount(page)
 
     armApply()
