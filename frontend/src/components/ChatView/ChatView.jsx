@@ -6,7 +6,6 @@ import {
   useCallback,
   useMemo,
   useSyncExternalStore,
-  useMemo,
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'

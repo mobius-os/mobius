@@ -532,14 +532,15 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   the viewport top and shrinks as reply, tool, image, or other content fills the
   deficit. The remaining room survives turn completion when the reply is short.
   Expanding content consumes it; collapsing the same content restores the exact
-  deficit. Mode does not own its lifetime: `PIN_USER_MSG` may reserve before a fresh
-  row is placed, while `ANCHOR_AT`, `FOLLOW_BOTTOM`, mount/return, question
-  submission, and disclosure settlement reserve only when their real viewport
-  contains the latest user row. If that row leaves the viewport, spacer is zero;
+  deficit. Mode does not own its ordinary lifetime: `PIN_USER_MSG` may reserve
+  before a fresh row is placed, while `ANCHOR_AT`, `FOLLOW_BOTTOM`, mount/return,
+  and disclosure settlement reserve only when their real viewport contains the
+  latest user row. If that row leaves the viewport, ordinary spacer is zero;
   seeing an older user row never qualifies. An otherwise unreachable anchor clamps
-  to real conversation content before visibility is decided. Positive dynamic
-  spacer therefore always implies that the latest user row is visible at the
-  current/applied target.
+  to real conversation content before visibility is decided. R6's transient
+  question-submit hold is the sole exception: it may reserve only the exact tail
+  deficit required to keep the answered card at its frozen offset through mobile
+  viewport growth, and that intent is never persisted.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
   pins when its submit-time DOM snapshot is at the real-content tail. Geometry is
@@ -618,11 +619,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   card enters its pending state or output resumes, the controller snapshots the
   currently visible message and its exact viewport offset as `ANCHOR_AT`. Resumed
   output grows without dragging the reader, even when the chat had been following
-  the tail before Submit. The answer anchor does not independently own spacer; it
-  receives R1's exact deficit only while its viewport still shows the latest user
-  row. If a viewport growth makes its exact offset unreachable, it clamps to real
-  conversation content. A failed answer keeps that settled reading anchor for the
-  retryable card rather than manufacturing follow intent again.
+  the tail before Submit. If a mobile viewport grows before that output arrives,
+  the dynamic spacer temporarily reserves exactly enough room to keep the anchor
+  target reachable; the reservation disappears as real content replaces it and
+  the transient reservation intent is stripped before persistence. A failed answer
+  keeps that settled reading anchor for the retryable card rather than manufacturing
+  follow intent again.
   The source handoff
   preserves the question, its answer, and every pre/post-answer thinking, tool, and
   text block in event order, without hiding, duplicating, or reordering them. Only a

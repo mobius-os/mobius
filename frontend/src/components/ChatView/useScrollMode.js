@@ -13,7 +13,10 @@
  *                                  — user msg at top (post-send), keyed on
  *                                    the stable client `cid` (data-cid)
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
- *   { kind: 'ANCHOR_AT', key, offset }  — anchored at a specific msg
+ *   { kind: 'ANCHOR_AT', key, offset, reserveTail? }
+ *                                  — anchored at a specific msg; an in-message
+ *                                    question may temporarily reserve the
+ *                                    exact room needed to keep it reachable
  *
  * Send pinning has one rule for direct, queued, and steered messages: the
  * first visible user message always pins; every later message pins when the
@@ -22,11 +25,14 @@
  * A live pin leaves FOLLOW_BOTTOM while its dynamic spacer is being consumed,
  * then hands off to FOLLOW_BOTTOM exactly when that reservation reaches zero.
  * A short reply never reaches the handoff and remains pinned after settle.
- * The dynamic spacer belongs exclusively to the latest visible user row.
- * It is independent of turn completion: short replies keep the remaining
- * room, while reply/tool expansion consumes it and collapse restores it.
- * PIN_USER_MSG may reserve before its row lands so a fresh send can pin in
- * one frame; every other mode reserves only while that latest row is visible.
+ * Ordinary dynamic spacer room belongs exclusively to the latest visible
+ * user row. It is independent of turn completion: short replies keep the
+ * remaining room, while reply/tool expansion consumes it and collapse
+ * restores it. PIN_USER_MSG may reserve before its row lands so a fresh send
+ * can pin in one frame; every other ordinary mode reserves only while that
+ * latest row is visible. The one explicit exception is the transient
+ * question-submit anchor: it reserves exactly enough tail room to keep its
+ * target reachable while the mobile viewport grows.
  * Gesture-driven bottom detection reads the scroll container's geometry in
  * the scroll event itself. There is no second sentinel/observer authority
  * that can lag behind the reader and contradict the current viewport.
@@ -401,8 +407,12 @@ export function _validateSavedMode(saved, messages, scrollEl) {
     // a huge negative offset while the viewport sat wholly in spacer below it.
     // Enforce the same content-intersection invariant used by spacer sizing,
     // self-healing every off-content restore to the real tail.
-    return _anchorModeIntersectsContent(row, saved, scrollEl?.clientHeight)
-      ? saved
+    const durable = saved.reserveTail
+      ? { kind: 'ANCHOR_AT', key: saved.key, offset: saved.offset,
+          ...(saved.defaultTail ? { defaultTail: true } : {}) }
+      : saved
+    return _anchorModeIntersectsContent(row, durable, scrollEl?.clientHeight)
+      ? durable
       : holdBottom()
   }
   return holdBottom()
@@ -472,7 +482,8 @@ function _latestUserOwnsSpacer(scrollEl, listEl, lastUserMsgEl, mode, viewH) {
 
 
 /** Spacer height needed so the latest visible user message can sit near the
- *  top of the viewport, with the PIN_OFFSET breathing room above it.
+ *  top of the viewport, with the PIN_OFFSET breathing room above it, or so a
+ *  transient question-submit anchor remains reachable through viewport growth.
  *
  *  Visibility is the defining invariant. The matching latest user pin may
  *  reserve before placement; every other mode gets room only while its real
@@ -493,8 +504,10 @@ function _latestUserOwnsSpacer(scrollEl, listEl, lastUserMsgEl, mode, viewH) {
  *  the pre-cushion behavior; a >0 value re-adds breathing room if the exact
  *  end-of-scroll rest ever feels cramped.)
  *
- *  Once the latest user row leaves the viewport, reservation collapses. An
- *  older visible user row never receives it.
+ *  Once the latest user row leaves the viewport, ordinary reservation
+ *  collapses. An older visible user row never receives it. A question-submit
+ *  anchor instead reserves only its exact reachability deficit; that transient
+ *  intent is stripped before persistence.
  */
 const PIN_OFFSET = 4
 const PIN_BOTTOM_ROOM = 0
@@ -505,8 +518,15 @@ export function _computeSpacerH(
   fullViewH,
   mode = null,
 ) {
-  if (!scrollEl || !listEl || !lastUserMsgEl) return 0
+  if (!scrollEl || !listEl) return 0
   const viewH = fullViewH || scrollEl.clientHeight
+  if (mode?.kind === 'ANCHOR_AT' && mode.reserveTail) {
+    const anchorEl = _anchorEl(scrollEl, mode.key)
+    if (!anchorEl) return 0
+    const anchorTarget = Math.max(0, anchorEl.offsetTop - mode.offset)
+    return Math.max(0, viewH + anchorTarget - listEl.offsetHeight)
+  }
+  if (!lastUserMsgEl) return 0
   if (!_latestUserOwnsSpacer(
     scrollEl,
     listEl,
@@ -762,7 +782,8 @@ export function modeForDisclosureToggle(scrollEl, currentMode) {
  * moves the reader. */
 export function modeForQuestionSubmission(scrollEl, currentMode) {
   if (!scrollEl) return currentMode
-  return anchorModeFromScroll(scrollEl) || currentMode
+  const anchor = anchorModeFromScroll(scrollEl)
+  return anchor ? { ...anchor, reserveTail: true } : currentMode
 }
 
 

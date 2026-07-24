@@ -333,7 +333,12 @@ test('question submission freezes the visible row before same-turn output resume
   }
   assert.deepEqual(
     modeForQuestionSubmission(scrollEl, { kind: 'FOLLOW_BOTTOM' }),
-    { kind: 'ANCHOR_AT', key: 'assistant-with-question', offset: 60 },
+    {
+      kind: 'ANCHOR_AT',
+      key: 'assistant-with-question',
+      offset: 60,
+      reserveTail: true,
+    },
   )
 })
 
@@ -934,6 +939,37 @@ test('a saved partially-visible anchor remains exact', () => {
     'an anchor whose row still intersects its restored viewport is preserved')
 })
 
+test('question-only tail reservation is never restored as durable reader state', () => {
+  const row = {
+    offsetTop: 500,
+    offsetHeight: 220,
+    dataset: { key: 'assistant-question' },
+  }
+  const liveMode = {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: 100,
+    reserveTail: true,
+  }
+  const scrollEl = {
+    clientHeight: 700,
+    querySelector(selector) {
+      return selector === '[data-key="assistant-question"]' ? row : null
+    },
+  }
+
+  assert.deepEqual(_modeForPersistence(liveMode, [], scrollEl), {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: 100,
+  })
+  assert.deepEqual(_validateSavedMode(liveMode, [], scrollEl), {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: 100,
+  })
+})
+
 test('the anchor invariant distinguishes content from layout reservation', () => {
   const row = { offsetHeight: 220 }
   assert.equal(_anchorModeIntersectsContent(
@@ -1275,6 +1311,38 @@ test('question-answer anchor gets no room when the latest user row is off-screen
     ),
     0,
     'an unreachable anchor clamps to conversation content instead',
+  )
+})
+
+test('question submission reserves the exact room that keeps its anchor reachable', () => {
+  const anchor = { offsetTop: 1200, offsetHeight: 220 }
+  const scrollEl = {
+    clientHeight: 600,
+    querySelector(selector) {
+      return selector === '[data-key="assistant-question"]' ? anchor : null
+    },
+  }
+  const mode = {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: 60,
+    reserveTail: true,
+  }
+  const listEl = { offsetHeight: 1400 }
+  const latestUser = {
+    offsetTop: 1100,
+    offsetHeight: 80,
+    dataset: { cid: 'c-1' },
+  }
+
+  assert.equal(
+    _computeSpacerH(scrollEl, listEl, latestUser, 600, mode),
+    340,
+  )
+  assert.equal(
+    _computeSpacerH(scrollEl, listEl, latestUser, 700, mode),
+    440,
+    'viewport growth adds exactly the room needed to preserve the anchor',
   )
 })
 
