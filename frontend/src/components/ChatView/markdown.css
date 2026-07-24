@@ -243,8 +243,6 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   min-width: 0;
   overflow-x: auto;
   overscroll-behavior-x: contain;
-  scroll-snap-type: x proximity;
-  scroll-padding-inline: 4px;
   scrollbar-width: none;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-x pan-y;
@@ -265,7 +263,6 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   min-width: 0;
   aspect-ratio: 4 / 3;
   overflow: hidden;
-  scroll-snap-align: start;
   border-radius: 10px;
   background: var(--surface);
 }
@@ -281,6 +278,19 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
 .md-image-gallery__item .md-image {
   border-radius: inherit;
   object-fit: cover;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+@media (pointer: fine) {
+  .md-image-gallery__rail {
+    cursor: grab;
+  }
+
+  .md-image-gallery__rail.is-dragging {
+    cursor: grabbing;
+    user-select: none;
+  }
 }
 
 .md-image-gallery__nav {

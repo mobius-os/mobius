@@ -15,14 +15,17 @@ function smoothBehavior() {
 /**
  * Compact, copy-friendly image filmstrip.
  *
- * mobius-ui:ImageRail — touch/trackpad scrolling is deliberately native. Do
- * not add pointer-move scroll emulation here: it removes mobile momentum and
- * competes with the chat's vertical scroll. Desktop buttons and Arrow keys are
- * the explicit non-gesture alternatives.
+ * mobius-ui:ImageRail — touch/trackpad scrolling is deliberately native so it
+ * keeps momentum and cooperates with the chat's vertical scroll. Mouse and pen
+ * get grab-to-scroll only after a horizontal gesture is established. Desktop
+ * buttons and Arrow keys remain the explicit non-gesture alternatives.
  */
 export default function ImageGallery({ images }) {
   const count = images.length
   const railRef = useRef(null)
+  const dragRef = useRef(null)
+  const suppressClickRef = useRef(false)
+  const suppressTimerRef = useRef(0)
   const [canPrevious, setCanPrevious] = useState(false)
   const [canNext, setCanNext] = useState(false)
   const [viewerKey, setViewerKey] = useState(null)
@@ -101,6 +104,55 @@ export default function ImageGallery({ images }) {
     if (viewerKey !== null && viewerIndex < 0) setViewerKey(null)
   }, [viewerIndex, viewerKey])
 
+  function beginPointerDrag(event) {
+    if (!event.isPrimary || event.pointerType === 'touch') return
+    if (event.pointerType === 'mouse' && event.button !== 0) return
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startScrollLeft: event.currentTarget.scrollLeft,
+      axis: null,
+      moved: false,
+      captured: false,
+    }
+  }
+
+  function movePointerDrag(event) {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    const deltaX = event.clientX - drag.startX
+    const deltaY = event.clientY - drag.startY
+    if (!drag.axis && Math.hypot(deltaX, deltaY) > 4) {
+      drag.axis = Math.abs(deltaX) > Math.abs(deltaY) ? 'x' : 'y'
+    }
+    if (drag.axis !== 'x') return
+    if (!drag.captured) {
+      drag.captured = true
+      event.currentTarget.setPointerCapture?.(event.pointerId)
+      event.currentTarget.classList.add('is-dragging')
+    }
+    drag.moved = true
+    event.preventDefault()
+    event.currentTarget.scrollLeft = drag.startScrollLeft - deltaX
+  }
+
+  function endPointerDrag(event) {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    dragRef.current = null
+    event.currentTarget.classList.remove('is-dragging')
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    if (!drag.moved) return
+    suppressClickRef.current = true
+    clearTimeout(suppressTimerRef.current)
+    suppressTimerRef.current = window.setTimeout(() => {
+      suppressClickRef.current = false
+    }, 0)
+  }
+
   return (
     <section
       className={`md-image-gallery md-image-gallery--${Math.min(count, 3)}`}
@@ -114,6 +166,16 @@ export default function ImageGallery({ images }) {
         tabIndex={0}
         onScroll={syncOverflow}
         onKeyDown={handleKeyDown}
+        onPointerDown={beginPointerDrag}
+        onPointerMove={movePointerDrag}
+        onPointerUp={endPointerDrag}
+        onPointerCancel={endPointerDrag}
+        onClickCapture={(event) => {
+          if (!suppressClickRef.current) return
+          suppressClickRef.current = false
+          event.preventDefault()
+          event.stopPropagation()
+        }}
       >
         {images.map((image, index) => (
           <div className="md-image-gallery__item" key={resolvedItems[index].key}>

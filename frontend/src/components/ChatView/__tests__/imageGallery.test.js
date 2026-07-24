@@ -80,12 +80,17 @@ test('prose ends one gallery run before a later image run', () => {
   )
 })
 
-test('the rail preserves native momentum instead of emulating touch scrolling', () => {
-  assert.doesNotMatch(gallerySource, /onPointerMove|scrollLeft\s*=/)
+test('the rail scrolls freely with native touch and mouse or pen grabbing', () => {
+  assert.match(gallerySource, /event\.pointerType === 'touch'\) return/)
+  assert.match(gallerySource, /drag\.axis = Math\.abs\(deltaX\)/)
+  assert.match(gallerySource, /if \(!drag\.captured\)/)
+  assert.match(gallerySource, /drag\.captured = true[\s\S]*setPointerCapture/)
+  assert.match(gallerySource, /scrollLeft = drag\.startScrollLeft - deltaX/)
+  assert.match(gallerySource, /onClickCapture/)
   assert.match(markdownCss, /touch-action:\s*pan-x pan-y/)
   assert.match(markdownCss, /-webkit-overflow-scrolling:\s*touch/)
-  assert.match(markdownCss, /scroll-snap-type:\s*x proximity/)
-  assert.doesNotMatch(markdownCss, /scroll-snap-type:\s*x mandatory/)
+  assert.doesNotMatch(markdownCss, /scroll-snap-type/)
+  assert.doesNotMatch(gallerySource, /md-image-gallery__dots/)
 })
 
 test('an image-only assistant reply stretches the gallery instead of collapsing', () => {
