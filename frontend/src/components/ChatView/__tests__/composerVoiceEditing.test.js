@@ -7,6 +7,9 @@ const chatViewSrc = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'u
 const changeHandler = inputBarSrc.match(
   /function handleTextareaChange\(e\) \{[\s\S]*?\n  \}/,
 )?.[0] || ''
+const historyMoveHandler = inputBarSrc.match(
+  /function applyHistoryMove\(historyMove\) \{[\s\S]*?\n    \}/,
+)?.[0] || ''
 
 test('manual textarea changes remain enabled while voice input is active', () => {
   assert.doesNotMatch(changeHandler, /listeningRef\?\.current\) return/,
@@ -20,4 +23,15 @@ test('manual textarea changes remain enabled while voice input is active', () =>
 
 test('ChatView connects manual voice edits to the voice-input session', () => {
   assert.match(chatViewSrc, /onManualVoiceEdit=\{acceptManualEdit\}/)
+})
+
+test('sent-message recall rebases live dictation before changing the draft', () => {
+  assert.match(historyMoveHandler,
+    /if \(listeningRef\?\.current\) \{[\s\S]*?onManualVoiceEdit\?\.\(historyMove\.value\)/,
+    'history recall must take the same voice-session ownership as typed edits')
+  assert.ok(
+    historyMoveHandler.indexOf('onManualVoiceEdit?.(historyMove.value)')
+      < historyMoveHandler.indexOf('onInputChange(historyMove.value)'),
+    'the voice baseline must update before the controlled composer value',
+  )
 })
