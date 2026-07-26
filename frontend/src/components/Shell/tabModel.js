@@ -37,19 +37,6 @@ export const SETTINGS_TAB_KEY = 'settings:settings'
 export function settingsTab() { return { kind: 'settings', id: SETTINGS_ID } }
 export function isSettingsTab(tab) { return !!tab && tab.kind === 'settings' }
 
-// The Notifications tab — the second takeover-class surface, with the exact
-// same contract as Settings: canonical single instance (fixed id, constant
-// key), tab in builder mode, full-screen takeover in single mode, and kept
-// out of the legacy `mobius-open-tabs` projection.
-export const NOTIFICATIONS_ID = 'notifications'
-export const NOTIFICATIONS_TAB_KEY = 'notifications:notifications'
-export function notificationsTab() {
-  return { kind: 'notifications', id: NOTIFICATIONS_ID }
-}
-export function isNotificationsTab(tab) {
-  return !!tab && tab.kind === 'notifications'
-}
-
 // Ids are stored as strings for stable React keys + sessionStorage. App ids
 // are re-coerced to Number in tabNavTarget — the ONLY correct nav shape (the
 // iframe LRU dedups on strict !==, so a string id would double-mount).
@@ -75,7 +62,6 @@ export function tabKey(tab) {
 // no `opts`.
 export function tabNavTarget(tab) {
   if (tab.kind === 'settings') return { view: 'settings' }
-  if (tab.kind === 'notifications') return { view: 'notifications' }
   return tab.kind === 'app'
     ? { view: 'canvas', opts: { appId: Number(tab.id) } }
     : { view: 'chat', opts: { chatId: tab.id } }

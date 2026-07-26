@@ -61,9 +61,8 @@ export function resolveInitialNav({
 
   // Seed HOME beneath an initial destination whose view is NOT chat — i.e. a
   // canvas (mini-app: the trap case, has back-sentinels + the restore-key loop)
-  // or a takeover view (settings, notifications). All leave activeView !==
-  // 'chat', so popping the seeded HOME is a genuine transition back to the
-  // chat surface.
+  // or settings. Both leave activeView !== 'chat', so popping the seeded HOME is
+  // a genuine transition back to the chat surface.
   //
   // We deliberately do NOT seed under any 'chat' destination — not plain home,
   // not a shell-reload into chat, and not a deep-linked SPECIFIC chat. A chat
@@ -72,9 +71,7 @@ export function resolveInitialNav({
   // and the seed would resolve to the chat you're already on — a dead Back press
   // that just delays the PWA exit. Backing out of a root chat exits the PWA,
   // which is the standard, pre-existing behavior.
-  const seedHome = dest.view === 'canvas'
-    || dest.view === 'settings'
-    || dest.view === 'notifications'
+  const seedHome = dest.view === 'canvas' || dest.view === 'settings'
 
   return {
     view: dest.view,

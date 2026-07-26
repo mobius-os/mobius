@@ -58,7 +58,7 @@ test('each pane holds one outgoing chat over one staging chat', () => {
   // the condition now also folds in a leaving pane during the exit beat (INV 9), so
   // match the leading clause rather than the exact full expression. The takeover
   // gate is the EFFECTIVE-mode `settingsOverlay` (finding F3), not the committed one.
-  assert.match(shell, /inert=\{takeoverOverlay \|\| role !== 'active'/,
+  assert.match(shell, /inert=\{settingsOverlay \|\| role !== 'active'/,
     'neither the held nor staging chat may accept interaction')
   assert.match(shell, /composerRequest=\{role === 'active' \? composerRequest : null\}/,
     'an inert staging composer must not consume a one-shot composer request')

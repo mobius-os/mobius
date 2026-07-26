@@ -5,6 +5,9 @@ import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
+import NotificationBell from '../NotificationBell/NotificationBell.jsx'
+import useNotificationCenter from '../NotificationBell/useNotificationCenter.js'
+import NotificationsView from '../NotificationsView/NotificationsView.jsx'
 import {
   api, apiFetch, jsonOrThrow, probeDeletion, BASE, clearAppRuntimeData,
   invalidateShellListCache,
@@ -15,6 +18,7 @@ import useNavigation, {
   deepLink,
 } from '../../hooks/useNavigation.js'
 import { replaceNavEntry } from '../../lib/navHistory.js'
+import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
@@ -24,11 +28,8 @@ import {
   chatMessagesQueryKey,
   chatQueries,
   modelQueries,
-  notificationQueries,
   ownerQueries,
 } from '../../hooks/queries.js'
-import NotificationBell from '../NotificationBell/NotificationBell.jsx'
-import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { appVersionKey } from '../../lib/appVersion.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal } from '../../lib/chatRunSignal.js'
@@ -120,7 +121,6 @@ const SHELL_RELOAD_RECHECK_MS = 6000
 // beat's Web-Animations `finished` promises, not a bare timer — so no BUILDER_ENTER
 // / BUILDER_EXIT Shell constants exist (exit-design v2; INV 7/14).
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
-const NotificationsView = lazy(() => import('../NotificationsView/NotificationsView.jsx'))
 
 export default function Shell() {
   const {
@@ -283,8 +283,7 @@ export default function Shell() {
     activeView,
     activeAppId,
     activeChatId,
-    drawerOpen, takeoverOverlayOpen, takeoverView, settingsOpenRaw,
-    notificationsOpenRaw, openDrawer, closeDrawer,
+    drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
     navTo, tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
@@ -347,13 +346,12 @@ export default function Shell() {
   }, [navigationOpen, persistentDrawer])
 
   // The COMMITTED-mode-gated overlay flag from the nav adapter — the DERIVATION
-  // INPUT to deriveContentVisibility only (finding F3). It counts any takeover
-  // (Settings or Notifications) wherever the COMMITTED world is single;
-  // deriveContentVisibility re-gates it by the EFFECTIVE mode and returns
-  // `takeoverOverlay`, which every PAINT gate reads. The render never uses
-  // `activeView === 'settings'` for pane suppression (that would hide every pane
-  // behind a builder takeover tab — the named risk).
-  const takeoverActive = takeoverOverlayOpen
+  // INPUT to deriveContentVisibility only (finding F3). It counts the takeover
+  // wherever the COMMITTED world is single; deriveContentVisibility re-gates it by
+  // the EFFECTIVE mode and returns `settingsOverlay`, which every PAINT gate reads.
+  // The render never uses `activeView === 'settings'` for pane suppression (that
+  // would hide every pane behind a builder Settings tab — the named risk).
+  const settingsActive = settingsOverlayOpen
   // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
   // exist). The logo itself is the persistent mode indicator and gesture surface;
   // there is deliberately no separate header control.
@@ -498,17 +496,13 @@ export default function Shell() {
   }, [immersiveActive])
   // HONEST EXIT DESTINATION (M2): the exit-plan classifier needs to know what the
   // SINGLE world will actually paint on completion, not just the slot the tree
-  // seeds. A suspended single-world takeover (takeoverView raw) paints that surface
-  // over the slot; a retained immersive request (immersiveAppId) solos the holder
-  // over the viewport. The classifier takes the destination TAB KEY (or null).
-  // Mirrored into refs so the toggle callback (stable identity, no dep churn) and
-  // the undo keydown handler (deps [dispatchWorkspace, mode]) both read the LIVE
-  // values without a stale closure or re-registering their listeners.
-  const takeoverDestinationKey = takeoverView === 'notifications'
-    ? tabModel.NOTIFICATIONS_TAB_KEY
-    : (takeoverView === 'settings' ? tabModel.SETTINGS_TAB_KEY : null)
-  const takeoverDestinationRef = useRef(takeoverDestinationKey)
-  takeoverDestinationRef.current = takeoverDestinationKey
+  // seeds. A suspended single-world takeover (settingsOpenRaw) paints Settings over
+  // the slot; a retained immersive request (immersiveAppId) solos the holder over
+  // the viewport. Mirrored into refs so the toggle callback (stable identity, no
+  // dep churn) and the undo keydown handler (deps [dispatchWorkspace, mode]) both
+  // read the LIVE values without a stale closure or re-registering their listeners.
+  const settingsDestinationRef = useRef(settingsOpenRaw)
+  settingsDestinationRef.current = settingsOpenRaw
   const immersiveHolderRef = useRef(immersiveAppId)
   immersiveHolderRef.current = immersiveAppId
 
@@ -522,11 +516,11 @@ export default function Shell() {
     if (!t?.presentation) return
     const live = transitionSignature({
       workspace, projection, contentRect,
-      takeoverDestination: takeoverDestinationKey,
+      settingsDestination: settingsOpenRaw,
       immersiveHolderId: immersiveAppId,
     })
     if (live !== t.presentation.snapshotSignature) mode.cancelBeat()
-  }, [workspace, projection, contentRect, takeoverDestinationKey, immersiveAppId, modeState, mode])
+  }, [workspace, projection, contentRect, settingsOpenRaw, immersiveAppId, modeState, mode])
 
   // The single derivation of what content the render paints and where (design
   // §2/§4/§5). Pure + memoized so the immersive-solo and Settings-overlay
@@ -534,7 +528,7 @@ export default function Shell() {
   // every dependent flag together.
   const contentVisibility = useMemo(
     () => deriveContentVisibility({
-      workspace, projection, takeoverOverlayOpen: takeoverActive,
+      workspace, projection, settingsOverlayOpen: settingsActive,
       immersiveActive, immersiveAppId,
       viewMode: effectiveViewMode, // 'panes' during a single-mode drag preview
       // World-reveal exit: paint the mounted destination beneath the deal (adds its
@@ -542,20 +536,17 @@ export default function Shell() {
       exitUnderlayKey: modeUnderlayKey,
       focusedPaneView: focusedPaneViewId != null,
     }),
-    [workspace, projection, takeoverActive, immersiveActive, immersiveAppId,
+    [workspace, projection, settingsActive, immersiveActive, immersiveAppId,
       effectiveViewMode, modeUnderlayKey, focusedPaneViewId],
   )
   const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
-  // The EFFECTIVE-mode-gated takeover flag (finding F3): true only when a takeover
-  // actually PAINTS — false in builder AND during a single-mode drag preview /
-  // exit beat (effectiveViewMode 'panes'). Suppression gates below read THIS
-  // (any-takeover); the per-view paint gates further split it by takeoverView.
-  // Neither reads the committed-gated `takeoverActive` (derivation INPUT only),
-  // so those transient windows paint the tiled world with the takeover suspended
-  // exactly as the derived flags assume. MOUNT keys off the raw per-view flags.
-  const takeoverOverlay = contentVisibility.takeoverOverlay
-  const settingsOverlay = takeoverOverlay && takeoverView === 'settings'
-  const notificationsOverlay = takeoverOverlay && takeoverView === 'notifications'
+  // The EFFECTIVE-mode-gated Settings takeover flag (finding F3): true only when the
+  // takeover actually PAINTS — false in builder AND during a single-mode drag
+  // preview / exit beat (effectiveViewMode 'panes'). Every PAINT gate below reads
+  // THIS, not the committed-gated `settingsActive` (which is only the derivation
+  // INPUT now), so those transient windows paint the tiled world with Settings
+  // suspended exactly as the derived flags assume. MOUNT keys off `settingsOpenRaw`.
+  const settingsOverlay = contentVisibility.settingsOverlay
   const workspaceChromeActive = contentVisibility.chromeActive
   // (v2: multiPaneRef / visibleLeavesRef are gone — handleToggleViewMode now builds
   // the whole latched plan from the live projection via deriveExit/EnterPlan, and the
@@ -580,6 +571,16 @@ export default function Shell() {
 
   const { loadTheme } = useTheme()
   const queryClient = useQueryClient()
+  const {
+    state: { open: notificationsOpen, unreadCount: notificationUnreadCount },
+    actions: {
+      toggle: toggleNotifications,
+      close: closeNotifications,
+      reconcile: reconcileNotifications,
+      onCreated: onNotificationCreated,
+    },
+    meta: { rootRef: notificationCenterRef, bellRef: notificationBellRef },
+  } = useNotificationCenter(queryClient)
   // Confirmed writes outrank offline-capable list reads. These session-scoped
   // tombstones filter every query completion (including an in-flight,
   // pre-delete NetworkFirst fallback) until a recovery succeeds.
@@ -634,46 +635,6 @@ export default function Shell() {
   // background. Shares the cache key, so the picker's own useQuery reuses it.
   modelQueries.registry.useQuery({ enabled: !!activeChatId })
   modelQueries.prefs.useQuery({ enabled: !!activeChatId })
-
-  // openAppWithIntent is created further down by useAppIntentNavigation; the
-  // notification row-click handler (declared here, fired long after mount)
-  // reaches the live instance through this ref, same pattern as navToRef.
-  const openAppWithIntentRef = useRef(null)
-
-  // Bell badge count. No polling: notification_created on the system SSE
-  // stream invalidates it, and reconcileSystemStateOnOpen refetches after a
-  // reconnect (a replay-free bus event lost while disconnected must not
-  // strand a stale badge).
-  const unreadQuery = notificationQueries.unreadCount.useQuery()
-  const unreadCount = unreadQuery.data ?? 0
-
-  // Seen-on-open (the bell contract): entering the notifications page marks
-  // the whole history read and clears the badge. Lives in Shell — the view
-  // stays mounted-hidden across world flips, so `activeView` transitions, not
-  // mounts, are the "opened" signal. Failure is safe by design: rows stay
-  // unread, the badge persists, and the next SSE event / reconnect / open
-  // retries the idempotent read-all.
-  useEffect(() => {
-    if (activeView !== 'notifications') return
-    let cancelled = false
-    api.notifications.readAll()
-      .then(() => {
-        if (cancelled) return
-        notificationQueries.unreadCount.invalidate(queryClient)
-        notificationQueries.list.invalidate(queryClient)
-      })
-      .catch(() => { /* offline — retried on the next open/SSE/reconnect */ })
-    return () => { cancelled = true }
-  }, [activeView, queryClient])
-
-  // Notification row → destination. The parser already fail-closed unknown
-  // shapes to null; canvas targets resolve slugs through the same
-  // openAppWithIntent path a push warm-tap uses.
-  const handleNotificationOpen = useCallback((nav) => {
-    if (!nav) return
-    if (nav.view === 'canvas') void openAppWithIntentRef.current?.(nav.app, nav.intent)
-    else if (nav.view === 'chat') navToRef.current('chat', { chatId: nav.chatId })
-  }, [])
 
   // Cache key from app.updated_at (server-side). Stable across reloads.
   const versionForApp = useCallback((id) => {
@@ -790,9 +751,7 @@ export default function Shell() {
     // mode showing the slot.
     const content = paneModel.activeContentRoute(workspaceStateRef.current.ws)
     return {
-      activeView: ['settings', 'notifications'].includes(activeViewRef.current)
-      ? activeViewRef.current
-      : content.view,
+      activeView: activeViewRef.current === 'settings' ? 'settings' : content.view,
       activeAppId: content.appId,
       activeChatId: content.chatId,
       drawerOpen: drawerOpenRef.current,
@@ -1247,7 +1206,7 @@ export default function Shell() {
   // the Settings tab active. Gated on the effective `settingsOverlay` (finding F3),
   // so a single-mode drag preview / exit beat can paint a stray Settings tab as a
   // pane. (Blind to a BACKGROUND Settings tab — not painted.)
-  const settingsVisibleAsTab = !takeoverOverlay
+  const settingsVisibleAsTab = !settingsOverlay
     && projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === SETTINGS_KEY)
   // MOUNT (finding F3): keyed off the RAW suspended overlay intent, NOT the
   // committed/effective PAINT flag, so SettingsView stays mounted-hidden across a
@@ -1264,23 +1223,6 @@ export default function Shell() {
   // (fullBleedKey === settings key).
   const settingsFullBleed = !settingsPaned
     && (settingsOverlay || (settingsVisibleAsTab && SETTINGS_KEY === fullBleedKey))
-  // ── The ONE Notifications wrapper — the Settings gates' exact twin ────────
-  // Same mount-identity contract: one stable NotificationsView element that is
-  // paned as a visible builder tab, full-bleed under the takeover overlay, and
-  // mounted-hidden (raw flag) across world flips so its scroll/pagination state
-  // survives.
-  const NOTIFICATIONS_KEY = tabModel.NOTIFICATIONS_TAB_KEY
-  const notificationsVisibleAsTab = !takeoverOverlay
-    && projection.visibleLeaves.some(
-      id => workspace.panes[id]?.activeTabKey === NOTIFICATIONS_KEY,
-    )
-  const notificationsMounted = notificationsOpenRaw || notificationsVisibleAsTab
-  const notificationsPaned = (workspaceChromeActive && notificationsVisibleAsTab)
-    ? visibleTabRects.get(NOTIFICATIONS_KEY)
-    : null
-  const notificationsFullBleed = !notificationsPaned
-    && (notificationsOverlay
-      || (notificationsVisibleAsTab && NOTIFICATIONS_KEY === fullBleedKey))
   // focusedActiveKey / fullBleedKey / visibleAppIds are derived once by
   // deriveContentVisibility above: focusedActiveKey drives the AppCanvas
   // focused-pane-only `active` prop (insets + immersive holder); fullBleedKey is
@@ -1293,14 +1235,14 @@ export default function Shell() {
   // tests (design §2 M13, finding D-iii).
   const visibleChatIds = useMemo(() => {
     const set = new Set()
-    if (takeoverOverlay) return set
+    if (settingsOverlay) return set
     for (const paneId of projection.visibleLeaves) {
       const pane = workspace.panes[paneId]
       const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
       if (active && active.kind === 'chat') set.add(String(active.id))
     }
     return set
-  }, [takeoverOverlay, workspace, projection])
+  }, [settingsOverlay, workspace, projection])
   const visibleChatIdsRef = useRef(visibleChatIds)
   useEffect(() => { visibleChatIdsRef.current = visibleChatIds }, [visibleChatIds])
   // The flat, chatId-sorted set of visible CHAT panes to mount as PaneChatViews
@@ -1345,7 +1287,7 @@ export default function Shell() {
   // without a remount (two-worlds design).
   const visibleChatKeys = useMemo(() => {
     const set = new Set()
-    if (takeoverOverlay) return set
+    if (settingsOverlay) return set
     if (single) {
       if (fullBleedKey && fullBleedKey.startsWith('chat:')) set.add(fullBleedKey)
       return set
@@ -1358,7 +1300,7 @@ export default function Shell() {
     // World-reveal exit: paint the (tree-absent) underlay chat beneath the deal.
     if (modeUnderlayKey && modeUnderlayKey.startsWith('chat:')) set.add(modeUnderlayKey)
     return set
-  }, [single, takeoverOverlay, fullBleedKey, projection, workspace, modeUnderlayKey])
+  }, [single, settingsOverlay, fullBleedKey, projection, workspace, modeUnderlayKey])
 
   // Last chat that reached a stable painted frame in each visible pane. On a
   // chat-tab change, keep that outgoing ChatView mounted as an inert cover while
@@ -1488,7 +1430,6 @@ export default function Shell() {
   }, [apps])
   const labelForTab = useCallback((tab) => {
     if (tab.kind === 'settings') return 'Settings'
-    if (tab.kind === 'notifications') return 'Notifications'
     if (tab.kind === 'chat') return chatById.get(tab.id)?.title || 'Chat'
     return appById.get(tab.id)?.name || 'App'
   }, [chatById, appById])
@@ -1650,12 +1591,12 @@ export default function Shell() {
         workspace: settled, projection, contentRect,
         // M2: reveal to Settings / classify immersive instant, not the slot the
         // takeover or immersive-solo covers at completion.
-        takeoverDestination: takeoverDestinationRef.current,
+        settingsDestination: settingsDestinationRef.current,
         immersiveHolderId: immersiveHolderRef.current,
       })
       : deriveEnterPlan({
         workspace: settled, projection, contentRect,
-        takeoverDestination: takeoverDestinationRef.current,
+        settingsDestination: settingsDestinationRef.current,
         immersiveHolderId: immersiveHolderRef.current,
       })
     // The honest `cause` ('hold'|'swipe'|'keyboard') threads from the caller;
@@ -1734,14 +1675,14 @@ export default function Shell() {
               workspace: undoSlot.ws,
               projection: paneModel.projectLayout(undoSlot.ws, scene.mode, scene.contentRect),
               contentRect: scene.contentRect,
-              takeoverDestination: takeoverDestinationRef.current,
+              settingsDestination: settingsDestinationRef.current,
               immersiveHolderId: immersiveHolderRef.current,
             })
             : deriveExitPlan({
               workspace: wsState.ws, projection: scene.projection, contentRect: scene.contentRect,
               // M2: same honest-destination classification for an undo that exits
               // builder — Settings/immersive still own the single world it lands in.
-              takeoverDestination: takeoverDestinationRef.current,
+              settingsDestination: settingsDestinationRef.current,
               immersiveHolderId: immersiveHolderRef.current,
             })
           mode.undo({ restoredMode, presentation })
@@ -2291,7 +2232,15 @@ export default function Shell() {
     setAppIntents,
     navToRef,
   })
-  openAppWithIntentRef.current = openAppWithIntent
+
+  const handleNotificationOpen = useCallback((target) => {
+    closeNotifications()
+    if (target?.view === 'canvas') {
+      void openAppWithIntent(target.app, target.intent)
+    } else if (target?.view === 'chat') {
+      navToRef.current('chat', { chatId: target.chatId })
+    }
+  }, [closeNotifications, openAppWithIntent])
 
   const coldDeepLinkHandledRef = useRef(false)
   useEffect(() => {
@@ -2789,20 +2738,12 @@ export default function Shell() {
       // producer logs the diagnostic and retries; an explicit operation such
       // as a platform update reports its own failure where it was initiated.
     } else if (ev.type === 'notification_created') {
-      // Replay-free badge nudge from notify_owner (payload is {type, id} only —
-      // the row is the durable truth). Refetch the count + history; if the
-      // owner is READING the notifications page right now, seen-on-open means
-      // the new arrival is immediately read (same contract as opening).
-      notificationQueries.unreadCount.invalidate(queryClient)
-      notificationQueries.list.invalidate(queryClient)
-      if (activeViewRef.current === 'notifications') {
-        api.notifications.readAll()
-          .then(() => notificationQueries.unreadCount.invalidate(queryClient))
-          .catch(() => { /* offline — the badge persists; retried on reconnect */ })
-      }
+      // The event is only a nudge; the durable list/count remain authoritative.
+      // Keeping this behind the notification-center interface prevents the
+      // shell event switch from learning preview implementation details.
+      onNotificationCreated()
     }
   }, [
-    queryClient,
     // Scalar state removed: shell_rebuilt now reads from refs (activeViewRef,
     // activeAppIdRef, activeChatIdRef, drawerOpenRef) so stale closure values
     // can't be serialized. Refs themselves don't need to be in deps (they're
@@ -2811,7 +2752,7 @@ export default function Shell() {
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished,
     markStreamingEnd, markStreamingStart,
-    placeInWorkspace, refreshApps, refreshChats, warmAppCode,
+    onNotificationCreated, placeInWorkspace, refreshApps, refreshChats, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for
@@ -2825,10 +2766,7 @@ export default function Shell() {
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_created events.
   const reconcileSystemStateOnOpen = useCallback(() => {
-    // A notification_created lost while disconnected is reconciled here, the
-    // same posture as the app/chat lists: refetch the durable truth on every
-    // (re)connect instead of trusting the replay-free bus.
-    notificationQueries.unreadCount.invalidate(queryClient)
+    reconcileNotifications()
     void Promise.all([
       invalidateShellListCache('apps'),
       invalidateShellListCache('chats'),
@@ -2839,7 +2777,7 @@ export default function Shell() {
       refreshChats()
     })
   }, [
-    queryClient,
+    reconcileNotifications,
     reconcileDeletedAppIdentities,
     reconcileDeletedChatIdentities,
     refreshApps,
@@ -2957,16 +2895,9 @@ export default function Shell() {
       // container, not the global.) sw.js fires this on
       // notificationclick when an existing client is focused.
       if (e.data?.type !== 'notification-click') return
-      // ONE parser for every in-page consumer of a notification target (the
-      // sibling of the page's row click — lib/notificationTarget.js), so warm
-      // taps and row clicks can never drift. The SW already ran _safeTarget,
-      // but the shared parser re-validates: targets are app-token-writable
-      // and must fail closed at every boundary, not just the outermost one.
-      const parsed = parseNotificationTarget(e.data.target)
-      if (!parsed) return
-      if (parsed.view === 'canvas') void openAppWithIntent(parsed.app, parsed.intent)
-      else if (parsed.view === 'chat') navTo('chat', { chatId: parsed.chatId })
-      else if (parsed.view === 'notifications') navTo('notifications')
+      const target = parseNotificationTarget(e.data.target)
+      if (target?.view === 'canvas') void openAppWithIntent(target.app, target.intent)
+      else if (target?.view === 'chat') navTo('chat', { chatId: target.chatId })
     }
 
     window.addEventListener('message', onMessage)
@@ -3580,22 +3511,21 @@ export default function Shell() {
               Offline
             </span>
           )}
-          {/* Shared header markup — the bell is identical on desktop and
-              mobile by construction. A TOGGLE: opening is an ordinary navTo
-              (history/Back and the builder-tab treatment come free); tapping
-              it while the page is active dismisses through the SAME history
-              edge that opening pushed — a real pop, never a new push, so no
-              dead Back entry. In builder mode the pop refocuses the previous
-              route and the canonical notifications tab simply stays in its
-              strip (single instance preserved; the next open re-focuses it). */}
-          <NotificationBell
-            unreadCount={unreadCount}
-            active={activeView === 'notifications'}
-            onClick={() => {
-              if (activeView === 'notifications') window.history.back()
-              else navTo('notifications')
-            }}
-          />
+          <div ref={notificationCenterRef} className="notification-center">
+            <NotificationBell
+              buttonRef={notificationBellRef}
+              unreadCount={notificationUnreadCount}
+              active={notificationsOpen}
+              onClick={toggleNotifications}
+            />
+            {notificationsOpen && (
+              <NotificationsView
+                active
+                onClose={closeNotifications}
+                onOpenTarget={handleNotificationOpen}
+              />
+            )}
+          </div>
         </div>
       </header>
 
@@ -3817,7 +3747,7 @@ export default function Shell() {
           const fullBleed = !underlay && !paned && paneActiveKey === fullBleedKey
           const motion = isActiveLayer ? wrapperMotion(paneActiveKey) : null
           const tabPanel = role !== 'held' && paned
-          const handoffClass = !takeoverOverlay && role !== 'active'
+          const handoffClass = !settingsOverlay && role !== 'active'
             ? ` shell__chat-view--${role}`
             : ''
           const posStyle = paned ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h } : null
@@ -3840,8 +3770,8 @@ export default function Shell() {
               style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
               // Inert while covered/handing-off OR while participating in / underlying
               // the exit beat (INV 9 inert beat).
-              inert={takeoverOverlay || role !== 'active' || (modeBeatActive && (!!motion || underlay))}
-              aria-hidden={takeoverOverlay || role !== 'active' ? 'true' : undefined}
+              inert={settingsOverlay || role !== 'active' || (modeBeatActive && (!!motion || underlay))}
+              aria-hidden={settingsOverlay || role !== 'active' ? 'true' : undefined}
               onPointerDownCapture={paned && role === 'active' && !modeBeatActive
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId })
                 : undefined}
@@ -3933,59 +3863,6 @@ export default function Shell() {
                 onThemeChange={loadTheme}
                 onOpenChat={selectChat}
                 focusTarget={settingsFocusTarget}
-              />
-            </Suspense>
-          </div>
-          )
-        })()}
-        {/* Notifications surface — the Settings wrapper's exact twin (ONE
-            stable element, paned as a builder tab, full-bleed under the
-            takeover overlay, keyed for identity across the conversion). */}
-        {notificationsMounted && (() => {
-          const notifUnderlay = isUnderlay(NOTIFICATIONS_KEY)
-          const notifMotion = notifUnderlay ? null : wrapperMotion(NOTIFICATIONS_KEY)
-          const notifPos = (!notifUnderlay && notificationsPaned)
-            ? {
-              top: notificationsPaned.y,
-              left: notificationsPaned.x,
-              width: notificationsPaned.w,
-              height: notificationsPaned.h,
-            }
-            : null
-          const notifTabPanel = !notifUnderlay && notificationsPaned
-          return (
-          <div
-            key="notifications"
-            id={notifTabPanel
-              ? panePanelDomId(notificationsPaned.paneId, NOTIFICATIONS_KEY)
-              : undefined}
-            role={notifTabPanel ? 'tabpanel' : undefined}
-            aria-labelledby={notifTabPanel
-              ? paneTabDomId(notificationsPaned.paneId, NOTIFICATIONS_KEY)
-              : undefined}
-            data-tab-key={(!notifUnderlay && notificationsPaned) ? NOTIFICATIONS_KEY : undefined}
-            data-mode-motion={notifMotion ? notifMotion.motion : undefined}
-            className={notifUnderlay
-              ? 'shell__view shell__view--exit-underlay shell__settings-view shell__notifications-view'
-              : (notificationsPaned
-                ? 'shell__view shell__view--paned shell__settings-view shell__notifications-view'
-                : `shell__view shell__settings-view shell__notifications-view ${notificationsFullBleed ? 'shell__view--active' : ''}`)}
-            style={notifMotion
-              ? { ...(notifPos || {}), ...notifMotion.vars }
-              : (notifPos || undefined)}
-            inert={(modeBeatActive && (!!notifMotion || notifUnderlay)) || undefined}
-            onPointerDownCapture={notificationsPaned && !notifUnderlay && !modeBeatActive
-              ? () => dispatchWorkspace({ type: 'FOCUS', paneId: notificationsPaned.paneId })
-              : undefined}
-          >
-            <Suspense fallback={(
-              <div className="shell__settings-loading" role="status" aria-label="Loading notifications">
-                <span className="shell__settings-loading-dot" aria-hidden="true" />
-              </div>
-            )}>
-              <NotificationsView
-                active={activeView === 'notifications'}
-                onOpenTarget={handleNotificationOpen}
               />
             </Suspense>
           </div>

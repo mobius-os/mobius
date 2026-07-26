@@ -863,10 +863,6 @@ function _safeTarget(raw) {
           : `/shell/?app=${app}`
       }
       if (chat && /^[A-Za-z0-9_-]+$/.test(chat)) return `/shell/?chat=${chat}`
-      // The notifications page (bell) — the only accepted `view` value. Kept
-      // in lockstep with lib/notificationTarget.js (the in-page sibling
-      // parser); anything else still normalizes to /shell/.
-      if (params.get('view') === 'notifications') return '/shell/?view=notifications'
     } catch { /* fall through */ }
     return '/shell/'
   }

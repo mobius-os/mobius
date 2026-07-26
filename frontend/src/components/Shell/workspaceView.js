@@ -2,11 +2,10 @@
 //
 // The renderer positions a flat, never-reparented set of content wrappers into
 // pane rectangles. WHICH wrapper is painted, WHERE, and whether the pane chrome
-// shows are all functions of the projection plus two overlay states — the
-// takeover (Settings/Notifications) and immersive. This module is that
-// function, pulled out of Shell.jsx so the two overlay branches (especially
-// immersive-solo, which had no multi-pane coverage) are unit-testable without
-// a DOM.
+// shows are all functions of the projection plus two overlay states — Settings
+// and immersive. This module is that function, pulled out of Shell.jsx so the
+// two overlay branches (especially immersive-solo, which had no multi-pane
+// coverage) are unit-testable without a DOM.
 //
 // Immersive solos its pane over the WHOLE workspace (design §4/§9): the chrome
 // is hidden, the holder app is painted full-bleed over the entire content box,
@@ -178,20 +177,18 @@ function visibleLeafDescriptors(workspace, projection) {
 }
 
 // The effective destination single mode will ACTUALLY paint on completion, given the
-// tree's slot plus the two live overlay states (M2). A suspended takeover (Settings
-// or Notifications) paints full-bleed OVER the slot (reveal to that surface); a
-// retained immersive holder that solos the exit slot is an INSTANT destination
-// (full-viewport, header gone) the beat cannot honestly latch. Both the exit PLAN
-// and the exit SIGNATURE classify through THIS one function from the SAME input, so
-// an overlay input can never change the plan's destination without also changing its
-// invalidation key (INV 10 / H2). `takeoverDestination` is the destination TAB KEY
-// (tabModel.SETTINGS_TAB_KEY / NOTIFICATIONS_TAB_KEY) or null.
-function classifyExitDestination({ workspace, takeoverDestination = null, immersiveHolderId = null }) {
+// tree's slot plus the two live overlay states (M2). A suspended Settings takeover
+// paints full-bleed OVER the slot (reveal to Settings); a retained immersive holder
+// that solos the exit slot is an INSTANT destination (full-viewport, header gone) the
+// beat cannot honestly latch. Both the exit PLAN and the exit SIGNATURE classify
+// through THIS one function from the SAME input, so an overlay input can never change
+// the plan's destination without also changing its invalidation key (INV 10 / H2).
+function classifyExitDestination({ workspace, settingsDestination = false, immersiveHolderId = null }) {
   const slotTarget = exitTargetKey(workspace)
-  const immersiveInstant = !takeoverDestination
+  const immersiveInstant = !settingsDestination
     && immersiveHolderId != null
     && slotTarget === `app:${immersiveHolderId}`
-  const target = takeoverDestination ?? slotTarget
+  const target = settingsDestination ? tabModel.SETTINGS_TAB_KEY : slotTarget
   return { target, immersiveInstant }
 }
 
@@ -226,7 +223,7 @@ function byVisualOrder(a, b) {
 
 // deriveExitPlan(input) → the latched exit plan, or null when the beat is instant (an
 // empty tree — nothing painted to deal out — or an immersive-instant destination).
-// `input` is { workspace, projection, contentRect, takeoverDestination?,
+// `input` is { workspace, projection, contentRect, settingsDestination?,
 // immersiveHolderId? }; the SAME object is fed to transitionSignature so the plan
 // and its invalidation key can never disagree about the destination (INV 10 / H2).
 //
@@ -239,7 +236,7 @@ function byVisualOrder(a, b) {
 //     for a legacy Settings-focused absent-slot). Never promote the focused pane to
 //     manufacture a correspondence single mode will not paint.
 export function deriveExitPlan(input) {
-  const { workspace, projection, contentRect, takeoverDestination = null } = input
+  const { workspace, projection, contentRect, settingsDestination = false } = input
   const leaves = visibleLeafDescriptors(workspace, projection)
   if (leaves.length === 0) return null // empty tree → instant flip, no descriptor
   // HONEST DESTINATION (M2): what single mode will ACTUALLY paint on completion — the
@@ -253,14 +250,14 @@ export function deriveExitPlan(input) {
   //     completion, so classify it instant (return null).
   const { target, immersiveInstant } = classifyExitDestination(input)
   if (immersiveInstant) return null
-  //   - A suspended takeover paints full-bleed OVER the slot → world reveal to the
-  //     mounted-hidden takeover surface (part-2 F3), never the slot the takeover
-  //     then covers (target = the takeover tab key). modeMachine stays ignorant of
-  //     what the takeover means; the underlayKey just names the destination wrapper.
+  //   - A suspended Settings takeover paints full-bleed OVER the slot → world reveal
+  //     to the mounted-hidden Settings surface (part-2 F3), never the slot the
+  //     takeover then covers (target = SETTINGS_TAB_KEY). modeMachine stays ignorant
+  //     of what Settings means; the underlayKey just names the destination wrapper.
   const dest = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
-  // A takeover destination is always a world reveal (never a promote), even if a
-  // builder takeover tab happens to be a visible leaf.
-  const promoteLeaf = (target && !takeoverDestination) ? leaves.find(l => l.activeKey === target) : null
+  // A Settings destination is always a world reveal (never a promote), even if a
+  // builder Settings tab happens to be a visible leaf.
+  const promoteLeaf = (target && !settingsDestination) ? leaves.find(l => l.activeKey === target) : null
 
   const participants = []
   const completionNames = new Set()
@@ -368,18 +365,16 @@ export function deriveEnterPlan(input) {
   }
 }
 
-// deriveContentVisibility({ workspace, projection, takeoverOverlayOpen,
+// deriveContentVisibility({ workspace, projection, settingsOverlayOpen,
 // immersiveActive, immersiveAppId, viewMode, exitUnderlayKey }) → the render flags.
 //
-// `takeoverOverlayOpen` is ONLY the full-workspace TAKEOVER overlay (Settings or
-// Notifications; single mode / flag off) — NOT "the focused content is a takeover
-// view". In builder mode each takeover is an ordinary pane tab, so this stays
-// FALSE and sibling panes keep painting; the takeover wrapper is positioned into
-// its pane rect like any chat/app content. Conflating the two would hide every
-// pane in builder (the named risk), so this function is deliberately blind to
-// takeover tabs and only sees the overlay boolean. WHICH takeover paints is
-// Shell's business (it derives per-view paint gates from takeoverView); this
-// module only decides that the panes are covered.
+// `settingsOverlayOpen` is ONLY the full-workspace Settings TAKEOVER overlay
+// (single mode / flag off) — NOT "the focused content is Settings". In builder
+// mode Settings is an ordinary pane tab, so this stays FALSE and sibling panes
+// keep painting; the Settings wrapper is positioned into its pane rect like any
+// chat/app content. Conflating the two would hide every pane in builder (the
+// named risk), so this function is deliberately blind to the Settings tab and
+// only sees the overlay boolean.
 //
 // `immersiveActive` already means the holder app is the focused pane's active
 // canvas (lib/immersive.isImmersiveActive); `immersiveAppId` is that holder.
@@ -394,17 +389,17 @@ export function deriveEnterPlan(input) {
 // takeover, preserving that invariant without making a game's explicit Focus
 // control silently inert whenever the owner happens to be in Builder mode.
 export function deriveContentVisibility({
-  workspace, projection, takeoverOverlayOpen, immersiveActive, immersiveAppId,
+  workspace, projection, settingsOverlayOpen, immersiveActive, immersiveAppId,
   viewMode = 'panes', exitUnderlayKey = null, focusedPaneView = false,
 }) {
   const multiPane = projection.visibleLeaves.length >= 2
   const builder = viewMode !== 'single'
-  // A takeover is structurally inert in builder. Immersive is a temporary overlay
+  // Settings is structurally inert in builder. Immersive is a temporary overlay
   // lease and may cover either world without mutating it.
-  const takeoverOverlay = !!takeoverOverlayOpen && !builder
+  const settingsOverlay = !!settingsOverlayOpen && !builder
   const immersive = !!immersiveActive && immersiveAppId != null
   // Single view-mode collapse is active only when no takeover already owns the box.
-  const single = !builder && !takeoverOverlay && !immersive
+  const single = !builder && !settingsOverlay && !immersive
   // TWO-WORLDS (codex-modecontext-design.md): in SINGLE mode the active content is
   // the persisted single-screen SLOT — the last item opened IN single mode — NOT
   // the focused builder pane. The slot may be absent from the pane tree entirely;
@@ -429,14 +424,14 @@ export function deriveContentVisibility({
   // paned/full-bleed surface, driven off this key). Immersive uses the holder key.
   // A null slot keeps focusedActiveKey NULL so navigation + AppCanvas never pretend
   // the New Chat landing is a chat/app tab (the landing is not a tab).
-  const focusedActiveKey = takeoverOverlay
+  const focusedActiveKey = settingsOverlay
     ? null
     : (immersive ? `app:${immersiveAppId}` : (single ? slotKey : focusedPaneKey))
   // Pane chrome (strips + dividers) whenever the box is TILED: ≥2 visible leaves
   // and no takeover. A focused builder projection retains its single pane's strip;
   // single mode or an immersive lease paints one surface over the whole box.
   const chromeActive = (multiPane || (builder && focusedPaneView))
-    && !takeoverOverlay && !immersive && !single
+    && !settingsOverlay && !immersive && !single
   // The single wrapper painted full-bleed. Null ONLY in the tiled multi-pane render;
   // the New Chat landing key for an empty single slot; the focused/holder key
   // otherwise. Distinct from focusedActiveKey (which stays null for the empty slot)
@@ -452,7 +447,7 @@ export function deriveContentVisibility({
   // visible pane's active app. A builder Settings tab is NOT an app, so it
   // contributes no id here — sibling app panes keep painting.
   let visibleAppIds
-  if (takeoverOverlay) visibleAppIds = new Set()
+  if (settingsOverlay) visibleAppIds = new Set()
   else if (immersive) visibleAppIds = new Set([String(immersiveAppId)])
   else if (single) {
     // The single world paints ONLY the slot; if the slot is an app, that one app
@@ -479,14 +474,14 @@ export function deriveContentVisibility({
   // takeover owns the box. In an ordinary builder world and single-mode they
   // paint; the renderer additionally gates each NON-focused single-mode chat pane
   // off via the `single` flag, the chat analogue of visibleAppIds.
-  const chatPanesVisible = !takeoverOverlay && !immersive
+  const chatPanesVisible = !settingsOverlay && !immersive
   return {
-    // `takeoverOverlay` is the EFFECTIVE-mode-gated takeover flag (finding F3): it
+    // `settingsOverlay` is the EFFECTIVE-mode-gated takeover flag (finding F3): it
     // is the one honest "is the Settings takeover painting NOW" signal — false in
     // builder AND during a single-mode drag preview / exit beat (viewMode='panes').
     // Shell's PAINT gates read THIS, not the committed-gated nav flag, so the tiled
     // world paints with the takeover suspended exactly as the flags above assume.
     multiPane, single, focusedActiveKey, chromeActive, fullBleedKey, visibleAppIds,
-    chatPanesVisible, takeoverOverlay, exitUnderlayKey,
+    chatPanesVisible, settingsOverlay, exitUnderlayKey,
   }
 }

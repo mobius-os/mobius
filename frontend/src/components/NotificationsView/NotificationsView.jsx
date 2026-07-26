@@ -3,6 +3,7 @@ import AppWindow from 'lucide-react/dist/esm/icons/app-window.mjs'
 import BotMessageSquare from 'lucide-react/dist/esm/icons/bot-message-square.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
 import Settings2 from 'lucide-react/dist/esm/icons/settings-2.mjs'
+import X from 'lucide-react/dist/esm/icons/x.mjs'
 import { notificationQueries } from '../../hooks/queries.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { formatRelativeTime, iconKindForSource } from './notificationsModel.js'
@@ -16,23 +17,33 @@ const ICONS = {
   default: Bell,
 }
 
-// The notifications page — a takeover-class view rendered by Shell exactly
-// like SettingsView (full-screen takeover in single mode, pane tab in
-// builder). TRUST: `title`/`body` are app-token-writable and render as plain
-// text only (React escaping); the row `icon` field is deliberately never
-// rendered; row clicks go through parseNotificationTarget, which fails closed
-// to null → the row simply isn't clickable.
-export default function NotificationsView({ active = false, onOpenTarget }) {
-  const {
-    data, isLoading, isError,
-    hasNextPage, isFetchingNextPage, fetchNextPage,
-  } = notificationQueries.list.useQuery({ enabled: active })
-  const rows = (data?.pages ?? []).flat()
+// A deliberately small shell preview, not a new navigation world. TRUST:
+// app-authored title/body stay plain text, app-authored icon URLs are ignored,
+// and targets pass through the fail-closed shared parser before navigation.
+export default function NotificationsView({ active = false, onClose, onOpenTarget }) {
+  const { data, isLoading, isError } = notificationQueries.list.useQuery({ enabled: active })
+  const rows = data ?? []
 
   return (
-    <div className="notifications">
+    <section
+      id="notification-preview"
+      className="notifications"
+      aria-labelledby="notification-preview-title"
+    >
+      <div className="notifications__header">
+        <h2 id="notification-preview-title" className="notifications__title">
+          Notifications
+        </h2>
+        <button
+          type="button"
+          className="notifications__close"
+          aria-label="Close notifications"
+          onClick={onClose}
+        >
+          <X size={18} aria-hidden="true" />
+        </button>
+      </div>
       <div className="notifications__content">
-        <h1 className="notifications__title">Notifications</h1>
         {isLoading && (
           <p className="notifications__hint" role="status">Loading…</p>
         )}
@@ -44,7 +55,7 @@ export default function NotificationsView({ active = false, onOpenTarget }) {
         {!isLoading && !isError && rows.length === 0 && (
           <div className="notifications__empty">
             <Bell size={28} aria-hidden="true" />
-            <p>Nothing yet. Updates from your apps and agents land here.</p>
+            <p>Updates from your apps and agents will appear here.</p>
           </div>
         )}
         <ul className="notifications__list">
@@ -87,17 +98,7 @@ export default function NotificationsView({ active = false, onOpenTarget }) {
             )
           })}
         </ul>
-        {hasNextPage && (
-          <button
-            type="button"
-            className="notifications__more"
-            disabled={isFetchingNextPage}
-            onClick={() => fetchNextPage()}
-          >
-            {isFetchingNextPage ? 'Loading…' : 'Load older'}
-          </button>
-        )}
       </div>
-    </div>
+    </section>
   )
 }

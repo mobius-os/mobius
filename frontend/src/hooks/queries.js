@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
 
@@ -392,35 +392,24 @@ export const ownerQueries = {
   },
 }
 
-// ── Notifications (bell badge + page) ────────────────────────────────────────
+// ── Notifications (bell badge + lightweight preview) ─────────────────────────
 // No polling anywhere: the `notification_created` system-SSE event invalidates
 // the unread count (Shell.handleSystemEvent), and the SSE reconnect hook
 // reconciles anything missed while disconnected — the same posture as apps.
 const notificationsListKey = ['notifications', 'list']
 const notificationsUnreadKey = ['notifications', 'unread-count']
-const NOTIFICATIONS_PAGE_SIZE = 30
+const NOTIFICATIONS_PREVIEW_SIZE = 8
 
-async function fetchNotificationsPage({ pageParam = null } = {}) {
-  const res = await api.notifications.list({
-    before: pageParam || undefined,
-    limit: NOTIFICATIONS_PAGE_SIZE,
-  })
+async function fetchNotificationsPreview() {
+  const res = await api.notifications.list({ limit: NOTIFICATIONS_PREVIEW_SIZE })
   const data = await jsonOrThrow(res, 'notifications fetch failed:')
   return Array.isArray(data) ? data : []
 }
 
 function useNotificationsListQuery({ enabled = true } = {}) {
-  return useInfiniteQuery({
+  return useQuery({
     queryKey: notificationsListKey,
-    queryFn: fetchNotificationsPage,
-    initialPageParam: null,
-    // A short page means the history is exhausted; a full page's last row id
-    // is the `before` cursor for the next one.
-    getNextPageParam: (lastPage) => (
-      lastPage.length === NOTIFICATIONS_PAGE_SIZE
-        ? lastPage[lastPage.length - 1].id
-        : undefined
-    ),
+    queryFn: fetchNotificationsPreview,
     enabled,
   })
 }
@@ -443,7 +432,7 @@ function useUnreadCountQuery({ enabled = true } = {}) {
 export const notificationQueries = {
   list: {
     key: notificationsListKey,
-    fetch: fetchNotificationsPage,
+    fetch: fetchNotificationsPreview,
     useQuery: useNotificationsListQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: notificationsListKey }),
   },

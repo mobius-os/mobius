@@ -116,12 +116,6 @@ if [[ ! "$min_free_gb" =~ ^[0-9]+$ ]]; then
 fi
 docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
 disk_path="${docker_root:-$ROOT}"
-# Docker Desktop (macOS/Windows) reports the VM-internal root
-# (/var/lib/docker), which does not exist on the host — df would abort the
-# whole run under `set -e`. Fall back to the checkout's disk: on Docker
-# Desktop the VM disk image lives on the same volume, so the free-space
-# signal stays honest.
-[[ -d "$disk_path" ]] || disk_path="$ROOT"
 available_kb="$(df -Pk "$disk_path" | awk 'NR == 2 {print $4}')"
 minimum_kb="$((min_free_gb * 1024 * 1024))"
 if (( available_kb < minimum_kb )); then

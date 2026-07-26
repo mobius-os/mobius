@@ -31,7 +31,7 @@ test('single-pane app: no chrome, holder full-bleed, that app visible', () => {
   const ws = paneModel.seedFromFlatTabs([makeTab('app', '42')])
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
   })
   assert.equal(v.multiPane, false)
   assert.equal(v.chromeActive, false)
@@ -44,7 +44,7 @@ test('multi-pane, no overlay: chrome on, no full-bleed, both actives visible', (
   const ws = twoPaneChatAndApp()
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
   })
   assert.equal(v.multiPane, true)
   assert.equal(v.chromeActive, true)
@@ -68,7 +68,7 @@ test('focused pane view is a reversible presentation projection, not a tree rewr
 
   const v = deriveContentVisibility({
     workspace: ws, projection: focused,
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
     viewMode: 'panes', focusedPaneView: true,
   })
   assert.equal(v.chromeActive, true, 'the selected pane keeps its own tab strip')
@@ -89,7 +89,7 @@ test('multi-pane immersive solos the holder over the whole workspace', () => {
   assert.equal(ws.panes[ws.focusedPaneId].activeTabKey, holderKey)
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: true, immersiveAppId: 42,
+    settingsOverlayOpen: false, immersiveActive: true, immersiveAppId: 42,
     viewMode: 'single',
   })
   // Chrome hidden: no strips or dividers paint over the solo.
@@ -110,7 +110,7 @@ test('immersive with a NON-holder in the set never leaks the sibling frame', () 
   })
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: true, immersiveAppId: 7,
+    settingsOverlayOpen: false, immersiveActive: true, immersiveAppId: 7,
     viewMode: 'single',
   })
   // Sibling app 3 must NOT be in the visible set (it would keep painting).
@@ -122,7 +122,7 @@ test('Settings overlay (single mode) hides every pane and frame', () => {
   const ws = twoPaneChatAndApp()
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
     viewMode: 'single', // the takeover overlay exists ONLY in single-screen mode
   })
   assert.equal(v.chromeActive, false)
@@ -137,13 +137,13 @@ test('builder immersive temporarily solos its holder while Settings stays inert'
   const ws = twoPaneChatAndApp() // 2 panes, focused pane holds app 42
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: true, immersiveActive: true, immersiveAppId: 42,
+    settingsOverlayOpen: true, immersiveActive: true, immersiveAppId: 42,
     viewMode: 'panes', // builder
   })
   // The temporary lease solos the holder without turning builder into single mode.
   assert.equal(v.multiPane, true)
   assert.equal(v.single, false)
-  assert.equal(v.takeoverOverlay, false, 'Settings never becomes a builder takeover')
+  assert.equal(v.settingsOverlay, false, 'Settings never becomes a builder takeover')
   assert.equal(v.chromeActive, false, 'immersive hides pane chrome temporarily')
   assert.equal(v.chatPanesVisible, false)
   assert.equal(v.fullBleedKey, 'app:42')
@@ -155,17 +155,17 @@ test('releasing builder immersive restores the exact tiled derivation', () => {
   const projection = project(ws)
   const before = deriveContentVisibility({
     workspace: ws, projection,
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
     viewMode: 'panes',
   })
   const during = deriveContentVisibility({
     workspace: ws, projection,
-    takeoverOverlayOpen: false, immersiveActive: true, immersiveAppId: 42,
+    settingsOverlayOpen: false, immersiveActive: true, immersiveAppId: 42,
     viewMode: 'panes',
   })
   const after = deriveContentVisibility({
     workspace: ws, projection,
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
     viewMode: 'panes',
   })
 
@@ -180,7 +180,7 @@ test('releasing builder immersive restores the exact tiled derivation', () => {
 
 // The named risk, made structural: a builder Settings TAB (overlay closed) must
 // NOT hide sibling panes. deriveContentVisibility is blind to the Settings tab —
-// it only sees takeoverOverlayOpen:false — so the tiled render is unchanged and
+// it only sees settingsOverlayOpen:false — so the tiled render is unchanged and
 // the focused Settings pane is just another full-bleed/paned surface.
 test('builder Settings tab does NOT suppress sibling panes', () => {
   let ws = twoPaneChatAndApp()
@@ -188,7 +188,7 @@ test('builder Settings tab does NOT suppress sibling panes', () => {
   ws = paneModel.openTab(ws, tabModel.settingsTab(), { paneId: ws.focusedPaneId, activate: true })
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
   })
   // Two visible leaves → tiled chrome stays on; the sibling chat pane still paints.
   assert.equal(v.multiPane, true)
@@ -207,11 +207,11 @@ test('exit restores the ordinary multi-pane view (derivation is stateless)', () 
   const ws = twoPaneChatAndApp()
   const projection = project(ws)
   const before = deriveContentVisibility({
-    workspace: ws, projection, takeoverOverlayOpen: false,
+    workspace: ws, projection, settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null,
   })
   const after = deriveContentVisibility({
-    workspace: ws, projection, takeoverOverlayOpen: false,
+    workspace: ws, projection, settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null,
   })
   assert.equal(after.chromeActive, before.chromeActive)
@@ -229,7 +229,7 @@ test('single-mode, multi-pane, focused app: chrome off, holder full-bleed, only 
   const ws = twoPaneChatAndApp() // right (app 42) pane focused
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
     viewMode: 'single',
   })
   assert.equal(v.single, true)
@@ -246,7 +246,7 @@ test('single-mode with a focused CHAT pane paints the chat and hides the sibling
   assert.equal(ws.panes.p0.activeTabKey, tabKey(makeTab('chat', '5')))
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
     viewMode: 'single',
   })
   assert.equal(v.single, true)
@@ -259,16 +259,16 @@ test('single-mode preserves the tree: a panes -> single -> panes round-trip rest
   const ws = twoPaneChatAndApp()
   const projection = project(ws)
   const panesBefore = deriveContentVisibility({
-    workspace: ws, projection, takeoverOverlayOpen: false,
+    workspace: ws, projection, settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null, viewMode: 'panes',
   })
   // Flip to single: the derivation changes, but ws + projection are untouched.
   deriveContentVisibility({
-    workspace: ws, projection, takeoverOverlayOpen: false,
+    workspace: ws, projection, settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null, viewMode: 'single',
   })
   const panesAfter = deriveContentVisibility({
-    workspace: ws, projection, takeoverOverlayOpen: false,
+    workspace: ws, projection, settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null, viewMode: 'panes',
   })
   assert.equal(panesAfter.single, false)
@@ -281,7 +281,7 @@ test('single-mode yields to Settings: the overlay governs and single is inert', 
   const ws = twoPaneChatAndApp()
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
     viewMode: 'single',
   })
   assert.equal(v.single, false, 'Settings takes precedence over view-mode')
@@ -295,7 +295,7 @@ test('single-mode yields to immersive: the holder solo governs and single is ine
   const ws = twoPaneChatAndApp() // app 42 focused, holds immersive
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: true, immersiveAppId: 42,
+    settingsOverlayOpen: false, immersiveActive: true, immersiveAppId: 42,
     viewMode: 'single',
   })
   assert.equal(v.single, false, 'immersive takes precedence over view-mode')
@@ -308,11 +308,11 @@ test('single-mode yields to immersive: the holder solo governs and single is ine
 test('single-mode on a single-pane workspace is a no-op (already full-bleed)', () => {
   const ws = paneModel.seedFromFlatTabs([makeTab('app', '42')])
   const panes = deriveContentVisibility({
-    workspace: ws, projection: project(ws), takeoverOverlayOpen: false,
+    workspace: ws, projection: project(ws), settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null, viewMode: 'panes',
   })
   const singleV = deriveContentVisibility({
-    workspace: ws, projection: project(ws), takeoverOverlayOpen: false,
+    workspace: ws, projection: project(ws), settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null, viewMode: 'single',
   })
   // Same render either way — one pane always paints full-bleed.
@@ -325,7 +325,7 @@ test('viewMode defaults to panes when omitted (back-compat with the pre-toggle s
   const ws = twoPaneChatAndApp()
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
   })
   assert.equal(v.single, false)
   assert.equal(v.chromeActive, true, 'absent viewMode tiles as before')
@@ -344,7 +344,7 @@ test('single-leaf builder: not single, no tiled chrome, the leaf is full-bleed (
   const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
     viewMode: 'panes', // builder
   })
   assert.equal(v.multiPane, false)
@@ -359,11 +359,11 @@ test('single-leaf builder: not single, no tiled chrome, the leaf is full-bleed (
 test('single-leaf single-screen matches builder content flags (strip difference is Shell-only)', () => {
   const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
   const builder = deriveContentVisibility({
-    workspace: ws, projection: project(ws), takeoverOverlayOpen: false,
+    workspace: ws, projection: project(ws), settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null, viewMode: 'panes',
   })
   const single = deriveContentVisibility({
-    workspace: ws, projection: project(ws), takeoverOverlayOpen: false,
+    workspace: ws, projection: project(ws), settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null, viewMode: 'single',
   })
   assert.equal(single.chromeActive, builder.chromeActive)
@@ -376,7 +376,7 @@ test('single-leaf single-screen matches builder content flags (strip difference 
 function singleView(ws) {
   return deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
     viewMode: 'single',
   })
 }
@@ -458,26 +458,26 @@ test('round 4 item 3: an INITIALIZED null slot targets home:new-chat; a legacy S
 // committed world is single). Shell's PAINT gates read this so those transient
 // windows paint the tiled world with Settings suspended.
 
-test('takeoverOverlay true when the takeover paints in single mode', () => {
+test('settingsOverlay true when the takeover paints in single mode', () => {
   const ws = twoPaneChatAndApp()
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
     viewMode: 'single',
   })
-  assert.equal(v.takeoverOverlay, true, 'the takeover paints in the single world')
+  assert.equal(v.settingsOverlay, true, 'the takeover paints in the single world')
 })
 
-test('takeoverOverlay SUSPENDED when the effective mode is panes (drag preview / exit beat)', () => {
+test('settingsOverlay SUSPENDED when the effective mode is panes (drag preview / exit beat)', () => {
   const ws = twoPaneChatAndApp()
   // The nav flag says the overlay is up (committed world single), but the effective
   // mode is 'panes' — a single-mode drag preview or exit beat holds the tiled world.
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: true, immersiveActive: false, immersiveAppId: null,
     viewMode: 'panes',
   })
-  assert.equal(v.takeoverOverlay, false, 'the takeover is suspended while the tiled world paints')
+  assert.equal(v.settingsOverlay, false, 'the takeover is suspended while the tiled world paints')
   // And the derivation paints the tiled world, not the takeover.
   assert.equal(v.single, false)
   assert.equal(v.chromeActive, true, 'panes deal out with Settings suspended, not covered')
@@ -487,7 +487,7 @@ test('builder mode ignores the slot entirely (tree drives the render)', () => {
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '99' } }
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
     viewMode: 'panes',
   })
   assert.equal(v.single, false)
@@ -691,7 +691,7 @@ test('deriveExitPlan: M2 a suspended Settings takeover reveals to the Settings u
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '42' } }
   const plan = deriveExitPlan({
     workspace: ws, projection: project(ws), contentRect: CONTENT,
-    takeoverDestination: tabModel.SETTINGS_TAB_KEY,
+    settingsDestination: true,
   })
   assert.equal(plan.target, tabModel.SETTINGS_TAB_KEY)
   assert.equal(plan.underlayKey, tabModel.SETTINGS_TAB_KEY, 'reveal to the Settings surface, not the slot')
@@ -730,7 +730,7 @@ test('deriveExitPlan: M2 Settings takes precedence over an immersive holder', ()
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '42' } }
   const plan = deriveExitPlan({
     workspace: ws, projection: project(ws), contentRect: CONTENT,
-    takeoverDestination: tabModel.SETTINGS_TAB_KEY, immersiveHolderId: 42,
+    settingsDestination: true, immersiveHolderId: 42,
   })
   assert.ok(plan, 'Settings destination still animates (it is representable as an underlay)')
   assert.equal(plan.underlayKey, tabModel.SETTINGS_TAB_KEY)
@@ -743,7 +743,7 @@ test('deriveExitPlan: M2 a builder Settings tab that IS the destination does not
   ws = paneModel.splitPaneWithTab(ws, tabModel.settingsTab(), { paneId: ws.focusedPaneId, edge: 'right' })
   const plan = deriveExitPlan({
     workspace: ws, projection: project(ws), contentRect: CONTENT,
-    takeoverDestination: tabModel.SETTINGS_TAB_KEY,
+    settingsDestination: true,
   })
   assert.equal(plan.underlayKey, tabModel.SETTINGS_TAB_KEY)
   assert.equal(plan.participants.some(p => p.key === tabModel.SETTINGS_TAB_KEY), false, 'the underlay surface never deals out')
@@ -878,12 +878,12 @@ test('transitionSignature folds the destination so a mid-beat destination change
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '5' } }
   const proj = project(ws)
   const toChat = transitionSignature({ workspace: ws, projection: proj, contentRect: CONTENT })
-  const toSettings = transitionSignature({ workspace: ws, projection: proj, contentRect: CONTENT, takeoverDestination: tabModel.SETTINGS_TAB_KEY })
+  const toSettings = transitionSignature({ workspace: ws, projection: proj, contentRect: CONTENT, settingsDestination: true })
   assert.notEqual(toChat, toSettings, 'chat-target vs settings:settings destinations must differ')
   // And the PLAN's stored snapshot equals a live recompute at the SAME destination, so
   // the watcher never false-cancels while the destination holds (structural coupling:
   // deriveExitPlan feeds its own input object to transitionSignature).
-  const settingsPlan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT, takeoverDestination: tabModel.SETTINGS_TAB_KEY })
+  const settingsPlan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT, settingsDestination: true })
   assert.equal(settingsPlan.snapshotSignature, toSettings)
   const chatPlan = deriveExitPlan({ workspace: ws, projection: proj, contentRect: CONTENT })
   assert.equal(chatPlan.snapshotSignature, toChat)
@@ -902,7 +902,7 @@ test('deriveContentVisibility augments visibleAppIds with an app underlay (exit 
   const ws = twoPaneChatAndApp()
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
-    takeoverOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
+    settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
     viewMode: 'panes', exitUnderlayKey: 'app:99',
   })
   assert.equal(v.exitUnderlayKey, 'app:99')

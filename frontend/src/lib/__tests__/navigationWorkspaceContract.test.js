@@ -123,7 +123,7 @@ test('M1: overlayShowingForWs is the world-gated PAINTED takeover, not the raw f
   // Settings flag off. This is the one predicate both consumers below share.
   assert.match(
     navigation,
-    /const overlayShowingForWs = useCallback\(\s*\(ws\) => takeoverRef\.current != null\s*&& \(ws\.viewMode === 'single' \|\| !paneModel\.BUILDER_SETTINGS_ENABLED\)/,
+    /const overlayShowingForWs = useCallback\(\s*\(ws\) => settingsOpenRef\.current\s*&& \(ws\.viewMode === 'single' \|\| !paneModel\.BUILDER_SETTINGS_ENABLED\)/,
   )
 })
 
@@ -136,16 +136,16 @@ test('M1: appOwnerPaneId gates on the painted overlay, never the raw settingsOpe
   // The early-out consults the world-gated overlay for THIS ws...
   assert.match(owner, /if \(appId == null \|\| overlayShowingForWs\(ws\)\) return null/)
   // ...and never rejects every app on the raw suspended flag (the M1 bug).
-  assert.doesNotMatch(owner, /takeoverRef\.current/)
+  assert.doesNotMatch(owner, /settingsOpenRef\.current/)
 })
 
-test('M1: snapshotRoute records the takeover only when it actually paints', () => {
+test('M1: snapshotRoute records Settings only when the takeover actually paints', () => {
   const snap = navigation.slice(
     navigation.indexOf('const snapshotRoute = useCallback'),
     navigation.indexOf('const pushShellEntry = useCallback'),
   )
   assert.ok(snap.length > 0)
-  assert.match(snap, /const view = overlayShowingForWs\(ws\) \? takeoverRef\.current : content\.view/)
-  // Back must never record a takeover from the raw suspended slot in builder.
-  assert.doesNotMatch(snap, /takeoverRef\.current \? takeoverRef\.current :/)
+  assert.match(snap, /const view = overlayShowingForWs\(ws\) \? 'settings' : content\.view/)
+  // Back must never record 'settings' from the raw suspended flag in builder.
+  assert.doesNotMatch(snap, /settingsOpenRef\.current \? 'settings'/)
 })

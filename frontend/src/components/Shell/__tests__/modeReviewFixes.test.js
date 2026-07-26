@@ -154,9 +154,9 @@ test('finding 6: topology/geometry/destination drift during either beat cancels 
   assert.match(shell, /if \(!t\?\.presentation\) return/)
   assert.doesNotMatch(shell, /t\.phase !== 'exiting'/)
   assert.match(shell, /const live = transitionSignature\(\{/)
-  assert.match(shell, /takeoverDestination: takeoverDestinationKey/)
+  assert.match(shell, /settingsDestination: settingsOpenRaw/)
   assert.match(shell, /immersiveHolderId: immersiveAppId/)
-  assert.match(shell, /\}, \[workspace, projection, contentRect, takeoverDestinationKey, immersiveAppId, modeState, mode\]\)/)
+  assert.match(shell, /\}, \[workspace, projection, contentRect, settingsOpenRaw, immersiveAppId, modeState, mode\]\)/)
   assert.match(shell, /if \(live !== t\.presentation\.snapshotSignature\) mode\.cancelBeat\(\)/)
   // The reducer's cancel-beat clears the descriptor without touching committedMode.
   let s = modeReducer({ committedMode: 'panes', transition: null, nextId: 1 },
@@ -196,7 +196,7 @@ test('finding R1: applyModeDestination only dismisses Settings when NOT preservi
   // repair/seed (preserveSettings:true) writes the slot beneath an open takeover
   // without dismissing the owner's Settings view; a user-initiated open still leaves.
   assert.match(nav, /const applyModeDestination = useCallback\(\(route, \{ preserveSettings = false \} = \{\}\)/)
-  assert.match(nav, /if \(!preserveSettings\) \{\s*\n\s*setTakeover\(null\)/)
+  assert.match(nav, /if \(!preserveSettings\) \{\s*\n\s*setSettingsOpen\(false\)/)
 })
 
 // -- Finding R2: a foreground single-world open dismisses the Settings takeover --
@@ -206,7 +206,7 @@ test('finding R2: a foreground single-world placement dismisses the Settings tak
   // exactly as a user-initiated open does — so the foregrounded item is visible.
   assert.match(shell, /if \(world === 'single'\s*\n\s*&& requests\.some\(r => r && r\.item && r\.activation === ACTIVATE_FOREGROUND\)\) \{\s*\n\s*dismissSettings\(\)/)
   // dismissSettings is a no-op when no takeover is open (guarded in the nav hook).
-  assert.match(nav, /const dismissSettings = useCallback\(\(\) => \{\s*\n\s*if \(takeoverRef\.current == null\) return/)
+  assert.match(nav, /const dismissSettings = useCallback\(\(\) => \{\s*\n\s*if \(!settingsOpenRef\.current\) return/)
 })
 
 // -- Finding W1: an epoch-keyed completion watchdog bounds a stuck beat ---------

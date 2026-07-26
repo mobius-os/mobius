@@ -46,3 +46,8 @@
   text-align: center;
   pointer-events: none;
 }
+
+.notification-center {
+  position: relative;
+  display: flex;
+}

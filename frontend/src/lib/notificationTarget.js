@@ -16,7 +16,6 @@
 // plus the notifications page):
 //   /shell/?app=<id-or-slug>[&intent=...]  → { view: 'canvas', app, intent }
 //   /shell/?chat=<id>                      → { view: 'chat', chatId }
-//   /shell/?view=notifications             → { view: 'notifications' }
 //   /app/<numeric-id>   (legacy)           → { view: 'canvas', app, intent: null }
 //   /chat/<id>          (legacy)           → { view: 'chat', chatId }
 //
@@ -68,7 +67,6 @@ export function parseNotificationTarget(target) {
       }
     }
     if (chat && ID_RE.test(chat)) return { view: 'chat', chatId: chat }
-    if (params.get('view') === 'notifications') return { view: 'notifications' }
     return null
   }
 

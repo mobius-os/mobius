@@ -1,6 +1,5 @@
 import { useLayoutEffect, useRef } from 'react'
 import AppWindow from 'lucide-react/dist/esm/icons/app-window.mjs'
-import Bell from 'lucide-react/dist/esm/icons/bell.mjs'
 import Maximize2 from 'lucide-react/dist/esm/icons/maximize-2.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
 import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
@@ -133,9 +132,7 @@ export function PaneTab({
 
   const TabIcon = tab.kind === 'settings'
     ? Settings
-    : (tab.kind === 'notifications'
-      ? Bell
-      : (tab.kind === 'chat' ? MessageSquare : AppWindow))
+    : (tab.kind === 'chat' ? MessageSquare : AppWindow)
   return (
     <div ref={tabRef} className={`shell__tab${active ? ' shell__tab--active' : ''}`}>
       <button

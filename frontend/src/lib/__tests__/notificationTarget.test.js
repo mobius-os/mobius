@@ -23,11 +23,6 @@ test('in-scope shell chat target parses', () => {
     { view: 'chat', chatId: 'abc-123' })
 })
 
-test('the notifications-page target parses', () => {
-  assert.deepEqual(parseNotificationTarget('/shell/?view=notifications'),
-    { view: 'notifications' })
-})
-
 test('legacy /app/:id and /chat/:id still parse (old rows)', () => {
   assert.deepEqual(parseNotificationTarget('/app/42'),
     { view: 'canvas', app: '42', intent: null })
@@ -89,6 +84,7 @@ test('id charset violations parse to null', () => {
 })
 
 test('unknown views, paths, and junk parse to null', () => {
+  assert.equal(parseNotificationTarget('/shell/?view=notifications'), null)
   assert.equal(parseNotificationTarget('/shell/?view=settings'), null)
   assert.equal(parseNotificationTarget('/shell/?view=evil'), null)
   assert.equal(parseNotificationTarget('/shell/'), null)

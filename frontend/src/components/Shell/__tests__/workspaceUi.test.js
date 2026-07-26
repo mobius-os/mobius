@@ -592,7 +592,7 @@ test('leaving builder plays the INVERSE deal: compositor-only promote/deal-out, 
   // M2: the exit plan is fed the honest single-world destination state (a suspended
   // Settings takeover / a retained immersive holder), so it reveals to Settings or
   // classifies immersive instant instead of promoting/revealing the covered slot.
-  assert.match(handler, /takeoverDestination: takeoverDestinationRef\.current/)
+  assert.match(handler, /settingsDestination: settingsDestinationRef\.current/)
   assert.match(handler, /immersiveHolderId: immersiveHolderRef\.current/)
   assert.doesNotMatch(handler, /settlePaneId|leavingPaneIds|dealMultiPane|multiPaneRef/)
   // Held tiled while the beat runs — from the ONE descriptor (INV 4).
