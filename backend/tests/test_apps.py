@@ -47,6 +47,48 @@ def test_update_app_rejects_cross_site_request(client, auth):
   assert cross.status_code == 403
 
 
+def test_update_app_attaches_share_url_without_changing_install_identity(
+  client, auth, db,
+):
+  app = create_local_app(
+    client, auth, name="Published later", description="test",
+  )
+  share_url = "https://raw.githubusercontent.com/example/app/main/mobius.json"
+
+  response = client.patch(
+    f"/api/apps/{app['id']}",
+    json={"share_manifest_url": share_url},
+    headers=auth,
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["share_manifest_url"] == share_url
+  assert response.json()["manifest_url"] is None
+  row = db.query(models.App).filter(models.App.id == app["id"]).one()
+  assert row.share_manifest_url == share_url
+  assert row.manifest_url is None
+
+  cleared = client.patch(
+    f"/api/apps/{app['id']}",
+    json={"share_manifest_url": ""},
+    headers=auth,
+  )
+  assert cleared.status_code == 200, cleared.text
+  assert cleared.json()["share_manifest_url"] is None
+
+
+def test_update_app_rejects_non_public_share_url(client, auth):
+  app = create_local_app(
+    client, auth, name="Private share", description="test",
+  )
+  response = client.patch(
+    f"/api/apps/{app['id']}",
+    json={"share_manifest_url": "http://localhost/mobius.json"},
+    headers=auth,
+  )
+  assert response.status_code == 422
+
+
 def test_list_apps_does_not_hydrate_source_or_icon_payloads(client, auth, db):
   app = models.App(
     name="Heavy metadata test",

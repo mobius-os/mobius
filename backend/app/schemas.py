@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import (
   BaseModel, ConfigDict, Field, field_validator, model_validator,
@@ -75,11 +76,33 @@ class AppUpdate(BaseModel):
   pinned: bool | None = None
   cross_app_access: ShareLevel | None = None
   share_with_apps: ShareLevel | None = None
+  # Public install manifest attached after a local app is published. Empty
+  # string clears it; None means omitted. This is deliberately separate from
+  # App.manifest_url, which controls Store install/update identity.
+  share_manifest_url: str | None = Field(default=None, max_length=1024)
   # Owner-only DOWNGRADE of skills authority: False revokes immediately (the
   # request gate reads the live row, so already-minted app JWTs lose access on
   # their next call). Granting (True) is rejected — that path stays with the
   # reviewed manifest install.
   manage_skills: bool | None = None
+
+  @field_validator("share_manifest_url")
+  @classmethod
+  def validate_share_manifest_url(cls, value: str | None) -> str | None:
+    if value is None:
+      return None
+    value = value.strip()
+    if not value:
+      return ""
+    parsed = urlsplit(value)
+    if (
+      parsed.scheme != "https"
+      or not parsed.hostname
+      or parsed.username is not None
+      or parsed.password is not None
+    ):
+      raise ValueError("Share manifest URL must be a public HTTPS URL.")
+    return value
 
 
 class AppOut(BaseModel):
@@ -124,6 +147,9 @@ class AppOut(BaseModel):
   # POST /api/apps/install). Null for user-built apps. The install
   # endpoint matches by this for update-vs-install discrimination.
   manifest_url: str | None = None
+  # Optional public install manifest attached to a locally-built app after
+  # publication. Drawer sharing prefers this without changing Store identity.
+  share_manifest_url: str | None = None
   # The manifest version currently installed (e.g. "1.7.0"). Null for
   # user-built apps and for rows installed before the column existed
   # (they backfill on their next update). The store reads this to show

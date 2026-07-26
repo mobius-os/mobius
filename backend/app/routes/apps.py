@@ -2134,6 +2134,8 @@ async def update_app(
       app.share_with_apps = body.share_with_apps
     if body.cross_app_access is not None:
       app.cross_app_access = body.cross_app_access
+    if body.share_manifest_url is not None:
+      app.share_manifest_url = body.share_manifest_url or None
     if body.manage_skills is not None:
       # Downgrade-only: the owner can revoke skills authority here (effective
       # on the app's next request — the gate reads the live row), but a grant

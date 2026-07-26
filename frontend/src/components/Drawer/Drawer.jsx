@@ -29,6 +29,8 @@ import {
   buildDrawerSections,
   filterInstalledApps,
 } from './drawerInformationArchitecture.js'
+import ShareAppSheet from './ShareAppSheet.jsx'
+import { isDrawerAppShareEligible } from './appShareState.js'
 import {
   clampDrawerChatCount,
   initialDrawerChatCount,
@@ -207,6 +209,9 @@ export default function Drawer({
     setRenaming(null)
     onAppsOpen?.()
   }
+  // Smart Share is also drawer-local. It consumes the same apps snapshot so
+  // it can route unpublished apps through Contribute or the App Store.
+  const [sharingApp, setSharingApp] = useState(null)
 
   // The install sheet navigates the whole document away to the standalone
   // install surface (/apps/<slug>/?install=1). When the user comes back via the
@@ -275,6 +280,9 @@ export default function Drawer({
         slug: app.slug,
         updatedAt: app.updated_at,
       })
+    },
+    share(app) {
+      rowActionInputsRef.current.setSharingApp(app)
     },
   }), [])
 
@@ -784,6 +792,7 @@ export default function Drawer({
     setRenaming,
     setInstallingApp,
     resetAppsSurfaceUi,
+    setSharingApp,
     overlayCancelRef,
     renameChat,
     renameApp,
@@ -1017,6 +1026,14 @@ export default function Drawer({
           appSlug={installingApp.slug}
           appUpdatedAt={installingApp.updatedAt}
           onClose={() => setInstallingApp(null)}
+        />
+      )}
+      {sharingApp && (
+        <ShareAppSheet
+          app={sharingApp}
+          apps={apps}
+          onOpenApp={onApp}
+          onClose={() => setSharingApp(null)}
         />
       )}
     </>
@@ -1580,6 +1597,11 @@ function DrawerItemMenu({
                 // Site Engagement score that gates beforeinstallprompt.
                 <Menu.Item onSelect={() => actions.install(item)}>
                   Install to home screen
+                </Menu.Item>
+              )}
+              {kind === 'app' && isDrawerAppShareEligible(item) && (
+                <Menu.Item onSelect={() => actions.share(item)}>
+                  Share app
                 </Menu.Item>
               )}
               {kind === 'chat' ? (
