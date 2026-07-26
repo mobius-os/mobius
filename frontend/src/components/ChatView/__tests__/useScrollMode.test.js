@@ -265,6 +265,32 @@ test('only provably clamped wheel input gets a next-frame no-scroll release', ()
   assert.equal(readerInputNeedsFrameRelease('touchmove'), false)
 })
 
+test('touch input never reads scroll geometry, so it cannot force a layout', () => {
+  // The geometry thunk performs layout-forcing DOM reads (scrollHeight on an
+  // unvirtualized transcript). Only the wheel branch consumes them, so any
+  // input type that short-circuits before that branch must never invoke it.
+  // Counting invocations - rather than asserting return values - is what pins
+  // the COST rather than the behaviour: the previous eagerly-built argument
+  // object returned identical answers while reading the scroller every time.
+  let geometryReads = 0
+  const readGeometry = () => {
+    geometryReads += 1
+    return { deltaY: 0, scrollTop: 500, scrollHeight: 2000, clientHeight: 800 }
+  }
+
+  readerInputNeedsFrameRelease('touchstart', readGeometry)
+  readerInputNeedsFrameRelease('touchmove', readGeometry)
+  readerInputNeedsFrameRelease('pointerdown', readGeometry)
+  assert.equal(geometryReads, 0, 'touch and pointer input must not measure the scroller')
+
+  readerInputNeedsFrameRelease('keydown', readGeometry)
+  assert.equal(geometryReads, 0, 'keydown short-circuits before measuring')
+
+  // Wheel genuinely needs the values, so it must still read them - exactly once.
+  readerInputNeedsFrameRelease('wheel', readGeometry)
+  assert.equal(geometryReads, 1, 'wheel reads the scroller once')
+})
+
 test('scroll diagnostics expose behavior without message identity', () => {
   assert.deepEqual(_scrollModeForDiagnostics({
     kind: 'PIN_USER_MSG',

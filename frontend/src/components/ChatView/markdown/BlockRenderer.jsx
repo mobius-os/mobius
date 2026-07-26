@@ -6,6 +6,7 @@ import { groupMarkdownImages } from './imageGallery.js'
 import ImageGallery from './ImageGallery.jsx'
 import AppLinkCard from './AppLinkCard.jsx'
 import { appLinkCardFromParagraph } from './appLinkCard.js'
+import { perfTime } from '../../../lib/perfProbe.js'
 import '../markdown.css'
 
 /**
@@ -34,7 +35,15 @@ export function ProgressiveMarkdown({
   onInternalNav,
   mediaDimensions,
 }) {
-  const tokens = useMemo(() => groupMarkdownImages(tokenize(text)), [text])
+  // Counted because `text` grows by a few characters per reveal commit while
+  // this re-tokenises the ENTIRE answer each time, making live streaming cost
+  // grow with answer length. Labelled apart from the settled renderer below so
+  // a report can tell "streaming is expensive" from "the transcript is
+  // expensive" - those have different fixes.
+  const tokens = useMemo(
+    () => perfTime('markdown.tokenize.streaming', () => groupMarkdownImages(tokenize(text))),
+    [text],
+  )
 
   return (
     <>
@@ -82,7 +91,15 @@ export function ProgressiveMarkdown({
  * One-shot render, no memoization overhead.
  */
 export function StandardMarkdown({ text, onInternalNav, mediaDimensions }) {
-  const tokens = useMemo(() => groupMarkdownImages(tokenize(text)), [text])
+  // The settled-transcript renderer, so this is the one that matters for "a
+  // stopped chat still feels slow". `useMemo` only holds while the component
+  // stays mounted; if anything remounts messages this re-tokenises every
+  // message, which the probe surfaces as a burst of calls with no stream
+  // running.
+  const tokens = useMemo(
+    () => perfTime('markdown.tokenize.settled', () => groupMarkdownImages(tokenize(text))),
+    [text],
+  )
 
   return (
     <div className="standard-markdown md-blocks">

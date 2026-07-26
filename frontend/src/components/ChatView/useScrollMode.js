@@ -55,6 +55,7 @@
 import { useState, useRef, useLayoutEffect, useCallback } from 'react'
 import { cidOf, isOwnerUserMessage } from './chatRuntimeState.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
+import { isPerfProbeEnabled, perfMark, perfTime } from '../../lib/perfProbe.js'
 
 
 // Hide-then-reveal safety cap. The ordinary path reveals after authoritative
@@ -785,17 +786,35 @@ export function readerInputActivatesDisclosure(
  * wheel can still move through that final gap, and its compositor scroll can
  * arrive after rAF. For a wheel that can move, the actual scroll event owns the
  * release. */
-export function readerInputNeedsFrameRelease(
-  type,
-  {
+/**
+ * `readGeometry` is a THUNK, not a value, because only the `wheel` branch below
+ * ever reads it.
+ *
+ * This function is called from the shared user-input handler, which is bound to
+ * touchstart and touchmove as well as wheel. Passing an eagerly-built object
+ * meant `scrollTop`/`scrollHeight`/`clientHeight` were read on every touch
+ * event and then discarded at the `type !== 'wheel'` line - and reading
+ * `scrollHeight` forces a synchronous layout of the whole (unvirtualized)
+ * transcript. On desktop that cost is at least paid for something: wheel
+ * genuinely needs the values, and fires roughly once per notch. Touch paid it
+ * for nothing, at digitizer rate, starting with the first event of the gesture
+ * - which is why the lag is felt as a scroll STARTS rather than during it.
+ *
+ * Deferring is deliberately done HERE rather than by guarding the call site on
+ * `type === 'wheel'`. Which input types need geometry is this function's own
+ * rule; duplicating it at the caller would let the two drift apart silently.
+ */
+export function readerInputNeedsFrameRelease(type, readGeometry) {
+  if (type === 'keydown') return true
+  if (type !== 'wheel') return false
+
+  const {
     deltaY = 0,
     scrollTop = 0,
     scrollHeight = 0,
     clientHeight = 0,
-  } = {},
-) {
-  if (type === 'keydown') return true
-  if (type !== 'wheel') return false
+  } = (typeof readGeometry === 'function' ? readGeometry() : readGeometry) || {}
+
   if (!Number.isFinite(deltaY) || deltaY === 0) return true
 
   const maxScrollTop = Math.max(0, scrollHeight - clientHeight)
@@ -1953,12 +1972,15 @@ export default function useScrollMode({
       pendingGestureTimerRef.current = setTimeout(() => {
         releasePendingGesture(sequence)
       }, PENDING_GESTURE_CAP_MS)
-      if (readerInputNeedsFrameRelease(event?.type, {
+      // Thunk, not an object literal: these three property reads force a
+      // synchronous layout, and only the wheel branch consumes them. See
+      // readerInputNeedsFrameRelease.
+      if (readerInputNeedsFrameRelease(event?.type, () => ({
         deltaY: event?.deltaY,
         scrollTop: scrollEl.scrollTop,
         scrollHeight: scrollEl.scrollHeight,
         clientHeight: scrollEl.clientHeight,
-      })) {
+      }))) {
         scheduleNoScrollRelease()
       }
     }
@@ -2002,13 +2024,51 @@ export default function useScrollMode({
       }
       scheduleQuestionEditNoScrollRelease()
     }
+    // Field-probe instrumentation, bound at the listener boundary so
+    // `onUserInput`'s own control flow - which has several early returns -
+    // stays exactly as written. Each wrapper is created once and reused for
+    // both add and remove; a fresh wrapper per call would not match on removal
+    // and would leak a listener per remount. When the device has not opted in,
+    // `probed` returns `onUserInput` itself, so an ordinary session registers
+    // the identical function reference it always did.
+    //
+    // touchmove and wheel are counted under separate labels because they are
+    // the mobile and desktop halves of one question: a touch digitizer samples
+    // at 120-240Hz where a wheel emits roughly one event per notch, so equal
+    // per-event cost is very unequal per-second cost.
+    const probed = (label) => (isPerfProbeEnabled()
+      ? (event) => perfTime(label, () => onUserInput(event))
+      : onUserInput)
+    const onTouchMoveInput = probed('scroll.touchmove')
+    const onWheelInput = probed('scroll.wheel')
+
+    // Scroll-START latency, measured rather than inferred. Lag at the moment a
+    // finger lands is a different failure from steady-state jank and has a
+    // different cause: the work between touchstart and the first frame that
+    // actually moves. Stamped on touchstart, consumed by that gesture's first
+    // scroll event, so the recorded value is exactly the gap a reader feels.
+    let pendingGestureStart = 0
+    const onTouchStartInput = (event) => {
+      if (isPerfProbeEnabled()) {
+        pendingGestureStart = performance.now()
+        perfTime('scroll.touchstart', () => onUserInput(event))
+        return
+      }
+      onUserInput(event)
+    }
+    const noteScrollStart = () => {
+      if (!pendingGestureStart) return
+      perfMark('scroll.startLatency', performance.now() - pendingGestureStart)
+      pendingGestureStart = 0
+    }
+
     scrollEl.addEventListener('pointerdown', onUserInput, { passive: true })
-    scrollEl.addEventListener('touchstart', onUserInput, { passive: true })
+    scrollEl.addEventListener('touchstart', onTouchStartInput, { passive: true })
     // A long touch can pause before moving. Refresh intent on touchmove so the
     // pre-scroll race stays closed for the whole gesture rather than only quick
     // flicks.
-    scrollEl.addEventListener('touchmove', onUserInput, { passive: true })
-    scrollEl.addEventListener('wheel', onUserInput, { passive: true })
+    scrollEl.addEventListener('touchmove', onTouchMoveInput, { passive: true })
+    scrollEl.addEventListener('wheel', onWheelInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
     scrollEl.addEventListener('focusin', onQuestionEditFocusIn, { passive: true })
     scrollEl.addEventListener('focusout', onQuestionEditFocusOut, { passive: true })
@@ -2022,6 +2082,11 @@ export default function useScrollMode({
     // Scroll handler — user-driven scrolls only mark intent here. The expensive
     // semantic location/mode work runs once in settleReaderScroll.
     const onScroll = () => {
+      // First scroll event of a touch gesture closes the start-latency window
+      // opened on touchstart. Placed before the early returns below so the
+      // measurement reflects when content actually moved, not whether this
+      // controller classified the movement as reader-driven.
+      noteScrollStart()
       const distanceToBottom = scrollEl.scrollHeight
         - scrollEl.scrollTop
         - scrollEl.clientHeight
@@ -2109,9 +2174,9 @@ export default function useScrollMode({
       if (paneResizeRunRef.current === runPaneResize) paneResizeRunRef.current = null
       scrollEl.removeEventListener('scroll', onScroll)
       scrollEl.removeEventListener('pointerdown', onUserInput)
-      scrollEl.removeEventListener('touchstart', onUserInput)
-      scrollEl.removeEventListener('touchmove', onUserInput)
-      scrollEl.removeEventListener('wheel', onUserInput)
+      scrollEl.removeEventListener('touchstart', onTouchStartInput)
+      scrollEl.removeEventListener('touchmove', onTouchMoveInput)
+      scrollEl.removeEventListener('wheel', onWheelInput)
       scrollEl.removeEventListener('keydown', onUserInput)
       scrollEl.removeEventListener('focusin', onQuestionEditFocusIn)
       scrollEl.removeEventListener('focusout', onQuestionEditFocusOut)

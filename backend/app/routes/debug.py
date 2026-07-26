@@ -6,6 +6,7 @@ authentication.  The agent uses these when debugging issues instead of
 ad-hoc debug endpoints.
 """
 
+import json
 import os
 import time
 from datetime import UTC, datetime
@@ -287,3 +288,114 @@ def debug_logs(
 
   result = all_lines[-lines:]
   return {"lines": result, "total_size": total_size}
+
+
+# ---------------------------------------------------------------------------
+# Field performance probe
+#
+# Every prior Mobius performance investigation measured headless desktop
+# Chromium with software rasterization. That environment cannot observe the
+# things that make a phone slow: a tile-based GPU, a 3-5x slower CPU, touch
+# input at 120-240Hz, `visualViewport` events (which essentially never fire on
+# desktop), mobile flash-storage latency, and a real cellular link.
+#
+# This endpoint pair is the missing half: the shell's probe (frontend/src/lib/
+# perfProbe.js) reports PASSIVE browser observations from the owner's actual
+# devices, and the agent reads them back here. It is opt-in, per-device, and
+# writes nothing unless the owner has explicitly enabled it.
+#
+# Samples are diagnostic exhaust, not durable state: they live in a single
+# capped JSONL file that is trimmed on write, so an enabled probe can never
+# grow the data directory without bound.
+_PERF_SAMPLE_LIMIT = 2000
+
+
+def _perf_sample_path() -> Path:
+  settings = get_settings()
+  return Path(settings.data_dir) / "logs" / "perf-samples.jsonl"
+
+
+@router.post("/perf")
+async def debug_perf_ingest(
+  request: Request,
+  _owner: models.Owner = Depends(get_current_owner),
+):
+  """Accepts one aggregated performance sample from a shell instance.
+
+  The body is stored verbatim alongside a server-side receipt timestamp. The
+  probe already bounds its own payload, so the only server-side concern is
+  keeping the file capped; the trim runs on every write rather than on a
+  schedule so a probe left enabled overnight still cannot grow unbounded.
+  """
+  try:
+    sample = await request.json()
+  except Exception:
+    return {"stored": False, "reason": "invalid json"}
+
+  if not isinstance(sample, dict):
+    return {"stored": False, "reason": "sample must be an object"}
+
+  sample["received_at"] = datetime.now(UTC).isoformat()
+
+  path = _perf_sample_path()
+  path.parent.mkdir(parents=True, exist_ok=True)
+
+  line = json.dumps(sample, separators=(",", ":"), default=str)
+  with open(path, "a", encoding="utf-8") as f:
+    f.write(line + "\n")
+
+  # Trim in place once the file exceeds the cap. Reading the whole file is
+  # acceptable because the cap keeps it small by construction.
+  try:
+    with open(path, encoding="utf-8") as f:
+      lines = f.readlines()
+    if len(lines) > _PERF_SAMPLE_LIMIT:
+      with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines[-_PERF_SAMPLE_LIMIT:])
+  except OSError:
+    pass
+
+  return {"stored": True}
+
+
+@router.get("/perf")
+def debug_perf_read(
+  _owner: models.Owner = Depends(get_current_owner),
+  limit: int = Query(default=50, ge=1, le=500),
+  device: str | None = Query(default=None),
+):
+  """Returns the most recent probe samples, newest last.
+
+  `device` filters to one reported form factor ("phone" / "desktop") so the
+  mobile and desktop populations can be compared without pulling both.
+  """
+  path = _perf_sample_path()
+  if not path.exists():
+    return {"samples": [], "total": 0}
+
+  samples = []
+  with open(path, encoding="utf-8") as f:
+    for line in f:
+      line = line.strip()
+      if not line:
+        continue
+      try:
+        samples.append(json.loads(line))
+      except ValueError:
+        continue
+
+  if device:
+    samples = [s for s in samples if s.get("device", {}).get("formFactor") == device]
+
+  return {"samples": samples[-limit:], "total": len(samples)}
+
+
+@router.delete("/perf")
+def debug_perf_clear(
+  _owner: models.Owner = Depends(get_current_owner),
+):
+  """Drops all collected samples so a new measurement run starts clean."""
+  path = _perf_sample_path()
+  if path.exists():
+    path.unlink()
+  return {"cleared": True}
