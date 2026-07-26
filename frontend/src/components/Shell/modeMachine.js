@@ -258,10 +258,9 @@ export function transitionRootClass(state, { splitsEnabled = true } = {}) {
   return ''
 }
 
-// Builder mode is active (the logo's 180° twist + power chrome) whenever the
-// COMMITTED mode is panes — it flips synchronously with the toggle. The LIVING HALO
-// pauses during any beat (see Shell's haloActive), so this is builder chrome, not
-// the halo gate. Clamped off by the kill switch. INV 4/16.
+// Builder mode is active (the logo's 180° twist + static brand cue + power chrome)
+// whenever the COMMITTED mode is panes — it flips synchronously with the toggle.
+// Clamped off by the kill switch. INV 4/16.
 export function builderModeActive(state, { splitsEnabled = true } = {}) {
   return clampMode(state.committedMode, splitsEnabled) === 'panes'
 }

@@ -159,20 +159,14 @@ function SingleActivity({ entry, chatId, live, surfaceKey }) {
       />
     )
   }
-  const hasHelpers = item.subagent
-    && typeof item.subagent === 'object'
-    && Object.keys(item.subagent).length > 0
   return (
-    <>
-      <ToolBlock
-        key={assistantBlockKey(item, idx)}
-        t={item}
-        chatId={chatId}
-        compact
-        disclosureKey={`${surfaceKey}:tool:${blockKey}`}
-      />
-      {hasHelpers && <SubagentChips subagent={item.subagent} />}
-    </>
+    <ToolBlock
+      key={assistantBlockKey(item, idx)}
+      t={item}
+      chatId={chatId}
+      compact
+      disclosureKey={`${surfaceKey}:tool:${blockKey}`}
+    />
   )
 }
 

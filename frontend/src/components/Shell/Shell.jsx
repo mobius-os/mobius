@@ -391,7 +391,7 @@ export default function Shell() {
     dispatchWorkspace({ type: 'FOCUS', paneId })
     setFocusedPaneViewId(paneId)
   }, [dispatchWorkspace, setFocusedPaneViewId])
-  // Builder mode = the committed 'panes' world (logo twist + living halo + power
+  // Builder mode = the committed 'panes' world (logo twist + static brand cue + power
   // chrome), clamped off by the splits kill switch (INV 16). Flips synchronously
   // with the toggle, matching the gesture's own spring/snap.
   const builderModeActive = modeMachine.builderModeActive(modeState, { splitsEnabled: SPLITS })
@@ -1595,8 +1595,8 @@ export default function Shell() {
     // flip and hand its compression to the descriptor (round 4 item 1).
     return mode.toggle({ cause, presentation })
   }, [dispatchWorkspace, mode, projection, contentRect])
-  // The single-tap navigation toggle passed to ShellBrand (which now owns the logo
-  // gesture + living halo). The HOLD / swipe / Shift+Enter mode toggle is
+  // The single-tap navigation toggle passed to ShellBrand (which owns the logo
+  // gesture and static Builder cue). The HOLD / swipe / Shift+Enter mode toggle is
   // handleToggleViewMode above, passed to ShellBrand as onToggleMode.
   const handleToggleNavigation = useCallback(() => {
     if (persistentDrawer) {
