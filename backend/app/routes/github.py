@@ -45,6 +45,7 @@ import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote, urljoin, urlparse
 
 import httpx
@@ -151,6 +152,13 @@ class ContributionSubmitBody(BaseModel):
   # Omitted/legacy request bodies stay on the classic manual path: the backend
   # lands before the UI that explains this authority and asks for it.
   autopilot: bool = False
+  # Where the owner pressed Send. Recorded on the claim purely as provenance, so
+  # the ledger says whether a PR was approved from the Contribute app or from the
+  # review card in its source chat. Constrained so the ledger cannot carry
+  # arbitrary caller-supplied text.
+  submitter: Literal["contribute-button", "chat-review-card"] = (
+    "contribute-button"
+  )
 
 
 class AutopilotRespondBody(BaseModel):
@@ -1008,7 +1016,8 @@ def _assert_fresh(
 
 
 def _claim_record(
-  *, app_id: int, record_id: str, db: Session, expected_nonce: str | None
+  *, app_id: int, record_id: str, db: Session, expected_nonce: str | None,
+  submitter: str = "contribute-button",
 ) -> tuple[dict, Path, Path]:
   record_path, diff_path = _record_paths(app_id, record_id)
   _recheck_submit_app(db, app_id, expected_nonce)
@@ -1041,7 +1050,7 @@ def _claim_record(
   claimed = {
     **record,
     "status": "submitting",
-    "submitter": "contribute-button",
+    "submitter": submitter,
     "submit_started_at": now,
     "updated_at": now,
   }
@@ -3493,6 +3502,137 @@ async def contribution_review_status(
   }
 
 
+# Paths touched by a stored diff, for the chat card's "what am I sending" list.
+# Deliberately a header scan rather than a real patch parser: the card only needs
+# names, and the app owns full diff rendering.
+def _diff_file_paths(diff_path: Path, limit: int = 40) -> list[str]:
+  paths: list[str] = []
+  try:
+    with diff_path.open("r", encoding="utf-8", errors="replace") as handle:
+      for line in handle:
+        if not line.startswith("+++ "):
+          continue
+        target = line[4:].strip()
+        if target == "/dev/null":
+          continue
+        if target.startswith("b/"):
+          target = target[2:]
+        if target and target not in paths:
+          paths.append(target)
+        if len(paths) >= limit:
+          break
+  except OSError:
+    return paths
+  return paths
+
+
+def _chat_review_projection(record: dict, app_id: int) -> dict:
+  """The small, display-only view of one ledger record for the chat card."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  record_id = str(record.get("id") or "")
+  _, diff_path = _record_paths(app_id, record_id)
+  return {
+    "id": record_id,
+    "type": record.get("type"),
+    "status": record.get("status"),
+    "title": plan.get("title") or record.get("title"),
+    "summary": record.get("summary"),
+    "repo": plan.get("repo") or record.get("repo"),
+    "branch": plan.get("branch") or record.get("branch"),
+    "body_draft": plan.get("body_draft"),
+    "diff_stat": plan.get("diff_stat"),
+    "files": _diff_file_paths(diff_path),
+    "labels": plan.get("labels") if isinstance(plan.get("labels"), list) else [],
+    "url": record.get("url"),
+    "number": record.get("number"),
+    "last_submit_error": record.get("last_submit_error"),
+    "updated_at": record.get("updated_at"),
+    "is_stack": isinstance(plan.get("stack"), dict),
+  }
+
+
+@router.get("/contributions/{app_id}/for-chat/{chat_id}")
+@_limiter.limit("60/minute")
+async def contributions_for_chat(
+  request: Request,
+  app_id: int,
+  chat_id: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Contribution records staged from ONE chat, for that chat's review card.
+
+  The chat card is a second view over the same ledger the Contribute app reads,
+  so the owner can approve a staged PR where the work happened instead of
+  navigating to the app. It is strictly read-only and stays a projection: Send
+  still goes through the submit endpoint below, which owns every freshness,
+  attribution, and fork check.
+
+  Filtering by chat first is what keeps this cheap. The local preflight below is
+  the same one the app's review cards use, but a single chat normally has zero or
+  one prepared record, so it runs on that bounded set rather than the whole
+  ledger.
+  """
+  _validate_submit_app(app_id, principal, db)
+  db.close()
+  contribution_dir = _contributions_dir(app_id)
+  async with fs_locks.app_storage_lock(app_id):
+    records = []
+    if contribution_dir.exists():
+      for path in sorted(contribution_dir.glob("*.json"))[:500]:
+        record = _read_record_tolerant(path)
+        if (
+          record is not None
+          and record.get("id")
+          and str(record.get("chat_id") or "") == chat_id
+          and record.get("type") == "pr"
+          and record.get("status") != "abandoned"
+        ):
+          records.append(record)
+    settings_path = (
+      Path(get_settings().data_dir) / "apps" / str(app_id) / "settings.json"
+    )
+    app_settings = _read_record_tolerant(settings_path) or {}
+
+  records.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+  records = records[:5]
+
+  github_state = github_auth.read_state() or {}
+  projections = []
+  for record in records:
+    view = _chat_review_projection(record, app_id)
+    review = None
+    if record.get("status") == "prepared" and not view["is_stack"]:
+      plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+      _, diff_path = _record_paths(app_id, str(record.get("id") or ""))
+      try:
+        repo = _safe_repo_path(plan.get("repo_path"))
+      except ContributionSubmitError as exc:
+        review = _review_status_problem(
+          str(record.get("id") or ""),
+          code=exc.code or "invalid_checkout",
+          detail=exc.message,
+        )
+      else:
+        async with fs_locks.source_dir_lock(str(repo)):
+          review = await asyncio.to_thread(
+            _inspect_prepared_review, record, diff_path, github_state,
+          )
+    view["review"] = review
+    projections.append(view)
+
+  autopilot_default = app_settings.get("autopilot_default")
+  return {
+    "generated_at": _now_iso(),
+    "connected": bool(github_state.get("token")),
+    "autopilot_available": True,
+    "autopilot_default": (
+      True if autopilot_default is None else bool(autopilot_default)
+    ),
+    "records": projections,
+  }
+
+
 @router.post(
   "/contributions/{app_id}/{record_id}/submit",
   dependencies=[Depends(reject_cross_site)],
@@ -3525,6 +3665,7 @@ async def submit_contribution(
       record_id=record_id,
       db=db,
       expected_nonce=expected_nonce,
+      submitter=body.submitter if body is not None else "contribute-button",
     )
   # The durable claim is complete. Git/fork/GitHub work below can take tens of
   # seconds; return the checkout now and let each short nonce recheck lazily
@@ -3972,8 +4113,9 @@ def _contributions_dir(app_id: int) -> Path:
 
 
 def _read_record_tolerant(path: Path) -> dict | None:
-  """Reads a contribution record, returning None (not raising) on a missing
-  or corrupt file so one bad record can't abort a whole refresh sweep."""
+  """Reads a small JSON object — a contribution record, or the app's settings
+  file — returning None (not raising) on a missing, oversized, or corrupt file so
+  one bad record can't abort a whole refresh sweep."""
   try:
     with path.open("rb") as handle:
       raw = handle.read(_MAX_CONTRIBUTION_RECORD_BYTES + 1)

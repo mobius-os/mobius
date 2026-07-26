@@ -4336,3 +4336,175 @@ def test_refresh_skips_non_open_and_success_without_notifying(
   assert checks["state"] == "SUCCESS"
   assert "notified_sha" not in checks
   assert _all_notifications() == []
+
+
+# ── The chat review card's read endpoint ─────────────────────────────────────
+# The card lets the owner approve a staged PR in the chat where the work
+# happened instead of navigating to the Contribute app. It is a projection over
+# the same ledger, so these tests pin what it exposes, what it filters, and that
+# it stays scoped to ONE chat.
+
+def _prepared_for_chat(app_id, record_id, chat_id, **overrides):
+  repo, record, diff_text = _prepared_real_review(app_id, record_id)
+  record["chat_id"] = chat_id
+  record["summary"] = "A plain sentence about the improvement."
+  record["plan"]["title"] = "Reviewed fix"
+  record["plan"]["body_draft"] = "## Summary\n\nThe exact published text.\n"
+  record["plan"]["diff_stat"] = "1 file changed, 1 insertion(+), 1 deletion(-)"
+  record["plan"]["labels"] = ["bug", "area: ui"]
+  record.update(overrides)
+  _write_contribution(app_id, record_id, record, diff_text)
+  return repo, record
+
+
+def test_for_chat_returns_only_this_chat_s_prepared_reviews(client, owner_token):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _prepared_for_chat(app_id, "mine", "chat-a")
+  _prepared_for_chat(app_id, "someone-elses", "chat-b")
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  r = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  )
+  assert r.status_code == 200, r.text
+  body = r.json()
+  assert [item["id"] for item in body["records"]] == ["mine"]
+  record = body["records"][0]
+  # Everything the card needs to show what would be published, and nothing that
+  # would let it publish anything itself.
+  assert record["title"] == "Reviewed fix"
+  assert record["summary"] == "A plain sentence about the improvement."
+  assert record["body_draft"] == "## Summary\n\nThe exact published text.\n"
+  assert record["files"] == ["index.jsx"]
+  assert record["labels"] == ["bug", "area: ui"]
+  assert record["diff_stat"].startswith("1 file changed")
+  assert record["review"] == {
+    "id": "mine",
+    "state": "ready",
+    "code": "ready",
+    "message": "Still matches the exact source you reviewed.",
+  }
+  assert "diff_sha256" not in record and "repo_path" not in record
+  assert body["connected"] is True
+  assert body["autopilot_available"] is True
+  # No stored preference means the same default the Contribute app applies.
+  assert body["autopilot_default"] is True
+
+
+def test_for_chat_reports_local_drift_so_the_card_can_block_send(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  repo, _record = _prepared_for_chat(app_id, "drifted", "chat-a")
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  (repo / "index.jsx").write_text("export default 3\n")
+  r = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  )
+  assert r.status_code == 200, r.text
+  review = r.json()["records"][0]["review"]
+  assert review["state"] == "needs_refresh"
+  assert review["code"] == "working_changes"
+  # Read-only: inspecting a review never commits or discards the owner's edit.
+  assert (repo / "index.jsx").read_text() == "export default 3\n"
+
+
+def test_for_chat_drops_abandoned_and_leaves_settled_to_the_client(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _prepared_for_chat(app_id, "dropped", "chat-a", status="abandoned")
+  _prepared_for_chat(
+    app_id, "already-open", "chat-a", status="open", number=7,
+    url="https://github.com/mobius-os/app-demo/pull/7",
+  )
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  r = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  )
+  assert r.status_code == 200, r.text
+  ids = [item["id"] for item in r.json()["records"]]
+  # An abandoned record is gone for good; an open one is history the app owns,
+  # but it is still returned so the client can decide (it carries no review).
+  assert "dropped" not in ids
+  assert ids == ["already-open"]
+  assert r.json()["records"][0]["review"] is None
+  assert r.json()["records"][0]["number"] == 7
+
+
+def test_for_chat_honors_the_owner_s_autopilot_default(client, owner_token):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _prepared_for_chat(app_id, "autopilot-default", "chat-a")
+  settings_path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id) / "settings.json"
+  )
+  atomic_write(settings_path, json.dumps({"autopilot_default": False}))
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  r = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  )
+  assert r.status_code == 200, r.text
+  assert r.json()["autopilot_default"] is False
+
+
+def test_for_chat_marks_a_stack_layer_so_chat_never_sends_one_alone(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _, record = _prepared_for_chat(app_id, "layer-2", "chat-a")
+  record["plan"]["stack"] = {
+    "id": "demo", "position": 2, "total": 3,
+    "parent_record_id": "layer-1", "base_branch": "stack/demo/01",
+  }
+  _write_contribution(app_id, "layer-2", record, "")
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  r = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  )
+  assert r.status_code == 200, r.text
+  item = r.json()["records"][0]
+  assert item["is_stack"] is True
+  # A stack layer is never preflighted here: the whole chain is reviewed and
+  # sent together in the app, so the card must not offer a single-layer Send.
+  assert item["review"] is None
+
+
+def test_for_chat_requires_the_owner_or_that_app(client, owner_token):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  other_id, other_token = _app_token(client, owner_token, github_access=True)
+  _prepared_for_chat(app_id, "scoped", "chat-a")
+
+  r = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a",
+    headers={"Authorization": f"Bearer {other_token}"},
+  )
+  assert r.status_code == 403, r.text
+  assert other_id != app_id
+
+  anon = client.get(f"/api/github/contributions/{app_id}/for-chat/chat-a")
+  assert anon.status_code == 401
+
+
+def test_submit_records_where_the_owner_pressed_send(client, owner_token):
+  """Provenance only: the ledger says which surface approved the publish."""
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _prepared_for_chat(app_id, "provenance", "chat-a")
+
+  r = client.post(
+    f"/api/github/contributions/{app_id}/provenance/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"autopilot": False, "submitter": "not-a-real-surface"},
+  )
+  # An unknown surface is rejected by the schema rather than stored.
+  assert r.status_code == 422, r.text

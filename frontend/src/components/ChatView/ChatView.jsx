@@ -32,6 +32,7 @@ import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
+import ContributionReviewCard from './ContributionReviewCard.jsx'
 import MsgContent from './MsgContent.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { formatResetTime } from './resetTime.js'
@@ -3996,6 +3997,13 @@ export default function ChatView({
           )}
           </>
         )}
+        {/* Contribution staged from THIS chat: approve it where the work
+            happened. Renders nothing unless something is actually waiting. */}
+        <ContributionReviewCard
+          chatId={chatId}
+          turnActive={turnActive}
+          onOpenApp={onOpenApp}
+        />
         <ConnectionStatus
           error={connectionError}
           reconnecting={reconnecting}
