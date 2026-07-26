@@ -57,12 +57,11 @@ import { cidOf, isOwnerUserMessage } from './chatRuntimeState.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 
 
-// Hide-then-reveal safety cap. Code-block-heavy chats with KaTeX and
-// highlight.js settle in the 500-1200ms range; a too-tight cap would
-// reveal before ANCHOR_AT-restored scroll positions get re-anchored to
-// the post-settle target offsets. Live streaming never reaches the
-// 50ms quiet window anyway, so the cap is mostly about giving lazy
-// renderers room to land before the chat becomes visible.
+// Hide-then-reveal safety cap. The ordinary path reveals after authoritative
+// history and one quiet layout window; this is only the escape hatch for a
+// stalled history/catch-up handshake. Image bytes are deliberately NOT part of
+// readiness: inline media owns a reserved frame and ResizeObserver keeps the
+// saved anchor stable as lazy previews arrive after reveal.
 const REVEAL_CAP_MS = 1500
 
 // Reader quiet-settle window. Input and momentum retain Infinity ownership;
@@ -890,19 +889,6 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
 }
 
 
-/** True once every image frame present during entry has either decoded or
- * failed. The frame is rendered before its short-lived media URL resolves, so
- * a frame without an <img> is still pending. */
-export function mountMediaSettled(scrollEl) {
-  if (!scrollEl?.querySelectorAll) return true
-  for (const frame of scrollEl.querySelectorAll('.md-image-frame')) {
-    const img = frame.querySelector?.('img')
-    if (!img || !img.complete) return false
-  }
-  return true
-}
-
-
 /**
  * Hook that owns the chat scroll subsystem.
  *
@@ -1670,14 +1656,14 @@ export default function useScrollMode({
     }
     paneResizeRunRef.current = runPaneResize
 
-    // Reveal only from trusted idle cache or after authoritative history/first
-    // catch-up, once current image frames settle and layout stays quiet for
-    // 50ms. REVEAL_CAP_MS remains the escape hatch for a request that stalls.
+    // Reveal from trusted idle cache or after authoritative history/first
+    // catch-up once transcript layout stays quiet for 50ms. Lazy image previews
+    // are not a reveal dependency: their frames already reserve space and the
+    // same ResizeObserver keeps ANCHOR_AT stable if a measured ratio differs.
+    // REVEAL_CAP_MS remains the escape hatch for a request that stalls.
     let revealTimer = 0
     let mountMutationObserver = null
-    const entryReady = () => (
-      initialEntryCanRevealRef.current && mountMediaSettled(scrollEl)
-    )
+    const entryReady = () => initialEntryCanRevealRef.current
     const requestRevealOnQuiet = () => {
       clearTimeout(revealTimer)
       if (revealedRef.current && !mountStabilizingRef.current) return

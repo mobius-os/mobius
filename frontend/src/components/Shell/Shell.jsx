@@ -120,6 +120,7 @@ import {
   transitionSignature, MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
+import { recentChatsToPrefetch } from './chatPrefetch.js'
 import {
   PaneTab, panePanelDomId, paneTabDomId, scrollStripWheel, stripKeyDown,
 } from './PaneStrip.jsx'
@@ -651,6 +652,40 @@ export default function Shell() {
   })
   const apps = appsQuery.data ?? []
   const chats = chatsQuery.data ?? []
+  // Prime only the two most-recent chats that are not already open, including
+  // active chats: their cached transcript is useful while stream catch-up runs.
+  // ChatView still revalidates on mount, but this gives its synchronous cache
+  // read a real transcript so a later chat switch can paint immediately. Run
+  // once after the live drawer projection arrives, at browser idle, and stand
+  // down under data-saver so speed never creates surprise background transfer.
+  const warmedChatsOnLoadRef = useRef(false)
+  useEffect(() => {
+    if (
+      warmedChatsOnLoadRef.current
+      || !chatsQuery.isSuccess
+      || !chatsQuery.isFetchedAfterMount
+    ) return
+    warmedChatsOnLoadRef.current = true
+    if (navigator.connection?.saveData) return
+    const candidates = recentChatsToPrefetch(chats, activeChatId)
+    if (candidates.length === 0) return
+    const warm = async () => {
+      for (const chat of candidates) {
+        await chatQueries.messages.prefetch(queryClient, chat.id)
+      }
+    }
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => { void warm() }, { timeout: 3000 })
+    } else {
+      setTimeout(() => { void warm() }, 1000)
+    }
+  }, [
+    activeChatId,
+    chats,
+    chatsQuery.isFetchedAfterMount,
+    chatsQuery.isSuccess,
+    queryClient,
+  ])
   const appPreviewAckRef = useRef(new Set())
   const handleAppPreviewSeen = useCallback((app, final) => {
     acknowledgeAppPreview({

@@ -13,6 +13,7 @@ from app.auth_helpers import TokenSource, get_auth_token_source
 from app.config import get_settings
 from app.database import get_db
 from app.deps import resolve_media_or_header_owner
+from app.image_previews import display_image_preview
 from app.path_utils import validate_path_within_base
 
 # Chat IDs are dashed UUID4 strings produced by str(uuid.uuid4()).
@@ -40,8 +41,7 @@ _RASTER_MEDIA_TYPES = {
   "image/webp",
 }
 
-
-def _serve_chat_image(chat_id, filename, token_src, db):
+def _serve_chat_image(chat_id, filename, token_src, db, *, preview=False):
   """Common auth + path-validation + FileResponse for a chat media file.
 
   The token can come from two sources:
@@ -69,6 +69,14 @@ def _serve_chat_image(chat_id, filename, token_src, db):
     guessed_type if guessed_type in _RASTER_MEDIA_TYPES
     else "application/octet-stream"
   )
+  if preview and media_type in _RASTER_MEDIA_TYPES:
+    preview_path = display_image_preview(file_path, base)
+    if preview_path is not None:
+      return FileResponse(
+        str(preview_path),
+        media_type="image/webp",
+        headers={"Cache-Control": "private, max-age=86400"},
+      )
   return FileResponse(str(file_path), media_type=media_type)
 
 
@@ -76,8 +84,11 @@ def _serve_chat_image(chat_id, filename, token_src, db):
 def serve_chat_media(
   chat_id: str,
   filename: str = FastPath(...),
+  preview: bool = False,
   token_src: TokenSource = Depends(get_auth_token_source),
   db: Session = Depends(get_db),
 ):
-  """Serves an agent-attached chat image, such as a screenshot."""
-  return _serve_chat_image(chat_id, filename, token_src, db)
+  """Serves an agent-attached image or its bounded transcript preview."""
+  return _serve_chat_image(
+    chat_id, filename, token_src, db, preview=preview,
+  )

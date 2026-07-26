@@ -29,20 +29,16 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseImageDims, imageVarsFromDims } from '../markdown/imageDims.js'
+import {
+  getMediaChatId,
+  previewSrcForChatMedia,
+} from '../markdown/mediaImageSource.js'
 
 // ---------------------------------------------------------------------------
-// Replicate the regex and helper from InlineContent.jsx
+// Regex contract used by the shared media-image helper
 // ---------------------------------------------------------------------------
 
-// Copy of MEDIA_PATH_RE as declared in InlineContent.jsx.
-// Any change to the source must be reflected here (the test documents the
-// contract, not the implementation — we verify the shape is correct).
 const MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(?:uploads|media)\//
-
-function getMediaChatId(src) {
-  const m = src.match(MEDIA_PATH_RE)
-  return m ? m[1] : null
-}
 
 // ---------------------------------------------------------------------------
 // Replicate safeUrl from InlineContent.jsx (protocol allowlist check)
@@ -174,6 +170,41 @@ describe('getMediaChatId', () => {
     const uuid = 'aaaabbbb-cccc-4ddd-8eee-ffffffffffff'
     const id = getMediaChatId(`/api/chats/${uuid}/media/mind-after-fix-v2.png`)
     assert.equal(id, uuid, 'filename hyphens must not bleed into chat ID')
+  })
+})
+
+describe('previewSrcForChatMedia', () => {
+  test('adds the preview flag without replacing the scoped media token', () => {
+    assert.equal(
+      previewSrcForChatMedia('/api/chats/abc/media/shot.png?token=MEDIA'),
+      '/api/chats/abc/media/shot.png?token=MEDIA&preview=true',
+    )
+  })
+
+  test('keeps the original URL for the lightbox contract', () => {
+    const full = '/api/chats/abc/media/shot.png?token=MEDIA'
+    const inline = previewSrcForChatMedia(full)
+    assert.notEqual(inline, full)
+    assert.equal(full.includes('preview='), false)
+  })
+
+  test('requests derivatives for uploads but leaves external images alone', () => {
+    const upload = '/api/chats/abc/uploads/photo.jpg?token=MEDIA'
+    const external = 'https://example.com/photo.jpg'
+    assert.equal(
+      previewSrcForChatMedia(upload),
+      '/api/chats/abc/uploads/photo.jpg?token=MEDIA&preview=true',
+    )
+    assert.equal(previewSrcForChatMedia(external), external)
+  })
+
+  test('preserves absolute URLs and existing query parameters', () => {
+    assert.equal(
+      previewSrcForChatMedia(
+        'https://mobius.example/api/chats/abc/media/x.png?w=800&token=T',
+      ),
+      'https://mobius.example/api/chats/abc/media/x.png?w=800&token=T&preview=true',
+    )
   })
 })
 

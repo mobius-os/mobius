@@ -60,6 +60,7 @@ import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
+import { chatDetailCacheValue, chatEntryPhase } from '../../lib/chatDetailCache.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
 import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
@@ -307,10 +308,10 @@ export default function ChatView({
   const offsetRef = useRef(offset)
   offsetRef.current = offset
   const [loading, setLoading] = useState(!cached)
-  // Warm cache content is useful immediately, but it is not authoritative for
-  // entry layout. The first refresh decides whether an already-running turn's
-  // catch-up must settle before the transcript can be revealed.
-  const cachedEntryPhase = cached && !cached.running ? 'cached' : 'history'
+  // Cached content is a real first paint even for a running chat. The initial
+  // refresh remains authoritative and the stream catches up any active tail,
+  // but neither needs to keep an already-useful transcript hidden.
+  const cachedEntryPhase = chatEntryPhase(cached)
   const [initialEntryPhase, setInitialEntryPhase] = useState(cachedEntryPhase)
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
   // the UI can render a retry message. Setting loading false alone would
@@ -1806,7 +1807,8 @@ export default function ChatView({
       .then(data => {
         if (cancelled) return
         if (fetchGenRef.current !== gen) return
-        const msgs = data.messages || []
+        const detailCache = chatDetailCacheValue(data)
+        const msgs = detailCache.messages
         const failedAttempt = failedSendAttemptRef.current
         if (failedAttempt) {
           if (sendAttemptIsDurable(failedAttempt, msgs, data.pending_messages)) {
@@ -1827,21 +1829,13 @@ export default function ChatView({
         // `+` popover's model picker silently vanished, leaving only Attach +
         // "What the agent knows". Setting it here keeps the picker present
         // regardless of the messages fast-path.
-        const nextChatInfo = {
-          provider: data.provider || 'claude',
-          created_by_app_id: data.created_by_app_id ?? null,
-          agent_settings_json: data.agent_settings_json || null,
-          effective: data.effective_agent_settings || {},
-          has_assistant_turns: !!data.has_assistant_turns,
-          auto_resume_on_limit: !!data.auto_resume_on_limit,
-          auto_resume_on_restart: !!data.auto_resume_on_restart,
-        }
+        const nextChatInfo = detailCache.chatInfo
         setChatInfo(nextChatInfo)
         queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
           ...(existing || {}),
-          running: !!data.running,
-          pending_messages: data.pending_messages || [],
-          pending_question_id: data.pending_question_id || null,
+          running: detailCache.running,
+          pending_messages: detailCache.pending_messages,
+          pending_question_id: detailCache.pending_question_id,
           chatInfo: nextChatInfo,
         }))
         if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
@@ -1856,17 +1850,6 @@ export default function ChatView({
         // promoteStreamToMessages replaces this partial with the final version.
         // Previously we stripped this and waited for SSE — caused the "message
         // disappears on choppy return" bug.
-
-        // Normalize stale "running" tool blocks from interrupted sessions.
-        for (const msg of msgs) {
-          if (msg.blocks) {
-            for (const blk of msg.blocks) {
-              if (blk.type === 'tool' && blk.status === 'running') {
-                blk.status = 'done'
-              }
-            }
-          }
-        }
 
         const refreshed = mergeRecentMessagesIntoLoadedWindow({
           loadedMessages: messagesRef.current,

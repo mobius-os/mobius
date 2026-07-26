@@ -5,6 +5,10 @@ import { getToken, isEphemeralAuth, BASE } from '../../../api/client.js'
 import { mediaTokenParam } from '../../../api/mediaToken.js'
 import { useMathHtml } from './math.js'
 import { parseImageDims, imageVarsFromDims } from './imageDims.js'
+import {
+  getMediaChatId,
+  previewSrcForChatMedia,
+} from './mediaImageSource.js'
 import ImageLightbox from './ImageLightbox.jsx'
 import { useHistoryDismiss } from '../../../hooks/useHistoryDismiss.jsx'
 import '../lightbox.css'
@@ -170,13 +174,6 @@ function safeLinkHref(href) {
 // the owner JWT must not appear there (it would leak into access logs, history,
 // Referer). Other /api/ paths that appear in markdown images (rare) still get the
 // owner token in the URL, but the primary media-serve paths are hardened.
-const MEDIA_PATH_RE = /^(?:.*)?\/api\/chats\/([^/]+)\/(?:uploads|media)\//
-
-function getMediaChatId(src) {
-  const m = src.match(MEDIA_PATH_RE)
-  return m ? m[1] : null
-}
-
 function resolveStaticImageSrc(href) {
   // Returns a URL for non-media API paths (or null for invalid hrefs).
   // Appends the owner token for API paths that aren't upload/generated routes —
@@ -209,6 +206,9 @@ export function ExpandableImage({
 
   const rawSrc = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
   const mediaChatId = rawSrc ? getMediaChatId(rawSrc) : null
+  const previewSrc = resolvedSrc
+    ? previewSrcForChatMedia(resolvedSrc)
+    : null
 
   // Reserve the exact aspect ratio on the FIRST paint when the markup carries
   // known dimensions (?w=&h=, lever 3): a screenshot whose size the agent
@@ -265,12 +265,12 @@ export function ExpandableImage({
           }
         }}
       >
-        {resolvedSrc && (
+        {previewSrc && (
           <img
-            src={resolvedSrc}
+            src={previewSrc}
             alt={alt}
             className="md-image"
-            loading={loading}
+            loading={loading || 'lazy'}
             decoding="async"
             onLoad={(e) => {
               const img = e.currentTarget

@@ -131,10 +131,15 @@ describe('ExpandableImage reserves the frame BEFORE the token resolves (lever 3)
       'a blocked/empty href renders nothing, but a valid-but-unresolved href still reserves its frame')
   })
 
-  test('the <img> element is gated on resolvedSrc while the frame is not', () => {
-    // The frame span is unconditional; the img swaps in once resolvedSrc lands.
-    assert.match(src, /resolvedSrc\s*&&\s*\(?\s*<img/,
-      'the <img> must render only once resolvedSrc is ready, inside an always-present frame')
+  test('the <img> element is gated on the derived preview while the frame is not', () => {
+    // The frame is unconditional; the lightweight inline image swaps in once
+    // the scoped original URL can be converted to its preview URL.
+    assert.match(src, /previewSrc\s*&&\s*\(?\s*<img/,
+      'the <img> must render only once previewSrc is ready, inside an always-present frame')
+    assert.match(src, /src=\{previewSrc\}/,
+      'the transcript must fetch the derivative rather than the full original')
+    assert.match(src, /<ImageLightbox\s+src=\{resolvedSrc\}/,
+      'opening an image must still hand the full original to the lightbox')
   })
 
   test('seeds first-paint aspect ratio from known dims (parseImageDims/imageVarsFromDims)', () => {

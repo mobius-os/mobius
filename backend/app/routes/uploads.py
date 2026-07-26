@@ -19,6 +19,7 @@ from app.deps import (
   Principal, get_owner_or_chat_embed_principal, reject_cross_site,
   require_chat_embed_operation, resolve_media_or_header_owner,
 )
+from app.image_previews import discard_image_preview, display_image_preview
 from app.path_utils import validate_path_within_base
 from app.resource_access import get_active_chat_for_principal
 from app.storage_io import atomic_write, app_dir_usage
@@ -218,6 +219,7 @@ def delete_upload(
 
   if file_path.exists() and file_path.is_file():
     file_path.unlink()
+    discard_image_preview(file_path, upload_dir)
 
   if chat.uploads:
     chat.uploads = [u for u in chat.uploads if u.get("name") != filename]
@@ -230,6 +232,7 @@ def delete_upload(
 def serve_upload(
   chat_id: str,
   filename: str = Path(...),
+  preview: bool = False,
   token_src: TokenSource = Depends(get_auth_token_source),
   db: Session = Depends(get_db),
 ):
@@ -275,5 +278,14 @@ def serve_upload(
   headers = {}
   if stored_mime not in _INLINE_MIME_TYPES:
     headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+  if preview and stored_mime in _INLINE_MIME_TYPES:
+    preview_path = display_image_preview(file_path, upload_dir)
+    if preview_path is not None:
+      return FileResponse(
+        str(preview_path),
+        media_type="image/webp",
+        headers={"Cache-Control": "private, max-age=86400"},
+      )
 
   return FileResponse(str(file_path), headers=headers)
