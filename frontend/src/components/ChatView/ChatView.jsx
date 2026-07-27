@@ -2001,14 +2001,10 @@ export default function ChatView({
   //     they just stopped) → original turn 1 user msg + partial get
   //     pushed above the viewport. Keep their current scroll mode
   //     instead — the new turn streams into view from where they were.
-  // Modified-Enter spans two requests (durable queue acknowledgement, then
-  // force-steer). Claim that whole operation synchronously so repeated
-  // keydowns cannot submit a second message before the steer busy state flips.
+  // Modified-Enter is a single durable direct-steer request. Claim it
+  // synchronously so repeated keydowns cannot submit a duplicate before the
+  // request settles.
   const submitSteerInFlightRef = useRef(false)
-  // doSend is intentionally stable and therefore must not capture the
-  // render-local steer implementation. Dereference the current function only
-  // after the queue POST settles, when a newer render may have replaced it.
-  const handleSteerOneRef = useRef(null)
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return
@@ -2062,7 +2058,8 @@ export default function ChatView({
       || serverRunningRef.current
       || pendingQueue.pendingMessagesRef.current.length > 0
     )
-    if (queuesBehindActiveTurn) {
+    const directSteer = opts.directSteer === true && queuesBehindActiveTurn
+    if (queuesBehindActiveTurn && !directSteer) {
       // Queueing changes the footer immediately (new chip, cleared composer)
       // but adds no transcript row yet. Freeze the exact visible message
       // before that layout change. The captured submit intent above is kept
@@ -2077,7 +2074,7 @@ export default function ChatView({
     if (shouldDismissComposerKeyboardOnSubmit({
       isTouchPrimary: _isTouchPrimary,
       queuesBehindActiveTurn,
-      steerAfterQueue: opts.steerAfterQueue === true,
+      directSteer,
     })) {
       inputRef.current?.blur()
     }
@@ -2111,10 +2108,10 @@ export default function ChatView({
         : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`),
     })
 
-    // QUEUE PATH: agent is streaming or queue isn't empty. Optimistic
-    // entry carrying the minted `cid` — the row identity is stable across
-    // the optimistic→server-ts display update. Backend writes to
-    // chat.pending_messages via POST /messages returning {status, ts, position}.
+    // ACTIVE-TURN PATH: ordinary sends add an optimistic queue row immediately.
+    // A direct steer does not: the backend durably reserves and steers this cid
+    // in the same request, so pending_messages is an invisible safety reserve.
+    // Only a `queued` response exposes that reserve as the fallback tray row.
     //
     // Read from refs (not React state) so doSend stays closure-safe.
     // Callers like handleStop invoke doSend AFTER calling
@@ -2125,7 +2122,7 @@ export default function ChatView({
     if (queuesBehindActiveTurn) {
       const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
       if (attachments.length > 0) queuedMsg.attachments = attachments
-      pendingQueue.add(queuedMsg, { inFlight: true })
+      if (!directSteer) pendingQueue.add(queuedMsg, { inFlight: true })
       // The shared send decision was captured AT SEND TIME, before blur or the
       // POST. If this queued send is promoted into the active turn (the backend
       // returns started, either as `queued+started` or the `started` race),
@@ -2156,7 +2153,9 @@ export default function ChatView({
         const result = await streamSend(
           text,
           attachments.length > 0 ? attachments : undefined,
-          { queueOnly: true, cid },
+          directSteer
+            ? { directSteer: true, cid }
+            : { queueOnly: true, cid },
         )
         clearFailedAttempt()
         releaseComposerFilesAfterAccepted()
@@ -2164,7 +2163,7 @@ export default function ChatView({
           // A stale local queue decision can race an already-durable retry.
           // Remove only this send's optimistic tray row; an unrelated live
           // turn may still be streaming and must remain attached.
-          pendingQueue.cancelByCid(queuedMsg.cid)
+          if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
           forgetQueuedPinIntent({ cid: queuedMsg.cid })
           inlineSteerPinIntentRef.current = null
           const durableRows = startedMessagesFromResponse(result)
@@ -2183,6 +2182,24 @@ export default function ChatView({
         }
         if (result?.status === 'queued') {
           const canonicalPending = result.pending_message || null
+          if (
+            directSteer
+            && !pendingQueue.pendingMessagesRef.current.some(
+              row => cidOf(row) === cid
+            )
+          ) {
+            // The one-request steer could not be accepted. Its server-reserved
+            // row is now a real queue fallback, so reveal it only at this point.
+            pendingQueue.add({
+              ...queuedMsg,
+              ...(canonicalPending || {}),
+              cid,
+              ts: canonicalPending?.ts ?? result.ts ?? queuedMsg.ts,
+              position: result.position,
+              queued: true,
+              serverTs: !!canonicalPending,
+            })
+          }
           // Update the DISPLAY ts + canonical content on the cid-matched row.
           // Identity (cid) never changes, so there is no swap — just a confirm.
           const ackTs = canonicalPending?.ts ?? result.ts
@@ -2228,18 +2245,18 @@ export default function ChatView({
               cidList: result.message?._consumed_cids,
             })
             bridgeHook.markBridged()
-          } else if (opts.steerAfterQueue) {
-            // Ctrl/Cmd+Enter uses the same durable queue -> force-steer path
-            // as the visible per-row arrow. The queue acknowledgement gives
-            // the new row a canonical ts before steering, so a failed or
-            // racing steer naturally leaves the message safely queued.
-            await handleSteerOneRef.current?.(cid)
           }
         }
         // Mid-turn steer: the backend delivered the send into the live provider
         // turn. Where the row LIVES right now is what `cut_deferred` states.
         if (result?.status === 'steered') {
-          if (result.cut_deferred) {
+          if (directSteer) {
+            // No tray row was ever created. Codex's cut event has already made
+            // the message inline; Claude's deferred cut will do so when its
+            // interrupt boundary lands. Until then the durable server reserve
+            // stays intentionally invisible rather than flashing as queued.
+            forgetQueuedPinIntent({ cid: queuedMsg.cid })
+          } else if (result.cut_deferred) {
             // Claude: the transcript split waits for the runner's interrupt
             // boundary, so the row is STILL queued server-side and its tray
             // entry stays — dropping it here left the owner's message with
@@ -2334,7 +2351,8 @@ export default function ChatView({
         // entry as an ordinary queued row, so clear the flag here or it
         // leaks forever and a later hydrate would wrongly preserve it.
         if (
-          result?.status !== 'queued'
+          !directSteer
+          && result?.status !== 'queued'
           && result?.status !== 'steered'
           && result?.status !== 'started'
         ) {
@@ -2342,7 +2360,7 @@ export default function ChatView({
         }
       } catch (err) {
         // Roll back optimistic + restore input.
-        pendingQueue.cancelByCid(queuedMsg.cid)
+        if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetQueuedPinIntent({ cid: queuedMsg.cid })
         inlineSteerPinIntentRef.current = null
         rememberFailedAttempt({
@@ -2726,7 +2744,7 @@ export default function ChatView({
     if (isProviderSwitchBlocking(chatId)) return
     if (submitSteerInFlightRef.current) return
     submitSteerInFlightRef.current = true
-    void doSend(input.trim(), { steerAfterQueue: true })
+    void doSend(input.trim(), { directSteer: true })
       .finally(() => { submitSteerInFlightRef.current = false })
   }
 
@@ -3260,8 +3278,6 @@ export default function ChatView({
       setSteerBusy(false)
     }
   }
-  handleSteerOneRef.current = handleSteerOne
-
   // Re-anchor the scroll mode when the tab returns to the foreground
   // (visibilitychange/pageshow/online) while a turn is active, so a
   // backgrounded-then-resumed streaming chat doesn't snap away from where the

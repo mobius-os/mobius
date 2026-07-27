@@ -195,17 +195,32 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(await page.locator('.queued__row').count()).toBe(0)
   })
 
-  test('Ctrl+Enter queues durably, then automatically steers only the composed message', async ({ page }) => {
+  test('Ctrl+Enter sends one direct-steer request without rendering a queue row', async ({ page }) => {
     const STEER_TEXT = 'change course immediately'
     const messagePosts = []
-    let releaseQueueAck
-    const queueAckGate = new Promise(resolve => { releaseQueueAck = resolve })
+    let releaseDirectSteer
+    const directSteerGate = new Promise(resolve => { releaseDirectSteer = resolve })
 
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       let body = {}
       try { body = JSON.parse(route.request().postData() || '{}') } catch { /* empty */ }
       messagePosts.push(body)
 
+      if (body.direct_steer) {
+        // Hold the one request open: the draft is already cleared, but it must
+        // never appear in the queued tray while the atomic reserve+steer is
+        // settling on the server.
+        await directSteerGate
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'steered',
+            chat_id: 'mock',
+            pending_messages: [],
+          }),
+        })
+      }
       if (body.force_steer) {
         return route.fulfill({
           status: 202,
@@ -229,13 +244,20 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           }),
         })
       }
-      // Hold the durable queue acknowledgement open so a repeated shortcut
-      // exercises the synchronous submit guard, before steerBusy can flip.
-      await queueAckGate
       return route.fulfill({
         status: 202,
         contentType: 'application/json',
-        body: JSON.stringify({ status: 'queued', ts: 778001, position: 1 }),
+        body: JSON.stringify({
+          status: 'queued',
+          ts: 778001,
+          position: 1,
+          pending_message: {
+            role: 'user',
+            content: body.content,
+            ts: 778001,
+            cid: body.cid,
+          },
+        }),
       })
     })
 
@@ -257,27 +279,26 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await input.fill(STEER_TEXT)
     await page.keyboard.press('Control+Enter')
     await expect.poll(() => messagePosts.filter(body => (
-      !body.force_steer && body.content === STEER_TEXT
+      body.direct_steer && body.content === STEER_TEXT
     )).length).toBe(1)
+    await expect(page.locator('.queued__row')).toHaveCount(0)
+
     await page.keyboard.press('Control+Enter')
     await page.waitForTimeout(100)
     expect(messagePosts.filter(body => (
-      !body.force_steer && body.content === STEER_TEXT
+      body.direct_steer && body.content === STEER_TEXT
     ))).toHaveLength(1)
-    releaseQueueAck()
+    releaseDirectSteer()
 
-    await expect.poll(
-      () => messagePosts.filter(body => body.force_steer).length,
-      { timeout: 5000 },
-    ).toBe(1)
-
-    const queuePost = messagePosts.find(body => (
-      !body.force_steer && body.content === STEER_TEXT
+    const directPost = messagePosts.find(body => (
+      body.direct_steer && body.content === STEER_TEXT
     ))
-    const steerPost = messagePosts.find(body => body.force_steer)
-    expect(typeof queuePost.cid).toBe('string')
-    expect(steerPost.content).toBe(STEER_TEXT)
-    expect(steerPost.consume_pending_cids).toEqual([queuePost.cid])
+    expect(typeof directPost.cid).toBe('string')
+    expect(directPost.force_steer).toBeUndefined()
+    expect(directPost.consume_pending_cids).toBeUndefined()
+    expect(messagePosts.filter(body => (
+      body.content === STEER_TEXT
+    ))).toHaveLength(1)
     await expect(page.locator('.queued__row')).toHaveCount(0, { timeout: 5000 })
   })
 

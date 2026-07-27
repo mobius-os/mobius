@@ -334,9 +334,12 @@ async def test_fetch_claude_models_raises_when_refresh_fails(
   assert any(e["id"] == "claude-opus-4-8" for e in fallback)
 
 
-def test_codex_model_slugs_from_raw_cli_catalog():
-  """The CLI debug fallback parses raw catalog JSON without caring about
-  newer metadata fields such as max/ultra reasoning levels."""
+def test_codex_model_entries_preserve_live_reasoning_levels():
+  """The loose CLI parser carries new effort values to the picker.
+
+  The generated SDK enum may still reject max/ultra, so model discovery must
+  not discard those strings while extracting the catalog IDs.
+  """
   payload = {
     "models": [
       {
@@ -352,8 +355,21 @@ def test_codex_model_slugs_from_raw_cli_catalog():
       "gpt-string-shape",
     ],
   }
-  assert providers._codex_model_slugs_from_payload(payload) == [
-    "gpt-5.6-sol",
-    "gpt-future",
-    "gpt-string-shape",
+  assert providers._codex_model_entries_from_payload(payload) == [
+    {
+      "id": "gpt-5.6-sol",
+      "effort_levels": ["medium", "max", "ultra"],
+    },
+    {"id": "gpt-future"},
+    {"id": "gpt-string-shape"},
   ]
+
+
+def test_codex_fallback_efforts_match_current_catalog():
+  by_id = {
+    entry["id"]: entry
+    for entry in providers._fallback_models("codex")
+  }
+  assert by_id["gpt-5.6-sol"]["effort_levels"][-2:] == ["max", "ultra"]
+  assert by_id["gpt-5.6-terra"]["effort_levels"][-2:] == ["max", "ultra"]
+  assert by_id["gpt-5.6-luna"]["effort_levels"][-1] == "max"

@@ -128,6 +128,21 @@ def _run_outcomes(chat_id):
     db.close()
 
 
+def _run_metrics(run_id):
+  db = SessionLocal()
+  try:
+    run = db.query(models.ChatRun).filter(models.ChatRun.id == run_id).one()
+    return {
+      "cost_usd": run.cost_usd,
+      "input_tokens": run.input_tokens,
+      "output_tokens": run.output_tokens,
+      "total_tokens": run.total_tokens,
+      "usage_json": run.usage_json,
+    }
+  finally:
+    db.close()
+
+
 def _run_real_chat(chat_id, *, run_token, run_gen, provider_id="claude",
                    published=None):
   """Drive the REAL run_chat for `chat_id` (Claude branch) on a fresh
@@ -1149,14 +1164,13 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   assert not chat_mod.registry.is_alive("t11"), "registry released"
 
 
-# -- 12. auth-error setup cleanup: marker cleared, pending dropped ----------
+# -- 12. no-agent first-run guidance ---------------------------------------
 @pytest.mark.parametrize("malformed_credentials", [False, True])
-def test_auth_error_cleanup_clears_marker_before_registry_release(
+def test_no_connected_agent_streams_and_persists_guidance(
   monkeypatch, malformed_credentials,
 ):
-  """The auth-error setup early return routes through the same bounded
-  terminal cleanup: pending cleared, marker cleared, registry released, no
-  continuation."""
+  """A first-run owner with no provider gets a normal durable assistant
+  response instead of a transient authentication error."""
   # Seed an owner with either NO creds file or a non-UTF-8 creds file →
   # Claude check_auth returns an error without escaping into a route/runner 500.
   # The DATA_DIR tmpdir is shared across tests and conftest does not sweep
@@ -1183,32 +1197,215 @@ def test_auth_error_cleanup_clears_marker_before_registry_release(
     dbx.close()
   _seed_chat(
     "t12", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[{"role": "user", "content": "queued", "ts": 3}],
     run_status="running",
   )
   _seed_run("rt-12", "t12")
 
-  scheduled = []
-  orig_sched = chat_mod._schedule_continuation
-  chat_mod._schedule_continuation = lambda **kw: scheduled.append(kw)
+  note_modes = []
+
+  async def capture_note(_data_dir, _chat_id, *, deterministic=False):
+    note_modes.append(deterministic)
+
+  monkeypatch.setattr(chat_mod, "_ensure_chat_note", capture_note)
 
   chat_mod.mark_starting("t12")
   gen = chat_mod.current_run_generation("t12")
   published = []
+  _run_real_chat("t12", run_token="rt-12", run_gen=gen, published=published)
+  _drain_actor()
+
+  assert published.count("text") == 1
+  assert "error" not in published
+  assert published[-1] == "done"
+  state = _load("t12")
+  assert state["run_status"] is None
+  assert state["messages"][-1]["role"] == "assistant"
+  assert state["messages"][-1]["content"] == chat_mod.NO_AGENT_CONNECTED_MESSAGE
+  assert state["messages"][-1]["blocks"] == [{
+    "type": "text",
+    "content": chat_mod.NO_AGENT_CONNECTED_MESSAGE,
+  }]
+  assert _run_outcomes("t12") == {"rt-12": "completed"}
+  assert _run_metrics("rt-12") == {
+    "cost_usd": 0.0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "usage_json": chat_mod._NO_AGENT_USAGE_METRICS,
+  }
+  assert note_modes == [True]
+  assert not chat_mod.registry.is_alive("t12"), "registry released"
+
+
+def test_no_connected_agent_promotes_queued_message(monkeypatch):
+  """A send queued during the synthetic reply follows the ordinary handoff:
+  the guidance finalizes first, then the queued row gets a fresh run token."""
+  from app import auth as auth_mod
+
+  for creds in (
+    pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
+    / ".credentials.json",
+    pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "codex"
+    / "auth.json",
+  ):
+    creds.unlink(missing_ok=True)
+  dbx = SessionLocal()
   try:
-    _run_real_chat("t12", run_token="rt-12", run_gen=gen, published=published)
+    dbx.add(models.Owner(
+      username="o", hashed_password=auth_mod.hash_password("x"),
+      provider="claude",
+    ))
+    dbx.commit()
   finally:
-    chat_mod._schedule_continuation = orig_sched
+    dbx.close()
+  _seed_chat(
+    "t12-queued",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    run_status="running",
+  )
+  _seed_run("rt-12-queued", "t12-queued")
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  chat_mod.mark_starting("t12-queued")
+  gen = chat_mod.current_run_generation("t12-queued")
+  published = []
+  _run_real_chat(
+    "t12-queued", run_token="rt-12-queued", run_gen=gen,
+    published=published,
+  )
+  _drain_actor()
+
+  assert published.count("text") == 1
+  assert "queued_turn_starting" in published
+  assert len(scheduled) == 1
+  successor_token = scheduled[0]["run_token"]
+  state = _load("t12-queued")
+  assert state["pending_messages"] == []
+  assert state["run_status"] == "running"
+  assert state["messages"][-2]["content"] == chat_mod.NO_AGENT_CONNECTED_MESSAGE
+  assert state["messages"][-1]["content"] == "queued"
+  assert _run_outcomes("t12-queued") == {
+    "rt-12-queued": "completed",
+    successor_token: "running",
+  }
+
+
+def test_no_connected_agent_stopped_during_metrics_preserves_successor_sink(
+  monkeypatch,
+):
+  """A Stop during the metrics ack must fence the provider-free response.
+
+  Before an agent-backed runner starts there is no registered handle or sink.
+  If Stop supersedes this run while zero metrics are being persisted, the old
+  task must not resume by overwriting a fresh successor's steering sink and
+  publishing obsolete guidance.
+  """
+  from app import auth as auth_mod
+
+  for creds in (
+    pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
+    / ".credentials.json",
+    pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "codex"
+    / "auth.json",
+  ):
+    creds.unlink(missing_ok=True)
+  dbx = SessionLocal()
+  try:
+    dbx.add(models.Owner(
+      username="o", hashed_password=auth_mod.hash_password("x"),
+      provider="claude",
+    ))
+    dbx.commit()
+  finally:
+    dbx.close()
+  _seed_chat(
+    "t12-metrics-stop",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    run_status="running",
+  )
+  _seed_run("rt-12-metrics-stop", "t12-metrics-stop")
+
+  chat_mod.mark_starting("t12-metrics-stop")
+  gen = chat_mod.current_run_generation("t12-metrics-stop")
+  successor_sink = object()
+
+  async def superseding_metrics(**_kwargs):
+    # Model Stop's generation handoff and release of the old starting claim,
+    # followed by a fresh send claiming the same chat before the ack resumes.
+    chat_mod.bump_run_generation("t12-metrics-stop")
+    chat_mod.discard_starting("t12-metrics-stop")
+    assert chat_mod.registry.mark_starting("t12-metrics-stop") is True
+    chat_mod.register_active_sink("t12-metrics-stop", successor_sink)
+
+  monkeypatch.setattr(chat_mod, "_record_run_metrics", superseding_metrics)
+  published = []
+  try:
+    _run_real_chat(
+      "t12-metrics-stop",
+      run_token="rt-12-metrics-stop",
+      run_gen=gen,
+      published=published,
+    )
+
+    assert "text" not in published
+    assert chat_mod.get_active_sink("t12-metrics-stop") is successor_sink
+  finally:
+    chat_mod.unregister_active_sink("t12-metrics-stop", successor_sink)
+    chat_mod.discard_starting("t12-metrics-stop")
+
+
+# -- 12a. selected-provider auth error still cleans up ----------------------
+def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
+  """A disconnected selected provider remains an error when another agent
+  is connected; the no-agent guidance must not hide a real provider issue."""
+  from app import auth as auth_mod
+
+  creds = (
+    pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
+    / ".credentials.json"
+  )
+  creds.unlink(missing_ok=True)
+  dbx = SessionLocal()
+  try:
+    dbx.add(models.Owner(
+      username="o", hashed_password=auth_mod.hash_password("x"),
+      provider="claude",
+    ))
+    dbx.commit()
+  finally:
+    dbx.close()
+  _seed_chat(
+    "t12-auth-error",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    run_status="running",
+  )
+  _seed_run("rt-12-auth", "t12-auth-error")
+  monkeypatch.setattr(
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: ["codex"],
+  )
+
+  chat_mod.mark_starting("t12-auth-error")
+  gen = chat_mod.current_run_generation("t12-auth-error")
+  published = []
+  _run_real_chat(
+    "t12-auth-error", run_token="rt-12-auth", run_gen=gen,
+    published=published,
+  )
   _drain_actor()
 
   assert "error" in published
-  assert "queued_turn_starting" not in published
-  assert scheduled == []
-  state = _load("t12")
-  assert state["run_status"] is None, "auth-error cleanup must clear the marker"
-  assert state["pending_messages"] == [], "pending must be cleared durably"
-  assert _run_outcomes("t12") == {"rt-12": "failed"}
-  assert not chat_mod.registry.is_alive("t12"), "registry released"
+  assert "text" not in published
+  state = _load("t12-auth-error")
+  assert state["run_status"] is None
+  assert state["pending_messages"] == []
+  assert _run_outcomes("t12-auth-error") == {"rt-12-auth": "failed"}
+  assert not chat_mod.registry.is_alive("t12-auth-error")
 
 
 # -- 12b. setup-error cleanup ownership gate (the forget-wedge guard) -------

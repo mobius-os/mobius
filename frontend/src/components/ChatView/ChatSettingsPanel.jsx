@@ -843,7 +843,7 @@ export default function ChatSettingsPanel({
                 onPointerDown={preserveFocusUnlessTouch}
               >
                 <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
-                  <span className="csp__automation-title">Continue after usage limits</span>
+                  <span className="csp__automation-title">Automatically continue after usage limits</span>
                 </label>
                 <Switch
                   className="chat-policy-switch"

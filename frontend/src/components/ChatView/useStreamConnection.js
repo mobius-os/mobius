@@ -138,10 +138,11 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *                         promotes the live stream into its own message,
  *                         re-bases streamItems for the continuation, and
  *                         renders the row inline as content growth. There is
- *                         no separate "accepted" event: on the deferred
- *                         (Claude) path the send's own 202 echoes the row as
- *                         the still-queued row it is, so the tray has ONE
- *                         reconciler until the cut arrives.
+ *                         no separate "accepted" event. On the deferred
+ *                         (Claude) path an existing queued-row conversion
+ *                         remains in the tray until the cut; a direct composer
+ *                         steer has no tray row and keeps its durable reserve
+ *                         hidden until either the cut or a queued fallback.
  *   catch_up_done         Replay burst finished; live events follow.
  *   error                 { message }. Surfaced inline.
  *   done                  Turn complete; SSE closes.
@@ -190,8 +191,9 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   catchUpCommitSeq: number,
  *   sendMessage: (text: string, attachments?: Array<object>,
  *                 opts?: {hidden?: boolean, queueOnly?: boolean, cid?: string,
- *                         forceSteer?: boolean, consumePendingCids?: string[],
- *                         answers?: object}) => Promise<object>,
+ *                         forceSteer?: boolean, directSteer?: boolean,
+ *                         consumePendingCids?: string[], answers?: object})
+ *                 => Promise<object>,
  *   connectToStream: () => void,
  *   retry: () => void,
  *   disconnect: (opts?: {clearStreaming?: boolean}) => void,
@@ -1269,6 +1271,7 @@ export default function useStreamConnection(chatId, {
       hidden = false,
       queueOnly = false,
       forceSteer = false,
+      directSteer = false,
       cid = undefined,
       consumePendingCids = undefined,
       steeredMessages = undefined,
@@ -1283,7 +1286,8 @@ export default function useStreamConnection(chatId, {
     // answered. If the backend reports `started` instead, it recovered a
     // restarted question as a fresh hidden continuation and we reset below.
     const isAnswerSubmission = !!answers
-    // A force_steer injects into the LIVE turn — it is not a new turn.
+    // force_steer and direct_steer inject into the LIVE turn — neither starts
+    // a new turn on the expected path.
     // The fresh-send reset below (setStreamItems([]) + setIsStreaming +
     // wantsReconnect) is for STARTING a turn: wiping streamItems here would
     // discard the pre-steer assistant text the live SSE has already
@@ -1294,7 +1298,7 @@ export default function useStreamConnection(chatId, {
     // the existing SSE keeps streaming the post-steer continuation inline, so
     // there is no reconnect/replay to set up either. Skip the reset; the live
     // stream stays attached and the steered message renders inline.
-    if (!queueOnly && !isAnswerSubmission && !forceSteer) {
+    if (!queueOnly && !isAnswerSubmission && !forceSteer && !directSteer) {
       wantsReconnectRef.current = true
       justSentAtRef.current = Date.now()
       clearStoredStreamSnapshot(activeStreamChatIdRef.current)
@@ -1313,6 +1317,7 @@ export default function useStreamConnection(chatId, {
       if (hidden) body.hidden = true
       if (cid) body.cid = cid
       if (forceSteer) body.force_steer = true
+      if (directSteer) body.direct_steer = true
       if (consumePendingCids && consumePendingCids.length > 0) {
         body.consume_pending_cids = consumePendingCids
       }
@@ -1443,7 +1448,11 @@ export default function useStreamConnection(chatId, {
       }
       // Started: ensure streaming state is set even if the caller
       // passed queueOnly:true expecting it would be queued.
-      if (queueOnly || data.status === 'queued') {
+      if (
+        queueOnly
+        || data.status === 'queued'
+        || (directSteer && data.status === 'started')
+      ) {
         wantsReconnectRef.current = true
         justSentAtRef.current = Date.now()
         clearStoredStreamSnapshot(activeStreamChatIdRef.current)
@@ -1461,12 +1470,12 @@ export default function useStreamConnection(chatId, {
       // when a queueOnly send raced the server's `status: 'started'`
       // branch and then the POST itself failed mid-flight.
       //
-      // EXCEPT requests that inject into an existing turn. A force_steer and
-      // an AskUserQuestion answer do not start the live turn they target, so
-      // their POST failures must not tear down that turn's stream. The caller
-      // keeps the queued steer / retryable question intact while the existing
-      // connection remains authoritative.
-      if (!forceSteer && !isAnswerSubmission) {
+      // EXCEPT requests that inject into an existing turn. force_steer,
+      // direct_steer, and AskUserQuestion answers do not start the live turn
+      // they target, so their POST failures must not tear down that turn's
+      // stream. The caller keeps the queued/direct-steer fallback or retryable
+      // question intact while the existing connection remains authoritative.
+      if (!forceSteer && !directSteer && !isAnswerSubmission) {
         wantsReconnectRef.current = false
         setIsStreaming(false)
       }

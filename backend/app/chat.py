@@ -38,7 +38,6 @@ from app.broadcast import (
   create_broadcast,
   get_broadcast,
   get_system_broadcast,
-  has_running_chat_broadcast,
   set_active_broadcast,
 )
 from app.chat_writer import (
@@ -81,9 +80,32 @@ from app.events import (
   undo_question_scrub,
 )
 from app.memory_recall import recall_from_command, recall_from_result
-from app.providers import effective_agent_settings, get_provider, get_skill_path
+from app.providers import (
+  authenticated_provider_ids,
+  effective_agent_settings,
+  get_provider,
+  get_skill_path,
+)
 from app.runner_registry import registry
 from app.runtime_types import ChatEvent
+
+
+NO_AGENT_CONNECTED_MESSAGE = (
+  "No agent is available right now. Connect or reconnect one in Settings "
+  "to start building with M\u00f6bius.\n\n"
+  "In the meantime, browse the App Store\u2014many apps work without AI. "
+  "You\u2019ll need a connected agent to modify an app, build a new one, or "
+  "change how M\u00f6bius looks."
+)
+
+_NO_AGENT_USAGE_METRICS = {
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_input_tokens": 0,
+  "cache_creation_input_tokens": 0,
+  "reasoning_output_tokens": 0,
+  "total_tokens": 0,
+}
 
 
 _chat_log_handler: RotatingFileHandler | None = None
@@ -2333,6 +2355,35 @@ async def drain_all_for_restart(
 LIMIT_RESET_NOTIFY_TITLE = "Your limit has reset"
 LIMIT_RESET_NOTIFY_BODY = "Your limit has reset."
 CONTINUATION_SWEEP_BATCH_SIZE = 100
+# Start due provider-limit continuations gradually. Unrelated live work must
+# not delay an opted-in chat after its reset, but a bad/early reset timestamp
+# also must not launch a whole parked batch in one burst.
+LIMIT_AUTO_RESUME_STAGGER_SECS = 30.0
+_next_limit_auto_resume_at = 0.0
+
+
+def _limit_auto_resume_now() -> float:
+  """Monotonic clock seam for the launch stagger."""
+  return time.monotonic()
+
+
+def _claim_limit_auto_resume_slot(now: float | None = None) -> bool:
+  """Claim the process-wide stagger slot for one due limit continuation.
+
+  The parked rows themselves are durable. This small in-process gate only
+  spaces their launches: one sweep starts at most one, and a fresh process
+  starts with an empty slot rather than consuming persisted state.
+  Claiming before scheduling deliberately keeps the delay when task creation
+  loses a race or fails — the durable ``resume_pending`` row retries later
+  without turning a local failure into a burst.
+  """
+  global _next_limit_auto_resume_at
+  if now is None:
+    now = _limit_auto_resume_now()
+  if now < _next_limit_auto_resume_at:
+    return False
+  _next_limit_auto_resume_at = now + LIMIT_AUTO_RESUME_STAGGER_SECS
+  return True
 
 
 def _has_unanswered_question(chat: models.Chat | None) -> bool:
@@ -2417,11 +2468,11 @@ async def _auto_resume_chat(
         # Share the queue lock with owner/app sends. The outer sweep check can
         # go stale while this task waits, so re-check global liveness, policy,
         # attribution, the exact latest park, and provider ownership at the
-        # actual claim point. Provider-limit retries are globally serial to
-        # avoid a reset storm. Planned-restart continuations are different:
-        # they are the exact, owner-opted set that was already live together
-        # before the restart, so each chat may reclaim its own slot
-        # independently.
+        # actual claim point. Provider-limit retries are staggered by the
+        # reset sweep, rather than blocked on unrelated live chats. Planned-
+        # restart continuations are different: they are the exact, owner-opted
+        # set that was already live together before the restart, so each chat
+        # may reclaim its own slot independently.
         async with chat_queue.get_lock(chat_id):
           with SessionLocal() as check_db:
             chat = check_db.query(models.Chat).filter(
@@ -2481,11 +2532,6 @@ async def _auto_resume_chat(
             resume_reason = (
               "restart" if park.park_reason == "restart" else "usage_limit"
             )
-          if (
-            resume_reason != "restart"
-            and _any_chat_turn_active()
-          ):
-            return False
           if not mark_starting(chat_id):
             return False
           claimed = True
@@ -2580,12 +2626,12 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       failure cannot silently consume the promised continuation. The narrow
       post-promote SIGKILL boundary is documented on `_auto_resume_chat`.
     - A park whose chat was deleted resolves silently.
-    - Auto-resume is controlled per chat. Provider-limit retries are strictly
-      serial: at most one starts per tick, and none while any turn is live
-      anywhere. Planned-restart continuations reclaim the exact set that was
-      already live before the restart, so every eligible chat in the batch may
-      resume independently. A blocked enabled chat stays pending for a later
-      tick, while notify-only chats in the same due batch still resolve
+    - Auto-resume is controlled per chat. Provider-limit retries are staggered:
+      at most one starts per sweep and launches are spaced even when unrelated
+      chats are live. Planned-restart continuations reclaim the exact set that
+      was already live before the restart, so every eligible chat in the batch
+      may resume independently. A staggered enabled chat stays pending for a
+      later tick, while notify-only chats in the same due batch still resolve
       normally. App-attributed runs and queues never auto-resume.
 
   Stands down while draining — a restart is in progress, and the fresh
@@ -2705,13 +2751,10 @@ async def sweep_reset_parks(db: Session) -> list[str]:
     chat_gone = chat is None or chat.deleted_at is not None
     auto_resume = wants_auto_resume(chat, run)
     restart_auto_resume = auto_resume and run.park_reason == "restart"
-    if auto_resume and not restart_auto_resume and (
-      limit_resume_started or _any_chat_turn_active()
-    ):
-      # Strictly-serial gate: a live turn (an earlier auto-resume, or the
-      # owner's own send) must settle before this enabled park is processed.
-      # Leave this park untouched, but keep walking so a later notify-only
-      # chat is not held hostage by another chat's auto-resume preference.
+    if auto_resume and not restart_auto_resume and limit_resume_started:
+      # One provider-limit continuation per sweep. Leave this park untouched,
+      # but keep walking so a later notify-only chat is not held hostage by
+      # another chat's auto-resume preference.
       continue
     if auto_resume:
       try:
@@ -2764,10 +2807,12 @@ async def sweep_reset_parks(db: Session) -> list[str]:
 
       if prepared.get("notify"):
         notify_due(chat_id, run)
-      if not restart_auto_resume and _any_chat_turn_active():
-        # The notification or refresh window admitted another turn. Keep the
-        # durable pending state so the next sweep retries instead of silently
-        # dropping the promised continuation.
+      if (
+        not restart_auto_resume
+        and not _claim_limit_auto_resume_slot()
+      ):
+        # Keep the durable pending state so the next sweep retries after the
+        # stagger window instead of silently consuming the continuation.
         continue
       resume_started = await _auto_resume_chat(
         chat_id, park_token=run.id,
@@ -2884,11 +2929,6 @@ def is_chat_running(chat_id: str) -> bool:
     return True
   bc = get_broadcast(chat_id)
   return bc is not None and bc.running
-
-
-def _any_chat_turn_active() -> bool:
-  """Include the terminal window after a provider handle unregisters."""
-  return bool(registry.all_alive_chat_ids()) or has_running_chat_broadcast()
 
 
 def mark_starting(chat_id: str) -> bool:
@@ -3749,6 +3789,7 @@ async def _complete_turn(
   limit_reached: bool = False,
   parked_until: datetime | None = None,
   park_reason: str | None = None,
+  provider_free: bool = False,
 ) -> chat_queue.TerminalDisposition:
   """Terminal sequence shared by both providers' success + error exits.
 
@@ -4070,6 +4111,11 @@ async def _complete_turn(
   if close_browser:
     await _close_browser_session(chat_id)
   db.close()
+  if (
+    provider_free
+    and disposition is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+  ):
+    return chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED
   return disposition
 
 
@@ -4714,7 +4760,10 @@ async def run_chat(
           _s.data_dir,
           chat_id,
           deterministic=(
-            disposition == chat_queue.TerminalDisposition.LIMIT_PARKED
+            disposition in {
+              chat_queue.TerminalDisposition.LIMIT_PARKED,
+              chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
+            }
           ),
         )
     except Exception:
@@ -4742,6 +4791,7 @@ def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
 # limit, while still preserving the final parked state for compaction/recovery.
 _NOTE_SETTLED_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
+  chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
   chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
   chat_queue.TerminalDisposition.LIMIT_PARKED,
 })
@@ -5362,6 +5412,46 @@ async def _run_chat_impl_with_db(
   # the SDK runner. Without this, the SDK fails with a cryptic error.
   auth_error = provider.check_auth(settings.data_dir)
   if auth_error:
+    # A fresh install may intentionally finish setup without connecting an
+    # agent; a returning owner's sole credential can also expire. When no
+    # provider can run, treat that product state as useful connect/reconnect
+    # guidance, not a dead-end error: send it through the same sink as a real
+    # assistant response so it typewrites live and survives reload.
+    #
+    # This branch is deliberately gated on EVERY registered provider being
+    # disconnected. If another provider is connected, this chat's selected
+    # provider genuinely failed and the existing error path below remains the
+    # honest response.
+    if not authenticated_provider_ids(settings.data_dir):
+      await _record_run_metrics(
+        chat_id=chat_id,
+        run_token=run_token or "",
+        provider_session_id=None,
+        cost_usd=0.0,
+        usage=_NO_AGENT_USAGE_METRICS,
+      )
+      # Metrics are ordered through the writer actor and may await its ack.
+      # Stop can supersede this run while no provider handle or sink exists;
+      # revalidate before installing a sink so a stale turn cannot overwrite
+      # a fresh successor's steering target or publish guidance after Stop.
+      if _run_generation_superseded(chat_id, run_gen):
+        _log_superseded_run(chat_id, "no-agent-metrics")
+        db.close()
+        return chat_queue.TerminalDisposition.STALE_NO_ACTION
+      sink = _ChatEventSink(bc, chat_id, run_token=run_token)
+      register_active_sink(chat_id, sink)
+      sink.publish({"type": "text", "content": NO_AGENT_CONNECTED_MESSAGE})
+      return await _complete_turn(
+        bc=bc,
+        sink=sink,
+        db=db,
+        chat_id=chat_id,
+        run_gen=run_gen,
+        provider_id=provider_id,
+        cost_usd=0,
+        close_browser=False,
+        provider_free=True,
+      )
     bc.publish({"type": "error", "message": auth_error})
     disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
     bc.publish({"type": "done"})

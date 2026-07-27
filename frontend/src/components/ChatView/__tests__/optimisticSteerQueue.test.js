@@ -75,32 +75,35 @@ test('a steer request disables sibling row actions until it settles', () => {
     'the queued tray should receive the in-flight state for its row buttons')
 })
 
-test('the modified-Enter submit waits for durability, then reuses per-row steer', () => {
-  const refDeclaration = source.indexOf('const handleSteerOneRef = useRef(null)')
-  const doSendDeclaration = source.indexOf('const doSend = useCallback')
-  assert.ok(
-    refDeclaration >= 0 && refDeclaration < doSendDeclaration,
-    'the stable doSend callback must reach the current steer implementation through a ref',
+test('the modified-Enter submit uses one direct request and reveals only queue fallback', () => {
+  assert.match(
+    source,
+    /const directSteer = opts\.directSteer === true && queuesBehindActiveTurn/,
+    'the send path must distinguish direct steering from ordinary queueing',
   )
   assert.match(
     source,
-    /pendingQueue\.confirmQueued\(cid,[\s\S]*?else if \(opts\.steerAfterQueue\) \{[\s\S]*?await handleSteerOneRef\.current\?\.\(cid\)/,
-    'the composed message must be server-confirmed before the existing row steer consumes it',
+    /if \(!directSteer\) pendingQueue\.add\(queuedMsg, \{ inFlight: true \}\)/,
+    'a direct steer must not create an optimistic queued-tray row',
+  )
+  assert.match(
+    source,
+    /directSteer\s*\? \{ directSteer: true, cid \}\s*: \{ queueOnly: true, cid \}/,
+    'Cmd/Ctrl+Enter must make one direct-steer POST instead of queue then force-steer',
+  )
+  assert.match(
+    source,
+    /if \(\s*directSteer\s*&& !pendingQueue\.pendingMessagesRef\.current\.some[\s\S]*?pendingQueue\.add\(/,
+    'the server-reserved row should appear only after a queued fallback response',
   )
   assert.doesNotMatch(
     source,
-    /else if \(opts\.steerAfterQueue\) \{[\s\S]*?await handleSteerOne\(cid\)/,
-    'doSend must not capture a render-local steer function across the queue request',
-  )
-  const steerOneDeclaration = source.indexOf('async function handleSteerOne(cid)')
-  const currentAssignment = source.indexOf('handleSteerOneRef.current = handleSteerOne')
-  assert.ok(
-    steerOneDeclaration >= 0 && currentAssignment > steerOneDeclaration,
-    'each render must publish the current per-row steer implementation',
+    /steerAfterQueue|handleSteerOneRef/,
+    'the former two-request queue-then-steer mechanism must be gone',
   )
   assert.match(
     source,
-    /function handleSubmitSteer\(e\) \{[\s\S]*?if \(submitSteerInFlightRef\.current\) return[\s\S]*?submitSteerInFlightRef\.current = true[\s\S]*?doSend\(input\.trim\(\), \{ steerAfterQueue: true \}\)[\s\S]*?\.finally\(\(\) => \{ submitSteerInFlightRef\.current = false \}\)/,
-    'the keyboard handler must synchronously guard the full queue-to-steer operation',
+    /function handleSubmitSteer\(e\) \{[\s\S]*?if \(submitSteerInFlightRef\.current\) return[\s\S]*?submitSteerInFlightRef\.current = true[\s\S]*?doSend\(input\.trim\(\), \{ directSteer: true \}\)[\s\S]*?\.finally\(\(\) => \{ submitSteerInFlightRef\.current = false \}\)/,
+    'the keyboard handler must synchronously guard the one direct request',
   )
 })

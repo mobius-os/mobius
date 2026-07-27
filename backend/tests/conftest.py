@@ -156,6 +156,7 @@ def fresh_db():
   chat_mod._clear_after_terminal_generation.clear()
   chat_mod._clear_after_terminal_status.clear()
   chat_mod._restart_draining_chats.clear()
+  chat_mod._next_limit_auto_resume_at = 0.0
   bc_mod._broadcasts.clear() if hasattr(bc_mod, "_broadcasts") else None
   # Activity log: clear the per-process debounce cache and delete any
   # /data/logs/activity*.jsonl files written by an earlier test so a
