@@ -3048,3 +3048,63 @@ def test_run_codex_sdk_turn_fallback_does_not_start_capture_poller(
   ))
 
   assert result["error"] is None
+
+
+# --- Structured rate-limit reset extraction --------------------------------
+# Mirrors the installed SDK shapes:
+# - RateLimitSnapshot: openai_codex/generated/v2_all.py:6724
+#   (primary/secondary: RateLimitWindow|None, rate_limit_reached_type: Enum|None)
+# - RateLimitWindow: v2_all.py:2928 (resets_at: int|None, used_percent: int)
+# The runner reads these off AccountRateLimitsUpdatedNotification so a Codex
+# quota kill parks on the provider's real reset time instead of the 30-minute
+# text-parse fallback (chat._limit_park_fields), and is detected structurally.
+
+
+def _window(resets_at, used_percent):
+  return SimpleNamespace(resets_at=resets_at, used_percent=used_percent)
+
+
+def test_extract_rate_limit_reset_picks_most_constrained_window():
+  # The binding limit is the fullest window; its reset is the one worth waiting
+  # for even though the other window resets sooner.
+  snapshot = SimpleNamespace(
+    primary=_window(1_800_000_000, 40),
+    secondary=_window(1_800_009_999, 97),
+    rate_limit_reached_type="rate_limit_reached",
+  )
+  reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
+  assert reset == 1_800_009_999
+  assert reached is True
+
+
+def test_extract_rate_limit_reset_not_reached_when_type_none():
+  # rate_limit_reached_type has no "ok" member, so None reliably means the cap
+  # was not hit — even while windows still report their reset schedule.
+  snapshot = SimpleNamespace(
+    primary=_window(1_800_000_000, 30),
+    secondary=None,
+    rate_limit_reached_type=None,
+  )
+  reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
+  assert reset == 1_800_000_000
+  assert reached is False
+
+
+def test_extract_rate_limit_reset_skips_windows_without_reset():
+  # A window missing resets_at must never be chosen even if it is the fullest.
+  snapshot = SimpleNamespace(
+    primary=_window(None, 99),
+    secondary=_window(1_800_005_000, 55),
+    rate_limit_reached_type="workspace_owner_usage_limit_reached",
+  )
+  reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
+  assert reset == 1_800_005_000
+  assert reached is True
+
+
+def test_extract_rate_limit_reset_handles_empty_and_none():
+  assert codex_sdk_runner._extract_rate_limit_reset(None) == (None, False)
+  empty = SimpleNamespace(
+    primary=None, secondary=None, rate_limit_reached_type=None
+  )
+  assert codex_sdk_runner._extract_rate_limit_reset(empty) == (None, False)

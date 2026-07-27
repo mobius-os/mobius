@@ -628,12 +628,24 @@ def _sdk_imports() -> dict[str, Any]:
     from openai_codex.generated.v2_all import ThreadStatusChangedNotification
   except ImportError:
     ThreadStatusChangedNotification = None
+  try:
+    from openai_codex.generated.v2_all import (
+      AccountRateLimitsUpdatedNotification,
+    )
+  except ImportError:
+    # Older Codex SDKs predate structured rate-limit push; the dispatch loop
+    # guards on non-None before its isinstance check, so absence just falls
+    # back to error-text limit detection.
+    AccountRateLimitsUpdatedNotification = None
 
   return {
     "CollabAgentToolCallThreadItem": CollabAgentToolCallThreadItem,
     "SubAgentActivityThreadItem": SubAgentActivityThreadItem,
     "ThreadStartedNotification": ThreadStartedNotification,
     "ThreadStatusChangedNotification": ThreadStatusChangedNotification,
+    "AccountRateLimitsUpdatedNotification": (
+      AccountRateLimitsUpdatedNotification
+    ),
     "AgentMessageDeltaNotification": AgentMessageDeltaNotification,
     "AgentMessageThreadItem": AgentMessageThreadItem,
     "ApprovalMode": ApprovalMode,
@@ -674,6 +686,43 @@ def _sdk_imports() -> dict[str, Any]:
     "TurnStatus": TurnStatus,
     "WebSearchThreadItem": WebSearchThreadItem,
   }
+
+
+def _extract_rate_limit_reset(snapshot) -> tuple[int | None, bool]:
+  """Pull a park-worthy reset epoch + reached flag from a RateLimitSnapshot.
+
+  The Codex analog of what the Claude runner reads off RateLimitEvent. Picks the
+  most-constrained window's ``resets_at`` (the binding limit is the one closest
+  to full, so its reset is the one worth waiting for) and reports whether any
+  window/credit pool actually hit its cap. ``rate_limit_reached_type`` has no
+  "ok" member, so a non-None value reliably means a real limit hit — a
+  structured signal trustworthy without string-matching the error text.
+
+  Returns ``(resets_at_epoch_or_None, reached_bool)``. Defensive against partial
+  or older SDK payloads: any missing field degrades to skip / (None, False).
+  """
+  if snapshot is None:
+    return None, False
+  reached = getattr(snapshot, "rate_limit_reached_type", None) is not None
+  best_reset: int | None = None
+  best_used = -1.0
+  for window in (
+    getattr(snapshot, "primary", None),
+    getattr(snapshot, "secondary", None),
+  ):
+    if window is None:
+      continue
+    resets_at = getattr(window, "resets_at", None)
+    if resets_at is None:
+      continue
+    try:
+      used = float(getattr(window, "used_percent", 0) or 0)
+    except (TypeError, ValueError):
+      used = 0.0
+    if used > best_used:
+      best_used = used
+      best_reset = resets_at
+  return best_reset, reached
 
 
 def _model_dump(value: Any) -> Any:
@@ -2165,6 +2214,14 @@ async def run_codex_sdk_turn(
       activation_by_call_child: dict[tuple[str, str], str] = {}
       activation_counts: dict[str, int] = {}
 
+      # Structured rate-limit state, mirroring the Claude runner. Captured from
+      # AccountRateLimitsUpdatedNotification during the turn so a Codex quota
+      # kill parks with the provider's REAL reset time (read by
+      # chat._limit_park_fields) and is detected structurally via
+      # api_error_status=429 — instead of the 30-minute error-text fallback.
+      rate_limit_resets_at: int | None = None
+      rate_limit_reached = False
+
       async for notification in turn.stream():
         payload = notification.payload
 
@@ -2306,6 +2363,17 @@ async def run_codex_sdk_turn(
           log.info("Codex context compacted for chat %s", chat_id)
           continue
 
+        ratelimit_cls = sdk.get("AccountRateLimitsUpdatedNotification")
+        if ratelimit_cls is not None and isinstance(payload, ratelimit_cls):
+          _reset, _reached = _extract_rate_limit_reset(
+            getattr(payload, "rate_limits", None)
+          )
+          if _reset is not None:
+            rate_limit_resets_at = _reset
+          if _reached:
+            rate_limit_reached = True
+          continue
+
         if sdk.get("ThreadStartedNotification") is not None and isinstance(
           payload, sdk["ThreadStartedNotification"]
         ):
@@ -2359,6 +2427,23 @@ async def run_codex_sdk_turn(
               message or "Codex error",
             )
             continue
+          # When a preceding AccountRateLimitsUpdatedNotification told us a quota
+          # window actually reached its cap, surface a STRUCTURED limit terminal
+          # rather than raising: api_error_status=429 lets chat._is_limit_terminal
+          # detect the kill without string-matching, and the captured reset epoch
+          # gives an exact park/resume time. This is the Codex analog of Claude's
+          # api_error_status/resets_at terminal. Absent that structured signal we
+          # keep raising, so chat.py's existing error-text detection is unchanged.
+          if rate_limit_reached:
+            limit_result: RunnerResult = with_usage({
+              "session_id": current_session_id,
+              "cost_usd": None,
+              "error": str(message or "Codex usage limit reached."),
+              "api_error_status": 429,
+            })
+            if rate_limit_resets_at is not None:
+              limit_result["rate_limit_resets_at"] = rate_limit_resets_at
+            return limit_result
           raise RuntimeError(str(message or "Codex error"))
 
       error_text, terminal_status, final_message_phase = _codex_terminal_error(
@@ -2376,6 +2461,10 @@ async def run_codex_sdk_turn(
         result["terminal_status"] = terminal_status
       if final_message_phase is not None:
         result["final_message_phase"] = final_message_phase
+      # Carry any reset the SDK reported this turn, so a limit surfaced in the
+      # terminal (rather than as an ErrorNotification) still parks on real time.
+      if rate_limit_resets_at is not None:
+        result.setdefault("rate_limit_resets_at", rate_limit_resets_at)
       return result
   except Exception as exc:
     if _is_transport_death(exc) and stop_requested():
