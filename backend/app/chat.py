@@ -5383,6 +5383,18 @@ async def _run_chat_impl_with_db(
       "chat start chat_id=%s provider=%s session=%s msg_len=%d sdk=codex",
       chat_id, provider.name, session_id or "new", len(user_message),
     )
+    # Mirror the shared skills into Codex's project-local skills dir
+    # (<cwd>/.codex/skills) so Codex auto-discovers them — name + description in
+    # the prompt, body loaded on demand — the parity match for Claude's
+    # skills="all". Gated on the same skills_enabled flag; when off it prunes its
+    # own shims. Best-effort: skill discovery is advisory, so a sync failure must
+    # never block the turn from starting.
+    try:
+      from app.codex_skills import sync_codex_skills
+      from app.providers import skills_enabled as _skills_enabled
+      sync_codex_skills(settings.data_dir, _skills_enabled(settings.data_dir))
+    except Exception:
+      log.exception("codex skills sync failed chat_id=%s", chat_id)
     sdk_env = provider.build_env(
       base_env=base_env,
       data_dir=settings.data_dir,
