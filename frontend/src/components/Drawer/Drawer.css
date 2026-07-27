@@ -210,23 +210,18 @@
 }
 
 
-/* Section labels: sentence case, plain muted color, no tracking.
-   The earlier uppercase-tracked-accent treatment read as ornament,
-   not structure. The leading icon already tells you which section
-   you're in; the label is just the readable hook.
+/* Section labels are navigation landmarks, not secondary metadata. Match the
+   type weight and contrast of New chat / Apps so Pinned and Chats remain easy
+   to scan; their non-button structure and lack of hover treatment still make
+   the action-vs-heading distinction clear.
 
-   Now an <h2> rather than a <p> — sighted users see the same
-   typography (the SDK reset + `margin: 0` here mean default heading
-   styles don't apply) but screen-reader users get a section-level
-   heading they can jump to via rotor / heading navigation. Size
-   bumped 12 → 13 to match `settings__section-title` so the platform
-   reads as one design system; stays quieter than the 14px rows
-   above so the action-vs-structure hierarchy still reads. */
+   These stay as <h2>s so screen-reader users can jump between sections via
+   rotor / heading navigation. */
 .drawer__label {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
@@ -238,7 +233,7 @@
   padding: 8px 12px 6px;
   margin: 0;
 }
-.drawer__label svg { flex-shrink: 0; opacity: 0.85; color: var(--muted); }
+.drawer__label svg { flex-shrink: 0; opacity: 1; color: currentColor; }
 .drawer__label span { line-height: 1; }
 
 .drawer__label .drawer__label-count {
