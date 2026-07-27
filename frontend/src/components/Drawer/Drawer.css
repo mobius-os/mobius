@@ -418,17 +418,6 @@
   gap: 0;
 }
 
-.drawer__menu-anchor.drawer__more {
-  position: absolute;
-  top: 50%;
-  right: 8px;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  opacity: 0;
-  pointer-events: none;
-}
-
 .drawer__row .drawer__item {
   flex: 1;
   min-width: 0;

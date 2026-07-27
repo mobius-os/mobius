@@ -594,7 +594,7 @@ test.describe('Logout cache wipe', () => {
     // (No internal query-client handle needed.) The 401 clears the
     // token, so the post-reload page lands on the login form.
     await page.evaluate(() => {
-      const btn = document.querySelector('[aria-expanded]')
+      const btn = document.querySelector('button[aria-label="Toggle navigation"]')
       if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
     })
     await expect.poll(() => forced401Count, { timeout: 5000 }).toBeGreaterThan(0)
