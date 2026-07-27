@@ -152,7 +152,7 @@ for (const scenario of SCENARIOS) {
     })
     const nudge = page.locator(scenario.nudgeSelector)
     await expect(nudge).toBeVisible({ timeout: 5000 })
-    const rail = page.locator('.chat__build-rail')
+    const rail = page.locator('.chat__progress-rail')
     const composer = page.locator('.chat__pill')
     await expect(rail).toBeVisible({ timeout: 5000 })
 
