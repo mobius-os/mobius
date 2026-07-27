@@ -30,6 +30,14 @@
 .md-heading--3 { font-size: 15px; }
 .md-heading--4, .md-heading--5, .md-heading--6 { font-size: 14.5px; }
 
+/* The wrapper (not the <pre>) anchors the copy button: an absolutely
+   positioned child of a scrolling <pre> would ride along with long lines,
+   so the button lives beside the <pre> and stays pinned to the corner. */
+.md-code-wrap {
+  position: relative;
+  min-width: 0;
+}
+
 .md-code-block {
   background: var(--surface);
   border: 1px solid var(--border-light);
@@ -40,6 +48,38 @@
   overflow-x: auto;
   white-space: pre;
   line-height: 1.6;
+}
+
+.md-code-copy {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-light);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.md-code-copy--copied { color: var(--accent); }
+
+.md-code-copy:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .md-code-copy:hover {
+    background: var(--surface2);
+    color: var(--text);
+  }
+  .md-code-copy--copied:hover { color: var(--accent); }
 }
 
 .md-code-lang {

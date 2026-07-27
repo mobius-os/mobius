@@ -1,6 +1,9 @@
-import { useEffect, useState, memo } from 'react'
+import { useEffect, useRef, useState, memo } from 'react'
 import DOMPurify from 'dompurify'
+import Check from 'lucide-react/dist/esm/icons/check.mjs'
+import Copy from 'lucide-react/dist/esm/icons/copy.mjs'
 import InlineContent from './InlineContent.jsx'
+import { copyPlainText } from '../messageCopy.js'
 import { useMathHtml } from './math.js'
 import { highlightSync, highlightCode } from './highlight.js'
 
@@ -36,6 +39,11 @@ export function CodeBlock({ token }) {
   const syncHtml = highlightSync(code, lang)
   const [asyncHtml, setAsyncHtml] = useState(null)
 
+  // Copy affordance: the raw token text goes to the clipboard (never the
+  // highlighted HTML), with a brief check-icon acknowledgement.
+  const [copied, setCopied] = useState(false)
+  const copyTimerRef = useRef(null)
+
   useEffect(() => {
     if (syncHtml) return  // already highlighted synchronously
     let cancelled = false
@@ -45,22 +53,44 @@ export function CodeBlock({ token }) {
     return () => { cancelled = true }
   }, [code, lang, syncHtml])
 
+  useEffect(() => () => clearTimeout(copyTimerRef.current), [])
+
+  async function copyCode() {
+    if (!(await copyPlainText(code))) return
+    setCopied(true)
+    clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => setCopied(false), 1600)
+  }
+
   const html = syncHtml || asyncHtml
 
   return (
-    <pre className="md-code-block">
-      {lang && <span className="md-code-lang">{lang}</span>}
-      {html ? (
-        <code
-          className={`md-code language-${lang}`}
-          dangerouslySetInnerHTML={{
-            __html: DOMPurify.sanitize(html),
-          }}
-        />
-      ) : (
-        <code className={`md-code language-${lang}`}>{code}</code>
-      )}
-    </pre>
+    <div className="md-code-wrap">
+      <pre className="md-code-block">
+        {lang && <span className="md-code-lang">{lang}</span>}
+        {html ? (
+          <code
+            className={`md-code language-${lang}`}
+            dangerouslySetInnerHTML={{
+              __html: DOMPurify.sanitize(html),
+            }}
+          />
+        ) : (
+          <code className={`md-code language-${lang}`}>{code}</code>
+        )}
+      </pre>
+      <button
+        type="button"
+        className={`md-code-copy${copied ? ' md-code-copy--copied' : ''}`}
+        onClick={copyCode}
+        aria-label={copied ? 'Copied' : 'Copy code'}
+        title="Copy code"
+      >
+        {copied
+          ? <Check size={13} strokeWidth={2.3} aria-hidden="true" />
+          : <Copy size={13} strokeWidth={2} aria-hidden="true" />}
+      </button>
+    </div>
   )
 }
 
