@@ -738,7 +738,7 @@ test('large drawer lists memoize ordering and row actions without changing row o
 })
 
 test('drawer row menus use one semantic context-menu path across pointer types', () => {
-  assert.match(drawer, /function openRowMenu\(event\)[\s\S]*?actions\.toggleMenu\(kind, id, true\)/)
+  assert.match(drawer, /function openRowMenu\(event\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface\)/)
   assert.match(drawer, /onContextMenu=\{openRowMenu\}/)
   assert.match(dragBinding, /srcEl\.dispatchEvent\(new window\.MouseEvent\('contextmenu'/)
   assert.doesNotMatch(
@@ -753,7 +753,7 @@ test('a secondary-button release cannot immediately select a flipped drawer menu
   assert.match(drawer, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)
   assert.match(drawer, /window\.addEventListener\('pointerup', onSecondaryPointerUp, true\)/)
   assert.match(drawer, /upEvent\.pointerId !== pointerId \|\| upEvent\.button !== 2/)
-  assert.match(drawer, /cleanup\(\)[\s\S]*?actions\.toggleMenu\(kind, id, true\)/)
+  assert.match(drawer, /cleanup\(\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface\)/)
   assert.match(drawer, /timer = setTimeout\(cleanup, 1500\)/)
 })
 
