@@ -503,7 +503,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.9 (2026-07-24).** This section is the
+**Owner-authoritative contract — v1.10 (2026-07-26).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -539,8 +539,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   seeing an older user row never qualifies. An otherwise unreachable anchor clamps
   to real conversation content before visibility is decided. R6's transient
   question-submit hold is the sole exception: it may reserve only the exact tail
-  deficit required to keep the answered card at its frozen offset through mobile
-  viewport growth, and that intent is never persisted.
+  deficit required for a stable card handoff while the viewport size is unchanged.
+  It is never persisted and must release to the unanswered card's prior mode before
+  a keyboard or other viewport resize is laid out.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
   pins when its submit-time DOM snapshot is at the real-content tail. Geometry is
@@ -629,10 +630,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   card enters its pending state or output resumes, the controller snapshots the
   currently visible message and its exact viewport offset as `ANCHOR_AT`. Resumed
   output grows without dragging the reader, even when the chat had been following
-  the tail before Submit. If a mobile viewport grows before that output arrives,
-  the dynamic spacer temporarily reserves exactly enough room to keep the anchor
-  target reachable; the reservation disappears as real content replaces it and
-  the transient reservation intent is stripped before persistence. A failed answer
+  the tail before Submit. That exact hold is scoped to the viewport where Submit
+  occurred. If the mobile keyboard changes the viewport, the controller restores
+  the mode that owned the unanswered card before sizing the new geometry. Answering
+  therefore adds no movement of its own, while the keyboard still moves the card
+  exactly as it would have moved unanswered. The transient hold is stripped before
+  persistence. A failed answer
   keeps that settled reading anchor for the retryable card rather than manufacturing
   follow intent again.
   The source handoff
@@ -667,7 +670,8 @@ path means routing it through the same entries rather than inventing another rul
 | Viewport/keyboard changes | `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply pin after resize; never infer intent from keyboard-open geometry |
 | Viewport/keyboard changes | follow or anchor hold | same follow if still at tail, otherwise hold anchor | Never creates follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
-| In-process question is answered | any | `ANCHOR_AT` on current visible row; same active assistant row | Hold exact visible anchor through card reflow and resumed output |
+| In-process question is answered | any | transient `ANCHOR_AT` over the prior mode; same active assistant row | Hold exact visible anchor through same-viewport card reflow and resumed output |
+| Viewport/keyboard changes after question submission | transient question anchor | pre-submit unanswered-card mode | Apply ordinary viewport behavior; answering adds no extra movement |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
 | Offscreen question or paused-turn nudge tapped | any hold | `ANCHOR_AT` at physical tail | User-requested one-shot move; clears the overlaid composer |
 
