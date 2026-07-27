@@ -176,6 +176,7 @@ def _fake_sdk(async_codex_cls):
     "ErrorNotification": _FakeErrorNotification,
     "FileChangePatchUpdatedNotification": _Dummy,
     "FileChangeThreadItem": _Dummy,
+    "ImageViewThreadItem": type("_FakeImageViewThreadItem", (), {}),
     "InvalidParamsError": _FakeInvalidParamsError,
     "ReasoningEffort": _FakeReasoningEffort(),
     "ReasoningSummary": _FakeReasoningSummary(),
@@ -250,6 +251,31 @@ def test_tool_completed_events_emit_output_before_end():
       "type": "tool_output", "content": "",
       "output_complete": True, "output_exit_code": 7,
     },
+    {"type": "tool_end"},
+  ]
+
+
+def test_native_image_view_item_uses_shared_view_image_activity():
+  class ImageViewThreadItem:
+    id = "image-1"
+    path = "/data/chats/chat-1/media/diagram.png"
+
+  sdk = {
+    "ImageViewThreadItem": ImageViewThreadItem,
+    "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
+    "FileChangeThreadItem": type("FileChangeThreadItem", (), {}),
+    "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
+    "DynamicToolCallThreadItem": type("DynamicToolCallThreadItem", (), {}),
+    "WebSearchThreadItem": type("WebSearchThreadItem", (), {}),
+  }
+
+  item = ImageViewThreadItem()
+  assert codex_sdk_runner._tool_start_event(item, sdk) == {
+    "type": "tool_start",
+    "tool": "ViewImage",
+    "input": "/data/chats/chat-1/media/diagram.png",
+  }
+  assert codex_sdk_runner._tool_completed_events(item, sdk) == [
     {"type": "tool_end"},
   ]
 
