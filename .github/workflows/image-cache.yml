@@ -71,7 +71,7 @@ jobs:
             if [ "$attempt" = 6 ]; then
               echo "ghcr.io/mobius-os/mobius:daily is not public" >&2
               echo "Set the package visibility once at:" >&2
-              echo "https://github.com/orgs/mobius-os/packages/container/package/mobius/settings" >&2
+              echo "https://github.com/orgs/mobius-os/packages/container/mobius/settings" >&2
               exit 1
             fi
             sleep 5
