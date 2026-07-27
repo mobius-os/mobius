@@ -593,9 +593,17 @@ def _sdk_imports() -> dict[str, Any]:
     ReasoningSummaryTextDeltaNotification,
     ReasoningTextDeltaNotification,
     ThreadTokenUsageUpdatedNotification,
+    ThreadItem,
     TurnCompletedNotification,
     TurnStatus,
     WebSearchThreadItem,
+  )
+
+  _enable_web_search_results_passthrough(
+    web_search_type=WebSearchThreadItem,
+    thread_item_type=ThreadItem,
+    started_notification_type=ItemStartedNotification,
+    completed_notification_type=ItemCompletedNotification,
   )
 
   # Multi-agent (collab) types exist only on multi-agent-capable SDKs (the
@@ -686,6 +694,39 @@ def _sdk_imports() -> dict[str, Any]:
     "TurnStatus": TurnStatus,
     "WebSearchThreadItem": WebSearchThreadItem,
   }
+
+
+def _enable_web_search_results_passthrough(
+  *,
+  web_search_type: Any,
+  thread_item_type: Any,
+  started_notification_type: Any,
+  completed_notification_type: Any,
+) -> None:
+  """Preserve structured search results during temporary SDK schema drift.
+
+  Codex app-server 0.145 emits ``webSearch.results`` and its Rust protocol plus
+  public app-server documentation declare the field. The generated Python SDK
+  at the same release still omits it and Pydantic silently drops the unknown
+  value before Möbius can turn URLs into source pills.
+
+  Keep extra fields only on this one leaf item, then rebuild the discriminated
+  union and its two notification envelopes. Once the generated type gains a
+  real ``results`` field this is a no-op and normal typed parsing takes over.
+  """
+  if "results" in getattr(web_search_type, "model_fields", {}):
+    return
+  if getattr(web_search_type, "model_config", {}).get("extra") == "allow":
+    return
+  from pydantic import ConfigDict
+
+  config = dict(getattr(web_search_type, "model_config", {}))
+  config["extra"] = "allow"
+  web_search_type.model_config = ConfigDict(**config)
+  web_search_type.model_rebuild(force=True)
+  thread_item_type.model_rebuild(force=True)
+  started_notification_type.model_rebuild(force=True)
+  completed_notification_type.model_rebuild(force=True)
 
 
 def _extract_rate_limit_reset(snapshot) -> tuple[int | None, bool]:
