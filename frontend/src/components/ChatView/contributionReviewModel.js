@@ -41,7 +41,7 @@ export function actionableRecords(payload) {
  */
 export function sendBlocker(record, { connected } = {}) {
   if (!record || record.status !== 'prepared') return null
-  if (record.is_stack) {
+  if (record.stack || record.is_stack) {
     return 'This is one layer of a stacked set — review and send the whole chain in Contribute.'
   }
   if (connected === false) return 'Connect GitHub in Contribute first.'
@@ -73,7 +73,8 @@ export const PLATFORM_REPO = 'mobius-os/mobius'
 /** The one-line status word shown on the card. */
 export function statusLabel(record, blocked) {
   if (record?.status === 'submitting') return 'Publishing'
-  if (blocked) return 'Needs an update'
+  if (record?.stack || record?.is_stack) return 'Review together'
+  if (blocked) return 'Needs attention'
   return 'Ready to contribute'
 }
 
@@ -184,4 +185,91 @@ export function rememberDismissed(record, storage) {
 /** Records that still deserve the composer's attention. */
 export function visibleRecords(payload, storage) {
   return actionableRecords(payload).filter(record => !isDismissed(record, storage))
+}
+
+function stackDescriptor(record) {
+  const stackId = record?.stack?.id
+  if (typeof stackId === 'string' && stackId.trim()) return record.stack
+  // Frontend source hot-reloads while backend Python waits for a restart. Keep
+  // that real rolling-upgrade seam coherent by recognizing the canonical stack
+  // branch emitted by older loaded backends; the next backend start supplies
+  // the explicit descriptor above. Unknown legacy shapes stay safely ungrouped.
+  if (!record?.is_stack || typeof record?.branch !== 'string') return null
+  const match = record.branch.match(/^stack\/([^/]+)\/(\d+)(?:-|$)/)
+  if (!match) return null
+  const id = match[1]
+  return {
+    id,
+    name: id.split('-').filter(Boolean)
+      .map((part, index) => index === 0
+        ? part.charAt(0).toUpperCase() + part.slice(1)
+        : part)
+      .join(' '),
+    position: Number(match[2]),
+    total: null,
+  }
+}
+
+/** Collapse every valid contribution stack into one logical review item. */
+export function reviewItems(payload) {
+  const items = []
+  const stacks = new Map()
+  for (const record of actionableRecords(payload)) {
+    const stack = stackDescriptor(record)
+    if (!stack) {
+      items.push({ kind: 'record', id: record.id, record })
+      continue
+    }
+    const groupKey = `${record?.repo || ''}:${stack.id}`
+    let item = stacks.get(groupKey)
+    if (!item) {
+      item = {
+        kind: 'stack',
+        id: `stack:${groupKey}`,
+        stack,
+        repo: record.repo,
+        records: [],
+      }
+      stacks.set(groupKey, item)
+      items.push(item)
+    }
+    item.records.push(record)
+  }
+  for (const item of stacks.values()) {
+    item.records.sort((left, right) => {
+      const a = stackDescriptor(left)?.position
+      const b = stackDescriptor(right)?.position
+      const hasA = typeof a === 'number' && Number.isFinite(a)
+      const hasB = typeof b === 'number' && Number.isFinite(b)
+      if (hasA && hasB) return a - b
+      if (hasA) return -1
+      if (hasB) return 1
+      return String(left?.id || '').localeCompare(String(right?.id || ''))
+    })
+  }
+  return items
+}
+
+function reviewItemDismissIdentity(item) {
+  if (item?.kind === 'record') return item.record
+  if (item?.kind !== 'stack') return null
+  return {
+    id: item.id,
+    // Any revised layer makes this a fresh stack decision, even when a newer
+    // sibling still has the group's greatest timestamp.
+    updated_at: item.records
+      .map(record => `${record.id}:${record.updated_at || ''}`)
+      .sort()
+      .join('|'),
+  }
+}
+
+export function visibleReviewItems(payload, storage) {
+  return reviewItems(payload).filter(
+    item => !isDismissed(reviewItemDismissIdentity(item), storage),
+  )
+}
+
+export function rememberReviewItemDismissed(item, storage) {
+  return rememberDismissed(reviewItemDismissIdentity(item), storage)
 }

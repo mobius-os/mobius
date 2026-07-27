@@ -3555,6 +3555,7 @@ def _diff_file_paths(diff_path: Path, limit: int = 40) -> list[str]:
 def _chat_review_projection(record: dict, app_id: int) -> dict:
   """The small, display-only view of one ledger record for the chat card."""
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  raw_stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
   record_id = str(record.get("id") or "")
   _, diff_path = _record_paths(app_id, record_id)
 
@@ -3565,6 +3566,24 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     value.strip() for value in plan.get("labels", [])
     if isinstance(value, str) and value.strip()
   ][:2] if isinstance(plan.get("labels"), list) else []
+  stack = None
+  if raw_stack is not None:
+    stack_id = text(raw_stack.get("id")).strip()
+    position = raw_stack.get("position")
+    total = raw_stack.get("total")
+    if stack_id:
+      stack = {
+        "id": stack_id,
+        "name": text(raw_stack.get("name")).strip(),
+        "position": (
+          position if isinstance(position, int) and not isinstance(position, bool)
+          and position > 0 else None
+        ),
+        "total": (
+          total if isinstance(total, int) and not isinstance(total, bool)
+          and total > 0 else None
+        ),
+      }
   return {
     "id": record_id,
     "type": text(record.get("type")),
@@ -3579,7 +3598,11 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "labels": labels,
     "last_submit_error": text(record.get("last_submit_error")),
     "updated_at": text(record.get("updated_at")),
-    "is_stack": isinstance(plan.get("stack"), dict),
+    # `is_stack` keeps an invalid/legacy stack safely non-sendable. `stack`
+    # carries only the display identity/order the chat needs to collapse every
+    # valid layer into one review-together card; branch ancestry stays private.
+    "is_stack": raw_stack is not None,
+    "stack": stack,
   }
 
 

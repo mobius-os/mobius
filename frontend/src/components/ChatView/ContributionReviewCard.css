@@ -135,6 +135,10 @@
   border-left-color: var(--muted);
 }
 
+.contrib-card--stack {
+  border-left-color: color-mix(in srgb, var(--accent) 70%, var(--muted));
+}
+
 /* The status is a full-width header BAND, not a chip beside the text. As a chip
    it sat next to a summary that wraps to several lines, leaving an obvious hole
    under the short label. Spanning the card's padding (negative margins cancel it)
@@ -298,6 +302,33 @@
   color: var(--text);
   /* Long paths stay inside the card rather than widening the chat column. */
   overflow-wrap: anywhere;
+}
+
+.contrib-card__layers {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.contrib-card__layers li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.contrib-card__layers li > span {
+  font-weight: 600;
+}
+
+.contrib-card__layers p {
+  margin: 0;
+  color: var(--muted);
 }
 
 /* Quoted verbatim; it flows inside the disclosure's single scroller above. */

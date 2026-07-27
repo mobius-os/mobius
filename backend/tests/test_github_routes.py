@@ -4471,7 +4471,7 @@ def test_for_chat_marks_a_stack_layer_so_chat_never_sends_one_alone(
   app_id, _ = _app_token(client, owner_token, github_access=True)
   _, record = _prepared_for_chat(app_id, "layer-2", "chat-a")
   record["plan"]["stack"] = {
-    "id": "demo", "position": 2, "total": 3,
+    "id": "demo", "name": "Demo stack", "position": 2, "total": 3,
     "parent_record_id": "layer-1", "base_branch": "stack/demo/01",
   }
   _write_contribution(app_id, "layer-2", record, "")
@@ -4483,6 +4483,11 @@ def test_for_chat_marks_a_stack_layer_so_chat_never_sends_one_alone(
   assert r.status_code == 200, r.text
   item = r.json()["records"][0]
   assert item["is_stack"] is True
+  assert item["stack"] == {
+    "id": "demo", "name": "Demo stack", "position": 2, "total": 3,
+  }
+  assert "parent_record_id" not in item["stack"]
+  assert "base_branch" not in item["stack"]
   # A stack layer is never preflighted here: the whole chain is reviewed and
   # sent together in the app, so the card must not offer a single-layer Send.
   assert item["review"] is None

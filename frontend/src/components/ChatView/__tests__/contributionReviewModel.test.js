@@ -17,8 +17,11 @@ import {
   isHorizontalSwipe,
   passedDismissThreshold,
   rememberDismissed,
+  rememberReviewItemDismissed,
+  reviewItems,
   sendBlocker,
   statusLabel,
+  visibleReviewItems,
   visibleRecords,
 } from '../contributionReviewModel.js'
 
@@ -89,7 +92,10 @@ test('a disconnected GitHub blocks Send before any request is made', () => {
 })
 
 test('a stack layer is never sendable from chat — the chain is reviewed together', () => {
-  const record = { status: 'prepared', is_stack: true, review: { state: 'ready' } }
+  const record = {
+    status: 'prepared', stack: { id: 'demo', position: 1, total: 2 },
+    review: { state: 'ready' },
+  }
   assert.match(sendBlocker(record, { connected: true }), /stacked set/)
 })
 
@@ -120,18 +126,81 @@ test('autopilot on send mirrors the owner default and the backend capability', (
 
 test('the status word distinguishes waiting, blocked, and in-flight', () => {
   assert.equal(statusLabel({ status: 'prepared' }, false), 'Ready to contribute')
-  assert.equal(statusLabel({ status: 'prepared' }, true), 'Needs an update')
+  assert.equal(statusLabel({ status: 'prepared' }, true), 'Needs attention')
+  assert.equal(
+    statusLabel({ status: 'prepared', stack: { id: 'demo' } }, true),
+    'Review together',
+  )
   assert.equal(statusLabel({ status: 'submitting' }, false), 'Publishing')
 })
 
-test('multiple independent contributions share one bounded review panel', () => {
-  assert.match(cardSrc, /const grouped = records\.length > 1/)
+test('multiple independent review items share one bounded review panel', () => {
+  assert.match(cardSrc, /const grouped = reviewItems\.length > 1/)
   assert.match(cardSrc, /contrib-card-stack--grouped/)
-  assert.match(cardSrc, /\{records\.length\} contributions ready/)
+  assert.match(cardSrc, /\{reviewItems\.length\} contributions ready/)
   assert.match(cardSrc, /Review each one separately\./)
   assert.match(cardCss, /\.contrib-card-stack\s*\{[\s\S]*?width:\s*min\(100%, 640px\);[\s\S]*?margin-inline:\s*auto;/)
   assert.match(cardCss, /\.contrib-card-stack--grouped\s*\{[\s\S]*?max-height:\s*min\(52vh, 520px\);/)
   assert.match(cardCss, /\.contrib-card-stack--grouped \.contrib-card\s*\{[\s\S]*?border-radius:\s*0;/)
+})
+
+test('stack layers collapse into one ordered review item', () => {
+  const payload = { records: [
+    { id: 'three', status: 'prepared', repo: PLATFORM_REPO, stack: {
+      id: 'drawer', name: 'Drawer navigation', position: 3, total: 3,
+    } },
+    { id: 'single', status: 'prepared' },
+    { id: 'one', status: 'prepared', repo: PLATFORM_REPO, stack: {
+      id: 'drawer', name: 'Drawer navigation', position: 1, total: 3,
+    } },
+    { id: 'two', status: 'prepared', repo: PLATFORM_REPO, stack: {
+      id: 'drawer', name: 'Drawer navigation', position: 2, total: 3,
+    } },
+  ] }
+  const items = reviewItems(payload)
+  assert.equal(items.length, 2)
+  assert.equal(items[0].kind, 'stack')
+  assert.deepEqual(items[0].records.map(record => record.id), ['one', 'two', 'three'])
+  assert.equal(items[1].record.id, 'single')
+})
+
+test('loaded older backends group canonical stack branches during hot reload', () => {
+  const payload = { records: [
+    // Deliberately opposite lexical order: branch position, not record id,
+    // owns the chain ordering during a frontend-before-backend rollout.
+    { id: 'a-second', status: 'prepared', repo: PLATFORM_REPO, is_stack: true,
+      branch: 'stack/drawer-navigation/02-pins' },
+    { id: 'z-first', status: 'prepared', repo: PLATFORM_REPO, is_stack: true,
+      branch: 'stack/drawer-navigation/01-apps' },
+  ] }
+  const items = reviewItems(payload)
+  assert.equal(items.length, 1)
+  assert.equal(items[0].kind, 'stack')
+  assert.equal(items[0].stack.name, 'Drawer navigation')
+  assert.deepEqual(items[0].records.map(record => record.id), ['z-first', 'a-second'])
+})
+
+test('dismissing a stack hides one card and any revised layer brings it back', () => {
+  const storage = fakeStorage()
+  const payload = { records: [
+    { id: 'one', status: 'prepared', updated_at: '1', repo: PLATFORM_REPO,
+      stack: { id: 'drawer', position: 1, total: 2 } },
+    { id: 'two', status: 'prepared', updated_at: '1', repo: PLATFORM_REPO,
+      stack: { id: 'drawer', position: 2, total: 2 } },
+  ] }
+  const item = visibleReviewItems(payload, storage)[0]
+  assert.equal(item.kind, 'stack')
+  assert.equal(rememberReviewItemDismissed(item, storage), true)
+  assert.equal(visibleReviewItems(payload, storage).length, 0)
+  payload.records[0].updated_at = '2'
+  assert.equal(visibleReviewItems(payload, storage).length, 1)
+})
+
+test('the renderer gives a stack one review-together card, not one card per layer', () => {
+  assert.match(cardSrc, /visibleReviewItems\(data, storage\)/)
+  assert.match(cardSrc, /item\.kind === 'stack'/)
+  assert.match(cardSrc, /<StackReviewRow/)
+  assert.match(cardSrc, /Review in Contribute/)
 })
 
 // The action names the value of contributing, not the mechanism of sending, and
@@ -291,12 +360,12 @@ test('the swipe has a visible, focusable equivalent', () => {
   assert.match(cardSrc, /className="contrib-card__dismiss"/)
   assert.match(cardSrc, /aria-label="Dismiss — keeps it in Contribute"/)
   assert.match(cardSrc, /onClick=\{\(\) => onDismiss\?\.\(\)\}/)
-  // Use the same outlined close icon as the shell's other compact dismiss
-  // controls; the heavier Apps SDK glyph made this one look out of place.
+  // Every card shape uses the same outlined close icon as the shell's other
+  // compact dismiss controls; the heavier Apps SDK glyph looked out of place.
   assert.match(cardSrc, /import X from 'lucide-react\/dist\/esm\/icons\/x\.mjs'/)
   assert.equal(
     (cardSrc.match(/<X size=\{14\} strokeWidth=\{2\} aria-hidden="true" \/>/g) || []).length,
-    2,
+    3,
   )
   assert.doesNotMatch(cardSrc, /title="Dismiss/)
   assert.doesNotMatch(cardSrc, /✕|✖|❌/)
@@ -317,7 +386,7 @@ test('the dismissal gesture is claimed with a non-passive touchmove', () => {
 test('the post-send acknowledgement is dismissible and self-clearing', () => {
   const sentRow = cardSrc.slice(
     cardSrc.indexOf('function SentRow('),
-    cardSrc.indexOf('function ReviewRow('),
+    cardSrc.indexOf('function StackReviewRow('),
   )
   assert.ok(sentRow.length > 0, 'the acknowledgement is its own card shape')
   // Same swipe binding as every other card, not a bespoke layout.
@@ -334,7 +403,7 @@ test('the post-send acknowledgement is dismissible and self-clearing', () => {
 // acknowledgement ended up without one.
 test('every card shape shares one swipe implementation', () => {
   assert.equal((cardSrc.match(/function useSwipeToDismiss\(/g) || []).length, 1)
-  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 2)
+  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 3)
   assert.equal((cardSrc.match(/addEventListener\('touchmove'/g) || []).length, 1)
 })
 

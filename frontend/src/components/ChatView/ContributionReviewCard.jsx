@@ -12,10 +12,10 @@ import {
   isHorizontalSwipe,
   passedDismissThreshold,
   payoffLine,
-  rememberDismissed,
+  rememberReviewItemDismissed,
   sendBlocker,
   statusLabel,
-  visibleRecords,
+  visibleReviewItems,
 } from './contributionReviewModel.js'
 import './ContributionReviewCard.css'
 
@@ -63,11 +63,11 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
   const [dismissRevision, setDismissRevision] = useState(0)
 
   const storage = typeof localStorage !== 'undefined' ? localStorage : null
-  const records = visibleRecords(data, storage)
-  const grouped = records.length > 1
+  const reviewItems = visibleReviewItems(data, storage)
+  const grouped = reviewItems.length > 1
   void dismissRevision
   if (!appId) return null
-  if (!records.length && !sent) return null
+  if (!reviewItems.length && !sent) return null
 
   async function send(record) {
     setBusyId(record.id)
@@ -108,19 +108,19 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
     <div
       className={`contrib-card-stack${grouped ? ' contrib-card-stack--grouped' : ''}`}
       role={grouped ? 'region' : undefined}
-      aria-label={grouped ? `${records.length} contributions ready` : undefined}
+      aria-label={grouped ? `${reviewItems.length} contributions ready` : undefined}
     >
       {grouped && (
         <div className="contrib-card-stack__heading">
           <div>
             <div className="contrib-card-stack__title">
-              {records.length} contributions ready
+              {reviewItems.length} contributions ready
             </div>
             <div className="contrib-card-stack__copy">
               Review each one separately.
             </div>
           </div>
-          <span className="contrib-card-stack__count">{records.length}</span>
+          <span className="contrib-card-stack__count">{reviewItems.length}</span>
         </div>
       )}
       {sent && (
@@ -130,24 +130,39 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
           onDismiss={() => setSent(null)}
         />
       )}
-      {records.map(record => (
-        <ReviewRow
-          key={record.id}
-          record={record}
-          connected={data?.connected !== false}
-          autopilot={autopilotOnSend(data)}
-          busy={busyId === record.id}
-          error={error?.id === record.id ? error.message : null}
-          onSend={send}
-          onOpenContribute={contributeApp && onOpenApp
-            ? () => onOpenApp(contributeApp, { final: true })
-            : null}
-          onDismiss={() => {
-            rememberDismissed(record, storage)
-            setDismissRevision(value => value + 1)
-          }}
-        />
-      ))}
+      {reviewItems.map(item => {
+        const onOpenContribute = contributeApp && onOpenApp
+          ? () => onOpenApp(contributeApp, { final: true })
+          : null
+        const onDismiss = () => {
+          rememberReviewItemDismissed(item, storage)
+          setDismissRevision(value => value + 1)
+        }
+        if (item.kind === 'stack') {
+          return (
+            <StackReviewRow
+              key={item.id}
+              item={item}
+              onOpenContribute={onOpenContribute}
+              onDismiss={onDismiss}
+            />
+          )
+        }
+        const record = item.record
+        return (
+          <ReviewRow
+            key={item.id}
+            record={record}
+            connected={data?.connected !== false}
+            autopilot={autopilotOnSend(data)}
+            busy={busyId === record.id}
+            error={error?.id === record.id ? error.message : null}
+            onSend={send}
+            onOpenContribute={onOpenContribute}
+            onDismiss={onDismiss}
+          />
+        )
+      })}
     </div>
   )
 }
@@ -292,6 +307,68 @@ function SentRow({ sent, onDismiss }) {
           >
             View on GitHub
           </a>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function StackReviewRow({ item, onOpenContribute, onDismiss }) {
+  const [open, setOpen] = useState(false)
+  const cardRef = useSwipeToDismiss(onDismiss)
+  const total = Number(item.stack?.total) || item.records.length
+  const name = item.stack?.name || 'This improvement'
+
+  return (
+    <div ref={cardRef} className="contrib-card contrib-card--stack">
+      <div className="contrib-card__badge">
+        <span>Review together</span>
+        <button
+          type="button"
+          className="contrib-card__dismiss"
+          aria-label="Dismiss — keeps the stack in Contribute"
+          onClick={() => onDismiss?.()}
+        >
+          <X size={14} strokeWidth={2} aria-hidden="true" />
+        </button>
+      </div>
+      <p className="contrib-card__summary">
+        {name} is ready as a {total}-part contribution stack.
+      </p>
+      <p className="contrib-card__meta">
+        {item.repo} · {item.records.length} linked layer{item.records.length === 1 ? '' : 's'}
+      </p>
+      <p className="contrib-card__payoff">
+        The layers build on each other and are reviewed in order.
+      </p>
+      <div className="contrib-card__actions">
+        <button
+          type="button"
+          className="contrib-card__send"
+          disabled={!onOpenContribute}
+          onClick={onOpenContribute}
+        >
+          Review in Contribute
+        </button>
+        <button
+          type="button"
+          className="contrib-card__toggle"
+          aria-expanded={open}
+          onClick={() => setOpen(value => !value)}
+        >
+          {open ? 'Hide layers' : 'Layers'}
+        </button>
+      </div>
+      {open && (
+        <div className="contrib-card__details">
+          <ol className="contrib-card__layers">
+            {item.records.map((record, index) => (
+              <li key={record.id}>
+                <span>{record.stack?.position || index + 1}. {record.title}</span>
+                {record.summary && <p>{record.summary}</p>}
+              </li>
+            ))}
+          </ol>
         </div>
       )}
     </div>
