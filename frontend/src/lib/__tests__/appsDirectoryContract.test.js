@@ -37,6 +37,11 @@ test('phone and web share one searchable launcher tab', () => {
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*?grid-template-columns: repeat\(4/)
   assert.match(drawer, /onContextMenu=\{openCardMenu\}/)
   assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?toggleMenu[\s\S]*?520\)/)
+  assert.match(
+    drawer,
+    /triggerClassName="drawer__more apps-directory__card-menu-anchor"\s+triggerHidden/,
+    'the invisible menu anchor must not add a ghost keyboard focus stop',
+  )
   assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
 })
 

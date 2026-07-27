@@ -1261,6 +1261,7 @@ const DrawerRow = memo(function DrawerRow({
           menuOpen={menuOpen}
           actions={actions}
           triggerClassName="drawer__more apps-directory__card-menu-anchor"
+          triggerHidden
         />
       </div>
     )
