@@ -8,7 +8,7 @@ const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8
 
 test('composer fast-forward dispatches immediately without an incidental blur', () => {
   const steerBlock = inputBar.match(
-    /key="steer"[\s\S]*?aria-label="Send queued message now"/,
+    /className="chat__action chat__steer"[\s\S]*?aria-label="Send queued message now"/,
   )?.[0] || ''
   assert.match(steerBlock, /onPointerDown=\{\(e\) => e\.preventDefault\(\)\}/)
   assert.match(
@@ -16,6 +16,34 @@ test('composer fast-forward dispatches immediately without an incidental blur', 
     /onTouchEnd=\{\(e\) => \{ e\.preventDefault\(\); onSteer\(\) \}\}/,
   )
   assert.match(steerBlock, /onClick=\{onSteer\}/)
+})
+
+test('optimistic queueing changes Send directly to an actionable Steer control', () => {
+  assert.match(
+    inputBar,
+    /if \(sending && !hasInput && showSteer\)[\s\S]*?key="forward"[\s\S]*?disabled=\{!steerReady\}/,
+    'the semantic Steer identity must not wait for serverTs confirmation',
+  )
+  assert.match(
+    chatView,
+    /const showSteer = !hasPendingQuestion[\s\S]*?turnActive[\s\S]*?pendingQueue\.pendingMessages\.length > 0/,
+    'an optimistic visible queue row should choose Steer immediately',
+  )
+  assert.match(
+    chatView,
+    /const queueWrites = \[\.\.\.queuedSendRequestsRef\.current\.values\(\)\][\s\S]*?await Promise\.allSettled\(queueWrites\)[\s\S]*?const snapshot = pendingQueue\.pendingMessagesRef\.current/,
+    'an early Steer tap must await the queue write before reading steerable rows',
+  )
+  const steerBlock = inputBar.match(
+    /if \(sending && !hasInput && showSteer\)[\s\S]*?<button[\s\S]*?<\/button>/,
+  )?.[0] || ''
+  const sendBlock = inputBar.match(
+    /if \(hasInput && !listening\)[\s\S]*?<button[\s\S]*?<\/button>/,
+  )?.[0] || ''
+  assert.match(steerBlock, /key="forward"/,
+    'Steer should reuse the forward action DOM node')
+  assert.match(sendBlock, /key="forward"/,
+    'Send should hand the same forward action DOM node to Steer')
 })
 
 test('per-row fast-forward dispatches on touchend too', () => {

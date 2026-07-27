@@ -1878,10 +1878,10 @@
     transform 0.08s ease;
 }
 
-/* Primary meanings share one slot. Hold the replacement invisible for a
-   brief beat so Send/Fast-forward clears before Stop is revealed. */
-.chat__send,
-.chat__steer,
+/* Stop is a destructive replacement, so let the prior forward icon clear
+   before revealing it. Send and Steer intentionally do NOT use this animation:
+   they share one forward-action DOM identity and the accent shell must remain
+   continuously visible while only its arrow icon changes. */
 .chat__stop {
   animation: chat-action-reveal 0.16s ease-out both;
 }
@@ -1948,6 +1948,9 @@
   color: #fff;
 }
 .chat__steer:hover { background: var(--accent-hover); /* CONTRACT: vivid opaque accent on hover */ }
+.chat__steer:disabled {
+  cursor: wait;
+}
 
 /* Pending-question nudge — shown in the foot when an unanswered
    AskUserQuestion card sits outside the viewport, so the frozen turn

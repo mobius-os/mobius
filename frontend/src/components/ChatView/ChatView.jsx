@@ -2005,6 +2005,11 @@ export default function ChatView({
   // synchronously so repeated keydowns cannot submit a duplicate before the
   // request settles.
   const submitSteerInFlightRef = useRef(false)
+  // Queue POSTs are optimistic: the tray row exists before the backend has
+  // confirmed it. The primary Steer control is visible immediately, and one
+  // early tap waits on these exact requests rather than becoming an inert
+  // click or briefly showing Stop.
+  const queuedSendRequestsRef = useRef(new Map())
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return
@@ -2149,14 +2154,17 @@ export default function ChatView({
         // on each committed value, but the synchronous reset keeps the
         // send transition correct before React commits the empty value.
       }
+      let queueRequest = null
       try {
-        const result = await streamSend(
+        queueRequest = streamSend(
           text,
           attachments.length > 0 ? attachments : undefined,
           directSteer
             ? { directSteer: true, cid }
             : { queueOnly: true, cid },
         )
+        if (!directSteer) queuedSendRequestsRef.current.set(cid, queueRequest)
+        const result = await queueRequest
         clearFailedAttempt()
         releaseComposerFilesAfterAccepted()
         if (result?.status === 'duplicate') {
@@ -2371,6 +2379,11 @@ export default function ChatView({
         })
         restoreComposerAfterFailedSend()
         setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
+      } finally {
+        if (!directSteer
+            && queuedSendRequestsRef.current.get(cid) === queueRequest) {
+          queuedSendRequestsRef.current.delete(cid)
+        }
       }
       return
     }
@@ -3220,6 +3233,12 @@ export default function ChatView({
     handlingSteerRef.current = true
     setSteerBusy(true)
     try {
+      // The UI changes Send → Steer in the same render that adds the
+      // optimistic queue row. If the owner taps during its persistence
+      // round-trip, wait for those exact writes; doSend's continuation
+      // confirms/removes each row before this continuation reads the queue.
+      const queueWrites = [...queuedSendRequestsRef.current.values()]
+      if (queueWrites.length > 0) await Promise.allSettled(queueWrites)
       const snapshot = pendingQueue.pendingMessagesRef.current
       // Only server-confirmed entries can be force-steered: the backend
       // reconstructs the durable rows from chat.pending_messages, so an
@@ -3520,15 +3539,17 @@ export default function ChatView({
   // steer button here is a dead end. Keep the existing deterministic Stop path
   // available instead: Stop cancels the question first, interrupts the turn,
   // and re-sends the queued rows as one fresh continuation.
-  const canSteer = !hasPendingQuestion
-    && connectionError !== 'disconnected' && !steerBusy
+  const showSteer = !hasPendingQuestion
+    && connectionError !== 'disconnected'
+    && turnActive
+    && pendingQueue.pendingMessages.length > 0
+  const canRequestSteer = showSteer && !steerBusy
+  const canSteer = canRequestSteer
     && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
   const canSubmitSteer = !hasPendingQuestion
     && connectionError !== 'disconnected'
     && !steerBusy
     && turnActive
-  const canRequestSteer = canSubmitSteer
-    && pendingQueue.pendingMessages.length > 0
 
   // ── Sticky "tap to resume" affordance ──────────────────────────────
   // A turn paused by a drain-gated restart, a stall, or a provider-limit park
@@ -4143,6 +4164,8 @@ export default function ChatView({
           onStop={handleStop}
           onSteer={handleSteer}
           canSteer={canSteer}
+          showSteer={showSteer}
+          steerReady={!steerBusy}
           canRequestSteer={canRequestSteer}
           canSubmitSteer={canSubmitSteer}
           offline={!online}

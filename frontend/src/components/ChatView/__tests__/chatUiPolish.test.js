@@ -90,17 +90,24 @@ test('message sources stay inside the assistant row on narrow screens', () => {
     'browser list indentation must not reduce the source card width')
 })
 
-test('primary chat actions leave a brief empty beat before replacement', () => {
+test('Send changes to Steer without an empty or black replacement frame', () => {
   const css = stripComments(chatCss)
-  const actionRule = css.match(/\.chat__send,\s*\.chat__steer,\s*\.chat__stop\s*\{[^}]*\}/)?.[0] || ''
+  const stopRule = css.match(/\.chat__stop\s*\{[^}]*\}/g)
+    ?.find(rule => /animation:\s*chat-action-reveal/.test(rule)) || ''
+  const sendRule = css.match(/\.chat__send\s*\{[^}]*\}/)?.[0] || ''
+  const steerRule = css.match(/\.chat__steer\s*\{[^}]*\}/)?.[0] || ''
   const revealFrames = css.match(/@keyframes\s+chat-action-reveal\s*\{[\s\S]*?\n\}/)?.[0] || ''
 
-  assert.match(actionRule, /animation:\s*chat-action-reveal/,
-    'each keyed primary action should run the replacement reveal')
+  assert.match(stopRule, /animation:\s*chat-action-reveal/,
+    'the genuinely different destructive Stop control may still reveal separately')
+  assert.doesNotMatch(sendRule, /animation:/,
+    'Send must keep its accent shell continuously visible')
+  assert.doesNotMatch(steerRule, /animation:/,
+    'Steer must not replay the opacity-zero replacement animation')
   assert.match(revealFrames, /0%,\s*44%\s*\{\s*opacity:\s*0/,
-    'the incoming action should remain hidden at the start')
+    'the Stop-only reveal should still clear the prior semantic control')
   assert.match(revealFrames, /100%\s*\{\s*opacity:\s*1/,
-    'the incoming action should then appear')
+    'the Stop-only reveal should then appear')
 })
 
 test('running activity uses a masked solid-text sweep, not gradient-clipped text', () => {
