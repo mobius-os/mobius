@@ -367,7 +367,7 @@ test.describe('Tabs', () => {
     await page.waitForTimeout(400)
 
     // Exactly one iframe wrapper for the single app — no string/number duplicate.
-    await expect(page.locator('.shell__view')).toHaveCount(1)
+    await expect(page.locator('.shell__app-view')).toHaveCount(1)
     expect(keyErrors, keyErrors.join('\n')).toHaveLength(0)
   })
 

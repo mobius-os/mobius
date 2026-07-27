@@ -408,6 +408,15 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+    // Re-stamp a chat's pin time WITHOUT invalidating the shell list. Used by
+    // drag-reorder, which re-stamps every pinned row in sequence: the shared
+    // per-mutation invalidation would refetch the list N times mid-sequence and
+    // visibly re-shuffle it. The caller has already applied the final order
+    // optimistically, so no refetch is wanted.
+    repin: (chatId) => apiFetch(`/chats/${chatId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ pinned: true }),
+    }),
     remove: (chatId) => listAffectingMutation(
       'chats', `/chats/${chatId}`, { method: 'DELETE' },
     ),
@@ -428,6 +437,13 @@ export const api = {
     update: (appId, payload) => listAffectingMutation('apps', `/apps/${appId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
+    }),
+    // Re-stamp an app's pin time WITHOUT invalidating the shell list — see
+    // chats.repin. Drag-reorder persists the whole pinned order this way so the
+    // list does not refetch-and-reshuffle on every step.
+    repin: (appId) => apiFetch(`/apps/${appId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ pinned: true }),
     }),
     remove: (appId) => listAffectingMutation(
       'apps', `/apps/${appId}`, { method: 'DELETE' },

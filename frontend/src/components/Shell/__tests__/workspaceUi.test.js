@@ -542,7 +542,7 @@ test('builder single-leaf: the strip deals with its pane, entry through the ONE 
   assert.match(shell, /data-mode-motion=\{navMotion \? navMotion\.motion : undefined\}/)
   // It is INERT throughout either direction (not just under the drawer), so a tap
   // on an in-flight strip cannot re-target the transition.
-  assert.match(shell, /className="shell__tabstrip"[\s\S]*?inert=\{modalDrawerOpen \|\| modeBeatActive\}/)
+  assert.match(shell, /className="shell__tabstrip"[\s\S]*?inert=\{navigationSurfaceOpen \|\| modeBeatActive\}/)
   // CSS: a strip deals in with its pane on enter (shared with the WorkspaceChrome
   // strips via .shell__tabstrip[data-mode-motion]).
   assert.match(css, /\.shell--builder-entering \.shell__tabstrip\[data-mode-motion="deal-in"\] \{[\s\S]*?shell-mode-deal-in/)
@@ -699,17 +699,37 @@ test('overflowing strips keep native pan and add a no-chrome wheel path', () => 
   assert.match(shell, /onWheel=\{scrollStripWheel\}/)
 })
 
-test('the mobile modal keeps its existing brand close path while the workspace is inert', () => {
+test('navigation surfaces keep the brand close path while the workspace is inert', () => {
   const header = shell.match(/<header className="shell__bar"[^>]*>/)?.[0] || ''
   assert.doesNotMatch(header, /inert=/)
-  assert.match(shell, /<main className="shell__content" inert=\{modalDrawerOpen\}/)
+  assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
+  assert.doesNotMatch(shell, /const navigationSurfaceOpen = .*apps/,
+    'the canonical Apps tab is workspace content, not a modal navigation surface')
+  assert.match(shell, /<main className="shell__content" inert=\{navigationSurfaceOpen\}/)
   assert.match(shellBrand, /aria-expanded=\{navigationOpen\}/)
   assert.match(shell, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
 })
 
+test('the Apps tab never disables the mobile drawer layered above it', () => {
+  assert.doesNotMatch(drawer, /drawer__body" inert=/,
+    'workspace content is inert while the drawer is open; the drawer must stay interactive')
+  assert.doesNotMatch(drawer, /interactionLocked \|\| appsActive/,
+    'Apps is a tab underneath navigation, not a modal owner of Escape')
+  assert.match(drawer, /appsActive \? ' drawer__item--active'/)
+  assert.match(shell, /appsActive=\{appsVisibleAsTab\}/)
+})
+
+test('opening navigation is presentation-only and never refetches whole lists', () => {
+  assert.doesNotMatch(shell, /if \(navigationOpen\) \{ refreshApps\(\); refreshChats\(\) \}/)
+  assert.match(shell, /ev\.type === 'app_updated' \|\| ev\.type === 'app_created'[\s\S]*?refreshApps\(\)/,
+    'app lifecycle events still own their authoritative refresh')
+  assert.match(shell, /ev\.type === 'chat_run_finished'[\s\S]*?refreshChats\(\)/,
+    'chat lifecycle events still own their authoritative refresh')
+})
+
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
-  assert.match(drawer, /const allChats = useMemo\(/)
-  assert.match(drawer, /const sortedApps = useMemo\(/)
+  assert.match(drawer, /useMemo\(\(\) => buildDrawerSections\(chats, apps\), \[chats, apps\]\)/)
+  assert.match(drawer, /const filteredApps = useMemo\(/)
   assert.match(drawer, /const rowActions = useMemo\(/)
   assert.match(drawer, /const DrawerRow = memo\(function DrawerRow/)
   assert.match(drawer, /item=\{chat\}[\s\S]*?actions=\{rowActions\}/)
@@ -718,7 +738,7 @@ test('large drawer lists memoize ordering and row actions without changing row o
 })
 
 test('drawer row menus use one semantic context-menu path across pointer types', () => {
-  assert.match(drawer, /function openRowMenu\(event\)[\s\S]*?actions\.toggleMenu\(kind, id, true\)/)
+  assert.match(drawer, /function openRowMenu\(event\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface\)/)
   assert.match(drawer, /onContextMenu=\{openRowMenu\}/)
   assert.match(dragBinding, /srcEl\.dispatchEvent\(new window\.MouseEvent\('contextmenu'/)
   assert.doesNotMatch(
@@ -733,7 +753,7 @@ test('a secondary-button release cannot immediately select a flipped drawer menu
   assert.match(drawer, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)
   assert.match(drawer, /window\.addEventListener\('pointerup', onSecondaryPointerUp, true\)/)
   assert.match(drawer, /upEvent\.pointerId !== pointerId \|\| upEvent\.button !== 2/)
-  assert.match(drawer, /cleanup\(\)[\s\S]*?actions\.toggleMenu\(kind, id, true\)/)
+  assert.match(drawer, /cleanup\(\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface\)/)
   assert.match(drawer, /timer = setTimeout\(cleanup, 1500\)/)
 })
 
