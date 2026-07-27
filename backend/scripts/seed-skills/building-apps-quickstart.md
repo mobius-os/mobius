@@ -108,8 +108,16 @@ const CSS = `
 Use Möbius theme variables (`--bg`, `--surface`, `--surface-2`, `--text`,
 `--muted`, `--border`, `--accent`, `--font`). Add a short app-specific prefix
 to classes. Prefer CSS classes over inline style objects except for truly
-computed values. Use lucide icons already supported by the app runtime rather
-than hand-drawn SVG.
+computed values. Use generic interface icons from the OpenAI Apps SDK UI rather
+than Lucide, hand-drawn SVG, emoji, or text characters:
+
+```jsx
+import { Plus, Search, Trash } from '@openai/apps-sdk-ui/components/Icon'
+```
+
+Keep custom imagery only when it carries real domain identity, such as a flag,
+provider logo, chart, sport, instrument, or game object. App-brand artwork is
+also separate from interface chrome and remains the app's own asset.
 
 For an ordinary app, make one strong visual decision—a calm breathing orb, a
 bright decision wheel, a tactile stack of cards—then support it with restrained
