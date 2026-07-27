@@ -61,6 +61,7 @@ import { focusComposerElement, shouldApplyComposerFocusRequest } from './compose
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
 import { chatDetailCacheValue, chatEntryPhase } from '../../lib/chatDetailCache.js'
+import { updateChatRuntimeCache } from './chatRuntimeCache.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
 import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
@@ -338,9 +339,10 @@ export default function ChatView({
     const running = !!v
     serverRunningRef.current = running
     setServerRunning(running)
-    queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => existing
-      ? { ...existing, running }
-      : existing
+    updateChatRuntimeCache(
+      queryClient,
+      chatMessagesQueryKey(chatId),
+      { running },
     )
   }
   const initialComposerRef = useRef(null)
@@ -1013,12 +1015,11 @@ export default function ChatView({
         setServerRunningState(!!data.running)
       }
       setLiveQuestionId(data.pending_question_id || null)
-      queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
-        ...(existing || {}),
+      updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
         pending_messages: data.pending_messages || [],
         pending_question_id: data.pending_question_id || null,
-      }))
+      })
       // Reconcile pending queue against authoritative server state.
       // hydrate() already preserves truly optimistic/in-flight local rows
       // whose POST has not committed yet. Server-confirmed rows omitted from
@@ -1079,12 +1080,11 @@ export default function ChatView({
       }
       setServerRunningState(!!data.running)
       setLiveQuestionId(data.pending_question_id || null)
-      queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
-        ...(existing || {}),
+      updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
         pending_messages: serverPending,
         pending_question_id: data.pending_question_id || null,
-      }))
+      })
       // Don't let the fallback poll add/clobber the queue while a turn is live
       // (localAuthoritative, above) — the optimistic queue + confirmQueued
       // own it during a turn; hydrate only when the stream is dead.
