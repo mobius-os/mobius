@@ -209,6 +209,39 @@ def test_lifecycle_notification_fields_and_status_enums_are_pinned():
   }
 
 
+def test_cache_write_usage_survives_generated_sdk_schema_lag():
+  """The 5.6 cache-write counter must reach cost normalization."""
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+  from app import codex_sdk_runner
+
+  codex_sdk_runner._sdk_imports()
+  breakdown = {
+    "inputTokens": 100,
+    "cachedInputTokens": 10,
+    "cacheWriteInputTokens": 60,
+    "outputTokens": 20,
+    "reasoningOutputTokens": 5,
+    "totalTokens": 120,
+  }
+  payload = v2_all.ThreadTokenUsageUpdatedNotification.model_validate({
+    "threadId": "thread-1",
+    "turnId": "turn-1",
+    "tokenUsage": {
+      "last": breakdown,
+      "total": breakdown,
+      "modelContextWindow": 1_050_000,
+    },
+  })
+  assert payload.token_usage.last.model_extra == {
+    "cacheWriteInputTokens": 60,
+  }
+  assert codex_sdk_runner.normalize_codex_usage(
+    payload.token_usage,
+    payload.token_usage,
+  )["cache_creation_input_tokens"] == 60
+
+
 def test_turn_terminal_status_and_message_phase_contracts_are_pinned():
   """The runner must not confuse a terminal envelope with a final answer."""
   pytest.importorskip("openai_codex")

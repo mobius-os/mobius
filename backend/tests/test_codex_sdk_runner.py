@@ -1525,6 +1525,7 @@ def test_run_codex_sdk_turn_self_requested_kill_still_reports_usage(
   assert result["terminal_status"] == "interrupted"
   assert result["usage"]["total"]["total_tokens"] == 1_100
   assert "usage_metrics" in result
+  assert len(result["usage_metrics"]["model_calls"]) == 1
 
 
 def test_run_codex_sdk_turn_unrequested_transport_death_stays_an_error(
