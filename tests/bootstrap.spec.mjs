@@ -588,15 +588,13 @@ test.describe('Logout cache wipe', () => {
       return route.fulfill({ status: 401, body: '{"detail":"Not signed in"}' })
     })
 
-    // Trigger a real apiFetch through the live client: opening the
-    // drawer runs Shell's `if (drawerOpen) refreshChats()` effect,
-    // which calls api.chats.list() → apiFetch('/chats') → 401 → wipe.
-    // (No internal query-client handle needed.) The 401 clears the
-    // token, so the post-reload page lands on the login form.
-    await page.evaluate(() => {
-      const btn = document.querySelector('[aria-expanded]')
-      if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
-    })
+    // Trigger a real apiFetch through the live client's authenticated boot.
+    // Navigation presentation no longer owns data refreshes: tying this test to
+    // opening the drawer would make a cache-security contract depend on an
+    // unrelated UI implementation detail. A shell reload reliably requests the
+    // chat list through apiFetch, whose 401 path performs the production wipe.
+    // The handler then schedules its own logged-out reload.
+    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {})
     await expect.poll(() => forced401Count, { timeout: 5000 }).toBeGreaterThan(0)
 
     // Wait through the apiFetch-deferred reload. The token was cleared,

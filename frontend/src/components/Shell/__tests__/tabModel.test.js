@@ -109,10 +109,22 @@ test('readOpenTabs keeps the legacy projection chat/app-only (drops Settings)', 
   const store = fakeStorage(JSON.stringify([
     { kind: 'chat', id: 'a' },
     { kind: 'settings', id: 'settings' },
+    { kind: 'apps', id: 'apps' },
     { kind: 'app', id: 7 },
   ]))
   assert.deepEqual(tabModel.readOpenTabs(store), [
     { kind: 'chat', id: 'a' },
     { kind: 'app', id: '7' },
   ])
+})
+
+// ── Apps launcher tab ───────────────────────────────────────────────────────
+
+test('appsTab is one canonical workspace item with an ordinary nav target', () => {
+  assert.deepEqual(tabModel.appsTab(), { kind: 'apps', id: 'apps' })
+  assert.equal(tabModel.tabKey(tabModel.appsTab()), tabModel.APPS_TAB_KEY)
+  assert.equal(tabModel.APPS_TAB_KEY, 'apps:apps')
+  assert.ok(tabModel.isAppsTab(tabModel.appsTab()))
+  assert.ok(!tabModel.isAppsTab(tabModel.makeTab('app', '1')))
+  assert.deepEqual(tabModel.tabNavTarget(tabModel.appsTab()), { view: 'apps' })
 })

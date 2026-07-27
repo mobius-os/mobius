@@ -2155,15 +2155,27 @@ async def update_app(
       app.capability_contract = contract_from_app_state(app)
     db.commit()
     db.refresh(app)
-    get_system_broadcast().publish(
-      {"type": "app_updated", "appId": str(app.id)}
+    # A pin toggle is drawer-local ORDERING, not a change to the app itself, so
+    # it must not ride the app_updated wire. Drag-reorder re-stamps every pinned
+    # app in sequence; one list-invalidating event per step would refetch the
+    # drawer repeatedly and visibly re-shuffle it mid-drop. Broadcast only when a
+    # meaningful app field actually changed (this also drops the stray "Preview
+    # updated ✓" flash a bare pin/unpin used to cause).
+    pin_only = body.pinned is not None and all(
+      field is None
+      for field in (
+        body.name, body.description, body.chat_id, body.share_with_apps,
+        body.cross_app_access, body.share_manifest_url, body.manage_skills,
+      )
     )
+    if not pin_only:
+      get_system_broadcast().publish(
+        {"type": "app_updated", "appId": str(app.id)}
+      )
     # The in-chat "Open <App>" CTA is DERIVED on the frontend from the apps
     # query's chat_id + updated_at, so app_updated alone surfaces it in the
-    # owning chat. A metadata-only PATCH still bumps updated_at, so a
-    # pin/rename can flash "Preview updated ✓" — sanctioned (see
-    # chatRuntimeState.builtAppPulseDecision), the wire carries no source-only
-    # version key to gate on.
+    # owning chat. A metadata-only PATCH still bumps updated_at; the wire carries
+    # no source-only version key to gate on.
   return app
 
 

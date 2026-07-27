@@ -1,8 +1,8 @@
 // Tab model — the openable-item primitive behind the shell's tab strip.
 //
 // A tab is a pinned reference to a chat or app the owner can swap to:
-// `{ kind: 'chat' | 'app', id: string }`, plus the one canonical
-// `{ kind: 'settings', id: 'settings' }` builder tab (see below). This module
+// `{ kind: 'chat' | 'app', id: string }`, plus the canonical shell-owned
+// Apps and Settings tabs (see below). This module
 // owns the whole tab contract — construction, identity, the open-set invariants
 // (dedup + cap), persistence, how a tab maps to navigation, and whether it is
 // the one on screen — so no call site has to re-derive them.
@@ -37,6 +37,15 @@ export const SETTINGS_TAB_KEY = 'settings:settings'
 export function settingsTab() { return { kind: 'settings', id: SETTINGS_ID } }
 export function isSettingsTab(tab) { return !!tab && tab.kind === 'settings' }
 
+// Apps is an ordinary, single-instance workspace destination. Unlike Settings
+// it has no takeover/overlay mode: it opens wherever it is invoked, exactly
+// like a chat or installed app, and workspace-wide tab dedup focuses the
+// existing copy instead of creating another launcher.
+export const APPS_ID = 'apps'
+export const APPS_TAB_KEY = 'apps:apps'
+export function appsTab() { return { kind: 'apps', id: APPS_ID } }
+export function isAppsTab(tab) { return !!tab && tab.kind === 'apps' }
+
 // Ids are stored as strings for stable React keys + sessionStorage. App ids
 // are re-coerced to Number in tabNavTarget — the ONLY correct nav shape (the
 // iframe LRU dedups on strict !==, so a string id would double-mount).
@@ -62,6 +71,7 @@ export function tabKey(tab) {
 // no `opts`.
 export function tabNavTarget(tab) {
   if (tab.kind === 'settings') return { view: 'settings' }
+  if (tab.kind === 'apps') return { view: 'apps' }
   return tab.kind === 'app'
     ? { view: 'canvas', opts: { appId: Number(tab.id) } }
     : { view: 'chat', opts: { chatId: tab.id } }

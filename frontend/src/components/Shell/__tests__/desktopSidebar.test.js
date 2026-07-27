@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   clampDesktopSidebarWidth,
   desktopContentWidthAfterSidebarToggle,
+  DESKTOP_RAIL_WIDTH,
   DESKTOP_SIDEBAR_DEFAULT_WIDTH,
   DESKTOP_SIDEBAR_MAX_WIDTH,
   DESKTOP_SIDEBAR_MIN_WIDTH,
@@ -62,8 +63,8 @@ test('desktop content width projects drawer open and close from live geometry', 
     currentReserved: true,
     nextReserved: false,
     sidebarWidth: 320,
-  }), 1680)
-  assert.equal(desktopContentWidthAfterSidebarToggle(1680, {
+  }), 1680 - DESKTOP_RAIL_WIDTH)
+  assert.equal(desktopContentWidthAfterSidebarToggle(1680 - DESKTOP_RAIL_WIDTH, {
     currentReserved: false,
     nextReserved: true,
     sidebarWidth: 320,
