@@ -62,20 +62,17 @@ jobs:
           no-cache: ${{ github.event_name != 'push' }}
 
       - name: Verify the open-source image is public
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          for attempt in 1 2 3 4 5; do
-            if gh api --method PATCH \
-              "/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/mobius" \
-              -f visibility=public; then
-              break
+          docker logout ghcr.io
+          for attempt in 1 2 3 4 5 6; do
+            if docker buildx imagetools inspect ghcr.io/mobius-os/mobius:daily; then
+              exit 0
             fi
-            if [ "$attempt" = 5 ]; then
-              echo "Could not make ghcr.io/mobius-os/mobius public" >&2
+            if [ "$attempt" = 6 ]; then
+              echo "ghcr.io/mobius-os/mobius:daily is not public" >&2
+              echo "Set the package visibility once at:" >&2
+              echo "https://github.com/orgs/mobius-os/packages/container/package/mobius/settings" >&2
               exit 1
             fi
-            sleep 3
+            sleep 5
           done
-          docker logout ghcr.io
-          docker buildx imagetools inspect ghcr.io/mobius-os/mobius:daily
