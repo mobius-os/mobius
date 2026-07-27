@@ -29,6 +29,15 @@ def test_cron_parser_resolves_supervised_command_to_real_job():
   )
 
 
+def test_only_bootstrap_commands_request_a_readiness_wait():
+  job = Path("/data/apps/memory/memory-job.sh")
+
+  assert app_jobs.runner_command(57, job, wait_for_ready=True)[-3:] == [
+    "--wait-for-ready", "57", str(job),
+  ]
+  assert app_jobs.runner_command(57, job)[-2:] == ["57", str(job)]
+
+
 def test_terminate_verifies_start_ticks_before_signalling(monkeypatch):
   data_dir = Path(get_settings().data_dir)
   leases = data_dir / "run" / "app-jobs" / "57"
@@ -107,6 +116,61 @@ def test_live_check_calls_real_app_endpoint(monkeypatch):
     "auth": "Bearer app-token",
     "timeout": 10,
   }
+
+
+def test_bootstrap_waits_for_ready_before_minting_a_job_token(
+  tmp_path, monkeypatch,
+):
+  runner = _load_runner()
+  data_dir = tmp_path / "data"
+  source = data_dir / "apps" / "memory"
+  source.mkdir(parents=True)
+  job = source / "memory-job.sh"
+  job.write_text("#!/bin/sh\nexit 0\n")
+  monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
+  events = []
+  monkeypatch.setattr(
+    runner, "_wait_for_ready", lambda: events.append("ready") or True,
+  )
+  monkeypatch.setattr(
+    runner, "_mint_app_token", lambda _app_id: events.append("mint") or "token",
+  )
+  monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
+  monkeypatch.setattr(
+    runner, "_job_context", lambda *_args: {"source_dir": str(source)},
+  )
+  monkeypatch.setattr(
+    runner.subprocess, "Popen", lambda *_args, **_kwargs: types.SimpleNamespace(wait=lambda: 0),
+  )
+  monkeypatch.setattr(runner.sys, "argv", [
+    "app-job-runner.py", "--wait-for-ready", "57", str(job),
+  ])
+
+  assert runner.run() == 0
+  assert events == ["ready", "mint"]
+
+
+def test_bootstrap_readiness_timeout_never_mints_a_job_token(
+  tmp_path, monkeypatch,
+):
+  runner = _load_runner()
+  data_dir = tmp_path / "data"
+  source = data_dir / "apps" / "memory"
+  source.mkdir(parents=True)
+  job = source / "memory-job.sh"
+  job.write_text("#!/bin/sh\nexit 0\n")
+  monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
+  monkeypatch.setattr(runner, "_wait_for_ready", lambda: False)
+  minted = []
+  monkeypatch.setattr(runner, "_mint_app_token", lambda _app_id: minted.append(True))
+  monkeypatch.setattr(runner.sys, "argv", [
+    "app-job-runner.py", "--wait-for-ready", "57", str(job),
+  ])
+
+  assert runner.run() == 4
+  assert minted == []
 
 
 def test_wrapper_publishes_lease_before_live_check_and_cleans_it(

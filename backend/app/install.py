@@ -3349,8 +3349,18 @@ async def install_from_manifest(
     try:
       from app.app_jobs import launch_app_job
       source = Path(app.source_dir)
-      launch_app_job(app.id, source / job_name, source)
-      warnings.append("initialization started")
+      # Bootstrap runs inside FastAPI lifespan, before this backend can answer
+      # the supervisor's scoped capability calls.  Keep that ordering detail in
+      # the generic runner: it waits for the existing readiness signal before
+      # starting.  Interactive installs already happen against a live server.
+      wait_for_ready = source == "bootstrap"
+      launch_app_job(
+        app.id, source / job_name, source, wait_for_ready=wait_for_ready,
+      )
+      warnings.append(
+        "initialization waiting for startup readiness"
+        if wait_for_ready else "initialization started"
+      )
     except Exception as exc:
       log.exception("install: initialization job failed to start")
       warnings.append(f"initialization failed to start — {exc!r}")

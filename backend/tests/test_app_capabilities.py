@@ -237,5 +237,8 @@ def test_matching_digest_is_persisted_with_explicit_system_identity(
   assert app.system_app is True
   assert app.capability_contract == contract
   assert response.json()["capability_contract"] == contract
-  launch.assert_called_once()
+  launch.assert_called_once_with(
+    app.id, Path(app.source_dir) / "memory-job.sh", Path(app.source_dir),
+    wait_for_ready=False,
+  )
   assert "initialization started" in response.json()["warnings"]
