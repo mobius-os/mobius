@@ -1,10 +1,17 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { Plus, Chats, Grid, DotsVerticalMoreMenu, SettingsCog, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
+import { Chats, DotsVerticalMoreMenu, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
+import {
+  AppsNavIcon,
+  NewChatNavIcon,
+  SettingsNavIcon,
+} from '../navigationIcons.js'
+import { appIconUrl } from '../appIcon.js'
 import {
   drawerCloseWatchdogMs,
   drawerWidthFromPointerDelta,
@@ -15,6 +22,12 @@ import {
 } from '../../lib/drawerLifecycle.js'
 import { WORKSPACE_SPLITS_ENABLED } from '../Shell/paneModel.js'
 import InstallSheet from './InstallSheet.jsx'
+import AppsDirectory from './AppsDirectory.jsx'
+import {
+  appInitials,
+  buildDrawerSections,
+  filterInstalledApps,
+} from './drawerInformationArchitecture.js'
 import {
   clampDrawerChatCount,
   initialDrawerChatCount,
@@ -52,6 +65,9 @@ export default function Drawer({
   onDeleteApp,
   onDeleteAppData,
   onSettings,
+  appsActive = false,
+  onAppsOpen,
+  appsHost,
   // Set of chat ids whose agent is currently streaming. Used to
   // show a small accent dot next to the row label so the user can
   // see at a glance which background builds are still running.
@@ -83,32 +99,11 @@ export default function Drawer({
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
   const resizeRef = useRef(null)
-  // Pinned-first sort: pinned rows by pinned_at desc, then unpinned by
-  // activity_at desc (owner-send), with updated_at as a fallback. Server
-  // returns this order already (see routes/chats.py list_chats), but we
-  // mirror it defensively so the drawer stays correct if the cache holds
-  // an older response.
-  const allChats = useMemo(() => (chats || [])
-    .filter(c => c.has_messages)
-    .sort((a, b) => {
-      const ap = a.pinned_at, bp = b.pinned_at
-      if (ap && !bp) return -1
-      if (!ap && bp) return 1
-      if (ap && bp) return bp.localeCompare(ap)
-      return ((b.activity_at || b.updated_at) || '')
-        .localeCompare((a.activity_at || a.updated_at) || '')
-    }), [chats])
-  // Mirror the same sort for apps. Server delivers it, but the cache
-  // may carry a stale list. Unpinned apps stay in creation order so
-  // the existing "stable apps list" UX (oldest-first within unpinned)
-  // is preserved.
-  const sortedApps = useMemo(() => (apps || []).slice().sort((a, b) => {
-    const ap = a.pinned_at, bp = b.pinned_at
-    if (ap && !bp) return -1
-    if (!ap && bp) return 1
-    if (ap && bp) return bp.localeCompare(ap)
-    return (a.created_at || '').localeCompare(b.created_at || '')
-  }), [apps])
+  const {
+    pinned: pinnedItems,
+    chats: allChats,
+    apps: sortedApps,
+  } = useMemo(() => buildDrawerSections(chats, apps), [chats, apps])
   const [visibleChatCount, setVisibleChatCount] = useState(
     () => initialDrawerChatCount(allChats.length),
   )
@@ -176,10 +171,41 @@ export default function Drawer({
     if (!stillThere) setOpenMenu(null)
   }, [openMenu, chats, apps])
   const [renamingState, setRenamingState] = useState(null) // { kind, id } | null
+  // Mirrors `renaming` synchronously (not via useEffect — that's one render
+  // behind) so outside-tap cancellation sees the current edit immediately.
+  const renamingRef = useRef(null)
+  const overlayCancelRef = useRef(false)
+  const renaming = renamingState
+  const setRenaming = useCallback((next) => {
+    renamingRef.current = next
+    setRenamingState(next)
+  }, [])
   // The app whose "Add to home screen" sheet is open ({id,name,slug}),
   // or null. Mirrors openMenu/renamingState — one at a time, owned here
   // rather than in Shell so this stays drawer-local.
   const [installingApp, setInstallingApp] = useState(null)
+  const [appQuery, setAppQuery] = useState('')
+  const appsButtonRef = useRef(null)
+  const filteredApps = useMemo(
+    () => filterInstalledApps(sortedApps, appQuery),
+    [sortedApps, appQuery],
+  )
+
+  const resetAppsSurfaceUi = useCallback(({ restoreFocus = true } = {}) => {
+    setAppQuery('')
+    setOpenMenu(null)
+    setRenaming(null)
+    if (restoreFocus) {
+      requestAnimationFrame(() => appsButtonRef.current?.focus())
+    }
+  }, [setRenaming])
+
+  function openApps() {
+    setAppQuery('')
+    setOpenMenu(null)
+    setRenaming(null)
+    onAppsOpen?.()
+  }
 
   // The install sheet navigates the whole document away to the standalone
   // install surface (/apps/<slug>/?install=1). When the user comes back via the
@@ -194,21 +220,6 @@ export default function Drawer({
     return () => window.removeEventListener('pageshow', closeOnReshow)
   }, [])
 
-  // Mirrors `renaming` synchronously (not via useEffect — that's
-  // one render behind). The overlay's pointerdown handler must see
-  // the latest value the same task the user starts renaming, so we
-  // wrap the state setter and update the ref inline.
-  // `overlayCancelRef` is set by the overlay's pointerdown when a
-  // rename is active; read by the rename-submit callback to skip
-  // the PATCH (overlay-tap = cancel, not commit).
-  const renamingRef = useRef(null)
-  const overlayCancelRef = useRef(false)
-  const renaming = renamingState
-  const setRenaming = (next) => {
-    renamingRef.current = next
-    setRenamingState(next)
-  }
-
   // Rows receive one stable action surface instead of a new closure for every
   // action on every item. The ref supplies the latest props and local helpers,
   // while memoized rows can bail out when an unrelated row or drawer state changes.
@@ -216,14 +227,15 @@ export default function Drawer({
   const rowActions = useMemo(() => ({
     select(kind, id) {
       const current = rowActionInputsRef.current
+      current.resetAppsSurfaceUi({ restoreFocus: false })
       if (kind === 'chat') current.onChat(id)
       else current.onApp(id)
     },
-    toggleMenu(kind, id, next) {
-      rowActionInputsRef.current.setOpenMenu(next ? { kind, id } : null)
+    toggleMenu(kind, id, next, surface = 'drawer') {
+      rowActionInputsRef.current.setOpenMenu(next ? { kind, id, surface } : null)
     },
-    startRename(kind, id) {
-      rowActionInputsRef.current.setRenaming({ kind, id })
+    startRename(kind, id, surface = 'drawer') {
+      rowActionInputsRef.current.setRenaming({ kind, id, surface })
     },
     cancelRename() {
       rowActionInputsRef.current.setRenaming(null)
@@ -243,6 +255,9 @@ export default function Drawer({
       const current = rowActionInputsRef.current
       if (kind === 'chat') current.pinChat(id, next)
       else current.pinApp(id, next)
+    },
+    reorderPinnedApp(sourceId, targetId) {
+      rowActionInputsRef.current.reorderPinnedApp(sourceId, targetId)
     },
     remove(kind, id) {
       const current = rowActionInputsRef.current
@@ -344,6 +359,44 @@ export default function Drawer({
     }
   }
 
+  async function reorderPinnedApp(sourceId, targetId) {
+    if (sourceId === targetId) return
+    const key = appQueries.keys.all
+    const prev = queryClient.getQueryData(key)
+    const pinnedApps = (prev || [])
+      .filter(app => app.pinned_at)
+      .slice()
+      .sort((a, b) => String(b.pinned_at).localeCompare(String(a.pinned_at)))
+    const from = pinnedApps.findIndex(app => app.id === sourceId)
+    const to = pinnedApps.findIndex(app => app.id === targetId)
+    if (from < 0 || to < 0) return
+    const ordered = pinnedApps.slice()
+    const [moved] = ordered.splice(from, 1)
+    ordered.splice(to, 0, moved)
+    const rank = new Map()
+    const now = Date.now()
+    ordered.forEach((app, index) => {
+      rank.set(app.id, new Date(now - index).toISOString())
+    })
+    queryClient.setQueryData(key, (list) =>
+      (list || []).map(app => rank.has(app.id)
+        ? { ...app, pinned_at: rank.get(app.id) }
+        : app),
+    )
+    try {
+      // The existing pin timestamp is the ordering primitive. Re-pin bottom to
+      // top so each later stamp becomes newer, yielding the requested order
+      // without adding a parallel rank field or migration.
+      for (const app of [...ordered].reverse()) {
+        const res = await api.apps.update(app.id, { pinned: true })
+        if (!res.ok) throw new Error('Could not reorder pinned apps')
+      }
+      refreshApps()
+    } catch {
+      queryClient.setQueryData(key, prev)
+    }
+  }
+
   // deleteApp is handled by Shell (where showToast lives) — the local
   // implementation silently swallowed 409 and network errors. Calls are
   // forwarded via the onDeleteApp prop; the local function is removed.
@@ -383,7 +436,8 @@ export default function Drawer({
     }
   }, [open, persistent])
 
-  // Escape key closes the drawer while it is open.
+  // Escape key closes the drawer while it is open. Apps is ordinary workspace
+  // content, so it never takes ownership away from navigation layered above it.
   useEffect(() => {
     if (!open || persistent || interactionLocked) return
     function onKeyDown(e) {
@@ -720,11 +774,13 @@ export default function Drawer({
     setOpenMenu,
     setRenaming,
     setInstallingApp,
+    resetAppsSurfaceUi,
     overlayCancelRef,
     renameChat,
     renameApp,
     pinChat,
     pinApp,
+    reorderPinnedApp,
   }
 
   return (
@@ -756,7 +812,7 @@ export default function Drawer({
            touchmove), not via React's passive onTouch* props. */
         onTransitionEnd={handleDrawerTransitionEnd}
       >
-        {persistent && (
+        {persistent && open && (
           <div
             className="drawer__resize-handle"
             role="separator"
@@ -779,40 +835,92 @@ export default function Drawer({
           </div>
         )}
         <div className="drawer__body">
-          {/* Single scroll wrapper around New chat + Chats + Apps.
-              Earlier each group held its own scrolling region with
-              flex:1, which split the drawer height evenly even when
-              one section had a few rows and the other had many. With
-              one outer scroll, sections size to content; if total
-              content overflows, the whole column scrolls and the
-              bottom edge fades via mask-image so a half-row at the
-              boundary doesn't read as abruptly cut off. Settings
-              sits outside this wrapper at the drawer bottom. */}
           <div className="drawer__scroll-wrap">
-
-            <button className="drawer__item drawer__item--new" onClick={onNewChat}>
+            <button
+              className="drawer__item drawer__item--new"
+              onClick={() => {
+                resetAppsSurfaceUi({ restoreFocus: false })
+                onNewChat()
+              }}
+            >
               <span className="drawer__item-icon" aria-hidden="true">
-                <Plus width={18} height={18} />
+                <NewChatNavIcon />
               </span>
               <span className="drawer__item-text">New chat</span>
             </button>
 
-          <div className="drawer__group drawer__group--chats">
-            <h2 className="drawer__label drawer__label--chats">
-              <Chats width={16} height={16} aria-hidden="true" />
-              <span>Chats</span>
-            </h2>
-            <div className="drawer__scroll" ref={chatScrollRef}>
+            <div className="drawer__scroll drawer__scroll--navigation" ref={chatScrollRef}>
+              <button
+                ref={appsButtonRef}
+                type="button"
+                className={`drawer__item drawer__item--apps${appsActive ? ' drawer__item--active' : ''}`}
+                aria-current={appsActive ? 'page' : undefined}
+                onClick={openApps}
+              >
+                <span className="drawer__item-icon" aria-hidden="true">
+                  <AppsNavIcon />
+                </span>
+                <span className="drawer__item-text">Apps</span>
+              </button>
+
+              {pinnedItems.length > 0 && (
+                <section className="drawer__section" aria-labelledby="drawer-pinned-label">
+                  <h2 id="drawer-pinned-label" className="drawer__label">
+                    <PinFilled width={15} height={15} aria-hidden="true" />
+                    <span>Pinned</span>
+                  </h2>
+                  {pinnedItems.map(({ kind, item }) => (
+                    <DrawerRow
+                      key={`${kind}:${item.id}`}
+                      kind={kind}
+                      item={item}
+                      surface="drawer"
+                      streaming={kind === 'chat' && streamingSet.has(item.id)}
+                      building={kind === 'app' && !!(item.chat_id && streamingSet.has(item.chat_id))}
+                      attention={kind === 'chat'
+                        ? attentionSet.has(item.id)
+                        : newAppSet.has(Number(item.id))}
+                      active={!appsActive && (
+                        kind === 'chat'
+                          ? activeView === 'chat' && activeChatId === item.id
+                          : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
+                      )}
+                      menuOpen={!!(openMenu
+                        && openMenu.surface === 'drawer'
+                        && openMenu.kind === kind
+                        && openMenu.id === item.id)}
+                      renaming={!!(renaming
+                        && renaming.surface === 'drawer'
+                        && renaming.kind === kind
+                        && renaming.id === item.id)}
+                      actions={rowActions}
+                    />
+                  ))}
+                </section>
+              )}
+
+              <section className="drawer__section" aria-labelledby="drawer-chats-label">
+                <h2 id="drawer-chats-label" className="drawer__label drawer__label--chats">
+                  <Chats width={16} height={16} aria-hidden="true" />
+                  <span>Chats</span>
+                </h2>
               {allChats.length > 0 ? visibleChats.map(chat => (
                 <DrawerRow
                   key={chat.id}
                   kind="chat"
                   item={chat}
+                  surface="drawer"
                   streaming={streamingSet.has(chat.id)}
                   attention={attentionSet.has(chat.id)}
-                  active={activeView === 'chat' && activeChatId === chat.id}
-                  menuOpen={!!(openMenu && openMenu.kind === 'chat' && openMenu.id === chat.id)}
-                  renaming={!!(renaming && renaming.kind === 'chat' && renaming.id === chat.id)}
+                  active={!appsActive && activeView === 'chat' && activeChatId === chat.id}
+                  menuOpen={!!(openMenu
+                    && openMenu.surface === 'drawer'
+                    && openMenu.kind === 'chat'
+                    && openMenu.id === chat.id)}
+                  renaming={!!(renaming
+                    && renaming.surface === 'drawer'
+                    && renaming.kind === 'chat'
+                    && renaming.id === chat.id)}
                   actions={rowActions}
                 />
               )) : (
@@ -829,33 +937,8 @@ export default function Drawer({
                   aria-hidden="true"
                 />
               )}
+              </section>
             </div>
-          </div>
-
-          {apps.length > 0 && (
-            <div className="drawer__group drawer__group--apps">
-              <h2 className="drawer__label drawer__label--apps">
-                <Grid width={16} height={16} aria-hidden="true" />
-                <span>Apps</span>
-              </h2>
-              <div className="drawer__scroll">
-                {sortedApps.map(app => (
-                  <DrawerRow
-                    key={app.id}
-                    kind="app"
-                    item={app}
-                    building={!!(app.chat_id && streamingSet.has(app.chat_id))}
-                    attention={newAppSet.has(Number(app.id))}
-                    active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
-                    menuOpen={!!(openMenu && openMenu.kind === 'app' && openMenu.id === app.id)}
-                    renaming={!!(renaming && renaming.kind === 'app' && renaming.id === app.id)}
-                    actions={rowActions}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-
           </div>{/* /.drawer__scroll-wrap */}
 
           <div className="drawer__group drawer__group--bottom">
@@ -863,9 +946,14 @@ export default function Drawer({
               className={`drawer__item ${activeView === 'settings' ? 'drawer__item--active' : ''}`}
               aria-label="Settings"
               aria-current={activeView === 'settings' ? 'page' : undefined}
-              onClick={onSettings}
+              onClick={() => {
+                resetAppsSurfaceUi({ restoreFocus: false })
+                onSettings()
+              }}
             >
-              <SettingsCog width={16} height={16} aria-hidden="true" style={{ flexShrink: 0 }} />
+              <span className="drawer__item-icon" aria-hidden="true">
+                <SettingsNavIcon />
+              </span>
               <span className="drawer__item-text">Settings</span>
               {/* Passive nudge — any provider's refresh token is no
                   longer valid. No banner, no modal: just a quiet dot
@@ -883,6 +971,36 @@ export default function Drawer({
 
         </div>
       </nav>
+      {appsActive && appsHost && createPortal((
+        <AppsDirectory
+          empty={sortedApps.length === 0}
+          resultCount={filteredApps.length}
+          query={appQuery}
+          onQueryChange={setAppQuery}
+        >
+          {filteredApps.map(app => (
+            <DrawerRow
+              key={app.id}
+              kind="app"
+              item={app}
+              variant="card"
+              surface="directory"
+              building={!!(app.chat_id && streamingSet.has(app.chat_id))}
+              attention={newAppSet.has(Number(app.id))}
+              active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
+              menuOpen={!!(openMenu
+                && openMenu.surface === 'directory'
+                && openMenu.kind === 'app'
+                && openMenu.id === app.id)}
+              renaming={!!(renaming
+                && renaming.surface === 'directory'
+                && renaming.kind === 'app'
+                && renaming.id === app.id)}
+              actions={rowActions}
+            />
+          ))}
+        </AppsDirectory>
+      ), appsHost)}
       {installingApp && (
         <InstallSheet
           appId={installingApp.id}
@@ -903,6 +1021,8 @@ export default function Drawer({
 const DrawerRow = memo(function DrawerRow({
   kind,
   item,
+  variant = 'row',
+  surface = 'drawer',
   active,
   streaming,
   // App rows only: the app's owning chat is streaming, i.e. the agent is
@@ -921,25 +1041,12 @@ const DrawerRow = memo(function DrawerRow({
   const slug = item.slug
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
+  const holdTimerRef = useRef(null)
+  const holdOriginRef = useRef(null)
+  const suppressCardClickRef = useRef(false)
+  const suppressRowClickRef = useRef(false)
+  const reorderCleanupRef = useRef(null)
   const secondaryReleaseCleanupRef = useRef(null)
-  const [confirmingDelete, setConfirmingDelete] = useState(false)
-  // Separate two-step confirm for the app-only "Delete data" action, which
-  // wipes stored data but keeps the app installed. Independent of
-  // confirmingDelete so the two confirm chips can't collide.
-  const [confirmingDeleteData, setConfirmingDeleteData] = useState(false)
-
-  // Reset the inline-confirm two-steps (apps only) whenever the menu
-  // closes — otherwise reopening would land the user back on the
-  // primed "Confirm delete?" view. The SDK Menu (Radix) handles
-  // open/close, outside-click, escape, and collision-aware
-  // positioning natively; we just listen for the close.
-  useEffect(() => {
-    if (!menuOpen) {
-      setConfirmingDelete(false)
-      setConfirmingDeleteData(false)
-    }
-  }, [menuOpen])
-
   // Cancel-on-outside-tap during rename. Capture-phase listeners on
   // pointerdown AND click anywhere outside the rename input normally call
   // preventDefault + stopPropagation so another row, Settings, or New chat
@@ -980,6 +1087,12 @@ const DrawerRow = memo(function DrawerRow({
     }
   }, [renaming, actions])
 
+  useEffect(() => () => {
+    if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
+    reorderCleanupRef.current?.()
+    secondaryReleaseCleanupRef.current?.()
+  }, [])
+
   // Autofocus + select-all on rename open so the user can either retype
   // from scratch or tap into the existing name to edit it.
   useEffect(() => {
@@ -988,10 +1101,6 @@ const DrawerRow = memo(function DrawerRow({
       inputRef.current.select()
     }
   }, [renaming])
-
-  useEffect(() => () => {
-    secondaryReleaseCleanupRef.current?.()
-  }, [])
 
   function commitRename() {
     if (cancelingRef.current) {
@@ -1008,6 +1117,20 @@ const DrawerRow = memo(function DrawerRow({
   }
 
   if (renaming) {
+    if (variant === 'card') {
+      return (
+        <div className="apps-directory__card apps-directory__card--editing">
+          <input
+            ref={inputRef}
+            className="drawer__rename-input"
+            defaultValue={label}
+            onKeyDown={onInputKeyDown}
+            onBlur={commitRename}
+            aria-label="Rename app"
+          />
+        </div>
+      )
+    }
     return (
       <div className={`drawer__item drawer__item--editing ${active ? 'drawer__item--active' : ''}`}>
         <input
@@ -1024,11 +1147,12 @@ const DrawerRow = memo(function DrawerRow({
 
   function openRowMenu(event) {
     event.preventDefault()
+    event.stopPropagation()
     // Chromium raises mouse contextmenu on secondary-button DOWN. The matching
     // UP is owned by beginSecondaryMenuPress below, which opens only after that
     // release; do not mount the collision-flipped menu underneath a held pointer.
     if (event.type === 'contextmenu' && secondaryReleaseCleanupRef.current) return
-    actions.toggleMenu(kind, id, true)
+    actions.toggleMenu(kind, id, true, surface)
   }
 
   function beginSecondaryMenuPress(event) {
@@ -1050,13 +1174,137 @@ const DrawerRow = memo(function DrawerRow({
       if (upEvent.pointerId !== pointerId || upEvent.button !== 2) return
       upEvent.preventDefault()
       cleanup()
-      actions.toggleMenu(kind, id, true)
+      actions.toggleMenu(kind, id, true, surface)
     }
     window.addEventListener('pointerup', onSecondaryPointerUp, true)
     window.addEventListener('pointercancel', cleanup, true)
     window.addEventListener('blur', cleanup, true)
     timer = setTimeout(cleanup, 1500)
     secondaryReleaseCleanupRef.current = cleanup
+  }
+
+  if (variant === 'card') {
+    function openCardMenu(event) {
+      openRowMenu(event)
+    }
+    function beginCardHold(event) {
+      if (event.pointerType === 'mouse' || event.button !== 0) return
+      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
+      holdOriginRef.current = { x: event.clientX, y: event.clientY }
+      holdTimerRef.current = setTimeout(() => {
+        holdTimerRef.current = null
+        suppressCardClickRef.current = true
+        actions.toggleMenu(kind, id, true, surface)
+      }, 520)
+    }
+    function cancelCardHold() {
+      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
+      holdTimerRef.current = null
+      holdOriginRef.current = null
+    }
+    return (
+      <div className="apps-directory__card">
+        <button
+          type="button"
+          className="apps-directory__card-main"
+          aria-label={`Open ${label}`}
+          onClick={() => {
+            if (suppressCardClickRef.current) {
+              suppressCardClickRef.current = false
+              return
+            }
+            actions.select(kind, id)
+          }}
+          onContextMenu={openCardMenu}
+          onPointerDown={event => {
+            beginSecondaryMenuPress(event)
+            beginCardHold(event)
+          }}
+          onPointerUp={cancelCardHold}
+          onPointerCancel={cancelCardHold}
+          onPointerMove={event => {
+            const origin = holdOriginRef.current
+            if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 8) {
+              cancelCardHold()
+            }
+          }}
+          onKeyDown={event => {
+            if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+              openCardMenu(event)
+            }
+          }}
+        >
+          <AppIcon
+            item={item}
+            label={label}
+            className="apps-directory__card-icon"
+            size={128}
+          />
+          <span className="apps-directory__card-meta">
+            <span className="apps-directory__card-name">{label}</span>
+          </span>
+        </button>
+        <DrawerItemMenu
+          kind={kind}
+          item={item}
+          surface={surface}
+          pinned={pinned}
+          menuOpen={menuOpen}
+          actions={actions}
+          triggerClassName="drawer__more apps-directory__card-menu-anchor"
+          triggerHidden
+        />
+      </div>
+    )
+  }
+
+  function beginPinnedReorder(event) {
+    if (kind !== 'app' || !pinned || event.pointerType !== 'mouse' || event.button !== 0) return
+    const pointerId = event.pointerId
+    const start = { x: event.clientX, y: event.clientY }
+    let dragging = false
+    let targetId = id
+    let cleaned = false
+    const source = event.currentTarget
+
+    function cleanup() {
+      if (cleaned) return
+      cleaned = true
+      source.removeAttribute('data-reordering')
+      window.removeEventListener('pointermove', onMove, true)
+      window.removeEventListener('pointerup', onUp, true)
+      window.removeEventListener('pointercancel', cleanup, true)
+      reorderCleanupRef.current = null
+    }
+    function onMove(moveEvent) {
+      if (moveEvent.pointerId !== pointerId) return
+      const dx = moveEvent.clientX - start.x
+      const dy = moveEvent.clientY - start.y
+      if (!dragging) {
+        if (Math.abs(dx) > Math.abs(dy) || Math.abs(dy) < 8) return
+        dragging = true
+        source.setAttribute('data-reordering', 'true')
+      }
+      moveEvent.preventDefault()
+      const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)
+        ?.closest?.('[data-pinned-app-id]')
+      if (target?.dataset.pinnedAppId) targetId = target.dataset.pinnedAppId
+    }
+    function onUp(upEvent) {
+      if (upEvent.pointerId !== pointerId) return
+      if (dragging) {
+        suppressRowClickRef.current = true
+        const numericTarget = Number(targetId)
+        actions.reorderPinnedApp(id, Number.isFinite(numericTarget) ? numericTarget : targetId)
+      }
+      cleanup()
+    }
+
+    reorderCleanupRef.current?.()
+    reorderCleanupRef.current = cleanup
+    window.addEventListener('pointermove', onMove, { capture: true, passive: false })
+    window.addEventListener('pointerup', onUp, true)
+    window.addEventListener('pointercancel', cleanup, true)
   }
 
   return (
@@ -1070,8 +1318,18 @@ const DrawerRow = memo(function DrawerRow({
         // pane. Only present when the splits flag is on; a plain tap still opens
         // in the focused pane (the controller never arms without slop/hold).
         data-drag-key={WORKSPACE_SPLITS_ENABLED ? `${kind}:${id}` : undefined}
-        onPointerDown={beginSecondaryMenuPress}
-        onClick={() => actions.select(kind, id)}
+        data-pinned-app-id={kind === 'app' && pinned ? id : undefined}
+        onPointerDown={event => {
+          beginSecondaryMenuPress(event)
+          beginPinnedReorder(event)
+        }}
+        onClick={() => {
+          if (suppressRowClickRef.current) {
+            suppressRowClickRef.current = false
+            return
+          }
+          actions.select(kind, id)
+        }}
         onDoubleClick={event => {
           event.preventDefault()
           actions.startRename(kind, id)
@@ -1083,6 +1341,9 @@ const DrawerRow = memo(function DrawerRow({
           }
         }}
       >
+        {kind === 'app' && (
+          <AppIcon item={item} label={label} className="drawer__app-icon" size={64} />
+        )}
         {/* Status dot. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's
             edge (where the pin lives). aria-label exposes the state. */}
@@ -1108,16 +1369,80 @@ const DrawerRow = memo(function DrawerRow({
           />
         ) : null}
         <span className="drawer__item-text">{label}</span>
-        {pinned && (
-          <span className="drawer__item-pin" aria-label="Pinned" title="Pinned">
-            <PinFilled width={14} height={14} />
-          </span>
-        )}
       </button>
-      <Menu
+      <DrawerItemMenu
+        kind={kind}
+        item={item}
+        surface={surface}
+        pinned={pinned}
+        menuOpen={menuOpen}
+        actions={actions}
+        triggerClassName="drawer__more drawer__menu-anchor"
+        triggerHidden
+      />
+    </div>
+  )
+})
+
+function AppIcon({ item, label, className, size }) {
+  const iconUrl = appIconUrl(item, size)
+  const [loadedUrl, setLoadedUrl] = useState(null)
+  const hasImage = Boolean(iconUrl && loadedUrl === iconUrl)
+  return (
+    <span
+      className={`${className}${hasImage ? ' is-image' : ''}`}
+      style={{ '--app-color': item.background_color || item.theme_color || 'var(--accent)' }}
+      aria-hidden="true"
+    >
+      <span>{appInitials(label)}</span>
+      {iconUrl && (
+        <img
+          src={iconUrl}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onLoad={event => {
+            event.currentTarget.hidden = false
+            setLoadedUrl(iconUrl)
+          }}
+          onError={event => {
+            event.currentTarget.hidden = true
+            setLoadedUrl(null)
+          }}
+        />
+      )}
+    </span>
+  )
+}
+
+function DrawerItemMenu({
+  kind,
+  item,
+  surface,
+  pinned,
+  menuOpen,
+  actions,
+  triggerClassName = 'drawer__more',
+  triggerHidden = false,
+}) {
+  const id = item.id
+  const label = kind === 'chat' ? item.title : item.name
+  const slug = item.slug
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [confirmingDeleteData, setConfirmingDeleteData] = useState(false)
+
+  useEffect(() => {
+    if (!menuOpen) {
+      setConfirmingDelete(false)
+      setConfirmingDeleteData(false)
+    }
+  }, [menuOpen])
+
+  return (
+    <Menu
         forceOpen={menuOpen}
-        onOpen={() => actions.toggleMenu(kind, id, true)}
-        onClose={() => actions.toggleMenu(kind, id, false)}
+        onOpen={() => actions.toggleMenu(kind, id, true, surface)}
+        onClose={() => actions.toggleMenu(kind, id, false, surface)}
       >
         <Menu.Trigger>
           {/* No Tooltip wrap here. Both Menu.Trigger and Tooltip
@@ -1130,8 +1455,10 @@ const DrawerRow = memo(function DrawerRow({
               we can revisit later with a different composition. */}
           <button
             type="button"
-            className="drawer__more"
+            className={triggerClassName}
             aria-label={`More actions for ${label}`}
+            aria-hidden={triggerHidden ? 'true' : undefined}
+            tabIndex={triggerHidden ? -1 : undefined}
           >
             <DotsVerticalMoreMenu width={16} height={16} aria-hidden="true" />
           </button>
@@ -1148,7 +1475,7 @@ const DrawerRow = memo(function DrawerRow({
                   : <PinFilled width={14} height={14} aria-hidden="true" />}
                 <span>{pinned ? 'Unpin' : 'Pin to top'}</span>
               </Menu.Item>
-              <Menu.Item onSelect={() => actions.startRename(kind, id)}>Rename</Menu.Item>
+              <Menu.Item onSelect={() => actions.startRename(kind, id, surface)}>Rename</Menu.Item>
               {kind === 'app' && slug && (
                 // Opens the in-PWA InstallSheet to set the home-screen
                 // name + icon first; the sheet saves, then navigates
@@ -1172,7 +1499,7 @@ const DrawerRow = memo(function DrawerRow({
                 // whichever row slides up into the slot.
                 <Menu.Item
                   onSelect={() => {
-                    actions.toggleMenu(kind, id, false)
+                    actions.toggleMenu(kind, id, false, surface)
                     actions.remove(kind, id)
                   }}
                   className="drawer__menu-item--danger"
@@ -1227,7 +1554,7 @@ const DrawerRow = memo(function DrawerRow({
                     // open-trigger bookkeeping in sync. The app STAYS in the
                     // list here (only its data is wiped), so no row unmounts.
                     setConfirmingDeleteData(false)
-                    actions.toggleMenu(kind, id, false)
+                    actions.toggleMenu(kind, id, false, surface)
                     actions.removeData(id)
                   }}
                 >
@@ -1258,7 +1585,7 @@ const DrawerRow = memo(function DrawerRow({
                     // into the deleted slot looks stuck pressed
                     // because openMenu still references the dead id.
                     setConfirmingDelete(false)
-                    actions.toggleMenu(kind, id, false)
+                    actions.toggleMenu(kind, id, false, surface)
                     actions.remove(kind, id)
                   }}
                 >
@@ -1277,6 +1604,5 @@ const DrawerRow = memo(function DrawerRow({
           )}
         </Menu.Content>
       </Menu>
-    </div>
   )
-})
+}

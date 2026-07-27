@@ -406,7 +406,19 @@ export default function useWorkspaceDrag({
             }
             if (!armed) return
           } else {
-            if (passedSlop(dx, dy)) arm()
+            if (sourceKind === 'drawer') {
+              // Drawer rows have two orthogonal mouse gestures: a deliberate
+              // rightward pull leaves navigation for the workspace, while a
+              // vertical drag belongs to pinned-item reordering. The previous
+              // any-axis arm contradicted that contract and stole vertical
+              // movement before the drawer could reorder it.
+              if (Math.abs(dy) > Math.abs(dx) && passedSlop(dx, dy)) {
+                cancelled = true
+                cleanup()
+                return
+              }
+              if (dx > 0 && Math.abs(dx) >= Math.abs(dy) && passedSlop(dx, dy)) arm()
+            } else if (passedSlop(dx, dy)) arm()
             if (!armed) return
           }
         }
