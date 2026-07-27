@@ -179,3 +179,46 @@ def normalize_codex_usage(
       "final": _plain(final_usage),
     },
   }
+
+
+# OpenAI Codex per-token USD rates as (uncached_input, cached_input_read,
+# output) dollars per 1,000,000 tokens. Sourced from OpenAI's published API
+# pricing (July 2026); cached reads are the standard 90%-discounted input rate.
+# The separate long-context surcharge tier is intentionally NOT modeled — these
+# are the standard-context rates, so a turn that crosses the long-context
+# threshold is a small, bounded underestimate rather than a wrong number.
+# Update these as OpenAI revises pricing; a model absent from this table is left
+# uncharged (cost None) rather than mispriced.
+CODEX_MODEL_RATES: dict[str, tuple[float, float, float]] = {
+  "gpt-5.6-sol": (5.00, 0.50, 30.00),
+  "gpt-5.6-terra": (2.50, 0.25, 15.00),
+  "gpt-5.6-luna": (1.00, 0.10, 6.00),
+  "gpt-5.5": (5.00, 0.50, 30.00),
+  "gpt-5.4": (2.50, 0.25, 15.00),
+  "gpt-5.4-mini": (0.75, 0.075, 4.50),
+}
+
+
+def codex_cost_usd(model: str | None, usage_metrics: dict | None) -> float | None:
+  """Best-effort USD cost for one Codex turn from its normalized usage.
+
+  Codex, unlike Claude, reports token counts but no dollar cost, so Möbius
+  derives it from the rate card above. Output tokens already include reasoning
+  tokens (OpenAI counts reasoning within completion), so output is billed once.
+  Returns None when the model is unpriced or usage is missing — an unpriced turn
+  is left uncharged rather than charged a guess, exactly matching the prior
+  cost_usd=None behavior for those cases.
+  """
+  if not model or not usage_metrics:
+    return None
+  rates = CODEX_MODEL_RATES.get(model)
+  if rates is None:
+    return None
+  in_rate, cached_rate, out_rate = rates
+  uncached = max(0, _count(usage_metrics.get("uncached_input_tokens")))
+  cached = max(0, _count(usage_metrics.get("cache_read_input_tokens")))
+  output = max(0, _count(usage_metrics.get("output_tokens")))
+  cost = (
+    uncached * in_rate + cached * cached_rate + output * out_rate
+  ) / 1_000_000
+  return round(cost, 6)
