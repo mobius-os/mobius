@@ -1,0 +1,316 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import {
+  ACTIONABLE_STATUSES,
+  DISMISS_DX_PX,
+  PLATFORM_REPO,
+  actionableRecords,
+  autopilotOnSend,
+  contributeApp,
+  contributeAppId,
+  contributeLabel,
+  payoffLine,
+  dismissKey,
+  isDismissed,
+  isHorizontalSwipe,
+  passedDismissThreshold,
+  rememberDismissed,
+  sendBlocker,
+  statusLabel,
+  visibleRecords,
+} from '../contributionReviewModel.js'
+
+const cardSrc = readFileSync(
+  new URL('../ContributionReviewCard.jsx', import.meta.url), 'utf8',
+)
+const clientSrc = readFileSync(
+  new URL('../../../api/client.js', import.meta.url), 'utf8',
+)
+const cardCss = readFileSync(
+  new URL('../ContributionReviewCard.css', import.meta.url), 'utf8',
+)
+
+const APPS = [
+  { id: 3, slug: 'some-other-app' },
+  { id: 8, slug: 'contribute' },
+]
+
+test('the ledger owner is resolved by slug, and a missing app hides the card', () => {
+  assert.equal(contributeAppId(APPS), 8)
+  assert.equal(contributeAppId([{ id: 3, slug: 'some-other-app' }]), null)
+  assert.equal(contributeAppId([]), null)
+  assert.equal(contributeAppId(undefined), null)
+  assert.equal(contributeApp(APPS, 8).slug, 'contribute')
+  assert.equal(contributeApp(APPS, 99), null)
+})
+
+test('only records awaiting an owner decision reach the composer', () => {
+  const payload = { records: [
+    { id: 'a', status: 'prepared' },
+    { id: 'b', status: 'submitting' },
+    { id: 'c', status: 'open' },
+    { id: 'd', status: 'merged' },
+    { id: 'e', status: 'closed' },
+    { id: 'f' },
+  ] }
+  assert.deepEqual(actionableRecords(payload).map(r => r.id), ['a', 'b'])
+  assert.deepEqual(actionableRecords(null), [])
+  assert.deepEqual([...ACTIONABLE_STATUSES], ['prepared', 'submitting'])
+})
+
+test('a ready prepared record is sendable', () => {
+  const record = {
+    status: 'prepared', review: { state: 'ready', message: 'Still matches' },
+  }
+  assert.equal(sendBlocker(record, { connected: true }), null)
+})
+
+test('a drifted record cannot be sent, and says why in the server’s words', () => {
+  const record = {
+    status: 'prepared',
+    review: { state: 'needs_refresh', message: 'The branch moved since you reviewed it.' },
+  }
+  assert.equal(
+    sendBlocker(record, { connected: true }),
+    'The branch moved since you reviewed it.',
+  )
+})
+
+test('a verdict with no message still blocks, with a generic reason', () => {
+  const record = { status: 'prepared', review: { state: 'needs_refresh' } }
+  assert.match(sendBlocker(record, { connected: true }), /prepared again/)
+})
+
+test('a disconnected GitHub blocks Send before any request is made', () => {
+  const record = { status: 'prepared', review: { state: 'ready' } }
+  assert.match(sendBlocker(record, { connected: false }), /Connect GitHub/)
+})
+
+test('a stack layer is never sendable from chat — the chain is reviewed together', () => {
+  const record = { status: 'prepared', is_stack: true, review: { state: 'ready' } }
+  assert.match(sendBlocker(record, { connected: true }), /stacked set/)
+})
+
+// The submit endpoint re-runs every check, but a one-tap public action must not
+// present an absent preflight as ready. Submitting is already in flight and does
+// not need another blocker.
+test('an absent prepared verdict fails closed', () => {
+  assert.match(
+    sendBlocker({ status: 'prepared' }, { connected: true }),
+    /Open Contribute/,
+  )
+  assert.equal(sendBlocker({ status: 'submitting' }, { connected: true }), null)
+  assert.equal(sendBlocker(null, { connected: true }), null)
+})
+
+test('autopilot on send mirrors the owner default and the backend capability', () => {
+  assert.equal(autopilotOnSend({ autopilot_available: true }), true)
+  assert.equal(
+    autopilotOnSend({ autopilot_available: true, autopilot_default: true }), true,
+  )
+  assert.equal(
+    autopilotOnSend({ autopilot_available: true, autopilot_default: false }), false,
+  )
+  // An older backend that cannot run the loop must never have one granted.
+  assert.equal(autopilotOnSend({ autopilot_default: true }), false)
+  assert.equal(autopilotOnSend(null), false)
+})
+
+test('the status word distinguishes waiting, blocked, and in-flight', () => {
+  assert.equal(statusLabel({ status: 'prepared' }, false), 'Ready to contribute')
+  assert.equal(statusLabel({ status: 'prepared' }, true), 'Needs an update')
+  assert.equal(statusLabel({ status: 'submitting' }, false), 'Publishing')
+})
+
+// The action names the value of contributing, not the mechanism of sending, and
+// never uses "upstream" — precise to anyone who works with open source, opaque to
+// everyone else. It only names a destination it actually knows.
+test('the action label says contribute, and only names Möbius for Möbius', () => {
+  assert.equal(contributeLabel({ repo: PLATFORM_REPO }), 'Contribute to Möbius')
+  assert.equal(
+    contributeLabel({ repo: 'mobius-os/app-example' }),
+    'Contribute this improvement',
+  )
+  assert.equal(contributeLabel(null), 'Contribute this improvement')
+  for (const label of [contributeLabel({ repo: PLATFORM_REPO }), contributeLabel({})]) {
+    assert.doesNotMatch(label, /upstream|pull request|PR\b/i)
+  }
+})
+
+// The payoff line motivates without overpromising: acceptance stays the
+// maintainers' decision, not a consequence of the tap.
+test('the payoff line matches who benefits and keeps acceptance conditional', () => {
+  const platform = payoffLine({ repo: PLATFORM_REPO })
+  assert.match(platform, /everyone running Möbius/)
+  const app = payoffLine({ repo: 'mobius-os/app-example' })
+  assert.match(app, /everyone using this app/)
+  for (const line of [platform, app]) assert.match(line, /^If it's accepted/)
+})
+
+test('the card discloses the continuing review authority granted by Send', () => {
+  assert.match(cardSrc, /autopilot=\{autopilotOnSend\(data\)\}/)
+  assert.match(cardSrc, /Möbius will also handle review feedback/)
+})
+
+// The whole safety argument for a one-tap chat button is that it reuses the app's
+// verified path. If the card ever grew its own push/PR-creation logic, or dropped
+// the provenance tag, that argument would quietly stop being true.
+test('Send routes through the same verified submit endpoint as the app button', () => {
+  assert.match(clientSrc, /\/github\/contributions\/\$\{appId\}\/\$\{encodeURIComponent\(recordId\)\}\/submit/)
+  assert.match(clientSrc, /submitter: 'chat-review-card'/)
+  assert.match(cardSrc, /api\.contributions\.submit\(appId, record\.id/)
+  // Anchored on real invocations. A bare /gh / also matches ordinary English
+  // ("through the", "enough room"), which made this fire on a prose comment.
+  const forbidden = [
+    /\bgh\s+(?:pr|api|issue|repo)\b/,
+    /api\.github\.com/,
+    /\/repos\//,
+    /git\s+push/,
+  ]
+  for (const pattern of forbidden) {
+    assert.doesNotMatch(cardSrc, pattern,
+      'the card must not talk to GitHub itself — the platform endpoint owns that')
+  }
+})
+
+// A public, irreversible action must show what it will publish. The expander is
+// what makes one tap honest rather than blind.
+test('the card exposes the exact text and file list that would be published', () => {
+  assert.match(cardSrc, /record\.body_draft/)
+  assert.match(cardSrc, /record\.files\?\.length > 0/)
+  assert.match(cardSrc, /The exact text that will be published/)
+})
+
+// `.chat__foot` is a transparent overlay with `pointer-events: none` so the
+// transcript scrolls behind the composer; every real control inside it opts back
+// in. A card that forgets renders perfectly and ignores every tap — the hit test
+// falls through to the messages underneath — which no amount of programmatic
+// clicking in a test reveals.
+test('the card opts back into pointer events inside the pass-through foot', () => {
+  assert.match(
+    cardCss,
+    /\.contrib-card-stack,\s*\n\.contrib-card \{\s*\n\s*pointer-events: auto;/,
+  )
+})
+
+// ── Swipe-to-dismiss ────────────────────────────────────────────────────────
+
+function fakeStorage(initial = {}) {
+  const map = new Map(Object.entries(initial))
+  return {
+    getItem: key => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => { map.set(key, String(value)) },
+    size: () => map.size,
+  }
+}
+
+test('only a decisively sideways drag counts, in either direction', () => {
+  assert.equal(isHorizontalSwipe(20, 0), true)
+  assert.equal(isHorizontalSwipe(-20, 0), true)
+  // Vertical and near-diagonal movement belongs to the details scroller.
+  assert.equal(isHorizontalSwipe(0, 30), false)
+  assert.equal(isHorizontalSwipe(20, 19), false)
+  // Below the slop nothing is a gesture yet.
+  assert.equal(isHorizontalSwipe(8, 0), false)
+})
+
+test('dismissal needs real travel, so a tap or a nudge cannot lose the card', () => {
+  assert.equal(passedDismissThreshold(DISMISS_DX_PX, 0), true)
+  assert.equal(passedDismissThreshold(-DISMISS_DX_PX, 0), true)
+  assert.equal(passedDismissThreshold(DISMISS_DX_PX - 1, 0), false)
+  assert.equal(passedDismissThreshold(0, 0), false)
+  // Travel far enough but mostly downward: still the scroller's gesture.
+  assert.equal(passedDismissThreshold(70, 90), false)
+})
+
+// Dismissing is a VIEW decision. The record stays prepared in the ledger, so an
+// accidental swipe can never drop staged work — it only stops the card asking.
+test('dismissal hides a record without touching the ledger', () => {
+  const record = { id: 'r1', status: 'prepared', updated_at: 'T1' }
+  const store = fakeStorage()
+  const payload = { records: [record] }
+  assert.equal(visibleRecords(payload, store).length, 1)
+  rememberDismissed(record, store)
+  assert.equal(isDismissed(record, store), true)
+  assert.equal(visibleRecords(payload, store).length, 0)
+  // The record object itself is untouched — nothing about it says "dismissed".
+  assert.deepEqual(record, { id: 'r1', status: 'prepared', updated_at: 'T1' })
+})
+
+// A dismissal means "not this version". Re-staging is a fresh decision, so the
+// card must come back rather than the first swipe burying every later revision.
+test('a re-staged record reappears after being dismissed', () => {
+  const store = fakeStorage()
+  const first = { id: 'r1', status: 'prepared', updated_at: 'T1' }
+  rememberDismissed(first, store)
+  const restaged = { id: 'r1', status: 'prepared', updated_at: 'T2' }
+  assert.equal(isDismissed(restaged, store), false)
+  assert.equal(visibleRecords({ records: [restaged] }, store).length, 1)
+})
+
+test('dismissal degrades safely without usable storage', () => {
+  const record = { id: 'r1', status: 'prepared', updated_at: 'T1' }
+  const hostile = {
+    getItem() { throw new Error('denied') },
+    setItem() { throw new Error('denied') },
+  }
+  assert.equal(rememberDismissed(record, hostile), false)
+  assert.equal(isDismissed(record, hostile), false)
+  assert.equal(isDismissed(record, null), false)
+  // A record with no id has no dismissal identity at all.
+  assert.equal(dismissKey({ updated_at: 'T1' }), null)
+  assert.equal(rememberDismissed({}, fakeStorage()), false)
+})
+
+// A touch-only dismissal would be unreachable with a mouse or a keyboard.
+test('the swipe has a visible, focusable equivalent', () => {
+  assert.match(cardSrc, /className="contrib-card__dismiss"/)
+  assert.match(cardSrc, /aria-label="Dismiss — keeps it in Contribute"/)
+  assert.match(cardSrc, /onClick=\{\(\) => onDismiss\?\.\(\)\}/)
+  // An icon from the shell's set, never a bare ✕ character — Inter has no glyph
+  // for U+2715, so the literal rendered as a tofu box on the real device.
+  assert.match(cardSrc, /<X width=\{13\} height=\{13\} aria-hidden="true" \/>/)
+  assert.doesNotMatch(cardSrc, /✕|✖|❌/)
+})
+
+// Same lesson as the navigation drawer: a passive listener can watch a gesture
+// but never claim it, and touch-action cannot cover for that on WebKit.
+test('the dismissal gesture is claimed with a non-passive touchmove', () => {
+  assert.match(cardSrc, /addEventListener\('touchmove', onMove, \{ passive: false \}\)/)
+  assert.match(cardSrc, /event\.preventDefault\(\)/)
+  assert.doesNotMatch(cardSrc, /onTouchMove=\{/)
+})
+
+// The first version of the acknowledgement had NO exit: no swipe (its handlers
+// lived in the other card shape), no control in a band it never rendered, and no
+// timeout. It became an undismissable box wedged above the composer. Every card
+// shape must be dismissible, and this one must also clear itself.
+test('the post-send acknowledgement is dismissible and self-clearing', () => {
+  const sentRow = cardSrc.slice(
+    cardSrc.indexOf('function SentRow('),
+    cardSrc.indexOf('function ReviewRow('),
+  )
+  assert.ok(sentRow.length > 0, 'the acknowledgement is its own card shape')
+  // Same swipe binding as every other card, not a bespoke layout.
+  assert.match(sentRow, /useSwipeToDismiss\(onDismiss\)/)
+  // A band with a real dismiss control.
+  assert.match(sentRow, /className="contrib-card__badge"/)
+  assert.match(sentRow, /className="contrib-card__dismiss"/)
+  // And it does not outlive its usefulness.
+  assert.match(sentRow, /setTimeout\(\(\) => dismissRef\.current\?\.\(\), SENT_VISIBLE_MS\)/)
+  assert.match(cardSrc, /const SENT_VISIBLE_MS = \d+/)
+})
+
+// One gesture implementation for every card shape here. Two copies is how the
+// acknowledgement ended up without one.
+test('every card shape shares one swipe implementation', () => {
+  assert.equal((cardSrc.match(/function useSwipeToDismiss\(/g) || []).length, 1)
+  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 2)
+  assert.equal((cardSrc.match(/addEventListener\('touchmove'/g) || []).length, 1)
+})
+
+test('a failed send is shown only on the record that failed', () => {
+  assert.match(cardSrc, /setError\(\{\s*id: record\.id,/)
+  assert.match(cardSrc, /error=\{error\?\.id === record\.id \? error\.message : null\}/)
+})

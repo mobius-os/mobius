@@ -96,11 +96,18 @@ export function useLogoModeGesture({
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0 }
   }, [])
 
-  // End the active press. suppressClick=true means the gesture consumed the
-  // activation (a completed hold, a swipe, or a drag), so the trailing pointer
-  // click must NOT also toggle the drawer; false means it was a plain TAP → let
-  // the native click open the drawer, UNCHANGED and with zero latency. Releases
-  // the pointer capture taken at press start.
+  // End the active press. suppressClick=true means the gesture ACTED — it flipped
+  // the mode (a completed hold or a swipe) or the drawer opened underneath it — so
+  // the trailing pointer click must NOT also toggle the drawer. false leaves the
+  // native click alone.
+  //
+  // An ABANDONED press (movement, pointercancel, lost capture) passes false: the
+  // hold is cancelled, but whether the gesture was still a tap is the BROWSER's
+  // call, not ours. Its tap slop is device-calibrated and it simply does not
+  // synthesize a click for a real drag or scroll, so suppressing here only ever
+  // ate legitimate taps — a thumb tap on the brand routinely drifts past our 10px
+  // hold-cancel slop, which made the drawer feel unopenable on a phone.
+  // Releases the pointer capture taken at press start.
   const endPress = useCallback(({ suppressClick }) => {
     stopRaf()
     writeProgress(0)
@@ -197,8 +204,10 @@ export function useLogoModeGesture({
       onToggleMode?.('swipe')
       endPress({ suppressClick: true })
     } else if (decision === 'cancel') {
-      // Became a scroll/drag — abandon the hold cleanly (no drawer either).
-      endPress({ suppressClick: true })
+      // Movement beyond the hold slop — abandon the HOLD (no mode flip). The click
+      // is left to the browser: if this really became a scroll or drag it emits no
+      // click, and if it was only a drifting thumb the tap still opens the drawer.
+      endPress({ suppressClick: false })
     }
     // 'continue' → keep holding; the rAF loop keeps filling the ring.
   }, [onToggleMode, endPress])
@@ -216,16 +225,20 @@ export function useLogoModeGesture({
     // Swipe-right flips ONLY for touch/pen (finding F12); a mouse drag past the slop
     // hits the movedBeyondSlop cancel just below, so a mouse never toggles the mode.
     if (swipeAllowed(press.pointerType) && isSwipeRight(dx, dy)) { onToggleMode?.('swipe'); endPress({ suppressClick: true }); return }
-    if (movedBeyondSlop(dx, dy)) { endPress({ suppressClick: true }); return } // a drag → cancel
+    // Displacement past the hold slop only rules out the mode FLIP; the browser
+    // decides tap-vs-drag for the click (see endPress).
+    if (movedBeyondSlop(dx, dy)) { endPress({ suppressClick: false }); return }
     if (holdComplete(elapsed)) { completeHold(); return } // held long enough → flip
     // A genuine short tap → let the native click open the drawer, unchanged.
     endPress({ suppressClick: false })
   }, [onToggleMode, endPress, completeHold])
 
+  // The browser took the gesture (normally a native pan). Abandon the hold; it
+  // owns whether a click still follows, so nothing is suppressed here.
   const onPointerCancel = useCallback((e) => {
     const press = pressRef.current
     if (!press || (e && e.pointerId !== press.pointerId)) return
-    endPress({ suppressClick: true })
+    endPress({ suppressClick: false })
   }, [endPress])
 
   // A LOST pointer capture ends the gesture's validity — cancel the live hold so a
@@ -233,7 +246,7 @@ export function useLogoModeGesture({
   const onLostPointerCapture = useCallback((e) => {
     const press = pressRef.current
     if (!press || (e && e.pointerId !== press.pointerId)) return
-    endPress({ suppressClick: true })
+    endPress({ suppressClick: false })
   }, [endPress])
 
   const onContextMenu = useCallback((e) => {
