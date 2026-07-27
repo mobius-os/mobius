@@ -2,9 +2,12 @@
 
 Möbius normally appends every send-while-running to `pending_messages`
 and drains it at turn-end. For chats with `steer_enabled` set (DEFAULT
-OFF), a send that arrives while a turn is streaming is steered into the
-live provider handle. Codex uses true SDK injection; Claude interrupts
-and re-prompts on the same connected SDK client.
+OFF), an ordinary send that arrives while a turn is streaming is steered
+into the live provider handle. `direct_steer` explicitly requests the same
+durable reserve-and-steer operation for a new composer row regardless of
+that flag, exposing the reservation as queued only when delivery cannot be
+accepted. Codex uses true SDK injection; Claude interrupts and re-prompts
+on the same connected SDK client.
 
 These tests pin the provider-gated branch in
 `routes/chats_stream.send_message`:
@@ -17,6 +20,9 @@ These tests pin the provider-gated branch in
   3. Claude with the flag on uses its live-client fallback.
   4. steer returns False (no live turn / closed-turn race) → queue.
   5. steer raises → queue (a steer failure must never break a send).
+  6. direct_steer reserves a new cid before delivery; success converts it
+     without a queue round-trip, while failure returns the reserved row as
+     the ordinary queued fallback.
 
 The steering primitive itself (the SDK `TurnHandle.steer()` wrapper) is
 covered by `test_codex_sdk_runner.py`; here we only exercise the wiring.
@@ -183,6 +189,114 @@ def test_steers_into_live_codex_turn_when_flag_on(
       "content": "actually use blue",
     }
   ]
+
+
+def test_direct_steer_reserves_and_converts_new_codex_message_in_one_request(
+  client, auth, monkeypatch,
+):
+  """Cmd/Ctrl+Enter must not require a visible queue acknowledgement first."""
+  chat_id = "codexdirectsteer"
+  message_cid = "direct-steer-cid"
+  _make_codex_chat(chat_id, steer_enabled=False)
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+  steered_calls = []
+
+  async def _fake_steer(cid, message):
+    reserved = _read_chat(chat_id).pending_messages
+    assert [cid_of(row) for row in reserved] == [message_cid]
+    assert [row["content"] for row in reserved] == ["change course now"]
+    steered_calls.append((cid, message))
+    return True
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _fake_steer,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "change course now",
+      "cid": message_cid,
+      "direct_steer": True,
+    },
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "steered"
+  assert steered_calls == [(chat_id, "change course now")]
+  chat = _read_chat(chat_id)
+  assert chat.pending_messages in (None, [])
+  assert [cid_of(row) for row in chat.messages].count(message_cid) == 1
+  assert chat.messages[-1]["content"] == "change course now"
+
+
+def test_direct_steer_failure_reveals_single_reserved_queue_fallback(
+  client, auth, monkeypatch,
+):
+  """A closed-turn race preserves the message without a second POST."""
+  chat_id = "codexdirectfallback"
+  message_cid = "direct-fallback-cid"
+  _make_codex_chat(chat_id, steer_enabled=False)
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+
+  async def _closed_turn(_chat_id, _message):
+    return False
+
+  monkeypatch.setattr(
+    "app.codex_sdk_runner.steer_into_active_turn", _closed_turn,
+  )
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "keep this even if steering races",
+      "cid": message_cid,
+      "direct_steer": True,
+    },
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  body = res.json()
+  assert body["status"] == "queued"
+  assert body["position"] == 1
+  assert cid_of(body["pending_message"]) == message_cid
+  chat = _read_chat(chat_id)
+  assert [cid_of(row) for row in chat.pending_messages] == [message_cid]
+  assert not [row for row in chat.messages if cid_of(row) == message_cid]
+
+
+def test_direct_claude_steer_keeps_reserve_until_deferred_cut(
+  client, auth,
+):
+  """The one-request contract also preserves Claude's real cut boundary."""
+  chat_id = "claudedirectsteer"
+  message_cid = "claude-direct-cid"
+  _make_claude_chat(chat_id, steer_enabled=False)
+  handle = _make_active_claude_client(chat_id)
+  registry.register(handle)
+  create_broadcast(chat_id)
+
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "change Claude course now",
+      "cid": message_cid,
+      "direct_steer": True,
+    },
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "steered"
+  assert res.json()["cut_deferred"] is True
+  chat = _read_chat(chat_id)
+  assert [cid_of(row) for row in chat.pending_messages] == [message_cid]
+  assert [cid_of(row) for row in handle._steer_user_msgs] == [message_cid]
+  assert handle._steer_consume_cids == [message_cid]
 
 
 def test_pending_question_refuses_force_steer_without_holding_queue(

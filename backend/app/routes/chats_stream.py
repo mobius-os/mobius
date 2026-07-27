@@ -765,12 +765,13 @@ async def _send_message_locked(
     provider=chat.provider or "claude",
   )
 
-  # One choke point for every genuine user send (initial / queued / steered all
-  # pass here, after the answer-delivery returns above). Skip force_steer —
-  # Stop's queue-collapse re-send of already-counted messages. Counts a turn
-  # ARRIVAL, not a durable commit (a rare failed store can overcount by one) —
-  # fine for a usage signal, not a billing counter. app_id = the originating
-  # app for window.mobius.chat sends, null for the owner; metadata only.
+  # One choke point for every genuine user send (initial / queued / direct
+  # steer all pass here, after the answer-delivery returns above). Skip
+  # force_steer — it converts already-counted queued messages. direct_steer is
+  # a new composer send and is counted normally. Counts a turn ARRIVAL, not a
+  # durable commit (a rare failed store can overcount by one) — fine for a
+  # usage signal, not a billing counter. app_id = the originating app for
+  # window.mobius.chat sends, null for the owner; metadata only.
   if not body.force_steer:
     activity.log_event(
       "chat_sent",
@@ -830,20 +831,23 @@ async def _send_message_locked(
     if body.force_steer and selected_force_pending is None:
       return _not_steered_response(chat_id)
 
-    # Mid-turn steering: ordinary sends require the opt-in flag, while
-    # Stop's queue-collapse path may pass force_steer to turn already
-    # queued messages into a live steer. Codex injects into the running
-    # SDK turn; Claude interrupts and re-prompts on the same client. On
-    # success a `steered_into_turn` event tells the client the transcript has
-    # been split and the user row is in it — published here for Codex (the
-    # route is its seal point) and by the runner for Claude, whose split waits
-    # for the interrupt boundary (see the publish below).
+    # Mid-turn steering:
+    #   - ordinary sends require the chat's opt-in flag;
+    #   - direct_steer requests this new composer row explicitly;
+    #   - force_steer converts named already-queued rows.
+    # The direct and ordinary new-message paths both reserve the row durably
+    # before provider delivery. Codex injects into the running SDK turn;
+    # Claude interrupts and re-prompts on the same client.
     provider = chat.provider or "claude"
     if (
       is_chat_running(chat_id)
       and not questions.is_waiting(chat_id)
-      and (body.force_steer or _steer_enabled(chat))
-      and (body.force_steer or not chat.pending_messages)
+      and (body.force_steer or body.direct_steer or _steer_enabled(chat))
+      and (
+        body.force_steer
+        or body.direct_steer
+        or not chat.pending_messages
+      )
       and _has_live_steerable_turn(chat_id, provider)
     ):
       # Every provider delivery names a row already durable in pending.
@@ -873,7 +877,7 @@ async def _send_message_locked(
       # handle buffer is only a delivery cache.
       defer_to_runner = provider == "claude"
       if questions.is_waiting(chat_id):
-        # An ordinary auto-steer awaits AppendPending above. A question can
+        # A new-message steer awaits AppendPending above. A question can
         # register during that actor round-trip even though the entry gate was
         # clear, so re-check immediately before touching the provider channel.
         steered = False
@@ -927,9 +931,11 @@ async def _send_message_locked(
         # seconds later — publishing the cut here re-based the client's stream
         # while the runner was still emitting blocks that the deferred seal then
         # folded into A1, so those blocks painted twice for the rest of the turn.
-        # The deferred path publishes NOTHING here: the 202 below carries the
-        # still-queued row, which is the single signal that keeps it visible
-        # until `_seal_steer_split` publishes the cut.
+        # The deferred path publishes NOTHING here. An ordinary auto-steer or
+        # existing queued-row conversion remains visible until
+        # `_seal_steer_split` publishes the cut; a direct composer steer has no
+        # tray row and keeps its durable reserve intentionally hidden over the
+        # same interval.
         if not defer_to_runner:
           bc = get_broadcast(chat_id)
           if bc is not None:
@@ -944,7 +950,7 @@ async def _send_message_locked(
         )
       if body.force_steer:
         return _not_steered_response(chat_id)
-      # A failed ordinary steer reports the existing reservation as queued.
+      # A failed new-message steer reports its existing reservation as queued.
       db.expire(chat)
       remaining = list(chat.pending_messages or [])
       try:
