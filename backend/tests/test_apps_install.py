@@ -534,6 +534,23 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   assert mock_run.call_args.args[0] == [
     str(fake_scaffold), "reflection", "0 6 * * *", "fetch.sh", "42",
   ]
+  assert mock_run.call_args.kwargs["env"]["API_BASE_URL"] == (
+    get_settings().api_base_url
+  )
+  assert mock_run.call_args.kwargs["env"]["MOBIUS_APP_JOB_RUNNER"].endswith(
+    "scripts/app-job-runner.py"
+  )
+
+
+def test_cron_scaffold_prefers_the_served_checkout():
+  from app import install
+
+  with patch("app.install.CRON_SCAFFOLD", install._BAKED_CRON_SCAFFOLD):
+    assert install._cron_scaffold() == (
+      Path(install.__file__).resolve().parent.parent
+      / "scripts"
+      / "init-cron-scaffold.sh"
+    )
 
 
 def test_register_cron_omits_app_id_when_none(tmp_path):

@@ -20,10 +20,10 @@ from app.config import get_settings
 
 
 def runner_script() -> Path:
-  baked = Path("/app/scripts/app-job-runner.py")
-  if baked.is_file():
-    return baked
-  return Path(__file__).resolve().parent.parent / "scripts" / "app-job-runner.py"
+  live = Path(__file__).resolve().parent.parent / "scripts" / "app-job-runner.py"
+  if live.is_file():
+    return live
+  return Path("/app/scripts/app-job-runner.py")
 
 
 def runner_command(
@@ -47,11 +47,17 @@ def launch_app_job(
   app_id: int, job_path: Path, source_dir: Path, *, wait_for_ready: bool = False,
 ):
   """Launch the common wrapper detached from the API worker's pipes."""
+  env = dict(os.environ)
+  # The runner is also invoked by cron, so it cannot rely on the shell's
+  # localhost default.  Every direct launch receives the same configured base
+  # URL the backend itself uses.
+  env["API_BASE_URL"] = get_settings().api_base_url
   return subprocess.Popen(
     runner_command(app_id, job_path, wait_for_ready=wait_for_ready),
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
     cwd=str(source_dir),
+    env=env,
     close_fds=True,
     start_new_session=True,
   )
