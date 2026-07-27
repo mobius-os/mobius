@@ -38,7 +38,6 @@ from app.broadcast import (
   create_broadcast,
   get_broadcast,
   get_system_broadcast,
-  has_running_chat_broadcast,
   set_active_broadcast,
 )
 from app.chat_writer import (
@@ -2356,6 +2355,35 @@ async def drain_all_for_restart(
 LIMIT_RESET_NOTIFY_TITLE = "Your limit has reset"
 LIMIT_RESET_NOTIFY_BODY = "Your limit has reset."
 CONTINUATION_SWEEP_BATCH_SIZE = 100
+# Start due provider-limit continuations gradually. Unrelated live work must
+# not delay an opted-in chat after its reset, but a bad/early reset timestamp
+# also must not launch a whole parked batch in one burst.
+LIMIT_AUTO_RESUME_STAGGER_SECS = 30.0
+_next_limit_auto_resume_at = 0.0
+
+
+def _limit_auto_resume_now() -> float:
+  """Monotonic clock seam for the launch stagger."""
+  return time.monotonic()
+
+
+def _claim_limit_auto_resume_slot(now: float | None = None) -> bool:
+  """Claim the process-wide stagger slot for one due limit continuation.
+
+  The parked rows themselves are durable. This small in-process gate only
+  spaces their launches: one sweep starts at most one, and a fresh process
+  starts with an empty slot rather than consuming persisted state.
+  Claiming before scheduling deliberately keeps the delay when task creation
+  loses a race or fails — the durable ``resume_pending`` row retries later
+  without turning a local failure into a burst.
+  """
+  global _next_limit_auto_resume_at
+  if now is None:
+    now = _limit_auto_resume_now()
+  if now < _next_limit_auto_resume_at:
+    return False
+  _next_limit_auto_resume_at = now + LIMIT_AUTO_RESUME_STAGGER_SECS
+  return True
 
 
 def _has_unanswered_question(chat: models.Chat | None) -> bool:
@@ -2440,11 +2468,11 @@ async def _auto_resume_chat(
         # Share the queue lock with owner/app sends. The outer sweep check can
         # go stale while this task waits, so re-check global liveness, policy,
         # attribution, the exact latest park, and provider ownership at the
-        # actual claim point. Provider-limit retries are globally serial to
-        # avoid a reset storm. Planned-restart continuations are different:
-        # they are the exact, owner-opted set that was already live together
-        # before the restart, so each chat may reclaim its own slot
-        # independently.
+        # actual claim point. Provider-limit retries are staggered by the
+        # reset sweep, rather than blocked on unrelated live chats. Planned-
+        # restart continuations are different: they are the exact, owner-opted
+        # set that was already live together before the restart, so each chat
+        # may reclaim its own slot independently.
         async with chat_queue.get_lock(chat_id):
           with SessionLocal() as check_db:
             chat = check_db.query(models.Chat).filter(
@@ -2504,11 +2532,6 @@ async def _auto_resume_chat(
             resume_reason = (
               "restart" if park.park_reason == "restart" else "usage_limit"
             )
-          if (
-            resume_reason != "restart"
-            and _any_chat_turn_active()
-          ):
-            return False
           if not mark_starting(chat_id):
             return False
           claimed = True
@@ -2603,12 +2626,12 @@ async def sweep_reset_parks(db: Session) -> list[str]:
       failure cannot silently consume the promised continuation. The narrow
       post-promote SIGKILL boundary is documented on `_auto_resume_chat`.
     - A park whose chat was deleted resolves silently.
-    - Auto-resume is controlled per chat. Provider-limit retries are strictly
-      serial: at most one starts per tick, and none while any turn is live
-      anywhere. Planned-restart continuations reclaim the exact set that was
-      already live before the restart, so every eligible chat in the batch may
-      resume independently. A blocked enabled chat stays pending for a later
-      tick, while notify-only chats in the same due batch still resolve
+    - Auto-resume is controlled per chat. Provider-limit retries are staggered:
+      at most one starts per sweep and launches are spaced even when unrelated
+      chats are live. Planned-restart continuations reclaim the exact set that
+      was already live before the restart, so every eligible chat in the batch
+      may resume independently. A staggered enabled chat stays pending for a
+      later tick, while notify-only chats in the same due batch still resolve
       normally. App-attributed runs and queues never auto-resume.
 
   Stands down while draining — a restart is in progress, and the fresh
@@ -2728,13 +2751,10 @@ async def sweep_reset_parks(db: Session) -> list[str]:
     chat_gone = chat is None or chat.deleted_at is not None
     auto_resume = wants_auto_resume(chat, run)
     restart_auto_resume = auto_resume and run.park_reason == "restart"
-    if auto_resume and not restart_auto_resume and (
-      limit_resume_started or _any_chat_turn_active()
-    ):
-      # Strictly-serial gate: a live turn (an earlier auto-resume, or the
-      # owner's own send) must settle before this enabled park is processed.
-      # Leave this park untouched, but keep walking so a later notify-only
-      # chat is not held hostage by another chat's auto-resume preference.
+    if auto_resume and not restart_auto_resume and limit_resume_started:
+      # One provider-limit continuation per sweep. Leave this park untouched,
+      # but keep walking so a later notify-only chat is not held hostage by
+      # another chat's auto-resume preference.
       continue
     if auto_resume:
       try:
@@ -2787,10 +2807,12 @@ async def sweep_reset_parks(db: Session) -> list[str]:
 
       if prepared.get("notify"):
         notify_due(chat_id, run)
-      if not restart_auto_resume and _any_chat_turn_active():
-        # The notification or refresh window admitted another turn. Keep the
-        # durable pending state so the next sweep retries instead of silently
-        # dropping the promised continuation.
+      if (
+        not restart_auto_resume
+        and not _claim_limit_auto_resume_slot()
+      ):
+        # Keep the durable pending state so the next sweep retries after the
+        # stagger window instead of silently consuming the continuation.
         continue
       resume_started = await _auto_resume_chat(
         chat_id, park_token=run.id,
@@ -2907,11 +2929,6 @@ def is_chat_running(chat_id: str) -> bool:
     return True
   bc = get_broadcast(chat_id)
   return bc is not None and bc.running
-
-
-def _any_chat_turn_active() -> bool:
-  """Include the terminal window after a provider handle unregisters."""
-  return bool(registry.all_alive_chat_ids()) or has_running_chat_broadcast()
 
 
 def mark_starting(chat_id: str) -> bool:

@@ -15,9 +15,10 @@ Locks in the six contracts of the limit-park feature:
       retryable until its continuation starts, skips future parks, stands down
       while draining, and resolves deleted chats silently.
   (e) Auto-resume is policy-controlled (off = notify only). Provider-limit
-      retries are strictly serial, while an accepted planned restart resumes
-      the exact previously-live set together. Each resumed turn combines its
-      preserved queue + a "continue" into one continuation.
+      retries ignore unrelated live work and launch with a short stagger,
+      while an accepted planned restart resumes the exact previously-live set
+      together. Each resumed turn combines its preserved queue + a "continue"
+      into one continuation.
   (f) The parks are observable: /api/debug/status lists parked runs.
   (g) A planned restart reuses the same exact-run state with a due-now time;
       crashes, unanswered questions, and app-owned work stay manual.
@@ -699,7 +700,7 @@ def test_sweep_auto_resume_off_by_default(owner_token, monkeypatch):
   assert resumes == []
 
 
-def test_sweep_auto_resume_on_starts_one_serial_continue(
+def test_sweep_auto_resume_on_starts_one_staggered_continue(
   owner_token, monkeypatch,
 ):
   del owner_token
@@ -738,6 +739,49 @@ def test_sweep_auto_resume_on_starts_one_serial_continue(
     # _schedule_continuation was stubbed, so release the claim it would have
     # handed to the spawned turn.
     chat_mod.discard_starting("sweep-auto")
+
+
+def test_limit_auto_resumes_are_staggered_not_blocked_by_live_work(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda db, owner_id, **kw: "notif-id",
+  )
+  clock = [100.0]
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: clock[0])
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  first, second = "stagger-a", "stagger-b"
+  _due_park(first, f"rt-{first}", auto_resume=True)
+  _due_park(second, f"rt-{second}", auto_resume=True)
+  unrelated = _Handle(f"unrelated-live-{uuid.uuid4()}")
+  registry.register(unrelated)
+
+  try:
+    assert len(_run_sweep()) == 1
+    assert len(scheduled) == 1
+    first_started = scheduled[0]["chat_id"]
+    assert first_started in {first, second}
+
+    # A repeated event-driven sweep inside the stagger does not launch the
+    # rest of the due batch, even though its durable row stays retryable.
+    assert _run_sweep() == []
+    assert len(scheduled) == 1
+
+    # Once the short stagger elapses, the next chat starts even while both the
+    # unrelated turn and the first continuation are still live.
+    clock[0] += chat_mod.LIMIT_AUTO_RESUME_STAGGER_SECS
+    assert len(_run_sweep()) == 1
+    assert {item["chat_id"] for item in scheduled} == {first, second}
+  finally:
+    registry.unregister(unrelated.chat_id, unrelated.kind)
+    chat_mod.discard_starting(first)
+    chat_mod.discard_starting(second)
 
 
 def test_restart_park_auto_continues_with_product_marker(
@@ -1093,7 +1137,7 @@ def test_owner_send_drains_preserved_queue_and_releases_restart_hold():
     db.close()
 
 
-def test_sweep_auto_resume_defers_while_any_turn_is_live(
+def test_sweep_auto_resume_starts_while_unrelated_turn_is_live(
   owner_token, monkeypatch,
 ):
   del owner_token
@@ -1102,25 +1146,30 @@ def test_sweep_auto_resume_defers_while_any_turn_is_live(
     "app.push.notify_owner",
     lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
   )
-  _due_park("sweep-serial", "rt-sweep-serial", auto_resume=True)
-  # An unrelated live turn: strictly-serial auto-resume must wait for it.
+  cid = "sweep-independent"
+  _due_park(cid, f"rt-{cid}", auto_resume=True)
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
   other = f"live-{uuid.uuid4()}"
   handle = _Handle(other)
   registry.register(handle)
   try:
-    assert _run_sweep() == []
+    assert _run_sweep() == [cid]
   finally:
     registry.unregister(other, handle.kind)
-  # Untouched: still parked, not notified — deferred to a later tick, never
-  # lost.
-  assert calls == []
-  assert _run_row("rt-sweep-serial")["status"] == "parked"
+    chat_mod.discard_starting(cid)
+  assert len(calls) == 1
+  assert len(scheduled) == 1
+  assert _run_row(f"rt-{cid}")["status"] == "completed"
 
 
-def test_live_turn_defers_enabled_chat_but_not_notify_only_chat(
+def test_live_turn_allows_enabled_and_notify_only_chats_to_resolve(
   owner_token, monkeypatch,
 ):
-  """One enabled chat must not hold another chat's reset notice hostage."""
+  """Unrelated work delays neither continuation nor reset notification."""
   del owner_token
   calls = []
   monkeypatch.setattr(
@@ -1129,23 +1178,32 @@ def test_live_turn_defers_enabled_chat_but_not_notify_only_chat(
   )
   _due_park("sweep-opted", "rt-sweep-opted", auto_resume=True)
   _due_park("sweep-notify", "rt-sweep-notify")
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
   other = f"live-{uuid.uuid4()}"
   handle = _Handle(other)
   registry.register(handle)
   try:
-    assert _run_sweep() == ["sweep-notify"]
+    assert set(_run_sweep()) == {"sweep-opted", "sweep-notify"}
   finally:
     registry.unregister(other, handle.kind)
+    chat_mod.discard_starting("sweep-opted")
 
-  assert _run_row("rt-sweep-opted")["status"] == "parked"
+  assert _run_row("rt-sweep-opted")["status"] == "completed"
   assert _run_row("rt-sweep-notify")["status"] == "parked_notified"
-  assert [call["source_id"] for call in calls] == ["sweep-notify"]
+  assert {call["source_id"] for call in calls} == {
+    "sweep-opted", "sweep-notify",
+  }
+  assert [item["chat_id"] for item in scheduled] == ["sweep-opted"]
 
 
-def test_auto_resume_race_after_notify_stays_retryable(
+def test_unrelated_turn_starting_during_notify_does_not_cancel_resume(
   owner_token, monkeypatch,
 ):
-  """A turn starting during the notify window must not consume auto-resume."""
+  """A notify callback admitting other work must not restore the global gate."""
   del owner_token
   cid = "sweep-notify-race"
   blocker_id = f"live-{uuid.uuid4()}"
@@ -1167,19 +1225,13 @@ def test_auto_resume_race_after_notify_stays_retryable(
   _due_park(cid, f"rt-{cid}", auto_resume=True)
 
   try:
-    assert _run_sweep() == []
-    assert _run_row(f"rt-{cid}")["status"] == "resume_pending"
+    assert _run_sweep() == [cid]
+    assert _run_row(f"rt-{cid}")["status"] == "completed"
     assert len(notifications) == 1
   finally:
     registry.unregister(blocker_id, blocker.kind)
-
-  try:
-    assert _run_sweep() == [cid]
-    assert len(scheduled) == 1
-    assert len(notifications) == 1
-    assert _run_row(f"rt-{cid}")["status"] == "completed"
-  finally:
     chat_mod.discard_starting(cid)
+  assert len(scheduled) == 1
 
 
 def test_sweep_starts_only_one_of_two_opted_chats(owner_token, monkeypatch):
@@ -1250,6 +1302,8 @@ def test_auto_resume_spawn_failure_rolls_back_and_retries_once(
     "app.push.notify_owner",
     lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
   )
+  clock = [100.0]
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: clock[0])
   queued = {
     "role": "user", "content": "preserve me", "ts": 5,
     "cid": "queued-before-limit",
@@ -1291,6 +1345,7 @@ def test_auto_resume_spawn_failure_rolls_back_and_retries_once(
     chat_mod, "_schedule_continuation",
     lambda **kwargs: scheduled.append(kwargs),
   )
+  clock[0] += chat_mod.LIMIT_AUTO_RESUME_STAGGER_SECS
   try:
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
@@ -1346,18 +1401,25 @@ def test_post_promote_process_death_recovers_as_manual_resume_boundary():
   )).result(timeout=5)
 
 
-def test_auto_resume_global_idle_check_is_repeated_at_locked_claim():
-  """A different chat starting while this chat waits on its lock wins."""
+def test_auto_resume_locked_claim_ignores_an_unrelated_live_chat(monkeypatch):
+  """Unrelated work must not turn automatic continuation into global idle."""
   cid = "auto-global-claim-race"
+  park_token = "rt-race"
   _seed_chat(cid, auto_resume=True)
+  _seed_run(cid, park_token, status="resume_pending", started_offset=-30)
   other = f"live-{uuid.uuid4()}"
   blocker = _Handle(other)
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
 
   async def scenario():
     lock = chat_mod.chat_queue.get_lock(cid)
     await lock.acquire()
     task = asyncio.create_task(
-      chat_mod._auto_resume_chat(cid, park_token="rt-race")
+      chat_mod._auto_resume_chat(cid, park_token=park_token)
     )
     await asyncio.sleep(0)
     registry.register(blocker)
@@ -1367,9 +1429,12 @@ def test_auto_resume_global_idle_check_is_repeated_at_locked_claim():
     finally:
       registry.unregister(other, blocker.kind)
 
-  assert asyncio.run(scenario()) is False
-  assert _chat_row(cid)["pending"] == []
-  assert not chat_mod.is_chat_running(cid)
+  try:
+    assert asyncio.run(scenario()) is True
+    assert len(scheduled) == 1
+    assert scheduled[0]["chat_id"] == cid
+  finally:
+    chat_mod.discard_starting(cid)
 
 
 def test_auto_resume_locked_claim_rejects_superseded_park():
@@ -1387,8 +1452,8 @@ def test_auto_resume_locked_claim_rejects_superseded_park():
   assert not chat_mod.is_chat_running(cid)
 
 
-def test_auto_resume_global_gate_includes_running_terminal_broadcast():
-  """Provider unregister is not idle until its broadcast completes."""
+def test_auto_resume_ignores_an_unrelated_terminal_broadcast(monkeypatch):
+  """Another chat finalizing must not delay a due continuation."""
   from app.broadcast import create_broadcast
 
   cid = "auto-terminal-broadcast-gate"
@@ -1397,14 +1462,20 @@ def test_auto_resume_global_gate_includes_running_terminal_broadcast():
   _seed_chat(cid, auto_resume=True)
   _seed_run(cid, park_token, status="resume_pending", started_offset=-30)
   broadcast = create_broadcast(other)
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
   try:
     assert asyncio.run(
       chat_mod._auto_resume_chat(cid, park_token=park_token)
-    ) is False
+    ) is True
   finally:
     broadcast.mark_completed()
-  assert _chat_row(cid)["pending"] == []
-  assert not chat_mod.is_chat_running(cid)
+    chat_mod.discard_starting(cid)
+  assert len(scheduled) == 1
+  assert scheduled[0]["chat_id"] == cid
 
 
 def test_app_initiated_park_never_auto_resumes(owner_token, monkeypatch):
