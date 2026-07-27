@@ -25,7 +25,7 @@ def _drain_writer():
 
 
 def _seed(chat_id, *, age_secs=200, run_status="running", pending=None,
-          with_run=True):
+          messages=None, live_assistant=None, with_run=True):
   db = SessionLocal()
   try:
     started = None
@@ -34,7 +34,8 @@ def _seed(chat_id, *, age_secs=200, run_status="running", pending=None,
         seconds=age_secs
       )
     c = models.Chat(
-      id=chat_id, title="t", messages=[], pending_messages=pending or [],
+      id=chat_id, title="t", messages=messages or [],
+      live_assistant=live_assistant, pending_messages=pending or [],
       session_id="sess", provider="claude",
       run_status=run_status, run_started_at=started,
     )
@@ -56,7 +57,12 @@ def _state(chat_id):
   db = SessionLocal()
   try:
     c = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    return c.run_status, list(c.pending_messages or [])
+    return (
+      c.run_status,
+      list(c.pending_messages or []),
+      list(c.messages or []),
+      c.live_assistant,
+    )
   finally:
     db.close()
 
@@ -80,16 +86,76 @@ def _sweep():
     db.close()
 
 
-def test_sweep_clears_orphaned_marker_and_preserves_queue():
-  _seed("wedged-1", age_secs=200, pending=[{"id": "p1", "ts": 1, "text": "hi"}])
+def test_sweep_recovers_orphaned_turn_and_preserves_queue():
+  _seed(
+    "wedged-1",
+    age_secs=200,
+    pending=[{"id": "p1", "ts": 1, "text": "hi"}],
+    messages=[{"role": "user", "content": "help", "ts": 10}],
+  )
   swept = _sweep()
   _drain_writer()
   assert "wedged-1" in swept
-  status, pending = _state("wedged-1")
+  status, pending, messages, live = _state("wedged-1")
   assert status is None, "orphaned marker should be cleared"
   assert _run_outcome("wedged-1") == "interrupted"
+  assert live is None
+  assert [message["role"] for message in messages] == ["user", "assistant"]
+  assert messages[-1]["blocks"] == [{
+    "type": "error",
+    "message": "This response could not be saved. You can resume the turn.",
+    "resumable": True,
+  }]
   # The queue is preserved for the next-send stale-pending self-heal.
   assert len(pending) == 1
+
+
+def test_sweep_materializes_live_reply_before_interruption_marker():
+  _seed(
+    "wedged-live",
+    messages=[{"role": "user", "content": "help", "ts": 10}],
+    live_assistant={
+      "role": "assistant",
+      "content": "Partial answer",
+      "ts": 11,
+      "blocks": [{"type": "text", "content": "Partial answer"}],
+    },
+  )
+  assert "wedged-live" in _sweep()
+  _drain_writer()
+  status, _pending, messages, live = _state("wedged-live")
+  assert status is None
+  assert live is None
+  assert messages[-1]["ts"] == 11
+  assert messages[-1]["content"] == "Partial answer"
+  assert [block["type"] for block in messages[-1]["blocks"]] == [
+    "text", "error",
+  ]
+
+
+def test_sweep_keeps_unanswered_question_terminal_without_second_resume():
+  _seed(
+    "wedged-question",
+    messages=[{"role": "user", "content": "choose", "ts": 10}],
+    live_assistant={
+      "role": "assistant",
+      "content": "",
+      "ts": 11,
+      "blocks": [{
+        "type": "question",
+        "id": "direction",
+        "question": "Which direction?",
+        "options": [{"label": "A"}, {"label": "B"}],
+      }],
+    },
+  )
+  assert "wedged-question" in _sweep()
+  _drain_writer()
+  _status, _pending, messages, _live = _state("wedged-question")
+  blocks = messages[-1]["blocks"]
+  assert [block["type"] for block in blocks] == ["error", "question"]
+  assert "resumable" not in blocks[0]
+  assert blocks[1]["id"] == "direction"
 
 
 def test_sweep_skips_recent_turn():

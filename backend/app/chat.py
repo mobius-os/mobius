@@ -56,6 +56,7 @@ from app.chat_writer import (
   PersistTranscript,
   QuestionCommit,
   RecordRunMetrics,
+  RecoverWedgedRun,
   ResolvePark,
   RollbackAutoResume,
   StashThinkingTrace,
@@ -1445,6 +1446,20 @@ async def _clear_run_status_strict(
   await _await_ack(ack)
 
 
+async def _recover_wedged_run_strict(chat_id: str, run_token: str) -> None:
+  """Atomically leave a durable interruption marker and close a wedged run."""
+  ack = get_writer().submit(
+    RecoverWedgedRun(
+      chat_id=chat_id,
+      run_token=run_token,
+      interruption_block=_pause_note(
+        "This response could not be saved. You can resume the turn.",
+      ),
+    )
+  )
+  await _await_ack(ack)
+
+
 @dataclass(frozen=True)
 class StartupReconcileResult:
   """Distinct boot outcomes: manual crash recovery vs authenticated replay."""
@@ -1924,15 +1939,16 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
       a live turn, only a definitively-finished one whose marker stuck.
     - `run_started_at` older than the floor — belt-and-suspenders.
 
-  The clear is IDENTITY-KEYED on the wedged run's `ChatRun.id` (never
+  Recovery is IDENTITY-KEYED on the wedged run's `ChatRun.id` (never
   tokenless): if a fresh turn raced in and took the marker, the actor no-ops
-  the clear rather than wiping the new run's marker. It runs under the per-chat
-  queue lock with an is_alive recheck, mirroring `stop_chat_for`'s clear
-  discipline. The transcript is NOT rewritten — a `ReplaceTranscript`
-  note-append would race a fresh send and could clobber its user message, and
-  any partial output already streamed is persisted. `pending_messages` is left
-  intact and self-heals on the next send; boot reconcile still adds the
-  interrupted-turn note on a real restart.
+  rather than wiping the new run's transcript or marker. It runs under the
+  per-chat queue lock with an is_alive recheck, mirroring `stop_chat_for`'s
+  clear discipline. The writer atomically materializes any saved live assistant,
+  appends a resumable interruption marker, closes the run, and clears the marker.
+  `pending_messages` is preserved. This atomic domain command is required: a
+  separate `ReplaceTranscript` + `ClearRunStatus` pair could race a fresh send,
+  while clearing only the marker can permanently erase the recovery handle for
+  a turn whose snapshots all failed to save.
   """
   log = _get_logger()
   swept: list[str] = []
@@ -1986,14 +2002,12 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
           # owns a different token, so the actor no-ops instead of wiping it.
           # Strict variant so a failed ack RAISES — a marker we couldn't clear
           # must not be reported as swept (reconciliation repairs it on boot).
-          await _clear_run_status_strict(
-            chat_id, run.id, terminal_status="interrupted",
-          )
+          await _recover_wedged_run_strict(chat_id, run.id)
       _finalize_broadcast_if_running(chat_id)
       swept.append(chat_id)
     except (Exception, asyncio.TimeoutError):
       log.warning(
-        "sweep_wedged_run_markers: clear failed chat_id=%s "
+        "sweep_wedged_run_markers: recovery failed chat_id=%s "
         "(reconciliation will repair)", chat_id, exc_info=True,
       )
   if swept:

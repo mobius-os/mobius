@@ -37,6 +37,7 @@ from app.chat_writer import (
   PersistTranscript,
   PromotePending,
   QuestionCommit,
+  RecoverWedgedRun,
   ReplaceTranscript,
   StartTurn,
 )
@@ -1194,6 +1195,38 @@ def test_clear_run_status_clears_durable_marker(actor):
   chat = _load_chat()
   assert chat["run_status"] is None
   assert chat["run_started_at"] is None
+
+
+def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
+  """A delayed recovery for run A must not alter run B's marker or history."""
+  _seed_chat(messages=[])
+  _await(actor.submit(StartTurn(
+    chat_id="c1",
+    run_token="old-run",
+    user_msg={"role": "user", "content": "old", "ts": 1, "cid": "old"},
+    title_source="old",
+  )))
+  _await(actor.submit(StartTurn(
+    chat_id="c1",
+    run_token="new-run",
+    user_msg={"role": "user", "content": "new", "ts": 2, "cid": "new"},
+    title_source="new",
+  )))
+
+  result = _await(actor.submit(RecoverWedgedRun(
+    chat_id="c1",
+    run_token="old-run",
+    interruption_block={
+      "type": "error", "message": "old recovery", "resumable": True,
+    },
+  )))
+
+  assert result is False
+  chat = _load_chat()
+  assert chat["run_status"] == "running"
+  assert [message["content"] for message in chat["messages"]] == ["old", "new"]
+  assert _load_run("old-run")["status"] == "interrupted"
+  assert _load_run("new-run")["status"] == "running"
 
 
 def test_append_pending_bumps_colliding_ts(actor):
