@@ -12,6 +12,7 @@ import {
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import { appIconUrl } from '../appIcon.js'
+import { computePinnedDrag } from './pinnedReorder.js'
 import {
   drawerCloseWatchdogMs,
   drawerWidthFromPointerDelta,
@@ -256,8 +257,8 @@ export default function Drawer({
       if (kind === 'chat') current.pinChat(id, next)
       else current.pinApp(id, next)
     },
-    reorderPinnedApp(sourceId, targetId) {
-      rowActionInputsRef.current.reorderPinnedApp(sourceId, targetId)
+    reorderPinned(orderedKeys) {
+      rowActionInputsRef.current.reorderPinned(orderedKeys)
     },
     remove(kind, id) {
       const current = rowActionInputsRef.current
@@ -359,41 +360,49 @@ export default function Drawer({
     }
   }
 
-  async function reorderPinnedApp(sourceId, targetId) {
-    if (sourceId === targetId) return
-    const key = appQueries.keys.all
-    const prev = queryClient.getQueryData(key)
-    const pinnedApps = (prev || [])
-      .filter(app => app.pinned_at)
-      .slice()
-      .sort((a, b) => String(b.pinned_at).localeCompare(String(a.pinned_at)))
-    const from = pinnedApps.findIndex(app => app.id === sourceId)
-    const to = pinnedApps.findIndex(app => app.id === targetId)
-    if (from < 0 || to < 0) return
-    const ordered = pinnedApps.slice()
-    const [moved] = ordered.splice(from, 1)
-    ordered.splice(to, 0, moved)
+  // Persist a new order for the one combined pinned list (chats AND apps share
+  // it). `orderedKeys` is the desired top → bottom order as "kind:id" strings —
+  // exactly what the drag previewed, so the optimistic state matches pixel for
+  // pixel and nothing re-shuffles when the PATCHes land.
+  async function reorderPinned(orderedKeys) {
+    if (!Array.isArray(orderedKeys) || orderedKeys.length === 0) return
+    const chatKey = chatQueries.keys.all
+    const appKey = appQueries.keys.all
+    const prevChats = queryClient.getQueryData(chatKey)
+    const prevApps = queryClient.getQueryData(appKey)
+    // Ascending synthetic pinned_at (top oldest → bottom newest) matching the
+    // rendered order; pinned_at is the ordering primitive the drawer sorts on.
     const rank = new Map()
     const now = Date.now()
-    ordered.forEach((app, index) => {
-      rank.set(app.id, new Date(now - index).toISOString())
+    orderedKeys.forEach((key, index) => {
+      rank.set(key, new Date(now + index).toISOString())
     })
-    queryClient.setQueryData(key, (list) =>
-      (list || []).map(app => rank.has(app.id)
-        ? { ...app, pinned_at: rank.get(app.id) }
-        : app),
-    )
+    const applyRank = (kind) => (list) =>
+      (list || []).map(item => rank.has(`${kind}:${item.id}`)
+        ? { ...item, pinned_at: rank.get(`${kind}:${item.id}`) }
+        : item)
+    queryClient.setQueryData(chatKey, applyRank('chat'))
+    queryClient.setQueryData(appKey, applyRank('app'))
     try {
-      // The existing pin timestamp is the ordering primitive. Re-pin bottom to
-      // top so each later stamp becomes newer, yielding the requested order
-      // without adding a parallel rank field or migration.
-      for (const app of [...ordered].reverse()) {
-        const res = await api.apps.update(app.id, { pinned: true })
-        if (!res.ok) throw new Error('Could not reorder pinned apps')
+      // Persist the order by re-stamping pin times top → bottom (each later call
+      // is newer, so the bottom row ends newest — the ascending order rendered).
+      // These are the QUIET `repin` calls: they do NOT invalidate the shell list,
+      // and we deliberately do NOT refetch afterwards. The optimistic cache above
+      // already holds the exact order the drag previewed; refetching would swap
+      // client-clock stamps for server-clock ones item-by-item and visibly
+      // re-shuffle the list. A later natural refetch returns the same order.
+      for (const key of orderedKeys) {
+        const sep = key.indexOf(':')
+        const kind = key.slice(0, sep)
+        const rawId = key.slice(sep + 1)
+        const res = kind === 'chat'
+          ? await api.chats.repin(rawId)
+          : await api.apps.repin(Number(rawId))
+        if (!res.ok) throw new Error('Could not reorder pinned items')
       }
-      refreshApps()
     } catch {
-      queryClient.setQueryData(key, prev)
+      queryClient.setQueryData(chatKey, prevChats)
+      queryClient.setQueryData(appKey, prevApps)
     }
   }
 
@@ -780,7 +789,7 @@ export default function Drawer({
     renameApp,
     pinChat,
     pinApp,
-    reorderPinnedApp,
+    reorderPinned,
   }
 
   return (
@@ -1259,52 +1268,138 @@ const DrawerRow = memo(function DrawerRow({
   }
 
   function beginPinnedReorder(event) {
-    if (kind !== 'app' || !pinned || event.pointerType !== 'mouse' || event.button !== 0) return
+    // Any pinned row (chat OR app) reorders on a vertical MOUSE drag — the
+    // workspace controller reserves that axis for us and yields it (a rightward
+    // pull still lifts the row into a pane). Touch keeps the drawer's own
+    // vertical scroll, so reorder stays mouse-only.
+    if (!pinned || event.pointerType !== 'mouse' || event.button !== 0) return
+    // Finish any still-settling previous drag before measuring, so its lingering
+    // transforms can't poison the geometry of this one.
+    reorderCleanupRef.current?.()
+
     const pointerId = event.pointerId
     const start = { x: event.clientX, y: event.clientY }
+    const sourceBtn = event.currentTarget
+    const drawerEl = sourceBtn.closest('#navigation-drawer')
+    const wrapOf = (btn) => btn.closest('.drawer__row') || btn
+    // Measure every pinned row once, at drag start.
+    const rows = [...(drawerEl || document).querySelectorAll('[data-pinned-key]')]
+      .map((btn) => {
+        const wrap = wrapOf(btn)
+        const rect = wrap.getBoundingClientRect()
+        return {
+          btn, wrap,
+          key: btn.dataset.pinnedKey,
+          top: rect.top, height: rect.height, center: rect.top + rect.height / 2,
+        }
+      })
+    const fromIndex = rows.findIndex((r) => r.btn === sourceBtn)
+    if (fromIndex < 0) return
+    const src = rows[fromIndex]
     let dragging = false
-    let targetId = id
-    let cleaned = false
-    const source = event.currentTarget
+    let listenersOff = false
+    let last = { slotDelta: 0, finalKeys: null, changed: false, shifts: new Map() }
 
-    function cleanup() {
-      if (cleaned) return
-      cleaned = true
-      source.removeAttribute('data-reordering')
+    function clearStyles() {
+      for (const r of rows) {
+        const s = r.wrap.style
+        s.transition = ''; s.transform = ''; s.zIndex = ''
+        s.position = ''; s.willChange = ''
+      }
+      src.btn.removeAttribute('data-reordering')
+      document.body.style.userSelect = ''
+    }
+    function removeListeners() {
+      if (listenersOff) return
+      listenersOff = true
       window.removeEventListener('pointermove', onMove, true)
       window.removeEventListener('pointerup', onUp, true)
-      window.removeEventListener('pointercancel', cleanup, true)
-      reorderCleanupRef.current = null
+      window.removeEventListener('pointercancel', onCancel, true)
     }
+    // One-shot teardown for the whole session, guarded so a settle that resolves
+    // AFTER a superseding drag has taken over cannot double-commit or wipe the
+    // newer drag's styles.
+    let ended = false
+    function finalize(commit) {
+      if (ended) return
+      ended = true
+      removeListeners()
+      if (commit && last.changed && last.finalKeys) actions.reorderPinned(last.finalKeys)
+      clearStyles()
+      if (reorderCleanupRef.current === forceFinish) reorderCleanupRef.current = null
+    }
+    // A later drag (or unmount) calls this to snap this one shut with no commit.
+    const forceFinish = () => finalize(false)
+    reorderCleanupRef.current = forceFinish
+
+    function armDrag() {
+      dragging = true
+      src.btn.setAttribute('data-reordering', 'true')
+      const s = src.wrap.style
+      s.zIndex = '6'; s.position = 'relative'; s.transition = 'none'; s.willChange = 'transform'
+      for (const r of rows) {
+        if (r === src) continue
+        r.wrap.style.transition = 'transform 170ms cubic-bezier(0.2, 0, 0, 1)'
+        r.wrap.style.willChange = 'transform'
+      }
+      document.body.style.userSelect = 'none'
+    }
+
     function onMove(moveEvent) {
       if (moveEvent.pointerId !== pointerId) return
       const dx = moveEvent.clientX - start.x
       const dy = moveEvent.clientY - start.y
       if (!dragging) {
         if (Math.abs(dx) > Math.abs(dy) || Math.abs(dy) < 8) return
-        dragging = true
-        source.setAttribute('data-reordering', 'true')
+        armDrag()
       }
       moveEvent.preventDefault()
-      const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)
-        ?.closest?.('[data-pinned-app-id]')
-      if (target?.dataset.pinnedAppId) targetId = target.dataset.pinnedAppId
-    }
-    function onUp(upEvent) {
-      if (upEvent.pointerId !== pointerId) return
-      if (dragging) {
-        suppressRowClickRef.current = true
-        const numericTarget = Number(targetId)
-        actions.reorderPinnedApp(id, Number.isFinite(numericTarget) ? numericTarget : targetId)
+      last = computePinnedDrag(rows, fromIndex, dy)
+      src.wrap.style.transform = `translateY(${dy}px)` // lifted row tracks the pointer 1:1
+      for (const r of rows) {
+        if (r === src) continue
+        r.wrap.style.transform = `translateY(${last.shifts.get(r.key) || 0}px)`
       }
-      cleanup()
     }
 
-    reorderCleanupRef.current?.()
-    reorderCleanupRef.current = cleanup
+    // Glide the lifted row into the gap the others already opened, then commit
+    // and clear together. Because each previewed position equals its final
+    // natural position, dropping the transforms as React reorders paints no jump.
+    function settle(commit) {
+      let animDone = false
+      const done = () => {
+        if (animDone) return
+        animDone = true
+        src.wrap.removeEventListener('transitionend', onEnd)
+        finalize(commit)
+      }
+      const onEnd = (ev) => {
+        if (ev.target === src.wrap && ev.propertyName === 'transform') done()
+      }
+      src.wrap.addEventListener('transitionend', onEnd)
+      src.wrap.style.transition = 'transform 190ms cubic-bezier(0.2, 0, 0, 1)'
+      src.wrap.style.transform = `translateY(${commit ? last.slotDelta : 0}px)`
+      // Fallback if transitionend never fires (e.g. the offset was already 0).
+      setTimeout(done, 240)
+    }
+
+    function onUp(upEvent) {
+      if (upEvent.pointerId !== pointerId) return
+      removeListeners()
+      if (!dragging) { finalize(false); return }
+      suppressRowClickRef.current = true
+      settle(true)
+    }
+    function onCancel(cancelEvent) {
+      if (cancelEvent.pointerId !== pointerId) return
+      removeListeners()
+      if (dragging) settle(false)
+      else finalize(false)
+    }
+
     window.addEventListener('pointermove', onMove, { capture: true, passive: false })
     window.addEventListener('pointerup', onUp, true)
-    window.addEventListener('pointercancel', cleanup, true)
+    window.addEventListener('pointercancel', onCancel, true)
   }
 
   return (
@@ -1318,7 +1413,7 @@ const DrawerRow = memo(function DrawerRow({
         // pane. Only present when the splits flag is on; a plain tap still opens
         // in the focused pane (the controller never arms without slop/hold).
         data-drag-key={WORKSPACE_SPLITS_ENABLED ? `${kind}:${id}` : undefined}
-        data-pinned-app-id={kind === 'app' && pinned ? id : undefined}
+        data-pinned-key={pinned ? `${kind}:${id}` : undefined}
         onPointerDown={event => {
           beginSecondaryMenuPress(event)
           beginPinnedReorder(event)
@@ -1473,7 +1568,7 @@ function DrawerItemMenu({
                 {pinned
                   ? <Pin width={14} height={14} aria-hidden="true" />
                   : <PinFilled width={14} height={14} aria-hidden="true" />}
-                <span>{pinned ? 'Unpin' : 'Pin to top'}</span>
+                <span>{pinned ? 'Unpin' : 'Pin'}</span>
               </Menu.Item>
               <Menu.Item onSelect={() => actions.startRename(kind, id, surface)}>Rename</Menu.Item>
               {kind === 'app' && slug && (

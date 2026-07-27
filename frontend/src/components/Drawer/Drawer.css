@@ -335,9 +335,13 @@
   background: var(--accent-dim);
 }
 
+/* The lifted row while it is being dragged to a new spot. It reads as "picked
+   up" — raised surface + shadow — rather than faded, so the movement is legible.
+   The vertical follow/settle transform lives on the parent .drawer__row. */
 .drawer__item[data-reordering="true"] {
-  opacity: 0.58;
   background: var(--surface);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.30);
+  cursor: grabbing;
 }
 
 /* Keyboard focus ring — applies to all interactive drawer rows.
@@ -540,7 +544,7 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Icon-bearing menu items (Pin to top / Unpin) get a flex row so
+/* Icon-bearing menu items (Pin / Unpin) get a flex row so
    the leading icon stays aligned with the row's text baseline. */
 .drawer__menu-item--icon {
   display: flex;
