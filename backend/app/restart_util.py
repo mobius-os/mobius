@@ -44,12 +44,13 @@ async def restart_this_worker() -> None:
     2. Arm an ABSOLUTE SIGKILL backstop at ``DRAIN_TIMEOUT + grace`` — the
        worker dies no matter what, so a wedged drain or a hung graceful shutdown
        can never leave the container "Up" with a dead worker.
-    3. Drain every live turn (interrupt → finalize partials + a "paused for a
-       platform update" note → mark that exact run due now using the existing
-       continuation row; preserve the pending queue). Bounded by
-       ``DRAIN_TIMEOUT``; best-effort — a turn that won't drain, or whose exact
-       transition cannot commit, leaves its generic marker for manual boot
-       reconciliation.
+    3. Before interruption, bind the one-shot restart nonce to every exact live
+       run in a transcript-independent writer transaction. Then drain every
+       turn (interrupt → finalize partials + a "paused for a platform update"
+       note → mark clean stops due now; preserve the pending queue). Bounded by
+       ``DRAIN_TIMEOUT``; a slow stop or failed terminal save retains its exact
+       nonce-stamped running row, which authenticated startup converts to the
+       same due continuation state.
     4. Publish the exact intent + restart sentinel. The frozen root-owned
        poller acknowledges it in the boot ledger, then SIGTERMs pid 1. If that
        path wedges, the backstop force-exits the worker without an
@@ -79,19 +80,44 @@ async def restart_this_worker() -> None:
 
   boot_id = restart_ledger.current_boot_id()
   restart_nonce = restart_ledger.new_nonce()
-  parked_runs: list[dict[str, str]] = []
+  restart_runs: list[dict[str, str]] = []
   try:
-    parked_runs = await asyncio.wait_for(
+    # Bind the authenticated nonce to every exact live run BEFORE provider
+    # interruption. This small writer-only transaction is independent of
+    # transcript serialization and survives a later stop/finalize timeout.
+    restart_runs = await asyncio.wait_for(
+      chat.prepare_restart_intents(restart_nonce),
+      timeout=min(10.0, chat.DRAIN_TIMEOUT),
+    )
+  except Exception:
+    # Fail closed: without an exact DB binding the next boot treats stranded
+    # turns as generic crash recovery and leaves them for manual Resume.
+    log.warning(
+      "restart-intent preparation failed; fallbacks will remain manual",
+      exc_info=True,
+    )
+  try:
+    drained_runs = await asyncio.wait_for(
       chat.drain_all_for_restart(
         timeout=chat.DRAIN_TIMEOUT,
         restart_nonce=restart_nonce,
+        prepared_runs=restart_runs,
       ),
       timeout=chat.DRAIN_TIMEOUT,
+    )
+    # The drain may discover a just-materialized handle after the initial
+    # snapshot. Keep every exact run it successfully authenticated.
+    known = {
+      (item["chat_id"], item["run_token"]) for item in restart_runs
+    }
+    restart_runs.extend(
+      item for item in drained_runs
+      if (item["chat_id"], item["run_token"]) not in known
     )
   except Exception:
     # Never let a drain failure block the restart — the backstop timer and the
     # fallback path still reboots the worker. Exact runs already transitioned
-    # remain due; any marker left set falls back to manual boot reconciliation.
+    # remain due; nonce-stamped running markers use authenticated boot recovery.
     log.warning("drain-for-restart failed; restarting anyway", exc_info=True)
 
   try:
@@ -103,7 +129,7 @@ async def restart_this_worker() -> None:
     restart_ledger.request_restart(
       boot_id=boot_id,
       nonce=restart_nonce,
-      runs=parked_runs,
+      runs=restart_runs,
     )
   except Exception:
     # Restart reliability and continuation authorization are independent.

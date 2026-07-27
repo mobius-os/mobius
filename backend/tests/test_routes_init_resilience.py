@@ -198,8 +198,8 @@ def test_lifespan_waits_for_initial_restart_resume_sweep(monkeypatch):
   lifespan_ready = threading.Event()
   boot_errors = []
 
-  async def held_sweep(db):
-    del db
+  async def held_sweep(db, **kwargs):
+    del db, kwargs
     sweep_entered.set()
     await asyncio.to_thread(release_sweep.wait)
     return []
