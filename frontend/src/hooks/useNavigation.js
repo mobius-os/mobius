@@ -52,7 +52,7 @@ function navRoute(view, chatId, appId, paneId, extra = null) {
 }
 
 function isRestorableRoute(route) {
-  return route && ['chat', 'canvas', 'settings'].includes(route.view)
+  return route && ['chat', 'canvas', 'apps', 'settings'].includes(route.view)
 }
 
 function sameRoute(a, b) {
@@ -803,7 +803,7 @@ export default function useNavigation({
 
   // ── The ONE navigation decision point (two-worlds design) ──────────────────
   // applySettingsDestination generalized to ALL destinations. Every path that
-  // APPLIES a chat/app/settings destination — navTo, restoreRoute, boot/deep-link,
+  // APPLIES a chat/app/Apps/settings destination — navTo, restoreRoute, boot/deep-link,
   // no-history opens, app-history restoration — funnels here, so the single-vs-
   // builder branch lives in EXACTLY ONE place and no caller can accidentally
   // OPEN_TAB into the pane tree while in single mode (design risk 4: nav bypasses).
@@ -833,18 +833,22 @@ export default function useNavigation({
       settingsOpenRef.current = false
     }
     if (mode === 'single') {
-      const item = route.view === 'canvas'
-        ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
-        : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null)
+      const item = route.view === 'apps'
+        ? tabModel.appsTab()
+        : (route.view === 'canvas'
+          ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
+          : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null))
       dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item })
       return
     }
     const targetPaneId = (typeof route.paneId === 'string' && ws.panes[route.paneId])
       ? route.paneId
       : ws.focusedPaneId
-    const tab = route.view === 'canvas'
-      ? tabModel.makeTab('app', route.appId)
-      : tabModel.makeTab('chat', route.chatId)
+    const tab = route.view === 'apps'
+      ? tabModel.appsTab()
+      : (route.view === 'canvas'
+        ? tabModel.makeTab('app', route.appId)
+        : tabModel.makeTab('chat', route.chatId))
     dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab, activate: true })
   }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
 
@@ -888,6 +892,9 @@ export default function useNavigation({
       // The destination is a Settings route; its paneId is the focused pane hint
       // behind the overlay.
       nextRoute = navRoute('settings', previousRoute.chatId, previousRoute.appId, targetPaneId)
+    } else if (view === 'apps') {
+      nextRoute = navRoute('apps', null, null, targetPaneId)
+      openTab = tabModel.appsTab()
     } else if (view === 'canvas') {
       const appId = 'appId' in opts ? opts.appId : activeAppIdRef.current
       const tab = tabModel.makeTab('app', appId)
@@ -986,7 +993,9 @@ export default function useNavigation({
     // ONE decision point so single restores the slot and builder the pane tab —
     // restoreRoute no longer dispatches OPEN_TAB directly (design risk 4).
     let itemRoute = null
-    if (route.view === 'canvas') {
+    if (route.view === 'apps') {
+      itemRoute = { view: 'apps', appId: null, chatId: null, paneId: route.paneId }
+    } else if (route.view === 'canvas') {
       if (route.appId != null) itemRoute = { view: 'canvas', appId: route.appId, chatId: null, paneId: route.paneId }
     } else {
       const chatId = route.homeSeed ? lastChatIdRef.current : route.chatId

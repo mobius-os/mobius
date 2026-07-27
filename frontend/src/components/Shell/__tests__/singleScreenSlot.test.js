@@ -270,13 +270,17 @@ test('INV 8: an explicit later toggle rebases a coupled undo to tree-only', () =
   assert.equal(state.ws.viewMode, 'panes', 'the owner\'s later mode choice is preserved')
 })
 
-test('singleScreenRoute: chat slot, app slot, and empty/home', () => {
+test('singleScreenRoute: chat, installed app, Apps launcher, and empty/home', () => {
   const base = paneModel.seedFromFlatTabs([])
   assert.deepEqual(paneModel.singleScreenRoute({ ...base, singleScreen: { kind: 'chat', id: '9' } }), {
     view: 'chat', chatId: '9', appId: null, paneId: base.focusedPaneId,
   })
   const appR = paneModel.singleScreenRoute({ ...base, singleScreen: { kind: 'app', id: '42' } })
   assert.equal(appR.view, 'canvas'); assert.equal(appR.appId, 42)
+  assert.deepEqual(
+    paneModel.singleScreenRoute({ ...base, singleScreen: tabModel.appsTab() }),
+    { view: 'apps', chatId: null, appId: null, paneId: base.focusedPaneId },
+  )
   // Null/empty slot → the empty chat home surface, never a fabricated id.
   assert.deepEqual(paneModel.singleScreenRoute({ ...base, singleScreen: null }), {
     view: 'chat', chatId: null, appId: null, paneId: base.focusedPaneId,
