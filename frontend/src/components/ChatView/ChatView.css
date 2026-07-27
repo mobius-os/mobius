@@ -2085,10 +2085,15 @@
   bottom: calc(100% + 8px);
   left: 0;
   width: 296px;
-  /* `dvh` (dynamic viewport height) shrinks when the soft keyboard
-     opens, so the popover never extends past the visible area. Cap
-     at ~50% of the visible viewport so the user can always see
-     some chat above; absolute 420px cap on tall screens. */
+  /* FALLBACK ONLY — the real cap is an inline `max-height` measured in
+     ComposerPopover.jsx from the space above the trigger inside
+     `visualViewport`, and it wins over this rule. `dvh` cannot do the job:
+     iOS Safari does NOT shrink the layout viewport (so not `dvh`/`vh`) for
+     the soft keyboard, so a dvh-derived cap let the panel's top — the
+     Attach files row — render above the top of the screen, unreachable,
+     whenever the keyboard was up. See composerPopoverHeight.js. This value
+     covers the frame before the measurement lands and non-visualViewport
+     environments (jsdom, very old browsers). */
   max-height: min(50dvh, 420px);
   overflow-y: auto;
   background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
@@ -2288,6 +2293,23 @@
   font-weight: 600;
   line-height: 1.2;
   text-align: center;
+}
+
+/* The thumbnail itself is the "open full screen" affordance, so it fills
+   the card edge-to-edge and carries no chrome of its own. */
+.chat__attach-card-thumb-button {
+  all: unset;
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: zoom-in;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat__attach-card-thumb-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 13px;
 }
 
 .chat__attach-card-thumb {
