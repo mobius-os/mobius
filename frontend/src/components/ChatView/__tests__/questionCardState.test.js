@@ -48,6 +48,16 @@ test('question card css has no stale styling hook', () => {
     'a failed answer should keep its retry notice attached to the card')
 })
 
+test('multiple questions read as one compact decision panel', () => {
+  assert.match(component, /const grouped = questions\.length > 1/)
+  assert.match(component, /className=\{`qcard\$\{grouped \? ' qcard--grouped'/)
+  assert.match(component, /\{questions\.length\} decisions/)
+  assert.match(component, /Choose each one, then submit them together\./)
+  assert.match(css, /\.qcard\s*\{[\s\S]*?width:\s*min\(100%, 640px\);[\s\S]*?margin:\s*10px auto;/)
+  assert.match(css, /\.qcard--grouped\s*\{[\s\S]*?overflow:\s*hidden;/)
+  assert.match(css, /\.qcard--grouped \.qcard__q \+ \.qcard__q\s*\{[\s\S]*?margin-top:\s*0;/)
+})
+
 test('a failed question submission does not append a transcript row', () => {
   const start = chatView.indexOf('const doSendSilent = useCallback')
   const end = chatView.indexOf('function handleSubmit(e)', start)

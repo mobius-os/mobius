@@ -104,6 +104,16 @@ export function payoffLine(record) {
     : "If it's accepted, everyone using this app gets it."
 }
 
+/**
+ * Reduce git's multi-line per-file table to the aggregate final line for the
+ * docked summary card. Full file details remain available in the disclosure.
+ */
+export function diffStatSummary(value) {
+  if (typeof value !== 'string') return ''
+  const lines = value.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  return lines.at(-1) || ''
+}
+
 // ── Swipe-to-dismiss ────────────────────────────────────────────────────────
 //
 // Dismissing is a VIEW decision, never a data one: the contribution stays

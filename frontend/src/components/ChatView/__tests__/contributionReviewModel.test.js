@@ -10,6 +10,7 @@ import {
   contributeApp,
   contributeAppId,
   contributeLabel,
+  diffStatSummary,
   payoffLine,
   dismissKey,
   isDismissed,
@@ -123,6 +124,16 @@ test('the status word distinguishes waiting, blocked, and in-flight', () => {
   assert.equal(statusLabel({ status: 'submitting' }, false), 'Publishing')
 })
 
+test('multiple independent contributions share one bounded review panel', () => {
+  assert.match(cardSrc, /const grouped = records\.length > 1/)
+  assert.match(cardSrc, /contrib-card-stack--grouped/)
+  assert.match(cardSrc, /\{records\.length\} contributions ready/)
+  assert.match(cardSrc, /Review each one separately\./)
+  assert.match(cardCss, /\.contrib-card-stack\s*\{[\s\S]*?width:\s*min\(100%, 640px\);[\s\S]*?margin-inline:\s*auto;/)
+  assert.match(cardCss, /\.contrib-card-stack--grouped\s*\{[\s\S]*?max-height:\s*min\(52vh, 520px\);/)
+  assert.match(cardCss, /\.contrib-card-stack--grouped \.contrib-card\s*\{[\s\S]*?border-radius:\s*0;/)
+})
+
 // The action names the value of contributing, not the mechanism of sending, and
 // never uses "upstream" — precise to anyone who works with open source, opaque to
 // everyone else. It only names a destination it actually knows.
@@ -146,6 +157,18 @@ test('the payoff line matches who benefits and keeps acceptance conditional', ()
   const app = payoffLine({ repo: 'mobius-os/app-example' })
   assert.match(app, /everyone using this app/)
   for (const line of [platform, app]) assert.match(line, /^If it's accepted/)
+})
+
+test('the docked card reduces a multi-line diff stat to its aggregate', () => {
+  assert.equal(
+    diffStatSummary(
+      ' frontend/src/a.js | 12 +++++\n backend/app/b.py | 3 ---\n 2 files changed, 12 insertions(+), 3 deletions(-)',
+    ),
+    '2 files changed, 12 insertions(+), 3 deletions(-)',
+  )
+  assert.equal(diffStatSummary(' 1 file changed, 4 insertions(+)\n'), '1 file changed, 4 insertions(+)')
+  assert.equal(diffStatSummary(null), '')
+  assert.match(cardSrc, /diffStatSummary\(record\.diff_stat\)/)
 })
 
 test('the card discloses the continuing review authority granted by Send', () => {

@@ -47,6 +47,7 @@ export default function QuestionCard({
 
   const answered = submitted || !!answeredMap
   const displayAnswers = answeredMap || {}
+  const grouped = questions.length > 1
 
   // ChatView is keyed by chat, so switching away remounts this card. Keep an
   // unsubmitted selection in the same per-tab cache as composer drafts; the
@@ -144,11 +145,24 @@ export default function QuestionCard({
 
   return (
     <div
-      className={`qcard${answered ? ' qcard--answered' : ''}`}
+      className={`qcard${grouped ? ' qcard--grouped' : ''}${answered ? ' qcard--answered' : ''}`}
       ref={answered ? null : pendingCardRef}
       aria-disabled={disabled && !answered ? true : undefined}
+      aria-label={grouped ? `${questions.length} decisions` : undefined}
     >
-      {questions.map((q, qi) => {
+      {grouped && (
+        <div className="qcard__group-head">
+          <div>
+            <div className="qcard__group-title">{questions.length} decisions</div>
+            <div className="qcard__group-copy">
+              Choose each one, then submit them together.
+            </div>
+          </div>
+          <span className="qcard__group-count">{questions.length}</span>
+        </div>
+      )}
+      <div className="qcard__questions">
+        {questions.map((q, qi) => {
         const selected = answers[q.question]
         const isMulti = q.multiSelect
         const selectedArr = isMulti
@@ -280,7 +294,8 @@ export default function QuestionCard({
             )}
           </div>
         )
-      })}
+        })}
+      </div>
       {(answered || !disabled) && (
         <>
           {submitError && !answered && (

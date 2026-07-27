@@ -1,7 +1,9 @@
 .qcard {
-  margin: 8px 0;
-  padding: 14px;
-  border-radius: 12px;
+  box-sizing: border-box;
+  width: min(100%, 640px);
+  margin: 10px auto;
+  padding: 16px;
+  border-radius: 14px;
   background: var(--surface, rgba(255,255,255,.06));
   border: 1px solid var(--border-light, var(--border));
 }
@@ -10,10 +12,65 @@
      are disabled, while the Submit slot remains visible as "Submitted". */
 }
 
+.qcard--grouped {
+  padding: 0;
+  overflow: hidden;
+}
+
+.qcard__group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border-light, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.qcard__group-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.qcard__group-copy {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.qcard__group-count {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qcard--grouped .qcard__questions {
+  padding: 0 16px;
+}
+
+.qcard--grouped .qcard__q {
+  padding: 14px 0;
+}
+
 .qcard__q + .qcard__q {
   margin-top: 14px;
   padding-top: 14px;
   border-top: 1px solid var(--border-light, var(--border));
+}
+
+.qcard--grouped .qcard__q + .qcard__q {
+  margin-top: 0;
 }
 
 .qcard__header {
@@ -67,6 +124,7 @@
    on touch). Quiet by design: small, muted, left-aligned with the label. The
    mark stays top-aligned so a two-line option still reads as one choice. */
 .qcard__opt:has(.qcard__opt-body) {
+  flex: 1 1 220px;
   align-items: flex-start;
   text-align: left;
 }
@@ -204,6 +262,10 @@
   margin-top: 8px;
 }
 
+.qcard--grouped .qcard__submit-error {
+  margin: 0 16px 8px;
+}
+
 .qcard__submit {
   display: block;
   width: 100%;
@@ -218,6 +280,13 @@
   cursor: pointer;
   transition: background .15s, opacity .15s;
 }
+.qcard--grouped .qcard__submit {
+  width: calc(100% - 32px);
+  margin: 0 16px 16px;
+}
+.qcard--grouped .qcard__submit-error + .qcard__submit {
+  margin-top: 0;
+}
 .qcard__submit:hover:not(:disabled) {
   background: var(--accent-hover, var(--accent));
 }
@@ -228,4 +297,32 @@
 .qcard__submit:disabled {
   opacity: .4;
   cursor: default;
+}
+
+@media (max-width: 560px) {
+  .qcard {
+    margin: 8px 0;
+    padding: 14px;
+  }
+
+  .qcard--grouped {
+    padding: 0;
+  }
+
+  .qcard__group-head {
+    padding-inline: 14px;
+  }
+
+  .qcard--grouped .qcard__questions {
+    padding-inline: 14px;
+  }
+
+  .qcard--grouped .qcard__submit {
+    width: calc(100% - 28px);
+    margin-inline: 14px;
+  }
+
+  .qcard--grouped .qcard__submit-error {
+    margin-inline: 14px;
+  }
 }
