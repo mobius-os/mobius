@@ -179,6 +179,9 @@ function clampRatio(ratio) {
 //     stored tabs into one key), it is dropped.
 function sanitizeTab(raw) {
   if (!raw || raw.id == null) return null
+  if (raw.kind === 'apps') {
+    return String(raw.id) === tabModel.APPS_ID ? tabModel.appsTab() : null
+  }
   if (raw.kind === 'settings') {
     return (BUILDER_SETTINGS_ENABLED && String(raw.id) === tabModel.SETTINGS_ID)
       ? tabModel.settingsTab()
@@ -211,6 +214,9 @@ function sanitizeTabs(tabs) {
 // migration marker; only a PRESENT-but-invalid value collapses to null here.
 function sanitizeSingleScreen(raw) {
   if (raw == null || typeof raw !== 'object') return null
+  if (raw.kind === 'apps' && String(raw.id) === tabModel.APPS_ID) {
+    return tabModel.appsTab()
+  }
   if (raw.kind === 'chat' && raw.id != null && String(raw.id).trim() !== '') {
     return { kind: 'chat', id: String(raw.id) }
   }
@@ -507,6 +513,7 @@ export function singleScreenKey(ws) {
   if (!slot || typeof slot !== 'object') return null
   if (slot.kind === 'app') return `app:${slot.id}`
   if (slot.kind === 'chat') return `chat:${slot.id}`
+  if (slot.kind === 'apps') return tabModel.APPS_TAB_KEY
   return null
 }
 
@@ -549,6 +556,7 @@ export function focusedSlotSeed(ws) {
   if (!tab) return null
   if (tab.kind === 'app') return { kind: 'app', id: String(tab.id) }
   if (tab.kind === 'chat') return { kind: 'chat', id: String(tab.id) }
+  if (tab.kind === 'apps') return tabModel.appsTab()
   return null
 }
 
@@ -617,6 +625,7 @@ export function focusedContentRoute(ws) {
       // apart via the SEPARATE settingsOverlayOpen flag, never via this route
       // (design: the overlay must not be conflated with focused-content-is-Settings).
       if (tab.kind === 'settings') return { view: 'settings', chatId: null, appId: null, paneId }
+      if (tab.kind === 'apps') return { view: 'apps', chatId: null, appId: null, paneId }
       const { view, opts } = tabModel.tabNavTarget(tab)
       if (view === 'canvas') return { view: 'canvas', chatId: null, appId: opts.appId, paneId }
       return { view: 'chat', chatId: opts.chatId, appId: null, paneId }
@@ -634,6 +643,9 @@ export function focusedContentRoute(ws) {
 export function singleScreenRoute(ws) {
   const slot = ws.singleScreen
   const paneId = ws.focusedPaneId
+  if (slot && slot.kind === 'apps') {
+    return { view: 'apps', chatId: null, appId: null, paneId }
+  }
   if (slot && slot.kind === 'app') {
     const appId = Number(slot.id)
     if (Number.isFinite(appId)) return { view: 'canvas', chatId: null, appId, paneId }
@@ -673,6 +685,7 @@ export function visibleAppIds(ws, visibleLeaves) {
 // no concrete workspace item (Settings, or a home-seed chat route).
 function routeItemKey(route) {
   if (!route || typeof route !== 'object') return null
+  if (route.view === 'apps') return tabModel.APPS_TAB_KEY
   if (route.view === 'canvas' && route.appId != null) return `app:${route.appId}`
   if (route.view === 'chat' && !route.homeSeed && route.chatId != null) return `chat:${route.chatId}`
   return null
@@ -1106,6 +1119,7 @@ function slotIsLive(slot, chats, apps) {
   if (!slot || typeof slot !== 'object') return true
   if (slot.kind === 'chat') return chats == null || chats.has(String(slot.id))
   if (slot.kind === 'app') return apps == null || apps.has(String(slot.id))
+  if (slot.kind === 'apps') return true
   return true
 }
 

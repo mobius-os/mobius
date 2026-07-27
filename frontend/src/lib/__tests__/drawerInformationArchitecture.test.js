@@ -1,0 +1,82 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  appInitials,
+  buildDrawerSections,
+  filterInstalledApps,
+} from '../../components/Drawer/drawerInformationArchitecture.js'
+
+test('drawer separates pinned chats and apps from ordinary chat history', () => {
+  const sections = buildDrawerSections([
+    { id: 'empty', has_messages: false, updated_at: '2026-07-30' },
+    { id: 'old-chat', has_messages: true, updated_at: '2026-07-20' },
+    { id: 'new-chat', has_messages: true, activity_at: '2026-07-29' },
+    { id: 'pinned-chat', has_messages: true, pinned_at: '2026-07-25', updated_at: '2026-07-01' },
+  ], [
+    { id: 1, created_at: '2026-07-01' },
+    { id: 2, created_at: '2026-07-02', pinned_at: '2026-07-26' },
+  ])
+
+  // Oldest pin first: the chat (pinned 07-25) sits above the app (pinned 07-26).
+  assert.deepEqual(sections.pinned.map(entry => [entry.kind, entry.item.id]), [
+    ['chat', 'pinned-chat'],
+    ['app', 2],
+  ])
+  assert.deepEqual(sections.chats.map(chat => chat.id), ['new-chat', 'old-chat'])
+  assert.deepEqual(sections.apps.map(app => app.id), [2, 1])
+})
+
+test('pinned order is stable across mixed timestamp formats (Z vs naive UTC)', () => {
+  // After a drag, optimistic chat stamps carry a trailing Z while a refetched
+  // app carries the server's naive-UTC form. Same instants must still interleave
+  // by time, not by the accident of the suffix.
+  const sections = buildDrawerSections([
+    { id: 'chat-early', has_messages: true, pinned_at: '2026-07-27T10:00:00.000Z' },
+    { id: 'chat-late', has_messages: true, pinned_at: '2026-07-27T10:00:02.000Z' },
+  ], [
+    { id: 9, created_at: '2026-07-01', pinned_at: '2026-07-27T10:00:01.123456' },
+  ])
+
+  assert.deepEqual(sections.pinned.map(entry => [entry.kind, entry.item.id]), [
+    ['chat', 'chat-early'],
+    ['app', 9],
+    ['chat', 'chat-late'],
+  ])
+})
+
+test('a freshly pinned item lands at the bottom of the pinned list', () => {
+  // Three items already pinned in chronological order; the newest pin (the app,
+  // stamped last) must render last so pinning appends rather than jumping to top.
+  const sections = buildDrawerSections([
+    { id: 'first-pinned', has_messages: true, pinned_at: '2026-07-25T09:00:00Z' },
+    { id: 'second-pinned', has_messages: true, pinned_at: '2026-07-25T10:00:00Z' },
+  ], [
+    { id: 7, created_at: '2026-07-01', pinned_at: '2026-07-25T11:00:00Z' },
+  ])
+
+  assert.deepEqual(sections.pinned.map(entry => [entry.kind, entry.item.id]), [
+    ['chat', 'first-pinned'],
+    ['chat', 'second-pinned'],
+    ['app', 7],
+  ])
+})
+
+test('app search covers names, descriptions, and slugs without reordering', () => {
+  const apps = [
+    { id: 1, name: 'Metro Board', description: 'Live departures', slug: 'underground' },
+    { id: 2, name: 'Atlas', description: 'Maps and places', slug: 'atlas' },
+  ]
+
+  assert.equal(filterInstalledApps(apps, '  LIVE  ')[0].id, 1)
+  assert.equal(filterInstalledApps(apps, 'underground')[0].id, 1)
+  assert.equal(filterInstalledApps(apps, 'places')[0].id, 2)
+  assert.equal(filterInstalledApps(apps, 'missing').length, 0)
+  assert.equal(filterInstalledApps(apps, ''), apps)
+})
+
+test('app initials remain useful for missing custom icons', () => {
+  assert.equal(appInitials('Beat Machine'), 'BM')
+  assert.equal(appInitials('Atlas'), 'AT')
+  assert.equal(appInitials('---'), 'A')
+})

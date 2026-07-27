@@ -890,8 +890,8 @@ async def patch_chat(
           chat.title = new_title
           chat.title_locked = True
 
-    # Drawer pin toggle. We stamp the time on pin so the pinned group
-    # sorts newest-pinned-first within itself.
+    # Drawer pin toggle. We stamp the time on pin so the shared pinned group
+    # can append the newest pin after the items already there.
     if body.pinned is not None:
       chat.pinned_at = now_naive_utc() if body.pinned else None
 
