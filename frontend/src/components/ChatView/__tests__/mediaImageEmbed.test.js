@@ -28,7 +28,7 @@
  */
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseImageDims, imageVarsFromDims } from '../markdown/imageDims.js'
+import { imageDimensionsForHref, imageVarsFromDims } from '../markdown/imageDims.js'
 import {
   getMediaChatId,
   previewSrcForChatMedia,
@@ -390,66 +390,54 @@ describe('regex and extraction consistency', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 7. Known image dimensions carried in the markup (contract v2 item 2, lever 3)
+// 7. Intrinsic dimensions projected from the owning media path
 //
-// A screenshot whose size the agent already knew can carry it as `?w=&h=` so
-// the frame reserves the exact aspect ratio on the first paint and the on-load
-// ratio delta vanishes. parseImageDims reads the query; imageVarsFromDims turns
-// dims into the same custom-property object the onLoad handler computes.
+// Chat detail carries a pathname-keyed dimensions map. The resource URL does
+// not carry layout state; auth and preview query parameters are ignored.
 // ---------------------------------------------------------------------------
 
-describe('parseImageDims', () => {
-  test('extracts positive integer w/h from a media href query', () => {
-    const dims = parseImageDims('/api/chats/abc/media/shot.png?w=412&h=915')
+describe('imageDimensionsForHref', () => {
+  const dimensions = {
+    '/api/chats/abc/media/shot.png': { width: 412, height: 915 },
+  }
+
+  test('looks up dimensions by canonical pathname', () => {
+    const dims = imageDimensionsForHref(
+      '/api/chats/abc/media/shot.png',
+      dimensions,
+    )
     assert.deepEqual(dims, { width: 412, height: 915 })
   })
 
-  test('works on an absolute URL too', () => {
-    const dims = parseImageDims('https://host.example/api/chats/abc/media/shot.png?w=800&h=600')
-    assert.deepEqual(dims, { width: 800, height: 600 })
+  test('ignores the origin, auth token, and preview query', () => {
+    const dims = imageDimensionsForHref(
+      'https://host.example/api/chats/abc/media/shot.png?preview=true&token=secret',
+      dimensions,
+    )
+    assert.deepEqual(dims, { width: 412, height: 915 })
   })
 
-  test('returns null when no dims are present (the common case)', () => {
-    assert.equal(parseImageDims('/api/chats/abc/media/shot.png'), null)
-  })
-
-  test('returns null for zero, negative, or non-numeric dims', () => {
-    assert.equal(parseImageDims('/x.png?w=0&h=100'), null)
-    assert.equal(parseImageDims('/x.png?w=-5&h=100'), null)
-    assert.equal(parseImageDims('/x.png?w=abc&h=100'), null)
-    assert.equal(parseImageDims('/x.png?w=100'), null, 'height missing')
-  })
-
-  test('returns null for empty/invalid input', () => {
-    assert.equal(parseImageDims(''), null)
-    assert.equal(parseImageDims(null), null)
-    assert.equal(parseImageDims(undefined), null)
-  })
-})
-
-describe('imageVarsFromDims — known dims kill the on-load delta', () => {
-  // Replicate ExpandableImage's onLoad math so we can prove the first-paint
-  // vars (from known dims) EQUAL the vars onLoad would set from the same natural
-  // size — i.e. there is no delta to shift on decode.
-  function onLoadVars(naturalW, naturalH, viewportH) {
-    const ratio = naturalW / naturalH
-    const cappedH = Math.min(viewportH * 0.60, 480)
-    const fitWidth = Math.min(520, Math.max(120, Math.round(cappedH * ratio)))
-    return {
-      '--md-image-ratio': `${naturalW} / ${naturalH}`,
-      '--md-image-fit-width': `${fitWidth}px`,
-    }
-  }
-
-  test('first-paint vars from known dims equal the onLoad vars for the same size', () => {
-    const w = 412, h = 915, vh = 900
-    assert.deepEqual(
-      imageVarsFromDims(w, h, vh),
-      onLoadVars(w, h, vh),
-      'known-dimension first paint must match the eventual onLoad measurement — zero delta',
+  test('does not read dimensions from the URL query', () => {
+    assert.equal(
+      imageDimensionsForHref('/api/chats/abc/media/other.png?w=800&h=600', dimensions),
+      null,
     )
   })
 
+  test('rejects missing or invalid response metadata', () => {
+    assert.equal(imageDimensionsForHref('/x.png', { '/x.png': { width: 0, height: 100 } }), null)
+    assert.equal(imageDimensionsForHref('/x.png', { '/x.png': { width: 100.5, height: 100 } }), null)
+    assert.equal(imageDimensionsForHref('/x.png', { '/x.png': { width: 100 } }), null)
+  })
+
+  test('returns null for empty/invalid input', () => {
+    assert.equal(imageDimensionsForHref('', dimensions), null)
+    assert.equal(imageDimensionsForHref(null, dimensions), null)
+    assert.equal(imageDimensionsForHref(undefined, dimensions), null)
+  })
+})
+
+describe('imageVarsFromDims — server dimensions fix the first layout', () => {
   test('sets an exact aspect-ratio custom property', () => {
     const vars = imageVarsFromDims(800, 600, 900)
     assert.equal(vars['--md-image-ratio'], '800 / 600')

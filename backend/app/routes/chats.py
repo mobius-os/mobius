@@ -354,6 +354,12 @@ def _chat_detail_response(
       message_offset=start,
       live_message=live_message,
     )
+  from app.chat_media_dimensions import project_message_image_dimensions
+  page = project_message_image_dimensions(
+    page,
+    chat_id=chat.id,
+    data_dir=get_settings().data_dir,
+  )
 
   provider = chat.provider or "claude"
   pending_question = questions.get(chat.id)

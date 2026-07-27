@@ -1,6 +1,7 @@
-"""Bounded, best-effort transcript previews for stored raster images."""
+"""Bounded previews and intrinsic layout metadata for stored raster images."""
 
 import hashlib
+import json
 import os
 import tempfile
 import threading
@@ -12,6 +13,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 PREVIEW_MAX_EDGE = 1024
 PREVIEW_WEBP_QUALITY = 72
 PREVIEW_DIR = ".previews"
+_EXIF_ORIENTATION = 274
 
 # Pillow expands compressed images in memory. Two concurrent generators keep a
 # transcript moving without letting a screenshot-heavy chat occupy the entire
@@ -23,6 +25,106 @@ def preview_cache_path(file_path: Path, base: Path) -> Path:
   """Return the single stable derivative path owned by one source filename."""
   digest = hashlib.sha256(file_path.name.encode("utf-8")).hexdigest()[:24]
   return base / PREVIEW_DIR / f"{digest}.webp"
+
+
+def dimensions_cache_path(file_path: Path, base: Path) -> Path:
+  """Return the stable intrinsic-dimensions sidecar for one source filename."""
+  return preview_cache_path(file_path, base).with_suffix(".json")
+
+
+def _oriented_dimensions(source: Image.Image) -> tuple[int, int] | None:
+  """Read display dimensions from headers, including EXIF rotation.
+
+  Pillow keeps ``Image.open`` lazy here: reading size and EXIF metadata does not
+  decode the compressed raster. That matters on the chat-detail path, where a
+  large screenshot must not briefly become a large RAM allocation merely to
+  reserve its layout box.
+  """
+  width, height = source.size
+  try:
+    orientation = source.getexif().get(_EXIF_ORIENTATION, 1)
+  except (AttributeError, OSError, ValueError):
+    orientation = 1
+  if orientation in {5, 6, 7, 8}:
+    width, height = height, width
+  if width <= 0 or height <= 0:
+    return None
+  return int(width), int(height)
+
+
+def stored_image_dimensions(file_path: Path, base: Path) -> dict | None:
+  """Return cached display dimensions for a stored raster image.
+
+  The disk sidecar is keyed by the source's size and nanosecond mtime. A cold
+  lookup parses only the image header, then writes atomically; later chat reads
+  do not open the image at all. Invalid or unsupported files deliberately have
+  no dimensions so the renderer can show an explicit image error rather than a
+  guessed aspect ratio that changes after decode.
+  """
+  cache_path = dimensions_cache_path(file_path, base)
+  try:
+    source_stat = file_path.stat()
+  except OSError:
+    return None
+
+  try:
+    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    if (
+      cached.get("source_mtime_ns") == source_stat.st_mtime_ns
+      and cached.get("source_size") == source_stat.st_size
+      and isinstance(cached.get("width"), int)
+      and cached["width"] > 0
+      and isinstance(cached.get("height"), int)
+      and cached["height"] > 0
+    ):
+      return {"width": cached["width"], "height": cached["height"]}
+  except (OSError, ValueError, TypeError, AttributeError):
+    pass
+
+  try:
+    with Image.open(file_path) as source:
+      dimensions = _oriented_dimensions(source)
+  except (Image.DecompressionBombError, UnidentifiedImageError, OSError, ValueError):
+    return None
+  if dimensions is None:
+    return None
+
+  width, height = dimensions
+  payload = {
+    "source_mtime_ns": source_stat.st_mtime_ns,
+    "source_size": source_stat.st_size,
+    "width": width,
+    "height": height,
+  }
+  temp_path = None
+  try:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+      dir=cache_path.parent,
+      prefix=".dimensions-",
+      suffix=".json",
+      mode="w",
+      encoding="utf-8",
+      delete=False,
+    ) as temp:
+      temp_path = Path(temp.name)
+      json.dump(payload, temp, separators=(",", ":"))
+      temp.flush()
+      os.fsync(temp.fileno())
+    os.replace(temp_path, cache_path)
+    temp_path = None
+  except OSError:
+    # Metadata is a performance cache, not the source of truth. A read-only or
+    # full cache directory may cost another header read but must not hide an
+    # otherwise valid image.
+    pass
+  finally:
+    if temp_path is not None:
+      try:
+        temp_path.unlink(missing_ok=True)
+      except OSError:
+        pass
+  return {"width": width, "height": height}
 
 
 def display_image_preview(file_path: Path, base: Path) -> Path | None:
@@ -100,8 +202,12 @@ def display_image_preview(file_path: Path, base: Path) -> Path | None:
 
 
 def discard_image_preview(file_path: Path, base: Path) -> None:
-  """Best-effort cleanup of the derivative owned by a deleted source file."""
-  try:
-    preview_cache_path(file_path, base).unlink(missing_ok=True)
-  except OSError:
-    pass
+  """Best-effort cleanup of derivatives owned by a deleted source file."""
+  for path in (
+    preview_cache_path(file_path, base),
+    dimensions_cache_path(file_path, base),
+  ):
+    try:
+      path.unlink(missing_ok=True)
+    except OSError:
+      pass

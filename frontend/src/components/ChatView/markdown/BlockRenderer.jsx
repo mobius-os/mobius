@@ -32,6 +32,7 @@ export function ProgressiveMarkdown({
   text,
   isStreaming = false,
   onInternalNav,
+  mediaDimensions,
 }) {
   const tokens = useMemo(() => groupMarkdownImages(tokenize(text)), [text])
 
@@ -52,13 +53,20 @@ export function ProgressiveMarkdown({
             return <MathBlock key={i} tex={token.text} />
           }
           if (token.type === 'imageGallery') {
-            return <ImageGallery key={i} images={token.images} />
+            return (
+              <ImageGallery
+                key={i}
+                images={token.images}
+                mediaDimensions={mediaDimensions}
+              />
+            )
           }
           return (
             <MemoBlock
               key={i}
               token={token}
               onInternalNav={onInternalNav}
+              mediaDimensions={mediaDimensions}
             />
           )
         })}
@@ -73,7 +81,7 @@ export function ProgressiveMarkdown({
  * StandardMarkdown — history mode.
  * One-shot render, no memoization overhead.
  */
-export function StandardMarkdown({ text, onInternalNav }) {
+export function StandardMarkdown({ text, onInternalNav, mediaDimensions }) {
   const tokens = useMemo(() => groupMarkdownImages(tokenize(text)), [text])
 
   return (
@@ -87,13 +95,20 @@ export function StandardMarkdown({ text, onInternalNav }) {
           return <MathBlock key={i} tex={token.text} />
         }
         if (token.type === 'imageGallery') {
-          return <ImageGallery key={i} images={token.images} />
+          return (
+            <ImageGallery
+              key={i}
+              images={token.images}
+              mediaDimensions={mediaDimensions}
+            />
+          )
         }
         return (
           <BlockToken
             key={i}
             token={token}
             onInternalNav={onInternalNav}
+            mediaDimensions={mediaDimensions}
           />
         )
       })}

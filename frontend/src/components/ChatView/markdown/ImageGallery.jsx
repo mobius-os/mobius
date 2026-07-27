@@ -21,7 +21,7 @@ function smoothBehavior() {
  * get grab-to-scroll only after a horizontal gesture is established. Desktop
  * buttons and Arrow keys remain the explicit non-gesture alternatives.
  */
-export default function ImageGallery({ images }) {
+export default function ImageGallery({ images, mediaDimensions }) {
   const count = images.length
   const railRef = useRef(null)
   const dragRef = useRef(null)
@@ -196,6 +196,7 @@ export default function ImageGallery({ images }) {
               loading={index === 0 ? 'eager' : 'lazy'}
               onResolved={registerResolved}
               onOpen={openViewer}
+              mediaDimensions={mediaDimensions}
             />
           </div>
         ))}

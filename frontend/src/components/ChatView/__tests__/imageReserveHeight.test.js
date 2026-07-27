@@ -10,12 +10,11 @@
  * after first layout a visible jump. Two mechanisms keep image height stable:
  *
  *   1. `.md-image-frame` is an aspect-ratio box — it occupies its final height
- *      on the first layout pass, before the image decodes. The default ratio
- *      is landscape-leaning (agent screenshots are landscape) so the pre-load
- *      estimate is close to reality and the on-load delta is small. A
- *      `max-height` cap bounds extreme tall ratios. Once dimensions are known,
- *      portrait images also shrink the frame width so the cap does not create
- *      a wide gray letterbox around phone screenshots.
+ *      on the first layout pass, before the image decodes. Local media receives
+ *      its exact server-read ratio in the message response; external media
+ *      keeps a permanent 4:3 frame. A `max-height` cap bounds extreme tall
+ *      ratios, and portrait images shrink the frame width so the cap does not
+ *      create a wide gray letterbox around phone screenshots.
  *
  *   2. `.chat__msg` deliberately does NOT use `content-visibility: auto`. It
  *      was added as a phone-scroll perf hint (2459dff) but collapses off-screen
@@ -83,7 +82,7 @@ describe('.md-image-frame reserves height before image decode', () => {
       'frame must cap reserved height for extreme tall ratios')
   })
 
-  test('frame width can shrink after image dimensions load', () => {
+  test('frame width can shrink from first-layout image dimensions', () => {
     assert.match(body, /width:\s*min\(100%,\s*var\(--md-image-fit-width/,
       'portrait screenshots must shrink the frame width instead of showing side letterboxes')
   })
@@ -142,9 +141,17 @@ describe('ExpandableImage reserves the frame BEFORE the token resolves (lever 3)
       'opening an image must still hand the full original to the lightbox')
   })
 
-  test('seeds first-paint aspect ratio from known dims (parseImageDims/imageVarsFromDims)', () => {
-    assert.match(src, /parseImageDims/,
-      'known dimensions carried in the markup must seed --md-image-ratio on the first paint')
+  test('seeds first-paint aspect ratio from response metadata', () => {
+    assert.match(src, /imageDimensionsForHref/,
+      'server-read dimensions must seed --md-image-ratio on the first paint')
     assert.match(src, /imageVarsFromDims/)
+    assert.doesNotMatch(src, /naturalWidth|naturalHeight|onLoad=/,
+      'image decode must never revise frame geometry')
+  })
+
+  test('local media without dimensions errors instead of guessing a ratio', () => {
+    assert.match(src, /const\s+dimensionError\s*=\s*!!\(/)
+    assert.match(src, /mediaChatId[\s\S]*mediaDimensions\s*!=\s*null[\s\S]*!dims/)
+    assert.match(src, /Image unavailable/)
   })
 })
