@@ -320,7 +320,11 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
       <span className="chat__tool-name" title={label}>
         {label}{t.status === 'running' ? '…' : ''}
       </span>
-      {failed && (
+      {/* A direct compact row IS the collapsed transcript overview, so its
+          technical code waits inside the disclosed result. A grouped child is
+          already behind the activity disclosure and can carry the diagnostic
+          here for quick scanning. */}
+      {failed && !compact && (
         <span className="chat__tool-exit chat__tool-exit--head">exit {exitCode}</span>
       )}
     </>

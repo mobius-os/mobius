@@ -34,6 +34,18 @@ test('tool detail is a third nested level with labeled command and output', () =
     'output aligns beneath the child label')
 })
 
+test('technical command failures stay behind the top-level disclosure', () => {
+  assert.doesNotMatch(activityHeader, /exitCode|chat__activity-chip|displayState === 'error'/,
+    'a collapsed activity overview must not present a command exit as a turn-level alarm')
+  assert.match(toolBlock, /\{failed && !compact && \(/,
+    'only a child already revealed by an expanded activity may show the header exit chip')
+  assert.match(toolBlock,
+    /r\.exitCode != null && r\.exitCode !== 0[\s\S]*className="chat__tool-exit"/,
+    'the exact code remains available in the disclosed command output')
+  assert.doesNotMatch(chatCss, /\.chat__activity--error|\.chat__activity-chip/,
+    'collapsed activity chrome stays visually neutral')
+})
+
 test('a lone tool activity uses the borderless compact disclosure surface', () => {
   assert.match(toolBlock, /compact = false/,
     'ToolBlock exposes an explicit compact surface instead of styling every tool globally')

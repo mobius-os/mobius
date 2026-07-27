@@ -96,34 +96,25 @@ test('empty input yields no nodes', () => {
   assert.deepEqual(groupActivityRuns([]), [])
 })
 
-// A failed shell result — the ONLY failure signal a tool block carries, since
-// the stream never sets a tool status beyond running→done.
-const failOutput = JSON.stringify({ stdout: '', stderr: 'boom', exit_code: 1 })
-const okOutput = JSON.stringify({ stdout: 'ok', exit_code: 0 })
-
-test('toolGroupState: running wins, then a nonzero exit is error, else done', () => {
-  // A finished tool with a nonzero exit code marks the whole group failed,
-  // even though its status is the usual 'done'.
+test('toolGroupState: collapsed overviews communicate only running or settled', () => {
+  // An individual command's failure is diagnostic detail, not a verdict on the
+  // surrounding turn. It remains inside ToolBlock after expansion.
   assert.equal(
-    toolGroupState([tool({ status: 'done', output: okOutput }), tool({ status: 'done', output: failOutput })]),
-    'error'
-  )
-  // A still-running tool has no final output yet, so it can't be "failed".
-  assert.equal(
-    toolGroupState([tool({ status: 'done', output: okOutput }), tool({ status: 'running' })]),
-    'running'
-  )
-  // Running WINS over an already-failed sibling — while live the header reads
-  // in-progress (spinner); the failure surfaces once the run settles to 'error'.
-  assert.equal(
-    toolGroupState([tool({ status: 'done', output: failOutput }), tool({ status: 'running' })]),
-    'running'
-  )
-  assert.equal(
-    toolGroupState([tool({ status: 'done', output: okOutput }), tool({ status: 'done', output: okOutput })]),
+    toolGroupState([
+      tool({ status: 'done', output: '{"exit_code":0}' }),
+      tool({ status: 'done', output: '{"exit_code":1}' }),
+    ]),
     'done'
   )
-  // A running tool whose (partial) output isn't a failed terminal stays running.
+  assert.equal(
+    toolGroupState([tool({ status: 'done' }), tool({ status: 'running' })]),
+    'running'
+  )
+  // Explicit reduced-output metadata is equally private to the expanded child.
+  assert.equal(
+    toolGroupState([tool({ status: 'done', output_exit_code: 4 })]),
+    'done'
+  )
   assert.equal(toolGroupState([tool({ status: 'running', output: '' })]), 'running')
 })
 
@@ -290,18 +281,6 @@ test('coalesceThinkingEntries: groupActivityRuns after coalesce yields one unifi
   assert.deepEqual(nodes[0].group.map(x => x.item.type), ['thinking', 'tool', 'tool'])
   assert.equal(nodes[0].group[0].item.content, 'ab')
   assert.deepEqual(nodes[0].group.map(x => x.idx), [0, 2, 3])
-})
-
-test('toolGroupState: reads output_exit_code field on a reduced block', () => {
-  // Contract rule 6: a failed tool whose output is only a carved excerpt (that
-  // may not re-parse) still resolves the group to 'error' via the explicit
-  // output_exit_code field.
-  const carved = { type: 'tool', status: 'done', output: 'head…[9 B]…tail', output_exit_code: 1 }
-  const ok = { type: 'tool', status: 'done', output: 'fine', output_exit_code: 0 }
-  assert.equal(toolGroupState([ok, carved]), 'error')
-  assert.equal(toolGroupState([ok, ok]), 'done')
-  // A still-running tool keeps the group 'running' even with a failed sibling.
-  assert.equal(toolGroupState([carved, { type: 'tool', status: 'running' }]), 'running')
 })
 
 test('a distinctive tool (image view) breaks out into its own line', () => {
