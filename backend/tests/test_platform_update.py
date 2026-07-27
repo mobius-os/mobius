@@ -31,8 +31,14 @@ from app import platform_update as pu
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+  # gc.auto=0: tests that build many commits in a tight loop (e.g. the
+  # beyond-the-render-cap commit-count preview test) otherwise let a `git commit`
+  # fork a detached background `git gc`, which then races the NEXT commit for the
+  # repo lock and fails it with a fatal exit 128 — an intermittent CI flake.
+  # Disabling auto-gc for these throwaway repos removes the race.
   return subprocess.run(
-    ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(cwd), *args],
+    ["git", "-c", "gc.auto=0", "-c", "user.name=t", "-c", "user.email=t@t",
+     "-C", str(cwd), *args],
     capture_output=True, text=True, check=check,
   )
 
