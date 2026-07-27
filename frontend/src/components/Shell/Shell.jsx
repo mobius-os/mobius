@@ -2590,6 +2590,12 @@ export default function Shell() {
       // Recovery is the sole operation allowed to clear the session tombstone.
       if (ev.chatId) confirmChatRecovered(ev.chatId)
       void invalidateShellListCache('chats').then(refreshChats)
+    } else if (ev.type === 'chat_renamed') {
+      // The platform titler (first-send deduction or the settled-turn note
+      // publisher) or another device renamed a chat. Refetch so the drawer
+      // and tab labels show the new name without waiting for the next
+      // drawer open or turn boundary.
+      void invalidateShellListCache('chats').then(refreshChats)
     } else if (ev.type === 'app_deleted') {
       if (ev.appId) confirmAppDeleted(ev.appId)
       void invalidateShellListCache('apps')

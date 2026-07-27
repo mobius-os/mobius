@@ -877,6 +877,7 @@ async def patch_chat(
     # Naming precedence (user > agent > first-message). A clear resets the name;
     # a manual rename locks it; an agent by_agent sync only fills the name when
     # it isn't locked, so it can never clobber a name the owner chose.
+    prev_title = chat.title
     if body.clear_title:
       chat.title = _first_message_title(chat) or "New chat"
       chat.title_locked = False
@@ -1023,6 +1024,15 @@ async def patch_chat(
 
     db.commit()
     db.refresh(chat)
+    if chat.title != prev_title:
+      # Live rename propagation: drawer/tab labels come from the chats list,
+      # which nothing refreshed when the platform titler (first-send quick
+      # title, settled-turn note publisher) or another device renamed a chat
+      # mid-session. Published only after the commit, so shells refetch
+      # durable truth.
+      get_system_broadcast().publish(
+        {"type": "chat_renamed", "chatId": str(chat_id)}
+      )
     # Record a real provider switch (Claude <-> Codex) once, after this first
     # commit — NOT after the owner-provider mirror commit below, which would
     # double-log. Model/effort tweaks within a provider are deliberately not

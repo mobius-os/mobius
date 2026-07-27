@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app import activity, models, questions, schemas
 from app.broadcast import create_broadcast, get_broadcast, get_system_broadcast
 from app.chat import (
+  _deduce_chat_title,
   _schedule_continuation,
   discard_starting,
   get_active_sink,
@@ -1128,6 +1129,15 @@ async def _send_message_locked(
           viewport=body.viewport, run_token=run_token,
         )
       )
+      if len(msgs) == 1 and getattr(get_settings(), "ensure_chat_note", False):
+        # First send of a brand-new chat: StartTurn just set the tab name to
+        # the truncated raw prompt. Deduce a few-word name in the background
+        # while the turn streams (chat_note.py --quick-title, PATCHed
+        # by_agent so a manual rename wins). Gated with the note publisher —
+        # both are the platform's LLM naming machinery.
+        asyncio.create_task(
+          _deduce_chat_title(get_settings().data_dir, chat_id)
+        )
     else:
       # A Stop raced during the StartTurn commit: it bumped the generation,
       # cleared the marker, and released _starting. The user message is

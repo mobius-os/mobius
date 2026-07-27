@@ -4820,12 +4820,13 @@ async def _ensure_chat_note(
     log.debug("ensure_chat_note failed", exc_info=True)
 
 
-async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
-  """Compatibility helper: sync a chat title from an existing note's gist.
+async def _run_note_tool_quiet(
+  data_dir: str, chat_id: str, flag: str, timeout: float,
+) -> None:
+  """Run one best-effort, quiet chat_note.py mode (--sync-title/--quick-title).
 
-  Normal turn-end publication performs this inside ``chat_note.py`` after its
-  compare-and-swap succeeds. This tool-free helper remains useful to older
-  callers and operator repair paths.
+  Unlike ``_ensure_chat_note`` these modes are cosmetic — a failure just leaves
+  the current title — so stderr is swallowed and nothing is warned.
   """
   log = _get_logger()
   script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
@@ -4836,12 +4837,12 @@ async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
   proc = None
   try:
     proc = await asyncio.create_subprocess_exec(
-      "python3", str(script), chat_id, "--sync-title",
+      "python3", str(script), chat_id, flag,
       stdout=asyncio.subprocess.DEVNULL,
       stderr=asyncio.subprocess.DEVNULL,
       env=env,
     )
-    await asyncio.wait_for(proc.communicate(), timeout=20)
+    await asyncio.wait_for(proc.communicate(), timeout=timeout)
   except asyncio.TimeoutError:
     if proc is not None:
       try:
@@ -4849,7 +4850,30 @@ async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
       except ProcessLookupError:
         pass
   except Exception:
-    log.debug("sync_chat_title failed", exc_info=True)
+    log.debug("chat_note %s failed", flag, exc_info=True)
+
+
+async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
+  """Compatibility helper: sync a chat title from an existing note's gist.
+
+  Normal turn-end publication performs this inside ``chat_note.py`` after its
+  compare-and-swap succeeds. This tool-free helper remains useful to older
+  callers and operator repair paths.
+  """
+  await _run_note_tool_quiet(data_dir, chat_id, "--sync-title", 20)
+
+
+async def _deduce_chat_title(data_dir: str, chat_id: str) -> None:
+  """Deduce a concise tab name from a brand-new chat's first message.
+
+  Fired right after the first send starts its turn (chats_stream), so the
+  clever name lands while the turn is still streaming instead of the tab
+  showing the raw prompt until the first settled turn. Spawns the tool-free
+  titler (``chat_note.py --quick-title``), which PATCHes the title by_agent —
+  a manual rename always wins, and the settled-turn note publisher owns the
+  name afterwards. Best-effort: failure keeps the truncated-prompt fallback.
+  """
+  await _run_note_tool_quiet(data_dir, chat_id, "--quick-title", 90)
 
 
 # Fallback viewport for turns no shell initiated (cron, reflection,
