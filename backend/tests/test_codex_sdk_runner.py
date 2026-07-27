@@ -3048,3 +3048,59 @@ def test_run_codex_sdk_turn_fallback_does_not_start_capture_poller(
   ))
 
   assert result["error"] is None
+
+
+def test_run_codex_sdk_turn_resume_supplies_base_instructions(monkeypatch):
+  # On resume, the immutable per-chat constitution snapshot must be re-supplied
+  # as base_instructions — parity with the Claude runner re-sending its system
+  # prompt every turn — so a resumed Codex thread stays anchored to its prompt
+  # even after a server-side compaction, rather than trusting the thread's
+  # original instructions to survive.
+  completed_turn = SimpleNamespace(id="turn-r", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ]
+  thread = _FakeThread("resumed-thread", _FakeTurnHandle(notifications))
+  captured: dict = {}
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_a):
+      return None
+
+    async def thread_resume(self, session_id, **kwargs):
+      captured["session_id"] = session_id
+      captured["base_instructions"] = kwargs.get("base_instructions")
+      return thread
+
+    async def thread_start(self, *_a, **_k):
+      raise AssertionError("a resume turn must not fall back to thread_start")
+
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="continue",
+    session_id="resumed-thread",
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-resume",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    system_prompt="FROZEN CONSTITUTION SNAPSHOT",
+  ))
+
+  assert captured["session_id"] == "resumed-thread"
+  assert captured["base_instructions"] == "FROZEN CONSTITUTION SNAPSHOT"
+  assert result["session_id"] == "resumed-thread"
+  assert result["error"] is None

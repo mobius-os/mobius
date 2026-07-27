@@ -1900,17 +1900,29 @@ async def run_codex_sdk_turn(
 
   reasoning_summary = _reasoning_summary_setting(sdk)
 
+  # Compute the constitution snapshot for BOTH thread_start and thread_resume.
+  # chat.py passes the SAME immutable per-chat system_prompt snapshot on every
+  # turn (never live core.md), so re-supplying it on resume cannot drift a chat
+  # off its frozen prompt. The Claude runner re-sends its system prompt every
+  # turn because the transport otherwise wipes it; the Codex SDK now accepts
+  # base_instructions on thread_resume too (rust-v0.145.0-alpha.13+), so doing
+  # the same keeps an established Codex thread anchored to its constitution even
+  # after a server-side compaction, instead of trusting the thread's original
+  # instructions to survive.
   base_instructions: str | None = None
-  if session_id is None:
-    if system_prompt is not None:
-      base_instructions = system_prompt
-    else:
-      skill = get_skill_path()
-      if skill is not None:
-        try:
-          base_instructions = skill.read_text(encoding="utf-8")
-        except OSError:
-          base_instructions = None
+  if system_prompt is not None:
+    base_instructions = system_prompt
+  elif session_id is None:
+    # Fresh-thread fallback ONLY: read the live skill file when no snapshot was
+    # supplied. On resume we never read it — production always passes the
+    # per-chat snapshot, so a legacy resume caller without one should neither
+    # trigger a file read nor override the thread's existing instructions.
+    skill = get_skill_path()
+    if skill is not None:
+      try:
+        base_instructions = skill.read_text(encoding="utf-8")
+      except OSError:
+        base_instructions = None
 
   env = dict(base_env)
   env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
@@ -2085,6 +2097,7 @@ async def run_codex_sdk_turn(
           session_id,
           approval_mode=sdk["ApprovalMode"].auto_review,
           sandbox=_sandbox,
+          base_instructions=base_instructions,
           cwd=cwd,
           model=model,
         )
