@@ -309,6 +309,9 @@ def test_app_schedules_are_readable_by_app_tokens(client, auth):
     headers={"Authorization": f"Bearer {token}"},
   )
   assert r.status_code == 200, r.text
+  from datetime import datetime
+  now = datetime.now().astimezone()
+  server_offset = now.utcoffset()
   assert r.json() == [{
     "id": 1,
     "name": "News",
@@ -316,6 +319,10 @@ def test_app_schedules_are_readable_by_app_tokens(client, auth):
     "cron": "0 10 * * *",
     "job": "fetch.sh",
     "next_run": None,
+    "tz_name": now.tzname() or "UTC",
+    "tz_offset_minutes": (
+      int(server_offset.total_seconds() // 60) if server_offset else 0
+    ),
   }]
 
 

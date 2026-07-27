@@ -236,7 +236,12 @@ class AppScheduleUpdate(BaseModel):
 
 
 class AppScheduleOut(BaseModel):
-  """Read-only metadata for an installed app's recurring cron job."""
+  """Read-only metadata for an installed app's recurring cron job.
+
+  ``cron`` is interpreted in the server's local timezone; ``tz_name`` and
+  ``tz_offset_minutes`` declare which one that is so UIs can translate the
+  time honestly. Defaults describe the conventional UTC container.
+  """
 
   id: int
   name: str
@@ -244,6 +249,8 @@ class AppScheduleOut(BaseModel):
   cron: str
   job: str
   next_run: datetime | None = None
+  tz_name: str = "UTC"
+  tz_offset_minutes: int = 0
 
 
 class ConflictFile(BaseModel):

@@ -724,6 +724,12 @@ def list_app_schedules(
 ):
   """Returns read-only recurring app schedules visible to owners and apps."""
   live_crontab = _read_live_crontab()
+  # Cron entries run in the server's local timezone; report which one so
+  # schedule UIs can show the time in terms the owner understands.
+  now = datetime.now().astimezone()
+  offset = now.utcoffset()
+  tz_offset_minutes = int(offset.total_seconds() // 60) if offset else 0
+  tz_name = now.tzname() or "UTC"
   rows = []
   apps = (
     db.query(models.App)
@@ -742,6 +748,8 @@ def list_app_schedules(
       slug=app.slug,
       cron=cron,
       job=job,
+      tz_name=tz_name,
+      tz_offset_minutes=tz_offset_minutes,
     ))
   return rows
 
