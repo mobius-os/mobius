@@ -35,3 +35,17 @@ test('sent attachments render above message text in both message paths', () => {
   assert.ok(firstAttachments >= 0 && firstAttachments < blockContent)
   assert.ok(secondAttachments >= 0 && secondAttachments < plainText)
 })
+
+test('a pending composer image opens the same full-screen viewer as a sent one', () => {
+  const bar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
+
+  // The thumbnail must be a real button (keyboard + a11y reachable), not a
+  // click handler on the <img>, and must render the shared lightbox.
+  assert.match(bar, /className="chat__attach-card-thumb-button"/)
+  assert.match(bar, /setLightboxIndex\(/)
+  assert.match(bar, /<ImageLightbox/)
+  // Gallery paging across every attached image, so multi-attach can be checked
+  // without closing and reopening.
+  assert.match(bar, /items=\{gallery\}/)
+  ruleBody('.chat__attach-card-thumb-button')
+})

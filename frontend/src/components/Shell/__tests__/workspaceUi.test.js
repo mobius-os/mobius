@@ -324,7 +324,14 @@ test('the press state machine is pointer-captured, keyed, and classified by time
   assert.match(logoGestureSrc, /if \(pressRef\.current\) return \/\/ a press is already live/)
   // §4: pointerup classifies by elapsed + displacement, not liveness.
   assert.match(logoGestureSrc, /if \(swipeAllowed\(press\.pointerType\) && isSwipeRight\(dx, dy\)\) \{ onToggleMode\?\.\('swipe'\); endPress\(\{ suppressClick: true \}\); return \}/)
-  assert.match(logoGestureSrc, /if \(movedBeyondSlop\(dx, dy\)\) \{ endPress\(\{ suppressClick: true \}\); return \}/)
+  // Displacement rules out the mode FLIP only. Suppressing the click here as well
+  // duplicated the browser's own tap-vs-drag decision with a stricter 10px slop, so
+  // an ordinary drifting thumb tap on the brand silently failed to open the drawer.
+  // Abandoned presses (movement, cancel, lost capture) must leave the click alone.
+  assert.match(logoGestureSrc, /if \(movedBeyondSlop\(dx, dy\)\) \{ endPress\(\{ suppressClick: false \}\); return \}/)
+  assert.equal((logoGestureSrc.match(/endPress\(\{ suppressClick: false \}\)/g) || []).length, 5,
+    'the abandon paths (move-cancel, up-with-drift, pointercancel, lost capture) plus '
+    + 'the plain tap all leave the click to the browser')
   assert.match(logoGestureSrc, /if \(holdComplete\(elapsed\)\) \{ completeHold\(\); return \}/)
   // §6: a drawer-open from any path cancels a live hold.
   assert.match(logoGestureSrc, /if \(drawerOpen && pressRef\.current\) endPress/)
@@ -635,6 +642,21 @@ test('tab gesture rules stay local while the shell root owns page zoom', () => {
   assert.match(dragBinding, /downEvent\.target\?\.closest\?\.\('\[data-touch-drag-handle\]'\)/)
   assert.match(dragBinding, /touchMoveIntent\(dx, dy, touchIntentKind\)/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
+})
+
+// iOS/WebKit does not implement the touch-action pan-* keywords (WebKit 133112),
+// so `touch-action: pan-y pinch-zoom` is dropped there entirely and cannot
+// reserve the horizontal axis for swipe-to-close. The gesture must therefore be
+// CLAIMED: a non-passive touchmove listener that cancels the event once the pan
+// is recognized. React's own onTouch* props are passive at the root, so binding
+// through them silently made the drawer undismissable by swipe on iPhone.
+test('drawer swipe-to-close claims the gesture with a non-passive touchmove listener', () => {
+  assert.match(drawer, /addEventListener\('touchmove', move, \{ passive: false \}\)/)
+  assert.doesNotMatch(drawer, /onTouchMove=\{/,
+    "React's touch props are passive — preventDefault from them is a no-op")
+  // The claim itself, plus the sticky per-gesture ownership flag it reads.
+  assert.match(drawer, /if \(dx < 0 && isHorizontalSwipe\) panningRef\.current = true/)
+  assert.match(drawer, /if \(!panningRef\.current\) return\s*\n[\s\S]{0,400}?e\.preventDefault\(\)/)
 })
 
 test('an active overflowing chat title cycles once, then becomes idle', () => {
