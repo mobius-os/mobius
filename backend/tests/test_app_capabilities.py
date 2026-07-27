@@ -1,6 +1,8 @@
 """Owner-reviewable app capability contracts and install binding."""
 
 import json
+
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -205,6 +207,46 @@ def test_digest_mismatch_rejects_before_fetching_code_or_mutating(
   assert detail["code"] == "capability_changed"
   assert requested_urls == [base + "mobius.json"]
   assert db.query(models.App).count() == 0
+
+
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_initialization_waits_for_backend_readiness(
+  db, bypass_url_validation,
+):
+  """Bootstrap and interactive installs share launch ownership but not timing."""
+  from app.install import install_from_manifest
+
+  base = "https://capability.test/bootstrap-memory/"
+  manifest = _manifest(id="bootstrap-memory", name="Bootstrap Memory")
+  _contract, digest = contract_and_digest(manifest)
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "memory-core.md": (200, b"Retrieve memory only on demand."),
+    base + "memory-job.sh": (200, b"#!/bin/sh\nexit 0\n"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch("app.app_jobs.launch_app_job") as launch:
+    app, mode, warnings, *_rest = await install_from_manifest(
+      db,
+      base + "mobius.json",
+      None,
+      None,
+      source="bootstrap",
+      reviewed_capability_digest=digest,
+    )
+
+  assert mode == "install"
+  source_dir = Path(app.source_dir)
+  launch.assert_called_once_with(
+    app.id, source_dir / "memory-job.sh", source_dir,
+    wait_for_ready=True,
+  )
+  assert "initialization waiting for startup readiness" in warnings
 
 
 def test_matching_digest_is_persisted_with_explicit_system_identity(
