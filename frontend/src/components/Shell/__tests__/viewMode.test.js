@@ -25,10 +25,12 @@ function twoPanes() {
 
 test('first boot and fallback workspaces default to standard single-screen mode', () => {
   assert.equal(freshWorkspace().viewMode, 'single')
+  assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, '5')
   const firstBoot = paneModel.parseWorkspace(null, {
     fallbackTabs: [makeTab('chat', '5')],
   })
   assert.equal(firstBoot.viewMode, 'single')
+  assert.equal(paneModel.activeContentRoute(firstBoot).chatId, '5')
 })
 
 test('setViewMode sets the mode and is same-reference on a no-op', () => {

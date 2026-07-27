@@ -204,12 +204,14 @@ async function toggleAndSamplePaneChrome(page) {
   })
 }
 
-async function seedTabs(page, tabs, { viewMode } = {}) {
-  // Two-worlds: the strip is builder chrome only. Builder ('panes', the default)
-  // ALWAYS shows it — even at one tab — and single-screen NEVER does; there is no
+async function seedTabs(page, tabs, { viewMode = 'panes' } = {}) {
+  // Two-worlds: the strip is builder chrome only. This helper opts into Builder
+  // by default because every caller except the explicit single-mode case is a
+  // strip contract; production first boot now intentionally defaults to Standard.
+  // Builder always shows it — even at one tab — and single-screen never does; there is no
   // single-mode strip contract left to seed.
   let ws = paneModel.seedFromFlatTabs(tabs)
-  if (viewMode) ws = paneModel.setViewMode(ws, viewMode)
+  ws = paneModel.setViewMode(ws, viewMode)
   const workspace = paneModel.serializeWorkspace(ws)
   await page.addInitScript(([workspaceKey, workspaceRaw, legacyKey, t]) => {
     try {

@@ -37,6 +37,19 @@ test('normalize preserves property ABSENCE as the migration marker', () => {
   assert.equal('singleScreen' in n, false, 'absence survives normalize')
 })
 
+test('a fresh standard seed routes through its focused fallback until the slot initializes', () => {
+  const chat = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  assert.equal('singleScreen' in chat, false)
+  assert.equal(paneModel.activeContentRoute(chat).chatId, '5')
+
+  const app = paneModel.seedFromFlatTabs([makeTab('chat', '5'), makeTab('app', '42')])
+  assert.equal('singleScreen' in app, false)
+  assert.equal(paneModel.activeContentRoute(app).appId, 42)
+
+  const empty = paneModel.seedFromFlatTabs([])
+  assert.equal(paneModel.activeContentRoute(empty).chatId, null, 'an empty first boot starts at home')
+})
+
 test('normalize sanitizes a present slot; corrupt/settings → explicit null', () => {
   const base = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
   const withGarbage = paneModel.normalize({ ...base, singleScreen: { kind: 'wat', id: 9 } })

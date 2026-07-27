@@ -647,7 +647,13 @@ export function singleScreenRoute(ws) {
 // and the reload snapshot — so a single-world reload restores the slot, not the
 // builder focus (design: derive activeView from the current world).
 export function activeContentRoute(ws) {
-  return ws.viewMode === 'single' ? singleScreenRoute(ws) : focusedContentRoute(ws)
+  // An absent slot is the migration marker for a fresh/legacy workspace. The
+  // renderer already falls back to the focused pane in that state; route
+  // projection must do the same or first boot paints one surface while
+  // navigation reports the empty home screen. Once singleScreen is initialized
+  // (including explicit null), the independent Standard world is authoritative.
+  if (ws.viewMode === 'single' && 'singleScreen' in ws) return singleScreenRoute(ws)
+  return focusedContentRoute(ws)
 }
 
 // The string app ids that are the active tab of one of `visibleLeaves` (or every

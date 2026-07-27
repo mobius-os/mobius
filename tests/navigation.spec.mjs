@@ -1422,6 +1422,7 @@ function twoAppPanes() {
   let ws = paneModel.seedFromFlatTabs([
     { kind: 'app', id: PANE_APP_A }, { kind: 'app', id: PANE_APP_B },
   ])
+  ws = paneModel.setViewMode(ws, 'panes')
   ws = paneModel.moveTab(ws, `app:${PANE_APP_B}`, { root: true, edge: 'right' })
   return paneModel.focusPane(ws, 'p0')
 }
