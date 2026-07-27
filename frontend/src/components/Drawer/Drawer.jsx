@@ -921,6 +921,7 @@ const DrawerRow = memo(function DrawerRow({
   const slug = item.slug
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
+  const secondaryReleaseCleanupRef = useRef(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   // Separate two-step confirm for the app-only "Delete data" action, which
   // wipes stored data but keeps the app installed. Independent of
@@ -988,6 +989,10 @@ const DrawerRow = memo(function DrawerRow({
     }
   }, [renaming])
 
+  useEffect(() => () => {
+    secondaryReleaseCleanupRef.current?.()
+  }, [])
+
   function commitRename() {
     if (cancelingRef.current) {
       cancelingRef.current = false
@@ -1017,6 +1022,43 @@ const DrawerRow = memo(function DrawerRow({
     )
   }
 
+  function openRowMenu(event) {
+    event.preventDefault()
+    // Chromium raises mouse contextmenu on secondary-button DOWN. The matching
+    // UP is owned by beginSecondaryMenuPress below, which opens only after that
+    // release; do not mount the collision-flipped menu underneath a held pointer.
+    if (event.type === 'contextmenu' && secondaryReleaseCleanupRef.current) return
+    actions.toggleMenu(kind, id, true)
+  }
+
+  function beginSecondaryMenuPress(event) {
+    if (event.pointerType !== 'mouse' || event.button !== 2) return
+    event.preventDefault()
+    secondaryReleaseCleanupRef.current?.()
+    const pointerId = event.pointerId
+    let timer = null
+    const cleanup = () => {
+      window.removeEventListener('pointerup', onSecondaryPointerUp, true)
+      window.removeEventListener('pointercancel', cleanup, true)
+      window.removeEventListener('blur', cleanup, true)
+      if (timer !== null) clearTimeout(timer)
+      if (secondaryReleaseCleanupRef.current === cleanup) {
+        secondaryReleaseCleanupRef.current = null
+      }
+    }
+    const onSecondaryPointerUp = upEvent => {
+      if (upEvent.pointerId !== pointerId || upEvent.button !== 2) return
+      upEvent.preventDefault()
+      cleanup()
+      actions.toggleMenu(kind, id, true)
+    }
+    window.addEventListener('pointerup', onSecondaryPointerUp, true)
+    window.addEventListener('pointercancel', cleanup, true)
+    window.addEventListener('blur', cleanup, true)
+    timer = setTimeout(cleanup, 1500)
+    secondaryReleaseCleanupRef.current = cleanup
+  }
+
   return (
     <div className="drawer__row" ref={wrapRef}>
       <button
@@ -1028,7 +1070,18 @@ const DrawerRow = memo(function DrawerRow({
         // pane. Only present when the splits flag is on; a plain tap still opens
         // in the focused pane (the controller never arms without slop/hold).
         data-drag-key={WORKSPACE_SPLITS_ENABLED ? `${kind}:${id}` : undefined}
+        onPointerDown={beginSecondaryMenuPress}
         onClick={() => actions.select(kind, id)}
+        onDoubleClick={event => {
+          event.preventDefault()
+          actions.startRename(kind, id)
+        }}
+        onContextMenu={openRowMenu}
+        onKeyDown={event => {
+          if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+            openRowMenu(event)
+          }
+        }}
       >
         {/* Status dot. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's

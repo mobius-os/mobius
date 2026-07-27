@@ -109,7 +109,14 @@ MODEL_LABELS: dict[str, str] = {
 # the fallback, so adding a new model normally needs no entry. Add a row only
 # when a model supports a narrower, reordered, or extended effort scale; the
 # registry carries it to every shell/app picker as data.
-MODEL_EFFORT_LEVELS: dict[str, list[str]] = {}
+MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
+  # Keep the failure fallback aligned with Codex's shipped catalog. Live
+  # discovery below carries each model's own advertised scale, so future
+  # changes do not require a platform release.
+  "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+  "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+  "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+}
 
 # Runtime recovery defaults are intentionally independent of picker order.
 # Fable is presented first in the interactive picker, but a stale/mismatched
@@ -872,29 +879,51 @@ def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
 
 
 def _live_model_entries(
-  provider_id: str, live_ids: list[str]
+  provider_id: str, live_models: list[Any],
 ) -> list[dict[str, Any]]:
-  """Wraps live SDK/CLI model IDs as registry entries.
+  """Wrap live provider models as registry entries.
 
   Static KNOWN_MODELS is only the failure fallback. When a live fetch
   succeeds, the provider SDK/CLI is the source of truth; labels are a
-  cosmetic map with raw-ID fallback.
+  cosmetic map with raw-ID fallback. Providers may return plain IDs or
+  lightweight ``{id, effort_levels}`` entries; the latter lets Codex carry its
+  live model-specific effort scale without teaching the frontend model names.
   """
+  live_by_id: dict[str, dict[str, Any]] = {}
+  for raw in live_models:
+    if isinstance(raw, str):
+      live_by_id[raw] = {"id": raw}
+      continue
+    if not isinstance(raw, dict) or not isinstance(raw.get("id"), str):
+      continue
+    live_by_id[raw["id"]] = raw
+
   # The curated compatibility aliases are an owner-chosen product surface, not
   # a mirror of one catalog response. Keep them available even when a provider
   # temporarily omits an older-but-still-supported alias (Sonnet 4.6 / GPT-5.5)
   # from discovery, then append every genuinely live extra in provider order.
   preferred = DEFAULT_VISIBLE_MODEL_ORDER.get(provider_id, ())
   ordered_ids = list(preferred)
-  ordered_ids.extend(model_id for model_id in live_ids if model_id not in preferred)
+  ordered_ids.extend(
+    model_id for model_id in live_by_id if model_id not in preferred
+  )
   return [
     {
       "id": mid,
       "label": _label_for(mid),
       "provider": provider_id,
       "available": True,
-      **({"effort_levels": MODEL_EFFORT_LEVELS[mid]}
-         if mid in MODEL_EFFORT_LEVELS else {}),
+      **(
+        {"effort_levels": live_by_id[mid]["effort_levels"]}
+        if (
+          isinstance(live_by_id.get(mid, {}).get("effort_levels"), list)
+          and live_by_id[mid]["effort_levels"]
+        )
+        else (
+          {"effort_levels": MODEL_EFFORT_LEVELS[mid]}
+          if mid in MODEL_EFFORT_LEVELS else {}
+        )
+      ),
     }
     for mid in ordered_ids
   ]
@@ -1114,20 +1143,40 @@ def _codex_model_slug(entry: Any) -> str | None:
   return slug if isinstance(slug, str) else None
 
 
-def _codex_model_slugs_from_payload(payload: Any) -> list[str]:
-  """Extract ordered Codex model slugs from `codex debug models` JSON."""
+def _codex_model_entries_from_payload(payload: Any) -> list[dict[str, Any]]:
+  """Extract model IDs and supported effort values from raw Codex catalog JSON.
+
+  ``codex debug models`` is deliberately the loose-schema boundary: the
+  generated SDK can lag newly added effort enum members, while this parser can
+  preserve the catalog's strings and let the picker display them immediately.
+  """
   raw_models = payload.get("models") if isinstance(payload, dict) else payload
   if not isinstance(raw_models, list):
     return []
-  ids: list[str] = []
-  for entry in raw_models:
-    slug = _codex_model_slug(entry)
-    if slug:
-      ids.append(slug)
-  return ids
+  entries: list[dict[str, Any]] = []
+  for raw in raw_models:
+    model_id = _codex_model_slug(raw)
+    if not model_id:
+      continue
+    entry: dict[str, Any] = {"id": model_id}
+    levels = (
+      raw.get("supported_reasoning_levels")
+      if isinstance(raw, dict) else None
+    )
+    efforts = [
+      level.get("effort")
+      for level in (levels or [])
+      if isinstance(level, dict) and isinstance(level.get("effort"), str)
+    ]
+    if efforts:
+      entry["effort_levels"] = efforts
+    entries.append(entry)
+  return entries
 
 
-async def _fetch_codex_models_from_cli(data_dir: str) -> list[str]:
+async def _fetch_codex_models_from_cli(
+  data_dir: str,
+) -> list[dict[str, Any]]:
   """Fetch raw Codex model catalog JSON from `codex debug models`.
 
   This is the model-registry source (`_fetch_codex_models` delegates here). New
@@ -1162,13 +1211,13 @@ async def _fetch_codex_models_from_cli(data_dir: str) -> list[str]:
     payload = json.loads(stdout.decode("utf-8"))
   except (UnicodeDecodeError, json.JSONDecodeError) as exc:
     raise RuntimeError("codex debug models returned invalid JSON") from exc
-  ids = _codex_model_slugs_from_payload(payload)
-  if not ids:
+  entries = _codex_model_entries_from_payload(payload)
+  if not entries:
     raise RuntimeError("codex debug models returned no model slugs")
-  return ids
+  return entries
 
 
-async def _fetch_codex_models(data_dir: str) -> list[str]:
+async def _fetch_codex_models(data_dir: str) -> list[dict[str, Any]]:
   """Reads the Codex model registry from `codex debug models`.
 
   The Codex SDK's `AsyncCodex.models()` was the former primary source, but the
@@ -1192,9 +1241,12 @@ async def _fetch_codex_models(data_dir: str) -> list[str]:
 
 async def _fetch_provider_models(
   provider_id: str, data_dir: str
-) -> list[str]:
-  """Dispatches to the right fetcher. Returns raw IDs; the caller
-  wraps them with labels."""
+) -> list[Any]:
+  """Dispatch to the provider registry.
+
+  Claude returns raw IDs; Codex returns lightweight entries carrying the
+  model-specific effort scale advertised by its catalog.
+  """
   if provider_id == "claude":
     return await _fetch_claude_models(data_dir)
   if provider_id == "codex":

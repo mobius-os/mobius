@@ -4,6 +4,8 @@ import { MemoBlock, BlockToken, MathBlock } from './blocks.jsx'
 import { mathTokens } from './mathTokens.js'
 import { groupMarkdownImages } from './imageGallery.js'
 import ImageGallery from './ImageGallery.jsx'
+import AppLinkCard from './AppLinkCard.jsx'
+import { appLinkCardFromParagraph } from './appLinkCard.js'
 import '../markdown.css'
 
 /**
@@ -42,6 +44,10 @@ export function ProgressiveMarkdown({
         aria-atomic={isStreaming ? 'false' : undefined}
       >
         {tokens.map((token, i) => {
+          const appCard = appLinkCardFromParagraph(token, window.location.href)
+          if (appCard) {
+            return <AppLinkCard key={i} card={appCard} onInternalNav={onInternalNav} />
+          }
           if (token.type === 'blockKatex') {
             return <MathBlock key={i} tex={token.text} />
           }
@@ -73,6 +79,10 @@ export function StandardMarkdown({ text, onInternalNav }) {
   return (
     <div className="standard-markdown md-blocks">
       {tokens.map((token, i) => {
+        const appCard = appLinkCardFromParagraph(token, window.location.href)
+        if (appCard) {
+          return <AppLinkCard key={i} card={appCard} onInternalNav={onInternalNav} />
+        }
         if (token.type === 'blockKatex') {
           return <MathBlock key={i} tex={token.text} />
         }

@@ -780,7 +780,13 @@ def test_fetch_codex_models_reads_cli_catalog_not_sdk(tmp_path, monkeypatch):
 
   captured = {}
   catalog = json.dumps({"models": [
-    {"slug": "gpt-5.6-sol"}, {"slug": "gpt-5.6-terra"},
+    {
+      "slug": "gpt-5.6-sol",
+      "supported_reasoning_levels": [
+        {"effort": "low"}, {"effort": "max"}, {"effort": "ultra"},
+      ],
+    },
+    {"slug": "gpt-5.6-terra"},
   ]}).encode()
 
   class FakeProc:
@@ -797,9 +803,15 @@ def test_fetch_codex_models_reads_cli_catalog_not_sdk(tmp_path, monkeypatch):
   monkeypatch.setattr(providers.shutil, "which", lambda _name: "/usr/bin/codex")
   monkeypatch.setattr(providers.asyncio, "create_subprocess_exec", fake_exec)
 
-  ids = asyncio.run(providers._fetch_codex_models(str(tmp_path)))
+  entries = asyncio.run(providers._fetch_codex_models(str(tmp_path)))
 
-  assert ids == ["gpt-5.6-sol", "gpt-5.6-terra"]
+  assert entries == [
+    {
+      "id": "gpt-5.6-sol",
+      "effort_levels": ["low", "max", "ultra"],
+    },
+    {"id": "gpt-5.6-terra"},
+  ]
   assert captured["args"][1:3] == ("debug", "models")
   assert captured["env"]["CODEX_HOME"] == str(codex_home)
 
@@ -952,6 +964,20 @@ def test_live_model_entries_float_curated_defaults_in_requested_order():
     "claude-sonnet-4-6",
     "claude-future-model",
   ]
+
+
+def test_live_model_entries_carry_provider_effort_metadata():
+  from app import providers
+
+  entries = providers._live_model_entries(
+    "codex",
+    [{
+      "id": "gpt-5.6-sol",
+      "effort_levels": ["low", "medium", "max", "ultra"],
+    }],
+  )
+  sol = next(entry for entry in entries if entry["id"] == "gpt-5.6-sol")
+  assert sol["effort_levels"] == ["low", "medium", "max", "ultra"]
 
 
 def test_resolve_displayed_models_keeps_selected_even_when_hidden():
