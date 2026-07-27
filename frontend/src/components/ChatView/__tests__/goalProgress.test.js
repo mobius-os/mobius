@@ -10,6 +10,7 @@ import {
 
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const progressRail = readFileSync(new URL('../ProgressRail.jsx', import.meta.url), 'utf8')
+const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
 test('goalObjectiveFromText follows the backend command boundary', () => {
   assert.equal(goalObjectiveFromText('/goal Ship the review'), 'Ship the review')
@@ -103,6 +104,11 @@ test('ChatView binds goal state to the existing run-start and turn-end lifecycle
   assert.match(progressRail, /chat__progress-rail/)
   assert.match(progressRail, /aria-expanded=\{expanded\}/)
   assert.match(progressRail, /label\.scrollWidth > step\.clientWidth/)
+  assert.match(
+    chatCss,
+    /\.chat__foot \.chat__progress-step--toggle[\s\S]*?\{ pointer-events: auto; \}/,
+    'an expandable step must opt back into pointer input inside the transparent footer',
+  )
   assert.doesNotMatch(progressRail, /goal|build/i,
     'the shared rail should not encode one producer’s domain')
 })

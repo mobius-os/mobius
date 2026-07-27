@@ -1725,6 +1725,7 @@
 .chat__foot .chat__question-nudge,
 .chat__foot .chat__resume-nudge,
 .chat__foot .chat__open-app,
+.chat__foot .chat__progress-step--toggle,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
 
