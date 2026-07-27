@@ -474,7 +474,19 @@ export default function useWorkspaceDrag({
           if (sourceKind === 'tab' && openTabMenuAtRef.current) {
             openTabMenuAtRef.current(ev.clientX, ev.clientY, tabFromKey(key), paneId)
           } else if (sourceKind === 'drawer') {
-            srcEl.closest('.drawer__row')?.querySelector('.drawer__more')?.click()
+            // Re-enter the row's real context-menu boundary instead of
+            // programmatically clicking its menu trigger. `contextmenu` is the
+            // one semantic path shared with desktop right-click and keyboard
+            // access, so touch hold cannot drift when the trigger composition
+            // changes.
+            srcEl.dispatchEvent(new window.MouseEvent('contextmenu', {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              button: 2,
+              clientX: ev.clientX,
+              clientY: ev.clientY,
+            }))
           }
         }
         if (!armed) {
