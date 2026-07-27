@@ -72,7 +72,7 @@ from typing import Any, Callable
 from app.codex_appserver import _extract_bash_command
 from app.providers import get_skill_path
 from app.runtime_types import RunnerResult
-from app.usage_metrics import normalize_codex_usage
+from app.usage_metrics import codex_cost_usd, normalize_codex_usage
 from app.runner_registry import RunnerKind, registry
 from app.tool_sources import normalize_tool_sources
 from app.memory_observability import record_memory_checkpoint_once
@@ -1981,9 +1981,14 @@ async def run_codex_sdk_turn(
     """Attaches whatever the turn spent before it ended, however it ended."""
     if final_token_usage is not None:
       result["usage"] = _model_dump(final_token_usage)
-      result["usage_metrics"] = normalize_codex_usage(
-        first_token_usage, final_token_usage,
-      )
+      metrics = normalize_codex_usage(first_token_usage, final_token_usage)
+      result["usage_metrics"] = metrics
+      # Codex reports tokens but no dollar cost; derive it from the rate card so
+      # a Codex chat records real spend like a Claude chat instead of always
+      # $0. Only overrides the caller's None when a priced model + usage exist.
+      cost = codex_cost_usd(model, metrics)
+      if cost is not None:
+        result["cost_usd"] = cost
     return result
 
   def aborted_result() -> RunnerResult:
