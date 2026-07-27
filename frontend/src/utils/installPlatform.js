@@ -1,161 +1,138 @@
-// Platform-aware install-instruction helpers.
+// Platform-aware instructions for installing the main Möbius shell.
 //
-// Mirrors the logic baked into `backend/app/routes/standalone.py`'s
-// per-app standalone shell, but for the main Möbius shell. The two
-// can't share source (standalone is Python-rendered HTML, this is an
-// ES module the bundler picks up), but they MUST stay logically in
-// sync — the walkthrough's "Add to home screen" step and the sub-app
-// install card should agree on which arrow points where on a given
-// device.
-//
-// UA-based, fragile-but-fine: we use this for hint copy only. If we
-// guess wrong on an edge case the browser still has its own menu.
-// Feature-detect when possible (matchMedia, navigator.standalone).
+// UA detection is intentionally limited to hint copy. Native install
+// availability is feature-detected separately through `beforeinstallprompt`;
+// if a browser changes its menu, Möbius still leaves installation to the
+// browser rather than pretending a guessed instruction is an API.
 
-export function detectInstallPlatform(ua) {
-  // Default to navigator.userAgent only if we're in a browser. Tests
-  // and any future SSR path can pass an explicit UA without crashing
-  // on undefined `navigator`. The `window.MSStream` check is the same
-  // — only consult it when window exists.
+export function detectInstallPlatform(ua, maxTouchPoints) {
   if (ua === undefined) {
     ua = typeof navigator !== 'undefined' ? (navigator.userAgent || '') : ''
   }
+  if (maxTouchPoints === undefined) {
+    maxTouchPoints = typeof navigator !== 'undefined'
+      ? (navigator.maxTouchPoints || 0)
+      : 0
+  }
   const hasWindow = typeof window !== 'undefined'
-  const ios = /iPad|iPhone|iPod/.test(ua) && !(hasWindow && window.MSStream)
-  // Every iOS browser uses WebKit (Apple gates engine choice until
-  // iOS 17.4 EU). CriOS = Chrome on iOS, FxiOS = Firefox on iOS, etc.
+  // iPadOS can request a desktop UA and identify as Macintosh. Touch points
+  // distinguish that mode from a real Mac for install-copy purposes.
+  const ipadDesktop = /Macintosh/.test(ua) && maxTouchPoints > 1
+  const ios = (/iPad|iPhone|iPod/.test(ua) || ipadDesktop) &&
+    !(hasWindow && window.MSStream)
   const iosNonSafari = ios && /CriOS|FxiOS|EdgiOS|OPiOS|GSA/.test(ua)
   const iosSafari = ios && !iosNonSafari
   const android = /Android/.test(ua)
   const samsung = /SamsungBrowser/.test(ua)
   const edge = /\bEdg\//.test(ua)
   const firefox = /Firefox|FxiOS/.test(ua)
-  // Chromium-family install-capable browsers — Chrome, Edge,
-  // Samsung Internet. CriOS is excluded because Apple forces it to
-  // be WebKit-engined on iOS.
+  const windows = /Windows/.test(ua)
+  const mac = /Macintosh|Mac OS X/.test(ua) && !ios
+  const desktopSafari = !ios && /Safari/.test(ua) &&
+    !/Chrome|Chromium|CriOS|Edg|OPR|Firefox/.test(ua)
   const chromium = !ios && (
     (/Chrome/.test(ua) && !/Edge\//.test(ua)) || edge || samsung
   )
   const desktop = !ios && !android
+
   return {
     ua,
     ios, iosSafari, iosNonSafari,
     android, chromium, edge, firefox, samsung, desktop,
+    desktopSafari, mac, windows,
     // `beforeinstallprompt` can fire here.
     bipCapable: chromium,
-    // PWA install is possible at all on this platform.
-    installPossible: iosSafari || chromium || (firefox && !ios),
+    // iOS 16.4+ allows third-party browsers to expose Add to Home Screen.
+    // Firefox desktop currently supports web apps on Windows only.
+    installPossible: ios || chromium || desktopSafari ||
+      (firefox && (android || windows)),
   }
 }
 
-// Returns rendering hints for the "Add to home screen" walkthrough
-// step. Each shape:
-//   {
-//     title:     short heading
-//     body:      one or two sentences explaining the path
-//     ctaLabel:  the primary-action button label
-//     arrowDir:  'up' | 'down' | null — for any directional UI accent
-//     unsupported: true on platforms where install is impossible
-//                  (renders an alternate CTA, e.g. copy-link)
-//   }
-//
-// The walkthrough overlay doesn't need to know about BIP — by the
-// time the user reaches step 2 they're on a Möbius origin where the
-// real install action is "tap your browser's menu" (Möbius can't
-// reliably auto-fire prompt() at walkthrough-step-2 time, especially
-// for first-time visitors who haven't built engagement yet). The
-// honest copy matches that reality.
-//
-// `standaloneMode` (optional, default false) flags that the caller is
-// ALREADY running inside an installed standalone PWA. On iOS Safari the
-// Share button only exists in the in-browser chrome; a standalone
-// launch has none, so the "tap the Share button below" copy would point
-// at an absent control. When standaloneMode is true on iOS Safari we
-// advise opening the page in Safari proper instead. Default-false keeps
-// the return shape and copy identical for every existing caller — an
-// unset param means "behave exactly as before"; callers that care detect
-// navigator.standalone===true themselves and pass it in.
+// Manual fallback for browsers that do not expose `beforeinstallprompt`.
+// Native prompt availability always wins in the UI; these instructions keep
+// iOS, Android, and desktop useful without it.
 export function installCopyForPlatform(
   p = detectInstallPlatform(),
   standaloneMode = false,
 ) {
-  if (p.iosSafari) {
-    if (standaloneMode) {
-      // Already launched standalone — the Share button isn't on screen.
-      // Tell the user to open the page in Safari, where it lives.
-      return {
-        title: 'Open Möbius in Safari',
-        body: 'You’re already in the installed app, so the Share button isn’t shown here. Open this page in Safari to add another app to your home screen.',
-        ctaLabel: 'Got it',
-        arrowDir: null,
-      }
-    }
+  if (standaloneMode) {
     return {
-      title: 'Add Möbius to your home screen',
-      body: 'Tap the Share button below (the square with the up-arrow), then choose Add to Home Screen.',
+      title: 'Möbius is installed',
+      summary: 'It already opens as an app on this device.',
+      body: 'You’re already using the installed app.',
       ctaLabel: 'Got it',
-      arrowDir: 'down',
     }
   }
-  if (p.iosNonSafari) {
+
+  if (p.ios) {
     return {
-      title: 'Open Möbius in Safari',
-      body: 'On iPhone and iPad, only Safari can install web apps. Copy this page’s link and open it in Safari, then tap Share → Add to Home Screen.',
-      ctaLabel: 'Copy link',
-      arrowDir: null,
-      unsupported: true,
+      title: 'Add Möbius to your Home Screen',
+      summary: 'Use Share, then Add to Home Screen.',
+      body: 'Open your browser’s Share menu, choose Add to Home Screen, keep Open as Web App turned on, then tap Add.',
+      ctaLabel: 'Show me',
     }
   }
+
   if (p.firefox && p.android) {
     return {
-      title: 'Add Möbius to your home screen',
-      body: 'Tap the ⋮ menu at the top right, then choose Install.',
-      ctaLabel: 'Got it',
-      arrowDir: 'up',
+      title: 'Install Möbius',
+      summary: 'Use the Firefox menu to add it.',
+      body: 'Open the Firefox menu, tap Install, then add Möbius to your Home Screen.',
+      ctaLabel: 'Show me',
     }
   }
-  if (p.firefox && p.desktop) {
+
+  if (p.firefox && p.windows) {
     return {
-      title: 'Install isn’t supported in Firefox',
-      body: 'Firefox on desktop doesn’t install web apps. Open Möbius in Chrome or Edge to add it as a desktop app, or just bookmark it.',
-      ctaLabel: 'Got it',
-      arrowDir: null,
-      unsupported: true,
+      title: 'Install Möbius',
+      summary: 'Pin it to your Windows taskbar.',
+      body: 'Click the web-app button in the Firefox address bar. Möbius will open in its own window and appear in your taskbar and Start menu.',
+      ctaLabel: 'Show me',
     }
   }
+
   if (p.chromium && p.android) {
     return {
-      title: 'Add Möbius to your home screen',
-      body: 'Tap the ⋮ menu in the address bar, then Install app (or Add to Home screen).',
-      ctaLabel: 'Got it',
-      arrowDir: 'up',
+      title: 'Install Möbius',
+      summary: 'Use your browser menu to add it.',
+      body: 'Open the browser menu, then choose Install app or Add to Home screen.',
+      ctaLabel: 'Show me',
     }
   }
+
   if (p.chromium && p.desktop) {
     return {
       title: 'Install Möbius',
-      body: 'Click the install icon on the right side of the address bar, or open the ⋮ menu and choose Install Möbius.',
-      ctaLabel: 'Got it',
-      arrowDir: 'up',
+      summary: 'Keep it in your dock or taskbar.',
+      body: 'Click the install icon in the address bar, or open the browser menu and choose Install Möbius.',
+      ctaLabel: 'Show me',
     }
   }
-  return {
-    title: 'Add Möbius to your home screen',
-    body: 'Look for an Install or Add to Home Screen option in your browser’s menu (usually ⋮ or ⋯).',
-    ctaLabel: 'Got it',
-    arrowDir: null,
-  }
-}
 
-// Attempts to copy the current URL to the clipboard. Used by the
-// iOS-non-Safari path where the only escape hatch is paste-into-
-// Safari. Returns true on success, false on any clipboard failure
-// (typically lack of permission or the page not being foregrounded).
-export async function copyOriginUrl() {
-  try {
-    await navigator.clipboard.writeText(window.location.href)
-    return true
-  } catch {
-    return false
+  if (p.desktopSafari && p.mac) {
+    return {
+      title: 'Add Möbius to your Dock',
+      summary: 'Open it like a Mac app.',
+      body: 'In Safari, open the File menu and choose Add to Dock.',
+      ctaLabel: 'Show me',
+    }
+  }
+
+  if (p.firefox && p.desktop) {
+    return {
+      title: 'Keep Möbius close',
+      summary: 'This Firefox version cannot install web apps.',
+      body: 'Open Möbius in Chrome, Edge, or Safari to install it as an app, or bookmark this page in Firefox.',
+      ctaLabel: 'Options',
+      unsupported: true,
+    }
+  }
+
+  return {
+    title: 'Install Möbius',
+    summary: 'Keep it one click away.',
+    body: 'Look for Install, Add to Home Screen, or Add to Dock in your browser’s address bar or menu.',
+    ctaLabel: 'Show me',
   }
 }

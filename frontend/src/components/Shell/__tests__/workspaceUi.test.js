@@ -122,6 +122,8 @@ test('the first-run walkthrough stays short and action-first', () => {
   assert.match(walkthrough, /Your Möbius is ready/)
   assert.match(walkthrough, /Connect an agent/)
   assert.match(walkthrough, /Open the App Store/)
+  assert.match(walkthrough, /Keep Möbius close/)
+  assert.match(walkthrough, /requestInstall/)
   assert.match(walkthrough, /I’ll explore/)
   assert.match(walkthrough, /mobius:walkthrough-completed/)
 })

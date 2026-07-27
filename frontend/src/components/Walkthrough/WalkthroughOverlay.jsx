@@ -1,12 +1,32 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { Download } from 'lucide-react'
 import { api } from '../../api/client.js'
 import { ownerQueries } from '../../hooks/queries.js'
+import {
+  getInstallPromptSnapshot,
+  requestInstall,
+  subscribeInstallPrompt,
+} from '../../lib/installPrompt.js'
+import {
+  detectInstallPlatform,
+  installCopyForPlatform,
+} from '../../utils/installPlatform.js'
 import './WalkthroughOverlay.css'
 
 export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreApps }) {
   const queryClient = useQueryClient()
   const closingRef = useRef(false)
+  const [platform] = useState(() => detectInstallPlatform())
+  const [installCopy] = useState(() => installCopyForPlatform(platform))
+  const [showInstallHelp, setShowInstallHelp] = useState(false)
+  const [installBusy, setInstallBusy] = useState(false)
+  const [installFeedback, setInstallFeedback] = useState('')
+  const installState = useSyncExternalStore(
+    subscribeInstallPrompt,
+    getInstallPromptSnapshot,
+    getInstallPromptSnapshot,
+  )
 
   function finish() {
     if (closingRef.current) return
@@ -25,16 +45,41 @@ export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreAp
     action?.()
   }
 
+  async function handleInstall() {
+    setInstallFeedback('')
+    if (installState !== 'ready') {
+      setShowInstallHelp((visible) => !visible)
+      return
+    }
+
+    setInstallBusy(true)
+    const result = await requestInstall()
+    setInstallBusy(false)
+    if (result.outcome === 'accepted') {
+      finish()
+      return
+    }
+
+    setShowInstallHelp(true)
+    setInstallFeedback(
+      result.outcome === 'dismissed'
+        ? 'Not installed. You can use the browser menu whenever you’re ready.'
+        : 'The browser prompt wasn’t available. Use the steps below instead.',
+    )
+  }
+
   useEffect(() => {
-    const standalone =
-      (typeof window !== 'undefined' &&
-        window.matchMedia &&
-        window.matchMedia('(display-mode: standalone)').matches) ||
-      (typeof navigator !== 'undefined' && navigator.standalone === true)
-    if (standalone) finish()
-    // finish is guarded and this should run only once on mount.
+    if (installState === 'installed') finish()
+    // The event can arrive after mount; finish is guarded across rerenders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [installState])
+
+  const nativeInstallReady = installState === 'ready'
+  const installButtonLabel = installBusy
+    ? 'Opening…'
+    : (nativeInstallReady
+        ? 'Install'
+        : (showInstallHelp ? 'Hide' : installCopy.ctaLabel))
 
   return (
     <aside
@@ -59,6 +104,40 @@ export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreAp
         You can explore now. Add an agent only when you want chats to act and
         build on your behalf.
       </p>
+      <section className="wt__install" aria-labelledby="wt-install-title">
+        <span className="wt__install-icon" aria-hidden="true">
+          <Download size={18} strokeWidth={2} />
+        </span>
+        <div className="wt__install-copy">
+          <h3 id="wt-install-title">Keep Möbius close</h3>
+          <p>
+            {nativeInstallReady
+              ? 'Install it on this device for a full-screen, one-tap launch.'
+              : installCopy.summary}
+          </p>
+        </div>
+        <button
+          type="button"
+          className="wt__install-btn"
+          onClick={handleInstall}
+          disabled={installBusy}
+          aria-expanded={nativeInstallReady ? undefined : showInstallHelp}
+          aria-controls={nativeInstallReady ? undefined : 'wt-install-help'}
+        >
+          {installButtonLabel}
+        </button>
+        {showInstallHelp && (
+          <div className="wt__install-help" id="wt-install-help">
+            <strong>{installCopy.title}</strong>
+            <span>{installCopy.body}</span>
+          </div>
+        )}
+        {installFeedback && (
+          <p className="wt__install-feedback" role="status">
+            {installFeedback}
+          </p>
+        )}
+      </section>
       <div className="wt__paths">
         <button
           type="button"
