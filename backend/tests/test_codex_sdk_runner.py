@@ -3048,3 +3048,117 @@ def test_run_codex_sdk_turn_fallback_does_not_start_capture_poller(
   ))
 
   assert result["error"] is None
+
+
+def test_run_codex_sdk_turn_resume_supplies_base_instructions(monkeypatch):
+  # On resume, the immutable per-chat constitution snapshot must be re-supplied
+  # as base_instructions — parity with the Claude runner re-sending its system
+  # prompt every turn — so a resumed Codex thread stays anchored to its prompt
+  # even after a server-side compaction, rather than trusting the thread's
+  # original instructions to survive.
+  completed_turn = SimpleNamespace(id="turn-r", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ]
+  thread = _FakeThread("resumed-thread", _FakeTurnHandle(notifications))
+  captured: dict = {}
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_a):
+      return None
+
+    async def thread_resume(self, session_id, **kwargs):
+      captured["session_id"] = session_id
+      captured["base_instructions"] = kwargs.get("base_instructions")
+      return thread
+
+    async def thread_start(self, *_a, **_k):
+      raise AssertionError("a resume turn must not fall back to thread_start")
+
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="continue",
+    session_id="resumed-thread",
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-resume",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    system_prompt="FROZEN CONSTITUTION SNAPSHOT",
+  ))
+
+  assert captured["session_id"] == "resumed-thread"
+  assert captured["base_instructions"] == "FROZEN CONSTITUTION SNAPSHOT"
+  assert result["session_id"] == "resumed-thread"
+  assert result["error"] is None
+# --- Structured rate-limit reset extraction --------------------------------
+# Mirrors the installed SDK shapes:
+# - RateLimitSnapshot: openai_codex/generated/v2_all.py:6724
+#   (primary/secondary: RateLimitWindow|None, rate_limit_reached_type: Enum|None)
+# - RateLimitWindow: v2_all.py:2928 (resets_at: int|None, used_percent: int)
+# The runner reads these off AccountRateLimitsUpdatedNotification so a Codex
+# quota kill parks on the provider's real reset time instead of the 30-minute
+# text-parse fallback (chat._limit_park_fields), and is detected structurally.
+
+
+def _window(resets_at, used_percent):
+  return SimpleNamespace(resets_at=resets_at, used_percent=used_percent)
+
+
+def test_extract_rate_limit_reset_picks_most_constrained_window():
+  # The binding limit is the fullest window; its reset is the one worth waiting
+  # for even though the other window resets sooner.
+  snapshot = SimpleNamespace(
+    primary=_window(1_800_000_000, 40),
+    secondary=_window(1_800_009_999, 97),
+    rate_limit_reached_type="rate_limit_reached",
+  )
+  reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
+  assert reset == 1_800_009_999
+  assert reached is True
+
+
+def test_extract_rate_limit_reset_not_reached_when_type_none():
+  # rate_limit_reached_type has no "ok" member, so None reliably means the cap
+  # was not hit — even while windows still report their reset schedule.
+  snapshot = SimpleNamespace(
+    primary=_window(1_800_000_000, 30),
+    secondary=None,
+    rate_limit_reached_type=None,
+  )
+  reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
+  assert reset == 1_800_000_000
+  assert reached is False
+
+
+def test_extract_rate_limit_reset_skips_windows_without_reset():
+  # A window missing resets_at must never be chosen even if it is the fullest.
+  snapshot = SimpleNamespace(
+    primary=_window(None, 99),
+    secondary=_window(1_800_005_000, 55),
+    rate_limit_reached_type="workspace_owner_usage_limit_reached",
+  )
+  reset, reached = codex_sdk_runner._extract_rate_limit_reset(snapshot)
+  assert reset == 1_800_005_000
+  assert reached is True
+
+
+def test_extract_rate_limit_reset_handles_empty_and_none():
+  assert codex_sdk_runner._extract_rate_limit_reset(None) == (None, False)
+  empty = SimpleNamespace(
+    primary=None, secondary=None, rate_limit_reached_type=None
+  )
+  assert codex_sdk_runner._extract_rate_limit_reset(empty) == (None, False)
