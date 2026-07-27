@@ -11,6 +11,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -5159,18 +5160,25 @@ def viewport_env(viewport: dict | None) -> dict[str, str]:
   """Returns the VIEWPORT_* env vars for an agent turn.
 
   The React shell sends `{width, height}` with every message POST and
-  agent-screenshot.sh hard-requires both vars (deliberately strict — it
-  is the guard that surfaced the missing-viewport bug). Shell-less turns
-  have no sender, so a missing or malformed viewport falls back to the
-  documented default instead of leaving the vars unset and failing every
-  screenshot in those contexts.
+  browser tooling requires integer CSS pixels even when layout APIs report
+  fractional pane geometry. Normalize the pair here so every provider gets
+  the same executable viewport contract. Shell-less turns have no sender, so
+  a missing or malformed viewport falls back to the documented default instead
+  of leaving the vars unset and failing every screenshot in those contexts.
   """
   vp_w = (viewport or {}).get("width")
   vp_h = (viewport or {}).get("height")
-  if not (vp_w and vp_h):
-    vp_w = DEFAULT_VIEWPORT_WIDTH
-    vp_h = DEFAULT_VIEWPORT_HEIGHT
-  return {"VIEWPORT_WIDTH": str(vp_w), "VIEWPORT_HEIGHT": str(vp_h)}
+  try:
+    dimensions = (float(vp_w), float(vp_h))
+  except (TypeError, ValueError):
+    dimensions = ()
+  if (
+    len(dimensions) != 2
+    or not all(math.isfinite(value) and value > 0 for value in dimensions)
+  ):
+    dimensions = (DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT)
+  width, height = (max(1, round(value)) for value in dimensions)
+  return {"VIEWPORT_WIDTH": str(width), "VIEWPORT_HEIGHT": str(height)}
 
 
 def _skill_context_value(value: object, limit: int) -> str:

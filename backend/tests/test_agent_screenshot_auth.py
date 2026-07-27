@@ -12,6 +12,18 @@ SHELL = Path(__file__).parents[2] / "frontend" / "src" / "components" / "Shell" 
 STANDALONE = Path(__file__).parents[1] / "app" / "routes" / "standalone.py"
 
 
+def _current_shell_entry() -> str:
+  import re
+
+  index = SCRIPT.parents[2] / "frontend" / "dist" / "index.html"
+  match = re.search(
+    r'<script[^>]+src="([^"]*/assets/(index-[^"]+\.js))"',
+    index.read_text(encoding="utf-8"),
+  )
+  assert match
+  return match.group(2)
+
+
 def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
   marker = tmp_path / "screenshot-called"
   browser = tmp_path / "agent-browser"
@@ -21,7 +33,11 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
     "case \"$1\" in\n"
     "  eval)\n"
     "    if [ \"$2\" = \"--stdin\" ]; then cat >/dev/null; exit 0; fi\n"
-    "    printf '%s\\n' \"${FAKE_AUTH_OK:-false}\"\n"
+    "    case \"$2\" in\n"
+    "      *src.split*) printf '%s\\n' \"${FAKE_LOADED_ASSET:-none}\" ;;\n"
+    "      *serviceWorker*) printf '%s\\n' true ;;\n"
+    "      *) printf '%s\\n' \"${FAKE_AUTH_OK:-false}\" ;;\n"
+    "    esac\n"
     "    ;;\n"
     "  screenshot)\n"
     "    : > \"$2\"\n"
@@ -37,8 +53,11 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
 
 def _run_helper(
   tmp_path: Path, *, auth_ok: bool, route: str = "/chat/example",
-  viewport_width: int = 412, viewport_height: int = 915,
+  viewport_width: int | float | str = 412,
+  viewport_height: int | float | str = 915,
   content_only: bool = False,
+  preserve_cache: bool = False,
+  loaded_asset: str | None = None,
 ) -> tuple[subprocess.CompletedProcess, Path, Path, Path]:
   _, marker = _fake_browser(tmp_path)
   output = tmp_path / "shot.png"
@@ -51,12 +70,15 @@ def _run_helper(
     "VIEWPORT_WIDTH": str(viewport_width),
     "VIEWPORT_HEIGHT": str(viewport_height),
     "FAKE_AUTH_OK": "true" if auth_ok else "false",
+    "FAKE_LOADED_ASSET": loaded_asset or _current_shell_entry(),
     "FAKE_BROWSER_LOG": str(browser_log),
     "FAKE_SCREENSHOT_MARKER": str(marker),
   }
   args = ["bash", str(SCRIPT)]
   if content_only:
     args.append("--content-only")
+  if preserve_cache:
+    args.append("--preserve-cache")
   args.extend([route, str(output)])
   result = subprocess.run(
     args,
@@ -91,6 +113,63 @@ def test_helper_captures_after_authentication_is_confirmed(tmp_path: Path):
   screenshot_index = next(i for i, command in enumerate(commands) if command.startswith("screenshot "))
   assert settle_index < auth_index < screenshot_index
   assert all("test-token" not in command for command in commands)
+
+
+def test_default_capture_detaches_pwa_state_and_verifies_current_shell(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(tmp_path, auth_ok=True)
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  reset_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("eval ") and "serviceWorker" in command
+  )
+  target_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("open http://mobius.test/chat/example?__mobius_capture=")
+  )
+  build_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("eval ") and "src.split" in command
+  )
+  screenshot_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("screenshot ")
+  )
+  detach_index = commands.index("open about:blank")
+  assert reset_index < detach_index < target_index < build_index < screenshot_index
+
+
+def test_stale_shell_fails_instead_of_capturing_misleading_evidence(tmp_path: Path):
+  result, output, marker, _ = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    loaded_asset="index-stale.js",
+  )
+
+  assert result.returncode != 0
+  assert "stale shell loaded" in result.stderr
+  assert not output.exists()
+  assert not marker.exists()
+
+
+def test_preserve_cache_mode_is_explicit_and_skips_freshness_reset(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    preserve_cache=True,
+    loaded_asset="index-stale.js",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  assert "open http://mobius.test/chat/example" in commands
+  assert not any("serviceWorker" in command for command in commands)
+  assert not any("src.split" in command for command in commands)
 
 
 def test_app_capture_waits_for_frame_mounted_state(tmp_path: Path):
@@ -138,6 +217,46 @@ def test_desktop_capture_does_not_wait_for_modal_drawer(tmp_path: Path):
   )
 
 
+def test_fractional_shell_viewport_is_rounded_for_agent_browser(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    viewport_width=1680,
+    viewport_height=956.6666870117188,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  assert "set viewport 1680 957" in browser_log.read_text(
+    encoding="utf-8",
+  ).splitlines()
+
+
+def test_cold_capture_opens_browser_before_configuring_viewport(tmp_path: Path):
+  result, _, _, browser_log = _run_helper(tmp_path, auth_ok=True)
+
+  assert result.returncode == 0, result.stderr
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  assert commands.index("open http://mobius.test/") < commands.index(
+    "set viewport 412 915",
+  )
+
+
+def test_invalid_manual_viewport_fails_before_browser_launch(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    viewport_width="nan",
+  )
+
+  assert result.returncode != 0
+  assert "must be positive numbers" in result.stderr
+  assert not output.exists()
+  assert not marker.exists()
+  assert not browser_log.exists()
+
+
 def test_non_app_capture_skips_frame_readiness_wait(tmp_path: Path):
   result, output, marker, browser_log = _run_helper(
     tmp_path, auth_ok=True, route="/chat/example",
@@ -173,7 +292,7 @@ def test_content_only_mode_is_set_before_target_navigation(tmp_path: Path):
   )
   target_index = next(
     i for i, command in enumerate(commands)
-    if command == "open http://mobius.test/app/42"
+    if command.startswith("open http://mobius.test/app/42?__mobius_capture=")
   )
   readiness_index = next(
     i for i, command in enumerate(commands)
@@ -195,7 +314,10 @@ def test_default_mode_clears_prior_visual_mode_before_navigation(tmp_path: Path)
     i for i, command in enumerate(commands)
     if "sessionStorage.removeItem('mobius:visual-content-only')" in command
   )
-  target_index = commands.index("open http://mobius.test/chat/example")
+  target_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("open http://mobius.test/chat/example?__mobius_capture=")
+  )
   assert clear_index < target_index
 
 

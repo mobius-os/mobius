@@ -87,13 +87,19 @@ def test_browser_cache_defaults_preserve_operator_flags_and_overrides():
 
 
 # VIEWPORT_WIDTH/HEIGHT belong to the same agent-browser env contract:
-# chat.py exports them per turn and agent-screenshot.sh hard-requires
-# both (deliberately strict — fix producers, never the consumer).
+# chat.py exports one validated integer pair per turn and agent-screenshot.sh
+# keeps the same validation at its executable boundary for existing sessions
+# and manual callers.
 
 
 def test_viewport_env_passes_through_the_shell_sent_viewport():
   env = viewport_env({"width": 390, "height": 844})
   assert env == {"VIEWPORT_WIDTH": "390", "VIEWPORT_HEIGHT": "844"}
+
+
+def test_viewport_env_rounds_fractional_shell_geometry_to_css_pixels():
+  env = viewport_env({"width": 1680, "height": 956.6666870117188})
+  assert env == {"VIEWPORT_WIDTH": "1680", "VIEWPORT_HEIGHT": "957"}
 
 
 def test_viewport_env_defaults_when_no_shell_sent_a_viewport():
@@ -110,7 +116,13 @@ def test_viewport_env_defaults_when_no_shell_sent_a_viewport():
 def test_viewport_env_defaults_on_malformed_viewport():
   # A half-set or zero payload must not export a broken pair — the
   # helper requires BOTH values, so anything short of that defaults.
-  for bad in ({}, {"width": 390}, {"height": 844}, {"width": 0, "height": 915}):
+  for bad in (
+    {},
+    {"width": 390},
+    {"height": 844},
+    {"width": 0, "height": 915},
+    {"width": float("nan"), "height": 915},
+  ):
     env = viewport_env(bad)
     assert env["VIEWPORT_WIDTH"] == str(DEFAULT_VIEWPORT_WIDTH)
     assert env["VIEWPORT_HEIGHT"] == str(DEFAULT_VIEWPORT_HEIGHT)

@@ -18,7 +18,7 @@
 #   /settings              owner settings, etc.
 #
 # Usage:
-#   agent-screenshot.sh [--content-only] <route> <out.png>
+#   agent-screenshot.sh [--content-only] [--preserve-cache] <route> <out.png>
 #   <route> is path-absolute (starts with /); it is appended to
 #   $API_BASE_URL.
 #
@@ -26,23 +26,34 @@
 # browser document after auth. It is deliberately ephemeral: no completion or
 # dismissal state is written to the owner's account or browser storage.
 #
+# Normal captures require the exact currently-built shell: the helper detaches
+# this test profile's service worker, cache-busts the navigation, and verifies
+# the loaded entry asset. --preserve-cache is reserved for explicitly
+# testing PWA upgrade/offline behavior where retained browser state is the
+# subject of the test.
+#
 # Prints the output path on stdout, or non-zero if the auth dance
 # fails (no token, no API_BASE_URL, no viewport, no agent-browser).
 
 set -euo pipefail
 
 CONTENT_ONLY=0
-if [ "${1:-}" = "--content-only" ]; then
-  CONTENT_ONLY=1
+PRESERVE_CACHE=0
+while [ "${1:-}" = "--content-only" ] || [ "${1:-}" = "--preserve-cache" ]; do
+  if [ "$1" = "--content-only" ]; then
+    CONTENT_ONLY=1
+  else
+    PRESERVE_CACHE=1
+  fi
   shift
-fi
+done
 
 ROUTE="${1:-}"
 OUT="${2:-}"
 
 if [ -z "$ROUTE" ]; then
   echo "agent-screenshot.sh: route required" >&2
-  echo "Usage: agent-screenshot.sh [--content-only] <route> [out.png]" >&2
+  echo "Usage: agent-screenshot.sh [--content-only] [--preserve-cache] <route> [out.png]" >&2
   exit 1
 fi
 
@@ -96,22 +107,52 @@ if [ -z "${VIEWPORT_WIDTH:-}" ] || [ -z "${VIEWPORT_HEIGHT:-}" ]; then
   echo "agent-screenshot.sh: VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be set" >&2
   exit 1
 fi
-agent-browser set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" >/dev/null
+# Existing agent sessions keep the env snapshot they started with, and manual
+# callers can bypass chat.py entirely. Normalize again at this executable
+# boundary so a valid fractional CSS size (for example 956.6667px from a scaled
+# desktop pane) never reaches agent-browser's integer-only viewport command.
+if ! NORMALIZED_VIEWPORT="$(
+  VIEWPORT_WIDTH="$VIEWPORT_WIDTH" VIEWPORT_HEIGHT="$VIEWPORT_HEIGHT" \
+  python3 - <<'PY'
+import math
+import os
+import sys
+
+try:
+  values = (
+    float(os.environ["VIEWPORT_WIDTH"]),
+    float(os.environ["VIEWPORT_HEIGHT"]),
+  )
+except (KeyError, ValueError):
+  raise SystemExit(1)
+if not all(math.isfinite(value) and value > 0 for value in values):
+  raise SystemExit(1)
+print(*(max(1, round(value)) for value in values))
+PY
+)"; then
+  echo "agent-screenshot.sh: VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be positive numbers" >&2
+  exit 1
+fi
+read -r VIEWPORT_WIDTH VIEWPORT_HEIGHT <<<"$NORMALIZED_VIEWPORT"
 
 # Origin must be loaded before localStorage.setItem (localStorage is
 # per-origin and only writable once a same-origin document exists).
 # Both the shell and the standalone /apps/<slug>/ page read the owner
 # JWT from localStorage['token'] on the same origin.
 agent-browser open "${API_BASE_URL}/" >/dev/null
+# `set viewport` requires a live browser connection. Setting it before the
+# first `open` happened to work only when a previous turn had leaked/reused a
+# daemon; a correctly closed, cold session failed before it could launch.
+agent-browser set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" >/dev/null
 # Seed the token via stdin (eval --stdin), never argv: the JWT must not
 # appear in /proc/<pid>/cmdline. python reads it from the env (not argv)
 # and JSON-encodes it so any character is a safe JS string literal.
 AGENT_TOKEN="$AGENT_TOKEN" python3 -c 'import json,os; print("localStorage.setItem(\"token\", "+json.dumps(os.environ["AGENT_TOKEN"])+")")' | agent-browser eval --stdin >/dev/null
 
 # Content mode is a browser-session presentation flag, not onboarding or
-# install completion state. Set it before the target document mounts so React
-# never opens its modal (and therefore never inerts the app workspace). Clear it
-# for ordinary captures so a prior content-only preview cannot affect them.
+# install completion state. Set it while the origin document is live and before
+# the target mounts so React never opens its modal. It survives the about:blank
+# detour below because sessionStorage is scoped to this tab + origin.
 if [ "$CONTENT_ONLY" -eq 1 ]; then
   agent-browser eval \
     "sessionStorage.setItem('mobius:visual-content-only', '1')" >/dev/null
@@ -120,8 +161,29 @@ else
     "sessionStorage.removeItem('mobius:visual-content-only')" >/dev/null
 fi
 
+# A per-chat Chromium profile deliberately survives browser close, which is
+# useful for realistic PWA tests but unsafe as the default proof of current
+# source. An old service worker can otherwise serve a stale precached shell
+# after a rebuild and make correct work look absent. Unregister it, then leave
+# its currently-controlled document via about:blank before the cache-busted
+# target navigation. Deleting every CacheStorage entry synchronously here used
+# to wedge CDP on larger profiles; detaching the controller is both sufficient
+# and bounded. The owner's real browser/profile is never touched.
+TARGET_ROUTE="$ROUTE"
+if [ "$PRESERVE_CACHE" -eq 0 ]; then
+  agent-browser eval \
+    "(async () => { try { const regs = await navigator.serviceWorker?.getRegistrations?.() || []; await Promise.all(regs.map((r) => r.unregister())); } catch {} return true })()" \
+    >/dev/null
+  agent-browser open "about:blank" >/dev/null
+  CAPTURE_NONCE="$(date +%s%N)"
+  case "$TARGET_ROUTE" in
+    *\?*) TARGET_ROUTE="${TARGET_ROUTE}&__mobius_capture=${CAPTURE_NONCE}" ;;
+    *) TARGET_ROUTE="${TARGET_ROUTE}?__mobius_capture=${CAPTURE_NONCE}" ;;
+  esac
+fi
+
 # Now navigate to the actual target route, authenticated.
-agent-browser open "${API_BASE_URL}${ROUTE}" >/dev/null
+agent-browser open "${API_BASE_URL}${TARGET_ROUTE}" >/dev/null
 
 # Give the target a bounded render window. The missing password field is only a
 # settling signal — token presence mounts Shell before the server has accepted
@@ -147,6 +209,54 @@ if [ "$AUTH_OK" != "true" ]; then
   echo "agent-screenshot.sh: authentication failed; the token was rejected or the login page remained visible" >&2
   exit 1
 fi
+
+# For shell routes, prove the browser loaded the same hashed entry asset that
+# exists in the currently-built dist. This turns stale screenshots into a clear
+# failure instead of misleading visual evidence. Standalone app PWAs have their
+# own entry shape, but still receive controller detachment + cache-busted
+# navigation.
+case "$ROUTE" in
+  /apps/*) : ;;
+  *)
+    if [ "$PRESERVE_CACHE" -eq 0 ]; then
+      DIST_INDEX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../frontend" && pwd)/dist/index.html"
+      if [ ! -f "$DIST_INDEX" ]; then
+        echo "agent-screenshot.sh: current frontend build not found at $DIST_INDEX" >&2
+        exit 1
+      fi
+      CURRENT_SHELL_ENTRY="$(
+        python3 - "$DIST_INDEX" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+html = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(r'<script[^>]+src="([^"]*/assets/index-[^"]+\.js)"', html)
+if not match:
+  raise SystemExit(1)
+print(match.group(1).rsplit("/", 1)[-1])
+PY
+      )" || {
+        echo "agent-screenshot.sh: current shell entry asset could not be resolved" >&2
+        exit 1
+      }
+      LOADED_SHELL_ENTRY_RAW="$(
+        agent-browser eval \
+          "(() => { const src = document.querySelector('script[type=\"module\"][src*=\"/assets/index-\"]')?.src || ''; return src.split('/').pop() })()" \
+          2>/dev/null || true
+      )"
+      LOADED_SHELL_ENTRY="$(
+        printf '%s' "$LOADED_SHELL_ENTRY_RAW" | python3 -c \
+          'import json,sys; raw=sys.stdin.read().strip(); value=json.loads(raw) if raw else ""; print(value if isinstance(value, str) else "")' \
+          2>/dev/null || printf '%s' "$LOADED_SHELL_ENTRY_RAW"
+      )"
+      if [ "$LOADED_SHELL_ENTRY" != "$CURRENT_SHELL_ENTRY" ]; then
+        echo "agent-screenshot.sh: stale shell loaded (expected $CURRENT_SHELL_ENTRY, got ${LOADED_SHELL_ENTRY:-none})" >&2
+        exit 1
+      fi
+    fi
+    ;;
+esac
 
 # A fresh phone-width shell can restore with the modal navigation drawer open
 # or still exiting, which makes an otherwise-correct app screenshot capture the
