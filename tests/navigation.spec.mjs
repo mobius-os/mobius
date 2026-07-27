@@ -27,11 +27,11 @@ const NAV_CHATS = [
   run_status: null,
 }))
 
-function navChatDetail(id) {
+function navChatDetail(id, assistantContent = 'Fixture response') {
   return {
     messages: [
       { role: 'user', content: `Open ${id}`, ts: 1700000000000, blocks: [] },
-      { role: 'assistant', content: 'Fixture response', ts: 1700000000001, blocks: [] },
+      { role: 'assistant', content: assistantContent, ts: 1700000000001, blocks: [] },
     ],
     total: 2,
     offset: 0,
@@ -51,7 +51,11 @@ async function navigateToSettings(page) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function setup(page, viewport = { width: 412, height: 915 }) {
+async function setup(
+  page,
+  viewport = { width: 412, height: 915 },
+  { assistantContent = 'Fixture response' } = {},
+) {
   await page.setViewportSize(viewport)
 
   // Navigation is a client-side contract. Seed an explicit active chat and
@@ -74,9 +78,14 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(navChatDetail(id)),
+      body: JSON.stringify(navChatDetail(id, assistantContent)),
     })
   })
+  await page.route('**/test-image.svg', route => route.fulfill({
+    status: 200,
+    contentType: 'image/svg+xml',
+    body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="60"><rect width="80" height="60" fill="#567"/></svg>',
+  }))
 
   // Intercept agent routes.
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
@@ -259,6 +268,26 @@ test.describe('Navigation basics', () => {
     expect(end.drawerOpen).toBe(false)
     expect(end.activeChatId).toBe(start.activeChatId)
     expect(end.hasChat).toBe(true)
+  })
+
+  test('chat image preview consumes Back without leaving the chat', async ({ page }) => {
+    await setup(page, { width: 412, height: 915 }, {
+      assistantContent: '![Navigation preview](/test-image.svg)',
+    })
+    const initial = await getNavState(page)
+    const image = page.locator('.md-image-frame')
+    await expect(image).toBeEnabled()
+
+    await image.click()
+    await expect(page.getByRole('dialog', { name: 'Navigation preview' })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => history.state?.kind)).toBe('dismissible')
+
+    await goBack(page)
+
+    await expect(page.getByRole('dialog', { name: 'Navigation preview' })).toHaveCount(0)
+    const afterBack = await getNavState(page)
+    expect(afterBack.hasChat).toBe(true)
+    expect(afterBack.activeChatId).toBe(initial.activeChatId)
   })
 
   test('4. Navigate chat -> app -> back returns to chat', async ({ page }) => {

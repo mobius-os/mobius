@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import ImageLightbox from './markdown/ImageLightbox.jsx'
+import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 
 export default function Attachments({ attachments, chatId }) {
   if (!attachments || attachments.length === 0) return null
@@ -55,6 +56,7 @@ export default function Attachments({ attachments, chatId }) {
 
 function AttachImage({ src, alt }) {
   const [open, setOpen] = useState(false)
+  const historyDismiss = useHistoryDismiss(() => setOpen(false))
   // Don't render the image until we have a token (src would 403 without one).
   if (!src.includes('?token=')) return null
   return (
@@ -63,7 +65,10 @@ function AttachImage({ src, alt }) {
         type="button"
         className="chat__attach-thumb-button"
         aria-label={`Open ${alt || 'attached image'} preview`}
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          historyDismiss.open()
+          setOpen(true)
+        }}
       >
         <img
           className="chat__attach-thumb"
@@ -73,7 +78,7 @@ function AttachImage({ src, alt }) {
         />
       </button>
       {open && createPortal(
-        <ImageLightbox src={src} alt={alt} onClose={() => setOpen(false)} />,
+        <ImageLightbox src={src} alt={alt} onClose={historyDismiss.close} />,
         document.body,
       )}
     </>

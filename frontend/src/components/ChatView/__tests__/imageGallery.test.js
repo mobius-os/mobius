@@ -19,6 +19,10 @@ const markdownCss = readFileSync(
   new URL('../markdown.css', import.meta.url),
   'utf8',
 )
+const navigationSource = readFileSync(
+  new URL('../../../hooks/useNavigation.js', import.meta.url),
+  'utf8',
+)
 
 const image = (href, text) => ({ type: 'image', href, text })
 const paragraph = (...tokens) => ({
@@ -112,6 +116,16 @@ test('gallery navigation has explicit keyboard and lightbox alternatives', () =>
   assert.match(lightboxSource, /gallerySwipeTarget/)
   assert.match(lightboxSource, /\[baseCenter, galleryItems, index, metrics, toggleZoomAt\]/)
   assert.match(lightboxSource, /\{index \+ 1\} \/ \{galleryItems\.length\}/)
+})
+
+test('lightbox dismissal is owned by the shell Back stack', () => {
+  assert.match(gallerySource, /historyDismiss\.open\(\)/)
+  assert.match(gallerySource, /onClose=\{historyDismiss\.close\}/)
+  assert.match(navigationSource, /pushShellEntry\('dismissible'/)
+  assert.match(
+    navigationSource,
+    /if \(source\?\.kind === 'dismissible'\) \{[\s\S]{0,300}?dismissal\?\.onDismiss\(\)/,
+  )
 })
 
 test('zoomed touch pan keeps its gesture snapshot through a queued render', () => {
