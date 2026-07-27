@@ -70,10 +70,15 @@ def test_list_apps_does_not_hydrate_source_or_icon_payloads(client, auth, db):
     event.remove(engine, "before_cursor_execute", capture)
 
   assert response.status_code == 200
+  payload = response.json()
+  heavy = next(item for item in payload if item["id"] == app.id)
+  assert heavy["has_custom_icon"] is True
   assert len(statements) == 1
   projection = statements[0].split("FROM apps", 1)[0]
   assert "apps.jsx_source" not in projection
-  assert "apps.icon_png" not in projection
+  # The projection may contain `icon_png IS NOT NULL`; it must never select the
+  # blob itself into an ORM attribute.
+  assert "apps.icon_png AS apps_icon_png" not in projection
 
 
 def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):

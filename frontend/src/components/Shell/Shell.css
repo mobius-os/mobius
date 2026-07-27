@@ -66,6 +66,12 @@
   gap: 8px;
 }
 
+/* Desktop-only quick actions. Declare the closed state outside the media query
+   so adding this shared markup can never leak controls into the phone header. */
+.shell__rail-actions {
+  display: none;
+}
+
 .shell__brand {
   display: flex;
   align-items: center;
@@ -352,6 +358,27 @@
 .shell__tab-kind > svg {
   flex: none;
 }
+.shell__tab-icon {
+  position: relative;
+  width: 13px;
+  height: 13px;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.shell__tab-icon--app {
+  overflow: visible;
+}
+.shell__tab-icon--app > img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.shell__tab-icon--app > svg {
+  visibility: hidden;
+}
 .shell__tab-text {
   display: block;
   min-width: 0;
@@ -431,6 +458,19 @@
      geometries (full-bleed overlay AND paned tab). inline-size only — vertical
      scroll of .settings is unaffected. */
   container: settings / inline-size;
+}
+
+.shell__apps-view {
+  background: var(--bg);
+  container: apps-directory / inline-size;
+}
+
+.shell__apps-host {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
 }
 
 .shell__settings-loading {
@@ -585,4 +625,159 @@
   .shell__brand.is-snapping .shell__logo,
   .shell__brand.is-beat-held-a .shell__logo,
   .shell__brand.is-beat-held-b .shell__logo { animation: none; }
+}
+
+/* Desktop productivity shell: the workspace starts at the very top, while a
+   narrow left rail remains as the only persistent chrome. Expanding navigation
+   turns that same rail into the drawer header (brand + notification bell);
+   collapsing it leaves a stable Möbius mark plus compact quick actions. Density
+   comes from removing redundant chrome, never by scaling the fixed viewport
+   (which clips composers and makes fixed edges drift). */
+@media (min-width: 1024px) {
+  .shell {
+    --desktop-rail-width: 58px;
+    --shell-bar-height: 0px;
+  }
+
+  .shell::before {
+    content: "";
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 2;
+    width: var(--desktop-rail-width);
+    background: var(--bg);
+    border-right: 1px solid var(--border-light);
+    pointer-events: none;
+  }
+
+  .shell--drawer-docked::before {
+    width: var(--desktop-sidebar-width);
+  }
+
+  .shell__bar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 100;
+    width: var(--desktop-rail-width);
+    height: 100%;
+    padding: 12px;
+    flex-direction: column;
+    align-items: center;
+    background: transparent;
+    border: 0;
+    pointer-events: none;
+  }
+
+  .shell__brand,
+  .shell__rail-actions,
+  .shell__bar-actions {
+    pointer-events: auto;
+  }
+
+  /* The mark owns one invariant desktop cell. The header may grow from rail to
+     drawer, but that cell never participates in either flex layout, so revealing
+     the wordmark cannot nudge the logo horizontally or vertically. */
+  .shell__brand,
+  .shell--drawer-docked .shell__brand {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    height: 34px;
+    min-height: 34px;
+    padding: 0;
+  }
+
+  .shell:not(.shell--drawer-docked) .shell__wordmark,
+  .shell:not(.shell--drawer-docked) .shell__bar-actions {
+    display: none;
+  }
+
+  .shell--drawer-docked .shell__bar {
+    width: var(--desktop-sidebar-width);
+    height: 58px;
+    padding: 8px 12px;
+    flex-direction: row;
+    align-items: center;
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  .shell--drawer-docked .shell__bar-actions {
+    position: absolute;
+    top: 7px;
+    right: 12px;
+    margin: 0;
+  }
+
+  .shell__rail-actions {
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    margin-top: 58px;
+  }
+
+  .shell__rail-action {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 40px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 11px;
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .shell__rail-action svg {
+    width: 20px;
+    height: 20px;
+    stroke-width: 1.8;
+  }
+
+  .shell__rail-action:hover,
+  .shell__rail-action--active {
+    color: var(--text);
+    background: var(--surface);
+  }
+
+  .shell__rail-action:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .shell__rail-action--bottom {
+    margin-top: auto;
+  }
+
+  .shell--drawer-docked .shell__rail-actions {
+    display: none;
+  }
+
+  .shell--drawer-docked .notifications {
+    top: 66px;
+    right: auto;
+    left: 12px;
+    width: min(390px, calc(var(--desktop-sidebar-width) - 24px));
+    max-height: calc(100dvh - 78px);
+  }
+
+  .shell > .shell__tabstrip,
+  .shell > .shell__content {
+    margin-left: var(--desktop-rail-width);
+  }
+
+  .shell--drawer-docked > .shell__tabstrip,
+  .shell--drawer-docked > .shell__content {
+    margin-left: var(--desktop-sidebar-width);
+  }
+
+  .shell--immersive > .shell__tabstrip,
+  .shell--immersive > .shell__content {
+    margin-left: 0;
+  }
 }

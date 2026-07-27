@@ -1,6 +1,11 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
+import {
+  AppsNavIcon,
+  NewChatNavIcon,
+  SettingsNavIcon,
+} from '../navigationIcons.js'
 import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
@@ -308,6 +313,8 @@ export default function Shell() {
   const drawerModeTransitioning = desktopSidebarMode && drawerOpen
   const navigationOpen = persistentDrawer ? desktopSidebarOpen : drawerOpen
   const modalDrawerOpen = !persistentDrawer && drawerOpen
+  const navigationSurfaceOpen = modalDrawerOpen
+  const [appsDirectoryHost, setAppsDirectoryHost] = useState(null)
   // This is the single semantic owner of reserved desktop navigation space.
   // Both the root class and the content-geometry transaction below read it.
   const desktopSidebarReserved = persistentDrawer && desktopSidebarOpen
@@ -1227,6 +1234,13 @@ export default function Shell() {
   // (fullBleedKey === settings key).
   const settingsFullBleed = !settingsPaned
     && (settingsOverlay || (settingsVisibleAsTab && SETTINGS_KEY === fullBleedKey))
+  // Apps is a normal canonical workspace item — no takeover state. It follows
+  // the same full-bleed/paned projection as chats and installed apps.
+  const APPS_KEY = tabModel.APPS_TAB_KEY
+  const appsVisibleAsTab = fullBleedKey === APPS_KEY
+    || projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === APPS_KEY)
+  const appsPaned = workspaceChromeActive ? visibleTabRects.get(APPS_KEY) : null
+  const appsFullBleed = !appsPaned && fullBleedKey === APPS_KEY
   // focusedActiveKey / fullBleedKey / visibleAppIds are derived once by
   // deriveContentVisibility above: focusedActiveKey drives the AppCanvas
   // focused-pane-only `active` prop (insets + immersive holder); fullBleedKey is
@@ -1433,6 +1447,7 @@ export default function Shell() {
     return m
   }, [apps])
   const labelForTab = useCallback((tab) => {
+    if (tab.kind === 'apps') return 'Apps'
     if (tab.kind === 'settings') return 'Settings'
     if (tab.kind === 'chat') return chatById.get(tab.id)?.title || 'Chat'
     return appById.get(tab.id)?.name || 'App'
@@ -2140,9 +2155,8 @@ export default function Shell() {
   // Stable refresh callbacks. Earlier versions used
   // `appsQuery.refetch` directly, but React Query returns a new
   // QueryObserverResult ref on every subscription tick — that made
-  // these `useCallback`s recreate identity each render, and the
-  // drawer-open effect below would re-fire on every SSE tick,
-  // hammering `/api/apps` and `/api/chats` while streaming.
+  // these `useCallback`s recreate identity each render and made every
+  // effect/caller that consumes them vulnerable to duplicate fetches.
   // Driving the refetch via the query client's stable
   // `refetchQueries` keeps the callback identity steady.
   const refreshApps = useCallback(() => {
@@ -2463,10 +2477,6 @@ export default function Shell() {
       chatsQuery.isFetchedAfterMount, chatsQuery.isFetching,
       refreshChats, dispatchWorkspace, applyModeDestination,
       requestEmptySingleNewChat, workspaceStateRef, activeChatIdRef])
-
-  useEffect(() => {
-    if (navigationOpen) { refreshApps(); refreshChats() }
-  }, [navigationOpen, refreshApps, refreshChats])
 
   // Deferred shell-update pickup: a service worker that finished installing and
   // is now WAITING (leashed — it never took over on its own), or index.html's
@@ -3505,6 +3515,40 @@ export default function Shell() {
           onToggleMode={handleToggleViewMode}
           onToggleNavigation={handleToggleNavigation}
         />
+        <nav className="shell__rail-actions" aria-label="Quick actions">
+          <button
+            type="button"
+            className="shell__rail-action"
+            aria-label="New chat shortcut"
+            title="New chat"
+            onClick={() => newChat({ focusComposer: true, recordHistory: true })}
+          >
+            <NewChatNavIcon aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className={`shell__rail-action${activeView === 'apps' ? ' shell__rail-action--active' : ''}`}
+            aria-label="Apps shortcut"
+            title="Apps"
+            aria-current={activeView === 'apps' ? 'page' : undefined}
+            onClick={() => navTo('apps')}
+          >
+            <AppsNavIcon aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className={`shell__rail-action shell__rail-action--bottom${activeView === 'settings' ? ' shell__rail-action--active' : ''}`}
+            aria-label="Settings shortcut"
+            title="Settings"
+            aria-current={activeView === 'settings' ? 'page' : undefined}
+            onClick={() => {
+              setSettingsFocusTarget(null)
+              navTo('settings')
+            }}
+          >
+            <SettingsNavIcon aria-hidden="true" />
+          </button>
+        </nav>
         <div className="shell__bar-actions">
           {!online && (
             <span className="shell__offline" role="status" aria-live="polite">
@@ -3551,6 +3595,9 @@ export default function Shell() {
           setSettingsFocusTarget(null)
           navTo('settings')
         }}
+        appsActive={appsVisibleAsTab}
+        onAppsOpen={() => navTo('apps')}
+        appsHost={appsDirectoryHost}
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
         newAppIds={appAttentionSet}
@@ -3603,7 +3650,7 @@ export default function Shell() {
           // an exit beat, so it is pointer/keyboard inert throughout — not just under
           // the drawer (M4). It matches the WorkspaceChrome strips, which already go
           // inert for the full mode beat.
-          inert={modalDrawerOpen || modeBeatActive}
+          inert={navigationSurfaceOpen || modeBeatActive}
           aria-label="Open tabs"
           // The single-pane strip is the PRIMARY drag source once the flag is on
           // Tag it with the sole pane's id so the drag controller resolves a
@@ -3626,6 +3673,7 @@ export default function Shell() {
                 key={key}
                 tab={tab}
                 label={labelForTab(tab)}
+                app={tab.kind === 'app' ? appById.get(String(tab.id)) : null}
                 active={active}
                 revealKey={tabRevealRevision}
                 tabIndex={active ? 0 : -1}
@@ -3644,7 +3692,7 @@ export default function Shell() {
         </nav>
         )
       })()}
-      <main className="shell__content" inert={modalDrawerOpen} ref={contentElRef}>
+      <main className="shell__content" inert={navigationSurfaceOpen} ref={contentElRef}>
         {/* Content layer (design §2): app-iframe wrappers (id-sorted) and chat
             wrappers (chatId-sorted) as ONE flat sibling set, never reparented.
             A wrapper is positioned (--paned) when its tab is a visible pane's
@@ -3678,10 +3726,10 @@ export default function Shell() {
             // full-bleed beneath the deal (INV 5).
             data-mode-motion={motion ? motion.motion : undefined}
             className={underlay
-              ? 'shell__view shell__view--exit-underlay'
+              ? 'shell__view shell__app-view shell__view--exit-underlay'
               : (paned
-                ? 'shell__view shell__view--paned'
-                : `shell__view ${fullBleed ? 'shell__view--active' : ''}`)}
+                ? 'shell__view shell__app-view shell__view--paned'
+                : `shell__view shell__app-view ${fullBleed ? 'shell__view--active' : ''}`)}
             style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
             // INV 9 (inert beat): every moving surface — a participant pane OR the
             // underlay — is pointer/keyboard inert so a tap on an in-flight / covered
@@ -3709,7 +3757,7 @@ export default function Shell() {
               // Every visible pane remains painted beneath the modal scrim, but
               // suspend its iframe interaction while the drawer is open OR during any
               // exit beat (INV 9: cross-origin app interaction is inert throughout).
-              interactive={visibleAppIds.has(String(id)) && !modalDrawerOpen && !modeBeatActive}
+              interactive={visibleAppIds.has(String(id)) && !navigationSurfaceOpen && !modeBeatActive}
               version={versionForApp(id)}
               appName={app?.name}
               appSlug={app?.slug}
@@ -3812,6 +3860,42 @@ export default function Shell() {
             </div>
           )
         })}
+        {/* Apps launcher — one canonical workspace surface, positioned and
+            moved by the same tab/pane projection as chats and installed apps.
+            Drawer owns the launcher interactions and portals them into this
+            stable host so app management remains one implementation. */}
+        {(() => {
+          const appsUnderlay = isUnderlay(APPS_KEY)
+          const appsMotion = appsUnderlay ? null : wrapperMotion(APPS_KEY)
+          const appsPos = (!appsUnderlay && appsPaned)
+            ? { top: appsPaned.y, left: appsPaned.x, width: appsPaned.w, height: appsPaned.h }
+            : null
+          const appsTabPanel = !appsUnderlay && appsPaned
+          return (
+            <div
+              key="apps"
+              id={appsTabPanel ? panePanelDomId(appsPaned.paneId, APPS_KEY) : undefined}
+              role={appsTabPanel ? 'tabpanel' : undefined}
+              aria-labelledby={appsTabPanel ? paneTabDomId(appsPaned.paneId, APPS_KEY) : undefined}
+              data-tab-key={appsTabPanel ? APPS_KEY : undefined}
+              data-mode-motion={appsMotion ? appsMotion.motion : undefined}
+              className={appsUnderlay
+                ? 'shell__view shell__view--exit-underlay shell__apps-view'
+                : (appsPaned
+                  ? 'shell__view shell__view--paned shell__apps-view'
+                  : `shell__view shell__apps-view ${appsFullBleed ? 'shell__view--active' : ''}`)}
+              style={appsMotion
+                ? { ...(appsPos || {}), ...appsMotion.vars }
+                : (appsPos || undefined)}
+              inert={(modeBeatActive && (!!appsMotion || appsUnderlay)) || undefined}
+              onPointerDownCapture={appsPaned && !appsUnderlay && !modeBeatActive
+                ? () => dispatchWorkspace({ type: 'FOCUS', paneId: appsPaned.paneId })
+                : undefined}
+            >
+              <div className="shell__apps-host" ref={setAppsDirectoryHost} />
+            </div>
+          )
+        })()}
         {/* Settings surface — ONE wrapper, positioned like a chat/app content
             wrapper (paned) when it is a visible builder tab, full-bleed when the
             takeover overlay is up. Keyed 'settings' so React reconciles it by key
@@ -3906,7 +3990,7 @@ export default function Shell() {
             // pointer-transparent (CSS) but fully INERT — keyboard-unfocusable and
             // aria-hidden — so a tab/divider that already held focus can't process
             // Enter/arrow input while invisibly dealing away.
-            inert={modalDrawerOpen || modeBeatActive}
+            inert={navigationSurfaceOpen || modeBeatActive}
             workspace={workspace}
             projection={projection}
             mode={workspaceMode}
@@ -3915,6 +3999,7 @@ export default function Shell() {
             dispatchWorkspace={dispatchWorkspace}
             navTo={navTo}
             labelForTab={labelForTab}
+            appById={appById}
             onTabContextMenu={openTabMenu}
             // The ONE shared user-close action (INV 13) + the per-pane beat motion
             // (each strip deals with its pane) — WorkspaceChrome owns no private
@@ -3938,7 +4023,7 @@ export default function Shell() {
           type="button"
           className="shell__immersive-exit"
           aria-label="Exit full screen"
-          inert={modalDrawerOpen}
+          inert={navigationSurfaceOpen}
           onClick={() => dispatchImmersive({ type: 'exit' })}
         >
           <Minimize2 size={18} aria-hidden="true" />

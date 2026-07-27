@@ -1,0 +1,331 @@
+.apps-directory {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.apps-directory__header {
+  flex: 0 0 auto;
+  min-height: 72px;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(280px, 360px);
+  align-items: center;
+  gap: 14px;
+  padding: 12px clamp(14px, 3vw, 34px);
+  border-bottom: 1px solid var(--border-light);
+  background: var(--bg);
+}
+
+.apps-directory__title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+}
+
+.apps-directory__title h1,
+.apps-directory__intro h2,
+.apps-directory__empty h2 {
+  margin: 0;
+  color: var(--text);
+}
+
+.apps-directory__title h1 {
+  font-size: clamp(22px, 2vw, 28px);
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.apps-directory__intro span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.apps-directory__search {
+  min-width: 0;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 13px;
+  border: 1px solid var(--border-light);
+  border-radius: 13px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.apps-directory__search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+.apps-directory__search svg {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+}
+
+.apps-directory__search input {
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+}
+
+.apps-directory__search input::placeholder {
+  color: var(--muted);
+}
+
+.apps-directory__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding:
+    clamp(20px, 3vw, 36px)
+    clamp(16px, 4vw, 46px)
+    max(30px, env(safe-area-inset-bottom));
+  scrollbar-width: var(--shell-scrollbar-width, none);
+}
+
+.apps-directory__intro {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 22px;
+}
+
+.apps-directory__intro h2 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.apps-directory__intro p,
+.apps-directory__empty p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.apps-directory__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 22px 14px;
+}
+
+.apps-directory__card {
+  position: relative;
+  min-width: 0;
+  min-height: 112px;
+  display: flex;
+  overflow: visible;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+}
+
+.apps-directory__card-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 6px;
+  border: 0;
+  border-radius: inherit;
+  color: var(--text);
+  background: transparent;
+  text-align: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+.apps-directory__card-icon {
+  position: relative;
+  flex: 0 0 auto;
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 17px;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--app-color, var(--accent)) 80%, white 8%), var(--app-color, var(--accent)));
+  color: var(--accent-fg, #fff);
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -0.025em;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, white 16%, transparent);
+}
+
+.apps-directory__card-icon img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  background: transparent;
+}
+
+.apps-directory__card-icon.is-image {
+  overflow: visible;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.apps-directory__card-icon.is-image > span {
+  visibility: hidden;
+}
+
+.apps-directory__card-meta {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.apps-directory__card-name {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 590;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.apps-directory__card-menu-anchor.drawer__more {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.apps-directory__card--editing {
+  align-items: center;
+  min-height: 112px;
+  padding: 12px 4px;
+}
+
+.apps-directory__card--editing .drawer__rename-input {
+  font-size: 14px;
+}
+
+.apps-directory__card-main:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.apps-directory__card-main:active {
+  transform: scale(0.96);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .apps-directory__card-main:hover {
+    background: color-mix(in srgb, var(--surface) 72%, transparent);
+  }
+}
+
+.apps-directory__empty {
+  min-height: 240px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  padding: 32px;
+  text-align: center;
+}
+
+.apps-directory__empty h2 {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .apps-directory__header {
+    min-height: 64px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .apps-directory__title {
+    padding: 0 5px;
+  }
+
+  .apps-directory__title h1 {
+    font-size: 18px;
+  }
+
+  .apps-directory__search {
+    width: calc(100% - 10px);
+    margin: 2px 5px 4px;
+  }
+
+  .apps-directory__scroll {
+    padding: 18px 13px max(28px, env(safe-area-inset-bottom));
+  }
+
+  .apps-directory__intro {
+    margin-bottom: 18px;
+  }
+
+  .apps-directory__grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 18px 7px;
+  }
+
+  .apps-directory__card {
+    min-height: 102px;
+  }
+
+  .apps-directory__card-main {
+    padding: 5px 2px;
+  }
+
+  .apps-directory__card-icon {
+    width: 58px;
+    height: 58px;
+    border-radius: 15px;
+  }
+}
+
+@media (max-width: 360px) {
+  .apps-directory__grid {
+    gap: 16px 4px;
+  }
+
+  .apps-directory__card-icon {
+    width: 54px;
+    height: 54px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .apps-directory__card-main {
+    transition: none;
+  }
+}

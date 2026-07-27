@@ -158,19 +158,14 @@
   min-height: 0;
 }
 
-/* Wrapper around New chat + Chats + Apps. Holds the layout for
-   the per-section scroll model: New chat stays at the top, Chats
-   and Apps share the remaining space proportionally to their
-   content, and each scrolls INTERNALLY when its share is smaller
-   than its content. This means both sections are always visible
-   with roughly equal spacing — if you have 100 chats, you don't
-   have to scroll past all of them to reach Apps. A single
-   parent-scroll would force that. */
+/* New chat is the fixed primary action. Everything navigational beneath it
+   shares one natural scroll: Apps, Pinned, then the complete chat history. */
 .drawer__scroll-wrap {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 /* ── New chat ──────────────────────────────────────── */
@@ -199,11 +194,8 @@
   border-color: var(--border-light);
 }
 
-/* ── Groups (History, Apps) ───────────────────────── */
+/* ── Navigation sections ──────────────────────────── */
 
-/* Default group: size-to-content, can shrink. The two sections
-   that share space (chats + apps) get more specific rules below
-   so the chats-heavy / apps-heavy lopsidedness self-corrects. */
 .drawer__group {
   flex: 0 1 auto;
   min-height: 0;
@@ -212,64 +204,24 @@
   margin-top: 4px;
 }
 
-/* Chats + Apps: symmetric split. Both sections grow to share
-   available space proportionally (`flex: 1 1 0`), and both scroll
-   internally when their share is smaller than their content. With
-   the previous asymmetric rule (chats `flex: 1 1 0`, apps `flex: 0
-   1 auto` capped at 50%), apps' content size often won the layout
-   when you had a handful of chats and many apps — chats shrank to
-   its 80px floor and apps ballooned up to the 50% cap, so apps
-   visually took more space than chats. Symmetric grow keeps both
-   at the same vertical share regardless of content count. A small
-   min-height on each guarantees neither section disappears even
-   when one has many more rows. */
-.drawer__group--chats,
-.drawer__group--apps {
-  flex: 1 1 0;
-  min-height: 80px;
-  /* Anchors the ::after bottom-fade overlay to the group. */
-  position: relative;
-}
-
-/* Bottom fade — the same 16px "there's more below / this row is
-   clipped" cue the scroll container used to paint with mask-image,
-   moved OFF the scroller onto a static overlay. A mask on an
-   overflow:auto element forces the compositor to re-apply the mask
-   against the moving rows on every scroll frame (a real Android
-   scroll-jank source); a fixed ::after does not — the list scrolls
-   underneath it on a cheap layer. Visually identical: content fades
-   into --bg over the last 16px. pointer-events:none so it never eats
-   a tap/scroll on the row beneath it. */
-.drawer__group--chats::after,
-.drawer__group--apps::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 16px;
-  pointer-events: none;
-  background: linear-gradient(to top, var(--bg), transparent);
+.drawer__section {
+  display: block;
+  margin: 0;
 }
 
 
-/* Section labels: sentence case, plain muted color, no tracking.
-   The earlier uppercase-tracked-accent treatment read as ornament,
-   not structure. The leading icon already tells you which section
-   you're in; the label is just the readable hook.
+/* Section labels are navigation landmarks, not secondary metadata. Match the
+   type weight and contrast of New chat / Apps so Pinned and Chats remain easy
+   to scan; their non-button structure and lack of hover treatment still make
+   the action-vs-heading distinction clear.
 
-   Now an <h2> rather than a <p> — sighted users see the same
-   typography (the SDK reset + `margin: 0` here mean default heading
-   styles don't apply) but screen-reader users get a section-level
-   heading they can jump to via rotor / heading navigation. Size
-   bumped 12 → 13 to match `settings__section-title` so the platform
-   reads as one design system; stays quieter than the 14px rows
-   above so the action-vs-structure hierarchy still reads. */
+   These stay as <h2>s so screen-reader users can jump between sections via
+   rotor / heading navigation. */
 .drawer__label {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
@@ -281,17 +233,18 @@
   padding: 8px 12px 6px;
   margin: 0;
 }
-.drawer__label svg { flex-shrink: 0; opacity: 0.85; color: var(--muted); }
+.drawer__label svg { flex-shrink: 0; opacity: 1; color: currentColor; }
 .drawer__label span { line-height: 1; }
 
-/* Per-section row container — scrolls internally when its group has
-   been shrunk below its content size. The bottom "more below" fade is
-   painted by the static .drawer__group--*::after overlay above, NOT a
-   mask on this element: a mask-image on an overflow:auto container
-   makes the compositor re-apply the mask against the moving rows every
-   scroll frame (Android jank). overscroll-behavior:contain keeps a
-   boundary scroll from chaining out to the blurred scrim behind the
-   drawer. */
+.drawer__label .drawer__label-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* One scroll owner keeps long histories continuous and avoids nested-scroll
+   gesture arbitration on phones. */
 .drawer__scroll {
   flex: 1;
   min-height: 0;
@@ -300,12 +253,33 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: var(--shell-scrollbar-width, none);
-  /* Bottom room equal to the 16px overlay fade, so the last row (e.g. the
-     selected app) can scroll clear of the dimmed band instead of reading as
-     pinned under the Settings divider. scroll-padding-bottom keeps
-     scroll-into-view from re-tucking it under the fade. */
+  /* Bottom room keeps the final chat clear of the Settings divider.
+     scroll-padding-bottom preserves the same clearance for focus reveals. */
   padding-bottom: 16px;
   scroll-padding-bottom: 16px;
+}
+
+.drawer__scroll--navigation {
+  margin-top: 2px;
+  padding-top: 2px;
+}
+
+.drawer__item--apps {
+  margin-bottom: 2px;
+  font-weight: 500;
+}
+
+.drawer__item-count {
+  flex: 0 0 auto;
+  min-width: 20px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.drawer__item--active .drawer__item-count {
+  color: inherit;
 }
 
 .drawer__progressive-sentinel {
@@ -356,6 +330,15 @@
   background: var(--accent-dim);
 }
 
+/* The lifted row while it is being dragged to a new spot. It reads as "picked
+   up" — raised surface + shadow — rather than faded, so the movement is legible.
+   The vertical follow/settle transform lives on the parent .drawer__row. */
+.drawer__item[data-reordering="true"] {
+  background: var(--surface);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.30);
+  cursor: grabbing;
+}
+
 /* Keyboard focus ring — applies to all interactive drawer rows.
    Without this, tab navigation lands on rows with no visual cue
    for screen-reader / keyboard users. The accent ring matches
@@ -376,6 +359,7 @@
   height: 18px;
   display: grid;
   place-items: center;
+  font-size: 18px;
   color: inherit;
   opacity: 0.85;
 }
@@ -388,19 +372,38 @@
   text-overflow: ellipsis;
 }
 
-
-/* Trailing pin badge on pinned rows — small, muted, sits flush to
-   the row's right edge. Doesn't compete with the chat title; just
-   signals the row is in the pinned group. */
-.drawer__item-pin {
+.drawer__app-icon {
+  position: relative;
   flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  margin-left: 6px;
-  color: var(--muted);
-  opacity: 0.85;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 7px;
+  background: var(--app-color, var(--accent));
+  color: var(--accent-fg, #fff);
+  font-size: 8px;
+  font-weight: 750;
 }
-.drawer__item--active .drawer__item-pin { color: inherit; opacity: 1; }
+
+.drawer__app-icon img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.drawer__app-icon.is-image {
+  overflow: visible;
+  border-radius: 0;
+  background: transparent;
+}
+
+.drawer__app-icon.is-image > span {
+  visibility: hidden;
+}
 
 /* ── Row + three-dots menu ─────────────────────────── */
 
@@ -412,7 +415,7 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
 }
 
 .drawer__row .drawer__item {
@@ -525,7 +528,7 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Icon-bearing menu items (Pin to top / Unpin) get a flex row so
+/* Icon-bearing menu items (Pin / Unpin) get a flex row so
    the leading icon stays aligned with the row's text baseline. */
 .drawer__menu-item--icon {
   display: flex;
@@ -628,6 +631,29 @@
   margin-top: auto;
   padding-top: 8px;
   border-top: 1px solid var(--border-light);
+}
+
+/* Desktop's collapsed rail and expanded drawer are two presentations of the
+   same three actions. Match their 20px glyphs and exact centers; the slightly
+   larger 15px labels preserve the rail's stronger visual weight when expanded.
+   Mobile has no collapsed rail, so it keeps its existing compact drawer scale. */
+@media (min-width: 1024px) {
+  .drawer__body {
+    padding: 12px 8px max(12px, env(safe-area-inset-bottom));
+  }
+
+  .drawer__item,
+  .drawer__item--new {
+    min-height: 40px;
+    padding: 0 11px;
+    font-size: 15px;
+  }
+
+  .drawer__item-icon {
+    width: 20px;
+    height: 20px;
+    font-size: 20px;
+  }
 }
 
 /* ── Row status dots ───────────────────────────────── */

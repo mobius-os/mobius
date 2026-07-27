@@ -6,6 +6,7 @@ export const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'mobius:desktop-sidebar-width:v
 export const DESKTOP_SIDEBAR_DEFAULT_WIDTH = 320
 export const DESKTOP_SIDEBAR_MIN_WIDTH = 240
 export const DESKTOP_SIDEBAR_MAX_WIDTH = 560
+export const DESKTOP_RAIL_WIDTH = 58
 
 export function clampDesktopSidebarWidth(width) {
   const numericWidth = Number(width)
@@ -32,10 +33,12 @@ export function desktopContentWidthAfterSidebarToggle(currentContentWidth, {
   const measured = Number(currentContentWidth)
   const contentWidth = Number.isFinite(measured) ? Math.max(0, measured) : 0
   const width = clampDesktopSidebarWidth(sidebarWidth)
+  const currentReservation = currentReserved ? width : DESKTOP_RAIL_WIDTH
+  const nextReservation = nextReserved ? width : DESKTOP_RAIL_WIDTH
   const shellWidth = contentWidth
-    + (currentReserved ? width : 0)
+    + currentReservation
   const projected = shellWidth
-    - (nextReserved ? width : 0)
+    - nextReservation
   return Math.max(0, Math.round(projected))
 }
 
