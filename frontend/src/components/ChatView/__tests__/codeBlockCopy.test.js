@@ -42,6 +42,7 @@ test('copy button is pinned outside the scrolling pre', () => {
 
   const css = stripComments(markdownCss)
   const wrapRule = css.match(/\.md-code-wrap\s*\{[^}]*\}/)?.[0] || ''
+  const blockRule = css.match(/\.md-code-block\s*\{[^}]*\}/)?.[0] || ''
   const copyRule = css.match(/\.md-code-copy\s*\{[^}]*\}/)?.[0] || ''
 
   assert.match(wrapRule, /position:\s*relative/,
@@ -49,6 +50,8 @@ test('copy button is pinned outside the scrolling pre', () => {
   assert.match(copyRule, /position:\s*absolute/, 'button floats over the block')
   assert.match(copyRule, /right:\s*\d/, 'anchored to the right edge')
   assert.match(copyRule, /bottom:\s*\d/, 'anchored to the bottom edge (lower-right)')
+  assert.match(blockRule, /padding:\s*14px\s+16px\s+40px/,
+    'the code block reserves a row so the button cannot obscure its last line')
 })
 
 test('copied acknowledgement resets and cleans up its timer', () => {

@@ -42,7 +42,9 @@
   background: var(--surface);
   border: 1px solid var(--border-light);
   border-radius: 10px;
-  padding: 14px 16px;
+  /* Reserve the button's row so the last code line never sits underneath the
+     always-visible touch target. Horizontal overflow remains owned by <pre>. */
+  padding: 14px 16px 40px;
   font-size: 13px;
   font-family: var(--mono);
   overflow-x: auto;
