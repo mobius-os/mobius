@@ -8,7 +8,7 @@ const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8
 
 test('composer fast-forward dispatches immediately without an incidental blur', () => {
   const steerBlock = inputBar.match(
-    /key="steer"[\s\S]*?aria-label="Send queued message now"/,
+    /className="chat__action chat__steer"[\s\S]*?aria-label="Send queued message now"/,
   )?.[0] || ''
   assert.match(steerBlock, /onPointerDown=\{\(e\) => e\.preventDefault\(\)\}/)
   assert.match(
@@ -16,6 +16,22 @@ test('composer fast-forward dispatches immediately without an incidental blur', 
     /onTouchEnd=\{\(e\) => \{ e\.preventDefault\(\); onSteer\(\) \}\}/,
   )
   assert.match(steerBlock, /onClick=\{onSteer\}/)
+})
+
+test('Send, Steer, and Stop reuse one continuously visible primary action', () => {
+  const steerBlock = inputBar.match(
+    /if \(sending && !hasInput && canSteer\)[\s\S]*?<button[\s\S]*?<\/button>/,
+  )?.[0] || ''
+  const stopBlock = inputBar.match(
+    /if \(sending && !hasInput\)[\s\S]*?<button[\s\S]*?<\/button>/,
+  )?.[0] || ''
+  const sendBlock = inputBar.match(
+    /if \(hasInput && !listening\)[\s\S]*?<button[\s\S]*?<\/button>/,
+  )?.[0] || ''
+
+  assert.match(steerBlock, /key="primary"/)
+  assert.match(stopBlock, /key="primary"/)
+  assert.match(sendBlock, /key="primary"/)
 })
 
 test('per-row fast-forward dispatches on touchend too', () => {

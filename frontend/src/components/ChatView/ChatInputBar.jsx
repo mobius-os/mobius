@@ -117,9 +117,11 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
  *  false and the Stop square returns, and while the composer has text the Send
  *  button (queue-another) still wins over both.
  *
- *  Each state's button carries a distinct `key`, and that is load-bearing:
- *  state swaps replace the semantic control, while the shared `.chat__action`
- *  base keeps geometry and box model stable across Send / Stop / Steer / Mic. */
+ *  Send, Steer, and Stop are states of the same primary action. They
+ *  deliberately share the `primary` key so React preserves the 40px action
+ *  target and swaps only its icon, label, handler, and semantic colour—there
+ *  must be no empty/black replacement frame between any of them. Mic remains
+ *  distinct because it is the idle input affordance rather than a turn action. */
 function PrimaryAction({
   sending, listening, hasInput, hasUploading, offline, canSteer,
   submissionBlocked,
@@ -128,7 +130,7 @@ function PrimaryAction({
   if (sending && !hasInput && canSteer) {
     return (
       <button
-        key="steer"
+        key="primary"
         className="chat__action chat__steer"
         type="button"
         // Keep focus stable through pointerdown, then let ChatView dismiss
@@ -146,7 +148,7 @@ function PrimaryAction({
   if (sending && !hasInput) {
     return (
       <button
-        key="stop"
+        key="primary"
         className="chat__action chat__stop"
         type="button"
         // Match Send's touch handling: the composer keeps focus on
@@ -167,7 +169,7 @@ function PrimaryAction({
   if (hasInput && !listening) {
     return (
       <button
-        key="send"
+        key="primary"
         className="chat__action chat__send"
         type="button"
         // Keep the textarea focused until ChatView snapshots the scroll

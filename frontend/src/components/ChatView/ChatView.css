@@ -1878,18 +1878,6 @@
     transform 0.08s ease;
 }
 
-/* Primary meanings share one slot. Hold the replacement invisible for a
-   brief beat so Send/Fast-forward clears before Stop is revealed. */
-.chat__send,
-.chat__steer,
-.chat__stop {
-  animation: chat-action-reveal 0.16s ease-out both;
-}
-
-@keyframes chat-action-reveal {
-  0%, 44% { opacity: 0; }
-  100% { opacity: 1; }
-}
 .chat__action:focus { outline: none; }
 .chat__action:focus-visible {
   outline: 2px solid var(--accent);
@@ -2647,9 +2635,6 @@
 @media (prefers-reduced-motion: reduce) {
   .chat__build-rail,
   .chat__copy-toast { animation: none; }
-  .chat__send,
-  .chat__steer,
-  .chat__stop { animation: none; }
 }
 
 /* ── Queued messages tray ──────────────────────────── */
