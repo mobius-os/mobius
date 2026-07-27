@@ -5342,7 +5342,7 @@ async def _run_chat_impl_with_db(
   # prompt/settings snapshot commits.
   resumed_context_fallback = (
     _build_resumed_context(chat_row)
-    if provider.name == "Claude Code" and session_id
+    if session_id and provider.name in ("Claude Code", "Codex")
     else None
   )
 
@@ -5410,6 +5410,7 @@ async def _run_chat_impl_with_db(
         db=db,
         agent_settings=runner_agent_settings,
         system_prompt=system_prompt,
+        resumed_context=resumed_context_fallback,
         should_abort=lambda: _run_generation_superseded(chat_id, run_gen),
       )
       new_session_id = runner_result.get("session_id")

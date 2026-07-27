@@ -639,8 +639,20 @@ def test_is_transport_death_binds_to_the_sdk_class_not_to_its_name():
   ) is False
 
 
-def test_run_codex_sdk_turn_resume_mismatch_returns_error(monkeypatch):
-  mismatched_thread = _FakeThread("actual-thread", _FakeTurnHandle())
+def test_run_codex_sdk_turn_resume_mismatch_reseeds_without_error(monkeypatch):
+  # A resume that returns a different thread id (a lost session) now reseeds and
+  # continues instead of erroring. Even with NO prior-history context to inject,
+  # it must not dead-end: it rides the fresh thread and publishes session_init,
+  # never an error. (Companion to the reseed+record test, which covers the
+  # history-injection and activity-event side.)
+  completed_turn = SimpleNamespace(id="turn-m", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ]
+  mismatched_thread = _FakeThread("actual-thread", _FakeTurnHandle(notifications))
 
   class FakeAsyncCodex:
     def __init__(self, config=None):
@@ -676,15 +688,9 @@ def test_run_codex_sdk_turn_resume_mismatch_returns_error(monkeypatch):
   )
 
   assert result["session_id"] == "actual-thread"
-  assert "different session id" in result["error"]
-  assert bc.events == [{
-    "type": "error",
-    "message": (
-      "Codex resume returned a different session id "
-      "(actual-thread) than requested (requested-thread); "
-      "start a fresh chat turn."
-    ),
-  }]
+  assert result["error"] is None
+  assert {"type": "session_init", "session_id": "actual-thread"} in bc.events
+  assert not any(e.get("type") == "error" for e in bc.events)
 
 
 def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
@@ -3048,3 +3054,76 @@ def test_run_codex_sdk_turn_fallback_does_not_start_capture_poller(
   ))
 
   assert result["error"] is None
+
+
+def test_run_codex_sdk_turn_reseeds_lost_session_and_records_event(monkeypatch):
+  # A lost Codex session — thread_resume returns a DIFFERENT thread id than
+  # requested — must reseed like the Claude runner: no error, continue on the
+  # fresh thread with the chat's prior history prepended, and record a
+  # codex_session_reseed activity event so the loss is not masked (Reflection
+  # reads /data/logs/activity.jsonl). A genuine resume error still raises; only
+  # this "different thread returned" (lost-session) case reseeds.
+  completed_turn = SimpleNamespace(id="turn-x", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ]
+  fresh_thread = _FakeThread("fresh-thread-999", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_a):
+      return None
+
+    async def thread_resume(self, session_id, **kwargs):
+      # Codex could not resume the requested id; hands back a fresh thread.
+      return fresh_thread
+
+    async def thread_start(self, *_a, **_k):
+      raise AssertionError("reseed must ride the fresh thread, not thread_start")
+
+  events: list = []
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  from app import activity
+  monkeypatch.setattr(
+    activity, "log_event", lambda ev, **f: events.append((ev, f)) or True,
+  )
+
+  bc = _FakeBroadcast()
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="please continue",
+    session_id="lost-thread-1",
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-reseed",
+    bc=bc,
+    pending_questions={},
+    db=None,
+    resumed_context="<resumed_context>earlier chat</resumed_context>",
+  ))
+
+  # Recovery is silent to the user: no error, continues on the fresh thread.
+  assert result["error"] is None
+  assert result["session_id"] == "fresh-thread-999"
+  assert {"type": "session_init", "session_id": "fresh-thread-999"} in bc.events
+  assert not any(e.get("type") == "error" for e in bc.events)
+  # Prior history was prepended to the turn on the fresh thread.
+  assert "<resumed_context>earlier chat</resumed_context>" in fresh_thread.turn_args[0]
+  # The loss is recorded for Reflection, not masked.
+  assert any(
+    ev == "codex_session_reseed"
+    and f.get("chat_id") == "chat-reseed"
+    and f.get("requested_session") == "lost-thread-1"
+    and f.get("replacement_session") == "fresh-thread-999"
+    and f.get("reseeded") is True
+    for ev, f in events
+  )

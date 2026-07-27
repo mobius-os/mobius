@@ -1830,6 +1830,7 @@ async def run_codex_sdk_turn(
   db,
   agent_settings: dict | None = None,
   system_prompt: str | None = None,
+  resumed_context: str | None = None,
   should_abort: Callable[[], bool] | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
@@ -2099,23 +2100,39 @@ async def run_codex_sdk_turn(
         log.info("Codex turn aborted before turn setup chat_id=%s", chat_id)
         return aborted_result()
       if session_id is not None and current_session_id != session_id:
-        error_text = (
-          "Codex resume returned a different session id "
-          f"({current_session_id}) than requested ({session_id}); "
-          "start a fresh chat turn."
-        )
+        # The requested Codex session is gone (rollout cleaned up, or a phantom
+        # id) — Codex returned a fresh thread instead of resuming. Rather than
+        # dead-end the chat, reseed like the Claude runner: continue on the fresh
+        # thread with the chat's own prior history prepended, so recovery is
+        # invisible to the user. Crucially the loss is NOT masked — a warning log
+        # plus a durable `codex_session_reseed` activity event (Reflection reads
+        # /data/logs/activity.jsonl) record that it happened, so the recovery is
+        # silent to the user, not to operators. A genuine resume ERROR still
+        # raises upstream and surfaces; only this "different thread returned"
+        # case (a lost session) reseeds.
         log.warning(
-          "Codex stale resume detected for chat %s: requested=%s actual=%s",
+          "Codex session lost for chat %s (requested=%s actual=%s); reseeding "
+          "from DB transcript",
           chat_id,
           session_id,
           current_session_id,
         )
-        bc.publish({"type": "error", "message": error_text})
-        return {
-          "session_id": current_session_id,
-          "cost_usd": None,
-          "error": error_text,
-        }
+        try:
+          from app import activity
+          activity.log_event(
+            "codex_session_reseed",
+            chat_id=chat_id,
+            requested_session=session_id,
+            replacement_session=current_session_id,
+            reseeded=bool(resumed_context),
+          )
+        except Exception:
+          log.debug(
+            "codex session reseed activity log failed chat_id=%s",
+            chat_id, exc_info=True,
+          )
+        if resumed_context:
+          user_message = f"{resumed_context}\n\n{user_message}"
       bc.publish({
         "type": "session_init",
         "session_id": current_session_id,
