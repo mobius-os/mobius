@@ -4019,6 +4019,22 @@ export default function Shell() {
             >
               Close tab
             </button>
+            {/* Close all other tabs — keep only the right-clicked tab in its
+                pane. Only when a sibling exists (never a no-op menu item);
+                other panes are untouched — the menu stays pane-scoped. */}
+            {menuPane && menuPane.tabs.length >= 2 && (
+              <button
+                type="button"
+                role="menuitem"
+                className="workspace__menu-item"
+                onClick={() => {
+                  dispatchWorkspace({ type: 'CLOSE_OTHER_TABS', tabKey: tabMenu.tabKey })
+                  closeTabMenu()
+                }}
+              >
+                Close all other tabs
+              </button>
+            )}
             {/* Close pane — a keyboard/menu affordance so a multi-tab pane need
                 not be dismissed one ✕ at a time (design §3.6). Only when there is
                 another pane to fall back to (never the single-pane strip). */}

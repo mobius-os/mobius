@@ -1137,6 +1137,36 @@ test('CLOSE_PANE closes a whole pane, is undoable, and names itself', () => {
   assert.equal(undone.ws, ws, 'Undo restores the closed pane and its tabs')
 })
 
+test('CLOSE_OTHER_TABS keeps only the clicked tab, is undoable, and names itself', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('app', 42), makeTab('chat', 'c')])
+  const paneId = ws.focusedPaneId
+  const start = paneModel.initialWorkspaceState(ws)
+  const closed = paneModel.workspaceReducer(start, { type: 'CLOSE_OTHER_TABS', tabKey: 'app:42' })
+  assert.deepEqual(closed.ws.panes[paneId].tabs.map(tabKey), ['app:42'], 'only the kept tab survives')
+  assert.equal(closed.ws.panes[paneId].activeTabKey, 'app:42', 'the kept tab becomes active')
+  assert.equal(closed.undo.toast, 'Closed other tabs')
+  const undone = paneModel.workspaceReducer(closed, { type: 'UNDO_LAST' })
+  assert.equal(undone.ws, ws, 'Undo restores every closed sibling at once')
+  // Already alone or unknown tab: same reference — no undo slot burned.
+  assert.equal(paneModel.workspaceReducer(closed, { type: 'CLOSE_OTHER_TABS', tabKey: 'app:42' }), closed)
+  assert.equal(paneModel.closeOtherTabs(ws, 'chat:nope'), ws)
+})
+
+test('CLOSE_OTHER_TABS is pane-scoped — a sibling pane keeps its tabs', () => {
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')])
+  const leftPane = ws.focusedPaneId
+  ws = paneModel.splitPaneWithTab(ws, makeTab('app', 42), { paneId: leftPane, edge: 'right' })
+  const closed = paneModel.workspaceReducer(
+    paneModel.initialWorkspaceState(ws),
+    { type: 'CLOSE_OTHER_TABS', tabKey: 'chat:a' },
+  )
+  assert.deepEqual(closed.ws.panes[leftPane].tabs.map(tabKey), ['chat:a'])
+  assert.ok(
+    paneModel.flatten(closed.ws).map(tabKey).includes('app:42'),
+    'the other pane is untouched',
+  )
+})
+
 test('reducer APPLY_PLACEMENT composes batched dispatches instead of clobbering', () => {
   // The former bug: two placements resolved against the same stale render
   // snapshot, so the second REPLACED the first. A resolve function run against
