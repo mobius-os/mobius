@@ -91,6 +91,10 @@ class TerminalDisposition(enum.Enum):
   EMPTY_TERMINAL_CLEARED = "empty_terminal_cleared"
   # Queue empty, terminal state durable; marker cleared + chat forgotten,
   # all inside the one bounded lock (clear-before-forget ordering).
+  PROVIDER_FREE_COMPLETED = "provider_free_completed"
+  # Same durable empty-queue terminal as EMPTY_TERMINAL_CLEARED, but the
+  # response was produced without a provider. Turn-end summaries must stay
+  # deterministic so this completion cannot re-enter the unavailable agent.
   STOP_HANDOFF_CLEARED = "stop_handoff_cleared"
   # A Stop-bumped generation reached terminal persistence and cleared the
   # marker for the immediate successor generation it still owns.

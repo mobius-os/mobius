@@ -432,7 +432,7 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
-def test_pull_requests_run_required_suites_and_main_only_refreshes_cache():
+def test_pull_requests_run_required_suites_and_main_publishes_daily_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
@@ -460,8 +460,13 @@ def test_pull_requests_run_required_suites_and_main_only_refreshes_cache():
 
   assert "push:\n" in cache_triggers
   assert "    branches: [main]\n" in cache_triggers
+  assert "schedule:\n" in cache_triggers
+  assert "workflow_dispatch:\n" in cache_triggers
   assert "pull_request:\n" not in cache_triggers
-  assert "outputs: type=cacheonly" in cache_workflow
+  assert "packages: write" in cache_workflow
+  assert "push: true" in cache_workflow
+  assert "tags: ghcr.io/mobius-os/mobius:daily" in cache_workflow
+  assert "docker buildx imagetools inspect ghcr.io/mobius-os/mobius:daily" in cache_workflow
   assert "cache-to: type=gha,mode=max,ignore-error=true" in cache_workflow
   assert "load: true" not in cache_workflow
 

@@ -454,6 +454,12 @@ class SendMessage(BaseModel):
   # the backend to steer them into the live turn even when the chat's
   # normal send-while-running behavior is queueing.
   force_steer: bool = False
+  # A new composer message that should be durably reserved and steered in one
+  # request. Unlike force_steer, this does not name an existing queued row:
+  # the route first appends this message to pending_messages, then converts
+  # that exact cid into the live turn. If delivery cannot be accepted, the
+  # reserved row remains queued and the response exposes that fallback.
+  direct_steer: bool = False
   # Which already-queued rows a force-steer should pull into the live
   # turn, selected by their stable `cid` (the server still reconstructs
   # the durable rows from Chat.pending_messages so the browser cannot
