@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { X } from '@openai/apps-sdk-ui/components/Icon'
+import X from 'lucide-react/dist/esm/icons/x.mjs'
 import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import {
@@ -271,10 +271,9 @@ function SentRow({ sent, onDismiss }) {
           type="button"
           className="contrib-card__dismiss"
           aria-label="Dismiss"
-          title="Dismiss"
           onClick={() => onDismiss?.()}
         >
-          <X width={13} height={13} aria-hidden="true" />
+          <X size={14} strokeWidth={2} aria-hidden="true" />
         </button>
       </div>
       <p className="contrib-card__summary">
@@ -322,13 +321,9 @@ function ReviewRow({
           type="button"
           className="contrib-card__dismiss"
           aria-label="Dismiss — keeps it in Contribute"
-          title="Dismiss — keeps it in Contribute"
           onClick={() => onDismiss?.()}
         >
-          {/* The shell's icon set rather than a close CHARACTER: Inter has no
-              glyph for U+2715, so the literal rendered as a tofu box on the
-              real device. */}
-          <X width={13} height={13} aria-hidden="true" />
+          <X size={14} strokeWidth={2} aria-hidden="true" />
         </button>
       </div>
       <p className="contrib-card__summary">

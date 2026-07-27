@@ -160,20 +160,19 @@
   color: var(--muted);
 }
 
-/* The swipe's visible equivalent. Quiet by default — the card is an offer, not
-   an alert — but a real control, so a pointer or keyboard can dismiss too. */
+/* The swipe's visible equivalent. This follows the shell's quiet Lucide close
+   controls rather than the heavier filled icon that made the button look off. */
 .contrib-card__dismiss {
   flex-shrink: 0;
+  display: grid;
+  place-items: center;
   width: 28px;
-  height: 22px;
+  height: 28px;
   padding: 0;
   border: none;
-  border-radius: 5px;
+  border-radius: 7px;
   background: transparent;
   color: var(--muted);
-  font-family: var(--font);
-  font-size: 0.75rem;
-  line-height: 1;
   cursor: pointer;
 }
 
@@ -182,6 +181,11 @@
     background: color-mix(in srgb, var(--text) 10%, transparent);
     color: var(--text);
   }
+}
+
+.contrib-card__dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .contrib-card__summary {

@@ -291,9 +291,14 @@ test('the swipe has a visible, focusable equivalent', () => {
   assert.match(cardSrc, /className="contrib-card__dismiss"/)
   assert.match(cardSrc, /aria-label="Dismiss — keeps it in Contribute"/)
   assert.match(cardSrc, /onClick=\{\(\) => onDismiss\?\.\(\)\}/)
-  // An icon from the shell's set, never a bare ✕ character — Inter has no glyph
-  // for U+2715, so the literal rendered as a tofu box on the real device.
-  assert.match(cardSrc, /<X width=\{13\} height=\{13\} aria-hidden="true" \/>/)
+  // Use the same outlined close icon as the shell's other compact dismiss
+  // controls; the heavier Apps SDK glyph made this one look out of place.
+  assert.match(cardSrc, /import X from 'lucide-react\/dist\/esm\/icons\/x\.mjs'/)
+  assert.equal(
+    (cardSrc.match(/<X size=\{14\} strokeWidth=\{2\} aria-hidden="true" \/>/g) || []).length,
+    2,
+  )
+  assert.doesNotMatch(cardSrc, /title="Dismiss/)
   assert.doesNotMatch(cardSrc, /✕|✖|❌/)
 })
 
