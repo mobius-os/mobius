@@ -21,6 +21,8 @@ from sqlalchemy import (
   String, Text, event, false, true,
 )
 
+from sqlalchemy.orm import column_property
+
 from app.database import Base
 from app.timeutil import now_naive_utc
 
@@ -543,6 +545,9 @@ class App(Base):
   # are small (~10-50KB at 512x512) and per-app — avoids needing a
   # separate file store + cleanup path.
   icon_png = Column(LargeBinary, nullable=True, default=None)
+  # Lightweight drawer/catalog projection. This selects only an IS NOT NULL
+  # boolean, so list_apps can advertise artwork without hydrating icon bytes.
+  has_custom_icon = column_property(icon_png.isnot(None))
   # Absolute directory holding this app's source files. Editable app source lives
   # under `/data/apps/<dirname>`. Stored explicitly so source apply can map a
   # directory back to its DB row without slugify-guessing the name.

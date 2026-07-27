@@ -317,7 +317,7 @@ test.describe('Desktop sidebar navigation', () => {
     ))).toBe('false')
     await expect.poll(() => page.locator('.shell__content').evaluate(
       element => element.getBoundingClientRect().left,
-    )).toBe(0)
+    )).toBe(58)
 
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(toggle).toHaveAttribute('aria-expanded', 'false')

@@ -133,6 +133,9 @@ class AppOut(BaseModel):
   # Optional standalone PWA colors persisted from installed app manifests.
   theme_color: str | None = None
   background_color: str | None = None
+  # True when the raw app-icon endpoint can return stored artwork. Lets shell
+  # chrome avoid using expected 404 responses as an icon-existence probe.
+  has_custom_icon: bool = False
   # Optional PWA display mode (web-manifest `display`). Null → "standalone".
   display: str | None = None
   # Offline contract from the manifest `offline` block (P1-D). None when no

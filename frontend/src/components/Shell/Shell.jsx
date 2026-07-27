@@ -3519,7 +3519,7 @@ export default function Shell() {
           <button
             type="button"
             className="shell__rail-action"
-            aria-label="New chat"
+            aria-label="New chat shortcut"
             title="New chat"
             onClick={() => newChat({ focusComposer: true, recordHistory: true })}
           >
@@ -3528,7 +3528,7 @@ export default function Shell() {
           <button
             type="button"
             className={`shell__rail-action${activeView === 'apps' ? ' shell__rail-action--active' : ''}`}
-            aria-label="Apps"
+            aria-label="Apps shortcut"
             title="Apps"
             aria-current={activeView === 'apps' ? 'page' : undefined}
             onClick={() => navTo('apps')}
@@ -3538,7 +3538,7 @@ export default function Shell() {
           <button
             type="button"
             className={`shell__rail-action shell__rail-action--bottom${activeView === 'settings' ? ' shell__rail-action--active' : ''}`}
-            aria-label="Settings"
+            aria-label="Settings shortcut"
             title="Settings"
             aria-current={activeView === 'settings' ? 'page' : undefined}
             onClick={() => {
@@ -3726,10 +3726,10 @@ export default function Shell() {
             // full-bleed beneath the deal (INV 5).
             data-mode-motion={motion ? motion.motion : undefined}
             className={underlay
-              ? 'shell__view shell__view--exit-underlay'
+              ? 'shell__view shell__app-view shell__view--exit-underlay'
               : (paned
-                ? 'shell__view shell__view--paned'
-                : `shell__view ${fullBleed ? 'shell__view--active' : ''}`)}
+                ? 'shell__view shell__app-view shell__view--paned'
+                : `shell__view shell__app-view ${fullBleed ? 'shell__view--active' : ''}`)}
             style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
             // INV 9 (inert beat): every moving surface — a participant pane OR the
             // underlay — is pointer/keyboard inert so a tap on an in-flight / covered
