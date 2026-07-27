@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -4820,13 +4821,12 @@ async def _ensure_chat_note(
     log.debug("ensure_chat_note failed", exc_info=True)
 
 
-async def _run_note_tool_quiet(
-  data_dir: str, chat_id: str, flag: str, timeout: float,
-) -> None:
-  """Run one best-effort, quiet chat_note.py mode (--sync-title/--quick-title).
+async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
+  """Compatibility helper: sync a chat title from an existing note's gist.
 
-  Unlike ``_ensure_chat_note`` these modes are cosmetic — a failure just leaves
-  the current title — so stderr is swallowed and nothing is warned.
+  Normal turn-end publication performs this inside ``chat_note.py`` after its
+  compare-and-swap succeeds. This tool-free helper remains useful to older
+  callers and operator repair paths.
   """
   log = _get_logger()
   script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
@@ -4837,12 +4837,12 @@ async def _run_note_tool_quiet(
   proc = None
   try:
     proc = await asyncio.create_subprocess_exec(
-      "python3", str(script), chat_id, flag,
+      "python3", str(script), chat_id, "--sync-title",
       stdout=asyncio.subprocess.DEVNULL,
       stderr=asyncio.subprocess.DEVNULL,
       env=env,
     )
-    await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    await asyncio.wait_for(proc.communicate(), timeout=20)
   except asyncio.TimeoutError:
     if proc is not None:
       try:
@@ -4850,20 +4850,10 @@ async def _run_note_tool_quiet(
       except ProcessLookupError:
         pass
   except Exception:
-    log.debug("chat_note %s failed", flag, exc_info=True)
+    log.debug("sync_chat_title failed", exc_info=True)
 
 
-async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
-  """Compatibility helper: sync a chat title from an existing note's gist.
-
-  Normal turn-end publication performs this inside ``chat_note.py`` after its
-  compare-and-swap succeeds. This tool-free helper remains useful to older
-  callers and operator repair paths.
-  """
-  await _run_note_tool_quiet(data_dir, chat_id, "--sync-title", 20)
-
-
-async def _deduce_chat_title(data_dir: str, chat_id: str) -> None:
+def _deduce_chat_title(data_dir: str, chat_id: str) -> None:
   """Deduce a concise tab name from a brand-new chat's first message.
 
   Fired right after the first send starts its turn (chats_stream), so the
@@ -4872,8 +4862,33 @@ async def _deduce_chat_title(data_dir: str, chat_id: str) -> None:
   titler (``chat_note.py --quick-title``), which PATCHes the title by_agent —
   a manual rename always wins, and the settled-turn note publisher owns the
   name afterwards. Best-effort: failure keeps the truncated-prompt fallback.
+
+  DETACHED on purpose — a plain Popen, never an awaited asyncio subprocess.
+  The caller's event loop must hold no reference to this child: an awaited
+  spawn parked on the request loop deadlocks CPython's loop shutdown when
+  that loop closes mid-spawn (asyncio.run's _cancel_all_tasks waits forever
+  on the cancelled task — reproduced via test_normal_send_spawns_turn, which
+  drives send_message with asyncio.run). The child needs no parent-side kill:
+  every path in chat_note.py --quick-title carries its own timeout (provider
+  call, title PATCH, sqlite read) plus an unhandled-exception backstop.
   """
-  await _run_note_tool_quiet(data_dir, chat_id, "--quick-title", 90)
+  log = _get_logger()
+  script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
+  if not script.exists() or not chat_id:
+    return
+  env = dict(os.environ)
+  env["DATA_DIR"] = data_dir
+  try:
+    subprocess.Popen(
+      ["python3", str(script), chat_id, "--quick-title"],
+      stdin=subprocess.DEVNULL,
+      stdout=subprocess.DEVNULL,
+      stderr=subprocess.DEVNULL,
+      env=env,
+      start_new_session=True,
+    )
+  except Exception:
+    log.debug("quick titler spawn failed", exc_info=True)
 
 
 # Fallback viewport for turns no shell initiated (cron, reflection,

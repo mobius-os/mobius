@@ -1134,10 +1134,11 @@ async def _send_message_locked(
         # the truncated raw prompt. Deduce a few-word name in the background
         # while the turn streams (chat_note.py --quick-title, PATCHed
         # by_agent so a manual rename wins). Gated with the note publisher —
-        # both are the platform's LLM naming machinery.
-        asyncio.create_task(
-          _deduce_chat_title(get_settings().data_dir, chat_id)
-        )
+        # both are the platform's LLM naming machinery. The spawn is a
+        # detached fire-and-forget subprocess, NOT a task on this request's
+        # loop — see _deduce_chat_title for why that distinction is load-
+        # bearing.
+        _deduce_chat_title(get_settings().data_dir, chat_id)
     else:
       # A Stop raced during the StartTurn commit: it bumped the generation,
       # cleared the marker, and released _starting. The user message is
