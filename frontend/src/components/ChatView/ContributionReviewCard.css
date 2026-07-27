@@ -1,0 +1,246 @@
+/* The chat's contribution review card — docked between the transcript and the
+   composer, so approving the work happens where the work happened. Deliberately
+   quieter than a chat message: it is a pending action, not part of the
+   conversation, and it disappears the moment nothing is staged. */
+
+/* The card is a child of `.chat__foot`, which is a transparent absolutely
+   positioned overlay with `pointer-events: none` so the transcript scrolls behind
+   the composer. Every real control in there has to opt back in — the composer
+   pill, the `+` button, the open-app row all do. Without this the card renders
+   perfectly and silently ignores every tap, because the hit test falls straight
+   through to the messages underneath. */
+.contrib-card-stack,
+.contrib-card {
+  pointer-events: auto;
+}
+
+.contrib-card-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px 0;
+}
+
+.contrib-card {
+  border: 1px solid var(--border-light);
+  border-left: 2px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* Eases the snap-back and the flight off-screen. Suppressed mid-drag so the
+     card tracks the finger 1:1 instead of lagging behind it. */
+  transition: transform 160ms cubic-bezier(0.2, 0, 0.2, 1),
+              opacity 160ms linear;
+}
+
+.contrib-card--dragging {
+  transition: none;
+}
+
+.contrib-card--blocked {
+  border-left-color: var(--muted);
+}
+
+/* The status is a full-width header BAND, not a chip beside the text. As a chip
+   it sat next to a summary that wraps to several lines, leaving an obvious hole
+   under the short label. Spanning the card's padding (negative margins cancel it)
+   makes the band read as the card's header and removes that hole entirely. */
+.contrib-card__badge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -10px -12px 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-light);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.contrib-card--blocked .contrib-card__badge {
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+  color: var(--muted);
+}
+
+/* The swipe's visible equivalent. Quiet by default — the card is an offer, not
+   an alert — but a real control, so a pointer or keyboard can dismiss too. */
+.contrib-card__dismiss {
+  flex-shrink: 0;
+  width: 28px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 0.75rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .contrib-card__dismiss:hover {
+    background: color-mix(in srgb, var(--text) 10%, transparent);
+    color: var(--text);
+  }
+}
+
+.contrib-card__summary {
+  min-width: 0;
+  font-size: 0.875rem;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.contrib-card__meta,
+.contrib-card__blocker {
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.contrib-card__blocker {
+  color: var(--danger);
+}
+
+/* The motivation the button cannot carry on its own: who actually benefits.
+   Accent-tinted so it reads as encouragement rather than another metadata line,
+   and hidden whenever the card is showing a problem instead. */
+.contrib-card__payoff {
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: color-mix(in srgb, var(--accent) 78%, var(--text));
+}
+
+.contrib-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.contrib-card__send {
+  flex: 1;
+  min-height: 36px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-family: var(--font);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.contrib-card__send:disabled {
+  background: var(--surface2);
+  color: var(--muted);
+  cursor: default;
+}
+
+.contrib-card__toggle {
+  flex-shrink: 0;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+/* ONE scroller for the whole disclosure. An expanded review can be long (the
+   published text is quoted verbatim), and it is docked above the composer, so it
+   must not push the conversation off the screen. Nesting a second scroller
+   inside the quoted text made the two fight on a phone. */
+.contrib-card__details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-light);
+  max-height: 42vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.contrib-card__detail-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.contrib-card__detail-line {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.contrib-card__detail-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
+.contrib-card__files {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--text);
+  /* Long paths stay inside the card rather than widening the chat column. */
+  overflow-wrap: anywhere;
+}
+
+/* Quoted verbatim; it flows inside the disclosure's single scroller above. */
+.contrib-card__body {
+  margin: 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The acknowledgement after this card's own Send. Same shape as every other card
+   — band, body, actions — so it inherits the swipe and the band's dismiss control
+   instead of being a special layout with no way out. */
+.contrib-card--sent {
+  border-left-color: var(--green, var(--accent));
+}
+
+.contrib-card--sent .contrib-card__badge {
+  background: color-mix(in srgb, var(--green, var(--accent)) 12%, transparent);
+  color: var(--green, var(--accent));
+}
+
+.contrib-card__link-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}

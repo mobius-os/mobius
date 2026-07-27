@@ -78,6 +78,8 @@
  */
 
 import { useRef, useState, useEffect, useLayoutEffect } from 'react'
+import { createPortal } from 'react-dom'
+import ImageLightbox from './markdown/ImageLightbox.jsx'
 import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
@@ -243,6 +245,8 @@ function FileChips({ files, onRemove, chatId }) {
     param: '',
     failed: false,
   })
+  // Index into the attached-image gallery currently shown full-screen.
+  const [lightboxIndex, setLightboxIndex] = useState(null)
   const hasRestoredImage = files?.some(file => (
     file.mime_type?.startsWith('image/') && !file.objectUrl
   ))
@@ -268,18 +272,41 @@ function FileChips({ files, onRemove, chatId }) {
     : { param: '', failed: false }
 
   if (!files?.length) return null
+
+  const cards = files.map(chip => {
+    const isImage = !!chip.objectUrl || chip.mime_type?.startsWith('image/')
+    const previewSrc = chip.objectUrl || (
+      isImage && currentTokenState.param
+        ? `${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(chip.name)}${currentTokenState.param}`
+        : ''
+    )
+    return {
+      chip,
+      isImage,
+      previewSrc,
+      previewFailed: !!(isImage && !chip.objectUrl && currentTokenState.failed),
+    }
+  })
+  // Every viewable attached image, in tray order, so the full-screen
+  // viewer can page/swipe between them like a sent-message gallery. Each
+  // card records its own gallery position: two attachments can share a
+  // preview URL (same restored filename), so looking the index up by src
+  // would open the wrong one.
+  const gallery = []
+  for (const card of cards) {
+    if (!card.isImage || !card.previewSrc) continue
+    card.galleryIndex = gallery.length
+    gallery.push({ src: card.previewSrc, alt: card.chip.name })
+  }
+  // Removing an attachment while open can invalidate the index; treat
+  // an out-of-range index as closed rather than showing the wrong image.
+  const openIndex = lightboxIndex !== null && lightboxIndex < gallery.length
+    ? lightboxIndex
+    : null
+
   return (
     <div className="chat__attach-tray">
-      {files.map(chip => {
-        const isImage = !!chip.objectUrl || chip.mime_type?.startsWith('image/')
-        const previewSrc = chip.objectUrl || (
-          isImage && currentTokenState.param
-            ? `${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(chip.name)}${currentTokenState.param}`
-            : ''
-        )
-        const previewFailed = !!(
-          isImage && !chip.objectUrl && currentTokenState.failed
-        )
+      {cards.map(({ chip, isImage, previewSrc, previewFailed, galleryIndex }) => {
         const cls = classifyFile(chip.name || '')
         const errorMark = chip.status === 'error' ? ' chat__attach-card--error' : ''
         return (
@@ -295,7 +322,18 @@ function FileChips({ files, onRemove, chatId }) {
               : (chip.status === 'error' ? chip.error : chip.name)}
           >
             {isImage && previewSrc ? (
-              <img className="chat__attach-card-thumb" src={previewSrc} alt="" />
+              <button
+                type="button"
+                className="chat__attach-card-thumb-button"
+                // Preserve the textarea until the dialog mounts. The shared
+                // lightbox then moves focus into itself deliberately and
+                // restores this button/text-entry context when it closes.
+                onPointerDown={(e) => e.preventDefault()}
+                onClick={() => setLightboxIndex(galleryIndex)}
+                aria-label={`View ${chip.name} full screen`}
+              >
+                <img className="chat__attach-card-thumb" src={previewSrc} alt="" />
+              </button>
             ) : previewFailed ? (
               <span className="chat__attach-card-preview-error" role="status">
                 Preview unavailable
@@ -328,6 +366,17 @@ function FileChips({ files, onRemove, chatId }) {
           </div>
         )
       })}
+      {openIndex !== null && createPortal(
+        <ImageLightbox
+          src={gallery[openIndex].src}
+          alt={gallery[openIndex].alt}
+          items={gallery}
+          index={openIndex}
+          onNavigate={setLightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+        />,
+        document.body,
+      )}
     </div>
   )
 }
