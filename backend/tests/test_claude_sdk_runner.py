@@ -1628,3 +1628,17 @@ def test_clip_task_text_bounds_and_coerces():
   out = _clip_task_text(big, 2000)
   assert len(out) == 2000 and out.endswith("…")
   assert _clip_task_text({"a": 1}, 100) == "{'a': 1}"
+
+
+def test_precompact_log_trigger_extracts_and_is_defensive():
+  # The PreCompact observability hook must never raise into the SDK's own
+  # compaction path, so the trigger extractor coerces anything unexpected to
+  # None and only returns a real string trigger.
+  from app.claude_sdk_runner import _precompact_log_trigger
+
+  assert _precompact_log_trigger({"trigger": "auto"}) == "auto"
+  assert _precompact_log_trigger({"trigger": "manual"}) == "manual"
+  assert _precompact_log_trigger({}) is None
+  assert _precompact_log_trigger({"trigger": 123}) is None
+  assert _precompact_log_trigger(None) is None
+  assert _precompact_log_trigger("not-a-dict") is None
