@@ -430,21 +430,18 @@ function commitBounded(ws, candidate) {
 
 // Seed a single-pane workspace from today's flat open set. Tabs are sanitized,
 // deduped, and capped to the last MAX_PANE_TABS (legacy readOpenTabs posture);
-// the last tab is active (the on-screen one under the flat model). A fresh
-// workspace opens in the tiled 'panes' view-mode by default, but the SPLITS
-// KILL SWITCH clamps it to 'single' HERE — the same coercion the valid-blob path
-// gets in normalize() (M3). parseWorkspace returns this seed DIRECTLY on the
-// fresh/fallback/invalid paths without re-normalizing, so without the clamp the
-// seed keeps viewMode 'panes' while the presentation clamps to single: the raw-
-// viewMode reader `activeContentRoute` then projects the hidden BUILDER world
-// (focused pane) while single mode paints the SLOT — two conflicting worlds.
+// the last tab is active (the on-screen one under the flat model). A fresh or
+// fallback workspace starts in the standard single-screen world. Persisted valid
+// workspaces keep their chosen mode through normalize(); this seed is only used
+// when there is no usable workspace blob. parseWorkspace returns it DIRECTLY on
+// the fresh/fallback/invalid paths, so the seed itself must carry the render mode.
 export function seedFromFlatTabs(tabs) {
   const clean = capTabs(dedupTabs(sanitizeTabs(tabs)))
   const paneId = 'p0'
   const keys = clean.map(tabModel.tabKey)
   return {
     v: 1,
-    viewMode: coerceViewMode('panes'),
+    viewMode: coerceViewMode('single'),
     layout: paneId,
     panes: {
       [paneId]: {
