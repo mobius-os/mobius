@@ -326,7 +326,7 @@ export default function ImageLightbox({
   }
 
   return (
-    <div className="lightbox-overlay" role="presentation">
+    <div className="lightbox-overlay" role="presentation" onClick={onClose}>
       <div
         ref={dialogRef}
         className="lightbox-content"
@@ -335,7 +335,6 @@ export default function ImageLightbox({
         aria-label={hasGallery
           ? `Image ${index + 1} of ${galleryItems.length}${activeAlt ? `: ${activeAlt}` : ''}`
           : activeAlt || 'Image viewer'}
-        onClick={onClose}
       >
         <img
           key={activeSrc}
