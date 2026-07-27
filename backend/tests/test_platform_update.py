@@ -31,10 +31,23 @@ from app import platform_update as pu
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-  return subprocess.run(
+  proc = subprocess.run(
     ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(cwd), *args],
-    capture_output=True, text=True, check=check,
+    capture_output=True, text=True,
   )
+  if check and proc.returncode != 0:
+    # Preserve the CalledProcessError type, but attach git's stderr as an
+    # exception note so the traceback shows git's actual `fatal:` line. The
+    # default check=True message is only "... exit status N", which is why the
+    # intermittent exit-128 failure this suite has hit in CI was undiagnosable:
+    # git's own error text was swallowed. Surfacing it lets the next occurrence
+    # name its own cause instead of leaving us to guess.
+    err = subprocess.CalledProcessError(
+      proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr,
+    )
+    err.add_note(f"git stderr: {proc.stderr.strip() or '(empty)'}")
+    raise err
+  return proc
 
 
 # A trivially-importable backend so the import probe (`import app.main` with cwd
