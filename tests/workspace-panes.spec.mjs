@@ -744,7 +744,13 @@ async function mouseDrag(page, sourceLocator, toX, toY, { release = true } = {})
 }
 
 /** A real Chromium touch stream (not synthetic PointerEvents). */
-async function touchDrag(page, sourceLocator, toX, toY, { firstDx = 0, firstDy = 12 } = {}) {
+async function touchDrag(
+  page,
+  sourceLocator,
+  toX,
+  toY,
+  { firstDx = 0, firstDy = 12, holdMs = 0 } = {},
+) {
   const box = await sourceLocator.boundingBox()
   const sx = box.x + box.width / 2
   const sy = box.y + box.height / 2
@@ -752,6 +758,7 @@ async function touchDrag(page, sourceLocator, toX, toY, { firstDx = 0, firstDy =
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
   const point = (x, y) => [{ x, y, radiusX: 4, radiusY: 4, force: 1, id: 1 }]
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: point(sx, sy) })
+  if (holdMs > 0) await page.waitForTimeout(holdMs)
   await cdp.send('Input.dispatchTouchEvent', {
     type: 'touchMove', touchPoints: point(sx + firstDx, sy + firstDy),
   })
@@ -901,32 +908,33 @@ test.describe('Workspace drag (PR3)', () => {
     ).toBe('p0')
   })
 
-  test('phone touch-drag moves a tab between stacked panes without a long press', async ({ page }) => {
+  test('phone touch-drag moves a tab between stacked panes after a short hold', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'touchDrag')
     await page.setViewportSize(PHONE)
     await expect(page.locator('[data-pane-strip="p1"]')).toBeVisible({ timeout: 4000 })
     const target = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
-    await touchDrag(page, src, target.x + target.width / 2, target.y + target.height / 2)
+    await touchDrag(page, src, target.x + target.width / 2, target.y + target.height / 2, {
+      holdMs: 450,
+    })
     await expect.poll(
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
       { timeout: 3000, message: 'the real touch stream moved C into the lower pane' },
     ).toBe('p1')
   })
 
-  test('phone horizontal touch-drag reorders tabs in the same strip', async ({ page }) => {
+  test('phone horizontal touch-drag reorders tabs in the same strip after a short hold', async ({ page }) => {
     const { a, c } = await bootThreeTab(page, 'touchReorder')
     await page.setViewportSize(PHONE)
     const target = await page.locator(
       `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${a.id}"]`,
     ).boundingBox()
     const src = page.locator(
-      `[data-pane-strip="p0"] [data-touch-drag-handle="chat:${c.id}"]`,
+      `[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`,
     )
-    await expect(src).toHaveClass(/shell__tab-kind/)
     await expect(page.locator('.shell__tab-drag-handle')).toHaveCount(0)
     await touchDrag(page, src, target.x + 2, target.y + target.height / 2, {
-      firstDx: -12, firstDy: 0,
+      firstDx: -12, firstDy: 0, holdMs: 450,
     })
     await expect.poll(async () => (await readWs(page)).panes.p0.tabs
       .map(t => `${t.kind}:${t.id}`), {
@@ -1133,7 +1141,9 @@ test.describe('Workspace view-mode toggle', () => {
     // Render collapsed to one full-bleed pane (the focused chat a), no chrome.
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1)
-    await expect(page.locator(`[data-tab-key="chat:${a.id}"].shell__view--active`)).toHaveCount(1)
+    await expect(page.locator(
+      `[data-chat-surface="painted"][data-chat-id="${a.id}"].shell__view--active`,
+    )).toHaveCount(1)
 
     // Flip back — identical tree restored (never mutated); the only delta vs the
     // pre-flip baseline is the seeded slot, which the return flip must NOT clear.
