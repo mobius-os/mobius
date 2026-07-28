@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+# Usage: python3 /data/shared/skills/manager-session-evidence.py [--hours 72] [--limit 5] [--traces 12] [--memory-writer-packet] [CHAT_ID]
+"""One consolidated performance bundle for a manager session, in ONE call.
+
+Instead of running many sequential tools (read the memory run-status, tail the
+update log, cross-check read-traces against the chat DB, tail reflection
+metrics, list interview artifacts, curl the skills API), this prints all of it
+as a single readable report so a 1-on-1 can start from one command.
+
+Read-only, defensive (missing pieces are skipped, never fatal), python3 stdlib
++ sqlite3 only. It gathers evidence; it does not judge — the manager session
+reads the bundle and forms the coaching.
+"""
+
+import argparse
+import ast
+import datetime as dt
+import json
+import os
+import sqlite3
+import subprocess
+import urllib.parse
+import urllib.request
+
+DB_PATH = "/data/db/ultimate.db"
+MEM_STATE = "/data/shared/memory/app-state"
+MEM_RUN_STATUS = os.path.join(MEM_STATE, "run-status.json")
+MEM_UPDATE_LOG = os.path.join(MEM_STATE, "update-log")
+MEM_READ_TRACE = os.path.join(MEM_STATE, "read-trace")
+MEM_RECALL_STATS = os.path.join(MEM_STATE, "recall-stats.json")
+MEM_RECALL_AUDIT = os.path.join(MEM_STATE, "recall-audit")
+MEM_REPOSITORY = "/data/shared/memory/repository"
+MEMORY_SKILL = "/data/shared/skills/memory.md"
+MEMORY_RUNNER = "/data/apps/memory/memory_runner.py"
+REFLECTION_DIR = "/data/apps/reflection"
+REFLECTION_METRICS = os.path.join(REFLECTION_DIR, "reflection-run-metrics.jsonl")
+REFLECTION_RUNS = os.path.join(REFLECTION_DIR, "runs")
+TOOL_FRICTION = os.path.join(REFLECTION_DIR, "tool_friction.py")
+
+# Filename tokens that identify a reflection run's interview capture.
+INTERVIEW_HINTS = ("interview", "int-", "fork", "1on1", "1-on-1")
+
+
+def now_utc():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def parse_ts(value):
+    """Parse an ISO-8601 timestamp defensively; return an aware datetime or None."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        d = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def short(text, width=64):
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def header(title):
+    print("\n" + "=" * 78)
+    print(title)
+    print("=" * 78)
+
+
+def sub(title):
+    print("\n" + title)
+    print("-" * len(title))
+
+
+def open_db():
+    """Open the chat DB read-only so this tool can never mutate live data."""
+    if not os.path.exists(DB_PATH):
+        return None
+    try:
+        return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+
+
+def chat_titles(con, ids):
+    """Map chat id -> title for the given ids (best effort; missing ids omitted)."""
+    out = {}
+    if not con or not ids:
+        return out
+    ids = list(ids)
+    try:
+        for i in range(0, len(ids), 400):
+            chunk = ids[i : i + 400]
+            q = "select id, title from chats where id in (%s)" % ",".join("?" * len(chunk))
+            for cid, title in con.execute(q, chunk):
+                out[cid] = title
+    except sqlite3.Error:
+        pass
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Section: Memory consolidation agent
+# --------------------------------------------------------------------------- #
+def section_memory(limit):
+    sub("MEMORY — scheduled consolidation agent")
+
+    status = None
+    try:
+        with open(MEM_RUN_STATUS) as fh:
+            status = json.load(fh)
+    except (OSError, ValueError):
+        pass
+
+    if not status:
+        print("  run-status: (not found — Memory app may not be installed)")
+    else:
+        started, finished = parse_ts(status.get("started_at")), parse_ts(status.get("finished_at"))
+        dur = f"{(finished - started).total_seconds():.0f}s" if started and finished else "?"
+        topo = (status.get("topology") or {})
+        before, after = topo.get("before") or {}, topo.get("after") or {}
+        print(f"  status={status.get('status','?')}  model={status.get('model','?')}  "
+              f"provider={status.get('provider','?')}  new_commit={status.get('new_commit')}")
+        print(f"  last run: started {status.get('started_at','?')}  ({dur})")
+        if after:
+            dn = _delta(after.get("nodes"), before.get("nodes"))
+            de = _delta(after.get("edges"), before.get("edges"))
+            print(f"  graph now: {after.get('nodes','?')} nodes ({dn}) / "
+                  f"{after.get('edges','?')} edges ({de}) / {after.get('problems','?')} problems")
+        queued = status.get("queued_chat_count")
+        sourced = status.get("source_chat_count")
+        starved = status.get("chat_input_starved")
+        if starved is None:
+            starved = isinstance(queued, int) and queued > 0 and sourced == 0
+        print(f"  queued_chats={status.get('queued_chat_count','?')}  "
+              f"source_chats={status.get('source_chat_count','?')}  "
+              f"input_starved={'yes' if starved else 'no'}  "
+              f"changed={len(status.get('changed_paths') or [])}  "
+              f"deleted={len(status.get('deleted_paths') or [])}")
+
+    # Last few consolidation outcomes from the append-only update log.
+    entries = _read_update_log(limit)
+    if not entries:
+        print("  update-log: (none found)")
+        return
+    print(f"  recent update-log outcomes (last {len(entries)}):")
+    print(f"  aggregate: changed={sum(len(e.get('changed_paths') or []) for e in entries)}  "
+          f"deleted={sum(len(e.get('deleted_paths') or []) for e in entries)}  "
+          f"published={sum(1 for e in entries if e.get('status') == 'published')}/{len(entries)}")
+    for e in entries:
+        counts = e.get("counts") or {}
+        ts = (e.get("timestamp") or "")[:16]
+        print(f"    {ts or '?':16}  changed={len(e.get('changed_paths') or [])}  "
+              f"deleted={len(e.get('deleted_paths') or [])}  "
+              f"problems={counts.get('problems','?')}  "
+              f"followups={len(e.get('followups') or [])}  status={e.get('status','?')}")
+        if e.get("summary"):
+            print(f"        summary: {short(e['summary'], 88)}")
+        for fu in (e.get("followups") or [])[:2]:
+            print(f"        followup: {short(fu, 88)}")
+
+    try:
+        with open(MEM_RECALL_STATS) as fh:
+            recall = json.load(fh)
+    except (OSError, ValueError):
+        recall = None
+    if recall:
+        print("  recall audit: "
+              f"reads={recall.get('reads_audited', 0)}  "
+              f"miss={float(recall.get('miss_rate', recall.get('important_miss_rate', 0)) or 0):.1%}  "
+              f"overreach={float(recall.get('overreach_rate', 0) or 0):.1%}  "
+              f"no-memory={float(recall.get('no_memory_rate', 0) or 0):.1%}  "
+              f"host-override={float(recall.get('model_to_host_selection_override_rate', 0) or 0):.1%}")
+        print("  miss classes: "
+              f"route={recall.get('route_misses', 0)}  "
+              f"continuation={recall.get('continuation_misses', 0)}  "
+              f"selection={recall.get('selection_misses', 0)}")
+
+
+def _delta(a, b):
+    try:
+        d = int(a) - int(b)
+        return f"{d:+d}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _read_update_log(limit):
+    if not os.path.isdir(MEM_UPDATE_LOG):
+        return []
+    files = sorted(f for f in os.listdir(MEM_UPDATE_LOG) if f.endswith(".jsonl"))
+    entries = []
+    for name in files:
+        try:
+            with open(os.path.join(MEM_UPDATE_LOG, name)) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except ValueError:
+                        continue
+        except OSError:
+            continue
+    entries.sort(key=lambda e: e.get("timestamp") or "")
+    return entries[-limit:]
+
+
+def _read_json(path):
+    try:
+        with open(path) as fh:
+            value = json.load(fh)
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _read_text(path, limit=80_000):
+    try:
+        with open(path) as fh:
+            value = fh.read(limit + 1)
+    except OSError:
+        return None
+    if len(value) > limit:
+        return value[:limit] + "\n[bounded by evidence helper]\n"
+    return value
+
+
+def _function_source(path, function_name):
+    """Return one current function without importing live app code."""
+    source = _read_text(path, limit=300_000)
+    if source is None:
+        return None
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+        ):
+            return ast.get_source_segment(source, node)
+    return None
+
+
+def _recall_audits_for_run(run_id):
+    rows = []
+    if not run_id or not os.path.isdir(MEM_RECALL_AUDIT):
+        return rows
+    for name in sorted(os.listdir(MEM_RECALL_AUDIT)):
+        if not name.endswith(".jsonl"):
+            continue
+        try:
+            with open(os.path.join(MEM_RECALL_AUDIT, name)) as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and row.get("run_id") == run_id:
+                        rows.append(row)
+        except OSError:
+            continue
+    return rows
+
+
+def _applied_memory_diff(outcome):
+    previous = outcome.get("previous_commit")
+    commit = outcome.get("commit")
+    paths = list(dict.fromkeys(
+        list(outcome.get("changed_paths") or [])
+        + list(outcome.get("deleted_paths") or [])
+    ))
+    if not previous or not commit or not paths or not os.path.isdir(MEM_REPOSITORY):
+        return "(no changed memory paths to diff)"
+    try:
+        proc = subprocess.run(
+            [
+                "git", "-C", MEM_REPOSITORY, "diff", "--no-ext-diff",
+                "--unified=3", str(previous), str(commit), "--", *paths,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"(diff unavailable: {type(exc).__name__})"
+    if proc.returncode != 0:
+        return f"(diff unavailable: git rc={proc.returncode})"
+    value = proc.stdout or "(changed paths produced no textual diff)"
+    if len(value) > 80_000:
+        return value[:80_000] + "\n[bounded by evidence helper]\n"
+    return value
+
+
+def section_memory_writer_packet():
+    """One bounded, read-only packet for a stateless writer interview."""
+    sub("MEMORY WRITER — latest reconstructed-interview packet")
+    outcomes = _read_update_log(1)
+    if not outcomes:
+        print("  (no published Memory outcome available)")
+        return
+    outcome = outcomes[-1]
+    run_id = outcome.get("run_id")
+    audits = _recall_audits_for_run(run_id)
+    status = _read_json(MEM_RUN_STATUS)
+    skill = _read_text(MEMORY_SKILL)
+    prompt_builder = _function_source(MEMORY_RUNNER, "_proposal_prompt")
+
+    print(f"  run_id={run_id or '?'}  status={outcome.get('status','?')}  "
+          f"audits={len(audits)}  changed={len(outcome.get('changed_paths') or [])}  "
+          f"deleted={len(outcome.get('deleted_paths') or [])}")
+    if status and status.get("run_id") != run_id:
+        print("  WARNING: current run-status belongs to a different run; "
+              "the outcome below is the latest published writer outcome.")
+    print("\nLATEST RUN STATUS (operational input):")
+    print(json.dumps(status or {}, ensure_ascii=False, indent=2, sort_keys=True))
+    print("\nLATEST WRITER OUTCOME:")
+    print(json.dumps(outcome, ensure_ascii=False, indent=2, sort_keys=True))
+    print("\nAPPLIED MEMORY DIFF (changed/deleted paths only):")
+    print(_applied_memory_diff(outcome))
+    print("\nRECALL AUDIT VERDICTS FOR THIS RUN:")
+    print(json.dumps(audits, ensure_ascii=False, indent=2, sort_keys=True))
+    print("\nCURRENT MEMORY GOVERNING SKILL:")
+    print(skill or "(Memory skill unavailable)")
+    print("\nCURRENT WRITER PROMPT BUILDER:")
+    print(prompt_builder or "(writer prompt builder unavailable)")
+
+
+# --------------------------------------------------------------------------- #
+# Section: Reflection nightly agent
+# --------------------------------------------------------------------------- #
+def section_reflection(limit):
+    sub("REFLECTION — nightly run agent")
+
+    runs = []
+    recent = []
+    try:
+        with open(REFLECTION_METRICS) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        runs.append(json.loads(line))
+                    except ValueError:
+                        continue
+    except OSError:
+        pass
+
+    if not runs:
+        print("  run metrics: (none found)")
+    else:
+        recent = runs[-limit:]
+        ok = sum(1 for r in recent if r.get("exit_code") == 0)
+        wrote = sum(1 for r in recent if r.get("brief_written"))
+        print(f"  recent runs (last {len(recent)}): {ok}/{len(recent)} exit=0, "
+              f"{wrote}/{len(recent)} brief written")
+        for r in recent:
+            started = (r.get("started_at") or "")[:16]
+            print(f"    {started or '?':16}  exit={r.get('exit_code','?')}  "
+                  f"{r.get('duration_seconds','?')}s  "
+                  f"brief={'yes' if r.get('brief_written') else 'no'}"
+                  f"{'  DRY-RUN' if r.get('dry_run') else ''}")
+
+    # Enumerate actual metric-backed run days, including days that left no
+    # artifact directory. Listing only existing directories hid the exact
+    # failure this section is meant to reveal: a completed run that skipped
+    # its interviews entirely.
+    run_days = list(dict.fromkeys(
+        str(row.get("started_at") or "")[:10]
+        for row in recent
+        if len(str(row.get("started_at") or "")) >= 10
+    ))
+    if not run_days and os.path.isdir(REFLECTION_RUNS):
+        run_days = sorted(
+            day for day in os.listdir(REFLECTION_RUNS)
+            if os.path.isdir(os.path.join(REFLECTION_RUNS, day))
+        )[-limit:]
+    print(f"  interview artifacts for recent runs ({len(run_days)} days):")
+    for day in run_days:
+        directory = os.path.join(REFLECTION_RUNS, day)
+        files = sorted(os.listdir(directory)) if os.path.isdir(directory) else []
+        interview = [f for f in files if any(h in f.lower() for h in INTERVIEW_HINTS)]
+        tag = f"  [interview: {', '.join(interview)}]" if interview else "  [no interview capture]"
+        print(f"    {day}: {', '.join(files) if files else '(empty)'}{tag}")
+
+
+def section_tool_friction(hours):
+    """Print the shared mechanical-friction baseline without re-scanning here."""
+    sub(f"TOOL FRICTION — recurring mechanical work (last {hours}h)")
+    if not os.path.isfile(TOOL_FRICTION):
+        print("  (tool-friction collector not installed)")
+        return
+    try:
+        result = subprocess.run(
+            ["python3", TOOL_FRICTION, "--hours", str(hours)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"  (collector unavailable: {exc})")
+        return
+    output = (result.stdout or result.stderr).strip()
+    print(output or f"  (collector exited {result.returncode} without output)")
+
+
+# --------------------------------------------------------------------------- #
+# Section: Memory read-traces cross-referenced to chat titles
+# --------------------------------------------------------------------------- #
+def section_read_traces(con, hours, traces_n):
+    sub(f"MEMORY READ-TRACES — what recall actually served (last {hours}h)")
+
+    if not os.path.isdir(MEM_READ_TRACE):
+        print("  (read-trace dir not found)")
+        return
+
+    cutoff = now_utc() - dt.timedelta(hours=hours)
+    rows = []
+    for name in os.listdir(MEM_READ_TRACE):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(MEM_READ_TRACE, name)) as fh:
+                obj = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        at = parse_ts(obj.get("at"))
+        if not at or at < cutoff:
+            continue
+        rows.append((at, name[:-5], len(obj.get("files") or [])))
+
+    rows.sort(reverse=True)
+    if not rows:
+        print(f"  0 read-traces in the last {hours}h.")
+        return
+
+    titles = chat_titles(con, [cid for _, cid, _ in rows])
+    chat_attributed = sum(1 for _, cid, _ in rows if cid in titles)
+    print(f"  {len(rows)} read-traces in window "
+          f"({chat_attributed} map to a chat, {len(rows) - chat_attributed} app/acceptance):")
+    for at, cid, nfiles in rows[:traces_n]:
+        title = titles.get(cid)
+        label = short(title, 52) if title else f"(non-chat: {cid[:12]})"
+        print(f"    {at.strftime('%Y-%m-%d %H:%M')}  {label:52}  {nfiles} notes")
+
+
+# --------------------------------------------------------------------------- #
+# Section: platform-wide skill loads
+# --------------------------------------------------------------------------- #
+def section_skill_loads(hours):
+    sub(f"SKILL LOADS — platform-wide (last {hours}h, /api/admin/activity/skills)")
+
+    base = os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
+    token = os.environ.get("AGENT_TOKEN")
+    if not token:
+        print("  (AGENT_TOKEN not set — skipping API call)")
+        return
+    since = (now_utc() - dt.timedelta(hours=hours)).isoformat()
+    url = f"{base}/api/admin/activity/skills?since={urllib.parse.quote(since)}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - any failure is non-fatal here
+        print(f"  (skills API unavailable: {exc})")
+        return
+
+    skills = data.get("skills") if isinstance(data, dict) else None
+    if not skills:
+        print("  (no skill loads recorded — Codex-only window or skills disabled)")
+        return
+    for row in skills:
+        print(f"    {short(row.get('skill','?'), 32):32}  {row.get('count','?')}")
+
+
+# --------------------------------------------------------------------------- #
+# Section: optional focus chat
+# --------------------------------------------------------------------------- #
+def section_focus_chat(con, chat_id):
+    sub(f"FOCUS CHAT — {chat_id}")
+    if not con:
+        print("  (chat DB unavailable)")
+        return
+    try:
+        row = con.execute(
+            "select title, provider, created_at, updated_at, run_status, "
+            "coalesce(session_id,''), messages from chats where id=?",
+            (chat_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        print(f"  (query failed: {exc})")
+        return
+    if not row:
+        print("  (no such chat)")
+        return
+    title, provider, created, updated, run_status, session, messages = row
+    try:
+        nmsg = len(json.loads(messages)) if messages else 0
+    except (ValueError, TypeError):
+        nmsg = "?"
+    print(f"  title:    {title}")
+    print(f"  provider: {provider or 'claude'}   messages: {nmsg}   run_status: {run_status or '-'}")
+    print(f"  created:  {created}   updated: {updated}")
+    print(f"  session:  {session or '(none)'}")
+
+    trace_path = os.path.join(MEM_READ_TRACE, f"{chat_id}.json")
+    if os.path.exists(trace_path):
+        try:
+            obj = json.load(open(trace_path))
+            print(f"  memory recall: {len(obj.get('files') or [])} notes served, "
+                  f"last at {obj.get('at','?')}")
+        except (OSError, ValueError):
+            print("  memory recall: trace present but unreadable")
+    else:
+        print("  memory recall: no read-trace for this chat")
+
+    fork = "fork-chat.sh" if not session else "fork-session.sh"
+    print(f"  fork with: /data/apps/reflection/{fork} "
+          f"{chat_id if fork == 'fork-chat.sh' else session + ' <cwd>'} \"<interview>\"")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="One-call performance bundle for a manager session.")
+    ap.add_argument("--hours", type=int, default=72,
+                    help="lookback window for read-traces and skill loads (default 72)")
+    ap.add_argument("--limit", type=int, default=5,
+                    help="how many recent memory/reflection runs to list (default 5)")
+    ap.add_argument("--traces", type=int, default=12,
+                    help="how many recent read-traces to list (default 12)")
+    ap.add_argument("--memory-writer-packet", action="store_true",
+                    help="append a bounded packet for the latest Memory writer interview")
+    ap.add_argument("chat_id", nargs="?", default=None,
+                    help="optional chat id to profile as a focus block")
+    args = ap.parse_args()
+
+    con = open_db()
+    header(f" MANAGER-SESSION EVIDENCE BUNDLE   generated {now_utc().strftime('%Y-%m-%d %H:%M UTC')}"
+           f"   window: last {args.hours}h")
+
+    section_memory(args.limit)
+    if args.memory_writer_packet:
+        section_memory_writer_packet()
+    section_reflection(args.limit)
+    section_tool_friction(args.hours)
+    section_read_traces(con, args.hours, args.traces)
+    section_skill_loads(args.hours)
+    if args.chat_id:
+        section_focus_chat(con, args.chat_id)
+
+    if con:
+        con.close()
+    print()
+
+
+if __name__ == "__main__":
+    main()

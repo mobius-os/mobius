@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app import activity, auth
+from app.routes import client_signal
 from test_app_fixtures import create_local_app
 
 
@@ -263,3 +264,40 @@ def test_signal_serialized_bytes_and_future_timestamp_are_bounded(
     "name": "app_ready",
   }]), headers=headers)
   assert future.status_code == 422
+
+
+def test_signal_rate_owners_expire_without_evicting_active_apps(monkeypatch):
+  """Only app instances outside the existing rate window are reclaimed."""
+  clock = [100.0]
+  monkeypatch.setattr(client_signal.time, "monotonic", lambda: clock[0])
+
+  for i in range(4):
+    clock[0] += 1
+    reservation = client_signal._reserve_rate(
+      (i, f"instance-{i}"), [(f"signal-{i}", 10)],
+    )
+    assert not isinstance(reservation, float)
+
+  assert len(client_signal._recent_by_app) == 4
+  assert len(client_signal._seen_ids_by_app) == 4
+  assert (0, "instance-0") in client_signal._recent_by_app
+  # A retained ID remains a deduplicated no-op.
+  _token, novel = client_signal._reserve_rate(
+    (3, "instance-3"), [("signal-3", 10)],
+  )
+  assert novel == set()
+
+  clock[0] += client_signal._RATE_WINDOW_SECONDS + 1
+  client_signal._reserve_rate((9, "fresh"), [("fresh", 10)])
+  assert set(client_signal._recent_by_app) == {(9, "fresh")}
+  assert set(client_signal._seen_ids_by_app) == {(9, "fresh")}
+
+
+def test_failed_signal_reservation_releases_empty_owner(monkeypatch):
+  """Rollback drops the app-instance owner when it retained no other budget."""
+  monkeypatch.setattr(client_signal.time, "monotonic", lambda: 100.0)
+  app_key = (1, "rolled-back")
+  token, novel = client_signal._reserve_rate(app_key, [("retry", 10)])
+  client_signal._rollback_rate(app_key, token, novel)
+  assert app_key not in client_signal._recent_by_app
+  assert app_key not in client_signal._seen_ids_by_app

@@ -50,7 +50,7 @@ def get_active_chat_for_principal(
   """
   required_fields = (
     (models.Chat.id, models.Chat.created_by_app_id, *load_fields)
-    if load_fields
+    if load_fields is not None
     else None
   )
   chat = get_active_chat_or_404(db, chat_id, load_fields=required_fields)
@@ -67,6 +67,22 @@ def get_active_chat_for_principal(
       detail="This chat is not owned by your app.",
     )
   return chat
+
+
+def require_active_chat_access(
+  db: Session,
+  chat_id: str,
+  principal: Principal,
+) -> None:
+  """Require access to an active chat without hydrating its transcript.
+
+  Use this for existence/ownership gates whose route never reads the returned
+  chat. The empty ``load_fields`` tuple deliberately selects only the identity
+  fields added by ``get_active_chat_for_principal``; ``raiseload`` keeps a
+  future accidental transcript access visible instead of silently decoding
+  the chat's JSON blobs.
+  """
+  get_active_chat_for_principal(db, chat_id, principal, load_fields=())
 
 
 def get_active_chat_or_404(

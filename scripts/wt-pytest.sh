@@ -40,12 +40,6 @@ WORKTREE_NODE_MODULES="$ROOT/frontend/node_modules"
 SHARED_NODE_MODULES="$MAIN/frontend/node_modules"
 CONTRIB_ROOT="$(dirname "$MAIN")/contrib"
 
-complete_frontend_deps() {
-  local frontend="$1"
-  [ -d "$frontend/node_modules" ] \
-    && (cd "$frontend" && npm ls --depth=0 >/dev/null 2>&1)
-}
-
 backend_test_node_deps() {
   local frontend="$1"
   local modules="$frontend/node_modules"
@@ -57,12 +51,10 @@ backend_test_node_deps() {
 
 # An integration worktree may carry a lockfile newer than main while another
 # reviewed worktree already has that exact dependency tree installed. Reuse
-# only an exact lockfile match. Prefer a complete frontend tree; a review in
-# progress can temporarily make `npm ls` reject the root metadata even though
-# the exact-lock tree still has the compiler/imports backend tests actually use,
-# so retain one narrowly verified backend-test fallback.
+# only an exact lockfile match and verify the small Node surface the backend
+# tests actually execute; a full `npm ls` is a frontend-suite concern and made
+# otherwise-hermetic backend tests depend on unrelated package completeness.
 matching_contrib_node_modules() {
-  local fallback=""
   local frontend
   [ "$ROOT" != "$MAIN" ] || return 1
   for frontend in "$CONTRIB_ROOT"/*/worktree/frontend; do
@@ -70,33 +62,24 @@ matching_contrib_node_modules() {
     [ -f "$frontend/package-lock.json" ] || continue
     cmp -s "$ROOT/frontend/package-lock.json" "$frontend/package-lock.json" \
       || continue
-    if complete_frontend_deps "$frontend"; then
+    if backend_test_node_deps "$frontend"; then
       printf '%s\n' "$frontend/node_modules"
       return 0
     fi
-    if [ -z "$fallback" ] && backend_test_node_deps "$frontend"; then
-      fallback="$frontend/node_modules"
-    fi
   done
-  [ -n "$fallback" ] || return 1
-  printf '%s\n' "$fallback"
+  return 1
 }
 
-if complete_frontend_deps "$ROOT/frontend"; then
+if backend_test_node_deps "$ROOT/frontend"; then
   NODE_MODULES="$WORKTREE_NODE_MODULES"
 elif [ "$ROOT" != "$MAIN" ] \
     && cmp -s "$ROOT/frontend/package-lock.json" "$MAIN/frontend/package-lock.json" \
-    && complete_frontend_deps "$MAIN/frontend"; then
+    && backend_test_node_deps "$MAIN/frontend"; then
   NODE_MODULES="$SHARED_NODE_MODULES"
 elif NODE_MODULES="$(matching_contrib_node_modules)"; then
-  if complete_frontend_deps "$(dirname "$NODE_MODULES")"; then
-    echo "wt-pytest: reusing exact-match dependencies from $(dirname "$NODE_MODULES")" >&2
-  else
-    echo "wt-pytest: reusing exact-lock backend-test dependencies from $(dirname "$NODE_MODULES")" >&2
-    echo "  (verified esbuild/acorn/eslint-scope; not claiming a complete frontend tree)" >&2
-  fi
+  echo "wt-pytest: reusing exact-lock backend-test dependencies from $(dirname "$NODE_MODULES")" >&2
 else
-  echo "wt-pytest: no complete frontend dependencies match this worktree" >&2
+  echo "wt-pytest: no verified backend Node dependencies match this worktree" >&2
   echo "  install them with: (cd \"$ROOT/frontend\" && npm ci)" >&2
   exit 1
 fi
@@ -117,11 +100,6 @@ else
   echo "      && \"$MAIN/backend/.venv/bin/pip\" install -r \"$MAIN/backend/requirements.txt\"" >&2
   exit 1
 fi
-if [ ! -x "$ESB_DIR/esbuild" ]; then
-  echo "wt-pytest: warning — esbuild not at $ESB_DIR; compile/install tests" >&2
-  echo "  will 422-cascade. Run 'npm ci' in $MAIN/frontend if you need them." >&2
-fi
-
 cd "$ROOT/backend" || exit 1
 # The worktree's backend/ is on sys.path (cwd); the venv supplies deps; the
 # generated SECRET_KEY satisfies pydantic Settings for tests that build it.
