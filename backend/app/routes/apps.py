@@ -590,6 +590,26 @@ def _app_schedule(app: models.App, live_crontab: str) -> tuple[str, str] | None:
   return _manifest_schedule(source_dir)
 
 
+def _app_zone_declaration(app: models.App) -> tuple[str, str] | None:
+  """The schedule's durable (timezone, zone_cron) identity, if declared.
+
+  Read from the init-cron.sh declaration lines the platform appends when a
+  schedule is owned in an IANA zone (see app.cron_tz / _register_cron).
+  """
+  from app import cron_tz
+
+  if not app.source_dir:
+    return None
+  source_dir = Path(app.source_dir)
+  for replay_dir in _cron_replay_dirs_for_app(app, source_dir):
+    declaration = cron_tz.parse_zone_declaration(
+      _read_init_cron_text(replay_dir),
+    )
+    if declaration is not None:
+      return declaration
+  return None
+
+
 def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   """Converge every live managed schedule through the common job runner.
 
@@ -600,7 +620,13 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   crontab entry and its durable declaration via the current
   scaffold. Tombstoned apps are excluded and source trees must be ordinary,
   non-symlink direct children of ``/data/apps``.
+
+  A schedule owned in an IANA timezone (see ``app.cron_tz``) is
+  re-materialized here from its durable (timezone, zone_cron) identity
+  rather than preserved verbatim — this pass, run at boot and periodically
+  at runtime, is what reschedules the entry across DST transitions.
   """
+  from app import cron_tz
   from app.install import _register_cron
 
   settings = get_settings()
@@ -632,9 +658,19 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
     try:
       if job_path.is_symlink() or not job_path.is_file():
         raise ValueError(f"job is missing or a symlink: {job_name}")
-      _register_cron(
-        resolved_source.name, cron, job_path, app.id,
-      )
+      declaration = _app_zone_declaration(app)
+      if declaration is not None:
+        timezone, zone_cron = declaration
+        _register_cron(
+          resolved_source.name,
+          cron_tz.materialize_zone_cron(zone_cron, timezone),
+          job_path, app.id,
+          timezone=timezone, zone_cron=zone_cron,
+        )
+      else:
+        _register_cron(
+          resolved_source.name, cron, job_path, app.id,
+        )
     except Exception as exc:
       warnings.append(f"app {app.id}: {exc}")
       continue
@@ -723,7 +759,10 @@ def list_app_schedules(
   _: models.Owner = Depends(get_current_owner_or_app),
 ):
   """Returns read-only recurring app schedules visible to owners and apps."""
+  from app import cron_tz
+
   live_crontab = _read_live_crontab()
+  server_timezone = cron_tz.server_timezone_name()
   rows = []
   apps = (
     db.query(models.App)
@@ -736,12 +775,16 @@ def list_app_schedules(
     if schedule is None:
       continue
     cron, job = schedule
+    declaration = _app_zone_declaration(app)
     rows.append(schemas.AppScheduleOut(
       id=app.id,
       name=app.name,
       slug=app.slug,
       cron=cron,
       job=job,
+      timezone=declaration[0] if declaration else None,
+      zone_cron=declaration[1] if declaration else None,
+      server_timezone=server_timezone,
     ))
   return rows
 
@@ -2863,11 +2906,27 @@ def update_app_schedule(
     raise HTTPException(
       status_code=400, detail="App has no source_dir; cannot locate job.",
     )
+  from app import cron_tz
   from app.install import _register_cron
   try:
     validate_cron_expr(body.cron)
   except ManifestContractError as exc:
     raise HTTPException(status_code=400, detail=str(exc)) from exc
+  timezone = (body.timezone or "").strip() or None
+  if timezone is not None:
+    # A zone-owned schedule is durable data: body.cron is the daily wall
+    # time in that zone, and the crontab entry is its server-local
+    # materialization, re-materialized when either zone's offset changes.
+    if not cron_tz.valid_timezone(timezone):
+      raise HTTPException(
+        status_code=400, detail=f"Unknown IANA timezone: {timezone!r}",
+      )
+    if cron_tz.parse_daily_cron(body.cron) is None:
+      raise HTTPException(
+        status_code=400,
+        detail="A timezone-owned schedule must be a plain daily cron "
+               "('m h * * *').",
+      )
   source_dir = Path(app.source_dir)
   job_name = body.job or "fetch.sh"
   if "/" in job_name or "\\" in job_name or not job_name.strip():
@@ -2876,8 +2935,19 @@ def update_app_schedule(
   if not job_path.is_file():
     raise HTTPException(status_code=400, detail="Job script not found.")
   slug = app.slug or _slugify_for_source_dir(app.name)
+  if timezone is not None:
+    materialized = cron_tz.materialize_zone_cron(body.cron, timezone)
+    _register_cron(
+      slug, materialized, job_path, app_id,
+      timezone=timezone, zone_cron=body.cron,
+    )
+    return {
+      "cron": materialized, "job": job_name,
+      "timezone": timezone, "zone_cron": body.cron,
+    }
   _register_cron(slug, body.cron, job_path, app_id)
-  return {"cron": body.cron, "job": job_name}
+  return {"cron": body.cron, "job": job_name, "timezone": None,
+          "zone_cron": None}
 
 
 def _etag_for_app(app: models.App) -> str | None:

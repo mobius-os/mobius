@@ -1127,8 +1127,17 @@ def _process_icon(raw: bytes) -> bytes:
 
 
 def _register_cron(slug: str, schedule_expr: str, job_path: Path,
-                   app_id: int | None = None) -> None:
+                   app_id: int | None = None,
+                   timezone: str | None = None,
+                   zone_cron: str | None = None) -> None:
   """Runs init-cron-scaffold.sh to install the crontab entry.
+
+  ``timezone``/``zone_cron`` (given together) declare the schedule's durable
+  zone-aware identity: ``schedule_expr`` is then its server-local
+  materialization, and the identity is appended to ``init-cron.sh`` after the
+  scaffold rewrites it, so reconciliation can re-materialize the entry when
+  either zone's UTC offset changes. The scaffold's own contract stays
+  unchanged; the platform owns the declaration lines (see app.cron_tz).
 
   The scaffold writes both the durable ``init-cron.sh`` declaration and the
   live crontab entry. On restart, lifespan parses that declaration and rewrites
@@ -1180,6 +1189,37 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
       500,
       f"Cron registration failed: {result.stderr.strip()[:400]}",
     )
+  if (timezone is None) != (zone_cron is None):
+    raise HTTPException(
+      500, "Cron registration bug: timezone and zone_cron must be paired.",
+    )
+  if timezone is not None:
+    from app import cron_tz
+
+    if not cron_tz.valid_timezone(timezone):
+      raise HTTPException(500, f"Unknown IANA timezone: {timezone!r}")
+    if cron_tz.parse_daily_cron(zone_cron) is None:
+      raise HTTPException(
+        500, f"Zone-owned schedule must be a plain daily cron: {zone_cron!r}",
+      )
+    init_path = job_path.parent / "init-cron.sh"
+    try:
+      # The scaffold just rewrote init-cron.sh from its template, so a plain
+      # append is deterministic and repeat-registration cannot duplicate.
+      with init_path.open("a", encoding="utf-8") as fh:
+        fh.write(
+          "\n# --- Zone-aware schedule identity "
+          "(platform-managed; parsed, never executed).\n"
+          "# ENTRY above is the server-local materialization of this durable\n"
+          "# identity, recomputed at boot and periodically so DST transitions\n"
+          "# reschedule the entry instead of drifting its wall time.\n"
+          f'SCHEDULE_TZ="{timezone}"\n'
+          f'SCHEDULE_SOURCE="{zone_cron}"\n'
+        )
+    except OSError as exc:
+      raise HTTPException(
+        500, f"Could not persist schedule timezone: {exc}",
+      ) from exc
 
 
 def _reconcile_cron_after_install_rollback() -> None:

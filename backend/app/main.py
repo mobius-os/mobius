@@ -442,6 +442,50 @@ async def lifespan(app):
       _cron_ready.write_text(f"{_BOOT_ID}\n", encoding="utf-8")
   except Exception as exc:
     _log.error("app cron supervision wiring failed: %s", exc, exc_info=True)
+  # Periodic re-materialization for timezone-owned schedules (app.cron_tz):
+  # a schedule declared as "wall time in an IANA zone" must be rescheduled
+  # when either that zone's or the server's UTC offset changes (DST). Boot
+  # reconciliation covers restarts; this hourly pass covers long-running
+  # containers crossing a transition. It reuses the same idempotent
+  # reconciler, and only runs while any zone declaration actually exists.
+  _cron_tz_task = None
+  try:
+    from app.routes.apps import (
+      _app_zone_declaration as _zone_decl,
+      reconcile_app_cron_supervision as _cron_reconcile,
+    )
+    from app.database import SessionLocal as _CronTzSession
+
+    async def _cron_tz_loop():
+      while True:
+        await _asyncio.sleep(3600)
+        try:
+          def _pass():
+            from app import models as _tz_models
+            _db = _CronTzSession()
+            try:
+              _live = _db.query(_tz_models.App).filter(
+                _tz_models.App.deleted_at.is_(None)
+              ).all()
+              if not any(_zone_decl(_a) for _a in _live):
+                return None
+              return _cron_reconcile(_db)
+            finally:
+              _db.close()
+          _result = await _asyncio.to_thread(_pass)
+          if _result is not None:
+            for _warning in _result[1]:
+              _log.warning("cron tz re-materialization: %s", _warning)
+        except _asyncio.CancelledError:
+          raise
+        except Exception as _exc:
+          _log.error(
+            "cron tz re-materialization failed: %s", _exc, exc_info=True,
+          )
+
+    _cron_tz_task = _asyncio.create_task(_cron_tz_loop())
+  except Exception as exc:
+    _log.error("cron tz loop wiring failed: %s", exc, exc_info=True)
   record_memory_checkpoint("startup_metadata_reconciled")
   # Route provider model-registry and memory diagnostics to the durable
   # rotating chat.log handler. These loggers otherwise land only on
@@ -665,6 +709,8 @@ async def lifespan(app):
       _reset_park_task.cancel()
     if _browser_profile_task is not None:
       _browser_profile_task.cancel()
+    if _cron_tz_task is not None:
+      _cron_tz_task.cancel()
     if _writer_supervisor_task is not None:
       _writer_supervisor_task.cancel()
     # Drain + join the chat-writer actor so any in-flight persistence
