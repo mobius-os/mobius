@@ -62,6 +62,7 @@
 }
 
 .wt__close:focus-visible,
+.wt__install-btn:focus-visible,
 .wt__path:focus-visible,
 .wt__dismiss:focus-visible {
   outline: 2px solid var(--accent, #8b6cf7);
@@ -114,6 +115,92 @@
   color: var(--muted, #a1a1aa);
   font-size: 14px;
   line-height: 1.55;
+}
+
+.wt__install {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 4px 10px;
+  align-items: center;
+  margin-top: 18px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--accent, #8b6cf7) 8%, var(--surface2, #1a1f28));
+  border: 1px solid color-mix(in srgb, var(--accent, #8b6cf7) 22%, var(--border, #252b36));
+  border-radius: 12px;
+}
+
+.wt__install-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  color: var(--accent, #a78bfa);
+  background: color-mix(in srgb, var(--accent, #8b6cf7) 15%, transparent);
+  border-radius: 10px;
+}
+
+.wt__install-copy {
+  min-width: 0;
+}
+
+.wt__install-copy h3 {
+  margin: 0;
+  color: var(--text, #e4e4e7);
+  font-size: 14px;
+  font-weight: 680;
+  line-height: 1.25;
+}
+
+.wt__install-copy p {
+  margin: 3px 0 0;
+  color: var(--muted, #a1a1aa);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.wt__install-btn {
+  min-height: 34px;
+  padding: 6px 10px;
+  color: var(--accent, #a78bfa);
+  background: color-mix(in srgb, var(--accent, #8b6cf7) 11%, transparent);
+  border: 0;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.wt__install-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent, #8b6cf7) 18%, transparent);
+}
+
+.wt__install-btn:disabled {
+  opacity: 0.64;
+  cursor: wait;
+}
+
+.wt__install-help,
+.wt__install-feedback {
+  grid-column: 2 / -1;
+  margin: 7px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.wt__install-help {
+  display: grid;
+  gap: 2px;
+  color: var(--muted, #a1a1aa);
+}
+
+.wt__install-help strong {
+  color: var(--text, #e4e4e7);
+  font-weight: 650;
+}
+
+.wt__install-feedback {
+  color: var(--muted, #a1a1aa);
 }
 
 .wt__paths {
@@ -194,6 +281,11 @@
 
   .wt__path small {
     white-space: normal;
+  }
+
+  .wt__install {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+    padding: 10px;
   }
 }
 

@@ -45,6 +45,9 @@ test('first-use guidance is a labeled non-modal region with a dismiss action', (
   assert.match(source, /role="region"/)
   assert.match(source, /aria-labelledby="wt-title"/)
   assert.match(source, /aria-label="Dismiss welcome"/)
+  assert.match(source, /aria-labelledby="wt-install-title"/)
+  assert.match(source, /aria-expanded=/)
+  assert.match(source, /role="status"/)
   assert.doesNotMatch(source, /aria-modal="true"/)
 })
 

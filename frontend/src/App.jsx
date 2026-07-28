@@ -8,6 +8,7 @@ import { setupQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
 import { shellReload } from './lib/shellReloadState.js'
 import { beginEmbedBootstrap } from './lib/chatEmbedBootstrap.js'
+import { startInstallPromptCapture } from './lib/installPrompt.js'
 
 // These flows are mutually exclusive. Keep setup, login, the full shell, and
 // the opaque embed out of one another's startup path; first boot should not
@@ -38,6 +39,10 @@ const EMBED_ROUTE = isEmbedRoute()
 if (EMBED_ROUTE) {
   beginEphemeralAuth()
   beginEmbedBootstrap()
+} else {
+  // Capture Chromium's one-shot install event before setup or sign-in can keep
+  // the first-use shell card from mounting.
+  startInstallPromptCapture()
 }
 
 // Validate a ?return= target: same-origin in-app path only. Rejects

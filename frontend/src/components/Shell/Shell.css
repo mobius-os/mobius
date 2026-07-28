@@ -424,11 +424,10 @@
 
 /* The install affordance lives in the first-sign-in walkthrough now
    (see frontend/src/components/Walkthrough/WalkthroughOverlay.jsx).
-   beforeinstallprompt capture and the drawer banner that used to
-   live here are gone — the walkthrough's "Add to home screen" step
-   tells the user how to install for their platform exactly once,
-   then never appears again. Sub-app install lives in the standalone
-   card surfaced from drawer ⋮ on a mini-app. */
+   App.jsx captures beforeinstallprompt early enough to survive account
+   setup; the walkthrough consumes it or shows platform-specific manual
+   guidance. The old drawer banner stays retired. Sub-app installation
+   lives in the standalone card surfaced from drawer ⋮ on a mini-app. */
 
   /* Global offline indicator pill in the top bar. Shown only when the
      browser reports offline (useOnlineStatus). Keeps the user oriented
