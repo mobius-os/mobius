@@ -721,7 +721,8 @@ test('deriveExitPlan: M2 an immersive-holder destination is an honest instant (n
 
 test('deriveExitPlan: M2 an immersive holder that is NOT the exit slot animates normally', () => {
   // app 42 holds an immersive REQUEST, but the exit lands on chat 5 (the slot), so
-  // immersive will not apply — the plan is the ordinary promote, not a false instant.
+  // immersive will not apply. The independent Standard chat is the underlay and
+  // every Builder pane deals out; it is not a false immersive instant.
   const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '5' } }
   const plan = deriveExitPlan({
     workspace: ws, projection: project(ws), contentRect: CONTENT,
@@ -729,7 +730,9 @@ test('deriveExitPlan: M2 an immersive holder that is NOT the exit slot animates 
   })
   assert.ok(plan, 'a non-slot immersive request does not suppress the beat')
   assert.equal(plan.target, 'chat:5')
-  assert.ok(plan.participants.some(p => p.motion === 'promote' && p.key === 'chat:5'))
+  assert.equal(plan.underlayKey, 'chat:5')
+  assert.ok(plan.participants.every(p => p.motion === 'deal-out'))
+  assert.ok(plan.participants.some(p => p.key === 'chat:5'))
 })
 
 test('deriveExitPlan: M2 Settings takes precedence over an immersive holder', () => {
@@ -758,7 +761,7 @@ test('deriveExitPlan: M2 a builder Settings tab that IS the destination does not
   assert.ok(plan.participants.some(p => p.key === 'chat:5'), 'the sibling pane still deals out')
 })
 
-test('deriveEnterPlan: the shared Standard surface stays still while siblings assemble', () => {
+test('deriveEnterPlan: a shared Standard app stays still while siblings assemble', () => {
   const two = twoPaneChatAndApp() // the app:42 pane is focused
   const twoPlan = deriveEnterPlan({ workspace: two, projection: project(two), contentRect: CONTENT })
   assert.deepEqual(twoPlan.completionNames, ['shell-mode-deal-in'])
@@ -776,6 +779,24 @@ test('deriveEnterPlan: the shared Standard surface stays still while siblings as
   const one = paneModel.seedFromFlatTabs([makeTab('app', '42')])
   const onePlan = deriveEnterPlan({ workspace: one, projection: project(one), contentRect: CONTENT })
   assert.equal(onePlan, null)
+})
+
+test('chat targets keep Standard stationary while every Builder pane assembles', () => {
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '5' } }
+  const input = { workspace: ws, projection: project(ws), contentRect: CONTENT }
+
+  const enter = deriveEnterPlan(input)
+  assert.equal(enter.underlayKey, 'chat:5')
+  assert.equal(enter.participants.length, 2)
+  assert.ok(enter.participants.every(participant => participant.motion === 'deal-in'))
+  assert.ok(enter.participants.some(participant => participant.key === 'chat:5'),
+    'the matching Builder chat is a separate pane surface, not the Standard DOM')
+
+  const exit = deriveExitPlan(input)
+  assert.equal(exit.underlayKey, 'chat:5')
+  assert.equal(exit.participants.length, 2)
+  assert.ok(exit.participants.every(participant => participant.motion === 'deal-out'))
+  assert.ok(exit.participants.some(participant => participant.key === 'chat:5'))
 })
 
 test('focused-pane mode keeps its original edge and its in-pane strip geometry', () => {

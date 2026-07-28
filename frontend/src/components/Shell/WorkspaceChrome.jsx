@@ -93,14 +93,20 @@ export default function WorkspaceChrome({
   onCloseTab,
   focusedPaneViewId = null,
   onTogglePaneFocus,
+  onChatPaneSelected,
   revealKey = 0,
   // key → { motion, vars } for the live mode beat, so each strip deals WITH its pane
   // (Shell's wrapperMotion). Null/absent when no beat is live.
   stripMotion = null,
 }) {
   const focusPane = useCallback((paneId) => {
+    const newlyFocused = workspace.focusedPaneId !== paneId
+    const pane = workspace.panes[paneId]
     dispatchWorkspace({ type: 'FOCUS', paneId })
-  }, [dispatchWorkspace])
+    if (!newlyFocused) return
+    const activeTab = pane?.tabs?.find(tab => tabModel.tabKey(tab) === pane.activeTabKey)
+    if (activeTab?.kind === 'chat') onChatPaneSelected?.(activeTab.id)
+  }, [dispatchWorkspace, onChatPaneSelected, workspace])
 
   // Tab activation in a pane routes through navTo (design §1): navTo's one
   // OPEN_TAB into `paneId` activates the tab AND focuses the pane, and its
@@ -112,13 +118,16 @@ export default function WorkspaceChrome({
   const activateTab = useCallback((paneId, tab) => {
     const pane = workspace.panes[paneId]
     const key = tabModel.tabKey(tab)
+    const newlyFocused = workspace.focusedPaneId !== paneId
     if (pane && pane.activeTabKey === key) {
       dispatchWorkspace({ type: 'FOCUS', paneId })
+      if (newlyFocused && tab.kind === 'chat') onChatPaneSelected?.(tab.id)
       return
     }
     const { view, opts } = tabModel.tabNavTarget(tab)
     navTo(view, { ...opts, paneId })
-  }, [navTo, workspace, dispatchWorkspace])
+    if (newlyFocused && tab.kind === 'chat') onChatPaneSelected?.(tab.id)
+  }, [navTo, workspace, dispatchWorkspace, onChatPaneSelected])
 
   // ── Divider drag (imperative, React-free per frame) ──────────────────────
   const beginDrag = useCallback((e, divider) => {

@@ -228,8 +228,12 @@ function byVisualOrder(a, b) {
 // and its invalidation key can never disagree about the destination (INV 10 / H2).
 //
 // Classification (exit-design v1 §exit-classification, honored by v2):
-//   - target is the active key of a VISIBLE leaf → promote that leaf (physical
-//     continuity), deal every sibling out, no underlay.
+//   - an APP target that is the active key of a VISIBLE leaf → promote that leaf
+//     (physical continuity), deal every sibling out, no underlay.
+//   - a CHAT target always has a separate Standard-world surface owner. Reveal
+//     that stationary full-bleed owner and deal out EVERY Builder chat pane,
+//     including the same underlying chat. Sharing one ChatView between the two
+//     geometries makes its composer/scroll controller resize at the mode boundary.
 //   - target is inactive-in-a-pane, tree-absent, the New Chat landing (an empty single
 //     slot, round 4 item 3), or null → WORLD REVEAL: deal every painted leaf out over
 //     the mounted destination (underlayKey = target; null = the opaque background only
@@ -255,9 +259,12 @@ export function deriveExitPlan(input) {
   //     takeover then covers (target = SETTINGS_TAB_KEY). modeMachine stays ignorant
   //     of what Settings means; the underlayKey just names the destination wrapper.
   const dest = { x: 0, y: 0, w: contentRect.w, h: contentRect.h }
+  const independentChatTarget = !!target?.startsWith('chat:')
   // A Settings destination is always a world reveal (never a promote), even if a
   // builder Settings tab happens to be a visible leaf.
-  const promoteLeaf = (target && !settingsDestination) ? leaves.find(l => l.activeKey === target) : null
+  const promoteLeaf = (target && !settingsDestination && !independentChatTarget)
+    ? leaves.find(l => l.activeKey === target)
+    : null
 
   const participants = []
   const completionNames = new Set()
@@ -300,7 +307,9 @@ export function deriveExitPlan(input) {
     // nothing — it was not a visible leaf, or the promote branch would have claimed
     // it. If it leaves nothing to deal out (destination is the sole surface), the
     // beat has no honest motion → instant flip.
-    const ordered = leaves.filter(l => l.activeKey !== target).sort(byVisualOrder)
+    const ordered = leaves
+      .filter(l => independentChatTarget || l.activeKey !== target)
+      .sort(byVisualOrder)
     if (ordered.length === 0) return null
     ordered.forEach((l) => {
       participants.push({
@@ -327,9 +336,11 @@ export function deriveExitPlan(input) {
 
 // deriveEnterPlan(input) → the latched entry plan, or null when there is nothing
 // to assemble. The single-screen surface remains the live, stationary full-bleed
-// underlay while every OTHER visible pane gathers from its nearest outer edge.
-// That background never joins the motion plan or changes geometry during the beat;
-// completion alone hands it back to the tiled layout.
+// underlay while visible panes gather from their nearest outer edge. Chat targets
+// have independent Standard/Builder surface owners, so EVERY Builder pane gathers
+// (including the matching chat) and fully covers the stationary Standard surface.
+// App/Settings targets still share one mounted surface and therefore exclude that
+// target leaf from the incoming set.
 //
 export function deriveEnterPlan(input) {
   const { workspace, projection, contentRect } = input
@@ -341,7 +352,8 @@ export function deriveEnterPlan(input) {
   const participants = []
   const completionNames = new Set()
   const underlayKey = target
-  const incoming = leaves.filter(l => l.activeKey !== target)
+  const independentChatTarget = !!target?.startsWith('chat:')
+  const incoming = leaves.filter(l => independentChatTarget || l.activeKey !== target)
   if (incoming.length === 0) return null
   for (const l of incoming) {
     participants.push({

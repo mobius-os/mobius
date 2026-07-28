@@ -204,16 +204,21 @@ const PENDING_DRAFT_KEY = 'pending-draft'
 const PENDING_DRAFT_AUTOSEND_KEY = 'pending-draft-autosend'
 const DRAFT_AUTOSEND_PREFIX = 'draft-autosend:'
 
-function readInitialComposer(chatId) {
+function readInitialComposer(chatId, { acceptPending = true } = {}) {
   try {
     const failedAttempt = loadFailedSendAttempt(chatId)
-    const pending = sessionStorage.getItem(PENDING_DRAFT_KEY)
+    // A retained hidden surface for the same chat must not claim a global
+    // navigation draft or its one-shot autosend. Only the currently painted
+    // world accepts that handoff; otherwise Standard + Builder duplicates could
+    // both start the same message when their shared chat id becomes visible.
+    const pending = acceptPending ? sessionStorage.getItem(PENDING_DRAFT_KEY) : null
     if (pending && failedAttempt) clearFailedSendAttempt(chatId)
     const saved = readComposerDraft(chatId)
     const input = pending || failedAttempt?.text || saved.input
-    const autoSendDraft =
-      sessionStorage.getItem(PENDING_DRAFT_AUTOSEND_KEY) ||
-      sessionStorage.getItem(`${DRAFT_AUTOSEND_PREFIX}${chatId}`)
+    const autoSendDraft = acceptPending
+      ? (sessionStorage.getItem(PENDING_DRAFT_AUTOSEND_KEY)
+        || sessionStorage.getItem(`${DRAFT_AUTOSEND_PREFIX}${chatId}`))
+      : null
     return {
       input,
       autoSend: !!input && autoSendDraft === input,
@@ -270,6 +275,8 @@ export default function ChatView({
   onDisplayReady = null,
 }) {
   const queryClient = useQueryClient()
+  const hiddenRef = useRef(hidden)
+  hiddenRef.current = hidden
   const handleInternalNav = useCallback((url) => {
     onInternalNav?.(url)
   }, [onInternalNav])
@@ -337,7 +344,7 @@ export default function ChatView({
   }
   const initialComposerRef = useRef(null)
   if (!initialComposerRef.current) {
-    initialComposerRef.current = readInitialComposer(chatId)
+    initialComposerRef.current = readInitialComposer(chatId, { acceptPending: !hidden })
   }
   const draftAttachmentsRef = useRef(initialComposerRef.current.attachments)
   const [input, setInputState] = useState(() => initialComposerRef.current.input)
@@ -362,6 +369,7 @@ export default function ChatView({
   const autoSendAttemptedRef = useRef(false)
 
   useEffect(() => {
+    if (hidden) return
     const initial = initialComposerRef.current.input
     try {
       if (sessionStorage.getItem(PENDING_DRAFT_KEY) === initial) {
@@ -371,7 +379,7 @@ export default function ChatView({
         sessionStorage.removeItem(PENDING_DRAFT_AUTOSEND_KEY)
       }
     } catch { /* private browsing */ }
-  }, [])
+  }, [hidden])
 
   // Per-chat agent runtime config (provider, agent_settings_json,
   // effective_agent_settings, has_assistant_turns). Resolved by the
@@ -1040,6 +1048,7 @@ export default function ChatView({
   // refresh. While a turn or visible queue exists, poll the small chat state
   // payload and hydrate only runtime fields — do not replace the transcript.
   const reconcileRuntimeState = useCallback(async () => {
+    if (hiddenRef.current) return
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
@@ -1090,6 +1099,7 @@ export default function ChatView({
   )
 
   useEffect(() => {
+    if (hidden) return
     if (
       providerSwitchState.status !== 'success'
       || !providerSwitchState.result
@@ -1106,6 +1116,7 @@ export default function ChatView({
   }, [
     chatId,
     handleCompactionStored,
+    hidden,
     providerSwitchState.result,
     providerSwitchState.status,
   ])
@@ -1323,10 +1334,14 @@ export default function ChatView({
   const externalReconcileInFlightRef = useRef(false)
   const externalClaimedRunRef = useRef(false)
   const reconcileExternalActivity = useCallback(async () => {
+    // A retained surface from the other workspace world is layout state, not a
+    // second chat runtime. Its visible twin owns fetch/stream reconciliation.
+    if (hiddenRef.current) return
     if (externalReconcileInFlightRef.current) return
     externalReconcileInFlightRef.current = true
     try {
       while (
+        !hiddenRef.current &&
         processedExternalSignalRef.current.seq
         < externalSignalRef.current.seq
       ) {
@@ -1384,6 +1399,7 @@ export default function ChatView({
     } finally {
       externalReconcileInFlightRef.current = false
       if (
+        !hiddenRef.current &&
         processedExternalSignalRef.current.seq
         < externalSignalRef.current.seq
       ) {
@@ -1392,10 +1408,12 @@ export default function ChatView({
     }
   }, [connectToStream, embedded, fetchMessages, isStreamingRef])
   useEffect(() => {
+    if (hidden) return
     reconcileExternalActivity()
-  }, [effectiveRunSignal.seq, reconcileExternalActivity])
+  }, [effectiveRunSignal.seq, hidden, reconcileExternalActivity])
 
   const ensureRuntimeStreamConnected = useCallback(() => {
+    if (hiddenRef.current) return
     if (connectionError === 'disconnected') return
     if (!serverRunningRef.current) return
     if (isStreamingRef.current) return
@@ -1428,6 +1446,53 @@ export default function ChatView({
       persistComposerDraft(chatId, inputValueRef.current, nextFiles)
     },
   })
+
+  const wasHiddenRef = useRef(hidden)
+  useLayoutEffect(() => {
+    const becameVisible = wasHiddenRef.current && !hidden
+    wasHiddenRef.current = hidden
+    if (!becameVisible) return
+
+    // The visible world keeps the shared query cache current while this owner is
+    // retained off-screen. Reconcile that recent page into this owner's loaded
+    // window before it paints, preserving any older rows it paged in earlier.
+    const latest = queryClient.getQueryData(chatMessagesQueryKey(chatId))
+    if (latest?.messages) {
+      const refreshed = mergeRecentMessagesIntoLoadedWindow({
+        loadedMessages: messagesRef.current,
+        loadedOffset: offsetRef.current,
+        recentMessages: latest.messages,
+        recentOffset: latest.offset || 0,
+      })
+      commitMessages(refreshed.messages, refreshed.offset)
+      setServerRunningState(!!latest.running)
+      setSending(!!latest.running)
+      setLiveQuestionId(latest.pending_question_id || null)
+      pendingQueue.hydrate(latest.pending_messages || [])
+      // Match the upstream entry gate without depending on the separate warm-
+      // running-cache optimization: settled cache may reveal immediately;
+      // running history still waits for its authoritative catch-up.
+      setInitialEntryPhase(latest.running ? 'history' : 'cached')
+      setLoading(false)
+    }
+
+    // Composer drafts are chat-scoped across workspace worlds. A hidden retained
+    // owner does not receive input events, so reconcile from the durable draft at
+    // the visibility boundary before its first painted frame.
+    const saved = readComposerDraft(chatId)
+    if (saved.input !== inputValueRef.current) {
+      inputValueRef.current = saved.input
+      setInputState(saved.input)
+    }
+    restoreFiles(saved.attachments)
+  }, [
+    chatId,
+    commitMessages,
+    hidden,
+    pendingQueue.hydrate,
+    queryClient,
+    restoreFiles,
+  ])
 
   function clearFailedAttempt() {
     if (!failedSendAttemptRef.current) return
@@ -2557,6 +2622,7 @@ export default function ChatView({
   ])
 
   useEffect(() => {
+    if (hidden) return
     if (!autoSendPendingDraft || autoSendAttemptedRef.current) return
     if (loading || loadError) return
     const text = input.trim()
@@ -2568,7 +2634,7 @@ export default function ChatView({
     setAutoSendPendingDraft(false)
     try { sessionStorage.removeItem(`${DRAFT_AUTOSEND_PREFIX}${chatId}`) } catch {}
     doSend(text)
-  }, [autoSendPendingDraft, loading, loadError, input, chatId, doSend])
+  }, [autoSendPendingDraft, loading, loadError, input, chatId, doSend, hidden])
 
   // Sends the answer without a visible user message bubble.
   // Sends the answer to an AskUserQuestion as a hidden user message.
@@ -3374,6 +3440,7 @@ export default function ChatView({
   }, [turnActive])
 
   useEffect(() => {
+    if (hidden) return
     const hasQueue = pendingQueue.pendingMessages.length > 0
     if (!turnActive && !hasQueue) return
     let cancelled = false
@@ -3408,12 +3475,14 @@ export default function ChatView({
     }
   }, [
     ensureRuntimeStreamConnected,
+    hidden,
     turnActive,
     pendingQueue.pendingMessages.length,
     reconcileRuntimeState,
   ])
 
   useEffect(() => {
+    if (hidden) return
     let cancelled = false
     const run = () => {
       if (cancelled) return
@@ -3435,7 +3504,7 @@ export default function ChatView({
       window.removeEventListener('online', run)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [ensureRuntimeStreamConnected, reconcileRuntimeState])
+  }, [ensureRuntimeStreamConnected, hidden, reconcileRuntimeState])
 
   const hasMore = offset > 0
   // Empty-state is the "I have nothing to show because nothing happened

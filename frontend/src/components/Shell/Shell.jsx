@@ -102,6 +102,15 @@ import * as modeMachine from './modeMachine.js'
 import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
 import {
+  STANDARD_CHAT_WORLD,
+  deriveChatSurfaceLayers,
+  deriveChatSurfaceOwners,
+} from './chatSurfaceModel.js'
+import {
+  shouldFocusComposerAfterPanePointer,
+  supportsDesktopPaneComposerFocus,
+} from './paneChatFocus.js'
+import {
   acknowledgeAppPreview,
   withAppPreviewSeen,
 } from './builtAppState.js'
@@ -766,6 +775,11 @@ export default function Shell() {
     })
   }
 
+  function focusDesktopChatPaneComposer(chatId) {
+    if (!supportsDesktopPaneComposerFocus()) return
+    requestComposer(chatId, { focus: true })
+  }
+
   const handleComposerRequestHandled = useCallback((token) => {
     setComposerRequest(prev => (
       prev?.token === token ? null : prev
@@ -1225,6 +1239,29 @@ export default function Shell() {
     return map
   }, [workspaceChromeActive, projection, workspace])
 
+  // Builder chat mounts keep their own projected geometry even while Standard
+  // paints. They remain visibility:hidden in that world, but their ChatView
+  // layout never borrows Standard's full-bleed box and therefore never resizes
+  // at the mode boundary. A normal one-leaf Builder uses the flow strip and a
+  // full-bleed wrapper, so only real tiled/focused projections need staged rects.
+  const builderChatTabRects = useMemo(() => {
+    const map = new Map()
+    if (projection.visibleLeaves.length < 2 && !projection.focusedPaneView) return map
+    for (const paneId of projection.visibleLeaves) {
+      const pane = workspace.panes[paneId]
+      const rect = projection.rects[paneId]
+      if (!pane || !pane.activeTabKey || !rect) continue
+      map.set(pane.activeTabKey, {
+        paneId,
+        x: rect.x,
+        y: rect.y + paneModel.STRIP_H,
+        w: rect.w,
+        h: Math.max(0, rect.h - paneModel.STRIP_H),
+      })
+    }
+    return map
+  }, [projection, workspace])
+
   // (v2: the exit-beat wrapper-rect substitution is DELETED. Panes hold their tiled
   // content rect through the beat; a promote pane FLIPs via transform to cover the
   // full box while departures deal out, so computed top/left/width/height never
@@ -1288,63 +1325,14 @@ export default function Shell() {
   }, [settingsOverlay, workspace, projection])
   const visibleChatIdsRef = useRef(visibleChatIds)
   useEffect(() => { visibleChatIdsRef.current = visibleChatIds }, [visibleChatIds])
-  // The flat, chatId-sorted set of visible CHAT panes to mount as PaneChatViews
-  // — for EVERY mode including single-pane (finding A): DOM identity across 1↔2
-  // panes is the invariant, so the first split never remounts the visible chat.
-  // Stable order (same no-reparent rule as the app iframes). Panes stay mounted
-  // (hidden) behind the Settings overlay, exactly like the app iframes.
+  // Retained chat surfaces for BOTH layout worlds. A chat selected in Standard's
+  // slot and a Builder pane has two physical layout owners: Standard remains
+  // full-bleed and Builder remains pane-sized, so neither world's ResizeObserver /
+  // scroll controller reacts to the other's mode transition. Within Builder the
+  // surface key remains chat-based, preserving identity across cross-pane moves.
   const visibleChatPanes = useMemo(() => {
-    const out = []
-    const mountedChatIds = new Set()
-    // While one pane is focused, keep the base projection's chats mounted-hidden.
-    // Defocusing then changes geometry/visibility only — no transcript refetch,
-    // stream teardown, or scroll-state loss for the sibling panes.
-    const mountedPaneIds = new Set([
-      ...baseProjection.visibleLeaves,
-      ...projection.visibleLeaves,
-    ])
-    for (const paneId of mountedPaneIds) {
-      const pane = workspace.panes[paneId]
-      const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
-      if (active && active.kind === 'chat') {
-        out.push({ paneId, chatId: active.id })
-        mountedChatIds.add(String(active.id))
-      }
-    }
-    // TWO-WORLDS mount identity: union the single-screen SLOT chat, mounted under a
-    // stable synthetic single-world owner even while builder shows, so a world
-    // switch changes VISIBILITY not mounts (no ChatView remount, no stream flush,
-    // no scroll loss). Deduped against the tree-visible chats — never two ChatViews
-    // for one chat (design: no duplicate mounts). When the slot chat is already a
-    // visible tree pane, that pane's mount covers it and no synthetic mount is added.
-    const slot = workspace.singleScreen
-    if (slot && slot.kind === 'chat' && !mountedChatIds.has(String(slot.id))) {
-      out.push({ paneId: paneModel.SINGLE_SLOT_PANE, chatId: slot.id })
-    }
-    return out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
+    return deriveChatSurfaceOwners({ workspace, baseProjection, projection })
   }, [baseProjection, projection, workspace])
-  // The chat keys that actually PAINT (as opposed to merely being mounted): in
-  // single mode ONLY the slot's chat (fullBleedKey), in builder every visible
-  // pane's active chat. Separating painting from mounting is what lets the slot
-  // chat sit mounted-but-hidden in builder and become visible on a world switch
-  // without a remount (two-worlds design).
-  const visibleChatKeys = useMemo(() => {
-    const set = new Set()
-    if (settingsOverlay) return set
-    if (single) {
-      if (fullBleedKey && fullBleedKey.startsWith('chat:')) set.add(fullBleedKey)
-      return set
-    }
-    for (const paneId of projection.visibleLeaves) {
-      const pane = workspace.panes[paneId]
-      const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
-      if (active && active.kind === 'chat') set.add(`chat:${active.id}`)
-    }
-    // World-reveal exit: paint the (tree-absent) underlay chat beneath the deal.
-    if (modeUnderlayKey && modeUnderlayKey.startsWith('chat:')) set.add(modeUnderlayKey)
-    return set
-  }, [single, settingsOverlay, fullBleedKey, projection, workspace, modeUnderlayKey])
-
   // Last chat that reached a stable painted frame in each visible pane. On a
   // chat-tab change, keep that outgoing ChatView mounted as an inert cover while
   // the incoming chat runs its existing hide/restore/reveal transaction below.
@@ -1352,7 +1340,7 @@ export default function Shell() {
   // so rapid A -> B -> C navigation keeps A painted and replaces only staging B.
   const [presentedChatByPane, setPresentedChatByPane] = useState(() => new Map())
   const visibleChatPaneSignature = visibleChatPanes
-    .map(({ paneId, chatId }) => `${paneId}:${chatId}`)
+    .map(({ world, paneId, chatId }) => `${world}:${paneId}:${chatId}`)
     .join('|')
 
   // Drop state for panes whose active visible surface is no longer a chat.
@@ -1390,27 +1378,11 @@ export default function Shell() {
     })
   }, [workspaceStateRef])
 
-  // At most two ChatViews per transitioning pane: the last painted chat and the
-  // current active chat. Cross-pane moves are deduped by chat id, preserving the
-  // workspace's no-reparent identity rule rather than manufacturing a cover.
+  // At most two ChatViews per transitioning owner: the last painted chat and the
+  // current active chat. Handoff dedupe is world-local: Standard's retained copy
+  // must never suppress Builder's outgoing cover for the same underlying chat.
   const chatPaneLayers = useMemo(() => {
-    const desiredIds = new Set(visibleChatPanes.map(({ chatId }) => String(chatId)))
-    const layers = []
-    for (const { paneId, chatId } of visibleChatPanes) {
-      const paneKey = String(paneId)
-      const activeId = String(chatId)
-      const previousId = presentedChatByPane.get(paneKey)
-      const transitioning = previousId && previousId !== activeId
-      if (transitioning && !desiredIds.has(previousId)) {
-        layers.push({ paneId, chatId: previousId, role: 'held' })
-      }
-      layers.push({
-        paneId,
-        chatId: activeId,
-        role: transitioning ? 'staging' : 'active',
-      })
-    }
-    return layers.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
+    return deriveChatSurfaceLayers(visibleChatPanes, presentedChatByPane)
   }, [presentedChatByPane, visibleChatPanes])
 
   // ── Synchronous pinned iframe-cache derivation (design §2/§4) ─────────────
@@ -3808,48 +3780,72 @@ export default function Shell() {
           </div>
           )
         })}
-        {/* Chat panes — normally one PaneChatView per visible chat pane. During
-            a chat change the last painted chat remains as an inert opaque cover
-            over the incoming staging chat until its existing scroll controller
-            reports a stable frame. Layers remain chatId-sorted, so adding or
-            removing the bounded cover never reparents another chat wrapper. */}
-        {chatPaneLayers.map(({ paneId, chatId, role }) => {
+        {/* Chat surfaces — one retained owner per world. Standard's synthetic
+            owner always keeps the full content-box geometry; Builder owners keep
+            their projected pane geometry even while hidden. During a chat change
+            the last painted chat remains as an inert opaque same-world cover until
+            the incoming chat reports a stable frame. */}
+        {chatPaneLayers.map(({ world, paneId, chatId, role, surfaceKey }) => {
           const tabKey = `chat:${chatId}`
+          const standardOwner = world === STANDARD_CHAT_WORLD
           const paneActiveKey = paneModel.activeKeyForOwner(workspace, paneId) || tabKey
-          // A retained chat owner may exist in the hidden workspace world. Its
-          // layers stay mounted for continuity, but must never borrow the
-          // handoff classes that make the painted world's held/staging pair
-          // visible. Key this by the owner's current active content rather than
-          // by an individual layer: the held layer intentionally has the old
-          // chat id while its owner is already painting the destination.
-          const ownerPaints = visibleChatKeys.has(paneActiveKey)
           const isActiveLayer = role === 'active'
-          // Beat motion + underlay apply only to the ACTIVE layer (a held/staging
-          // handoff cover is orthogonal to a mode beat). Keyed by the pane's active
-          // key, exactly how deriveExitPlan keys its participants.
-          const underlay = isActiveLayer && isUnderlay(paneActiveKey)
-          const paned = !underlay && workspaceChromeActive ? visibleTabRects.get(paneActiveKey) : null
-          const fullBleed = !underlay && !paned && paneActiveKey === fullBleedKey
-          const motion = isActiveLayer ? wrapperMotion(paneActiveKey) : null
+          // The Standard owner alone may be the stationary world underlay. Every
+          // Builder chat — including one for the SAME chat id — is an independent
+          // moving participant, so the Standard DOM never changes geometry.
+          const underlay = standardOwner && isActiveLayer && isUnderlay(paneActiveKey)
+          const builderRect = standardOwner ? null : builderChatTabRects.get(paneActiveKey)
+          const builderPainted = !standardOwner
+            && effectiveViewMode === 'panes'
+            && chatPanesVisible
+          const paned = !underlay && builderPainted ? builderRect : null
+          const fullBleed = !underlay && paneActiveKey === fullBleedKey
+            && (standardOwner
+              ? effectiveViewMode === 'single'
+              : (builderPainted && !paned))
+          const surfaceVisible = !!(underlay || paned || fullBleed)
+          // A Standard surface never receives Builder motion. Its separate
+          // full-bleed owner sits still beneath the assembling/dealing panes.
+          const motion = !standardOwner && isActiveLayer
+            ? wrapperMotion(paneActiveKey)
+            : null
           const tabPanel = role !== 'held' && paned
-          const handoffClass = !settingsOverlay && ownerPaints && role !== 'active'
+          // A retained owner may belong to the hidden workspace world. Its
+          // layers stay mounted for continuity, but only a surface painted by
+          // its own world may expose held/staging handoff classes.
+          const handoffClass = !settingsOverlay && surfaceVisible && role !== 'active'
             ? ` shell__chat-view--${role}`
             : ''
-          const posStyle = paned ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h } : null
+          // Keep hidden Builder ChatViews laid out at their pane size before a
+          // transition. Clearing right/bottom is the geometry half of
+          // .shell__view--paned without making the hidden wrapper paint.
+          const posStyle = builderRect
+            ? {
+              top: builderRect.y,
+              left: builderRect.x,
+              width: builderRect.w,
+              height: builderRect.h,
+              right: 'auto',
+              bottom: 'auto',
+            }
+            : null
           return (
             <div
-              key={chatId}
+              key={surfaceKey}
               id={tabPanel ? panePanelDomId(paneId, tabKey) : undefined}
               role={tabPanel ? 'tabpanel' : undefined}
               aria-labelledby={tabPanel ? paneTabDomId(paneId, tabKey) : undefined}
-              data-tab-key={(multiPane || focusedPaneViewId != null) && role !== 'held' && !underlay
+              data-chat-world={world}
+              data-chat-id={chatId}
+              data-tab-key={!standardOwner && (multiPane || focusedPaneViewId != null)
+                && role !== 'held' && !underlay
                 ? tabKey : undefined}
               // A ChatView can stay mounted in the parked workspace world so its
               // stream, draft, and scroll controller survive a world flip. Expose
               // one explicit page-level selector for the settled surface that is
               // actually interactive; browser contracts must not accidentally
               // target a retained hidden world or an in-flight handoff layer.
-              data-chat-surface={ownerPaints && role === 'active' ? 'painted' : undefined}
+              data-chat-surface={surfaceVisible && role === 'active' ? 'painted' : undefined}
               // Compositor-only beat motion (v2): see the app wrapper. The world-
               // reveal underlay chat paints full-bleed beneath the deal.
               data-mode-motion={motion ? motion.motion : undefined}
@@ -3859,15 +3855,27 @@ export default function Shell() {
                   ? `shell__view shell__view--paned shell__chat-view${handoffClass}`
                   : `shell__view shell__chat-view ${fullBleed ? 'shell__view--active' : ''}${handoffClass}`)}
               style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
-              // Inert while covered/handing-off OR while participating in / underlying
-              // the exit beat (INV 9 inert beat).
-              inert={settingsOverlay || !ownerPaints || role !== 'active'
+              // A retained owner that belongs to the other world is physically
+              // inert as well as visibility-hidden. Moving/underlay surfaces stay
+              // inert for the whole mode beat (INV 9).
+              inert={!surfaceVisible || settingsOverlay || role !== 'active'
                 || (modeBeatActive && (!!motion || underlay))}
-              aria-hidden={settingsOverlay || !ownerPaints || role !== 'active'
-                ? 'true'
-                : undefined}
+              aria-hidden={!surfaceVisible || settingsOverlay || role !== 'active'
+                ? 'true' : undefined}
               onPointerDownCapture={paned && role === 'active' && !modeBeatActive
-                ? () => dispatchWorkspace({ type: 'FOCUS', paneId })
+                ? (event) => {
+                  const wasFocused = workspaceStateRef.current.ws.focusedPaneId === paneId
+                  dispatchWorkspace({ type: 'FOCUS', paneId })
+                  if (supportsDesktopPaneComposerFocus()
+                    && shouldFocusComposerAfterPanePointer({
+                      wasFocused,
+                      pointerType: event.pointerType,
+                      button: event.button,
+                      target: event.target,
+                    })) {
+                    requestComposer(chatId, { focus: true })
+                  }
+                }
                 : undefined}
             >
               <PaneChatView
@@ -3878,13 +3886,13 @@ export default function Shell() {
               // NON-focused chat pane stops doing work (streaming/scroll) — the
               // chat analogue of visibleAppIds soloing the focused app. Panes mode
               // keeps every visible chat pane doing work.
-              visible={chatPanesVisible && role !== 'held' && visibleChatKeys.has(`chat:${chatId}`)}
-                paneContentHeight={paned ? paned.h : null}
+              visible={surfaceVisible && chatPanesVisible && role !== 'held'}
+                paneContentHeight={builderRect ? builderRect.h : null}
                 // Select before the memo boundary. Passing the replacement Map
                 // would rerender every visible chat pane for another chat's run.
                 externalRunSignal={chatRunSignal(chatRunSignals, chatId)}
-                composerRequest={role === 'active' ? composerRequest : null}
-                onComposerRequestHandled={role === 'active'
+                composerRequest={role === 'active' && surfaceVisible ? composerRequest : null}
+                onComposerRequestHandled={role === 'active' && surfaceVisible
                   ? handleComposerRequestHandled
                   : null}
                 onSystemEvent={handleSystemEvent}
@@ -3899,7 +3907,7 @@ export default function Shell() {
                 onInternalNav={handleChatInternalNav}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}
-                onDisplayReady={role === 'held'
+                onDisplayReady={role === 'held' || !surfaceVisible
                   ? null
                   : handlePaneChatDisplayReady}
               />
@@ -4053,6 +4061,7 @@ export default function Shell() {
             onCloseTab={closeTab}
             focusedPaneViewId={focusedPaneViewId}
             onTogglePaneFocus={toggleFocusedPaneView}
+            onChatPaneSelected={focusDesktopChatPaneComposer}
             revealKey={tabRevealRevision}
             stripMotion={wrapperMotion}
           />

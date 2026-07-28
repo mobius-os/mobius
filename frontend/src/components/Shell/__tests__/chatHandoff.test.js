@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
+const chatSurfaceModel = readFileSync(new URL('../chatSurfaceModel.js', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
@@ -45,9 +46,9 @@ test('a staging chat cannot leave the outgoing transcript held on a wedged reque
 })
 
 test('each pane holds one outgoing chat over one staging chat', () => {
-  assert.match(shell, /layers\.push\(\{ paneId, chatId: previousId, role: 'held' \}\)/,
+  assert.match(chatSurfaceModel, /chatId: previousId,[\s\S]*role: 'held'/,
     'the transition keeps only the last painted chat in its pane')
-  assert.match(shell, /role: transitioning \? 'staging' : 'active'/,
+  assert.match(chatSurfaceModel, /role: transitioning \? 'staging' : 'active'/,
     'the destination stages only while a different painted chat exists')
   assert.match(
     shell,
@@ -58,9 +59,9 @@ test('each pane holds one outgoing chat over one staging chat', () => {
   // the condition now also folds in a leaving pane during the exit beat (INV 9), so
   // match the leading clause rather than the exact full expression. The takeover
   // gate is the EFFECTIVE-mode `settingsOverlay` (finding F3), not the committed one.
-  assert.match(shell, /inert=\{settingsOverlay \|\| !ownerPaints \|\| role !== 'active'/,
+  assert.match(shell, /inert=\{!surfaceVisible \|\| settingsOverlay \|\| role !== 'active'/,
     'neither the held nor staging chat may accept interaction')
-  assert.match(shell, /composerRequest=\{role === 'active' \? composerRequest : null\}/,
+  assert.match(shell, /composerRequest=\{role === 'active' && surfaceVisible \? composerRequest : null\}/,
     'an inert staging composer must not consume a one-shot composer request')
 })
 
@@ -72,27 +73,27 @@ test('only the painted workspace world can expose its handoff layers', () => {
   )
   assert.match(
     shell,
-    /const ownerPaints = visibleChatKeys\.has\(paneActiveKey\)/,
+    /const surfaceVisible = !!\(underlay \|\| paned \|\| fullBleed\)/,
     'a retained owner in the hidden world must remain mounted without becoming visible',
   )
   assert.match(
     shell,
-    /const handoffClass = !settingsOverlay && ownerPaints && role !== 'active'/,
+    /const handoffClass = !settingsOverlay && surfaceVisible && role !== 'active'/,
     'held and staging visibility classes belong only to the world that is actually painting',
   )
   assert.match(
     shell,
-    /data-chat-surface=\{ownerPaints && role === 'active' \? 'painted' : undefined\}/,
+    /data-chat-surface=\{surfaceVisible && role === 'active' \? 'painted' : undefined\}/,
     'browser contracts need one explicit selector for the settled interactive chat surface',
   )
   assert.match(
     shell,
-    /inert=\{settingsOverlay \|\| !ownerPaints \|\| role !== 'active'/,
+    /inert=\{!surfaceVisible \|\| settingsOverlay \|\| role !== 'active'/,
     'a retained chat in the parked workspace world must remain inert',
   )
   assert.match(
     shell,
-    /aria-hidden=\{settingsOverlay \|\| !ownerPaints \|\| role !== 'active'/,
+    /aria-hidden=\{!surfaceVisible \|\| settingsOverlay \|\| role !== 'active'/,
     'a retained chat in the parked workspace world must leave the accessibility tree',
   )
 })
