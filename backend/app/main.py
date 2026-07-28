@@ -231,18 +231,34 @@ async def lifespan(app):
   # "running" forever and stranding queued messages. Wrapped like the
   # other lifespan steps: a failure here must not brick the recovery
   # surface. Runs single-threaded pre-serving, so no queue-lock
-  # contention — see reconcile_interrupted_chats for the argument.
-  # Chats reconciled at boot (crashes plus a planned drain whose exact park did
-  # not commit) are carried to the post-`init_vapid` manual-recovery notify
-  # below. Exact planned-restart parks bypass this destructive reconciliation
-  # and are handled by the continuation sweep after the writer starts.
-  _reconciled_chats: list[str] = []
+  # contention — see reconcile_startup_chats for the argument.
+  # Crashes reconciled at boot are carried to the post-`init_vapid`
+  # manual-recovery notify below. A planned drain whose exact park did not
+  # commit is instead converted to a restart park when its nonce matches the
+  # root-owned authorization; both it and exact pre-shutdown parks are handled
+  # by the continuation sweep after the writer starts.
+  _restart_authorization: str | None = None
   try:
-    from app.chat import reconcile_interrupted_chats
+    from app.restart_ledger import authorized_restart_nonce
+    _restart_authorization = authorized_restart_nonce()
+  except Exception as exc:
+    _log.error(
+      "startup restart authorization read failed: %s", exc, exc_info=True,
+    )
+
+  _manual_reconciled_chats: list[str] = []
+  _restart_fallback_chats: list[str] = []
+  try:
+    from app.chat import reconcile_startup_chats
     from app.database import SessionLocal as _ReconcileSession
     _rc_db = _ReconcileSession()
     try:
-      _reconciled_chats = reconcile_interrupted_chats(_rc_db) or []
+      _reconcile_result = reconcile_startup_chats(
+        _rc_db,
+        restart_authorization=_restart_authorization,
+      )
+      _manual_reconciled_chats = _reconcile_result.manual
+      _restart_fallback_chats = _reconcile_result.restart_parks
     finally:
       _rc_db.close()
   except Exception as exc:
@@ -297,8 +313,8 @@ async def lifespan(app):
     _log.error("compiled-bundle reconcile wiring failed: %s", exc, exc_info=True)
   record_memory_checkpoint("startup_bundles_reconciled")
   # Start the single-writer chat-persistence actor AFTER db init and
-  # crash reconciliation. Order is load-bearing: reconcile_interrupted_chats
-  # must run BEFORE the actor exists — recovery has to work even when
+  # crash reconciliation. Order is load-bearing: reconcile_startup_chats must
+  # run BEFORE the actor exists — recovery has to work even when
   # persistence is degraded, so it never routes through the actor.
   # start_writer catches its own startup failure (marks the writer fatal
   # rather than raising), so a writer that can't start can't brick boot
@@ -323,12 +339,12 @@ async def lifespan(app):
   # Best-effort — the resumable note is already durable in the transcript, so a
   # notify failure never blocks boot.
   try:
-    if _reconciled_chats:
+    if _manual_reconciled_chats:
       from app.chat import notify_after_reconcile
       from app.database import SessionLocal as _NotifySession
       _nt_db = _NotifySession()
       try:
-        notify_after_reconcile(_nt_db, _reconciled_chats)
+        notify_after_reconcile(_nt_db, _manual_reconciled_chats)
       finally:
         _nt_db.close()
   except Exception as exc:
@@ -463,7 +479,7 @@ async def lifespan(app):
   except Exception as exc:
     _log.error("start_frontend_watcher failed: %s", exc, exc_info=True)
   record_memory_checkpoint("startup_frontend_watcher_started")
-  # Runtime liveness watchdog. reconcile_interrupted_chats only runs at boot,
+  # Runtime liveness watchdog. reconcile_startup_chats only runs at boot,
   # so a turn that leaves its run marker set without a process restart (a
   # FAILED_LEAVE_MARKER terminal, or the late-promote gap) would hold the chat
   # "running" forever and make the app look permanently busy. This periodic
@@ -531,19 +547,33 @@ async def lifespan(app):
     from app.broadcast import get_system_broadcast as _system_broadcast
     _reset_park_events = _system_broadcast().subscribe()
 
-    async def _sweep_reset_parks_once():
+    async def _sweep_reset_parks_once(*, startup: bool = False):
       try:
         _rp_db = _SweepSession()
         try:
-          await sweep_reset_parks(_rp_db)
+          if startup:
+            return await sweep_reset_parks(
+              _rp_db,
+              restart_authorization=_restart_authorization,
+            )
+          return await sweep_reset_parks(_rp_db)
         finally:
           _rp_db.close()
       except _asyncio.CancelledError:
         raise
       except Exception as _exc:
         _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
+        return []
 
-    await _sweep_reset_parks_once()
+    _startup_continuations = await _sweep_reset_parks_once(startup=True)
+    if _restart_authorization:
+      _log.info(
+        "startup restart continuation pass authorized=%d fallback_recovered=%d "
+        "started_or_resolved=%d",
+        1,
+        len(_restart_fallback_chats),
+        len(_startup_continuations),
+      )
 
     async def _reset_park_loop():
       try:

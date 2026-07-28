@@ -744,26 +744,33 @@ completion or a particular scroll mode.
 
 Automatic continuation reuses one durable run transition with separate
 chat-local policies and cause validation. Provider-limit exits mark their exact
-`ChatRun` as `parked` until the parsed reset time. A planned restart
-creates a fresh nonce, stops and finalizes each exact live run, and parks it
-due-now with that nonce. The platform process then publishes an intent and
-restart request; it does not terminate itself on the normal path.
+`ChatRun` as `parked` until the parsed reset time. A planned restart creates a
+fresh nonce and, **before provider interruption**, stamps it onto every exact
+live run in one writer transaction. Provider stops then run concurrently; clean
+stops finalize and become due-now parks immediately, while a slow stop or failed
+terminal transcript write keeps its exact nonce-stamped `running` row for boot
+recovery. The platform process then publishes an intent and restart request; it
+does not terminate itself on the normal path.
 
 The frozen root-owned entrypoint poller validates and consumes the request,
 records its one-shot nonce in `/data/.restart-ledger`, and only then terminates
 pid 1. At the very start of the next entrypoint invocation, the ledger binds
 that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
 restart park when the root-owned boot acknowledgement matches the nonce on the
-latest exact DB run and the restart policy is on. The supervisor
-attests the boot transition; the database owns run identity. An intent merely
-written before a crash/OOM, an acknowledgement skipped by a failed handshake,
-or an acknowledgement left across another boot authorizes nothing. Transcript
-text is presentation, never restart-cause evidence.
+latest exact DB run and the restart policy is on. At startup, the same
+authorization converts matching stranded `running` rows into due restart parks
+after finalizing their persisted partial transcript; this happens before the
+writer starts and before the initial continuation sweep. The supervisor attests
+the boot transition; the database owns run identity. An intent merely written
+before a crash/OOM, an acknowledgement skipped by a failed handshake, or an
+acknowledgement left across another boot authorizes nothing. Transcript text is
+presentation, never restart-cause evidence.
 
 | Event | Durable result | Boot/sweep result |
 |-------|----------------|-------------------|
 | Provider usage/rate limit | exact run `parked` until reset | notify; continue if the usage policy is on |
 | Accepted planned restart, exact park + boot nonce match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if the restart policy is on |
+| Accepted planned restart, stop/finalize did not settle | exact latest run remains `running` with the authenticated nonce | finalize partials, convert to due restart park, then continue in the same pre-yield pass |
 | Crash/OOM before supervisor acknowledgement | unacknowledged park or generic `running` evidence | resolve/reconcile to manual resumable interruption |
 | Repeated/unrelated boot before claim | acknowledgement is retired by boot-id mismatch | manual resumable interruption |
 | Policy off, unanswered question, app-owned run, or app-queued work | due park resolves without an automatic send | notify/manual owner action |
@@ -771,20 +778,24 @@ text is presentation, never restart-cause evidence.
 | Restart task creation fails after promotion | exact promoted rows roll back; restart park becomes `interrupted` | manual recovery; one-shot cause is not retried |
 
 Eligibility is rechecked under the per-chat transition lock immediately before
-promotion, and the global idle gate permits only one automatic turn at a time.
-The provider still receives a synthetic user `continue`, but the durable row is
-tagged `kind="auto_continuation"` with reason `restart` or `usage_limit`; the UI,
-copy behavior, title selection, time context, compaction, provider-switch
-handoff, chat-note summarization, and redacted chat logs treat it as a product
-marker rather than owner speech.
+promotion. Provider-limit retries are staggered one at a time; an authenticated
+planned restart restores the exact set that was already concurrent, so its
+eligible batch may start together. The provider still receives a synthetic user
+`continue`, but the durable row is tagged `kind="auto_continuation"` with reason
+`restart` or `usage_limit`; the UI, copy behavior, title selection, time
+context, compaction, provider-switch handoff, chat-note summarization, and
+redacted chat logs treat it as a product marker rather than owner speech.
 
 The sweep is cheap: one indexed due-row query immediately at boot, on
-`chat_run_finished`, and on a 60-second fallback, plus one bounded local ledger
-read when due rows exist. It does not create per-chat workers or poll at a short
-interval. Paid provider-limit continuation (`auto_resume_on_limit`) initially
-defaults off; planned-restart continuation (`auto_resume_on_restart`) initially
-defaults on. Each chat stores both choices independently, and changing either
-choice seeds future chats without rewriting existing conversations.
+`chat_run_finished`, and on a 60-second fallback. Startup captures the boot
+authorization once and threads that exact value through reconciliation and the
+pre-yield sweep, so a second ledger read cannot make the two phases disagree;
+later sweeps perform one bounded local ledger read only when due restart rows
+exist. It does not create per-chat workers or poll at a short interval. Paid
+provider-limit continuation (`auto_resume_on_limit`) initially defaults off;
+planned-restart continuation (`auto_resume_on_restart`) initially defaults on.
+Each chat stores both choices independently, and changing either choice seeds
+future chats without rewriting existing conversations.
 
 ### Tool output rendering
 

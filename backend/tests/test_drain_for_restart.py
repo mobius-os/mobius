@@ -1,6 +1,6 @@
 """Drain-gated restart (design §2.2, DrainForRestart path).
 
-Locks in the four contracts that distinguish a restart-drain from a Stop:
+Locks in the five contracts that distinguish a restart-drain from a Stop:
 
   (a) DrainForRestart PRESERVES pending_messages and moves the exact run to a
       due restart park, while stop_chat_for CLEARS the queue (contrast).
@@ -9,6 +9,8 @@ Locks in the four contracts that distinguish a restart-drain from a Stop:
   (c) Generic boot reconciliation stays manual; display text alone never
       manufactures planned-restart intent.
   (d) A send arriving while draining QUEUES instead of starting a turn.
+  (e) Stop/finalize failures retain authenticated exact-run intent, and startup
+      converts every opted fallback to the same immediate continuation path.
 """
 
 import asyncio
@@ -154,6 +156,40 @@ def test_drain_persists_paused_note_and_preserves_partials():
   assert _run("drain-note-1")["restart_nonce"] == "restart-nonce-drain"
 
 
+def test_drain_pause_survives_claude_interrupt_terminal(monkeypatch):
+  """Claude reports a provider error while honoring the drain interrupt."""
+  cid = "drain-claude-interrupt"
+  _, sink, handle = _live_turn(cid)
+
+  async def _stop_with_claude_terminal(timeout=2.0):
+    del timeout
+    handle.stop_calls += 1
+    # This is the terminal result Claude emits after the drain has already
+    # published the authoritative, resumable restart pause.
+    chat_mod._limit_exit(sink, {}, "Execution interrupted.")
+    registry.unregister(cid, handle.kind)
+    return True
+
+  monkeypatch.setattr(handle, "stop", _stop_with_claude_terminal)
+
+  assert _run_drain() == [{
+    "chat_id": cid,
+    "run_token": f"rt-{cid}",
+  }]
+  _drain_writer()
+
+  errors = [
+    block for block in _chat(cid)["messages"][-1]["blocks"]
+    if block.get("type") == "error"
+  ]
+  assert errors == [{
+    "type": "error",
+    "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE,
+    "resumable": True,
+    "pause": {"kind": "restart"},
+  }]
+
+
 def test_drain_finalizes_running_tool_before_clearing_reconcile_marker():
   cid = "drain-running-tool"
   _, sink, _ = _live_turn(cid, partial="")
@@ -231,7 +267,7 @@ def test_drain_does_not_promote_the_queue():
   assert "drain-nopromote" in chat_mod._restart_draining_chats
 
 
-def test_drain_park_failure_leaves_generic_marker_for_manual_recovery(
+def test_drain_park_failure_leaves_authenticated_marker_for_boot_recovery(
   monkeypatch,
 ):
   cid = "drain-park-failure"
@@ -242,11 +278,96 @@ def test_drain_park_failure_leaves_generic_marker_for_manual_recovery(
     raise RuntimeError("writer unavailable")
 
   monkeypatch.setattr(chat_mod, "_park_run_strict", _fail_park)
-  assert _run_drain() == []
+  assert _run_drain() == [{
+    "chat_id": cid,
+    "run_token": f"rt-{cid}",
+  }]
   _drain_writer()
 
   assert _chat(cid)["run_status"] == "running"
   assert _run(cid)["status"] == "running"
+  assert _run(cid)["restart_nonce"] == "restart-nonce-drain"
+
+
+def test_drain_stop_timeout_keeps_authenticated_restart_intent():
+  """A provider that misses the stop window must still auto-recover on boot."""
+  cid = "drain-stop-timeout"
+  _seed(cid)
+  bc = create_broadcast(cid)
+  sink = chat_mod._ChatEventSink(
+    bc, cid, run_token=f"rt-{cid}",
+  )
+  chat_mod.register_active_sink(cid, sink)
+  handle = _Handle(cid, stops=False)
+  registry.register(handle)
+
+  assert _run_drain() == [{
+    "chat_id": cid,
+    "run_token": f"rt-{cid}",
+  }]
+  _drain_writer()
+
+  assert handle.stop_calls == 1
+  assert _chat(cid)["run_status"] == "running"
+  run = _run(cid)
+  assert run["status"] == "running"
+  assert run["restart_nonce"] == "restart-nonce-drain"
+
+
+def test_drain_interrupts_live_providers_concurrently(monkeypatch):
+  """One slow provider must not consume every later chat's stop window."""
+  ids = [
+    "drain-parallel-a",
+    "drain-parallel-b",
+    "drain-parallel-c",
+  ]
+  handles = {}
+  for cid in ids:
+    _, _sink, handle = _live_turn(cid)
+    handles[cid] = handle
+  entered = set()
+  all_entered = asyncio.Event()
+  completed = set()
+
+  for cid, handle in handles.items():
+    async def _stop(timeout=2.0, *, _cid=cid, _handle=handle):
+      del timeout
+      entered.add(_cid)
+      if len(entered) == len(ids):
+        all_entered.set()
+      await asyncio.wait_for(all_entered.wait(), timeout=0.5)
+      registry.unregister(_cid, _handle.kind)
+      completed.add(_cid)
+      return True
+
+    monkeypatch.setattr(handle, "stop", _stop)
+
+  _run_drain()
+  assert completed == set(ids)
+  assert all(_run(cid)["status"] == "parked" for cid in ids)
+
+
+def test_drain_terminal_snapshot_failure_keeps_authenticated_restart_intent(
+  monkeypatch,
+):
+  """Transcript serialization failure no longer downgrades to manual."""
+  cid = "drain-finalize-failure"
+  _, sink, _ = _live_turn(cid)
+
+  async def _fail_finalize():
+    raise TypeError("Object is not JSON serializable")
+
+  monkeypatch.setattr(sink, "finalize", _fail_finalize)
+  assert _run_drain() == [{
+    "chat_id": cid,
+    "run_token": f"rt-{cid}",
+  }]
+  _drain_writer()
+
+  assert _chat(cid)["run_status"] == "running"
+  run = _run(cid)
+  assert run["status"] == "running"
+  assert run["restart_nonce"] == "restart-nonce-drain"
 
 
 def test_drain_without_exact_run_token_stays_manual():
@@ -263,6 +384,145 @@ def test_drain_without_exact_run_token_stays_manual():
 
   assert _chat(cid)["run_status"] == "running"
   assert _run(cid)["status"] == "running"
+
+
+def test_authenticated_restart_fallback_becomes_due_park():
+  cid = "reco-authenticated-restart"
+  nonce = "restart-nonce-authorized"
+  _seed(cid, messages=[
+    {"role": "user", "content": "do work", "ts": 1},
+    {"role": "assistant", "content": "partial", "ts": 2, "blocks": [
+      {"type": "text", "content": "partial"},
+      {"type": "error", "message": chat_mod.PAUSED_FOR_RESTART_MESSAGE},
+    ]},
+  ])
+  db = SessionLocal()
+  try:
+    run = db.query(models.ChatRun).filter(
+      models.ChatRun.id == f"rt-{cid}",
+    ).one()
+    run.restart_nonce = nonce
+    db.commit()
+    result = chat_mod.reconcile_startup_chats(
+      db, restart_authorization=nonce,
+    )
+  finally:
+    db.close()
+
+  assert result.manual == []
+  assert result.restart_parks == [cid]
+  assert _chat(cid)["run_status"] is None
+  run = _run(cid)
+  assert run["status"] == "parked"
+  assert run["park_reason"] == "restart"
+  assert run["parked_until"] is not None
+  assert run["restart_nonce"] == nonce
+  errors = [
+    block for block in _chat(cid)["messages"][-1]["blocks"]
+    if block.get("type") == "error"
+  ]
+  assert len(errors) == 1
+  assert errors[0]["resumable"] is True
+
+
+def test_unacknowledged_restart_intent_remains_manual():
+  cid = "reco-unacknowledged-restart"
+  _seed(cid)
+  db = SessionLocal()
+  try:
+    run = db.query(models.ChatRun).filter(
+      models.ChatRun.id == f"rt-{cid}",
+    ).one()
+    run.restart_nonce = "restart-nonce-unaccepted"
+    db.commit()
+    result = chat_mod.reconcile_startup_chats(
+      db, restart_authorization="different-authorized-nonce",
+    )
+  finally:
+    db.close()
+
+  assert result.manual == [cid]
+  assert result.restart_parks == []
+  run = _run(cid)
+  assert run["status"] == "interrupted"
+  assert run["restart_nonce"] is None
+
+
+def test_five_chat_restart_recovers_timeouts_and_finalize_failure(
+  monkeypatch,
+):
+  """Regression for the production incident: all five opted turns resume."""
+  nonce = "restart-nonce-five-chat"
+  clean_id = "restart-five-clean"
+  timeout_ids = [
+    "restart-five-timeout-a",
+    "restart-five-timeout-b",
+    "restart-five-timeout-c",
+  ]
+  finalize_id = "restart-five-finalize"
+  all_ids = [clean_id, *timeout_ids, finalize_id]
+  sinks = {}
+  handles = {}
+  for cid in all_ids:
+    _, sink, handle = _live_turn(cid)
+    sinks[cid] = sink
+    handles[cid] = handle
+  for cid in timeout_ids:
+    handles[cid]._stops = False
+
+  async def _fail_finalize():
+    raise TypeError("legacy path is not JSON serializable")
+
+  monkeypatch.setattr(sinks[finalize_id], "finalize", _fail_finalize)
+
+  covered = asyncio.run(chat_mod.drain_all_for_restart(
+    restart_nonce=nonce,
+  ))
+  assert {item["chat_id"] for item in covered} == set(all_ids)
+  assert _run(clean_id)["status"] == "parked"
+  for cid in [*timeout_ids, finalize_id]:
+    run = _run(cid)
+    assert run["status"] == "running"
+    assert run["restart_nonce"] == nonce
+
+  # Simulate the new process: no old registry/sink survives the boot.
+  registry.reset_for_tests()
+  for cid, sink in sinks.items():
+    chat_mod.unregister_active_sink(cid, sink)
+  chat_mod._restart_draining_chats.clear()
+  chat_mod.draining = False
+
+  db = SessionLocal()
+  try:
+    result = chat_mod.reconcile_startup_chats(
+      db, restart_authorization=nonce,
+    )
+  finally:
+    db.close()
+  assert set(result.restart_parks) == {*timeout_ids, finalize_id}
+  assert result.manual == []
+  assert all(_run(cid)["status"] == "parked" for cid in all_ids)
+
+  scheduled = []
+
+  async def _record_resume(
+    chat_id, park_token=None, *, restart_authorization=None,
+  ):
+    scheduled.append((chat_id, park_token, restart_authorization))
+    return True
+
+  monkeypatch.setattr(chat_mod, "_auto_resume_chat", _record_resume)
+  db = SessionLocal()
+  try:
+    resumed = asyncio.run(chat_mod.sweep_reset_parks(
+      db, restart_authorization=nonce,
+    ))
+  finally:
+    db.close()
+
+  assert set(resumed) == set(all_ids)
+  assert {item[0] for item in scheduled} == set(all_ids)
+  assert all(item[2] == nonce for item in scheduled)
 
 
 # -- (c) boot reconcile marks the note resumable (no double note) + notify once

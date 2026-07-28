@@ -559,6 +559,27 @@ class ParkRun(_Command):
 
 
 @dataclass
+class PrepareRestartIntents(_Command):
+  """Stamp the exact live runs covered by one planned restart.
+
+  This happens BEFORE provider interruption. A slow provider stop or failed
+  terminal transcript write must not erase the one fact startup needs to
+  distinguish an authenticated planned restart from an unrelated crash.
+  The root-owned boot acknowledgement still authorizes the nonce; this command
+  only binds that nonce to the exact currently-running database rows.
+
+  ``runs`` is a bounded process snapshot of ``chat_id``/``run_token`` pairs.
+  The actor revalidates each pair against the latest running row and its
+  in-process token owner, commits every accepted stamp in one transaction, and
+  returns only the accepted pairs. Invalid/stale pairs are ordinary skips so
+  one turn finishing during preparation cannot block the other live turns.
+  """
+
+  restart_nonce: str = ""
+  runs: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
 class ResolvePark(_Command):
   """Resolve a parked/pending run without starting a continuation.
 
@@ -1402,6 +1423,8 @@ class ChatWriterActor:
       return self._clear_run_status(db, cmd)
     if isinstance(cmd, ParkRun):
       return self._park_run(db, cmd)
+    if isinstance(cmd, PrepareRestartIntents):
+      return self._prepare_restart_intents(db, cmd)
     if isinstance(cmd, ResolvePark):
       return self._resolve_park(db, cmd)
     if isinstance(cmd, PrepareAutoResume):
@@ -2601,6 +2624,50 @@ class ChatWriterActor:
       raise _PersistFailed("ParkRun did not persist")
     self._run_token_owner.pop(cmd.chat_id, None)
     return parked
+
+  def _prepare_restart_intents(
+    self, db, cmd: PrepareRestartIntents,
+  ) -> list[dict[str, str]]:
+    """Bind one authenticated-restart nonce to exact live run rows."""
+    from app.models import Chat, ChatRun
+
+    if not cmd.restart_nonce:
+      return []
+
+    accepted: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    changed = False
+    for item in cmd.runs:
+      chat_id = str(item.get("chat_id") or "")
+      run_token = str(item.get("run_token") or "")
+      key = (chat_id, run_token)
+      if not chat_id or not run_token or key in seen:
+        continue
+      seen.add(key)
+
+      owner = self._run_token_owner.get(chat_id)
+      if owner is not None and owner != run_token:
+        continue
+      run = db.query(ChatRun).filter(
+        ChatRun.id == run_token,
+        ChatRun.chat_id == chat_id,
+        ChatRun.status == "running",
+      ).first()
+      chat = db.query(Chat).filter(
+        Chat.id == chat_id,
+        Chat.deleted_at.is_(None),
+        Chat.run_status == "running",
+      ).first()
+      if run is None or chat is None or not self._run_is_latest(db, run):
+        continue
+      if run.restart_nonce != cmd.restart_nonce:
+        run.restart_nonce = cmd.restart_nonce
+        changed = True
+      accepted.append({"chat_id": chat_id, "run_token": run_token})
+
+    if changed and not _commit_or_rollback(db):
+      raise _PersistFailed("PrepareRestartIntents did not persist")
+    return accepted
 
   def _resolve_park(self, db, cmd: ResolvePark):
     """Resolve a parked/pending row without continuing; idempotent."""

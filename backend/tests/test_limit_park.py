@@ -825,6 +825,46 @@ def test_restart_park_auto_continues_with_product_marker(
     chat_mod.discard_starting(cid)
 
 
+def test_startup_sweep_uses_one_captured_restart_authorization(
+  owner_token, monkeypatch,
+):
+  """The pre-yield pass must not depend on a second ledger read."""
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+  )
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_restart_nonce",
+    lambda: (_ for _ in ()).throw(AssertionError("unexpected reread")),
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  cid = "restart-captured-authorization"
+  token = f"rt-{cid}"
+  nonce = "restart-nonce-captured"
+  _due_park(
+    cid, token, auto_restart=True,
+    park_reason="restart", restart_nonce=nonce,
+  )
+
+  db = SessionLocal()
+  try:
+    resolved = asyncio.run(chat_mod.sweep_reset_parks(
+      db, restart_authorization=nonce,
+    ))
+  finally:
+    db.close()
+
+  try:
+    assert resolved == [cid]
+    assert len(scheduled) == 1
+  finally:
+    chat_mod.discard_starting(cid)
+
+
 def test_restart_park_waiting_on_question_stays_manual(
   owner_token, monkeypatch,
 ):

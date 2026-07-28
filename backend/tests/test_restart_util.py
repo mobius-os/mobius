@@ -42,7 +42,10 @@ def test_restart_drains_then_requests_supervisor_and_arms_force_kill(monkeypatch
     lambda **kwargs: requests.append(kwargs),
   )
 
-  async def _fake_drain(timeout=0, *, restart_nonce=""):
+  async def _fake_drain(
+    timeout=0, *, restart_nonce="", prepared_runs=None,
+  ):
+    del timeout, prepared_runs
     assert restart_nonce == "nonce-12345678"
     drained["n"] += 1
     return [{"chat_id": "chat-12345678", "run_token": "run-12345678"}]
@@ -89,9 +92,19 @@ def test_restart_request_survives_drain_failure(monkeypatch):
     restart_ledger, "request_restart",
     lambda **kwargs: requests.append(kwargs),
   )
+  prepared = [{
+    "chat_id": "chat-prepared-1234",
+    "run_token": "run-prepared-1234",
+  }]
 
-  async def _boom(timeout=0, *, restart_nonce=""):
-    del timeout, restart_nonce
+  async def _prepare(nonce):
+    assert nonce == "nonce-12345678"
+    return prepared
+
+  monkeypatch.setattr(chat_mod, "prepare_restart_intents", _prepare)
+
+  async def _boom(timeout=0, *, restart_nonce="", prepared_runs=None):
+    del timeout, restart_nonce, prepared_runs
     raise RuntimeError("drain exploded")
 
   monkeypatch.setattr(chat_mod, "drain_all_for_restart", _boom)
@@ -102,7 +115,7 @@ def test_restart_request_survives_drain_failure(monkeypatch):
   assert requests == [{
     "boot_id": "boot-12345678",
     "nonce": "nonce-12345678",
-    "runs": [],
+    "runs": prepared,
   }]
   assert len(_FakeTimer.instances) == 1
 
@@ -115,8 +128,10 @@ def test_restart_handshake_failure_restarts_without_authorization(monkeypatch):
   monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
   monkeypatch.setattr(restart_ledger, "new_nonce", lambda: "nonce-12345678")
 
-  async def _fake_drain(timeout=0, *, restart_nonce=""):
-    del timeout, restart_nonce
+  async def _fake_drain(
+    timeout=0, *, restart_nonce="", prepared_runs=None,
+  ):
+    del timeout, restart_nonce, prepared_runs
     return [{"chat_id": "chat-12345678", "run_token": "run-12345678"}]
 
   def _request_fails(**kwargs):
