@@ -20,11 +20,6 @@ import {
 } from './contributionReviewModel.js'
 import './ContributionReviewCard.css'
 
-// How long the post-send acknowledgement stays before clearing itself. Long
-// enough to read and tap through to GitHub, short enough that walking away never
-// leaves a stale box wedged above the composer.
-const SENT_VISIBLE_MS = 4000
-
 export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }) {
   const queryClient = useQueryClient()
   const { data: apps } = appQueries.list.useQuery()
@@ -271,20 +266,13 @@ function useSwipeToDismiss(onDismiss) {
  * The acknowledgement after this card's own Send.
  *
  * It is an acknowledgement, NOT a permanent record — the Contribute app owns the
- * history and the chat reply carries the link. So it gets every exit the other
- * cards have (swipe, the band control) AND clears itself, because the first
- * version shipped with no exit at all and became an undismissable box above the
- * composer.
+ * history and the chat reply carries the link. It gets every explicit exit the
+ * other cards have (swipe and the band control), but no timed exit: the
+ * acknowledgement and its GitHub link stay available until the owner dismisses
+ * it or leaves the current chat surface.
  */
 function SentRow({ sent, onDismiss }) {
   const cardRef = useSwipeToDismiss(onDismiss)
-  const dismissRef = useRef(onDismiss)
-  dismissRef.current = onDismiss
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => dismissRef.current?.(), SENT_VISIBLE_MS)
-    return () => window.clearTimeout(timer)
-  }, [])
 
   return (
     <div ref={cardRef} className="contrib-card contrib-card--sent" role="status">

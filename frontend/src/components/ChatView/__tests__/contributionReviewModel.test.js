@@ -420,10 +420,10 @@ test('the dismissal gesture is claimed with a non-passive touchmove', () => {
 })
 
 // The first version of the acknowledgement had NO exit: no swipe (its handlers
-// lived in the other card shape), no control in a band it never rendered, and no
-// timeout. It became an undismissable box wedged above the composer. Every card
-// shape must be dismissible, and this one must also clear itself.
-test('the post-send acknowledgement is dismissible and self-clearing', () => {
+// lived in the other card shape) and no control in a band it never rendered.
+// Every card shape must remain explicitly dismissible, while the acknowledgement
+// and its interactive GitHub link must never disappear on a timer.
+test('the post-send acknowledgement persists until an explicit user or navigation exit', () => {
   const sentRow = cardSrc.slice(
     cardSrc.indexOf('function SentRow('),
     cardSrc.indexOf('function StackReviewRow('),
@@ -434,9 +434,11 @@ test('the post-send acknowledgement is dismissible and self-clearing', () => {
   // A band with a real dismiss control.
   assert.match(sentRow, /className="contrib-card__badge"/)
   assert.match(sentRow, /className="contrib-card__dismiss"/)
-  // And it does not outlive its usefulness.
-  assert.match(sentRow, /setTimeout\(\(\) => dismissRef\.current\?\.\(\), SENT_VISIBLE_MS\)/)
-  assert.match(cardSrc, /const SENT_VISIBLE_MS = 4000/)
+  // Interactive content stays until one of those user exits or component
+  // navigation owns its lifecycle; elapsed time never removes it.
+  assert.doesNotMatch(sentRow, /setTimeout|setInterval/)
+  assert.doesNotMatch(cardSrc, /SENT_VISIBLE_MS/)
+  assert.match(sentRow, /View on GitHub/)
 })
 
 // One gesture implementation for every card shape here. Two copies is how the
