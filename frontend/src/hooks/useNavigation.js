@@ -1082,15 +1082,20 @@ export default function useNavigation({
           : { type: 'OPEN_TAB', paneId: bootPaneId, tab, activate: true })
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
-      // A deep link routes through the ONE decision point (finding 3; INV 2/4): in
-      // an initialized SINGLE world it sets the slot (the requested item actually
-      // appears) rather than OPEN_TAB-ing the hidden pane tree. Builder (and the
-      // no-valid-blob RESET_FLAT path) keep openBootTab.
+      // A deep link routes through the ONE decision point (finding 3; INV 2/4):
+      // an initialized SINGLE world changes only its slot, while a fresh SINGLE
+      // world seeds BOTH retained representations to the explicit destination.
+      // RESET_FLAT deliberately preserves a slot, so omitting the second write
+      // would leave the implicit starter chat mounted behind the requested chat.
       const bootDeepLink = (route, tab) => {
         const mode = paneModel.WORKSPACE_SPLITS_ENABLED
           ? workspaceStateRef.current.ws.viewMode : 'single'
-        if (mode === 'single' && blobValid) applyModeDestination(route)
-        else openBootTab(tab)
+        if (mode === 'single') {
+          if (!blobValid) openBootTab(tab)
+          applyModeDestination(route)
+        } else {
+          openBootTab(tab)
+        }
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
       if (deepLink?.view === 'canvas' && Number.isFinite(deepLink.appId)) {

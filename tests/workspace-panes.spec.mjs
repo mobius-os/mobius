@@ -163,18 +163,22 @@ async function seedWorkspace(page, ws) {
   }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob, 'mobius-open-tabs', legacy])
 }
 
-/** Boot without a workspace blob and with an EMPTY legacy open-tabs mirror.
- *  The explicit deep link then creates the fallback's one leaf in builder mode
- *  with tabStripEngaged=false — the owner's real "one chat, strip never engaged"
- *  state where builder shows the drag surface and single-screen hides it. */
-async function seedFallbackSingleLeaf(page) {
-  await page.addInitScript(([flagKey, workspaceKey]) => {
+/** Seed one explicit Builder leaf while keeping the legacy strip mirror empty.
+ *  Fresh workspaces now intentionally start in Standard; this fixture owns the
+ *  older "one chat, strip never engaged" Builder state directly. */
+async function seedBuilderSingleLeaf(page, chatId) {
+  const ws = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([{ kind: 'chat', id: chatId }]),
+    'panes',
+  )
+  const blob = paneModel.serializeWorkspace(ws)
+  await page.addInitScript(([flagKey, workspaceKey, workspaceBlob]) => {
     try {
       localStorage.setItem(flagKey, '1')
-      sessionStorage.removeItem(workspaceKey)
+      sessionStorage.setItem(workspaceKey, workspaceBlob)
       sessionStorage.setItem('mobius-open-tabs', '[]') // empty legacy -> strip not engaged
     } catch { /* private mode */ }
-  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY])
+  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
 }
 
 /** Two chat panes side by side: p0 = chatA (focused), p1 = chatB. */
@@ -1408,9 +1412,9 @@ test.describe('Workspace view-mode toggle', () => {
     await boot(page, PHONE)
     const a = await createTaggedChat(page, 'vmPhoneStrip')
     await mockApps(page, [])
-    await seedFallbackSingleLeaf(page)
-    // The ?chat= deep-link RESET_FLATs the empty-legacy boot into builder ('panes')
-    // with a single leaf and tabStripEngaged=false — the exact case the owner hit.
+    await seedBuilderSingleLeaf(page, a.id)
+    // The explicit Builder blob owns the single leaf while the legacy strip
+    // mirror remains unengaged — the exact case this contract exercises.
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
     await expect.poll(async () => (await readWs(page)).viewMode, { timeout: 3000 }).toBe('panes')

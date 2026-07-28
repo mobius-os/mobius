@@ -855,8 +855,8 @@ async function beatHeldNow(page) {
 }
 
 test('round4-1: a completed HOLD keeps the logo compressed then springs back at completion', async ({ page }) => {
-  await bootShell(page, WIDE)
-  // Fresh boot = builder; a hold EXITS to single with an animated beat.
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
+  // Explicit builder seed; a hold EXITS to single with an animated beat.
   await expect.poll(() => builderActive(page)).toBe(true)
   const sampler = sampleLogoBeat(page)
   await page.waitForTimeout(30)
@@ -876,7 +876,7 @@ test('round4-1: a completed HOLD keeps the logo compressed then springs back at 
 })
 
 test('round4-1: a standalone Shift+Enter flip never emits a compression class', async ({ page }) => {
-  await bootShell(page, WIDE)
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
   await expect.poll(() => builderActive(page)).toBe(true)
   const sampler = sampleLogoBeat(page)
   await page.waitForTimeout(30)
@@ -901,7 +901,7 @@ test('round4-1: an EARLY logo release is a tap — mode unchanged, no compressio
 })
 
 test('round4-1: rapid hold → keyboard retoggle keeps the logo epoch equal to the mode epoch', async ({ page }) => {
-  await bootShell(page, WIDE)
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
   await expect.poll(() => builderActive(page)).toBe(true)
   const sampler = sampleLogoBeat(page)
   await page.waitForTimeout(30)
@@ -918,7 +918,7 @@ test('round4-1: rapid hold → keyboard retoggle keeps the logo epoch equal to t
 
 test('round4-1: reduced motion keeps direct hold feedback but releases without animation', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
-  await bootShell(page, WIDE)
+  await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
   await expect.poll(() => builderActive(page)).toBe(true)
   await page.evaluate(() => {
     const root = document.querySelector('.shell')
