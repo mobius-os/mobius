@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import './QuestionCard.css'
 import {
   clearQuestionDraft,
@@ -15,6 +15,61 @@ function resolveAnswer(answer, otherText) {
   }
   if (answer === '__other__') return otherText?.trim() || ''
   return answer || ''
+}
+
+
+const CUSTOM_ANSWER_MAX_HEIGHT = 180
+
+
+function resizeCustomAnswer(textarea) {
+  if (!textarea) return
+  textarea.style.height = 'auto'
+  const contentHeight = textarea.scrollHeight
+  textarea.style.height = `${Math.min(contentHeight, CUSTOM_ANSWER_MAX_HEIGHT)}px`
+  textarea.style.overflowY = contentHeight > CUSTOM_ANSWER_MAX_HEIGHT
+    ? 'auto'
+    : 'hidden'
+}
+
+
+function CustomAnswerArea({
+  active,
+  answered,
+  disabled,
+  onChange,
+  onSubmitShortcut,
+  question,
+  value,
+}) {
+  const textareaRef = useRef(null)
+
+  // Re-measure both while writing and when a live answer becomes its
+  // confirmed transcript value. The field therefore keeps the same natural
+  // content height instead of collapsing during the submission handoff.
+  useLayoutEffect(() => {
+    resizeCustomAnswer(textareaRef.current)
+  }, [value])
+
+  return (
+    <textarea
+      ref={textareaRef}
+      className={`qcard__input${active ? ' qcard__input--active' : ''}`}
+      data-chat-scroll-edit-field
+      aria-label={`Custom answer for: ${question}`}
+      placeholder={answered ? 'No custom answer' : 'Or type your own answer…'}
+      autoComplete="off"
+      rows={1}
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      disabled={disabled}
+      onKeyDown={e => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault()
+          onSubmitShortcut()
+        }
+      }}
+    />
+  )
 }
 
 
@@ -78,14 +133,17 @@ export default function QuestionCard({
 
   function selectOption(question, label) {
     if (answered || disabled) return
+    const q = questions.find(qq => qq.question === question)
+    if (!q?.multiSelect) {
+      setOtherTexts(prev => ({ ...prev, [question]: '' }))
+    }
     setAnswers(prev => {
-      const q = questions.find(qq => qq.question === question)
       if (q?.multiSelect) {
         const current = prev[question] || []
         const arr = Array.isArray(current) ? current : [current]
         const next = arr.includes(label)
           ? arr.filter(l => l !== label)
-          : [...arr.filter(l => l !== '__other__'), label]
+          : [...arr, label]
         return { ...prev, [question]: next }
       }
       return { ...prev, [question]: label }
@@ -94,23 +152,26 @@ export default function QuestionCard({
 
   function setOtherText(question, text) {
     setOtherTexts(prev => ({ ...prev, [question]: text }))
-  }
-
-  function selectOther(question) {
-    if (answered || disabled) return
-    const q = questions.find(qq => qq.question === question)
-    if (q?.multiSelect) {
-      setAnswers(prev => {
+    setAnswers(prev => {
+      const q = questions.find(qq => qq.question === question)
+      if (q?.multiSelect) {
         const current = prev[question] || []
         const arr = Array.isArray(current) ? current : [current]
-        if (arr.includes('__other__')) {
-          return { ...prev, [question]: arr.filter(l => l !== '__other__') }
+        const withoutOther = arr.filter(label => label !== '__other__')
+        return {
+          ...prev,
+          [question]: text.trim()
+            ? [...withoutOther, '__other__']
+            : withoutOther,
         }
-        return { ...prev, [question]: [...arr, '__other__'] }
-      })
-    } else {
-      setAnswers(prev => ({ ...prev, [question]: '__other__' }))
-    }
+      }
+      return {
+        ...prev,
+        [question]: text.trim()
+          ? '__other__'
+          : (prev[question] === '__other__' ? '' : prev[question]),
+      }
+    })
   }
 
   async function handleSubmit() {
@@ -119,7 +180,7 @@ export default function QuestionCard({
     const lines = questions.map(q => {
       const val = resolveAnswer(answers[q.question], otherTexts[q.question])
       resolved[q.question] = val
-      return `- ${q.question}: ${val}`
+      return `- ${q.question}: ${val.replace(/\n/g, '\n  ')}`
     })
     setSubmitError('')
     setSubmitting(true)
@@ -256,42 +317,20 @@ export default function QuestionCard({
                   )
                 })
               })()}
-              <button
-                type="button"
-                role={isMulti ? 'checkbox' : 'radio'}
-                aria-checked={answered ? answeredWithOther : isOtherSelected}
-                className={`qcard__opt qcard__opt--other${(answered ? answeredWithOther : isOtherSelected) ? ' qcard__opt--on' : ''}${answered && !answeredWithOther ? ' qcard__opt--dim' : ''}`}
-                onClick={answered ? undefined : () => selectOther(q.question)}
-                disabled={inactive}
-              >
-                <span
-                  className={`qcard__mark qcard__mark--${isMulti ? 'box' : 'radio'}`}
-                  aria-hidden="true"
-                />
-                Other
-              </button>
             </div>
-            {(isOtherSelected || answeredWithOther) && (
-              <input
-                className="qcard__input"
-                type="text"
-                aria-label={`Other answer for: ${q.question}`}
-                placeholder="Type your answer…"
-                autoComplete="off"
-                value={answered
-                  ? unmatchedAnswers.join(', ')
-                  : (otherTexts[q.question] || '')}
-                onChange={e => setOtherText(q.question, e.target.value)}
-                disabled={inactive}
-                autoFocus
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && allAnswered) {
-                    e.preventDefault()
-                    handleSubmit()
-                  }
-                }}
-              />
-            )}
+            <CustomAnswerArea
+              active={isOtherSelected || answeredWithOther}
+              answered={answered}
+              disabled={inactive}
+              onChange={text => setOtherText(q.question, text)}
+              onSubmitShortcut={() => {
+                if (allAnswered) handleSubmit()
+              }}
+              question={q.question}
+              value={answered
+                ? unmatchedAnswers.join(', ')
+                : (otherTexts[q.question] || '')}
+            />
           </div>
         )
         })}

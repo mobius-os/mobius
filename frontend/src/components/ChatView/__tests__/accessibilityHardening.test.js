@@ -67,10 +67,10 @@ test('a restored image with no media token stops spinning and exposes its failur
     'the failed preview must retain an explicit removal affordance')
 })
 
-test('QuestionCard gives the conditional Other field a durable accessible name', () => {
+test('QuestionCard gives the custom answer area a durable accessible name', () => {
   const source = read('../QuestionCard.jsx')
-  assert.match(source, /aria-label=\{`Other answer for: \$\{q\.question\}`\}/)
-  assert.match(source, /placeholder="Type your answer…"/)
+  assert.match(source, /aria-label=\{`Custom answer for: \$\{question\}`\}/)
+  assert.match(source, /placeholder=\{answered \? 'No custom answer' : 'Or type your own answer…'\}/)
 })
 
 test('message sources expose list semantics, keyboard focus, and touch targets', () => {

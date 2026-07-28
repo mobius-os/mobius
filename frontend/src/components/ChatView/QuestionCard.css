@@ -223,16 +223,28 @@
 .qcard__input {
   display: block;
   width: 100%;
-  margin-top: 6px;
-  padding: 8px 10px;
+  min-height: 38px;
+  margin-top: 10px;
+  padding: 10px 11px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface2, rgba(128,128,128,.1));
   color: var(--text);
   font-size: 13px;
+  font-family: inherit;
+  line-height: 1.45;
   outline: none;
+  overflow-y: hidden;
+  resize: none;
   box-sizing: border-box;
   transition: border-color .15s, box-shadow .15s;
+}
+.qcard__input::placeholder {
+  color: var(--muted);
+  opacity: .85;
+}
+.qcard__input--active {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
 }
 .qcard__input:focus,
 .qcard__input:focus-visible {

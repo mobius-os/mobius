@@ -663,6 +663,19 @@ export function modeForViewportChange(mode, wasNearScrollBottom, anchorMode = nu
 }
 
 
+/** A focused, content-growing question field gives the browser temporary
+ * ownership of caret visibility. If that native adjustment moved an ordinary
+ * held viewport, rebase the hold to what is visible now instead of restoring
+ * the stale pre-edit anchor. Send pins, reserved-tail holds, and live following
+ * keep their stronger contracts and therefore pass through unchanged. */
+export function modeForQuestionEditingViewportChange(mode, anchorMode = null) {
+  if (mode?.kind !== 'ANCHOR_AT' || !anchorMode) return mode
+  if (mode.key === anchorMode.key
+      && Math.abs(mode.offset - anchorMode.offset) <= 0.5) return mode
+  return anchorMode
+}
+
+
 /** Advance an armed live pin to tail-follow exactly when its reserved reply
  * room is exhausted. Settled/restored pins omit `followWhenFilled`, so later
  * viewport or lazy-layout changes cannot manufacture follow intent. */
@@ -1060,6 +1073,12 @@ export default function useScrollMode({
   // when the keyboard opens, visualViewport fires AFTER the viewport has
   // already changed, so we need the last known pre-change tail snapshot.
   const nearScrollBottomRef = useRef(false)
+  // A custom Q&A field can grow while the phone browser is also moving its
+  // visual viewport to keep the caret above the keyboard. Keep that native
+  // editing lifecycle visible across focusout until the keyboard has returned
+  // to the full pane height; otherwise the controller can restore a stale
+  // anchor between viewport-animation frames and make the card oscillate.
+  const questionEditSessionRef = useRef(false)
   // Keep reader events wired to the latest run state without rebuilding every
   // observer/listener whenever the boolean changes.
   const turnRunningRef = useRef(!!turnRunning)
@@ -1539,6 +1558,9 @@ export default function useScrollMode({
     // forceApply so the current PIN/FOLLOW/ANCHOR survives the viewport clamp.
     function syncLayout({ forceApply = false, viewportChange = false } = {}) {
       const preserveBottom = viewportChange && nearScrollBottomRef.current
+      const questionSubmissionWasActive = viewportChange
+        && modeRef.current?.kind === 'ANCHOR_AT'
+        && Number.isFinite(modeRef.current.questionSubmitViewportH)
       // Question submission freezes the card-to-stream handoff, not the
       // keyboard. Restore the unanswered card's mode before sizing a changed
       // viewport so its ordinary reservation and clamp remain authoritative.
@@ -1561,9 +1583,24 @@ export default function useScrollMode({
       }
       if (viewportChange) {
         const anchor = preserveBottom ? null : anchorModeFromScroll(scrollEl)
+        const editingAnchor = questionEditSessionRef.current
+          && !questionSubmissionWasActive
+          ? anchorModeFromScroll(scrollEl)
+          : null
+        const ordinaryViewportMode = modeForViewportChange(
+          modeRef.current, preserveBottom, anchor,
+        )
+        const editingViewportMode = editingAnchor
+          ? modeForQuestionEditingViewportChange(ordinaryViewportMode, editingAnchor)
+          : ordinaryViewportMode
+        if (editingViewportMode !== ordinaryViewportMode) {
+          readerLocationExplicitRef.current = true
+        }
         transitionMode(
-          modeForViewportChange(modeRef.current, preserveBottom, anchor),
-          'layout:viewport-change',
+          editingViewportMode,
+          editingViewportMode !== ordinaryViewportMode
+            ? 'layout:question-edit-viewport'
+            : 'layout:viewport-change',
         )
         persistMode()
         writeMode(scrollEl, modeRef.current, 'layout:viewport-change')
@@ -1571,8 +1608,14 @@ export default function useScrollMode({
         if (modeRef.current.kind === 'PIN_USER_MSG') {
           const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
           lastPinTopRef.current = el ? el.offsetTop : null
+          lastAnchorTopRef.current = null
+        } else if (modeRef.current.kind === 'ANCHOR_AT') {
+          const el = _anchorEl(scrollEl, modeRef.current.key)
+          lastAnchorTopRef.current = el ? el.offsetTop : null
+          lastPinTopRef.current = null
         } else {
           lastPinTopRef.current = null
+          lastAnchorTopRef.current = null
         }
       } else if (forceApply) {
         writeMode(scrollEl, modeRef.current, 'layout:forced-reapply')
@@ -1855,6 +1898,24 @@ export default function useScrollMode({
         releasePendingGesture(sequence)
       })
     }
+    const scheduleQuestionEditNoScrollRelease = () => {
+      if (gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY
+          || readerScrollDirty) return
+      // Q&A mutation changes DOM height after the input event. Hold ownership
+      // through one complete rendered frame so ResizeObserver and the browser's
+      // native caret reveal can settle before a no-scroll input gives layout
+      // writes back. This is a layout handshake, not a guessed delay.
+      const sequence = gestureSequenceRef.current
+      cancelAnimationFrame(pendingGestureReleaseRafRef.current)
+      pendingGestureReleaseRafRef.current = requestAnimationFrame(() => {
+        if (gestureSequenceRef.current !== sequence
+            || gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
+        pendingGestureReleaseRafRef.current = requestAnimationFrame(() => {
+          pendingGestureReleaseRafRef.current = 0
+          releasePendingGesture(sequence)
+        })
+      })
+    }
     const onUserInput = (event) => {
       const activatesDisclosure = readerInputActivatesDisclosure(
         event?.type,
@@ -1916,6 +1977,45 @@ export default function useScrollMode({
       }
     }
     const onGestureEndWithoutScroll = scheduleNoScrollRelease
+    const questionEditField = (target) => target?.matches?.(
+      'textarea[data-chat-scroll-edit-field]',
+    ) ? target : null
+    const onQuestionEditFocusIn = (event) => {
+      if (questionEditField(event.target)) {
+        questionEditSessionRef.current = true
+        return
+      }
+      // Moving directly into another writing surface usually keeps the same
+      // keyboard open. That new field owns any later caret/viewport movement;
+      // do not leave the Q&A session waiting for a full-height close that will
+      // not happen during this focus transfer.
+      if (questionEditSessionRef.current && event.target?.matches?.(
+        'textarea, input, [contenteditable="true"], [role="textbox"]',
+      )) {
+        questionEditSessionRef.current = false
+      }
+    }
+    const onQuestionEditFocusOut = (event) => {
+      if (!questionEditField(event.target)) return
+      if (questionEditField(event.relatedTarget)) {
+        questionEditSessionRef.current = true
+        return
+      }
+      if (scrollEl.clientHeight >= fullViewHRef.current - 1) {
+        questionEditSessionRef.current = false
+      }
+    }
+    const onQuestionEditMutation = (event) => {
+      if (!questionEditField(event.target)) return
+      questionEditSessionRef.current = true
+      if (layoutMayOwnScroll(
+        gestureWindowUntilRef.current,
+        performance.now(),
+      )) {
+        onUserInput(event)
+      }
+      scheduleQuestionEditNoScrollRelease()
+    }
     scrollEl.addEventListener('pointerdown', onUserInput, { passive: true })
     scrollEl.addEventListener('touchstart', onUserInput, { passive: true })
     // A long touch can pause before moving. Refresh intent on touchmove so the
@@ -1924,6 +2024,10 @@ export default function useScrollMode({
     scrollEl.addEventListener('touchmove', onUserInput, { passive: true })
     scrollEl.addEventListener('wheel', onUserInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
+    scrollEl.addEventListener('focusin', onQuestionEditFocusIn, { passive: true })
+    scrollEl.addEventListener('focusout', onQuestionEditFocusOut, { passive: true })
+    scrollEl.addEventListener('beforeinput', onQuestionEditMutation, { passive: true })
+    scrollEl.addEventListener('input', onQuestionEditMutation, { passive: true })
     scrollEl.addEventListener('pointerup', onGestureEndWithoutScroll, { passive: true })
     scrollEl.addEventListener('pointercancel', onGestureEndWithoutScroll, { passive: true })
     scrollEl.addEventListener('touchend', onGestureEndWithoutScroll, { passive: true })
@@ -1978,7 +2082,14 @@ export default function useScrollMode({
     // Mobile keyboard via visualViewport.
     let vvHandler = null
     if (typeof window !== 'undefined' && window.visualViewport) {
-      vvHandler = () => syncLayout({ forceApply: true, viewportChange: true })
+      vvHandler = () => {
+        syncLayout({ forceApply: true, viewportChange: true })
+        if (questionEditSessionRef.current
+            && !questionEditField(document.activeElement)
+            && scrollEl.clientHeight >= fullViewHRef.current - 1) {
+          questionEditSessionRef.current = false
+        }
+      }
       window.visualViewport.addEventListener('resize', vvHandler)
       window.visualViewport.addEventListener('scroll', vvHandler)
     }
@@ -2016,6 +2127,10 @@ export default function useScrollMode({
       scrollEl.removeEventListener('touchmove', onUserInput)
       scrollEl.removeEventListener('wheel', onUserInput)
       scrollEl.removeEventListener('keydown', onUserInput)
+      scrollEl.removeEventListener('focusin', onQuestionEditFocusIn)
+      scrollEl.removeEventListener('focusout', onQuestionEditFocusOut)
+      scrollEl.removeEventListener('beforeinput', onQuestionEditMutation)
+      scrollEl.removeEventListener('input', onQuestionEditMutation)
       scrollEl.removeEventListener('pointerup', onGestureEndWithoutScroll)
       scrollEl.removeEventListener('pointercancel', onGestureEndWithoutScroll)
       scrollEl.removeEventListener('touchend', onGestureEndWithoutScroll)

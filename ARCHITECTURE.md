@@ -508,7 +508,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.10 (2026-07-26).** This section is the
+**Owner-authoritative contract — v1.11 (2026-07-27).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -617,6 +617,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   geometry, while a disclosure first settles any preceding gesture and then owns
   layout caused by its own expansion/collapse. A bounded dead-man remains the final
   escape hatch for any interrupted no-scroll gesture.
+  A marked Q&A custom-answer field is the deliberate exception to "ordinary
+  typing cannot scroll": changing its value can grow the field and cause the
+  browser to move the transcript to keep the native caret visible. From
+  `beforeinput` through one complete rendered frame, that mutation uses the
+  same reader-ownership gate as a possible scroll. If no scroll lands, layout
+  resumes immediately after that frame; if one does, the ordinary quiet-settle
+  path records the resulting hold. The controller must not restore a stale
+  anchor between those two outcomes.
 - **R5a — Attention nudges reveal the usable tail.** Tapping an offscreen question
   or paused-turn nudge is an explicit one-shot reading action: it lands at the
   physical tail, including the list's composer-clearance padding, so the card's
@@ -643,6 +651,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   persistence. A failed answer
   keeps that settled reading anchor for the retryable card rather than manufacturing
   follow intent again.
+  While the custom-answer field is focused, a visual-viewport change may rebase
+  an ordinary `ANCHOR_AT` hold to the browser's current caret-visible position
+  instead of reapplying its stale pre-edit offset. `PIN_USER_MSG`,
+  `HOLD_RESERVED_TAIL`, `FOLLOW_BOTTOM`, and the transient question-submission
+  overlay retain their existing stronger rules. The editing lifecycle remains
+  active through keyboard-closing focusout until the full pane height returns,
+  preventing alternating browser/controller corrections without reserving any
+  extra conversation tail space.
   The source handoff
   preserves the question, its answer, and every pre/post-answer thinking, tool, and
   text block in event order, without hiding, duplicating, or reordering them. Only a
@@ -677,6 +693,7 @@ path means routing it through the same entries rather than inventing another rul
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
 | In-process question is answered | any | transient `ANCHOR_AT` over the prior mode; same active assistant row | Hold exact visible anchor through same-viewport card reflow and resumed output |
 | Viewport/keyboard changes after question submission | transient question anchor | pre-submit unanswered-card mode | Apply ordinary viewport behavior; answering adds no extra movement |
+| Focused Q&A custom answer grows or its keyboard viewport changes | ordinary hold | current caret-visible `ANCHOR_AT` | Browser may reveal the caret once; controller rebases instead of snapping back. Pins, reserved-tail holds, follow, and submission overlay are unchanged |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
 | Offscreen question or paused-turn nudge tapped | any hold | `ANCHOR_AT` at physical tail | User-requested one-shot move; clears the overlaid composer |
 
