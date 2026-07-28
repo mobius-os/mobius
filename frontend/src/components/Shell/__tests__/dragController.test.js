@@ -7,6 +7,7 @@ import {
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
   passedSlop, touchMoveIntent, releasedInPlace, holdMsFor, chipOffset,
+  clientPointToLocal,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene, paneAcceptsJoin,
 } from '../dragController.js'
@@ -33,6 +34,35 @@ function scene(panes, opts = {}) {
     rootCanSplit: { left: true, right: true, top: true, bottom: true, ...(opts.rootCanSplit || {}) },
   }
 }
+
+// ── Client-to-layout coordinate bridge ───────────────────────────────────────
+
+test('clientPointToLocal reverses ancestor scaling before workspace hit-testing', () => {
+  // The desktop shell paints at 90%: a 1360×960 layout box is observed through
+  // getBoundingClientRect() as 1224×864, starting 288px into the visual viewport.
+  const clientRect = { left: 288, top: 0, width: 1224, height: 864 }
+  const localSize = { w: 1360, h: 960 }
+
+  assert.deepEqual(
+    clientPointToLocal({ x: 738, y: 27 }, clientRect, localSize),
+    { x: 500, y: 30 },
+  )
+  assert.deepEqual(
+    clientPointToLocal({ x: clientRect.left + clientRect.width, y: clientRect.height }, clientRect, localSize),
+    { x: localSize.w, y: localSize.h },
+  )
+})
+
+test('clientPointToLocal keeps ordinary unscaled coordinates unchanged', () => {
+  assert.deepEqual(
+    clientPointToLocal(
+      { x: 235, y: 120 },
+      { left: 200, top: 80, width: 500, height: 300 },
+      { w: 500, h: 300 },
+    ),
+    { x: 35, y: 40 },
+  )
+})
 
 // ── Threshold predicates ─────────────────────────────────────────────────────
 

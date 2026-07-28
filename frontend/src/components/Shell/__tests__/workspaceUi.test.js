@@ -947,9 +947,15 @@ test('workspace focus, drag label, and cancel visuals remain coherent', () => {
   const focused = css.match(/\.workspace__strip--focused \.shell__tab--active \{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(focused, /box-shadow: inset 0 -2px 0 0 var\(--accent\)/)
   assert.match(focused, /border-color: color-mix\(in srgb, var\(--accent\) 45%, var\(--border-light\)\)/)
-  // V5: the drag chip clamps within the viewport so its label never clips at the
-  // right edge (measured offsetWidth + an 8px margin).
-  assert.match(dragBinding, /const maxLeft = Math\.max\(margin, window\.innerWidth - chipWidth - margin\)/)
+  // V5: pointer and tab-client measurements cross the scale boundary before the
+  // preview/chip write layout pixels. The chip then clamps against that same
+  // layout viewport so its label never clips at the right edge.
+  assert.match(dragBinding, /return clientPointToLocal\(\{ x: clientX, y: clientY \}, box\.rect, box\.localSize\)/)
+  assert.match(dragBinding, /left: toLocal\(r\.left, r\.top, box\)\.x/)
+  assert.match(dragBinding, /chipOffset\(toViewportLayout\(clientX, clientY\), isTouch\)/)
+  assert.match(dragBinding, /w: root\.offsetWidth \|\| root\.clientWidth \|\| rect\.width/)
+  assert.match(dragBinding, /const viewportWidth = document\.documentElement\.offsetWidth\s*\n\s*\|\| document\.documentElement\.clientWidth\s*\n\s*\|\| window\.innerWidth/)
+  assert.match(dragBinding, /const maxLeft = Math\.max\(margin, viewportWidth - chipWidth - margin\)/)
   assert.match(dragBinding, /Math\.max\(margin, Math\.min\(left, maxLeft\)\)/)
   // V6: a CANCELLED drag blurs the drag-origin row so its focus ring clears; a
   // committed drop keeps focus (the tab moved).
