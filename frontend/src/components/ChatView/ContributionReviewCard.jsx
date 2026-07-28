@@ -13,6 +13,7 @@ import {
   passedDismissThreshold,
   payoffLine,
   rememberReviewItemDismissed,
+  reviewPanelSummary,
   sendBlocker,
   statusLabel,
   visibleReviewItems,
@@ -57,19 +58,31 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
 
   const [busyId, setBusyId] = useState(null)
   const [error, setError] = useState(null)
-  const [sent, setSent] = useState(null)
+  const [sentRows, setSentRows] = useState([])
+  // State disables the buttons on the next render; the ref closes the smaller
+  // same-frame window too. One owner press can therefore claim exactly one
+  // record, even if another click lands before React has painted the lock.
+  const activeSendRef = useRef(null)
   // Dismissals are persisted, so this only forces the re-render; the stored
   // decision is what actually filters the list.
   const [dismissRevision, setDismissRevision] = useState(0)
 
   const storage = typeof localStorage !== 'undefined' ? localStorage : null
-  const reviewItems = visibleReviewItems(data, storage)
-  const grouped = reviewItems.length > 1
+  const sentIds = new Set(sentRows.map(row => row.id))
+  // Remove a successful single record locally before the ledger refetch
+  // returns. Stack review items never send from chat and stay untouched.
+  const pendingItems = visibleReviewItems(data, storage).filter(
+    item => item.kind !== 'record' || !sentIds.has(item.record.id),
+  )
+  const panel = reviewPanelSummary(pendingItems.length, sentRows.length)
+  const grouped = panel.count > 1
   void dismissRevision
   if (!appId) return null
-  if (!reviewItems.length && !sent) return null
+  if (panel.count === 0) return null
 
   async function send(record) {
+    if (activeSendRef.current !== null) return
+    activeSendRef.current = record.id
     setBusyId(record.id)
     setError(null)
     try {
@@ -87,19 +100,24 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
         })
         return
       }
-      setSent({
+      const sent = {
         id: record.id,
         number: body?.number ?? body?.record?.number ?? null,
         url: body?.url || body?.record?.url || null,
         repo: record.repo,
-      })
+      }
+      setSentRows(rows => [
+        ...rows.filter(row => row.id !== sent.id),
+        sent,
+      ])
     } catch {
       setError({
         id: record.id,
         message: 'Could not reach the server. Nothing was contributed.',
       })
     } finally {
-      setBusyId(null)
+      if (activeSendRef.current === record.id) activeSendRef.current = null
+      setBusyId(current => current === record.id ? null : current)
       queryClient.invalidateQueries({ queryKey, exact: true })
     }
   }
@@ -108,29 +126,31 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
     <div
       className={`contrib-card-stack${grouped ? ' contrib-card-stack--grouped' : ''}`}
       role={grouped ? 'region' : undefined}
-      aria-label={grouped ? `${reviewItems.length} reviews ready` : undefined}
+      aria-label={grouped ? panel.title : undefined}
     >
       {grouped && (
         <div className="contrib-card-stack__heading">
           <div>
             <div className="contrib-card-stack__title">
-              {reviewItems.length} reviews ready
+              {panel.title}
             </div>
             <div className="contrib-card-stack__copy">
-              Review each item separately.
+              {panel.copy}
             </div>
           </div>
-          <span className="contrib-card-stack__count">{reviewItems.length}</span>
+          <span className="contrib-card-stack__count">{panel.count}</span>
         </div>
       )}
-      {sent && (
+      {sentRows.map(sent => (
         <SentRow
           key={`sent:${sent.id}`}
           sent={sent}
-          onDismiss={() => setSent(null)}
+          onDismiss={() => setSentRows(rows => (
+            rows.filter(row => row.id !== sent.id)
+          ))}
         />
-      )}
-      {reviewItems.map(item => {
+      ))}
+      {pendingItems.map(item => {
         const onOpenContribute = contributeApp && onOpenApp
           ? () => onOpenApp(contributeApp, { final: true })
           : null
@@ -156,6 +176,7 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
             connected={data?.connected !== false}
             autopilot={autopilotOnSend(data)}
             busy={busyId === record.id}
+            locked={busyId !== null}
             error={error?.id === record.id ? error.message : null}
             onSend={send}
             onOpenContribute={onOpenContribute}
@@ -376,7 +397,8 @@ function StackReviewRow({ item, onOpenContribute, onDismiss }) {
 }
 
 function ReviewRow({
-  record, connected, autopilot, busy, error, onSend, onOpenContribute, onDismiss,
+  record, connected, autopilot, busy, locked, error, onSend, onOpenContribute,
+  onDismiss,
 }) {
   const [open, setOpen] = useState(false)
   const blocker = sendBlocker(record, { connected })
@@ -429,7 +451,7 @@ function ReviewRow({
         <button
           type="button"
           className="contrib-card__send"
-          disabled={busy || submitting || !!blocker}
+          disabled={locked || submitting || !!blocker}
           onClick={() => onSend(record)}
         >
           {submitting || busy ? 'Contributing…' : contributeLabel(record)}
