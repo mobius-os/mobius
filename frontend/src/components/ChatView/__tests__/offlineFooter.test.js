@@ -11,7 +11,7 @@ test('footer stacks offline note → notices → rail → connection → queued 
   const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
   const composer = chatView.indexOf('<ChatInputBar', footStart)
   const foot = chatView.slice(footStart, composer)
-  const rail = foot.indexOf('className="chat__build-rail"')
+  const rail = foot.indexOf('<ProgressRail')
   const queued = foot.indexOf('<QueuedMessages')
   const connection = foot.indexOf('<ConnectionStatus')
   const offline = foot.indexOf('className="chat__offline-note"')
@@ -22,7 +22,7 @@ test('footer stacks offline note → notices → rail → connection → queued 
     'the complete footer stack must be present',
   )
   assert.ok(offline < connection, 'the offline explanation stacks above connection/retry')
-  assert.ok(rail < connection, 'the build rail stacks above connection/retry')
+  assert.ok(rail < connection, 'the progress rail stacks above connection/retry')
   assert.ok(connection < queued, 'connection/retry stacks directly above the queued input tray')
   for (const notice of [
     'className="chat__open-app"',
@@ -32,7 +32,7 @@ test('footer stacks offline note → notices → rail → connection → queued 
     const noticeIndex = foot.indexOf(notice)
     assert.ok(noticeIndex >= 0, `${notice} must be present in the footer`)
     assert.ok(noticeIndex < rail,
-      `${notice} must stack above the build rail`)
+      `${notice} must stack above the progress rail`)
   }
 })
 
@@ -51,12 +51,14 @@ test('offline explanation has one owner while send failures stay in the composer
 test('connection failure hides queued actions and disables composer steering', () => {
   assert.match(chatView, /\{connectionError !== 'disconnected' && \([\s\S]*?<QueuedMessages/,
     'the lost-connection state should own the footer stack until Retry succeeds')
-  assert.match(chatView, /const canSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected' && !steerBusy[\s\S]*?canFastForwardQueue/,
-    'the visible composer steer action must be gated by pending QA and connection health')
+  assert.match(chatView, /const showSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?turnActive[\s\S]*?pendingQueue\.visiblePendingMessages\.length > 0/,
+    'the visible composer steer identity must be gated by pending QA and connection health')
+  assert.match(chatView, /const canSteer = canRequestSteer[\s\S]*?canFastForwardQueue/,
+    'server-confirmed steering must remain stricter than the optimistic visual identity')
   assert.match(chatView, /const canSubmitSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?!steerBusy[\s\S]*?turnActive/,
     'the composed-text keyboard steer path must be gated by pending QA and connection health too')
-  assert.match(chatView, /const canRequestSteer = canSubmitSteer[\s\S]*?pendingQueue\.pendingMessages\.length > 0/,
-    'the empty-composer keyboard path must share the same gate and require queued work')
+  assert.match(chatView, /const canRequestSteer = showSteer && !steerBusy/,
+    'the empty-composer keyboard path must share the optimistic visible steer gate')
 })
 
 test('connection status matches the composer column while the offline note stays compact', () => {

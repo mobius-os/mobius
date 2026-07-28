@@ -16,11 +16,11 @@ import {
   isNearContentBottom,
   isNearScrollBottom,
   layoutMayOwnScroll,
-  mountMediaSettled,
   modeForChatExit,
   modeForDisclosureToggle,
   modeForForegroundReturn,
   modeForQuestionSubmission,
+  modeForQuestionEditingViewportChange,
   modeForQueuedSubmission,
   modeForViewportChange,
   modeAfterReaderReachesBottom,
@@ -53,21 +53,6 @@ function makeScrollEl({ scrollHeight, scrollTop, clientHeight, spacerHeight = 0 
     },
   }
 }
-
-test('mount media readiness waits for token insertion and image decode', () => {
-  const frame = img => ({ querySelector: selector => selector === 'img' ? img : null })
-  const scrollEl = frames => ({
-    querySelectorAll: selector => selector === '.md-image-frame' ? frames : [],
-  })
-
-  assert.equal(mountMediaSettled(scrollEl([])), true)
-  assert.equal(mountMediaSettled(scrollEl([frame(null)])), false)
-  assert.equal(mountMediaSettled(scrollEl([frame({ complete: false })])), false)
-  assert.equal(mountMediaSettled(scrollEl([
-    frame({ complete: true }),
-    frame({ complete: true, naturalWidth: 0 }),
-  ])), true, 'decoded and terminally-failed images both release the bounded gate')
-})
 
 test('shouldPinSend pins first visible user message regardless of scroll', () => {
   assert.equal(shouldPinSend({
@@ -278,6 +263,32 @@ test('only provably clamped wheel input gets a next-frame no-scroll release', ()
   assert.equal(readerInputNeedsFrameRelease('keydown'), true)
   assert.equal(readerInputNeedsFrameRelease('pointerdown'), false)
   assert.equal(readerInputNeedsFrameRelease('touchmove'), false)
+})
+
+test('touch input never reads scroll geometry, so it cannot force a layout', () => {
+  // The geometry thunk performs layout-forcing DOM reads (scrollHeight on an
+  // unvirtualized transcript). Only the wheel branch consumes them, so any
+  // input type that short-circuits before that branch must never invoke it.
+  // Counting invocations - rather than asserting return values - is what pins
+  // the COST rather than the behaviour: the previous eagerly-built argument
+  // object returned identical answers while reading the scroller every time.
+  let geometryReads = 0
+  const readGeometry = () => {
+    geometryReads += 1
+    return { deltaY: 0, scrollTop: 500, scrollHeight: 2000, clientHeight: 800 }
+  }
+
+  readerInputNeedsFrameRelease('touchstart', readGeometry)
+  readerInputNeedsFrameRelease('touchmove', readGeometry)
+  readerInputNeedsFrameRelease('pointerdown', readGeometry)
+  assert.equal(geometryReads, 0, 'touch and pointer input must not measure the scroller')
+
+  readerInputNeedsFrameRelease('keydown', readGeometry)
+  assert.equal(geometryReads, 0, 'keydown short-circuits before measuring')
+
+  // Wheel genuinely needs the values, so it must still read them - exactly once.
+  readerInputNeedsFrameRelease('wheel', readGeometry)
+  assert.equal(geometryReads, 1, 'wheel reads the scroller once')
 })
 
 test('scroll diagnostics expose behavior without message identity', () => {
@@ -589,6 +600,39 @@ test('viewport resize never turns a pin into auto-scroll without a gesture', () 
   assert.equal(
     modeForViewportChange(stalePin, true),
     stalePin,
+  )
+})
+
+test('question editing rebases only an ordinary held viewport to native caret movement', () => {
+  const staleHold = { kind: 'ANCHOR_AT', key: 'before-edit', offset: 20 }
+  const caretHold = { kind: 'ANCHOR_AT', key: 'question-row', offset: 84 }
+  assert.equal(
+    modeForQuestionEditingViewportChange(staleHold, caretHold),
+    caretHold,
+    'the visible caret-adjusted position becomes the new ordinary hold',
+  )
+
+  for (const strongerMode of [
+    { kind: 'PIN_USER_MSG', cid: 'c-1' },
+    { kind: 'HOLD_RESERVED_TAIL', cid: 'c-1' },
+    { kind: 'FOLLOW_BOTTOM' },
+  ]) {
+    assert.equal(
+      modeForQuestionEditingViewportChange(strongerMode, caretHold),
+      strongerMode,
+      `${strongerMode.kind} must keep its existing ownership contract`,
+    )
+  }
+  assert.equal(
+    modeForQuestionEditingViewportChange(staleHold, null),
+    staleHold,
+    'an unresolved visible anchor never invents a new location',
+  )
+  const settledHold = { kind: 'ANCHOR_AT', key: 'question-row', offset: 84 }
+  assert.equal(
+    modeForQuestionEditingViewportChange(settledHold, { ...settledHold }),
+    settledHold,
+    'an unchanged caret hold does not manufacture a mode transition',
   )
 })
 

@@ -8,6 +8,8 @@ import { setupQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
 import { shellReload } from './lib/shellReloadState.js'
 import { beginEmbedBootstrap } from './lib/chatEmbedBootstrap.js'
+import { startInstallPromptCapture } from './lib/installPrompt.js'
+import { safeReturnPath } from './lib/safeReturnPath.js'
 
 // These flows are mutually exclusive. Keep setup, login, the full shell, and
 // the opaque embed out of one another's startup path; first boot should not
@@ -38,22 +40,10 @@ const EMBED_ROUTE = isEmbedRoute()
 if (EMBED_ROUTE) {
   beginEphemeralAuth()
   beginEmbedBootstrap()
-}
-
-// Validate a ?return= target: same-origin in-app path only. Rejects
-// backslashes (browsers normalize '/\\evil' to '//evil' -> open redirect),
-// absolute/cross-origin URLs, and protocol-relative '//'. Returns the safe
-// path+query+hash, or null.
-function safeReturnPath(raw) {
-  if (!raw) return null
-  if (!raw.startsWith('/')) return null            // absolute in-app path only
-  if (raw.includes('\\') || /%5c/i.test(raw)) return null  // (encoded) backslash -> // -> open redirect
-  let u
-  try { u = new URL(raw, window.location.origin) } catch { return null }
-  if (u.origin !== window.location.origin) return null
-  if (!u.pathname.startsWith('/') || u.pathname.startsWith('//')) return null
-  if (decodeURIComponent(u.pathname).includes('\\')) return null  // belt-and-suspenders
-  return u.pathname + u.search + u.hash
+} else {
+  // Capture Chromium's one-shot install event before setup or sign-in can keep
+  // the first-use shell card from mounting.
+  startInstallPromptCapture()
 }
 
 export default function App() {
@@ -134,7 +124,7 @@ function AppRoot() {
           setStatus('shell')
           return
         }
-        const ret = safeReturnPath(data.return_path)
+        const ret = safeReturnPath(data.return_path, window.location.origin)
         if (ret && ret !== '/') {
           window.location.replace(ret)
           return
@@ -163,8 +153,10 @@ function AppRoot() {
   // restored chat. One-shot sessionStorage guard prevents a cross-partition
   // redirect loop. Same-origin in-app paths only (no open-redirect).
   useEffect(() => {
-    let ret
-    try { ret = safeReturnPath(new URLSearchParams(window.location.search).get('return')) } catch { return }
+    const ret = safeReturnPath(
+      new URLSearchParams(window.location.search).get('return'),
+      window.location.origin,
+    )
     if (!ret) { try { sessionStorage.removeItem('mobius_return_bounced') } catch { /* ignore */ } return }
     if (!hasToken) return  // no token: the login path honors return post-login
     // Target-scoped one-shot: only suppress a repeat bounce to the SAME
@@ -210,7 +202,9 @@ function AppRoot() {
     }
   }, [hasToken, setupStatusQuery.isError, setupStatusQuery.isSuccess, setupStatusQuery.data])
 
-  if (status === 'loading' || isRestoring) return null
+  if (status === 'loading' || isRestoring) {
+    return <RouteLoading label={isRestoring ? 'Restoring Möbius' : 'Loading Möbius'} />
+  }
   if (status === 'sso') return <RouteLoading label="Signing in to Möbius" />
   if (status === 'sso-error') return (
     <ManagedSignInError
@@ -237,8 +231,10 @@ function AppRoot() {
   if (status === 'login') return (
     <Suspense fallback={<RouteLoading label="Loading sign in" />}>
       <LoginForm onLogin={() => {
-        let ret
-        try { ret = safeReturnPath(new URLSearchParams(window.location.search).get('return')) } catch { /* ignore */ }
+        const ret = safeReturnPath(
+          new URLSearchParams(window.location.search).get('return'),
+          window.location.origin,
+        )
         if (ret) { window.location.replace(ret); return }
         setStatus('shell')
       }} />
@@ -253,7 +249,9 @@ function AppRoot() {
 
 function RouteLoading({ label }) {
   return (
-    <div className="app-route-loading" role="status" aria-label={label} />
+    <div className="app-route-loading" role="status">
+      <span>{label}…</span>
+    </div>
   )
 }
 

@@ -30,16 +30,58 @@
 .md-heading--3 { font-size: 15px; }
 .md-heading--4, .md-heading--5, .md-heading--6 { font-size: 14.5px; }
 
+/* The wrapper (not the <pre>) anchors the copy button: an absolutely
+   positioned child of a scrolling <pre> would ride along with long lines,
+   so the button lives beside the <pre> and stays pinned to the corner. */
+.md-code-wrap {
+  position: relative;
+  min-width: 0;
+}
+
 .md-code-block {
   background: var(--surface);
   border: 1px solid var(--border-light);
   border-radius: 10px;
-  padding: 14px 16px;
+  /* Reserve the button's row so the last code line never sits underneath the
+     always-visible touch target. Horizontal overflow remains owned by <pre>. */
+  padding: 14px 16px 40px;
   font-size: 13px;
   font-family: var(--mono);
   overflow-x: auto;
   white-space: pre;
   line-height: 1.6;
+}
+
+.md-code-copy {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-light);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.md-code-copy--copied { color: var(--accent); }
+
+.md-code-copy:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .md-code-copy:hover {
+    background: var(--surface2);
+    color: var(--text);
+  }
+  .md-code-copy--copied:hover { color: var(--accent); }
 }
 
 .md-code-lang {
@@ -156,22 +198,10 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   margin: 4px 8px;
 }
 
-/* Reserve image height BEFORE the bytes decode so a late <img> load doesn't
-   reflow everything below it (CLS). The frame is an aspect-ratio box: its
-   height is computed from its width and the ratio, so it occupies its final
-   space on the first layout pass — no jump when decode finishes.
-
-   The default ratio (4 / 3) is the pre-load estimate. Chat images are
-   overwhelmingly agent screenshots, which are landscape; a landscape-leaning
-   default keeps the estimate close to reality, so even before onLoad sets the
-   exact `--md-image-ratio` the reserved box is near-final and the on-load
-   delta is small. (A portrait default would reserve a tall box that collapses
-   when a wide screenshot decodes — the original scroll-jump.)
-
-   `max-height` caps the reserved height for extreme tall ratios so one image
-   can't claim a whole viewport; `object-fit: contain` on the inner <img> then
-   letterboxes against the frame background, which is intentional. The cap is
-   in `dvh` (not `vh`) so it tracks the mobile dynamic viewport. */
+/* Local chat images receive an exact server-read ratio on first layout, before
+   token resolution or image decode. External images keep this permanent 4:3
+   frame rather than resizing after load. `max-height` caps extreme tall ratios;
+   `object-fit:contain` letterboxes inside the stable frame when necessary. */
 .md-image-frame {
   display: block;
   width: min(100%, var(--md-image-fit-width, 520px));
@@ -209,6 +239,18 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
 }
 .md-image:hover {
   opacity: 0.85;
+}
+
+.md-image-error {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 0.8125rem;
 }
 
 /* mobius-ui:ImageRail — app-owned, copy-friendly filmstrip.

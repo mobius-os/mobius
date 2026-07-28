@@ -51,6 +51,9 @@ const ALLOWED_GLOBALS = new Set([
   'indexedDB', 'IntersectionObserver', 'localStorage', 'location', 'matchMedia',
   'MessageChannel', 'MessageEvent', 'MutationObserver', 'navigation',
   'navigator', 'Node', 'NodeFilter', 'Notification', 'performance',
+  // Used by the opt-in field performance probe (lib/perfProbe.js) to read the
+  // browser's own long-animation-frame / longtask / event-timing entries.
+  'PerformanceObserver',
   'queueMicrotask', 'ReadableStream', 'reportError', 'Request',
   'requestAnimationFrame', 'requestIdleCallback', 'ResizeObserver', 'Response',
   'screen', 'sessionStorage', 'setImmediate', 'setInterval', 'setTimeout',

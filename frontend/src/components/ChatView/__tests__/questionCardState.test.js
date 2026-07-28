@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 
 const component = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const scrollMode = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../QuestionCard.css', import.meta.url), 'utf8')
 
 test('unanswered question cards do not have a stale gray state', () => {
@@ -19,10 +20,32 @@ test('unanswered question cards do not have a stale gray state', () => {
     'the retained submit button should explain pending and answered states')
   assert.match(component, /\{\(!disabled \|\| answered\) && \(\s*<div className="qcard__hint"/,
     'selection hints should stay in place after the answer is submitted')
-  assert.doesNotMatch(component, /\{!answered && \(\s*<button[\s\S]*?qcard__opt--other/,
-    'the Other option should not disappear after submission')
-  assert.match(component, /\{\(isOtherSelected \|\| answeredWithOther\) && \(\s*<input/,
-    'a submitted custom answer should keep its input row in place')
+  assert.doesNotMatch(component, /qcard__opt--other/,
+    'a custom answer should be a direct writing surface, not an Other option')
+  assert.match(component, /<CustomAnswerArea[\s\S]*?answered=\{answered\}[\s\S]*?value=\{answered[\s\S]*?unmatchedAnswers\.join\(', '\)/,
+    'the custom answer should stay mounted and retain submitted custom text')
+  assert.match(component, /rows=\{1\}/,
+    'the custom answer should begin as a single line')
+  assert.match(component, /data-chat-scroll-edit-field/,
+    'the custom answer should publish its native caret-scroll ownership')
+  assert.doesNotMatch(component, /onInput=\{e => resizeCustomAnswer/,
+    'one post-commit measurement should own growth instead of resizing twice per edit')
+  assert.match(component, /textarea\.style\.height = 'auto'[\s\S]*?Math\.min\(contentHeight, CUSTOM_ANSWER_MAX_HEIGHT\)/,
+    'the custom answer should grow with its content up to the phone-safe cap')
+  assert.match(component, /useLayoutEffect\(\(\) => \{\s*resizeCustomAnswer\(textareaRef\.current\)\s*\}, \[value\]\)/,
+    'confirmed answer values should retain their natural content height')
+  assert.match(component, /new ResizeObserver\(\(\) => \{[\s\S]*?const width = textarea\.clientWidth[\s\S]*?if \(width === lastWidth\) return[\s\S]*?resizeCustomAnswer\(textarea\)/,
+    'settled width changes should trigger one fresh content-height measurement')
+  assert.match(component, /observer\.observe\(textarea\)[\s\S]*?return \(\) => observer\.disconnect\(\)/,
+    'the width observer should be released with the answered card')
+  assert.match(component, /e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/,
+    'plain Enter should create a new line while the explicit shortcut submits')
+  assert.match(component, /val\.replace\(\/\\n\/g, '\\n  '\)/,
+    'multiline custom answers should keep their structure in the resumed turn')
+  assert.match(component, /const next = arr\.includes\(label\)[\s\S]*?: \[\.\.\.arr, label\]/,
+    'multi-select options should compose with a written custom answer')
+  assert.match(component, /if \(!q\?\.multiSelect\) \{\s*setOtherTexts\(prev => \(\{ \.\.\.prev, \[question\]: '' \}\)\)/,
+    'choosing a single option should clear custom text that is no longer active')
   assert.match(component, /writeQuestionDraft\(draftKey, answers, otherTexts\)/,
     'unsubmitted selections and custom text should be cached')
   assert.match(component, /if \(answered\) \{\s*clearQuestionDraft\(draftKey\)/,
@@ -44,6 +67,8 @@ test('question card css has no stale styling hook', () => {
     'expiration status styling should not come back')
   assert.match(css, /\.qcard__input:disabled\s*\{[\s\S]*?color:\s*var\(--muted\);[\s\S]*?-webkit-text-fill-color:\s*var\(--muted\);[\s\S]*?\}/,
     'a submitted custom answer should visibly gray out in every browser')
+  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*38px;[\s\S]*?overflow-y:\s*hidden;[\s\S]*?resize:\s*none;/,
+    'the custom answer should span the card and begin as a single growing line')
   assert.match(css, /\.qcard__submit-error\s*\{/,
     'a failed answer should keep its retry notice attached to the card')
 })
@@ -56,6 +81,24 @@ test('multiple questions read as one compact decision panel', () => {
   assert.match(css, /\.qcard\s*\{[\s\S]*?width:\s*min\(100%, 640px\);[\s\S]*?margin:\s*10px auto;/)
   assert.match(css, /\.qcard--grouped\s*\{[\s\S]*?overflow:\s*hidden;/)
   assert.match(css, /\.qcard--grouped \.qcard__q \+ \.qcard__q\s*\{[\s\S]*?margin-top:\s*0;/)
+})
+
+test('question editing lets native caret movement settle before layout reclaims scroll', () => {
+  assert.match(
+    scrollMode,
+    /addEventListener\('beforeinput', onQuestionEditMutation[\s\S]*?addEventListener\('input', onQuestionEditMutation/,
+    'all text mutation paths should enter the shared reader-ownership gate',
+  )
+  assert.match(
+    scrollMode,
+    /scheduleQuestionEditNoScrollRelease[\s\S]*?requestAnimationFrame\(\(\) => \{[\s\S]*?requestAnimationFrame\(\(\) => \{[\s\S]*?releasePendingGesture/,
+    'a no-scroll edit should yield one rendered frame before layout resumes',
+  )
+  assert.match(
+    scrollMode,
+    /questionSubmissionWasActive[\s\S]*?editingAnchor = questionEditSessionRef\.current[\s\S]*?!questionSubmissionWasActive/,
+    'the editing rebase must never replace the established submission overlay',
+  )
 })
 
 test('a failed question submission does not append a transcript row', () => {
@@ -100,7 +143,7 @@ test('question submission freezes the visible anchor before the async handoff', 
 test('a pending question exposes Stop instead of an impossible steer', () => {
   assert.match(
     chatView,
-    /const canSteer = !hasPendingQuestion[\s\S]*?canFastForwardQueue/,
+    /const showSteer = !hasPendingQuestion[\s\S]*?const canSteer = canRequestSteer[\s\S]*?canFastForwardQueue/,
     'the composer must fall back to Stop while request_user_input owns the turn',
   )
   assert.match(

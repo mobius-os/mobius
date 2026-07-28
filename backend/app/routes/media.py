@@ -1,7 +1,6 @@
 """Authenticated chat-media serving routes."""
 
 import mimetypes
-import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,22 +12,8 @@ from app.auth_helpers import TokenSource, get_auth_token_source
 from app.config import get_settings
 from app.database import get_db
 from app.deps import resolve_media_or_header_owner
-from app.path_utils import validate_path_within_base
-
-# Chat IDs are dashed UUID4 strings produced by str(uuid.uuid4()).
-# Rejecting early prevents using a crafted chat_id as a filesystem path
-# component to escape the chats/ subtree.
-_CHAT_ID_RE = re.compile(
-  r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
-  re.IGNORECASE,
-)
-
-
-def _validate_chat_id(chat_id: str) -> None:
-  """Raises 400 if chat_id doesn't look like a UUID4."""
-  if not _CHAT_ID_RE.match(chat_id):
-    raise HTTPException(status_code=400, detail="Invalid chat id.")
-
+from app.image_previews import display_image_preview
+from app.path_utils import validate_chat_id, validate_path_within_base
 
 router = APIRouter(prefix="/api/chats", tags=["media"])
 
@@ -40,8 +25,7 @@ _RASTER_MEDIA_TYPES = {
   "image/webp",
 }
 
-
-def _serve_chat_image(chat_id, filename, token_src, db):
+def _serve_chat_image(chat_id, filename, token_src, db, *, preview=False):
   """Common auth + path-validation + FileResponse for a chat media file.
 
   The token can come from two sources:
@@ -52,7 +36,7 @@ def _serve_chat_image(chat_id, filename, token_src, db):
 
   App tokens are rejected on both paths.
   """
-  _validate_chat_id(chat_id)
+  validate_chat_id(chat_id)
   resolve_media_or_header_owner(
     token_src.token, db, chat_id=chat_id, from_query=token_src.from_query,
   )
@@ -69,6 +53,14 @@ def _serve_chat_image(chat_id, filename, token_src, db):
     guessed_type if guessed_type in _RASTER_MEDIA_TYPES
     else "application/octet-stream"
   )
+  if preview and media_type in _RASTER_MEDIA_TYPES:
+    preview_path = display_image_preview(file_path, base)
+    if preview_path is not None:
+      return FileResponse(
+        str(preview_path),
+        media_type="image/webp",
+        headers={"Cache-Control": "private, max-age=86400"},
+      )
   return FileResponse(str(file_path), media_type=media_type)
 
 
@@ -76,8 +68,11 @@ def _serve_chat_image(chat_id, filename, token_src, db):
 def serve_chat_media(
   chat_id: str,
   filename: str = FastPath(...),
+  preview: bool = False,
   token_src: TokenSource = Depends(get_auth_token_source),
   db: Session = Depends(get_db),
 ):
-  """Serves an agent-attached chat image, such as a screenshot."""
-  return _serve_chat_image(chat_id, filename, token_src, db)
+  """Serves an agent-attached image or its bounded transcript preview."""
+  return _serve_chat_image(
+    chat_id, filename, token_src, db, preview=preview,
+  )

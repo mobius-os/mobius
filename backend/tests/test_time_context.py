@@ -4,17 +4,34 @@ Locks in the contract that the agent gets a clock every turn (issue: the
 agent only ever saw an IANA timezone NAME, and only on turn 1).
 """
 
+import re
 import time
 import uuid
+from pathlib import Path
 
 from app import models
 from app.chat import (
+  CLI_SLASH_COMMANDS,
   _build_time_context,
   _human_elapsed,
   _is_cli_slash_command,
   _last_user_message_elapsed,
 )
 from app.database import SessionLocal
+
+
+def _frontend_slash_command_names(source: str) -> set[str]:
+  """Read every command name from the top-level frontend registry."""
+  match = re.search(
+    r"export const SLASH_COMMANDS\s*=\s*\[(?P<commands>.*?)^\]",
+    source,
+    flags=re.DOTALL | re.MULTILINE,
+  )
+  assert match, "could not find the frontend slash-command registry"
+  return {
+    f"/{name}"
+    for name in re.findall(r"name:\s*'([^']+)'", match.group("commands"))
+  }
 
 
 def test_includes_timezone_label_and_clock():
@@ -98,3 +115,36 @@ def test_goal_slash_command_is_detected_without_matching_paths():
   assert not _is_cli_slash_command("/")
   assert not _is_cli_slash_command("/data/apps/x is broken")
   assert not _is_cli_slash_command("please run /goal later")
+
+
+def test_slash_command_registry_parity():
+  """The composer's "/" menu offers exactly what the backend dispatches.
+
+  These two lists live in different languages and cannot import each other, so
+  nothing but this test stops them drifting. Drift is silent in the worst
+  direction: a command offered in the menu but unknown here still SENDS — it
+  just stops being a command and becomes prose, with no error anywhere.
+  """
+  registry = (
+    Path(__file__).resolve().parents[2]
+    / "frontend/src/components/ChatView/slashCommands.js"
+  )
+  source = registry.read_text(encoding="utf-8")
+  offered = _frontend_slash_command_names(source)
+
+  assert offered, f"no commands parsed from {registry} — did its shape change?"
+  assert offered == set(CLI_SLASH_COMMANDS), (
+    "composer menu and backend dispatch disagree: "
+    f"menu={sorted(offered)} backend={sorted(CLI_SLASH_COMMANDS)}"
+  )
+
+
+def test_slash_command_registry_parser_reads_commands_after_nested_arrays():
+  source = """
+export const SLASH_COMMANDS = [
+  { name: 'goal', providers: ['claude'] },
+  { name: 'review', providers: ['claude', 'codex'] },
+]
+"""
+
+  assert _frontend_slash_command_names(source) == {"/goal", "/review"}

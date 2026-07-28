@@ -1,0 +1,165 @@
+/* Drawer Smart Share sheet for public install links and local-app publishing
+   handoffs through Contribute. */
+
+import { useMemo, useRef, useState } from 'react'
+import useDialogFocus from '../../hooks/useDialogFocus.js'
+import {
+  appInstallShareText,
+  appNativeSharePayload,
+  appShareState,
+} from './appShareState.js'
+import './ShareAppSheet.css'
+
+async function copyText(value) {
+  try {
+    await navigator.clipboard.writeText(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export default function ShareAppSheet({ app, apps, onOpenApp, onClose }) {
+  const cardRef = useRef(null)
+  const primaryFocusRef = useRef(null)
+  const [status, setStatus] = useState('')
+  const state = useMemo(() => appShareState(app, apps), [app, apps])
+  const canNativeShare = typeof navigator !== 'undefined' &&
+    typeof navigator.share === 'function'
+
+  useDialogFocus({
+    containerRef: cardRef,
+    initialFocusRef: primaryFocusRef,
+    onClose,
+  })
+
+  async function shareInstallLink() {
+    setStatus('')
+    try {
+      await navigator.share(appNativeSharePayload(app, state.installUrl))
+      onClose?.()
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        setStatus("That share didn't open. You can copy the install link instead.")
+      }
+    }
+  }
+
+  async function copyInstallLink() {
+    const copied = await copyText(appInstallShareText(app, state.installUrl))
+    setStatus(copied
+      ? 'Install link copied.'
+      : "Couldn't copy automatically. Press and hold the link to copy it.")
+  }
+
+  function openTarget() {
+    if (!state.targetApp) return
+    const id = state.targetApp.id
+    onClose?.()
+    onOpenApp?.(id)
+  }
+
+  const published = state.kind === 'published'
+  const hasTarget = !!state.targetApp
+  const targetIsContribute = state.kind === 'open-contribute'
+
+  return (
+    <div className="sas__overlay" onClick={() => onClose?.()}>
+      <div
+        ref={cardRef}
+        className="sas__card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sas-title"
+        tabIndex={-1}
+        onClick={event => event.stopPropagation()}
+      >
+        <div className="sas__identity">
+          <img
+            className="sas__icon"
+            src={`/apps/${encodeURIComponent(app.slug)}/icon-192.png`}
+            alt=""
+          />
+          <div>
+            <p className="sas__eyebrow">{published ? 'Ready to install' : 'Local app'}</p>
+            <h2 id="sas-title" className="sas__title">
+              {published ? `Share ${app.name}` : `Publish ${app.name} first`}
+            </h2>
+          </div>
+        </div>
+
+        {published ? (
+          <>
+            <p className="sas__body">
+              Send this install link to someone who uses Möbius. Their own data
+              starts fresh.
+            </p>
+            <div className="sas__url" tabIndex={0}>{state.installUrl}</div>
+            <div className="sas__actions">
+              {canNativeShare && (
+                <button
+                  ref={primaryFocusRef}
+                  type="button"
+                  className="sas__btn sas__btn--primary"
+                  onClick={shareInstallLink}
+                >
+                  Share install link
+                </button>
+              )}
+              <button
+                ref={canNativeShare ? undefined : primaryFocusRef}
+                type="button"
+                className={`sas__btn ${canNativeShare ? 'sas__btn--secondary' : 'sas__btn--primary'}`}
+                onClick={copyInstallLink}
+              >
+                Copy install link
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="sas__body">
+              {targetIsContribute
+                ? 'Contribute can help publish this app, giving it an install link you can share.'
+                : state.kind === 'install-contribute'
+                  ? 'Install Contribute from the App Store, then use it to publish this app and create a shareable install link.'
+                  : 'Install Contribute from the Möbius App Store, then use it to publish this app.'}
+            </p>
+            <div className="sas__route">
+              <span className="sas__route-step">1</span>
+              <span>{targetIsContribute ? 'Open Contribute' : 'Install Contribute'}</span>
+              <span className="sas__route-line" aria-hidden="true" />
+              <span className="sas__route-step">2</span>
+              <span>Publish and share</span>
+            </div>
+            <div className="sas__actions">
+              {hasTarget ? (
+                <button
+                  ref={primaryFocusRef}
+                  type="button"
+                  className="sas__btn sas__btn--primary"
+                  onClick={openTarget}
+                >
+                  {targetIsContribute ? 'Open Contribute' : 'Open App Store'}
+                </button>
+              ) : (
+                <button
+                  ref={primaryFocusRef}
+                  type="button"
+                  className="sas__btn sas__btn--secondary"
+                  onClick={() => onClose?.()}
+                >
+                  Close
+                </button>
+              )}
+            </div>
+          </>
+        )}
+
+        {status && (
+          <p className="sas__status" role="status">{status}</p>
+        )}
+      </div>
+    </div>
+  )
+}

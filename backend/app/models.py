@@ -511,6 +511,11 @@ class App(Base):
   # between user-built apps and store-installed apps are tolerated
   # because allocate_unique_slug just picks the next free suffix.
   manifest_url = Column(String(1024), nullable=True, index=True)
+  # Public manifest URL the owner explicitly attached for sharing this app.
+  # Kept separate from `manifest_url`: the latter is install/update identity,
+  # while a locally-built app may be published later without becoming a
+  # Store-managed install or changing how its source updates are reconciled.
+  share_manifest_url = Column(String(1024), nullable=True, default=None)
   # Soft-delete tombstone. Uninstall sets this instead of dropping the row, so
   # the source tree AND the id-keyed runtime storage tree survive — a reinstall
   # (matched by manifest_url) or POST /{id}/recover then revives the SAME id +

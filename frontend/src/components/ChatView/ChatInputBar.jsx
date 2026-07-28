@@ -80,6 +80,7 @@
 import { useRef, useState, useEffect, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
 import ImageLightbox from './markdown/ImageLightbox.jsx'
+import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
@@ -89,6 +90,15 @@ import {
   resolveComposerHistoryMove,
 } from './composerHistory.js'
 import { resolveComposerEnterAction } from './composerShortcuts.js'
+import SlashMenu from './SlashMenu.jsx'
+import {
+  applySlashCommand,
+  matchSlashCommands,
+  resolveSlashMenuKey,
+  slashCommandIsAvailable,
+  slashCommandUnavailableReason,
+  visibleSlashCommands,
+} from './slashCommands.js'
 import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import {
@@ -105,30 +115,31 @@ let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 
-/** The primary action button — FastForward / Send / Stop / Mic —
+/** The primary action button — Steer / Send / Stop / Mic —
  *  auto-resolved from the bar's input/sending/listening/uploading state.
  *
- *  When there are queued messages ready to try (`canSteer`), the Stop square
- *  is swapped for a fast-forward button. The handler reconciles server state
- *  before acting: if a live turn exists, it injects the queued messages into
- *  that turn; if local running state was stale, this still gives the user one
- *  immediate affordance instead of waiting for focus/remount to reveal it.
- *  Stop is NOT lost: clearing the queue (the tray's X) flips canSteer back to
+ *  When queued work exists (`showSteer`), the Stop square is swapped for a
+ *  fast-forward button immediately — including the brief persistence
+ *  round-trip. Its handler waits for that write before acting, so the semantic
+ *  control does not flash Send → Stop → Steer while the server confirms it.
+ *  Stop is NOT lost: clearing the queue (the tray's X) flips showSteer back to
  *  false and the Stop square returns, and while the composer has text the Send
  *  button (queue-another) still wins over both.
  *
- *  Each state's button carries a distinct `key`, and that is load-bearing:
- *  state swaps replace the semantic control, while the shared `.chat__action`
- *  base keeps geometry and box model stable across Send / Stop / Steer / Mic. */
+ *  Send, Steer, and Stop are states of the same primary action. They
+ *  deliberately share the `primary` key so React preserves the 40px action
+ *  target and swaps only its icon, label, handler, and semantic colour—there
+ *  must be no empty/black replacement frame between any of them. Mic remains
+ *  distinct because it is the idle input affordance rather than a turn action. */
 function PrimaryAction({
-  sending, listening, hasInput, hasUploading, offline, canSteer,
+  sending, listening, hasInput, hasUploading, offline, showSteer, steerReady,
   submissionBlocked,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
-  if (sending && !hasInput && canSteer) {
+  if (sending && !hasInput && showSteer) {
     return (
       <button
-        key="steer"
+        key="primary"
         className="chat__action chat__steer"
         type="button"
         // Keep focus stable through pointerdown, then let ChatView dismiss
@@ -138,6 +149,8 @@ function PrimaryAction({
         onTouchEnd={(e) => { e.preventDefault(); onSteer() }}
         onClick={onSteer}
         aria-label="Send queued message now"
+        aria-busy={!steerReady}
+        disabled={!steerReady}
       >
         <DoubleChevronRight width={20} height={20} />
       </button>
@@ -146,7 +159,7 @@ function PrimaryAction({
   if (sending && !hasInput) {
     return (
       <button
-        key="stop"
+        key="primary"
         className="chat__action chat__stop"
         type="button"
         // Match Send's touch handling: the composer keeps focus on
@@ -167,7 +180,7 @@ function PrimaryAction({
   if (hasInput && !listening) {
     return (
       <button
-        key="send"
+        key="primary"
         className="chat__action chat__send"
         type="button"
         // Keep the textarea focused until ChatView snapshots the scroll
@@ -247,6 +260,7 @@ function FileChips({ files, onRemove, chatId }) {
   })
   // Index into the attached-image gallery currently shown full-screen.
   const [lightboxIndex, setLightboxIndex] = useState(null)
+  const historyDismiss = useHistoryDismiss(() => setLightboxIndex(null))
   const hasRestoredImage = files?.some(file => (
     file.mime_type?.startsWith('image/') && !file.objectUrl
   ))
@@ -329,7 +343,10 @@ function FileChips({ files, onRemove, chatId }) {
                 // lightbox then moves focus into itself deliberately and
                 // restores this button/text-entry context when it closes.
                 onPointerDown={(e) => e.preventDefault()}
-                onClick={() => setLightboxIndex(galleryIndex)}
+                onClick={() => {
+                  historyDismiss.open()
+                  setLightboxIndex(galleryIndex)
+                }}
                 aria-label={`View ${chip.name} full screen`}
               >
                 <img className="chat__attach-card-thumb" src={previewSrc} alt="" />
@@ -373,7 +390,7 @@ function FileChips({ files, onRemove, chatId }) {
           items={gallery}
           index={openIndex}
           onNavigate={setLightboxIndex}
-          onClose={() => setLightboxIndex(null)}
+          onClose={historyDismiss.close}
         />,
         document.body,
       )}
@@ -405,10 +422,11 @@ function FileChips({ files, onRemove, chatId }) {
  *   onStop             — stop button handler
  *   onSteer            — fast-forward handler (steer queued msgs into the
  *                        live turn). Shown in place of Stop while a turn
- *                        is streaming AND `canSteer` is true.
- *   canSteer           — true when there are queued messages that can be
- *                        steered right now (all server-confirmed). Drives
- *                        the FastForward-vs-Stop choice in PrimaryAction.
+ *                        is streaming AND `showSteer` is true.
+ *   showSteer          — true as soon as queued work exists for a live turn;
+ *                        drives the Steer-vs-Stop identity without waiting for
+ *                        the queue persistence round-trip.
+ *   steerReady         — false only while a steer tap is already in flight.
  *   canRequestSteer    — true when the keyboard shortcut may ask the
  *                        existing steer handler to reconcile/steer queued
  *                        messages, even before the visual fast-forward gate
@@ -434,6 +452,9 @@ function FileChips({ files, onRemove, chatId }) {
  *                        chat; drafting stays available but send/mic-start do
  *                        not race the transition.
  *   messageHistory     — visible owner-authored message text, oldest first.
+ *   provider           — the chat's provider id ('claude' | 'codex'). Filters
+ *                        the "/" menu to commands that actually dispatch on it;
+ *                        provider-specific commands stay hidden while unknown.
  *
  * The bar does NOT own send state — ChatView's doSend handles that.
  * The bar's only job: composition + the Send/Stop/Mic resolution.
@@ -453,6 +474,8 @@ export default function ChatInputBar({
   onStop,
   onSteer,
   canSteer,
+  showSteer = canSteer,
+  steerReady = true,
   canRequestSteer = canSteer,
   canSubmitSteer = canRequestSteer,
   offline,
@@ -465,6 +488,7 @@ export default function ChatInputBar({
   rightButtons,
   attachTriggerRef,
   messageHistory = [],
+  provider,
 }) {
   const fileInputRef = useRef(null)
   const historyIndexRef = useRef(null)
@@ -477,6 +501,35 @@ export default function ChatInputBar({
   // unconditionally would pop the soft keyboard up even when the
   // keyboard was down before the `+` tap.
   const wasInputFocusedAtPickerOpenRef = useRef(false)
+
+  // Slash-command menu state. The list itself is derived from the current
+  // text every render rather than stored, so it can never disagree with what
+  // the composer holds; only the highlight and an explicit dismissal are state.
+  const [slashIndex, setSlashIndex] = useState(0)
+  const [slashDismissed, setSlashDismissed] = useState(false)
+  const [slashInputFocused, setSlashInputFocused] = useState(false)
+  const slashCandidates = matchSlashCommands(input)
+  const slashMatches = visibleSlashCommands(slashCandidates, {
+    focused: slashInputFocused,
+    dismissed: slashDismissed,
+  })
+  // Clamped rather than trusted: the list shrinks as the query narrows, and a
+  // stale highlight one past the end would accept `undefined`.
+  const slashActiveIndex = Math.min(slashIndex, Math.max(slashMatches.length - 1, 0))
+  const slashListId = `slash-menu-${chatId}`
+  const slashOptionId = `${slashListId}-active`
+  const slashNames = slashCandidates.map((command) => command.name).join(',')
+
+  // A narrowed query should highlight the new best match, not keep pointing at
+  // wherever the user had arrowed to in the previous, longer list.
+  useEffect(() => { setSlashIndex(0) }, [slashNames])
+
+  // Escape silences the menu for the command being typed — not forever. Once
+  // the composer leaves slash mode (or the query stops matching anything), the
+  // next "/" gets a fresh menu.
+  useEffect(() => {
+    if (slashCandidates.length === 0) setSlashDismissed(false)
+  }, [slashCandidates.length])
 
   // Expose the hidden-file-input trigger to the parent. The parent
   // owns the visible "attach" affordance (now part of ComposerPopover);
@@ -588,7 +641,35 @@ export default function ChatInputBar({
     onAddFiles(files)
   }
 
+  function acceptSlashCommand(command) {
+    if (!command || !slashCommandIsAvailable(command, provider)) return
+    const value = applySlashCommand(command)
+    resetMessageHistory()
+    if (listeningRef?.current) onManualVoiceEdit?.(value)
+    onInputChange(value)
+    // The textarea never lost focus (rows suppress pointerdown), but a click
+    // accept still needs the caret put back after the controlled update.
+    inputRef?.current?.focus({ preventScroll: true })
+  }
+
   function handleKeyDown(e) {
+    // The menu claims Enter and the arrows while it is open — the same keys
+    // that otherwise send and walk sent-message history — so it resolves
+    // BEFORE both. Keys it doesn't claim fall through untouched.
+    const slashAction = resolveSlashMenuKey(e, {
+      open: slashMatches.length > 0,
+      count: slashMatches.length,
+    })
+    if (slashAction) {
+      e.preventDefault()
+      const total = slashMatches.length
+      if (slashAction === 'dismiss') setSlashDismissed(true)
+      else if (slashAction === 'next') setSlashIndex((i) => (i + 1) % total)
+      else if (slashAction === 'previous') setSlashIndex((i) => (i - 1 + total) % total)
+      else if (slashAction === 'accept') acceptSlashCommand(slashMatches[slashActiveIndex])
+      return
+    }
+
     function applyHistoryMove(historyMove) {
       historyIndexRef.current = historyMove.index
       historyDraftRef.current = historyMove.draft
@@ -708,6 +789,15 @@ export default function ChatInputBar({
           {sendFailure}
         </div>
       )}
+      <SlashMenu
+        commands={slashMatches}
+        activeIndex={slashActiveIndex}
+        onSelect={acceptSlashCommand}
+        isAvailable={(command) => slashCommandIsAvailable(command, provider)}
+        unavailableReason={(command) => slashCommandUnavailableReason(command, provider)}
+        listId={slashListId}
+        optionId={slashOptionId}
+      />
       <div className="chat__input-row">
         {leftButtons}
         <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}`}>
@@ -726,11 +816,23 @@ export default function ChatInputBar({
               onChange={handleTextareaChange}
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
+              onFocus={() => setSlashInputFocused(true)}
+              onBlur={() => setSlashInputFocused(false)}
               placeholder="Message Möbius…"
               aria-label="Message Möbius…"
               name="message"
               autoComplete="off"
               rows={1}
+              // Combobox semantics apply only while the menu is open. Left on
+              // permanently they would announce this plain prose textarea as a
+              // picker in every ordinary message the user writes.
+              {...(slashMatches.length > 0 ? {
+                role: 'combobox',
+                'aria-expanded': true,
+                'aria-controls': slashListId,
+                'aria-activedescendant': slashOptionId,
+                'aria-autocomplete': 'list',
+              } : {})}
             />
             {rightButtons}
             <PrimaryAction
@@ -739,7 +841,8 @@ export default function ChatInputBar({
               hasInput={hasInput}
               hasUploading={hasUploading}
               offline={offline}
-              canSteer={canSteer}
+              showSteer={showSteer}
+              steerReady={steerReady}
               submissionBlocked={submissionBlocked}
               onSubmit={handleSubmit}
               onStop={onStop}

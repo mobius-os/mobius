@@ -12,13 +12,13 @@ test('composer disables + notes when offline, re-enables online', async ({ page,
   const input = page.getByPlaceholder('Message Möbius…')
   await input.waitFor()
   await input.fill('hello')
-  await expect(page.locator('button[aria-label="Send"]')).toBeEnabled()
+  await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeEnabled()
 
   await context.setOffline(true)
   await expect(page.locator('.shell__offline')).toHaveText(/Offline/i)
-  await expect(page.getByText("You're offline — chat needs a connection.")).toBeVisible()
-  await expect(page.locator('button[aria-label="Send"]')).toBeDisabled()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText("You're offline — chat needs a connection.")).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeDisabled()
 
   await context.setOffline(false)
-  await expect(page.locator('button[aria-label="Send"]')).toBeEnabled()
+  await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeEnabled()
 })

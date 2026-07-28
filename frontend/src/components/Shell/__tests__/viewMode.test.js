@@ -5,13 +5,17 @@ import * as tabModel from '../tabModel.js'
 
 const { makeTab } = tabModel
 
-// A fresh workspace and a two-pane one, both seeded through the public ops so
-// their viewMode is whatever the model assigns by default.
-function onePane() {
+function freshWorkspace() {
   return paneModel.seedFromFlatTabs([makeTab('chat', '5')])
 }
+
+// Builder-world fixtures opt into panes explicitly. This keeps the remainder of
+// the mode-machine tests about mode transitions rather than the first-boot policy.
+function onePane() {
+  return paneModel.setViewMode(freshWorkspace(), 'panes')
+}
 function twoPanes() {
-  let ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  let ws = onePane()
   return paneModel.splitPaneWithTab(ws, makeTab('app', '42'), {
     paneId: ws.focusedPaneId, edge: 'right',
   })
@@ -19,9 +23,14 @@ function twoPanes() {
 
 // ── viewMode field + persistence (design: view-mode toggle, forgiving parse) ──
 
-test('a fresh workspace defaults to panes view-mode', () => {
-  assert.equal(onePane().viewMode, 'panes')
-  assert.equal(twoPanes().viewMode, 'panes')
+test('first boot and fallback workspaces default to standard single-screen mode', () => {
+  assert.equal(freshWorkspace().viewMode, 'single')
+  assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, '5')
+  const firstBoot = paneModel.parseWorkspace(null, {
+    fallbackTabs: [makeTab('chat', '5')],
+  })
+  assert.equal(firstBoot.viewMode, 'single')
+  assert.equal(paneModel.activeContentRoute(firstBoot).chatId, '5')
 })
 
 test('setViewMode sets the mode and is same-reference on a no-op', () => {
@@ -170,14 +179,11 @@ test('UNDO_LAST restores the captured tree but KEEPS the current view-mode', () 
   assert.equal(undone.ws.viewMode, 'single', 'the view-mode flip is NOT reverted')
 })
 
-// ── M3: the kill switch clamps the fresh/fallback seed to ONE world ───────────
+// ── M3: the fresh/fallback seed has one standard world in every flag state ────
 // parseWorkspace returns seedFromFlatTabs directly on the fresh/fallback/invalid
-// paths (no re-normalize), and the seed was always viewMode:'panes'. With splits
-// OFF the presentation clamps to single, but activeContentRoute reads the RAW
-// ws.viewMode — 'panes' made it project the hidden builder focus while single
-// mode painted the slot: two conflicting worlds. Clamping the seed's viewMode at
-// the parse layer (coerceViewMode, the same clamp the valid-blob path gets) keeps
-// the blob itself single, so both readers agree.
+// paths (no re-normalize), so the seed itself must carry the mode both rendering
+// and activeContentRoute read. The splits kill switch still clamps every other
+// candidate to that same single-screen world.
 test('M3: with splits OFF a fresh/fallback seed is single and activeContentRoute reads the slot', async () => {
   const prevLS = globalThis.localStorage
   globalThis.localStorage = { getItem: (k) => (k === 'mobius:workspace-splits' ? '0' : null) }
@@ -200,11 +206,10 @@ test('M3: with splits OFF a fresh/fallback seed is single and activeContentRoute
   }
 })
 
-test('M3: with splits ON the seed keeps the tiled panes default (no regression)', () => {
-  // The clamp only fires under the kill switch; the default (tests + prod) is the
-  // tiled builder world, and activeContentRoute reads the focused pane there.
+test('M3: with splits ON a fresh seed still starts in standard mode', () => {
   assert.equal(paneModel.WORKSPACE_SPLITS_ENABLED, true)
-  const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'A')])
-  assert.equal(ws.viewMode, 'panes')
-  assert.equal(paneModel.activeContentRoute(ws).chatId, 'A')
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', 'A')])
+  assert.equal(ws.viewMode, 'single')
+  ws = paneModel.setSingleScreen(ws, { kind: 'chat', id: 'B' })
+  assert.equal(paneModel.activeContentRoute(ws).chatId, 'B')
 })

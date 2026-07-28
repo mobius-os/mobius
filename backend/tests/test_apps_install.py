@@ -8,6 +8,7 @@ and force failure modes.
 """
 
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -534,6 +535,23 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   assert mock_run.call_args.args[0] == [
     str(fake_scaffold), "reflection", "0 6 * * *", "fetch.sh", "42",
   ]
+  assert mock_run.call_args.kwargs["env"]["API_BASE_URL"] == (
+    get_settings().api_base_url
+  )
+  assert mock_run.call_args.kwargs["env"]["MOBIUS_APP_JOB_RUNNER"].endswith(
+    "scripts/app-job-runner.py"
+  )
+
+
+def test_cron_scaffold_prefers_the_served_checkout():
+  from app import install
+
+  with patch("app.install.CRON_SCAFFOLD", install._BAKED_CRON_SCAFFOLD):
+    assert install._cron_scaffold() == (
+      Path(install.__file__).resolve().parent.parent
+      / "scripts"
+      / "init-cron-scaffold.sh"
+    )
 
 
 def test_register_cron_omits_app_id_when_none(tmp_path):
@@ -2644,6 +2662,58 @@ def test_flag_on_static_asset_update_leaves_clean_app_repo(
   assert not (data_dir / "apps" / ".static-clean.mobius-static-bak").exists()
   assert app_git._run(source_dir, "status", "--porcelain").stdout == ""
   assert app_git._run(source_dir, "ls-files", "*.mobius-bak").stdout == ""
+
+
+def test_app_store_update_recognizes_squashed_local_contribution(
+  client, auth, bypass_url_validation,
+):
+  """App Store update uses the same provenance engine as the shell updater."""
+  from app import app_git
+
+  base_url = "https://equivalent.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "equivalent-update"}
+  r1 = _install_v1(client, auth, base_url, manifest, JSX_MULTI)
+  assert r1.status_code == 201, r1.text
+  source = Path(get_settings().data_dir) / "apps" / "equivalent-update"
+  entry = source / "index.jsx"
+  base_sha = app_git.head_sha(source, app_git.UPSTREAM_BRANCH)
+
+  shared = JSX_MULTI.replace("ORIGINAL TITLE", "SHARED REVIEW")
+  entry.write_text(shared)
+  reviewed = app_git.commit_local(source, "reviewed contribution")
+  assert reviewed
+  reviewed_diff = app_git._canonical_diff(source, base_sha, reviewed)
+  assert reviewed_diff is not None
+  digest = hashlib.sha256(reviewed_diff).hexdigest()
+  assert app_git.record_pending_equivalent_change(
+    source,
+    base_sha=base_sha,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="app-store-reviewed-change",
+  )
+  landed = app_git.mark_equivalent_change_landed(source, digest)
+  assert landed
+
+  # Local keeps evolving the contributed line before the Store fetches the
+  # squash result, which is exactly the shape ordinary three-way Git conflicts.
+  entry.write_text(shared.replace("SHARED REVIEW", "LOCAL FOLLOWUP"))
+  r2 = _update_v2(
+    client,
+    auth,
+    base_url,
+    {**manifest, "version": "2.0.0"},
+    shared,
+  )
+
+  assert r2.status_code == 201, r2.text
+  body = r2.json()
+  assert body["mode"] == "update"
+  assert body["divergence"] == "clean_merge"
+  assert any("already present upstream" in item for item in body["warnings"])
+  assert "LOCAL FOLLOWUP" in entry.read_text()
+  assert not app_git.ref_exists(source, landed)
 
 
 def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(

@@ -103,6 +103,14 @@ export const MIN_PANE_H = 200
 // still finds its tabs.
 export const STORAGE_KEY = 'mobius-workspace'
 
+// sessionStorage key for the maximized ("focus one pane full-screen") presentation.
+// Deliberately SEPARATE from STORAGE_KEY: focusing a pane must never rewrite the
+// persisted split tree or ratios (design §2), so the maximize is a thin presentation
+// overlay stored beside the blob and re-seeded on mount. Without this, the reload
+// that apply-on-idle fires while the tab is backgrounded dropped the maximize, so a
+// full-screen pane came back tiled ("minimized") on return. Colon-style like the flags.
+export const FOCUSED_PANE_VIEW_KEY = 'mobius:workspace-focused-pane'
+
 // The stable synthetic pane id the single-world SLOT (chat or app) mounts + owns
 // its history under when the item is ABSENT from the builder pane tree (two-worlds
 // design: a stable single-world owner rather than assuming paneOf() succeeds). It
@@ -436,21 +444,18 @@ function commitBounded(ws, candidate) {
 
 // Seed a single-pane workspace from today's flat open set. Tabs are sanitized,
 // deduped, and capped to the last MAX_PANE_TABS (legacy readOpenTabs posture);
-// the last tab is active (the on-screen one under the flat model). A fresh
-// workspace opens in the tiled 'panes' view-mode by default, but the SPLITS
-// KILL SWITCH clamps it to 'single' HERE — the same coercion the valid-blob path
-// gets in normalize() (M3). parseWorkspace returns this seed DIRECTLY on the
-// fresh/fallback/invalid paths without re-normalizing, so without the clamp the
-// seed keeps viewMode 'panes' while the presentation clamps to single: the raw-
-// viewMode reader `activeContentRoute` then projects the hidden BUILDER world
-// (focused pane) while single mode paints the SLOT — two conflicting worlds.
+// the last tab is active (the on-screen one under the flat model). A fresh or
+// fallback workspace starts in the standard single-screen world. Persisted valid
+// workspaces keep their chosen mode through normalize(); this seed is only used
+// when there is no usable workspace blob. parseWorkspace returns it DIRECTLY on
+// the fresh/fallback/invalid paths, so the seed itself must carry the render mode.
 export function seedFromFlatTabs(tabs) {
   const clean = capTabs(dedupTabs(sanitizeTabs(tabs)))
   const paneId = 'p0'
   const keys = clean.map(tabModel.tabKey)
   return {
     v: 1,
-    viewMode: coerceViewMode('panes'),
+    viewMode: coerceViewMode('single'),
     layout: paneId,
     panes: {
       [paneId]: {
@@ -522,7 +527,11 @@ export function singleScreenKey(ws) {
 // selects through its independent slot. Callers that bind lifecycle events to
 // an owner use this instead of assuming every owner exists in ws.panes.
 export function activeKeyForOwner(ws, ownerPaneId) {
-  if (String(ownerPaneId) === SINGLE_SLOT_PANE) return singleScreenKey(ws)
+  if (String(ownerPaneId) === SINGLE_SLOT_PANE) {
+    if ('singleScreen' in ws) return singleScreenKey(ws)
+    const seed = focusedSlotSeed(ws)
+    return seed ? tabModel.tabKey(seed) : null
+  }
   return ws.panes?.[ownerPaneId]?.activeTabKey ?? null
 }
 
@@ -662,7 +671,13 @@ export function singleScreenRoute(ws) {
 // and the reload snapshot — so a single-world reload restores the slot, not the
 // builder focus (design: derive activeView from the current world).
 export function activeContentRoute(ws) {
-  return ws.viewMode === 'single' ? singleScreenRoute(ws) : focusedContentRoute(ws)
+  // An absent slot is the migration marker for a fresh/legacy workspace. The
+  // renderer already falls back to the focused pane in that state; route
+  // projection must do the same or first boot paints one surface while
+  // navigation reports the empty home screen. Once singleScreen is initialized
+  // (including explicit null), the independent Standard world is authoritative.
+  if (ws.viewMode === 'single' && 'singleScreen' in ws) return singleScreenRoute(ws)
+  return focusedContentRoute(ws)
 }
 
 // The string app ids that are the active tab of one of `visibleLeaves` (or every
@@ -917,6 +932,23 @@ export function closePane(ws, paneId) {
   return commit(ws, {
     ...ws,
     panes: { ...ws.panes, [paneId]: { ...pane, tabs: [], activeTabKey: null } },
+  })
+}
+
+// Close every OTHER tab in the kept tab's pane (the context-menu "Close all
+// other tabs" affordance). The kept tab becomes the pane's active tab — the
+// gesture's intent is "just this one". Scoped to ONE pane on purpose: other
+// panes are surfaces the owner arranged deliberately, and this menu never
+// reaches across them. The pane can never empty (the kept tab survives), so
+// no auto-return applies. Reversible — the reducer snapshot restores the
+// closed tabs. Same reference on a no-op (unknown tab, or already alone).
+export function closeOtherTabs(ws, tabKey) {
+  const pane = paneOf(ws, tabKey)
+  if (!pane || pane.tabs.length <= 1) return ws
+  const kept = pane.tabs.find(tab => tabModel.tabKey(tab) === tabKey)
+  return commit(ws, {
+    ...ws,
+    panes: { ...ws.panes, [pane.id]: { ...pane, tabs: [kept], activeTabKey: tabKey } },
   })
 }
 
@@ -1592,6 +1624,43 @@ export function readWorkspaceRaw(storage) {
   }
 }
 
+// Forgiving read/write for the maximized-pane overlay (FOCUSED_PANE_VIEW_KEY),
+// mirroring readWorkspaceRaw's throwing-getItem posture. writeFocusedPaneView
+// REMOVES the key when nothing is maximized so a dismissed maximize can never
+// resurrect on a later reload.
+export function readFocusedPaneView(storage) {
+  try {
+    const raw = storage.getItem(FOCUSED_PANE_VIEW_KEY)
+    return typeof raw === 'string' && raw.length > 0 ? raw : null
+  } catch {
+    return null
+  }
+}
+
+export function writeFocusedPaneView(paneId, storage) {
+  try {
+    if (paneId == null) storage.removeItem(FOCUSED_PANE_VIEW_KEY)
+    else storage.setItem(FOCUSED_PANE_VIEW_KEY, String(paneId))
+  } catch { /* private mode / quota — the maximize just won't survive a reload */ }
+}
+
+// Re-seed the maximized-pane presentation on boot from a persisted id, but ONLY
+// when it is still valid for the rehydrated workspace. Mirrors the runtime reset
+// guards EXACTLY so a restored value can never desync the render (which reads the
+// maximized geometry from this id but the active surface from ws.focusedPaneId):
+//   - splits on + a multi-pane 'panes' world (single/immersive have no maximize),
+//   - the pane still exists in the tree,
+//   - and it IS the focused pane (the lockstep invariant toggle/reconcile keep).
+// Any miss returns null → the workspace boots in its normal tiled view.
+export function resolveInitialFocusedPaneView(ws, rawId) {
+  if (!WORKSPACE_SPLITS_ENABLED || rawId == null || !ws || !ws.panes) return null
+  if (ws.viewMode === 'single') return null
+  if (Object.keys(ws.panes).length <= 1) return null
+  if (!ws.panes[rawId]) return null
+  if (rawId !== ws.focusedPaneId) return null
+  return rawId
+}
+
 // Forgiving read: any structural failure — bad JSON, wrong version, or an
 // invariant that survives normalize (a too-deep/too-wide corrupt blob) — falls
 // back to a fresh flat seed. Never throws.
@@ -1703,6 +1772,15 @@ export function workspaceReducer(state, action) {
       const paneLabel = action.label || 'Closed pane'
       const { ws: closed, autoReturned } = autoReturnIfEmptied(ws, next)
       return { ws: closed, undo: { ws, label: paneLabel, toast: paneLabel, restoreViewMode: autoReturned } }
+    }
+    case 'CLOSE_OTHER_TABS': {
+      // Keep only the named tab in its pane. The kept tab survives, so the pane
+      // never empties — no auto-return branch. One reversible gesture: the
+      // snapshot restores every closed sibling at once.
+      const next = closeOtherTabs(ws, action.tabKey)
+      if (next === ws) return state
+      const label = action.label || 'Closed other tabs'
+      return { ws: next, undo: { ws, label, toast: label } }
     }
     case 'MOVE_TAB': {
       const next = moveTab(ws, action.tabKey, action.target)

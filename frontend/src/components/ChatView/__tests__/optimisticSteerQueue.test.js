@@ -4,33 +4,30 @@ import assert from 'node:assert/strict'
 
 const source = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
-test('optimistic steer restore only hydrates when no queue mutation won the race', () => {
+test('accepted deferred steers stay hidden without removing durable queue rows', () => {
   assert.match(
     source,
-    /queueAfterOptimisticPromote = pendingQueue\.pendingMessagesRef\.current/,
-    'handleSteer should snapshot the queue array immediately after optimistic promote',
+    /pendingQueue\.reserveForSteer\(consumePendingCids\)[\s\S]*?await streamSend/,
+    'the tray should reserve steered rows before the request without removing them',
+  )
+  assert.doesNotMatch(
+    source,
+    /pendingQueue\.promoteManyByCid\(consumePendingCids\)/,
+    'starting a steer must not mutate the durable queue merely to hide its tray rows',
+  )
+  const deferred = source.slice(
+    source.indexOf('if (result.cut_deferred) {', source.indexOf('async function steerRowsImpl')),
+    source.indexOf('} else if (', source.indexOf('if (result.cut_deferred) {', source.indexOf('async function steerRowsImpl'))),
+  )
+  assert.doesNotMatch(
+    deferred,
+    /releaseSteerReservation|hydrate|promote|cancelByCid/,
+    'an accepted deferred cut should keep its reservation until the cut lands',
   )
   assert.match(
     source,
-    /function restoreOptimisticSteerQueue|const restoreOptimisticSteerQueue = \(\) =>/,
-    'handleSteer should route failed optimistic restores through a helper',
-  )
-  const restoreHelper = source.indexOf('function restoreOptimisticSteerQueue')
-  // Indent-agnostic: the steer core's nesting depth changed when per-row
-  // steer extracted it out of handleSteer; the contract is only that a try
-  // block FOLLOWS the helper declaration (so catch can call it).
-  const guardedRequest = source.slice(restoreHelper).search(/\n\s+try \{/)
-  assert.ok(
-    restoreHelper >= 0 && guardedRequest > 0,
-    'the restore helper must be declared outside the request try block so catch can call it',
-  )
-  assert.match(
-    source,
-    // The snapshot identifier is whatever the steer core names it (it became
-    // fullConfirmedSnapshot when per-row steer landed) — the contract is the
-    // identity check gating a preserveMissing hydrate, not the name.
-    /pendingQueue\.pendingMessagesRef\.current === queueAfterOptimisticPromote[\s\S]*?pendingQueue\.hydrate\(\w+, \{ preserveMissing: true \}\)/,
-    'the restore helper must hydrate the stale snapshot only if the queue array identity is unchanged',
+    /if \(result\?\.status !== 'steered'\)[\s\S]*?pendingQueue\.releaseSteerReservation\(consumePendingCids\)/,
+    'a rejected steer must make the unchanged queue visible again',
   )
 })
 

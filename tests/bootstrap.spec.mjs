@@ -228,9 +228,9 @@ async function cleanSession(page) {
 
 async function waitForShell(page) {
   await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 }
   )
 }
@@ -285,7 +285,7 @@ test.describe('Bootstrap seam: empty-chat auto-create', () => {
         () => page.evaluate(() => localStorage.getItem('moebius_active_chat')),
         { timeout: 2000 },
       ).toBe(created[0].id)
-      await expect(page.locator('.chat__empty-wrap')).toBeVisible()
+      await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible()
     } finally {
       created.releasePostCreateList()
       created.releaseDetail()
@@ -300,7 +300,7 @@ test.describe('Bootstrap seam: empty-chat auto-create', () => {
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await expect.poll(() => created.attempts, { timeout: 8000 }).toBeGreaterThan(0)
-    await expect(page.getByText(/couldn't start a new chat/i)).toBeVisible()
+    await expect(page.getByText(/couldn’t start a new chat/i)).toBeVisible()
 
     expect(created).toHaveLength(0)
     expect(await page.evaluate(() => localStorage.getItem('moebius_active_chat')))

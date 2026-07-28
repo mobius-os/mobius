@@ -59,9 +59,9 @@ for (const scenario of SCENARIOS) {
     await page.setViewportSize({ width: 1512, height: 861 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-        || document.querySelector('.chat__scroll')
-        || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+        || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 },
     )
 
@@ -132,17 +132,17 @@ for (const scenario of SCENARIOS) {
     }, chat.id)
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
 
-    await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 15000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 15000 })
     await expect(page.locator(scenario.cardSelector)).toBeVisible({ timeout: 5000 })
     await page.waitForFunction(() => {
-      const scroll = document.querySelector('.chat__scroll')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return !!scroll && scroll.scrollHeight > scroll.clientHeight + 1000
     }, { timeout: 5000 })
 
     // Put the attention card well below the viewport with the same gesture
     // signal the controller receives from a human scroll.
     await page.evaluate(() => {
-      const scroll = document.querySelector('.chat__scroll')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!scroll) return
       scroll.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
       scroll.scrollTop = Math.max(
@@ -152,8 +152,8 @@ for (const scenario of SCENARIOS) {
     })
     const nudge = page.locator(scenario.nudgeSelector)
     await expect(nudge).toBeVisible({ timeout: 5000 })
-    const rail = page.locator('.chat__build-rail')
-    const composer = page.locator('.chat__pill')
+    const rail = page.locator('[data-chat-surface="painted"] .chat__progress-rail')
+    const composer = page.locator('[data-chat-surface="painted"] .chat__pill')
     await expect(rail).toBeVisible({ timeout: 5000 })
 
     const [nudgeBox, railBox, composerBox] = await Promise.all([
@@ -167,15 +167,15 @@ for (const scenario of SCENARIOS) {
     await nudge.click()
 
     await page.waitForFunction(nudgeSelector => {
-      const scroll = document.querySelector('.chat__scroll')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!scroll || document.querySelector(nudgeSelector)) return false
       return Math.abs(scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop) <= 1
     }, scenario.nudgeSelector, { timeout: 5000 })
 
     const geometry = await page.evaluate(({ chatId, actionSelector }) => {
-      const scroll = document.querySelector('.chat__scroll')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const action = document.querySelector(actionSelector)
-      const composer = document.querySelector('.chat__pill')
+      const composer = document.querySelector('[data-chat-surface="painted"] .chat__pill')
       let mode = null
       try {
         mode = JSON.parse(sessionStorage.getItem('chat-mode') || '{}')[chatId]

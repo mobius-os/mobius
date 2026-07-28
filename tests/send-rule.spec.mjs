@@ -105,13 +105,13 @@ async function sendMessage(page, text) {
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
-  await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))))
 }
 
 async function waitStreamDone(page) {
-  await page.waitForFunction(() => !document.querySelector('.chat__stop'), { timeout: 10000 })
+  await page.waitForFunction(() => !document.querySelector('[data-chat-surface="painted"] .chat__stop'), { timeout: 10000 })
   await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
 }
 
@@ -121,12 +121,12 @@ async function waitStreamDone(page) {
  *  (Mirrors spacer.spec.mjs tests 18/24.) */
 async function gestureToBottom(page) {
   await page.evaluate(() => {
-    const s = document.querySelector('.chat__scroll')
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (s) s.scrollTop = s.scrollHeight
   })
   await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
   await page.evaluate(() => {
-    const s = document.querySelector('.chat__scroll')
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!s) return
     s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
     s.scrollTop = Math.max(0, s.scrollTop - 1)
@@ -142,7 +142,7 @@ async function gestureToBottom(page) {
  *  ANCHOR_AT (the "user is reading" state). */
 async function gestureScrollUp(page) {
   await page.evaluate(() => {
-    const s = document.querySelector('.chat__scroll')
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!s) return
     s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
     s.scrollTop = Math.floor(s.scrollHeight / 3)
@@ -154,14 +154,14 @@ async function gestureScrollUp(page) {
 
 async function measure(page) {
   return page.evaluate(() => {
-    const scroll = document.querySelector('.chat__scroll')
-    const users = document.querySelectorAll('.chat__msg--user')
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    const users = document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--user')
     const last = users[users.length - 1]
     if (!scroll) return { error: 'missing scroll element' }
     const sr = scroll.getBoundingClientRect()
     const lr = last?.getBoundingClientRect()
     const textEl = last?.querySelector('.chat__text--user')
-    const spacer = document.querySelector('.spacer-dynamic')
+    const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
     return {
       scrollTop: Math.round(scroll.scrollTop),
       clientH: scroll.clientHeight,
@@ -272,7 +272,7 @@ test('Immediate tail-to-send holds through reserved streaming room, then follows
   // No grace period after the gesture: send exactly as a person can.
   await sendMessage(page, 'Second immediately from tail')
   await page.waitForFunction(() =>
-    [...document.querySelectorAll('.chat__msg--assistant')]
+    [...document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--assistant')]
       .some(el => el.textContent?.includes('HOLD_MARKER')),
   null, { timeout: 5000 })
 
@@ -286,14 +286,14 @@ test('Immediate tail-to-send holds through reserved streaming room, then follows
   // must keep the prompt parked; it cannot turn that tail gesture into
   // immediate real-content following.
   await page.evaluate(() => {
-    const s = document.querySelector('.chat__scroll')
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!s) return
     s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
     s.scrollTop = Math.max(0, s.scrollTop - 120)
     s.scrollTop = s.scrollHeight
   })
   await page.waitForFunction(() =>
-    [...document.querySelectorAll('.chat__msg--assistant')]
+    [...document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--assistant')]
       .some(el => el.textContent?.includes('HOLD_AFTER_MANUAL_TAIL')))
   const manuallyHeld = await measure(page)
   expect(manuallyHeld.spacerH).toBeGreaterThan(1)
@@ -301,13 +301,13 @@ test('Immediate tail-to-send holds through reserved streaming room, then follows
   expect(manuallyHeld.lastUserVisualTop).toBeLessThanOrEqual(10)
 
   await page.waitForFunction(() => {
-    const text = [...document.querySelectorAll('.chat__msg--assistant')]
+    const text = [...document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--assistant')]
       .map(el => el.textContent || '').join(' ')
     return (text.match(/FILL_MARKER/g) || []).length > 500
   })
   await page.waitForFunction(() => {
-    const scroll = document.querySelector('.chat__scroll')
-    const spacer = document.querySelector('.spacer-dynamic')
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
     if (!scroll || !spacer || spacer.offsetHeight > 1) return false
     return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 8
   })

@@ -1,0 +1,160 @@
+/* Smart Share dialog: a compact, touch-friendly handoff from drawer app rows. */
+
+.sas__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  animation: sas-fade 0.16s ease;
+}
+
+@keyframes sas-fade { from { opacity: 0; } to { opacity: 1; } }
+
+.sas__card {
+  width: 100%;
+  max-width: 420px;
+  padding: 20px;
+  border: 1px solid var(--border, #252b36);
+  border-radius: 12px;
+  background: var(--surface, #14181f);
+  color: var(--text, #d4d4d8);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.36);
+  animation: sas-pop 0.18s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@keyframes sas-pop {
+  from { transform: scale(0.96) translateY(4px); opacity: 0; }
+  to { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+.sas__identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sas__icon {
+  width: 54px;
+  height: 54px;
+  flex: 0 0 54px;
+  object-fit: contain;
+  border: 1px solid var(--border, #252b36);
+  border-radius: 12px;
+}
+
+.sas__eyebrow {
+  margin: 0 0 3px;
+  color: var(--accent, #a78bfa);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sas__title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.sas__body {
+  margin: 16px 0 0;
+  color: var(--muted, #9ca3af);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.sas__url {
+  margin-top: 14px;
+  padding: 11px 12px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border, #252b36);
+  border-radius: 8px;
+  background: var(--bg, #0d0d0d);
+  color: var(--text, #d4d4d8);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.sas__route {
+  display: grid;
+  grid-template-columns: 24px auto 1fr 24px auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  color: var(--text, #d4d4d8);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sas__route-step {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, #a78bfa) 14%, transparent);
+  color: var(--accent, #a78bfa);
+}
+
+.sas__route-line {
+  min-width: 12px;
+  height: 1px;
+  background: var(--border, #252b36);
+}
+
+.sas__actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.sas__btn {
+  min-height: 44px;
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.sas__btn:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: 2px;
+}
+
+.sas__btn--primary {
+  background: var(--accent, #a78bfa);
+  color: var(--accent-fg, #ffffff);
+}
+
+.sas__btn--secondary {
+  border-color: var(--border, #252b36);
+  background: transparent;
+  color: var(--text, #d4d4d8);
+}
+
+.sas__status {
+  margin: 12px 0 0;
+  color: var(--muted, #9ca3af);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sas__overlay,
+  .sas__card {
+    animation: none;
+  }
+}

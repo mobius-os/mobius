@@ -9,7 +9,6 @@ import {
   activityCollapsedLabel,
   thoughtDurationLabel,
 } from './groupBlocks.js'
-import { toolBlockExitCode } from './toolResultFormat.js'
 import { toolActivityIcon, effectiveToolName } from './toolActivityLabel.js'
 import { thinkingContentForDisplay } from './streamReducers.js'
 import { assistantBlockKey } from './streamPromotion.js'
@@ -24,11 +23,11 @@ import { useDisclosureState } from './disclosureState.js'
 // quiet ~32px line instead of alternating rows — the answer keeps the screen.
 // A lone thought/tool renders as its own disclosure (see SingleActivity below):
 // wrapping one row in an identical parent adds hierarchy without information.
-// Collapsed, the borderless dim header carries live
-// status (a periodic shimmer over the label — bare "Thinking", or the muted
-// type glyph + progressive activities while tools run) and a FAILED step's
-// danger triangle + exit chip, all readable
-// WITHOUT expanding. Expanded, it renders the chronological timeline: mixed
+// Collapsed, the borderless dim header carries only live status (a periodic
+// shimmer over the label — bare "Thinking", or the muted type glyph +
+// progressive activities while tools run). A command exit is diagnostic detail,
+// not a verdict on the turn, so it stays inside expansion. Expanded, the line
+// renders the chronological timeline: mixed
 // thinking entries and tools become independently collapsed child rows, so
 // opening the overview never spills a full reasoning trace or tool output into
 // the transcript. A thought keeps this same child component as tools arrive,
@@ -284,10 +283,9 @@ function GroupedActivityStretch({
         failedHelpers > 0 ? `${failedHelpers} failed` : null,
       ].filter(Boolean).join(' · ')
     : null
-  // Deriving the state parses each tool's output for its exit code, so memoize
-  // on a cheap signature (see activityMemoSig for the exact staleness contract:
-  // head+tail output slices catch an equal-length exit-code flip; thinking
-  // content never busts the memo on typewriter frames).
+  // The overview depends only on tool identity/status. Command output and exact
+  // failures stay with ToolBlock after expansion, so typewriter/output frames do
+  // not churn every collapsed activity summary above the live turn.
   const sig = activityMemoSig(entries, { liveThinkingTail })
 
   const meta = useMemo(() => {
@@ -295,19 +293,8 @@ function GroupedActivityStretch({
       .filter(e => e?.item?.type === 'tool')
       .map(e => e.item)
     const state = activityStreamState(tools, { liveThinkingTail })
-    // The collapsed exit chip shows the most-recent failed tool's code (the same
-    // "exit N" the ToolBlock header carries), so a failed step is legible without
-    // opening. Only computed once the stretch has settled to 'error'.
-    let exitCode = null
-    if (state === 'error') {
-      for (const t of tools) {
-        const code = toolBlockExitCode(t)
-        if (code != null && code !== 0) exitCode = code
-      }
-    }
     return {
       state,
-      exitCode,
       toolCount: Number.isInteger(summaryToolCount)
         ? summaryToolCount
         : tools.length,
@@ -315,8 +302,8 @@ function GroupedActivityStretch({
     }
   }, [sig, summaryToolCount]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const { state, exitCode, toolCount, thinkingOnly } = meta
-  // The one presentation authority for icon, chip, and state class: a live
+  const { state, toolCount, thinkingOnly } = meta
+  // The one presentation authority for icon and state class: a live
   // stretch reads in-progress for its whole life — the tool→tool gap included —
   // so icon and tense can never contradict (see activityDisplayState). Applied
   // OUTSIDE the memo because `live` is not part of the signature.
@@ -333,17 +320,14 @@ function GroupedActivityStretch({
   // header comment). While collapsed, the header status carries liveness.
   const open = userOpen
 
-  // The step count and failure detail ride in the accessible name only (the
-  // visible line stays a calm activity summary); the one-second clock is not in
-  // an aria-live region, so a screen reader is not re-announced every tick.
+  // The step count rides in the accessible name. Command diagnostics do not:
+  // screen-reader users get the same calm overview and can inspect the same
+  // expanded child rows. The one-second clock is not in an aria-live region,
+  // so it is not re-announced every tick.
   const stepNote = toolCount > 0
     ? ` (${toolCount} ${toolCount === 1 ? 'step' : 'steps'})`
     : ''
-  const stateNote = displayState === 'error'
-    ? `, a step failed${exitCode != null ? ` with exit ${exitCode}` : ''}`
-    : displayState === 'running'
-      ? ', in progress'
-      : ''
+  const stateNote = displayState === 'running' ? ', in progress' : ''
   const iconKind = thinkingOnly ? 'reasoning' : leadToolIcon
   const timelineEntries = detailRef ? detailEntries : entries
 
@@ -357,7 +341,6 @@ function GroupedActivityStretch({
         text={text}
         displayState={displayState}
         iconKind={iconKind}
-        exitCode={exitCode}
         interactive
         open={open}
         ariaLabel={`${text}${stepNote}${stateNote}`}

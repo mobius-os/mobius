@@ -56,7 +56,9 @@ app with no source_dir has no `.git`.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -64,6 +66,8 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+
+log = logging.getLogger(__name__)
 
 # Branch names. `upstream` is installer-only pristine history; `main` is
 # the local working branch explicit apply commits to and the working
@@ -159,6 +163,17 @@ _GIT_EMAIL = "mobius@localhost"
 # slow.
 _GIT_TIMEOUT = 30
 
+# Contribute records a reviewed change as a Git object in the repository that
+# owns the live source.  The pending ref proves the reviewed diff came from a
+# specific local commit; terminal contribution cleanup promotes it to landed
+# only after GitHub reports the PR merged.  Neither ref touches the working
+# tree, and both survive branch rewrites because they are ordinary Git refs.
+_EQUIVALENCE_PENDING_PREFIX = "refs/mobius/equivalences/pending"
+_EQUIVALENCE_LANDED_PREFIX = "refs/mobius/equivalences/landed"
+_EQUIVALENCE_VERSION = 1
+_HEX_OID = re.compile(r"^[0-9a-f]{40,64}$")
+_DIFF_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
 
 @dataclass
 class MergeResult:
@@ -178,6 +193,30 @@ class MergeResult:
   status: str
   conflict_paths: list[str] = field(default_factory=list)
   merged_tree_oid: str | None = None
+  equivalent_change_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EquivalentChange:
+  """One reviewed local change that Contribute observed landing upstream.
+
+  ``anchor_sha`` is a synthetic commit whose parent is ``base_sha`` and whose
+  tree is the exact reviewed head tree.  ``source_sha`` is the local commit in
+  which Contribute proved that reviewed delta was already present.  The updater
+  may use the anchor only while ``source_sha`` remains an ancestor of local.
+  ``upstream_sha`` is GitHub's merge commit when it was available; it must both
+  contain the reviewed delta and be an ancestor of the target. Otherwise a
+  conservative tree-subsumption proof is required against the update target.
+  """
+
+  ref: str
+  anchor_sha: str
+  base_sha: str
+  source_sha: str
+  upstream_sha: str | None
+  diff_sha256: str
+  contribution_id: str
+  proof_mode: str
 
 
 @dataclass(frozen=True)
@@ -461,6 +500,643 @@ def ref_exists(source_dir: str | Path, ref: str) -> bool:
     Path(source_dir), "rev-parse", "--verify", "--quiet", ref, check=False,
   )
   return proc.returncode == 0
+
+
+def _resolve_commit(repo: Path, ref: str) -> str | None:
+  """Resolve ``ref`` to a full commit oid, failing closed on bad metadata."""
+  proc = _run(
+    repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
+    f"{ref}^{{commit}}",
+    check=False,
+  )
+  oid = proc.stdout.strip().lower()
+  return oid if proc.returncode == 0 and _HEX_OID.fullmatch(oid) else None
+
+
+def _tree_oid(repo: Path, ref: str) -> str | None:
+  proc = _run(
+    repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
+    f"{ref}^{{tree}}",
+    check=False,
+  )
+  oid = proc.stdout.strip().lower()
+  return oid if proc.returncode == 0 and _HEX_OID.fullmatch(oid) else None
+
+
+def _canonical_diff(repo: Path, base_sha: str, head_sha: str) -> bytes | None:
+  """The byte-exact diff shape Contribute hashes before a PR can be sent."""
+  try:
+    proc = subprocess.run(
+      [
+        "git", "-c", "core.quotePath=false", "-C", str(repo),
+        "diff", "--no-ext-diff", "--no-color", "--binary", "--full-index",
+        "--src-prefix=a/", "--dst-prefix=b/", f"{base_sha}..{head_sha}",
+      ],
+      capture_output=True, timeout=_GIT_TIMEOUT, check=False,
+      env=_git_env(repo),
+    )
+  except (OSError, subprocess.SubprocessError):
+    return None
+  return proc.stdout if proc.returncode == 0 else None
+
+
+def merge_refs(
+  source_dir: str | Path,
+  left: str,
+  right: str,
+  *,
+  merge_base: str | None = None,
+) -> MergeResult:
+  """Off-tree three-way merge of two refs, optionally with an explicit base.
+
+  This is the one parser for ``git merge-tree --write-tree`` used by ordinary
+  app updates, provenance proofs, and the platform updater's conflict fallback.
+  It never moves a ref, index, or working tree.
+  """
+  repo = Path(source_dir)
+  args = ["merge-tree", "--write-tree", "--name-only"]
+  if merge_base is not None:
+    args.extend(("--merge-base", merge_base))
+  args.extend((left, right))
+  proc = _run(repo, *args, check=False)
+  if proc.returncode > 1:
+    detail = proc.stderr.strip() or proc.stdout.strip()
+    raise RuntimeError(
+      f"git merge-tree failed (rc={proc.returncode}): {detail}"
+    )
+  lines = proc.stdout.splitlines()
+  tree_oid = lines[0].strip() if lines else ""
+  if not tree_oid:
+    raise RuntimeError("git merge-tree returned no merged tree")
+  if proc.returncode == 1:
+    paths: list[str] = []
+    for line in lines[1:]:
+      if not line.strip():
+        break
+      paths.append(line.strip())
+    return MergeResult(status="conflict", conflict_paths=paths)
+  return MergeResult(status="clean", merged_tree_oid=tree_oid)
+
+
+def _change_is_subsumed(
+  repo: Path, base_sha: str, anchor_sha: str, descendant: str,
+) -> bool:
+  """Prove ``base..anchor`` is already contained in ``descendant``'s tree.
+
+  A clean three-way result equal to the descendant tree means adding the
+  reviewed delta contributes no bytes.  This proof is intentionally stricter
+  than patch-id: later edits to the same lines make it fail rather than guess.
+  Causal provenance (the source/upstream witness SHAs) covers that later-edit
+  case once the pending/landed refs have been recorded.
+  """
+  try:
+    merged = merge_refs(repo, anchor_sha, descendant, merge_base=base_sha)
+  except (OSError, subprocess.SubprocessError, RuntimeError):
+    return False
+  descendant_tree = _tree_oid(repo, descendant)
+  return bool(
+    merged.status == "clean"
+    and descendant_tree
+    and merged.merged_tree_oid == descendant_tree
+  )
+
+
+def _diff_paths(repo: Path, left: str, right: str) -> set[str] | None:
+  proc = _run(
+    repo, "diff", "--name-only", "--no-renames", "-z", f"{left}..{right}",
+    check=False,
+  )
+  if proc.returncode != 0:
+    return None
+  return {path for path in proc.stdout.split("\0") if path}
+
+
+def _source_is_resolved_projection(
+  repo: Path,
+  reviewed_base: str,
+  reviewed_head: str,
+  source_sha: str,
+) -> bool:
+  """Prove ``source_sha`` is a conflict resolution of the reviewed delta.
+
+  A platform/app contribution is often projected onto current upstream for a
+  clean PR after the same change was integrated into a busier local tree. The
+  local integration commit can therefore differ from the PR patch on conflict
+  lines even though it is causally the same change. This proof accepts that
+  shape only for a one-parent source commit that changes exactly the reviewed
+  path set. A temporary three-way index then requires every non-conflicting
+  entry to equal the source tree and at least one reviewed path to remain
+  independently checkable; only Git's explicit conflict paths may carry the
+  local resolution. No branch, real index, or worktree is touched.
+
+  This is deliberately narrower than arbitrary patch similarity. It captures
+  the agent-resolved projection once, at owner-reviewed Send time, so later
+  updates are deterministic; any extra path or unexplained non-conflict byte
+  fails closed to the ordinary resolver.
+  """
+  parent_line = _run(
+    repo, "rev-list", "--parents", "-n", "1", source_sha, check=False,
+  ).stdout.split()
+  if len(parent_line) != 2:
+    return False
+  source_parent = parent_line[1]
+  reviewed_paths = _diff_paths(repo, reviewed_base, reviewed_head)
+  source_paths = _diff_paths(repo, source_parent, source_sha)
+  if not reviewed_paths or source_paths != reviewed_paths:
+    return False
+
+  try:
+    with tempfile.TemporaryDirectory(prefix="mobius-equivalence-") as tmp:
+      index = Path(tmp) / "index"
+      read = _run_with_index(
+        repo, index,
+        "read-tree", "-m", reviewed_base, source_parent, reviewed_head,
+        check=False,
+      )
+      if read.returncode != 0:
+        return False
+      staged = _run_with_index(
+        repo, index, "ls-files", "--stage", "-z", check=False,
+      )
+      if staged.returncode != 0:
+        return False
+  except (OSError, subprocess.SubprocessError):
+    return False
+
+  stage_zero: dict[str, tuple[str, str]] = {}
+  unmerged: dict[str, dict[int, tuple[str, str]]] = {}
+  for record in staged.stdout.split("\0"):
+    if not record:
+      continue
+    try:
+      metadata, path = record.split("\t", 1)
+      mode, oid, stage_text = metadata.split()
+      stage = int(stage_text)
+    except (ValueError, TypeError):
+      return False
+    if stage == 0:
+      stage_zero[path] = (mode, oid)
+    else:
+      unmerged.setdefault(path, {})[stage] = (mode, oid)
+
+  source_entries: dict[str, tuple[str, str]] = {}
+  source_tree = _run(
+    repo, "ls-tree", "-r", "-z", "--full-tree", source_sha, check=False,
+  )
+  if source_tree.returncode != 0:
+    return False
+  for record in source_tree.stdout.split("\0"):
+    if not record:
+      continue
+    try:
+      metadata, path = record.split("\t", 1)
+      mode, _kind, oid = metadata.split()
+    except ValueError:
+      return False
+    source_entries[path] = (mode, oid)
+
+  # read-tree intentionally leaves some one-sided delete/change cases staged
+  # even though the reviewed side equals the base. Resolve those mechanically
+  # and compare them too; only paths where BOTH source and review changed from
+  # the base are genuine agent-owned conflicts.
+  expected_entries: dict[str, tuple[str, str] | None] = dict(stage_zero)
+  conflicts: set[str] = set()
+  for path, stages in unmerged.items():
+    base_entry = stages.get(1)
+    source_entry = stages.get(2)
+    reviewed_entry = stages.get(3)
+    if reviewed_entry == base_entry:
+      expected_entries[path] = source_entry
+    elif source_entry == base_entry:
+      expected_entries[path] = reviewed_entry
+    else:
+      conflicts.add(path)
+  if (
+    not conflicts
+    or not conflicts.issubset(reviewed_paths)
+    or not reviewed_paths.difference(conflicts)
+  ):
+    return False
+  return all(
+    source_entries.get(path) == entry
+    for path, entry in expected_entries.items()
+  )
+
+
+def primary_worktree_path(source_dir: str | Path) -> Path | None:
+  """Primary live checkout path when ``source_dir`` is a linked worktree.
+
+  Contribute stages reviews in linked worktrees.  Their common Git directory is
+  the live platform/app checkout's ``.git`` directory. A standalone/separate
+  staging clone deliberately returns ``None`` because it cannot prove a
+  relationship to any installed source tree.
+  """
+  repo = Path(source_dir)
+  proc = _run(
+    repo, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
+    check=False,
+  )
+  if proc.returncode != 0:
+    return None
+  paths = [Path(line).resolve() for line in proc.stdout.splitlines() if line]
+  if len(paths) != 2:
+    return None
+  git_dir, common = paths
+  if git_dir == common:
+    return None
+  if common.name != ".git":
+    return None
+  primary = common.parent
+  if not (primary / ".git").is_dir():
+    return None
+  return primary
+
+
+def primary_worktree_head(source_dir: str | Path) -> str | None:
+  """HEAD of the primary live checkout linked to ``source_dir``, if any."""
+  primary = primary_worktree_path(source_dir)
+  return _resolve_commit(primary, "HEAD") if primary else None
+
+
+def _equivalence_ref(prefix: str, diff_sha256: str) -> str:
+  return f"{prefix}/{diff_sha256}"
+
+
+def _write_equivalence_anchor(
+  repo: Path,
+  *,
+  prefix: str,
+  base_sha: str,
+  head_sha: str,
+  source_sha: str,
+  diff_sha256: str,
+  contribution_id: str,
+  upstream_sha: str | None,
+  proof_mode: str,
+) -> str:
+  tree = _tree_oid(repo, head_sha)
+  if tree is None:
+    raise RuntimeError("reviewed contribution tree is unavailable")
+  metadata = {
+    "version": _EQUIVALENCE_VERSION,
+    "diff_sha256": diff_sha256,
+    "source_sha": source_sha,
+    "upstream_sha": upstream_sha,
+    "contribution_id": contribution_id[:128],
+    "proof_mode": proof_mode,
+  }
+  anchor = _run(
+    repo, "commit-tree", tree, "-p", base_sha,
+    "-m", json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+  ).stdout.strip()
+  ref = _equivalence_ref(prefix, diff_sha256)
+  _run(repo, "update-ref", ref, anchor)
+  return ref
+
+
+def record_pending_equivalent_change(
+  source_dir: str | Path,
+  *,
+  base_sha: str,
+  head_sha: str,
+  source_sha: str,
+  diff_sha256: str,
+  contribution_id: str,
+  review_source_dir: str | Path | None = None,
+) -> str | None:
+  """Record a reviewed contribution only after proving its local provenance.
+
+  The caller invokes this after the owner sends the reviewed PR.  The canonical
+  diff hash must still match, and ``base..head`` must be fully present in the
+  supplied local ``source_sha``.  A later local edit may overlap the contributed
+  lines: the immutable source witness remains the causal proof as long as it is
+  still an ancestor of the local update branch. ``review_source_dir`` is the
+  durable review checkout when it does not share Git objects with the installed
+  source (the standalone-clone app workflow). Only the two verified reviewed
+  commits are imported into the installed repository; no branch or worktree is
+  moved.
+  """
+  repo = Path(source_dir)
+  review_repo = Path(review_source_dir) if review_source_dir else repo
+  digest = str(diff_sha256 or "").lower()
+  review_base = _resolve_commit(review_repo, base_sha)
+  review_head = _resolve_commit(review_repo, head_sha)
+  source = _resolve_commit(repo, source_sha)
+  if (
+    not _DIFF_SHA256.fullmatch(digest)
+    or review_base is None
+    or review_head is None
+    or source is None
+  ):
+    return None
+  reviewed_diff = _canonical_diff(review_repo, review_base, review_head)
+  if reviewed_diff is None or hashlib.sha256(reviewed_diff).hexdigest() != digest:
+    return None
+  base = _resolve_commit(repo, review_base)
+  head = _resolve_commit(repo, review_head)
+  if base is None or head is None:
+    try:
+      # A raw-oid local fetch transfers the immutable reviewed commits and their
+      # trees without creating a remote, branch, FETCH_HEAD, or worktree. The
+      # review path is already restricted to owner-controlled durable staging
+      # roots by Contribute before this function is called.
+      _run(
+        repo,
+        "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+        str(review_repo), review_base, review_head,
+      )
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+      return None
+    base = _resolve_commit(repo, review_base)
+    head = _resolve_commit(repo, review_head)
+  if base is None or head is None:
+    return None
+  proof_mode = "exact_tree"
+  if not _change_is_subsumed(repo, base, head, source):
+    if not _source_is_resolved_projection(repo, base, head, source):
+      return None
+    proof_mode = "resolved_projection"
+  return _write_equivalence_anchor(
+    repo,
+    prefix=_EQUIVALENCE_PENDING_PREFIX,
+    base_sha=base,
+    head_sha=head,
+    source_sha=source,
+    diff_sha256=digest,
+    contribution_id=str(contribution_id or ""),
+    upstream_sha=None,
+    proof_mode=proof_mode,
+  )
+
+
+def _read_equivalent_change(repo: Path, ref: str) -> EquivalentChange | None:
+  anchor = _resolve_commit(repo, ref)
+  if anchor is None:
+    return None
+  parent_line = _run(
+    repo, "rev-list", "--parents", "-n", "1", anchor, check=False,
+  ).stdout.split()
+  if len(parent_line) != 2:
+    return None
+  try:
+    metadata = json.loads(
+      _run(repo, "show", "-s", "--format=%B", anchor).stdout.strip()
+    )
+  except (ValueError, TypeError):
+    return None
+  if not isinstance(metadata, dict) or metadata.get("version") != _EQUIVALENCE_VERSION:
+    return None
+  digest = str(metadata.get("diff_sha256") or "").lower()
+  source = str(metadata.get("source_sha") or "").lower()
+  upstream_raw = metadata.get("upstream_sha")
+  upstream = str(upstream_raw).lower() if upstream_raw else None
+  proof_mode = str(metadata.get("proof_mode") or "exact_tree")
+  if (
+    not _DIFF_SHA256.fullmatch(digest)
+    or not ref.endswith(f"/{digest}")
+    or not _HEX_OID.fullmatch(source)
+    or (upstream is not None and not _HEX_OID.fullmatch(upstream))
+    or proof_mode not in {"exact_tree", "resolved_projection"}
+  ):
+    return None
+  return EquivalentChange(
+    ref=ref,
+    anchor_sha=anchor,
+    base_sha=parent_line[1].lower(),
+    source_sha=source,
+    upstream_sha=upstream,
+    diff_sha256=digest,
+    contribution_id=str(metadata.get("contribution_id") or "")[:128],
+    proof_mode=proof_mode,
+  )
+
+
+def mark_equivalent_change_landed(
+  source_dir: str | Path,
+  diff_sha256: str,
+  *,
+  upstream_sha: str | None = None,
+) -> str | None:
+  """Promote one owner-sent reviewed change after its PR is confirmed merged."""
+  repo = Path(source_dir)
+  digest = str(diff_sha256 or "").lower()
+  if not _DIFF_SHA256.fullmatch(digest):
+    return None
+  pending_ref = _equivalence_ref(_EQUIVALENCE_PENDING_PREFIX, digest)
+  pending = _read_equivalent_change(repo, pending_ref)
+  if pending is None:
+    return None
+  upstream = _resolve_commit(repo, upstream_sha) if upstream_sha else None
+  # The merge commit may not have been fetched into this checkout yet.  Keep a
+  # validated hex oid as provenance; the updater verifies ancestry only after
+  # it fetches the target that should contain it.
+  if upstream is None and upstream_sha:
+    candidate = str(upstream_sha).lower()
+    upstream = candidate if _HEX_OID.fullmatch(candidate) else None
+  ref = _write_equivalence_anchor(
+    repo,
+    prefix=_EQUIVALENCE_LANDED_PREFIX,
+    base_sha=pending.base_sha,
+    head_sha=pending.anchor_sha,
+    source_sha=pending.source_sha,
+    diff_sha256=pending.diff_sha256,
+    contribution_id=pending.contribution_id,
+    upstream_sha=upstream,
+    proof_mode=pending.proof_mode,
+  )
+  _run(repo, "update-ref", "-d", pending_ref, check=False)
+  return ref
+
+
+def discard_pending_equivalent_change(
+  source_dir: str | Path, diff_sha256: str,
+) -> None:
+  digest = str(diff_sha256 or "").lower()
+  if _DIFF_SHA256.fullmatch(digest):
+    _run(
+      Path(source_dir), "update-ref", "-d",
+      _equivalence_ref(_EQUIVALENCE_PENDING_PREFIX, digest), check=False,
+    )
+
+
+def _equivalent_changes(repo: Path, prefix: str) -> list[EquivalentChange]:
+  proc = _run(
+    repo, "for-each-ref", "--format=%(refname)",
+    f"{prefix}/", check=False,
+  )
+  if proc.returncode != 0:
+    return []
+  changes = []
+  for ref in sorted(line.strip() for line in proc.stdout.splitlines() if line.strip()):
+    change = _read_equivalent_change(repo, ref)
+    if change is not None:
+      changes.append(change)
+  return changes
+
+
+def _landed_equivalent_changes(repo: Path) -> list[EquivalentChange]:
+  return _equivalent_changes(repo, _EQUIVALENCE_LANDED_PREFIX)
+
+
+def carry_equivalent_change_sources(
+  source_dir: str | Path, old_local: str, new_local: str,
+) -> int:
+  """Carry local witnesses across the app model's intentional replay rewrite.
+
+  ``commit_replay`` and resolved-conflict finalization preserve the accepted
+  source tree but replace its ancestry with the new upstream tip. Any pending
+  or not-yet-integrated landed contribution whose source witness was reachable
+  from the old local tip therefore needs the new replay commit as its witness
+  only if the exact reviewed delta is still present there. For an
+  agent-resolved projection whose bytes intentionally differ on conflict lines,
+  preserving the old branch's complete local delta is the equivalent proof.
+  Both checks reject the explicit take-upstream path when it drops those edits.
+  Anchors unrelated to ``old_local`` remain untouched.
+  """
+  repo = Path(source_dir)
+  old = _resolve_commit(repo, old_local)
+  new = _resolve_commit(repo, new_local)
+  if old is None or new is None:
+    return 0
+  whole_local_delta_preserved = False
+  new_parent_line = _run(
+    repo, "rev-list", "--parents", "-n", "1", new, check=False,
+  ).stdout.split()
+  if len(new_parent_line) == 2:
+    replay_base = _run(
+      repo, "merge-base", old, new_parent_line[1], check=False,
+    )
+    if replay_base.returncode == 0 and replay_base.stdout.strip():
+      whole_local_delta_preserved = _change_is_subsumed(
+        repo, replay_base.stdout.strip(), old, new,
+      )
+  carried = 0
+  for prefix in (_EQUIVALENCE_PENDING_PREFIX, _EQUIVALENCE_LANDED_PREFIX):
+    for change in _equivalent_changes(repo, prefix):
+      if ref_is_ancestor(repo, change.source_sha, old) is not True:
+        continue
+      reviewed_delta_preserved = _change_is_subsumed(
+        repo, change.base_sha, change.anchor_sha, new,
+      )
+      if not reviewed_delta_preserved and not (
+        change.proof_mode == "resolved_projection"
+        and whole_local_delta_preserved
+      ):
+        continue
+      _write_equivalence_anchor(
+        repo,
+        prefix=prefix,
+        base_sha=change.base_sha,
+        head_sha=change.anchor_sha,
+        source_sha=new,
+        diff_sha256=change.diff_sha256,
+        contribution_id=change.contribution_id,
+        upstream_sha=change.upstream_sha,
+        proof_mode=change.proof_mode,
+      )
+      carried += 1
+  return carried
+
+
+def _change_landed_in_target(
+  repo: Path, change: EquivalentChange, target: str,
+) -> bool:
+  if change.upstream_sha:
+    return bool(
+      ref_is_ancestor(repo, change.upstream_sha, target) is True
+      and _change_is_subsumed(
+        repo, change.base_sha, change.anchor_sha, change.upstream_sha,
+      )
+    )
+  return _change_is_subsumed(
+    repo, change.base_sha, change.anchor_sha, target,
+  )
+
+
+def merge_with_equivalent_changes(
+  source_dir: str | Path, local: str, upstream: str,
+) -> MergeResult | None:
+  """Resolve a duplicate-contribution conflict from proven shared changes.
+
+  Start at Git's real merge base.  Each applicable reviewed anchor contributes
+  only its ``reviewed-base..reviewed-head`` delta to a synthetic shared TREE.
+  The anchor is applicable only when its immutable local source witness is an
+  ancestor of ``local`` and its GitHub merge witness is an ancestor of
+  ``upstream`` *and still contains the exact reviewed delta* (or strict
+  tree-subsumption proves the latter directly against the target when GitHub
+  could not provide a merge oid). A final off-tree merge with that semantic
+  base is accepted only when Git itself produces a clean tree. No ref or
+  working tree moves here; callers keep their existing rollback transaction.
+
+  Anchors are applied in deterministic passes.  A dependent anchor that cannot
+  merge onto the current shared tree is deferred until another anchor supplies
+  its prerequisite.  Any anchor still unprovable is simply omitted; the final
+  merge then remains conflicted and the existing agent fallback owns it.
+  """
+  repo = Path(source_dir)
+  real_base = _run(repo, "merge-base", local, upstream, check=False)
+  if real_base.returncode != 0 or not real_base.stdout.strip():
+    return None
+  shared_tree = _tree_oid(repo, real_base.stdout.strip())
+  if shared_tree is None:
+    return None
+
+  pending = [
+    change for change in _landed_equivalent_changes(repo)
+    if ref_is_ancestor(repo, change.source_sha, local) is True
+    and _change_landed_in_target(repo, change, upstream)
+  ]
+  if not pending:
+    return None
+
+  applied: list[EquivalentChange] = []
+  while pending:
+    deferred: list[EquivalentChange] = []
+    progressed = False
+    for change in pending:
+      try:
+        combined = merge_refs(
+          repo,
+          shared_tree,
+          change.anchor_sha,
+          merge_base=change.base_sha,
+        )
+      except (OSError, subprocess.SubprocessError, RuntimeError):
+        deferred.append(change)
+        continue
+      if combined.status != "clean" or not combined.merged_tree_oid:
+        deferred.append(change)
+        continue
+      shared_tree = combined.merged_tree_oid
+      applied.append(change)
+      progressed = True
+    if not progressed:
+      break
+    pending = deferred
+
+  if not applied:
+    return None
+  try:
+    merged = merge_refs(repo, local, upstream, merge_base=shared_tree)
+  except (OSError, subprocess.SubprocessError, RuntimeError):
+    return None
+  if merged.status != "clean" or not merged.merged_tree_oid:
+    return None
+  merged.equivalent_change_refs = tuple(change.ref for change in applied)
+  return merged
+
+
+def retire_landed_equivalent_changes(
+  source_dir: str | Path, integrated_upstream: str,
+) -> int:
+  """Drop landed anchors made obsolete by a successfully integrated target."""
+  repo = Path(source_dir)
+  retired = 0
+  for change in _landed_equivalent_changes(repo):
+    if _change_landed_in_target(repo, change, integrated_upstream):
+      proc = _run(repo, "update-ref", "-d", change.ref, check=False)
+      retired += int(proc.returncode == 0)
+  return retired
 
 
 def restore_upstream_ref(source_dir: str | Path, expected_sha: str | None) -> bool:
@@ -975,11 +1651,20 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
     # MERGE_HEAD is set), fanning history into a 2-parent merge; we want the
     # squashed `A -> B -> X` shape instead, identical to commit_replay.
     merge_head = merge_head_path.read_text(encoding="utf-8").strip()
+    old_local = head_sha(repo, LOCAL_BRANCH)
     tree = _run(repo, "write-tree").stdout.strip()
     sha = _run(
       repo, "commit-tree", tree, "-p", merge_head, "-m", msg,
     ).stdout.strip()
     _run(repo, "update-ref", f"refs/heads/{LOCAL_BRANCH}", sha)
+    try:
+      carry_equivalent_change_sources(repo, old_local, sha)
+    except Exception:
+      # The accepted replay is already committed. A stale witness only means a
+      # later update may ask the agent; it must not make this resolution appear
+      # failed after the source branch has moved.
+      log.warning("could not carry contribution provenance across replay",
+                  exc_info=True)
     for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
       (repo / ".git" / name).unlink(missing_ok=True)
     return sha
@@ -1019,6 +1704,7 @@ def commit_replay(
   """
   repo = Path(source_dir)
   ensure_repo(repo)
+  old_local = head_sha(repo, LOCAL_BRANCH)
   _refresh_ignore_rules(repo)
   _run(repo, "add", *_tracked_source(repo))
   tree = _run(repo, "write-tree").stdout.strip()
@@ -1033,6 +1719,11 @@ def commit_replay(
     repo, "commit-tree", tree, "-p", upstream_tip, "-m", msg,
   ).stdout.strip()
   _run(repo, "update-ref", f"refs/heads/{LOCAL_BRANCH}", sha)
+  try:
+    carry_equivalent_change_sources(repo, old_local, sha)
+  except Exception:
+    log.warning("could not carry contribution provenance across replay",
+                exc_info=True)
   return sha
 
 
@@ -1115,31 +1806,18 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
   repo = Path(source_dir)
   ensure_repo(repo)
   _unshallow_if_no_merge_base(repo)
-  proc = _run(
-    repo, "merge-tree", "--write-tree", "--name-only",
-    LOCAL_BRANCH, UPSTREAM_BRANCH,
-    check=False,
+  ordinary = merge_refs(repo, LOCAL_BRANCH, UPSTREAM_BRANCH)
+  if ordinary.status == "clean":
+    return ordinary
+  # A normal three-way merge can conflict when both sides carry the same
+  # contributed change under different commit identities and local work later
+  # evolved those lines.  Only replace the base when Contribute recorded both
+  # causal witnesses; otherwise preserve the ordinary conflict verbatim for the
+  # owner-gated agent resolver.
+  equivalent = merge_with_equivalent_changes(
+    repo, LOCAL_BRANCH, UPSTREAM_BRANCH,
   )
-  # merge-tree exits 0 on a clean merge, 1 on conflicts, >1 on real
-  # errors. stdout's first line is always the merged tree oid. On a
-  # conflict the `--name-only` section follows: the conflicting file
-  # paths are the lines AFTER the oid up to the first blank line; the
-  # lines after that blank are human-readable "CONFLICT (...)" messages,
-  # not paths.
-  if proc.returncode > 1:
-    raise RuntimeError(
-      f"git merge-tree failed (rc={proc.returncode}): {proc.stderr.strip()}"
-    )
-  lines = proc.stdout.splitlines()
-  tree_oid = lines[0].strip() if lines else ""
-  if proc.returncode == 1:
-    conflict_paths: list[str] = []
-    for ln in lines[1:]:
-      if not ln.strip():
-        break  # blank line ends the path section
-      conflict_paths.append(ln.strip())
-    return MergeResult(status="conflict", conflict_paths=conflict_paths)
-  return MergeResult(status="clean", merged_tree_oid=tree_oid)
+  return equivalent or ordinary
 
 
 def read_merged_tree(source_dir: str | Path, tree_oid: str) -> dict[str, bytes]:

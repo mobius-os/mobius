@@ -5,8 +5,8 @@
    ║   Every rule below has a real-bug history. If a future     ║
    ║   pass quietly violates one, regression-hunt these first.  ║
    ║                                                            ║
-   ║   1. `.chat__foot` is `position: absolute`, tucked above    ║
-   ║      max(0px, env(safe-area-inset-bottom) - 14px),          ║
+   ║   1. `.chat__foot` is `position: absolute`, offset above   ║
+   ║      env(safe-area-inset-bottom),                           ║
    ║      with `pointer-events: none` — chat content scrolls    ║
    ║      *behind* the composer. Only the pill + + + queue +    ║
    ║      attach-tray re-enable pointer-events. The gutter is   ║
@@ -14,7 +14,7 @@
    ║                                                            ║
    ║   2. `--composer-h` is published by a ResizeObserver in    ║
    ║      ChatView.jsx that watches `.chat__foot`. `.chat__list`║
-   ║      reserves --composer-h + the same tucked safe-area     ║
+   ║      reserves --composer-h + the same full safe-area       ║
    ║      expression + 16px so the last message clears the      ║
    ║      pill and gesture area as it grows                     ║
    ║      (chips, queue tray, multi-line input).                ║
@@ -107,12 +107,12 @@
 }
 
 /* Empty state: centered in the available chat area, with a FIXED
-   bottom reservation so the composer doesn't overlap the logo.
-   Centering means the cluster moves up when the visible viewport
+   bottom reservation so the composer doesn't overlap the prompt.
+   Centering means the prompt moves up when the visible viewport
    shrinks (keyboard open via `interactive-widget=resizes-content`)
    — the chat container itself gets shorter, so the centerpoint
    moves up. The bottom padding is a CONSTANT (not --composer-h)
-   so multi-line input growth doesn't push the cluster up; only
+   so multi-line input growth doesn't push the prompt up; only
    the keyboard does. 140px clears a typical multi-line composer;
    if the user composes a wall of text on the empty state, slight
    overlap is acceptable. */
@@ -151,13 +151,13 @@
   margin: 0 auto;
   /* Bottom padding clears the absolutely-positioned `.chat__foot`.
      Tracks the foot's measured height via the `--composer-h` CSS
-     var (written by ChatView's ResizeObserver), the tucked safe-area
-     gap below the foot (the SAME max() expression as `.chat__foot`'s
+     var (written by ChatView's ResizeObserver), the full device safe-area
+     gap below the foot (the SAME env() expression as `.chat__foot`'s
      `bottom` — keep them in sync), plus a small breathing-room
      margin so chips/queue tray growing the foot keeps the last
      message clear of the pill. Fallback 80px is for the first
      paint before the RO fires. */
-  padding: 8px 6px calc(var(--composer-h, 80px) + max(0px, env(safe-area-inset-bottom, 0px) - 14px) + 16px);
+  padding: 8px 6px calc(var(--composer-h, 80px) + env(safe-area-inset-bottom, 0px) + 16px);
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -193,21 +193,10 @@
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 72px 24px 24px;
+  padding: 24px;
   gap: 12px;
   max-width: 768px;
   margin: 0 auto;
-  /* Lift the empty-state cluster (logo + title + sub) ~5% above
-     the visual centerline so it doesn't feel buried by the
-     composer at the bottom. */
-  transform: translateY(-5%);
-}
-
-.chat__empty-glyph {
-  width: 96px;
-  height: 96px;
-  opacity: 0.88;
-  margin-bottom: 2px;
 }
 
 /* .chat__empty-title lives in index.css so theme toggles keep it stable. */
@@ -361,36 +350,6 @@
   transition: opacity 0.15s ease;
 }
 .chat__ts--visible { opacity: 1; }
-
-/* Holding a mobile message copies immediately. The only visible UI is this
-   brief confirmation, kept above the composer so it never shifts content. */
-.chat__copy-toast {
-  position: absolute;
-  left: 50%;
-  bottom: calc(var(--composer-h, 72px) + 18px);
-  z-index: 230;
-  transform: translateX(-50%);
-  max-width: calc(100% - 32px);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: blur(16px) saturate(140%);
-  color: var(--text);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-  animation: chat-copy-toast-in 0.18s var(--ease-out-soft, ease-out);
-}
-.chat__copy-toast--success svg { color: var(--accent); }
-
-@keyframes chat-copy-toast-in {
-  from { opacity: 0; transform: translate(-50%, 6px); }
-}
 
 /* ── Evolving chat summary ─────────────────────────── */
 .chat-summary__overlay {
@@ -810,8 +769,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* The type icon leads this label. The exit chip hugs the text instead of
-     drifting to the far edge of a wide activity row. */
+  /* The type icon leads this label. When this is a child row already revealed
+     by an expanded activity, its exit chip hugs the text instead of drifting
+     to the far edge. */
   flex: 0 1 auto;
 }
 
@@ -1155,17 +1115,17 @@
   border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border-light)); /* CONTRACT: danger-tinted hairline */
 }
 
-/* The same exit chip on the COLLAPSED tool header, so a failed command shows
-   its nonzero exit without expanding (a tool never carries an 'error' status —
-   the exit code is the only failure signal). */
+/* Inside an expanded multi-step activity, a failed child row keeps the same
+   compact exit chip. A direct top-level compact row waits until its own output
+   is expanded, where `.chat__tool-exit` above renders the exact code. */
 .chat__tool-exit--head {
   flex-shrink: 0;
   align-self: auto;
 }
 
-/* A failed tool's header name tints toward danger so the whole row reads as a
-   failure at a glance, not just the chip. */
-.chat__tool--failed .chat__tool-name {
+/* A failed child inside an already-expanded activity tints toward danger.
+   Direct compact transcript rows stay neutral until explicitly opened. */
+.chat__tool:not(.chat__tool--compact).chat__tool--failed .chat__tool-name {
   color: color-mix(in srgb, var(--danger) 70%, var(--text)); /* CONTRACT: danger-leaning tool name on a failed row */
 }
 
@@ -1217,8 +1177,9 @@
    borderless dim line, so a build turn's pre-prose burst stops burying the
    answer. A lone thought or tool uses its own disclosure directly: hierarchy
    is added only when there is something to group. Structure is neutral; the
-   only hue is --danger for a failed step and --accent for keyboard focus.
-   Collapsed by default; status remains readable without expanding. See
+   only accent hue is the keyboard focus ring. Command-level diagnostics stay
+   inside expansion because a nonzero shell exit is not a turn-level verdict.
+   Collapsed by default; liveness remains readable without expanding. See
    ActivityStretch.jsx + groupBlocks.js. */
 .chat__activity {
   margin: 0;
@@ -1268,15 +1229,9 @@
   color: var(--muted); /* CONTRACT: low-contrast status glyph */
 }
 
-.chat__activity--error .chat__activity-icon {
-  color: var(--danger); /* CONTRACT: vivid danger — a step in the stretch failed */
-}
-
 .chat__activity-label {
-  /* No stretch: the label and its trailing chip group left as one compact
-     unit (the ChatGPT idiom) rather than spreading across the row. The header
-     button is still full-width — only the visual grouping is left-aligned.
-     Long labels truncate before the danger chip clips. */
+  /* No stretch: the calm label stays left-aligned rather than spreading across
+     the row. The header button remains full-width. */
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -1340,17 +1295,6 @@
   0% { -webkit-mask-position: 120% 0; mask-position: 120% 0; }
   42% { -webkit-mask-position: -50% 0; mask-position: -50% 0; }
   100% { -webkit-mask-position: -50% 0; mask-position: -50% 0; }
-}
-
-.chat__activity-chip {
-  flex-shrink: 0;
-  padding: 0 6px;
-  border-radius: 8px;
-  font-family: var(--mono); /* CONTRACT: monospace exit-code chip, matches the tool block */
-  font-size: 11px;
-  color: var(--danger); /* CONTRACT: vivid danger text — a nonzero exit failed */
-  background: color-mix(in srgb, var(--danger) 12%, transparent); /* CONTRACT: faint danger tint on the opaque message-list fill */
-  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border-light)); /* CONTRACT: danger-tinted hairline */
 }
 
 /* Rotating disclosure chevron for the MARKER card (the activity line dropped
@@ -1659,15 +1603,12 @@
    children, so taps on the gutter pass through to the chat. */
 .chat__foot {
   position: absolute;
-  /* iMessage-style tuck: lift the foot by the device bottom inset MINUS 14px,
-     floored at 0. iPhones report a constant 34px home-indicator inset, which
-     left the pill floating visibly higher than on Android (where Chrome's
-     edge-to-edge reports ~0) — the 14px tuck dips the pill into the top of
-     that reserved zone, still clear of the indicator line, so both platforms
-     read consistently. Android/zero-inset devices: max() floors at 0 and
-     nothing moves. Keep the same expression in `.chat__list`'s bottom
-     padding — the two must move together. */
-  bottom: max(0px, calc(env(safe-area-inset-bottom, 0px) - 14px));
+  /* Interactive controls must stay wholly inside the device safe rectangle.
+     Android Chrome paints the shell's gesture backdrop in the unsafe band;
+     dipping the composer into that band makes the backdrop clip the pill.
+     Keep the same full inset in `.chat__list`'s bottom padding so composer
+     placement and transcript clearance remain one geometry contract. */
+  bottom: env(safe-area-inset-bottom, 0px);
   left: 0;
   right: 0;
   padding: 8px 12px;
@@ -1689,8 +1630,10 @@
    ABOVE the scrolling message list (fading the text) but BEHIND the composer pill
    (the pill's backdrop-blur stays crisp). `top` extends above the composer only so
    the ramp's percentage stops map onto the pill; the ramp itself is bottom-weighted.
-   Percentage stops so the embedded (shorter) composer gets a proportional fade.
-   Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
+   `bottom` extends through the device safe area independently of the interactive
+   foot, so keeping the controls safe cannot expose scrolling text beneath the
+   gesture bar. Percentage stops give the embedded (shorter) composer a proportional
+   fade. Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
    colour. */
 .chat__foot::before {
   content: "";
@@ -1698,7 +1641,7 @@
   left: 0;
   right: 0;
   top: -100px;
-  bottom: 0;
+  bottom: calc(0px - env(safe-area-inset-bottom, 0px));
   background: linear-gradient(
     to bottom,
     transparent 0%,
@@ -1725,6 +1668,7 @@
 .chat__foot .chat__question-nudge,
 .chat__foot .chat__resume-nudge,
 .chat__foot .chat__open-app,
+.chat__foot .chat__progress-step--toggle,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
 
@@ -1878,18 +1822,6 @@
     transform 0.08s ease;
 }
 
-/* Primary meanings share one slot. Hold the replacement invisible for a
-   brief beat so Send/Fast-forward clears before Stop is revealed. */
-.chat__send,
-.chat__steer,
-.chat__stop {
-  animation: chat-action-reveal 0.16s ease-out both;
-}
-
-@keyframes chat-action-reveal {
-  0%, 44% { opacity: 0; }
-  100% { opacity: 1; }
-}
 .chat__action:focus { outline: none; }
 .chat__action:focus-visible {
   outline: 2px solid var(--accent);
@@ -2581,17 +2513,17 @@
   to   { box-shadow: inset 0 0 0 2px transparent; }
 }
 
-/* ── Build-milestone rail ──────────────────────────── */
-/* A slim, non-interactive progress rail in the foot, directly above the composer:
-   one dot+label per milestone the building agent emitted this turn. Attention,
-   connection, queue, and open-app notices deliberately stack ABOVE this rail so
-   nothing interrupts its relationship to the chat controls. Frosted so it reads
-   as a card over the chat scrolling behind the transparent foot, muted so it
-   stays quiet next to the composer. The most recent phase is emphasized; earlier
-   ones dim to compact history. Entrance is transform/opacity ONLY — the foot's
-   ResizeObserver publishes --composer-h off its height, so a height animation
-   would fight the composer clearance. */
-.chat__build-rail {
+/* ── Goal/build progress rail ──────────────────────── */
+/* A slim progress rail in the foot, directly above the composer:
+   the active goal (when present) followed by each build milestone emitted this
+   turn. Attention, connection, queue, and open-app notices deliberately stack
+   ABOVE this rail so nothing interrupts its relationship to the chat controls.
+   Frosted so it reads as a card over the chat scrolling behind the transparent
+   foot, muted so it stays quiet next to the composer. The most recent phase is
+   emphasized; earlier ones dim to compact history. Entrance is
+   transform/opacity ONLY — the foot's ResizeObserver publishes --composer-h off
+   its height, so a height animation would fight the composer clearance. */
+.chat__progress-rail {
   max-width: 720px;
   margin: 0 auto 8px;
   display: flex;
@@ -2606,50 +2538,79 @@
   -webkit-backdrop-filter: blur(16px) saturate(140%);
   font-size: 12px;
   line-height: 1.3;
-  animation: build-rail-in 0.22s ease both;
+  animation: progress-rail-in 0.22s ease both;
 }
 
-@keyframes build-rail-in {
+@keyframes progress-rail-in {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
 }
 
-.chat__build-phase {
+.chat__progress-step {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
+  max-width: 100%;
   color: var(--muted); /* CONTRACT: low-contrast text — earlier phases read as dim history */
 }
 
-.chat__build-phase-label {
+.chat__progress-step-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.chat__progress-step--button {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat__progress-step--toggle {
+  cursor: pointer;
+}
+
+.chat__progress-step--toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+.chat__progress-step--expanded {
+  flex-basis: 100%;
+}
+
+.chat__progress-step--expanded .chat__progress-step-label {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /* Milestones separate with a small neutral "›" (text-first — the dots were
    retired 2026-07-17, owner spec); the most recent phase carries the eye with
    full-contrast weight. */
-.chat__build-phase + .chat__build-phase::before {
+.chat__progress-step + .chat__progress-step::before {
   content: "›";
   color: var(--muted);
   margin-right: 8px;
   font-weight: 400;
 }
 
-.chat__build-phase--current {
+.chat__progress-step--current {
   color: var(--text); /* CONTRACT: high-contrast text on the current milestone */
   font-weight: 600;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat__build-rail,
+  .chat__progress-rail,
   .chat__copy-toast { animation: none; }
-  .chat__send,
-  .chat__steer,
-  .chat__stop { animation: none; }
 }
 
 /* ── Queued messages tray ──────────────────────────── */

@@ -83,6 +83,8 @@ test('finding 2: an undo snapshot restoring single + a Settings tab is not a for
 // -- Findings 3/4/9: all nav paths funnel through the ONE decision point --------
 test('finding 3: the deep-link boot routes through applyModeDestination', () => {
   assert.match(nav, /const bootDeepLink = \(route, tab\) => \{[\s\S]*?applyModeDestination\(route\)/)
+  assert.match(nav, /if \(mode === 'single'\) \{\s*if \(!blobValid\) openBootTab\(tab\)\s*applyModeDestination\(route\)/,
+    'a fresh Standard deep link seeds both the implicit tree and the single-screen slot')
 })
 
 test('finding 4: non-history newChat routes through applyModeDestination (not a direct OPEN_TAB)', () => {

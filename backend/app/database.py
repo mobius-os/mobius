@@ -356,6 +356,15 @@ def run_migrations(eng) -> None:
       "CREATE INDEX IF NOT EXISTS ix_apps_manifest_url ON apps (manifest_url)"
     ))
     conn.commit()
+  if "share_manifest_url" not in apps_cols:
+    # Optional distribution metadata for locally-built apps. This is not
+    # install identity: attaching a public manifest must never make the local
+    # source tree Store-managed or change update matching.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN share_manifest_url VARCHAR(1024) NULL"
+      ))
+      conn.commit()
   if "version" not in apps_cols:
     # Installed manifest version — see models.App.version. Nullable;
     # existing rows backfill on their next install/update.

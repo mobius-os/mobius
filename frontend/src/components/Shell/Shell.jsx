@@ -51,6 +51,7 @@ import {
   workspaceRequestFromSystemEvent,
   workspaceRequestsForBuiltApps,
   ACTIVATE_FOREGROUND,
+  ACTIVATE_LIVE_PREVIEW,
 } from './workspacePlacement.js'
 import {
   appUpdateStaleMessage,
@@ -102,6 +103,17 @@ import * as modeMachine from './modeMachine.js'
 import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
 import {
+  BUILDER_CHAT_WORLD,
+  STANDARD_CHAT_WORLD,
+  deriveChatSurfaceLayers,
+  deriveChatSurfaceOwners,
+} from './chatSurfaceModel.js'
+import { deriveWorkspaceVisualState } from './visualReadiness.js'
+import {
+  shouldFocusComposerAfterPanePointer,
+  supportsDesktopPaneComposerFocus,
+} from './paneChatFocus.js'
+import {
   acknowledgeAppPreview,
   withAppPreviewSeen,
 } from './builtAppState.js'
@@ -111,6 +123,7 @@ import {
   transitionSignature, MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
+import { recentChatsToPrefetch } from './chatPrefetch.js'
 import {
   PaneTab, panePanelDomId, paneTabDomId, scrollStripWheel, stripKeyDown,
 } from './PaneStrip.jsx'
@@ -119,6 +132,7 @@ import useDesktopSidebar, {
   desktopContentWidthAfterSidebarToggle,
 } from './useDesktopSidebar.js'
 import ShellBrand from './ShellBrand.jsx'
+import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
 const SHELL_RELOAD_RECHECK_MS = 6000
 // The builder mode beat durations live in workspaceView.js (MODE_MOTION); the
@@ -187,10 +201,20 @@ export default function Shell() {
   // workspace boundary can then own every edge into an empty single screen without
   // making early navigation hooks depend on a callback declared later in the render.
   const requestEmptySingleNewChatRef = useRef(null)
-  // Ephemeral presentation state only. Focusing one pane must never rewrite the
-  // persisted split tree or ratios, so this id lives outside the workspace blob.
-  const [focusedPaneViewId, setFocusedPaneViewIdState] = useState(null)
-  const focusedPaneViewIdRef = useRef(null)
+  // Presentation state: which pane (if any) is maximized full-screen. It lives
+  // OUTSIDE the workspace blob so focusing a pane never rewrites the split tree or
+  // ratios — but it IS persisted to its own key and re-seeded here, so a maximize
+  // survives the apply-on-idle reload that fires while the tab is backgrounded
+  // (which otherwise dropped it, un-maximizing the pane on return). Seed the STATE
+  // and the REF together: dispatchWorkspace's reconcile reads the ref and short-
+  // circuits when it is null, so a state-only seed would fail to retarget/collapse
+  // the maximize on the first workspace mutation after boot.
+  const [focusedPaneViewId, setFocusedPaneViewIdState] = useState(
+    () => paneModel.resolveInitialFocusedPaneView(
+      workspace, paneModel.readFocusedPaneView(sessionStorage),
+    ),
+  )
+  const focusedPaneViewIdRef = useRef(focusedPaneViewId)
   const setFocusedPaneViewId = useCallback((paneId) => {
     focusedPaneViewIdRef.current = paneId
     setFocusedPaneViewIdState(paneId)
@@ -295,6 +319,7 @@ export default function Shell() {
     drawerOpenRef,
     appNavPush, appNavPop, appNavReset, appNavForwardResult,
     retireAppHistory, tombstoneRoute,
+    openHistoryDismiss, closeHistoryDismiss, unregisterHistoryDismiss,
   } = useNavigation({
     workspace,
     workspaceStateRef,
@@ -388,6 +413,15 @@ export default function Shell() {
       setFocusedPaneViewId(null)
     }
   }, [workspace.viewMode, modeState.transition, setFocusedPaneViewId])
+
+  // Persist the maximized-pane presentation to its own key on every change so it
+  // survives the apply-on-idle reload (and a browser tab discard). Removing the
+  // key when nothing is maximized keeps a dismissed maximize from resurrecting on
+  // a later reload. Kept separate from the workspace-blob dual-write so focusing a
+  // pane never rewrites the tree/ratios.
+  useEffect(() => {
+    paneModel.writeFocusedPaneView(focusedPaneViewId, sessionStorage)
+  }, [focusedPaneViewId])
 
   const toggleFocusedPaneView = useCallback((paneId) => {
     const ws = workspaceStateRef.current.ws
@@ -621,6 +655,46 @@ export default function Shell() {
   })
   const apps = appsQuery.data ?? []
   const chats = chatsQuery.data ?? []
+  const appsStatus = apps.length > 0 || appsQuery.isSuccess
+    ? 'success'
+    : (appsQuery.isError ? 'error' : 'loading')
+  const chatsStatus = chats.length > 0 || chatsQuery.isSuccess
+    ? 'success'
+    : (chatsQuery.isError ? 'error' : 'loading')
+  // Prime only the two most-recent chats that are not already open, including
+  // active chats: their cached transcript is useful while stream catch-up runs.
+  // ChatView still revalidates on mount, but this gives its synchronous cache
+  // read a real transcript so a later chat switch can paint immediately. Run
+  // once after the live drawer projection arrives, at browser idle, and stand
+  // down under data-saver so speed never creates surprise background transfer.
+  const warmedChatsOnLoadRef = useRef(false)
+  useEffect(() => {
+    if (
+      warmedChatsOnLoadRef.current
+      || !chatsQuery.isSuccess
+      || !chatsQuery.isFetchedAfterMount
+    ) return
+    warmedChatsOnLoadRef.current = true
+    if (navigator.connection?.saveData) return
+    const candidates = recentChatsToPrefetch(chats, activeChatId)
+    if (candidates.length === 0) return
+    const warm = async () => {
+      for (const chat of candidates) {
+        await chatQueries.messages.prefetch(queryClient, chat.id)
+      }
+    }
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => { void warm() }, { timeout: 3000 })
+    } else {
+      setTimeout(() => { void warm() }, 1000)
+    }
+  }, [
+    activeChatId,
+    chats,
+    chatsQuery.isFetchedAfterMount,
+    chatsQuery.isSuccess,
+    queryClient,
+  ])
   const appPreviewAckRef = useRef(new Set())
   const handleAppPreviewSeen = useCallback((app, final) => {
     acknowledgeAppPreview({
@@ -699,6 +773,11 @@ export default function Shell() {
   const toastSequenceRef = useRef(0)
   const [toast, setToast] = useState(null)
   const [settingsFocusTarget, setSettingsFocusTarget] = useState(null)
+  // Settings stays mounted across workspace transitions. An explicit shell
+  // apply can therefore complete a platform-conflict repair without remounting
+  // Settings; this token lets that live instance re-read authoritative status
+  // even when a multi-pane workspace deliberately defers the full-page reload.
+  const [settingsRefreshToken, setSettingsRefreshToken] = useState(0)
   const showToast = useCallback((
     message,
     { variant = 'info', duration = 4000, action } = {},
@@ -743,6 +822,11 @@ export default function Shell() {
       draft: draft == null ? null : String(draft),
       focus: focus === true,
     })
+  }
+
+  function focusDesktopChatPaneComposer(chatId) {
+    if (!supportsDesktopPaneComposerFocus()) return
+    requestComposer(chatId, { focus: true })
   }
 
   const handleComposerRequestHandled = useCallback((token) => {
@@ -807,6 +891,10 @@ export default function Shell() {
         paneModel.STORAGE_KEY,
         paneModel.serializeWorkspace(workspaceStateRef.current.ws),
       )
+      // Capture the maximize from the REF (like the ws above): this runs after an
+      // await, so the render-closure focusedPaneViewId is stale. Keeping the (ws,
+      // maximize) pair from refs makes the persisted snapshot atomic.
+      paneModel.writeFocusedPaneView(focusedPaneViewIdRef.current, sessionStorage)
     } catch { /* private mode / quota — the in-memory workspace still boots */ }
     sessionStorage.setItem('shell-reload', JSON.stringify(shellReloadState()))
     // Match the manifest scope so the post-reload page lands inside
@@ -1016,7 +1104,7 @@ export default function Shell() {
   // One revision bump after that await releases is enough to drain the latest token;
   // this is event-driven and only renders in that rare collision (no polling loop).
   const [materializeNewChatRevision, setMaterializeNewChatRevision] = useState(0)
-  const [newChatLandingOffline, setNewChatLandingOffline] = useState(false)
+  const [newChatLandingFailure, setNewChatLandingFailure] = useState(null)
   // Live mirror of the mode descriptor so the async materialize can re-check for a
   // beat that started during its await (writing the slot mid-beat would cancel it).
   const modeTransitionRef = useRef(modeState.transition)
@@ -1087,7 +1175,7 @@ export default function Shell() {
     const token = newChatRequestSeqRef.current + 1
     newChatRequestSeqRef.current = token
     pendingNewChatRef.current = { token, candidateId: candidate ? candidate.id : null }
-    setNewChatLandingOffline(false)
+    setNewChatLandingFailure(null)
     setPendingNewChatToken(token)
   }, [workspaceStateRef, activeChatIdRef])
   requestEmptySingleNewChatRef.current = requestEmptySingleNewChat
@@ -1125,7 +1213,7 @@ export default function Shell() {
     if ((!contentRect.w || !contentRect.h) && contentElRef.current) {
       contentRect = { w: contentElRef.current.clientWidth, h: contentElRef.current.clientHeight }
     }
-    const mode = paneModel.modeForRect(contentRect)
+    const deviceMode = paneModel.modeForRect(contentRect)
     const liveApps = appsRef.current
     // R2: a FOREGROUND agent open in the SINGLE world writes the slot (via the pure
     // resolver's F4 branch) BENEATH an open Settings takeover, so the item would be
@@ -1136,6 +1224,17 @@ export default function Shell() {
     // takeover is open.
     const currentWs = workspaceStateRef.current.ws
     const world = paneModel.WORKSPACE_SPLITS_ENABLED ? currentWs.viewMode : 'single'
+    const opensLivePreview = requests.some(
+      request => request?.activation === ACTIVATE_LIVE_PREVIEW,
+    )
+    // The placement resolver folds the durable Standard → Builder flip into the
+    // live-preview request. Mirror that same intent into the transition
+    // descriptor in this React batch so render mode and workspace mode never
+    // disagree for an intermediate frame. No presentation plan: the preview
+    // should appear immediately, not wait behind decorative entry motion.
+    if (SPLITS && world === 'single' && opensLivePreview) {
+      mode.toggle({ cause: 'auto', to: 'panes' })
+    }
     if (world === 'single'
         && requests.some(r => r && r.item && r.activation === ACTIVATE_FOREGROUND)) {
       dismissSettings()
@@ -1148,9 +1247,13 @@ export default function Shell() {
     // delivered one dispatch at a time (batch == sequential).
     dispatchWorkspace({
       type: 'APPLY_PLACEMENT',
-      resolve: (ws) => resolveWorkspaceRequests(ws, requests, { mode, contentRect, liveApps }),
+      resolve: (ws) => resolveWorkspaceRequests(ws, requests, {
+        mode: deviceMode,
+        contentRect,
+        liveApps,
+      }),
     })
-  }, [dispatchWorkspace, dismissSettings])
+  }, [dispatchWorkspace, dismissSettings, mode])
   // The tab strip is the BUILDER SURFACE: with splits ON it follows the
   // EFFECTIVE builder world exactly — always present in builder (even at a
   // single leaf, where this single-pane .shell__tabstrip stands in for the
@@ -1199,6 +1302,29 @@ export default function Shell() {
     }
     return map
   }, [workspaceChromeActive, projection, workspace])
+
+  // Builder chat mounts keep their own projected geometry even while Standard
+  // paints. They remain visibility:hidden in that world, but their ChatView
+  // layout never borrows Standard's full-bleed box and therefore never resizes
+  // at the mode boundary. A normal one-leaf Builder uses the flow strip and a
+  // full-bleed wrapper, so only real tiled/focused projections need staged rects.
+  const builderChatTabRects = useMemo(() => {
+    const map = new Map()
+    if (projection.visibleLeaves.length < 2 && !projection.focusedPaneView) return map
+    for (const paneId of projection.visibleLeaves) {
+      const pane = workspace.panes[paneId]
+      const rect = projection.rects[paneId]
+      if (!pane || !pane.activeTabKey || !rect) continue
+      map.set(pane.activeTabKey, {
+        paneId,
+        x: rect.x,
+        y: rect.y + paneModel.STRIP_H,
+        w: rect.w,
+        h: Math.max(0, rect.h - paneModel.STRIP_H),
+      })
+    }
+    return map
+  }, [projection, workspace])
 
   // (v2: the exit-beat wrapper-rect substitution is DELETED. Panes hold their tiled
   // content rect through the beat; a promote pane FLIPs via transform to cover the
@@ -1263,63 +1389,14 @@ export default function Shell() {
   }, [settingsOverlay, workspace, projection])
   const visibleChatIdsRef = useRef(visibleChatIds)
   useEffect(() => { visibleChatIdsRef.current = visibleChatIds }, [visibleChatIds])
-  // The flat, chatId-sorted set of visible CHAT panes to mount as PaneChatViews
-  // — for EVERY mode including single-pane (finding A): DOM identity across 1↔2
-  // panes is the invariant, so the first split never remounts the visible chat.
-  // Stable order (same no-reparent rule as the app iframes). Panes stay mounted
-  // (hidden) behind the Settings overlay, exactly like the app iframes.
+  // Retained chat surfaces for BOTH layout worlds. A chat selected in Standard's
+  // slot and a Builder pane has two physical layout owners: Standard remains
+  // full-bleed and Builder remains pane-sized, so neither world's ResizeObserver /
+  // scroll controller reacts to the other's mode transition. Within Builder the
+  // surface key remains chat-based, preserving identity across cross-pane moves.
   const visibleChatPanes = useMemo(() => {
-    const out = []
-    const mountedChatIds = new Set()
-    // While one pane is focused, keep the base projection's chats mounted-hidden.
-    // Defocusing then changes geometry/visibility only — no transcript refetch,
-    // stream teardown, or scroll-state loss for the sibling panes.
-    const mountedPaneIds = new Set([
-      ...baseProjection.visibleLeaves,
-      ...projection.visibleLeaves,
-    ])
-    for (const paneId of mountedPaneIds) {
-      const pane = workspace.panes[paneId]
-      const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
-      if (active && active.kind === 'chat') {
-        out.push({ paneId, chatId: active.id })
-        mountedChatIds.add(String(active.id))
-      }
-    }
-    // TWO-WORLDS mount identity: union the single-screen SLOT chat, mounted under a
-    // stable synthetic single-world owner even while builder shows, so a world
-    // switch changes VISIBILITY not mounts (no ChatView remount, no stream flush,
-    // no scroll loss). Deduped against the tree-visible chats — never two ChatViews
-    // for one chat (design: no duplicate mounts). When the slot chat is already a
-    // visible tree pane, that pane's mount covers it and no synthetic mount is added.
-    const slot = workspace.singleScreen
-    if (slot && slot.kind === 'chat' && !mountedChatIds.has(String(slot.id))) {
-      out.push({ paneId: paneModel.SINGLE_SLOT_PANE, chatId: slot.id })
-    }
-    return out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
+    return deriveChatSurfaceOwners({ workspace, baseProjection, projection })
   }, [baseProjection, projection, workspace])
-  // The chat keys that actually PAINT (as opposed to merely being mounted): in
-  // single mode ONLY the slot's chat (fullBleedKey), in builder every visible
-  // pane's active chat. Separating painting from mounting is what lets the slot
-  // chat sit mounted-but-hidden in builder and become visible on a world switch
-  // without a remount (two-worlds design).
-  const visibleChatKeys = useMemo(() => {
-    const set = new Set()
-    if (settingsOverlay) return set
-    if (single) {
-      if (fullBleedKey && fullBleedKey.startsWith('chat:')) set.add(fullBleedKey)
-      return set
-    }
-    for (const paneId of projection.visibleLeaves) {
-      const pane = workspace.panes[paneId]
-      const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
-      if (active && active.kind === 'chat') set.add(`chat:${active.id}`)
-    }
-    // World-reveal exit: paint the (tree-absent) underlay chat beneath the deal.
-    if (modeUnderlayKey && modeUnderlayKey.startsWith('chat:')) set.add(modeUnderlayKey)
-    return set
-  }, [single, settingsOverlay, fullBleedKey, projection, workspace, modeUnderlayKey])
-
   // Last chat that reached a stable painted frame in each visible pane. On a
   // chat-tab change, keep that outgoing ChatView mounted as an inert cover while
   // the incoming chat runs its existing hide/restore/reveal transaction below.
@@ -1327,7 +1404,7 @@ export default function Shell() {
   // so rapid A -> B -> C navigation keeps A painted and replaces only staging B.
   const [presentedChatByPane, setPresentedChatByPane] = useState(() => new Map())
   const visibleChatPaneSignature = visibleChatPanes
-    .map(({ paneId, chatId }) => `${paneId}:${chatId}`)
+    .map(({ world, paneId, chatId }) => `${world}:${paneId}:${chatId}`)
     .join('|')
 
   // Drop state for panes whose active visible surface is no longer a chat.
@@ -1365,28 +1442,23 @@ export default function Shell() {
     })
   }, [workspaceStateRef])
 
-  // At most two ChatViews per transitioning pane: the last painted chat and the
-  // current active chat. Cross-pane moves are deduped by chat id, preserving the
-  // workspace's no-reparent identity rule rather than manufacturing a cover.
+  // At most two ChatViews per transitioning owner: the last painted chat and the
+  // current active chat. Handoff dedupe is world-local: Standard's retained copy
+  // must never suppress Builder's outgoing cover for the same underlying chat.
   const chatPaneLayers = useMemo(() => {
-    const desiredIds = new Set(visibleChatPanes.map(({ chatId }) => String(chatId)))
-    const layers = []
-    for (const { paneId, chatId } of visibleChatPanes) {
-      const paneKey = String(paneId)
-      const activeId = String(chatId)
-      const previousId = presentedChatByPane.get(paneKey)
-      const transitioning = previousId && previousId !== activeId
-      if (transitioning && !desiredIds.has(previousId)) {
-        layers.push({ paneId, chatId: previousId, role: 'held' })
-      }
-      layers.push({
-        paneId,
-        chatId: activeId,
-        role: transitioning ? 'staging' : 'active',
-      })
-    }
-    return layers.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)))
+    return deriveChatSurfaceLayers(visibleChatPanes, presentedChatByPane)
   }, [presentedChatByPane, visibleChatPanes])
+  // Shell is the only layer that knows which retained workspace world is
+  // actually painted. Publish one stable readiness contract for visual tools;
+  // they must not learn private handoff classes or compositor attributes.
+  const workspaceVisualState = deriveWorkspaceVisualState({
+    modeTransition: modeState.transition,
+    chatPanesVisible,
+    chatPaneLayers,
+    paintedChatWorld: effectiveViewMode === 'single'
+      ? STANDARD_CHAT_WORLD
+      : BUILDER_CHAT_WORLD,
+  })
 
   // ── Synchronous pinned iframe-cache derivation (design §2/§4) ─────────────
   // renderedAppIds = sortById(visibleAppIds ∪ boundedWarmLRU). Visible ids come
@@ -2089,7 +2161,7 @@ export default function Shell() {
     for (const id of fresh) appBaselineRef.current.add(id)
     setNewAppIds(prev => withAppsFlagged(prev, fresh))
 
-    // Durable-list fallback for an app-created event missed during reconnect.
+    // Durable-list fallback for a live-preview event missed during reconnect.
     // Convert server relationships into the same pane-neutral
     // requests used by the live event path; the flat resolver is only today's
     // one-pane projection.
@@ -2600,13 +2672,22 @@ export default function Shell() {
       // Recovery is the sole operation allowed to clear the session tombstone.
       if (ev.chatId) confirmChatRecovered(ev.chatId)
       void invalidateShellListCache('chats').then(refreshChats)
+    } else if (ev.type === 'chat_renamed') {
+      // The summary publisher committed a new generated name. Refresh durable
+      // list truth immediately so open tabs and the drawer update after the
+      // first settled turn, and after a later substantial topic shift.
+      void invalidateShellListCache('chats').then(refreshChats)
     } else if (ev.type === 'app_deleted') {
       if (ev.appId) confirmAppDeleted(ev.appId)
       void invalidateShellListCache('apps')
     } else if (ev.type === 'app_recovered') {
       if (ev.appId) confirmAppRecovered(ev.appId)
       void invalidateShellListCache('apps').then(refreshApps)
-    } else if (ev.type === 'app_updated' || ev.type === 'app_created') {
+    } else if (
+      ev.type === 'app_updated'
+      || ev.type === 'app_created'
+      || ev.type === 'app_preview_ready'
+    ) {
       const placementRequest = workspaceRequestFromSystemEvent(ev)
       // app_updated is also the reinstall event for a tombstoned store app,
       // while app_created may carry an integer id freed by TTL purge and reused
@@ -2615,11 +2696,11 @@ export default function Shell() {
       const reconcileIdentity = ev.appId
         ? confirmAppIdentityIsLive(ev.appId)
         : Promise.resolve(false)
-      // Refresh server truth before warming or placing. app_updated is
-      // refresh-only; app_created may additionally issue one background
-      // workspace placement after the returned row confirms the relationship.
-      // `updated_at` drives the iframe cache-buster and the derived built-app
-      // CTA, so neither needs a separate client mirror.
+      // Refresh server truth before warming or placing. app_updated/app_created
+      // remain lifecycle refreshes; app_preview_ready is the explicit
+      // build-session action that reveals either a new app or an updated one.
+      // `updated_at` drives the iframe live-swap and derived built-app CTA, so
+      // neither needs a separate client mirror.
       Promise.all([
         invalidateShellListCache('apps'),
         reconcileIdentity,
@@ -2632,22 +2713,30 @@ export default function Shell() {
           const app = updatedApps.find(a => String(a.id) === String(ev.appId))
           if (app) warmAppCode(app)
         }
-        // `app_created` is emitted only after the first runnable compile. Check
-        // the refreshed row before honoring it, then place in the background;
-        // a malformed/spoofed event cannot open an absent or unrelated app.
+        // A live-preview event is emitted only after a coherent revision
+        // committed. Confirm both named resources before honoring it. The
+        // requesting chat is deliberately NOT compared with app.chat_id: an
+        // existing app keeps its original ownership/error-routing relationship
+        // while a later chat may be the one modifying it.
         if (placementRequest) {
           const app = updatedApps.find(a => (
             String(a.id) === placementRequest.item.id
-            && String(a.chat_id) === placementRequest.source.id
           ))
-          if (app) placeInWorkspace(placementRequest)
+          if (app) {
+            refreshChats().then(updatedChats => {
+              const chatExists = updatedChats.some(
+                chat => String(chat.id) === placementRequest.source.id,
+              )
+              if (chatExists) placeInWorkspace(placementRequest)
+            })
+          }
         }
       })
     } else if (ev.type === 'open_item') {
       // An explicit agent-initiated open (design §6.3), system-bus-only so it
       // fires exactly once. Confirm the item actually exists in fresh server
-      // truth before placing — mirror the app_created confirm-guard so a spoofed
-      // or absent id is a silent no-op. App items also warm their code cache.
+      // truth before placing — mirror the live-preview confirm-guard so a
+      // spoofed or absent id is a silent no-op. App items also warm their cache.
       const request = workspaceRequestFromSystemEvent(ev)
       if (request) {
         // A background open lands as an inactive tab, so it earns the drawer/tab
@@ -2744,6 +2833,9 @@ export default function Shell() {
       // leash rides the same moment: performShellReload posts SKIP_WAITING to
       // the waiting worker so the SW generation flips exactly when the page
       // reloads.
+      if (ev.type === 'shell_apply_now') {
+        setSettingsRefreshToken(token => token + 1)
+      }
       requestShellReload({ passive: ev.type === 'shell_rebuilt' })
     } else if (ev.type === 'shell_rebuild_failed') {
       // Deliberately silent in the owner UI. The atomic publisher keeps the
@@ -2778,7 +2870,7 @@ export default function Shell() {
   // A system-bus event can be lost while the stream is disconnected. Refetch
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
-  // through the same idempotent placement resolver as live app_created events.
+  // through the same idempotent placement resolver as live app_preview_ready events.
   const reconcileSystemStateOnOpen = useCallback(() => {
     reconcileNotifications()
     void Promise.all([
@@ -3061,8 +3153,8 @@ export default function Shell() {
       const candidate = pending.candidateId != null
         ? (chatsRef.current.find(c => String(c.id) === String(pending.candidateId)) || null)
         : null
-      const { chatId } = pending.resolvedChatId != null
-        ? { chatId: pending.resolvedChatId }
+      const { chatId, reason } = pending.resolvedChatId != null
+        ? { chatId: pending.resolvedChatId, reason: null }
         : await resolveNewChatId({ candidate })
       // Stale-guard: if a newer empty-single request arrived during the await, hand
       // it this already-validated/created untouched row. That preserves latest-token
@@ -3093,11 +3185,11 @@ export default function Shell() {
       if (modeTransitionRef.current) return
       if (chatId == null) {
         // offline / failed — keep the landing + the pending request for a retry.
-        setNewChatLandingOffline(true)
+        setNewChatLandingFailure(reason === 'offline' ? 'offline' : 'error')
         return
       }
       pendingNewChatRef.current = null
-      setNewChatLandingOffline(false)
+      setNewChatLandingFailure(null)
       // Guarded, history-free slot write: applyModeDestination never pushes history;
       // preserveSettings so a background repair doesn't yank an open Settings takeover;
       // no composer focus — a mode toggle must not summon the mobile keyboard.
@@ -3477,6 +3569,11 @@ export default function Shell() {
       chatsQuery.isFetchedAfterMount, requestEmptySingleNewChat, workspaceStateRef])
 
   return (
+    <HistoryDismissProvider
+      openHistoryDismiss={openHistoryDismiss}
+      closeHistoryDismiss={closeHistoryDismiss}
+      unregisterHistoryDismiss={unregisterHistoryDismiss}
+    >
     <div
       ref={shellRootRef}
       // The logo-release timing vars for the live beat (round 4 item 1); absent when
@@ -3488,6 +3585,7 @@ export default function Shell() {
       // beat class, so this is the only external signal it is armed). idle otherwise.
       data-mode-phase={modeState.transition ? modeState.transition.phase : 'idle'}
       data-mode-epoch={modeState.transition ? modeState.transition.id : undefined}
+      data-workspace-visual-state={workspaceVisualState}
       // The ONE transient beat class comes from the descriptor (INV 1/4): exactly
       // one of entering/exiting is ever present, and the keyed animationend on
       // this root completes the beat (the controller's listener). No separate
@@ -3497,6 +3595,16 @@ export default function Shell() {
       + `${modeMachine.transitionRootClass(modeState, { splitsEnabled: SPLITS })
         ? ` ${modeMachine.transitionRootClass(modeState, { splitsEnabled: SPLITS })}` : ''}`
       + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>
+      <a
+        className="shell__skip-link"
+        href="#main-content"
+        onClick={(event) => {
+          event.preventDefault()
+          contentElRef.current?.focus({ preventScroll: true })
+        }}
+      >
+        Skip to content
+      </a>
       {/* The existing brand toggle remains the visible close affordance while the
           mobile drawer is modal. Keep the workspace inert below, but do not inert
           the header: doing so lets the scrim intercept the toggle and strands the
@@ -3581,9 +3689,13 @@ export default function Shell() {
         interactionLocked={drawerModeTransitioning}
         onClose={drawerModeTransitioning ? undefined : closeDrawer}
         apps={apps}
+        appsStatus={appsStatus}
+        onRetryApps={() => appsQuery.refetch()}
         activeView={activeView}
         activeAppId={activeAppId}
         chats={chats}
+        chatsStatus={chatsStatus}
+        onRetryChats={() => chatsQuery.refetch()}
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
@@ -3673,7 +3785,6 @@ export default function Shell() {
                 key={key}
                 tab={tab}
                 label={labelForTab(tab)}
-                app={tab.kind === 'app' ? appById.get(String(tab.id)) : null}
                 active={active}
                 revealKey={tabRevealRevision}
                 tabIndex={active ? 0 : -1}
@@ -3692,7 +3803,7 @@ export default function Shell() {
         </nav>
         )
       })()}
-      <main className="shell__content" inert={navigationSurfaceOpen} ref={contentElRef}>
+      <main className="shell__content" id="main-content" tabIndex={-1} inert={navigationSurfaceOpen} ref={contentElRef}>
         {/* Content layer (design §2): app-iframe wrappers (id-sorted) and chat
             wrappers (chatId-sorted) as ONE flat sibling set, never reparented.
             A wrapper is positioned (--paned) when its tab is a visible pane's
@@ -3778,35 +3889,72 @@ export default function Shell() {
           </div>
           )
         })}
-        {/* Chat panes — normally one PaneChatView per visible chat pane. During
-            a chat change the last painted chat remains as an inert opaque cover
-            over the incoming staging chat until its existing scroll controller
-            reports a stable frame. Layers remain chatId-sorted, so adding or
-            removing the bounded cover never reparents another chat wrapper. */}
-        {chatPaneLayers.map(({ paneId, chatId, role }) => {
+        {/* Chat surfaces — one retained owner per world. Standard's synthetic
+            owner always keeps the full content-box geometry; Builder owners keep
+            their projected pane geometry even while hidden. During a chat change
+            the last painted chat remains as an inert opaque same-world cover until
+            the incoming chat reports a stable frame. */}
+        {chatPaneLayers.map(({ world, paneId, chatId, role, surfaceKey }) => {
           const tabKey = `chat:${chatId}`
-          const paneActiveKey = workspace.panes[paneId]?.activeTabKey || tabKey
+          const standardOwner = world === STANDARD_CHAT_WORLD
+          const paneActiveKey = paneModel.activeKeyForOwner(workspace, paneId) || tabKey
           const isActiveLayer = role === 'active'
-          // Beat motion + underlay apply only to the ACTIVE layer (a held/staging
-          // handoff cover is orthogonal to a mode beat). Keyed by the pane's active
-          // key, exactly how deriveExitPlan keys its participants.
-          const underlay = isActiveLayer && isUnderlay(paneActiveKey)
-          const paned = !underlay && workspaceChromeActive ? visibleTabRects.get(paneActiveKey) : null
-          const fullBleed = !underlay && !paned && paneActiveKey === fullBleedKey
-          const motion = isActiveLayer ? wrapperMotion(paneActiveKey) : null
+          // The Standard owner alone may be the stationary world underlay. Every
+          // Builder chat — including one for the SAME chat id — is an independent
+          // moving participant, so the Standard DOM never changes geometry.
+          const underlay = standardOwner && isActiveLayer && isUnderlay(paneActiveKey)
+          const builderRect = standardOwner ? null : builderChatTabRects.get(paneActiveKey)
+          const builderPainted = !standardOwner
+            && effectiveViewMode === 'panes'
+            && chatPanesVisible
+          const paned = !underlay && builderPainted ? builderRect : null
+          const fullBleed = !underlay && paneActiveKey === fullBleedKey
+            && (standardOwner
+              ? effectiveViewMode === 'single'
+              : (builderPainted && !paned))
+          const surfaceVisible = !!(underlay || paned || fullBleed)
+          // A Standard surface never receives Builder motion. Its separate
+          // full-bleed owner sits still beneath the assembling/dealing panes.
+          const motion = !standardOwner && isActiveLayer
+            ? wrapperMotion(paneActiveKey)
+            : null
           const tabPanel = role !== 'held' && paned
-          const handoffClass = !settingsOverlay && role !== 'active'
+          // A retained owner may belong to the hidden workspace world. Its
+          // layers stay mounted for continuity, but only a surface painted by
+          // its own world may expose held/staging handoff classes.
+          const handoffClass = !settingsOverlay && surfaceVisible && role !== 'active'
             ? ` shell__chat-view--${role}`
             : ''
-          const posStyle = paned ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h } : null
+          // Keep hidden Builder ChatViews laid out at their pane size before a
+          // transition. Clearing right/bottom is the geometry half of
+          // .shell__view--paned without making the hidden wrapper paint.
+          const posStyle = builderRect
+            ? {
+              top: builderRect.y,
+              left: builderRect.x,
+              width: builderRect.w,
+              height: builderRect.h,
+              right: 'auto',
+              bottom: 'auto',
+            }
+            : null
           return (
             <div
-              key={chatId}
+              key={surfaceKey}
               id={tabPanel ? panePanelDomId(paneId, tabKey) : undefined}
               role={tabPanel ? 'tabpanel' : undefined}
               aria-labelledby={tabPanel ? paneTabDomId(paneId, tabKey) : undefined}
-              data-tab-key={(multiPane || focusedPaneViewId != null) && role !== 'held' && !underlay
+              data-chat-world={world}
+              data-chat-id={chatId}
+              data-tab-key={!standardOwner && (multiPane || focusedPaneViewId != null)
+                && role !== 'held' && !underlay
                 ? tabKey : undefined}
+              // A ChatView can stay mounted in the parked workspace world so its
+              // stream, draft, and scroll controller survive a world flip. Expose
+              // one explicit page-level selector for the settled surface that is
+              // actually interactive; browser contracts must not accidentally
+              // target a retained hidden world or an in-flight handoff layer.
+              data-chat-surface={surfaceVisible && role === 'active' ? 'painted' : undefined}
               // Compositor-only beat motion (v2): see the app wrapper. The world-
               // reveal underlay chat paints full-bleed beneath the deal.
               data-mode-motion={motion ? motion.motion : undefined}
@@ -3816,12 +3964,27 @@ export default function Shell() {
                   ? `shell__view shell__view--paned shell__chat-view${handoffClass}`
                   : `shell__view shell__chat-view ${fullBleed ? 'shell__view--active' : ''}${handoffClass}`)}
               style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
-              // Inert while covered/handing-off OR while participating in / underlying
-              // the exit beat (INV 9 inert beat).
-              inert={settingsOverlay || role !== 'active' || (modeBeatActive && (!!motion || underlay))}
-              aria-hidden={settingsOverlay || role !== 'active' ? 'true' : undefined}
+              // A retained owner that belongs to the other world is physically
+              // inert as well as visibility-hidden. Moving/underlay surfaces stay
+              // inert for the whole mode beat (INV 9).
+              inert={!surfaceVisible || settingsOverlay || role !== 'active'
+                || (modeBeatActive && (!!motion || underlay))}
+              aria-hidden={!surfaceVisible || settingsOverlay || role !== 'active'
+                ? 'true' : undefined}
               onPointerDownCapture={paned && role === 'active' && !modeBeatActive
-                ? () => dispatchWorkspace({ type: 'FOCUS', paneId })
+                ? (event) => {
+                  const wasFocused = workspaceStateRef.current.ws.focusedPaneId === paneId
+                  dispatchWorkspace({ type: 'FOCUS', paneId })
+                  if (supportsDesktopPaneComposerFocus()
+                    && shouldFocusComposerAfterPanePointer({
+                      wasFocused,
+                      pointerType: event.pointerType,
+                      button: event.button,
+                      target: event.target,
+                    })) {
+                    requestComposer(chatId, { focus: true })
+                  }
+                }
                 : undefined}
             >
               <PaneChatView
@@ -3832,13 +3995,13 @@ export default function Shell() {
               // NON-focused chat pane stops doing work (streaming/scroll) — the
               // chat analogue of visibleAppIds soloing the focused app. Panes mode
               // keeps every visible chat pane doing work.
-              visible={chatPanesVisible && role !== 'held' && visibleChatKeys.has(`chat:${chatId}`)}
-                paneContentHeight={paned ? paned.h : null}
+              visible={surfaceVisible && chatPanesVisible && role !== 'held'}
+                paneContentHeight={builderRect ? builderRect.h : null}
                 // Select before the memo boundary. Passing the replacement Map
                 // would rerender every visible chat pane for another chat's run.
                 externalRunSignal={chatRunSignal(chatRunSignals, chatId)}
-                composerRequest={role === 'active' ? composerRequest : null}
-                onComposerRequestHandled={role === 'active'
+                composerRequest={role === 'active' && surfaceVisible ? composerRequest : null}
+                onComposerRequestHandled={role === 'active' && surfaceVisible
                   ? handleComposerRequestHandled
                   : null}
                 onSystemEvent={handleSystemEvent}
@@ -3853,7 +4016,7 @@ export default function Shell() {
                 onInternalNav={handleChatInternalNav}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}
-                onDisplayReady={role === 'held'
+                onDisplayReady={role === 'held' || !surfaceVisible
                   ? null
                   : handlePaneChatDisplayReady}
               />
@@ -3949,6 +4112,8 @@ export default function Shell() {
                 onThemeChange={loadTheme}
                 onOpenChat={selectChat}
                 focusTarget={settingsFocusTarget}
+                active={!settingsUnderlay && (settingsFullBleed || !!settingsPaned)}
+                refreshToken={settingsRefreshToken}
               />
             </Suspense>
           </div>
@@ -3974,7 +4139,7 @@ export default function Shell() {
             >
               <NewChatLanding
                 // Retry state only on the resting surface — never mid-reveal.
-                offline={newChatSurface && newChatLandingOffline}
+                failure={newChatSurface ? newChatLandingFailure : null}
                 onRetry={requestEmptySingleNewChat}
               />
             </div>
@@ -3999,7 +4164,6 @@ export default function Shell() {
             dispatchWorkspace={dispatchWorkspace}
             navTo={navTo}
             labelForTab={labelForTab}
-            appById={appById}
             onTabContextMenu={openTabMenu}
             // The ONE shared user-close action (INV 13) + the per-pane beat motion
             // (each strip deals with its pane) — WorkspaceChrome owns no private
@@ -4007,6 +4171,7 @@ export default function Shell() {
             onCloseTab={closeTab}
             focusedPaneViewId={focusedPaneViewId}
             onTogglePaneFocus={toggleFocusedPaneView}
+            onChatPaneSelected={focusDesktopChatPaneComposer}
             revealKey={tabRevealRevision}
             stripMotion={wrapperMotion}
           />
@@ -4104,6 +4269,22 @@ export default function Shell() {
             >
               Close tab
             </button>
+            {/* Close all other tabs — keep only the right-clicked tab in its
+                pane. Only when a sibling exists (never a no-op menu item);
+                other panes are untouched — the menu stays pane-scoped. */}
+            {menuPane && menuPane.tabs.length >= 2 && (
+              <button
+                type="button"
+                role="menuitem"
+                className="workspace__menu-item"
+                onClick={() => {
+                  dispatchWorkspace({ type: 'CLOSE_OTHER_TABS', tabKey: tabMenu.tabKey })
+                  closeTabMenu()
+                }}
+              >
+                Close all other tabs
+              </button>
+            )}
             {/* Close pane — a keyboard/menu affordance so a multi-tab pane need
                 not be dismissed one ✕ at a time (design §3.6). Only when there is
                 another pane to fall back to (never the single-pane strip). */}
@@ -4124,5 +4305,6 @@ export default function Shell() {
         )
       })()}
     </div>
+    </HistoryDismissProvider>
   )
 }

@@ -89,10 +89,11 @@ async function mockOwnedApp(page, chatId) {
 }
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  const paintedChat = page.locator('[data-chat-surface="painted"]')
+  const input = paintedChat.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
-  await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 4000 })
+  await expect(paintedChat.locator('.chat__scroll')).toBeVisible({ timeout: 4000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))))
 }
@@ -123,9 +124,10 @@ async function persistMockedMessageOnReload(page, chat, text) {
 async function measure(page) {
   return page.evaluate(() => {
     const content = document.querySelector('.shell__content')
-    const chat = document.querySelector('.chat')
-    const scroll = document.querySelector('.chat__scroll')
-    const spacer = document.querySelector('.spacer-dynamic')
+    const surface = document.querySelector('[data-chat-surface="painted"]')
+    const chat = surface?.querySelector('.chat')
+    const scroll = surface?.querySelector('.chat__scroll')
+    const spacer = surface?.querySelector('.spacer-dynamic')
     return {
       contentH: content?.offsetHeight || 0,
       chatH: chat?.offsetHeight || 0,
@@ -204,12 +206,14 @@ async function toggleAndSamplePaneChrome(page) {
   })
 }
 
-async function seedTabs(page, tabs, { viewMode } = {}) {
-  // Two-worlds: the strip is builder chrome only. Builder ('panes', the default)
-  // ALWAYS shows it — even at one tab — and single-screen NEVER does; there is no
+async function seedTabs(page, tabs, { viewMode = 'panes' } = {}) {
+  // Two-worlds: the strip is builder chrome only. This helper opts into Builder
+  // by default because every caller except the explicit single-mode case is a
+  // strip contract; production first boot now intentionally defaults to Standard.
+  // Builder always shows it — even at one tab — and single-screen never does; there is no
   // single-mode strip contract left to seed.
   let ws = paneModel.seedFromFlatTabs(tabs)
-  if (viewMode) ws = paneModel.setViewMode(ws, viewMode)
+  ws = paneModel.setViewMode(ws, viewMode)
   const workspace = paneModel.serializeWorkspace(ws)
   await page.addInitScript(([workspaceKey, workspaceRaw, legacyKey, t]) => {
     try {
@@ -270,7 +274,8 @@ test.describe('Tabs', () => {
 
     // Tap the chat tab (the one that is NOT the app) — back to the chat.
     await page.getByRole('button', { name: chat.title, exact: true }).click()
-    await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toBeVisible({ timeout: 3000 })
 
     // Close the app tab — one fewer tab, and the strip STAYS: builder shows its
     // chrome even at a single tab (owner: "builder strip always visible").
@@ -361,7 +366,10 @@ test.describe('Tabs', () => {
     // (string id → Number()). Waiting between taps keeps the sequence
     // deterministic under multi-worker load.
     await page.getByRole('button', { name: chat.title, exact: true }).click()
-    await expect(page.locator('.chat__scroll, .chat__empty-wrap')).toBeVisible({ timeout: 3000 })
+    await expect(page.locator(
+      '[data-chat-surface="painted"] .chat__scroll, '
+      + '[data-chat-surface="painted"] .chat__empty-wrap',
+    )).toBeVisible({ timeout: 3000 })
     await page.locator('.shell__tab', { hasText: 'Demo App' }).locator('.shell__tab-open').click()
     await expect(page.locator('.shell__view--active')).toBeVisible({ timeout: 3000 })
     await page.waitForTimeout(400)
@@ -421,7 +429,7 @@ test.describe('Tabs', () => {
     await expect.poll(() => paneChromeDeltas(page)).toEqual(aligned)
 
     // Native chat content focuses its pane through wrapper capture.
-    await page.locator('.chat').dispatchEvent('pointerdown')
+    await page.locator('[data-chat-surface="painted"] .chat').dispatchEvent('pointerdown')
     await expect(page.locator('.workspace__strip--focused')).toContainText(chat.title)
 
     // Opaque iframe input uses the explicit frame-focus bridge.
@@ -449,6 +457,6 @@ test.describe('Tabs', () => {
     await page.locator('.workspace__strip', { hasText: 'Demo App' }).locator('.shell__tab-close').click()
     await expect(page.locator('.workspace__strip')).toHaveCount(0)
     await expect(page.locator('.shell__tabstrip')).toHaveCount(1)
-    await expect(page.locator('.chat')).toBeVisible()
+    await expect(page.locator('[data-chat-surface="painted"] .chat')).toBeVisible()
   })
 })

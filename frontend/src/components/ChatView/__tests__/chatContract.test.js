@@ -72,7 +72,7 @@ test('owner contract freezes question answers without locking keyboard movement'
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.10 \(2026-07-26\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.11 \(2026-07-27\)/)
   assert.match(
     architecture,
     /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,
@@ -88,6 +88,11 @@ test('owner contract freezes question answers without locking keyboard movement'
     /Viewport\/keyboard changes after question submission \| transient question anchor \| pre-submit unanswered-card mode/,
     'keyboard movement must return to the unanswered card baseline',
   )
+  assert.match(
+    architecture,
+    /Focused Q&A custom answer grows or its keyboard viewport changes \| ordinary hold \| current caret-visible `ANCHOR_AT`/,
+    'editing may adopt native caret movement without weakening stronger scroll modes',
+  )
 })
 
 test('a retained chat crosses the old unmount lifecycle while hidden', () => {
@@ -102,6 +107,23 @@ test('a retained chat crosses the old unmount lifecycle while hidden', () => {
     /if \(hidden\) return[\s\S]*?\}, \[chatId, loadNonce, hidden\]\)/,
     'hidden chats must disconnect and refresh history when they become visible again',
   )
+})
+
+test('an empty chat initializes scroll identity before its first transcript mounts', () => {
+  const scrollController = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
+  const layoutOwner = scrollController.indexOf('// Single layout effect:')
+  const identityReset = scrollController.indexOf(
+    'if (modeChatIdRef.current !== chatId)',
+    layoutOwner,
+  )
+  const missingSurfaceReturn = scrollController.indexOf(
+    'if (!scrollEl || !spacerEl) return',
+    layoutOwner,
+  )
+
+  assert.ok(layoutOwner >= 0 && identityReset > layoutOwner)
+  assert.ok(identityReset < missingSurfaceReturn,
+    'the empty-state early return must not defer chat identity until after the first send arms its pin')
 })
 
 test('snapshotChatUX derives the geometry fields from a clean pinned frame', () => {

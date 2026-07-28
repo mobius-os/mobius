@@ -584,6 +584,7 @@ def _sdk_imports() -> dict[str, Any]:
     ErrorNotification,
     FileChangePatchUpdatedNotification,
     FileChangeThreadItem,
+    ImageViewThreadItem,
     ItemCompletedNotification,
     ItemGuardianApprovalReviewCompletedNotification,
     ItemGuardianApprovalReviewStartedNotification,
@@ -593,11 +594,26 @@ def _sdk_imports() -> dict[str, Any]:
     ReasoningSummaryTextDeltaNotification,
     ReasoningTextDeltaNotification,
     ThreadTokenUsageUpdatedNotification,
+    ThreadItem,
+    ThreadTokenUsage,
+    TokenUsageBreakdown,
     TurnCompletedNotification,
     TurnStatus,
     WebSearchThreadItem,
   )
 
+  _enable_web_search_results_passthrough(
+    web_search_type=WebSearchThreadItem,
+    thread_item_type=ThreadItem,
+    started_notification_type=ItemStartedNotification,
+    completed_notification_type=ItemCompletedNotification,
+  )
+
+  _enable_cache_write_usage_passthrough(
+    breakdown_type=TokenUsageBreakdown,
+    thread_usage_type=ThreadTokenUsage,
+    notification_type=ThreadTokenUsageUpdatedNotification,
+  )
   # Multi-agent (collab) types exist only on multi-agent-capable SDKs (the
   # openai-codex multi_agent_v2 line). Import them defensively in their own
   # block so an SDK that predates them still boots — a missing type here must
@@ -661,6 +677,7 @@ def _sdk_imports() -> dict[str, Any]:
     "ErrorNotification": ErrorNotification,
     "FileChangePatchUpdatedNotification": FileChangePatchUpdatedNotification,
     "FileChangeThreadItem": FileChangeThreadItem,
+    "ImageViewThreadItem": ImageViewThreadItem,
     "ReasoningEffort": ReasoningEffort,
     "ReasoningSummary": ReasoningSummary,
     "Sandbox": Sandbox,
@@ -686,6 +703,61 @@ def _sdk_imports() -> dict[str, Any]:
     "TurnStatus": TurnStatus,
     "WebSearchThreadItem": WebSearchThreadItem,
   }
+
+
+def _enable_web_search_results_passthrough(
+  *,
+  web_search_type: Any,
+  thread_item_type: Any,
+  started_notification_type: Any,
+  completed_notification_type: Any,
+) -> None:
+  """Preserve structured search results during temporary SDK schema drift.
+
+  Codex app-server 0.145 emits ``webSearch.results`` and its Rust protocol plus
+  public app-server documentation declare the field. The generated Python SDK
+  at the same release still omits it and Pydantic silently drops the unknown
+  value before Möbius can turn URLs into source pills.
+
+  Keep extra fields only on this one leaf item, then rebuild the discriminated
+  union and its two notification envelopes. Once the generated type gains a
+  real ``results`` field this is a no-op and normal typed parsing takes over.
+  """
+  if "results" in getattr(web_search_type, "model_fields", {}):
+    return
+  if getattr(web_search_type, "model_config", {}).get("extra") == "allow":
+    return
+  from pydantic import ConfigDict
+
+  config = dict(getattr(web_search_type, "model_config", {}))
+  config["extra"] = "allow"
+  web_search_type.model_config = ConfigDict(**config)
+  web_search_type.model_rebuild(force=True)
+  thread_item_type.model_rebuild(force=True)
+  started_notification_type.model_rebuild(force=True)
+  completed_notification_type.model_rebuild(force=True)
+
+
+def _enable_cache_write_usage_passthrough(
+  *,
+  breakdown_type: Any,
+  thread_usage_type: Any,
+  notification_type: Any,
+) -> None:
+  """Preserve Codex's cache-write counter across generated SDK schema lag."""
+  field = "cache_write_input_tokens"
+  if field in getattr(breakdown_type, "model_fields", {}):
+    return
+  if getattr(breakdown_type, "model_config", {}).get("extra") == "allow":
+    return
+  from pydantic import ConfigDict
+
+  config = dict(getattr(breakdown_type, "model_config", {}))
+  config["extra"] = "allow"
+  breakdown_type.model_config = ConfigDict(**config)
+  breakdown_type.model_rebuild(force=True)
+  thread_usage_type.model_rebuild(force=True)
+  notification_type.model_rebuild(force=True)
 
 
 def _extract_rate_limit_reset(snapshot) -> tuple[int | None, bool]:
@@ -972,6 +1044,52 @@ def _record_private_lifecycle(bc: Any, event: dict[str, Any] | None) -> None:
     recorder(event)
 
 
+def _public_task_event(
+  lifecycle: dict[str, Any] | None,
+  *,
+  tool_use_id: str,
+) -> dict[str, Any] | None:
+  """Translate one provider-neutral lifecycle fact into the shared chip wire.
+
+  Durable Workflows attribution keeps the richer ``agent_lifecycle`` record.
+  The transcript needs only the same task_start/task_done contract Claude
+  already uses. An activation id, rather than a child thread id, is the public
+  task identity because Codex can resume one helper multiple times in a turn.
+  """
+  if not lifecycle:
+    return None
+  task_id = (
+    lifecycle.get("provider_activation_id")
+    or lifecycle.get("provider_agent_id")
+  )
+  if not task_id:
+    return None
+  event_type = lifecycle.get("event_type")
+  if event_type in ("agent_spawned", "agent_started"):
+    agent_type = str(lifecycle.get("agent_type") or "").strip()
+    return {
+      "type": "task_start",
+      "task_id": str(task_id),
+      "description": (
+        agent_type[:_COLLAB_DESCRIPTION_MAX] or "Background helper"
+      ),
+      "task_type": agent_type or None,
+      "tool_use_id": tool_use_id,
+    }
+  if event_type == "agent_terminal":
+    summary = lifecycle.get("summary")
+    return {
+      "type": "task_done",
+      "task_id": str(task_id),
+      "status": lifecycle.get("state") or "done",
+      "summary": (
+        str(summary)[:_COLLAB_SUMMARY_MAX] if summary is not None else None
+      ),
+      "tool_use_id": tool_use_id,
+    }
+  return None
+
+
 def _collab_reactivation_events(
   item: Any, sdk: dict[str, Any], *, root_thread_id: str | None,
   occurred_at: Any, active: dict[str, str], known: set[str],
@@ -1148,16 +1266,17 @@ async def _record_collab_child_links(
 
 def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   """Builds one Möbius `tool_start` event from a typed item."""
-  # The invariant is that Codex collab items are ordinary tool activity because
-  # the parent stream exposes no per-helper identity. RUNTIME REALITY (verified
-  # live on codex 0.144.5, gpt-5.6-sol delegating a sub-task): the SDK streams
-  # the collab tool ONLY as the `wait` op (a
-  # CollabAgentToolCallThreadItem, unwrapped at payload.item.root), whose
-  # ``receiver_thread_ids`` and ``agents_states`` are both EMPTY. The `Task`
-  # vocabulary folds this generic wait into ActivityStretch as "Working in the
-  # background" without falsely opening Claude's task lifecycle contract. The
-  # named child and its result remain the Workflows app parser's job via the
-  # forked child rollout's parent_thread_id.
+  image_view_cls = sdk.get("ImageViewThreadItem")
+  if image_view_cls is not None and isinstance(item, image_view_cls):
+    return {
+      "type": "tool_start",
+      "tool": "ViewImage",
+      "input": getattr(item, "path", ""),
+    }
+  # Standalone dispatch keeps collab items as ordinary Task activity. The live
+  # loop now groups all such items under one per-turn host and enriches it with
+  # ThreadStarted/ThreadStatus task events, avoiding duplicate Task rows while
+  # retaining this safe fallback for isolated callers and older SDKs.
   collab_cls = sdk.get("CollabAgentToolCallThreadItem")
   if collab_cls is not None and isinstance(item, collab_cls):
     return {
@@ -1221,10 +1340,12 @@ def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
 
 def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any]]:
   """Builds Möbius tool-end events from a completed typed item."""
-  # The invariant is that a Codex collab completion closes the ordinary tool
-  # activity opened by _tool_start_event and never manufactures task_done. The
-  # optional summary remains defensive for a future SDK that populates
-  # agents_states; it is always absent at runtime on codex 0.144.5.
+  image_view_cls = sdk.get("ImageViewThreadItem")
+  if image_view_cls is not None and isinstance(item, image_view_cls):
+    return [{"type": "tool_end"}]
+  # Standalone dispatch closes the ordinary Task activity above. The live loop
+  # owns its one per-turn host and bypasses this branch, publishing normalized
+  # task_done events from lifecycle notifications before closing that host.
   collab_cls = sdk.get("CollabAgentToolCallThreadItem")
   if collab_cls is not None and isinstance(item, collab_cls):
     events: list[dict[str, Any]] = []
@@ -1931,12 +2052,10 @@ async def run_codex_sdk_turn(
     )
     model = DEFAULT_MODELS["codex"]
 
-  # Reasoning effort — Codex's `ReasoningEffort` enum accepts
-  # none/minimal/low/medium/high/xhigh; the Möbius picker exposes the
-  # last four. Pass through the string and let the SDK convert; if the
-  # value is unknown (e.g. a future picker addition the SDK doesn't
-  # yet accept), surface the SDK's error rather than silently dropping
-  # the choice.
+  # Reasoning effort comes from Codex's live per-model catalog. The generated
+  # enum implements `_missing_`, so newer wire values such as max/ultra survive
+  # even before codegen grows named members. Pass through the string and let
+  # the SDK convert; a genuinely invalid value degrades to the model default.
   effort_str = agent_settings.get("effort")
   effort = None
   if effort_str:
@@ -2006,7 +2125,11 @@ async def run_codex_sdk_turn(
   completed_message_phases: list[str | None] = []
   first_token_usage: Any | None = None
   final_token_usage: Any | None = None
+  call_token_usages: list[Any] = []
   process_group_id: int | None = None
+  task_host_open = False
+  task_host_tool_use_id: str | None = None
+  public_task_ids: set[str] = set()
   codex_context = sdk["AsyncCodex"](config=config)
   process_group_capture_stop: asyncio.Event | None = None
   process_group_capture_task: asyncio.Task[int | None] | None = None
@@ -2043,7 +2166,11 @@ async def run_codex_sdk_turn(
     """Attaches whatever the turn spent before it ended, however it ended."""
     if final_token_usage is not None:
       result["usage"] = _model_dump(final_token_usage)
-      metrics = normalize_codex_usage(first_token_usage, final_token_usage)
+      metrics = normalize_codex_usage(
+        first_token_usage,
+        final_token_usage,
+        call_token_usages,
+      )
       result["usage_metrics"] = metrics
       # Codex reports tokens but no dollar cost; derive it from the rate card so
       # a Codex chat records real spend like a Claude chat instead of always
@@ -2248,6 +2375,39 @@ async def run_codex_sdk_turn(
       last_activation_by_child: dict[str, str] = {}
       activation_by_call_child: dict[tuple[str, str], str] = {}
       activation_counts: dict[str, int] = {}
+      task_host_tool_use_id = (
+        f"codex-agents:{getattr(turn, 'id', None) or id(turn)}"
+      )
+
+      def ensure_task_host() -> None:
+        nonlocal task_host_open
+        if task_host_open:
+          return
+        bc.publish({
+          "type": "tool_start",
+          "tool": "Task",
+          "input": "Working in the background",
+          "tool_use_id": task_host_tool_use_id,
+        })
+        task_host_open = True
+
+      def record_task_lifecycle(
+        lifecycle: dict[str, Any] | None,
+      ) -> None:
+        _record_private_lifecycle(bc, lifecycle)
+        event = _public_task_event(
+          lifecycle,
+          tool_use_id=task_host_tool_use_id,
+        )
+        if event is None:
+          return
+        ensure_task_host()
+        task_id = str(event["task_id"])
+        if event["type"] == "task_start":
+          public_task_ids.add(task_id)
+        else:
+          public_task_ids.discard(task_id)
+        bc.publish(event)
 
       # Structured rate-limit state, mirroring the Claude runner. Captured from
       # AccountRateLimitsUpdatedNotification during the turn so a Codex quota
@@ -2306,10 +2466,18 @@ async def run_codex_sdk_turn(
           if isinstance(item, sdk["AgentMessageThreadItem"]):
             bc.publish({"type": "text_boundary"})
             continue
-          event = _tool_start_event(item, sdk)
-          if event is not None:
-            _stamp_tool_use_id(event, item)
-            bc.publish(event)
+          collab_cls = sdk.get("CollabAgentToolCallThreadItem")
+          if collab_cls is not None and isinstance(item, collab_cls):
+            # One provider-neutral Task block hosts every helper activation in
+            # this turn. Codex may announce ThreadStarted before or after its
+            # collab item, so opening it here is a fallback while the lifecycle
+            # path below can also open it on demand.
+            ensure_task_host()
+          else:
+            event = _tool_start_event(item, sdk)
+            if event is not None:
+              _stamp_tool_use_id(event, item)
+              bc.publish(event)
           _observe_skill_reads(item, sdk, bc=bc, chat_id=chat_id)
           # A spawn's child thread ids first appear on its collab item; record
           # the session->chat link now so the child rollout stays attributed
@@ -2322,7 +2490,7 @@ async def run_codex_sdk_turn(
             activation_by_call_child=activation_by_call_child,
             last_activation_by_child=last_activation_by_child,
           ):
-            _record_private_lifecycle(bc, lifecycle)
+            record_task_lifecycle(lifecycle)
           child_id = str(getattr(item, "agent_thread_id", None) or "")
           kind = getattr(getattr(item, "kind", None), "value", None)
           kind = kind or str(getattr(item, "kind", ""))
@@ -2338,7 +2506,7 @@ async def run_codex_sdk_turn(
             occurred_at=getattr(payload, "started_at_ms", None),
             provider_activation_id=activation,
           )
-          _record_private_lifecycle(bc, lifecycle)
+          record_task_lifecycle(lifecycle)
           if lifecycle is not None and lifecycle.get("event_type") == "agent_terminal":
             activation = str(lifecycle.get("provider_activation_id") or "")
             if activation:
@@ -2359,9 +2527,11 @@ async def run_codex_sdk_turn(
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
           if isinstance(item, sdk["AgentMessageThreadItem"]):
             completed_message_phases.append(_agent_message_phase(item, sdk))
-          for event in _tool_completed_events(item, sdk):
-            _stamp_tool_use_id(event, item)
-            bc.publish(event)
+          collab_cls = sdk.get("CollabAgentToolCallThreadItem")
+          if collab_cls is None or not isinstance(item, collab_cls):
+            for event in _tool_completed_events(item, sdk):
+              _stamp_tool_use_id(event, item)
+              bc.publish(event)
           # Also record child links here (idempotent) in case receiver_thread_ids
           # only populates on completion — a missed link silently loses the
           # attribution this recording exists to provide.
@@ -2373,13 +2543,23 @@ async def run_codex_sdk_turn(
             activation_by_call_child=activation_by_call_child,
             last_activation_by_child=last_activation_by_child,
           ):
-            _record_private_lifecycle(bc, lifecycle)
+            record_task_lifecycle(lifecycle)
           continue
 
         if isinstance(payload, sdk["ThreadTokenUsageUpdatedNotification"]):
           if first_token_usage is None:
             first_token_usage = payload.token_usage
           final_token_usage = payload.token_usage
+          # ``last`` is the exact upstream Responses completion. Attribute only
+          # notifications owned by this turn so a resume-time replay from an
+          # earlier turn cannot be charged again.
+          if (
+            str(getattr(payload, "turn_id", ""))
+            == str(getattr(turn, "id", ""))
+          ):
+            call_token_usages.append(
+              getattr(payload.token_usage, "last", None)
+            )
           continue
 
         if isinstance(
@@ -2433,12 +2613,12 @@ async def run_codex_sdk_turn(
             )
             last_activation_by_child[child_id] = activation
             lifecycle["provider_activation_id"] = activation
-            _record_private_lifecycle(bc, lifecycle)
+            record_task_lifecycle(lifecycle)
           continue
 
         status_cls = sdk.get("ThreadStatusChangedNotification")
         if status_cls is not None and isinstance(payload, status_cls):
-          _record_private_lifecycle(bc, _thread_status_lifecycle_event(
+          record_task_lifecycle(_thread_status_lifecycle_event(
             payload, root_thread_id=current_session_id,
             active=active_activation_by_child, known=known_child_ids,
             activation_counts=activation_counts,
@@ -2532,6 +2712,21 @@ async def run_codex_sdk_turn(
       "error": str(exc),
     })
   finally:
+    if task_host_open and task_host_tool_use_id is not None:
+      # A provider error/interrupt may skip terminal child notifications.
+      # Close every still-live chip honestly before closing its Task host.
+      for task_id in sorted(public_task_ids):
+        bc.publish({
+          "type": "task_done",
+          "task_id": task_id,
+          "status": "stopped",
+          "summary": None,
+          "tool_use_id": task_host_tool_use_id,
+        })
+      bc.publish({
+        "type": "tool_end",
+        "tool_use_id": task_host_tool_use_id,
+      })
     deferred_cancel: asyncio.CancelledError | None = None
     if process_group_capture_stop is not None:
       process_group_capture_stop.set()

@@ -1,0 +1,120 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  BUILDER_CHAT_WORLD,
+  STANDARD_CHAT_WORLD,
+  chatSurfaceKey,
+  deriveChatSurfaceLayers,
+  deriveChatSurfaceOwners,
+} from '../chatSurfaceModel.js'
+import { SINGLE_SLOT_PANE } from '../paneModel.js'
+
+function workspace({ slot = 'a', left = 'a', right = 'b' } = {}) {
+  return {
+    singleScreen: slot == null ? null : { kind: 'chat', id: slot },
+    panes: {
+      left: {
+        activeTabKey: `chat:${left}`,
+        tabs: [{ kind: 'chat', id: left }],
+      },
+      right: {
+        activeTabKey: `chat:${right}`,
+        tabs: [{ kind: 'chat', id: right }],
+      },
+    },
+  }
+}
+
+const projection = { visibleLeaves: ['left', 'right'] }
+
+test('a legacy absent slot retains the focused chat in the Standard world immediately', () => {
+  const legacy = workspace()
+  legacy.focusedPaneId = 'right'
+  delete legacy.singleScreen
+
+  const owners = deriveChatSurfaceOwners({
+    workspace: legacy,
+    baseProjection: projection,
+    projection,
+  })
+
+  assert.ok(owners.some(owner => (
+    owner.world === STANDARD_CHAT_WORLD
+      && owner.paneId === SINGLE_SLOT_PANE
+      && owner.chatId === 'b'
+  )))
+})
+
+test('an explicit null slot remains the New Chat landing', () => {
+  const owners = deriveChatSurfaceOwners({
+    workspace: workspace({ slot: null }),
+    baseProjection: projection,
+    projection,
+  })
+
+  assert.equal(
+    owners.some(owner => owner.world === STANDARD_CHAT_WORLD),
+    false,
+  )
+})
+
+test('the same chat gets independent Standard and Builder surface owners', () => {
+  const owners = deriveChatSurfaceOwners({
+    workspace: workspace(),
+    baseProjection: projection,
+    projection,
+  })
+
+  const chatA = owners.filter(owner => String(owner.chatId) === 'a')
+  assert.equal(chatA.length, 2)
+  assert.deepEqual(
+    new Set(chatA.map(owner => owner.world)),
+    new Set([STANDARD_CHAT_WORLD, BUILDER_CHAT_WORLD]),
+  )
+  assert.equal(
+    chatA.find(owner => owner.world === STANDARD_CHAT_WORLD).paneId,
+    SINGLE_SLOT_PANE,
+  )
+  assert.notEqual(chatA[0].surfaceKey, chatA[1].surfaceKey)
+})
+
+test('a Builder chat keeps its surface key when its tab moves panes', () => {
+  const before = deriveChatSurfaceOwners({
+    workspace: workspace(),
+    baseProjection: projection,
+    projection,
+  }).find(owner => owner.world === BUILDER_CHAT_WORLD && owner.chatId === 'a')
+
+  const movedWorkspace = workspace({ left: 'b', right: 'a' })
+  const after = deriveChatSurfaceOwners({
+    workspace: movedWorkspace,
+    baseProjection: projection,
+    projection,
+  }).find(owner => owner.world === BUILDER_CHAT_WORLD && owner.chatId === 'a')
+
+  assert.equal(before.surfaceKey, chatSurfaceKey(BUILDER_CHAT_WORLD, 'a'))
+  assert.equal(after.surfaceKey, before.surfaceKey)
+  assert.notEqual(after.paneId, before.paneId)
+})
+
+test('a Standard duplicate does not suppress Builder chat handoff coverage', () => {
+  const owners = deriveChatSurfaceOwners({
+    workspace: workspace({ slot: 'a', left: 'b', right: 'c' }),
+    baseProjection: projection,
+    projection,
+  })
+  const presented = new Map([['left', 'a']])
+  const layers = deriveChatSurfaceLayers(owners, presented)
+
+  assert.ok(layers.some(layer => (
+    layer.world === BUILDER_CHAT_WORLD
+      && layer.chatId === 'a'
+      && layer.role === 'held'
+  )))
+  assert.ok(layers.some(layer => (
+    layer.world === STANDARD_CHAT_WORLD
+      && layer.chatId === 'a'
+      && layer.role === 'active'
+  )))
+})

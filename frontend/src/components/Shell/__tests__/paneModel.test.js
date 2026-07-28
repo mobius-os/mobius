@@ -1137,6 +1137,36 @@ test('CLOSE_PANE closes a whole pane, is undoable, and names itself', () => {
   assert.equal(undone.ws, ws, 'Undo restores the closed pane and its tabs')
 })
 
+test('CLOSE_OTHER_TABS keeps only the clicked tab, is undoable, and names itself', () => {
+  const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('app', 42), makeTab('chat', 'c')])
+  const paneId = ws.focusedPaneId
+  const start = paneModel.initialWorkspaceState(ws)
+  const closed = paneModel.workspaceReducer(start, { type: 'CLOSE_OTHER_TABS', tabKey: 'app:42' })
+  assert.deepEqual(closed.ws.panes[paneId].tabs.map(tabKey), ['app:42'], 'only the kept tab survives')
+  assert.equal(closed.ws.panes[paneId].activeTabKey, 'app:42', 'the kept tab becomes active')
+  assert.equal(closed.undo.toast, 'Closed other tabs')
+  const undone = paneModel.workspaceReducer(closed, { type: 'UNDO_LAST' })
+  assert.equal(undone.ws, ws, 'Undo restores every closed sibling at once')
+  // Already alone or unknown tab: same reference — no undo slot burned.
+  assert.equal(paneModel.workspaceReducer(closed, { type: 'CLOSE_OTHER_TABS', tabKey: 'app:42' }), closed)
+  assert.equal(paneModel.closeOtherTabs(ws, 'chat:nope'), ws)
+})
+
+test('CLOSE_OTHER_TABS is pane-scoped — a sibling pane keeps its tabs', () => {
+  let ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')])
+  const leftPane = ws.focusedPaneId
+  ws = paneModel.splitPaneWithTab(ws, makeTab('app', 42), { paneId: leftPane, edge: 'right' })
+  const closed = paneModel.workspaceReducer(
+    paneModel.initialWorkspaceState(ws),
+    { type: 'CLOSE_OTHER_TABS', tabKey: 'chat:a' },
+  )
+  assert.deepEqual(closed.ws.panes[leftPane].tabs.map(tabKey), ['chat:a'])
+  assert.ok(
+    paneModel.flatten(closed.ws).map(tabKey).includes('app:42'),
+    'the other pane is untouched',
+  )
+})
+
 test('reducer APPLY_PLACEMENT composes batched dispatches instead of clobbering', () => {
   // The former bug: two placements resolved against the same stale render
   // snapshot, so the second REPLACED the first. A resolve function run against
@@ -1472,4 +1502,89 @@ test('reconcileRoutePanes returns the SAME array when nothing changed', () => {
   const bPane = paneModel.paneOf(ws, 'chat:b').id
   const routes = [{ view: 'chat', chatId: 'b', appId: null, paneId: bPane }] // already correct
   assert.equal(paneModel.reconcileRoutePanes(routes, ws, ws), routes)
+})
+
+// ── Maximized-pane ("full-screen pane") persistence (survives apply-on-idle reload)
+
+// A storage stub with removeItem so the clear-on-null path is exercised.
+function focusStorage(initial = null) {
+  let value = initial
+  return {
+    getItem: () => value,
+    setItem: (_k, v) => { value = String(v) },
+    removeItem: () => { value = null },
+    peek: () => value,
+  }
+}
+
+const maxPaneWs = (focusedPaneId = 'p1') => ({
+  viewMode: 'panes',
+  panes: { p0: {}, p1: {} },
+  focusedPaneId,
+})
+
+test('resolveInitialFocusedPaneView restores a valid maximized pane', () => {
+  assert.equal(
+    paneModel.resolveInitialFocusedPaneView(maxPaneWs('p1'), 'p1'), 'p1',
+    'a multi-pane panes-world with the stored id === focusedPaneId restores the maximize',
+  )
+})
+
+test('resolveInitialFocusedPaneView returns null for a single-pane workspace', () => {
+  const ws = { viewMode: 'panes', panes: { p0: {} }, focusedPaneId: 'p0' }
+  assert.equal(paneModel.resolveInitialFocusedPaneView(ws, 'p0'), null)
+})
+
+test('resolveInitialFocusedPaneView returns null in single (Standard) viewMode', () => {
+  assert.equal(
+    paneModel.resolveInitialFocusedPaneView({ ...maxPaneWs('p1'), viewMode: 'single' }, 'p1'),
+    null, 'single mode has no maximize presentation to restore',
+  )
+})
+
+test('resolveInitialFocusedPaneView returns null for a vanished pane id', () => {
+  assert.equal(paneModel.resolveInitialFocusedPaneView(maxPaneWs('p1'), 'p9'), null)
+})
+
+test('resolveInitialFocusedPaneView enforces the id === focusedPaneId lockstep', () => {
+  // p0 exists but is NOT the focused pane; restoring it would maximize one pane's
+  // rectangle while a different pane's content is active. Reject it.
+  assert.equal(paneModel.resolveInitialFocusedPaneView(maxPaneWs('p1'), 'p0'), null)
+})
+
+test('resolveInitialFocusedPaneView returns null when nothing was stored', () => {
+  assert.equal(paneModel.resolveInitialFocusedPaneView(maxPaneWs('p1'), null), null)
+})
+
+test('writeFocusedPaneView round-trips through readFocusedPaneView and clears on null', () => {
+  const storage = focusStorage()
+  paneModel.writeFocusedPaneView('p1', storage)
+  assert.equal(paneModel.readFocusedPaneView(storage), 'p1', 'a maximize persists')
+  paneModel.writeFocusedPaneView(null, storage)
+  assert.equal(paneModel.readFocusedPaneView(storage), null, 'un-maximizing removes the key')
+  assert.equal(storage.peek(), null, 'the key is removed, not left stale')
+})
+
+test('readFocusedPaneView is forgiving of a throwing storage', () => {
+  const throwing = { getItem: () => { throw new Error('SecurityError') } }
+  assert.equal(paneModel.readFocusedPaneView(throwing), null)
+})
+
+test('resolveInitialFocusedPaneView round-trips a real maximized 2-pane workspace', () => {
+  // Build a genuine 2-pane workspace through the model, focus the second pane
+  // (what toggleFocusedPaneView does before maximizing), persist + restore.
+  const seeded = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('chat', 'b')]),
+    'panes',
+  )
+  const split = paneModel.moveTab(seeded, 'chat:b', { paneId: 'p0', edge: 'right' })
+  const bPane = paneModel.paneOf(split, 'chat:b').id
+  const focused = paneModel.workspaceReducer({ ws: split }, { type: 'FOCUS', paneId: bPane }).ws
+  const storage = focusStorage()
+  paneModel.writeFocusedPaneView(bPane, storage)
+  const restored = paneModel.resolveInitialFocusedPaneView(
+    paneModel.parseWorkspace(paneModel.serializeWorkspace(focused)),
+    paneModel.readFocusedPaneView(storage),
+  )
+  assert.equal(restored, bPane, 'a maximized pane survives a serialize→parse→resolve round-trip')
 })

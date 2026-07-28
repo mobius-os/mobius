@@ -27,11 +27,11 @@ const NAV_CHATS = [
   run_status: null,
 }))
 
-function navChatDetail(id) {
+function navChatDetail(id, assistantContent = 'Fixture response') {
   return {
     messages: [
       { role: 'user', content: `Open ${id}`, ts: 1700000000000, blocks: [] },
-      { role: 'assistant', content: 'Fixture response', ts: 1700000000001, blocks: [] },
+      { role: 'assistant', content: assistantContent, ts: 1700000000001, blocks: [] },
     ],
     total: 2,
     offset: 0,
@@ -51,7 +51,11 @@ async function navigateToSettings(page) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function setup(page, viewport = { width: 412, height: 915 }) {
+async function setup(
+  page,
+  viewport = { width: 412, height: 915 },
+  { assistantContent = 'Fixture response' } = {},
+) {
   await page.setViewportSize(viewport)
 
   // Navigation is a client-side contract. Seed an explicit active chat and
@@ -74,9 +78,14 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(navChatDetail(id)),
+      body: JSON.stringify(navChatDetail(id, assistantContent)),
     })
   })
+  await page.route('**/test-image.svg', route => route.fulfill({
+    status: 200,
+    contentType: 'image/svg+xml',
+    body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="60"><rect width="80" height="60" fill="#567"/></svg>',
+  }))
 
   // Intercept agent routes.
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
@@ -101,8 +110,9 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 /** Read the current navigation state from the app. */
 async function getNavState(page) {
   return page.evaluate(() => {
-    const chatScroll = document.querySelector('.chat__scroll')
-    const emptyWrap = document.querySelector('.chat__empty-wrap')
+    const painted = document.querySelector('[data-chat-surface="painted"]')
+    const chatScroll = painted?.querySelector('.chat__scroll')
+    const emptyWrap = painted?.querySelector('.chat__empty-wrap')
     const canvas = document.querySelector('.canvas')
     const drawer = document.querySelector('.drawer')
 
@@ -118,23 +128,19 @@ async function getNavState(page) {
 
 /** Navigate to a chat by clicking in the drawer. */
 async function navigateToChat(page, index = 0) {
-  const clicked = await page.evaluate((idx) => {
-    const chats = document.querySelector('.drawer__group--chats')
-    const items = chats?.querySelectorAll('.drawer__item') || []
-    const chatItems = Array.from(items).filter(el =>
-      el.querySelector('.drawer__item-text') && !el.classList.contains('drawer__item--new')
-    )
-    const target = chatItems[idx] || document.querySelector('.drawer__item--new')
-    if (!target) return false
-    target.click()
-    return true
-  }, index)
-  if (!clicked) throw new Error('No chat row or New chat button found in drawer')
+  const expectedChat = NAV_CHATS[index]
+  if (!expectedChat) throw new Error(`No navigation fixture at index ${index}`)
+
+  const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+  const target = navigation.getByRole('button', { name: expectedChat.title, exact: true })
+  await target.click()
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+    .toBe(expectedChat.id)
   await page.waitForFunction(
     () => !document.querySelector('.settings')
-      && !!(document.querySelector('.chat__empty-wrap')
-        || document.querySelector('.chat__scroll')
-        || document.querySelector('.chat__form')),
+      && !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+        || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 8000 }
   )
 }
@@ -192,12 +198,15 @@ async function closeDrawerToggle(page) {
  *  which triggers a real page navigation. */
 async function goBack(page) {
   await page.evaluate(() => history.back())
-  await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+  // Wait from the test runner, not the page's old execution context: the assertion
+  // below should report an accidental document navigation as the product failure,
+  // rather than this helper racing the context swap with a second evaluate().
+  await page.waitForTimeout(500)
 }
 
 async function goForward(page) {
   await page.evaluate(() => history.forward())
-  await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+  await page.waitForTimeout(500)
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +268,26 @@ test.describe('Navigation basics', () => {
     expect(end.drawerOpen).toBe(false)
     expect(end.activeChatId).toBe(start.activeChatId)
     expect(end.hasChat).toBe(true)
+  })
+
+  test('chat image preview consumes Back without leaving the chat', async ({ page }) => {
+    await setup(page, { width: 412, height: 915 }, {
+      assistantContent: '![Navigation preview](/test-image.svg)',
+    })
+    const initial = await getNavState(page)
+    const image = page.locator('[data-chat-surface="painted"] .md-image-frame')
+    await expect(image).toBeEnabled()
+
+    await image.click()
+    await expect(page.getByRole('dialog', { name: 'Navigation preview' })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => history.state?.kind)).toBe('dismissible')
+
+    await goBack(page)
+
+    await expect(page.getByRole('dialog', { name: 'Navigation preview' })).toHaveCount(0)
+    const afterBack = await getNavState(page)
+    expect(afterBack.hasChat).toBe(true)
+    expect(afterBack.activeChatId).toBe(initial.activeChatId)
   })
 
   test('4. Navigate chat -> app -> back returns to chat', async ({ page }) => {
@@ -550,7 +579,11 @@ test.describe('Back button edge cases', () => {
     expect((await getNavState(page)).url).toBe('/shell/')
 
     await openDrawer(page)
-    await navigateToChat(page, 0)
+    // Move to a different chat so this test creates a real navigation entry. Opening
+    // and selecting the already-active row only consumes the drawer sentinel; a
+    // subsequent Back would correctly leave the app because there is no chat route
+    // to return to.
+    await navigateToChat(page, 1)
     expect((await getNavState(page)).url).toBe('/shell/')
 
     await goBack(page)
@@ -1422,6 +1455,7 @@ function twoAppPanes() {
   let ws = paneModel.seedFromFlatTabs([
     { kind: 'app', id: PANE_APP_A }, { kind: 'app', id: PANE_APP_B },
   ])
+  ws = paneModel.setViewMode(ws, 'panes')
   ws = paneModel.moveTab(ws, `app:${PANE_APP_B}`, { root: true, edge: 'right' })
   return paneModel.focusPane(ws, 'p0')
 }

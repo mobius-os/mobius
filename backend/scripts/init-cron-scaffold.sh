@@ -107,8 +107,15 @@ JOB_PATH="${APP_DIR}/${JOB_NAME}"
 INIT_PATH="${APP_DIR}/init-cron.sh"
 # The command cron runs. Managed apps enter through the same supervised wrapper
 # as the Run now API, giving uninstall one revocable process-group lease.
+# Cron starts jobs with a minimal environment, so the installer passes both the
+# configured backend URL and the currently active supervisor path here. Quote
+# each assignment for the command shell rather than relying on cron defaults.
+JOB_API_BASE_URL="${API_BASE_URL:-http://localhost:8000}"
+JOB_RUNNER="${MOBIUS_APP_JOB_RUNNER:-/app/scripts/app-job-runner.py}"
+JOB_API_BASE_ASSIGNMENT="API_BASE_URL=$(printf '%q' "$JOB_API_BASE_URL")"
+JOB_RUNNER_ARG="$(printf '%q' "$JOB_RUNNER")"
 if [ -n "$APP_ID" ]; then
-  CRON_CMD="python3 /app/scripts/app-job-runner.py ${APP_ID} ${JOB_PATH}"
+  CRON_CMD="${JOB_API_BASE_ASSIGNMENT} python3 ${JOB_RUNNER_ARG} ${APP_ID} ${JOB_PATH}"
 else
   CRON_CMD="${JOB_PATH}"
 fi

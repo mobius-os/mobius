@@ -437,6 +437,10 @@ def test_notify_body_type_validator_rejects_unknown():
   """NotifyBody rejects unknown system-event types."""
   assert NotifyBody(type="app_build_failed").type == "app_build_failed"
   assert NotifyBody(type="app_update_stale").type == "app_update_stale"
+  preview = NotifyBody(
+    type="app_preview_ready", appId="7", chatId="building-chat",
+  )
+  assert preview.chatId == "building-chat"
   try:
     NotifyBody(type="bogus")
   except ValidationError:
@@ -448,8 +452,8 @@ def test_notify_body_type_validator_rejects_unknown():
 # --- Single-bus routing: catch-up-safe fan-out vs system-bus-only -------
 #
 # The built-app CTA remains derived from the apps query's chat_id + updated_at.
-# First placement is additionally triggered by the system-bus-only app_created
-# lifecycle event, while app_updated remains the catch-up-safe recompile signal.
+# Workspace reveal is triggered by the system-bus-only app_preview_ready action,
+# while app_created/app_updated remain lifecycle and recompile signals.
 # What matters here is which events fan out to per-chat broadcasts and which
 # ride the system bus alone.
 
@@ -476,6 +480,37 @@ async def test_notify_app_updated_fans_out_to_live_chat_broadcast(client, auth):
   finally:
     sb.unsubscribe(q_sys)
     bc_mod.remove_broadcast("live-chat")
+
+@pytest.mark.asyncio
+async def test_notify_app_preview_ready_is_system_bus_only(client, auth):
+  """A live-preview action is delivered once and carries the requesting chat."""
+  chat = bc_mod.create_broadcast("preview-building-chat")
+  q_chat = chat.subscribe()[1]
+  sb = get_system_broadcast()
+  q_sys = sb.subscribe()
+  try:
+    r = client.post(
+      "/api/notify", headers=auth,
+      json={
+        "type": "app_preview_ready",
+        "appId": "42",
+        "chatId": "preview-building-chat",
+      },
+    )
+    assert r.status_code == 204, r.text
+    assert await asyncio.wait_for(q_sys.get(), timeout=1.0) == {
+      "type": "app_preview_ready",
+      "appId": "42",
+      "chatId": "preview-building-chat",
+    }
+    assert all(
+      e.get("type") != "app_preview_ready" for e in chat.event_log
+    ), chat.event_log
+    with pytest.raises(asyncio.TimeoutError):
+      await asyncio.wait_for(q_chat.get(), timeout=0.2)
+  finally:
+    sb.unsubscribe(q_sys)
+    bc_mod.remove_broadcast("preview-building-chat")
 
 
 @pytest.mark.asyncio

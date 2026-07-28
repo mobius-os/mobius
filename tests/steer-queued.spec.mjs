@@ -150,12 +150,12 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
 
     // First send → starts the (held-open) turn. Stop button = streaming.
     await sendMessage(page, 'first message')
-    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
 
     // Queue a second message while streaming.
     await sendMessage(page, QUEUED_TEXT)
     await page.waitForFunction(
-      (t) => Array.from(document.querySelectorAll('.queued__text'))
+      (t) => Array.from(document.querySelectorAll('[data-chat-surface="painted"] .queued__text'))
         .some(el => el.textContent?.includes(t)),
       QUEUED_TEXT,
       { timeout: 5000 },
@@ -167,7 +167,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
     // Stop must be gone while steer is showing (the slot swaps, not stacks).
-    await expect(page.locator('.chat__stop')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toHaveCount(0)
 
     // (b) Press it → expect a force_steer POST with the exact payload.
     await steerBtn.click()
@@ -189,10 +189,10 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     // (c) The tray clears on {status:"steered"} (steered rows now render
     // inline via the steered_into_turn event; tray drops them).
     await page.waitForFunction(
-      () => document.querySelectorAll('.queued__row').length === 0,
+      () => document.querySelectorAll('[data-chat-surface="painted"] .queued__row').length === 0,
       { timeout: 5000 },
     )
-    expect(await page.locator('.queued__row').count()).toBe(0)
+    expect(await page.locator('[data-chat-surface="painted"] .queued__row').count()).toBe(0)
   })
 
   test('Ctrl+Enter sends one direct-steer request without rendering a queue row', async ({ page }) => {
@@ -273,7 +273,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await setupChat(page)
     await newChat(page)
     await sendMessage(page, 'first message')
-    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
 
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill(STEER_TEXT)
@@ -281,7 +281,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await expect.poll(() => messagePosts.filter(body => (
       body.direct_steer && body.content === STEER_TEXT
     )).length).toBe(1)
-    await expect(page.locator('.queued__row')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toHaveCount(0)
 
     await page.keyboard.press('Control+Enter')
     await page.waitForTimeout(100)
@@ -299,7 +299,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(messagePosts.filter(body => (
       body.content === STEER_TEXT
     ))).toHaveLength(1)
-    await expect(page.locator('.queued__row')).toHaveCount(0, { timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toHaveCount(0, { timeout: 5000 })
   })
 
   test('two queued messages steer with the exact "\\n\\n"-joined content', async ({ page }) => {
@@ -362,13 +362,13 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await setupChat(page)
     await newChat(page)
     await sendMessage(page, 'first message')
-    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
 
     await sendMessage(page, TEXT1)
     await sendMessage(page, TEXT2)
     // Wait for both rows queued + both server-confirmed (steer button shows).
     await page.waitForFunction(
-      () => document.querySelectorAll('.queued__row').length === 2,
+      () => document.querySelectorAll('[data-chat-surface="painted"] .queued__row').length === 2,
       { timeout: 5000 },
     )
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
@@ -456,7 +456,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await setupChat(page)
     await newChat(page)
     await sendMessage(page, 'first message')
-    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
     await sendMessage(page, TEXT1)
     await sendMessage(page, TEXT2)
 
@@ -477,9 +477,9 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(steerPost.consume_pending_cids).toEqual([firstQueuePost.cid])
     expect(steerPost.content).toBe(TEXT1)
 
-    await expect(page.locator('.queued__row')).toHaveCount(1, { timeout: 5000 })
-    await expect(page.locator('.queued__row')).toContainText(TEXT2)
-    await expect(page.locator('.queued__row')).not.toContainText(TEXT1)
+    await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toHaveCount(1, { timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toContainText(TEXT2)
+    await expect(page.locator('[data-chat-surface="painted"] .queued__row')).not.toContainText(TEXT1)
   })
 
   test('a steer while reading above the tail preserves the live stream and held position', async ({ page }) => {
@@ -645,21 +645,21 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       })
     })
     await page.goto(`${BASE}/shell/chat/${chat.id}`, { waitUntil: 'domcontentloaded' })
-    await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 
     await sendMessage(page, 'first message')
     // A real stream cannot replay assistant output from this turn before the
     // POST has persisted and acknowledged its canonical user row. Holding the
     // mock's initial catch-up burst until that row renders keeps the fixture
     // faithful to that ordering instead of manufacturing a pre-ack replay.
-    await expect(page.locator('.chat__msg--user')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user')).toBeVisible({ timeout: 5000 })
     await page.evaluate(() => {
       const mock = window.__steerQueuedStreamMock
       if (!mock) return
       mock.initialRequested = true
       mock.emitInitial?.()
     })
-    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
     // The pre-steer assistant text streams in.
     await page.waitForFunction(
       (t) => document.body.textContent?.includes(t),
@@ -673,9 +673,9 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     // would disappear during promotion and test a browser clamp instead of the
     // steer anchor contract.
     await page.evaluate(() => {
-      const scroll = document.querySelector('.chat__scroll')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!scroll) return
-      const firstUser = document.querySelector('.chat__msg--user')
+      const firstUser = document.querySelector('[data-chat-surface="painted"] .chat__msg--user')
       if (firstUser) firstUser.style.paddingBottom = '1600px'
       scroll.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
       scroll.scrollTop = Math.floor(scroll.scrollHeight / 3)
@@ -687,8 +687,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
     const heldBeforeSteer = await page.evaluate(() => {
-      const scroll = document.querySelector('.chat__scroll')
-      const firstUser = document.querySelector('.chat__msg--user')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const firstUser = document.querySelector('[data-chat-surface="painted"] .chat__msg--user')
       if (!scroll || !firstUser) return null
       return {
         scrollTop: scroll.scrollTop,
@@ -732,8 +732,8 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       { timeout: 5000 },
     )
     const heldAfterSteer = await page.evaluate((anchorKey) => {
-      const scroll = document.querySelector('.chat__scroll')
-      const users = document.querySelectorAll('.chat__msg--user')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const users = document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--user')
       if (!scroll || users.length < 2) return null
       const scrollTop = scroll.getBoundingClientRect().top
       const heldUser = Array.from(users).find(el => el.dataset.key === anchorKey)

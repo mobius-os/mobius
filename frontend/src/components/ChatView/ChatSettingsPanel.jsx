@@ -797,7 +797,12 @@ export default function ChatSettingsPanel({
                     efforts={rowEfforts}
                     value={draftEffort}
                     onChange={handleEffortChange}
-                    disabled={saving || switchBusy || !providerConfigured}
+                    // Effort writes are optimistic and latest-request-wins, so
+                    // keep the shared control visually stable and available
+                    // while a save settles. Provider/model changes still lock
+                    // the picker through `saving`; a live provider switch or
+                    // disconnected provider remains genuinely unavailable.
+                    disabled={switchBusy || !providerConfigured}
                     onStopPointerDown={preserveFocusUnlessTouch}
                   />
                 </div>

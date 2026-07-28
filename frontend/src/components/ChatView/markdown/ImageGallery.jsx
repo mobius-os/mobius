@@ -5,6 +5,7 @@ import ChevronRight from 'lucide-react/dist/esm/icons/chevron-right.mjs'
 import { ExpandableImage } from './InlineContent.jsx'
 import ImageLightbox from './ImageLightbox.jsx'
 import { projectResolvedGalleryItems } from './imageGallery.js'
+import { useHistoryDismiss } from '../../../hooks/useHistoryDismiss.jsx'
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
 
@@ -20,7 +21,7 @@ function smoothBehavior() {
  * get grab-to-scroll only after a horizontal gesture is established. Desktop
  * buttons and Arrow keys remain the explicit non-gesture alternatives.
  */
-export default function ImageGallery({ images }) {
+export default function ImageGallery({ images, mediaDimensions }) {
   const count = images.length
   const railRef = useRef(null)
   const dragRef = useRef(null)
@@ -29,6 +30,7 @@ export default function ImageGallery({ images }) {
   const [canPrevious, setCanPrevious] = useState(false)
   const [canNext, setCanNext] = useState(false)
   const [viewerKey, setViewerKey] = useState(null)
+  const historyDismiss = useHistoryDismiss(() => setViewerKey(null))
   const [resolvedSources, setResolvedSources] = useState(() => new Map())
   const resolvedItems = useMemo(
     () => projectResolvedGalleryItems(images, resolvedSources),
@@ -92,8 +94,9 @@ export default function ImageGallery({ images }) {
 
   const openViewer = useCallback((index, item) => {
     registerResolved(index, item)
+    historyDismiss.open()
     setViewerKey(resolvedItems[index]?.key || null)
-  }, [registerResolved, resolvedItems])
+  }, [historyDismiss, registerResolved, resolvedItems])
 
   const viewerIndex = viewerKey === null
     ? -1
@@ -101,8 +104,8 @@ export default function ImageGallery({ images }) {
   const viewerItem = viewerIndex < 0 ? null : resolvedItems[viewerIndex]
 
   useEffect(() => {
-    if (viewerKey !== null && viewerIndex < 0) setViewerKey(null)
-  }, [viewerIndex, viewerKey])
+    if (viewerKey !== null && viewerIndex < 0) historyDismiss.close()
+  }, [historyDismiss, viewerIndex, viewerKey])
 
   useEffect(() => () => {
     clearTimeout(suppressTimerRef.current)
@@ -193,6 +196,7 @@ export default function ImageGallery({ images }) {
               loading={index === 0 ? 'eager' : 'lazy'}
               onResolved={registerResolved}
               onOpen={openViewer}
+              mediaDimensions={mediaDimensions}
             />
           </div>
         ))}
@@ -224,7 +228,7 @@ export default function ImageGallery({ images }) {
           items={resolvedItems}
           index={viewerIndex}
           onNavigate={(nextIndex) => setViewerKey(resolvedItems[nextIndex]?.key || null)}
-          onClose={() => setViewerKey(null)}
+          onClose={historyDismiss.close}
         />,
         document.body,
       )}

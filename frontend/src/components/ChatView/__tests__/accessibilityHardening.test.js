@@ -18,6 +18,16 @@ test('InstallSheet uses the shared modal focus contract', () => {
   assert.match(hook, /dialogStack\.at\(-1\) !== stackEntry/)
 })
 
+test('ShareAppSheet uses the shared modal focus contract', () => {
+  const source = read('../../Drawer/ShareAppSheet.jsx')
+  assert.match(source, /useDialogFocus\(\{/)
+  assert.match(source, /ref=\{cardRef\}/)
+  assert.match(source, /initialFocusRef: primaryFocusRef/)
+  assert.match(source, /role="dialog"/)
+  assert.match(source, /aria-modal="true"/)
+  assert.match(source, /aria-labelledby="sas-title"/)
+})
+
 test('full-screen dialogs share one focus, inerting, and Escape contract', () => {
   const dialogs = [
     read('../../ui/ModelSheet.jsx'),
@@ -45,6 +55,8 @@ test('first-use guidance is a labeled non-modal region with a dismiss action', (
   assert.match(source, /role="region"/)
   assert.match(source, /aria-labelledby="wt-title"/)
   assert.match(source, /aria-label="Dismiss welcome"/)
+  assert.match(source, /aria-expanded=/)
+  assert.match(source, /role="status"/)
   assert.doesNotMatch(source, /aria-modal="true"/)
 })
 
@@ -64,10 +76,10 @@ test('a restored image with no media token stops spinning and exposes its failur
     'the failed preview must retain an explicit removal affordance')
 })
 
-test('QuestionCard gives the conditional Other field a durable accessible name', () => {
+test('QuestionCard gives the custom answer area a durable accessible name', () => {
   const source = read('../QuestionCard.jsx')
-  assert.match(source, /aria-label=\{`Other answer for: \$\{q\.question\}`\}/)
-  assert.match(source, /placeholder="Type your answer…"/)
+  assert.match(source, /aria-label=\{`Custom answer for: \$\{question\}`\}/)
+  assert.match(source, /placeholder=\{answered \? 'No custom answer' : 'Or type your own answer…'\}/)
 })
 
 test('message sources expose list semantics, keyboard focus, and touch targets', () => {

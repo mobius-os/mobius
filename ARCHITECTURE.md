@@ -242,18 +242,31 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `self_reminders.py` | Agent self-scheduling endpoints |
 | `skills.py` | `GET /api/skills` (installed skills + provenance + 30-day usage), `POST /install` (fetch a `SKILL.md` dir or single markdown from GitHub via the same SSRF-safe fetcher as app installs; `.installed-skills.json` provenance sidecar; basename collision ⇒ 409), `DELETE /{name}` (installed-provenance only, git-snapshot before removal). Install/uninstall gated owner-or-`manage_skills` (the Skills app's permission, pattern of `manage_apps`) |
 | `admin.py` | Admin / introspection endpoints (service-token gated) |
-| `debug.py` | Observability: active SDK clients/sessions, broadcasts, chat logs |
+| `debug.py` | Observability: active SDK clients/sessions, broadcasts, chat logs, and resource facts/pressure |
 | `client_error.py` | `POST /api/client-error` — record an uncaught client/app JS error |
 | `recover.py` | Recovery page at `/recover` (reset/backup/rebuild) — frozen island |
 | `recover_html.py` | HTML templates for the recovery page (no `router`; used by `recover.py`) |
 
 Note: there is no `routes/ai.py` and no `POST /api/ai`. An older mini-app AI proxy lived there and was removed; mini-apps reach the agent via `window.mobius.chat`, `POST /api/apps/{id}/run-job`, or cron — not a synchronous AI endpoint.
 
+## Resource facts and pressure
+
+`resource_pressure.py` keeps observation separate from interpretation. Facts are
+an on-demand snapshot of `/data` capacity and cgroup memory; pressure classifies
+that snapshot as `normal`, `constrained`, `critical`, or `unknown`. The snapshot
+is exposed through authenticated debug status but is not polled or stored.
+Workload policy and owner communication remain separate future consumers.
+
 ## App execution tiers
 
 Host-mediated device/browser access uses the versioned capability broker; see
 [`CAPABILITIES.md`](CAPABILITIES.md) for the manifest, app API, wire protocol,
 provider contract, lifecycle rules, and trust-tier escape hatches.
+Server-side app jobs have a separate two-tier model: ordinary reviewed scripts
+retain the Möbius process authority, while `background_agent` jobs run through
+one reviewed data contract and the strongest secure executor available on the
+host. See [`BACKGROUND_JOBS.md`](BACKGROUND_JOBS.md) for the contract,
+Bubblewrap/Landlock selection, history, and verification strategy.
 
 | Tier | Boundary and capability | UX / standalone consequence |
 |---|---|---|
@@ -503,7 +516,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.10 (2026-07-26).** This section is the
+**Owner-authoritative contract — v1.11 (2026-07-27).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -612,6 +625,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   geometry, while a disclosure first settles any preceding gesture and then owns
   layout caused by its own expansion/collapse. A bounded dead-man remains the final
   escape hatch for any interrupted no-scroll gesture.
+  A marked Q&A custom-answer field is the deliberate exception to "ordinary
+  typing cannot scroll": changing its value can grow the field and cause the
+  browser to move the transcript to keep the native caret visible. From
+  `beforeinput` through one complete rendered frame, that mutation uses the
+  same reader-ownership gate as a possible scroll. If no scroll lands, layout
+  resumes immediately after that frame; if one does, the ordinary quiet-settle
+  path records the resulting hold. The controller must not restore a stale
+  anchor between those two outcomes.
 - **R5a — Attention nudges reveal the usable tail.** Tapping an offscreen question
   or paused-turn nudge is an explicit one-shot reading action: it lands at the
   physical tail, including the list's composer-clearance padding, so the card's
@@ -638,6 +659,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   persistence. A failed answer
   keeps that settled reading anchor for the retryable card rather than manufacturing
   follow intent again.
+  While the custom-answer field is focused, a visual-viewport change may rebase
+  an ordinary `ANCHOR_AT` hold to the browser's current caret-visible position
+  instead of reapplying its stale pre-edit offset. `PIN_USER_MSG`,
+  `HOLD_RESERVED_TAIL`, `FOLLOW_BOTTOM`, and the transient question-submission
+  overlay retain their existing stronger rules. The editing lifecycle remains
+  active through keyboard-closing focusout until the full pane height returns,
+  preventing alternating browser/controller corrections without reserving any
+  extra conversation tail space.
   The source handoff
   preserves the question, its answer, and every pre/post-answer thinking, tool, and
   text block in event order, without hiding, duplicating, or reordering them. Only a
@@ -672,6 +701,7 @@ path means routing it through the same entries rather than inventing another rul
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
 | In-process question is answered | any | transient `ANCHOR_AT` over the prior mode; same active assistant row | Hold exact visible anchor through same-viewport card reflow and resumed output |
 | Viewport/keyboard changes after question submission | transient question anchor | pre-submit unanswered-card mode | Apply ordinary viewport behavior; answering adds no extra movement |
+| Focused Q&A custom answer grows or its keyboard viewport changes | ordinary hold | current caret-visible `ANCHOR_AT` | Browser may reveal the caret once; controller rebases instead of snapping back. Pins, reserved-tail holds, follow, and submission overlay are unchanged |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |
 | Offscreen question or paused-turn nudge tapped | any hold | `ANCHOR_AT` at physical tail | User-requested one-shot move; clears the overlaid composer |
 
@@ -744,26 +774,33 @@ completion or a particular scroll mode.
 
 Automatic continuation reuses one durable run transition with separate
 chat-local policies and cause validation. Provider-limit exits mark their exact
-`ChatRun` as `parked` until the parsed reset time. A planned restart
-creates a fresh nonce, stops and finalizes each exact live run, and parks it
-due-now with that nonce. The platform process then publishes an intent and
-restart request; it does not terminate itself on the normal path.
+`ChatRun` as `parked` until the parsed reset time. A planned restart creates a
+fresh nonce and, **before provider interruption**, stamps it onto every exact
+live run in one writer transaction. Provider stops then run concurrently; clean
+stops finalize and become due-now parks immediately, while a slow stop or failed
+terminal transcript write keeps its exact nonce-stamped `running` row for boot
+recovery. The platform process then publishes an intent and restart request; it
+does not terminate itself on the normal path.
 
 The frozen root-owned entrypoint poller validates and consumes the request,
 records its one-shot nonce in `/data/.restart-ledger`, and only then terminates
 pid 1. At the very start of the next entrypoint invocation, the ledger binds
 that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
 restart park when the root-owned boot acknowledgement matches the nonce on the
-latest exact DB run and the restart policy is on. The supervisor
-attests the boot transition; the database owns run identity. An intent merely
-written before a crash/OOM, an acknowledgement skipped by a failed handshake,
-or an acknowledgement left across another boot authorizes nothing. Transcript
-text is presentation, never restart-cause evidence.
+latest exact DB run and the restart policy is on. At startup, the same
+authorization converts matching stranded `running` rows into due restart parks
+after finalizing their persisted partial transcript; this happens before the
+writer starts and before the initial continuation sweep. The supervisor attests
+the boot transition; the database owns run identity. An intent merely written
+before a crash/OOM, an acknowledgement skipped by a failed handshake, or an
+acknowledgement left across another boot authorizes nothing. Transcript text is
+presentation, never restart-cause evidence.
 
 | Event | Durable result | Boot/sweep result |
 |-------|----------------|-------------------|
 | Provider usage/rate limit | exact run `parked` until reset | notify; continue if the usage policy is on |
 | Accepted planned restart, exact park + boot nonce match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if the restart policy is on |
+| Accepted planned restart, stop/finalize did not settle | exact latest run remains `running` with the authenticated nonce | finalize partials, convert to due restart park, then continue in the same pre-yield pass |
 | Crash/OOM before supervisor acknowledgement | unacknowledged park or generic `running` evidence | resolve/reconcile to manual resumable interruption |
 | Repeated/unrelated boot before claim | acknowledgement is retired by boot-id mismatch | manual resumable interruption |
 | Policy off, unanswered question, app-owned run, or app-queued work | due park resolves without an automatic send | notify/manual owner action |
@@ -771,20 +808,24 @@ text is presentation, never restart-cause evidence.
 | Restart task creation fails after promotion | exact promoted rows roll back; restart park becomes `interrupted` | manual recovery; one-shot cause is not retried |
 
 Eligibility is rechecked under the per-chat transition lock immediately before
-promotion, and the global idle gate permits only one automatic turn at a time.
-The provider still receives a synthetic user `continue`, but the durable row is
-tagged `kind="auto_continuation"` with reason `restart` or `usage_limit`; the UI,
-copy behavior, title selection, time context, compaction, provider-switch
-handoff, chat-note summarization, and redacted chat logs treat it as a product
-marker rather than owner speech.
+promotion. Provider-limit retries are staggered one at a time; an authenticated
+planned restart restores the exact set that was already concurrent, so its
+eligible batch may start together. The provider still receives a synthetic user
+`continue`, but the durable row is tagged `kind="auto_continuation"` with reason
+`restart` or `usage_limit`; the UI, copy behavior, title selection, time
+context, compaction, provider-switch handoff, chat-note summarization, and
+redacted chat logs treat it as a product marker rather than owner speech.
 
 The sweep is cheap: one indexed due-row query immediately at boot, on
-`chat_run_finished`, and on a 60-second fallback, plus one bounded local ledger
-read when due rows exist. It does not create per-chat workers or poll at a short
-interval. Paid provider-limit continuation (`auto_resume_on_limit`) initially
-defaults off; planned-restart continuation (`auto_resume_on_restart`) initially
-defaults on. Each chat stores both choices independently, and changing either
-choice seeds future chats without rewriting existing conversations.
+`chat_run_finished`, and on a 60-second fallback. Startup captures the boot
+authorization once and threads that exact value through reconciliation and the
+pre-yield sweep, so a second ledger read cannot make the two phases disagree;
+later sweeps perform one bounded local ledger read only when due restart rows
+exist. It does not create per-chat workers or poll at a short interval. Paid
+provider-limit continuation (`auto_resume_on_limit`) initially defaults off;
+planned-restart continuation (`auto_resume_on_restart`) initially defaults on.
+Each chat stores both choices independently, and changing either choice seeds
+future chats without rewriting existing conversations.
 
 ### Tool output rendering
 
@@ -923,28 +964,29 @@ tab. A pane will instead store `activeTabKey` and compare it with `tabKey(tab)`.
 hidden app-iframe LRU. This is the degenerate one-pane form of the target model.
 
 `frontend/src/components/Shell/workspacePlacement.js` is the placement seam.
-Producers issue an `open-item` request with `placement: 'beside-source'` and
-`activation: 'background'`; they never name a tab strip, pane id, split
-direction, or breakpoint. The flat resolver inserts a built app after its
-source chat. A pane resolver should interpret the same request as: use the next
-pane when one exists, create one when the viewport supports it, and fall back
-to an adjacent background tab on narrow screens.
+Producers issue an `open-item` request with `placement: 'beside-source'`; they
+never name a tab strip, pane id, split direction, or breakpoint. Generic opens
+use `background` / `foreground`. A committed build uses the internal
+`live-preview` activation: it enters Builder, reveals the app in a companion
+pane while keeping the chat focused on wider screens, and activates the app tab
+on phones.
 
 | Input | Confirmation | Current action |
 | --- | --- | --- |
-| `app_created {appId, chatId}` | Refetched row matches both ids | Apply one background `beside-source` request |
-| `app_created` missing/mismatched ids | No matching live row | Ignore the placement request |
-| Fresh app-list row with `chat_id` | App absent from the established session baseline | Apply the same request as reconnect fallback |
-| `app_updated` | Live row exists | Refresh CTA/code and warm cache; never place again |
+| `app_created {appId, chatId}` | Live row exists | Refresh lifecycle/list state |
+| `app_preview_ready {appId, chatId}` | Refetched row matches the app and requesting chat | Apply one `live-preview` `beside-source` request |
+| `app_preview_ready` missing/mismatched ids | No matching live row | Ignore the placement request |
+| Fresh app-list row with `chat_id` | App absent from the established session baseline | Apply the same live-preview request as reconnect fallback |
+| `app_updated` | Live row exists | Refresh CTA/code and live-swap the open frame |
 | Store install or app without `chat_id` | No source-chat relationship | Drawer arrival only |
 | Replayed/duplicate placement | Target app already open | Strict same-reference no-op |
 
 Every automatic built-preview path passes through
-`applyWorkspaceRequestsToFlatTabs`. Direct drawer/user tab opens remain
-explicit foreground navigation and bypass automatic placement by design.
-When the flat strip is at capacity, automatic placement protects the currently
-visible tab as well as the new source-chat/app pair; background work must never
-make the user's on-screen tab disappear from the strip.
+`resolveWorkspaceRequests`. Direct drawer/user tab opens remain explicit
+foreground navigation and bypass automatic placement by design. Generic
+background work preserves every already-visible surface; a live preview is
+intentionally visible and may activate an existing companion tab without
+moving keyboard focus away from the building chat.
 
 ### Target pane model
 
@@ -1003,6 +1045,16 @@ On narrow layouts the drawer is modeled as a *virtual route*: opening it pushes 
 
 The mobile design satisfies a few hard desiderata — no "two drawers" artifact during Chrome-Android swipe-back, the 250ms slide stays visible, one back-press exits the PWA from home, and closing the drawer (overlay tap / X) must never navigate. Three load-bearing invariants in `useNavigation.js` enforce this: (1) **`navTo` consumes the existing drawer-sentinel rather than pushing** when the drawer is open (it pushes one `'nav'` entry only if the drawer was closed), so an in-app nav reuses the drawer's history slot instead of growing the stack — keeping history pinned to a pre-drawer snapshot and killing the BFCache artifact; (2) **every close path funnels through `history.back()` → `handleBack`**, whose drawer-first guard (`if (drawerOpenRef && drawerPushedRef) { close; return }`) prevents over-popping `navStackRef`; (3) **`drawerPushedRef` is a ref, not state** (mutated synchronously in the same task as the history call) and is the single source of truth for "is a drawer-sentinel above the current entry." Activating the already-current destination is a close/no-op and must not create a duplicate history edge. Every shell-pushed entry is tagged `{__mobiusNav:true, kind}` via `navHistory.js` and written to *both* the classic History store and the Navigation API entry (`updateCurrentEntry`); both back handlers ignore untagged pops so sandboxed-iframe phantom entries can't over-pop — do not drop the tag from any push site or genuine sentinels read as phantoms and back-nav dies. Mini-apps install their own back-targets via the `moebius:nav-push` postMessage protocol (per-app counts in `appSentinelCountsRef`, capped at 20), consumed before navStack pops; `Shell.deleteChat` must scrub `navStackRef` of the deleted chat's entries or back lands on a 404'd chat. Three architectures were tried and rejected (per-nav pushState, `flushSync`-before-pushState, perpetual single-sentinel) — read `tests/navigation.spec.mjs` before changing anything.
 
+Transient shell surfaces that should dismiss on browser Back use the same owner
+through `useHistoryDismiss`. Opening one pushes a tagged `kind:'dismissible'`
+entry before the surface paints; its close affordances consume that entry via
+`history.back()`, and both navigation-event paths call the registered dismissal
+instead of popping `navStackRef`. Forward traversal deliberately leaves a
+dismissed transient closed and treats its physical entry as a no-op sentinel;
+reopening it pushes a fresh entry and naturally truncates that stale Forward
+branch. Do not add component-local `popstate` listeners for these surfaces —
+they race the shell's indexed cursor and break Safari's source-state fallback.
+
 ## Service worker + offline
 
 Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/app-assets/`, `/app-embeds/`, `/recover`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/apps.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
@@ -1060,4 +1112,7 @@ cover it deterministically.
 ## See also
 
 - **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/platform/frontend/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
+- **Secure server-side app jobs:** `BACKGROUND_JOBS.md` defines the
+  background-agent data contract, portable executor design, historical
+  rationale, and topology-level verification.
 - **Subsystem deep-dives are inlined above** as their own sections: *Stop-chat contract*, *AskUserQuestion interception*, *Chat persistence — single-writer actor*, *Navigation back-stack + drawer model*, *Service worker + offline*, and *Mini-app manifest (mobius.json)*. (The chat-persistence v2 design + staged-rollout notes remain internal/gitignored — the as-built contract is the section above.)

@@ -19,6 +19,7 @@ import {
   rememberDismissed,
   rememberReviewItemDismissed,
   reviewItems,
+  reviewPanelSummary,
   sendBlocker,
   statusLabel,
   visibleReviewItems,
@@ -135,10 +136,11 @@ test('the status word distinguishes waiting, blocked, and in-flight', () => {
 })
 
 test('multiple independent review items share one bounded review panel', () => {
-  assert.match(cardSrc, /const grouped = reviewItems\.length > 1/)
+  assert.match(cardSrc, /const panel = reviewPanelSummary\(pendingItems\.length, sentRows\.length\)/)
+  assert.match(cardSrc, /const grouped = panel\.count > 1/)
   assert.match(cardSrc, /contrib-card-stack--grouped/)
-  assert.match(cardSrc, /\{reviewItems\.length\} reviews ready/)
-  assert.match(cardSrc, /Review each item separately\./)
+  assert.match(cardSrc, /\{panel\.title\}/)
+  assert.match(cardSrc, /\{panel\.copy\}/)
   assert.match(cardCss, /\.contrib-card-stack\s*\{[\s\S]*?width:\s*min\(100%, 640px\);[\s\S]*?margin-inline:\s*auto;/)
   assert.match(cardCss, /\.contrib-card-stack--grouped\s*\{[\s\S]*?max-height:\s*min\(52vh, 520px\);/)
   assert.match(cardCss, /\.contrib-card-stack--grouped \.contrib-card\s*\{[\s\S]*?border-radius:\s*0;/)
@@ -201,6 +203,37 @@ test('the renderer gives a stack one review-together card, not one card per laye
   assert.match(cardSrc, /item\.kind === 'stack'/)
   assert.match(cardSrc, /<StackReviewRow/)
   assert.match(cardSrc, /Review in Contribute/)
+})
+
+test('the grouped panel survives pending-to-contributed transitions', () => {
+  assert.deepEqual(reviewPanelSummary(3, 0), {
+    count: 3,
+    title: '3 reviews ready',
+    copy: 'Each item keeps its own review and action.',
+  })
+  assert.deepEqual(reviewPanelSummary(2, 1), {
+    count: 3,
+    title: '2 remaining · 1 contributed',
+    copy: 'Each item keeps its own review and action.',
+  })
+  assert.deepEqual(reviewPanelSummary(0, 2), {
+    count: 2,
+    title: '2 items contributed',
+    copy: 'Each item was contributed separately.',
+  })
+  assert.match(cardSrc, /const \[sentRows, setSentRows\] = useState\(\[\]\)/)
+  assert.match(cardSrc, /setSentRows\(rows => \[/)
+  assert.match(cardSrc, /\{sentRows\.map\(sent => \(/)
+  assert.match(cardSrc, /rows\.filter\(row => row\.id !== sent\.id\)/)
+})
+
+test('one card press can own only one public submission at a time', () => {
+  assert.match(cardSrc, /const activeSendRef = useRef\(null\)/)
+  assert.match(cardSrc, /if \(activeSendRef\.current !== null\) return/)
+  assert.match(cardSrc, /activeSendRef\.current = record\.id/)
+  assert.match(cardSrc, /locked=\{busyId !== null\}/)
+  assert.match(cardSrc, /disabled=\{locked \|\| submitting \|\| !!blocker\}/)
+  assert.match(cardSrc, /item => item\.kind !== 'record' \|\| !sentIds\.has\(item\.record\.id\)/)
 })
 
 // The action names the value of contributing, not the mechanism of sending, and

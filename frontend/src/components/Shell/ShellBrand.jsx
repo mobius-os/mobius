@@ -1,5 +1,5 @@
 import { memo, useRef } from 'react'
-import mobiusLogoUrl from '../../assets/moebius.png'
+import mobiusLogoUrl from '../../assets/moebius.svg'
 import { useLogoModeGesture } from './useLogoModeGesture.js'
 
 /**

@@ -17,8 +17,8 @@ const dockerfile = readFileSync(
   new URL('../../../../Dockerfile', import.meta.url),
   'utf8',
 )
-const publicLogo = readFileSync(new URL('../../../public/moebius.png', import.meta.url))
-const bundledLogo = readFileSync(new URL('../../assets/moebius.png', import.meta.url))
+const publicLogo = readFileSync(new URL('../../../public/moebius.svg', import.meta.url))
+const bundledLogo = readFileSync(new URL('../../assets/moebius.svg', import.meta.url))
 
 test('retained runtime precache covers the complete PDF and KaTeX URL payload', () => {
   const byUrl = new Map(RETAINED_RUNTIME_ASSETS.map(entry => [entry.url, entry]))
@@ -53,7 +53,7 @@ test('only stable aliases need explicit cache revisions', () => {
   }
 })
 
-test('precache versions match the package graph and image asset copies', () => {
+test('precache versions match the package graph and logo asset copies', () => {
   assert.equal(packageJson.dependencies['pdfjs-dist'], PDFJS_ASSET_VERSION)
   assert.equal(packageJson.dependencies.katex, KATEX_ASSET_VERSION)
   assert.match(dockerfile, new RegExp(`pdfjs-dist@${PDFJS_ASSET_VERSION}`))

@@ -398,11 +398,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-    detail: (chatId, { limit } = {}) => {
+    detail: (chatId, { limit, compact, signal, timeoutMs } = {}) => {
       const params = new URLSearchParams()
       if (limit !== undefined) params.set('limit', String(limit))
+      if (compact !== undefined) params.set('compact', compact ? '1' : '0')
       const query = params.toString()
-      return apiFetch(`/chats/${chatId}${query ? `?${query}` : ''}`)
+      return apiFetch(
+        `/chats/${chatId}${query ? `?${query}` : ''}`,
+        { signal, timeoutMs },
+      )
     },
     update: (chatId, payload) => listAffectingMutation('chats', `/chats/${chatId}`, {
       method: 'PATCH',

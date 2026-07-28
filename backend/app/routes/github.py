@@ -57,7 +57,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
-from app import fs_locks, github_auth, models, source_status
+from app import app_git, fs_locks, github_auth, models, source_status
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -386,6 +386,173 @@ def _safe_repo_path(raw: object) -> Path:
     "Ask the agent to prepare it again from /data/contrib, /data/apps, or "
     "/data/platform; nothing was sent to GitHub."
   )
+
+
+def _safe_equivalence_source_path(raw: object) -> Path:
+  """Installed app/platform repo allowed to own durable provenance refs."""
+  repo = _safe_repo_path(raw)
+  data_dir = Path(get_settings().data_dir).resolve()
+  platform = data_dir / "platform"
+  apps = data_dir / "apps"
+  if repo != platform and not repo.is_relative_to(apps):
+    raise ContributionSubmitError(
+      "The contribution source must be an installed app or the live platform."
+    )
+  if not app_git.is_repo(repo):
+    raise ContributionSubmitError(
+      "The contribution source is no longer a Git-backed app or platform."
+    )
+  return repo
+
+
+def _equivalence_source_repo(record: dict) -> tuple[Path, Path] | None:
+  """Return ``(installed source, review checkout)`` for one contribution."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  review_repo = _safe_repo_path(plan.get("repo_path"))
+  raw_source_repo = plan.get("source_repo_path")
+  if raw_source_repo:
+    return _safe_equivalence_source_path(raw_source_repo), review_repo
+  primary = app_git.primary_worktree_path(review_repo)
+  if primary is not None:
+    return _safe_equivalence_source_path(str(primary)), review_repo
+  # Legacy prepared records sometimes used the installed source checkout
+  # directly rather than a linked worktree. It is already under the stricter
+  # apps/platform allowlist, so it can safely own the witness itself.
+  try:
+    return _safe_equivalence_source_path(str(review_repo)), review_repo
+  except ContributionSubmitError:
+    return None
+
+
+def _record_pending_equivalence(record: dict) -> str | None:
+  """Persist the reviewed local-history witness after the owner sends a PR.
+
+  Linked review worktrees derive their primary live checkout automatically.
+  Standalone app review clones carry an explicit ``plan.source_repo_path``;
+  :mod:`app_git` copies only the verified reviewed commits into that installed
+  repo before recording the witness. A prepared record should pin
+  ``plan.source_sha``; old linked records safely use the primary HEAD observed
+  at send time.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  repos = _equivalence_source_repo(record)
+  if repos is None:
+    return None
+  source_repo, review_repo = repos
+  source_sha = str(plan.get("source_sha") or "").strip()
+  current_source = app_git.head_sha(source_repo, "HEAD")
+  if not source_sha:
+    source_sha = current_source
+  elif (
+    current_source
+    and source_sha != current_source
+    and app_git.ref_is_ancestor(source_repo, source_sha, current_source) is not True
+  ):
+    # The app model may have replayed the accepted tree onto a new upstream
+    # parent before Send, so the captured commit is no longer causal history.
+    # Use the stable current tip; the exact diff/tree proof below still decides.
+    source_sha = current_source
+  if not source_sha:
+    return None
+  kwargs = {
+    "base_sha": str(plan.get("base_sha") or ""),
+    "head_sha": str(plan.get("head_sha") or ""),
+    "diff_sha256": str(plan.get("diff_sha256") or ""),
+    "contribution_id": str(record.get("id") or ""),
+    "review_source_dir": review_repo,
+  }
+  recorded = app_git.record_pending_equivalent_change(
+    source_repo, source_sha=source_sha, **kwargs,
+  )
+  if recorded is not None:
+    return recorded
+  # An App Store update can intentionally replay the accepted source tree onto
+  # a new upstream parent between preparation and Send. Under the source lock,
+  # retry the *current* immutable tip: record_pending repeats the exact diff-hash
+  # and tree-subsumption proofs, so this carries a preserved change across that
+  # pre-witness rewrite without blessing a source that removed the change.
+  if current_source and current_source != source_sha:
+    return app_git.record_pending_equivalent_change(
+      source_repo, source_sha=current_source, **kwargs,
+    )
+  return None
+
+
+async def _record_pending_equivalence_locked(
+  record: dict,
+  *,
+  already_locked: frozenset[str] = frozenset(),
+) -> str | None:
+  """Serialize witness creation with an App Store source-history replay."""
+  repos = await asyncio.to_thread(_equivalence_source_repo, record)
+  if repos is None:
+    return None
+  source_repo, _review_repo = repos
+  if str(source_repo) in already_locked:
+    return await asyncio.to_thread(_record_pending_equivalence, record)
+  async with fs_locks.source_dir_lock(str(source_repo)):
+    return await asyncio.to_thread(_record_pending_equivalence, record)
+
+
+def _merged_upstream_sha(record: dict, repo: Path) -> str | None:
+  """Best available immutable upstream commit for a terminal merged record."""
+  for value in (
+    record.get("last_land_head_sha"),
+    record.get("merge_commit_sha"),
+    (record.get("checks") or {}).get("merge_commit_sha")
+    if isinstance(record.get("checks"), dict) else None,
+  ):
+    candidate = str(value or "").strip().lower()
+    if _GIT_SHA.fullmatch(candidate):
+      return candidate
+
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  repo_slug = plan.get("repo") or record.get("repo")
+  number = record.get("number")
+  if not isinstance(repo_slug, str) or not _GITHUB_REPO.fullmatch(repo_slug):
+    return None
+  if not isinstance(number, int) or number <= 0:
+    return None
+  try:
+    proc = _gh(
+      repo,
+      "pr", "view", str(number),
+      "-R", repo_slug,
+      "--json", "state,mergeCommit",
+      check=False,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return None
+  if proc.returncode != 0:
+    return None
+  try:
+    payload = json.loads(proc.stdout or "{}")
+  except ValueError:
+    return None
+  merge_commit = payload.get("mergeCommit") if isinstance(payload, dict) else None
+  candidate = (
+    str(merge_commit.get("oid") or "").strip().lower()
+    if isinstance(merge_commit, dict) and payload.get("state") == "MERGED"
+    else ""
+  )
+  return candidate if _GIT_SHA.fullmatch(candidate) else None
+
+
+def _settle_equivalence(record: dict, upstream_sha: str | None = None) -> str | None:
+  """Promote or discard the pending witness when GitHub settles the PR."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  repos = _equivalence_source_repo(record)
+  if repos is None:
+    return None
+  repo, _review_repo = repos
+  digest = str(plan.get("diff_sha256") or "")
+  if record.get("status") == "merged":
+    return app_git.mark_equivalent_change_landed(
+      repo, digest, upstream_sha=upstream_sha,
+    )
+  if record.get("status") == "closed":
+    app_git.discard_pending_equivalent_change(repo, digest)
+  return None
 
 
 def _cleanup_terminal_staging_checkout(record: dict) -> bool:
@@ -3739,10 +3906,36 @@ async def submit_contribution(
   try:
     plan = claimed.get("plan") or {}
     repo_path = _safe_repo_path(plan.get("repo_path"))
-    async with fs_locks.source_dir_lock(str(repo_path)):
+    lock_paths = {str(repo_path)}
+    try:
+      equivalence_repos = _equivalence_source_repo(claimed)
+      if equivalence_repos is not None:
+        lock_paths.add(str(equivalence_repos[0]))
+    except Exception:
+      # An absent/legacy provenance destination must not block the reviewed PR.
+      pass
+    async with AsyncExitStack() as source_locks:
+      for lock_path in sorted(lock_paths):
+        await source_locks.enter_async_context(
+          fs_locks.source_dir_lock(lock_path)
+        )
       pr_url, number, record_patch = await asyncio.to_thread(
         _submit_prepared_pr, claimed, diff_path,
       )
+      try:
+        await _record_pending_equivalence_locked(
+          {**claimed, **record_patch},
+          already_locked=frozenset(lock_paths),
+        )
+      except Exception:
+        # The PR already exists at this point.  Provenance is an automatic
+        # conflict-avoidance optimization, never a reason to misreport the
+        # owner-approved public action as failed; an absent witness simply keeps
+        # the conservative agent resolver fallback.
+        log.warning(
+          "contribution equivalence witness failed %s/%s",
+          app_id, record_id, exc_info=True,
+        )
   except ContributionSubmitError as exc:
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
@@ -3862,11 +4055,19 @@ async def submit_contribution_stack(
   db.close()
 
   try:
-    repo_paths = sorted({
+    lock_paths = {
       str(_safe_repo_path((row["record"].get("plan") or {}).get("repo_path")))
       for row in rows
       if row["record"].get("status") == "submitting"
-    })
+    }
+    for row in rows:
+      try:
+        repos = _equivalence_source_repo(row["record"])
+        if repos is not None:
+          lock_paths.add(str(repos[0]))
+      except Exception:
+        pass
+    repo_paths = sorted(lock_paths)
     async with AsyncExitStack() as source_locks:
       for repo_path in repo_paths:
         await source_locks.enter_async_context(
@@ -3886,6 +4087,16 @@ async def submit_contribution_stack(
             row["diff_path"],
             direct_base_branch=row["stack"]["base_branch"],
           )
+          try:
+            await _record_pending_equivalence_locked(
+              {**record, **record_patch},
+              already_locked=frozenset(repo_paths),
+            )
+          except Exception:
+            log.warning(
+              "stack contribution equivalence witness failed %s/%s",
+              app_id, record.get("id"), exc_info=True,
+            )
         except ContributionSubmitError as exc:
           async with fs_locks.app_storage_lock(app_id):
             _recheck_submit_app(db, app_id, expected_nonce)
@@ -3990,10 +4201,18 @@ async def land_contribution_stack(
   db.close()
 
   try:
-    repo_paths = sorted({
+    lock_paths = {
       str(_safe_repo_path((row["record"].get("plan") or {}).get("repo_path")))
       for row in rows
-    })
+    }
+    for row in rows:
+      try:
+        repos = _equivalence_source_repo(row["record"])
+        if repos is not None:
+          lock_paths.add(str(repos[0]))
+      except Exception:
+        pass
+    repo_paths = sorted(lock_paths)
     async with AsyncExitStack() as source_locks:
       for repo_path in repo_paths:
         await source_locks.enter_async_context(
@@ -4010,6 +4229,35 @@ async def land_contribution_stack(
         target_branch, landed_sha = await asyncio.to_thread(
           _land_reviewed_stack, rows,
         )
+      # Atomic app-stack landing already knows the exact upstream commit; do
+      # not wait for a later cron cleanup to promote the pending witnesses.
+      for row in rows:
+        record = row["record"]
+        plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+        try:
+          repos = _equivalence_source_repo(record)
+          if repos is None:
+            continue
+          if str(repos[0]) in repo_paths:
+            await asyncio.to_thread(
+              app_git.mark_equivalent_change_landed,
+              repos[0],
+              str(plan.get("diff_sha256") or ""),
+              upstream_sha=landed_sha,
+            )
+          else:
+            async with fs_locks.source_dir_lock(str(repos[0])):
+              await asyncio.to_thread(
+                app_git.mark_equivalent_change_landed,
+                repos[0],
+                str(plan.get("diff_sha256") or ""),
+                upstream_sha=landed_sha,
+              )
+        except Exception:
+          log.warning(
+            "landed stack equivalence promotion failed %s/%s",
+            app_id, record.get("id"), exc_info=True,
+          )
   except ContributionSubmitError as exc:
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
@@ -4075,7 +4323,19 @@ async def cleanup_contribution_staging(
     record = _read_record(record_path)
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   repo = _safe_repo_path(plan.get("repo_path"))
-  async with fs_locks.source_dir_lock(str(repo)):
+  equivalence_repos = _equivalence_source_repo(record)
+  upstream_sha = None
+  if record.get("status") == "merged":
+    upstream_sha = await asyncio.to_thread(_merged_upstream_sha, record, repo)
+  lock_repo = equivalence_repos[0] if equivalence_repos else repo
+  async with fs_locks.source_dir_lock(str(lock_repo)):
+    try:
+      await asyncio.to_thread(_settle_equivalence, record, upstream_sha)
+    except Exception:
+      log.warning(
+        "terminal contribution equivalence settlement failed %s/%s",
+        app_id, record_id, exc_info=True,
+      )
     cleaned = await asyncio.to_thread(_cleanup_terminal_staging_checkout, record)
   # Terminal cleanup also ends autopilot: the PR merged/closed, so release any
   # claim and disable the grant (symmetric with the submit-time grant stamp).

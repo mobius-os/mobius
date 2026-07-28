@@ -29,6 +29,7 @@ import {
 } from './streamSnapshotCache.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
+import { perfTime } from '../../lib/perfProbe.js'
 import {
   reportNetworkReachable,
   verifyConnectivity,
@@ -249,7 +250,17 @@ export default function useStreamConnection(chatId, {
     const next = typeof updater === 'function' ? updater(latestItemsRef.current) : updater
     if (next.length > 0) lastGoodItemsRef.current = next
     latestItemsRef.current = next
-    if (next.length > 0) writeStoredStreamSnapshot(activeStreamChatIdRef.current, next)
+    // Counted because this serialises the whole live turn to sessionStorage on
+    // every reveal commit — up to once per animation frame — so its cost grows
+    // with the length of the answer being streamed. sessionStorage is a
+    // synchronous main-thread write, and mobile flash is far slower than a
+    // desktop page cache, so the same call is not the same cost on a phone.
+    if (next.length > 0) {
+      perfTime(
+        'stream.snapshotWrite',
+        () => writeStoredStreamSnapshot(activeStreamChatIdRef.current, next),
+      )
+    }
     _setStreamItems(next)
   }
 

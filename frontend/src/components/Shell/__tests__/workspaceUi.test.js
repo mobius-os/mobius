@@ -15,6 +15,9 @@ const paneModelSrc = readFileSync(new URL('../paneModel.js', import.meta.url), '
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const dragBinding = readFileSync(new URL('../useWorkspaceDrag.js', import.meta.url), 'utf8')
 const paneStrip = readFileSync(new URL('../PaneStrip.jsx', import.meta.url), 'utf8')
+const settingsView = readFileSync(
+  new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8',
+)
 const walkthrough = readFileSync(
   new URL('../../Walkthrough/WalkthroughOverlay.jsx', import.meta.url), 'utf8',
 )
@@ -120,10 +123,28 @@ test('the undo chord is flag-gated and defers to focused inputs', () => {
 test('the first-run walkthrough stays short and action-first', () => {
   assert.doesNotMatch(walkthrough, /const STEPS/)
   assert.match(walkthrough, /Your Möbius is ready/)
-  assert.match(walkthrough, /Connect an agent/)
-  assert.match(walkthrough, /Open the App Store/)
-  assert.match(walkthrough, /I’ll explore/)
+  assert.match(walkthrough, /Connect agent/)
+  assert.match(walkthrough, /Explore apps/)
+  assert.match(walkthrough, /Install Möbius/)
+  assert.match(walkthrough, /How to install/)
+  assert.match(walkthrough, /requestInstall/)
+  assert.doesNotMatch(walkthrough, /wt__kicker|wt__mark|Open Settings|Open the App Store|I’ll explore/)
   assert.match(walkthrough, /mobius:walkthrough-completed/)
+})
+
+test('the authenticated shell offers a keyboard skip link', () => {
+  assert.match(shell, /href="#main-content"/)
+  assert.match(shell, /event\.preventDefault\(\)[\s\S]*?contentElRef\.current\?\.focus\(\{ preventScroll: true \}\)/)
+  assert.match(shell, /<main className="shell__content" id="main-content" tabIndex=\{-1\}/)
+})
+
+test('drawer lists distinguish loading, error, and confirmed empty data', () => {
+  assert.match(shell, /appsStatus=\{appsStatus\}/)
+  assert.match(shell, /chatsStatus=\{chatsStatus\}/)
+  assert.match(drawer, /chatsStatus === 'loading'/)
+  assert.match(drawer, /chatsStatus === 'error'/)
+  assert.match(drawer, /chatsStatus === 'success' && allChats\.length > 0/)
+  assert.doesNotMatch(drawer, /No conversations yet/)
 })
 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
@@ -142,6 +163,12 @@ test('the divider drag tears down from the window, surviving a mid-drag unmount'
 test('the context menu offers Close pane when another pane can absorb the space', () => {
   assert.match(shell, /type: 'CLOSE_PANE', paneId: tabMenu\.paneId/)
   assert.match(shell, /Close pane/)
+})
+
+test('the context menu offers Close all other tabs only when a sibling tab exists', () => {
+  assert.match(shell, /menuPane && menuPane\.tabs\.length >= 2/)
+  assert.match(shell, /type: 'CLOSE_OTHER_TABS', tabKey: tabMenu\.tabKey/)
+  assert.match(shell, /Close all other tabs/)
 })
 
 test('tab labels resolve through memoized id Maps, not per-render linear scans', () => {
@@ -630,17 +657,18 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
-test('tab gesture rules stay local while the shell root owns page zoom', () => {
+test('mobile tabs require a hold before dragging while the strip preserves pinch zoom', () => {
   assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
-  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
-  assert.match(shellCss, /\.shell__tab-kind\[data-touch-drag-handle\]\s*\{[\s\S]*?touch-action:\s*none/)
-  assert.match(paneStrip, /data-touch-drag-handle=\{dragKey\}/)
+  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pinch-zoom/)
+  assert.doesNotMatch(shellCss, /data-touch-drag-handle/)
+  assert.doesNotMatch(paneStrip, /data-touch-drag-handle/)
   assert.doesNotMatch(paneStrip, /GripVertical|shell__tab-drag-handle/)
   assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
-    'the nested icon target must not duplicate the generic drag-source selector')
+    'the tab button is the one drag source')
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
-  assert.match(dragBinding, /downEvent\.target\?\.closest\?\.\('\[data-touch-drag-handle\]'\)/)
-  assert.match(dragBinding, /touchMoveIntent\(dx, dy, touchIntentKind\)/)
+  assert.match(dragBinding, /if \(sourceKind === 'tab'\) arm\(\)/)
+  assert.match(dragBinding, /touchMoveIntent\(dx, dy, sourceKind\)/)
+  assert.match(dragBinding, /scrollStripEl\.scrollLeft \+= previousPoint\.x - ev\.clientX/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
 })
 
@@ -657,6 +685,11 @@ test('drawer swipe-to-close claims the gesture with a non-passive touchmove list
   // The claim itself, plus the sticky per-gesture ownership flag it reads.
   assert.match(drawer, /if \(dx < 0 && isHorizontalSwipe\) panningRef\.current = true/)
   assert.match(drawer, /if \(!panningRef\.current\) return\s*\n[\s\S]{0,400}?e\.preventDefault\(\)/)
+})
+
+test('workspace tabs spend their chrome on names rather than redundant kind icons', () => {
+  assert.doesNotMatch(paneStrip, /shell__tab-kind|AppWindow|MessageSquare|Settings/)
+  assert.match(shellCss, /\.shell__tab-text\s*\{[\s\S]*?flex:\s*1[\s\S]*?max-width:\s*128px/)
 })
 
 test('an active overflowing chat title cycles once, then becomes idle', () => {
@@ -705,7 +738,7 @@ test('navigation surfaces keep the brand close path while the workspace is inert
   assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
   assert.doesNotMatch(shell, /const navigationSurfaceOpen = .*apps/,
     'the canonical Apps tab is workspace content, not a modal navigation surface')
-  assert.match(shell, /<main className="shell__content" inert=\{navigationSurfaceOpen\}/)
+  assert.match(shell, /<main className="shell__content"[^>]*inert=\{navigationSurfaceOpen\}/)
   assert.match(shellBrand, /aria-expanded=\{navigationOpen\}/)
   assert.match(shell, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
 })
@@ -721,10 +754,42 @@ test('the Apps tab never disables the mobile drawer layered above it', () => {
 
 test('opening navigation is presentation-only and never refetches whole lists', () => {
   assert.doesNotMatch(shell, /if \(navigationOpen\) \{ refreshApps\(\); refreshChats\(\) \}/)
-  assert.match(shell, /ev\.type === 'app_updated' \|\| ev\.type === 'app_created'[\s\S]*?refreshApps\(\)/,
+  assert.match(shell, /ev\.type === 'app_updated'[\s\S]*?ev\.type === 'app_created'[\s\S]*?ev\.type === 'app_preview_ready'[\s\S]*?refreshApps\(\)/,
     'app lifecycle events still own their authoritative refresh')
   assert.match(shell, /ev\.type === 'chat_run_finished'[\s\S]*?refreshChats\(\)/,
     'chat lifecycle events still own their authoritative refresh')
+})
+
+test('chat drawer dots distinguish active work from unseen completion', () => {
+  assert.match(
+    shell,
+    /ev\.type === 'chat_run_started'[\s\S]*?markStreamingStart\(ev\.chatId\)/,
+    'a started run must raise the active-work dot',
+  )
+  assert.match(
+    shell,
+    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)[\s\S]*?setAttentionChatIds/,
+    'a finished run must raise attention only while the chat is not visible',
+  )
+  assert.match(
+    shell,
+    /for \(const cid of visibleChatIds\) clearChatAttention\(cid\)/,
+    'viewing a chat must clear its completion dot',
+  )
+  assert.match(
+    drawer,
+    /streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
+    'active work must take precedence over unseen completion in a row',
+  )
+  assert.match(drawerCss, /\.drawer__streaming-dot\s*\{[\s\S]*?background:\s*var\(--accent\)/)
+  assert.match(drawerCss, /\.drawer__attention-dot\s*\{[\s\S]*?border:\s*1\.5px solid var\(--green\)/)
+})
+
+test('live preview reveal keeps the workspace controller distinct from device mode', () => {
+  assert.match(shell, /const deviceMode = paneModel\.modeForRect\(contentRect\)/)
+  assert.match(shell, /mode\.toggle\(\{ cause: 'auto', to: 'panes' \}\)/)
+  assert.match(shell, /resolveWorkspaceRequests\(ws, requests, \{[\s\S]*?mode: deviceMode,/)
+  assert.doesNotMatch(shell, /const mode = paneModel\.modeForRect\(contentRect\)/)
 })
 
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
@@ -780,6 +845,21 @@ test('the Settings surface responds to PANE width via a query container', () => 
   assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
 })
 
+test('a manual platform reconcile refreshes the persistent Settings surface', () => {
+  assert.match(shell, /const \[settingsRefreshToken, setSettingsRefreshToken\] = useState\(0\)/)
+  assert.match(
+    shell,
+    /if \(ev\.type === 'shell_apply_now'\) \{\s*setSettingsRefreshToken\(token => token \+ 1\)/,
+  )
+  assert.match(shell, /active=\{!settingsUnderlay && \(settingsFullBleed \|\| !!settingsPaned\)\}/)
+  assert.match(shell, /refreshToken=\{settingsRefreshToken\}/)
+  assert.match(settingsView, /active = true,\s*refreshToken = 0,/)
+  assert.match(
+    settingsView,
+    /useEffect\(\(\) => \{\s*if \(active\) refreshPlatform\(\)\s*\}, \[active, refreshPlatform, refreshToken\]\)/,
+  )
+})
+
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {
   // The invariant governs navigable destinations (Settings, takeover views,
   // immersive), NOT dismissible dialogs layered over the workspace. Those stay
@@ -811,9 +891,11 @@ test('Shell threads the (drag-preview) viewMode into the content derivation and 
   assert.match(shell, /dragPreviewIdRef\.current = mode\.dragArm\(/)
   assert.match(shell, /mode\.dragCancel\(dragPreviewIdRef\.current\)/)
   assert.match(shell, /const \{ multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds \}/)
-  // Chat PAINTING is gated on the two-worlds painting set (single mode paints only
-  // the slot chat; builder paints each visible pane's chat), separate from MOUNTING.
-  assert.match(shell, /visible=\{chatPanesVisible && role !== 'held' && visibleChatKeys\.has\(`chat:\$\{chatId\}`\)\}/)
+  // Each retained owner paints only in its own world. Standard and Builder can
+  // retain the same chat without sharing geometry or activating both runtimes.
+  assert.match(shell, /const standardOwner = world === STANDARD_CHAT_WORLD/)
+  assert.match(shell, /const builderPainted = !standardOwner[\s\S]*effectiveViewMode === 'panes'/)
+  assert.match(shell, /visible=\{surfaceVisible && chatPanesVisible && role !== 'held'\}/)
 })
 
 test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any drop commits panes', () => {
@@ -844,7 +926,7 @@ test('the builder preview cannot outlive its drag session past one visibility bo
   // guards keep it bounded:
   // (1) SOURCE — pagehide joins the per-session teardown, so a BFCache freeze that
   //     fires no pointercancel/blur/visibilitychange still cancels the drag.
-  assert.match(dragBinding, /const onPageHide = \(\) => cleanup\(\{ suppressClick: armed \}\)/)
+  assert.match(dragBinding, /const onPageHide = \(\) => cleanup\(\{ suppressClick: armed \|\| scrolling \}\)/)
   assert.match(dragBinding, /window\.addEventListener\('pagehide', onPageHide\)/)
   assert.match(dragBinding, /window\.removeEventListener\('pagehide', onPageHide\)/)
   // (2) BACKSTOP — a persistent foreground reconcile force-cleans any session still
@@ -1015,7 +1097,7 @@ test('round4-3: materializeNewChatHome is stale-guarded and writes a history-fre
   assert.match(fn, /latest\.token !== pending\.token[\s\S]*?setMaterializeNewChatRevision/)
   assert.doesNotMatch(fn, /setInterval|setTimeout/)
   // offline/failed → keep the landing with a retry state, never chats[0].
-  assert.match(fn, /if \(chatId == null\) \{[\s\S]*?setNewChatLandingOffline\(true\)/)
+  assert.match(fn, /if \(chatId == null\) \{[\s\S]*?setNewChatLandingFailure\(reason === 'offline' \? 'offline' : 'error'\)/)
   // The slot write is history-free (applyModeDestination pushes none) + preserveSettings,
   // and there is NO composer focus (a mode toggle must not summon the keyboard).
   assert.match(fn, /applyModeDestination\(\s*\{ view: 'chat', chatId, appId: null, paneId: ws\.focusedPaneId \},\s*\{ preserveSettings: true \}/)
@@ -1043,6 +1125,7 @@ test('round4-3: the New Chat landing renders for a null slot / reveal underlay a
   assert.match(newChatLanding, /className="chat chat--empty"/)
   assert.match(newChatLanding, /className="chat__empty-wrap"/)
   assert.match(newChatLanding, /What&apos;s on your mind\?/)
+  assert.match(newChatLanding, /Couldn’t start a new chat/)
 })
 
 // ── N1: retired v2 plumbing is gone ───────────────────────────────────────────

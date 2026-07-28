@@ -140,7 +140,7 @@ async function gotoEmptyChat(page) {
   const chat = await createTaggedChat(page)
   if (!chat?.id) throw new Error('failed to create isolated shell-update chat')
   await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
-  await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
   return chat
 }
 
@@ -149,6 +149,7 @@ async function seedTwoPaneBuilder(page, firstChatId, secondChatId) {
     { kind: 'chat', id: firstChatId },
     { kind: 'chat', id: secondChatId },
   ])
+  workspace = paneModel.setViewMode(workspace, 'panes')
   workspace = paneModel.moveTab(workspace, `chat:${secondChatId}`, {
     root: true,
     edge: 'right',
@@ -193,7 +194,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     await sendMessage(page, 'rebuild the shell')
 
     // The live turn is rendering — NOW deliver shell_rebuilt mid-turn.
-    await expect(page.getByText('building the shell...')).toBeVisible({ timeout: 8000 })
+    await expect(page.locator('[data-chat-surface="painted"]').getByText('building the shell...')).toBeVisible({ timeout: 8000 })
     armRebuilt()
 
     // Wait PAST the hold-until-idle recheck interval (6s): the recheck fires,
@@ -276,7 +277,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       () => Number(sessionStorage.getItem('__load_count') || '0') === 1,
       { timeout: 20000 },
     )
-    await expect(page.getByText('shell rebuilt')).toBeVisible({ timeout: 1500 })
+    await expect(page.locator('[data-chat-surface="painted"]').getByText('shell rebuilt')).toBeVisible({ timeout: 1500 })
     releasePostReloadChatRead()
     expect(await page.evaluate(() => (
       sessionStorage.getItem('__before_shell_reload_seen')

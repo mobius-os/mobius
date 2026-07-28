@@ -45,6 +45,15 @@ test('phone and web share one searchable launcher tab', () => {
   assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
 })
 
+test('the app directory distinguishes loading, errors, and confirmed emptiness', () => {
+  assert.match(drawer, /status=\{appsStatus\}/)
+  assert.match(directory, /status === 'loading'/)
+  assert.match(directory, /status === 'error'/)
+  assert.match(directory, /Apps unavailable/)
+  assert.match(directory, /onClick=\{onRetry\}/)
+  assert.match(directory, /No installed apps yet/)
+})
+
 test('expanded and collapsed navigation share one ChatGPT SDK icon vocabulary', () => {
   for (const icon of ['ComposeEditSquare', 'Grid', 'SettingsSlider']) {
     assert.match(navigationIcons, new RegExp(icon))

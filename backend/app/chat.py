@@ -11,10 +11,12 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -49,11 +51,13 @@ from app.chat_writer import (
   Finalize,
   ParkRun,
   PrepareAutoResume,
+  PrepareRestartIntents,
   RecordAgentLifecycle,
   PersistError,
   PersistTranscript,
   QuestionCommit,
   RecordRunMetrics,
+  RecoverWedgedRun,
   ResolvePark,
   RollbackAutoResume,
   StashThinkingTrace,
@@ -980,6 +984,12 @@ _restart_draining_chats: set[str] = set()
 # utility arms its SIGKILL backstop at DRAIN_TIMEOUT + grace; the existing short
 # hard-kill stays as the crash floor once SIGTERM is sent.
 DRAIN_TIMEOUT = 25.0
+# Provider interrupts run together, not serially. Five live turns exposed that
+# the old two-second-per-handle loop was both too short for ordinary Codex
+# teardown and spent the drain budget on early chats while later chats waited.
+# Ten seconds leaves the outer 25-second drain ample time to finalize/park the
+# stopped set while giving every provider the same useful shutdown window.
+RESTART_HANDLE_STOP_TIMEOUT_SECS = 10.0
 
 # The terminal note a drained turn persists (design §2.2). Boot reconcile keys
 # on this exact text to mark the block resumable rather than stacking a second
@@ -1437,8 +1447,34 @@ async def _clear_run_status_strict(
   await _await_ack(ack)
 
 
-def reconcile_interrupted_chats(db: Session) -> list[str]:
-  """Resolve chats stranded "running" by a process that died mid-turn.
+async def _recover_wedged_run_strict(chat_id: str, run_token: str) -> None:
+  """Atomically leave a durable interruption marker and close a wedged run."""
+  ack = get_writer().submit(
+    RecoverWedgedRun(
+      chat_id=chat_id,
+      run_token=run_token,
+      interruption_block=_pause_note(
+        "This response could not be saved. You can resume the turn.",
+      ),
+    )
+  )
+  await _await_ack(ack)
+
+
+@dataclass(frozen=True)
+class StartupReconcileResult:
+  """Distinct boot outcomes: manual crash recovery vs authenticated replay."""
+
+  manual: list[str]
+  restart_parks: list[str]
+
+
+def reconcile_startup_chats(
+  db: Session,
+  *,
+  restart_authorization: str | None = None,
+) -> StartupReconcileResult:
+  """Resolve chats stranded "running" by the previous process.
 
   Called once from the FastAPI lifespan startup, BEFORE the server
   accepts requests. The runner registry is in-memory, so at boot it is
@@ -1459,13 +1495,13 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       holds only the SUBSEQUENT sends the user queued while that turn ran,
       so preserving them does NOT re-run the interrupted turn — it just
       keeps the unsent queue. We deliberately do NOT auto-drain it here:
-      clearing only the run marker (below) leaves the chat in the SAME
-      markerless state (``run_status=None`` + non-empty queue) the bottom
-      of this function already documents, which self-heals on the NEXT user
-      POST via the stale-pending drain in ``chats_stream.send_message``
-      (it claims ``mark_starting`` and promotes the head). Auto-promoting
-      at boot is what the crash-loop concern below forbids; a drain gated
-      on an explicit user interaction does not re-spawn turns during boot;
+      generic crashes clear only the run marker (below), leaving the chat in
+      the SAME markerless state (``run_status=None`` + non-empty queue) the
+      bottom of this function documents; that self-heals on the NEXT user POST
+      via the stale-pending drain in ``chats_stream.send_message``. The sole
+      boot auto-promotion exception is an exact run whose restart nonce matches
+      the root-owned authorization for this boot — that external proof removes
+      the crash-loop ambiguity;
     - clear the durable run marker.
 
   No queue lock is taken: this runs single-threaded at startup before
@@ -1515,12 +1551,19 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
   a still-alive chat is skipped above). So the lost-update race the actor
   exists to close cannot occur here.
 
-  Returns the ids of the chats it reconciled (empty list if none) so
-  the caller can log/observe the recovery rather than have it happen
-  silently.
+  An exact running ChatRun stamped with the root-authorized restart nonce is
+  different from a generic crash. After the same transcript finalization, an
+  opted-in owner turn with no unanswered question or app-attributed work is
+  converted to a due ``restart`` park. The initial continuation sweep then
+  resumes it before lifespan yields. Every other stranded turn remains the
+  conservative manual-resume outcome.
+
+  Returns both outcomes separately so startup can notify only genuinely manual
+  recoveries and can report authenticated fallbacks without conflating them.
   """
   log = _get_logger()
-  reconciled: list[str] = []
+  manual: list[str] = []
+  restart_parks: list[str] = []
   try:
     stale = (
       db.query(models.Chat)
@@ -1529,8 +1572,8 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       .all()
     )
   except Exception:
-    log.exception("reconcile_interrupted_chats: query failed")
-    return reconciled
+    log.exception("reconcile_startup_chats: query failed")
+    return StartupReconcileResult(manual=manual, restart_parks=restart_parks)
 
   for chat in stale:
     # Belt-and-suspenders: if a live registry entry somehow exists for
@@ -1542,6 +1585,42 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       continue
     try:
       queued = len(chat.pending_messages or [])
+      running_runs = (
+        db.query(models.ChatRun)
+        .filter(models.ChatRun.chat_id == chat.id)
+        .filter(models.ChatRun.status == "running")
+        .all()
+      )
+      latest = (
+        db.query(models.ChatRun.id)
+        .filter(models.ChatRun.chat_id == chat.id)
+        .order_by(
+          models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
+        )
+        .first()
+      )
+      latest_id = latest[0] if latest is not None else None
+      restart_run = next((
+        run for run in running_runs
+        if (
+          restart_authorization
+          and run.id == latest_id
+          and run.restart_nonce == restart_authorization
+        )
+      ), None)
+      pending = list(chat.pending_messages or [])
+      app_work_queued = any(
+        isinstance(msg, dict)
+        and msg.get("_initiated_by_app_id") is not None
+        for msg in pending
+      )
+      restart_eligible = bool(
+        restart_run is not None
+        and restart_run.initiated_by_app_id is None
+        and chat.auto_resume_on_restart
+        and not app_work_queued
+        and not _has_unanswered_question(chat)
+      )
       from app.chat_transcript import materialized_messages
       msgs = materialized_messages(chat)
       note = "This turn was paused when Möbius restarted."
@@ -1552,7 +1631,7 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
         plural = "s" if queued != 1 else ""
         note += (
           f" {queued} queued message{plural} {'are' if queued != 1 else 'is'}"
-          " still queued and will be sent with your next message."
+          " still queued and will be included when this turn resumes."
         )
       # `message` (not `content`) is the error-block field the
       # transcript renderer reads — see MsgContent.jsx's error branch
@@ -1683,28 +1762,41 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       # so the run record matches reality. (Flipping the destructive read onto
       # chat_runs + retiring run_status is the Step-3b follow-up, once the
       # record is proven in prod.)
-      for run in (
-        db.query(models.ChatRun)
-        .filter(models.ChatRun.chat_id == chat.id)
-        .filter(models.ChatRun.status == "running")
-        .all()
-      ):
-        run.status = "interrupted"
-        run.ended_at = datetime.now(UTC)
-        run.restart_nonce = None
+      recovered_at = datetime.now(UTC)
+      for run in running_runs:
+        if restart_eligible and restart_run is not None and run.id == restart_run.id:
+          run.status = "parked"
+          run.parked_until = recovered_at.replace(tzinfo=None)
+          run.park_reason = "restart"
+          run.ended_at = recovered_at
+          # Keep restart_nonce: the reset sweep rechecks it against the same
+          # root-owned boot authorization immediately before continuation.
+        else:
+          run.status = "interrupted"
+          run.ended_at = recovered_at
+          run.restart_nonce = None
       db.commit()
-      reconciled.append(chat.id)
+      if restart_eligible:
+        restart_parks.append(chat.id)
+      else:
+        manual.append(chat.id)
     except Exception:
       db.rollback()
       log.exception(
-        "reconcile_interrupted_chats: failed to reconcile chat_id=%s",
+        "reconcile_startup_chats: failed to reconcile chat_id=%s",
         chat.id,
       )
 
-  if reconciled:
+  if manual:
     log.info(
-      "reconciled %d interrupted chat(s) on startup: %s",
-      len(reconciled), ", ".join(reconciled),
+      "reconciled %d interrupted chat(s) for manual recovery: %s",
+      len(manual), ", ".join(manual),
+    )
+  if restart_parks:
+    log.info(
+      "recovered %d authenticated restart fallback(s) for immediate "
+      "continuation: %s",
+      len(restart_parks), ", ".join(restart_parks),
     )
 
   # Orphaned run records (077 Step 3): a chat_runs row left "running" whose
@@ -1752,7 +1844,7 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
       log.info("closed %d orphaned running run record(s) on startup", closed)
   except Exception:
     db.rollback()
-    log.exception("reconcile_interrupted_chats: orphan run sweep failed")
+    log.exception("reconcile_startup_chats: orphan run sweep failed")
 
   # Boot never starts markerless work; the age-gated runtime sweep claims it.
   try:
@@ -1765,14 +1857,22 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
     for chat_id, pending_messages in markerless:
       if pending_messages:
         log.warning(
-          "reconcile_interrupted_chats: markerless pending queue chat_id=%s "
+          "reconcile_startup_chats: markerless pending queue chat_id=%s "
           "count=%d; left intact for the age-gated pending sweep",
           chat_id, len(pending_messages),
         )
   except Exception:
-    log.exception("reconcile_interrupted_chats: markerless-queue scan failed")
+    log.exception("reconcile_startup_chats: markerless-queue scan failed")
 
-  return reconciled
+  return StartupReconcileResult(
+    manual=manual,
+    restart_parks=restart_parks,
+  )
+
+
+def reconcile_interrupted_chats(db: Session) -> list[str]:
+  """Backward-compatible generic-crash recovery used outside boot wiring."""
+  return reconcile_startup_chats(db).manual
 
 
 def notify_after_reconcile(db: Session, reconciled: list[str]) -> str | None:
@@ -1840,15 +1940,16 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
       a live turn, only a definitively-finished one whose marker stuck.
     - `run_started_at` older than the floor — belt-and-suspenders.
 
-  The clear is IDENTITY-KEYED on the wedged run's `ChatRun.id` (never
+  Recovery is IDENTITY-KEYED on the wedged run's `ChatRun.id` (never
   tokenless): if a fresh turn raced in and took the marker, the actor no-ops
-  the clear rather than wiping the new run's marker. It runs under the per-chat
-  queue lock with an is_alive recheck, mirroring `stop_chat_for`'s clear
-  discipline. The transcript is NOT rewritten — a `ReplaceTranscript`
-  note-append would race a fresh send and could clobber its user message, and
-  any partial output already streamed is persisted. `pending_messages` is left
-  intact and self-heals on the next send; boot reconcile still adds the
-  interrupted-turn note on a real restart.
+  rather than wiping the new run's transcript or marker. It runs under the
+  per-chat queue lock with an is_alive recheck, mirroring `stop_chat_for`'s
+  clear discipline. The writer atomically materializes any saved live assistant,
+  appends a resumable interruption marker, closes the run, and clears the marker.
+  `pending_messages` is preserved. This atomic domain command is required: a
+  separate `ReplaceTranscript` + `ClearRunStatus` pair could race a fresh send,
+  while clearing only the marker can permanently erase the recovery handle for
+  a turn whose snapshots all failed to save.
   """
   log = _get_logger()
   swept: list[str] = []
@@ -1902,14 +2003,12 @@ async def sweep_wedged_run_markers(db: Session) -> list[str]:
           # owns a different token, so the actor no-ops instead of wiping it.
           # Strict variant so a failed ack RAISES — a marker we couldn't clear
           # must not be reported as swept (reconciliation repairs it on boot).
-          await _clear_run_status_strict(
-            chat_id, run.id, terminal_status="interrupted",
-          )
+          await _recover_wedged_run_strict(chat_id, run.id)
       _finalize_broadcast_if_running(chat_id)
       swept.append(chat_id)
     except (Exception, asyncio.TimeoutError):
       log.warning(
-        "sweep_wedged_run_markers: clear failed chat_id=%s "
+        "sweep_wedged_run_markers: recovery failed chat_id=%s "
         "(reconciliation will repair)", chat_id, exc_info=True,
       )
   if swept:
@@ -2191,6 +2290,7 @@ async def drain_all_for_restart(
   timeout: float = DRAIN_TIMEOUT,
   *,
   restart_nonce: str = "",
+  prepared_runs: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
   """Interrupt every live turn for a graceful restart, preserving queues.
 
@@ -2201,8 +2301,15 @@ async def drain_all_for_restart(
   remains available for the owner's next action on the manual fallback path.
 
   Sets the `draining` gate first (idempotent) so a send arriving mid-drain
-  queues rather than starting, and both liveness sweeps stand down. Then, for
-  each live turn:
+  queues rather than starting, and both liveness sweeps stand down. Before any
+  provider is interrupted, ``prepare_restart_intents`` stamps the accepted
+  restart nonce onto every exact live ChatRun in one writer transaction. That
+  stamp is deliberately independent of transcript serialization and provider
+  teardown: after the root-owned supervisor authenticates the nonce for the
+  next boot, startup can safely auto-resume a turn even when its stop timed out
+  or its terminal snapshot failed.
+
+  Then, for each live turn:
 
     - publishes a one-line "paused for a platform update" note through the
       turn's sink, so the note + the accumulated partial blocks are persisted
@@ -2221,17 +2328,26 @@ async def drain_all_for_restart(
       text. If that transition cannot commit, the generic run marker remains for
       manual crash reconciliation.
 
-  Best-effort and bounded: a handle that won't interrupt in time keeps today's
-  contract — the restart utility's SIGKILL backstop kills the worker and boot
-  reconcile finalizes the marker for manual Resume. Handle
-  stops run serially at up to 2s each, so with many concurrent live turns the
-  tail may not drain before the backstop — accepted for the single-owner
-  reality (a handful of turns at most); parallelize the stops before this
-  assumption breaks. Returns only the exact chat/run pairs that finalized and
-  parked successfully; the restart supervisor binds precisely that set.
+  Best-effort and bounded: every provider stop starts concurrently and receives
+  the same shutdown window. A slow stop or failed Finalize leaves its exact
+  running row + restart nonce intact; authenticated startup finalizes that
+  transcript and converts it to the same due restart park as the clean path.
+  Returns every exact run covered by the restart intent, not merely the subset
+  that finalized before process exit.
   """
   begin_drain()
   log = _get_logger()
+  restart_runs = list(prepared_runs or [])
+  if prepared_runs is None:
+    try:
+      restart_runs = await prepare_restart_intents(restart_nonce)
+    except Exception:
+      # The restart still proceeds, but without an exact durable binding boot
+      # recovery must fail closed to the existing manual-resume path.
+      log.warning(
+        "drain-for-restart intent preparation failed; fallbacks stay manual",
+        exc_info=True,
+      )
   parked_runs: list[dict[str, str]] = []
   # `resumable` rides the event LIVE (events.process_event carries the
   # whitelisted extras onto the persisted block), so a drained turn's manual
@@ -2241,6 +2357,7 @@ async def drain_all_for_restart(
   # lets the card render in the calm "Paused" family instead of the danger-red
   # error styling reserved for genuine failures.
   note = _pause_note(PAUSED_FOR_RESTART_MESSAGE, kind="restart")
+  candidates: list[tuple[str, list, object | None]] = []
   for chat_id in sorted(registry.all_alive_chat_ids()):
     handles = registry.get_handles(chat_id)
     if not handles:
@@ -2248,15 +2365,6 @@ async def drain_all_for_restart(
       # interrupt. Its send is durable and reconciles on the next boot.
       continue
     sink = get_active_sink(chat_id)
-    if sink is not None:
-      sink.publish(dict(note))
-    else:
-      bc = get_broadcast(chat_id)
-      if bc is not None:
-        # Transport-only fallback (handle live but no sink). The note isn't
-        # persisted here; boot reconcile still adds the resumable interrupted
-        # note for this marker.
-        bc.publish(dict(note))
     stopped_gen = current_run_generation(chat_id)
     if not isinstance(stopped_gen, int):
       # Soft-deleted chat (+inf generation) — leave it to delete's own cleanup.
@@ -2267,10 +2375,25 @@ async def drain_all_for_restart(
     bump_run_generation(chat_id)
     _clear_after_terminal_generation[chat_id] = stopped_gen
     _clear_after_terminal_status[chat_id] = "interrupted"
+
+    if sink is not None:
+      sink.publish(dict(note))
+    else:
+      bc = get_broadcast(chat_id)
+      if bc is not None:
+        # Transport-only fallback (handle live but no sink). The note isn't
+        # persisted here; boot reconcile still adds the resumable interrupted
+        # note for this marker.
+        bc.publish(dict(note))
+    candidates.append((chat_id, handles, sink))
+
+  async def _stop_candidate(chat_id: str, handles: list) -> bool:
     all_interrupted = True
     for handle in handles:
       try:
-        stopped = await handle.stop(timeout=2.0)
+        stopped = await handle.stop(
+          timeout=min(RESTART_HANDLE_STOP_TIMEOUT_SECS, timeout)
+        )
       except asyncio.CancelledError:
         raise
       except Exception:
@@ -2280,20 +2403,36 @@ async def drain_all_for_restart(
         )
         stopped = False
       if not stopped:
+        log.warning(
+          "drain-for-restart stop timed out; authenticated boot recovery "
+          "will continue chat_id=%s kind=%s",
+          chat_id, getattr(handle, "kind", "?"),
+        )
         all_interrupted = False
+    return all_interrupted
+
+  stop_results = await asyncio.gather(*(
+    _stop_candidate(chat_id, handles)
+    for chat_id, handles, _sink in candidates
+  ))
+
+  for (chat_id, _handles, sink), all_interrupted in zip(
+    candidates, stop_results, strict=True,
+  ):
     if all_interrupted:
       run_token = sink.run_token if sink is not None else None
       # Own the terminal snapshot fence here instead of assuming the runner's
       # teardown won the scheduling race. This force-completes running tool
       # blocks/thinking sidecars before ParkRun clears the generic boot-reconcile
-      # marker. A failed Finalize leaves that marker intact for manual recovery.
+      # marker. A failed Finalize leaves that marker + its already-committed
+      # restart nonce intact for authenticated startup recovery.
       if sink is not None:
         try:
           await sink.finalize()
         except Exception:
           log.warning(
-            "drain-for-restart terminal snapshot failed; leaving manual "
-            "recovery chat_id=%s run_token=%s",
+            "drain-for-restart terminal snapshot failed; authenticated boot "
+            "recovery will continue chat_id=%s run_token=%s",
             chat_id, run_token, exc_info=True,
           )
           continue
@@ -2313,8 +2452,8 @@ async def drain_all_for_restart(
             })
           else:
             log.warning(
-              "drain-for-restart could not park exact run; leaving manual "
-              "recovery chat_id=%s run_token=%s",
+              "drain-for-restart could not park exact run; authenticated boot "
+              "recovery will continue chat_id=%s run_token=%s",
               chat_id,
               run_token,
             )
@@ -2322,7 +2461,8 @@ async def drain_all_for_restart(
           # Restart must still proceed. ParkRun is transactional; on failure
           # the generic running marker remains for safe manual reconciliation.
           log.warning(
-            "drain-for-restart park failed; leaving manual recovery "
+            "drain-for-restart park failed; authenticated boot recovery "
+            "will continue "
             "chat_id=%s run_token=%s",
             chat_id,
             run_token,
@@ -2347,7 +2487,56 @@ async def drain_all_for_restart(
       len(parked_runs),
       ", ".join(item["chat_id"] for item in parked_runs),
     )
-  return parked_runs
+  if restart_runs:
+    parked_ids = {item["chat_id"] for item in parked_runs}
+    fallback_ids = [
+      item["chat_id"] for item in restart_runs
+      if item["chat_id"] not in parked_ids
+    ]
+    log.info(
+      "drain-for-restart authenticated %d exact turn(s); parked=%d "
+      "boot-recovery=%d%s",
+      len(restart_runs),
+      len(parked_ids),
+      len(fallback_ids),
+      f" ({', '.join(fallback_ids)})" if fallback_ids else "",
+    )
+  return restart_runs
+
+
+async def prepare_restart_intents(
+  restart_nonce: str,
+) -> list[dict[str, str]]:
+  """Durably bind a planned restart to every exact live run before stopping.
+
+  The writer actor revalidates the registry snapshot and commits all accepted
+  ChatRun nonce stamps atomically. This operation intentionally does not touch
+  Chat.messages or Chat.pending_messages, so a transcript value that cannot be
+  serialized cannot suppress restart authorization.
+  """
+  begin_drain()
+  if not restart_nonce:
+    return []
+  candidates: list[dict[str, str]] = []
+  for chat_id in sorted(registry.all_alive_chat_ids()):
+    if not registry.get_handles(chat_id):
+      continue
+    sink = get_active_sink(chat_id)
+    run_token = sink.run_token if sink is not None else None
+    if run_token:
+      candidates.append({
+        "chat_id": chat_id,
+        "run_token": run_token,
+      })
+  if not candidates:
+    return []
+  prepared = await _await_ack(get_writer().submit(
+    PrepareRestartIntents(
+      restart_nonce=restart_nonce,
+      runs=candidates,
+    )
+  ))
+  return list(prepared or [])
 
 
 # One-shot notify copy for a limit park whose reset time has arrived
@@ -2360,6 +2549,7 @@ CONTINUATION_SWEEP_BATCH_SIZE = 100
 # also must not launch a whole parked batch in one burst.
 LIMIT_AUTO_RESUME_STAGGER_SECS = 30.0
 _next_limit_auto_resume_at = 0.0
+_RESTART_AUTHORIZATION_UNSET = object()
 
 
 def _limit_auto_resume_now() -> float:
@@ -2421,6 +2611,10 @@ def _has_unanswered_question(chat: models.Chat | None) -> bool:
 
 async def _auto_resume_chat(
   chat_id: str, park_token: str | None = None,
+  *,
+  restart_authorization: str | None | object = (
+    _RESTART_AUTHORIZATION_UNSET
+  ),
 ) -> bool:
   """Start one continuation for an eligible due park.
 
@@ -2496,8 +2690,11 @@ async def _auto_resume_chat(
             latest_id = latest[0] if latest is not None else None
             restart_authorized = True
             if park is not None and park.park_reason == "restart":
-              from app.restart_ledger import authorized_restart_nonce
-              accepted_nonce = authorized_restart_nonce()
+              if restart_authorization is _RESTART_AUTHORIZATION_UNSET:
+                from app.restart_ledger import authorized_restart_nonce
+                accepted_nonce = authorized_restart_nonce()
+              else:
+                accepted_nonce = restart_authorization
               restart_authorized = (
                 bool(accepted_nonce)
                 and bool(park.restart_nonce)
@@ -2608,7 +2805,13 @@ async def _auto_resume_chat(
     return False
 
 
-async def sweep_reset_parks(db: Session) -> list[str]:
+async def sweep_reset_parks(
+  db: Session,
+  *,
+  restart_authorization: str | None | object = (
+    _RESTART_AUTHORIZATION_UNSET
+  ),
+) -> list[str]:
   """Notify and optionally continue due durable recovery rows.
 
   The third lifespan sweep (same 60s loop shape as the wedged-marker and
@@ -2670,17 +2873,19 @@ async def sweep_reset_parks(db: Session) -> list[str]:
   except Exception:
     log.exception("sweep_reset_parks: chat batch query failed")
     return resolved
-  restart_authorization = None
+  accepted_restart_nonce = restart_authorization
   if any(run.park_reason == "restart" for run in due):
-    try:
-      from app.restart_ledger import authorized_restart_nonce
-      restart_authorization = authorized_restart_nonce()
-    except Exception:
-      log.warning(
-        "sweep_reset_parks: restart ledger read failed; restart parks will "
-        "fall back to manual recovery",
-        exc_info=True,
-      )
+    if restart_authorization is _RESTART_AUTHORIZATION_UNSET:
+      try:
+        from app.restart_ledger import authorized_restart_nonce
+        accepted_restart_nonce = authorized_restart_nonce()
+      except Exception:
+        accepted_restart_nonce = None
+        log.warning(
+          "sweep_reset_parks: restart ledger read failed; restart parks will "
+          "fall back to manual recovery",
+          exc_info=True,
+        )
   owner_loaded = False
   owner = None
 
@@ -2712,37 +2917,35 @@ async def sweep_reset_parks(db: Session) -> list[str]:
         "continuation notify failed chat_id=%s", chat_id, exc_info=True,
       )
 
-  def wants_auto_resume(chat, run) -> bool:
+  def auto_resume_rejection(chat, run) -> str | None:
     pending = list(chat.pending_messages or []) if chat is not None else []
     app_work_queued = any(
       isinstance(msg, dict) and msg.get("_initiated_by_app_id") is not None
       for msg in pending
     )
+    if chat is None or chat.deleted_at is not None:
+      return "chat unavailable"
+    if run.initiated_by_app_id is not None or app_work_queued:
+      return "app-attributed work"
+    if _has_unanswered_question(chat):
+      return "waiting for an answer"
     restart_park = run.park_reason == "restart"
     policy_enabled = bool(
-      chat is not None
-      and (
-        chat.auto_resume_on_restart
-        if restart_park else chat.auto_resume_on_limit
-      )
+      chat.auto_resume_on_restart
+      if restart_park else chat.auto_resume_on_limit
     )
-    restart_authorized = (
-      not restart_park
-      or (
-        bool(restart_authorization)
-        and bool(run.restart_nonce)
-        and restart_authorization == run.restart_nonce
-      )
-    )
-    return bool(
-      chat is not None
-      and chat.deleted_at is None
-      and run.initiated_by_app_id is None
-      and not app_work_queued
-      and not _has_unanswered_question(chat)
-      and policy_enabled
-      and restart_authorized
-    )
+    if not policy_enabled:
+      return "policy disabled"
+    if restart_park and not (
+      bool(accepted_restart_nonce)
+      and bool(run.restart_nonce)
+      and accepted_restart_nonce == run.restart_nonce
+    ):
+      return "boot authorization missing or mismatched"
+    return None
+
+  def wants_auto_resume(chat, run) -> bool:
+    return auto_resume_rejection(chat, run) is None
 
   limit_resume_started = False
   for run in due:
@@ -2751,6 +2954,11 @@ async def sweep_reset_parks(db: Session) -> list[str]:
     chat_gone = chat is None or chat.deleted_at is not None
     auto_resume = wants_auto_resume(chat, run)
     restart_auto_resume = auto_resume and run.park_reason == "restart"
+    if run.park_reason == "restart" and not auto_resume:
+      log.info(
+        "restart continuation stays manual chat_id=%s run_token=%s reason=%s",
+        chat_id, run.id, auto_resume_rejection(chat, run),
+      )
     if auto_resume and not restart_auto_resume and limit_resume_started:
       # One provider-limit continuation per sweep. Leave this park untouched,
       # but keep walking so a later notify-only chat is not held hostage by
@@ -2815,12 +3023,20 @@ async def sweep_reset_parks(db: Session) -> list[str]:
         # stagger window instead of silently consuming the continuation.
         continue
       resume_started = await _auto_resume_chat(
-        chat_id, park_token=run.id,
+        chat_id,
+        park_token=run.id,
+        restart_authorization=accepted_restart_nonce,
       )
       if resume_started:
         resolved.append(chat_id)
         if not restart_auto_resume:
           limit_resume_started = True
+      elif restart_auto_resume:
+        log.warning(
+          "restart continuation remained pending after scheduling attempt "
+          "chat_id=%s run_token=%s; next event/fallback sweep will retry",
+          chat_id, run.id,
+        )
       continue
 
     # Notify-only/app/deleted path: resolve before the best-effort push so a
@@ -3740,8 +3956,18 @@ def _limit_exit(
   the park fields on a limit kill — is persisted alongside any partial
   response. A limit kill with NO error text (a bare 429 result) still gets a
   synthetic message: the persisted block IS the parked card, so it must
-  exist. Returns the `_complete_turn` kwargs for the limit disposition.
+  exist.
+
+  A planned restart is already the authoritative terminal outcome by the time
+  the provider exits: ``drain_all_for_restart`` publishes the resumable pause
+  before interrupting the handle and records the chat in
+  ``_restart_draining_chats``. Provider teardown errors after that point
+  describe HOW the requested interrupt completed, not a second user-visible
+  outcome, so they must not replace the pause card. Returns the
+  `_complete_turn` kwargs for the limit disposition.
   """
+  if getattr(sink, "chat_id", None) in _restart_draining_chats:
+    return {"limit_reached": False}
   if runner_result is not None:
     limit = _is_limit_terminal(runner_result)
   else:
@@ -4591,6 +4817,16 @@ def _build_resumed_context(chat_row) -> str | None:
   )
 
 
+# The CLI slash commands Möbius keeps at character 0. Named rather than
+# inlined below because it is half of a cross-language contract: the composer's
+# "/" menu (frontend/src/components/ChatView/slashCommands.js) offers exactly
+# this set, and `test_slash_command_registry_parity` reads both to pin them
+# together. Without that pin the menu could offer a command this dispatch check
+# does not know, and picking it would degrade into ordinary prose with no error
+# shown anywhere.
+CLI_SLASH_COMMANDS = frozenset({"/goal"})
+
+
 def _is_cli_slash_command(text: str) -> bool:
   """True when `text` starts with a supported Claude CLI slash command.
 
@@ -4601,7 +4837,7 @@ def _is_cli_slash_command(text: str) -> bool:
   a command-shaped prompt.
   """
   words = (text or "").lstrip("\n").split(None, 1)
-  return bool(words) and words[0].strip() in {"/goal"}
+  return bool(words) and words[0].strip() in CLI_SLASH_COMMANDS
 
 
 async def run_chat(
@@ -4924,18 +5160,25 @@ def viewport_env(viewport: dict | None) -> dict[str, str]:
   """Returns the VIEWPORT_* env vars for an agent turn.
 
   The React shell sends `{width, height}` with every message POST and
-  agent-screenshot.sh hard-requires both vars (deliberately strict — it
-  is the guard that surfaced the missing-viewport bug). Shell-less turns
-  have no sender, so a missing or malformed viewport falls back to the
-  documented default instead of leaving the vars unset and failing every
-  screenshot in those contexts.
+  browser tooling requires integer CSS pixels even when layout APIs report
+  fractional pane geometry. Normalize the pair here so every provider gets
+  the same executable viewport contract. Shell-less turns have no sender, so
+  a missing or malformed viewport falls back to the documented default instead
+  of leaving the vars unset and failing every screenshot in those contexts.
   """
   vp_w = (viewport or {}).get("width")
   vp_h = (viewport or {}).get("height")
-  if not (vp_w and vp_h):
-    vp_w = DEFAULT_VIEWPORT_WIDTH
-    vp_h = DEFAULT_VIEWPORT_HEIGHT
-  return {"VIEWPORT_WIDTH": str(vp_w), "VIEWPORT_HEIGHT": str(vp_h)}
+  try:
+    dimensions = (float(vp_w), float(vp_h))
+  except (TypeError, ValueError):
+    dimensions = ()
+  if (
+    len(dimensions) != 2
+    or not all(math.isfinite(value) and value > 0 for value in dimensions)
+  ):
+    dimensions = (DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT)
+  width, height = (max(1, round(value)) for value in dimensions)
+  return {"VIEWPORT_WIDTH": str(width), "VIEWPORT_HEIGHT": str(height)}
 
 
 def _skill_context_value(value: object, limit: int) -> str:

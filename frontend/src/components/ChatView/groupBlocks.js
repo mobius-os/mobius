@@ -1,4 +1,3 @@
-import { toolBlockFailed } from './toolResultFormat.js'
 import {
   toolActivityLabel,
   toolActivityPastLabel,
@@ -100,31 +99,15 @@ export function coalesceThinkingEntries(entries) {
   return out
 }
 
-// Derive the collapsed status of a tool group from its children: while any tool
-// is still running the group reads in-progress; once settled, a failed child
-// shows error (so a broken step is visible without expanding), else done.
-// Shared by ActivityStretch (via activityStreamState), which
-// maps this to the header status — label shimmer while 'running', a danger
-// triangle + exit chip on 'error', the muted type glyph on 'done' — all
-// readable WITHOUT expanding,
-// since the stretch stays collapsed by default (see ActivityStretch).
-//
-// "Failed" comes from the result's exit code, NOT a tool status — the stream
-// contract only sets 'running' → 'done' (streamReducers.js), so a failed bash
-// still ends 'done'. toolBlockFailed reads the explicit output_exit_code field
-// when a reduced block carries one (contract rule 6), else the nonzero exit out
-// of the parsed terminal envelope — the same signal ToolBlock shows on the
-// block header. A
-// still-running tool has no final output yet, so it can't be "failed" here.
-//
-// `running` wins over `error`: while ANY child is still live the header reads
-// as in-progress (the shimmer), even if an earlier child already failed — the
-// failure surfaces once the run settles and the state resolves to 'error'.
-// Checking running first also short-circuits the parse-heavy failure scan on
-// every streaming frame while the run is in flight.
+// Derive only the state a COLLAPSED activity overview can honestly communicate:
+// in progress while a child runs, settled otherwise. A shell exit is a
+// low-level diagnostic, not a reliable verdict on the turn — agents commonly
+// recover from optional probes, guarded test invocations, or stale patch
+// attempts. Exact failures remain on the individual ToolBlock after the owner
+// expands the activity. Keeping them out of this overview also avoids parsing
+// every command output merely to paint a misleading alarm.
 export function toolGroupState(tools) {
   if (tools.some(t => t?.status === 'running')) return 'running'
-  if (tools.some(t => toolBlockFailed(t))) return 'error'
   return 'done'
 }
 
@@ -215,48 +198,31 @@ export function thoughtDurationLabel(durationMs) {
   return secondsText ? `Thought for ${secondsText}` : 'Thought'
 }
 
-// Collapsed status of a whole activity stretch: reuses toolGroupState (running >
-// error > done, failure read from the exit code) but a LIVE thinking tail forces
-// 'running' — while the agent is actively reasoning the line reads in-progress
-// (the shimmering bare "Thinking"), and an earlier nonzero exit stays quiet until the run
-// settles (running-wins). Empty tools + no live tail settles 'done'.
+// Collapsed status of a whole activity stretch. A LIVE thinking tail forces
+// 'running'; otherwise the overview is running while a tool runs and settled
+// when the stretch is done. Command-level diagnostics belong inside expansion.
 export function activityStreamState(tools, { liveThinkingTail = false } = {}) {
   if (liveThinkingTail) return 'running'
   return toolGroupState(tools)
 }
 
-// The SINGLE presentation authority for the collapsed line's icon, danger
-// chip, and state class, applied on top of an already-derived stream state
-// (so the caller's memo keeps owning the parse-heavy failure scan). A live
-// trailing stretch is in-progress for its WHOLE life — including the gap
-// between one tool ending and the next event, where no tool is 'running' —
-// so tense (activityCollapsedLabel's live||running branch) and the shimmer
-// stay in agreement instead of a settled face or the
-// failure triangle flashing in mid-turn beside present-tense copy. Failure
-// surfaces when the stretch actually
-// settles (live=false), consistent with running-wins.
+// The SINGLE presentation authority for a collapsed line's settled/running
+// face. A live trailing stretch stays in progress through the gap between tool
+// events, so tense and shimmer never contradict each other.
 export function activityDisplayState(state, { live = false } = {}) {
-  if (live && state !== 'running') return 'running'
-  return state
+  return live || state === 'running' ? 'running' : 'done'
 }
 
-// The memo signature ActivityStretch keys its parse-heavy derivations on.
-// Pure and exported so the staleness contract is unit-testable. Per tool:
-// name + status + output length + the output's HEAD and TAIL slices + the
-// explicit exit-code field. The two slices cover both places a failure marker
-// can live in replace-semantics output — Claude's plain-text "Exit code N"
-// head is START-anchored and a JSON envelope may serialize exit_code first or
-// last — so an equal-length replacement that flips the exit code cannot leave
-// a stale success line. Thinking entries contribute a
-// constant: their content length must NOT bust the memo on typewriter frames.
+// The memo signature ActivityStretch keys its overview derivations on. The
+// overview depends on tool identity/status, never command output; ToolBlock owns
+// output and failure rendering after expansion. Thinking content likewise stays
+// out so typewriter frames do not rebuild every settled overview above them.
 export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
   return entries
     .map(e => {
       const it = e?.item
       if (it?.type === 'tool') {
-        return `t:${it.tool || ''}:${it.status || ''}:${it.output?.length || 0}`
-          + `:${it.output?.slice(0, 16) || ''}:${it.output?.slice(-14) || ''}`
-          + `:${it.output_exit_code ?? ''}`
+        return `t:${it.tool || ''}:${it.status || ''}`
       }
       return 'k'
     })
@@ -275,7 +241,7 @@ export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
 //     aria-label instead
 //   - thinking-only → "Thought for Ns" (the reasoning duration IS the content)
 // Cheap on every call (Map lookups + a duration sum), so it runs each render
-// without a memo; the parse-heavy failure state lives in activityStreamState.
+// without a memo.
 export function activityCollapsedLabel(entries, { live = false } = {}) {
   const tools = entries
     .filter(e => e?.item?.type === 'tool')

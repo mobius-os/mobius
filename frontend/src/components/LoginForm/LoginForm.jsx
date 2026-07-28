@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import mobiusLogoUrl from '../../assets/moebius.png'
+import mobiusLogoUrl from '../../assets/moebius.svg'
 import { api, setToken, BASE } from '../../api/client.js'
 import './LoginForm.css'
 

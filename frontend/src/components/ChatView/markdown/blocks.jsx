@@ -1,6 +1,9 @@
-import { useEffect, useState, memo } from 'react'
+import { useEffect, useRef, useState, memo } from 'react'
 import DOMPurify from 'dompurify'
+import Check from 'lucide-react/dist/esm/icons/check.mjs'
+import Copy from 'lucide-react/dist/esm/icons/copy.mjs'
 import InlineContent from './InlineContent.jsx'
+import { copyPlainText } from '../messageCopy.js'
 import { useMathHtml } from './math.js'
 import { highlightSync, highlightCode } from './highlight.js'
 
@@ -9,19 +12,27 @@ import { highlightSync, highlightCode } from './highlight.js'
  * Each handles its own overflow and styling.
  */
 
-export function Paragraph({ token, onInternalNav }) {
+export function Paragraph({ token, onInternalNav, mediaDimensions }) {
   return (
     <p className="md-paragraph">
-      <InlineContent tokens={token.tokens} onInternalNav={onInternalNav} />
+      <InlineContent
+        tokens={token.tokens}
+        onInternalNav={onInternalNav}
+        mediaDimensions={mediaDimensions}
+      />
     </p>
   )
 }
 
-export function Heading({ token, onInternalNav }) {
+export function Heading({ token, onInternalNav, mediaDimensions }) {
   const Tag = `h${token.depth}`
   return (
     <Tag className={`md-heading md-heading--${token.depth}`}>
-      <InlineContent tokens={token.tokens} onInternalNav={onInternalNav} />
+      <InlineContent
+        tokens={token.tokens}
+        onInternalNav={onInternalNav}
+        mediaDimensions={mediaDimensions}
+      />
     </Tag>
   )
 }
@@ -36,6 +47,11 @@ export function CodeBlock({ token }) {
   const syncHtml = highlightSync(code, lang)
   const [asyncHtml, setAsyncHtml] = useState(null)
 
+  // Copy affordance: the raw token text goes to the clipboard (never the
+  // highlighted HTML), with a brief check-icon acknowledgement.
+  const [copied, setCopied] = useState(false)
+  const copyTimerRef = useRef(null)
+
   useEffect(() => {
     if (syncHtml) return  // already highlighted synchronously
     let cancelled = false
@@ -45,26 +61,48 @@ export function CodeBlock({ token }) {
     return () => { cancelled = true }
   }, [code, lang, syncHtml])
 
+  useEffect(() => () => clearTimeout(copyTimerRef.current), [])
+
+  async function copyCode() {
+    if (!(await copyPlainText(code))) return
+    setCopied(true)
+    clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => setCopied(false), 1600)
+  }
+
   const html = syncHtml || asyncHtml
 
   return (
-    <pre className="md-code-block">
-      {lang && <span className="md-code-lang">{lang}</span>}
-      {html ? (
-        <code
-          className={`md-code language-${lang}`}
-          dangerouslySetInnerHTML={{
-            __html: DOMPurify.sanitize(html),
-          }}
-        />
-      ) : (
-        <code className={`md-code language-${lang}`}>{code}</code>
-      )}
-    </pre>
+    <div className="md-code-wrap">
+      <pre className="md-code-block">
+        {lang && <span className="md-code-lang">{lang}</span>}
+        {html ? (
+          <code
+            className={`md-code language-${lang}`}
+            dangerouslySetInnerHTML={{
+              __html: DOMPurify.sanitize(html),
+            }}
+          />
+        ) : (
+          <code className={`md-code language-${lang}`}>{code}</code>
+        )}
+      </pre>
+      <button
+        type="button"
+        className={`md-code-copy${copied ? ' md-code-copy--copied' : ''}`}
+        onClick={copyCode}
+        aria-label={copied ? 'Copied' : 'Copy code'}
+        title="Copy code"
+      >
+        {copied
+          ? <Check size={13} strokeWidth={2.3} aria-hidden="true" />
+          : <Copy size={13} strokeWidth={2} aria-hidden="true" />}
+      </button>
+    </div>
   )
 }
 
-export function Table({ token, onInternalNav }) {
+export function Table({ token, onInternalNav, mediaDimensions }) {
   return (
     <div className="md-table-wrap">
       <table className="md-table">
@@ -75,6 +113,7 @@ export function Table({ token, onInternalNav }) {
                 <InlineContent
                   tokens={cell.tokens}
                   onInternalNav={onInternalNav}
+                  mediaDimensions={mediaDimensions}
                 />
               </th>
             ))}
@@ -88,6 +127,7 @@ export function Table({ token, onInternalNav }) {
                   <InlineContent
                     tokens={cell.tokens}
                     onInternalNav={onInternalNav}
+                    mediaDimensions={mediaDimensions}
                   />
                 </td>
               ))}
@@ -99,7 +139,7 @@ export function Table({ token, onInternalNav }) {
   )
 }
 
-export function BlockQuote({ token, onInternalNav }) {
+export function BlockQuote({ token, onInternalNav, mediaDimensions }) {
   return (
     <blockquote className="md-blockquote">
       {token.tokens?.map((child, i) => (
@@ -107,13 +147,14 @@ export function BlockQuote({ token, onInternalNav }) {
           key={i}
           token={child}
           onInternalNav={onInternalNav}
+          mediaDimensions={mediaDimensions}
         />
       ))}
     </blockquote>
   )
 }
 
-export function ListBlock({ token, onInternalNav }) {
+export function ListBlock({ token, onInternalNav, mediaDimensions }) {
   const Tag = token.ordered ? 'ol' : 'ul'
   return (
     <Tag className="md-list" start={token.ordered ? token.start : undefined}>
@@ -126,6 +167,7 @@ export function ListBlock({ token, onInternalNav }) {
                   key={j}
                   tokens={child.tokens}
                   onInternalNav={onInternalNav}
+                  mediaDimensions={mediaDimensions}
                 />
               )
             }
@@ -134,6 +176,7 @@ export function ListBlock({ token, onInternalNav }) {
                 key={j}
                 token={child}
                 onInternalNav={onInternalNav}
+                mediaDimensions={mediaDimensions}
               />
             )
           })}
@@ -174,21 +217,43 @@ export function HorizontalRule() {
  * Renders a single block-level token.
  * Used by BlockQuote and other nesting containers.
  */
-export function BlockToken({ token, onInternalNav }) {
+export function BlockToken({ token, onInternalNav, mediaDimensions }) {
   switch (token.type) {
     case 'paragraph': return (
-      <Paragraph token={token} onInternalNav={onInternalNav} />
+      <Paragraph
+        token={token}
+        onInternalNav={onInternalNav}
+        mediaDimensions={mediaDimensions}
+      />
     )
     case 'heading': return (
-      <Heading token={token} onInternalNav={onInternalNav} />
+      <Heading
+        token={token}
+        onInternalNav={onInternalNav}
+        mediaDimensions={mediaDimensions}
+      />
     )
     case 'code': return <CodeBlock token={token} />
-    case 'table': return <Table token={token} onInternalNav={onInternalNav} />
+    case 'table': return (
+      <Table
+        token={token}
+        onInternalNav={onInternalNav}
+        mediaDimensions={mediaDimensions}
+      />
+    )
     case 'blockquote': return (
-      <BlockQuote token={token} onInternalNav={onInternalNav} />
+      <BlockQuote
+        token={token}
+        onInternalNav={onInternalNav}
+        mediaDimensions={mediaDimensions}
+      />
     )
     case 'list': return (
-      <ListBlock token={token} onInternalNav={onInternalNav} />
+      <ListBlock
+        token={token}
+        onInternalNav={onInternalNav}
+        mediaDimensions={mediaDimensions}
+      />
     )
     case 'hr': return <HorizontalRule />
     case 'html': return null
@@ -204,4 +269,5 @@ export function BlockToken({ token, onInternalNav }) {
 export const MemoBlock = memo(BlockToken, (prev, next) => {
   return prev.token.raw === next.token.raw
     && prev.onInternalNav === next.onInternalNav
+    && prev.mediaDimensions === next.mediaDimensions
 })

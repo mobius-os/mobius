@@ -45,6 +45,8 @@ def test_init_cron_scaffold_does_not_splice_existing_crontab_into_comments(
     "MOBIUS_APP_BASE": str(app_base),
     "MOBIUS_ALLOW_TEST_CRON": "1",
     "DATA_DIR": str(tmp_path / "data"),
+    "API_BASE_URL": "http://jobs.example.test:8123",
+    "MOBIUS_APP_JOB_RUNNER": "/live/scripts/app-job-runner.py",
   }
   script = Path(__file__).parents[1] / "scripts" / "init-cron-scaffold.sh"
 
@@ -60,9 +62,12 @@ def test_init_cron_scaffold_does_not_splice_existing_crontab_into_comments(
   init_text = (app_dir / "init-cron.sh").read_text()
   assert existing.strip() not in init_text
   assert "ENTRY=\"0 6 * * *" in init_text
+  assert "API_BASE_URL=http://jobs.example.test:8123" in init_text
+  assert "/live/scripts/app-job-runner.py 46" in init_text
   live_crontab = state.read_text()
   assert existing.strip() in live_crontab
   assert "0 6 * * *" in live_crontab
+  assert "API_BASE_URL=http://jobs.example.test:8123" in live_crontab
 
 
 def test_init_cron_scaffold_refuses_test_runtime_before_any_write(tmp_path):

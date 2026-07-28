@@ -179,10 +179,12 @@ function MsgContentInner({
                       text={text}
                       isStreaming={isStreaming && i === lastEntryIdx}
                       onInternalNav={onInternalNav}
+                      mediaDimensions={msg.media_dimensions}
                     />
                   : <StandardMarkdown
                       text={text}
                       onInternalNav={onInternalNav}
+                      mediaDimensions={msg.media_dimensions}
                     />)
               : text}
           </div>
@@ -374,10 +376,12 @@ function MsgContentInner({
                     text={text}
                     isStreaming={isStreaming}
                     onInternalNav={onInternalNav}
+                    mediaDimensions={msg.media_dimensions}
                   />
                 : <StandardMarkdown
                     text={text}
                     onInternalNav={onInternalNav}
+                    mediaDimensions={msg.media_dimensions}
                   />)
             : text}
         </div>

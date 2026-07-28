@@ -27,17 +27,13 @@ import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
-function sseBody(events) {
-  return events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')
-}
-
 async function setupChat(page) {
   await page.setViewportSize({ width: 412, height: 915 })
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 }
   )
 }
@@ -89,29 +85,79 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
 
     let stopHits = 0
     let refetchHits = 0
+    let ordinaryMessageHits = 0
+    let steerHits = 0
     let resolveStop
     const stopGate = new Promise(r => { resolveStop = r })
+    let resolveSteer
+    const steerGate = new Promise(r => { resolveSteer = r })
 
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-      route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
-    )
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
-      // Hold the stream connection open for the lifetime of the test
-      // so isStreaming stays true and the second send hits the QUEUE
-      // path. (Playwright's route.fulfill flushes the body atomically
-      // — the SSE "stream" needs to be held open externally to
-      // simulate a long-running turn. Pattern lifted from
-      // stream-reconnect.spec.mjs test 4.)
-      await new Promise(r => setTimeout(r, 8000))
-      await route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
-        body: sseBody([
-          { type: 'catch_up_done' },
-          { type: 'text', content: 'streaming response...' },
-        ]),
-      }).catch(() => {})
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
+      const request = route.request()
+      const body = request.postDataJSON()
+      if (body.force_steer) {
+        steerHits++
+        await steerGate
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'not_steered' }),
+        })
+      }
+      ordinaryMessageHits++
+      if (ordinaryMessageHits === 2) {
+        // Confirm the second send as a durable queued row so the fast-forward
+        // control can enter its real in-flight path.
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'queued',
+            ts: 12344,
+            position: 1,
+            pending_message: {
+              role: 'user',
+              content: body.content,
+              ts: 12344,
+              cid: body.cid,
+            },
+          }),
+        })
+      }
+      return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
     })
+    // page.route().fulfill() cannot drip a body: it delivers the complete payload and
+    // closes the response. Sleeping before fulfill merely delayed the first SSE event,
+    // then closed the stream and removed Stop before the click. Install a page-local
+    // fetch seam that returns a real open ReadableStream instead. All other requests
+    // continue through Playwright's route mocks.
+    await page.addInitScript(events => {
+      const nativeFetch = window.fetch.bind(window)
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : input?.url
+        if (/\/api\/chats\/[0-9a-f-]+\/stream$/.test(String(url))) {
+          const encoder = new TextEncoder()
+          const stream = new ReadableStream({
+            start(controller) {
+              for (const event of events) {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+              }
+            },
+          })
+          return Promise.resolve(new Response(stream, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+            },
+          }))
+        }
+        return nativeFetch(input, init)
+      }
+    }, [
+      { type: 'catch_up_done' },
+      { type: 'text', content: 'streaming response...' },
+    ])
     await page.route('**/api/chat/stop', async (route) => {
       stopHits++
       // Park for 250ms; any natural-handler refetch firing during
@@ -145,23 +191,35 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     // stays open per the route mock above).
     await sendMessage(page, 'first message')
     // Wait until sending=true (Stop button rendered).
-    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
     // Queue a second message while the first is still streaming.
     await sendMessage(page, 'queued message')
     // Verify the queued tray rendered with the second message.
     await page.waitForFunction(
-      () => Array.from(document.querySelectorAll('.queued__text'))
+      () => Array.from(document.querySelectorAll('[data-chat-surface="painted"] .queued__text'))
         .some(el => el.textContent?.includes('queued message')),
       { timeout: 5000 },
     )
 
-    // Press Stop. handleStop must:
+    // Queued work intentionally replaces Stop with Steer. Enter the real
+    // reachable overlap: Steer hides its confirmed row while its POST is in
+    // flight, which reveals Stop; Stop serializes behind that request. Resolve
+    // Steer as not_steered so it restores the durable row before handleStop
+    // snapshots and clears it.
+    await page.locator('[data-chat-surface="painted"] .chat__steer').click()
+    await expect.poll(() => steerHits).toBe(1)
+    const stop = page.locator('[data-chat-surface="painted"] .chat__stop')
+    await expect(stop).toBeVisible()
+    await stop.click()
+    resolveSteer()
+    await expect.poll(() => stopHits).toBe(1)
+
+    // handleStop must:
     //   (1) bump fetchGenRef + clear pendingMessagesRef SYNCHRONOUSLY
     //   (2) then await POST /chat/stop (held by our mock for 250ms)
     // During step 2, the natural onStreamEnd path may attempt to
     // refetch; whether it does or not, the cleared queue must NOT
     // come back.
-    await page.locator('.chat__stop').click()
     // Poll the queued tray every ~30ms during the stop-await window.
     // Each sample must be empty (or at least not contain the
     // resurrected ts). Any sample seeing "resurrected-queue-item"
@@ -169,7 +227,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     let sawResurrection = false
     for (let i = 0; i < 8; i++) {
       const queuedTexts = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('.queued__text'))
+        return Array.from(document.querySelectorAll('[data-chat-surface="painted"] .queued__text'))
           .map(el => el.textContent?.trim() ?? '')
       })
       if (queuedTexts.some(t => t.includes('resurrected-queue-item'))) {

@@ -173,6 +173,26 @@ def test_subagent_activity_is_natively_modeled_and_fallback_removed():
   assert not hasattr(codex_sdk_runner, "_is_subagent_activity_resume_validation_error")
 
 
+def test_native_image_view_item_is_wired_to_tool_dispatch():
+  """Codex image inspection must not disappear from the visible transcript."""
+  import inspect
+
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+  from app import codex_sdk_runner
+
+  assert getattr(v2_all, "ImageViewThreadItem", None) is not None
+  assert codex_sdk_runner._sdk_imports()["ImageViewThreadItem"] is (
+    v2_all.ImageViewThreadItem
+  )
+  assert "ImageViewThreadItem" in inspect.getsource(
+    codex_sdk_runner._tool_start_event
+  )
+  assert "ImageViewThreadItem" in inspect.getsource(
+    codex_sdk_runner._tool_completed_events
+  )
+
+
 def test_lifecycle_notification_fields_and_status_enums_are_pinned():
   """Fail loudly if the generated lifecycle surface drifts under the runner."""
   pytest.importorskip("openai_codex")
@@ -207,6 +227,77 @@ def test_lifecycle_notification_fields_and_status_enums_are_pinned():
   assert {item.value for item in v2_all.SubAgentActivityKind} >= {
     "started", "interacted", "interrupted",
   }
+
+
+def test_web_search_results_survive_generated_sdk_schema_lag():
+  """App-server result URLs must reach the source-pill extractor.
+
+  Codex 0.145's Rust protocol emits ``webSearch.results`` while the generated
+  Python leaf model still omits that field. The runner installs a narrow
+  passthrough at import time; validate the real notification union so a future
+  SDK refactor cannot silently resume dropping every search result.
+  """
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+  from app import codex_sdk_runner
+
+  codex_sdk_runner._sdk_imports()
+  payload = v2_all.ItemCompletedNotification.model_validate({
+    "completedAtMs": 1,
+    "threadId": "thread-1",
+    "turnId": "turn-1",
+    "item": {
+      "id": "search-1",
+      "type": "webSearch",
+      "query": "Möbius parity",
+      "results": [{
+        "title": "Structured search result",
+        "url": "https://example.test/result",
+      }],
+    },
+  })
+  item = payload.item.root
+  assert getattr(item, "results") == [{
+    "title": "Structured search result",
+    "url": "https://example.test/result",
+  }]
+  assert codex_sdk_runner._web_search_sources(item) == [{
+    "title": "Structured search result",
+    "url": "https://example.test/result",
+  }]
+
+
+def test_cache_write_usage_survives_generated_sdk_schema_lag():
+  """The 5.6 cache-write counter must reach cost normalization."""
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+  from app import codex_sdk_runner
+
+  codex_sdk_runner._sdk_imports()
+  breakdown = {
+    "inputTokens": 100,
+    "cachedInputTokens": 10,
+    "cacheWriteInputTokens": 60,
+    "outputTokens": 20,
+    "reasoningOutputTokens": 5,
+    "totalTokens": 120,
+  }
+  payload = v2_all.ThreadTokenUsageUpdatedNotification.model_validate({
+    "threadId": "thread-1",
+    "turnId": "turn-1",
+    "tokenUsage": {
+      "last": breakdown,
+      "total": breakdown,
+      "modelContextWindow": 1_050_000,
+    },
+  })
+  assert payload.token_usage.last.model_extra == {
+    "cacheWriteInputTokens": 60,
+  }
+  assert codex_sdk_runner.normalize_codex_usage(
+    payload.token_usage,
+    payload.token_usage,
+  )["cache_creation_input_tokens"] == 60
 
 
 def test_turn_terminal_status_and_message_phase_contracts_are_pinned():

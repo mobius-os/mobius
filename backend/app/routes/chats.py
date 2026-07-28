@@ -33,7 +33,11 @@ from app.deps import (
   reject_cross_site,
   require_chat_embed_operation,
 )
-from app.resource_access import get_active_chat_for_principal, get_active_chat_or_404
+from app.resource_access import (
+  get_active_chat_for_principal,
+  get_active_chat_or_404,
+  require_active_chat_access,
+)
 from app.schemas import ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
@@ -231,7 +235,7 @@ def issue_media_token(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:media")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   if principal.scope == "chat_embed":
     if (
       principal.app_id is None
@@ -354,6 +358,12 @@ def _chat_detail_response(
       message_offset=start,
       live_message=live_message,
     )
+  from app.chat_media_dimensions import project_message_image_dimensions
+  page = project_message_image_dimensions(
+    page,
+    chat_id=chat.id,
+    data_dir=get_settings().data_dir,
+  )
 
   provider = chat.provider or "claude"
   pending_question = questions.get(chat.id)
@@ -877,6 +887,7 @@ async def patch_chat(
     # Naming precedence (user > agent > first-message). A clear resets the name;
     # a manual rename locks it; an agent by_agent sync only fills the name when
     # it isn't locked, so it can never clobber a name the owner chose.
+    previous_title = chat.title
     if body.clear_title:
       chat.title = _first_message_title(chat) or "New chat"
       chat.title_locked = False
@@ -1023,6 +1034,15 @@ async def patch_chat(
 
     db.commit()
     db.refresh(chat)
+    if chat.title != previous_title:
+      # The platform summary publisher PATCHes the generated name immediately
+      # after its durable note CAS. Publish only committed truth so every open
+      # shell can refresh its drawer and tab labels without waiting for another
+      # drawer open or chat-list poll. Manual-title precedence still lives above.
+      get_system_broadcast().publish({
+        "type": "chat_renamed",
+        "chatId": str(chat_id),
+      })
     # Record a real provider switch (Claude <-> Codex) once, after this first
     # commit — NOT after the owner-provider mirror commit below, which would
     # double-log. Model/effort tweaks within a provider are deliberately not
@@ -1269,14 +1289,14 @@ def get_tool_output_by_id(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:read")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
 
   # This sync route runs in FastAPI's worker pool, so waiting on the concurrent
   # Future does not block the event loop.
   _drain_writer_before_sidecar_read(db, chat_id, "tool output")
   # The barrier refreshes the request transaction. Recheck the chat so a
   # concurrent soft-delete cannot expose a sidecar after its parent vanished.
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   query = db.query(models.ToolOutput).filter(
     models.ToolOutput.chat_id == chat_id,
     models.ToolOutput.tool_use_id == tool_use_id,
@@ -1324,9 +1344,9 @@ def get_thinking_trace_by_id(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:read")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   _drain_writer_before_sidecar_read(db, chat_id, "thinking trace")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   query = db.query(models.ThinkingTrace).filter(
     models.ThinkingTrace.chat_id == chat_id,
     models.ThinkingTrace.thinking_id == thinking_id,
@@ -1477,7 +1497,11 @@ def get_chat_usage(
   This owner-only diagnostic is deliberately independent of the transcript:
   benchmark tooling can read it without parsing user-visible messages.
   """
-  get_active_chat_or_404(db, chat_id)
+  get_active_chat_or_404(
+    db,
+    chat_id,
+    load_fields=(models.Chat.id,),
+  )
   runs = (
     db.query(models.ChatRun)
     .filter(models.ChatRun.chat_id == chat_id)

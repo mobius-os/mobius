@@ -233,10 +233,6 @@ export default function useWorkspaceDrag({
     // ── One drag session ──────────────────────────────────────────────────────
     function startSession(downEvent, srcEl, sourceKind, key, paneId) {
       const isTouch = downEvent.pointerType !== 'mouse'
-      const touchIntentKind = sourceKind === 'tab'
-        && downEvent.target?.closest?.('[data-touch-drag-handle]')
-        ? 'tab-handle'
-        : sourceKind
       const start = { x: downEvent.clientX, y: downEvent.clientY }
       const pointerId = downEvent.pointerId
       let armed = false
@@ -244,6 +240,8 @@ export default function useWorkspaceDrag({
       let cleaned = false
       let holdTimer = null
       let held = false
+      let scrolling = false
+      let scrollStripEl = null
       let curZone = null
       let scene = null
       let drawerEdgeX = null
@@ -306,17 +304,18 @@ export default function useWorkspaceDrag({
         }
       }
 
-      // A vertical tab-body move, either-axis kind-icon move, or deliberate
-      // RIGHTWARD drawer-row pull arms immediately. A leftward drawer movement is
-      // reserved for swipe-to-close and retires this controller before it can set
-      // dragActiveRef (which would otherwise make Drawer stand down). A stationary
-      // hold is the alternate path to the tab/row menu; it deliberately does not
-      // unfold the workspace just because time passed.
+      // Tabs use one unambiguous touch contract across their whole surface:
+      // movement before the hold belongs to strip scrolling; surviving the short
+      // hold lifts the tab so a following move drags it. Drawer rows keep their
+      // directional drag-out shortcut because it does not compete with the
+      // drawer's vertical scroll axis. A stationary drawer hold remains the
+      // alternate path to its row menu.
       if (isTouch) {
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
           held = true
           if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
+          if (sourceKind === 'tab') arm()
         }, holdMsFor(sourceKind))
       }
 
@@ -389,15 +388,33 @@ export default function useWorkspaceDrag({
       }
       const onMove = (ev) => {
         if (ev.pointerId !== pointerId) return // ignore a second finger
+        const previousPoint = lastPoint
         lastPoint = { x: ev.clientX, y: ev.clientY }
         const dx = ev.clientX - start.x
         const dy = ev.clientY - start.y
+        if (scrolling) {
+          ev.preventDefault?.()
+          if (scrollStripEl) scrollStripEl.scrollLeft += previousPoint.x - ev.clientX
+          return
+        }
         if (!armed) {
           if (isTouch) {
-            const intent = touchMoveIntent(dx, dy, touchIntentKind)
+            const intent = touchMoveIntent(dx, dy, sourceKind)
             if (intent === 'scroll' || intent === 'swipe-close') {
-              cancelled = true
-              cleanup()
+              clearTimeout(holdTimer)
+              if (sourceKind === 'tab' && intent === 'scroll') {
+                // The tab reserves one-finger panning so the browser cannot
+                // reclaim a post-hold horizontal move and cancel a live drag.
+                // Until the hold wins, mirror the strip's one-to-one pan here.
+                // Whitespace and close buttons remain native pan-x.
+                scrolling = true
+                scrollStripEl = srcEl.closest('.shell__tabstrip')
+                ev.preventDefault?.()
+                if (scrollStripEl) scrollStripEl.scrollLeft += start.x - ev.clientX
+              } else {
+                cancelled = true
+                cleanup()
+              }
               return
             }
             if (intent === 'drag') {
@@ -502,7 +519,9 @@ export default function useWorkspaceDrag({
           }
         }
         if (!armed) {
-          if (isTouch && held) {
+          if (scrolling) {
+            cleanup({ suppressClick: true })
+          } else if (isTouch && held) {
             openTouchMenu()
             cleanup({ suppressClick: true })
           } else cleanup()
@@ -524,7 +543,7 @@ export default function useWorkspaceDrag({
           // Lift → release-in-place = context menu. A strip tab reuses the
           // stage-A pane menu; a drawer row opens its own ⋮ menu (adjudicated).
           openTouchMenu()
-          cleanup()
+          cleanup({ suppressClick: true })
         } else if (backOverDrawer) {
           // Released back over the drawer = cancel; cleanup reopens it if glided.
           cleanup({ suppressClick: true })
@@ -541,7 +560,9 @@ export default function useWorkspaceDrag({
       // Every cancel path suppresses the trailing source click when a drag had
       // ARMED (§9): otherwise the compat click after an Escape / lost-capture /
       // blur / visibility cancel can still navigate to the source row.
-      const onCancel = (ev) => { if (ev.pointerId === pointerId) cleanup({ suppressClick: armed }) }
+      const onCancel = (ev) => {
+        if (ev.pointerId === pointerId) cleanup({ suppressClick: armed || scrolling })
+      }
       const onKey = (ev) => { if (ev.key === 'Escape' && armed) { ev.preventDefault(); cleanup({ suppressClick: true }) } }
       // Touch pointers already have implicit capture, and Chromium may release and
       // reacquire it while the strip updates without ending the contact. The window
@@ -550,14 +571,16 @@ export default function useWorkspaceDrag({
       const onLostCapture = (ev) => {
         if (ev.pointerId === pointerId && !isTouch) cleanup({ suppressClick: armed })
       }
-      const onWinBlur = () => cleanup({ suppressClick: armed })
-      const onVisibility = () => { if (document.visibilityState === 'hidden') cleanup({ suppressClick: armed }) }
+      const onWinBlur = () => cleanup({ suppressClick: armed || scrolling })
+      const onVisibility = () => {
+        if (document.visibilityState === 'hidden') cleanup({ suppressClick: armed || scrolling })
+      }
       // BFCache freeze / bfcache navigation can be the ONLY interruption event some
       // browsers fire — no pointercancel, no blur, and (on older Safari) no
       // visibilitychange-hidden first. Without this, a drag frozen mid-flight and
       // then restored would keep its render-only builder preview, wedging the
       // workspace tiled. pagehide cancels the drag as the page is frozen/unloaded.
-      const onPageHide = () => cleanup({ suppressClick: armed })
+      const onPageHide = () => cleanup({ suppressClick: armed || scrolling })
 
       function cleanup({ suppressClick = false, committed = false } = {}) {
         if (cleaned) return

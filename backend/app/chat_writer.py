@@ -534,6 +534,22 @@ class ClearRunStatus(_Command):
 
 
 @dataclass
+class RecoverWedgedRun(_Command):
+  """Atomically materialize an interrupted turn and clear its stale marker.
+
+  Runtime recovery must never clear the only durable recovery handle while
+  leaving a trailing user message unanswered.  This command folds the saved
+  live assistant snapshot (when one exists) into history, appends the supplied
+  interruption block, closes the exact run row, and clears the marker in one
+  commit.  It preserves ``pending_messages`` unchanged.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  interruption_block: dict = field(default_factory=dict)
+
+
+@dataclass
 class ParkRun(_Command):
   """Park a turn for a due continuation (design §2.4).
 
@@ -556,6 +572,27 @@ class ParkRun(_Command):
   parked_until: object = None
   park_reason: str = ""
   restart_nonce: str = ""
+
+
+@dataclass
+class PrepareRestartIntents(_Command):
+  """Stamp the exact live runs covered by one planned restart.
+
+  This happens BEFORE provider interruption. A slow provider stop or failed
+  terminal transcript write must not erase the one fact startup needs to
+  distinguish an authenticated planned restart from an unrelated crash.
+  The root-owned boot acknowledgement still authorizes the nonce; this command
+  only binds that nonce to the exact currently-running database rows.
+
+  ``runs`` is a bounded process snapshot of ``chat_id``/``run_token`` pairs.
+  The actor revalidates each pair against the latest running row and its
+  in-process token owner, commits every accepted stamp in one transaction, and
+  returns only the accepted pairs. Invalid/stale pairs are ordinary skips so
+  one turn finishing during preparation cannot block the other live turns.
+  """
+
+  restart_nonce: str = ""
+  runs: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -681,6 +718,7 @@ _FENCE_COMMANDS = (
   ClearPending,
   ReplaceTranscript,
   ClearRunStatus,
+  RecoverWedgedRun,
   ParkRun,
   ResolvePark,
   PrepareAutoResume,
@@ -1400,8 +1438,12 @@ class ChatWriterActor:
       return self._replace_transcript(db, cmd)
     if isinstance(cmd, ClearRunStatus):
       return self._clear_run_status(db, cmd)
+    if isinstance(cmd, RecoverWedgedRun):
+      return self._recover_wedged_run(db, cmd)
     if isinstance(cmd, ParkRun):
       return self._park_run(db, cmd)
+    if isinstance(cmd, PrepareRestartIntents):
+      return self._prepare_restart_intents(db, cmd)
     if isinstance(cmd, ResolvePark):
       return self._resolve_park(db, cmd)
     if isinstance(cmd, PrepareAutoResume):
@@ -2530,6 +2572,101 @@ class ChatWriterActor:
     self._run_token_owner.pop(cmd.chat_id, None)
     return None
 
+  def _recover_wedged_run(self, db, cmd: RecoverWedgedRun):
+    """Recover a finished turn without creating a silent transcript gap.
+
+    The ownership check is the same identity fence as ``ClearRunStatus``.  A
+    stale recovery command may close its own old run row, but it cannot alter a
+    newer owner's transcript or marker.  When this run still owns the marker,
+    transcript recovery and marker/run closure land in the same transaction.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import Chat, ChatRun
+
+    owner = self._run_token_owner.get(cmd.chat_id)
+    marker_is_ours = not (
+      cmd.run_token and owner is not None and owner != cmd.run_token
+    )
+    changed = False
+    run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.run_token,
+      ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if run is not None and run.status == "running":
+      run.status = "interrupted"
+      run.ended_at = datetime.now(UTC)
+      run.restart_nonce = None
+      changed = True
+
+    if not marker_is_ours:
+      if changed and not _commit_or_rollback(db):
+        raise _PersistFailed("RecoverWedgedRun did not persist stale close")
+      return False
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is not None and chat.deleted_at is None:
+      messages = list(chat.messages or [])
+      live = copy.deepcopy(chat.live_assistant)
+      if (
+        isinstance(live, dict)
+        and live.get("role") == "assistant"
+        and isinstance(live.get("blocks"), list)
+        and live["blocks"]
+      ):
+        if messages and messages[-1].get("role") == "assistant":
+          messages[-1] = live
+        else:
+          messages.append(live)
+
+      note = copy.deepcopy(cmd.interruption_block)
+      if not isinstance(note, dict) or note.get("type") != "error":
+        raise _PersistFailed("RecoverWedgedRun requires an error block")
+
+      if messages and messages[-1].get("role") == "assistant":
+        previous = messages[-1]
+        blocks = copy.deepcopy(previous.get("blocks") or [])
+        finalize_blocks(blocks)
+        # Keep unanswered question cards as the terminal affordance.  The
+        # recovery note belongs immediately before them and must not compete
+        # with a second Resume button.
+        open_question_start = len(blocks)
+        while open_question_start > 0:
+          block = blocks[open_question_start - 1]
+          if block.get("type") != "question" or block.get("answers"):
+            break
+          open_question_start -= 1
+        if open_question_start < len(blocks):
+          note.pop("resumable", None)
+          blocks.insert(open_question_start, note)
+        else:
+          blocks.append(note)
+        recovered = build_assistant_message(blocks)
+        recovered["ts"] = (
+          previous.get("ts")
+          if previous.get("ts") is not None
+          else next_message_ts(messages[:-1] + list(chat.pending_messages or []))
+        )
+        messages[-1] = recovered
+      else:
+        recovered = build_assistant_message([note])
+        recovered["ts"] = next_message_ts(
+          messages + list(chat.pending_messages or [])
+        )
+        messages.append(recovered)
+
+      chat.messages = messages
+      chat.live_assistant = None
+      if chat.run_status is not None or chat.run_started_at is not None:
+        chat.run_status = None
+        chat.run_started_at = None
+      changed = True
+
+    if changed and not _commit_or_rollback(db):
+      raise _PersistFailed("RecoverWedgedRun did not persist")
+    self._run_token_owner.pop(cmd.chat_id, None)
+    return True
+
   def _park_run(self, db, cmd: ParkRun):
     """Park the run's row for continuation + clear the per-chat marker.
 
@@ -2601,6 +2738,50 @@ class ChatWriterActor:
       raise _PersistFailed("ParkRun did not persist")
     self._run_token_owner.pop(cmd.chat_id, None)
     return parked
+
+  def _prepare_restart_intents(
+    self, db, cmd: PrepareRestartIntents,
+  ) -> list[dict[str, str]]:
+    """Bind one authenticated-restart nonce to exact live run rows."""
+    from app.models import Chat, ChatRun
+
+    if not cmd.restart_nonce:
+      return []
+
+    accepted: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    changed = False
+    for item in cmd.runs:
+      chat_id = str(item.get("chat_id") or "")
+      run_token = str(item.get("run_token") or "")
+      key = (chat_id, run_token)
+      if not chat_id or not run_token or key in seen:
+        continue
+      seen.add(key)
+
+      owner = self._run_token_owner.get(chat_id)
+      if owner is not None and owner != run_token:
+        continue
+      run = db.query(ChatRun).filter(
+        ChatRun.id == run_token,
+        ChatRun.chat_id == chat_id,
+        ChatRun.status == "running",
+      ).first()
+      chat = db.query(Chat).filter(
+        Chat.id == chat_id,
+        Chat.deleted_at.is_(None),
+        Chat.run_status == "running",
+      ).first()
+      if run is None or chat is None or not self._run_is_latest(db, run):
+        continue
+      if run.restart_nonce != cmd.restart_nonce:
+        run.restart_nonce = cmd.restart_nonce
+        changed = True
+      accepted.append({"chat_id": chat_id, "run_token": run_token})
+
+    if changed and not _commit_or_rollback(db):
+      raise _PersistFailed("PrepareRestartIntents did not persist")
+    return accepted
 
   def _resolve_park(self, db, cmd: ResolvePark):
     """Resolve a parked/pending row without continuing; idempotent."""

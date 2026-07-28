@@ -80,14 +80,18 @@ EventType = Literal[
 SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   "theme_updated",
   # Internal lifecycle event emitted after explicit app apply has committed its
-  # first runnable bundle. Shell uses chatId + appId to place the preview; it
-  # is system-bus-only so it is never replayed as a second workspace action.
+  # first runnable bundle. It refreshes app identity/list state; the separate
+  # app_preview_ready action owns workspace placement.
   "app_created",
+  # Emitted after any explicit app apply commits a coherent runnable revision.
+  # Shell reveals the app beside the requesting chat (or activates its phone
+  # tab) so later app_updated revisions are visible as they live-swap.
+  "app_preview_ready",
   # Explicit agent-initiated "open this in the partner's workspace" request
   # (split-pane design §6.3). The agent POSTs it with a typed item + optional
   # source + placement/activation; Shell confirms the item exists, then routes
-  # it through the same pane-aware resolver as app_created. Like app_created it
-  # is system-bus-only (an action event must never replay on reconnect).
+  # it through the same pane-aware resolver as app_preview_ready. Like that
+  # preview action it is system-bus-only (an action must never replay).
   "open_item",
   "app_updated",
   "app_build_failed",
@@ -272,6 +276,11 @@ TOOL_OUTPUT_INLINE_THRESHOLD = 4096
 # reader actually wants) of a carved plain-text output.
 TOOL_OUTPUT_HEAD = 2048
 TOOL_OUTPUT_TAIL = 1024
+# A tool may publish a compact machine-readable receipt on its final line.
+# Preserve that complete line when it is reasonably bounded; a plain tail slice
+# can otherwise start halfway through the receipt and turn a successful result
+# into an apparent failure.
+TOOL_OUTPUT_FINAL_LINE_MAX = 8192
 # Hard ceiling on the whole excerpt. Per-string carving handles the common shell
 # envelope (one big stdout), but a JSON value with MANY small strings re-
 # serializes near full size, which would defeat "bounded on the wire". When the
@@ -293,11 +302,20 @@ _TOOL_OUTPUT_EXIT_RE = re.compile(r"^Exit code (\d+)\r?\n")
 
 
 def _shorten_text(s: str) -> str:
-  """head + a byte-count marker + tail, for a plain-text output over budget."""
+  """Head + marker + tail, preserving a bounded complete final line."""
   if len(s) <= TOOL_OUTPUT_HEAD + TOOL_OUTPUT_TAIL:
     return s
   head = s[:TOOL_OUTPUT_HEAD]
   tail = s[-TOOL_OUTPUT_TAIL:]
+  trimmed = s.rstrip("\r\n")
+  final_start = trimmed.rfind("\n") + 1
+  final_suffix = s[final_start:]
+  if (
+    final_start > 0
+    and final_start < len(s) - TOOL_OUTPUT_TAIL
+    and len(final_suffix) <= TOOL_OUTPUT_FINAL_LINE_MAX
+  ):
+    tail = final_suffix
   shown = len(head) + len(tail)
   return f"{head}\n…[{len(s)} B total — {shown} shown, expand for full]…\n{tail}"
 
@@ -701,7 +719,9 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # the parent turn's Task tool call that spawned it. Enrich that block in
     # place so the persisted transcript carries the chip data for historical
     # chats (ToolBlock.jsx / SubagentChips read block["subagent"]); the same
-    # events also drive the LIVE chip on the wire. Route-through-the-actor is
+    # events also drive the LIVE chip on the wire. Codex opens one synthetic
+    # Task host per delegating turn and points each activation at it, so the
+    # same persistence path serves both providers. Route-through-the-actor is
     # implicit: process_event mutates assistant_blocks and returns True, so the
     # sink's normal PersistTranscript/Finalize path persists it — this never
     # writes Chat.messages directly (the single-writer guardrail).
@@ -710,9 +730,8 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # summary}} — status is "running" until task_done, then the terminal status
     # verbatim (done/failed/killed/stopped). task_progress stays LIVE-ONLY: its
     # per-tick usage/last_tool_name is not worth persisting (it falls through to
-    # `return False` below). Codex has no host Task tool block, so this enriches
-    # Claude turns only. A missing id, or a tool_use_id with no matching block
-    # (unknown), no-ops so a stray event can never append a phantom block.
+    # `return False` below). A missing id, or a tool_use_id with no matching
+    # block (unknown), no-ops so a stray event can never append a phantom block.
     task_id = event.get("task_id")
     if task_id is None:
       return False

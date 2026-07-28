@@ -19,6 +19,14 @@ const markdownCss = readFileSync(
   new URL('../markdown.css', import.meta.url),
   'utf8',
 )
+const navigationSource = readFileSync(
+  new URL('../../../hooks/useNavigation.js', import.meta.url),
+  'utf8',
+)
+const lightboxCss = readFileSync(
+  new URL('../lightbox.css', import.meta.url),
+  'utf8',
+)
 
 const image = (href, text) => ({ type: 'image', href, text })
 const paragraph = (...tokens) => ({
@@ -112,6 +120,36 @@ test('gallery navigation has explicit keyboard and lightbox alternatives', () =>
   assert.match(lightboxSource, /gallerySwipeTarget/)
   assert.match(lightboxSource, /\[baseCenter, galleryItems, index, metrics, toggleZoomAt\]/)
   assert.match(lightboxSource, /\{index \+ 1\} \/ \{galleryItems\.length\}/)
+})
+
+test('lightbox dismissal is owned by the shell Back stack', () => {
+  assert.match(gallerySource, /historyDismiss\.open\(\)/)
+  assert.match(gallerySource, /onClose=\{historyDismiss\.close\}/)
+  assert.match(navigationSource, /pushShellEntry\('dismissible'/)
+  assert.match(
+    navigationSource,
+    /if \(source\?\.kind === 'dismissible'\) \{[\s\S]{0,300}?dismissal\?\.onDismiss\(\)/,
+  )
+})
+
+test('lightbox fills its actual overlay and dismisses from every backdrop edge', () => {
+  assert.match(
+    lightboxSource,
+    /className="lightbox-overlay" role="presentation" onClick=\{onClose\}/,
+    'the full overlay owns backdrop dismissal, including space outside the dialog stage',
+  )
+  assert.match(
+    lightboxCss,
+    /\.lightbox-content\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;/s,
+    'the stage should inherit the fixed overlay bounds instead of recalculating a zoomed viewport',
+  )
+  assert.match(lightboxCss, /max-width:\s*calc\(100% - 32px\)/)
+  assert.match(lightboxCss, /max-height:\s*calc\(100% - 32px\)/)
+  assert.doesNotMatch(
+    lightboxCss,
+    /\.lightbox-(?:content|image)\s*\{[^}]*(?:100vw|100vh|100dvh)/s,
+    'root-level desktop density makes viewport units smaller than the already-correct fixed overlay',
+  )
 })
 
 test('zoomed touch pan keeps its gesture snapshot through a queued render', () => {

@@ -43,12 +43,10 @@ test('passedSlop arms only past the slop radius', () => {
   assert.equal(passedSlop(3, 3), false) // hypot 4.24 < 5
 })
 
-test('touchMoveIntent preserves tab-body scrolling and gives the kind icon either-axis drag', () => {
+test('touchMoveIntent reserves every pre-hold tab move for scrolling', () => {
   assert.equal(touchMoveIntent(8, 0, 'tab'), 'pending')
-  assert.equal(touchMoveIntent(0, 8.1, 'tab'), 'drag', 'vertical pull drags a horizontal tab strip')
+  assert.equal(touchMoveIntent(0, 8.1, 'tab'), 'scroll', 'vertical jitter does not bypass the hold')
   assert.equal(touchMoveIntent(8.1, 0, 'tab'), 'scroll', 'horizontal pull scrolls over a tab body')
-  assert.equal(touchMoveIntent(8.1, 0, 'tab-handle'), 'drag', 'the icon reorders horizontally')
-  assert.equal(touchMoveIntent(0, 8.1, 'tab-handle'), 'drag', 'the icon can move across panes')
   assert.equal(touchMoveIntent(-8.1, 0, 'drawer'), 'swipe-close',
     'leftward pull belongs exclusively to drawer close')
   assert.equal(touchMoveIntent(18, 0, 'drawer'), 'pending',

@@ -71,10 +71,10 @@ async function newChat(page) {
   await createTaggedChat(page)
   await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
   const hasEmpty = await page.evaluate(
-    () => !!document.querySelector('.chat__empty-wrap')
+    () => !!document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
   )
   if (!hasEmpty) await page.goto(BASE)
-  await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
 
@@ -89,7 +89,7 @@ async function sendMessage(page, text) {
   // shared storageState; downstream assertions already do their
   // own visibility waits, so blocking on container visibility up
   // front bought nothing.
-  await expect(page.locator('.chat__msg--user').first()).toBeVisible({ timeout: 8000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').first()).toBeVisible({ timeout: 8000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
   ))
@@ -131,11 +131,11 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Ask me a question')
 
-    await expect(page.locator('.qcard')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
     // The option buttons MUST be enabled (the regression was that
     // post-question tool_start events kept isStreaming=true →
     // disabled={isStreaming} stayed grayed out).
-    const optionButtons = page.locator('.qcard__opt')
+    const optionButtons = page.locator('[data-chat-surface="painted"] .qcard__opt')
     await expect(optionButtons.first()).toBeEnabled({ timeout: 5000 })
   })
 
@@ -177,7 +177,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Ask for a launch lane')
 
-    const card = page.locator('.qcard')
+    const card = page.locator('[data-chat-surface="painted"] .qcard')
     const careful = page.getByRole('radio', { name: 'Careful' })
     const submit = page.getByRole('button', { name: 'Submit' })
     await expect(card).toBeVisible({ timeout: 5000 })
@@ -221,10 +221,9 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Ask me which route')
 
-    const card = page.locator('.qcard')
+    const card = page.locator('[data-chat-surface="painted"] .qcard')
     await expect(card).toBeVisible({ timeout: 5000 })
-    await page.getByRole('radio', { name: 'Other' }).click()
-    const customAnswer = card.getByRole('textbox', { name: 'Other answer for: Which route?' })
+    const customAnswer = card.getByRole('textbox', { name: 'Custom answer for: Which route?' })
     await customAnswer.fill('Take the quiet streets')
 
     const geometry = () => card.evaluate(el => ({
@@ -261,7 +260,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await page.getByRole('button', { name: 'Submit' }).click()
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
     await expect(card.locator('.qcard__hint')).toHaveText('Choose one')
-    await expect(card.locator('.qcard__opt')).toHaveCount(3)
+    await expect(card.locator('.qcard__opt')).toHaveCount(2)
     await expect(customAnswer).toBeDisabled()
     await expect(customAnswer).toHaveValue('Take the quiet streets')
 
@@ -316,13 +315,15 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Try the partial-then-full sequence')
 
-    await expect(page.locator('.qcard')).toHaveCount(1, { timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(1, { timeout: 5000 })
     // The single card has the FINAL options (replace happened), not
     // the empty partial options.
-    await expect(page.locator('.qcard__opt')).toHaveCount(
-      3, // 2 real options + "Other"
+    await expect(page.locator('[data-chat-surface="painted"] .qcard__opt')).toHaveCount(
+      2,
       { timeout: 2000 }
     )
+    await expect(page.getByRole('textbox', { name: 'Custom answer for: What change?' }))
+      .toBeVisible()
     // Options are radios (single-select) — single AskUserQuestion radiogroup.
     await expect(page.getByRole('radio', { name: 'Fix' })).toBeVisible()
     await expect(page.getByRole('radio', { name: 'Skip' })).toBeVisible()
@@ -361,7 +362,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Ask two questions')
 
-    await expect(page.locator('.qcard')).toHaveCount(2, { timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(2, { timeout: 5000 })
   })
 
 
@@ -388,9 +389,9 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Pick scope')
 
-    await expect(page.locator('.qcard')).toHaveCount(1, { timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(1, { timeout: 5000 })
     // Only the question card; no leaked tool blocks.
-    await expect(page.locator('.chat__tool')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__tool')).toHaveCount(0)
   })
 })
 
@@ -417,7 +418,7 @@ test.describe('Bug 3: mid-stream return shows persisted content', () => {
     // redesign means messages.map's suppression only fires under
     // bridgePartialRef.current (which we don't set in tests).
     await page.evaluate(() => {
-      const list = document.querySelector('.chat__list')
+      const list = document.querySelector('[data-chat-surface="painted"] .chat__list')
       const li = document.createElement('li')
       li.className = 'chat__msg chat__msg--assistant'
       li.setAttribute('data-key', 'assistant-99-test')
@@ -429,7 +430,7 @@ test.describe('Bug 3: mid-stream return shows persisted content', () => {
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(r))
     ))
-    await expect(page.locator('.chat__msg--assistant').last())
+    await expect(page.locator('[data-chat-surface="painted"] .chat__msg--assistant').last())
       .toContainText('Persisted partial visible')
   })
 })
@@ -445,8 +446,8 @@ test.describe('Bug 2/4: scroll state machine', () => {
     await setupWithStreamMock(page, null)
     await newChat(page)
     await sendMessage(page, 'First send')
-    await expect(page.locator('.chat__bottom-sentinel')).toHaveCount(0)
-    await expect(page.locator('.chat__scroll')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__bottom-sentinel')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toHaveCount(1)
   })
 
 
@@ -456,9 +457,9 @@ test.describe('Bug 2/4: scroll state machine', () => {
     await sendMessage(page, 'Send with cid')
     // The pin resolves the user row by its stable cid (data-cid). data-ts is
     // kept too, but only for the timestamp tooltip (display metadata).
-    const pinnable = await page.locator('.chat__msg--user[data-cid]').count()
+    const pinnable = await page.locator('[data-chat-surface="painted"] .chat__msg--user[data-cid]').count()
     expect(pinnable).toBeGreaterThan(0)
-    const withTs = await page.locator('.chat__msg--user[data-ts]').count()
+    const withTs = await page.locator('[data-chat-surface="painted"] .chat__msg--user[data-ts]').count()
     expect(withTs).toBeGreaterThan(0)
   })
 
@@ -467,7 +468,7 @@ test.describe('Bug 2/4: scroll state machine', () => {
     await setupWithStreamMock(page, null)
     await newChat(page)
     await sendMessage(page, 'Send with key')
-    const keyed = await page.locator('.chat__msg[data-key]').count()
+    const keyed = await page.locator('[data-chat-surface="painted"] .chat__msg[data-key]').count()
     expect(keyed).toBeGreaterThan(0)
   })
 })
@@ -533,20 +534,20 @@ test.describe('Q&A atomic write', () => {
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
     await sendMessage(page, 'Ask')
-    await expect(page.locator('.qcard')).toBeVisible({ timeout: 5000 })
-    await page.locator('.qcard__opt', { hasText: 'Yes' }).click()
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
+    await page.locator('[data-chat-surface="painted"] .qcard__opt', { hasText: 'Yes' }).click()
     await page.evaluate(() => {
       window.__mobiusChatScrollTrace = {
         version: 1, transitions: [], writes: [], events: [],
       }
     })
-    await page.locator('.qcard__submit').click()
+    await page.locator('[data-chat-surface="painted"] .qcard__submit').click()
 
     await expect.poll(() => sentBodies.length).toBe(2)
     // The hidden answer message MUST carry the answers field
@@ -609,22 +610,22 @@ test.describe('Q&A atomic write', () => {
     )
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 },
     )
     await newChat(page)
     await sendMessage(page, 'Ask the anchored question')
 
-    const card = page.locator('.qcard')
+    const card = page.locator('[data-chat-surface="painted"] .qcard')
     await expect(card).toBeVisible({ timeout: 5000 })
     await page.evaluate(() => {
-      const scroll = document.querySelector('.chat__scroll')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (scroll) scroll.scrollTop = scroll.scrollHeight
     })
-    await page.locator('.qcard__opt', { hasText: 'Yes' }).click()
+    await page.locator('[data-chat-surface="painted"] .qcard__opt', { hasText: 'Yes' }).click()
 
-    const submit = page.locator('.qcard__submit')
+    const submit = page.locator('[data-chat-surface="painted"] .qcard__submit')
     const submitClick = submit.click()
     await answerStarted
     await page.evaluate(() => new Promise(resolve => (
@@ -632,9 +633,9 @@ test.describe('Q&A atomic write', () => {
     )))
 
     const geometry = () => page.evaluate(() => {
-      const scroll = document.querySelector('.chat__scroll')
-      const question = document.querySelector('.qcard')
-      const spacer = document.querySelector('.spacer-dynamic')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const question = document.querySelector('[data-chat-surface="painted"] .qcard')
+      const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
       const sr = scroll?.getBoundingClientRect()
       const qr = question?.getBoundingClientRect()
       return {
@@ -706,8 +707,8 @@ test.describe('Error block: persists across chat return', () => {
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -715,11 +716,11 @@ test.describe('Error block: persists across chat return', () => {
 
     // The error notice appears during streaming with the
     // system-notice class — distinct from the assistant bubble.
-    const errorBlock = page.locator('.chat__text--error', {
+    const errorBlock = page.locator('[data-chat-surface="painted"] .chat__text--error', {
       hasText: 'Quota exceeded',
     })
     await expect(errorBlock).toBeVisible({ timeout: 5000 })
-    await expect(page.locator('.chat__error-label', { hasText: /Error/i }))
+    await expect(page.locator('[data-chat-surface="painted"] .chat__error-label', { hasText: /Error/i }))
       .toBeVisible()
 
     // Wait for the stream's `done` to fire and promote the
@@ -731,7 +732,7 @@ test.describe('Error block: persists across chat return', () => {
     // missing, the error block on the promoted message renders
     // to null and disappears here.
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 5000 },
     )
     // The Stop button is gone; the streaming `<li>` (which
@@ -739,7 +740,7 @@ test.describe('Error block: persists across chat return', () => {
     // branch in ChatView.jsx) is replaced by the assistant
     // `<li>` whose body comes from MsgContent.
     await expect(
-      page.locator('.chat__text--error', { hasText: 'Quota exceeded' }),
+      page.locator('[data-chat-surface="painted"] .chat__text--error', { hasText: 'Quota exceeded' }),
     ).toBeVisible({ timeout: 3000 })
   })
 
@@ -776,8 +777,8 @@ test.describe('Error block: persists across chat return', () => {
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -786,7 +787,7 @@ test.describe('Error block: persists across chat return', () => {
     // The error renders as a system notice. The URL inside it
     // must be an actual <a href> — assert the anchor exists with
     // the URL the message contained.
-    const link = page.locator('.chat__text--error a[href*="example.test/billing"]')
+    const link = page.locator('[data-chat-surface="painted"] .chat__text--error a[href*="example.test/billing"]')
     await expect(link).toBeVisible({ timeout: 5000 })
   })
 })

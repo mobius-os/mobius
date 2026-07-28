@@ -1,5 +1,8 @@
 # backend/tests/test_uploads.py
 import io
+
+from PIL import Image
+
 from app import models
 
 
@@ -81,6 +84,38 @@ def test_serve_uploaded_file(client, db, auth, chat):
   )
   assert res.status_code == 200
   assert res.content == b"secret"
+
+
+def test_serve_uploaded_image_preview_without_touching_original(
+  client, db, auth, chat,
+):
+  image_bytes = io.BytesIO()
+  Image.new("RGB", (1800, 1200), (42, 91, 130)).save(image_bytes, "PNG")
+  original = image_bytes.getvalue()
+  client.post(
+    f"/api/chats/{chat.id}/uploads",
+    files=[("files", ("photo.png", io.BytesIO(original), "image/png"))],
+    headers=auth,
+  )
+  media_token = client.post(
+    f"/api/chats/{chat.id}/media-token", headers=auth,
+  ).json()["token"]
+
+  preview = client.get(
+    f"/api/chats/{chat.id}/uploads/photo.png",
+    params={"token": media_token, "preview": "true"},
+  )
+
+  assert preview.status_code == 200
+  assert preview.headers["content-type"] == "image/webp"
+  with Image.open(io.BytesIO(preview.content)) as image:
+    assert max(image.size) == 1024
+
+  full = client.get(
+    f"/api/chats/{chat.id}/uploads/photo.png",
+    params={"token": media_token},
+  )
+  assert full.content == original
 
 
 def test_upload_rejects_missing_chat(client, auth):

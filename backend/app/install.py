@@ -45,7 +45,15 @@ from PIL import Image as _PILImage
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
-from app import activity, app_git, fs_locks, legacy_platform_apps, models, source_dirs
+from app import (
+  activity,
+  app_git,
+  data_git,
+  fs_locks,
+  legacy_platform_apps,
+  models,
+  source_dirs,
+)
 from app.app_capabilities import contract_and_digest
 from app.app_source_check import check_app_source
 from app.compiler import (
@@ -239,11 +247,28 @@ _HTTP_TIMEOUT = 15.0
 # different host.
 _MAX_REDIRECTS = 5
 
-# Cron scaffold lives at this path in the built image. Tests normally override
-# the module attribute; the test-runtime mutation guard below is the backstop
-# when the baked scaffold is present (as it is inside the production image).
-CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
+_BAKED_CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
+# Tests override this module attribute to prevent production cron mutation.
+CRON_SCAFFOLD = _BAKED_CRON_SCAFFOLD
 _ALLOW_TEST_CRON_ENV = "MOBIUS_ALLOW_TEST_CRON"
+
+
+def _cron_scaffold() -> Path:
+  """Return an explicit test override or the active production scaffold.
+
+  Startup reconciliation must migrate persisted crontab entries immediately
+  after a platform update, before the next image rebuild refreshes /app. Prefer
+  the served checkout for that production default; retain the baked copy as
+  the degraded-boot floor.
+  """
+  if CRON_SCAFFOLD != _BAKED_CRON_SCAFFOLD:
+    return CRON_SCAFFOLD
+  live = (
+    Path(__file__).resolve().parent.parent
+    / "scripts"
+    / "init-cron-scaffold.sh"
+  )
+  return live if live.is_file() else _BAKED_CRON_SCAFFOLD
 
 
 def _cron_mutation_blocked_in_test_runtime() -> bool:
@@ -1141,15 +1166,22 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
       500,
       "Cron mutation is disabled in the test runtime.",
     )
-  scaffold = CRON_SCAFFOLD
+  scaffold = _cron_scaffold()
   if not scaffold.exists():
     # In tests we mock this away; in containers it's always present.
     raise HTTPException(500, "init-cron-scaffold.sh missing from image.")
   cmd = [str(scaffold), slug, schedule_expr, job_path.name]
   if app_id is not None:
     cmd.append(str(app_id))
+  # Cron has a deliberately minimal environment. Materialize the configured
+  # backend URL and the active supervisor path into its generated entry so
+  # scheduled jobs use the same live runner and server as Run now.
+  from app.app_jobs import runner_script
+  env = dict(os.environ)
+  env["API_BASE_URL"] = get_settings().api_base_url
+  env["MOBIUS_APP_JOB_RUNNER"] = str(runner_script())
   result = subprocess.run(
-    cmd, capture_output=True, text=True, timeout=30,
+    cmd, capture_output=True, text=True, timeout=30, env=env,
   )
   if result.returncode != 0:
     raise HTTPException(
@@ -1317,69 +1349,6 @@ def _storage_path(app_id: int, sub: str) -> Path:
   return data_dir / "apps" / str(app_id) / sub
 
 
-# Env vars that would redirect the skill-snapshot git commands away from the
-# /data repo (git exports them into hook environments, where they OVERRIDE
-# `-C`). app_git._git_env is deliberately NOT reused for the snapshot: its
-# GIT_CEILING_DIRECTORIES is designed to STOP repo discovery at /data, which
-# is exactly the repo the snapshot targets.
-_SNAPSHOT_GIT_ENV_DROP = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
-
-
-def _snapshot_shared_skill(
-  data_dir: Path, rel: str, slug: str, version: str,
-) -> tuple[bool, str]:
-  """Commits shared/skills/<rel>'s current bytes into the /data repo.
-
-  Returns (ok, detail). ok=True means the current content is durable in git
-  history — either a fresh pre-install snapshot commit, or the file was
-  already committed clean (the nightly /data safety-net commit got there
-  first, which IS the snapshot). ok=False means durability could not be
-  guaranteed (index.lock, dubious ownership, unborn HEAD, ...) and the
-  caller must NOT overwrite the file.
-
-  `--only` + the pathspec keeps the commit to this one file, so a racing
-  `git add -A` (the nightly pm-commit) can't be swept into it and unrelated
-  staged files stay staged.
-  """
-  env = {
-    k: v for k, v in os.environ.items() if k not in _SNAPSHOT_GIT_ENV_DROP
-  }
-  # Explicit identity: the /data repo normally carries user.name from
-  # entrypoint.sh, but a snapshot must not fail (and thereby block a skill
-  # update) just because that config is missing.
-  base = [
-    "git", "-C", str(data_dir),
-    "-c", "user.name=Mobius", "-c", "user.email=mobius@localhost",
-  ]
-
-  def _run(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-      [*base, *args], capture_output=True, text=True, timeout=30, env=env,
-    )
-
-  def _reason(proc: subprocess.CompletedProcess) -> str:
-    lines = (proc.stderr or proc.stdout or "").strip().splitlines()
-    return lines[0] if lines else f"git exited {proc.returncode}"
-
-  path = f"shared/skills/{rel}"
-  status = _run("status", "--porcelain", "--", path)
-  if status.returncode != 0:
-    return False, _reason(status)
-  if not status.stdout.strip():
-    return True, "already committed"
-  add = _run("add", "--", path)
-  if add.returncode != 0:
-    return False, _reason(add)
-  commit = _run(
-    "commit", "--only",
-    "-m", f"pre-install snapshot of {rel} (app {slug} v{version})",
-    "--", path,
-  )
-  if commit.returncode != 0:
-    return False, _reason(commit)
-  return True, "committed"
-
-
 async def _sync_app_skills(
   db: Session,
   app: "models.App",
@@ -1516,7 +1485,10 @@ async def _sync_app_skills(
           if (data_dir / ".git").is_dir():
             try:
               ok, detail = await asyncio.to_thread(
-                _snapshot_shared_skill, data_dir, rel, app.slug, version,
+                data_git.snapshot_path,
+                data_dir,
+                f"shared/skills/{rel}",
+                f"pre-install snapshot of {rel} (app {app.slug} v{version})",
               )
             except Exception as exc:
               ok, detail = False, repr(exc)
@@ -2330,6 +2302,7 @@ async def install_from_manifest(
   # means a plain local commit (fresh install, or a conflict that left local
   # untouched).
   merge_applied = False
+  equivalence_target_to_retire: str | None = None
   if icon_warning:
     warnings.append(icon_warning)
 
@@ -2845,6 +2818,11 @@ async def install_from_manifest(
                 source_tree = merged_source
                 divergence = "clean_merge"
                 merge_applied = True
+                if merge.equivalent_change_refs:
+                  warnings.append(
+                    "reconciled reviewed changes that were already present "
+                    "upstream"
+                  )
                 # Read exec bits only now that we WILL write this tree — a
                 # conflict/unreadable verdict never ls-tree's the (possibly
                 # degenerate) merged oid.
@@ -3112,6 +3090,7 @@ async def install_from_manifest(
                 app_git.commit_replay, source_dir_path,
                 app.upstream_commit, commit_msg,
               )
+              equivalence_target_to_retire = app.upstream_commit
             else:
               await asyncio.to_thread(
                 app_git.commit_local, source_dir_path, commit_msg,
@@ -3178,6 +3157,24 @@ async def install_from_manifest(
     rollback_actions.clear()
     created_paths.clear()
     db.refresh(app)
+
+    # Only the durable update may retire provenance.  Doing this before the DB
+    # commit would lose the witness if a later storage/row failure rolled the
+    # install back.  Ref deletion is best-effort post-commit housekeeping: the
+    # replay already parents `main` directly on this upstream target, so keeping
+    # an obsolete ref is harmless while deleting it bounds metadata growth.
+    if app.source_dir and equivalence_target_to_retire:
+      try:
+        async with fs_locks.source_dir_lock(str(app.source_dir)):
+          await asyncio.to_thread(
+            app_git.retire_landed_equivalent_changes,
+            app.source_dir, equivalence_target_to_retire,
+          )
+      except Exception:
+        log.warning(
+          "install: could not retire integrated contribution provenance",
+          exc_info=True,
+        )
 
     # app_install: log only after the row is durable so the timestamp
     # in the activity log reflects when the install actually landed,
@@ -3348,9 +3345,19 @@ async def install_from_manifest(
   ):
     try:
       from app.app_jobs import launch_app_job
-      source = Path(app.source_dir)
-      launch_app_job(app.id, source / job_name, source)
-      warnings.append("initialization started")
+      source_dir = Path(app.source_dir)
+      # Bootstrap runs inside FastAPI lifespan, before this backend can answer
+      # the supervisor's scoped capability calls.  Keep that ordering detail in
+      # the generic runner: it waits for the existing readiness signal before
+      # starting.  Interactive installs already happen against a live server.
+      wait_for_ready = source == "bootstrap"
+      launch_app_job(
+        app.id, source_dir / job_name, source_dir, wait_for_ready=wait_for_ready,
+      )
+      warnings.append(
+        "initialization waiting for startup readiness"
+        if wait_for_ready else "initialization started"
+      )
     except Exception as exc:
       log.exception("install: initialization job failed to start")
       warnings.append(f"initialization failed to start — {exc!r}")

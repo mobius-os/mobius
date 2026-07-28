@@ -54,11 +54,11 @@ async function setVisibility(page, state) {
 
 async function pillOverlapDiagnostics(page) {
   return page.evaluate(() => {
-    const pill = document.querySelector('.chat__pill')
+    const pill = document.querySelector('[data-chat-surface="painted"] .chat__pill')
     if (!pill) return { missing: 'pill' }
     const pillRect = pill.getBoundingClientRect()
-    const retry = document.querySelector('.connection-status__retry')
-    const status = document.querySelector('.connection-status')
+    const retry = document.querySelector('[data-chat-surface="painted"] .connection-status__retry')
+    const status = document.querySelector('[data-chat-surface="painted"] .connection-status')
 
     const describe = (el) => {
       if (!el) return null
@@ -137,8 +137,8 @@ test.describe('Stream reconnection', () => {
     await setupChat(page)
     await send(page, 'hello')
 
-    await expect(page.locator('.chat__scroll')).toContainText('complete response')
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('complete response')
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
 
     await page.evaluate(() => {
       Object.defineProperty(document, 'visibilityState', {
@@ -152,8 +152,8 @@ test.describe('Stream reconnection', () => {
     })
     await page.waitForTimeout(500)
 
-    await expect(page.locator('.chat__scroll')).toContainText('complete response')
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('complete response')
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
     expect(streamRequestCount).toBe(1)
   })
 
@@ -191,10 +191,10 @@ test.describe('Stream reconnection', () => {
     await setupChat(page)
     await send(page, 'expired broadcast')
 
-    await expect(page.locator('.chat__scroll')).toContainText('final response from db', {
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('final response from db', {
       timeout: 8000,
     })
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
     expect(streamRequestCount).toBe(1)
   })
 
@@ -216,8 +216,8 @@ test.describe('Stream reconnection', () => {
     await setupChat(page)
     await send(page, 'hi')
 
-    await expect(page.locator('.chat__scroll')).toContainText('hello back')
-    await expect(page.locator('button[aria-label="Voice input"]')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('hello back')
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Voice input"]')).toHaveCount(1)
   })
 
   test('4. Stop clears streaming so visibility change does not reconnect', async ({ page }) => {
@@ -240,9 +240,9 @@ test.describe('Stream reconnection', () => {
     await setupChat(page)
     await send(page, 'stop me')
 
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
-    await page.locator('button[aria-label="Stop"]').click()
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
+    await page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]').click()
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
 
     await page.evaluate(() => {
       Object.defineProperty(document, 'visibilityState', {
@@ -316,7 +316,7 @@ test.describe('Stream reconnection', () => {
 
     await setupChat(page)
     await send(page, 'sleep before first event')
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
     await page.waitForFunction(() => window.__droppedStreamParked === true)
 
     await setVisibility(page, 'hidden')
@@ -326,13 +326,13 @@ test.describe('Stream reconnection', () => {
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
-    await expect(page.locator('.chat__scroll')).toContainText(
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
       'reattached in-progress', { timeout: 5000 },
     )
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
 
     await page.evaluate(() => window.__finishReattachedStream())
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
   })
 
   test('11. Quick visibility flip keeps a fresh live socket quiet', async ({ page }) => {
@@ -370,7 +370,7 @@ test.describe('Stream reconnection', () => {
 
     await setupChat(page)
     await send(page, 'quick flip with healthy socket')
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
@@ -379,7 +379,7 @@ test.describe('Stream reconnection', () => {
     await page.waitForTimeout(1800)
 
     expect(await page.evaluate(() => window.__streamFetchCount)).toBe(1)
-    await expect(page.locator('.connection-status--reattach')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toHaveCount(0)
   })
 
   test('14. Kept quick-wake socket self-heals when reads stop', async ({ page }) => {
@@ -441,7 +441,7 @@ test.describe('Stream reconnection', () => {
 
     await setupChat(page)
     await send(page, 'quick flip with silently dead socket')
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
@@ -451,10 +451,10 @@ test.describe('Stream reconnection', () => {
     await page.waitForFunction(() => window.__streamFetchCount === 2, {
       timeout: 5000,
     })
-    await expect(page.locator('.chat__scroll')).toContainText(
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
       'deadman replay', { timeout: 5000 },
     )
-    await expect(page.locator('.connection-status--reattach')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toHaveCount(0)
 
     await setVisibility(page, 'hidden')
     await page.waitForTimeout(50)
@@ -464,7 +464,7 @@ test.describe('Stream reconnection', () => {
     await page.waitForTimeout(400)
 
     expect(await page.evaluate(() => window.__streamFetchCount)).toBe(2)
-    await expect(page.locator('.connection-status--reattach')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toHaveCount(0)
   })
 
   test('12. Long-hidden wake with stale reads still reattaches and replays', async ({ page }) => {
@@ -523,7 +523,7 @@ test.describe('Stream reconnection', () => {
 
     await setupChat(page)
     await send(page, 'long hidden with stale socket')
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
@@ -531,13 +531,13 @@ test.describe('Stream reconnection', () => {
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
-    await expect(page.locator('.chat__scroll')).toContainText(
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
       'long-hidden replay', { timeout: 5000 },
     )
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
 
     await page.evaluate(() => window.__finishReattachedStream())
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
   })
 
   test('13. Slow long-hidden reattach shows the reconnecting note', async ({ page }) => {
@@ -592,7 +592,7 @@ test.describe('Stream reconnection', () => {
 
     await setupChat(page)
     await send(page, 'slow reattach')
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
     await page.waitForFunction(() => window.__streamFetchCount === 1)
 
     await setVisibility(page, 'hidden')
@@ -600,12 +600,12 @@ test.describe('Stream reconnection', () => {
     await setVisibility(page, 'visible')
 
     await page.waitForFunction(() => window.__streamFetchCount === 2)
-    await expect(page.locator('.connection-status--reattach')).toBeVisible({
+    await expect(page.locator('[data-chat-surface="painted"] .connection-status--reattach')).toBeVisible({
       timeout: 3000,
     })
 
     await page.evaluate(() => window.__releaseSlowReattach())
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
   })
 
   test('9. ConnectionStatus retry button stays above the composer pill on wake failure', async ({ page }) => {
@@ -627,12 +627,12 @@ test.describe('Stream reconnection', () => {
     await setupChat(page)
     await send(page, 'retry button layout')
 
-    await expect(page.locator('.connection-status__retry')).toBeVisible({
+    await expect(page.locator('[data-chat-surface="painted"] .connection-status__retry')).toBeVisible({
       timeout: 10000,
     })
     await page.waitForFunction(() => {
-      const chat = document.querySelector('.chat')
-      const foot = document.querySelector('.chat__foot')
+      const chat = document.querySelector('[data-chat-surface="painted"] .chat')
+      const foot = document.querySelector('[data-chat-surface="painted"] .chat__foot')
       return chat && foot
         && getComputedStyle(chat).getPropertyValue('--composer-h').trim()
           === `${foot.offsetHeight}px`
@@ -686,7 +686,7 @@ test.describe('Stream reconnection', () => {
     await send(page, 'hello')
 
     // Stop button should appear while agent is working.
-    await expect(page.locator('button[aria-label="Stop"]')).toBeVisible({
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toBeVisible({
       timeout: 3000,
     }).catch(() => {
       // Stream may have completed already — that's OK for this test.
@@ -694,16 +694,16 @@ test.describe('Stream reconnection', () => {
     })
 
     // After stream completes, type a follow-up.
-    await expect(page.locator('.chat__scroll')).toContainText(
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
       'streaming...', { timeout: 5000 },
     )
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('follow up')
-    await expect(page.locator('button[aria-label="Send"]')).toBeVisible()
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeVisible()
 
     // Send and verify second response arrives.
-    await page.locator('button[aria-label="Send"]').click()
-    await expect(page.locator('.chat__scroll')).toContainText(
+    await page.locator('[data-chat-surface="painted"] button[aria-label="Send"]').click()
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
       'second response', { timeout: 5000 },
     )
   })
@@ -849,7 +849,7 @@ test.describe('Stream reconnection', () => {
 
     // Send the first message. Its /stream fetch is parked by the shim.
     await send(page, 'first turn')
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(1)
     await page.waitForFunction(() => window.__staleStreamRequested === true, {
       timeout: 5000,
     })
@@ -865,32 +865,32 @@ test.describe('Stream reconnection', () => {
     // (status:'started' → real /stream).
     const input = page.getByRole('textbox', { name: 'Message Möbius…' })
     await input.fill('queued follow-up')
-    await expect(page.locator('button[aria-label="Send"]')).toBeVisible()
-    await page.locator('button[aria-label="Send"]').click()
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeVisible()
+    await page.locator('[data-chat-surface="painted"] button[aria-label="Send"]').click()
     // Wait for it to land as a server-confirmed queued row, then cancel it.
     await expect(page.getByRole('button', { name: 'Send queued message now' }))
       .toBeVisible()
-    await page.locator('.queued__cancel').first().click()
-    await expect(page.locator('.queued__row')).toHaveCount(0)
+    await page.locator('[data-chat-surface="painted"] .queued__cancel').first().click()
+    await expect(page.locator('[data-chat-surface="painted"] .queued__row')).toHaveCount(0)
 
     // Stop: with the queue cleared the primary action is Stop again. Stop
     // aborts the parked first stream's controller (a no-op for the shim)
     // and zeroes justSentAtRef.
-    await expect(page.locator('button[aria-label="Stop"]')).toBeVisible()
-    await page.locator('button[aria-label="Stop"]').click()
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toBeVisible()
+    await page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]').click()
     // click() only waits for the DOM event, not handleStop's async backend
     // confirmation. Wait for the state machine to become idle before modeling
     // the user's next send; otherwise Enter can race the still-active Stop
     // state and legitimately enqueue instead of opening the fresh stream this
     // test is meant to exercise.
-    await expect(page.locator('button[aria-label="Stop"]')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Stop"]')).toHaveCount(0)
 
     // Send the follow-up as a fresh turn whose /stream (request #2) hits the
     // real route above — this is the turn the stale 204 must not clobber.
     await send(page, 'queued follow-up')
 
     // The resent turn's response should stream in and stick.
-    await expect(page.locator('.chat__scroll')).toContainText(
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
       'RESENT TURN RESPONSE', { timeout: 8000 },
     )
 
@@ -906,7 +906,7 @@ test.describe('Stream reconnection', () => {
 
     // The resent response must still be present — the stale 204 must not
     // have cleared streamItems / forced a DB refetch over the live turn.
-    await expect(page.locator('.chat__scroll')).toContainText('RESENT TURN RESPONSE')
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('RESENT TURN RESPONSE')
 
     // The discriminating signal: a DB refetch triggered by the stale
     // 204's terminal-refresh path fires AFTER we release it. (An earlier,
@@ -944,7 +944,7 @@ test.describe('Stream reconnection', () => {
     await setupChat(page)
     await send(page, 'hello')
 
-    await expect(page.locator('.chat__scroll')).toContainText('delayed response', {
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText('delayed response', {
       timeout: 10000,
     })
     expect(streamRequestCount).toBeGreaterThanOrEqual(3)
@@ -1067,7 +1067,7 @@ test.describe('Stream reconnection', () => {
     })
 
     // The persisted question card renders.
-    await expect(page.locator('.qcard')).toBeVisible({ timeout: 10000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 10000 })
 
     // The option buttons must be ENABLED (the bug rendered them
     // disabled). Pick an answer + submit.

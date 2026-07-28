@@ -18,6 +18,7 @@ crash-interrupted merge is aborted on the next pass. A legacy interrupted rebase
 is still cleaned up because an update can cross this implementation boundary.
 """
 
+import hashlib
 import subprocess
 import stat
 import textwrap
@@ -27,14 +28,28 @@ from types import SimpleNamespace
 
 import pytest
 
+from app import app_git
 from app import platform_update as pu
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-  return subprocess.run(
+  proc = subprocess.run(
     ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(cwd), *args],
-    capture_output=True, text=True, check=check,
+    capture_output=True, text=True,
   )
+  if check and proc.returncode != 0:
+    # Preserve the CalledProcessError type, but attach git's stderr as an
+    # exception note so the traceback shows git's actual `fatal:` line. The
+    # default check=True message is only "... exit status N", which is why the
+    # intermittent exit-128 failure this suite has hit in CI was undiagnosable:
+    # git's own error text was swallowed. Surfacing it lets the next occurrence
+    # name its own cause instead of leaving us to guess.
+    err = subprocess.CalledProcessError(
+      proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr,
+    )
+    err.add_note(f"git stderr: {proc.stderr.strip() or '(empty)'}")
+    raise err
+  return proc
 
 
 # A trivially-importable backend so the import probe (`import app.main` with cwd
@@ -266,6 +281,64 @@ def test_conflict_serves_old_and_flags(clone_env):
   status = pu.platform_status(platform)
   assert status["state"] == pu.PlatformUpdateState.CONFLICT.value
   assert any("main.py" in p for p in status["conflict_paths"])
+
+
+def test_contributed_squash_uses_provenance_for_both_histories(clone_env):
+  """The shell auto-reconciles a reviewed change returned under a new SHA.
+
+  The local line evolves after review, while upstream squash-merges the reviewed
+  predecessor and adds a separate release edit.  Ordinary Git conflicts on the
+  line; the two provenance witnesses make the reviewed tree a semantic base,
+  preserving the follow-up and recording the real target as merge parent.
+  """
+  origin, platform = clone_env
+  base = _served_sha(platform)
+  shared = _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'SHARED REVIEW'")
+  reviewed = _local_commit(
+    platform,
+    edits={"backend/app/main.py": shared},
+    msg="reviewed contribution",
+  )
+  diff = app_git._canonical_diff(platform, base, reviewed)
+  assert diff is not None
+  digest = hashlib.sha256(diff).hexdigest()
+  pending = app_git.record_pending_equivalent_change(
+    platform,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="shell-reviewed-change",
+  )
+  assert pending
+
+  followup = shared.replace("SHARED REVIEW", "LOCAL FOLLOWUP")
+  pre = _local_commit(
+    platform,
+    edits={"backend/app/main.py": followup},
+    msg="local followup",
+  )
+  target_body = shared.replace("LINE_C = 3", "LINE_C = 9001")
+  target = _advance_origin(
+    origin,
+    edits={"backend/app/main.py": target_body},
+    msg="squash reviewed contribution",
+  )
+  landed = app_git.mark_equivalent_change_landed(
+    platform, digest, upstream_sha=target,
+  )
+  assert landed
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "updated"
+  served = (platform / "backend/app/main.py").read_text()
+  assert "LINE_A = 'LOCAL FOLLOWUP'" in served
+  assert "LINE_C = 9001" in served
+  parents = _git(platform, "show", "-s", "--format=%P", "HEAD").stdout.split()
+  assert parents == [pre, target]
+  assert not pu.CONFLICT_FLAG.exists()
+  assert not app_git.ref_exists(platform, landed)
 
 
 def test_diverged_update_surfaces_all_net_conflicts_together(clone_env):

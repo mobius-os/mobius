@@ -337,6 +337,10 @@ export default function useNavigation({
   // stays put while traversing iframe-created phantom entries; the next tagged
   // destination can then still be compared with the last shell position.
   const currentNavStateRef = useRef(null)
+  // Transient shell surfaces (currently the chat image viewer) own real Back
+  // sentinels but no route. The callback registry lets handleBack dismiss the
+  // exact mounted surface without teaching it about that surface's React state.
+  const historyDismissalsRef = useRef(new Map())
   // Legacy app-local levels are destructive: Back tells the iframe to close
   // them, and Forward cannot recreate them. Remember those physical entries so
   // revisiting one can safely degrade to the app base. Reversible entries use
@@ -511,6 +515,39 @@ export default function useNavigation({
     })
     currentNavStateRef.current = state
     return state
+  }, [])
+
+  const openHistoryDismiss = useCallback((onDismiss) => {
+    if (typeof onDismiss !== 'function') return null
+    let state
+    try {
+      state = pushShellEntry('dismissible', snapshotRoute())
+    } catch {
+      return null
+    }
+    const entryId = navEntryId(state)
+    if (!entryId) return null
+    historyDismissalsRef.current.set(entryId, { onDismiss, closing: false })
+    return entryId
+  }, [pushShellEntry, snapshotRoute])
+
+  const closeHistoryDismiss = useCallback((entryId) => {
+    const dismissal = historyDismissalsRef.current.get(entryId)
+    if (!dismissal) return false
+    if (dismissal.closing) return true
+    const current = currentNavStateRef.current
+    if (current?.kind === 'dismissible' && navEntryId(current) === entryId) {
+      dismissal.closing = true
+      history.back()
+      return true
+    }
+    historyDismissalsRef.current.delete(entryId)
+    dismissal.onDismiss()
+    return true
+  }, [])
+
+  const unregisterHistoryDismiss = useCallback((entryId) => {
+    historyDismissalsRef.current.delete(entryId)
   }, [])
 
   function openDrawer() {
@@ -1045,15 +1082,20 @@ export default function useNavigation({
           : { type: 'OPEN_TAB', paneId: bootPaneId, tab, activate: true })
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
-      // A deep link routes through the ONE decision point (finding 3; INV 2/4): in
-      // an initialized SINGLE world it sets the slot (the requested item actually
-      // appears) rather than OPEN_TAB-ing the hidden pane tree. Builder (and the
-      // no-valid-blob RESET_FLAT path) keep openBootTab.
+      // A deep link routes through the ONE decision point (finding 3; INV 2/4):
+      // an initialized SINGLE world changes only its slot, while a fresh SINGLE
+      // world seeds BOTH retained representations to the explicit destination.
+      // RESET_FLAT deliberately preserves a slot, so omitting the second write
+      // would leave the implicit starter chat mounted behind the requested chat.
       const bootDeepLink = (route, tab) => {
         const mode = paneModel.WORKSPACE_SPLITS_ENABLED
           ? workspaceStateRef.current.ws.viewMode : 'single'
-        if (mode === 'single') applyModeDestination(route)
-        else openBootTab(tab)
+        if (mode === 'single') {
+          if (!blobValid) openBootTab(tab)
+          applyModeDestination(route)
+        } else {
+          openBootTab(tab)
+        }
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
       if (deepLink?.view === 'canvas' && Number.isFinite(deepLink.appId)) {
@@ -1131,6 +1173,11 @@ export default function useNavigation({
         drawerClosePendingRef.current = false
         drawerOpenRef.current = false
       }
+      // A transient surface is deliberately not recreated by Forward: its
+      // resource may have streamed away or its owner may have unmounted. Keep
+      // this physical entry as a no-op sentinel so the next Back consumes only
+      // the duplicate history position rather than a real shell route.
+      if (destination?.kind === 'dismissible') return
       const route = destination?.route
       // A nav entry represents a shell-level transition. Back destructively
       // removed its source from navStack, so Forward rebuilds that one edge.
@@ -1262,7 +1309,16 @@ export default function useNavigation({
           setDrawerVisible(false)
         }
       }
-      // (1) Drawer-first: a back that consumes the drawer's own sentinel closes
+      // (1) A transient dismissible consumes Back before any shell route. The
+      // callback is removed first because dismissing unmounts its owner.
+      if (source?.kind === 'dismissible') {
+        const entryId = navEntryId(source)
+        const dismissal = entryId ? historyDismissalsRef.current.get(entryId) : null
+        if (entryId) historyDismissalsRef.current.delete(entryId)
+        dismissal?.onDismiss()
+        return
+      }
+      // (2) Drawer-first: a back that consumes the drawer's own sentinel closes
       // the drawer only — never pops navStack. Catches real back-gestures on a
       // drawer-open view AND closeDrawer's history.back().
       if (drawerOpenRef.current && drawerPushedRef.current) {
@@ -1446,6 +1502,13 @@ export default function useNavigation({
           } })
           return
         }
+        if (source?.kind === 'dismissible') {
+          e.intercept({ handler() {
+            currentNavStateRef.current = destination
+            handleBack(destination, source)
+          } })
+          return
+        }
         if (direction === 'forward') {
           e.intercept({ handler() {
             currentNavStateRef.current = destination
@@ -1517,6 +1580,10 @@ export default function useNavigation({
       // direction classifier returns same/unknown, a pending close whose source
       // is the drawer sentinel must consume that sentinel through handleBack.
       if (drawerClosePendingRef.current && source?.kind === 'drawer') {
+        handleBack(destination, source)
+        return
+      }
+      if (source?.kind === 'dismissible') {
         handleBack(destination, source)
         return
       }
@@ -1632,6 +1699,9 @@ export default function useNavigation({
     appNavReset,
     appNavForwardResult,
     retireAppHistory,
+    openHistoryDismiss,
+    closeHistoryDismiss,
+    unregisterHistoryDismiss,
     tombstoneRoute,
   }
 }

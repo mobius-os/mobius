@@ -18,15 +18,16 @@ test('an uploaded attachment survives a chat switch and remains sendable', async
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(draftChat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
-  const composer = page.getByRole('textbox', { name: 'Message Möbius…' })
+  const paintedChat = page.locator('[data-chat-surface="painted"]')
+  const composer = paintedChat.getByRole('textbox', { name: 'Message Möbius…' })
   await expect(composer).toBeVisible({ timeout: 8000 })
   await composer.fill('Keep this file with my unfinished message')
-  await page.locator('input[type="file"]').setInputFiles({
+  await paintedChat.locator('input[type="file"]').setInputFiles({
     name: 'draft-note.txt',
     mimeType: 'text/plain',
     buffer: Buffer.from('draft attachment'),
   })
-  await expect(page.getByRole('button', { name: 'Remove draft-note.txt' }))
+  await expect(paintedChat.getByRole('button', { name: 'Remove draft-note.txt' }))
     .toBeVisible({ timeout: 8000 })
   await expect.poll(() => page.evaluate((chatId) => {
     const raw = sessionStorage.getItem(`draft:${chatId}`)
@@ -42,14 +43,15 @@ test('an uploaded attachment survives a chat switch and remains sendable', async
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(otherChat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
-  await expect(page.getByRole('textbox', { name: 'Message Möbius…' }))
+  await expect(page.locator('[data-chat-surface="painted"]')
+    .getByRole('textbox', { name: 'Message Möbius…' }))
     .toBeVisible({ timeout: 8000 })
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(draftChat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
 
   await expect(composer).toHaveValue('Keep this file with my unfinished message')
-  await expect(page.getByRole('button', { name: 'Remove draft-note.txt' })).toBeVisible()
+  await expect(paintedChat.getByRole('button', { name: 'Remove draft-note.txt' })).toBeVisible()
 
   let sentBody = null
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
