@@ -275,11 +275,12 @@ _PULL_LOCK = RECOVERY_LIVE_ROOT / ".pull.lock"
 # Persistent crash-loop guard for the live copy. recoveryd (root) bumps this
 # counter just before it execs into the live copy and resets it once the live
 # copy reaches a bound, serving state. It lives on the recoveryd-only volume
-# (which persists across a container restart) — unlike the in-process exec
-# sentinel — so a trusted-but-crashing live copy that dies before serving
-# cannot loop past the baked floor forever: after _MAX_LIVE_ATTEMPTS the
-# launcher quarantines to baked. Written by recoveryd as root; kept off
-# /data so the agent cannot forge a low count to defeat the quarantine.
+# (which persists across a process or container restart) — unlike the
+# in-process exec sentinel — so a trusted-but-crashing live copy that dies
+# before serving cannot loop past the baked floor forever: after
+# _MAX_LIVE_ATTEMPTS the launcher quarantines to baked. Written by recoveryd
+# as root; kept off /data so the agent cannot forge a low count to defeat the
+# quarantine.
 ATTEMPTS_FILE = RECOVERY_LIVE_ROOT / ".attempts"
 _MAX_LIVE_ATTEMPTS = 3
 
@@ -687,10 +688,11 @@ def _maybe_reexec_into_run_dir() -> None:
   argv = [sys.executable, "-P", target, *sys.argv[1:]]
   # Count this live-copy start BEFORE handing off. execv never returns, and
   # if the live copy crashes before its serve loop resets the counter the
-  # bump persists across the container restart, so after _MAX_LIVE_ATTEMPTS
-  # resolve_run_dir quarantines to the baked floor. If the bump cannot be
-  # persisted, decline the live copy and run baked in-place — an untracked
-  # start could otherwise crash-loop forever with no way to reach the floor.
+  # bump persists across the next process or container launch, so after
+  # _MAX_LIVE_ATTEMPTS resolve_run_dir quarantines to the baked floor. If the
+  # bump cannot be persisted, decline the live copy and run baked in-place — an
+  # untracked start could otherwise crash-loop forever with no way to reach the
+  # floor.
   if not _bump_live_attempts():
     log.warning("launcher: cannot persist attempts counter — running baked "
                 "floor instead of the live copy")
@@ -1022,16 +1024,16 @@ def _pull_locked(timeout: float) -> tuple[bool, str]:
 
 
 def _restart_recoveryd() -> None:
-  """Exits the process so the container restart policy re-runs the launcher.
+  """Exits cleanly so the deployment's recovery supervisor re-runs the launcher.
 
   Called AFTER the update response has been written and flushed to the
   client (never mid-response — os.execv here would kill the reply in flight).
   A short-lived daemon thread gives the response bytes a moment to drain
-  through the reverse proxy to the browser, then os._exit(0) drops the
-  process; the recoveryd container's `restart: unless-stopped` policy
-  immediately recreates it, and the fresh main() runs the launcher, which now
-  execs into the just-pulled live copy. os._exit (not sys.exit) so no
-  atexit/finally can intercept — this is a deliberate, unconditional restart.
+  through the reverse proxy to the browser, then os._exit(0) drops the process.
+  Compose's recoveryd container policy or Railway's bounded recovery component
+  supervisor immediately relaunches it; fresh main() runs the launcher, which
+  now execs into the just-pulled live copy. os._exit (not sys.exit) keeps
+  atexit/finally from intercepting this deliberate, unconditional reload.
   """
   def _die() -> None:
     time.sleep(1.0)

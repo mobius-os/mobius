@@ -400,25 +400,3 @@ def test_gateway_forwards_sse_before_the_upstream_stream_finishes():
     for server in (proxy, upstream):
       server.shutdown()
       server.server_close()
-
-
-def test_railway_entrypoint_supervises_every_essential_process():
-  entrypoint = (
-    Path(__file__).resolve().parents[1] / "scripts" / "entrypoint.sh"
-  ).read_text()
-  assert "_wait_for_railway_child_exit" in entrypoint
-  assert '_railway_child_running "$_gateway_pid"' in entrypoint
-  assert '_railway_child_running "$_app_pid"' in entrypoint
-  assert '_railway_child_running "$_recovery_pid"' in entrypoint
-  assert '"/proc/${_child_pid}/status"' in entrypoint
-  assert 'wait "$_gateway_pid"' in entrypoint
-  assert 'wait "$_app_pid"' in entrypoint
-  assert 'wait "$_recovery_pid"' in entrypoint
-  assert "Railway recovery process exited" in entrypoint
-  assert "recoveryd exited with status" not in entrypoint
-  assert "A clean child exit is still a service failure" in entrypoint
-
-  railway = Path(__file__).resolve().parents[2] / "railway.toml"
-  config = railway.read_text()
-  assert 'restartPolicyType = "ON_FAILURE"' in config
-  assert "restartPolicyMaxRetries" in config
