@@ -50,6 +50,29 @@ function CustomAnswerArea({
     resizeCustomAnswer(textareaRef.current)
   }, [value])
 
+  // scrollHeight depends on the field's WIDTH, so the layout-phase measure
+  // above is only correct if the field is already at its final width. During
+  // the live→durable answered-state handoff the card remounts and that measure
+  // can land at a pre-layout width: a one-paragraph answer then wraps into far
+  // more lines than the settled width needs, blows past CUSTOM_ANSWER_MAX_HEIGHT,
+  // and freezes at that clamp — a tall box holding two lines of text. Observe
+  // width and re-measure whenever it settles or later changes so the height
+  // self-corrects. The width guard makes our own height writes (which fire the
+  // observer with an unchanged width) no-ops, so there is no resize loop.
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea || typeof ResizeObserver === 'undefined') return undefined
+    let lastWidth = -1
+    const observer = new ResizeObserver(() => {
+      const width = textarea.clientWidth
+      if (width === lastWidth) return
+      lastWidth = width
+      resizeCustomAnswer(textarea)
+    })
+    observer.observe(textarea)
+    return () => observer.disconnect()
+  }, [])
+
   return (
     <textarea
       ref={textareaRef}

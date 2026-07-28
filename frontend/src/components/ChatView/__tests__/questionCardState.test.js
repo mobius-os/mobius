@@ -34,6 +34,10 @@ test('unanswered question cards do not have a stale gray state', () => {
     'the custom answer should grow with its content up to the phone-safe cap')
   assert.match(component, /useLayoutEffect\(\(\) => \{\s*resizeCustomAnswer\(textareaRef\.current\)\s*\}, \[value\]\)/,
     'confirmed answer values should retain their natural content height')
+  assert.match(component, /new ResizeObserver\(\(\) => \{[\s\S]*?const width = textarea\.clientWidth[\s\S]*?if \(width === lastWidth\) return[\s\S]*?resizeCustomAnswer\(textarea\)/,
+    'settled width changes should trigger one fresh content-height measurement')
+  assert.match(component, /observer\.observe\(textarea\)[\s\S]*?return \(\) => observer\.disconnect\(\)/,
+    'the width observer should be released with the answered card')
   assert.match(component, /e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/,
     'plain Enter should create a new line while the explicit shortcut submits')
   assert.match(component, /val\.replace\(\/\\n\/g, '\\n  '\)/,
