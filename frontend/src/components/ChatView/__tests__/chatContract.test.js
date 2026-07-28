@@ -104,6 +104,23 @@ test('a retained chat crosses the old unmount lifecycle while hidden', () => {
   )
 })
 
+test('an empty chat initializes scroll identity before its first transcript mounts', () => {
+  const scrollController = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
+  const layoutOwner = scrollController.indexOf('// Single layout effect:')
+  const identityReset = scrollController.indexOf(
+    'if (modeChatIdRef.current !== chatId)',
+    layoutOwner,
+  )
+  const missingSurfaceReturn = scrollController.indexOf(
+    'if (!scrollEl || !spacerEl) return',
+    layoutOwner,
+  )
+
+  assert.ok(layoutOwner >= 0 && identityReset > layoutOwner)
+  assert.ok(identityReset < missingSurfaceReturn,
+    'the empty-state early return must not defer chat identity until after the first send arms its pin')
+})
+
 test('snapshotChatUX derives the geometry fields from a clean pinned frame', () => {
   const s = snapshotChatUX(pinnedEnv)
   assert.equal(s.scrollTop, 996)

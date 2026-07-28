@@ -1333,6 +1333,14 @@ export default function useScrollMode({
   // scroll transitions, and mobile keyboard tracking via visualViewport.
   // Re-runs on messages / pendingMessages / chatId changes.
   useLayoutEffect(() => {
+    // Empty chats intentionally render no scroll node. Initialize the chat
+    // identity before that early return so the first send can arm its pin
+    // without the newly mounted transcript being mistaken for a chat change.
+    if (modeChatIdRef.current !== chatId) {
+      modeChatIdRef.current = chatId
+      transitionMode({ kind: 'INITIAL' }, 'lifecycle:chat-change')
+    }
+
     const scrollEl = scrollRef.current
     const spacerEl = spacerRef.current
     if (!scrollEl || !spacerEl) return
@@ -1343,15 +1351,6 @@ export default function useScrollMode({
 
     const listEl = scrollEl.querySelector('.chat__list')
     if (!listEl) return
-
-    // Reset modeRef when the layout effect sees a NEW chatId.
-    // Defensive: today Shell uses key={chatId} so this only fires
-    // on mount; if that key is ever removed, in-place chat switches
-    // won't inherit stale modes from the previous chat.
-    if (modeChatIdRef.current !== chatId) {
-      modeChatIdRef.current = chatId
-      transitionMode({ kind: 'INITIAL' }, 'lifecycle:chat-change')
-    }
 
     // Restore mode for this chat if persisted (mount-restore path).
     if (modeRef.current.kind === 'INITIAL') {
