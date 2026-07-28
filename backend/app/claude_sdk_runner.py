@@ -62,13 +62,19 @@ import inspect
 import json
 import logging
 import os
+import signal
 import shutil
 import time
 from collections import deque
 from typing import Any
 from uuid import uuid4
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
+from claude_agent_sdk import (
+  ClaudeAgentOptions,
+  ClaudeSDKClient,
+  HookMatcher,
+  ProcessError,
+)
 from claude_agent_sdk.types import (
   AssistantMessage,
   PermissionResultAllow,
@@ -147,6 +153,26 @@ def _claude_process_group_id(client: ClaudeSDKClient) -> int | None:
       pid,
     )
   return pgid
+
+
+def _claude_process_was_force_stopped(client: ClaudeSDKClient) -> bool:
+  """Whether the SDK transport recorded one of Möbius's stop signals.
+
+  The SDK's background reader converts ``ProcessError`` into a plain
+  ``Exception`` before it reaches ``receive_response()``. Keep this predicate
+  narrow by reading the still-typed transport outcome and accepting only the
+  TERM/KILL return codes ``terminate_process_group`` can cause. A different
+  typed process failure that merely races a Stop must remain visible to the
+  owner. The transport is already an intentional private SDK seam here
+  (``_claude_process_group_id`` reads its child pid); if the SDK changes shape,
+  this fails closed and the error remains visible.
+  """
+  transport = getattr(client, "_transport", None)
+  exit_error = getattr(transport, "_exit_error", None)
+  return (
+    isinstance(exit_error, ProcessError)
+    and exit_error.exit_code in (-signal.SIGTERM, -signal.SIGKILL)
+  )
 
 
 def _terminate_claude_process_group(pgid: int | None) -> bool:
@@ -305,6 +331,11 @@ class ActiveClaudeClient:
     # Never signal a retained PGID twice; the kernel can eventually reuse it
     # after the first hard stop.
     self._force_stop_started = False
+    # Set synchronously before interrupt()'s first await. Claude reports both a
+    # Möbius-requested Stop and an unexpected provider interruption as an
+    # error-shaped ResultMessage, so the runner needs this local ownership fact
+    # to keep a deliberate Stop from overwriting its resumable pause note.
+    self._interrupt_requested = False
     # FIFO of mid-turn steer texts: two rapid sends must both reach Claude
     # (both are already persisted to the transcript), so a single slot would
     # silently drop the first. The runner drains the whole list on interrupt.
@@ -424,6 +455,7 @@ class ActiveClaudeClient:
     dropping them here: they were never in the transcript, and Stop's own
     clear-and-resend path is what preserves them.
     """
+    self._interrupt_requested = True
     self.pending_steer = []
     self._steer_requested = False
     self._steer_user_msgs = []
@@ -437,6 +469,10 @@ class ActiveClaudeClient:
         "ActiveClaudeClient._finished never resolved within 5s; "
         "runner is wedged",
       )
+
+  @property
+  def interrupt_requested(self) -> bool:
+    return self._interrupt_requested
 
   async def stop(self, timeout: float = 2.0) -> bool:
     """Interrupts the SDK run and waits up to `timeout` seconds."""
@@ -1570,6 +1606,17 @@ async def run_claude_sdk_turn(
               active_client._interrupt_in_flight = True
               await client.interrupt()
             continue
+          if (
+            active_client.interrupt_requested
+            and isinstance(sdk_msg, ResultMessage)
+            and sdk_msg.stop_reason == "interrupt"
+          ):
+            # The SDK describes a deliberate Stop with the same
+            # error_during_execution envelope it uses for an unexpected
+            # interruption. Preserve its usage/cost, but do not let the
+            # provider-shaped error overwrite chat.py's resumable stop note.
+            terminal["error"] = None
+            terminal["terminal_status"] = "interrupted"
           # Terminal result: the interrupt cycle (if any) is closed, so a
           # fresh boundary cut may fire on a later turn.
           active_client._interrupt_in_flight = False
@@ -1599,6 +1646,7 @@ async def run_claude_sdk_turn(
           # retry is also empty the finalize backstop records a retry marker.
           if (
             session_id is not None            # a resume (non-first turn)
+            and not active_client.interrupt_requested  # Stop is terminal
             and not terminal.get("error")     # clean terminal (is_error False)
             and terminal.get("api_error_status") != 429  # not a bare 429/park
             and not active_client.pending_steer
@@ -1646,6 +1694,21 @@ async def run_claude_sdk_turn(
       # error and finalize() persists a durable error block, instead of the
       # old silent `error=None` that logged a clean $0 "done" and let the
       # just-consumed user message go unanswered with nothing to reconcile.
+      if active_client.interrupt_requested:
+        # A graceful interrupt may close the response stream without its usual
+        # ResultMessage. The local ownership flag is enough here: there is no
+        # provider error to suppress, only the resultless end caused by Stop.
+        log.warning(
+          "Claude response stream ended after our own stop chat_id=%s",
+          chat_id,
+        )
+        return {
+          "session_id": current_session_id,
+          "cost_usd": cost_usd,
+          "usage": None,
+          "error": None,
+          "terminal_status": "interrupted",
+        }
       return {
         "session_id": current_session_id,
         "cost_usd": cost_usd,
@@ -1657,6 +1720,28 @@ async def run_claude_sdk_turn(
       }
     except Exception as exc:
       msg = str(exc)
+      if (
+        active_client.interrupt_requested
+        and _claude_process_was_force_stopped(client)
+      ):
+        # force_stop() SIGTERMs the verified private CLI process group when a
+        # graceful interrupt times out. The SDK's reader converts the typed
+        # ProcessError into a plain Exception before it reaches us, so consult
+        # the still-typed transport outcome rather than matching message text.
+        # WARNING is deliberate: the owner sees a clean interrupted turn, but
+        # operators retain the only evidence a coincident CLI crash leaves.
+        log.warning(
+          "Claude process exited during our own stop chat_id=%s: %s",
+          chat_id,
+          exc,
+        )
+        return {
+          "session_id": current_session_id,
+          "cost_usd": None,
+          "usage": None,
+          "error": None,
+          "terminal_status": "interrupted",
+        }
       # The SDK raises this generic placeholder when the CLI dies before a
       # structured result (early resume failure, auth, crash, OOM/SIGTERM
       # kill). Splice in the captured stderr tail ONLY then — gating on the

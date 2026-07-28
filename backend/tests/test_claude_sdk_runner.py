@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from claude_agent_sdk import ProcessError
 from claude_agent_sdk.types import (
   AssistantMessage,
   RateLimitEvent,
@@ -44,7 +45,7 @@ from app.claude_sdk_runner import (
   steer_into_active_turn,
 )
 from app.database import SessionLocal
-from app.runner_registry import registry
+from app.runner_registry import RunnerKind, registry
 
 
 class _Bus:
@@ -274,6 +275,189 @@ def _interrupt_result(session_id: str = "sess-1") -> ResultMessage:
     total_cost_usd=0.01,
     usage={"input_tokens": 1, "output_tokens": 2},
   )
+
+
+async def _run_claude_stop_outcome(monkeypatch, mode: str, *, owned: bool):
+  """Run one fake response stream with an optional owner Stop in flight."""
+  process_error = ProcessError(
+    f"Command failed with exit code {'1' if mode == 'process_failure' else '-15'}",
+    exit_code=1 if mode == "process_failure" else -15,
+    stderr="Check stderr output for details",
+  )
+
+  class _Transport:
+    _process = None
+    _exit_error = process_error if mode in ("process_error", "process_failure") else None
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+      self._transport = _Transport()
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      del message
+
+    async def interrupt(self):
+      return None
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      handle = registry.get_handle("claude-stop-shape", RunnerKind.CLAUDE_SDK)
+      assert handle is not None
+      handle._interrupt_requested = owned
+      if mode == "terminal":
+        yield _interrupt_result()
+        return
+      if mode == "resultless":
+        return
+      if mode in ("process_error", "process_failure"):
+        raise Exception(str(process_error))
+      if mode == "other_error":
+        raise ValueError("unexpected notification payload")
+      raise AssertionError(mode)
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  return await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="claude-stop-shape",
+    skill_text="system",
+    bc=_ChatBus(),
+    pending_questions={},
+    db=None,
+  )
+
+
+@pytest.mark.asyncio
+async def test_claude_interrupt_marks_owner_request_before_sdk_await():
+  observed = []
+
+  class _Client:
+    async def interrupt(self):
+      observed.append(handle.interrupt_requested)
+
+  handle = ActiveClaudeClient(_Client(), chat_id="claude-owned-stop")
+  task = asyncio.create_task(handle.interrupt())
+  while not observed:
+    await asyncio.sleep(0)
+  handle.mark_finished()
+  await task
+
+  assert observed == [True]
+
+
+def test_claude_force_stop_check_uses_the_sdk_type_not_its_name():
+  impostor = type("ProcessError", (Exception,), {})
+
+  class _Client:
+    _transport = type("Transport", (), {"_exit_error": impostor("boom")})()
+
+  assert claude_sdk_runner._claude_process_was_force_stopped(_Client()) is False
+
+
+def test_claude_force_stop_check_rejects_other_typed_process_failures():
+  class _Client:
+    _transport = type("Transport", (), {
+      "_exit_error": ProcessError("CLI failed", exit_code=1),
+    })()
+
+  assert claude_sdk_runner._claude_process_was_force_stopped(_Client()) is False
+
+
+@pytest.mark.asyncio
+async def test_owner_stop_turns_claude_interrupt_result_into_clean_terminal(
+  monkeypatch,
+):
+  result = await _run_claude_stop_outcome(monkeypatch, "terminal", owned=True)
+
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+  assert result["cost_usd"] == 0.01
+  assert result["usage"] == {"input_tokens": 1, "output_tokens": 2}
+
+
+@pytest.mark.asyncio
+async def test_unrequested_claude_interrupt_result_stays_an_error(monkeypatch):
+  result = await _run_claude_stop_outcome(monkeypatch, "terminal", owned=False)
+
+  assert result["error"] == "Execution interrupted."
+  assert result.get("terminal_status") is None
+
+
+@pytest.mark.asyncio
+async def test_owner_stop_accepts_resultless_claude_stream_as_interrupted(
+  monkeypatch,
+):
+  result = await _run_claude_stop_outcome(
+    monkeypatch, "resultless", owned=True,
+  )
+
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_unrequested_resultless_claude_stream_stays_an_error(monkeypatch):
+  result = await _run_claude_stop_outcome(
+    monkeypatch, "resultless", owned=False,
+  )
+
+  assert "ended unexpectedly" in result["error"]
+  assert result.get("terminal_status") is None
+
+
+@pytest.mark.asyncio
+async def test_owner_stop_reclassifies_typed_claude_process_exit(
+  monkeypatch, caplog,
+):
+  result = await _run_claude_stop_outcome(
+    monkeypatch, "process_error", owned=True,
+  )
+
+  assert result["error"] is None
+  assert result["terminal_status"] == "interrupted"
+  assert any(
+    record.levelname == "WARNING"
+    and "Claude process exited during our own stop" in record.message
+    for record in caplog.records
+  )
+
+
+@pytest.mark.asyncio
+async def test_unrequested_claude_process_exit_stays_an_error(monkeypatch):
+  result = await _run_claude_stop_outcome(
+    monkeypatch, "process_error", owned=False,
+  )
+
+  assert "Command failed with exit code -15" in result["error"]
+  assert result.get("terminal_status") is None
+
+
+@pytest.mark.asyncio
+async def test_owner_stop_does_not_hide_unrelated_claude_failure(monkeypatch):
+  result = await _run_claude_stop_outcome(
+    monkeypatch, "other_error", owned=True,
+  )
+
+  assert result["error"] == "unexpected notification payload"
+  assert result.get("terminal_status") is None
+
+
+@pytest.mark.asyncio
+async def test_owner_stop_does_not_hide_other_claude_process_failure(monkeypatch):
+  result = await _run_claude_stop_outcome(
+    monkeypatch, "process_failure", owned=True,
+  )
+
+  assert "exit code 1" in result["error"]
+  assert result.get("terminal_status") is None
 
 
 @pytest.mark.asyncio
