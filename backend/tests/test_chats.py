@@ -250,6 +250,35 @@ def test_chat_list_projects_summaries_without_hydrating_transcripts(
   )
 
 
+def test_chat_list_orders_by_owner_activity_not_agent_updates(
+  client, auth, db,
+):
+  """A later agent write must not outrank a newer owner send or steer."""
+  db.add_all([
+    models.Chat(
+      id="agent-finished",
+      title="Agent finished",
+      messages=[{"role": "user", "content": "older owner activity"}],
+      activity_at=datetime(2026, 7, 28, 9, 0, tzinfo=UTC),
+      updated_at=datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
+    ),
+    models.Chat(
+      id="owner-steered",
+      title="Owner steered",
+      messages=[{"role": "user", "content": "newer owner activity"}],
+      activity_at=datetime(2026, 7, 28, 11, 0, tzinfo=UTC),
+      updated_at=datetime(2026, 7, 28, 11, 0, tzinfo=UTC),
+    ),
+  ])
+  db.commit()
+
+  listed = client.get("/api/chats", headers=auth)
+
+  assert listed.status_code == 200
+  ids = [row["id"] for row in listed.json()]
+  assert ids.index("owner-steered") < ids.index("agent-finished")
+
+
 def test_update_chat_rejects_cross_site_request(client, auth, chat):
   cross = client.put(
     f"/api/chats/{chat.id}",

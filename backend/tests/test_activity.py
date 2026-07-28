@@ -134,8 +134,41 @@ def test_storage_write_debounce_per_key():
   assert activity.should_emit_storage_write(1, "a.json", now=now) is False
 
 
+def test_storage_write_debounce_reclaims_expired_keys_under_churn():
+  """Expired paths leave the cache instead of accumulating for process life."""
+  start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+  for i in range(3):
+    assert activity.should_emit_storage_write(1, f"{i}.json", now=start)
+  assert activity.should_emit_storage_write(
+    1, "hot.json", now=start + timedelta(seconds=30),
+  )
+
+  later = start + timedelta(seconds=61)
+  assert not activity.should_emit_storage_write(1, "hot.json", now=later)
+  assert list(activity._debounce) == [(1, "hot.json")]
+
+
+def test_debounce_caches_preserve_every_key_inside_window():
+  """Active keys remain debounced without an arbitrary working-set limit."""
+  now = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+  for path in ("a", "b", "c"):
+    assert activity.should_emit_storage_write(1, path, now=now)
+  for message in ("a", "b", "c"):
+    assert activity.should_emit_app_error(1, message, now=now)
+
+  assert len(activity._debounce) == 3
+  assert len(activity._error_debounce) == 3
+  for key in ("a", "b", "c"):
+    assert activity.should_emit_storage_write(1, key, now=now) is False
+    assert activity.should_emit_app_error(1, key, now=now) is False
+
+
 def test_request_error_storm_appends_only_one_summary_per_window():
-  start = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+  # This test owns the minute-bucket boundary, not weekly log rotation. Keep
+  # its simulated burst near the real write clock so the active file cannot
+  # rotate merely because a fixed fixture date aged past ROTATION_DAYS.
+  start = datetime.now(timezone.utc)
   for offset_ms in range(1000):
     activity.record_request_error(
       "GET", "/api/storage/apps/{app_id}/{path:path}", 404, 66,

@@ -113,11 +113,16 @@ RUN git clone --depth 1 --branch v1.0.6 \
 WORKDIR /app
 
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -c \
+      'from pathlib import Path; import claude_agent_sdk; p = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"; p.unlink(missing_ok=True); assert not p.exists()'
 
-# openai-codex Python SDK: installed in a separate step because its
-# upstream pyproject pins a specific openai-codex-cli-bin. Install
-# --no-deps so Docker keeps the exact runtime pin below explicit.
+# openai-codex Python SDK: its upstream pyproject pins a second, older
+# openai-codex-cli-bin payload. Keep that declared package so `pip check` and
+# owner-authored Python SDK code retain the documented default constructor, but
+# replace its private payload in the SAME image layer with a link to Möbius's
+# lockstep npm CLI. This preserves the external SDK contract without storing a
+# second ~350 MB runtime or running a second protocol version.
 # Pinned to commit SHA (not tag) for full reproducibility — tags are
 # mutable on GitHub. SHA corresponds to refs/tags/rust-v0.145.0
 # as of 2026-07-24, and is kept in lockstep with the npm @openai/codex
@@ -136,7 +141,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 # client's `_approval_handler`.
 RUN pip install --no-cache-dir --no-deps \
       'openai-codex @ git+https://github.com/openai/codex.git@25af12f7e61572b0bc18ddb1008be543b91519b0#subdirectory=sdk/python' \
-    && pip install --no-cache-dir 'openai-codex-cli-bin==0.144.4'
+    && pip install --no-cache-dir 'openai-codex-cli-bin==0.144.4' \
+    && _codex_cli_bin="$(python -c \
+      'from pathlib import Path; import codex_cli_bin; print(Path(codex_cli_bin.__file__).parent)')" \
+    && rm -rf "${_codex_cli_bin}/bin" \
+      "${_codex_cli_bin}/codex-path" \
+      "${_codex_cli_bin}/codex-resources" \
+    && mkdir -p "${_codex_cli_bin}/bin" \
+    && ln -s /usr/local/bin/codex "${_codex_cli_bin}/bin/codex" \
+    && python -c \
+      'from pathlib import Path; import openai_codex; from codex_cli_bin import bundled_codex_path; assert bundled_codex_path().samefile(Path("/usr/local/bin/codex"))' \
+    && pip check
 
 # Capture each installed agent CLI's npm publish date into a small JSON the
 # Settings row reads (routes/settings._cli_release_dates), keyed by the

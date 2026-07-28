@@ -242,12 +242,20 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `self_reminders.py` | Agent self-scheduling endpoints |
 | `skills.py` | `GET /api/skills` (installed skills + provenance + 30-day usage), `POST /install` (fetch a `SKILL.md` dir or single markdown from GitHub via the same SSRF-safe fetcher as app installs; `.installed-skills.json` provenance sidecar; basename collision ⇒ 409), `DELETE /{name}` (installed-provenance only, git-snapshot before removal). Install/uninstall gated owner-or-`manage_skills` (the Skills app's permission, pattern of `manage_apps`) |
 | `admin.py` | Admin / introspection endpoints (service-token gated) |
-| `debug.py` | Observability: active SDK clients/sessions, broadcasts, chat logs |
+| `debug.py` | Observability: active SDK clients/sessions, broadcasts, chat logs, and resource facts/pressure |
 | `client_error.py` | `POST /api/client-error` — record an uncaught client/app JS error |
 | `recover.py` | Recovery page at `/recover` (reset/backup/rebuild) — frozen island |
 | `recover_html.py` | HTML templates for the recovery page (no `router`; used by `recover.py`) |
 
 Note: there is no `routes/ai.py` and no `POST /api/ai`. An older mini-app AI proxy lived there and was removed; mini-apps reach the agent via `window.mobius.chat`, `POST /api/apps/{id}/run-job`, or cron — not a synchronous AI endpoint.
+
+## Resource facts and pressure
+
+`resource_pressure.py` keeps observation separate from interpretation. Facts are
+an on-demand snapshot of `/data` capacity and cgroup memory; pressure classifies
+that snapshot as `normal`, `constrained`, `critical`, or `unknown`. The snapshot
+is exposed through authenticated debug status but is not polled or stored.
+Workload policy and owner communication remain separate future consumers.
 
 ## App execution tiers
 

@@ -6,6 +6,8 @@ matches the intended commit (the backend analogue of the frontend bundle-hash
 check). These pin the endpoint contract + the config wiring in both directions.
 """
 
+import os
+
 from app.config import Settings
 
 # A throwaway secret so a fresh Settings() validates without touching the
@@ -89,7 +91,7 @@ def test_build_date_falls_back_to_baked_build_info(tmp_path, monkeypatch):
 # .baked-sha passthrough, and platform_sha/platform_dirty only when serving
 # from the platform layer.
 
-_SENTINEL = "/tmp/serving-source"
+_SENTINEL = os.environ["MOBIUS_SERVING_SOURCE_FILE"]
 
 
 def _baked_sha_path():

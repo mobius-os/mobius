@@ -45,7 +45,15 @@ from PIL import Image as _PILImage
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
-from app import activity, app_git, fs_locks, legacy_platform_apps, models, source_dirs
+from app import (
+  activity,
+  app_git,
+  data_git,
+  fs_locks,
+  legacy_platform_apps,
+  models,
+  source_dirs,
+)
 from app.app_capabilities import contract_and_digest
 from app.app_source_check import check_app_source
 from app.compiler import (
@@ -1341,69 +1349,6 @@ def _storage_path(app_id: int, sub: str) -> Path:
   return data_dir / "apps" / str(app_id) / sub
 
 
-# Env vars that would redirect the skill-snapshot git commands away from the
-# /data repo (git exports them into hook environments, where they OVERRIDE
-# `-C`). app_git._git_env is deliberately NOT reused for the snapshot: its
-# GIT_CEILING_DIRECTORIES is designed to STOP repo discovery at /data, which
-# is exactly the repo the snapshot targets.
-_SNAPSHOT_GIT_ENV_DROP = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
-
-
-def _snapshot_shared_skill(
-  data_dir: Path, rel: str, slug: str, version: str,
-) -> tuple[bool, str]:
-  """Commits shared/skills/<rel>'s current bytes into the /data repo.
-
-  Returns (ok, detail). ok=True means the current content is durable in git
-  history — either a fresh pre-install snapshot commit, or the file was
-  already committed clean (the nightly /data safety-net commit got there
-  first, which IS the snapshot). ok=False means durability could not be
-  guaranteed (index.lock, dubious ownership, unborn HEAD, ...) and the
-  caller must NOT overwrite the file.
-
-  `--only` + the pathspec keeps the commit to this one file, so a racing
-  `git add -A` (the nightly pm-commit) can't be swept into it and unrelated
-  staged files stay staged.
-  """
-  env = {
-    k: v for k, v in os.environ.items() if k not in _SNAPSHOT_GIT_ENV_DROP
-  }
-  # Explicit identity: the /data repo normally carries user.name from
-  # entrypoint.sh, but a snapshot must not fail (and thereby block a skill
-  # update) just because that config is missing.
-  base = [
-    "git", "-C", str(data_dir),
-    "-c", "user.name=Mobius", "-c", "user.email=mobius@localhost",
-  ]
-
-  def _run(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-      [*base, *args], capture_output=True, text=True, timeout=30, env=env,
-    )
-
-  def _reason(proc: subprocess.CompletedProcess) -> str:
-    lines = (proc.stderr or proc.stdout or "").strip().splitlines()
-    return lines[0] if lines else f"git exited {proc.returncode}"
-
-  path = f"shared/skills/{rel}"
-  status = _run("status", "--porcelain", "--", path)
-  if status.returncode != 0:
-    return False, _reason(status)
-  if not status.stdout.strip():
-    return True, "already committed"
-  add = _run("add", "--", path)
-  if add.returncode != 0:
-    return False, _reason(add)
-  commit = _run(
-    "commit", "--only",
-    "-m", f"pre-install snapshot of {rel} (app {slug} v{version})",
-    "--", path,
-  )
-  if commit.returncode != 0:
-    return False, _reason(commit)
-  return True, "committed"
-
-
 async def _sync_app_skills(
   db: Session,
   app: "models.App",
@@ -1540,7 +1485,10 @@ async def _sync_app_skills(
           if (data_dir / ".git").is_dir():
             try:
               ok, detail = await asyncio.to_thread(
-                _snapshot_shared_skill, data_dir, rel, app.slug, version,
+                data_git.snapshot_path,
+                data_dir,
+                f"shared/skills/{rel}",
+                f"pre-install snapshot of {rel} (app {app.slug} v{version})",
               )
             except Exception as exc:
               ok, detail = False, repr(exc)

@@ -1,44 +1,73 @@
-#!/bin/sh
-# pm-commit: stage and commit agent-touched files with a denylist guard.
-#
-# Default: stage everything visible to git (.gitignore already filters
-# most runtime state), then unstage anything in the denylist below. If
-# more than 50 files end up staged after that, abort — caller almost
-# certainly meant to scope narrower. Pass --allow-broad as the FIRST
-# arg to override.
+#!/usr/bin/env bash
+# pm-commit: create a commit owned by declared paths, without sweeping /data.
 #
 # Usage:
-#   pm-commit "message"
-#   pm-commit --allow-broad "message"   # for legitimate big sweeps
-set -e
-cd /data
+#   START_SHA="$(git -C /data rev-parse HEAD)"   # capture before editing
+#   pm-commit --from "$START_SHA" "message" -- path [path ...]
 
-ALLOW_BROAD=0
-if [ "$1" = "--allow-broad" ]; then
-  ALLOW_BROAD=1
-  shift
-fi
+set -euo pipefail
+cd "${PM_COMMIT_ROOT:-/data}"
 
-DENY='^(agent-browser-profiles|compiled|logs|cron-logs|push|generated)/'
+DENY='^(agent-browser-profiles|compiled|logs|cron-logs|push|generated)(/|$)'
 
-git add -A
-# Unstage anything matching the denylist (belt-and-braces with .gitignore).
-# NUL-delimited the whole way so filenames with spaces / quotes / newlines
-# don't trip xargs or the shell.
-git diff --cached --name-only -z \
-  | grep -zE "$DENY" \
-  | xargs -0r git reset HEAD --
-
-staged=$(git diff --cached --name-only | wc -l)
-if [ "$staged" -gt 50 ] && [ "$ALLOW_BROAD" -ne 1 ]; then
-  echo "pm-commit: $staged files staged — refusing without --allow-broad" >&2
-  echo "Top of staged set:" >&2
-  git diff --cached --stat | head -20 >&2
-  # Unstage everything so the caller isn't left with a fully-staged tree
-  # they have to clean up by hand.
-  git reset HEAD -- . >/dev/null
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  pm-commit --from <starting-sha> "message" -- <path> [path ...]
+EOF
   exit 2
+}
+
+[ "${1:-}" = "--from" ] || usage
+START="${2:-}"
+shift 2
+MESSAGE="${1:-}"
+[ -n "$MESSAGE" ] || usage
+shift
+[ "${1:-}" = "--" ] || usage
+shift
+[ "$#" -gt 0 ] || usage
+PATHS=("$@")
+
+git rev-parse --verify "${START}^{commit}" >/dev/null 2>&1 || {
+  echo "pm-commit: starting revision is not a commit: $START" >&2
+  exit 2
+}
+git merge-base --is-ancestor "$START" HEAD || {
+  echo "pm-commit: history no longer descends from starting revision $START" >&2
+  exit 3
+}
+
+for path in "${PATHS[@]}"; do
+  case "$path" in
+    ""|/*|../*|*/../*|*/..|-*)
+      echo "pm-commit: path must be repository-relative: $path" >&2
+      exit 2 ;;
+  esac
+  if [[ "$path" =~ $DENY ]]; then
+    echo "pm-commit: runtime path may not be committed: $path" >&2
+    exit 2
+  fi
+done
+
+if ! git diff --quiet "$START"..HEAD -- "${PATHS[@]}"; then
+  echo "pm-commit: a declared path changed since task start; reconcile it first" >&2
+  git diff --stat "$START"..HEAD -- "${PATHS[@]}" >&2
+  exit 3
+fi
+if ! git diff --cached --quiet -- "${PATHS[@]}"; then
+  echo "pm-commit: a declared path is already staged; preserve or unstage it first" >&2
+  exit 3
 fi
 
-git diff --cached --quiet && exit 0
-git commit -m "$1"
+STATUS="$(git status --porcelain=v1 --untracked-files=all -- "${PATHS[@]}")"
+[ -n "$STATUS" ] || exit 0
+
+# Intent-to-add lets `git commit --only` include new files while that commit
+# ignores every unrelated staged or unstaged change. On failure, restore only
+# the paths this command introduced to the index.
+git add -N -- "${PATHS[@]}"
+cleanup_index() { git reset HEAD -- "${PATHS[@]}" >/dev/null 2>&1 || true; }
+trap cleanup_index EXIT
+git commit --only -m "$MESSAGE" -- "${PATHS[@]}"
+trap - EXIT
