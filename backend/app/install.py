@@ -2354,6 +2354,7 @@ async def install_from_manifest(
   # means a plain local commit (fresh install, or a conflict that left local
   # untouched).
   merge_applied = False
+  equivalence_target_to_retire: str | None = None
   if icon_warning:
     warnings.append(icon_warning)
 
@@ -2869,6 +2870,11 @@ async def install_from_manifest(
                 source_tree = merged_source
                 divergence = "clean_merge"
                 merge_applied = True
+                if merge.equivalent_change_refs:
+                  warnings.append(
+                    "reconciled reviewed changes that were already present "
+                    "upstream"
+                  )
                 # Read exec bits only now that we WILL write this tree — a
                 # conflict/unreadable verdict never ls-tree's the (possibly
                 # degenerate) merged oid.
@@ -3136,6 +3142,7 @@ async def install_from_manifest(
                 app_git.commit_replay, source_dir_path,
                 app.upstream_commit, commit_msg,
               )
+              equivalence_target_to_retire = app.upstream_commit
             else:
               await asyncio.to_thread(
                 app_git.commit_local, source_dir_path, commit_msg,
@@ -3202,6 +3209,24 @@ async def install_from_manifest(
     rollback_actions.clear()
     created_paths.clear()
     db.refresh(app)
+
+    # Only the durable update may retire provenance.  Doing this before the DB
+    # commit would lose the witness if a later storage/row failure rolled the
+    # install back.  Ref deletion is best-effort post-commit housekeeping: the
+    # replay already parents `main` directly on this upstream target, so keeping
+    # an obsolete ref is harmless while deleting it bounds metadata growth.
+    if app.source_dir and equivalence_target_to_retire:
+      try:
+        async with fs_locks.source_dir_lock(str(app.source_dir)):
+          await asyncio.to_thread(
+            app_git.retire_landed_equivalent_changes,
+            app.source_dir, equivalence_target_to_retire,
+          )
+      except Exception:
+        log.warning(
+          "install: could not retire integrated contribution provenance",
+          exc_info=True,
+        )
 
     # app_install: log only after the row is durable so the timestamp
     # in the activity log reflects when the install actually landed,

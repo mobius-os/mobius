@@ -8,6 +8,7 @@ combined edits) and a conflict must name the file WITHOUT touching the
 working tree.
 """
 
+import hashlib
 import os
 import stat
 import subprocess
@@ -975,6 +976,515 @@ def test_merge_conflict_names_paths_and_leaves_worktree_intact(tmp_path):
   assert result.merged_tree_oid is None
   # The verdict must NOT have written conflict markers into the live file.
   assert (repo / "index.jsx").read_text() == worktree_before
+
+
+def _review_digest(repo: Path, base: str, head: str) -> str:
+  reviewed = app_git._canonical_diff(repo, base, head)
+  assert reviewed is not None
+  return hashlib.sha256(reviewed).hexdigest()
+
+
+def test_primary_worktree_path_distinguishes_linked_from_standalone(tmp_path):
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  linked = tmp_path / "review"
+  app_git._run(repo, "worktree", "add", "-q", "-b", "review", str(linked))
+
+  assert app_git.primary_worktree_path(repo) is None
+  assert app_git.primary_worktree_path(linked) == repo.resolve()
+
+
+def test_landed_equivalent_change_rebases_later_local_edit_without_agent(
+  tmp_path,
+):
+  """A squash merge of an already-contributed line is a semantic base.
+
+  Ordinary Git conflicts because local evolved ``base -> shared -> followup``
+  while the fetched upstream commit independently says ``base -> shared``.
+  The reviewed source witness plus landed target witness lets the off-tree merge
+  use ``shared`` as the base, preserving the follow-up and the genuinely new
+  upstream file.
+  """
+  repo = tmp_path / "app"
+  _install(repo, b'mode = "base"\n')
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+
+  _write(repo, 'mode = "shared contribution"\n')
+  reviewed_head = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed_head
+  digest = _review_digest(repo, base, reviewed_head)
+  pending = app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed_head,
+    source_sha=reviewed_head,
+    diff_sha256=digest,
+    contribution_id="reviewed-change",
+  )
+  assert pending
+
+  _write(repo, 'mode = "local followup"\n')
+  local_head = app_git.commit_local(repo, "later local edit")
+  assert local_head
+  upstream = app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b'mode = "shared contribution"\n',
+      "upstream.js": b"export const upstream = true\n",
+    },
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+
+  # Pending provenance alone grants no update authority.
+  assert app_git.merge_refs(
+    repo, app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
+  ).status == "conflict"
+  assert app_git.merge_upstream(repo).status == "conflict"
+
+  landed = app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream,
+  )
+  assert landed
+  result = app_git.merge_upstream(repo)
+
+  assert result.status == "clean"
+  assert result.equivalent_change_refs == (landed,)
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  assert tree["index.jsx"] == b'mode = "local followup"\n'
+  assert tree["upstream.js"] == b"export const upstream = true\n"
+  # The proof is off-tree: neither the accepted branch nor live source moved.
+  assert app_git.head_sha(repo, app_git.LOCAL_BRANCH) == local_head
+  assert (repo / "index.jsx").read_text() == 'mode = "local followup"\n'
+
+
+def test_agent_resolved_local_projection_becomes_a_durable_shared_base(
+  tmp_path,
+):
+  """A reviewed PR projected from a busier local base is recognized later."""
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(
+    repo,
+    {"index.jsx": b"base\n", "helper.js": b"helper base\n"},
+    "https://x/mobius.json", "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+
+  # The clean review projection on current upstream changes these two paths.
+  _write(repo, "reviewed\n")
+  (repo / "helper.js").write_text("helper reviewed\n")
+  reviewed = app_git.commit_local(repo, "review projection")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+
+  # Live source had a conflicting local context first. Its integration commit
+  # changes the same reviewed path set, matches Git's automatic result on every
+  # non-conflict entry, and owns the two explicit conflict resolutions.
+  app_git._run(repo, "reset", "--hard", base)
+  _write(repo, "local context\n")
+  assert app_git.commit_local(repo, "pre-existing local context")
+  _write(repo, "local context + reviewed behavior\n")
+  (repo / "helper.js").write_text("helper reviewed\n")
+  source = app_git.commit_local(repo, "integrate reviewed behavior locally")
+  assert source
+  assert not app_git._change_is_subsumed(repo, base, reviewed, source)
+
+  pending = app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    diff_sha256=digest,
+    contribution_id="resolved-local-projection",
+  )
+  assert pending
+  recorded = app_git._read_equivalent_change(repo, pending)
+  assert recorded is not None
+  assert recorded.proof_mode == "resolved_projection"
+
+  upstream = app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b"reviewed\n",
+      "helper.js": b"helper reviewed\n",
+      "upstream.js": b"release\n",
+    },
+    "https://x/mobius.json", "2.0.0",
+  )
+  assert app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream,
+  )
+  result = app_git.merge_upstream(repo)
+
+  assert result.status == "clean"
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  assert tree["index.jsx"] == b"local context + reviewed behavior\n"
+  assert tree["helper.js"] == b"helper reviewed\n"
+  assert tree["upstream.js"] == b"release\n"
+
+
+def test_all_conflict_projection_is_too_ambiguous_to_record(tmp_path):
+  """One arbitrary conflict resolution is not evidence of shared history."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "review projection")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+
+  app_git._run(repo, "reset", "--hard", base)
+  _write(repo, "different local context\n")
+  assert app_git.commit_local(repo, "local context")
+  _write(repo, "arbitrary resolution\n")
+  source = app_git.commit_local(repo, "resolve one conflicted path")
+  assert source
+
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=source,
+    diff_sha256=digest,
+    contribution_id="all-conflict-is-ambiguous",
+  ) is None
+
+
+def test_multiple_landed_changes_form_one_shared_base_for_a_squash_batch(
+  tmp_path,
+):
+  """Several reviewed records mapped to one squash commit combine safely.
+
+  This is the shape that previously forced a hand merge: each local follow-up
+  conflicts with its contributed predecessor in the batch, while neither
+  individual anchor is enough.  Deterministic anchor composition produces the
+  reviewed shared tree before the final merge.
+  """
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(
+    repo,
+    {"index.jsx": b"A base\n", "panel.js": b"B base\n"},
+    "https://x/mobius.json",
+    "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+
+  _write(repo, "A shared\n")
+  first = app_git.commit_local(repo, "first reviewed change")
+  assert first
+  first_digest = _review_digest(repo, base, first)
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=first,
+    source_sha=first,
+    diff_sha256=first_digest,
+    contribution_id="first",
+  )
+
+  (repo / "panel.js").write_text("B shared\n")
+  second = app_git.commit_local(repo, "second reviewed change")
+  assert second
+  second_digest = _review_digest(repo, first, second)
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=first,
+    head_sha=second,
+    source_sha=second,
+    diff_sha256=second_digest,
+    contribution_id="second",
+  )
+
+  _write(repo, "A local followup\n")
+  (repo / "panel.js").write_text("B local followup\n")
+  assert app_git.commit_local(repo, "follow up both contributed changes")
+  upstream = app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b"A shared\n",
+      "panel.js": b"B shared\n",
+      "new.js": b"upstream only\n",
+    },
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+  assert app_git.merge_refs(
+    repo, app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
+  ).status == "conflict"
+
+  assert app_git.mark_equivalent_change_landed(
+    repo, first_digest, upstream_sha=upstream,
+  )
+  assert app_git.mark_equivalent_change_landed(
+    repo, second_digest, upstream_sha=upstream,
+  )
+  result = app_git.merge_upstream(repo)
+
+  assert result.status == "clean"
+  assert len(result.equivalent_change_refs) == 2
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  assert tree["index.jsx"] == b"A local followup\n"
+  assert tree["panel.js"] == b"B local followup\n"
+  assert tree["new.js"] == b"upstream only\n"
+
+
+def test_equivalent_change_is_ignored_when_source_witness_left_local_history(
+  tmp_path,
+):
+  """A landed PR from another/replaced local line cannot authorize a merge."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "shared\n")
+  reviewed = app_git.commit_local(repo, "reviewed")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="replaced-history",
+  )
+
+  # Replace main with a sibling edit that never descends from the witnessed
+  # source commit.  The upstream side still lands the reviewed bytes.
+  app_git._run(repo, "reset", "--hard", base)
+  _write(repo, "different local\n")
+  assert app_git.commit_local(repo, "replacement branch")
+  upstream = app_git.record_upstream(
+    repo, {"index.jsx": b"shared\n"},
+    "https://x/mobius.json", "2.0.0",
+  )
+  assert app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream,
+  )
+
+  assert app_git.merge_upstream(repo).status == "conflict"
+
+
+def test_equivalent_change_is_ignored_when_merge_witness_is_not_in_target(
+  tmp_path,
+):
+  """A PR merged on another branch cannot authorize this update target."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "shared\n")
+  reviewed = app_git.commit_local(repo, "reviewed")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="wrong-upstream-line",
+  )
+
+  _write(repo, "local followup\n")
+  assert app_git.commit_local(repo, "later local edit")
+  target = app_git.record_upstream(
+    repo, {"index.jsx": b"shared\n"},
+    "https://x/mobius.json", "2.0.0",
+  )
+  # The reviewed tree exists under a different, root commit identity, but that
+  # commit is not reachable from the fetched update target.
+  reviewed_tree = app_git._tree_oid(repo, reviewed)
+  assert reviewed_tree
+  other_line = app_git._run(
+    repo, "commit-tree", reviewed_tree, "-m", "merged elsewhere",
+  ).stdout.strip()
+  assert app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=other_line,
+  )
+
+  assert app_git.ref_is_ancestor(repo, other_line, target) is False
+  assert app_git.merge_upstream(repo).status == "conflict"
+
+
+def test_merge_witness_that_dropped_reviewed_bytes_cannot_authorize_merge(
+  tmp_path,
+):
+  """A merged status cannot bless merge-queue conflict-resolution drift."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "reviewed")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="dropped-by-merge-resolution",
+  )
+  _write(repo, "local followup\n")
+  assert app_git.commit_local(repo, "later local edit")
+
+  # The PR is reported merged at this exact commit, but its tree does not carry
+  # the reviewed delta (for example, a bad merge-queue conflict resolution).
+  target = app_git.record_upstream(
+    repo, {"index.jsx": b"different upstream\n"},
+    "https://x/mobius.json", "2.0.0",
+  )
+  assert app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=target,
+  )
+
+  assert app_git.merge_upstream(repo).status == "conflict"
+
+
+def test_pending_equivalent_change_rejects_stale_review_hash(tmp_path):
+  """The send-time witness cannot silently bless a different reviewed diff."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "reviewed")
+  assert reviewed
+
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256="0" * 64,
+    contribution_id="stale-review",
+  ) is None
+  assert not app_git.ref_exists(
+    repo, f"refs/mobius/equivalences/pending/{'0' * 64}",
+  )
+
+
+def test_successful_update_retires_landed_equivalence_refs(tmp_path):
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "shared\n")
+  reviewed = app_git.commit_local(repo, "reviewed")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="retire-me",
+  )
+  upstream = app_git.record_upstream(
+    repo, {"index.jsx": b"shared\n"},
+    "https://x/mobius.json", "2.0.0",
+  )
+  landed = app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream,
+  )
+  assert landed and app_git.ref_exists(repo, landed)
+
+  assert app_git.retire_landed_equivalent_changes(repo, upstream) == 1
+  assert not app_git.ref_exists(repo, landed)
+
+
+def test_pending_source_witness_survives_unrelated_app_replay(tmp_path):
+  """An open contribution remains recognizable across an intervening update."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "shared\n")
+  reviewed = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  pending = app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="open-across-update",
+  )
+  assert pending
+
+  # Upstream v2 is unrelated to the open contribution. The clean app replay
+  # intentionally replaces local ancestry while preserving the accepted tree.
+  v2 = app_git.record_upstream(
+    repo,
+    {"index.jsx": b"base\n", "helper.js": b"v2\n"},
+    "https://x/mobius.json", "2.0.0",
+  )
+  merged_v2 = app_git.merge_upstream(repo)
+  assert merged_v2.status == "clean"
+  tree_v2 = app_git.read_merged_tree(repo, merged_v2.merged_tree_oid)
+  for rel, body in tree_v2.items():
+    target = repo / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(body)
+  replay = app_git.commit_replay(repo, v2, "install v2")
+  assert replay
+  carried = app_git._read_equivalent_change(repo, pending)
+  assert carried is not None
+  assert carried.source_sha == replay
+
+  # Local evolves the reviewed line after v2; v3 now contains the squash of the
+  # original reviewed predecessor. The carried witness keeps it automatic.
+  _write(repo, "local followup\n")
+  assert app_git.commit_local(repo, "later local edit")
+  v3 = app_git.record_upstream(
+    repo,
+    {"index.jsx": b"shared\n", "helper.js": b"v3\n"},
+    "https://x/mobius.json", "3.0.0",
+  )
+  landed = app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=v3,
+  )
+  assert landed
+  result = app_git.merge_upstream(repo)
+  assert result.status == "clean"
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+  assert tree["index.jsx"] == b"local followup\n"
+  assert tree["helper.js"] == b"v3\n"
+
+
+def test_take_upstream_replay_does_not_carry_a_dropped_contribution(tmp_path):
+  """An intentional source replacement must retire causal local provenance."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "reviewed local\n")
+  reviewed = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  pending = app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="dropped-by-take-upstream",
+  )
+  assert pending
+
+  replacement = app_git.record_upstream(
+    repo, {"index.jsx": b"upstream replacement\n"},
+    "https://x/mobius.json", "2.0.0",
+  )
+  _write(repo, "upstream replacement\n")
+  replay = app_git.commit_replay(repo, replacement, "take upstream")
+  assert replay
+
+  retained = app_git._read_equivalent_change(repo, pending)
+  assert retained is not None
+  assert retained.source_sha == reviewed
+  assert app_git.ref_is_ancestor(repo, reviewed, replay) is False
 
 
 def test_start_conflict_merge_leaves_real_markers_and_merge_head(tmp_path):

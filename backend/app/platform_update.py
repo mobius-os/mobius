@@ -629,6 +629,37 @@ def _merge_target(repo: Path, target: str) -> int:
     return _MERGE_TIMEOUT
 
 
+def _commit_equivalent_merge_tree(
+  repo: Path,
+  *,
+  local: str,
+  pre_sha: str,
+  target: str,
+  tree_oid: str,
+) -> str:
+  """Commit a proven semantic merge while preserving both real histories.
+
+  ``merge_with_equivalent_changes`` computes the tree entirely off-worktree.
+  The compare-and-swap update refuses if another writer moved the local branch
+  after ``pre_sha``; only after that succeeds do we reset the checked-out tree
+  to the new two-parent merge commit.  The target remains an explicit parent,
+  so every later update falls back to ordinary ancestry with no side metadata.
+  """
+  sha = app_git._run(
+    repo,
+    "commit-tree", tree_oid,
+    "-p", pre_sha,
+    "-p", target,
+    "-m", f"platform: merge equivalent upstream {target[:12]}",
+  ).stdout.strip()
+  _git(
+    "update-ref", f"refs/heads/{local}", sha, pre_sha,
+    repo=repo,
+  )
+  _git("reset", "--hard", sha, repo=repo)
+  return sha
+
+
 def _reset_hard_to(repo: Path, local: str, sha: str) -> None:
   """Return the working branch to ``sha`` (the pre-reconcile served commit),
   updating the working tree. Used to serve OLD after a conflict/rollback."""
@@ -1278,12 +1309,32 @@ def reconcile_clone(
           _clear_reconcile_pre()
           err = "merge_timeout" if rc == _MERGE_TIMEOUT else "merge_failed"
           return ReconcileResult("error", pre, pre, target, error=err)
-        # Content conflict: record it, clear any stale rollback flag, and let the
-        # caller open a resolver chat.
-        _write_conflict_flag(target, paths)
-        ROLLED_BACK_FLAG.unlink(missing_ok=True)
-        _clear_reconcile_pre()
-        return ReconcileResult("conflict", pre, pre, target, conflict_paths=paths)
+        # Before asking the owner to resolve a content conflict, let the shared
+        # app/platform provenance engine replace Git's historical base with a
+        # semantic base made ONLY from reviewed changes proven to come from this
+        # local history and to have landed in this target history.  This is the
+        # squash/batch case: ordinary Git sees two edits to the same lines, while
+        # the causal record says one side is the already-contributed predecessor
+        # of the other.  The engine is off-tree and fail-closed; no proof (or a
+        # genuine later conflict) returns None and preserves the resolver path.
+        equivalent = app_git.merge_with_equivalent_changes(repo, pre, target)
+        if equivalent is not None and equivalent.merged_tree_oid:
+          _commit_equivalent_merge_tree(
+            repo,
+            local=local,
+            pre_sha=pre,
+            target=target,
+            tree_oid=equivalent.merged_tree_oid,
+          )
+        else:
+          # Genuine/unproven content conflict: record it, clear any stale
+          # rollback flag, and let the caller open a resolver chat.
+          _write_conflict_flag(target, paths)
+          ROLLED_BACK_FLAG.unlink(missing_ok=True)
+          _clear_reconcile_pre()
+          return ReconcileResult(
+            "conflict", pre, pre, target, conflict_paths=paths,
+          )
 
     # Post-reconcile import probe: a text-clean ff/merge can still produce a
     # tree that fails to import (upstream dropped a module a local edit imports;
@@ -1315,6 +1366,13 @@ def reconcile_clone(
   # restart the flag would ask for); an owner Apply marks a restart via the
   # caller.
   new_sha = _rev(repo, local)
+  try:
+    app_git.retire_landed_equivalent_changes(repo, target)
+  except Exception:
+    # The target is already committed and validated.  A stale provenance ref is
+    # harmless and can be retired by the next update; never turn housekeeping
+    # into a false failed-update report after source has moved.
+    log.warning("platform: could not retire contribution provenance", exc_info=True)
   _set_upstream(repo, target)
   CONFLICT_FLAG.unlink(missing_ok=True)
   ROLLED_BACK_FLAG.unlink(missing_ok=True)
