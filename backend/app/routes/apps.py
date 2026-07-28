@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_git, app_jobs, app_preview, fs_locks,
-  icon_cache,
+  icon_cache, icon_ownership,
   legacy_platform_apps,
   models, providers, schemas,
   source_dirs, theme,
@@ -2255,6 +2255,12 @@ async def update_icon(
     app = live_app(db, app_id, populate=True)
     if app is None or app.token_nonce != expected_nonce:
       raise HTTPException(404, "App not found.")
+    transition = icon_ownership.split_legacy_icon_ownership(app)
+    if transition.warning:
+      log.warning(
+        "legacy icon ownership for app %s: %s",
+        app.id, transition.warning,
+      )
     app.icon_override_png = processed
     db.commit()
   return Response(status_code=204)

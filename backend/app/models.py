@@ -550,6 +550,12 @@ class App(Base):
   # Owner-chosen home-screen artwork is an explicit override, not a second
   # writer racing the manifest-owned package icon.
   icon_override_png = Column(LargeBinary, nullable=True, default=None)
+  # True once legacy effective-icon bytes have been classified as accepted
+  # package artwork or an explicit owner override. The additive migration gives
+  # existing rows FALSE; ordinary ORM-created rows start already split.
+  icon_ownership_split = Column(
+    Boolean, nullable=False, default=True, server_default=false(),
+  )
   # Lightweight response projection: advertise a canonical icon reference
   # without hydrating either blob into drawer/catalog queries.
   has_icon = column_property(or_(

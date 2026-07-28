@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from typing import Literal
 
 from sqlalchemy.orm import Session
 
-from app import app_git, icon_assets, models, timeutil
+from app import app_git, icon_assets, icon_ownership, models, timeutil
 from app.app_capabilities import (
   contract_from_app_state,
   local_manifest_runtime_fields,
@@ -45,6 +46,9 @@ class AppApplyError(RuntimeError):
     super().__init__(message)
     self.code = code
     self.status_code = status_code
+
+
+log = logging.getLogger("mobius.app_apply")
 
 
 @dataclass(frozen=True)
@@ -163,12 +167,11 @@ def _manifest_icon(snapshot_dir: Path, manifest: dict) -> bytes | None:
 
 
 def reconcile_manifest_icons(db: Session) -> tuple[list[int], list[str]]:
-  """Backfill local package icons from each app's accepted Git revision.
+  """Split legacy icon ownership from each app's accepted Git revision.
 
-  Local apply did not historically materialize the manifest icon, so the
-  source declaration and served asset could drift. Read the accepted commit,
-  never the editable worktree, and repair only rows still missing a package
-  icon. Invalid legacy declarations remain non-fatal and are reported.
+  The transition is per-row and idempotent. Missing or invalid immutable source
+  never risks old effective artwork: those bytes become an explicit override,
+  while a later accepted revision remains free to populate package artwork.
   """
   repaired: list[int] = []
   warnings: list[str] = []
@@ -176,42 +179,20 @@ def reconcile_manifest_icons(db: Session) -> tuple[list[int], list[str]]:
     db.query(models.App)
     .filter(
       models.App.deleted_at.is_(None),
-      models.App.manifest_url.is_(None),
-      models.App.icon_png.is_(None),
-      models.App.source_dir.isnot(None),
-      models.App.source_commit.isnot(None),
+      models.App.icon_ownership_split.is_(False),
     )
     .order_by(models.App.id)
     .all()
   )
   for app in apps:
     try:
-      raw_manifest = app_git.read_blob(
-        app.source_dir, app.source_commit, "mobius.json",
-      )
-      if raw_manifest is None:
-        raise AppApplyError(
-          "manifest_missing", "Accepted revision has no mobius.json.",
-        )
-      try:
-        manifest = json.loads(raw_manifest)
-        validate_manifest_contract(manifest)
-      except (UnicodeDecodeError, json.JSONDecodeError, ManifestContractError) as exc:
-        raise AppApplyError("manifest_invalid", str(exc)) from exc
-      relative = manifest.get("icon")
-      if not relative:
-        continue
-      raw_icon = app_git.read_blob(
-        app.source_dir, app.source_commit, relative,
-      )
-      if raw_icon is None:
-        raise AppApplyError(
-          "icon_missing", f"Manifest icon {relative!r} does not exist.",
-        )
-      app.icon_png = _normalize_manifest_icon(relative, raw_icon)
+      transition = icon_ownership.split_legacy_icon_ownership(app)
       db.commit()
       db.refresh(app)
-      repaired.append(app.id)
+      if transition.changed:
+        repaired.append(app.id)
+      if transition.warning:
+        warnings.append(f"app {app.id}: {transition.warning}")
     except Exception as exc:
       db.rollback()
       warnings.append(f"app {app.id}: {exc}")
@@ -326,7 +307,15 @@ async def apply_source_revision(
         app.compiled_path,
         app.source_commit,
         app.icon_png,
+        app.icon_override_png,
+        app.icon_ownership_split,
       )
+      transition = icon_ownership.split_legacy_icon_ownership(app)
+      if transition.warning:
+        log.warning(
+          "legacy icon ownership for app %s: %s",
+          app.id, transition.warning,
+        )
 
       staged = _compiled_dir() / f"app-{app.id}.js.staging"
       await compile_jsx(
@@ -388,6 +377,8 @@ async def apply_source_revision(
           str(published),
           app.source_commit,
           app.icon_png,
+          app.icon_override_png,
+          app.icon_ownership_split,
         )
       )
       if not changed:

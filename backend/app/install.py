@@ -43,8 +43,8 @@ from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app import (
-  activity, app_git, fs_locks, icon_assets, legacy_platform_apps, models,
-  source_dirs,
+  activity, app_git, fs_locks, icon_assets, icon_ownership,
+  legacy_platform_apps, models, source_dirs,
 )
 from app.app_capabilities import contract_and_digest
 from app.app_source_check import check_app_source
@@ -2362,6 +2362,9 @@ async def install_from_manifest(
   try:
     if existing:
       app = existing
+      transition = icon_ownership.split_legacy_icon_ownership(app)
+      if transition.warning:
+        warnings.append(f"icon ownership: {transition.warning}")
       # Reinstalling a tombstoned app REVIVES it: the manifest_url match finds
       # the soft-deleted row (the query is deleted_at-agnostic on purpose), and
       # clearing deleted_at reattaches the SAME id + its preserved storage tree
