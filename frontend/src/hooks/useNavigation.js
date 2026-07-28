@@ -1089,7 +1089,7 @@ export default function useNavigation({
       const bootDeepLink = (route, tab) => {
         const mode = paneModel.WORKSPACE_SPLITS_ENABLED
           ? workspaceStateRef.current.ws.viewMode : 'single'
-        if (mode === 'single') applyModeDestination(route)
+        if (mode === 'single' && blobValid) applyModeDestination(route)
         else openBootTab(tab)
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
