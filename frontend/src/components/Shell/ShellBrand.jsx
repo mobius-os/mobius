@@ -112,7 +112,7 @@ const ShellBrand = memo(function ShellBrand({
               browsers cannot raise a native image preview over the gesture. */}
           <img
             className="shell__logo"
-            src="/moebius.svg"
+            src="/moebius.png"
             alt=""
             width="30"
             height="30"
