@@ -956,28 +956,29 @@ tab. A pane will instead store `activeTabKey` and compare it with `tabKey(tab)`.
 hidden app-iframe LRU. This is the degenerate one-pane form of the target model.
 
 `frontend/src/components/Shell/workspacePlacement.js` is the placement seam.
-Producers issue an `open-item` request with `placement: 'beside-source'` and
-`activation: 'background'`; they never name a tab strip, pane id, split
-direction, or breakpoint. The flat resolver inserts a built app after its
-source chat. A pane resolver should interpret the same request as: use the next
-pane when one exists, create one when the viewport supports it, and fall back
-to an adjacent background tab on narrow screens.
+Producers issue an `open-item` request with `placement: 'beside-source'`; they
+never name a tab strip, pane id, split direction, or breakpoint. Generic opens
+use `background` / `foreground`. A committed build uses the internal
+`live-preview` activation: it enters Builder, reveals the app in a companion
+pane while keeping the chat focused on wider screens, and activates the app tab
+on phones.
 
 | Input | Confirmation | Current action |
 | --- | --- | --- |
-| `app_created {appId, chatId}` | Refetched row matches both ids | Apply one background `beside-source` request |
-| `app_created` missing/mismatched ids | No matching live row | Ignore the placement request |
-| Fresh app-list row with `chat_id` | App absent from the established session baseline | Apply the same request as reconnect fallback |
-| `app_updated` | Live row exists | Refresh CTA/code and warm cache; never place again |
+| `app_created {appId, chatId}` | Live row exists | Refresh lifecycle/list state |
+| `app_preview_ready {appId, chatId}` | Refetched row matches the app and requesting chat | Apply one `live-preview` `beside-source` request |
+| `app_preview_ready` missing/mismatched ids | No matching live row | Ignore the placement request |
+| Fresh app-list row with `chat_id` | App absent from the established session baseline | Apply the same live-preview request as reconnect fallback |
+| `app_updated` | Live row exists | Refresh CTA/code and live-swap the open frame |
 | Store install or app without `chat_id` | No source-chat relationship | Drawer arrival only |
 | Replayed/duplicate placement | Target app already open | Strict same-reference no-op |
 
 Every automatic built-preview path passes through
-`applyWorkspaceRequestsToFlatTabs`. Direct drawer/user tab opens remain
-explicit foreground navigation and bypass automatic placement by design.
-When the flat strip is at capacity, automatic placement protects the currently
-visible tab as well as the new source-chat/app pair; background work must never
-make the user's on-screen tab disappear from the strip.
+`resolveWorkspaceRequests`. Direct drawer/user tab opens remain explicit
+foreground navigation and bypass automatic placement by design. Generic
+background work preserves every already-visible surface; a live preview is
+intentionally visible and may activate an existing companion tab without
+moving keyboard focus away from the building chat.
 
 ### Target pane model
 

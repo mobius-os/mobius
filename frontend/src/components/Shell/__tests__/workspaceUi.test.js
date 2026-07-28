@@ -735,10 +735,17 @@ test('the Apps tab never disables the mobile drawer layered above it', () => {
 
 test('opening navigation is presentation-only and never refetches whole lists', () => {
   assert.doesNotMatch(shell, /if \(navigationOpen\) \{ refreshApps\(\); refreshChats\(\) \}/)
-  assert.match(shell, /ev\.type === 'app_updated' \|\| ev\.type === 'app_created'[\s\S]*?refreshApps\(\)/,
+  assert.match(shell, /ev\.type === 'app_updated'[\s\S]*?ev\.type === 'app_created'[\s\S]*?ev\.type === 'app_preview_ready'[\s\S]*?refreshApps\(\)/,
     'app lifecycle events still own their authoritative refresh')
   assert.match(shell, /ev\.type === 'chat_run_finished'[\s\S]*?refreshChats\(\)/,
     'chat lifecycle events still own their authoritative refresh')
+})
+
+test('live preview reveal keeps the workspace controller distinct from device mode', () => {
+  assert.match(shell, /const deviceMode = paneModel\.modeForRect\(contentRect\)/)
+  assert.match(shell, /mode\.toggle\(\{ cause: 'auto', to: 'panes' \}\)/)
+  assert.match(shell, /resolveWorkspaceRequests\(ws, requests, \{[\s\S]*?mode: deviceMode,/)
+  assert.doesNotMatch(shell, /const mode = paneModel\.modeForRect\(contentRect\)/)
 })
 
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {

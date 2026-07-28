@@ -7,6 +7,7 @@ import * as paneModel from '../paneModel.js'
 import {
   ACTIVATE_FOREGROUND,
   ACTIVATE_IN_BACKGROUND,
+  ACTIVATE_LIVE_PREVIEW,
   PLACE_BESIDE_SOURCE,
   PLACE_WITH_FOCUS,
   PLACE_WITH_SOURCE,
@@ -75,7 +76,7 @@ test('built app placement names intent without naming a tab strip or pane', () =
     item: makeTab('app', 42),
     source: makeTab('chat', 'chat-a'),
     placement: PLACE_BESIDE_SOURCE,
-    activation: ACTIVATE_IN_BACKGROUND,
+    activation: ACTIVATE_LIVE_PREVIEW,
     reason: 'chat-built-app',
   })
 })
@@ -89,13 +90,14 @@ test('invalid app and chat identities cannot produce workspace requests', () => 
 
 // ── open_item event mapping (design §6.3) ───────────────────────────────────
 
-test('app_created and open_item are the live events that request placement', () => {
+test('app_preview_ready and open_item are the live events that request placement', () => {
   assert.deepEqual(
-    workspaceRequestFromSystemEvent({ type: 'app_created', appId: '42', chatId: 'chat-a' }),
+    workspaceRequestFromSystemEvent({ type: 'app_preview_ready', appId: '42', chatId: 'chat-a' }),
     builtAppWorkspaceRequest('chat-a', 42),
   )
   assert.equal(workspaceRequestFromSystemEvent({ type: 'app_updated', appId: '42', chatId: 'chat-a' }), null)
-  assert.equal(workspaceRequestFromSystemEvent({ type: 'app_created', appId: '42' }), null)
+  assert.equal(workspaceRequestFromSystemEvent({ type: 'app_created', appId: '42', chatId: 'chat-a' }), null)
+  assert.equal(workspaceRequestFromSystemEvent({ type: 'app_preview_ready', appId: '42' }), null)
 
   const opened = workspaceRequestFromSystemEvent({
     type: 'open_item', itemKind: 'app', itemId: '7',
@@ -200,8 +202,8 @@ test('attentionForRequest flags a background open by kind, and nothing for foreg
   assert.equal(attentionForRequest(fgApp), null, 'a foreground open is on screen — no dot')
 
   assert.equal(attentionForRequest(null), null)
-  assert.equal(attentionForRequest(builtAppWorkspaceRequest('a', 41)).kind, 'app',
-    'a background built-app request also earns the dot')
+  assert.equal(attentionForRequest(builtAppWorkspaceRequest('a', 41)), null,
+    'a visible live preview needs no background-attention dot')
 })
 
 // ── resolver: forward-compat / malformed request ────────────────────────────
@@ -234,6 +236,19 @@ test('beside-source + foreground · phone: insert and activate', () => {
   assert.equal(out.panes.p0.activeTabKey, 'app:9', 'foreground activates the item')
 })
 
+test('live preview · phone: enters Builder, keeps a chat tab, and activates the app', () => {
+  const ws = paneModel.setViewMode(paneModel.seedFromFlatTabs([CHAT('a')]), 'single')
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('a', 9),
+    env(ws, { mode: 'phone', rect: { w: 400, h: 800 } }),
+  )
+  assert.equal(out.viewMode, 'panes', 'the live preview reveals the Builder world')
+  assert.deepEqual(keysOf(out.panes.p0), ['chat:a', 'app:9'])
+  assert.equal(out.panes.p0.activeTabKey, 'app:9', 'the phone switches to the preview tab')
+  assert.equal(out.focusedPaneId, 'p0')
+})
+
 test('beside-source + background · tile single pane: split, item active in the NEW pane, focus stays', () => {
   const ws = builderSeed([CHAT('a')])
   const out = resolveWorkspaceRequest(
@@ -247,6 +262,22 @@ test('beside-source + background · tile single pane: split, item active in the 
   assert.deepEqual(keysOf(newPane), ['app:9'])
   assert.equal(newPane.activeTabKey, 'app:9', 'the item is active within the new pane')
   assert.deepEqual(keysOf(out.panes.p0), ['chat:a'], 'the source pane is unchanged')
+})
+
+test('live preview · wide: enters Builder and blooms beside the focused chat', () => {
+  const ws = paneModel.setViewMode(paneModel.seedFromFlatTabs([CHAT('a')]), 'single')
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('a', 9),
+    env(ws, { mode: 'wide', rect: { w: 1400, h: 900 } }),
+  )
+  assert.equal(out.viewMode, 'panes')
+  assert.equal(paneModel.paneIdsInOrder(out).length, 2)
+  assert.equal(out.panes[out.focusedPaneId].activeTabKey, 'chat:a',
+    'the building chat keeps keyboard focus')
+  const appPane = paneModel.paneOf(out, 'app:9')
+  assert.ok(appPane)
+  assert.equal(appPane.activeTabKey, 'app:9', 'the preview is visible in its pane')
 })
 
 test('beside-source + foreground · tile single pane: split AND focus the new pane', () => {
@@ -412,6 +443,39 @@ test('item already open: background is a strict no-op; foreground focuses its pa
   assert.equal(fg.panes.p0.activeTabKey, 'app:5', 'and activates the item tab')
 })
 
+test('live preview · wide update: an app parked with its chat moves into a visible companion pane', () => {
+  const ws = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([CHAT('a'), APP(5)]),
+    'single',
+  )
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('a', 5),
+    env(ws, { mode: 'wide', rect: { w: 1400, h: 900 } }),
+  )
+  assert.equal(out.viewMode, 'panes')
+  assert.equal(paneModel.paneIdsInOrder(out).length, 2)
+  assert.equal(out.panes[out.focusedPaneId].activeTabKey, 'chat:a')
+  assert.equal(paneModel.paneOf(out, 'app:5').activeTabKey, 'app:5')
+  assert.notEqual(paneModel.paneOf(out, 'app:5').id, out.focusedPaneId)
+})
+
+test('live preview · missing builder source: restores the requesting chat before placing the app', () => {
+  const ws = {
+    ...paneModel.seedFromFlatTabs([CHAT('old')]),
+    viewMode: 'single',
+    singleScreen: { kind: 'chat', id: 'new' },
+  }
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('new', 9),
+    env(ws, { mode: 'wide', rect: { w: 1400, h: 900 } }),
+  )
+  assert.equal(out.viewMode, 'panes')
+  assert.equal(out.panes[out.focusedPaneId].activeTabKey, 'chat:new')
+  assert.ok(paneModel.paneOf(out, 'app:9'))
+})
+
 test('source missing / not open: degrade to with-focus (append to focused pane)', () => {
   const ws = twoPaneWs([CHAT('a')], [CHAT('b')], { focused: 'p1' })
   const out = resolveWorkspaceRequest(
@@ -451,7 +515,7 @@ test('pane at MAX_PANE_TABS: protected eviction spares source, item, active, vis
 const batchEnv = (mode, rect, liveApps = []) => ({ mode, contentRect: rect, liveApps })
 
 // Deliver the same requests one dispatch at a time (each its own resolve) — what
-// the live app_created path does.
+// the live app_preview_ready path does.
 function applySequential(ws, requests, e) {
   let next = ws
   for (const r of requests) next = resolveWorkspaceRequests(next, [r], e)

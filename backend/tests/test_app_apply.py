@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from unittest.mock import call, patch
 
 import pytest
 
@@ -73,7 +74,8 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
     "export default function App() { return <div>{label}</div> }\n"
   )
 
-  updated = _apply(client, auth, source)
+  with patch("app.routes.apps.get_system_broadcast") as mock_get_broadcast:
+    updated = _apply(client, auth, source, "editing-chat")
 
   assert updated.status_code == 200, updated.text
   assert updated.json()["mode"] == "updated"
@@ -87,6 +89,14 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
   ).stdout.strip() == "1"
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
   assert "import { label }" in row.jsx_source
+  assert mock_get_broadcast.return_value.publish.call_args_list == [
+    call({"type": "app_updated", "appId": str(app_id)}),
+    call({
+      "type": "app_preview_ready",
+      "appId": str(app_id),
+      "chatId": "editing-chat",
+    }),
+  ]
 
 
 def test_compile_failure_keeps_previous_live_revision(client, auth, db):

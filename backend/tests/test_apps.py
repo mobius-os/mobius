@@ -1,7 +1,7 @@
 """App registry lifecycle tests."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from app import models
 from app.config import get_settings
@@ -24,18 +24,25 @@ def test_apply_app_rejects_cross_site_request(client, auth):
   assert cross.status_code == 403
 
 
-def test_apply_app_publishes_pane_neutral_ready_relationship(client, auth):
+def test_apply_app_publishes_lifecycle_then_live_preview_relationship(client, auth):
   with patch("app.routes.apps.get_system_broadcast") as mock_get_broadcast:
     app = create_local_app(
       client, auth, name="Trip planner", description="test",
       chat_id="building-chat",
     )
 
-  mock_get_broadcast.return_value.publish.assert_called_once_with({
-    "type": "app_created",
-    "appId": str(app["id"]),
-    "chatId": "building-chat",
-  })
+  assert mock_get_broadcast.return_value.publish.call_args_list == [
+    call({
+      "type": "app_created",
+      "appId": str(app["id"]),
+      "chatId": "building-chat",
+    }),
+    call({
+      "type": "app_preview_ready",
+      "appId": str(app["id"]),
+      "chatId": "building-chat",
+    }),
+  ]
 
 
 def test_update_app_rejects_cross_site_request(client, auth):

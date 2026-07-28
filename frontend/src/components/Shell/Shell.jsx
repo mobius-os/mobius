@@ -51,6 +51,7 @@ import {
   workspaceRequestFromSystemEvent,
   workspaceRequestsForBuiltApps,
   ACTIVATE_FOREGROUND,
+  ACTIVATE_LIVE_PREVIEW,
 } from './workspacePlacement.js'
 import {
   appUpdateStaleMessage,
@@ -1199,7 +1200,7 @@ export default function Shell() {
     if ((!contentRect.w || !contentRect.h) && contentElRef.current) {
       contentRect = { w: contentElRef.current.clientWidth, h: contentElRef.current.clientHeight }
     }
-    const mode = paneModel.modeForRect(contentRect)
+    const deviceMode = paneModel.modeForRect(contentRect)
     const liveApps = appsRef.current
     // R2: a FOREGROUND agent open in the SINGLE world writes the slot (via the pure
     // resolver's F4 branch) BENEATH an open Settings takeover, so the item would be
@@ -1210,6 +1211,17 @@ export default function Shell() {
     // takeover is open.
     const currentWs = workspaceStateRef.current.ws
     const world = paneModel.WORKSPACE_SPLITS_ENABLED ? currentWs.viewMode : 'single'
+    const opensLivePreview = requests.some(
+      request => request?.activation === ACTIVATE_LIVE_PREVIEW,
+    )
+    // The placement resolver folds the durable Standard → Builder flip into the
+    // live-preview request. Mirror that same intent into the transition
+    // descriptor in this React batch so render mode and workspace mode never
+    // disagree for an intermediate frame. No presentation plan: the preview
+    // should appear immediately, not wait behind decorative entry motion.
+    if (SPLITS && world === 'single' && opensLivePreview) {
+      mode.toggle({ cause: 'auto', to: 'panes' })
+    }
     if (world === 'single'
         && requests.some(r => r && r.item && r.activation === ACTIVATE_FOREGROUND)) {
       dismissSettings()
@@ -1222,9 +1234,13 @@ export default function Shell() {
     // delivered one dispatch at a time (batch == sequential).
     dispatchWorkspace({
       type: 'APPLY_PLACEMENT',
-      resolve: (ws) => resolveWorkspaceRequests(ws, requests, { mode, contentRect, liveApps }),
+      resolve: (ws) => resolveWorkspaceRequests(ws, requests, {
+        mode: deviceMode,
+        contentRect,
+        liveApps,
+      }),
     })
-  }, [dispatchWorkspace, dismissSettings])
+  }, [dispatchWorkspace, dismissSettings, mode])
   // The tab strip is the BUILDER SURFACE: with splits ON it follows the
   // EFFECTIVE builder world exactly — always present in builder (even at a
   // single leaf, where this single-pane .shell__tabstrip stands in for the
@@ -2121,7 +2137,7 @@ export default function Shell() {
     for (const id of fresh) appBaselineRef.current.add(id)
     setNewAppIds(prev => withAppsFlagged(prev, fresh))
 
-    // Durable-list fallback for an app-created event missed during reconnect.
+    // Durable-list fallback for a live-preview event missed during reconnect.
     // Convert server relationships into the same pane-neutral
     // requests used by the live event path; the flat resolver is only today's
     // one-pane projection.
@@ -2643,7 +2659,11 @@ export default function Shell() {
     } else if (ev.type === 'app_recovered') {
       if (ev.appId) confirmAppRecovered(ev.appId)
       void invalidateShellListCache('apps').then(refreshApps)
-    } else if (ev.type === 'app_updated' || ev.type === 'app_created') {
+    } else if (
+      ev.type === 'app_updated'
+      || ev.type === 'app_created'
+      || ev.type === 'app_preview_ready'
+    ) {
       const placementRequest = workspaceRequestFromSystemEvent(ev)
       // app_updated is also the reinstall event for a tombstoned store app,
       // while app_created may carry an integer id freed by TTL purge and reused
@@ -2652,11 +2672,11 @@ export default function Shell() {
       const reconcileIdentity = ev.appId
         ? confirmAppIdentityIsLive(ev.appId)
         : Promise.resolve(false)
-      // Refresh server truth before warming or placing. app_updated is
-      // refresh-only; app_created may additionally issue one background
-      // workspace placement after the returned row confirms the relationship.
-      // `updated_at` drives the iframe cache-buster and the derived built-app
-      // CTA, so neither needs a separate client mirror.
+      // Refresh server truth before warming or placing. app_updated/app_created
+      // remain lifecycle refreshes; app_preview_ready is the explicit
+      // build-session action that reveals either a new app or an updated one.
+      // `updated_at` drives the iframe live-swap and derived built-app CTA, so
+      // neither needs a separate client mirror.
       Promise.all([
         invalidateShellListCache('apps'),
         reconcileIdentity,
@@ -2669,22 +2689,30 @@ export default function Shell() {
           const app = updatedApps.find(a => String(a.id) === String(ev.appId))
           if (app) warmAppCode(app)
         }
-        // `app_created` is emitted only after the first runnable compile. Check
-        // the refreshed row before honoring it, then place in the background;
-        // a malformed/spoofed event cannot open an absent or unrelated app.
+        // A live-preview event is emitted only after a coherent revision
+        // committed. Confirm both named resources before honoring it. The
+        // requesting chat is deliberately NOT compared with app.chat_id: an
+        // existing app keeps its original ownership/error-routing relationship
+        // while a later chat may be the one modifying it.
         if (placementRequest) {
           const app = updatedApps.find(a => (
             String(a.id) === placementRequest.item.id
-            && String(a.chat_id) === placementRequest.source.id
           ))
-          if (app) placeInWorkspace(placementRequest)
+          if (app) {
+            refreshChats().then(updatedChats => {
+              const chatExists = updatedChats.some(
+                chat => String(chat.id) === placementRequest.source.id,
+              )
+              if (chatExists) placeInWorkspace(placementRequest)
+            })
+          }
         }
       })
     } else if (ev.type === 'open_item') {
       // An explicit agent-initiated open (design §6.3), system-bus-only so it
       // fires exactly once. Confirm the item actually exists in fresh server
-      // truth before placing — mirror the app_created confirm-guard so a spoofed
-      // or absent id is a silent no-op. App items also warm their code cache.
+      // truth before placing — mirror the live-preview confirm-guard so a
+      // spoofed or absent id is a silent no-op. App items also warm their cache.
       const request = workspaceRequestFromSystemEvent(ev)
       if (request) {
         // A background open lands as an inactive tab, so it earns the drawer/tab
@@ -2815,7 +2843,7 @@ export default function Shell() {
   // A system-bus event can be lost while the stream is disconnected. Refetch
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
-  // through the same idempotent placement resolver as live app_created events.
+  // through the same idempotent placement resolver as live app_preview_ready events.
   const reconcileSystemStateOnOpen = useCallback(() => {
     reconcileNotifications()
     void Promise.all([

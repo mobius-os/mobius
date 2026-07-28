@@ -156,18 +156,25 @@ python "$SCRIPTS_DIR/apply_app.py" /data/apps/<slug>
 
 The helper validates the manifest and complete source tree, compiles and
 commits that exact revision, returns a compact receipt with `app_id`,
-`preview_path`, and `open_path`, and opens the live preview beside the owning
-chat. Reuse that numeric ID for preview, storage, notifications, and later
-actions; do not list apps again after a successful apply. Do not send a
-separate `open_item`.
+`preview_path`, and `open_path`, and emits one live-preview action tied to this
+building chat. On a phone the shell enters Builder and activates the app tab;
+on a wider screen it opens the app in a companion pane while keyboard focus
+stays in the chat. Reuse that numeric ID for preview, storage, notifications,
+and later actions; do not list apps again after a successful apply. Do not send
+a separate `open_item`.
 
 Afterward, edit source files normally and run the same command once the change
-is coherent enough to preview. A failed apply keeps the prior version live and
-returns the compiler or validation error directly. Saving alone deliberately
-does not publish a half-written draft.
+is coherent enough to preview. Each successful apply live-swaps the already
+open app, so the partner can watch and try the build as it gains layers. For a
+material build, the first apply is a beginning rather than the closeout: keep
+refining in coherent visible passes instead of holding every feature until one
+final reveal. A trivial fix may still be one pass. A failed apply keeps the
+prior version live and returns the compiler or validation error directly.
+Saving alone deliberately does not publish a half-written draft.
 
-The visible intent sentence at the start of the turn is the first progress
-cue. Use `build_phase.py` only when the partner benefits from a real milestone:
+The app surface is the primary progress view; the visible intent sentence at
+the start of the turn is its first cue. Use `build_phase.py` only when the
+partner benefits from a real milestone:
 
 - the first preview is available;
 - verification/refinement has begun and substantial work remains;

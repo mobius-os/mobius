@@ -63,6 +63,7 @@ _SYSTEM_BUS_ONLY_EVENTS = frozenset({
   "app_build_failed",
   "app_update_stale",
   "app_created",
+  "app_preview_ready",
   # open_item is an ACTION event (open this now); a chat reconnect replaying it
   # would re-open the item a second time, so it rides the replay-free system bus.
   "open_item",
@@ -133,8 +134,8 @@ class NotifyBody(BaseModel):
     """Confine every optional field to the one event type that owns it.
 
     Each event type carries a closed field set: build_phase owns
-    `label`/`chatId`, open_item owns the typed request fields, and neither may
-    borrow the other's (nor `appId`/`error`). This is the per-type confinement
+    `label`/`chatId`, open_item owns the typed request fields, and
+    app_preview_ready owns `appId`/`chatId`. This is the per-type confinement
     the design requires so the type whitelist stays the meaningful contract.
     """
     if self.type == "open_item":
@@ -164,6 +165,20 @@ class NotifyBody(BaseModel):
         raise ValueError("open_item placement is not a recognized value")
       if self.activation is not None and self.activation not in _OPEN_ITEM_ACTIVATIONS:
         raise ValueError("open_item activation is not a recognized value")
+      return self
+
+    if self.type == "app_preview_ready":
+      for name in _OPEN_ITEM_FIELDS:
+        if getattr(self, name) is not None:
+          raise ValueError(f"{name} is only valid for open_item events")
+      if self.label is not None:
+        raise ValueError("label is only valid for build_phase events")
+      if self.error is not None:
+        raise ValueError("error is not valid for app_preview_ready events")
+      if not _is_numeric_app_id(self.appId) or float(self.appId) <= 0:
+        raise ValueError("app_preview_ready requires a positive numeric appId")
+      if not (self.chatId or "").strip():
+        raise ValueError("app_preview_ready requires a non-empty chatId")
       return self
 
     # Non-open_item: none of the open_item fields may appear.
@@ -241,6 +256,8 @@ def notify(
     event["appId"] = body.appId
   if body.error is not None:
     event["error"] = body.error
+  if body.type == "app_preview_ready":
+    event["chatId"] = body.chatId
   # Carry the typed open_item request onto the event so the Shell resolver can
   # confirm + place it. Only the fields the validator accepted are copied, so a
   # spoofed extra can never ride along. Delivery is advisory + fire-once (§6.3):

@@ -80,14 +80,18 @@ EventType = Literal[
 SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   "theme_updated",
   # Internal lifecycle event emitted after explicit app apply has committed its
-  # first runnable bundle. Shell uses chatId + appId to place the preview; it
-  # is system-bus-only so it is never replayed as a second workspace action.
+  # first runnable bundle. It refreshes app identity/list state; the separate
+  # app_preview_ready action owns workspace placement.
   "app_created",
+  # Emitted after any explicit app apply commits a coherent runnable revision.
+  # Shell reveals the app beside the requesting chat (or activates its phone
+  # tab) so later app_updated revisions are visible as they live-swap.
+  "app_preview_ready",
   # Explicit agent-initiated "open this in the partner's workspace" request
   # (split-pane design §6.3). The agent POSTs it with a typed item + optional
   # source + placement/activation; Shell confirms the item exists, then routes
-  # it through the same pane-aware resolver as app_created. Like app_created it
-  # is system-bus-only (an action event must never replay on reconnect).
+  # it through the same pane-aware resolver as app_preview_ready. Like that
+  # preview action it is system-bus-only (an action must never replay).
   "open_item",
   "app_updated",
   "app_build_failed",

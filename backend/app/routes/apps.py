@@ -1874,6 +1874,16 @@ async def apply_app_source(
     if result.mode == "created" and result.app.chat_id is not None:
       event["chatId"] = str(result.app.chat_id)
     get_system_broadcast().publish(event)
+    # Lifecycle refresh and workspace reveal are separate contracts. A preview
+    # action carries the REQUESTING chat (which may be modifying an app created
+    # elsewhere) and is emitted only after the coherent revision committed, so
+    # the shell never opens a half-written or failed build.
+    if body.chat_id:
+      get_system_broadcast().publish({
+        "type": "app_preview_ready",
+        "appId": str(result.app.id),
+        "chatId": str(body.chat_id),
+      })
   return schemas.AppApplyOut(mode=result.mode, app=result.app)
 
 
