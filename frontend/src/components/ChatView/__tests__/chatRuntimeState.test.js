@@ -6,6 +6,7 @@ import {
   answerTurnDisposition,
   builtAppPulseDecision,
   canFastForwardQueue,
+  shouldFreezeStreamingReturn,
   cidOf,
   continuationRowsFromPromotedMessage,
   isAutoContinuationMessage,
@@ -35,6 +36,39 @@ test('automatic continuations are product markers, not owner messages', () => {
   assert.equal(isOwnerUserMessage(marker), false)
   assert.equal(isOwnerUserMessage({ role: 'user', content: 'hello' }), true)
   assert.equal(isOwnerUserMessage({ role: 'user', hidden: true }), false)
+})
+
+test('the initial pageshow cannot retire a fast first-send pin', () => {
+  assert.equal(shouldFreezeStreamingReturn({
+    eventType: 'pageshow',
+    pagePersisted: false,
+    visibilityState: 'visible',
+    turnActive: true,
+  }), false)
+})
+
+test('genuine foreground return edges freeze an active reader position', () => {
+  assert.equal(shouldFreezeStreamingReturn({
+    eventType: 'pageshow',
+    pagePersisted: true,
+    visibilityState: 'visible',
+    turnActive: true,
+  }), true)
+  assert.equal(shouldFreezeStreamingReturn({
+    eventType: 'online',
+    visibilityState: 'visible',
+    turnActive: true,
+  }), true)
+  assert.equal(shouldFreezeStreamingReturn({
+    eventType: 'visibilitychange',
+    visibilityState: 'hidden',
+    turnActive: true,
+  }), false)
+  assert.equal(shouldFreezeStreamingReturn({
+    eventType: 'visibilitychange',
+    visibilityState: 'visible',
+    turnActive: false,
+  }), false)
 })
 
 test('an in-process question answer keeps ownership of the active assistant turn', () => {

@@ -300,7 +300,7 @@ test.describe('Bootstrap seam: empty-chat auto-create', () => {
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await expect.poll(() => created.attempts, { timeout: 8000 }).toBeGreaterThan(0)
-    await expect(page.getByText(/couldn't start a new chat/i)).toBeVisible()
+    await expect(page.getByText(/couldn’t start a new chat/i)).toBeVisible()
 
     expect(created).toHaveLength(0)
     expect(await page.evaluate(() => localStorage.getItem('moebius_active_chat')))

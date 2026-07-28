@@ -79,6 +79,7 @@ import {
   stopConfirmedIdle,
   stopRequestSucceeded,
   serverSnapshotBehindLocal,
+  shouldFreezeStreamingReturn,
   startedMessagesFromResponse,
   stripInternalUserMessageFields,
   systemEventForChat,
@@ -3350,13 +3351,15 @@ export default function ChatView({
     }
   }, [turnActive, messages, activeGoalObjective, setActiveGoalState])
   useEffect(() => {
-    function freezeStreamingReturn() {
-      if (typeof document !== 'undefined'
-          && document.visibilityState
-          && document.visibilityState !== 'visible') {
-        return
-      }
-      if (!turnActive) return
+    function freezeStreamingReturn(event) {
+      if (!shouldFreezeStreamingReturn({
+        eventType: event?.type,
+        pagePersisted: event?.persisted === true,
+        visibilityState: typeof document !== 'undefined'
+          ? document.visibilityState
+          : 'visible',
+        turnActive,
+      })) return
       freezeForegroundReturn()
     }
 

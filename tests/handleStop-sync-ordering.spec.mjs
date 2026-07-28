@@ -85,12 +85,47 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
 
     let stopHits = 0
     let refetchHits = 0
+    let ordinaryMessageHits = 0
+    let steerHits = 0
     let resolveStop
     const stopGate = new Promise(r => { resolveStop = r })
+    let resolveSteer
+    const steerGate = new Promise(r => { resolveSteer = r })
 
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
-      route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
-    )
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async route => {
+      const request = route.request()
+      const body = request.postDataJSON()
+      if (body.force_steer) {
+        steerHits++
+        await steerGate
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'not_steered' }),
+        })
+      }
+      ordinaryMessageHits++
+      if (ordinaryMessageHits === 2) {
+        // Confirm the second send as a durable queued row so the fast-forward
+        // control can enter its real in-flight path.
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'queued',
+            ts: 12344,
+            position: 1,
+            pending_message: {
+              role: 'user',
+              content: body.content,
+              ts: 12344,
+              cid: body.cid,
+            },
+          }),
+        })
+      }
+      return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
+    })
     // page.route().fulfill() cannot drip a body: it delivers the complete payload and
     // closes the response. Sleeping before fulfill merely delayed the first SSE event,
     // then closed the stream and removed Stop before the click. Install a page-local
@@ -166,13 +201,25 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
       { timeout: 5000 },
     )
 
-    // Press Stop. handleStop must:
+    // Queued work intentionally replaces Stop with Steer. Enter the real
+    // reachable overlap: Steer hides its confirmed row while its POST is in
+    // flight, which reveals Stop; Stop serializes behind that request. Resolve
+    // Steer as not_steered so it restores the durable row before handleStop
+    // snapshots and clears it.
+    await page.locator('[data-chat-surface="painted"] .chat__steer').click()
+    await expect.poll(() => steerHits).toBe(1)
+    const stop = page.locator('[data-chat-surface="painted"] .chat__stop')
+    await expect(stop).toBeVisible()
+    await stop.click()
+    resolveSteer()
+    await expect.poll(() => stopHits).toBe(1)
+
+    // handleStop must:
     //   (1) bump fetchGenRef + clear pendingMessagesRef SYNCHRONOUSLY
     //   (2) then await POST /chat/stop (held by our mock for 250ms)
     // During step 2, the natural onStreamEnd path may attempt to
     // refetch; whether it does or not, the cleared queue must NOT
     // come back.
-    await page.locator('[data-chat-surface="painted"] .chat__stop').click()
     // Poll the queued tray every ~30ms during the stop-await window.
     // Each sample must be empty (or at least not contain the
     // resurrected ts). Any sample seeing "resurrected-queue-item"

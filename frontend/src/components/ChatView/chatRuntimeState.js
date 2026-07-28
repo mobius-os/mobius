@@ -147,6 +147,24 @@ export function canFastForwardQueue(pendingMessages, turnActive) {
     && pendingMessages.every(m => typeof m?.ts === 'number' && m.serverTs === true)
 }
 
+/** A foreground lifecycle event should freeze a live reader position only when
+ * it represents an actual return. The browser's initial non-BFCache `pageshow`
+ * can land after a very fast first send; treating that startup event as a
+ * return retires the brand-new PIN_USER_MSG into ANCHOR_AT before its reserved
+ * reply room fills. A persisted pageshow, visible visibilitychange, and online
+ * recovery are genuine return edges. */
+export function shouldFreezeStreamingReturn({
+  eventType,
+  pagePersisted = false,
+  visibilityState = 'visible',
+  turnActive = false,
+} = {}) {
+  if (!turnActive) return false
+  if (visibilityState && visibilityState !== 'visible') return false
+  if (eventType === 'pageshow' && !pagePersisted) return false
+  return true
+}
+
 // An in-process AskUserQuestion answer resumes the assistant turn that owns
 // the card. Only the recovery path (the original runner disappeared after the
 // card was persisted) starts a distinct hidden continuation. ChatView uses
