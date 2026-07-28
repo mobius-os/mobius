@@ -724,6 +724,20 @@ test('the pane focus action uses one unambiguous accessible state contract', () 
     'a button whose label changes with the action must not also announce a toggle state')
 })
 
+test('the pane focus action stays compact at the far edge and reachable on overflow', () => {
+  const stripRule = css.match(/\.workspace__strip\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  const focusRule = css.match(/\.workspace__pane-focus\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(stripRule, /padding-inline-end:\s*0/,
+    'the strip owns removal of its trailing gutter')
+  assert.match(focusRule, /position:\s*sticky/)
+  assert.match(focusRule, /right:\s*0/)
+  assert.match(focusRule, /flex:\s*0 0 28px/)
+  assert.match(focusRule, /margin-left:\s*auto/,
+    'free strip width belongs to the tabs; the focus action stays at the far edge')
+  assert.doesNotMatch(focusRule, /margin-right|translateX/,
+    'the control should not compensate for padding owned by its strip')
+})
+
 test('overflowing strips keep native pan and add a no-chrome wheel path', () => {
   assert.match(paneStrip, /export function scrollStripWheel\(e\)/)
   assert.match(paneStrip, /Math\.abs\(e\.deltaX\) >= Math\.abs\(e\.deltaY\)/)
