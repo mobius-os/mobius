@@ -1004,6 +1004,11 @@
   height: 16px;
   object-fit: contain;
   background: color-mix(in srgb, var(--accent-dim) 82%, var(--surface));
+  opacity: 0;
+}
+
+.chat__source-favicon--loaded {
+  opacity: 1;
 }
 
 .chat__source-title {

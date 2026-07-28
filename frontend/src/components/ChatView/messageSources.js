@@ -84,9 +84,9 @@ export function sourceHost(url) {
   }
 }
 
-// Browsers still commonly expose a site's default icon at the origin root.
-// Loading that conventional URL keeps source cards independent of a third-party
-// favicon service; MessageSources retains its local letter mark when it fails.
+// Sites commonly expose a default icon at their origin root. SourceFavicon owns
+// the authenticated proxy read; this helper only derives that conventional
+// target, keeping us independent of third-party favicon services.
 export function sourceFaviconUrl(url) {
   try {
     const safeUrl = safeSourceUrl(url)

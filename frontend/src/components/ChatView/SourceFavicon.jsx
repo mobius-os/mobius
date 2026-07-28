@@ -1,0 +1,173 @@
+import { useEffect, useRef, useState } from 'react'
+import { apiFetch } from '../../api/client.js'
+
+const MAX_FAVICON_BYTES = 256 * 1024
+const FAVICON_TIMEOUT_MS = 8000
+const ACCEPTED_CONTENT_TYPES = new Set([
+  'application/octet-stream',
+  'image/gif',
+  'image/ico',
+  'image/jpeg',
+  'image/png',
+  'image/vnd.microsoft.icon',
+  'image/webp',
+  'image/x-icon',
+])
+
+// Components for repeated citations share the same read. Once it settles, the
+// service worker's existing proxy cache owns reuse across renders and sessions.
+const pendingFavicons = new Map()
+
+function hasBytes(bytes, signature, offset = 0) {
+  return bytes.length >= offset + signature.length
+    && signature.every((byte, index) => bytes[offset + index] === byte)
+}
+
+function detectedImageType(bytes) {
+  if (hasBytes(bytes, [0x00, 0x00, 0x01, 0x00])) return 'image/x-icon'
+  if (hasBytes(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return 'image/png'
+  }
+  if (
+    hasBytes(bytes, [0x47, 0x49, 0x46, 0x38])
+    && [0x37, 0x39].includes(bytes[4])
+    && bytes[5] === 0x61
+  ) return 'image/gif'
+  if (hasBytes(bytes, [0xff, 0xd8, 0xff])) return 'image/jpeg'
+  if (
+    hasBytes(bytes, [0x52, 0x49, 0x46, 0x46])
+    && hasBytes(bytes, [0x57, 0x45, 0x42, 0x50], 8)
+  ) return 'image/webp'
+  return ''
+}
+
+export function sourceFaviconProxyPath(faviconUrl) {
+  try {
+    const parsed = new URL(faviconUrl)
+    if (!['http:', 'https:'].includes(parsed.protocol)) return ''
+    if (!parsed.host || parsed.username || parsed.password) return ''
+    return `/proxy?url=${encodeURIComponent(parsed.href)}`
+  } catch {
+    return ''
+  }
+}
+
+export async function validatedFaviconBlob(response) {
+  if (!response.ok) throw new Error(`Favicon read failed: ${response.status}`)
+
+  const declaredType = (response.headers.get('content-type') || '')
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase()
+  if (declaredType && !ACCEPTED_CONTENT_TYPES.has(declaredType)) {
+    throw new Error(`Unsupported favicon content type: ${declaredType}`)
+  }
+
+  const declaredLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_FAVICON_BYTES) {
+    throw new Error('Favicon is too large')
+  }
+
+  const blob = await response.blob()
+  if (!blob.size || blob.size > MAX_FAVICON_BYTES) {
+    throw new Error('Favicon is empty or too large')
+  }
+  const prefix = new Uint8Array(await blob.slice(0, 12).arrayBuffer())
+  const detectedType = detectedImageType(prefix)
+  if (!detectedType) throw new Error('Favicon bytes are not a supported image')
+
+  // Give the browser the sniffed type without trusting the remote server's
+  // declaration; application/octet-stream is especially common for .ico.
+  return blob.type === detectedType
+    ? blob
+    : new Blob([blob], { type: detectedType })
+}
+
+export function loadSourceFavicon(faviconUrl) {
+  const path = sourceFaviconProxyPath(faviconUrl)
+  if (!path) return Promise.reject(new Error('Invalid favicon URL'))
+
+  const existing = pendingFavicons.get(path)
+  if (existing) return existing
+
+  const request = apiFetch(path, { timeoutMs: FAVICON_TIMEOUT_MS })
+    .then(validatedFaviconBlob)
+    .finally(() => pendingFavicons.delete(path))
+  pendingFavicons.set(path, request)
+  return request
+}
+
+function useNearViewport() {
+  const ref = useRef(null)
+  const [near, setNear] = useState(false)
+
+  useEffect(() => {
+    const node = ref.current
+    if (!node) return undefined
+    if (typeof IntersectionObserver === 'undefined') {
+      setNear(true)
+      return undefined
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) setNear(true)
+    }, { rootMargin: '240px' })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+
+  return [ref, near]
+}
+
+export default function SourceFavicon({ faviconUrl, fallback }) {
+  const [hostRef, near] = useNearViewport()
+  const [objectUrl, setObjectUrl] = useState('')
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    if (!near || !faviconUrl) return undefined
+    let disposed = false
+    let ownedUrl = ''
+    setLoaded(false)
+
+    loadSourceFavicon(faviconUrl).then((blob) => {
+      const nextUrl = URL.createObjectURL(blob)
+      if (disposed) {
+        URL.revokeObjectURL(nextUrl)
+        return
+      }
+      ownedUrl = nextUrl
+      setObjectUrl(nextUrl)
+    }).catch(() => {
+      if (!disposed) setObjectUrl('')
+    })
+
+    return () => {
+      disposed = true
+      if (ownedUrl) URL.revokeObjectURL(ownedUrl)
+    }
+  }, [faviconUrl, near])
+
+  const discardObjectUrl = () => {
+    if (objectUrl) URL.revokeObjectURL(objectUrl)
+    setObjectUrl('')
+    setLoaded(false)
+  }
+
+  return (
+    <span ref={hostRef} className="chat__source-icon" aria-hidden="true">
+      <span className="chat__source-fallback">{fallback}</span>
+      {objectUrl && (
+        <img
+          className={`chat__source-favicon${loaded ? ' chat__source-favicon--loaded' : ''}`}
+          src={objectUrl}
+          alt=""
+          width="16"
+          height="16"
+          decoding="async"
+          onLoad={() => setLoaded(true)}
+          onError={discardObjectUrl}
+        />
+      )}
+    </span>
+  )
+}

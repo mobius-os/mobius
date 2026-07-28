@@ -6,6 +6,7 @@ import {
   sourceLabel,
 } from './messageSources.js'
 import { messageRecall, noteHref, noteLabel } from './memoryRecall.js'
+import SourceFavicon from './SourceFavicon.jsx'
 
 function sourceMark(host) {
   const displayHost = String(host || '').replace(/^www\./i, '')
@@ -14,10 +15,6 @@ function sourceMark(host) {
 
 function MemoryMark() {
   return <BrainCircuit className="chat__source-glyph" aria-hidden="true" />
-}
-
-function hideBrokenFavicon(event) {
-  event.currentTarget.hidden = true
 }
 
 // Everything that informed an answer, surfaced ONCE at the end of the message:
@@ -129,23 +126,10 @@ export default function MessageSources({ blocks, onInternalNav }) {
                 title={source.snippet || source.title || source.url}
                 aria-label={`${label}${host && host !== label ? ` — ${host}` : ''} (opens in a new tab)`}
               >
-                <span className="chat__source-icon" aria-hidden="true">
-                  <span className="chat__source-fallback">{sourceMark(host)}</span>
-                  {faviconUrl && (
-                    <img
-                      className="chat__source-favicon"
-                      src={faviconUrl}
-                      alt=""
-                      width="16"
-                      height="16"
-                      loading="lazy"
-                      decoding="async"
-                      fetchPriority="low"
-                      referrerPolicy="no-referrer"
-                      onError={hideBrokenFavicon}
-                    />
-                  )}
-                </span>
+                <SourceFavicon
+                  faviconUrl={faviconUrl}
+                  fallback={sourceMark(host)}
+                />
                 <span className="chat__source-title">{label}</span>
               </a>
             </li>
