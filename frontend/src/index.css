@@ -263,6 +263,15 @@ html {
   background-color: var(--bg, #0d0d0d);
 }
 
+/* The shell is fixed chrome: pan normally, but never let page-level pinch zoom
+   scale the toolbar, drawer, chat, and active app as one document. The viewport
+   meta is the primary lock; this closes the iOS gap where user-scalable=no may
+   be ignored. Local zoom surfaces still own their gesture with touch-action:none
+   and transform only their content. */
+html, body {
+  touch-action: pan-x pan-y;
+}
+
 /* Accessibility: respect prefers-reduced-motion. Collapses all
    transitions and animations to near-instant — the user has asked
    the OS to suppress non-essential motion. The shell + drawer +
@@ -461,8 +470,8 @@ textarea:focus-visible {
 }
 
 .chat__empty-title {
-  font-size: clamp(22px, 4vw, 26px);
-  font-weight: 650;
+  font-size: 30px;
+  font-weight: 700;
   letter-spacing: 0;
   line-height: 1.05;
   color: var(--text);

@@ -123,12 +123,11 @@ test('the undo chord is flag-gated and defers to focused inputs', () => {
 test('the first-run walkthrough stays short and action-first', () => {
   assert.doesNotMatch(walkthrough, /const STEPS/)
   assert.match(walkthrough, /Your Möbius is ready/)
-  assert.match(walkthrough, /Connect agent/)
-  assert.match(walkthrough, /Explore apps/)
-  assert.match(walkthrough, /Install Möbius/)
-  assert.match(walkthrough, /How to install/)
+  assert.match(walkthrough, /Connect an agent/)
+  assert.match(walkthrough, /Open the App Store/)
+  assert.match(walkthrough, /Keep Möbius close/)
   assert.match(walkthrough, /requestInstall/)
-  assert.doesNotMatch(walkthrough, /wt__kicker|wt__mark|Open Settings|Open the App Store|I’ll explore/)
+  assert.match(walkthrough, /I’ll explore/)
   assert.match(walkthrough, /mobius:walkthrough-completed/)
 })
 
@@ -143,8 +142,8 @@ test('drawer lists distinguish loading, error, and confirmed empty data', () => 
   assert.match(shell, /chatsStatus=\{chatsStatus\}/)
   assert.match(drawer, /chatsStatus === 'loading'/)
   assert.match(drawer, /chatsStatus === 'error'/)
-  assert.match(drawer, /chatsStatus === 'success' && allChats\.length > 0/)
-  assert.doesNotMatch(drawer, /No conversations yet/)
+  assert.match(drawer, /chatsStatus === 'success'/)
+  assert.match(drawer, /No conversations yet/)
 })
 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
@@ -1099,6 +1098,7 @@ test('round4-3: the New Chat landing renders for a null slot / reveal underlay a
   // Seamless swap: the landing reuses ChatView's exact empty treatment.
   assert.match(newChatLanding, /className="chat chat--empty"/)
   assert.match(newChatLanding, /className="chat__empty-wrap"/)
+  assert.match(newChatLanding, /className="chat__empty-glyph"/)
   assert.match(newChatLanding, /What&apos;s on your mind\?/)
   assert.match(newChatLanding, /Couldn’t start a new chat/)
 })

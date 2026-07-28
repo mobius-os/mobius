@@ -51,6 +51,8 @@ test('the app directory distinguishes loading, errors, and confirmed emptiness',
   assert.match(directory, /status === 'error'/)
   assert.match(directory, /Apps unavailable/)
   assert.match(directory, /onClick=\{onRetry\}/)
+  assert.match(directory, /Your apps/)
+  assert.match(directory, /Everything installed in this Möbius workspace/)
   assert.match(directory, /No installed apps yet/)
 })
 
