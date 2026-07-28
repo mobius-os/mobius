@@ -923,6 +923,23 @@ export function closePane(ws, paneId) {
   })
 }
 
+// Close every OTHER tab in the kept tab's pane (the context-menu "Close all
+// other tabs" affordance). The kept tab becomes the pane's active tab — the
+// gesture's intent is "just this one". Scoped to ONE pane on purpose: other
+// panes are surfaces the owner arranged deliberately, and this menu never
+// reaches across them. The pane can never empty (the kept tab survives), so
+// no auto-return applies. Reversible — the reducer snapshot restores the
+// closed tabs. Same reference on a no-op (unknown tab, or already alone).
+export function closeOtherTabs(ws, tabKey) {
+  const pane = paneOf(ws, tabKey)
+  if (!pane || pane.tabs.length <= 1) return ws
+  const kept = pane.tabs.find(tab => tabModel.tabKey(tab) === tabKey)
+  return commit(ws, {
+    ...ws,
+    panes: { ...ws.panes, [pane.id]: { ...pane, tabs: [kept], activeTabKey: tabKey } },
+  })
+}
+
 // Move a tab within/between panes. target is one of:
 //   { paneId, index? }  insert into an existing pane at index (append if absent)
 //   { paneId, edge }    split that pane on the edge, the tab alone in the new one
@@ -1706,6 +1723,15 @@ export function workspaceReducer(state, action) {
       const paneLabel = action.label || 'Closed pane'
       const { ws: closed, autoReturned } = autoReturnIfEmptied(ws, next)
       return { ws: closed, undo: { ws, label: paneLabel, toast: paneLabel, restoreViewMode: autoReturned } }
+    }
+    case 'CLOSE_OTHER_TABS': {
+      // Keep only the named tab in its pane. The kept tab survives, so the pane
+      // never empties — no auto-return branch. One reversible gesture: the
+      // snapshot restores every closed sibling at once.
+      const next = closeOtherTabs(ws, action.tabKey)
+      if (next === ws) return state
+      const label = action.label || 'Closed other tabs'
+      return { ws: next, undo: { ws, label, toast: label } }
     }
     case 'MOVE_TAB': {
       const next = moveTab(ws, action.tabKey, action.target)

@@ -146,6 +146,12 @@ test('the context menu offers Close pane when another pane can absorb the space'
   assert.match(shell, /Close pane/)
 })
 
+test('the context menu offers Close all other tabs only when a sibling tab exists', () => {
+  assert.match(shell, /menuPane && menuPane\.tabs\.length >= 2/)
+  assert.match(shell, /type: 'CLOSE_OTHER_TABS', tabKey: tabMenu\.tabKey/)
+  assert.match(shell, /Close all other tabs/)
+})
+
 test('tab labels resolve through memoized id Maps, not per-render linear scans', () => {
   // labelForTab and the single-pane strip use O(1) Map lookups keyed by id.
   assert.match(shell, /const chatById = useMemo/)
