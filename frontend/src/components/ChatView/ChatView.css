@@ -2760,6 +2760,7 @@
 }
 
 .queued__action {
+  --queued-action-visual-shift: 0px;
   flex-shrink: 0;
   width: 44px;
   height: 44px;
@@ -2786,6 +2787,7 @@
   border: 1px solid var(--border-light); /* CONTRACT: subtle hairline around the visible action well */
   border-radius: 9px;
   background: var(--surface2); /* CONTRACT: neutral compact well inside the full 44px target */
+  transform: translateX(var(--queued-action-visual-shift));
   transition:
     background-color 0.15s,
     border-color 0.15s,
@@ -2797,36 +2799,45 @@
   display: block;
   position: relative;
   z-index: 1;
+  transform: translateX(var(--queued-action-visual-shift));
   transition: transform 0.08s;
 }
 
-.queued__action:hover::before {
-  transform: translateY(-1px);
+.queued__steer {
+  --queued-action-visual-shift: 3px;
 }
 
-.queued__steer:hover {
+.queued__cancel {
+  --queued-action-visual-shift: -3px;
+}
+
+.queued__action:hover::before {
+  transform: translate(var(--queued-action-visual-shift), -1px);
+}
+
+.queued__steer:not(:disabled):hover {
   color: var(--accent); /* CONTRACT: forwarding stays neutral at rest and reveals its meaning on interaction */
 }
 
-.queued__steer:hover::before {
+.queued__steer:not(:disabled):hover::before {
   background: color-mix(in srgb, var(--accent) 9%, var(--surface));
   border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
 }
 
-.queued__cancel:hover,
-.queued__cancel:active {
+.queued__cancel:not(:disabled):hover,
+.queued__cancel:not(:disabled):active {
   color: var(--danger); /* CONTRACT: removal becomes destructive only at interaction */
 }
 
-.queued__cancel:hover::before,
-.queued__cancel:active::before {
+.queued__cancel:not(:disabled):hover::before,
+.queued__cancel:not(:disabled):active::before {
   background: color-mix(in srgb, var(--danger) 9%, var(--surface));
   border-color: color-mix(in srgb, var(--danger) 32%, var(--border-light));
 }
 
 .queued__action:active::before,
 .queued__action:active svg {
-  transform: scale(0.9);
+  transform: translateX(var(--queued-action-visual-shift)) scale(0.9);
 }
 
 .queued__action:disabled {
@@ -2835,7 +2846,7 @@
 }
 
 .queued__action:disabled:hover::before {
-  transform: none;
+  transform: translateX(var(--queued-action-visual-shift));
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2843,7 +2854,9 @@
   .queued__action svg { transition: none; }
   .queued__action:hover::before,
   .queued__action:active::before,
-  .queued__action:active svg { transform: none; }
+  .queued__action:active svg {
+    transform: translateX(var(--queued-action-visual-shift));
+  }
 }
 
 .queued__action:focus-visible {

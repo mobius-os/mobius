@@ -152,6 +152,9 @@ test('queued row actions share full touch targets with compact visible wells', (
   const toggleRule = css.match(/\.queued__toggle\s*\{[^}]*\}/)?.[0] || ''
   const actionRule = css.match(/\.queued__action\s*\{[^}]*\}/)?.[0] || ''
   const wellRule = css.match(/\.queued__action::before\s*\{[^}]*\}/)?.[0] || ''
+  const iconRule = css.match(/\.queued__action svg\s*\{[^}]*\}/)?.[0] || ''
+  const steerRule = css.match(/\.queued__steer\s*\{[^}]*\}/)?.[0] || ''
+  const cancelRule = css.match(/\.queued__cancel\s*\{[^}]*\}/)?.[0] || ''
   const focusWellRule = css.match(/\.queued__action:focus-visible::before\s*\{[^}]*\}/)?.[0] || ''
 
   assert.match(trayRule, /width:\s*100%/,
@@ -165,10 +168,18 @@ test('queued row actions share full touch targets with compact visible wells', (
   assert.match(actionRule, /height:\s*44px/)
   assert.match(wellRule, /width:\s*30px/)
   assert.match(wellRule, /height:\s*30px/)
-  assert.doesNotMatch(css, /\.queued__steer\s*\{/,
-    'fast-forward should inherit the neutral action color at rest')
+  assert.match(wellRule, /transform:\s*translateX\(var\(--queued-action-visual-shift\)\)/)
+  assert.match(iconRule, /transform:\s*translateX\(var\(--queued-action-visual-shift\)\)/,
+    'the well and icon should move together inside the stationary touch target')
+  assert.match(steerRule, /--queued-action-visual-shift:\s*3px/)
+  assert.match(cancelRule, /--queued-action-visual-shift:\s*-3px/,
+    'the two 30px visuals move inward while their 44px targets remain adjacent')
+  assert.doesNotMatch(steerRule, /\bcolor:|\bbackground:/,
+    'fast-forward should inherit the neutral action treatment at rest')
   assert.doesNotMatch(css, /\.queued__steer::before\s*\{/,
     'fast-forward should inherit the neutral action well at rest')
+  assert.match(css, /\.queued__steer:not\(:disabled\):hover/,
+    'disabled fast-forward controls should not pick up hover emphasis')
   assert.match(focusWellRule, /box-shadow:\s*0 0 0 2px var\(--accent\)/,
     'keyboard focus should follow the visible well inside the full touch target')
   assert.match(queuedMessages, /className="queued__action queued__steer"/)
