@@ -12,6 +12,9 @@ from app.chat_transcript import (
   _compact_activity_item,
   _compact_activity_run,
   _distinctive_activity,
+  compact_messages_for_detail,
+  legacy_memory_recall_output_ids,
+  project_legacy_memory_recalls,
 )
 from app.chat import _ChatEventSink
 from app.events import process_event
@@ -23,9 +26,14 @@ from app.memory_recall import (
   RECALL_SEARCHING,
   recall_from_command,
   recall_from_result,
+  recall_from_tool_block,
 )
 
 MEMORY_CMD = 'python3 /data/apps/memory/memory_search.py "what does he prefer" "chat-1"'
+WRAPPED_MEMORY_CMD = (
+  "/bin/bash -lc 'python3 /data/apps/memory/memory_search.py "
+  '"what does he prefer" "$CHAT_ID"\''
+)
 
 # Synthetic notes. Fixtures here become a public diff, so they must never carry
 # anything from a real owner's graph — a memory note is personal by definition.
@@ -44,7 +52,9 @@ MOBIUS_MEMORY_RESULT_V1:{"status":"failed"}"""
 
 def test_a_memory_search_command_is_identified_as_a_lookup():
   assert recall_from_command(MEMORY_CMD) == {
-    "status": RECALL_SEARCHING, "app_slug": "memory",
+    "status": RECALL_SEARCHING,
+    "app_slug": "memory",
+    "query": "what does he prefer",
   }
 
 
@@ -70,7 +80,19 @@ def test_the_documented_simple_invocation_is_recognized():
   assert recall_from_command(
     'MEMORY_READER_PROVIDER=none python3 -u '
     '/data/apps/memory-2/memory_search.py "q" "chat-1"'
-  ) == {"status": RECALL_SEARCHING, "app_slug": "memory-2"}
+  ) == {
+    "status": RECALL_SEARCHING,
+    "app_slug": "memory-2",
+    "query": "q",
+  }
+
+
+def test_codex_login_shell_wrapper_preserves_the_same_lookup_identity():
+  assert recall_from_command(WRAPPED_MEMORY_CMD) == {
+    "status": RECALL_SEARCHING,
+    "app_slug": "memory",
+    "query": "what does he prefer",
+  }
 
 
 def test_shell_composition_and_non_memory_paths_are_rejected_conservatively():
@@ -84,6 +106,10 @@ def test_shell_composition_and_non_memory_paths_are_rejected_conservatively():
   assert recall_from_command('python3 /a/b/memory_search.py "q"') is None
   assert recall_from_command(
     'python3 /data/apps/memory/memory_search.py "q" > /tmp/result'
+  ) is None
+  assert recall_from_command(
+    "/bin/bash -lc 'python3 /data/apps/memory/memory_search.py "
+    '"q" "$CHAT_ID" && printf forged\''
   ) is None
 
 
@@ -285,6 +311,8 @@ def test_claude_and_codex_lifecycles_settle_to_identical_recall_metadata():
   ])
   assert codex == claude
   assert codex["status"] == RECALL_HIT
+  assert codex["query"] == "what does he prefer"
+  assert codex["app_slug"] == "memory"
   assert [note["id"] for note in codex["notes"]] == [
     "apps-render-in-a-sandboxed-frame", "theme-variables-are-shared",
   ]
@@ -321,51 +349,88 @@ def test_the_compacted_line_still_knows_what_it_recalled():
   assert item["recall"]["notes"][0]["id"] == "a"
 
 
-def test_citations_roll_up_so_a_folded_run_keeps_them():
-  # _compact_activity_entries keeps only two entries per tool name, so a third
-  # lookup's notes exist ONLY on the run summary.
-  blocks = [
-    (i, {"type": "tool", "tool": "Bash", "status": "done",
-         "recall": {"status": RECALL_HIT,
-                    "notes": [{"id": f"n{i}", "path": f"notes/n{i}.md"}]}})
-    for i in range(3)
+def test_legacy_codex_block_recovers_its_question_and_results_on_read():
+  block = {
+    "type": "tool",
+    "tool": "Bash",
+    "status": "done",
+    "input": WRAPPED_MEMORY_CMD,
+    "output": HIT_OUTPUT,
+    "output_exit_code": 0,
+  }
+  recall = recall_from_tool_block(block)
+  assert recall["status"] == RECALL_HIT
+  assert recall["query"] == "what does he prefer"
+  assert recall["app_slug"] == "memory"
+  assert _distinctive_activity(block)
+
+  item = _compact_activity_item(block)
+  assert item["recall"] == recall
+
+  projected = compact_messages_for_detail(
+    [{"role": "assistant", "blocks": [block]}],
+    message_offset=0,
+  )
+  assert projected[0]["blocks"][0]["recall"] == recall
+  assert "recall" not in block, "read projection never rewrites stored history"
+
+
+def test_a_deferred_legacy_output_is_unknown_instead_of_a_false_failure():
+  block = {
+    "type": "tool",
+    "tool": "Bash",
+    "status": "done",
+    "input": WRAPPED_MEMORY_CMD,
+    "tool_use_id": "legacy-memory",
+    "output_truncated": True,
+    "output_exit_code": 0,
+  }
+
+  assert recall_from_tool_block(block) is None
+  assert not _distinctive_activity(block)
+
+
+def test_a_legacy_sidecar_tail_recovers_the_real_memory_result_before_compaction():
+  block = {
+    "type": "tool",
+    "tool": "Bash",
+    "status": "done",
+    "input": WRAPPED_MEMORY_CMD,
+    "tool_use_id": "legacy-memory",
+    "output_truncated": True,
+    "output_exit_code": 0,
+  }
+  messages = [{"role": "assistant", "blocks": [block]}]
+
+  assert legacy_memory_recall_output_ids(messages) == {"legacy-memory"}
+  recovered = project_legacy_memory_recalls(
+    messages,
+    output_tails={"legacy-memory": HIT_OUTPUT},
+  )
+  recall = recovered[0]["blocks"][0]["recall"]
+  assert recall["status"] == RECALL_HIT
+  assert recall["query"] == "what does he prefer"
+  assert [note["id"] for note in recall["notes"]] == [
+    "apps-render-in-a-sandboxed-frame", "theme-variables-are-shared",
   ]
-  run = _compact_activity_run(blocks, message_index=0)
-  assert [note["id"] for note in run["recall"]["notes"]] == ["n0", "n1", "n2"]
-  assert run["recall"]["status"] == RECALL_HIT
+  assert "recall" not in block, "sidecar recovery never rewrites stored history"
+
+  compact = compact_messages_for_detail(recovered, message_offset=0)
+  assert compact[0]["blocks"][0]["recall"] == recall
+
+
+def test_a_real_legacy_process_error_remains_visible_without_stdout():
+  block = {
+    "type": "tool",
+    "tool": "Bash",
+    "status": "done",
+    "input": WRAPPED_MEMORY_CMD,
+    "output_exit_code": 1,
+  }
+
+  assert recall_from_tool_block(block)["status"] == RECALL_FAILED
 
 
 def test_a_run_with_no_lookup_carries_no_recall_key():
   blocks = [(0, {"type": "tool", "tool": "Bash", "status": "done"})]
   assert "recall" not in _compact_activity_run(blocks, message_index=0)
-
-
-def test_a_remembered_note_outranks_an_empty_probe_in_the_same_run():
-  blocks = [
-    (0, {"type": "tool", "tool": "Bash", "status": "done",
-         "recall": {"status": RECALL_EMPTY}}),
-    (1, {"type": "tool", "tool": "Bash", "status": "done",
-         "recall": {"status": RECALL_HIT,
-                    "notes": [{"id": "a", "path": "notes/a.md"}]}}),
-  ]
-  run = _compact_activity_run(blocks, message_index=0)
-  assert run["recall"]["status"] == RECALL_HIT
-  assert [note["id"] for note in run["recall"]["notes"]] == ["a"]
-
-
-def test_an_all_empty_run_still_reports_that_it_looked():
-  blocks = [(0, {"type": "tool", "tool": "Bash", "status": "done",
-                 "recall": {"status": RECALL_EMPTY}})]
-  run = _compact_activity_run(blocks, message_index=0)
-  assert run["recall"] == {"status": RECALL_EMPTY, "notes": []}
-
-
-def test_a_successful_empty_lookup_outranks_a_failed_probe_in_the_same_run():
-  blocks = [
-    (0, {"type": "tool", "tool": "Bash", "status": "done",
-         "recall": {"status": RECALL_FAILED}}),
-    (1, {"type": "tool", "tool": "Bash", "status": "done",
-         "recall": {"status": RECALL_EMPTY}}),
-  ]
-  run = _compact_activity_run(blocks, message_index=0)
-  assert run["recall"] == {"status": RECALL_EMPTY, "notes": []}

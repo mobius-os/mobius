@@ -2,83 +2,21 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  MAX_RECALLED_NOTES,
-  messageRecall,
   noteHref,
   noteLabel,
   safeMemoryAppSlug,
   safeNoteId,
 } from '../memoryRecall.js'
+import {
+  MAX_VISIBLE_MEMORY_NOTES,
+  memoryRecallCardModel,
+} from '../memoryRecallCard.js'
 
 const note = (id, extra = {}) => ({
   id,
   path: `notes/${id}.md`,
   title: id.replace(/-/g, ' '),
   ...extra,
-})
-
-const toolBlock = recall => ({ type: 'tool', tool: 'Bash', recall })
-
-test('a turn that never consulted Memory yields no row at all', () => {
-  assert.equal(messageRecall([{ type: 'text', content: 'hi' }]), null)
-  assert.equal(messageRecall([{ type: 'tool', tool: 'Bash' }]), null)
-  assert.equal(messageRecall([]), null)
-  assert.equal(messageRecall(null), null)
-})
-
-test('a lookup that found nothing is reported, not silently dropped', () => {
-  // The distinction this whole row exists for: an owner must be able to tell a
-  // gap in their memory from an agent that ignored it.
-  const recall = messageRecall([toolBlock({ status: 'empty' })])
-  assert.deepEqual(recall, { notes: [], empty: true })
-})
-
-test('an in-flight lookup is a live beat, not yet a citation', () => {
-  assert.equal(messageRecall([toolBlock({ status: 'searching' })]), null)
-})
-
-test('recalled notes are collected in first-seen order', () => {
-  const recall = messageRecall([
-    toolBlock({ status: 'hit', notes: [note('alpha'), note('beta')] }),
-  ])
-  assert.deepEqual(recall.notes.map(n => n.id), ['alpha', 'beta'])
-  assert.equal(recall.empty, false)
-})
-
-test('the same note recalled twice in a turn is cited once', () => {
-  const recall = messageRecall([
-    toolBlock({ status: 'hit', notes: [note('alpha')] }),
-    toolBlock({ status: 'hit', notes: [note('alpha'), note('beta')] }),
-  ])
-  assert.deepEqual(recall.notes.map(n => n.id), ['alpha', 'beta'])
-})
-
-test('one empty probe does not erase what another lookup remembered', () => {
-  const recall = messageRecall([
-    toolBlock({ status: 'empty' }),
-    toolBlock({ status: 'hit', notes: [note('alpha')] }),
-  ])
-  assert.deepEqual(recall.notes.map(n => n.id), ['alpha'])
-  assert.equal(recall.empty, false, 'the turn did remember something')
-})
-
-test('compacted activity carries citations so they survive a reload', () => {
-  // _compact_activity_run rolls recall onto the activity summary for exactly
-  // this reason: the individual tool blocks are folded away on read.
-  const recall = messageRecall([
-    { type: 'activity', recall: { status: 'hit', notes: [note('alpha')] } },
-  ])
-  assert.deepEqual(recall.notes.map(n => n.id), ['alpha'])
-})
-
-test('a failed lookup creates no citation section or empty-memory claim', () => {
-  assert.equal(messageRecall([toolBlock({ status: 'failed' })]), null)
-})
-
-test('citations are bounded so one turn cannot flood the transcript', () => {
-  const many = Array.from({ length: 40 }, (_, i) => note(`note-${i}`))
-  const recall = messageRecall([toolBlock({ status: 'hit', notes: many })])
-  assert.equal(recall.notes.length, MAX_RECALLED_NOTES)
 })
 
 test('only a well-formed note id may build a deep link', () => {
@@ -110,18 +48,54 @@ test('a note links into the Memory app through the shell intent contract', () =>
 
 test('a note without a title still reads as words, never blank', () => {
   assert.equal(noteLabel({ id: 'x', title: 'Real Title' }), 'Real Title')
-  // A large tool output is carved head+tail, which can drop the titled section
-  // lines; the id is the fallback and must not surface raw dashes.
-  assert.equal(noteLabel({ id: 'theme-variables-are-shared' }), 'theme variables are shared')
+  assert.equal(noteLabel({ id: 'theme-variables-are-shared' }),
+    'theme variables are shared')
   assert.equal(noteLabel({ id: '../evil' }), '')
 })
 
-test('a malformed note is skipped without dropping its siblings', () => {
-  const recall = messageRecall([
-    toolBlock({
-      status: 'hit',
-      notes: [{ id: '../evil', path: 'notes/evil.md' }, note('alpha'), null],
-    }),
-  ])
-  assert.deepEqual(recall.notes.map(n => n.id), ['alpha'])
+test('the card model keeps the question and result summaries together', () => {
+  const model = memoryRecallCardModel({
+    status: 'hit',
+    query: '  What did we decide\nabout navigation?  ',
+    app_slug: 'memory',
+    notes: [
+      note('alpha', { title: 'Use one navigation seam',
+        excerpt: 'All internal links should use the shell intent contract.' }),
+      note('beta', { title: 'Keep destinations durable' }),
+    ],
+  })
+
+  assert.equal(model.query, 'What did we decide about navigation?')
+  assert.equal(model.noteCount, 2)
+  assert.equal(model.notes[0].label, 'Use one navigation seam')
+  assert.equal(
+    model.notes[0].summary,
+    'All internal links should use the shell intent contract.',
+  )
+  assert.equal(model.notes[0].href,
+    '/shell/?app=memory&intent=note%3Aalpha')
+})
+
+test('the visible result list is bounded without losing the total', () => {
+  const notes = Array.from({ length: 12 }, (_, index) => note(`note-${index}`))
+  const model = memoryRecallCardModel({ status: 'hit', notes })
+  assert.equal(model.notes.length, MAX_VISIBLE_MEMORY_NOTES)
+  assert.equal(model.noteCount, 12)
+  assert.equal(model.hiddenCount, 12 - MAX_VISIBLE_MEMORY_NOTES)
+})
+
+test('malformed notes are skipped without dropping valid siblings', () => {
+  const model = memoryRecallCardModel({
+    status: 'hit',
+    notes: [{ id: '../evil', path: 'notes/evil.md' }, note('alpha'), null],
+  })
+  assert.deepEqual(model.notes.map(item => item.label), ['alpha'])
+})
+
+test('searching, empty, and failed recalls remain honest card states', () => {
+  for (const status of ['searching', 'empty', 'failed']) {
+    assert.equal(memoryRecallCardModel({ status, query: 'q' }).status, status)
+  }
+  assert.equal(memoryRecallCardModel({ status: 'unknown' }), null)
+  assert.equal(memoryRecallCardModel(null), null)
 })

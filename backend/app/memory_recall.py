@@ -33,10 +33,15 @@ import shlex
 # its final receipt carries only bounded path/title metadata. These ceilings
 # keep a malformed or hostile stdout from inflating every transcript read.
 MAX_RECALL_NOTES = 12
+MAX_RECALL_QUERY_CHARS = 600
 MAX_RECALL_TITLE_CHARS = 120
 MAX_RECALL_EXCERPT_CHARS = 300
 MAX_RECALL_PATH_CHARS = 256
-_MAX_OUTPUT_SCAN_CHARS = 262_144
+# Public because the transcript read boundary uses the same bound when it
+# recovers a legacy lookup from a large-output sidecar. Keeping one ceiling
+# means the database never materializes an old Memory search's complete note
+# bodies merely to read the small structured receipt printed at the end.
+MAX_RECALL_RESULT_SCAN_CHARS = 262_144
 _MAX_SECTION_LINES_SCANNED = 256
 
 RECALL_SEARCHING = "searching"
@@ -52,6 +57,7 @@ RECALL_FAILED = "failed"
 _MAX_COMMAND_SCAN_CHARS = 8192
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _INTERPRETER_RE = re.compile(r"^(?:.*/)?python[0-9.]*$")
+_LOGIN_SHELL_RE = re.compile(r"^(?:.*/)?bash$")
 _SCRIPT_RE = re.compile(
   r"^/data/apps/(?P<app_slug>memory(?:-[0-9]+)?)/memory_search\.py$"
 )
@@ -137,8 +143,25 @@ def _simple_command_tokens(command: str) -> list[str] | None:
   return tokens
 
 
-def _tokens_search_slug(tokens: list[str]) -> str | None:
-  """Return the invoked Memory app slug for the exact documented command.
+def _unwrap_login_shell(tokens: list[str]) -> list[str] | None:
+  """Unwrap the exact ``/bin/bash -lc <command>`` used by Codex exec.
+
+  Codex's command item records the host wrapper rather than only the inner
+  command. Treating that wrapper as arbitrary shell composition made every
+  real Codex Memory read invisible even though plain synthetic commands passed
+  the recognizer tests. The wrapper is accepted only at exact arity; the inner
+  text then goes through the same conservative token/control checks as a plain
+  invocation.
+  """
+  if len(tokens) != 3 or not _LOGIN_SHELL_RE.fullmatch(tokens[0]):
+    return tokens
+  if tokens[1] != "-lc":
+    return None
+  return _simple_command_tokens(tokens[2])
+
+
+def _memory_search_invocation(tokens: list[str]) -> tuple[str, str] | None:
+  """Return the app slug and question for the documented Memory command.
 
   Exact arity is a security boundary, not mere tidiness: ``shlex`` treats a
   newline as whitespace, so accepting arbitrary trailing tokens would also
@@ -154,7 +177,10 @@ def _tokens_search_slug(tokens: list[str]) -> str | None:
   head = tokens[index]
   direct = _SCRIPT_RE.fullmatch(head)
   if direct:
-    return direct.group("app_slug") if len(tokens) == index + 3 else None
+    return (
+      (direct.group("app_slug"), tokens[index + 1])
+      if len(tokens) == index + 3 else None
+    )
   if not _INTERPRETER_RE.match(head):
     return None
   for script_index, token in enumerate(tokens[index + 1:], start=index + 1):
@@ -162,7 +188,7 @@ def _tokens_search_slug(tokens: list[str]) -> str | None:
       continue
     script = _SCRIPT_RE.fullmatch(token)
     if script and len(tokens) == script_index + 3:
-      return script.group("app_slug")
+      return script.group("app_slug"), tokens[script_index + 1]
     return None
   return None
 
@@ -184,11 +210,17 @@ def recall_from_command(command: object) -> dict | None:
   if "memory_search.py" not in command:
     return None
   tokens = _simple_command_tokens(command)
-  app_slug = _tokens_search_slug(tokens) if tokens else None
-  return (
-    {"status": RECALL_SEARCHING, "app_slug": app_slug}
-    if app_slug else None
-  )
+  tokens = _unwrap_login_shell(tokens) if tokens else None
+  invocation = _memory_search_invocation(tokens) if tokens else None
+  if not invocation:
+    return None
+  app_slug, raw_query = invocation
+  query = _clean(raw_query, MAX_RECALL_QUERY_CHARS)
+  return {
+    "status": RECALL_SEARCHING,
+    "app_slug": app_slug,
+    **({"query": query} if query else {}),
+  }
 
 
 def recall_from_result(text: object, exit_code: object = None) -> dict:
@@ -200,7 +232,7 @@ def recall_from_result(text: object, exit_code: object = None) -> dict:
   if not isinstance(text, str) or not text.strip():
     return {"status": RECALL_FAILED}
 
-  body = text[-_MAX_OUTPUT_SCAN_CHARS:]
+  body = text[-MAX_RECALL_RESULT_SCAN_CHARS:]
   matches = list(_RESULT_RE.finditer(body))
   if not matches:
     return {"status": RECALL_FAILED}
@@ -246,25 +278,62 @@ def recall_from_result(text: object, exit_code: object = None) -> dict:
   )
 
 
-def merge_recall_notes(
-  target: list[dict[str, str]],
-  seen: set[str],
-  recall: object,
-) -> None:
-  """Accumulate one block's notes into a deduped, bounded citation list.
+def settle_recall(
+  pending: object,
+  text: object,
+  exit_code: object = None,
+) -> dict:
+  """Settle one command-identified lookup and retain its product context."""
+  settled = recall_from_result(text, exit_code)
+  if not isinstance(pending, dict):
+    return settled
+  app_slug = pending.get("app_slug")
+  query = pending.get("query")
+  if isinstance(app_slug, str):
+    settled["app_slug"] = app_slug
+  if isinstance(query, str) and query:
+    settled["query"] = query
+  if settled.get("status") == RECALL_HIT and isinstance(app_slug, str):
+    settled["notes"] = [
+      {**note, "app_slug": app_slug} for note in settled.get("notes", [])
+    ]
+  return settled
 
-  Shared by the transcript compaction rollup so the projection and the live
-  block agree on ordering (first occurrence owns the position) and on the cap.
+
+def recall_from_tool_block(block: object) -> dict | None:
+  """Return explicit or recoverable recall metadata for a stored tool block.
+
+  Early Codex transcripts contain the exact Memory command and structured
+  receipt but no ``recall`` field because the provider recorded its standard
+  login-shell wrapper. Recovering at the read projection preserves that real
+  owner history without rewriting ``Chat.messages``.
   """
-  if not isinstance(recall, dict):
-    return
-  for note in recall.get("notes") or []:
-    if not isinstance(note, dict):
-      continue
-    path = note.get("path")
-    if not isinstance(path, str) or not path or path in seen:
-      continue
-    seen.add(path)
-    target.append(note)
-    if len(target) >= MAX_RECALL_NOTES:
-      return
+  if not isinstance(block, dict) or block.get("type") != "tool":
+    return None
+  recall = block.get("recall")
+  if isinstance(recall, dict):
+    return recall
+  pending = recall_from_command(block.get("input"))
+  if pending is None or block.get("status") == "running":
+    return None
+
+  output = block.get("output")
+  exit_code = block.get("output_exit_code")
+  # Historical large outputs are removed from the ordinary chat payload once
+  # their durable sidecar exists. An absent inline excerpt therefore means
+  # "deferred", not "Memory failed". The sidecar-aware transcript boundary
+  # enriches these blocks before compaction; callers without that sidecar must
+  # leave the lookup unclassified rather than manufacture an error. A real
+  # non-zero process exit is still enough to report failure without stdout.
+  failed_exit = (
+    isinstance(exit_code, int)
+    and not isinstance(exit_code, bool)
+    and exit_code != 0
+  )
+  if not failed_exit and (not isinstance(output, str) or not output.strip()):
+    return None
+  return settle_recall(
+    pending,
+    output,
+    exit_code,
+  )

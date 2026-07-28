@@ -342,18 +342,17 @@ function MsgContentInner({
                   chatId={chatId}
                   live={live}
                   surfaceKey={messageKey}
+                  onInternalNav={onInternalNav}
                 />
               </div>
             )
           }
           return renderBlock(node.single.item, node.single.idx)
         })}
-        {/* What informed the turn — notes recalled from Memory, then web
-            sources — collected from its tool blocks and shown once after the
-            answer. Renders nothing when the turn neither searched the web nor
-            consulted Memory, so an ordinary reply is unchanged. */}
+        {/* Web sources collected from the turn's tool blocks and shown once
+            after the answer. Memory keeps its own richer lookup card inline. */}
         {msg.role === 'assistant' && !isStreaming && (
-          <MessageSources blocks={msg.blocks} onInternalNav={onInternalNav} />
+          <MessageSources blocks={msg.blocks} />
         )}
       </>
     )

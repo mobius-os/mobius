@@ -234,6 +234,78 @@ def test_settled_chat_detail_uses_lazy_sidecar_for_large_output(
     assert preview.text == "complete output"
 
 
+def test_chat_detail_recovers_a_legacy_memory_receipt_from_its_sidecar(
+    client, auth, db,
+):
+    chat_id = str(uuid.uuid4())
+    command = (
+        "/bin/bash -lc 'python3 /data/apps/memory/memory_search.py "
+        '"where is the navigation decision" "$CHAT_ID"\''
+    )
+    block = {
+        "type": "tool",
+        "tool": "Bash",
+        "input": command,
+        "output": "bounded excerpt without the final receipt",
+        "status": "done",
+        "tool_use_id": "tu_legacy_memory",
+        "output_truncated": True,
+        "output_full_len": 50000,
+        "output_exit_code": 0,
+    }
+    db.add(models.Chat(
+        id=chat_id,
+        title="t",
+        messages=[{"role": "assistant", "blocks": [block]}],
+    ))
+    db.add(models.ToolOutput(
+        chat_id=chat_id,
+        tool_use_id="tu_legacy_memory",
+        output=(
+            "Selected note contents\n"
+            'MOBIUS_MEMORY_RESULT_V1:{"status":"hit","notes":['
+            '{"id":"navigation-decision","path":"notes/navigation-decision.md",'
+            '"title":"Navigation decision"}]}\n'
+        ),
+    ))
+    db.commit()
+
+    statements = []
+    engine = db.get_bind()
+
+    def capture_sql(_, __, statement, *args):
+        statements.append(statement.lower())
+
+    sqlalchemy_event.listen(engine, "before_cursor_execute", capture_sql)
+    try:
+        detail = client.get(
+            f"/api/chats/{chat_id}?compact=1",
+            headers=auth,
+        )
+    finally:
+        sqlalchemy_event.remove(engine, "before_cursor_execute", capture_sql)
+
+    assert detail.status_code == 200
+    projected = detail.json()["messages"][0]["blocks"][0]
+    assert "output" not in projected
+    assert projected["recall"] == {
+        "status": "hit",
+        "app_slug": "memory",
+        "query": "where is the navigation decision",
+        "notes": [{
+            "id": "navigation-decision",
+            "path": "notes/navigation-decision.md",
+            "title": "Navigation decision",
+            "app_slug": "memory",
+        }],
+    }
+    memory_tail_sql = [
+        statement for statement in statements
+        if "from tool_outputs" in statement and "substr(" in statement
+    ]
+    assert memory_tail_sql, "legacy recovery reads a bounded result tail in SQL"
+
+
 def test_running_chat_detail_strips_history_but_keeps_live_excerpt(
     client, auth, db, monkeypatch,
 ):

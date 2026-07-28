@@ -12,6 +12,7 @@ import {
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import { useDisclosureState } from './disclosureState.js'
+import MemoryRecallCard from './MemoryRecallCard.jsx'
 
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
 // output reads as a terminal (stdout / stderr / exit code) and a structured
@@ -73,7 +74,7 @@ function ToolResult({ r }) {
   )
 }
 
-export default function ToolBlock({ t, chatId, compact = false, disclosureKey }) {
+function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   // Collapsed until tapped — nothing produces a pre-opened tool block anymore
   // (the last producer, the legacy compaction path, renders as CompactionCard;
   // a legacy persisted `defaultOpen` field is ignored and renders collapsed
@@ -102,10 +103,9 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
   const isShell = effectiveName === 'Bash' || effectiveName === 'shell'
   const label = toolCallLabel(t)
   const iconKind = toolActivityIcon(effectiveName)
-  // `t.sources` is NOT rendered here: the turn's sources surface once at the
-  // end of the message (MessageSources), where they belong to the answer
-  // rather than to the one search that found them. They deliberately do not
-  // make a tool row expandable on their own.
+  // Web sources surface once at the end of the answer (MessageSources), rather
+  // than inside the individual search step that happened to find them. They
+  // deliberately do not make a generic tool row expandable on their own.
   const hasDetail = !!(t.input || t.output || t.output_truncated)
 
   useEffect(() => {
@@ -444,5 +444,32 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
         </div>
       )}
     </div>
+  )
+}
+
+export default function ToolBlock({
+  t,
+  chatId,
+  compact = false,
+  disclosureKey,
+  onInternalNav,
+}) {
+  if (effectiveToolName(t) === 'MemoryRecall') {
+    return (
+      <MemoryRecallCard
+        t={t}
+        chatId={chatId}
+        disclosureKey={disclosureKey}
+        onInternalNav={onInternalNav}
+      />
+    )
+  }
+  return (
+    <GenericToolBlock
+      t={t}
+      chatId={chatId}
+      compact={compact}
+      disclosureKey={disclosureKey}
+    />
   )
 }

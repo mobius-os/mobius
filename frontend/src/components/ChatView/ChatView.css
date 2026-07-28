@@ -702,6 +702,139 @@
   overflow: hidden;
 }
 
+/* A Memory lookup keeps the same quiet collapsed row as every other search
+   tool. Only its disclosure switches to the regular UI font and presents the
+   bounded question/result receipt instead of raw command output. */
+.chat__memory-tool--failed .chat__tool-name {
+  color: color-mix(in srgb, var(--danger) 74%, var(--text));
+}
+
+.chat__tool-detail.chat__memory-detail {
+  box-sizing: border-box;
+  gap: 10px;
+  max-height: min(320px, 50vh);
+  color: var(--text);
+  font: 400 12.5px/1.45 var(--font, system-ui, sans-serif);
+}
+
+.chat__memory-section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat__memory-kicker {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.chat__memory-query,
+.chat__memory-state {
+  margin: 0;
+}
+
+.chat__memory-query {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.chat__memory-results {
+  gap: 5px;
+}
+
+.chat__memory-list {
+  margin: 0;
+  padding: 0;
+  border-block: 1px solid var(--border-light);
+  list-style: none;
+}
+
+.chat__memory-list li + li {
+  border-block-start: 1px solid var(--border-light);
+}
+
+.chat__memory-note {
+  display: flex;
+  box-sizing: border-box;
+  align-items: center;
+  min-width: 0;
+  min-height: 40px;
+  gap: 8px;
+  padding: 6px 2px;
+  border-radius: 6px;
+  color: var(--text);
+  text-decoration: none;
+  transition: background-color 120ms ease;
+}
+
+.chat__memory-note > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.chat__memory-note-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.chat__memory-note-copy strong {
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 610;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__memory-note-copy span {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.chat__memory-note:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .chat__memory-note:not(.chat__memory-note--static):hover {
+    background: color-mix(in srgb, var(--accent-dim) 30%, transparent);
+  }
+}
+
+.chat__memory-note:not(.chat__memory-note--static):active {
+  background: color-mix(in srgb, var(--accent-dim) 46%, transparent);
+}
+
+.chat__memory-state {
+  color: var(--muted);
+}
+
+.chat__memory-state--failed {
+  color: color-mix(in srgb, var(--danger) 74%, var(--text));
+}
+
+.chat__memory-more {
+  padding-inline-start: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+@media (pointer: coarse) {
+  .chat__memory-note { min-height: 44px; }
+}
+
 .chat__tool--running {
   background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
   border: 1px solid var(--accent, var(--border-light)); /* CONTRACT: vivid accent line; falls back to hairline if accent unset */
@@ -936,51 +1069,6 @@
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
-}
-
-/* A recalled note reads as the same KIND of citation as a web source, so it
-   shares the chip entirely and diverges only in its mark: a glyph rather than
-   a domain letter, tinted to separate "remembered" from "read on the web"
-   without becoming a second visual language. */
-.chat__source-glyph {
-  width: 13px;
-  height: 13px;
-}
-
-/* A note title is prose, not a domain, so it needs more room than a host chip
-   and is the part that should absorb any shortfall. */
-.chat__source-chip--memory {
-  max-width: 320px;
-}
-
-.chat__source-chip--memory .chat__source-icon {
-  color: color-mix(in srgb, var(--accent) 62%, var(--text));
-  background: color-mix(in srgb, var(--accent-dim) 52%, var(--surface2));
-}
-
-/* "Memory" is a fixed six-character label; letting it share the shrink budget
-   with the title collapses it to "Me…" and says nothing. */
-.chat__source-chip--memory .chat__source-host {
-  flex: 0 0 auto;
-}
-
-/* An empty lookup is a fact about the answer, not a destination — so it is
-   stated plainly and styled back, with no hover or pointer affordance. */
-.chat__source-chip--quiet {
-  max-width: none;
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  background: color-mix(in srgb, var(--surface2) 34%, var(--surface));
-  border-style: dashed;
-}
-
-.chat__source-chip--quiet .chat__source-icon {
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  background: color-mix(in srgb, var(--surface2) 60%, var(--surface));
-  border-color: transparent;
-}
-
-.chat__source-chip--quiet .chat__source-title {
-  font-style: italic;
 }
 
 .chat__source-copy {

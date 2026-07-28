@@ -83,7 +83,7 @@ from app.events import (
   tool_output_exit_code,
   undo_question_scrub,
 )
-from app.memory_recall import recall_from_command, recall_from_result
+from app.memory_recall import recall_from_command, settle_recall
 from app.providers import (
   authenticated_provider_ids,
   effective_agent_settings,
@@ -507,18 +507,9 @@ class _ChatEventSink:
       return
     pending = self._memory_recall_for_tool(event.get("tool_use_id"))
     if event.get("output_complete") and pending is not None:
-      settled = recall_from_result(
-        event.get("content"), event.get("output_exit_code"),
+      event["recall"] = settle_recall(
+        pending, event.get("content"), event.get("output_exit_code"),
       )
-      # The command path is the authoritative installed-app identity. Stamp it
-      # onto each successful note so deep links keep working when the official
-      # system app had to install as memory-2 (or another numeric suffix).
-      app_slug = pending.get("app_slug")
-      if settled.get("status") == "hit" and isinstance(app_slug, str):
-        settled["notes"] = [
-          {**note, "app_slug": app_slug} for note in settled.get("notes", [])
-        ]
-      event["recall"] = settled
 
   def _reduce_tool_output(self, event: ChatEvent) -> bool:
     """Move a large tool_output's full text OFF the wire (contract rule 6).

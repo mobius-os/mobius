@@ -5,11 +5,9 @@ from __future__ import annotations
 import re
 
 from app.memory_recall import (
-  RECALL_EMPTY,
-  RECALL_FAILED,
-  RECALL_HIT,
-  RECALL_SEARCHING,
-  merge_recall_notes,
+  recall_from_command,
+  recall_from_tool_block,
+  settle_recall,
 )
 
 
@@ -122,14 +120,104 @@ def historical_tool_output_ids(
   return ids
 
 
+def legacy_memory_recall_output_ids(
+  messages: list[dict],
+  *,
+  live_message: dict | None = None,
+) -> set[str]:
+  """Return old Memory tools whose result receipt lives in a sidecar.
+
+  Current tool events persist bounded ``recall`` metadata directly. A short
+  window of older Codex history predates that stamp and can only be recovered
+  from its exact Memory command plus the structured receipt at the end of the
+  tool output. Restrict sidecar reads to those recognizable, settled, truncated
+  blocks so ordinary large command outputs stay lazy.
+  """
+  ids: set[str] = set()
+  for message in messages:
+    if message is live_message:
+      continue
+    blocks = message.get("blocks")
+    if not isinstance(blocks, list):
+      continue
+    for block in blocks:
+      if not (
+        isinstance(block, dict)
+        and block.get("type") == "tool"
+        and not isinstance(block.get("recall"), dict)
+        and block.get("status") != "running"
+        and block.get("output_truncated") is True
+        and isinstance(block.get("tool_use_id"), str)
+        and block["tool_use_id"]
+        and recall_from_command(block.get("input")) is not None
+      ):
+        continue
+      ids.add(block["tool_use_id"])
+  return ids
+
+
+def project_legacy_memory_recalls(
+  messages: list[dict],
+  *,
+  output_tails: dict[str, str],
+  live_message: dict | None = None,
+) -> list[dict]:
+  """Enrich old Memory blocks from bounded sidecar tails, without mutation."""
+  if not output_tails:
+    return messages
+
+  projected: list[dict] | None = None
+  for message_index, message in enumerate(messages):
+    if message is live_message:
+      continue
+    blocks = message.get("blocks")
+    if not isinstance(blocks, list):
+      continue
+
+    next_blocks: list[dict] | None = None
+    for block_index, block in enumerate(blocks):
+      if not (
+        isinstance(block, dict)
+        and block.get("type") == "tool"
+        and not isinstance(block.get("recall"), dict)
+        and block.get("status") != "running"
+        and isinstance(block.get("tool_use_id"), str)
+        and block["tool_use_id"] in output_tails
+      ):
+        continue
+      pending = recall_from_command(block.get("input"))
+      if pending is None:
+        continue
+      if next_blocks is None:
+        next_blocks = list(blocks)
+      next_block = dict(block)
+      next_block["recall"] = settle_recall(
+        pending,
+        output_tails[block["tool_use_id"]],
+        block.get("output_exit_code"),
+      )
+      next_blocks[block_index] = next_block
+
+    if next_blocks is None:
+      continue
+    if projected is None:
+      projected = list(messages)
+    next_message = dict(message)
+    next_message["blocks"] = next_blocks
+    projected[message_index] = next_message
+
+  return projected if projected is not None else messages
+
+
 def _distinctive_activity(block: dict) -> bool:
   """Keep notable one-line activity beats out of a folded metadata run."""
   if block.get("type") != "tool":
     return False
   # Consulting Memory is a beat worth seeing on its own, not shell housekeeping
-  # folded into "ran commands". The marker was stamped from the command itself,
-  # so this needs no knowledge of how that command is spelled.
-  if isinstance(block.get("recall"), dict):
+  # folded into "ran commands". New blocks carry a marker from the event
+  # funnel; older Codex blocks recover the same bounded marker from their exact
+  # command + structured receipt.
+  if recall_from_tool_block(block) is not None:
     return True
   if block.get("tool") != "Read":
     return False
@@ -179,8 +267,9 @@ def _compact_activity_item(block: dict) -> dict:
   # A Memory recall is already a bounded citation set, and it is what the
   # collapsed line says ("Recalled 4 notes from Memory"). Dropping it here
   # would make the beat visible live and gone on the next chat load.
-  if isinstance(block.get("recall"), dict):
-    tool["recall"] = block["recall"]
+  recall = recall_from_tool_block(block)
+  if recall is not None:
+    tool["recall"] = recall
   return tool
 
 
@@ -262,31 +351,6 @@ def _compact_activity_run(
     if len(sources) >= _MAX_COMPACT_SOURCES:
       break
 
-  # Memory citations roll up for the same reason web sources do: the message
-  # renders them once per turn, so they must outlive the individual tool blocks
-  # this projection folds away. `_compact_activity_entries` keeps only two
-  # entries per tool name, so without this a third lookup's notes would vanish.
-  recall_notes: list[dict] = []
-  seen_recall_paths: set[str] = set()
-  recall_status = ""
-  recall_rank = {
-    RECALL_SEARCHING: 0,
-    RECALL_FAILED: 1,
-    RECALL_EMPTY: 2,
-    RECALL_HIT: 3,
-  }
-  for _, block in blocks:
-    recall = block.get("recall")
-    if not isinstance(recall, dict):
-      continue
-    # A real hit outranks an empty search, which outranks a failed probe. This
-    # preserves useful evidence without letting one failure erase a successful
-    # result elsewhere in the same folded run.
-    status = recall.get("status")
-    if recall_rank.get(status, -1) > recall_rank.get(recall_status, -1):
-      recall_status = status
-    merge_recall_notes(recall_notes, seen_recall_paths, recall)
-
   start = blocks[0][0]
   end = blocks[-1][0] + 1
   return {
@@ -300,10 +364,6 @@ def _compact_activity_run(
       block.get("type") == "tool" for _, block in blocks
     ),
     **({"sources": sources} if sources else {}),
-    **(
-      {"recall": {"status": recall_status, "notes": recall_notes}}
-      if recall_status else {}
-    ),
   }
 
 
@@ -331,7 +391,7 @@ def compact_messages_for_detail(
     if message is live_message or message.get("role") != "assistant":
       continue
     blocks = message.get("blocks")
-    if not isinstance(blocks, list) or len(blocks) < 2:
+    if not isinstance(blocks, list):
       continue
 
     has_question = any(
@@ -372,11 +432,23 @@ def compact_messages_for_detail(
         flush()
         changed = True
         continue
-      if activity and not _distinctive_activity(block):
+      recovered_recall = (
+        recall_from_tool_block(block)
+        if activity and block.get("type") == "tool"
+        else None
+      )
+      distinctive = activity and (
+        bool(recovered_recall) or _distinctive_activity(block)
+      )
+      if activity and not distinctive:
         run.append((raw_index, block))
         continue
       flush()
-      next_blocks.append(block)
+      if recovered_recall is not None and not isinstance(block.get("recall"), dict):
+        next_blocks.append({**block, "recall": recovered_recall})
+        changed = True
+      else:
+        next_blocks.append(block)
     flush()
 
     if not changed:

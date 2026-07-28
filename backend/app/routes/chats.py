@@ -68,6 +68,62 @@ TOOL_OUTPUT_PREVIEW_CHARS = 20_000
 THINKING_TRACE_PREVIEW_CHARS = 20_000
 
 
+def _project_legacy_memory_recall_sidecars(
+  messages: list[dict],
+  *,
+  chat_id: str,
+  db: Session,
+  live_message: dict | None = None,
+) -> list[dict]:
+  """Recover old Memory receipts before large-output excerpts are removed.
+
+  Only legacy Memory tool ids are queried, and SQL returns at most the bounded
+  tail that can contain the structured receipt. This preserves lazy loading for
+  every ordinary tool and avoids repeatedly hydrating complete recalled notes
+  on chat reads.
+  """
+  from app.chat_transcript import (
+    legacy_memory_recall_output_ids,
+    project_legacy_memory_recalls,
+  )
+  from app.memory_recall import MAX_RECALL_RESULT_SCAN_CHARS
+
+  tool_ids = legacy_memory_recall_output_ids(
+    messages,
+    live_message=live_message,
+  )
+  if not tool_ids:
+    return messages
+
+  # ``substr(text, start, length)`` and this CASE expression work on both
+  # SQLite and PostgreSQL. Avoid SQLite's convenient negative-start extension
+  # so the read contract stays portable.
+  output_length = func.length(models.ToolOutput.output)
+  tail_start = case(
+    (
+      output_length > MAX_RECALL_RESULT_SCAN_CHARS,
+      output_length - MAX_RECALL_RESULT_SCAN_CHARS + 1,
+    ),
+    else_=1,
+  )
+  rows = db.query(
+    models.ToolOutput.tool_use_id,
+    func.substr(
+      models.ToolOutput.output,
+      tail_start,
+      MAX_RECALL_RESULT_SCAN_CHARS,
+    ),
+  ).filter(
+    models.ToolOutput.chat_id == chat_id,
+    models.ToolOutput.tool_use_id.in_(tool_ids),
+  ).all()
+  return project_legacy_memory_recalls(
+    messages,
+    output_tails={tool_use_id: tail for tool_use_id, tail in rows},
+    live_message=live_message,
+  )
+
+
 def _drain_writer_before_sidecar_read(
   db: Session,
   chat_id: str,
@@ -328,6 +384,12 @@ def _chat_detail_response(
   else:
     start = max(0, total - limit)
     page = all_msgs[start:]
+  page = _project_legacy_memory_recall_sidecars(
+    page,
+    chat_id=chat.id,
+    db=db,
+    live_message=live_message,
+  )
   candidate_tool_ids = historical_tool_output_ids(
     page,
     live_message=live_message,
@@ -1235,6 +1297,11 @@ def get_chat_activity_detail(
     "role": "assistant",
     "blocks": [block for _, block in selected],
   }
+  detail_message = _project_legacy_memory_recall_sidecars(
+    [detail_message],
+    chat_id=chat.id,
+    db=db,
+  )[0]
   candidate_tool_ids = historical_tool_output_ids([detail_message])
   fetchable_tool_ids = (
     {

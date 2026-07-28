@@ -213,8 +213,8 @@ export function effectiveToolName(tool) {
 const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall'])
 
 // The one-line story of a memory lookup, including honest operational failure.
-// Reading the count from the citation set the backend already parsed keeps the
-// label and the pills under the answer from ever disagreeing.
+// Reading the count from the result set the backend already parsed keeps the
+// activity label and the Memory card from ever disagreeing.
 export function memoryRecallLabel(tool) {
   const recall = tool?.recall
   if (recall?.status === 'searching' || tool?.status === 'running') {

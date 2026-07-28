@@ -142,7 +142,7 @@ function TimelineThought({ label, thought, chatId, disclosureKey, direct = false
   )
 }
 
-function SingleActivity({ entry, chatId, live, surfaceKey }) {
+function SingleActivity({ entry, chatId, live, surfaceKey, onInternalNav }) {
   const { item, idx } = entry
   const blockKey = assistantBlockKey(item, idx)
   if (item.type === 'thinking') {
@@ -165,6 +165,7 @@ function SingleActivity({ entry, chatId, live, surfaceKey }) {
       chatId={chatId}
       compact
       disclosureKey={`${surfaceKey}:tool:${blockKey}`}
+      onInternalNav={onInternalNav}
     />
   )
 }
@@ -184,6 +185,7 @@ function GroupedActivityStretch({
   surfaceKey,
   detailRef = null,
   summaryToolCount = null,
+  onInternalNav,
 }) {
   const stretchKey = assistantBlockKey(entries[0]?.item, entries[0]?.idx)
   const [userOpen, setUserOpen] = useDisclosureState(
@@ -414,6 +416,7 @@ function GroupedActivityStretch({
               t={item}
               chatId={chatId}
               disclosureKey={`${surfaceKey}:tool:${assistantBlockKey(item, idx)}`}
+              onInternalNav={onInternalNav}
             />
           )
         })}
@@ -429,6 +432,7 @@ export default function ActivityStretch({
   surfaceKey,
   detailRef = null,
   summaryToolCount = null,
+  onInternalNav,
 }) {
   const loneItem = entries[0]?.item
   const loneHasHelpers = loneItem?.type === 'tool'
@@ -444,6 +448,7 @@ export default function ActivityStretch({
         chatId={chatId}
         live={live}
         surfaceKey={surfaceKey}
+        onInternalNav={onInternalNav}
       />
     )
   }
@@ -455,6 +460,7 @@ export default function ActivityStretch({
       surfaceKey={surfaceKey}
       detailRef={detailRef}
       summaryToolCount={summaryToolCount}
+      onInternalNav={onInternalNav}
     />
   )
 }
