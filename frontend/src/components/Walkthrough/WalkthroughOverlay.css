@@ -39,12 +39,12 @@
 
 .wt__close {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: 10px;
+  right: 10px;
   display: grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
+  width: 36px;
+  height: 36px;
   padding: 0;
   color: var(--muted, #a1a1aa);
   background: transparent;
@@ -159,7 +159,7 @@
 }
 
 .wt__install-btn {
-  min-height: 44px;
+  min-height: 34px;
   padding: 6px 10px;
   color: var(--accent, #a78bfa);
   background: color-mix(in srgb, var(--accent, #8b6cf7) 11%, transparent);

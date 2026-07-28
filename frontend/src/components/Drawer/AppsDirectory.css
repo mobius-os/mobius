@@ -265,7 +265,6 @@
 }
 
 .apps-directory__empty button {
-  min-height: 44px;
   margin-top: 14px;
   padding: 8px 13px;
   color: var(--text);

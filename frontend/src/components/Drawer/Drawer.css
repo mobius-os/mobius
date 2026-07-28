@@ -637,7 +637,6 @@
 }
 
 .drawer__list-status button {
-  min-height: 44px;
   padding: 7px 10px;
   color: var(--text);
   background: transparent;
