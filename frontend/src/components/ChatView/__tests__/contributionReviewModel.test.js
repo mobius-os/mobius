@@ -227,13 +227,20 @@ test('the grouped panel survives pending-to-contributed transitions', () => {
   assert.match(cardSrc, /rows\.filter\(row => row\.id !== sent\.id\)/)
 })
 
-test('one card press can own only one public submission at a time', () => {
-  assert.match(cardSrc, /const activeSendRef = useRef\(null\)/)
-  assert.match(cardSrc, /if \(activeSendRef\.current !== null\) return/)
-  assert.match(cardSrc, /activeSendRef\.current = record\.id/)
-  assert.match(cardSrc, /locked=\{busyId !== null\}/)
-  assert.match(cardSrc, /disabled=\{locked \|\| submitting \|\| !!blocker\}/)
+test('independent cards can submit in parallel without duplicating one record', () => {
+  assert.match(cardSrc, /function ReviewRow\(/)
+  assert.match(cardSrc, /const activeSendRef = useRef\(false\)/)
+  assert.match(cardSrc, /if \(activeSendRef\.current\) return/)
+  assert.match(cardSrc, /activeSendRef\.current = true/)
+  assert.match(cardSrc, /const \[busy, setBusy\] = useState\(false\)/)
+  assert.match(cardSrc, /disabled=\{busy \|\| submitting \|\| !!blocker\}/)
+  assert.doesNotMatch(cardSrc, /busyIds|errorsById/)
   assert.match(cardSrc, /item => item\.kind !== 'record' \|\| !sentIds\.has\(item\.record\.id\)/)
+})
+
+test('a grouped panel does not repeat the same audience payoff on every card', () => {
+  assert.match(cardSrc, /showPayoff=\{!grouped\}/)
+  assert.match(cardSrc, /showPayoff && !blocker && !error && !submitting/)
 })
 
 // The action names the value of contributing, not the mechanism of sending, and
@@ -429,7 +436,7 @@ test('the post-send acknowledgement is dismissible and self-clearing', () => {
   assert.match(sentRow, /className="contrib-card__dismiss"/)
   // And it does not outlive its usefulness.
   assert.match(sentRow, /setTimeout\(\(\) => dismissRef\.current\?\.\(\), SENT_VISIBLE_MS\)/)
-  assert.match(cardSrc, /const SENT_VISIBLE_MS = \d+/)
+  assert.match(cardSrc, /const SENT_VISIBLE_MS = 4000/)
 })
 
 // One gesture implementation for every card shape here. Two copies is how the
@@ -441,6 +448,6 @@ test('every card shape shares one swipe implementation', () => {
 })
 
 test('a failed send is shown only on the record that failed', () => {
-  assert.match(cardSrc, /setError\(\{\s*id: record\.id,/)
-  assert.match(cardSrc, /error=\{error\?\.id === record\.id \? error\.message : null\}/)
+  assert.match(cardSrc, /const \[error, setError\] = useState\(null\)/)
+  assert.match(cardSrc, /setError\(outcome\.error\)/)
 })
