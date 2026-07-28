@@ -233,10 +233,6 @@ export default function useWorkspaceDrag({
     // ── One drag session ──────────────────────────────────────────────────────
     function startSession(downEvent, srcEl, sourceKind, key, paneId) {
       const isTouch = downEvent.pointerType !== 'mouse'
-      const touchIntentKind = sourceKind === 'tab'
-        && downEvent.target?.closest?.('[data-touch-drag-handle]')
-        ? 'tab-handle'
-        : sourceKind
       const start = { x: downEvent.clientX, y: downEvent.clientY }
       const pointerId = downEvent.pointerId
       let armed = false
@@ -306,8 +302,8 @@ export default function useWorkspaceDrag({
         }
       }
 
-      // A vertical tab-body move, either-axis kind-icon move, or deliberate
-      // RIGHTWARD drawer-row pull arms immediately. A leftward drawer movement is
+      // A vertical tab move or deliberate RIGHTWARD drawer-row pull arms
+      // immediately. A leftward drawer movement is
       // reserved for swipe-to-close and retires this controller before it can set
       // dragActiveRef (which would otherwise make Drawer stand down). A stationary
       // hold is the alternate path to the tab/row menu; it deliberately does not
@@ -394,7 +390,7 @@ export default function useWorkspaceDrag({
         const dy = ev.clientY - start.y
         if (!armed) {
           if (isTouch) {
-            const intent = touchMoveIntent(dx, dy, touchIntentKind)
+            const intent = touchMoveIntent(dx, dy, sourceKind)
             if (intent === 'scroll' || intent === 'swipe-close') {
               cancelled = true
               cleanup()

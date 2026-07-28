@@ -3675,7 +3675,6 @@ export default function Shell() {
                 key={key}
                 tab={tab}
                 label={labelForTab(tab)}
-                app={tab.kind === 'app' ? appById.get(String(tab.id)) : null}
                 active={active}
                 revealKey={tabRevealRevision}
                 tabIndex={active ? 0 : -1}
@@ -4053,7 +4052,6 @@ export default function Shell() {
             dispatchWorkspace={dispatchWorkspace}
             navTo={navTo}
             labelForTab={labelForTab}
-            appById={appById}
             onTabContextMenu={openTabMenu}
             // The ONE shared user-close action (INV 13) + the per-pane beat motion
             // (each strip deals with its pane) — WorkspaceChrome owns no private

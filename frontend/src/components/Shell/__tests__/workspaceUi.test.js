@@ -638,17 +638,14 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
-test('tab gesture rules stay local while the shell root owns page zoom', () => {
+test('tabs keep one full-width pan and drag surface while the shell root owns page zoom', () => {
   assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
   assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
-  assert.match(shellCss, /\.shell__tab-kind\[data-touch-drag-handle\]\s*\{[\s\S]*?touch-action:\s*none/)
-  assert.match(paneStrip, /data-touch-drag-handle=\{dragKey\}/)
-  assert.doesNotMatch(paneStrip, /GripVertical|shell__tab-drag-handle/)
+  assert.doesNotMatch(paneStrip, /data-touch-drag-handle|shell__tab-kind|shell__tab-drag-handle/)
   assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
-    'the nested icon target must not duplicate the generic drag-source selector')
+    'the tab itself remains the only drag source')
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
-  assert.match(dragBinding, /downEvent\.target\?\.closest\?\.\('\[data-touch-drag-handle\]'\)/)
-  assert.match(dragBinding, /touchMoveIntent\(dx, dy, touchIntentKind\)/)
+  assert.match(dragBinding, /touchMoveIntent\(dx, dy, sourceKind\)/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
 })
 
@@ -665,6 +662,11 @@ test('drawer swipe-to-close claims the gesture with a non-passive touchmove list
   // The claim itself, plus the sticky per-gesture ownership flag it reads.
   assert.match(drawer, /if \(dx < 0 && isHorizontalSwipe\) panningRef\.current = true/)
   assert.match(drawer, /if \(!panningRef\.current\) return\s*\n[\s\S]{0,400}?e\.preventDefault\(\)/)
+})
+
+test('workspace tabs spend their chrome on names rather than redundant kind icons', () => {
+  assert.doesNotMatch(paneStrip, /shell__tab-kind|AppWindow|MessageSquare|Settings/)
+  assert.match(shellCss, /\.shell__tab-text\s*\{[\s\S]*?flex:\s*1[\s\S]*?max-width:\s*128px/)
 })
 
 test('an active overflowing chat title cycles once, then becomes idle', () => {

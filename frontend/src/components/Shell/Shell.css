@@ -318,7 +318,6 @@
 .shell__tab-open {
   display: flex;
   align-items: center;
-  gap: 5px;
   min-width: 0;
   padding: 5px 4px 5px 9px;
   background: none;
@@ -328,63 +327,23 @@
   font-size: 12.5px;
   -webkit-tap-highlight-color: transparent;
 }
-/* The tab body remains the strip's native horizontal pan surface. A vertical pull
-   can still lift the tab, while the EXISTING kind icon owns both axes for an
-   intentional horizontal reorder. No separate grip or extra tab width is needed. */
+/* The whole tab remains the strip's single horizontal pan surface. A deliberate
+   vertical pull still lifts it without spending title width on a second handle. */
 .shell__tab-open[data-drag-key] {
   touch-action: pan-x pinch-zoom;
-}
-.shell__tab-kind {
-  display: grid;
-  place-items: center;
-  flex: none;
-}
-.shell__tab-kind[data-touch-drag-handle] {
-  /* Expand the pointer box but cancel the padding from layout, preserving the
-     icon's original 13px footprint and every pixel of title space. */
-  margin: -5px;
-  padding: 5px;
-  cursor: grab;
-  touch-action: none;
-}
-.shell__tab-kind[data-touch-drag-handle]:active {
-  cursor: grabbing;
 }
 .shell__tab-open:focus-visible {
   outline: none;
   box-shadow: inset 0 0 0 2px var(--accent);
   border-radius: 7px;
 }
-.shell__tab-kind > svg {
-  flex: none;
-}
-.shell__tab-icon {
-  position: relative;
-  width: 13px;
-  height: 13px;
-  display: grid;
-  place-items: center;
-  flex: none;
-}
-.shell__tab-icon--app {
-  overflow: visible;
-}
-.shell__tab-icon--app > img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-.shell__tab-icon--app > svg {
-  visibility: hidden;
-}
 .shell__tab-text {
   display: block;
+  flex: 1;
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
-  max-width: 110px;
+  max-width: 128px;
 }
 .shell__tab-text-inner {
   display: inline-block;

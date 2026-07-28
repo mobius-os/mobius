@@ -103,11 +103,9 @@ export function passedSlop(dx, dy, slop = POINTER_SLOP) {
 
 // Drawer rows live in a vertical list: vertical movement stays native scrolling,
 // a LEFTWARD pull belongs to the drawer's swipe-close handler, and only a
-// deliberate RIGHTWARD pull toward the workspace becomes a row drag. Tab bodies
-// live in a horizontal strip: a horizontal move stays native scrolling, while a
-// vertical pull lifts the tab. The dedicated tab handle owns its pointer stream in
-// CSS and can therefore reorder on either axis without taking horizontal scrolling
-// away from the tab body.
+// deliberate RIGHTWARD pull toward the workspace becomes a row drag. Tabs live in
+// a horizontal strip: a horizontal move stays native scrolling, while a vertical
+// pull lifts the tab.
 export function touchMoveIntent(dx, dy, sourceKind, limit = PRE_HOLD_MOVE_PX) {
   if (hypot(dx, dy) <= limit) return 'pending'
   const x = Math.abs(dx)
@@ -118,7 +116,6 @@ export function touchMoveIntent(dx, dy, sourceKind, limit = PRE_HOLD_MOVE_PX) {
     if (y >= x) return 'scroll'
     return 'pending'
   }
-  if (sourceKind === 'tab-handle') return 'drag'
   return y > x ? 'drag' : 'scroll'
 }
 

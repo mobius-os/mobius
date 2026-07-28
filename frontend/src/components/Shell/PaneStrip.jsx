@@ -1,13 +1,7 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef } from 'react'
 import Maximize2 from 'lucide-react/dist/esm/icons/maximize-2.mjs'
 import Minimize2 from 'lucide-react/dist/esm/icons/minimize-2.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
-import {
-  AppsNavIcon,
-  ChatNavIcon,
-  SettingsNavIcon,
-} from '../navigationIcons.js'
-import { appIconUrl } from '../appIcon.js'
 import * as tabModel from './tabModel.js'
 import { STRIP_H, WORKSPACE_SPLITS_ENABLED } from './paneModel.js'
 
@@ -81,7 +75,6 @@ export function scrollStripWheel(e) {
 // (tabIndex 0); the rest and every close button are reached via stripKeyDown.
 export function PaneTab({
   tab, label, active, focused = true, revealKey = 0,
-  app = null,
   tabIndex, dragKey, role, tabId, controlsId,
   onActivate, onClose, onContextMenu,
 }) {
@@ -134,12 +127,6 @@ export function PaneTab({
     }
   }, [active, focused, revealKey])
 
-  const TabIcon = tab.kind === 'settings'
-    ? SettingsNavIcon
-    : (tab.kind === 'chat' ? ChatNavIcon : AppsNavIcon)
-  const iconUrl = tab.kind === 'app' ? appIconUrl(app, 64) : null
-  const [loadedIconUrl, setLoadedIconUrl] = useState(null)
-  const hasAppIcon = Boolean(iconUrl && loadedIconUrl === iconUrl)
   return (
     <div ref={tabRef} className={`shell__tab${active ? ' shell__tab--active' : ''}`}>
       <button
@@ -168,37 +155,6 @@ export function PaneTab({
         onMouseDown={(e) => { if (e.button === 1) e.preventDefault() }}
         onContextMenu={onContextMenu}
       >
-        {/* Reuse the tab's existing kind icon as the touch reorder region. The
-            transparent padding enlarges its hit box without adding visible chrome
-            or consuming any more tab width. The rest of the tab remains native
-            pan-x so an overflowing strip can still be scrolled. */}
-        <span
-          className="shell__tab-kind"
-          data-touch-drag-handle={dragKey}
-          aria-hidden="true"
-        >
-          <span
-            className={`shell__tab-icon${hasAppIcon ? ' shell__tab-icon--app' : ''}`}
-          >
-            <TabIcon width={13} height={13} />
-            {iconUrl && (
-              <img
-                src={iconUrl}
-                alt=""
-                loading="lazy"
-                decoding="async"
-                onLoad={event => {
-                  event.currentTarget.hidden = false
-                  setLoadedIconUrl(iconUrl)
-                }}
-                onError={event => {
-                  event.currentTarget.hidden = true
-                  setLoadedIconUrl(null)
-                }}
-              />
-            )}
-          </span>
-        </span>
         <span ref={titleRef} className="shell__tab-text">
           <span className="shell__tab-text-inner">{label}</span>
         </span>
@@ -237,7 +193,7 @@ export function PaneFocusButton({ paneId, focused, onToggle }) {
 // pre-focusing on the tab's own pointerdown would advance the workspace ref
 // before navTo snapshots the source route (see WorkspaceChrome.activateTab).
 export function PaneStrip({
-  pane, paneRect, focused, labelForTab, appById,
+  pane, paneRect, focused, labelForTab,
   onActivate, onClose, onFocus, onTabContextMenu, motion = null,
   canFocusPane = false, paneFocused = false, onTogglePaneFocus,
   revealKey = 0,
@@ -271,7 +227,6 @@ export function PaneStrip({
             key={key}
             tab={tab}
             label={labelForTab(tab)}
-            app={tab.kind === 'app' ? appById?.get(String(tab.id)) : null}
             active={active}
             focused={focused}
             revealKey={revealKey}
