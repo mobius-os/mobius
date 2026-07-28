@@ -31,7 +31,7 @@ test('Send, Steer, and Stop reuse one continuously visible primary action', () =
   )
   assert.match(
     chatView,
-    /const queueWrites = \[\.\.\.queuedSendRequestsRef\.current\.values\(\)\][\s\S]*?await Promise\.allSettled\(queueWrites\)[\s\S]*?const snapshot = pendingQueue\.pendingMessagesRef\.current/,
+    /const queueWrites = \[\.\.\.queuedSendRequestsRef\.current\.values\(\)\][\s\S]*?await Promise\.allSettled\(queueWrites\)[\s\S]*?const snapshot = pendingQueue\.getVisiblePendingMessages\(\)/,
     'an early Steer tap must await the queue write before reading steerable rows',
   )
   const steerBlock = inputBar.match(
