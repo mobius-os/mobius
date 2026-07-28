@@ -1,7 +1,6 @@
 """Authenticated chat-media serving routes."""
 
 import mimetypes
-import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,22 +13,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import resolve_media_or_header_owner
 from app.image_previews import display_image_preview
-from app.path_utils import validate_path_within_base
-
-# Chat IDs are dashed UUID4 strings produced by str(uuid.uuid4()).
-# Rejecting early prevents using a crafted chat_id as a filesystem path
-# component to escape the chats/ subtree.
-_CHAT_ID_RE = re.compile(
-  r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
-  re.IGNORECASE,
-)
-
-
-def _validate_chat_id(chat_id: str) -> None:
-  """Raises 400 if chat_id doesn't look like a UUID4."""
-  if not _CHAT_ID_RE.match(chat_id):
-    raise HTTPException(status_code=400, detail="Invalid chat id.")
-
+from app.path_utils import validate_chat_id, validate_path_within_base
 
 router = APIRouter(prefix="/api/chats", tags=["media"])
 
@@ -52,7 +36,7 @@ def _serve_chat_image(chat_id, filename, token_src, db, *, preview=False):
 
   App tokens are rejected on both paths.
   """
-  _validate_chat_id(chat_id)
+  validate_chat_id(chat_id)
   resolve_media_or_header_owner(
     token_src.token, db, chat_id=chat_id, from_query=token_src.from_query,
   )
