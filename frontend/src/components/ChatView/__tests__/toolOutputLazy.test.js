@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-test('expansion fetches a cancellable bounded preview only after completion', () => {
+test('expansion keeps ordinary output bounded and image fallback cancellable', () => {
   const src = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
   const start = src.indexOf('useEffect(() => {', src.indexOf('export default function ToolBlock'))
   const end = src.indexOf('// Show the larger bounded preview', start)
@@ -12,8 +12,10 @@ test('expansion fetches a cancellable bounded preview only after completion', ()
     'closing the disclosure clears the visible loading state')
   assert.match(effect, /if \(t\.status === 'running'\) return/,
     'an intermediate sidecar is never read before the matching tool settles')
-  assert.match(effect, /\+ '\?preview=1'/,
-    'ordinary expansion requests only the server-bounded preview')
+  assert.match(effect, /\+ \(isImageTool \? '' : '\?preview=1'\)/,
+    'ordinary expansion stays server-bounded; only a visual image fallback requests its complete envelope')
+  assert.match(effect, /if \(isImageTool && durableImage\) return/,
+    'durable images use their existing protected route without fetching duplicated base64')
   assert.doesNotMatch(effect, /previewOutput !== null \|\| loadingPreview/,
     'loading state cannot prevent the request it just started from settling')
   const dependencies = effect.match(/\}, \[([^\]]+)\]\)/)?.[1] || ''

@@ -325,6 +325,14 @@ test('effectiveToolName classifies image reads from the STRING wire input', () =
   assert.equal(effectiveToolName(T('Read', '/tmp/shot.png')), 'ViewImage')
   assert.equal(effectiveToolName(T('Read', '/tmp/SHOT.PNG')), 'ViewImage')       // case-insensitive
   assert.equal(effectiveToolName(T('Read', '/tmp/a.jpeg?token=x')), 'ViewImage') // query suffix
+  assert.equal(
+    effectiveToolName(T('functions:view_image', '{"path":"/tmp/preview.png"}')),
+    'ViewImage',
+  )
+  assert.equal(
+    toolCallLabel(T('functions:view_image', '{"path":"/tmp/preview.png"}')),
+    'Viewed /tmp/preview.png',
+  )
   assert.equal(effectiveToolName(T('Read', '/src/app.js')), 'Read')              // non-image folds
   assert.equal(effectiveToolName(T('Bash', 'ls')), 'Bash')
   // Defensive: an object shape (unit fixtures / any future source) still classifies.

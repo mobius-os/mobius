@@ -246,7 +246,7 @@ def test_validator_rejects_symlinked_manifest(tmp_path):
   assert "manifest must not be a symlink" in result.stderr
 
 
-def test_validator_warns_for_oversized_icon(tmp_path):
+def test_validator_rejects_oversized_local_icon(tmp_path):
   _write_app(tmp_path, "export default function App(){ return null }")
   icon = tmp_path / "icon.png"
   icon.write_bytes(b"x" * (12 * 1024 * 1024 + 1))
@@ -255,8 +255,20 @@ def test_validator_warns_for_oversized_icon(tmp_path):
   (tmp_path / "mobius.json").write_text(json.dumps(manifest))
 
   result = _run(tmp_path)
-  assert result.returncode == 0, result.stderr
-  assert "install uses the fallback icon" in result.stdout
+  assert result.returncode == 1
+  assert "local apply rejects the revision" in result.stderr
+
+
+def test_validator_rejects_missing_declared_local_icon(tmp_path):
+  _write_app(tmp_path, "export default function App(){ return null }")
+  manifest = json.loads((tmp_path / "mobius.json").read_text())
+  manifest["icon"] = "missing.png"
+  (tmp_path / "mobius.json").write_text(json.dumps(manifest))
+
+  result = _run(tmp_path)
+
+  assert result.returncode == 1
+  assert "local apply rejects the revision" in result.stderr
 
 
 def test_validator_does_not_require_informational_offline_precache_files(tmp_path):

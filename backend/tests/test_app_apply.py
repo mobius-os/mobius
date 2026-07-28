@@ -1,12 +1,13 @@
 """Explicit mini-app source application."""
 
+import io
 import json
 from pathlib import Path
 from unittest.mock import call, patch
 
 import pytest
 
-from app import app_apply, app_git, models
+from app import app_apply, app_git, icon_assets, models
 from app.config import get_settings
 
 
@@ -34,6 +35,20 @@ def _apply(client, auth, source: Path, chat_id: str | None = None):
   if chat_id is not None:
     body["chat_id"] = chat_id
   return client.post("/api/apps/apply", json=body, headers=auth)
+
+
+def _icon_bytes(color: tuple[int, int, int]) -> bytes:
+  from PIL import Image
+  output = io.BytesIO()
+  Image.new("RGB", (30, 18), color).save(output, format="PNG")
+  return output.getvalue()
+
+
+def _declare_icon(source: Path, raw: bytes, name: str = "icon.png") -> None:
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["icon"] = name
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / name).write_bytes(raw)
 
 
 def test_apply_creates_from_manifest_and_commits_exact_source(
@@ -97,6 +112,104 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
       "chatId": "editing-chat",
     }),
   ]
+
+
+def test_local_manifest_icon_is_materialized_with_its_accepted_revision(
+  client, auth, db,
+):
+  """Create, replace, and remove package artwork through one apply boundary."""
+  from app import icon_assets
+
+  source = _source()
+  first_raw = _icon_bytes((40, 90, 180))
+  _declare_icon(source, first_raw)
+
+  created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  app_id = created.json()["app"]["id"]
+  assert created.json()["app"]["icon_url"].startswith(
+    f"/api/apps/{app_id}/icon?v="
+  )
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.icon_png == icon_assets.normalize_icon(first_raw)
+  assert client.get(f"/api/apps/{app_id}/icon").content == row.icon_png
+
+  override_raw = _icon_bytes((220, 70, 80))
+  override = client.put(
+    f"/api/apps/{app_id}/icon", content=override_raw, headers=auth,
+  )
+  assert override.status_code == 204, override.text
+
+  second_raw = _icon_bytes((50, 180, 100))
+  (source / "icon.png").write_bytes(second_raw)
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.icon_png == icon_assets.normalize_icon(second_raw)
+  assert row.icon_override_png == icon_assets.normalize_icon(override_raw)
+  assert client.get(f"/api/apps/{app_id}/icon").content == row.icon_override_png
+
+  cleared = client.put(f"/api/apps/{app_id}/icon", content=b"", headers=auth)
+  assert cleared.status_code == 204, cleared.text
+  assert client.get(f"/api/apps/{app_id}/icon").content == row.icon_png
+
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest.pop("icon")
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  removed = _apply(client, auth, source)
+
+  assert removed.status_code == 200, removed.text
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.icon_png is None
+  assert row.icon_override_png is None
+  assert removed.json()["app"]["icon_url"] is None
+  assert client.get(f"/api/apps/{app_id}/icon").status_code == 404
+
+
+def test_invalid_local_manifest_icon_keeps_previous_revision(
+  client, auth, db,
+):
+  source = _source()
+  _declare_icon(source, _icon_bytes((40, 90, 180)))
+  created = _apply(client, auth, source)
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  previous_icon = row.icon_png
+  previous_head = app_git.head_sha(source, app_git.LOCAL_BRANCH)
+  (source / "icon.png").write_bytes(b"not an image")
+
+  failed = _apply(client, auth, source)
+
+  assert failed.status_code == 422
+  assert failed.json()["detail"]["code"] == "icon_invalid"
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.icon_png == previous_icon
+  assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == previous_head
+
+
+def test_manifest_icon_reconciliation_reads_the_accepted_commit_not_draft(
+  client, auth, db,
+):
+  source = _source()
+  accepted_raw = _icon_bytes((40, 90, 180))
+  _declare_icon(source, accepted_raw)
+  created = _apply(client, auth, source)
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  row.icon_png = None
+  db.commit()
+  # An invalid unpublished draft must not influence startup repair.
+  (source / "icon.png").write_bytes(b"unpublished invalid image")
+
+  repaired, warnings = app_apply.reconcile_manifest_icons(db)
+
+  assert repaired == [app_id]
+  assert warnings == []
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.icon_png == icon_assets.normalize_icon(accepted_raw)
+  assert (source / "icon.png").read_bytes() == b"unpublished invalid image"
 
 
 def test_compile_failure_keeps_previous_live_revision(client, auth, db):

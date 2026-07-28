@@ -166,13 +166,13 @@ def _referenced_file_findings(
   icon_path = root / icon if isinstance(icon, str) and icon else None
   if icon_path is not None and _symlink_component(root, icon) is None:
     if not icon_path.is_file():
-      warnings.append(
-        f"manifest icon {icon!r} is missing; install uses the fallback icon"
+      errors.append(
+        f"manifest icon {icon!r} is missing; local apply rejects the revision"
       )
     elif icon_path.stat().st_size > ICON_MAX_BYTES:
-      warnings.append(
+      errors.append(
         f"manifest icon {icon!r} exceeds {ICON_MAX_BYTES} bytes; "
-        "install uses the fallback icon"
+        "local apply rejects the revision"
       )
   for source in static_assets.values():
     if _symlink_component(root, source) is None and not (root / source).is_file():

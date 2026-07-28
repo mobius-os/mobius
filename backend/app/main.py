@@ -312,6 +312,27 @@ async def lifespan(app):
   except Exception as exc:
     _log.error("compiled-bundle reconcile wiring failed: %s", exc, exc_info=True)
   record_memory_checkpoint("startup_bundles_reconciled")
+  # Local app apply historically accepted the manifest without materializing
+  # its declared icon. Repair those legacy rows from the exact accepted Git
+  # revision before the shell asks for canonical icon references.
+  try:
+    from app.app_apply import reconcile_manifest_icons
+    from app.database import SessionLocal as _IconSession
+    _icon_db = _IconSession()
+    try:
+      _repaired_icon_ids, _icon_warnings = reconcile_manifest_icons(_icon_db)
+      if _repaired_icon_ids or _icon_warnings:
+        _log.info(
+          "manifest-icon reconciliation: repaired=%d warnings=%d",
+          len(_repaired_icon_ids), len(_icon_warnings),
+        )
+      for _warning in _icon_warnings:
+        _log.warning("manifest-icon reconciliation: %s", _warning)
+    finally:
+      _icon_db.close()
+  except Exception as exc:
+    _log.error("manifest-icon reconciliation failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_icons_reconciled")
   # Start the single-writer chat-persistence actor AFTER db init and
   # crash reconciliation. Order is load-bearing: reconcile_startup_chats must
   # run BEFORE the actor exists — recovery has to work even when

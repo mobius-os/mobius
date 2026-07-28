@@ -143,8 +143,10 @@ offline-safe app uses:
 
 List every imported sibling source file in `source_files`. Set
 `offline_capable` to `true` only when every required read and write works
-without the network. The apply helper applies this flag and the
-versioned `capabilities` object; do not patch the app row separately.
+without the network. The manifest's `icon` is the package-artwork source of
+truth: apply validates and materializes that exact accepted file, so do not
+upload a second copy after applying. The apply helper also applies the offline
+flag and versioned `capabilities` object; do not patch the app row separately.
 
 ### 3. Apply once early, then after each coherent revision
 

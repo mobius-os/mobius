@@ -12,6 +12,11 @@ import {
 import { preserveTogglePosition } from './preserveTogglePosition.js'
 import { ActivityTypeIcon } from './ActivityLineHeader.jsx'
 import { useDisclosureState } from './disclosureState.js'
+import ToolImageResult from './ToolImageResult.jsx'
+import {
+  durableImageReference,
+  toolImageReference,
+} from './toolImageResult.js'
 
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
 // output reads as a terminal (stdout / stderr / exit code) and a structured
@@ -83,9 +88,11 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
   const detailRef = useRef(null)
   const headerId = useId()
   const detailId = useId()
-  // Expansion fetches only the renderer-sized preview. The exact full output
-  // is fetched on explicit copy and never stored in component state, so a huge
-  // Read or shell result cannot inflate the transcript or retained JS heap.
+  // Expansion normally fetches only the renderer-sized preview. The exact full
+  // output is fetched on explicit copy and never stored in component state, so
+  // a huge Read or shell result cannot inflate the transcript or retained JS
+  // heap. The one exception is an image viewed outside chat-owned media: its
+  // complete base64 envelope is required to build the visual fallback.
   const [previewOutput, setPreviewOutput] = useState(null)
   const [previewComplete, setPreviewComplete] = useState(true)
   const [loadingPreview, setLoadingPreview] = useState(false)
@@ -102,6 +109,10 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
   const isShell = effectiveName === 'Bash' || effectiveName === 'shell'
   const label = toolCallLabel(t)
   const iconKind = toolActivityIcon(effectiveName)
+  const isImageTool = effectiveName === 'ViewImage'
+  const durableImage = useMemo(() => (
+    isImageTool ? durableImageReference(t.input) : null
+  ), [isImageTool, t.input])
   // `t.sources` is NOT rendered here: the turn's sources surface once at the
   // end of the message (MessageSources), where they belong to the answer
   // rather than to the one search that found them. They deliberately do not
@@ -123,6 +134,11 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
     // barrier then guarantees the final queued stash wins the query.
     if (t.status === 'running') return
     if (!t.output_truncated || previewOutput !== null || missingOutput) return
+    // Durable chat media and installed app icons can render through their
+    // existing narrow routes, avoiding the image tool's much larger base64
+    // sidecar altogether. An image viewed elsewhere needs the complete result
+    // (not the ordinary 20k text preview) so the fallback data URL is valid.
+    if (isImageTool && durableImage) return
     if (!chatId) return
     // Contract rule 6: a reduced block carries a stable tool_use_id and fetches
     // its full text from the side-table endpoint. Every large block is tagged
@@ -130,7 +146,7 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
     // full text — leave the inline excerpt.
     if (!t.tool_use_id) return
     const url = `/chats/${chatId}/tool-output/${encodeURIComponent(t.tool_use_id)}`
-      + '?preview=1'
+      + (isImageTool ? '' : '?preview=1')
     const controller = new AbortController()
     let cancelled = false
     setLoadingPreview(true)
@@ -161,6 +177,8 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
     missingOutput,
     chatId,
     loadAttempt,
+    isImageTool,
+    durableImage,
   ])
 
   useEffect(() => {
@@ -193,11 +211,17 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
   const hasOutput = !!shownOutput
     || !!t.output_truncated
     || (t.status !== 'running' && shownOutput === '')
+  const imageReference = useMemo(
+    () => (isImageTool && open
+      ? toolImageReference(t.input, shownOutput)
+      : null),
+    [isImageTool, open, shownOutput, t.input],
+  )
   const r = useMemo(
-    () => (hasOutput
+    () => (hasOutput && !isImageTool
       ? formatToolResult(shownOutput ?? '', { terminal: isShell })
       : null),
-    [shownOutput, hasOutput, isShell],
+    [shownOutput, hasOutput, isShell, isImageTool],
   )
   // Failure exit code, field-or-parse (contract rule 6): a block reduced at the
   // funnel carries an explicit output_exit_code, so read that rather than
@@ -270,7 +294,7 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
     setLoadAttempt(value => value + 1)
   }
 
-  const showLazyStatus = !!t.output_truncated && (
+  const showLazyStatus = !!t.output_truncated && !durableImage && (
     t.status === 'running'
     || loadingPreview
     || missingOutput
@@ -334,6 +358,7 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
     <div className={
       `chat__tool chat__tool--${t.status || 'done'}${failed ? ' chat__tool--failed' : ''}`
       + (compact ? ' chat__tool--compact' : '')
+      + (isImageTool ? ' chat__tool--image' : '')
     }>
       {hasDetail ? (
         // A real <button> so the disclosure is keyboard-operable (the old
@@ -369,7 +394,7 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
           tabIndex={open ? 0 : undefined}
           hidden={!open}
         >
-          {open && t.input && (
+          {open && t.input && !isImageTool && (
             <div className="chat__tool-section">
               <span className="chat__tool-section-label">
                 {isShell ? 'Command' : 'Input'}
@@ -382,13 +407,13 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
               </pre>
             </div>
           )}
-          {open && (r || t.output_truncated) && (
-            <div className="chat__tool-section">
-              <div className="chat__tool-section-head">
-                <span className="chat__tool-section-label">
-                  {isShell ? 'Output' : 'Result'}
-                </span>
-                {r && (
+          {open && (r || t.output_truncated || isImageTool) && (
+            <div className={isImageTool ? 'chat__tool-image-result' : 'chat__tool-section'}>
+              {!isImageTool && (
+                <div className="chat__tool-section-head">
+                  <span className="chat__tool-section-label">
+                    {isShell ? 'Output' : 'Result'}
+                  </span>
                   <button
                     type="button"
                     className={`chat__tool-copy chat__tool-copy--${copyState}`}
@@ -410,16 +435,24 @@ export default function ToolBlock({ t, chatId, compact = false, disclosureKey })
                       : <Copy size={13} strokeWidth={2} aria-hidden="true" />}
                     <span>{copyVisibleLabel}</span>
                   </button>
-                )}
-                <span className="chat__sr-only" role="status" aria-live="polite">
-                  {copyState === 'copied'
-                    ? copySuccessText
-                    : copyState === 'failed'
-                      ? 'Could not copy output'
-                      : ''}
-                </span>
-              </div>
-              {r && <ToolResult r={r} />}
+                  <span className="chat__sr-only" role="status" aria-live="polite">
+                    {copyState === 'copied'
+                      ? copySuccessText
+                      : copyState === 'failed'
+                        ? 'Could not copy output'
+                        : ''}
+                  </span>
+                </div>
+              )}
+              {imageReference
+                ? <ToolImageResult reference={imageReference} />
+                : isImageTool && !showLazyStatus
+                  ? (
+                    <span className="chat__tool-image-status" role="status">
+                      Image preview unavailable
+                    </span>
+                  )
+                  : r && <ToolResult r={r} />}
               {showLazyStatus && (
                 <div className="chat__tool-output-more chat__lazy-status">
                   <span

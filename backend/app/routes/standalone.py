@@ -287,7 +287,7 @@ def _render_standalone_icon(
 
   Takes plain primitives, not the live ORM row, so it can run on a worker
   thread without that thread touching the request's DB session (the caller
-  snapshots `app.icon_png` / `app.name` / the background color first)."""
+  snapshots the effective icon / app name / background color first)."""
   if icon_png:
     from PIL import Image
     img = Image.open(io.BytesIO(icon_png))
@@ -327,7 +327,7 @@ async def standalone_icon(
 ):
   """Serves the per-app icon at the requested size.
 
-  Two paths: user-uploaded `app.icon_png` is resized + background-composited
+  Two paths: the app's effective stored icon is resized + background-composited
   on the fly via Pillow; a missing upload falls back to the auto-generated
   letter icon. Both renders are memoized in `icon_cache` keyed on the app's
   `updated_at` (which a name / icon / background change bumps), so the
@@ -362,7 +362,7 @@ async def standalone_icon(
   # sampling) is resolved INSIDE `_compute` from these snapshots, so its cost
   # lands on the cold miss only — a warm hit skips it.
   app_id = app.id
-  icon_png = app.icon_png
+  icon_png = app.effective_icon_png
   name = app.name
   app_slug = app.slug or slug
   bg_inputs = (app.background_color, app.theme_color)

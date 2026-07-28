@@ -44,6 +44,8 @@
 #   VIEWPORT      mobile viewport "W H"               (default "412 915")
 #   AB_SESSION    agent-browser session (isolation)   (default render-miniapp)
 #   FULL_PAGE     "1" to capture the full scroll height (default viewport only)
+#   CHAT_ID       when set, default output is written directly to chat media
+#   DATA_DIR      Möbius data root used with CHAT_ID   (default /data)
 #
 # The browser session is left OPEN on success so you can keep driving it with
 # the same AB_SESSION (e.g. open a brief, toggle the chat) and screenshot
@@ -79,7 +81,20 @@ if [[ ! "$VIEWPORT" =~ ^[0-9]+[[:space:]]+[0-9]+$ ]]; then
 fi
 read -r VW VH <<<"$VIEWPORT"
 AB_SESSION="${AB_SESSION:-render-miniapp}"
-OUT="${2:-/tmp/render-${SLUG}.png}"
+if [[ -n "${2:-}" ]]; then
+  OUT="$2"
+elif [[ -n "${CHAT_ID:-}" ]]; then
+  if [[ ! "$CHAT_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "error: invalid CHAT_ID for media output" >&2
+    exit 2
+  fi
+  MEDIA_DIR="${DATA_DIR:-/data}/chats/${CHAT_ID}/media"
+  mkdir -p "$MEDIA_DIR"
+  OUT="${MEDIA_DIR}/render-${SLUG}-$(date +%s%N).png"
+else
+  # Test-container CLI use outside a chat has no protected media destination.
+  OUT="/tmp/render-${SLUG}.png"
+fi
 BASE="http://${HOST}:${PORT}"
 
 # Test-only foot-gun guard. This tool mints + injects a real OWNER JWT, so it's

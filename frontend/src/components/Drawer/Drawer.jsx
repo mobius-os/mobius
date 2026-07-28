@@ -186,7 +186,7 @@ export default function Drawer({
     renamingRef.current = next
     setRenamingState(next)
   }, [])
-  // The app whose "Add to home screen" sheet is open ({id,name,slug}),
+  // The app whose "Add to home screen" sheet is open,
   // or null. Mirrors openMenu/renamingState — one at a time, owned here
   // rather than in Shell so this stays drawer-local.
   const [installingApp, setInstallingApp] = useState(null)
@@ -277,12 +277,7 @@ export default function Drawer({
       rowActionInputsRef.current.onDeleteAppData?.(id)
     },
     install(app) {
-      rowActionInputsRef.current.setInstallingApp({
-        id: app.id,
-        name: app.name,
-        slug: app.slug,
-        updatedAt: app.updated_at,
-      })
+      rowActionInputsRef.current.setInstallingApp(app)
     },
     share(app) {
       rowActionInputsRef.current.setSharingApp(app)
@@ -1031,10 +1026,7 @@ export default function Drawer({
       ), appsHost)}
       {installingApp && (
         <InstallSheet
-          appId={installingApp.id}
-          appName={installingApp.name}
-          appSlug={installingApp.slug}
-          appUpdatedAt={installingApp.updatedAt}
+          app={installingApp}
           onClose={() => setInstallingApp(null)}
         />
       )}

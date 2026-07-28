@@ -62,8 +62,12 @@ test('first-use guidance is a labeled non-modal region with a dismiss action', (
 
 test('chat image preview actions use labeled buttons', () => {
   const attachments = read('../Attachments.jsx')
+  const composer = read('../ChatInputBar.jsx')
+  const preview = read('../ImagePreviewButton.jsx')
   const markdown = read('../markdown/InlineContent.jsx')
-  assert.match(attachments, /<button[\s\S]*aria-label=\{`Open \$\{alt \|\| 'attached image'\} preview`\}/)
+  assert.match(attachments, /<ImagePreviewButton/)
+  assert.match(composer, /aria-label=\{`View \$\{chip\.name\} full screen`\}/)
+  assert.match(preview, /aria-label=\{`Open \$\{alt \|\| 'image'\} preview`\}/)
   assert.match(markdown, /<button[\s\S]*className="md-image-frame"[\s\S]*aria-label=\{`Open \$\{alt \|\| 'image'\} preview`\}/)
 })
 

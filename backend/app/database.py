@@ -469,6 +469,12 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN icon_png BLOB NULL"))
       conn.commit()
+  if "icon_override_png" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN icon_override_png BLOB NULL"
+      ))
+      conn.commit()
   # Per-app token nonce. Add the column, then backfill
   # any NULL row with a fresh random nonce so existing apps get the same
   # id-reuse protection as new ones. Two independent idempotent gates so a
