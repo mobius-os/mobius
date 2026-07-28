@@ -39,9 +39,9 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
   // Auth is handled by the global setup (storageState).
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 }
   )
 }
@@ -61,7 +61,7 @@ async function newChat(page) {
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
-  await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
 /** Type a message and press Enter.  Returns after React has rendered. */
@@ -70,7 +70,7 @@ async function sendMessage(page, text) {
   await input.fill(text)
   await page.keyboard.press('Enter')
   // Wait for the scroll container to appear (empty state -> chat state).
-  await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
   // Two rAFs for React to flush layout effects.
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
@@ -79,9 +79,9 @@ async function sendMessage(page, text) {
 
 /** Click the stop button and wait for sending state to clear. */
 async function stopAgent(page) {
-  await page.evaluate(() => document.querySelector('.chat__stop')?.click())
+  await page.evaluate(() => document.querySelector('[data-chat-surface="painted"] .chat__stop')?.click())
   await page.waitForFunction(
-    () => !document.querySelector('.chat__stop'),
+    () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
     { timeout: 3000 }
   )
   // Let React settle.
@@ -93,10 +93,10 @@ async function stopAgent(page) {
 /** Read spacer/scroll measurements from the DOM. */
 async function measure(page) {
   return page.evaluate(() => {
-    const scroll = document.querySelector('.chat__scroll')
-    const spacer = document.querySelector('.spacer-dynamic')
-    const list = document.querySelector('.chat__list')
-    const userMsgs = document.querySelectorAll('.chat__msg--user')
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
+    const list = document.querySelector('[data-chat-surface="painted"] .chat__list')
+    const userMsgs = document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--user')
     const lastUser = userMsgs[userMsgs.length - 1]
     if (!scroll) throw new Error('chat scroll element is missing')
     return {
@@ -105,8 +105,8 @@ async function measure(page) {
       scrollH: scroll.scrollHeight,
       spacerH: parseInt(spacer?.style.height) || 0,
       listH: list?.offsetHeight || 0,
-      msgCount: document.querySelectorAll('.chat__msg').length,
-      toolCount: document.querySelectorAll('.chat__tool').length,
+      msgCount: document.querySelectorAll('[data-chat-surface="painted"] .chat__msg').length,
+      toolCount: document.querySelectorAll('[data-chat-surface="painted"] .chat__tool').length,
       lastUserTop: lastUser?.offsetTop ?? null,
       // Visual position of last user message relative to viewport.
       userVisualTop: lastUser ? lastUser.offsetTop - scroll.scrollTop : null,
@@ -120,7 +120,7 @@ async function measure(page) {
  */
 async function injectContent(page, textContent, repeat = 1) {
   await page.evaluate(({ text, n }) => {
-    const list = document.querySelector('.chat__list')
+    const list = document.querySelector('[data-chat-surface="painted"] .chat__list')
     if (!list) return
     let li = list.querySelector('.chat__msg--assistant:last-child')
     if (!li) {
@@ -142,7 +142,7 @@ async function injectContent(page, textContent, repeat = 1) {
 /** Inject a fake tool block via safe DOM construction. */
 async function injectToolBlock(page) {
   await page.evaluate(() => {
-    const list = document.querySelector('.chat__list')
+    const list = document.querySelector('[data-chat-surface="painted"] .chat__list')
     if (!list) return
     let li = list.querySelector('.chat__msg--assistant:last-child')
     if (!li) {
@@ -174,7 +174,7 @@ async function injectToolBlock(page) {
 /** Simulate a lazy renderer resizing content (e.g., highlight.js). */
 async function simulateLazyResize(page, extraHeight) {
   await page.evaluate((h) => {
-    const blocks = document.querySelectorAll('.chat__text--assistant')
+    const blocks = document.querySelectorAll('[data-chat-surface="painted"] .chat__text--assistant')
     const last = blocks[blocks.length - 1]
     if (last) last.style.paddingBottom = `${h}px`
   }, extraHeight)
@@ -209,9 +209,9 @@ async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 }
   )
 }
@@ -398,7 +398,7 @@ test.describe('Short responses', () => {
     // structurally impossible: localStorage MUST agree with the chat
     // ChatView is rendering before we PUT messages onto it.
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__scroll')
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__scroll')
               && localStorage.getItem('moebius_active_chat')),
       { timeout: 3000 },
     )
@@ -431,7 +431,7 @@ test.describe('Short responses', () => {
     // ChatView intentionally keeps a restored transcript hidden while its
     // quiet-layout pass sizes the reservation. Waiting only for DOM presence
     // races that pass and can sample the spacer's pre-reveal 0px bootstrap.
-    await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 15000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 15000 })
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(r))
     ))
@@ -488,8 +488,8 @@ test.describe('Chat switching (the bug)', () => {
 
     // Simulate switching away: save state to sessionStorage.
     await page.evaluate(() => {
-      const scroll = document.querySelector('.chat__scroll')
-      const spacer = document.querySelector('.spacer-dynamic')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
       if (scroll && spacer) {
         const positions = JSON.parse(sessionStorage.getItem('chat-scroll') || '{}')
         const spacers = JSON.parse(sessionStorage.getItem('chat-spacer') || '{}')
@@ -502,10 +502,10 @@ test.describe('Chat switching (the bug)', () => {
 
     // Reload to simulate returning.
     await page.goto(BASE)
-    await expect(page.locator('.chat__scroll, .chat__empty-wrap').first()).toBeVisible({ timeout: 8000 })
+    await expect(page.locator('[data-chat-surface="painted"] :is(.chat__scroll, .chat__empty-wrap)').first()).toBeVisible({ timeout: 8000 })
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
 
-    const hasScroll = await page.evaluate(() => !!document.querySelector('.chat__scroll'))
+    const hasScroll = await page.evaluate(() => !!document.querySelector('[data-chat-surface="painted"] .chat__scroll'))
     if (!hasScroll) {
       // App loaded a different (empty) chat — skip this assertion.
       return
@@ -532,7 +532,7 @@ test.describe('Empty state transition', () => {
 
     // Verify empty state — no scroll container.
     const hasScroll = await page.evaluate(
-      () => !!document.querySelector('.chat__scroll')
+      () => !!document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     )
     expect(hasScroll).toBe(false)
 
@@ -562,7 +562,7 @@ test.describe('SSE streaming (real React path)', () => {
 
     // Wait for the stream to be processed and promote to happen.
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
@@ -587,7 +587,7 @@ test.describe('SSE streaming (real React path)', () => {
     await sendMessage(page, 'SSE tool test')
 
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
@@ -599,7 +599,7 @@ test.describe('SSE streaming (real React path)', () => {
     // A lone operation is its own collapsed disclosure: no redundant activity
     // summary wrapping one identical child row. It keeps the concrete
     // past-tense label and file glyph; the spinner belongs only to a live tool.
-    const tools = page.locator('.chat__tools').first()
+    const tools = page.locator('[data-chat-surface="painted"] .chat__tools').first()
     await expect(tools.locator('.chat__activity')).toHaveCount(0)
     const tool = tools.locator(':scope > .chat__tool')
     await expect(tool.locator('.chat__tool-header')).toHaveAttribute('aria-expanded', 'false')
@@ -631,7 +631,7 @@ test.describe('SSE streaming (real React path)', () => {
     await newChat(page)
     await sendMessage(page, 'Near-foot disclosure test')
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
     await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
@@ -639,7 +639,7 @@ test.describe('SSE streaming (real React path)', () => {
     // Enter FOLLOW_BOTTOM through the same input→scroll sequence as a reader,
     // rather than assigning scrollTop as app-owned test setup.
     await page.evaluate(async () => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       s.scrollTop = Math.max(0, s.scrollHeight - s.clientHeight - 100)
       await new Promise(requestAnimationFrame)
       s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
@@ -648,11 +648,11 @@ test.describe('SSE streaming (real React path)', () => {
       await new Promise(r => setTimeout(r, 300))
     })
 
-    const header = page.locator('.chat__activity-header').last()
+    const header = page.locator('[data-chat-surface="painted"] .chat__activity-header').last()
     await expect(header).toBeVisible()
     const before = await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
-      const b = [...document.querySelectorAll('.chat__activity-header')].at(-1)
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const b = [...document.querySelectorAll('[data-chat-surface="painted"] .chat__activity-header')].at(-1)
       const sr = s.getBoundingClientRect()
       return {
         top: b.getBoundingClientRect().top,
@@ -672,7 +672,7 @@ test.describe('SSE streaming (real React path)', () => {
     // mutations; that is the autoscroll half of the idempotent-toggle contract.
     await page.evaluate(() => {
       window.__disclosureChurn = setInterval(() => {
-        const timeline = [...document.querySelectorAll('.chat__activity-timeline')].at(-1)
+        const timeline = [...document.querySelectorAll('[data-chat-surface="painted"] .chat__activity-timeline')].at(-1)
         if (!timeline) return
         const marker = document.createElement('i')
         marker.hidden = true
@@ -688,8 +688,8 @@ test.describe('SSE streaming (real React path)', () => {
         await page.evaluate(() => new Promise(r =>
           requestAnimationFrame(() => requestAnimationFrame(r))))
         const after = await page.evaluate(() => {
-          const s = document.querySelector('.chat__scroll')
-          const b = [...document.querySelectorAll('.chat__activity-header')].at(-1)
+          const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          const b = [...document.querySelectorAll('[data-chat-surface="painted"] .chat__activity-header')].at(-1)
           return {
             top: b.getBoundingClientRect().top,
             gap: s.scrollHeight - s.scrollTop - s.clientHeight,
@@ -723,7 +723,7 @@ test.describe('SSE streaming (real React path)', () => {
     await sendMessage(page, 'SSE long test')
 
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
@@ -758,12 +758,12 @@ test.describe('Autoscroll behavior', () => {
     //      window. The scroll handler now sees bottomVisibleRef=true
     //      AND userDriven=true → transitions mode to FOLLOW_BOTTOM.
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (s) s.scrollTop = s.scrollHeight
     })
     await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!s) return
       s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
       // Tiny in-window scroll forces onScroll to re-evaluate mode.
@@ -798,7 +798,7 @@ test.describe('Autoscroll behavior', () => {
 
     // Scroll to middle (user deliberately scrolled up).
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!s) return
       s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
       s.scrollTop = s.scrollHeight / 2
@@ -833,7 +833,7 @@ test.describe('Autoscroll behavior', () => {
     await sendMessage(page, 'SSE autoscroll test')
 
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
@@ -864,7 +864,7 @@ test.describe('Autoscroll behavior', () => {
     await sendMessage(page, 'Pin test')
 
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
@@ -918,7 +918,7 @@ test.describe('Scroll edge cases', () => {
 
     // Wait for stream to complete.
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
     await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
@@ -929,13 +929,13 @@ test.describe('Scroll edge cases', () => {
 
     // Scroll up to ~1/3.
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (s) s.scrollTop = Math.max(0, s.scrollHeight / 3)
     })
     await page.evaluate(() => new Promise(r => setTimeout(r, 200)))
 
     const scrollBefore = await page.evaluate(() =>
-      document.querySelector('.chat__scroll')?.scrollTop ?? 0
+      document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop ?? 0
     )
     expect(scrollBefore).toBeGreaterThan(0)
 
@@ -943,7 +943,7 @@ test.describe('Scroll edge cases', () => {
     await page.evaluate(() => new Promise(r => setTimeout(r, 1000)))
 
     const scrollAfter = await page.evaluate(() =>
-      document.querySelector('.chat__scroll')?.scrollTop ?? 0
+      document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop ?? 0
     )
     expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThan(5)
   })
@@ -955,7 +955,7 @@ test.describe('Scroll edge cases', () => {
 
     // Start at the bottom (auto-follow engaged).
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (s) s.scrollTop = s.scrollHeight
     })
     await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
@@ -979,14 +979,14 @@ test.describe('Scroll edge cases', () => {
 
     // Start at the bottom.
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (s) s.scrollTop = s.scrollHeight
     })
     await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
 
     // Scroll up past 50px threshold.
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!s) return
       // This test claims reader ownership, so exercise the actual contract:
       // input opens the gesture window before the browser scroll lands.
@@ -998,14 +998,14 @@ test.describe('Scroll edge cases', () => {
     await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
 
     const scrollBefore = await page.evaluate(() =>
-      document.querySelector('.chat__scroll')?.scrollTop ?? 0
+      document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop ?? 0
     )
 
     // Inject more content — should NOT auto-follow.
     await injectContent(page, 'New content arriving. ', 20)
 
     const scrollAfter = await page.evaluate(() =>
-      document.querySelector('.chat__scroll')?.scrollTop ?? 0
+      document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop ?? 0
     )
 
     // Position should not have jumped to the bottom.
@@ -1031,12 +1031,12 @@ test.describe('Scroll edge cases', () => {
 
     // Engage FOLLOW_BOTTOM via real gesture (test 18's exact pattern).
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (s) s.scrollTop = s.scrollHeight
     })
     await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!s) return
       s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
       s.scrollTop = Math.max(0, s.scrollTop - 1)
@@ -1074,13 +1074,13 @@ test.describe('Scroll edge cases', () => {
         // already-clamped bottom write into no scroll event, which would test
         // a no-op gesture rather than the FOLLOW_BOTTOM transition.
         await page.evaluate(() => {
-          const s = document.querySelector('.chat__scroll')
+          const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
           if (s) s.scrollTop = Math.max(0, s.scrollHeight - s.clientHeight - 80)
         })
         await page.evaluate(() => new Promise(r => requestAnimationFrame(r)))
       }
       await page.evaluate((t) => {
-        const s = document.querySelector('.chat__scroll')
+        const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
         if (!s) return
         s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
         s.scrollTop = t === 'bottom' ? s.scrollHeight
@@ -1105,7 +1105,7 @@ test.describe('Scroll edge cases', () => {
     // Inject content — should NOT follow (user scrolled up).
     await injectContent(page, 'While scrolled up. ', 10)
     const midGap = await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return s ? s.scrollHeight - s.scrollTop - s.clientHeight : 0
     })
     expect(midGap).toBeGreaterThan(50)
@@ -1119,11 +1119,11 @@ test.describe('Scroll edge cases', () => {
     // finite reader-ownership window expires. Wait for the deferred layout pass
     // it schedules, rather than sampling the intentional intermediate frame.
     await page.waitForFunction(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return !!s && s.scrollHeight - s.scrollTop - s.clientHeight < 50
     }, undefined, { timeout: 3000 })
     const afterGap = await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return s ? s.scrollHeight - s.scrollTop - s.clientHeight : 0
     })
     expect(afterGap).toBeLessThan(50)
@@ -1150,7 +1150,7 @@ test.describe('Scroll edge cases', () => {
 
     await sendMessage(page, 'First message')
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
     await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
@@ -1160,7 +1160,7 @@ test.describe('Scroll edge cases', () => {
     const overflow = await measure(page)
     expect(overflow.scrollH).toBeGreaterThan(overflow.clientH)
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!s) return
       s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
       s.scrollTop = Math.max(0, Math.floor(s.scrollHeight / 3))
@@ -1181,7 +1181,7 @@ test.describe('Scroll edge cases', () => {
     ))
 
     const userMsgs = await page.evaluate(() => {
-      const msgs = document.querySelectorAll('.chat__text--user')
+      const msgs = document.querySelectorAll('[data-chat-surface="painted"] .chat__text--user')
       return [...msgs].map(el => el.textContent.trim())
     })
     expect(userMsgs).toContain('Second message')
@@ -1211,7 +1211,7 @@ test.describe('Scroll edge cases', () => {
 
     // Scroll to the top (definitely not near the bottom).
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (s) s.scrollTop = 0
     })
     await page.evaluate(() => new Promise(r => setTimeout(r, 50)))

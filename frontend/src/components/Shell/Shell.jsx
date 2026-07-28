@@ -3821,6 +3821,12 @@ export default function Shell() {
               aria-labelledby={tabPanel ? paneTabDomId(paneId, tabKey) : undefined}
               data-tab-key={(multiPane || focusedPaneViewId != null) && role !== 'held' && !underlay
                 ? tabKey : undefined}
+              // A ChatView can stay mounted in the parked workspace world so its
+              // stream, draft, and scroll controller survive a world flip. Expose
+              // one explicit page-level selector for the settled surface that is
+              // actually interactive; browser contracts must not accidentally
+              // target a retained hidden world or an in-flight handoff layer.
+              data-chat-surface={ownerPaints && role === 'active' ? 'painted' : undefined}
               // Compositor-only beat motion (v2): see the app wrapper. The world-
               // reveal underlay chat paints full-bleed beneath the deal.
               data-mode-motion={motion ? motion.motion : undefined}
@@ -3832,8 +3838,11 @@ export default function Shell() {
               style={motion ? { ...(posStyle || {}), ...motion.vars } : (posStyle || undefined)}
               // Inert while covered/handing-off OR while participating in / underlying
               // the exit beat (INV 9 inert beat).
-              inert={settingsOverlay || role !== 'active' || (modeBeatActive && (!!motion || underlay))}
-              aria-hidden={settingsOverlay || role !== 'active' ? 'true' : undefined}
+              inert={settingsOverlay || !ownerPaints || role !== 'active'
+                || (modeBeatActive && (!!motion || underlay))}
+              aria-hidden={settingsOverlay || !ownerPaints || role !== 'active'
+                ? 'true'
+                : undefined}
               onPointerDownCapture={paned && role === 'active' && !modeBeatActive
                 ? () => dispatchWorkspace({ type: 'FOCUS', paneId })
                 : undefined}

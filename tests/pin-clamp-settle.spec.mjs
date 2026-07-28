@@ -41,9 +41,9 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
     route.fulfill({ status: 200, body: '{}' }))
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     undefined,
     { timeout: 10000 })
 }
@@ -114,18 +114,18 @@ async function newChat(page) {
 
 async function sendMessage(page, text) {
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
-  const previousCount = await page.locator('.chat__msg--user').count()
+  const previousCount = await page.locator('[data-chat-surface="painted"] .chat__msg--user').count()
   await input.fill(text)
   await page.keyboard.press('Enter')
-  await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
   // `.chat__scroll` already exists after the first exchange. Waiting only for
   // that container lets a busy CI worker measure the previous user message
   // before React commits the new pinned row. Synchronize on the state this
   // helper is responsible for creating, then allow the pin's layout pass.
-  await expect(page.locator('.chat__msg--user')).toHaveCount(previousCount + 1, {
+  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user')).toHaveCount(previousCount + 1, {
     timeout: 3000,
   })
-  await expect(page.locator('.chat__msg--user').last()).toContainText(text)
+  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').last()).toContainText(text)
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))))
 }
@@ -135,12 +135,12 @@ async function sendMessage(page, text) {
  *  Mirrors spacer.spec.mjs tests 18/24. */
 async function gestureToBottom(page) {
   await page.evaluate(() => {
-    const s = document.querySelector('.chat__scroll')
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (s) s.scrollTop = Math.max(0, s.scrollHeight - s.clientHeight - 80)
   })
   await page.evaluate(() => new Promise(r => requestAnimationFrame(r)))
   await page.evaluate(() => {
-    const s = document.querySelector('.chat__scroll')
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!s) return
     s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
     s.scrollTop = s.scrollHeight
@@ -159,7 +159,7 @@ async function gestureToBottom(page) {
 
 async function waitStreamDone(page) {
   await page.waitForFunction(
-    () => !document.querySelector('.chat__stop'),
+    () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
     undefined,
     { timeout: 10000 },
   )
@@ -168,8 +168,8 @@ async function waitStreamDone(page) {
 
 async function measure(page) {
   return page.evaluate(() => {
-    const scroll = document.querySelector('.chat__scroll')
-    const users = document.querySelectorAll('.chat__msg--user')
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    const users = document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--user')
     const last = users[users.length - 1]
     if (!scroll || !last) return { error: 'missing element' }
     const sr = scroll.getBoundingClientRect()
@@ -185,8 +185,8 @@ async function measure(page) {
 
 async function waitForLastUserPinned(page) {
   await page.waitForFunction(() => {
-    const scroll = document.querySelector('.chat__scroll')
-    const users = document.querySelectorAll('.chat__msg--user')
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    const users = document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--user')
     const last = users[users.length - 1]
     if (!scroll || !last) return false
     const top = last.getBoundingClientRect().top - scroll.getBoundingClientRect().top
@@ -196,9 +196,9 @@ async function waitForLastUserPinned(page) {
 
 async function waitForFollowBottom(page) {
   await page.waitForFunction(() => {
-    const scroll = document.querySelector('.chat__scroll')
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!scroll || scroll.dataset.scrollMode !== 'FOLLOW_BOTTOM') return false
-    const spacerH = document.querySelector('.spacer-dynamic')?.offsetHeight || 0
+    const spacerH = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')?.offsetHeight || 0
     const contentGap =
       scroll.scrollHeight - spacerH - scroll.scrollTop - scroll.clientHeight
     return Math.abs(contentGap) <= 4
@@ -207,10 +207,10 @@ async function waitForFollowBottom(page) {
 
 async function measureStreamingGeometry(page) {
   return page.evaluate(() => {
-    const scroll = document.querySelector('.chat__scroll')
-    const users = document.querySelectorAll('.chat__msg--user')
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    const users = document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--user')
     const user = users[users.length - 1]
-    const spacer = document.querySelector('.spacer-dynamic')
+    const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
     if (!scroll || !user || !spacer) return { error: 'missing element' }
     const sr = scroll.getBoundingClientRect()
     const ur = user.getBoundingClientRect()
@@ -311,7 +311,7 @@ test('Keyboard close cannot retire a pin before a short stream settles', async (
   // this send is eligible to pin.
   await waitForFollowBottom(page)
   await sendMessage(page, 'Second deep message')
-  await expect(page.locator('.chat__cursor')).toBeVisible({ timeout: 5000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__cursor')).toBeVisible({ timeout: 5000 })
 
   await waitForLastUserPinned(page)
   const pinnedWithKeyboard = await measure(page)
@@ -357,12 +357,12 @@ test('A live pin holds while spacer remains, then follows only after it is fille
   // content stays at the real-content tail (spacer excluded), with no timer or
   // token-count heuristic involved.
   await page.waitForFunction(() => (
-    (document.querySelector('.spacer-dynamic')?.offsetHeight ?? 999) <= 1
+    (document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')?.offsetHeight ?? 999) <= 1
   ), undefined, { timeout: 10000 })
   await expect(page.getByText(/TAIL_MARKER/)).toBeVisible({ timeout: 10000 })
   await page.waitForFunction(() => {
-    const s = document.querySelector('.chat__scroll')
-    const spacerH = document.querySelector('.spacer-dynamic')?.offsetHeight || 0
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    const spacerH = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')?.offsetHeight || 0
     if (!s) return false
     const gap = s.scrollHeight - spacerH - s.scrollTop - s.clientHeight
     return Math.abs(gap) <= 4
@@ -387,7 +387,7 @@ test('Reader gesture owns scroll and spacer geometry while a reply is streaming'
   await expect(page.getByText(/Opening line/)).toBeVisible({ timeout: 5000 })
 
   await page.waitForFunction(() => (
-    (document.querySelector('.spacer-dynamic')?.offsetHeight ?? 999) <= 1
+    (document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')?.offsetHeight ?? 999) <= 1
   ), undefined, { timeout: 10000 })
   const before = await measureStreamingGeometry(page)
   expect(before.spacerH).toBeLessThanOrEqual(1)
@@ -397,14 +397,14 @@ test('Reader gesture owns scroll and spacer geometry while a reply is streaming'
   // until the gesture window closes. This locks the pre-scroll race where the
   // stream used to throw the reader back to the pin before `scroll` landed.
   await page.evaluate(() => {
-    const s = document.querySelector('.chat__scroll')
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!s) return
     s.dispatchEvent(new Event('touchstart', { bubbles: true }))
     s.dispatchEvent(new Event('touchmove', { bubbles: true }))
     s.scrollTop = Math.max(0, s.scrollTop - 120)
   })
   const gestureTop = await page.evaluate(
-    () => Math.round(document.querySelector('.chat__scroll')?.scrollTop || 0),
+    () => Math.round(document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop || 0),
   )
   await page.waitForFunction(() => document.body.textContent.includes('later streamed'))
   const during = await measureStreamingGeometry(page)

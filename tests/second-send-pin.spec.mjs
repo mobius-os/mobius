@@ -40,9 +40,9 @@ async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 }
   )
 }
@@ -70,7 +70,7 @@ async function sendMessage(page, text) {
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
-  await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 3000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
   ))
@@ -82,12 +82,12 @@ async function sendMessage(page, text) {
  *  is the first message. Mirrors spacer.spec.mjs tests 18/24. */
 async function gestureToBottom(page) {
   await page.evaluate(() => {
-    const s = document.querySelector('.chat__scroll')
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (s) s.scrollTop = s.scrollHeight
   })
   await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
   await page.evaluate(() => {
-    const s = document.querySelector('.chat__scroll')
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!s) return
     s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
     s.scrollTop = Math.max(0, s.scrollTop - 1)
@@ -99,7 +99,7 @@ async function gestureToBottom(page) {
 
 async function waitStreamDone(page) {
   await page.waitForFunction(
-    () => !document.querySelector('.chat__stop'),
+    () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
     { timeout: 10000 }
   )
   // Settle for any post-stream effects (promoteStreamToMessages, etc.).
@@ -108,8 +108,8 @@ async function waitStreamDone(page) {
 
 async function measure(page) {
   return page.evaluate(() => {
-    const scroll = document.querySelector('.chat__scroll')
-    const userMsgs = document.querySelectorAll('.chat__msg--user')
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    const userMsgs = document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--user')
     const last = userMsgs[userMsgs.length - 1]
     if (!scroll || !last) return { error: 'missing element' }
     const scrollRect = scroll.getBoundingClientRect()
@@ -220,7 +220,7 @@ test('A tall-composer send lands once without a visible post-paint correction', 
     'before it collapses on send.',
   ].join('\n')
   await input.fill(multiline)
-  await expect(page.locator('.chat__pill')).toHaveClass(/chat__pill--tall/)
+  await expect(page.locator('[data-chat-surface="painted"] .chat__pill')).toHaveClass(/chat__pill--tall/)
   // Growing the absolutely-positioned composer increases the list's bottom
   // clearance. Re-establish the test's stated send-rule precondition after
   // that geometry change: this case is about the collapse race while the
@@ -233,8 +233,8 @@ test('A tall-composer send lands once without a visible post-paint correction', 
   // pre-paint layout pass, before it sizes the reservation or writes scrollTop.
   const preSend = await page.evaluate(() => {
     const chat = document.querySelector('.chat')
-    const foot = document.querySelector('.chat__foot')
-    const scroll = document.querySelector('.chat__scroll')
+    const foot = document.querySelector('[data-chat-surface="painted"] .chat__foot')
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!chat || !foot || !scroll) throw new Error('missing chat geometry')
     chat.style.setProperty('--composer-h', `${foot.offsetHeight + 48}px`)
     const spacer = scroll.querySelector('.spacer-dynamic')
@@ -254,7 +254,7 @@ test('A tall-composer send lands once without a visible post-paint correction', 
     }
     window.__tallComposerScrolls = []
     scroll.addEventListener('scroll', () => {
-      const users = document.querySelectorAll('.chat__msg--user')
+      const users = document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--user')
       const last = users[users.length - 1]
       const sr = scroll.getBoundingClientRect()
       const ur = last?.getBoundingClientRect()
@@ -270,13 +270,13 @@ test('A tall-composer send lands once without a visible post-paint correction', 
   expect(preSend.contentGap).toBeLessThan(50)
 
   await page.keyboard.press('Enter')
-  await expect(page.locator('.chat__msg--user')).toHaveCount(2, { timeout: 3000 })
-  await expect(page.locator('.chat__msg--user').last()).toContainText('Second user message')
+  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user')).toHaveCount(2, { timeout: 3000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').last()).toContainText('Second user message')
   await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 350)))
 
   const result = await page.evaluate(() => {
-    const scroll = document.querySelector('.chat__scroll')
-    const users = document.querySelectorAll('.chat__msg--user')
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    const users = document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--user')
     const last = users[users.length - 1]
     const sr = scroll?.getBoundingClientRect()
     const ur = last?.getBoundingClientRect()
@@ -348,7 +348,7 @@ test('Pin HOLDS when content above the pinned message grows after send (late ima
   // Simulate late content growth ABOVE the pinned message (image load /
   // error / question card rendering in an earlier turn) — no user action.
   await page.evaluate(() => {
-    const list = document.querySelector('.chat__list')
+    const list = document.querySelector('[data-chat-surface="painted"] .chat__list')
     const firstMsg = list?.querySelector('.chat__msg')
     if (firstMsg) {
       const grow = document.createElement('div')
@@ -440,9 +440,9 @@ test('Second send pins and HOLDS through a thinking pause when the server ts dif
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 })
   await newChat(page)
 
@@ -460,7 +460,7 @@ test('Second send pins and HOLDS through a thinking pause when the server ts dif
   // land well under the 1.3s stream delay), then assert the pin held with no
   // streamed content on screen yet.
   await page.waitForFunction(() => {
-    const users = document.querySelectorAll('.chat__msg--user')
+    const users = document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--user')
     const last = users[users.length - 1]
     return !!last && (last.querySelector('.chat__text--user')?.textContent || '')
       .includes('Second user message')

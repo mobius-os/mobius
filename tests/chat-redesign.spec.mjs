@@ -55,9 +55,9 @@ async function setupWithStreamMock(page, streamBody) {
   }
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 }
   )
 }
@@ -71,10 +71,10 @@ async function newChat(page) {
   await createTaggedChat(page)
   await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
   const hasEmpty = await page.evaluate(
-    () => !!document.querySelector('.chat__empty-wrap')
+    () => !!document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
   )
   if (!hasEmpty) await page.goto(BASE)
-  await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
 
@@ -89,7 +89,7 @@ async function sendMessage(page, text) {
   // shared storageState; downstream assertions already do their
   // own visibility waits, so blocking on container visibility up
   // front bought nothing.
-  await expect(page.locator('.chat__msg--user').first()).toBeVisible({ timeout: 8000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').first()).toBeVisible({ timeout: 8000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
   ))
@@ -390,7 +390,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
 
     await expect(page.locator('.qcard')).toHaveCount(1, { timeout: 5000 })
     // Only the question card; no leaked tool blocks.
-    await expect(page.locator('.chat__tool')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__tool')).toHaveCount(0)
   })
 })
 
@@ -417,7 +417,7 @@ test.describe('Bug 3: mid-stream return shows persisted content', () => {
     // redesign means messages.map's suppression only fires under
     // bridgePartialRef.current (which we don't set in tests).
     await page.evaluate(() => {
-      const list = document.querySelector('.chat__list')
+      const list = document.querySelector('[data-chat-surface="painted"] .chat__list')
       const li = document.createElement('li')
       li.className = 'chat__msg chat__msg--assistant'
       li.setAttribute('data-key', 'assistant-99-test')
@@ -429,7 +429,7 @@ test.describe('Bug 3: mid-stream return shows persisted content', () => {
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(r))
     ))
-    await expect(page.locator('.chat__msg--assistant').last())
+    await expect(page.locator('[data-chat-surface="painted"] .chat__msg--assistant').last())
       .toContainText('Persisted partial visible')
   })
 })
@@ -445,8 +445,8 @@ test.describe('Bug 2/4: scroll state machine', () => {
     await setupWithStreamMock(page, null)
     await newChat(page)
     await sendMessage(page, 'First send')
-    await expect(page.locator('.chat__bottom-sentinel')).toHaveCount(0)
-    await expect(page.locator('.chat__scroll')).toHaveCount(1)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__bottom-sentinel')).toHaveCount(0)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toHaveCount(1)
   })
 
 
@@ -456,9 +456,9 @@ test.describe('Bug 2/4: scroll state machine', () => {
     await sendMessage(page, 'Send with cid')
     // The pin resolves the user row by its stable cid (data-cid). data-ts is
     // kept too, but only for the timestamp tooltip (display metadata).
-    const pinnable = await page.locator('.chat__msg--user[data-cid]').count()
+    const pinnable = await page.locator('[data-chat-surface="painted"] .chat__msg--user[data-cid]').count()
     expect(pinnable).toBeGreaterThan(0)
-    const withTs = await page.locator('.chat__msg--user[data-ts]').count()
+    const withTs = await page.locator('[data-chat-surface="painted"] .chat__msg--user[data-ts]').count()
     expect(withTs).toBeGreaterThan(0)
   })
 
@@ -467,7 +467,7 @@ test.describe('Bug 2/4: scroll state machine', () => {
     await setupWithStreamMock(page, null)
     await newChat(page)
     await sendMessage(page, 'Send with key')
-    const keyed = await page.locator('.chat__msg[data-key]').count()
+    const keyed = await page.locator('[data-chat-surface="painted"] .chat__msg[data-key]').count()
     expect(keyed).toBeGreaterThan(0)
   })
 })
@@ -533,8 +533,8 @@ test.describe('Q&A atomic write', () => {
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -609,8 +609,8 @@ test.describe('Q&A atomic write', () => {
     )
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 },
     )
     await newChat(page)
@@ -619,7 +619,7 @@ test.describe('Q&A atomic write', () => {
     const card = page.locator('.qcard')
     await expect(card).toBeVisible({ timeout: 5000 })
     await page.evaluate(() => {
-      const scroll = document.querySelector('.chat__scroll')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (scroll) scroll.scrollTop = scroll.scrollHeight
     })
     await page.locator('.qcard__opt', { hasText: 'Yes' }).click()
@@ -632,9 +632,9 @@ test.describe('Q&A atomic write', () => {
     )))
 
     const geometry = () => page.evaluate(() => {
-      const scroll = document.querySelector('.chat__scroll')
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const question = document.querySelector('.qcard')
-      const spacer = document.querySelector('.spacer-dynamic')
+      const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
       const sr = scroll?.getBoundingClientRect()
       const qr = question?.getBoundingClientRect()
       return {
@@ -706,8 +706,8 @@ test.describe('Error block: persists across chat return', () => {
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -715,11 +715,11 @@ test.describe('Error block: persists across chat return', () => {
 
     // The error notice appears during streaming with the
     // system-notice class — distinct from the assistant bubble.
-    const errorBlock = page.locator('.chat__text--error', {
+    const errorBlock = page.locator('[data-chat-surface="painted"] .chat__text--error', {
       hasText: 'Quota exceeded',
     })
     await expect(errorBlock).toBeVisible({ timeout: 5000 })
-    await expect(page.locator('.chat__error-label', { hasText: /Error/i }))
+    await expect(page.locator('[data-chat-surface="painted"] .chat__error-label', { hasText: /Error/i }))
       .toBeVisible()
 
     // Wait for the stream's `done` to fire and promote the
@@ -731,7 +731,7 @@ test.describe('Error block: persists across chat return', () => {
     // missing, the error block on the promoted message renders
     // to null and disappears here.
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 5000 },
     )
     // The Stop button is gone; the streaming `<li>` (which
@@ -739,7 +739,7 @@ test.describe('Error block: persists across chat return', () => {
     // branch in ChatView.jsx) is replaced by the assistant
     // `<li>` whose body comes from MsgContent.
     await expect(
-      page.locator('.chat__text--error', { hasText: 'Quota exceeded' }),
+      page.locator('[data-chat-surface="painted"] .chat__text--error', { hasText: 'Quota exceeded' }),
     ).toBeVisible({ timeout: 3000 })
   })
 
@@ -776,8 +776,8 @@ test.describe('Error block: persists across chat return', () => {
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -786,7 +786,7 @@ test.describe('Error block: persists across chat return', () => {
     // The error renders as a system notice. The URL inside it
     // must be an actual <a href> — assert the anchor exists with
     // the URL the message contained.
-    const link = page.locator('.chat__text--error a[href*="example.test/billing"]')
+    const link = page.locator('[data-chat-surface="painted"] .chat__text--error a[href*="example.test/billing"]')
     await expect(link).toBeVisible({ timeout: 5000 })
   })
 })

@@ -39,9 +39,9 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 }
   )
 }
@@ -61,14 +61,14 @@ async function newChat(page) {
       document.querySelector('.drawer__item--new')?.click()
     })
   }
-  await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
 async function sendMessage(page, text) {
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
-  await expect(page.locator('.chat__msg--user').first()).toBeVisible({ timeout: 8000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user').first()).toBeVisible({ timeout: 8000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))
   ))
@@ -213,7 +213,7 @@ test.describe('Input behavior', () => {
     await sendMessage(page, 'Test message')
 
     const value = await page.evaluate(
-      () => document.querySelector('.chat__input')?.value
+      () => document.querySelector('[data-chat-surface="painted"] .chat__input')?.value
     )
     expect(value).toBe('')
   })
@@ -228,7 +228,7 @@ test.describe('Input behavior', () => {
 
     // Should still be on empty state
     const hasEmpty = await page.evaluate(
-      () => !!document.querySelector('.chat__empty-wrap')
+      () => !!document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
     )
     expect(hasEmpty).toBe(true)
   })
@@ -239,13 +239,13 @@ test.describe('Input behavior', () => {
 
     // Initially no send button (voice button instead)
     const hasSend = await page.evaluate(
-      () => !!document.querySelector('.chat__send')
+      () => !!document.querySelector('[data-chat-surface="painted"] .chat__send')
     )
     expect(hasSend).toBe(false)
 
     // Type something — send button should appear
     await page.getByRole('textbox', { name: 'Message Möbius…' }).fill('hello')
-    await expect(page.locator('.chat__send')).toBeVisible()
+    await expect(page.locator('[data-chat-surface="painted"] .chat__send')).toBeVisible()
   })
 })
 
@@ -256,7 +256,7 @@ test.describe('Message rendering', () => {
     await sendMessage(page, 'Hello world')
 
     const userMsg = await page.evaluate(() => {
-      const el = document.querySelector('.chat__msg--user')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__msg--user')
       return {
         exists: !!el,
         text: el?.querySelector('.chat__text--user')?.textContent?.trim(),
@@ -272,13 +272,13 @@ test.describe('Message rendering', () => {
     await sendMessage(page, 'First')
 
     // Stop and send second
-    await page.evaluate(() => document.querySelector('.chat__stop')?.click())
-    await page.waitForFunction(() => !document.querySelector('.chat__stop'), { timeout: 3000 })
+    await page.evaluate(() => document.querySelector('[data-chat-surface="painted"] .chat__stop')?.click())
+    await page.waitForFunction(() => !document.querySelector('[data-chat-surface="painted"] .chat__stop'), { timeout: 3000 })
     await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))
     await sendMessage(page, 'Second')
 
     const msgs = await page.evaluate(() => {
-      const userMsgs = document.querySelectorAll('.chat__text--user')
+      const userMsgs = document.querySelectorAll('[data-chat-surface="painted"] .chat__text--user')
       return [...userMsgs].map(m => m.textContent.trim())
     })
     expect(msgs).toContain('First')
@@ -292,7 +292,7 @@ test.describe('Message rendering', () => {
     await sendMessage(page, 'Test thinking')
 
     const hasThinking = await page.evaluate(
-      () => !!document.querySelector('.chat__thinking')
+      () => !!document.querySelector('[data-chat-surface="painted"] .chat__thinking')
     )
     expect(hasThinking).toBe(true)
   })
@@ -321,15 +321,15 @@ test.describe('Message rendering', () => {
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
     await sendMessage(page, 'Render markdown')
 
     const result = await page.evaluate(() => {
-      const assistant = document.querySelector('.chat__msg--assistant')
+      const assistant = document.querySelector('[data-chat-surface="painted"] .chat__msg--assistant')
       const anchors = Array.from(assistant?.querySelectorAll('a') || [])
         .map(a => ({ text: a.textContent, href: a.getAttribute('href') }))
       const images = Array.from(assistant?.querySelectorAll('img.md-image') || [])
@@ -415,8 +415,8 @@ test.describe('Message rendering', () => {
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -493,7 +493,7 @@ test.describe('Message rendering', () => {
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap') || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap') || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -534,7 +534,7 @@ test.describe('Message rendering', () => {
     await page.setViewportSize({ width: 412, height: 915 })
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap') || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap') || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -664,7 +664,7 @@ test.describe('Scroll position', () => {
     await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => {
-        const el = document.querySelector('.chat__scroll')
+        const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
         return !!el
           && getComputedStyle(el).visibility !== 'hidden'
           && el.scrollHeight > el.clientHeight + 100
@@ -676,19 +676,19 @@ test.describe('Scroll position', () => {
     // Stamp an ANCHOR_AT mode with a real wheel gesture; the scroll state
     // machine intentionally ignores non-gesture scroll events.
     await page.evaluate(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!el) return
       el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
       el.scrollTop = Math.floor(el.scrollHeight / 3)
     })
     await page.waitForFunction(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!el) return false
       const gap = el.scrollHeight - el.scrollTop - el.clientHeight
       return el.scrollTop > 0 && gap > 100
     }, { timeout: 3000 })
     const scrollBefore = await page.evaluate(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return el ? el.scrollTop : null
     })
     expect(scrollBefore).toBeGreaterThan(0)
@@ -707,7 +707,7 @@ test.describe('Scroll position', () => {
     await page.evaluate(() => history.back())
     await page.waitForFunction(
       () => {
-        const el = document.querySelector('.chat__scroll')
+        const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
         return !!el
           && getComputedStyle(el).visibility !== 'hidden'
           && el.scrollHeight > el.clientHeight + 100
@@ -718,7 +718,7 @@ test.describe('Scroll position', () => {
     await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))
 
     const scrollAfter = await page.evaluate(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return el ? el.scrollTop : null
     })
     expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThan(50)
@@ -769,7 +769,7 @@ test.describe('Scroll position', () => {
     await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () => {
-        const el = document.querySelector('.chat__scroll')
+        const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
         return !!el
           && getComputedStyle(el).visibility !== 'hidden'
           && el.scrollHeight > el.clientHeight + 100
@@ -782,23 +782,23 @@ test.describe('Scroll position', () => {
     // initial restore can already place the viewport at the physical bottom,
     // so first move away from it; a wheel-down from an already-clamped tail
     // emits no scroll event and therefore cannot establish reader intent.
-    const scroll = page.locator('.chat__scroll')
+    const scroll = page.locator('[data-chat-surface="painted"] .chat__scroll')
     await scroll.hover()
     await page.mouse.wheel(0, -300)
     await page.waitForFunction(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return !!el
         && el.scrollTop > 0
         && el.scrollHeight - el.scrollTop - el.clientHeight > 100
     }, { timeout: 3000 })
     await page.mouse.wheel(0, 100000)
     await page.waitForFunction(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 50
     }, { timeout: 3000 })
     await waitForChatMode(page, chatId, 'FOLLOW_BOTTOM')
     const scrollBefore = await page.evaluate(
-      () => document.querySelector('.chat__scroll')?.scrollTop ?? null,
+      () => document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop ?? null,
     )
     expect(scrollBefore).toBeGreaterThan(0)
 
@@ -826,7 +826,7 @@ test.describe('Scroll position', () => {
     await page.evaluate(() => history.back())
     await page.waitForFunction(
       () => {
-        const el = document.querySelector('.chat__scroll')
+        const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
         return !!el
           && getComputedStyle(el).visibility !== 'hidden'
           && el.textContent.includes('Grown while away marker 18')
@@ -837,7 +837,7 @@ test.describe('Scroll position', () => {
       requestAnimationFrame(() => requestAnimationFrame(r))))
 
     const restored = await page.evaluate(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return el ? {
         scrollTop: el.scrollTop,
         bottomGap: el.scrollHeight - el.scrollTop - el.clientHeight,
@@ -908,7 +908,7 @@ test.describe('Scroll position', () => {
     // The pointerdown makes the ensuing scroll an owner gesture, so R4 saves
     // this exact row+offset rather than a programmatic position.
     await page.evaluate(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const target = document.querySelector('[data-key="user-1700000200010"]')
       if (!el || !target) throw new Error('missing paginated anchor target')
       el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
@@ -930,7 +930,7 @@ test.describe('Scroll position', () => {
     await expect.poll(() => recentFetches, { timeout: 10000 }).toBeGreaterThan(1)
     await page.waitForFunction(
       () => {
-        const el = document.querySelector('.chat__scroll')
+        const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
         return !!el && getComputedStyle(el).visibility !== 'hidden'
       },
       { timeout: 10000 },
@@ -939,7 +939,7 @@ test.describe('Scroll position', () => {
       requestAnimationFrame(() => requestAnimationFrame(resolve))))
 
     const restored = await page.evaluate(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const target = document.querySelector('[data-key="user-1700000200010"]')
       return {
         keyStillMounted: !!target,
@@ -1028,13 +1028,13 @@ test.describe('Scroll position', () => {
     // First visit: establish a deliberate saved ANCHOR_AT location.
     await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const img = document.querySelector('.md-image')
       return !!el && getComputedStyle(el).visibility !== 'hidden'
         && !!img?.complete && !!document.querySelector('[data-key="entry-anchor"]')
     }, { timeout: 10000 })
     await page.evaluate(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const target = document.querySelector('[data-key="entry-anchor"]')
       if (!el || !target) throw new Error('missing entry anchor')
       el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
@@ -1056,7 +1056,7 @@ test.describe('Scroll position', () => {
     await page.getByLabel('Primary navigation')
       .getByRole('button', { name: 'New chat', exact: true })
       .click()
-    await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 5000 })
     const decoyChatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(decoyChatId).toBeTruthy()
     expect(decoyChatId).not.toBe(chatId)
@@ -1066,7 +1066,7 @@ test.describe('Scroll position', () => {
       window.__entryTrajectory = []
       const started = performance.now()
       const sample = () => {
-        const el = document.querySelector('.chat__scroll')
+        const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
         const target = document.querySelector('[data-key="entry-anchor"]')
         const visible = !!el && getComputedStyle(el).visibility !== 'hidden'
         const held = !!document.querySelector('.shell__chat-view--held')
@@ -1098,7 +1098,7 @@ test.describe('Scroll position', () => {
     })
 
     await page.waitForFunction(() => {
-      const el = document.querySelector('.chat__scroll')
+      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const img = document.querySelector('.md-image')
       return !!el && getComputedStyle(el).visibility !== 'hidden'
         // The retained ChatView deliberately reveals its already-settled DOM
@@ -1144,8 +1144,8 @@ test.describe('Enter key — touch-primary device (mobile)', () => {
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -1158,13 +1158,13 @@ test.describe('Enter key — touch-primary device (mobile)', () => {
 
     // Should still be on the empty state (no send happened).
     const hasEmpty = await page.evaluate(
-      () => !!document.querySelector('.chat__empty-wrap')
+      () => !!document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
     )
     expect(hasEmpty).toBe(true)
 
     // Textarea should still have the text.
     const value = await page.evaluate(
-      () => document.querySelector('.chat__input')?.value
+      () => document.querySelector('[data-chat-surface="painted"] .chat__input')?.value
     )
     expect(value).toContain('Line one')
   })
@@ -1183,7 +1183,7 @@ test.describe('Enter key — desktop (no touch)', () => {
     await page.keyboard.press('Enter')
 
     // Should NOT be on empty state — message was sent.
-    await expect(page.locator('.chat__scroll')).toBeVisible()
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible()
   })
 
   test('10c. Shift+Enter inserts newline on desktop', async ({ page }) => {
@@ -1198,13 +1198,13 @@ test.describe('Enter key — desktop (no touch)', () => {
 
     // Should still be on empty state (no send).
     const hasEmpty = await page.evaluate(
-      () => !!document.querySelector('.chat__empty-wrap')
+      () => !!document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
     )
     expect(hasEmpty).toBe(true)
 
     // Textarea should have multiline content.
     const value = await page.evaluate(
-      () => document.querySelector('.chat__input')?.value
+      () => document.querySelector('[data-chat-surface="painted"] .chat__input')?.value
     )
     expect(value).toContain('Line one')
     expect(value).toContain('\n')
@@ -1246,8 +1246,8 @@ test.describe('Scroll after stream end', () => {
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -1258,27 +1258,27 @@ test.describe('Scroll after stream end', () => {
     await page.keyboard.press('Enter')
 
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
 
     // Verify content overflows.
     await expect.poll(() => page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return s ? s.scrollHeight > s.clientHeight + 100 : false
     })).toBe(true)
 
     // Scroll up to ~1/3 of the way (user reading earlier content).
     await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (s) s.scrollTop = Math.max(0, s.scrollHeight / 3)
     })
     await expect.poll(() => page.evaluate(
-      () => document.querySelector('.chat__scroll')?.scrollTop || 0
+      () => document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop || 0
     )).toBeGreaterThan(0)
 
     const scrollBefore = await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return s ? s.scrollTop : 0
     })
     expect(scrollBefore).toBeGreaterThan(0)
@@ -1288,7 +1288,7 @@ test.describe('Scroll after stream end', () => {
     await page.evaluate(() => new Promise(r => setTimeout(r, 1000)))
 
     const scrollAfter = await page.evaluate(() => {
-      const s = document.querySelector('.chat__scroll')
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return s ? s.scrollTop : 0
     })
 
@@ -1348,8 +1348,8 @@ test.describe('Connection recovery', () => {
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -1360,10 +1360,10 @@ test.describe('Connection recovery', () => {
     await page.keyboard.press('Enter')
 
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
-    await expect(page.locator('.chat__scroll')).toContainText(
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toContainText(
       'Recovered final response from DB.',
       { timeout: 5000 },
     )
@@ -1404,8 +1404,8 @@ test.describe('Connection recovery', () => {
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
-      () => !!(document.querySelector('.chat__empty-wrap')
-            || document.querySelector('.chat__form')),
+      () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+            || document.querySelector('[data-chat-surface="painted"] .chat__form')),
       { timeout: 10000 }
     )
     await newChat(page)
@@ -1415,10 +1415,10 @@ test.describe('Connection recovery', () => {
     await page.keyboard.press('Enter')
 
     await page.waitForFunction(
-      () => !document.querySelector('.chat__stop'),
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
       { timeout: 10000 }
     )
-    await expect(page.locator('.chat__msg--assistant')).toContainText('Agent response.')
+    await expect(page.locator('[data-chat-surface="painted"] .chat__msg--assistant')).toContainText('Agent response.')
     expect(streamCallCount).toBe(1)
 
     // Simulate visibility change — should not reconnect because the
@@ -1435,7 +1435,7 @@ test.describe('Connection recovery', () => {
 
     // Content should still be intact (not duplicated or lost).
     const msgCount = await page.evaluate(() =>
-      document.querySelectorAll('.chat__msg--assistant').length
+      document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--assistant').length
     )
     expect(msgCount).toBe(1)
   })

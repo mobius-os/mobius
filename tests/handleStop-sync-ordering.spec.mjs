@@ -35,9 +35,9 @@ async function setupChat(page) {
   await page.setViewportSize({ width: 412, height: 915 })
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('.chat__empty-wrap')
-          || document.querySelector('.chat__scroll')
-          || document.querySelector('.chat__form')),
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 10000 }
   )
 }
@@ -145,7 +145,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     // stays open per the route mock above).
     await sendMessage(page, 'first message')
     // Wait until sending=true (Stop button rendered).
-    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__stop')).toBeVisible({ timeout: 5000 })
     // Queue a second message while the first is still streaming.
     await sendMessage(page, 'queued message')
     // Verify the queued tray rendered with the second message.
@@ -161,7 +161,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     // During step 2, the natural onStreamEnd path may attempt to
     // refetch; whether it does or not, the cleared queue must NOT
     // come back.
-    await page.locator('.chat__stop').click()
+    await page.locator('[data-chat-surface="painted"] .chat__stop').click()
     // Poll the queued tray every ~30ms during the stop-await window.
     // Each sample must be empty (or at least not contain the
     // resurrected ts). Any sample seeing "resurrected-queue-item"

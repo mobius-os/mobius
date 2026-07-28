@@ -58,7 +58,7 @@ test('each pane holds one outgoing chat over one staging chat', () => {
   // the condition now also folds in a leaving pane during the exit beat (INV 9), so
   // match the leading clause rather than the exact full expression. The takeover
   // gate is the EFFECTIVE-mode `settingsOverlay` (finding F3), not the committed one.
-  assert.match(shell, /inert=\{settingsOverlay \|\| role !== 'active'/,
+  assert.match(shell, /inert=\{settingsOverlay \|\| !ownerPaints \|\| role !== 'active'/,
     'neither the held nor staging chat may accept interaction')
   assert.match(shell, /composerRequest=\{role === 'active' \? composerRequest : null\}/,
     'an inert staging composer must not consume a one-shot composer request')
@@ -79,6 +79,21 @@ test('only the painted workspace world can expose its handoff layers', () => {
     shell,
     /const handoffClass = !settingsOverlay && ownerPaints && role !== 'active'/,
     'held and staging visibility classes belong only to the world that is actually painting',
+  )
+  assert.match(
+    shell,
+    /data-chat-surface=\{ownerPaints && role === 'active' \? 'painted' : undefined\}/,
+    'browser contracts need one explicit selector for the settled interactive chat surface',
+  )
+  assert.match(
+    shell,
+    /inert=\{settingsOverlay \|\| !ownerPaints \|\| role !== 'active'/,
+    'a retained chat in the parked workspace world must remain inert',
+  )
+  assert.match(
+    shell,
+    /aria-hidden=\{settingsOverlay \|\| !ownerPaints \|\| role !== 'active'/,
+    'a retained chat in the parked workspace world must leave the accessibility tree',
   )
 })
 
