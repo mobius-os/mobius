@@ -422,6 +422,14 @@ test('legacy (ABSENT slot) single mode falls back to the focused pane', () => {
   assert.deepEqual([...v.visibleAppIds], ['42'])
 })
 
+test('a fresh empty legacy seed paints the New Chat landing instead of a blank main', () => {
+  const ws = paneModel.seedFromFlatTabs([])
+  assert.equal('singleScreen' in ws, false, 'the fresh seed still carries no migration marker')
+  const v = singleView(ws)
+  assert.equal(v.fullBleedKey, EMPTY_SINGLE_SURFACE_KEY)
+  assert.equal(v.focusedActiveKey, null)
+})
+
 test('round 4 item 3: a null slot renders home:new-chat while its ROUTE stays chat:null (no chats[0])', () => {
   // Even with populated chats in the tree, an empty single slot NEVER selects a chat —
   // the render key is the New Chat landing and the semantic route is still chat:null.

@@ -27,10 +27,6 @@ import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
-function sseBody(events) {
-  return events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')
-}
-
 async function setupChat(page) {
   await page.setViewportSize({ width: 412, height: 915 })
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -95,23 +91,38 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
       route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
     )
-    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async (route) => {
-      // Hold the stream connection open for the lifetime of the test
-      // so isStreaming stays true and the second send hits the QUEUE
-      // path. (Playwright's route.fulfill flushes the body atomically
-      // — the SSE "stream" needs to be held open externally to
-      // simulate a long-running turn. Pattern lifted from
-      // stream-reconnect.spec.mjs test 4.)
-      await new Promise(r => setTimeout(r, 30000))
-      await route.fulfill({
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
-        body: sseBody([
-          { type: 'catch_up_done' },
-          { type: 'text', content: 'streaming response...' },
-        ]),
-      }).catch(() => {})
-    })
+    // page.route().fulfill() cannot drip a body: it delivers the complete payload and
+    // closes the response. Sleeping before fulfill merely delayed the first SSE event,
+    // then closed the stream and removed Stop before the click. Install a page-local
+    // fetch seam that returns a real open ReadableStream instead. All other requests
+    // continue through Playwright's route mocks.
+    await page.addInitScript(events => {
+      const nativeFetch = window.fetch.bind(window)
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : input?.url
+        if (/\/api\/chats\/[0-9a-f-]+\/stream$/.test(String(url))) {
+          const encoder = new TextEncoder()
+          const stream = new ReadableStream({
+            start(controller) {
+              for (const event of events) {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+              }
+            },
+          })
+          return Promise.resolve(new Response(stream, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+            },
+          }))
+        }
+        return nativeFetch(input, init)
+      }
+    }, [
+      { type: 'catch_up_done' },
+      { type: 'text', content: 'streaming response...' },
+    ])
     await page.route('**/api/chat/stop', async (route) => {
       stopHits++
       // Park for 250ms; any natural-handler refetch firing during

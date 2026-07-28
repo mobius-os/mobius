@@ -198,12 +198,15 @@ async function closeDrawerToggle(page) {
  *  which triggers a real page navigation. */
 async function goBack(page) {
   await page.evaluate(() => history.back())
-  await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+  // Wait from the test runner, not the page's old execution context: the assertion
+  // below should report an accidental document navigation as the product failure,
+  // rather than this helper racing the context swap with a second evaluate().
+  await page.waitForTimeout(500)
 }
 
 async function goForward(page) {
   await page.evaluate(() => history.forward())
-  await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+  await page.waitForTimeout(500)
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +579,10 @@ test.describe('Back button edge cases', () => {
     expect((await getNavState(page)).url).toBe('/shell/')
 
     await openDrawer(page)
+    // Move to a different chat so this test creates a real navigation entry. Opening
+    // and selecting the already-active row only consumes the drawer sentinel; a
+    // subsequent Back would correctly leave the app because there is no chat route
+    // to return to.
     await navigateToChat(page, 1)
     expect((await getNavState(page)).url).toBe('/shell/')
 

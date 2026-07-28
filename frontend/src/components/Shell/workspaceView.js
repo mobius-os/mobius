@@ -416,7 +416,11 @@ export function deriveContentVisibility({
   // An INITIALIZED but empty slot in single mode is the New Chat landing (round 4
   // item 3): a first-class home:new-chat surface, never the freshest chat. Legacy
   // absent-slot blobs still fall back to the focused pane (hasSlot false).
-  const emptySingleSlot = single && hasSlot && paneModel.singleScreenKey(workspace) == null
+  // A fresh workspace has no persisted slot property yet. When its fallback pane is
+  // also empty, that is still the first-class New Chat destination rather than a
+  // blank full-bleed wrapper. Preserve the legacy focused-pane fallback whenever a
+  // concrete focused tab exists; only the genuinely empty legacy seed paints home.
+  const emptySingleSlot = single && slotKey == null
   // The active tab key that drives the full-bleed surface + AppCanvas `active`
   // prop. Under the Settings overlay it is null (panes hidden behind it). In single
   // mode it is the slot key (or the focused-pane fallback); otherwise the focused
