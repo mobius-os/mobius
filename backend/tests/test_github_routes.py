@@ -2100,6 +2100,182 @@ def test_cleanup_terminal_staging_checkout_only_removes_disposable_clone():
   assert live_repo.exists()
 
 
+def test_contribution_lifecycle_persists_equivalence_in_live_linked_repo():
+  """Send records the local witness; merged cleanup promotes it before delete."""
+  from app import app_git
+  from app.routes.github import (
+    _cleanup_terminal_staging_checkout,
+    _record_pending_equivalence,
+    _settle_equivalence,
+  )
+
+  data_dir = Path(get_settings().data_dir)
+  live = data_dir / "apps" / "equivalence-live"
+  review = data_dir / "contrib" / "equivalence-review" / "worktree"
+  live.mkdir(parents=True)
+  subprocess.run(["git", "init", "-qb", "main", str(live)], check=True)
+  subprocess.run(["git", "-C", str(live), "config", "user.name", "Test"], check=True)
+  subprocess.run(
+    ["git", "-C", str(live), "config", "user.email", "test@example.invalid"],
+    check=True,
+  )
+  (live / "index.jsx").write_text("base\n")
+  subprocess.run(["git", "-C", str(live), "add", "index.jsx"], check=True)
+  subprocess.run(["git", "-C", str(live), "commit", "-qm", "base"], check=True)
+  base = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", "HEAD"], text=True,
+  ).strip()
+  (live / "index.jsx").write_text("reviewed\n")
+  subprocess.run(["git", "-C", str(live), "commit", "-qam", "reviewed"], check=True)
+  head = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", "HEAD"], text=True,
+  ).strip()
+  review.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(live), "worktree", "add", "-qb", "fix/review", str(review), head],
+    check=True,
+  )
+  diff = app_git._canonical_diff(review, base, head)
+  assert diff is not None
+  digest = hashlib.sha256(diff).hexdigest()
+  record = {
+    "id": "equivalence-review",
+    "status": "open",
+    "plan": {
+      "repo_path": str(review),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": digest,
+    },
+  }
+
+  pending = _record_pending_equivalence(record)
+  assert pending and app_git.ref_exists(live, pending)
+  # Simulate GitHub's squash commit: a new identity with the reviewed tree.
+  tree = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", f"{head}^{{tree}}"], text=True,
+  ).strip()
+  upstream = subprocess.check_output(
+    [
+      "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+      "-C", str(live), "commit-tree", tree, "-p", base, "-m", "squash",
+    ],
+    text=True,
+  ).strip()
+  record["status"] = "merged"
+  landed = _settle_equivalence(record, upstream)
+  assert landed and app_git.ref_exists(live, landed)
+  assert not app_git.ref_exists(live, pending)
+
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not review.exists()
+  assert app_git.ref_exists(live, landed)
+
+
+def test_standalone_app_review_persists_equivalence_in_installed_repo():
+  """A no-origin app's disposable review clone cannot own the only witness."""
+  from app import app_git
+  from app.routes.github import (
+    _cleanup_terminal_staging_checkout,
+    _record_pending_equivalence,
+    _settle_equivalence,
+  )
+
+  data_dir = Path(get_settings().data_dir)
+  live = data_dir / "apps" / "equivalence-standalone-live"
+  review = data_dir / "contrib" / "equivalence-standalone" / "worktree"
+  for repo in (live, review):
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-qb", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+      ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+      check=True,
+    )
+
+  (review / "index.jsx").write_text("base\n")
+  subprocess.run(["git", "-C", str(review), "add", "index.jsx"], check=True)
+  subprocess.run(["git", "-C", str(review), "commit", "-qm", "review base"], check=True)
+  base = subprocess.check_output(
+    ["git", "-C", str(review), "rev-parse", "HEAD"], text=True,
+  ).strip()
+  (review / "index.jsx").write_text("reviewed\n")
+  subprocess.run(["git", "-C", str(review), "commit", "-qam", "review head"], check=True)
+  head = subprocess.check_output(
+    ["git", "-C", str(review), "rev-parse", "HEAD"], text=True,
+  ).strip()
+
+  # The installed synthetic app has the same accepted content but unrelated
+  # commit identities. It does not contain either reviewed commit beforehand.
+  (live / "index.jsx").write_text("reviewed\n")
+  subprocess.run(["git", "-C", str(live), "add", "index.jsx"], check=True)
+  subprocess.run(
+    ["git", "-C", str(live), "commit", "-qm", "installed synthetic source"],
+    check=True,
+  )
+  source_sha = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", "HEAD"], text=True,
+  ).strip()
+  live_tree = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", "HEAD^{tree}"], text=True,
+  ).strip()
+  replayed_source = subprocess.check_output(
+    [
+      "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+      "-C", str(live), "commit-tree", live_tree, "-m", "store replay",
+    ],
+    text=True,
+  ).strip()
+  subprocess.run(
+    [
+      "git", "-C", str(live), "update-ref", "refs/heads/main",
+      replayed_source, source_sha,
+    ],
+    check=True,
+  )
+  subprocess.run(["git", "-C", str(live), "reset", "--hard", "-q"], check=True)
+  assert app_git.ref_is_ancestor(live, source_sha, replayed_source) is False
+  assert subprocess.run(
+    ["git", "-C", str(live), "cat-file", "-e", f"{head}^{{commit}}"],
+    check=False,
+  ).returncode != 0
+
+  diff = app_git._canonical_diff(review, base, head)
+  assert diff is not None
+  digest = hashlib.sha256(diff).hexdigest()
+  record = {
+    "id": "equivalence-standalone",
+    "status": "open",
+    "plan": {
+      "repo_path": str(review),
+      "source_repo_path": str(live),
+      "source_sha": source_sha,
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": digest,
+    },
+  }
+
+  pending = _record_pending_equivalence(record)
+  assert pending and app_git.ref_exists(live, pending)
+  assert not app_git.ref_exists(review, pending)
+  # The exact reviewed commits were imported without moving the installed app.
+  assert app_git.head_sha(live, "HEAD") == replayed_source
+  recorded = app_git._read_equivalent_change(live, pending)
+  assert recorded is not None and recorded.source_sha == replayed_source
+  assert subprocess.run(
+    ["git", "-C", str(live), "cat-file", "-e", f"{head}^{{commit}}"],
+    check=False,
+  ).returncode == 0
+
+  record["status"] = "merged"
+  landed = _settle_equivalence(record)
+  assert landed and app_git.ref_exists(live, landed)
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not review.exists()
+  assert app_git.ref_exists(live, landed)
+
+
 def test_ensure_owner_fork_remote_runs_in_repo_after_pinning_origin(
   tmp_path, monkeypatch,
 ):
