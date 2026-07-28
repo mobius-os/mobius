@@ -137,8 +137,8 @@ test('the status word distinguishes waiting, blocked, and in-flight', () => {
 test('multiple independent review items share one bounded review panel', () => {
   assert.match(cardSrc, /const grouped = reviewItems\.length > 1/)
   assert.match(cardSrc, /contrib-card-stack--grouped/)
-  assert.match(cardSrc, /\{reviewItems\.length\} contributions ready/)
-  assert.match(cardSrc, /Review each one separately\./)
+  assert.match(cardSrc, /\{reviewItems\.length\} reviews ready/)
+  assert.match(cardSrc, /Review each item separately\./)
   assert.match(cardCss, /\.contrib-card-stack\s*\{[\s\S]*?width:\s*min\(100%, 640px\);[\s\S]*?margin-inline:\s*auto;/)
   assert.match(cardCss, /\.contrib-card-stack--grouped\s*\{[\s\S]*?max-height:\s*min\(52vh, 520px\);/)
   assert.match(cardCss, /\.contrib-card-stack--grouped \.contrib-card\s*\{[\s\S]*?border-radius:\s*0;/)

@@ -108,16 +108,16 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
     <div
       className={`contrib-card-stack${grouped ? ' contrib-card-stack--grouped' : ''}`}
       role={grouped ? 'region' : undefined}
-      aria-label={grouped ? `${reviewItems.length} contributions ready` : undefined}
+      aria-label={grouped ? `${reviewItems.length} reviews ready` : undefined}
     >
       {grouped && (
         <div className="contrib-card-stack__heading">
           <div>
             <div className="contrib-card-stack__title">
-              {reviewItems.length} contributions ready
+              {reviewItems.length} reviews ready
             </div>
             <div className="contrib-card-stack__copy">
-              Review each one separately.
+              Review each item separately.
             </div>
           </div>
           <span className="contrib-card-stack__count">{reviewItems.length}</span>
