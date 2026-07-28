@@ -327,10 +327,11 @@
   font-size: 12.5px;
   -webkit-tap-highlight-color: transparent;
 }
-/* The whole tab remains the strip's single horizontal pan surface. A deliberate
-   vertical pull still lifts it without spending title width on a second handle. */
+/* The tab button reserves one-finger motion so the browser cannot cancel a
+   post-hold horizontal drag. Before the hold, the drag controller pans the strip
+   one-to-one; surrounding strip whitespace and close buttons remain native pan-x. */
 .shell__tab-open[data-drag-key] {
-  touch-action: pan-x pinch-zoom;
+  touch-action: pinch-zoom;
 }
 .shell__tab-open:focus-visible {
   outline: none;

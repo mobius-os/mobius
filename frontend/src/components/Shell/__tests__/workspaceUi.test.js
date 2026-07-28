@@ -638,14 +638,18 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
-test('tabs keep one full-width pan and drag surface while the shell root owns page zoom', () => {
+test('mobile tabs require a hold before dragging while the strip preserves pinch zoom', () => {
   assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
-  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
-  assert.doesNotMatch(paneStrip, /data-touch-drag-handle|shell__tab-kind|shell__tab-drag-handle/)
+  assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pinch-zoom/)
+  assert.doesNotMatch(shellCss, /data-touch-drag-handle/)
+  assert.doesNotMatch(paneStrip, /data-touch-drag-handle/)
+  assert.doesNotMatch(paneStrip, /GripVertical|shell__tab-drag-handle/)
   assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
-    'the tab itself remains the only drag source')
+    'the tab button is the one drag source')
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
+  assert.match(dragBinding, /if \(sourceKind === 'tab'\) arm\(\)/)
   assert.match(dragBinding, /touchMoveIntent\(dx, dy, sourceKind\)/)
+  assert.match(dragBinding, /scrollStripEl\.scrollLeft \+= previousPoint\.x - ev\.clientX/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
 })
 
@@ -856,7 +860,7 @@ test('the builder preview cannot outlive its drag session past one visibility bo
   // guards keep it bounded:
   // (1) SOURCE — pagehide joins the per-session teardown, so a BFCache freeze that
   //     fires no pointercancel/blur/visibilitychange still cancels the drag.
-  assert.match(dragBinding, /const onPageHide = \(\) => cleanup\(\{ suppressClick: armed \}\)/)
+  assert.match(dragBinding, /const onPageHide = \(\) => cleanup\(\{ suppressClick: armed \|\| scrolling \}\)/)
   assert.match(dragBinding, /window\.addEventListener\('pagehide', onPageHide\)/)
   assert.match(dragBinding, /window\.removeEventListener\('pagehide', onPageHide\)/)
   // (2) BACKSTOP — a persistent foreground reconcile force-cleans any session still
