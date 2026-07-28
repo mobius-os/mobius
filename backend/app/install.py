@@ -239,11 +239,28 @@ _HTTP_TIMEOUT = 15.0
 # different host.
 _MAX_REDIRECTS = 5
 
-# Cron scaffold lives at this path in the built image. Tests normally override
-# the module attribute; the test-runtime mutation guard below is the backstop
-# when the baked scaffold is present (as it is inside the production image).
-CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
+_BAKED_CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
+# Tests override this module attribute to prevent production cron mutation.
+CRON_SCAFFOLD = _BAKED_CRON_SCAFFOLD
 _ALLOW_TEST_CRON_ENV = "MOBIUS_ALLOW_TEST_CRON"
+
+
+def _cron_scaffold() -> Path:
+  """Return an explicit test override or the active production scaffold.
+
+  Startup reconciliation must migrate persisted crontab entries immediately
+  after a platform update, before the next image rebuild refreshes /app. Prefer
+  the served checkout for that production default; retain the baked copy as
+  the degraded-boot floor.
+  """
+  if CRON_SCAFFOLD != _BAKED_CRON_SCAFFOLD:
+    return CRON_SCAFFOLD
+  live = (
+    Path(__file__).resolve().parent.parent
+    / "scripts"
+    / "init-cron-scaffold.sh"
+  )
+  return live if live.is_file() else _BAKED_CRON_SCAFFOLD
 
 
 def _cron_mutation_blocked_in_test_runtime() -> bool:
@@ -1141,15 +1158,22 @@ def _register_cron(slug: str, schedule_expr: str, job_path: Path,
       500,
       "Cron mutation is disabled in the test runtime.",
     )
-  scaffold = CRON_SCAFFOLD
+  scaffold = _cron_scaffold()
   if not scaffold.exists():
     # In tests we mock this away; in containers it's always present.
     raise HTTPException(500, "init-cron-scaffold.sh missing from image.")
   cmd = [str(scaffold), slug, schedule_expr, job_path.name]
   if app_id is not None:
     cmd.append(str(app_id))
+  # Cron has a deliberately minimal environment. Materialize the configured
+  # backend URL and the active supervisor path into its generated entry so
+  # scheduled jobs use the same live runner and server as Run now.
+  from app.app_jobs import runner_script
+  env = dict(os.environ)
+  env["API_BASE_URL"] = get_settings().api_base_url
+  env["MOBIUS_APP_JOB_RUNNER"] = str(runner_script())
   result = subprocess.run(
-    cmd, capture_output=True, text=True, timeout=30,
+    cmd, capture_output=True, text=True, timeout=30, env=env,
   )
   if result.returncode != 0:
     raise HTTPException(

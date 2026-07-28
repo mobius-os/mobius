@@ -33,6 +33,11 @@ being external attackers reaching the public HTTPS endpoint.
   the app's exact installed permissions. Opacity protects ambient **owner**
   authority — it is not a promise that ordinary app code never sees its own
   scoped credential.
+- **Background-agent jobs:** apps declaring `permissions.background_agent`
+  run under the reviewed data contract in
+  [`BACKGROUND_JOBS.md`](BACKGROUND_JOBS.md). Möbius prefers Bubblewrap after a
+  real namespace probe, otherwise uses a fully probed Landlock ABI 6+ boundary,
+  and fails closed if neither executor can enforce the contract.
 - **Rate limiting:** 120 req/min global, 3-5/min on auth endpoints.
   Uses TCP peer address (not X-Forwarded-For).
 

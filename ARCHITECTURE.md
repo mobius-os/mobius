@@ -254,6 +254,11 @@ Note: there is no `routes/ai.py` and no `POST /api/ai`. An older mini-app AI pro
 Host-mediated device/browser access uses the versioned capability broker; see
 [`CAPABILITIES.md`](CAPABILITIES.md) for the manifest, app API, wire protocol,
 provider contract, lifecycle rules, and trust-tier escape hatches.
+Server-side app jobs have a separate two-tier model: ordinary reviewed scripts
+retain the Möbius process authority, while `background_agent` jobs run through
+one reviewed data contract and the strongest secure executor available on the
+host. See [`BACKGROUND_JOBS.md`](BACKGROUND_JOBS.md) for the contract,
+Bubblewrap/Landlock selection, history, and verification strategy.
 
 | Tier | Boundary and capability | UX / standalone consequence |
 |---|---|---|
@@ -1081,4 +1086,7 @@ cover it deterministically.
 ## See also
 
 - **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/platform/frontend/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
+- **Secure server-side app jobs:** `BACKGROUND_JOBS.md` defines the
+  background-agent data contract, portable executor design, historical
+  rationale, and topology-level verification.
 - **Subsystem deep-dives are inlined above** as their own sections: *Stop-chat contract*, *AskUserQuestion interception*, *Chat persistence — single-writer actor*, *Navigation back-stack + drawer model*, *Service worker + offline*, and *Mini-app manifest (mobius.json)*. (The chat-persistence v2 design + staged-rollout notes remain internal/gitignored — the as-built contract is the section above.)
