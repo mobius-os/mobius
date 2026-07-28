@@ -338,3 +338,46 @@ export default function MarkdownFixture() {
     "Markdown runtime dependencies escaped the self-contained app bundle"
   )
   assert output.is_file() and output.stat().st_size > 0
+
+
+def test_openai_app_icons_compile_from_the_supported_public_entry(tmp_path):
+  """Generic mini-app chrome uses the same maintained icon set as the shell."""
+  aliases = dict(runtime_library_aliases())
+  icon_entry = (
+    runtime_node_path() / "@openai" / "apps-sdk-ui" / "dist" / "es"
+    / "components" / "Icon" / "index.js"
+  )
+  assert aliases["@openai/apps-sdk-ui/components/Icon"] == icon_entry
+
+  entry = tmp_path / "openai-icons.jsx"
+  output = tmp_path / "openai-icons.js"
+  metafile = tmp_path / "openai-icons-meta.json"
+  entry.write_text(
+    """import { ArrowLeft, Chat, Check, Copy, Search, Trash } from '@openai/apps-sdk-ui/components/Icon'
+
+export default function OpenAIIconsFixture() {
+  return <div>{[ArrowLeft, Chat, Check, Copy, Search, Trash].map((Icon) => <Icon key={Icon.name} />)}</div>
+}
+"""
+  )
+
+  completed = subprocess.run(
+    esbuild_command(entry, output, metafile=metafile),
+    capture_output=True,
+    check=False,
+    env=esbuild_environment(),
+    text=True,
+    timeout=ESBUILD_TIMEOUT_SECS,
+  )
+  assert completed.returncode == 0, completed.stderr
+
+  metadata = json.loads(metafile.read_text())
+  entry_outputs = [
+    details for details in metadata["outputs"].values()
+    if details.get("entryPoint")
+  ]
+  assert len(entry_outputs) == 1
+  assert entry_outputs[0].get("imports") == [], (
+    "OpenAI app icons escaped the pinned self-contained app bundle"
+  )
+  assert output.is_file() and output.stat().st_size > 0

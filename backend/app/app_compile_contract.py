@@ -32,6 +32,7 @@ BUNDLED_RUNTIME_LIBS: tuple[str, ...] = (
   "marked-highlight",
   "highlight.js/*",
   "dompurify",
+  "@openai/apps-sdk-ui/components/Icon",
 )
 
 COMPILED_RUNTIME_ABI = 1
@@ -116,6 +117,11 @@ def runtime_library_aliases() -> tuple[tuple[str, Path], ...]:
   node_path = runtime_node_path()
   roots = sorted({_package_root(specifier) for specifier in BUNDLED_RUNTIME_LIBS})
   overrides = (
+    (
+      "@openai/apps-sdk-ui/components/Icon",
+      node_path / "@openai" / "apps-sdk-ui" / "dist" / "es"
+      / "components" / "Icon" / "index.js",
+    ),
     ("three/addons", node_path / "three" / "examples" / "jsm"),
     # Marked's browser field is a UMD build. Point the public root import at
     # its ESM entry so `import { marked } from "marked"` keeps the documented
