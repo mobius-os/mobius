@@ -765,6 +765,11 @@ export default function Shell() {
   const toastSequenceRef = useRef(0)
   const [toast, setToast] = useState(null)
   const [settingsFocusTarget, setSettingsFocusTarget] = useState(null)
+  // Settings stays mounted across workspace transitions. An explicit shell
+  // apply can therefore complete a platform-conflict repair without remounting
+  // Settings; this token lets that live instance re-read authoritative status
+  // even when a multi-pane workspace deliberately defers the full-page reload.
+  const [settingsRefreshToken, setSettingsRefreshToken] = useState(0)
   const showToast = useCallback((
     message,
     { variant = 'info', duration = 4000, action } = {},
@@ -2809,6 +2814,9 @@ export default function Shell() {
       // leash rides the same moment: performShellReload posts SKIP_WAITING to
       // the waiting worker so the SW generation flips exactly when the page
       // reloads.
+      if (ev.type === 'shell_apply_now') {
+        setSettingsRefreshToken(token => token + 1)
+      }
       requestShellReload({ passive: ev.type === 'shell_rebuilt' })
     } else if (ev.type === 'shell_rebuild_failed') {
       // Deliberately silent in the owner UI. The atomic publisher keeps the
@@ -4070,6 +4078,8 @@ export default function Shell() {
                 onThemeChange={loadTheme}
                 onOpenChat={selectChat}
                 focusTarget={settingsFocusTarget}
+                active={!settingsUnderlay && (settingsFullBleed || !!settingsPaned)}
+                refreshToken={settingsRefreshToken}
               />
             </Suspense>
           </div>

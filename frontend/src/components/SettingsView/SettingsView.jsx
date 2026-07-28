@@ -314,7 +314,13 @@ async function shellDocumentReady() {
   }
 }
 
-export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = null }) {
+export default function SettingsView({
+  onThemeChange,
+  onOpenChat,
+  focusTarget = null,
+  active = true,
+  refreshToken = 0,
+}) {
   const queryClient = useQueryClient()
   const settingsQuery = settingsQueries.owner.useQuery()
   const providerStatusQuery = authQueries.provider.statuses.useQuery()
@@ -973,8 +979,11 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
     return true
   }
 
-  // Platform self-update: read availability once on mount so Settings can show
-  // "new update available" without a polling daemon.
+  // Platform self-update: read availability whenever this persistent Settings
+  // surface becomes visible, and when an explicit shell apply reports that
+  // agent-authored platform work settled. Settings can remain mounted beside a
+  // resolver chat, so mount-only fetching leaves a cleared conflict looking
+  // blocked until a full page reload.
   const refreshPlatform = useCallback(async () => {
     try {
       const res = await api.platform.status()
@@ -983,7 +992,9 @@ export default function SettingsView({ onThemeChange, onOpenChat, focusTarget = 
       // A status hiccup just leaves the section hidden — never blocks Settings.
     }
   }, [])
-  useEffect(() => { refreshPlatform() }, [refreshPlatform])
+  useEffect(() => {
+    if (active) refreshPlatform()
+  }, [active, refreshPlatform, refreshToken])
 
   // Apply is currently one synchronous request, but the server publishes its
   // real fetch/reconcile/validate/build phases while that request is running.

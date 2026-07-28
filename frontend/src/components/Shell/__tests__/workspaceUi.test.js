@@ -15,6 +15,9 @@ const paneModelSrc = readFileSync(new URL('../paneModel.js', import.meta.url), '
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const dragBinding = readFileSync(new URL('../useWorkspaceDrag.js', import.meta.url), 'utf8')
 const paneStrip = readFileSync(new URL('../PaneStrip.jsx', import.meta.url), 'utf8')
+const settingsView = readFileSync(
+  new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8',
+)
 const walkthrough = readFileSync(
   new URL('../../Walkthrough/WalkthroughOverlay.jsx', import.meta.url), 'utf8',
 )
@@ -799,6 +802,21 @@ test('the Settings surface responds to PANE width via a query container', () => 
   assert.doesNotMatch(settingsCss, /@media \(max-width: 620px\)/)
   // The update-review modal stays a FIXED takeover (design: not reclassified to a pane).
   assert.match(urmCss, /\.urm__overlay\s*\{[\s\S]*?position:\s*fixed/)
+})
+
+test('a manual platform reconcile refreshes the persistent Settings surface', () => {
+  assert.match(shell, /const \[settingsRefreshToken, setSettingsRefreshToken\] = useState\(0\)/)
+  assert.match(
+    shell,
+    /if \(ev\.type === 'shell_apply_now'\) \{\s*setSettingsRefreshToken\(token => token \+ 1\)/,
+  )
+  assert.match(shell, /active=\{!settingsUnderlay && \(settingsFullBleed \|\| !!settingsPaned\)\}/)
+  assert.match(shell, /refreshToken=\{settingsRefreshToken\}/)
+  assert.match(settingsView, /active = true,\s*refreshToken = 0,/)
+  assert.match(
+    settingsView,
+    /useEffect\(\(\) => \{\s*if \(active\) refreshPlatform\(\)\s*\}, \[active, refreshPlatform, refreshToken\]\)/,
+  )
 })
 
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {
