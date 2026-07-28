@@ -51,7 +51,7 @@ test('Send, Steer, and Stop reuse one continuously visible primary action', () =
 
 test('per-row fast-forward dispatches on touchend too', () => {
   const steerBlock = queuedMessages.match(
-    /className="queued__steer"[\s\S]*?aria-label="Send this queued message now"/,
+    /className="queued__action queued__steer"[\s\S]*?aria-label="Send this queued message now"/,
   )?.[0] || ''
   assert.match(steerBlock, /onPointerDown=\{\(e\) => e\.preventDefault\(\)\}/)
   assert.match(steerBlock, /onTouchEnd=\{\(e\) => \{/)

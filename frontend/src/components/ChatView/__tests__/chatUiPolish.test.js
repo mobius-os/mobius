@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const queuedMessages = readFileSync(new URL('../QueuedMessages.jsx', import.meta.url), 'utf8')
 const chatSettingsPanel = readFileSync(
   new URL('../ChatSettingsPanel.jsx', import.meta.url),
   'utf8',
@@ -144,18 +145,34 @@ test('running activity uses a masked solid-text sweep, not gradient-clipped text
     'the base or sweep text must never depend on transparent text fill')
 })
 
-test('queued row actions expose real touch targets and keyboard focus', () => {
+test('queued row actions share full touch targets with compact visible wells', () => {
   const css = stripComments(chatCss)
-  const steerRule = css.match(/\.queued__steer\s*\{[^}]*\}/)?.[0] || ''
-  const cancelRule = css.match(/\.queued__cancel\s*\{[^}]*\}/)?.[0] || ''
-  const focusRule = css.match(
-    /\.queued__steer:focus-visible,\s*\.queued__cancel:focus-visible\s*\{[^}]*\}/,
-  )?.[0] || ''
+  const trayRule = css.match(/\.queued\s*\{[^}]*\}/)?.[0] || ''
+  const rowRule = css.match(/\.queued__row\s*\{[^}]*\}/)?.[0] || ''
+  const toggleRule = css.match(/\.queued__toggle\s*\{[^}]*\}/)?.[0] || ''
+  const actionRule = css.match(/\.queued__action\s*\{[^}]*\}/)?.[0] || ''
+  const wellRule = css.match(/\.queued__action::before\s*\{[^}]*\}/)?.[0] || ''
+  const focusWellRule = css.match(/\.queued__action:focus-visible::before\s*\{[^}]*\}/)?.[0] || ''
 
-  for (const rule of [steerRule, cancelRule]) {
-    assert.match(rule, /width:\s*44px/)
-    assert.match(rule, /height:\s*44px/)
-  }
-  assert.match(focusRule, /outline:\s*2px solid var\(--accent\)/,
-    'both icon-only actions need a visible keyboard focus indicator')
+  assert.match(trayRule, /width:\s*100%/,
+    'the flex-item tray must shrink with the composer instead of resolving to its 720px maximum')
+  assert.match(trayRule, /max-width:\s*720px/)
+  assert.match(rowRule, /gap:\s*0/,
+    'adjacent action targets should not carry an extra flex gap')
+  assert.match(toggleRule, /margin-right:\s*4px/,
+    'text keeps its breathing room independently of the adjacent action pair')
+  assert.match(actionRule, /width:\s*44px/)
+  assert.match(actionRule, /height:\s*44px/)
+  assert.match(wellRule, /width:\s*30px/)
+  assert.match(wellRule, /height:\s*30px/)
+  assert.doesNotMatch(css, /\.queued__steer\s*\{/,
+    'fast-forward should inherit the neutral action color at rest')
+  assert.doesNotMatch(css, /\.queued__steer::before\s*\{/,
+    'fast-forward should inherit the neutral action well at rest')
+  assert.match(focusWellRule, /box-shadow:\s*0 0 0 2px var\(--accent\)/,
+    'keyboard focus should follow the visible well inside the full touch target')
+  assert.match(queuedMessages, /className="queued__action queued__steer"/)
+  assert.match(queuedMessages, /className="queued__action queued__cancel"/)
+  assert.match(queuedMessages, /<DoubleChevronRight width=\{16\} height=\{16\}/)
+  assert.match(queuedMessages, /<X width=\{16\} height=\{16\}/)
 })

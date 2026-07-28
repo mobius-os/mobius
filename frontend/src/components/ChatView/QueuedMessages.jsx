@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
+import { DoubleChevronRight, X } from '@openai/apps-sdk-ui/components/Icon'
 import { stripAugmentation } from './msgText.js'
 import { cidOf } from './chatRuntimeState.js'
 
@@ -133,14 +133,15 @@ export default function QueuedMessages({
                 </button>
                 {steerActive && msg.serverTs === true && (
                   // Per-row fast-forward (owner ask, 2026-07-17): the same
-                  // double-chevron as the composer's steer button, icon-only —
-                  // send exactly THIS message into the running turn now.
+                  // double-chevron as the composer's steer button, in the
+                  // queue action's compact neutral well — send exactly THIS
+                  // message into the running turn now.
                   // Rendered only while a turn is live and the row is
                   // server-confirmed (an optimistic row's cid selects nothing
                   // on the backend).
                   <button
                     type="button"
-                    className="queued__steer"
+                    className="queued__action queued__steer"
                     onPointerDown={(e) => e.preventDefault()}
                     onTouchEnd={(e) => {
                       e.preventDefault()
@@ -151,20 +152,18 @@ export default function QueuedMessages({
                     title="Send now"
                     disabled={steerBusy}
                   >
-                    <DoubleChevronRight width={14} height={14} />
+                    <DoubleChevronRight width={16} height={16} aria-hidden="true" />
                   </button>
                 )}
                 <button
                   type="button"
-                  className="queued__cancel"
+                  className="queued__action queued__cancel"
                   onPointerDown={(e) => e.preventDefault()}
                   onClick={() => onCancel?.(cidOf(msg))}
                   aria-label="Cancel queued message"
                   title="Cancel"
                 >
-                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
-                    <path d="M2 2l7 7M9 2l-7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-                  </svg>
+                  <X width={16} height={16} aria-hidden="true" />
                 </button>
               </div>
             )
