@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import uuid
 from pathlib import Path
@@ -29,6 +30,7 @@ MOBIUS_GID = 1000
 # cron never restarts the container for us.
 SUPERVISOR_LOG = DATA_DIR / "cron-logs" / "app-jobs.log"
 SUPERVISOR_LOG_CAP = 2 * 1024 * 1024
+READY_WAIT_SECONDS = 90
 
 
 def _log(app_id: object, message: str) -> None:
@@ -50,6 +52,29 @@ def _log(app_id: object, message: str) -> None:
 def _start_ticks(pid: int) -> int:
   tail = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
   return int(tail[19])
+
+
+def _wait_for_ready(timeout_seconds: int = READY_WAIT_SECONDS) -> bool:
+  """Wait only for the platform startup dependency bootstrap jobs require.
+
+  A bootstrap install runs during FastAPI lifespan, while the app-job runner
+  needs the backend to mint a scoped token and return job context.  `/api/ready`
+  is the platform's existing readiness contract; polling it here avoids a
+  startup ordering race without adding a second scheduler or retry system.
+  """
+  deadline = time.monotonic() + max(0, timeout_seconds)
+  while True:
+    try:
+      request = urllib.request.Request(f"{API_BASE_URL}/api/ready")
+      with urllib.request.urlopen(request, timeout=2) as response:
+        if response.status == 200:
+          return True
+    except Exception:
+      pass
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+      return False
+    time.sleep(min(1, remaining))
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -243,11 +268,15 @@ def _sandboxed_command(
 
 
 def run() -> int:
-  if len(sys.argv) != 3 or not re.fullmatch(r"[0-9]+", sys.argv[1]):
-    _log(sys.argv[1] if len(sys.argv) > 1 else "?", "rejected: bad argv")
+  argv = sys.argv[1:]
+  wait_for_ready = argv[:1] == ["--wait-for-ready"]
+  if wait_for_ready:
+    argv = argv[1:]
+  if len(argv) != 2 or not re.fullmatch(r"[0-9]+", argv[0]):
+    _log(argv[0] if argv else "?", "rejected: bad argv")
     return 2
-  app_id = int(sys.argv[1])
-  job = Path(sys.argv[2])
+  app_id = int(argv[0])
+  job = Path(argv[1])
   if job.is_symlink():
     _log(app_id, f"rejected: symlinked job {job}")
     return 2
@@ -283,6 +312,9 @@ def run() -> int:
     "job": str(resolved),
   })
   try:
+    if wait_for_ready and not _wait_for_ready():
+      _log(app_id, "failed: timed out waiting for platform readiness")
+      return 4
     app_token = _mint_app_token(app_id)
     if not app_token:
       _log(app_id, "failed: could not mint app token (backend down or bad service token)")
