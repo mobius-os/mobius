@@ -29,9 +29,9 @@ import shlex
 
 # Recall metadata rides inline on the SSE event, the persisted tool block, and
 # the compacted activity summary — the same budget the web-source citations
-# live within. memory_search.py itself returns at most 4 files with 900-char
-# excerpts; these ceilings leave headroom without letting a malformed or
-# hostile stdout inflate every transcript read.
+# live within. Memory transports full selected nodes in ordinary tool output;
+# its final receipt carries only bounded path/title metadata. These ceilings
+# keep a malformed or hostile stdout from inflating every transcript read.
 MAX_RECALL_NOTES = 12
 MAX_RECALL_TITLE_CHARS = 120
 MAX_RECALL_EXCERPT_CHARS = 300

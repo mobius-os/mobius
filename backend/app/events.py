@@ -276,6 +276,11 @@ TOOL_OUTPUT_INLINE_THRESHOLD = 4096
 # reader actually wants) of a carved plain-text output.
 TOOL_OUTPUT_HEAD = 2048
 TOOL_OUTPUT_TAIL = 1024
+# A tool may publish a compact machine-readable receipt on its final line.
+# Preserve that complete line when it is reasonably bounded; a plain tail slice
+# can otherwise start halfway through the receipt and turn a successful result
+# into an apparent failure.
+TOOL_OUTPUT_FINAL_LINE_MAX = 8192
 # Hard ceiling on the whole excerpt. Per-string carving handles the common shell
 # envelope (one big stdout), but a JSON value with MANY small strings re-
 # serializes near full size, which would defeat "bounded on the wire". When the
@@ -297,11 +302,20 @@ _TOOL_OUTPUT_EXIT_RE = re.compile(r"^Exit code (\d+)\r?\n")
 
 
 def _shorten_text(s: str) -> str:
-  """head + a byte-count marker + tail, for a plain-text output over budget."""
+  """Head + marker + tail, preserving a bounded complete final line."""
   if len(s) <= TOOL_OUTPUT_HEAD + TOOL_OUTPUT_TAIL:
     return s
   head = s[:TOOL_OUTPUT_HEAD]
   tail = s[-TOOL_OUTPUT_TAIL:]
+  trimmed = s.rstrip("\r\n")
+  final_start = trimmed.rfind("\n") + 1
+  final_suffix = s[final_start:]
+  if (
+    final_start > 0
+    and final_start < len(s) - TOOL_OUTPUT_TAIL
+    and len(final_suffix) <= TOOL_OUTPUT_FINAL_LINE_MAX
+  ):
+    tail = final_suffix
   shown = len(head) + len(tail)
   return f"{head}\n…[{len(s)} B total — {shown} shown, expand for full]…\n{tail}"
 

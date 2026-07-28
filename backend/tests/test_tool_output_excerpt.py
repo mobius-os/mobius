@@ -11,6 +11,7 @@ from app.events import (
     excerpt_tool_output,
     tool_output_exit_code,
 )
+from app.memory_recall import RECALL_HIT, recall_from_result
 
 
 def test_excerpt_is_nonempty_and_preserves_head_and_tail():
@@ -25,6 +26,29 @@ def test_excerpt_is_nonempty_and_preserves_head_and_tail():
     assert excerpt.endswith(body[-1024:])
     # The marker announces the true size so the reader knows it is a preview.
     assert str(full_len) in excerpt
+
+
+def test_excerpt_preserves_a_complete_bounded_final_receipt_line():
+    notes = [
+        {
+            "id": f"node-{index}",
+            "path": f"notes/node-{index}.md",
+            "title": "Detailed title " + ("x" * 180),
+        }
+        for index in range(12)
+    ]
+    receipt = "MOBIUS_MEMORY_RESULT_V1:" + json.dumps({
+        "status": "hit",
+        "notes": notes,
+    })
+    assert len(receipt) > 1024
+    content = ("complete memory output\n" * 5000) + receipt + "\n"
+
+    excerpt, _, exit_code = excerpt_tool_output(content)
+
+    assert exit_code is None
+    assert receipt in excerpt
+    assert recall_from_result(excerpt, 0)["status"] == RECALL_HIT
 
 
 def test_bash_failure_head_and_exit_code_survive_truncation():
