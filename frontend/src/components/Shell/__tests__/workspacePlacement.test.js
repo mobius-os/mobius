@@ -236,8 +236,11 @@ test('beside-source + foreground · phone: insert and activate', () => {
   assert.equal(out.panes.p0.activeTabKey, 'app:9', 'foreground activates the item')
 })
 
-test('live preview · phone: enters Builder, keeps a chat tab, and activates the app', () => {
-  const ws = paneModel.setViewMode(paneModel.seedFromFlatTabs([CHAT('a')]), 'single')
+test('live preview · phone: enters Builder without replacing its source chat', () => {
+  const ws = {
+    ...paneModel.setViewMode(builderSeed([CHAT('a')]), 'single'),
+    singleScreen: { kind: 'chat', id: 'a' },
+  }
   const out = resolveWorkspaceRequest(
     ws,
     builtAppWorkspaceRequest('a', 9),
@@ -245,8 +248,25 @@ test('live preview · phone: enters Builder, keeps a chat tab, and activates the
   )
   assert.equal(out.viewMode, 'panes', 'the live preview reveals the Builder world')
   assert.deepEqual(keysOf(out.panes.p0), ['chat:a', 'app:9'])
-  assert.equal(out.panes.p0.activeTabKey, 'app:9', 'the phone switches to the preview tab')
+  assert.equal(out.panes.p0.activeTabKey, 'chat:a',
+    'the preview is parked until the owner opens it')
   assert.equal(out.focusedPaneId, 'p0')
+})
+
+test('live preview · Standard elsewhere: parks without changing the visible surface', () => {
+  const ws = {
+    ...paneModel.setViewMode(builderSeed([CHAT('a')]), 'single'),
+    singleScreen: { kind: 'chat', id: 'elsewhere' },
+  }
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('a', 9),
+    env(ws, { mode: 'wide', rect: { w: 1400, h: 900 } }),
+  )
+  assert.equal(out.viewMode, 'single', 'background work does not leave Standard')
+  assert.deepEqual(out.singleScreen, { kind: 'chat', id: 'elsewhere' },
+    'the owner keeps the surface they were using')
+  assert.ok(paneModel.paneOf(out, 'app:9'), 'the preview is parked in Builder')
 })
 
 test('beside-source + background · tile single pane: split, item active in the NEW pane, focus stays', () => {
@@ -265,7 +285,10 @@ test('beside-source + background · tile single pane: split, item active in the 
 })
 
 test('live preview · wide: enters Builder and blooms beside the focused chat', () => {
-  const ws = paneModel.setViewMode(paneModel.seedFromFlatTabs([CHAT('a')]), 'single')
+  const ws = {
+    ...paneModel.setViewMode(builderSeed([CHAT('a')]), 'single'),
+    singleScreen: { kind: 'chat', id: 'a' },
+  }
   const out = resolveWorkspaceRequest(
     ws,
     builtAppWorkspaceRequest('a', 9),
@@ -278,6 +301,36 @@ test('live preview · wide: enters Builder and blooms beside the focused chat', 
   const appPane = paneModel.paneOf(out, 'app:9')
   assert.ok(appPane)
   assert.equal(appPane.activeTabKey, 'app:9', 'the preview is visible in its pane')
+})
+
+test('live preview · compact fallback: parks in the source pane without replacing it', () => {
+  const ws = twoPaneWs([CHAT('a')], [CHAT('b')])
+  const rect = { w: 800, h: 560 }
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('a', 9),
+    env(ws, { mode: 'compact', rect, liveApps: [{ id: 9, chat_id: 'a' }] }),
+  )
+  assert.equal(paneModel.paneIdsInOrder(out).length, 2,
+    'a projection-unsafe third pane is not created')
+  assert.deepEqual(keysOf(out.panes.p0), ['chat:a', 'app:9'])
+  assert.equal(out.panes.p0.activeTabKey, 'chat:a',
+    'the preview cannot take over the shared pane')
+  assertNoVisibleContentVanished(ws, out, 'compact', rect)
+})
+
+test('live preview · occupied companion: joins without replacing the visible app', () => {
+  const ws = twoPaneWs([CHAT('a')], [APP(5)])
+  const liveApps = [{ id: 5, chat_id: 'a' }, { id: 9, chat_id: 'a' }]
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('a', 9),
+    env(ws, { mode: 'wide', liveApps }),
+  )
+  assert.deepEqual(keysOf(out.panes.p1), ['app:5', 'app:9'])
+  assert.equal(out.panes.p1.activeTabKey, 'app:5',
+    'a preview never replaces content in an existing companion pane')
+  assert.equal(out.focusedPaneId, 'p0')
 })
 
 test('beside-source + foreground · tile single pane: split AND focus the new pane', () => {
@@ -444,10 +497,13 @@ test('item already open: background is a strict no-op; foreground focuses its pa
 })
 
 test('live preview · wide update: an app parked with its chat moves into a visible companion pane', () => {
-  const ws = paneModel.setViewMode(
-    paneModel.seedFromFlatTabs([CHAT('a'), APP(5)]),
-    'single',
-  )
+  const ws = {
+    ...paneModel.setViewMode(
+      paneModel.seedFromFlatTabs([CHAT('a'), APP(5)]),
+      'single',
+    ),
+    singleScreen: { kind: 'chat', id: 'a' },
+  }
   const out = resolveWorkspaceRequest(
     ws,
     builtAppWorkspaceRequest('a', 5),
