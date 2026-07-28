@@ -3,7 +3,6 @@
 
 import { noteHref, noteLabel } from './memoryRecall.js'
 
-export const MAX_VISIBLE_MEMORY_NOTES = 4
 const MAX_QUERY_CHARS = 600
 const MAX_SUMMARY_CHARS = 300
 const RECALL_STATUSES = new Set(['searching', 'hit', 'empty', 'failed'])
@@ -38,12 +37,10 @@ export function memoryRecallCardModel(recall) {
     })
   }
 
-  const visibleNotes = notes.slice(0, MAX_VISIBLE_MEMORY_NOTES)
   return {
     status: recall.status,
     query: cleanText(recall.query, MAX_QUERY_CHARS),
-    notes: visibleNotes,
+    notes,
     noteCount: notes.length,
-    hiddenCount: Math.max(0, notes.length - visibleNotes.length),
   }
 }

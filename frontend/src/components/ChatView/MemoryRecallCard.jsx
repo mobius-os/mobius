@@ -129,11 +129,6 @@ export default function MemoryRecallCard({
                     </li>
                   ))}
                 </ul>
-                {model.hiddenCount > 0 && (
-                  <span className="chat__memory-more">
-                    +{model.hiddenCount} more {model.hiddenCount === 1 ? 'note' : 'notes'} in Memory
-                  </span>
-                )}
               </div>
             )}
 

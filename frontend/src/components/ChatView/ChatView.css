@@ -825,12 +825,6 @@
   color: color-mix(in srgb, var(--danger) 74%, var(--text));
 }
 
-.chat__memory-more {
-  padding-inline-start: 2px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
 @media (pointer: coarse) {
   .chat__memory-note { min-height: 44px; }
 }

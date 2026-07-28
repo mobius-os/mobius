@@ -7,10 +7,7 @@ import {
   safeMemoryAppSlug,
   safeNoteId,
 } from '../memoryRecall.js'
-import {
-  MAX_VISIBLE_MEMORY_NOTES,
-  memoryRecallCardModel,
-} from '../memoryRecallCard.js'
+import { memoryRecallCardModel } from '../memoryRecallCard.js'
 
 const note = (id, extra = {}) => ({
   id,
@@ -76,12 +73,12 @@ test('the card model keeps the question and result summaries together', () => {
     '/shell/?app=memory&intent=note%3Aalpha')
 })
 
-test('the visible result list is bounded without losing the total', () => {
+test('the expanded card preserves every note in the bounded receipt', () => {
   const notes = Array.from({ length: 12 }, (_, index) => note(`note-${index}`))
   const model = memoryRecallCardModel({ status: 'hit', notes })
-  assert.equal(model.notes.length, MAX_VISIBLE_MEMORY_NOTES)
+  assert.equal(model.notes.length, 12)
   assert.equal(model.noteCount, 12)
-  assert.equal(model.hiddenCount, 12 - MAX_VISIBLE_MEMORY_NOTES)
+  assert.equal(model.notes.at(-1).label, 'note 11')
 })
 
 test('malformed notes are skipped without dropping valid siblings', () => {
