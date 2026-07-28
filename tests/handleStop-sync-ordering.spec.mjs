@@ -102,7 +102,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
       // — the SSE "stream" needs to be held open externally to
       // simulate a long-running turn. Pattern lifted from
       // stream-reconnect.spec.mjs test 4.)
-      await new Promise(r => setTimeout(r, 8000))
+      await new Promise(r => setTimeout(r, 30000))
       await route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },

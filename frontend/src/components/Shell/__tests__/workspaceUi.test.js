@@ -1017,7 +1017,7 @@ test('round4-3: materializeNewChatHome is stale-guarded and writes a history-fre
   assert.match(fn, /latest\.token !== pending\.token[\s\S]*?setMaterializeNewChatRevision/)
   assert.doesNotMatch(fn, /setInterval|setTimeout/)
   // offline/failed → keep the landing with a retry state, never chats[0].
-  assert.match(fn, /if \(chatId == null\) \{[\s\S]*?setNewChatLandingOffline\(true\)/)
+  assert.match(fn, /if \(chatId == null\) \{[\s\S]*?setNewChatLandingFailure\(reason === 'offline' \? 'offline' : 'error'\)/)
   // The slot write is history-free (applyModeDestination pushes none) + preserveSettings,
   // and there is NO composer focus (a mode toggle must not summon the keyboard).
   assert.match(fn, /applyModeDestination\(\s*\{ view: 'chat', chatId, appId: null, paneId: ws\.focusedPaneId \},\s*\{ preserveSettings: true \}/)
@@ -1045,6 +1045,7 @@ test('round4-3: the New Chat landing renders for a null slot / reveal underlay a
   assert.match(newChatLanding, /className="chat chat--empty"/)
   assert.match(newChatLanding, /className="chat__empty-wrap"/)
   assert.match(newChatLanding, /What&apos;s on your mind\?/)
+  assert.match(newChatLanding, /Couldn’t start a new chat/)
 })
 
 // ── N1: retired v2 plumbing is gone ───────────────────────────────────────────

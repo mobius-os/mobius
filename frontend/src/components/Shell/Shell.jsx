@@ -1018,7 +1018,7 @@ export default function Shell() {
   // One revision bump after that await releases is enough to drain the latest token;
   // this is event-driven and only renders in that rare collision (no polling loop).
   const [materializeNewChatRevision, setMaterializeNewChatRevision] = useState(0)
-  const [newChatLandingOffline, setNewChatLandingOffline] = useState(false)
+  const [newChatLandingFailure, setNewChatLandingFailure] = useState(null)
   // Live mirror of the mode descriptor so the async materialize can re-check for a
   // beat that started during its await (writing the slot mid-beat would cancel it).
   const modeTransitionRef = useRef(modeState.transition)
@@ -1089,7 +1089,7 @@ export default function Shell() {
     const token = newChatRequestSeqRef.current + 1
     newChatRequestSeqRef.current = token
     pendingNewChatRef.current = { token, candidateId: candidate ? candidate.id : null }
-    setNewChatLandingOffline(false)
+    setNewChatLandingFailure(null)
     setPendingNewChatToken(token)
   }, [workspaceStateRef, activeChatIdRef])
   requestEmptySingleNewChatRef.current = requestEmptySingleNewChat
@@ -3063,8 +3063,8 @@ export default function Shell() {
       const candidate = pending.candidateId != null
         ? (chatsRef.current.find(c => String(c.id) === String(pending.candidateId)) || null)
         : null
-      const { chatId } = pending.resolvedChatId != null
-        ? { chatId: pending.resolvedChatId }
+      const { chatId, reason } = pending.resolvedChatId != null
+        ? { chatId: pending.resolvedChatId, reason: null }
         : await resolveNewChatId({ candidate })
       // Stale-guard: if a newer empty-single request arrived during the await, hand
       // it this already-validated/created untouched row. That preserves latest-token
@@ -3095,11 +3095,11 @@ export default function Shell() {
       if (modeTransitionRef.current) return
       if (chatId == null) {
         // offline / failed — keep the landing + the pending request for a retry.
-        setNewChatLandingOffline(true)
+        setNewChatLandingFailure(reason === 'offline' ? 'offline' : 'error')
         return
       }
       pendingNewChatRef.current = null
-      setNewChatLandingOffline(false)
+      setNewChatLandingFailure(null)
       // Guarded, history-free slot write: applyModeDestination never pushes history;
       // preserveSettings so a background repair doesn't yank an open Settings takeover;
       // no composer focus — a mode toggle must not summon the mobile keyboard.
@@ -3997,7 +3997,7 @@ export default function Shell() {
             >
               <NewChatLanding
                 // Retry state only on the resting surface — never mid-reveal.
-                offline={newChatSurface && newChatLandingOffline}
+                failure={newChatSurface ? newChatLandingFailure : null}
                 onRetry={requestEmptySingleNewChat}
               />
             </div>

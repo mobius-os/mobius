@@ -110,8 +110,9 @@ async function setup(
 /** Read the current navigation state from the app. */
 async function getNavState(page) {
   return page.evaluate(() => {
-    const chatScroll = document.querySelector('.chat__scroll')
-    const emptyWrap = document.querySelector('.chat__empty-wrap')
+    const painted = document.querySelector('[data-chat-surface="painted"]')
+    const chatScroll = painted?.querySelector('.chat__scroll')
+    const emptyWrap = painted?.querySelector('.chat__empty-wrap')
     const canvas = document.querySelector('.canvas')
     const drawer = document.querySelector('.drawer')
 
@@ -137,9 +138,9 @@ async function navigateToChat(page, index = 0) {
     .toBe(expectedChat.id)
   await page.waitForFunction(
     () => !document.querySelector('.settings')
-      && !!(document.querySelector('.chat__empty-wrap')
-        || document.querySelector('.chat__scroll')
-        || document.querySelector('.chat__form')),
+      && !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+        || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        || document.querySelector('[data-chat-surface="painted"] .chat__form')),
     { timeout: 8000 }
   )
 }

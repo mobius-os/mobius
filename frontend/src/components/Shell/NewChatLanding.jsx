@@ -15,7 +15,7 @@ import mobiusLogoUrl from '../../assets/moebius.svg'
  * offline/failed the retry affordance keeps the surface honest — never a blank <main>,
  * never chats[0].
  */
-export default function NewChatLanding({ offline = false, onRetry }) {
+export default function NewChatLanding({ failure = null, onRetry }) {
   // The .chat.chat--empty wrapper reuses ChatView's exact empty layout (opaque --bg
   // fill + centered cluster with the fixed bottom reservation), so the swap to a real
   // empty ChatView is seamless.
@@ -25,9 +25,13 @@ export default function NewChatLanding({ offline = false, onRetry }) {
         <div className="chat__empty">
           <img className="chat__empty-glyph" src={mobiusLogoUrl} alt="" width="120" height="120" />
           <p className="chat__empty-title">What&apos;s on your mind?</p>
-          {offline && (
+          {failure && (
             <>
-              <p className="chat__empty-sub">You&apos;re offline — a new chat needs the network.</p>
+              <p className="chat__empty-sub">
+                {failure === 'offline'
+                  ? 'You’re offline — a new chat needs the network.'
+                  : 'Couldn’t start a new chat — please try again.'}
+              </p>
               {onRetry && (
                 <button type="button" className="chat__empty-action" onClick={onRetry}>
                   Retry
