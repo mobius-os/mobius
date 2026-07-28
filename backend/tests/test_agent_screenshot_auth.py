@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import shutil
+import socket
 import subprocess
 
 
@@ -35,21 +36,62 @@ def _fixture_script(tmp_path: Path) -> Path:
 
 def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
   marker = tmp_path / "screenshot-called"
+  png_writer = tmp_path / "fake-png.py"
+  png_writer.write_text(
+    "import struct, sys\n"
+    "path, width, height, size = sys.argv[1], *map(int, sys.argv[2:])\n"
+    "header = (b'\\x89PNG\\r\\n\\x1a\\n' + struct.pack('>I', 13) + b'IHDR' "
+    "+ struct.pack('>II', width, height))\n"
+    "with open(path, 'wb') as handle:\n"
+    "  handle.write(header + bytes(max(0, size - len(header))))\n",
+    encoding="utf-8",
+  )
   browser = tmp_path / "agent-browser"
   browser.write_text(
     "#!/bin/sh\n"
     "printf '%s\\n' \"$*\" >> \"$FAKE_BROWSER_LOG\"\n"
     "case \"$1\" in\n"
+    "  open)\n"
+    "    printf '%s\\n' \"$2\" > \"$FAKE_BROWSER_URL_FILE\"\n"
+    "    if [ -n \"${FAKE_CANONICAL_TARGET_URL:-}\" ]; then\n"
+    "      case \"$2\" in\n"
+    "        */chat/*) printf '%s\\n' \"$FAKE_CANONICAL_TARGET_URL\" > \"$FAKE_BROWSER_NEXT_URL_FILE\" ;;\n"
+    "      esac\n"
+    "    fi\n"
+    "    ;;\n"
+    "  get)\n"
+    "    if [ \"$2\" = url ]; then\n"
+    "      cat \"$FAKE_BROWSER_URL_FILE\"\n"
+    "      if [ -s \"$FAKE_BROWSER_NEXT_URL_FILE\" ]; then\n"
+    "        mv \"$FAKE_BROWSER_NEXT_URL_FILE\" \"$FAKE_BROWSER_URL_FILE\"\n"
+    "      fi\n"
+    "    fi\n"
+    "    ;;\n"
     "  eval)\n"
-    "    if [ \"$2\" = \"--stdin\" ]; then cat >/dev/null; exit 0; fi\n"
+    "    if [ \"$2\" = \"--stdin\" ]; then cat > \"$FAKE_BROWSER_STDIN_LOG\"; exit 0; fi\n"
     "    case \"$2\" in\n"
     "      *src.split*) printf '%s\\n' \"${FAKE_LOADED_ASSET:-none}\" ;;\n"
     "      *serviceWorker*) printf '%s\\n' true ;;\n"
     "      *) printf '%s\\n' \"${FAKE_AUTH_OK:-false}\" ;;\n"
     "    esac\n"
     "    ;;\n"
+    "  set)\n"
+    "    if [ \"${FAKE_VIEWPORT_FAIL_ONCE:-0}\" = 1 ] && [ ! -e \"$FAKE_VIEWPORT_MARKER\" ]; then\n"
+    "      : > \"$FAKE_VIEWPORT_MARKER\"\n"
+    "      exit 1\n"
+    "    fi\n"
+    "    ;;\n"
     "  screenshot)\n"
-    "    : > \"$2\"\n"
+    "    if [ \"${FAKE_SCREENSHOT_FAIL_ONCE:-0}\" = 1 ] && [ ! -e \"$FAKE_SCREENSHOT_RETRY_MARKER\" ]; then\n"
+    "      : > \"$FAKE_SCREENSHOT_RETRY_MARKER\"\n"
+    "      exit 1\n"
+    "    fi\n"
+    "    if [ \"${FAKE_SCREENSHOT_TINY_ONCE:-0}\" = 1 ] && [ ! -e \"$FAKE_SCREENSHOT_TINY_MARKER\" ]; then\n"
+    "      : > \"$FAKE_SCREENSHOT_TINY_MARKER\"\n"
+    "      python3 \"$FAKE_PNG_WRITER\" \"$2\" \"$VIEWPORT_WIDTH\" \"$VIEWPORT_HEIGHT\" 100\n"
+    "    else\n"
+    "      python3 \"$FAKE_PNG_WRITER\" \"$2\" \"$VIEWPORT_WIDTH\" \"$VIEWPORT_HEIGHT\" 9000\n"
+    "    fi\n"
     "    : > \"$FAKE_SCREENSHOT_MARKER\"\n"
     "    ;;\n"
     "  *) exit 0 ;;\n"
@@ -67,11 +109,24 @@ def _run_helper(
   content_only: bool = False,
   preserve_cache: bool = False,
   loaded_asset: str | None = None,
+  viewport_fail_once: bool = False,
+  screenshot_fail_once: bool = False,
+  canonical_target_url: str | None = None,
+  screenshot_tiny_once: bool = False,
+  profile_lock_target: str | None = None,
+  profile_lock_artifacts: tuple[str, ...] = (
+    "SingletonLock", "SingletonCookie", "SingletonSocket",
+  ),
 ) -> tuple[subprocess.CompletedProcess, Path, Path, Path]:
   _, marker = _fake_browser(tmp_path)
   script = _fixture_script(tmp_path)
   output = tmp_path / "shot.png"
   browser_log = tmp_path / "browser.log"
+  browser_profile = tmp_path / "browser-profile"
+  browser_profile.mkdir()
+  if profile_lock_target is not None:
+    for artifact in profile_lock_artifacts:
+      (browser_profile / artifact).symlink_to(profile_lock_target)
   env = {
     **os.environ,
     "PATH": f"{tmp_path}:{os.environ['PATH']}",
@@ -79,10 +134,22 @@ def _run_helper(
     "API_BASE_URL": "http://mobius.test",
     "VIEWPORT_WIDTH": str(viewport_width),
     "VIEWPORT_HEIGHT": str(viewport_height),
+    "AGENT_BROWSER_PROFILE": str(browser_profile),
     "FAKE_AUTH_OK": "true" if auth_ok else "false",
     "FAKE_LOADED_ASSET": loaded_asset or SHELL_ENTRY,
     "FAKE_BROWSER_LOG": str(browser_log),
     "FAKE_SCREENSHOT_MARKER": str(marker),
+    "FAKE_VIEWPORT_FAIL_ONCE": "1" if viewport_fail_once else "0",
+    "FAKE_VIEWPORT_MARKER": str(tmp_path / "viewport-ready"),
+    "FAKE_SCREENSHOT_FAIL_ONCE": "1" if screenshot_fail_once else "0",
+    "FAKE_SCREENSHOT_RETRY_MARKER": str(tmp_path / "screenshot-retried"),
+    "FAKE_SCREENSHOT_TINY_ONCE": "1" if screenshot_tiny_once else "0",
+    "FAKE_SCREENSHOT_TINY_MARKER": str(tmp_path / "screenshot-tiny"),
+    "FAKE_PNG_WRITER": str(tmp_path / "fake-png.py"),
+    "FAKE_BROWSER_URL_FILE": str(tmp_path / "browser-url"),
+    "FAKE_BROWSER_NEXT_URL_FILE": str(tmp_path / "browser-next-url"),
+    "FAKE_CANONICAL_TARGET_URL": canonical_target_url or "",
+    "FAKE_BROWSER_STDIN_LOG": str(tmp_path / "browser-stdin.log"),
   }
   args = ["bash", str(script)]
   if content_only:
@@ -100,6 +167,59 @@ def _run_helper(
   return result, output, marker, browser_log
 
 
+def test_stale_foreign_container_profile_lock_is_repaired_before_launch(tmp_path: Path):
+  profile = tmp_path / "browser-profile"
+  result, output, marker, _ = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    profile_lock_target="previous-container-999999",
+    profile_lock_artifacts=("SingletonLock",),
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  assert not any(
+    (profile / artifact).is_symlink()
+    for artifact in ("SingletonLock", "SingletonCookie", "SingletonSocket")
+  )
+
+
+def test_live_local_profile_lock_is_preserved(tmp_path: Path):
+  profile = tmp_path / "browser-profile"
+  result, output, marker, _ = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    profile_lock_target=f"{socket.gethostname()}-{os.getpid()}",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  assert all(
+    (profile / artifact).is_symlink()
+    for artifact in ("SingletonLock", "SingletonCookie", "SingletonSocket")
+  )
+
+
+def test_unfamiliar_profile_lock_is_preserved(tmp_path: Path):
+  profile = tmp_path / "browser-profile"
+  result, output, marker, _ = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    profile_lock_target="unexpected-owner-format",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert "unfamiliar owner" in result.stderr
+  assert output.exists()
+  assert marker.exists()
+  assert all(
+    (profile / artifact).is_symlink()
+    for artifact in ("SingletonLock", "SingletonCookie", "SingletonSocket")
+  )
+
+
 def test_helper_refuses_to_capture_when_protected_request_rejects_token(tmp_path: Path):
   result, output, marker, browser_log = _run_helper(tmp_path, auth_ok=False)
 
@@ -110,6 +230,16 @@ def test_helper_refuses_to_capture_when_protected_request_rejects_token(tmp_path
   assert not marker.exists()
 
 
+def test_browser_bootstrap_is_inert_same_origin_html(client):
+  response = client.get("/api/browser-bootstrap")
+
+  assert response.status_code == 200
+  assert response.headers["content-type"].startswith("text/html")
+  assert response.headers["cache-control"] == "no-store"
+  assert "<script" not in response.text
+  assert "Möbius browser bootstrap" in response.text
+
+
 def test_helper_captures_after_authentication_is_confirmed(tmp_path: Path):
   result, output, marker, browser_log = _run_helper(tmp_path, auth_ok=True)
 
@@ -118,11 +248,36 @@ def test_helper_captures_after_authentication_is_confirmed(tmp_path: Path):
   assert marker.exists()
 
   commands = browser_log.read_text(encoding="utf-8").splitlines()
-  settle_index = commands.index("wait 300")
+  target_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("open http://mobius.test/chat/example?__mobius_capture=")
+  )
   auth_index = next(i for i, command in enumerate(commands) if "/api/chats" in command)
   screenshot_index = next(i for i, command in enumerate(commands) if command.startswith("screenshot "))
-  assert settle_index < auth_index < screenshot_index
+  assert target_index < auth_index < screenshot_index
+  assert not any(
+    command.startswith("wait ") and "input[type=password]" in command
+    for command in commands
+  )
   assert all("test-token" not in command for command in commands)
+
+
+def test_helper_accepts_a_stable_canonical_shell_route(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    canonical_target_url="http://mobius.test/shell/",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  target_opens = [
+    command for command in commands
+    if command.startswith("open http://mobius.test/chat/example?__mobius_capture=")
+  ]
+  assert len(target_opens) == 1, "a stable canonical redirect must not be retried"
 
 
 def test_default_capture_detaches_pwa_state_and_verifies_current_shell(tmp_path: Path):
@@ -132,10 +287,9 @@ def test_default_capture_detaches_pwa_state_and_verifies_current_shell(tmp_path:
   assert output.exists()
   assert marker.exists()
   commands = browser_log.read_text(encoding="utf-8").splitlines()
-  reset_index = next(
-    i for i, command in enumerate(commands)
-    if command.startswith("eval ") and "serviceWorker" in command
-  )
+  seed_index = commands.index("eval --stdin")
+  seed = (tmp_path / "browser-stdin.log").read_text(encoding="utf-8")
+  assert "serviceWorker" in seed
   target_index = next(
     i for i, command in enumerate(commands)
     if command.startswith("open http://mobius.test/chat/example?__mobius_capture=")
@@ -148,8 +302,34 @@ def test_default_capture_detaches_pwa_state_and_verifies_current_shell(tmp_path:
     i for i, command in enumerate(commands)
     if command.startswith("screenshot ")
   )
-  detach_index = commands.index("open about:blank")
-  assert reset_index < detach_index < target_index < build_index < screenshot_index
+  detach_indexes = [
+    i for i, command in enumerate(commands) if command == "open about:blank"
+  ]
+  assert len(detach_indexes) == 2
+  assert detach_indexes[0] < seed_index < detach_indexes[1]
+  assert detach_indexes[1] < target_index < build_index < screenshot_index
+
+
+def test_default_capture_detaches_a_stale_controller_before_requiring_bootstrap(
+  tmp_path: Path,
+):
+  result, output, marker, browser_log = _run_helper(tmp_path, auth_ok=True)
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  first_bootstrap = commands.index("open http://mobius.test/api/browser-bootstrap")
+  preflight_unregister = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("eval ") and "serviceWorker" in command
+  )
+  first_detach = commands.index("open about:blank")
+  second_bootstrap = next(
+    i for i, command in enumerate(commands[first_detach + 1:], first_detach + 1)
+    if command == "open http://mobius.test/api/browser-bootstrap"
+  )
+  assert first_bootstrap < preflight_unregister < first_detach < second_bootstrap
 
 
 def test_stale_shell_fails_instead_of_capturing_misleading_evidence(tmp_path: Path):
@@ -177,8 +357,9 @@ def test_preserve_cache_mode_is_explicit_and_skips_freshness_reset(tmp_path: Pat
   assert output.exists()
   assert marker.exists()
   commands = browser_log.read_text(encoding="utf-8").splitlines()
+  seed = (tmp_path / "browser-stdin.log").read_text(encoding="utf-8")
   assert "open http://mobius.test/chat/example" in commands
-  assert not any("serviceWorker" in command for command in commands)
+  assert "serviceWorker" not in seed
   assert not any("src.split" in command for command in commands)
 
 
@@ -248,9 +429,113 @@ def test_cold_capture_opens_browser_before_configuring_viewport(tmp_path: Path):
 
   assert result.returncode == 0, result.stderr
   commands = browser_log.read_text(encoding="utf-8").splitlines()
-  assert commands.index("open http://mobius.test/") < commands.index(
+  assert commands.index("open http://mobius.test/api/browser-bootstrap") < commands.index(
     "set viewport 412 915",
   )
+  assert "open http://mobius.test/" not in commands
+
+
+def test_browser_commands_never_split_daemons_with_per_call_environment():
+  source = SCRIPT.read_text(encoding="utf-8")
+  assert "AGENT_BROWSER_DEFAULT_TIMEOUT=" not in source
+  assert "timeout 5s agent-browser" in source
+
+
+def test_cold_capture_retries_viewport_until_browser_socket_is_ready(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    viewport_fail_once=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  assert commands.count("set viewport 412 915") == 5
+  assert commands.index("set viewport 412 915") < max(
+    i for i, command in enumerate(commands)
+    if command == "open http://mobius.test/api/browser-bootstrap"
+  )
+
+
+def test_final_target_reapplies_the_requested_viewport_at_capture_boundary(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(tmp_path, auth_ok=True)
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  target_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("open http://mobius.test/chat/example?__mobius_capture=")
+  )
+  final_viewport_index = max(
+    i for i, command in enumerate(commands)
+    if command == "set viewport 412 915"
+  )
+  final_screenshot_index = next(
+    i for i, command in enumerate(commands)
+    if command == f"screenshot {output}"
+  )
+  target_viewports = [
+    i for i, command in enumerate(commands)
+    if i > target_index and command == "set viewport 412 915"
+  ]
+  assert len(target_viewports) == 3
+  assert target_index < final_viewport_index < final_screenshot_index
+
+
+def test_capture_retries_when_busy_renderer_rejects_first_screenshot(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    screenshot_fail_once=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  assert sum(command.startswith("screenshot ") for command in commands) == 3
+
+
+def test_capture_primes_the_compositor_before_keeping_evidence(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(tmp_path, auth_ok=True)
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  screenshots = [
+    command for command in commands if command.startswith("screenshot ")
+  ]
+  assert len(screenshots) == 2
+  assert "/mobius-screenshot-warmup." in screenshots[0]
+  assert screenshots[1] == f"screenshot {output}"
+  warmup_index = commands.index(screenshots[0])
+  post_warmup_frame = next(
+    i for i, command in enumerate(commands[warmup_index + 1:], warmup_index + 1)
+    if command.startswith("eval ") and "requestAnimationFrame" in command
+  )
+  assert warmup_index < post_warmup_frame < commands.index(screenshots[1])
+
+
+def test_shell_capture_retries_a_solid_background_frame(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    screenshot_tiny_once=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.stat().st_size == 9000
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  screenshots = [
+    command for command in commands if command.startswith("screenshot ")
+  ]
+  assert len(screenshots) == 3, "tiny warm-up, retry, then kept capture"
 
 
 def test_invalid_manual_viewport_fails_before_browser_launch(tmp_path: Path):
@@ -283,6 +568,35 @@ def test_non_app_capture_skips_frame_readiness_wait(tmp_path: Path):
   )
 
 
+def test_shell_capture_waits_for_visual_ownership_to_settle(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path, auth_ok=True, route="/chat/example",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  settle_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("wait --fn ")
+    and "data-workspace-visual-state" in command
+    and "first-contentful-paint" in command
+  )
+  settle_command = commands[settle_index]
+  assert "shell__chat-view--staging" not in settle_command
+  assert "shell__chat-view--held" not in settle_command
+  assert "data-mode-motion" not in settle_command
+  frame_index = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("eval ") and "requestAnimationFrame" in command
+  )
+  screenshot_index = next(
+    i for i, command in enumerate(commands) if command.startswith("screenshot ")
+  )
+  assert settle_index < frame_index < screenshot_index
+
+
 def test_content_only_mode_is_set_before_target_navigation(tmp_path: Path):
   result, output, marker, browser_log = _run_helper(
     tmp_path,
@@ -295,11 +609,9 @@ def test_content_only_mode_is_set_before_target_navigation(tmp_path: Path):
   assert output.exists()
   assert marker.exists()
   commands = browser_log.read_text(encoding="utf-8").splitlines()
-  visual_mode_index = next(
-    i for i, command in enumerate(commands)
-    if command.startswith("eval ")
-    and "sessionStorage.setItem('mobius:visual-content-only', '1')" in command
-  )
+  seed_index = commands.index("eval --stdin")
+  seed = (tmp_path / "browser-stdin.log").read_text(encoding="utf-8")
+  assert 'sessionStorage.setItem("mobius:visual-content-only", "1")' in seed
   target_index = next(
     i for i, command in enumerate(commands)
     if command.startswith("open http://mobius.test/app/42?__mobius_capture=")
@@ -313,22 +625,21 @@ def test_content_only_mode_is_set_before_target_navigation(tmp_path: Path):
     i for i, command in enumerate(commands)
     if command.startswith("screenshot ")
   )
-  assert visual_mode_index < target_index < readiness_index < screenshot_index
+  assert seed_index < target_index < readiness_index < screenshot_index
 
 
 def test_default_mode_clears_prior_visual_mode_before_navigation(tmp_path: Path):
   _, _, _, browser_log = _run_helper(tmp_path, auth_ok=True)
 
   commands = browser_log.read_text(encoding="utf-8").splitlines()
-  clear_index = next(
-    i for i, command in enumerate(commands)
-    if "sessionStorage.removeItem('mobius:visual-content-only')" in command
-  )
+  seed_index = commands.index("eval --stdin")
+  seed = (tmp_path / "browser-stdin.log").read_text(encoding="utf-8")
+  assert 'sessionStorage.removeItem("mobius:visual-content-only")' in seed
   target_index = next(
     i for i, command in enumerate(commands)
     if command.startswith("open http://mobius.test/chat/example?__mobius_capture=")
   )
-  assert clear_index < target_index
+  assert seed_index < target_index
 
 
 def test_content_mode_suppresses_modals_without_dom_surgery():
