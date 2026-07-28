@@ -264,6 +264,28 @@
   font-weight: 600;
 }
 
+.apps-directory__empty button {
+  margin-top: 14px;
+  padding: 8px 13px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.apps-directory__empty button:hover {
+  border-color: var(--accent);
+}
+
+.apps-directory__empty button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 @media (max-width: 720px) {
   .apps-directory__header {
     min-height: 64px;

@@ -25,6 +25,6 @@ test('shell route reload is logo-free without changing the launch splash', () =>
     INDEX_HTML.indexOf('<div id="root"'),
   )
 
-  assert.doesNotMatch(routeLoading, /moebius\.svg|<img/)
-  assert.match(launchSplash, /moebius\.svg/)
+  assert.doesNotMatch(routeLoading, /moebius\.(?:png|svg)|<img/)
+  assert.match(launchSplash, /moebius\.png/)
 })

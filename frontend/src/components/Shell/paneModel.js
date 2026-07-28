@@ -45,10 +45,9 @@ export const COMPACT_MIN_W = 700
 export const COMPACT_MIN_H = 520
 
 // Render geometry (pixels are a RENDER concern — the model never stores them).
-// PANE_GAP sits between two sibling panes and is where a divider is drawn;
-// OUTER_MARGIN insets the whole tiled area from the content-box edge.
+// PANE_GAP sits between two sibling panes and is where a divider is drawn.
+// Tiled and focused panes both use the full content rect edge-to-edge.
 export const PANE_GAP = 7
-export const OUTER_MARGIN = 8
 
 // Height of a per-pane tab strip. A pane's CONTENT rect is its pane rect minus
 // this strip row (design §2). The renderer and the divider drag both subtract
@@ -1284,16 +1283,6 @@ function normalizeRect(rect) {
   }
 }
 
-// Inset a rect by m on every side — the tiled area's outer margin.
-function insetRect(rect, m) {
-  return {
-    x: rect.x + m,
-    y: rect.y + m,
-    w: Math.max(0, rect.w - 2 * m),
-    h: Math.max(0, rect.h - 2 * m),
-  }
-}
-
 // A ratio-patched COPY of the tree for the divider drag preview — the renderer
 // re-projects each frame with the dragged split's live ratio without a reducer
 // dispatch (design §2: imperative, React-free per frame). Pure; ws untouched.
@@ -1415,7 +1404,7 @@ export function modeForRect({ w, h } = {}) {
 // - EXACTLY ONE visible leaf is the pixel-identical single-pane sentinel: rects
 //   is the full contentRect and dividers is empty. The renderer branches on
 //   `visibleLeaves.length === 1` to emit today's DOM verbatim (no pane chrome).
-// - 'wide'    → all leaves, full tree walk, gap + outer margin, a divider per
+// - 'wide'    → all leaves, full edge-to-edge tree walk with a gap + divider per
 //               split.
 // - 'compact' → the focused leaf + its immediate-parent split's sibling (first
 //               in-order leaf of the sibling subtree), laid along the parent's
@@ -1441,7 +1430,7 @@ export function projectLayout(ws, mode, contentRect, ratioOverride = null) {
   }
 
   const tree = ratioOverride ? withRatioOverride(ws.layout, ratioOverride) : ws.layout
-  const box = insetRect(content, OUTER_MARGIN)
+  const box = content
 
   // Wide renders EVERY leaf — but only while the box can still honor the pane
   // minimums. A 4-pane tree built legally at 1400px, shrunk to 960px, cannot fit
@@ -1516,11 +1505,6 @@ export function canSplit(ws, paneId, edge, mode, contentRect) {
   const projected = projectLayout(ws, mode, content)
   let rect = projected.rects[paneId]
   if (!rect) return false
-  // Going 1 leaf → 2 introduces the outer margin the single-pane projection
-  // omits (it returns the full content rect). Judge feasibility against the
-  // POST-split usable box, else a first split is offered that then lands
-  // children below the minimum once the inset applies (finding E-ii).
-  if (projected.visibleLeaves.length <= 1) rect = insetRect(content, OUTER_MARGIN)
   const row = edge === 'left' || edge === 'right'
   if (row) {
     const childW = (rect.w - PANE_GAP) / 2
@@ -1535,7 +1519,7 @@ export function canSplit(ws, paneId, edge, mode, contentRect) {
 // whole tree in a new split on `edge` is allowed: within MAX_PANES / MAX_DEPTH
 // (a root split adds ONE level above every existing leaf, so it needs
 // depthOf(layout) + 1 ≤ MAX_DEPTH), permitted by the mode (phone → top/bottom
-// only), and each half of the inset content box clears MIN_PANE_W × MIN_PANE_H.
+// only), and each half of the full content box clears MIN_PANE_W × MIN_PANE_H.
 // The drag layer greys the zone out on false — a cap or minimum is felt as "no
 // target", never an error, exactly like canSplit.
 export function canRootSplit(ws, edge, mode, contentRect) {
@@ -1545,7 +1529,7 @@ export function canRootSplit(ws, edge, mode, contentRect) {
   const leaves = leafIds(ws.layout).filter(id => ws.panes[id])
   if (leaves.length >= MAX_PANES) return false
   if (depthOf(ws.layout) + 1 > MAX_DEPTH) return false
-  const box = insetRect(normalizeRect(contentRect), OUTER_MARGIN)
+  const box = normalizeRect(contentRect)
   const row = edge === 'left' || edge === 'right'
   if (row) {
     const childW = (box.w - PANE_GAP) / 2

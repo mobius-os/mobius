@@ -10,9 +10,14 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import event
 
 from app import models
-from app.resource_access import get_active_chat_or_404
+from app.deps import Principal
+from app.resource_access import (
+  get_active_chat_or_404,
+  require_active_chat_access,
+)
 
 
 def test_returns_active_chat(db):
@@ -56,3 +61,73 @@ def test_returns_same_row_callers_can_mutate(db):
   db.commit()
   refetched = get_active_chat_or_404(db, "mut")
   assert refetched.title == "renamed"
+
+
+def test_access_only_gate_does_not_select_transcript_json(db):
+  """An ownership check never decodes the large chat payload columns."""
+  chat = models.Chat(
+    id="large",
+    title="large transcript",
+    messages=[{"role": "user", "content": "x" * 100_000}],
+    live_assistant={"role": "assistant", "blocks": [{"type": "text"}]},
+    pending_messages=[{"role": "user", "content": "queued"}],
+  )
+  db.add(chat)
+  db.commit()
+  db.expunge_all()
+
+  statements: list[str] = []
+
+  def capture_select(_conn, _cursor, statement, _params, _context, _many):
+    if "FROM chats" in statement:
+      statements.append(statement)
+
+  event.listen(db.bind, "before_cursor_execute", capture_select)
+  try:
+    require_active_chat_access(
+      db,
+      "large",
+      Principal(owner=models.Owner(username="owner"), app_id=None),
+    )
+  finally:
+    event.remove(db.bind, "before_cursor_execute", capture_select)
+
+  assert len(statements) == 1
+  selected = statements[0].partition("FROM chats")[0]
+  assert "chats.id" in selected
+  assert "chats.created_by_app_id" in selected
+  assert "chats.messages" not in selected
+  assert "chats.live_assistant" not in selected
+  assert "chats.pending_messages" not in selected
+
+
+def test_access_only_gate_preserves_app_chat_ownership(db):
+  """The minimal projection keeps the same app-vs-foreign authorization."""
+  db.add_all([
+    models.App(
+      id=7,
+      name="owner app",
+      description="",
+      jsx_source="",
+      compiled_path="",
+    ),
+    models.Chat(
+      id="app-chat",
+      title="owned",
+      messages=[],
+      created_by_app_id=7,
+    ),
+  ])
+  db.commit()
+  db.expunge_all()
+
+  owner = models.Owner(username="owner")
+  require_active_chat_access(
+    db, "app-chat", Principal(owner=owner, app_id=7, scope="app"),
+  )
+
+  with pytest.raises(HTTPException) as exc:
+    require_active_chat_access(
+      db, "app-chat", Principal(owner=owner, app_id=8, scope="app"),
+    )
+  assert exc.value.status_code == 403

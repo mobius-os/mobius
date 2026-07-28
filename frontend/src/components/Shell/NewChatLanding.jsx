@@ -1,5 +1,3 @@
-import mobiusLogoUrl from '../../assets/moebius.svg'
-
 /**
  * The first-class New Chat landing painted for a null single-screen slot
  * (round 4 item 3). A null slot is a DEFINITE New Chat destination now — never the
@@ -23,7 +21,7 @@ export default function NewChatLanding({ failure = null, onRetry }) {
     <div className="chat chat--empty">
       <div className="chat__empty-wrap">
         <div className="chat__empty">
-          <img className="chat__empty-glyph" src={mobiusLogoUrl} alt="" width="120" height="120" />
+          <img className="chat__empty-glyph" src="/moebius.png" alt="" width="120" height="120" />
           <p className="chat__empty-title">What&apos;s on your mind?</p>
           {failure && (
             <>

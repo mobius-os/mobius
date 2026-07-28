@@ -201,13 +201,24 @@ def validate_manifest_contract(manifest) -> None:
       "Manifest `permissions.chat_log_access` must be one of "
       "none/summary/full."
     )
+  if "background_agent" in permissions:
+    _fail(
+      "Manifest `permissions.background_agent` has been removed; use "
+      "`permissions.job_authority: scoped`."
+    )
+  if (
+    "job_authority" in permissions
+    and permissions["job_authority"] not in ("platform", "scoped")
+  ):
+    _fail(
+      "Manifest `permissions.job_authority` must be one of platform/scoped."
+    )
   for field in (
     "manage_apps",
     "manage_skills",
     "github_access",
     "github_connect",
     "filesystem_access",
-    "background_agent",
   ):
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")
@@ -344,9 +355,9 @@ def validate_manifest_contract(manifest) -> None:
         "Manifest `schedule.initialize_on_install` requires `schedule.job`."
       )
 
-  if permissions.get("background_agent") is True and not (
+  if "job_authority" in permissions and not (
     isinstance(schedule, Mapping) and schedule.get("job")
   ):
     _fail(
-      "Manifest `permissions.background_agent: true` requires `schedule.job`."
+      "Manifest `permissions.job_authority` requires `schedule.job`."
     )

@@ -2334,7 +2334,10 @@ let _embedSeq = 0
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key)
 
-export function appChatMetadataBody(opts = {}, { includeProvider = true } = {}) {
+export function appChatMetadataBody(
+  opts = {},
+  { includeProvider = true, includeOwnerVisible = false } = {},
+) {
   const body = {}
   if (hasOwn(opts, 'systemPrompt')) {
     body.system_prompt = opts.systemPrompt == null ? '' : String(opts.systemPrompt)
@@ -2363,6 +2366,9 @@ export function appChatMetadataBody(opts = {}, { includeProvider = true } = {}) 
   if (hasOwn(opts, 'scopeLabel')) {
     const label = opts.scopeLabel == null ? '' : String(opts.scopeLabel).trim()
     if (label) body.scope_label = label
+  }
+  if (includeOwnerVisible && hasOwn(opts, 'ownerVisible')) {
+    body.owner_visible = opts.ownerVisible === true
   }
   return body
 }
@@ -2462,7 +2468,7 @@ export function makeEmbedAuthorizationHandoff({
   }
 }
 
-function makeChat({ appId, getToken, storage }) {
+export function makeChat({ appId, getToken, storage }) {
   // Lazily create a chat the agent turn can be attributed to, via the
   // app-attributed backend contract (design §1.1: POST /api/app-chats).
   // The ordinary /api/chats create route is owner-only and intentionally
@@ -2500,7 +2506,10 @@ function makeChat({ appId, getToken, storage }) {
         // small design, design §1.5). Forward them so they're honored
         // the moment the backend accepts them; harmless extra fields
         // until then.
-        ...appChatMetadataBody(opts, { includeProvider: true }),
+        ...appChatMetadataBody(opts, {
+          includeProvider: true,
+          includeOwnerVisible: true,
+        }),
       }),
     })
     if (!res.ok) {
@@ -2557,6 +2566,54 @@ function makeChat({ appId, getToken, storage }) {
     } catch (e) {}
   }
 
+  // Start a first-class owner-visible chat and submit its first turn without
+  // depending on shell navigation, retained ChatView state, or browser draft
+  // storage. Navigation is deliberately left to the caller: after this
+  // promise resolves, an app can post moebius:open-chat for the returned id.
+  async function startChat(opts = {}) {
+    const content = String(opts.content ?? opts.draft ?? '').trim()
+    if (!content) {
+      throw new Error('window.mobius.chat.start: opts.draft must not be empty')
+    }
+    const chatId = await createChat({
+      ...opts,
+      ownerVisible: opts.ownerVisible !== false,
+    })
+    const cid = (
+      typeof crypto !== 'undefined'
+      && typeof crypto.randomUUID === 'function'
+    )
+      ? crypto.randomUUID()
+      : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    let timezone = 'UTC'
+    try {
+      timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    } catch (e) {}
+    const body = { content, cid, timezone }
+    if (typeof window !== 'undefined') {
+      body.viewport = {
+        width: window.innerWidth,
+        height: window.visualViewport?.height || window.innerHeight,
+      }
+    }
+    const res = await appChatFetch(
+      `/api/chats/${encodeURIComponent(chatId)}/messages`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    )
+    if (!res.ok) {
+      const error = new Error(`window.mobius.chat.start: send failed (${res.status})`)
+      error.chatId = chatId
+      throw error
+    }
+    let response = null
+    try { response = await res.json() } catch (e) {}
+    return { chatId, response }
+  }
+
   // Open the embed in a nested iframe inside `mount` (an element the app
   // controls). Returns a handle: { chatId, instanceId, iframe, destroy,
   // on(event, cb) }. Events: 'ready' | 'message-sent' | 'turn-done' |
@@ -2574,7 +2631,7 @@ function makeChat({ appId, getToken, storage }) {
   // So the common app usage is one call:
   //   const h = await window.mobius.chat({ mount, persist: 'chat_id.json',
   //     systemPrompt, picker: false, onTurnDone: refresh })  // h.destroy() on unmount
-  return async function chat(opts = {}) {
+  const chat = async function chat(opts = {}) {
     const mount = opts.mount
     if (!mount || typeof mount.appendChild !== 'function') {
       throw new Error('window.mobius.chat: opts.mount must be a DOM element')
@@ -3005,6 +3062,8 @@ function makeChat({ appId, getToken, storage }) {
       },
     }
   }
+  chat.start = startChat
+  return chat
 }
 
 // ── ChatSplit — window.mobius.split(opts) ────────────────────────────────────

@@ -15,6 +15,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   appChatMetadataBody,
+  makeChat,
   makeCapabilities,
   makeNav,
   makeSignal,
@@ -93,6 +94,72 @@ test('app chat metadata body forwards scoped chat fields', () => {
     scope: 'workout-session:session-123',
     scope_label: 'Workout Jul 11',
   })
+})
+
+test('app chat metadata body exposes owner visibility only on create', () => {
+  assert.deepEqual(appChatMetadataBody({
+    ownerVisible: true,
+  }, { includeOwnerVisible: true }), {
+    owner_visible: true,
+  })
+  assert.deepEqual(appChatMetadataBody({ ownerVisible: true }), {})
+})
+
+test('chat.start creates one owner-visible app chat and submits its first turn', async () => {
+  const previousFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url, init })
+    if (url === '/api/app-chats') {
+      return new Response(JSON.stringify({ id: 'chat-started' }), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (url === '/api/chats/chat-started/messages') {
+      return new Response(JSON.stringify({ status: 'started' }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(null, { status: 404 })
+  }
+  try {
+    const chat = makeChat({
+      appId: 80,
+      getToken: async () => 'app-token',
+      storage: null,
+    })
+    const result = await chat.start({
+      title: 'Address Contribute follow-ups',
+      draft: 'Address every active follow-up.',
+    })
+
+    assert.equal(result.chatId, 'chat-started')
+    assert.equal(calls.length, 2)
+    assert.deepEqual(JSON.parse(calls[0].init.body), {
+      title: 'Address Contribute follow-ups',
+      owner_visible: true,
+    })
+    const sent = JSON.parse(calls[1].init.body)
+    assert.equal(sent.content, 'Address every active follow-up.')
+    assert.equal(typeof sent.cid, 'string')
+    assert.equal(typeof sent.timezone, 'string')
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('chat.start rejects an empty first turn before creating a chat', async () => {
+  const chat = makeChat({
+    appId: 80,
+    getToken: async () => 'app-token',
+    storage: null,
+  })
+  await assert.rejects(
+    chat.start({ draft: '   ' }),
+    /opts\.draft must not be empty/,
+  )
 })
 
 async function withFakeWindow(fn) {

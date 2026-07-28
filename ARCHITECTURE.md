@@ -242,12 +242,20 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `self_reminders.py` | Agent self-scheduling endpoints |
 | `skills.py` | `GET /api/skills` (installed skills + provenance + 30-day usage), `POST /install` (fetch a `SKILL.md` dir or single markdown from GitHub via the same SSRF-safe fetcher as app installs; `.installed-skills.json` provenance sidecar; basename collision ⇒ 409), `DELETE /{name}` (installed-provenance only, git-snapshot before removal). Install/uninstall gated owner-or-`manage_skills` (the Skills app's permission, pattern of `manage_apps`) |
 | `admin.py` | Admin / introspection endpoints (service-token gated) |
-| `debug.py` | Observability: active SDK clients/sessions, broadcasts, chat logs |
+| `debug.py` | Observability: active SDK clients/sessions, broadcasts, chat logs, and resource facts/pressure |
 | `client_error.py` | `POST /api/client-error` — record an uncaught client/app JS error |
 | `recover.py` | Recovery page at `/recover` (reset/backup/rebuild) — frozen island |
 | `recover_html.py` | HTML templates for the recovery page (no `router`; used by `recover.py`) |
 
 Note: there is no `routes/ai.py` and no `POST /api/ai`. An older mini-app AI proxy lived there and was removed; mini-apps reach the agent via `window.mobius.chat`, `POST /api/apps/{id}/run-job`, or cron — not a synchronous AI endpoint.
+
+## Resource facts and pressure
+
+`resource_pressure.py` keeps observation separate from interpretation. Facts are
+an on-demand snapshot of `/data` capacity and cgroup memory; pressure classifies
+that snapshot as `normal`, `constrained`, `critical`, or `unknown`. The snapshot
+is exposed through authenticated debug status but is not polled or stored.
+Workload policy and owner communication remain separate future consumers.
 
 ## App execution tiers
 
@@ -255,9 +263,10 @@ Host-mediated device/browser access uses the versioned capability broker; see
 [`CAPABILITIES.md`](CAPABILITIES.md) for the manifest, app API, wire protocol,
 provider contract, lifecycle rules, and trust-tier escape hatches.
 Server-side app jobs have a separate two-tier model: ordinary reviewed scripts
-retain the Möbius process authority, while `background_agent` jobs run through
-one reviewed data contract and the strongest secure executor available on the
-host. See [`BACKGROUND_JOBS.md`](BACKGROUND_JOBS.md) for the contract,
+retain the Möbius process authority, while jobs declaring
+`job_authority: scoped` run through one reviewed data contract and the
+strongest secure executor available on the host. See
+[`BACKGROUND_JOBS.md`](BACKGROUND_JOBS.md) for the contract,
 Bubblewrap/Landlock selection, history, and verification strategy.
 
 | Tier | Boundary and capability | UX / standalone consequence |
@@ -619,12 +628,15 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   escape hatch for any interrupted no-scroll gesture.
   A marked Q&A custom-answer field is the deliberate exception to "ordinary
   typing cannot scroll": changing its value can grow the field and cause the
-  browser to move the transcript to keep the native caret visible. From
-  `beforeinput` through one complete rendered frame, that mutation uses the
-  same reader-ownership gate as a possible scroll. If no scroll lands, layout
-  resumes immediately after that frame; if one does, the ordinary quiet-settle
-  path records the resulting hold. The controller must not restore a stale
-  anchor between those two outcomes.
+  browser to move the transcript to keep the native caret visible. Only an
+  ordinary `ANCHOR_AT` reading hold yields from `beforeinput` through one
+  complete rendered frame; if no scroll lands, layout resumes immediately
+  after that frame, and if one does, the ordinary quiet-settle path records the
+  resulting hold. Stronger location contracts keep layout ownership:
+  `FOLLOW_BOTTOM` absorbs the new line in its normal ResizeObserver pass, while
+  pins, reserved-tail holds, and the question-submission overlay remain fixed.
+  The controller must not restore a stale anchor between those two outcomes or
+  interrupt live tail-follow with a delayed snap.
 - **R5a — Attention nudges reveal the usable tail.** Tapping an offscreen question
   or paused-turn nudge is an explicit one-shot reading action: it lands at the
   physical tail, including the list's composer-clearance padding, so the card's
@@ -1105,6 +1117,6 @@ cover it deterministically.
 
 - **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/platform/frontend/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
 - **Secure server-side app jobs:** `BACKGROUND_JOBS.md` defines the
-  background-agent data contract, portable executor design, historical
-  rationale, and topology-level verification.
+  scoped-authority data contract, private executor adapters, rationale, and
+  topology-level verification.
 - **Subsystem deep-dives are inlined above** as their own sections: *Stop-chat contract*, *AskUserQuestion interception*, *Chat persistence — single-writer actor*, *Navigation back-stack + drawer model*, *Service worker + offline*, and *Mini-app manifest (mobius.json)*. (The chat-persistence v2 design + staged-rollout notes remain internal/gitignored — the as-built contract is the section above.)

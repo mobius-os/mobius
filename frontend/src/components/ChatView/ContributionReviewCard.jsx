@@ -20,11 +20,6 @@ import {
 } from './contributionReviewModel.js'
 import './ContributionReviewCard.css'
 
-// How long the post-send acknowledgement stays before clearing itself. Long
-// enough to read and tap through to GitHub, short enough that walking away never
-// leaves a stale box wedged above the composer.
-const SENT_VISIBLE_MS = 12000
-
 export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }) {
   const queryClient = useQueryClient()
   const { data: apps } = appQueries.list.useQuery()
@@ -56,13 +51,7 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
     wasActive.current = turnActive
   }, [turnActive, queryClient, queryKey])
 
-  const [busyId, setBusyId] = useState(null)
-  const [error, setError] = useState(null)
   const [sentRows, setSentRows] = useState([])
-  // State disables the buttons on the next render; the ref closes the smaller
-  // same-frame window too. One owner press can therefore claim exactly one
-  // record, even if another click lands before React has painted the lock.
-  const activeSendRef = useRef(null)
   // Dismissals are persisted, so this only forces the re-render; the stored
   // decision is what actually filters the list.
   const [dismissRevision, setDismissRevision] = useState(0)
@@ -80,11 +69,7 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
   if (!appId) return null
   if (panel.count === 0) return null
 
-  async function send(record) {
-    if (activeSendRef.current !== null) return
-    activeSendRef.current = record.id
-    setBusyId(record.id)
-    setError(null)
+  async function submit(record) {
     try {
       const res = await api.contributions.submit(appId, record.id, {
         autopilot: autopilotOnSend(data),
@@ -92,34 +77,32 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         const detail = body?.detail?.message || body?.detail
-        setError({
-          id: record.id,
-          message: typeof detail === 'string'
+        return {
+          error: typeof detail === 'string'
             ? detail
             : 'Could not contribute this. Open Contribute for the details.',
-        })
-        return
+        }
       }
-      const sent = {
-        id: record.id,
-        number: body?.number ?? body?.record?.number ?? null,
-        url: body?.url || body?.record?.url || null,
-        repo: record.repo,
+      return {
+        sent: {
+          id: record.id,
+          number: body?.number ?? body?.record?.number ?? null,
+          url: body?.url || body?.record?.url || null,
+          repo: record.repo,
+        },
       }
-      setSentRows(rows => [
-        ...rows.filter(row => row.id !== sent.id),
-        sent,
-      ])
     } catch {
-      setError({
-        id: record.id,
-        message: 'Could not reach the server. Nothing was contributed.',
-      })
+      return { error: 'Could not reach the server. Nothing was contributed.' }
     } finally {
-      if (activeSendRef.current === record.id) activeSendRef.current = null
-      setBusyId(current => current === record.id ? null : current)
       queryClient.invalidateQueries({ queryKey, exact: true })
     }
+  }
+
+  function rememberSent(sent) {
+    setSentRows(rows => [
+      ...rows.filter(row => row.id !== sent.id),
+      sent,
+    ])
   }
 
   return (
@@ -175,10 +158,9 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
             record={record}
             connected={data?.connected !== false}
             autopilot={autopilotOnSend(data)}
-            busy={busyId === record.id}
-            locked={busyId !== null}
-            error={error?.id === record.id ? error.message : null}
-            onSend={send}
+            showPayoff={!grouped}
+            onSubmit={submit}
+            onSent={rememberSent}
             onOpenContribute={onOpenContribute}
             onDismiss={onDismiss}
           />
@@ -284,20 +266,13 @@ function useSwipeToDismiss(onDismiss) {
  * The acknowledgement after this card's own Send.
  *
  * It is an acknowledgement, NOT a permanent record — the Contribute app owns the
- * history and the chat reply carries the link. So it gets every exit the other
- * cards have (swipe, the band control) AND clears itself, because the first
- * version shipped with no exit at all and became an undismissable box above the
- * composer.
+ * history and the chat reply carries the link. It gets every explicit exit the
+ * other cards have (swipe and the band control), but no timed exit: the
+ * acknowledgement and its GitHub link stay available until the owner dismisses
+ * it or leaves the current chat surface.
  */
 function SentRow({ sent, onDismiss }) {
   const cardRef = useSwipeToDismiss(onDismiss)
-  const dismissRef = useRef(onDismiss)
-  dismissRef.current = onDismiss
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => dismissRef.current?.(), SENT_VISIBLE_MS)
-    return () => window.clearTimeout(timer)
-  }, [])
 
   return (
     <div ref={cardRef} className="contrib-card contrib-card--sent" role="status">
@@ -397,14 +372,38 @@ function StackReviewRow({ item, onOpenContribute, onDismiss }) {
 }
 
 function ReviewRow({
-  record, connected, autopilot, busy, locked, error, onSend, onOpenContribute,
-  onDismiss,
+  record, connected, autopilot, showPayoff, onSubmit, onSent,
+  onOpenContribute, onDismiss,
 }) {
   const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  // Each row owns its own in-flight guard. That keeps sibling rows independent
+  // while closing the same-frame double-click window for this record.
+  const activeSendRef = useRef(false)
   const blocker = sendBlocker(record, { connected })
   const diffStat = diffStatSummary(record.diff_stat)
   const submitting = record.status === 'submitting'
   const cardRef = useSwipeToDismiss(onDismiss)
+
+  async function send() {
+    if (activeSendRef.current) return
+    activeSendRef.current = true
+    setBusy(true)
+    setError(null)
+    let outcome
+    try {
+      outcome = await onSubmit(record)
+    } finally {
+      activeSendRef.current = false
+      setBusy(false)
+    }
+    if (outcome?.error) {
+      setError(outcome.error)
+    } else if (outcome?.sent) {
+      onSent(outcome.sent)
+    }
+  }
 
   return (
     <div
@@ -436,7 +435,7 @@ function ReviewRow({
 
       {/* The payoff, but never next to a problem: a blocked review needs the
           reason, not encouragement. */}
-      {!blocker && !error && !submitting && (
+      {showPayoff && !blocker && !error && !submitting && (
         <p className="contrib-card__payoff">{payoffLine(record)}</p>
       )}
       {autopilot && !blocker && !error && !submitting && (
@@ -451,8 +450,8 @@ function ReviewRow({
         <button
           type="button"
           className="contrib-card__send"
-          disabled={locked || submitting || !!blocker}
-          onClick={() => onSend(record)}
+          disabled={busy || submitting || !!blocker}
+          onClick={send}
         >
           {submitting || busy ? 'Contributing…' : contributeLabel(record)}
         </button>

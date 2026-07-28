@@ -616,6 +616,13 @@ test('question editing rebases only an ordinary held viewport to native caret mo
     { kind: 'PIN_USER_MSG', cid: 'c-1' },
     { kind: 'HOLD_RESERVED_TAIL', cid: 'c-1' },
     { kind: 'FOLLOW_BOTTOM' },
+    {
+      kind: 'ANCHOR_AT',
+      key: 'question-row',
+      offset: 84,
+      questionSubmitViewportH: 600,
+      questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' },
+    },
   ]) {
     assert.equal(
       modeForQuestionEditingViewportChange(strongerMode, caretHold),

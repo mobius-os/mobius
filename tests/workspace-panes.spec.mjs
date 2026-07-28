@@ -324,11 +324,11 @@ test.describe('Workspace panes (PR2 gate)', () => {
     ]) {
       expect(frames.every(Boolean), 'every sampled frame has two projected panes').toBe(true)
       for (const frame of frames) {
-        // Wide projection owns an 8px outer margin on both sides. If the content
-        // box and projection land in separate renders, one of these gaps differs
-        // by exactly the desktop drawer width for the first sampled frame.
-        expect(Math.abs((frame.firstPaneLeft - frame.contentLeft) - 8)).toBeLessThanOrEqual(1)
-        expect(Math.abs((frame.contentRight - frame.lastPaneRight) - 8)).toBeLessThanOrEqual(1)
+        // Tiled panes use focused-pane's edge-to-edge density. If the content box
+        // and projection land in separate renders, one edge differs by exactly
+        // the desktop drawer width for the first sampled frame.
+        expect(Math.abs(frame.firstPaneLeft - frame.contentLeft)).toBeLessThanOrEqual(1)
+        expect(Math.abs(frame.contentRight - frame.lastPaneRight)).toBeLessThanOrEqual(1)
       }
     }
   })

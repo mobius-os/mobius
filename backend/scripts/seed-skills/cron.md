@@ -13,13 +13,13 @@ The container has `cron` installed. Cron tasks run as `mobius` and get the app i
 
 `/var/spool/cron/crontabs/` lives in the image layer, not on `/data`, so a rebuild starts with an empty crontab. Installed apps should declare `schedule.default` and `schedule.job` in `mobius.json`. The installer persists an `init-cron.sh` declaration, but boot never executes app-owned shell from that file. FastAPI lifespan parses the effective cadence and job, validates the live app/source tree, and rewrites the entry through `app-job-runner.py` before cron starts.
 
-Managed jobs receive a short-lived app-scoped `APP_TOKEN`, not the owner service token. A manifest with `permissions.background_agent: true` also runs inside the reviewed filesystem sandbox. Its job can see its read-only source, numeric app storage, declared Memory mount, and configured provider credentials; it cannot see arbitrary owner/platform state.
+Managed jobs receive a short-lived app-scoped `APP_TOKEN`, not the owner service token. A manifest with `permissions.job_authority: scoped` also runs inside the reviewed filesystem sandbox. Its job can see its read-only source, numeric app storage, declared Memory mount, and configured provider credentials; it cannot see arbitrary owner/platform state.
 
 For an installable app, use the manifest contract:
 
 ```json
 {
-  "permissions": { "background_agent": true },
+  "permissions": { "job_authority": "scoped" },
   "schedule": {
     "default": "30 5 * * *",
     "user_configurable": true,

@@ -93,12 +93,48 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
 })
 
 test('newer semantic actions cannot be overwritten by an older quiet settlement', () => {
-  const closeStart = ownerSource.indexOf('const closePreSendGestureWindow =')
-  const closeEnd = ownerSource.indexOf('useLayoutEffect(() => () => {', closeStart)
-  const closePath = ownerSource.slice(closeStart, closeEnd)
-  assert.ok(closeStart >= 0 && closeEnd > closeStart,
-    'pre-send ownership handoff must remain discoverable')
-  assert.match(closePath, /discardPendingReaderSettleRef\.current\?\.\(\)/)
+  const supersedeStart = ownerSource.indexOf(
+    'const supersedePendingReaderGesture =',
+  )
+  const supersedeEnd = ownerSource.indexOf(
+    'const captureSendIntent =',
+    supersedeStart,
+  )
+  const supersedePath = ownerSource.slice(supersedeStart, supersedeEnd)
+  assert.ok(supersedeStart >= 0 && supersedeEnd > supersedeStart,
+    'semantic-action ownership handoff must remain discoverable')
+  assert.match(supersedePath, /discardPendingReaderSettleRef\.current\?\.\(\)/)
+
+  const captureStart = supersedeEnd
+  const captureEnd = ownerSource.indexOf(
+    'const sendIntentIsCurrent =',
+    captureStart,
+  )
+  const capturePath = ownerSource.slice(captureStart, captureEnd)
+  assert.ok(
+    capturePath.indexOf('shouldPinSend({')
+      < capturePath.indexOf('supersedePendingReaderGesture()'),
+    'send must snapshot current geometry before retiring the gesture that positioned it',
+  )
+
+  const questionStart = ownerSource.indexOf(
+    'const freezeQuestionSubmission =',
+  )
+  const questionEnd = ownerSource.indexOf(
+    'const anchorPagination =',
+    questionStart,
+  )
+  const questionPath = ownerSource.slice(questionStart, questionEnd)
+  assert.ok(
+    questionPath.indexOf('modeForQuestionSubmission(')
+      < questionPath.indexOf('supersedePendingReaderGesture()'),
+    'question submit must snapshot its card before retiring older settlement',
+  )
+  assert.ok(
+    questionPath.indexOf('supersedePendingReaderGesture()')
+      < questionPath.indexOf('transitionMode('),
+    'older settlement must be retired before the question anchor is committed',
+  )
 
   const hotStart = ownerSource.indexOf('const onScroll = () => {')
   const hotEnd = ownerSource.indexOf(

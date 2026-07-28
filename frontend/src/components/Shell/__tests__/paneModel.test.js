@@ -654,20 +654,20 @@ test('projectLayout returns the single-pane sentinel for a one-leaf tree', () =>
   }
 })
 
-test('projectLayout wide: a row split fills the box with a gap and one divider', () => {
+test('projectLayout wide: a row split fills the edge-to-edge box with a gap and divider', () => {
   const ws = twoPaneWs('right')     // layout: s? row a=p0 b=pNew
   const [left, right] = paneModel.projectLayout(ws, 'wide', { w: 1000, h: 700 }).visibleLeaves
   const proj = paneModel.projectLayout(ws, 'wide', { w: 1000, h: 700 })
   const L = proj.rects[left]
   const R = proj.rects[right]
-  assert.equal(L.x, paneModel.OUTER_MARGIN, 'left starts at the outer margin')
-  assert.equal(L.y, paneModel.OUTER_MARGIN)
-  assert.equal(L.h, 700 - 2 * paneModel.OUTER_MARGIN, 'full box height')
+  assert.equal(L.x, 0, 'left starts at the content edge')
+  assert.equal(L.y, 0)
+  assert.equal(L.h, 700, 'full box height')
   assert.equal(R.h, L.h)
   assert.equal(R.x, L.x + L.w + paneModel.PANE_GAP, 'right sits a gap past the left')
   assert.equal(
-    L.w + paneModel.PANE_GAP + R.w, 1000 - 2 * paneModel.OUTER_MARGIN,
-    'the two panes plus the gap fill the inset box',
+    L.w + paneModel.PANE_GAP + R.w, 1000,
+    'the two panes plus the gap fill the content box',
   )
   assert.equal(proj.dividers.length, 1)
   const d = proj.dividers[0]
@@ -1391,13 +1391,12 @@ test('projectLayout clamps a dragged ANCESTOR ratio against child SUBTREE minima
   assert.ok(proj.rects.p2.w >= paneModel.MIN_PANE_W, `p2 ${proj.rects.p2.w} >= ${paneModel.MIN_PANE_W}`)
 })
 
-test('canSplit judges the first split against the POST-inset box, not the full rect', () => {
+test('canSplit judges the first split against the edge-to-edge post-split box', () => {
   const ws = paneModel.seedFromFlatTabs([makeTab('chat', 'a')])
-  // 407px-high phone: (407-7)/2 == 200 looks OK, but after the multi-leaf inset
-  // (391-7)/2 == 192 < MIN_PANE_H, so the split must NOT be offered (finding E-ii).
-  assert.equal(paneModel.canSplit(ws, 'p0', 'top', 'phone', { w: 400, h: 407 }), false)
-  assert.equal(paneModel.canSplit(ws, 'p0', 'bottom', 'phone', { w: 400, h: 407 }), false)
-  // A taller phone clears MIN_PANE_H even after the inset.
+  // With no outer inset, 407px is the exact first legal height:
+  // (407 - 7px inter-pane gap) / 2 == MIN_PANE_H.
+  assert.equal(paneModel.canSplit(ws, 'p0', 'top', 'phone', { w: 400, h: 406 }), false)
+  assert.equal(paneModel.canSplit(ws, 'p0', 'bottom', 'phone', { w: 400, h: 407 }), true)
   assert.equal(paneModel.canSplit(ws, 'p0', 'bottom', 'phone', { w: 400, h: 520 }), true)
 })
 

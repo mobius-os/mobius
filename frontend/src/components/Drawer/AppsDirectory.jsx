@@ -4,6 +4,8 @@ import './AppsDirectory.css'
 
 export default function AppsDirectory({
   empty,
+  status = 'success',
+  onRetry,
   resultCount,
   query,
   onQueryChange,
@@ -23,7 +25,7 @@ export default function AppsDirectory({
     }
   }, [])
 
-  const noMatches = !empty && resultCount === 0
+  const noMatches = status === 'success' && !empty && resultCount === 0
 
   return (
     <section className="apps-directory" aria-label="Installed apps">
@@ -47,30 +49,44 @@ export default function AppsDirectory({
       </header>
 
       <div className="apps-directory__scroll">
-        <div className="apps-directory__intro">
-          <div>
-            <h2>Your apps</h2>
-            <p>Everything installed in this Möbius workspace.</p>
+        {status === 'loading' ? (
+          <div className="apps-directory__empty" role="status">
+            <p>Loading apps…</p>
           </div>
-          {query && !empty && (
-            <span aria-live="polite">
-              {resultCount} {resultCount === 1 ? 'match' : 'matches'}
-            </span>
-          )}
-        </div>
-
-        {empty ? (
-          <div className="apps-directory__empty">
-            <h2>No installed apps yet</h2>
-            <p>Installed apps will appear here as soon as you add one.</p>
-          </div>
-        ) : noMatches ? (
-          <div className="apps-directory__empty" aria-live="polite">
-            <h2>No apps found</h2>
-            <p>Try a different name or keyword.</p>
+        ) : status === 'error' ? (
+          <div className="apps-directory__empty" role="alert">
+            <h2>Apps unavailable</h2>
+            <p>Check your connection, then try again.</p>
+            <button type="button" onClick={onRetry}>Try again</button>
           </div>
         ) : (
-          <div className="apps-directory__grid">{children}</div>
+          <>
+            <div className="apps-directory__intro">
+              <div>
+                <h2>Your apps</h2>
+                <p>Everything installed in this Möbius workspace.</p>
+              </div>
+              {query && !empty && (
+                <span aria-live="polite">
+                  {resultCount} {resultCount === 1 ? 'match' : 'matches'}
+                </span>
+              )}
+            </div>
+
+            {empty ? (
+              <div className="apps-directory__empty">
+                <h2>No installed apps yet</h2>
+                <p>Installed apps will appear here as soon as you add one.</p>
+              </div>
+            ) : noMatches ? (
+              <div className="apps-directory__empty" aria-live="polite">
+                <h2>No apps found</h2>
+                <p>Try a different name or keyword.</p>
+              </div>
+            ) : (
+              <div className="apps-directory__grid">{children}</div>
+            )}
+          </>
         )}
       </div>
     </section>

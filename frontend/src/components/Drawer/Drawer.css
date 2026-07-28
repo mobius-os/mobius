@@ -625,6 +625,37 @@
   align-items: flex-start;
 }
 
+.drawer__list-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 4px 10px 8px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.drawer__list-status button {
+  padding: 7px 10px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.drawer__list-status button:hover {
+  background: var(--surface);
+}
+
+.drawer__list-status button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ── Bottom group (Settings) ───────────────────────── */
 
 .drawer__group--bottom {

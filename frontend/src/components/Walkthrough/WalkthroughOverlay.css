@@ -9,9 +9,14 @@
   top: calc(62px + env(safe-area-inset-top, 0px));
   right: 18px;
   width: min(390px, calc(100vw - 32px));
+  /* Width-independent: short landscape and compact desktop windows need the
+     same finishable scroll surface as phones. 62px top + 18px bottom = 80px. */
+  max-height: calc(100dvh - 80px - env(safe-area-inset-top, 0px));
   box-sizing: border-box;
   padding: 22px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   color: var(--text, #e4e4e7);
   background:
     radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--accent, #8b6cf7) 24%, transparent), transparent 48%),

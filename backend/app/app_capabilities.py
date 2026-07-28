@@ -13,7 +13,7 @@ import json
 from typing import Any
 
 
-CONTRACT_SCHEMA = 2
+CONTRACT_SCHEMA = 3
 
 
 # Host-mediated browser capabilities. These are deliberately separate from
@@ -148,6 +148,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
   """Return the normalized capability contract for a validated manifest."""
   perms = manifest.get("permissions") or {}
   schedule = manifest.get("schedule") or {}
+  job_authority = perms.get("job_authority", "platform")
   requested_logs = perms.get("chat_log_access", "none")
   # The only chat-log route is structurally redacted.  A historical ``full``
   # declaration therefore has summary effectiveness, never silent full access.
@@ -192,10 +193,9 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "cron": cron,
         "user_configurable": bool(schedule.get("user_configurable", False)),
         "initialize_on_install": bool(schedule.get("initialize_on_install", False)),
-        "agent": bool(perms.get("background_agent", False)),
-        # A job is outside the iframe.  This label is intentionally explicit so
-        # ``filesystem_api: false`` is never misread as constraining the job.
-        "authority": "scoped_system_job" if perms.get("background_agent") else "app_job_process",
+        # A job is outside the iframe. This authority is intentionally explicit
+        # so ``filesystem_api: false`` is never misread as constraining it.
+        "authority": job_authority,
       }
       if job else None
     ),

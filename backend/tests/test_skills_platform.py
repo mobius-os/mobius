@@ -428,6 +428,43 @@ def test_uninstall_removes_dir_and_sidecar_record(client, auth, skills_dir):
   assert "tips" not in sidecar
 
 
+def test_uninstall_snapshots_the_owned_directory_before_removal(
+  client, auth, skills_dir, monkeypatch,
+):
+  """The route delegates its exact path and lifecycle intent before deletion."""
+  from app.routes import skills as rs
+
+  d = skills_dir / "tips"
+  d.mkdir()
+  (d / "SKILL.md").write_text("# tips\n")
+  (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).write_text(
+    json.dumps({"tips": {"source": "o/r"}}),
+  )
+  data_dir = skills_dir.parents[1]
+  git_dir = data_dir / ".git"
+  git_dir.mkdir()
+  calls = []
+
+  def snapshot(data_dir_, relative_path, commit_message):
+    calls.append((data_dir_, relative_path, commit_message, d.is_dir()))
+    return True, "committed"
+
+  monkeypatch.setattr(rs.data_git, "snapshot_path", snapshot)
+  try:
+    r = client.delete("/api/skills/tips", headers=auth)
+  finally:
+    git_dir.rmdir()
+
+  assert r.status_code == 200, r.text
+  assert calls == [(
+    data_dir,
+    "shared/skills/tips",
+    "pre-uninstall snapshot of skill tips",
+    True,
+  )]
+  assert not d.exists()
+
+
 def test_uninstall_rejects_traversal_name(client, auth, skills_dir):
   r = client.delete("/api/skills/..%2Fetc", headers=auth)
   assert r.status_code in (400, 404, 409)
