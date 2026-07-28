@@ -15,7 +15,7 @@ function stripComments(css) {
 }
 
 test('an empty chat keeps the Möbius brand anchor above its prompt', () => {
-  assert.match(chatView, /import mobiusLogoUrl from '\.\.\/\.\.\/assets\/moebius\.svg'/)
+  assert.match(chatView, /src="\/moebius\.svg"/)
   assert.match(chatView, /className="chat__empty-glyph"[\s\S]*?What's on your mind\?/)
   assert.match(chatCss, /\.chat__empty-glyph\s*\{[\s\S]*?width:\s*96px/)
 })

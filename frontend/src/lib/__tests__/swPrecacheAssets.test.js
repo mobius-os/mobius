@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 
 import {
   KATEX_ASSET_VERSION,
@@ -17,8 +17,11 @@ const dockerfile = readFileSync(
   new URL('../../../../Dockerfile', import.meta.url),
   'utf8',
 )
-const publicLogo = readFileSync(new URL('../../../public/moebius.svg', import.meta.url))
-const bundledLogo = readFileSync(new URL('../../assets/moebius.svg', import.meta.url))
+const publicLogo = readFileSync(
+  new URL('../../../public/moebius.svg', import.meta.url),
+  'utf8',
+)
+const bundledLogo = new URL('../../assets/moebius.svg', import.meta.url)
 
 test('retained runtime precache covers the complete PDF and KaTeX URL payload', () => {
   const byUrl = new Map(RETAINED_RUNTIME_ASSETS.map(entry => [entry.url, entry]))
@@ -53,11 +56,12 @@ test('only stable aliases need explicit cache revisions', () => {
   }
 })
 
-test('precache versions match the package graph and logo asset copies', () => {
+test('precache versions match the package graph and the shell has one vector logo', () => {
   assert.equal(packageJson.dependencies['pdfjs-dist'], PDFJS_ASSET_VERSION)
   assert.equal(packageJson.dependencies.katex, KATEX_ASSET_VERSION)
   assert.match(dockerfile, new RegExp(`pdfjs-dist@${PDFJS_ASSET_VERSION}`))
   assert.match(dockerfile, new RegExp(`pdfjs@${PDFJS_ASSET_VERSION}`))
   assert.match(dockerfile, new RegExp(`katex@${KATEX_ASSET_VERSION}`))
-  assert.deepEqual(bundledLogo, publicLogo)
+  assert.match(publicLogo, /^<svg[^>]+viewBox="0 0 768 768"/)
+  assert.equal(existsSync(bundledLogo), false)
 })
