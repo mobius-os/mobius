@@ -28,6 +28,37 @@ function workspace({ slot = 'a', left = 'a', right = 'b' } = {}) {
 
 const projection = { visibleLeaves: ['left', 'right'] }
 
+test('a legacy absent slot retains the focused chat in the Standard world immediately', () => {
+  const legacy = workspace()
+  legacy.focusedPaneId = 'right'
+  delete legacy.singleScreen
+
+  const owners = deriveChatSurfaceOwners({
+    workspace: legacy,
+    baseProjection: projection,
+    projection,
+  })
+
+  assert.ok(owners.some(owner => (
+    owner.world === STANDARD_CHAT_WORLD
+      && owner.paneId === SINGLE_SLOT_PANE
+      && owner.chatId === 'b'
+  )))
+})
+
+test('an explicit null slot remains the New Chat landing', () => {
+  const owners = deriveChatSurfaceOwners({
+    workspace: workspace({ slot: null }),
+    baseProjection: projection,
+    projection,
+  })
+
+  assert.equal(
+    owners.some(owner => owner.world === STANDARD_CHAT_WORLD),
+    false,
+  )
+})
+
 test('the same chat gets independent Standard and Builder surface owners', () => {
   const owners = deriveChatSurfaceOwners({
     workspace: workspace(),

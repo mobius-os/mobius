@@ -108,6 +108,23 @@ test('activeKeyForOwner resolves real panes and the synthetic single owner', () 
   assert.equal(paneModel.activeKeyForOwner(ws, 'missing-pane'), null)
 })
 
+test('activeKeyForOwner gives a legacy Standard owner the focused seed without overriding explicit null', () => {
+  const legacy = paneModel.seedFromFlatTabs([
+    { kind: 'chat', id: '5', title: 'Five' },
+  ])
+  assert.equal('singleScreen' in legacy, false)
+  assert.equal(
+    paneModel.activeKeyForOwner(legacy, paneModel.SINGLE_SLOT_PANE),
+    'chat:5',
+  )
+
+  const initializedEmpty = { ...legacy, singleScreen: null }
+  assert.equal(
+    paneModel.activeKeyForOwner(initializedEmpty, paneModel.SINGLE_SLOT_PANE),
+    null,
+  )
+})
+
 // ── Seed-once on first builder→single switch ─────────────────────────────────
 
 test('SET_VIEW_MODE to single seeds the slot from the focused item, once', () => {

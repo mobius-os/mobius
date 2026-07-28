@@ -527,7 +527,11 @@ export function singleScreenKey(ws) {
 // selects through its independent slot. Callers that bind lifecycle events to
 // an owner use this instead of assuming every owner exists in ws.panes.
 export function activeKeyForOwner(ws, ownerPaneId) {
-  if (String(ownerPaneId) === SINGLE_SLOT_PANE) return singleScreenKey(ws)
+  if (String(ownerPaneId) === SINGLE_SLOT_PANE) {
+    if ('singleScreen' in ws) return singleScreenKey(ws)
+    const seed = focusedSlotSeed(ws)
+    return seed ? tabModel.tabKey(seed) : null
+  }
   return ws.panes?.[ownerPaneId]?.activeTabKey ?? null
 }
 
