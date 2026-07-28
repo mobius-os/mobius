@@ -103,10 +103,12 @@ import * as modeMachine from './modeMachine.js'
 import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
 import {
+  BUILDER_CHAT_WORLD,
   STANDARD_CHAT_WORLD,
   deriveChatSurfaceLayers,
   deriveChatSurfaceOwners,
 } from './chatSurfaceModel.js'
+import { deriveWorkspaceVisualState } from './visualReadiness.js'
 import {
   shouldFocusComposerAfterPanePointer,
   supportsDesktopPaneComposerFocus,
@@ -1446,6 +1448,17 @@ export default function Shell() {
   const chatPaneLayers = useMemo(() => {
     return deriveChatSurfaceLayers(visibleChatPanes, presentedChatByPane)
   }, [presentedChatByPane, visibleChatPanes])
+  // Shell is the only layer that knows which retained workspace world is
+  // actually painted. Publish one stable readiness contract for visual tools;
+  // they must not learn private handoff classes or compositor attributes.
+  const workspaceVisualState = deriveWorkspaceVisualState({
+    modeTransition: modeState.transition,
+    chatPanesVisible,
+    chatPaneLayers,
+    paintedChatWorld: effectiveViewMode === 'single'
+      ? STANDARD_CHAT_WORLD
+      : BUILDER_CHAT_WORLD,
+  })
 
   // ── Synchronous pinned iframe-cache derivation (design §2/§4) ─────────────
   // renderedAppIds = sortById(visibleAppIds ∪ boundedWarmLRU). Visible ids come
@@ -3572,6 +3585,7 @@ export default function Shell() {
       // beat class, so this is the only external signal it is armed). idle otherwise.
       data-mode-phase={modeState.transition ? modeState.transition.phase : 'idle'}
       data-mode-epoch={modeState.transition ? modeState.transition.id : undefined}
+      data-workspace-visual-state={workspaceVisualState}
       // The ONE transient beat class comes from the descriptor (INV 1/4): exactly
       // one of entering/exiting is ever present, and the keyed animationend on
       // this root completes the beat (the controller's listener). No separate

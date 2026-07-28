@@ -11,7 +11,7 @@ import math
 import json
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -36,6 +36,28 @@ _ingest_lock = threading.Lock()
 _AppInstanceKey = tuple[int, str | None]
 _recent_by_app: dict[_AppInstanceKey, deque[tuple[object, float, int, int]]] = {}
 _seen_ids_by_app: dict[_AppInstanceKey, dict[str, float]] = {}
+_rate_owner_activity: OrderedDict[_AppInstanceKey, float] = OrderedDict()
+
+
+def _drop_rate_owner(app_key: _AppInstanceKey) -> None:
+  _recent_by_app.pop(app_key, None)
+  _seen_ids_by_app.pop(app_key, None)
+  _rate_owner_activity.pop(app_key, None)
+
+
+def _mark_rate_owner_active(app_key: _AppInstanceKey, accepted_at: float) -> None:
+  _rate_owner_activity.pop(app_key, None)
+  _rate_owner_activity[app_key] = accepted_at
+
+
+def _reclaim_rate_owners(now: float) -> None:
+  """Forget app-instance state after its rolling rate window closes."""
+  cutoff = now - _RATE_WINDOW_SECONDS
+  while _rate_owner_activity:
+    app_key, last_seen = next(iter(_rate_owner_activity.items()))
+    if last_seen >= cutoff:
+      break
+    _drop_rate_owner(app_key)
 
 
 def _reserve_rate(
@@ -44,6 +66,7 @@ def _reserve_rate(
   now = time.monotonic()
   cutoff = now - _RATE_WINDOW_SECONDS
   with _rate_lock:
+    _reclaim_rate_owners(now)
     recent = _recent_by_app.setdefault(app_key, deque())
     while recent and recent[0][1] < cutoff:
       recent.popleft()
@@ -86,6 +109,7 @@ def _reserve_rate(
     recent.append((token, now, len(novel), batch_bytes))
     for signal_id, _ in novel:
       seen[signal_id] = now
+    _mark_rate_owner_active(app_key, now)
     return token, {signal_id for signal_id, _ in novel}
 
 
@@ -99,12 +123,15 @@ def _rollback_rate(
     seen = _seen_ids_by_app.get(app_key, {})
     for signal_id in signal_ids:
       seen.pop(signal_id, None)
+    if not _recent_by_app.get(app_key) and not _seen_ids_by_app.get(app_key):
+      _drop_rate_owner(app_key)
 
 
 def _reset_for_tests() -> None:
   with _rate_lock:
     _recent_by_app.clear()
     _seen_ids_by_app.clear()
+    _rate_owner_activity.clear()
 
 
 class ClientSignal(BaseModel):

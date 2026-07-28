@@ -37,6 +37,238 @@
 
 set -euo pipefail
 
+# agent-browser includes launch/runtime configuration in its daemon identity.
+# Never vary AGENT_BROWSER_* env between commands: doing so silently splits one
+# logical capture across multiple browsers. Bound individual CLI waits with the
+# process-level `timeout` utility instead, which preserves daemon identity and
+# lets the caller inspect/close the same session after this helper returns.
+
+BROWSER_ERROR_FILE=""
+WARMUP_OUT=""
+CAPTURE_OUT=""
+
+cleanup() {
+  local path
+  for path in "$BROWSER_ERROR_FILE" "$WARMUP_OUT" "$CAPTURE_OUT"; do
+    [ -z "$path" ] || rm -f "$path"
+  done
+}
+
+die() {
+  printf 'agent-screenshot.sh: %s\n' "$*" >&2
+  if [ -n "$BROWSER_ERROR_FILE" ] && [ -s "$BROWSER_ERROR_FILE" ]; then
+    tail -n 2 "$BROWSER_ERROR_FILE" | sed 's/^/agent-browser: /' >&2
+  fi
+  exit 1
+}
+
+browser_command() {
+  local timeout_seconds="$1"
+  local status=0
+  shift
+  : > "$BROWSER_ERROR_FILE"
+  timeout "${timeout_seconds}s" agent-browser "$@" \
+    2>"$BROWSER_ERROR_FILE" || status=$?
+  if [ "$status" -eq 124 ] && [ ! -s "$BROWSER_ERROR_FILE" ]; then
+    printf 'command timed out after %ss\n' "$timeout_seconds" \
+      > "$BROWSER_ERROR_FILE"
+  fi
+  return "$status"
+}
+
+browser_wait() {
+  local status=0
+  : > "$BROWSER_ERROR_FILE"
+  agent-browser wait "$@" 2>"$BROWSER_ERROR_FILE" || status=$?
+  return "$status"
+}
+
+browser_eval_retry() {
+  local expression="$1"
+  local output=""
+  local attempt
+  for attempt in 1 2 3; do
+    if output="$(browser_command 5 eval "$expression")"; then
+      printf '%s' "$output"
+      return 0
+    fi
+    sleep 0.3
+  done
+  return 1
+}
+
+browser_screenshot_retry() {
+  local output_path="$1"
+  local attempt
+  local byte_count
+  for attempt in 1 2 3; do
+    # Navigation/service-worker handoffs can replace the page after an earlier
+    # viewport command. Configure the page that will produce THIS screenshot,
+    # not merely the page that existed at helper startup.
+    if ! browser_set_viewport_retry; then
+      continue
+    fi
+    if browser_command 5 screenshot "$output_path" >/dev/null; then
+      byte_count="$(wc -c < "$output_path" 2>/dev/null || printf '0')"
+      if { [ "${CAPTURE_MIN_BYTES:-0}" -le 0 ] \
+            || [ "${byte_count:-0}" -ge "${CAPTURE_MIN_BYTES}" ]; } \
+          && python3 - "$output_path" "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" <<'PY'
+import struct
+import sys
+
+path, expected_w, expected_h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+try:
+  with open(path, "rb") as handle:
+    header = handle.read(24)
+  valid = header[:8] == b"\x89PNG\r\n\x1a\n" and header[12:16] == b"IHDR"
+  width, height = struct.unpack(">II", header[16:24]) if valid else (0, 0)
+except (OSError, struct.error):
+  width, height = 0, 0
+raise SystemExit(0 if (width, height) == (expected_w, expected_h) else 1)
+PY
+      then
+        return 0
+      fi
+      # A shell screenshot smaller than the minimum is the observed solid-
+      # background compositor frame, not useful evidence. Yield two renderer
+      # frames before retrying; do not accept a successful CDP command as proof
+      # that the shell's paint reached the captured surface.
+      browser_eval_retry \
+        "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))" \
+        >/dev/null || true
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+browser_open_origin_retry() {
+  local url="$1"
+  local mode="$2"
+  local current=""
+  local confirmed=""
+  local settled=""
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    browser_command 5 open "$url" >/dev/null || true
+    sleep 0.2
+    current="$(
+      browser_command 5 get url || true
+    )"
+    sleep 0.2
+    confirmed="$(
+      browser_command 5 get url || true
+    )"
+    if [ "$current" != "$confirmed" ]; then
+      # In-shell deep links intentionally canonicalize to `/shell/` after the
+      # router consumes their intent. That redirect can land between these two
+      # reads. Require the canonical URL to remain stable for one more read
+      # instead of retrying the deep link forever; the final auth/readiness
+      # checks below still reject login or an unmounted target.
+      case "$mode:$confirmed" in
+        target:"${API_BASE_URL}"*)
+          case "$confirmed" in
+            "${API_BASE_URL}/api/browser-bootstrap"*) continue ;;
+          esac
+          sleep 0.2
+          settled="$(
+            browser_command 5 get url || true
+          )"
+          [ "$confirmed" = "$settled" ] && return 0
+          ;;
+      esac
+      continue
+    fi
+    case "$mode:$confirmed" in
+      bootstrap:"${API_BASE_URL}/api/browser-bootstrap"*) return 0 ;;
+      target:"${API_BASE_URL}"*)
+        case "$confirmed" in
+          "${API_BASE_URL}/api/browser-bootstrap"*) : ;;
+          *) return 0 ;;
+        esac
+        ;;
+    esac
+  done
+  return 1
+}
+
+browser_open_exact_retry() {
+  local url="$1"
+  local current=""
+  local confirmed=""
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    browser_command 5 open "$url" >/dev/null || true
+    sleep 0.2
+    current="$(
+      browser_command 5 get url || true
+    )"
+    sleep 0.2
+    confirmed="$(
+      browser_command 5 get url || true
+    )"
+    [ "$current" = "$url" ] && [ "$confirmed" = "$url" ] && return 0
+  done
+  return 1
+}
+
+browser_set_viewport_retry() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if browser_command 5 set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" \
+        >/dev/null; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+clear_stale_browser_profile_lock() {
+  local lock_path="${AGENT_BROWSER_PROFILE:-}/SingletonLock"
+  local lock_target=""
+  local owner_host=""
+  local owner_pid=""
+  local current_host=""
+  local artifact=""
+
+  [ -n "${AGENT_BROWSER_PROFILE:-}" ] || return 0
+  [ -L "$lock_path" ] || return 0
+
+  lock_target="$(readlink "$lock_path" 2>/dev/null || true)"
+  owner_host="${lock_target%-*}"
+  owner_pid="${lock_target##*-}"
+  case "$owner_pid" in
+    ''|*[!0-9]*)
+      # An unfamiliar lock shape may belong to a newer Chromium contract.
+      # Preserve it rather than guessing that the automation profile is idle.
+      echo "agent-screenshot.sh: browser profile lock has an unfamiliar owner; leaving it untouched" >&2
+      return 0
+      ;;
+  esac
+  if [ -z "$owner_host" ] || [ "$owner_host" = "$lock_target" ]; then
+    echo "agent-screenshot.sh: browser profile lock has an unfamiliar owner; leaving it untouched" >&2
+    return 0
+  fi
+
+  current_host="$(hostname)"
+  if [ "$owner_host" = "$current_host" ] && kill -0 "$owner_pid" 2>/dev/null; then
+    # Never disturb a browser that still owns this profile in this container.
+    return 0
+  fi
+
+  # Chromium records its singleton owner as <hostname>-<pid>. The per-chat
+  # automation profile survives container restarts, while the previous
+  # container and its processes do not. Remove only Chromium's three singleton
+  # symlinks; authenticated browser state, cache, and the partner's real browser
+  # profile remain untouched. A same-host dead PID is the equivalent crash case.
+  for artifact in SingletonLock SingletonCookie SingletonSocket; do
+    if [ -L "${AGENT_BROWSER_PROFILE}/${artifact}" ]; then
+      rm -f "${AGENT_BROWSER_PROFILE}/${artifact}"
+    fi
+  done
+}
+
 CONTENT_ONLY=0
 PRESERVE_CACHE=0
 while [ "${1:-}" = "--content-only" ] || [ "${1:-}" = "--preserve-cache" ]; do
@@ -52,7 +284,7 @@ ROUTE="${1:-}"
 OUT="${2:-}"
 
 if [ -z "$ROUTE" ]; then
-  echo "agent-screenshot.sh: route required" >&2
+  printf '%s\n' "agent-screenshot.sh: route required" >&2
   echo "Usage: agent-screenshot.sh [--content-only] [--preserve-cache] <route> [out.png]" >&2
   exit 1
 fi
@@ -62,8 +294,7 @@ fi
 # written elsewhere (e.g. /tmp) is viewable by the agent but 404s if embedded.
 if [ -z "$OUT" ]; then
   if [ -z "${CHAT_ID:-}" ]; then
-    echo "agent-screenshot.sh: no out.png given and CHAT_ID unset" >&2
-    exit 1
+    die "no out.png given and CHAT_ID unset"
   fi
   OUT="/data/chats/${CHAT_ID}/media/shot-$(date +%s%N).png"
 fi
@@ -77,13 +308,11 @@ esac
 mkdir -p "$(dirname "$OUT")"
 
 if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${API_BASE_URL:-}" ]; then
-  echo "agent-screenshot.sh: AGENT_TOKEN and API_BASE_URL must be set" >&2
-  exit 1
+  die "AGENT_TOKEN and API_BASE_URL must be set"
 fi
 
 if ! command -v agent-browser >/dev/null 2>&1; then
-  echo "agent-screenshot.sh: agent-browser not on PATH" >&2
-  exit 1
+  die "agent-browser not on PATH"
 fi
 
 # Prefer the runner-provided per-chat session/profile. Fall back from CHAT_ID
@@ -104,8 +333,7 @@ fi
 # they see. chat.py exports VIEWPORT_WIDTH/HEIGHT from the React
 # shell's per-turn payload; screenshots require those values.
 if [ -z "${VIEWPORT_WIDTH:-}" ] || [ -z "${VIEWPORT_HEIGHT:-}" ]; then
-  echo "agent-screenshot.sh: VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be set" >&2
-  exit 1
+  die "VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be set"
 fi
 # Existing agent sessions keep the env snapshot they started with, and manual
 # callers can bypass chat.py entirely. Normalize again at this executable
@@ -130,35 +358,88 @@ if not all(math.isfinite(value) and value > 0 for value in values):
 print(*(max(1, round(value)) for value in values))
 PY
 )"; then
-  echo "agent-screenshot.sh: VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be positive numbers" >&2
-  exit 1
+  die "VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be positive numbers"
 fi
 read -r VIEWPORT_WIDTH VIEWPORT_HEIGHT <<<"$NORMALIZED_VIEWPORT"
 
-# Origin must be loaded before localStorage.setItem (localStorage is
-# per-origin and only writable once a same-origin document exists).
-# Both the shell and the standalone /apps/<slug>/ page read the owner
-# JWT from localStorage['token'] on the same origin.
-agent-browser open "${API_BASE_URL}/" >/dev/null
-# `set viewport` requires a live browser connection. Setting it before the
-# first `open` happened to work only when a previous turn had leaked/reused a
-# daemon; a correctly closed, cold session failed before it could launch.
-agent-browser set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" >/dev/null
-# Seed the token via stdin (eval --stdin), never argv: the JWT must not
-# appear in /proc/<pid>/cmdline. python reads it from the env (not argv)
-# and JSON-encodes it so any character is a safe JS string literal.
-AGENT_TOKEN="$AGENT_TOKEN" python3 -c 'import json,os; print("localStorage.setItem(\"token\", "+json.dumps(os.environ["AGENT_TOKEN"])+")")' | agent-browser eval --stdin >/dev/null
+# One chat can host parallel agents, but its browser commands target one
+# persistent profile. Serialize the complete navigation/capture transaction so
+# two helpers cannot interleave routes, viewport changes, or output ownership.
+if [ -n "${AGENT_BROWSER_PROFILE:-}" ]; then
+  if ! command -v flock >/dev/null 2>&1; then
+    die "flock is required for shared browser profiles"
+  fi
+  exec 9>"${AGENT_BROWSER_PROFILE}.capture.lock"
+  if ! flock -w 30 9; then
+    die "another capture still owns this browser profile"
+  fi
+fi
 
-# Content mode is a browser-session presentation flag, not onboarding or
-# install completion state. Set it while the origin document is live and before
-# the target mounts so React never opens its modal. It survives the about:blank
-# detour below because sessionStorage is scoped to this tab + origin.
-if [ "$CONTENT_ONLY" -eq 1 ]; then
-  agent-browser eval \
-    "sessionStorage.setItem('mobius:visual-content-only', '1')" >/dev/null
-else
-  agent-browser eval \
-    "sessionStorage.removeItem('mobius:visual-content-only')" >/dev/null
+clear_stale_browser_profile_lock
+BROWSER_ERROR_FILE="$(mktemp "${TMPDIR:-/tmp}/mobius-agent-browser-error.XXXXXX")"
+trap cleanup EXIT
+
+# Start the browser, then wait narrowly for its command socket before applying
+# viewport state. A cold launch can return before that socket is connectable.
+browser_command 5 open "${API_BASE_URL}/api/browser-bootstrap" >/dev/null || true
+if ! browser_set_viewport_retry; then
+  die "browser did not become ready for viewport configuration"
+fi
+
+# A retained test profile can start under an older service worker that handles
+# `/api/browser-bootstrap` as an app navigation and immediately canonicalizes
+# it to `/shell/`. Requiring the inert bootstrap before detaching that
+# controller makes authentication fail even though the authenticated shell is
+# already on screen. Unregister from whichever same-origin document the cold
+# open produced, then leave that controlled document before requiring the
+# bootstrap URL below. The later detach still protects the final target
+# navigation from a controller installed between authentication and capture.
+if [ "$PRESERVE_CACHE" -eq 0 ]; then
+  browser_eval_retry \
+    "(async () => { try { const regs = await navigator.serviceWorker?.getRegistrations?.() || []; await Promise.all(regs.map((r) => r.unregister())); } catch {} return true })()" \
+    >/dev/null || true
+  if ! browser_open_exact_retry "about:blank"; then
+    die "browser did not detach its stale bootstrap page"
+  fi
+fi
+
+# Seed the token, ephemeral visual mode, and default service-worker reset in
+# one same-origin evaluation. The dedicated bootstrap is inert HTML, so it
+# cannot restore the last chat or disappear like Chromium's JSON viewer.
+# The JWT travels via stdin, never argv or /proc/<pid>/cmdline.
+TOKEN_READY=0
+for attempt in 1 2 3; do
+  if ! browser_open_origin_retry \
+    "${API_BASE_URL}/api/browser-bootstrap" bootstrap; then
+    continue
+  fi
+  if AGENT_TOKEN="$AGENT_TOKEN" CONTENT_ONLY="$CONTENT_ONLY" PRESERVE_CACHE="$PRESERVE_CACHE" \
+    python3 -c '
+import json, os
+token = json.dumps(os.environ["AGENT_TOKEN"])
+visual = (
+  "sessionStorage.setItem(\"mobius:visual-content-only\", \"1\");"
+  if os.environ["CONTENT_ONLY"] == "1"
+  else "sessionStorage.removeItem(\"mobius:visual-content-only\");"
+)
+reset = (
+  "try { const regs = await navigator.serviceWorker?.getRegistrations?.() || []; "
+  "await Promise.all(regs.map((r) => r.unregister())); } catch {}"
+  if os.environ["PRESERVE_CACHE"] == "0"
+  else ""
+)
+print(
+  "(async () => { localStorage.setItem(\"token\", " + token + "); "
+  + visual + reset + " return true })()"
+)
+' \
+      | browser_command 5 eval --stdin >/dev/null; then
+    TOKEN_READY=1
+    break
+  fi
+done
+if [ "$TOKEN_READY" -ne 1 ]; then
+  die "browser origin did not remain ready for authentication"
 fi
 
 # A per-chat Chromium profile deliberately survives browser close, which is
@@ -171,10 +452,9 @@ fi
 # and bounded. The owner's real browser/profile is never touched.
 TARGET_ROUTE="$ROUTE"
 if [ "$PRESERVE_CACHE" -eq 0 ]; then
-  agent-browser eval \
-    "(async () => { try { const regs = await navigator.serviceWorker?.getRegistrations?.() || []; await Promise.all(regs.map((r) => r.unregister())); } catch {} return true })()" \
-    >/dev/null
-  agent-browser open "about:blank" >/dev/null
+  if ! browser_open_exact_retry "about:blank"; then
+    die "browser did not detach before target navigation"
+  fi
   CAPTURE_NONCE="$(date +%s%N)"
   case "$TARGET_ROUTE" in
     *\?*) TARGET_ROUTE="${TARGET_ROUTE}&__mobius_capture=${CAPTURE_NONCE}" ;;
@@ -183,31 +463,41 @@ if [ "$PRESERVE_CACHE" -eq 0 ]; then
 fi
 
 # Now navigate to the actual target route, authenticated.
-agent-browser open "${API_BASE_URL}${TARGET_ROUTE}" >/dev/null
+if ! browser_open_origin_retry "${API_BASE_URL}${TARGET_ROUTE}" target; then
+  die "browser did not reach the target route"
+fi
 
-# Give the target a bounded render window. The missing password field is only a
-# settling signal — token presence mounts Shell before the server has accepted
-# it — so the protected request below remains the authoritative auth check.
-agent-browser wait --fn \
-  "!document.querySelector('input[type=password]')" >/dev/null 2>&1 || \
-  agent-browser wait 1500 >/dev/null
+# The URL can canonicalize before the replacement document has committed.
+# Applying device metrics during that gap reports success on the outgoing page,
+# then the newly-created shell page falls back to Chromium's default viewport.
+# Wait on browser paint ownership before configuring the final page.
+if ! browser_wait --fn \
+  "document.readyState === 'complete' && performance.getEntriesByName('first-contentful-paint').length > 0" \
+  >/dev/null; then
+  die "target document did not finish its initial paint"
+fi
+
+# Let the navigation commit without asking the renderer to poll the transcript.
+# A long, actively streaming chat can keep agent-browser's DOM wait inside one
+# Runtime.evaluate call until its global timeout even though the browser is
+# otherwise responsive. The authoritative checks below retry narrowly instead.
+sleep 0.3
 
 # Dismiss the PWA install banner if it surfaces — it covers the bottom
 # of the view and would distract from the actual page.
-agent-browser find text "Not now" click >/dev/null 2>&1 || true
-agent-browser wait 300 >/dev/null
+browser_command 2 find text "Not now" click >/dev/null || true
+sleep 0.3
 
 # Token presence alone is not proof of authentication: App mounts Shell from
 # localStorage immediately, then a later protected request can reject the token,
 # clear it, and reload onto LoginForm. Verify the token with a protected request
 # at the FINAL capture boundary, after the settle/banner work above. The token is
 # read inside the page and never appears in argv or output.
-AUTH_OK="$(agent-browser eval \
+AUTH_OK="$(browser_eval_retry \
   "(async () => { const token = localStorage.getItem('token'); if (!token || document.querySelector('input[type=password]')) return false; try { const res = await fetch('/api/chats?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); return res.status === 200 && !!localStorage.getItem('token') && !document.querySelector('input[type=password]'); } catch { return false; } })()" \
-  2>/dev/null || true)"
+  || true)"
 if [ "$AUTH_OK" != "true" ]; then
-  echo "agent-screenshot.sh: authentication failed; the token was rejected or the login page remained visible" >&2
-  exit 1
+  die "authentication failed; the token was rejected or the login page remained visible"
 fi
 
 # For shell routes, prove the browser loaded the same hashed entry asset that
@@ -215,14 +505,19 @@ fi
 # failure instead of misleading visual evidence. Standalone app PWAs have their
 # own entry shape, but still receive controller detachment + cache-busted
 # navigation.
+SHELL_SETTLED_EXPR=""
 case "$ROUTE" in
   /apps/*) : ;;
   *)
+    # An authenticated shell frame always contains chrome/text and is far
+    # larger than the ~3 KiB one-colour PNG Chromium emits before its first
+    # useful compositor submission. Standalone app PWAs may intentionally be a
+    # solid canvas, so this evidence check is shell-only.
+    CAPTURE_MIN_BYTES=8192
     if [ "$PRESERVE_CACHE" -eq 0 ]; then
       DIST_INDEX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../frontend" && pwd)/dist/index.html"
       if [ ! -f "$DIST_INDEX" ]; then
-        echo "agent-screenshot.sh: current frontend build not found at $DIST_INDEX" >&2
-        exit 1
+        die "current frontend build not found at $DIST_INDEX"
       fi
       CURRENT_SHELL_ENTRY="$(
         python3 - "$DIST_INDEX" <<'PY'
@@ -237,13 +532,12 @@ if not match:
 print(match.group(1).rsplit("/", 1)[-1])
 PY
       )" || {
-        echo "agent-screenshot.sh: current shell entry asset could not be resolved" >&2
-        exit 1
+        die "current shell entry asset could not be resolved"
       }
       LOADED_SHELL_ENTRY_RAW="$(
-        agent-browser eval \
+        browser_eval_retry \
           "(() => { const src = document.querySelector('script[type=\"module\"][src*=\"/assets/index-\"]')?.src || ''; return src.split('/').pop() })()" \
-          2>/dev/null || true
+          || true
       )"
       LOADED_SHELL_ENTRY="$(
         printf '%s' "$LOADED_SHELL_ENTRY_RAW" | python3 -c \
@@ -251,26 +545,47 @@ PY
           2>/dev/null || printf '%s' "$LOADED_SHELL_ENTRY_RAW"
       )"
       if [ "$LOADED_SHELL_ENTRY" != "$CURRENT_SHELL_ENTRY" ]; then
-        echo "agent-screenshot.sh: stale shell loaded (expected $CURRENT_SHELL_ENTRY, got ${LOADED_SHELL_ENTRY:-none})" >&2
-        exit 1
+        die "stale shell loaded (expected $CURRENT_SHELL_ENTRY, got ${LOADED_SHELL_ENTRY:-none})"
       fi
+    fi
+
+    # Shell mode changes and chat-to-chat handoffs deliberately retain multiple
+    # fully laid-out surfaces. Shell owns which world is actually painted and
+    # publishes one stable visual-readiness contract; automation must not learn
+    # its private handoff classes or compositor attributes. Once the owner says
+    # settled, give style/layout two frames to commit.
+    SHELL_SETTLED_EXPR="document.querySelector('.shell[data-workspace-visual-state=\"settled\"]') !== null && performance.getEntriesByName('first-contentful-paint').length > 0"
+    if ! browser_wait --fn "$SHELL_SETTLED_EXPR" >/dev/null; then
+      die "shell did not reach a settled visual state before capture"
+    fi
+    if ! browser_eval_retry \
+      "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))" \
+      >/dev/null; then
+      die "shell did not commit its settled frame before capture"
     fi
     ;;
 esac
+
+# Device metrics attach to one CDP page. A canonical redirect, a service-worker
+# handoff, or agent-browser's about:blank detach can replace that page after the
+# startup viewport command. Reapply before drawer/app checks and immediately
+# before every capture attempt; the kept PNG's IHDR is the race-free proof.
+if ! browser_set_viewport_retry; then
+  die "target page did not retain the requested viewport"
+fi
 
 # A fresh phone-width shell can restore with the modal navigation drawer open
 # or still exiting, which makes an otherwise-correct app screenshot capture the
 # scrim/drawer transition. Close only the mobile modal form; the desktop docked
 # sidebar is part of the partner's actual layout and stays untouched.
-agent-browser eval \
+browser_eval_retry \
   "(() => { const b = document.querySelector('button[aria-label=\"Toggle navigation\"][aria-expanded=\"true\"]'); if (window.innerWidth < 768 && b) b.click(); return true })()" \
-  >/dev/null 2>&1 || true
+  >/dev/null || true
 if [ "$VIEWPORT_WIDTH" -lt 768 ]; then
-  if ! agent-browser wait --fn \
+  if ! browser_wait --fn \
     "!document.querySelector('.drawer-overlay--blocking') && !document.querySelector('.drawer:not(.drawer--persistent).drawer--open')" \
-    >/dev/null 2>&1; then
-    echo "agent-screenshot.sh: mobile navigation did not finish closing before capture" >&2
-    exit 1
+    >/dev/null; then
+    die "mobile navigation did not finish closing before capture"
   fi
 fi
 
@@ -281,18 +596,48 @@ fi
 # loading skeleton. Keep the predicate as a simple boolean expression —
 # agent-browser's wait parser has timed out on equivalent IIFE forms.
 case "$ROUTE" in
-  /app/[0-9]*)
+  /app/*)
     APP_ID="${ROUTE#/app/}"
     APP_ID="${APP_ID%%[/?#]*}"
+    case "$APP_ID" in
+      ''|*[!0-9]*)
+        die "in-shell app routes require a numeric app id"
+        ;;
+    esac
     READY_EXPR="document.querySelector('iframe[data-app-id=\"${APP_ID}\"]') !== null && document.querySelector('iframe[data-app-id=\"${APP_ID}\"]')?.parentElement.querySelector('.canvas-loading') === null"
-    if ! agent-browser wait --fn "$READY_EXPR" >/dev/null 2>&1; then
-      echo "agent-screenshot.sh: app ${APP_ID} did not reach its mounted frame before capture" >&2
-      exit 1
+    if ! browser_wait --fn "$READY_EXPR" >/dev/null; then
+      die "app ${APP_ID} did not reach its mounted frame before capture"
     fi
     ;;
 esac
 
-agent-browser screenshot "${OUT}" >/dev/null
+# Chromium can expose a complete DOM and a first-contentful-paint timing entry
+# one compositor submission before CDP's first screenshot contains that paint.
+# The symptom is a successful, solid-background PNG; the immediately following
+# capture is correct. Prime the screenshot path into a disposable file, then
+# wait two frames before keeping evidence. This is a renderer handshake, not a
+# guessed sleep, and the temporary image never enters chat media.
+WARMUP_OUT="$(mktemp "${TMPDIR:-/tmp}/mobius-screenshot-warmup.XXXXXX.png")"
+# Validate the final frame before publishing it. Wrappers intentionally reuse
+# friendly paths such as shell.png and app-42.png; a failed capture must never
+# replace the last known-good image with a partial or misleading frame.
+CAPTURE_OUT="$(mktemp "$(dirname "$OUT")/.mobius-screenshot.XXXXXX.png")"
+if ! browser_screenshot_retry "$WARMUP_OUT"; then
+  die "page remained too busy to prime capture"
+fi
+if ! browser_eval_retry \
+  "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))" \
+  >/dev/null; then
+  die "page did not commit after capture priming"
+fi
+
+if ! browser_screenshot_retry "$CAPTURE_OUT"; then
+  die "page remained too busy to capture after bounded retries"
+fi
+mv -f "$CAPTURE_OUT" "$OUT"
+CAPTURE_OUT=""
+rm -f "$WARMUP_OUT"
+WARMUP_OUT=""
 echo "${OUT}"
 
 # Also print the ready-to-paste chat embed. The partner sees ONLY embedded

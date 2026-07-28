@@ -45,13 +45,34 @@ SQLAlchemy `create_all` only CREATEs missing tables; it never adds a column to a
 
 ## `/data` is a git repo — commit agent-owned state
 
-`/data/` is a git repo initialized on first boot. After substantial changes (apps, shell, shared data, theme), commit so undo is clean:
+For platform source, record the starting revision before editing, then use the
+path-owned helper against the platform clone:
 
 ```bash
-pm-commit 'one-line what and why'
+git -C /data/platform rev-parse HEAD
+PM_COMMIT_ROOT=/data/platform pm-commit --from <sha-before-edit> \
+  'one-line what and why' -- <exact changed paths>
 ```
 
-It stages, unstages a runtime-state denylist (profiles, compiled, logs, generated), then commits; it refuses (exit 2) if >50 files stage after filtering. Re-run with `--allow-broad` only after confirming the staged set is what you meant. Shared user data and editable skills are tracked here, so this history is your undo for a bad app-owned data rewrite or a skill edit you regret. Scheduled background agents should take pre-run snapshots before they touch anything.
+The helper commits only those paths, preserves unrelated staged and unstaged
+work, and stops when another commit touched one of them since the task began.
+Never use `git add -A` for platform work.
+
+`/data/` is a separate git repo. After substantial changes to agent-owned state,
+commit so undo is clean:
+
+```bash
+git -C /data rev-parse HEAD                 # record this before editing
+pm-commit --from <sha-before-edit> 'one-line what and why' -- <exact paths>
+```
+
+It commits only the declared paths and leaves every unrelated staged or
+unstaged change alone. If one of those paths changed in another commit since
+the recorded starting revision, it stops for reconciliation instead of
+guessing who owns the newest `HEAD`. Shared user data and editable skills are
+tracked here, so this history is your undo for a bad app-owned data rewrite or
+a skill edit you regret. Scheduled background agents follow the same exact-path
+contract; they never snapshot another task's working tree.
 
 To actually roll one back, find the commit that last had the good version and restore just that path:
 
@@ -150,10 +171,10 @@ Chat files are purged when the chat is permanently deleted (after 7 days). For d
 
 ## Viewing apps directly (debugging)
 
-To check an app's rendered output, use the preview helper — it loads the app inside the authenticated Möbius shell, the realistic path the partner takes:
+To check an app's rendered output, use the canonical capture helper — it loads the app inside the authenticated Möbius shell, the realistic path the partner takes:
 
 ```bash
-bash "$SCRIPTS_DIR/preview_app.sh" <id>
+bash "$SCRIPTS_DIR/agent-screenshot.sh" --content-only /app/<id>
 ```
 
-The frame URL (`$API_BASE_URL/api/apps/<id>/frame`) is stable per-app (ETag + browser cache handles freshness, no `?v=`), but the frame waits for a parent-shell `moebius:frame-init` postMessage — opening it standalone just shows "Loading timeout." Always go through the preview helper or the live shell.
+The frame URL (`$API_BASE_URL/api/apps/<id>/frame`) is stable per-app (ETag + browser cache handles freshness, no `?v=`), but the frame waits for a parent-shell `moebius:frame-init` postMessage — opening it standalone just shows "Loading timeout." Always go through the authenticated capture helper or the live shell.

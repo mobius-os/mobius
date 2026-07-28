@@ -74,6 +74,13 @@ _TMP_DIR = _FRONTEND_DIR / ".vite-tmp"
 # vite's transform cache is not designed for concurrent writers.
 _REBUILD_CACHE_DIR = _FRONTEND_DIR / ".vite-cache-rebuild"
 _REBUILD_TMP_DIR = _FRONTEND_DIR / ".vite-tmp-rebuild"
+_NODE_COMPILE_CACHE_PROBE = (
+  "const m = require('node:module');"
+  "m.enableCompileCache();"
+  "const dir = m.getCompileCacheDir();"
+  "if (!dir) process.exit(1);"
+  "process.stdout.write(dir);"
+)
 # In-process serialization only — rebuild_shell.sh publishes from its own
 # process, so _publish_built_dir additionally takes an OS-level flock (derived
 # from _FRONTEND_DIR at call time so tests that repoint the dir stay isolated).
@@ -464,6 +471,72 @@ def _ensure_node_modules() -> None:
     log.warning("could not link frontend node_modules to %s", source)
 
 
+def _current_node_compile_cache_dir(
+  env: dict[str, str],
+) -> Path | None:
+  """Ask the active Node runtime for its exact compile-cache directory."""
+  try:
+    result = subprocess.run(
+      ["node", "-e", _NODE_COMPILE_CACHE_PROBE],
+      env=env,
+      capture_output=True,
+      text=True,
+      timeout=5,
+      check=False,
+    )
+  except (OSError, subprocess.SubprocessError) as exc:
+    log.warning("could not identify current Node compile cache: %s", exc)
+    return None
+  if result.returncode != 0 or not result.stdout.strip():
+    log.warning(
+      "could not identify current Node compile cache (exit %s): %s",
+      result.returncode,
+      result.stderr.strip(),
+    )
+    return None
+  return Path(result.stdout.strip())
+
+
+def _prune_node_compile_cache(tmp_dir: Path, env: dict[str, str]) -> None:
+  """Best-effort removal of cache generations from older Node runtimes."""
+  cache_root = tmp_dir / "node-compile-cache"
+  if not cache_root.is_dir():
+    # A first build has nothing to prune; Node will create its current
+    # generation as part of the actual Vite process.
+    return
+  current_dir = _current_node_compile_cache_dir(env)
+  if current_dir is None:
+    return
+  try:
+    relative = current_dir.relative_to(cache_root)
+  except ValueError:
+    # An operator-provided NODE_COMPILE_CACHE can deliberately move this
+    # outside the watcher temp root; leave both locations untouched.
+    return
+  if len(relative.parts) != 1:
+    log.warning("unexpected Node compile cache path: %s", current_dir)
+    return
+
+  try:
+    entries = tuple(cache_root.iterdir())
+  except OSError as exc:
+    log.warning("could not inspect Node compile cache at %s: %s", cache_root, exc)
+    return
+  for entry in entries:
+    if entry.name == relative.name:
+      continue
+    try:
+      if entry.is_symlink() or not entry.is_dir():
+        entry.unlink(missing_ok=True)
+      else:
+        shutil.rmtree(entry)
+    except FileNotFoundError:
+      # Another watcher setup may have pruned the same stale generation.
+      continue
+    except OSError as exc:
+      log.warning("could not prune stale Node compile cache %s: %s", entry, exc)
+
+
 def _vite_env(
   cache_dir: Path | None = None, tmp_dir: Path | None = None,
 ) -> dict[str, str]:
@@ -481,6 +554,7 @@ def _vite_env(
   node_options = env.get("NODE_OPTIONS", "")
   if "--max-old-space-size" not in node_options and "--max_old_space_size" not in node_options:
     env["NODE_OPTIONS"] = f"{node_options} --max-old-space-size=384".strip()
+  _prune_node_compile_cache(tmp_dir, env)
   return env
 
 

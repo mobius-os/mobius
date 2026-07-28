@@ -49,6 +49,13 @@ def test_debug_status_shape_matches_golden(client, auth):
   assert memory["process"]["available"] is True
   assert memory["process"]["rss_bytes"] > 0
   assert memory["tracing"]["source"]
+  resources = payload.pop("resources")
+  assert set(resources) == {"facts", "pressure"}
+  assert resources["facts"]["disk"]["available"] is True
+  assert resources["facts"]["memory"]["available"] is True
+  assert resources["pressure"]["state"] in {
+    "normal", "constrained", "critical", "unknown",
+  }
   runtime_memory = payload.pop("runtime_memory")
   assert runtime_memory["runner_handles"]["claude_sdk"] == 1
   assert runtime_memory["runner_handles"]["codex_sdk"] == 1

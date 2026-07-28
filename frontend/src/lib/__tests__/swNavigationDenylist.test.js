@@ -2,32 +2,31 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
+import {
+  isShellNavigationDenied,
+  PROXIED_APP_SUBTREES,
+} from '../swNavigationPolicy.js'
+
 const SOURCE = readFileSync(
   new URL('../../sw.js', import.meta.url),
   'utf8',
 )
 
-// The denylist spreads the legacy instance-local extension point. Keep that
-// binding available while also testing the stock reserved /services subtree.
-function shellNavigationDenylist(proxied = null) {
-  const match = SOURCE.match(/denylist:\s*\[([\s\S]*?)\n\s*\]/)
-  assert.ok(match, 'shell NavigationRoute denylist exists')
-  let declaration
-  if (proxied === null) {
-    const constMatch = SOURCE.match(/^const PROXIED_APP_SUBTREES = (\[[\s\S]*?\])/m)
-    assert.ok(constMatch, 'PROXIED_APP_SUBTREES extension point exists')
-    declaration = constMatch[1]
-  } else {
-    declaration = `[${proxied}]`
-  }
-  return Function(
-    `"use strict"; const PROXIED_APP_SUBTREES = ${declaration}; return [${match[1]}]`,
-  )()
-}
+test('shell route and offline fallback consume one navigation policy', () => {
+  assert.match(
+    SOURCE,
+    /request\.mode === 'navigate' && !isShellNavigationDenied\(url\.pathname\)/,
+  )
+  assert.match(
+    SOURCE,
+    /request\.mode === 'navigate' && isShellNavigationDenied\(url\.pathname\),\s+new NetworkOnly\(\)/,
+  )
+  assert.match(SOURCE, /if \(isShellNavigationDenied\(url\.pathname\)\)/)
+  assert.doesNotMatch(SOURCE, /new NavigationRoute|NavigationRoute,/)
+})
 
 test('shell app navigation does not intercept top-level app-like routes', () => {
-  const denylist = shellNavigationDenylist()
-  const denied = path => denylist.some(re => re.test(path))
+  const denied = isShellNavigationDenied
 
   assert.equal(denied('/cuberun'), true)
   assert.equal(denied('/cuberun/'), true)
@@ -48,8 +47,7 @@ test('shell embed navigation reaches the server, not the non-injected precache',
   // The embed renders OUTSIDE Shell and needs the server-injected theme
   // block on its FIRST paint; the precached index.html omits that block,
   // so /shell/embed/* must be denylisted (mirrors how /recover is handled).
-  const denylist = shellNavigationDenylist()
-  const denied = path => denylist.some(re => re.test(path))
+  const denied = isShellNavigationDenied
 
   assert.equal(denied('/shell/embed/chat'), true)
   assert.equal(denied('/shell/embed'), true)
@@ -60,7 +58,7 @@ test('shell embed navigation reaches the server, not the non-injected precache',
 })
 
 test('guarded local services bypass the shell at every depth', () => {
-  const denied = path => shellNavigationDenylist().some(re => re.test(path))
+  const denied = isShellNavigationDenied
 
   assert.equal(denied('/services'), true)
   assert.equal(denied('/services/'), true)
@@ -75,18 +73,39 @@ test('guarded local services bypass the shell at every depth', () => {
 })
 
 test('legacy reverse-proxy extension still ships empty', () => {
-  const constMatch = SOURCE.match(/^const PROXIED_APP_SUBTREES = (\[[\s\S]*?\])/m)
-  assert.ok(constMatch, 'PROXIED_APP_SUBTREES extension point exists')
-  assert.equal(constMatch[1].replace(/\s/g, ''), '[]')
+  assert.deepEqual(PROXIED_APP_SUBTREES, [])
 })
 
-test('a configured legacy proxy subtree still bypasses the shell deeply', () => {
-  const denylist = shellNavigationDenylist(String.raw`/^\/recipes(\/|$)/`)
-  const denied = path => denylist.some(re => re.test(path))
+test('server-owned and standalone navigations never catch-fallback to shell', () => {
+  const denied = value => {
+    const url = new URL(value, 'https://mobius.example')
+    return isShellNavigationDenied(url.pathname)
+  }
 
-  assert.equal(denied('/recipes'), true)
-  assert.equal(denied('/recipes/setup/step/2'), true)
-  assert.equal(denied('/other/deep/path'), false)
+  for (const path of [
+    '/api/health',
+    '/api/chats/demo',
+    '/api?source=browser',
+    '/recover',
+    '/recover/chat',
+    '/recover?source=notification',
+    '/shell/embed',
+    '/shell/embed/chat',
+    '/shell/embed?chat=demo',
+    '/sites/demo/index.html',
+    '/sites?published=demo',
+    '/services/recipes/accounts/login/',
+    '/services?app=recipes',
+    '/apps/cuberun/',
+    '/app-assets/cuberun/index.html',
+    '/app-embeds/by-id/60/index.html',
+    '/cuberun?install=1',
+  ]) {
+    assert.equal(denied(path), true, `${path} stays server/app owned`)
+  }
+  for (const path of ['/', '/shell/', '/shell/chat/abc']) {
+    assert.equal(denied(path), false, `${path} remains an offline shell route`)
+  }
 })
 
 test('offline app cache key ignores install intent query', () => {
