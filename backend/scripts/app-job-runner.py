@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -18,7 +19,11 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
   sys.path.insert(0, str(_SCRIPT_DIR))
+_BACKEND_DIR = _SCRIPT_DIR.parent
+if str(_BACKEND_DIR) not in sys.path:
+  sys.path.insert(0, str(_BACKEND_DIR))
 from app_job_sandbox import JobAccess, select_executor
+from app import cron_tz
 
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -34,6 +39,7 @@ TOKEN_FILE = DATA_DIR / "service-token.txt"
 SUPERVISOR_LOG = DATA_DIR / "cron-logs" / "app-jobs.log"
 SUPERVISOR_LOG_CAP = 2 * 1024 * 1024
 READY_WAIT_SECONDS = 90
+WALL_CLOCK_STATE_DIR = DATA_DIR / "run" / "app-wall-clock"
 
 
 def _log(app_id: object, message: str) -> None:
@@ -95,6 +101,44 @@ def _atomic_json(path: Path, value: dict) -> None:
     except OSError:
       pass
     raise
+
+
+def _claim_wall_clock_run(
+  app_id: int,
+  job: Path,
+  tz_name: str,
+  zone_cron: str,
+) -> bool:
+  """Atomically claim today's due wall-clock occurrence.
+
+  cron invokes this gate every minute. The durable state prevents the repeated
+  hour at a fall-back transition (and concurrent cron processes) from
+  launching the same app schedule twice.
+  """
+  due_date = cron_tz.due_wall_clock_date(zone_cron, tz_name)
+  if due_date is None:
+    return False
+  WALL_CLOCK_STATE_DIR.mkdir(parents=True, exist_ok=True)
+  lock_path = WALL_CLOCK_STATE_DIR / f"{app_id}.lock"
+  state_path = WALL_CLOCK_STATE_DIR / f"{app_id}.json"
+  identity = {
+    "schema": 1,
+    "app_id": app_id,
+    "job": str(job),
+    "timezone": tz_name,
+    "zone_cron": zone_cron,
+    "local_date": due_date.isoformat(),
+  }
+  with lock_path.open("a", encoding="utf-8") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    try:
+      previous = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+      previous = None
+    if previous == identity:
+      return False
+    _atomic_json(state_path, identity)
+    return True
 
 
 def _app_is_live(app_id: int, token: str | None = None) -> bool:
@@ -223,6 +267,13 @@ def run() -> int:
   wait_for_ready = argv[:1] == ["--wait-for-ready"]
   if wait_for_ready:
     argv = argv[1:]
+  wall_clock = None
+  if argv[:1] == ["--wall-clock"]:
+    if len(argv) < 3:
+      _log("?", "rejected: incomplete wall-clock argv")
+      return 2
+    wall_clock = (argv[1], argv[2])
+    argv = argv[3:]
   if len(argv) != 2 or not re.fullmatch(r"[0-9]+", argv[0]):
     _log(argv[0] if argv else "?", "rejected: bad argv")
     return 2
@@ -243,6 +294,14 @@ def run() -> int:
   ):
     _log(app_id, f"rejected: job outside apps root {resolved}")
     return 2
+  if wall_clock is not None:
+    tz_name, zone_cron = wall_clock
+    try:
+      if not _claim_wall_clock_run(app_id, resolved, tz_name, zone_cron):
+        return 0
+    except (OSError, ValueError) as exc:
+      _log(app_id, f"rejected: invalid wall-clock schedule ({exc})")
+      return 2
 
   # API launches already create a session; cron launches do not.
   try:

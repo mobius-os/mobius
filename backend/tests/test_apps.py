@@ -303,9 +303,8 @@ def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):
 def test_schedule_update_with_timezone_materializes_and_declares(
   client, auth, monkeypatch,
 ):
-  """A timezone-owned schedule registers its MATERIALIZED server-local cron
-  plus the durable (timezone, zone_cron) identity; invalid zones and
-  non-daily expressions are rejected before any registration."""
+  """A timezone-owned schedule registers the truthful every-minute gate plus
+  its durable identity; invalid contracts never reach registration."""
   calls = []
 
   def fake_register(slug, schedule_expr, job_path, app_id=None,
@@ -316,7 +315,7 @@ def test_schedule_update_with_timezone_materializes_and_declares(
   monkeypatch.setattr("app.install._register_cron", fake_register)
   monkeypatch.setattr(
     "app.cron_tz.materialize_zone_cron",
-    lambda zone_cron, tz_name, **kw: "0 3 * * *",
+    lambda zone_cron, tz_name: "* * * * *",
   )
   source_dir = Path(get_settings().data_dir) / "apps" / "memory"
   source_dir.mkdir(parents=True, exist_ok=True)
@@ -333,11 +332,11 @@ def test_schedule_update_with_timezone_materializes_and_declares(
   )
   assert r.status_code == 200, r.text
   assert r.json() == {
-    "cron": "0 3 * * *", "job": "fetch.sh",
+    "cron": "* * * * *", "job": "fetch.sh",
     "timezone": "Europe/Belgrade", "zone_cron": "0 5 * * *",
   }
   assert calls == [
-    ("memory", "0 3 * * *", "fetch.sh", app_id,
+    ("memory", "* * * * *", "fetch.sh", app_id,
      "Europe/Belgrade", "0 5 * * *"),
   ]
 
@@ -356,14 +355,13 @@ def test_schedule_update_with_timezone_materializes_and_declares(
   assert len(calls) == 1
 
 
-def test_reconcile_rematerializes_zone_owned_schedule(client, auth, db):
-  """Reconciliation recomputes a zone-owned entry from its durable identity —
-  the mechanism that reschedules it across a DST transition."""
+def test_reconcile_restores_zone_schedule_as_wall_clock_gate(client, auth, db):
+  """Reconciliation restores the gate from the durable IANA identity."""
   source_dir = Path(get_settings().data_dir) / "apps" / "memory"
   source_dir.mkdir(parents=True)
   (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
   (source_dir / "init-cron.sh").write_text(
-    f'ENTRY="0 4 * * * {source_dir}/fetch.sh 56"\n'
+    f'ENTRY="* * * * * {source_dir}/fetch.sh 56"\n'
     'SCHEDULE_TZ="Europe/Belgrade"\n'
     'SCHEDULE_SOURCE="0 5 * * *"\n',
     encoding="utf-8",
@@ -380,17 +378,41 @@ def test_reconcile_rematerializes_zone_owned_schedule(client, auth, db):
                     timezone=None, zone_cron=None):
     calls.append((slug, schedule_expr, timezone, zone_cron))
 
-  # The offset changed since the entry was written (0 4 → materializes 0 3
-  # now): reconciliation must register the RECOMPUTED entry, not preserve
-  # the stale one.
   with patch("app.install._register_cron", fake_register), \
        patch("app.cron_tz.materialize_zone_cron",
-             lambda zone_cron, tz_name, **kw: "0 3 * * *"):
+             lambda zone_cron, tz_name: "* * * * *"):
     count, warnings = apps_module.reconcile_app_cron_supervision(db)
 
   assert warnings == []
   assert count == 1
-  assert calls == [("memory", "0 3 * * *", "Europe/Belgrade", "0 5 * * *")]
+  assert calls == [("memory", "* * * * *", "Europe/Belgrade", "0 5 * * *")]
+
+
+def test_reconcile_fails_closed_on_malformed_zone_declaration(
+  client, auth, db,
+):
+  """A damaged declaration cannot turn the gate into an every-minute job."""
+  source_dir = Path(get_settings().data_dir) / "apps" / "memory"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  (source_dir / "init-cron.sh").write_text(
+    f'ENTRY="* * * * * {source_dir}/fetch.sh 56"\n'
+    'SCHEDULE_TZ="Europe/Belgrade"\n',
+    encoding="utf-8",
+  )
+  create_local_app(
+    client, _service_auth(), name="Memory", description="test",
+    source_dir=source_dir,
+  )
+
+  from app.routes import apps as apps_module
+  with patch("app.install._register_cron") as register:
+    count, warnings = apps_module.reconcile_app_cron_supervision(db)
+
+  assert count == 0
+  assert len(warnings) == 1
+  assert "Incomplete IANA wall-clock schedule declaration" in warnings[0]
+  register.assert_not_called()
 
 
 def test_app_schedules_expose_zone_declaration(client, auth):
@@ -399,8 +421,8 @@ def test_app_schedules_expose_zone_declaration(client, auth):
   source_dir.mkdir(parents=True)
   (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
   (source_dir / "init-cron.sh").write_text(
-    f'ENTRY="0 3 * * * {source_dir}/fetch.sh 56"\n'
-    "# --- Zone-aware schedule identity (platform-managed).\n"
+    f'ENTRY="* * * * * {source_dir}/fetch.sh 56"\n'
+    "# Zone-aware schedule identity (platform-managed).\n"
     'SCHEDULE_TZ="Europe/Belgrade"\n'
     'SCHEDULE_SOURCE="0 5 * * *"\n',
     encoding="utf-8",
@@ -413,7 +435,7 @@ def test_app_schedules_expose_zone_declaration(client, auth):
   assert r.status_code == 200, r.text
   rows = r.json()
   assert [(j["cron"], j["timezone"], j["zone_cron"]) for j in rows] == [
-    ("0 3 * * *", "Europe/Belgrade", "0 5 * * *"),
+    ("* * * * *", "Europe/Belgrade", "0 5 * * *"),
   ]
 
 

@@ -621,10 +621,9 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   scaffold. Tombstoned apps are excluded and source trees must be ordinary,
   non-symlink direct children of ``/data/apps``.
 
-  A schedule owned in an IANA timezone (see ``app.cron_tz``) is
-  re-materialized here from its durable (timezone, zone_cron) identity
-  rather than preserved verbatim — this pass, run at boot and periodically
-  at runtime, is what reschedules the entry across DST transitions.
+  A schedule owned in an IANA timezone (see ``app.cron_tz``) is materialized
+  as an every-minute supervised gate. The gate, not a snapshot of today's UTC
+  offset, decides the declared wall-clock occurrence at runtime.
   """
   from app import cron_tz
   from app.install import _register_cron
@@ -775,7 +774,12 @@ def list_app_schedules(
     if schedule is None:
       continue
     cron, job = schedule
-    declaration = _app_zone_declaration(app)
+    try:
+      declaration = _app_zone_declaration(app)
+    except ValueError:
+      # Listing remains available for repair, while reconciliation itself
+      # fails closed and never installs the unguarded every-minute cadence.
+      declaration = None
     rows.append(schemas.AppScheduleOut(
       id=app.id,
       name=app.name,
@@ -2914,9 +2918,9 @@ def update_app_schedule(
     raise HTTPException(status_code=400, detail=str(exc)) from exc
   timezone = (body.timezone or "").strip() or None
   if timezone is not None:
-    # A zone-owned schedule is durable data: body.cron is the daily wall
-    # time in that zone, and the crontab entry is its server-local
-    # materialization, re-materialized when either zone's offset changes.
+    # A zone-owned schedule is durable data: body.cron is the daily wall time
+    # in that zone, and the crontab entry is an every-minute materialization
+    # whose supervised gate decides the real due instant.
     if not cron_tz.valid_timezone(timezone):
       raise HTTPException(
         status_code=400, detail=f"Unknown IANA timezone: {timezone!r}",

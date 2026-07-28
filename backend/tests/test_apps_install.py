@@ -554,6 +554,56 @@ def test_cron_scaffold_prefers_the_served_checkout():
     )
 
 
+def test_register_cron_gives_scaffold_the_complete_zone_identity(tmp_path):
+  """The scaffold owns durable declaration + live update as one ordered unit."""
+  from app import install
+
+  app_dir = tmp_path / "reflection"
+  app_dir.mkdir()
+  job_path = app_dir / "fetch.sh"
+  fake_scaffold = tmp_path / "init-cron-scaffold.sh"
+  fake_scaffold.write_text("#!/bin/bash\n")
+
+  with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
+       patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
+       patch("app.install.subprocess.run") as mock_run:
+    mock_run.return_value = MagicMock(returncode=0, stderr="")
+    install._register_cron(
+      "reflection", "* * * * *", job_path, 42,
+      timezone="Europe/Belgrade", zone_cron="30 2 * * *",
+    )
+
+  assert mock_run.call_args.args[0] == [
+    str(fake_scaffold), "reflection", "* * * * *", "fetch.sh", "42",
+    "Europe/Belgrade", "30 2 * * *",
+  ]
+
+
+@pytest.mark.parametrize("timezone, zone_cron, app_id", [
+  ("Europe/Belgrade", None, 42),
+  (None, "30 2 * * *", 42),
+  ("Not/AZone", "30 2 * * *", 42),
+  ("Europe/Belgrade", "30 2 * * 1", 42),
+  ("Europe/Belgrade", "30 2 * * *", None),
+])
+def test_register_cron_rejects_invalid_zone_contract_before_subprocess(
+  tmp_path, timezone, zone_cron, app_id,
+):
+  from app import install
+
+  fake_scaffold = tmp_path / "init-cron-scaffold.sh"
+  fake_scaffold.write_text("#!/bin/sh\n")
+  with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
+       patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
+       patch("app.install.subprocess.run") as mock_run, \
+       pytest.raises(install.HTTPException):
+    install._register_cron(
+      "memory", "* * * * *", tmp_path / "fetch.sh", app_id,
+      timezone=timezone, zone_cron=zone_cron,
+    )
+  mock_run.assert_not_called()
+
+
 def test_register_cron_omits_app_id_when_none(tmp_path):
   """A self-contained job (hardcoded id) needs no app-id arg — the
   scaffold call stays 4 elements so the crontab command stays bare."""

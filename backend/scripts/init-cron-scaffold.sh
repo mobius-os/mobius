@@ -13,6 +13,7 @@
 #
 # Usage:
 #   init-cron-scaffold.sh <slug> "<cron-schedule>" [job-filename] [app-id]
+#                         [iana-timezone zone-local-daily-cron]
 #
 # Example:
 #   init-cron-scaffold.sh news "*/10 * * * *"             # runs job.sh
@@ -66,6 +67,11 @@ JOB_NAME="${3:-job.sh}"
 # for "Generate now". Empty (default) leaves the command bare, for
 # self-contained jobs that hardcode their own id.
 APP_ID="${4:-}"
+# Optional 5th + 6th args are platform-owned and always paired. They preserve
+# a daily IANA wall-clock identity while the live cron expression simply wakes
+# the supervised gate every minute.
+SCHEDULE_TZ="${5:-}"
+SCHEDULE_SOURCE="${6:-}"
 
 # Guards use `case`, not `grep -qE`. A per-line regex (`grep`) passes a
 # multiline value as long as ONE line matches — so a newline could sneak
@@ -99,6 +105,34 @@ case "$APP_ID" in
     exit 2 ;;
 esac
 
+if [ "$#" -gt 6 ]; then
+  echo "ERROR: too many arguments" >&2
+  exit 2
+fi
+if [ -n "$SCHEDULE_TZ" ] || [ -n "$SCHEDULE_SOURCE" ]; then
+  if [ -z "$SCHEDULE_TZ" ] || [ -z "$SCHEDULE_SOURCE" ]; then
+    echo "ERROR: timezone and zone-local cron must be provided together" >&2
+    exit 2
+  fi
+  if [ -z "$APP_ID" ]; then
+    echo "ERROR: a timezone-owned schedule requires an app-id" >&2
+    exit 2
+  fi
+  if [[ ! "$SCHEDULE_TZ" =~ ^[A-Za-z0-9_+/-]+$ ]]; then
+    echo "ERROR: invalid IANA timezone syntax: $SCHEDULE_TZ" >&2
+    exit 2
+  fi
+  if [[ ! "$SCHEDULE_SOURCE" =~ ^([0-9]{1,2})[[:blank:]]+([0-9]{1,2})[[:blank:]]+\*[[:blank:]]+\*[[:blank:]]+\*$ ]]; then
+    echo "ERROR: zone-local cron must be a plain daily expression" >&2
+    exit 2
+  fi
+  if [ "$((10#${BASH_REMATCH[1]}))" -gt 59 ] \
+      || [ "$((10#${BASH_REMATCH[2]}))" -gt 23 ]; then
+    echo "ERROR: zone-local cron has an invalid minute or hour" >&2
+    exit 2
+  fi
+fi
+
 # APP_BASE is overridable only so the scaffold is testable without a
 # container; production never sets it, so the base stays /data/apps.
 APP_BASE="${MOBIUS_APP_BASE:-/data/apps}"
@@ -114,7 +148,11 @@ JOB_API_BASE_URL="${API_BASE_URL:-http://localhost:8000}"
 JOB_RUNNER="${MOBIUS_APP_JOB_RUNNER:-/app/scripts/app-job-runner.py}"
 JOB_API_BASE_ASSIGNMENT="API_BASE_URL=$(printf '%q' "$JOB_API_BASE_URL")"
 JOB_RUNNER_ARG="$(printf '%q' "$JOB_RUNNER")"
-if [ -n "$APP_ID" ]; then
+if [ -n "$SCHEDULE_TZ" ]; then
+  SCHEDULE_TZ_ARG="$(printf '%q' "$SCHEDULE_TZ")"
+  SCHEDULE_SOURCE_ARG="$(printf '%q' "$SCHEDULE_SOURCE")"
+  CRON_CMD="${JOB_API_BASE_ASSIGNMENT} python3 ${JOB_RUNNER_ARG} --wall-clock ${SCHEDULE_TZ_ARG} ${SCHEDULE_SOURCE_ARG} ${APP_ID} ${JOB_PATH}"
+elif [ -n "$APP_ID" ]; then
   CRON_CMD="${JOB_API_BASE_ASSIGNMENT} python3 ${JOB_RUNNER_ARG} ${APP_ID} ${JOB_PATH}"
 else
   CRON_CMD="${JOB_PATH}"
@@ -149,9 +187,12 @@ else
   echo "kept existing $JOB_PATH"
 fi
 
-# 2. Write init-cron.sh. Always rewrite — the schedule is the only
-#    variable, and the script body is tiny + standardised.
-cat > "$INIT_PATH" <<INIT
+# 2. Write the complete durable declaration to a sibling, then atomically
+#    replace init-cron.sh before touching live cron. A failed temp write,
+#    chmod, or rename leaves both the old declaration and live behavior intact.
+INIT_TMP="$(mktemp "${INIT_PATH}.tmp.XXXXXX")"
+trap 'rm -f "$INIT_TMP"' EXIT
+cat > "$INIT_TMP" <<INIT
 #!/bin/sh
 # Declares the cron entry for "$SLUG" across container restarts.
 # /var/spool/cron/crontabs/ lives inside the container, not on the
@@ -182,23 +223,40 @@ cat > "$INIT_PATH" <<INIT
 ENTRY="$SCHEDULE $CRON_CMD"
 ERRFILE=\$(mktemp)
 EXISTING=\$(crontab -u mobius -l 2>"\$ERRFILE"); RC=\$?
+STATUS=0
 if [ "\$RC" -eq 0 ]; then
   # Authoritative read — keep every other app's line, replace only ours.
   (printf '%s\\n' "\$EXISTING" | grep -vF "$JOB_PATH"; echo "\$ENTRY") \\
-    | crontab -u mobius -
+    | crontab -u mobius - || STATUS=\$?
 elif grep -qi 'no crontab for' "\$ERRFILE"; then
   # Genuinely no crontab yet — safe to install just this entry; lifespan
   # reconciles every other live app declaration before cron starts.
-  echo "\$ENTRY" | crontab -u mobius -
+  echo "\$ENTRY" | crontab -u mobius - || STATUS=\$?
 else
   # A real read error (not "no crontab"): do NOT rewrite, or we'd drop every
-  # other app's entry from a partial/empty read. Leave the crontab as-is.
+  # other app's entry from a partial/empty read. Leave the crontab as-is and
+  # report failure; the durable declaration is already safe for a later retry.
   echo "init-cron($SLUG): crontab read error (rc=\$RC); leaving crontab unchanged" >&2
   cat "\$ERRFILE" >&2
+  STATUS=\$RC
 fi
 rm -f "\$ERRFILE"
+exit "\$STATUS"
 INIT
-chmod +x "$INIT_PATH"
+if [ -n "$SCHEDULE_TZ" ]; then
+  cat >> "$INIT_TMP" <<ZONE
+
+# Zone-aware schedule identity (platform-managed; parsed, never executed).
+# ENTRY is an every-minute materialization; app-job-runner evaluates the IANA
+# wall clock and claims at most one run for each local civil date.
+SCHEDULE_TZ="$SCHEDULE_TZ"
+SCHEDULE_SOURCE="$SCHEDULE_SOURCE"
+ZONE
+fi
+chmod +x "$INIT_TMP"
+mv -f "$INIT_TMP" "$INIT_PATH"
+INIT_TMP=""
+trap - EXIT
 echo "wrote $INIT_PATH"
 
 # 3. Install the entry NOW so the agent doesn't need to wait for a

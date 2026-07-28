@@ -1,21 +1,12 @@
-"""Zone-aware schedule materialization — including DST boundaries.
+"""IANA wall-clock scheduling, including DST gaps and folds."""
 
-The durable schedule identity is (IANA timezone, zone-local daily cron);
-the crontab entry is a server-local materialization recomputed when either
-zone's UTC offset changes. These tests pin the conversion on both sides of
-the 2026 European transitions (spring forward 2026-03-29, fall back
-2026-10-25) and in both directions of ownership.
-"""
-
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, timezone
 
 import pytest
 
 from app import cron_tz
 
-UTC = ZoneInfo("UTC")
-BELGRADE = ZoneInfo("Europe/Belgrade")
+UTC = timezone.utc
 
 
 def test_parse_daily_cron_accepts_plain_daily():
@@ -36,80 +27,88 @@ def test_parse_daily_cron_rejects_non_daily(expr):
   assert cron_tz.parse_daily_cron(expr) is None
 
 
-def test_materialize_summer_offset_on_utc_server():
-  # 2026-07-01: Belgrade is UTC+2 → 5:00 local = 3:00 server.
-  now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+def test_materialization_is_a_gate_not_a_static_offset_snapshot():
   assert cron_tz.materialize_zone_cron(
-    "0 5 * * *", "Europe/Belgrade", now=now, server_tz=UTC,
-  ) == "0 3 * * *"
-
-
-def test_materialize_winter_offset_on_utc_server():
-  # 2026-12-01: Belgrade is UTC+1 → 5:00 local = 4:00 server.
-  now = datetime(2026, 12, 1, 12, 0, tzinfo=UTC)
+    "0 5 * * *", "Europe/Belgrade",
+  ) == "* * * * *"
   assert cron_tz.materialize_zone_cron(
-    "0 5 * * *", "Europe/Belgrade", now=now, server_tz=UTC,
-  ) == "0 4 * * *"
+    "30 0 * * *", "Asia/Kathmandu",
+  ) == "* * * * *"
 
 
-def test_materialize_across_spring_forward_boundary():
-  # Europe's 2026 spring transition: 2026-03-29 02:00 CET → 03:00 CEST.
-  before = datetime(2026, 3, 28, 12, 0, tzinfo=UTC)
-  after = datetime(2026, 3, 29, 12, 0, tzinfo=UTC)
-  materialize = lambda now: cron_tz.materialize_zone_cron(
-    "0 5 * * *", "Europe/Belgrade", now=now, server_tz=UTC,
+def test_ordinary_wall_clock_occurrence_tracks_seasonal_offset():
+  # The durable identity stays 05:00 Belgrade; its real UTC instant changes.
+  assert cron_tz.wall_clock_occurrence(
+    date(2026, 7, 1), "0 5 * * *", "Europe/Belgrade",
+  ) == datetime(2026, 7, 1, 3, 0, tzinfo=UTC)
+  assert cron_tz.wall_clock_occurrence(
+    date(2026, 12, 1), "0 5 * * *", "Europe/Belgrade",
+  ) == datetime(2026, 12, 1, 4, 0, tzinfo=UTC)
+
+
+def test_nonexistent_wall_time_runs_at_first_valid_minute_after_gap():
+  # 2026-03-29 jumps from 01:59:59 UTC / 02:59:59 CET to 03:00 CEST.
+  # The declared 02:30 does not exist, so the explicit policy selects 03:00.
+  occurrence = cron_tz.wall_clock_occurrence(
+    date(2026, 3, 29), "30 2 * * *", "Europe/Belgrade",
   )
-  assert materialize(before) == "0 4 * * *"   # +1 before the switch
-  assert materialize(after) == "0 3 * * *"    # +2 after — entry rescheduled
+  assert occurrence == datetime(2026, 3, 29, 1, 0, tzinfo=UTC)
+  assert cron_tz.due_wall_clock_date(
+    "30 2 * * *", "Europe/Belgrade", now=occurrence,
+  ) == date(2026, 3, 29)
+  assert cron_tz.due_wall_clock_date(
+    "30 2 * * *", "Europe/Belgrade",
+    now=datetime(2026, 3, 29, 1, 30, tzinfo=UTC),
+  ) is None
 
 
-def test_materialize_across_fall_back_boundary():
-  # Europe's 2026 fall transition: 2026-10-25 03:00 CEST → 02:00 CET.
-  before = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
-  after = datetime(2026, 10, 25, 12, 0, tzinfo=UTC)
-  materialize = lambda now: cron_tz.materialize_zone_cron(
-    "0 5 * * *", "Europe/Belgrade", now=now, server_tz=UTC,
+def test_ambiguous_wall_time_runs_once_at_first_fold():
+  # 02:30 occurs at both 00:30 UTC (CEST, fold=0) and 01:30 UTC (CET,
+  # fold=1). The first occurrence is selected and the repeated one is not due.
+  occurrence = cron_tz.wall_clock_occurrence(
+    date(2026, 10, 25), "30 2 * * *", "Europe/Belgrade",
   )
-  assert materialize(before) == "0 3 * * *"
-  assert materialize(after) == "0 4 * * *"
+  assert occurrence == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+  assert cron_tz.due_wall_clock_date(
+    "30 2 * * *", "Europe/Belgrade", now=occurrence,
+  ) == date(2026, 10, 25)
+  assert cron_tz.due_wall_clock_date(
+    "30 2 * * *", "Europe/Belgrade",
+    now=datetime(2026, 10, 25, 1, 30, tzinfo=UTC),
+  ) is None
 
 
-def test_materialize_when_server_itself_observes_dst():
-  # Server clock in Berlin, schedule owned in UTC: the SERVER side of the
-  # conversion moves at ITS transition, the schedule's identity does not.
-  berlin = ZoneInfo("Europe/Berlin")
-  materialize = lambda now: cron_tz.materialize_zone_cron(
-    "0 5 * * *", "UTC", now=now, server_tz=berlin,
-  )
-  assert materialize(datetime(2026, 7, 1, 12, 0, tzinfo=UTC)) == "0 7 * * *"
-  assert materialize(datetime(2026, 12, 1, 12, 0, tzinfo=UTC)) == "0 6 * * *"
+def test_occurrence_can_cross_the_utc_day_boundary():
+  assert cron_tz.wall_clock_occurrence(
+    date(2026, 7, 2), "30 0 * * *", "Asia/Kathmandu",
+  ) == datetime(2026, 7, 1, 18, 45, tzinfo=UTC)
 
 
-def test_materialize_wraps_across_the_day_boundary():
-  # 00:30 in Kathmandu (UTC+5:45) is 18:45 the previous day in UTC; a
-  # daily job simply wraps — date fields are '*' by contract.
-  now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
-  assert cron_tz.materialize_zone_cron(
-    "30 0 * * *", "Asia/Kathmandu", now=now, server_tz=UTC,
-  ) == "45 18 * * *"
+def test_civil_date_with_no_remaining_valid_minute_is_skipped():
+  # Pacific/Apia skipped 2011-12-30 when it moved across the date line.
+  assert cron_tz.wall_clock_occurrence(
+    date(2011, 12, 30), "0 0 * * *", "Pacific/Apia",
+  ) is None
 
 
-def test_materialize_rejects_non_daily_and_unknown_zone():
-  now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+def test_wall_clock_functions_reject_bad_contracts():
   with pytest.raises(ValueError):
-    cron_tz.materialize_zone_cron("0 5 * * 1", "UTC", now=now, server_tz=UTC)
+    cron_tz.materialize_zone_cron("0 5 * * 1", "UTC")
   with pytest.raises(ValueError):
-    cron_tz.materialize_zone_cron(
-      "0 5 * * *", "Not/AZone", now=now, server_tz=UTC,
+    cron_tz.materialize_zone_cron("0 5 * * *", "Not/AZone")
+  with pytest.raises(ValueError):
+    cron_tz.due_wall_clock_date(
+      "0 5 * * *", "UTC", now=datetime(2026, 7, 1, 5, 0),
     )
 
 
 def test_parse_zone_declaration_round_trip():
   text = (
     "#!/bin/sh\n"
-    'ENTRY="0 3 * * * python3 /app/scripts/app-job-runner.py 4 '
+    'ENTRY="* * * * * python3 /app/scripts/app-job-runner.py '
+    '--wall-clock Europe/Belgrade 0\\ 5\\ \\*\\ \\*\\ \\* 4 '
     '/data/apps/memory/fetch.sh"\n'
-    "# --- Zone-aware schedule identity (platform-managed).\n"
+    "# Zone-aware schedule identity (platform-managed).\n"
     'SCHEDULE_TZ="Europe/Belgrade"\n'
     'SCHEDULE_SOURCE="0 5 * * *"\n'
   )
@@ -118,21 +117,23 @@ def test_parse_zone_declaration_round_trip():
   )
 
 
+def test_parse_zone_declaration_returns_none_when_identity_is_absent():
+  assert cron_tz.parse_zone_declaration("") is None
+
+
 @pytest.mark.parametrize("text", [
-  "",
   'SCHEDULE_TZ="Europe/Belgrade"\n',                     # half a declaration
   'SCHEDULE_SOURCE="0 5 * * *"\n',                       # half a declaration
   'SCHEDULE_TZ="Nope"\nSCHEDULE_SOURCE="0 5 * * *"\n',   # unknown zone
   'SCHEDULE_TZ="UTC"\nSCHEDULE_SOURCE="0 5 * * 1"\n',    # non-daily source
 ])
-def test_parse_zone_declaration_rejects_incomplete(text):
-  assert cron_tz.parse_zone_declaration(text) is None
+def test_parse_zone_declaration_rejects_malformed_identity(text):
+  with pytest.raises(ValueError):
+    cron_tz.parse_zone_declaration(text)
 
 
 def test_server_timezone_name_prefers_valid_tz_env(monkeypatch):
   monkeypatch.setenv("TZ", "Europe/Belgrade")
   assert cron_tz.server_timezone_name() == "Europe/Belgrade"
   monkeypatch.setenv("TZ", "Total/Nonsense")
-  # Invalid TZ falls through to /etc/localtime or the UTC default —
-  # either way a valid IANA identifier comes back.
   assert cron_tz.valid_timezone(cron_tz.server_timezone_name())

@@ -10,6 +10,8 @@ import sys
 import tempfile
 import time
 import types
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,17 @@ def test_runtime_image_pins_landlock_capable_setpriv_release():
 def test_cron_parser_resolves_supervised_command_to_real_job():
   line = (
     "30 5 * * * python3 /app/scripts/app-job-runner.py "
+    "57 /data/apps/memory/memory-job.sh"
+  )
+  assert _crontab_command_path(line) == (
+    "/data/apps/memory/memory-job.sh"
+  )
+
+
+def test_cron_parser_resolves_wall_clock_gate_to_real_job():
+  line = (
+    "* * * * * python3 /app/scripts/app-job-runner.py "
+    "--wall-clock Europe/Belgrade 30\\ 2\\ \\*\\ \\*\\ \\* "
     "57 /data/apps/memory/memory-job.sh"
   )
   assert _crontab_command_path(line) == (
@@ -112,6 +125,59 @@ def _load_runner():
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
   return module
+
+
+def test_wall_clock_claim_is_once_per_identity_and_local_date(
+  monkeypatch, tmp_path,
+):
+  runner = _load_runner()
+  monkeypatch.setattr(runner, "WALL_CLOCK_STATE_DIR", tmp_path / "state")
+  monkeypatch.setattr(
+    runner.cron_tz, "due_wall_clock_date",
+    lambda zone_cron, tz_name: date(2026, 10, 25),
+  )
+  job = tmp_path / "memory" / "fetch.sh"
+
+  def claim():
+    return runner._claim_wall_clock_run(
+      57, job, "Europe/Belgrade", "30 2 * * *",
+    )
+
+  with ThreadPoolExecutor(max_workers=8) as pool:
+    claims = list(pool.map(lambda _index: claim(), range(8)))
+
+  assert claims.count(True) == 1
+  assert claims.count(False) == 7
+  # An explicit schedule change is a new identity, not a duplicate tick.
+  assert runner._claim_wall_clock_run(
+    57, job, "Europe/Belgrade", "45 2 * * *",
+  ) is True
+
+
+def test_wall_clock_tick_that_is_not_due_stops_before_job_authority(
+  monkeypatch, tmp_path,
+):
+  runner = _load_runner()
+  data_dir = tmp_path / "data"
+  job = data_dir / "apps" / "memory" / "fetch.sh"
+  job.parent.mkdir(parents=True)
+  job.write_text("#!/bin/sh\n")
+  monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  monkeypatch.setattr(runner, "_claim_wall_clock_run", lambda *_args: False)
+  mint = pytest.fail
+  monkeypatch.setattr(
+    runner, "_mint_app_token",
+    lambda *_args: mint("a non-due tick must not mint authority"),
+  )
+  monkeypatch.setattr(
+    runner.sys, "argv",
+    [
+      "app-job-runner.py", "--wall-clock", "Europe/Belgrade", "30 2 * * *",
+      "57", str(job),
+    ],
+  )
+
+  assert runner.run() == 0
 
 
 def test_live_check_calls_real_app_endpoint(monkeypatch):

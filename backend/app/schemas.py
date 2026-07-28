@@ -262,9 +262,10 @@ class AppScheduleUpdate(BaseModel):
 
   When ``timezone`` (an IANA identifier) is set, ``cron`` is a plain daily
   expression owned in that zone; the platform stores that identity durably
-  and materializes/re-materializes the server-local crontab entry itself.
-  Without it, ``cron`` is interpreted in the server's local timezone as
-  before.
+  and materializes an every-minute gate that resolves the real wall-clock
+  occurrence. Ambiguous times run once at their first occurrence; nonexistent
+  times run at the first valid minute after the gap. Without ``timezone``,
+  ``cron`` is interpreted in the server's local timezone as before.
   """
 
   cron: str
@@ -275,10 +276,9 @@ class AppScheduleUpdate(BaseModel):
 class AppScheduleOut(BaseModel):
   """Read-only metadata for an installed app's recurring cron job.
 
-  ``cron`` is always the materialized server-local entry. When the schedule
-  is owned in an IANA zone, ``timezone``/``zone_cron`` carry that durable
-  identity (the platform re-materializes ``cron`` when offsets change).
-  ``server_timezone`` is the server clock's own IANA identity.
+  ``cron`` is always the live crontab cadence. For an IANA-owned schedule it
+  is the every-minute gate; ``timezone``/``zone_cron`` carry the durable wall
+  clock identity. ``server_timezone`` is the server clock's own IANA identity.
   """
 
   id: int
