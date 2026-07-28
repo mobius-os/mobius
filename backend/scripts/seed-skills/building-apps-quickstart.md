@@ -160,8 +160,7 @@ commits that exact revision, returns a compact receipt with `app_id`,
 building chat. The preview may bloom into a separate visible pane when that
 adds space without hiding anything. When it would have to share a pane, it
 parks as an inactive tab instead of replacing what the partner is using. Reuse
-that numeric ID for preview, storage, notifications, and later actions; do not
-list apps again after a successful apply. Do not send a separate `open_item`.
+that numeric ID for preview, storage, notifications, and later actions; do not list apps again after a successful apply. Do not send a separate `open_item`.
 
 Afterward, edit source files normally and run the same command once the change
 is coherent enough to preview. Each successful apply live-swaps the already
