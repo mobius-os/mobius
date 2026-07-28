@@ -346,7 +346,7 @@ test('A live pin holds while spacer remains, then follows only after it is fille
   // The first small frame must consume blank reservation without moving the
   // pinned prompt. This is the owner-observed regression: following from the
   // first token makes the whole chat move while blank reply room still exists.
-  await expect(page.getByText(/EARLY_MARKER/)).toBeVisible({ timeout: 5000 })
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(/EARLY_MARKER/)).toBeVisible({ timeout: 5000 })
   const early = await measureStreamingGeometry(page)
   expect(early.userVisualTop).toBeGreaterThanOrEqual(-2)
   expect(early.userVisualTop).toBeLessThanOrEqual(10)
@@ -359,7 +359,7 @@ test('A live pin holds while spacer remains, then follows only after it is fille
   await page.waitForFunction(() => (
     (document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')?.offsetHeight ?? 999) <= 1
   ), undefined, { timeout: 10000 })
-  await expect(page.getByText(/TAIL_MARKER/)).toBeVisible({ timeout: 10000 })
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(/TAIL_MARKER/)).toBeVisible({ timeout: 10000 })
   await page.waitForFunction(() => {
     const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     const spacerH = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')?.offsetHeight || 0
@@ -384,7 +384,7 @@ test('Reader gesture owns scroll and spacer geometry while a reply is streaming'
   await setup(page, { width: 426, height: 860 })
   await newChat(page)
   await sendMessage(page, 'Let me scroll while this runs')
-  await expect(page.getByText(/Opening line/)).toBeVisible({ timeout: 5000 })
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(/Opening line/)).toBeVisible({ timeout: 5000 })
 
   await page.waitForFunction(() => (
     (document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')?.offsetHeight ?? 999) <= 1

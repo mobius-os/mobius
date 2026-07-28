@@ -55,9 +55,9 @@ async function setupWithStreamMock(page, streamBody) {
   }
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
+    () => !!(document.querySelector('.chat__empty-wrap')
+          || document.querySelector('.chat__scroll')
+          || document.querySelector('.chat__form')),
     { timeout: 10000 }
   )
 }
@@ -131,11 +131,11 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Ask me a question')
 
-    await expect(page.locator('.qcard')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
     // The option buttons MUST be enabled (the regression was that
     // post-question tool_start events kept isStreaming=true →
     // disabled={isStreaming} stayed grayed out).
-    const optionButtons = page.locator('.qcard__opt')
+    const optionButtons = page.locator('[data-chat-surface="painted"] .qcard__opt')
     await expect(optionButtons.first()).toBeEnabled({ timeout: 5000 })
   })
 
@@ -177,7 +177,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Ask for a launch lane')
 
-    const card = page.locator('.qcard')
+    const card = page.locator('[data-chat-surface="painted"] .qcard')
     const careful = page.getByRole('radio', { name: 'Careful' })
     const submit = page.getByRole('button', { name: 'Submit' })
     await expect(card).toBeVisible({ timeout: 5000 })
@@ -221,7 +221,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Ask me which route')
 
-    const card = page.locator('.qcard')
+    const card = page.locator('[data-chat-surface="painted"] .qcard')
     await expect(card).toBeVisible({ timeout: 5000 })
     const customAnswer = card.getByRole('textbox', { name: 'Custom answer for: Which route?' })
     await customAnswer.fill('Take the quiet streets')
@@ -315,10 +315,10 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Try the partial-then-full sequence')
 
-    await expect(page.locator('.qcard')).toHaveCount(1, { timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(1, { timeout: 5000 })
     // The single card has the FINAL options (replace happened), not
     // the empty partial options.
-    await expect(page.locator('.qcard__opt')).toHaveCount(
+    await expect(page.locator('[data-chat-surface="painted"] .qcard__opt')).toHaveCount(
       2,
       { timeout: 2000 }
     )
@@ -362,7 +362,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Ask two questions')
 
-    await expect(page.locator('.qcard')).toHaveCount(2, { timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(2, { timeout: 5000 })
   })
 
 
@@ -389,7 +389,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await newChat(page)
     await sendMessage(page, 'Pick scope')
 
-    await expect(page.locator('.qcard')).toHaveCount(1, { timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(1, { timeout: 5000 })
     // Only the question card; no leaked tool blocks.
     await expect(page.locator('[data-chat-surface="painted"] .chat__tool')).toHaveCount(0)
   })
@@ -540,14 +540,14 @@ test.describe('Q&A atomic write', () => {
     )
     await newChat(page)
     await sendMessage(page, 'Ask')
-    await expect(page.locator('.qcard')).toBeVisible({ timeout: 5000 })
-    await page.locator('.qcard__opt', { hasText: 'Yes' }).click()
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
+    await page.locator('[data-chat-surface="painted"] .qcard__opt', { hasText: 'Yes' }).click()
     await page.evaluate(() => {
       window.__mobiusChatScrollTrace = {
         version: 1, transitions: [], writes: [], events: [],
       }
     })
-    await page.locator('.qcard__submit').click()
+    await page.locator('[data-chat-surface="painted"] .qcard__submit').click()
 
     await expect.poll(() => sentBodies.length).toBe(2)
     // The hidden answer message MUST carry the answers field
@@ -617,15 +617,15 @@ test.describe('Q&A atomic write', () => {
     await newChat(page)
     await sendMessage(page, 'Ask the anchored question')
 
-    const card = page.locator('.qcard')
+    const card = page.locator('[data-chat-surface="painted"] .qcard')
     await expect(card).toBeVisible({ timeout: 5000 })
     await page.evaluate(() => {
       const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (scroll) scroll.scrollTop = scroll.scrollHeight
     })
-    await page.locator('.qcard__opt', { hasText: 'Yes' }).click()
+    await page.locator('[data-chat-surface="painted"] .qcard__opt', { hasText: 'Yes' }).click()
 
-    const submit = page.locator('.qcard__submit')
+    const submit = page.locator('[data-chat-surface="painted"] .qcard__submit')
     const submitClick = submit.click()
     await answerStarted
     await page.evaluate(() => new Promise(resolve => (
@@ -634,7 +634,7 @@ test.describe('Q&A atomic write', () => {
 
     const geometry = () => page.evaluate(() => {
       const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      const question = document.querySelector('.qcard')
+      const question = document.querySelector('[data-chat-surface="painted"] .qcard')
       const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
       const sr = scroll?.getBoundingClientRect()
       const qr = question?.getBoundingClientRect()

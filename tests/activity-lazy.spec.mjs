@@ -35,7 +35,7 @@ test('the first thinking event becomes interactive without moving the row', asyn
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
-  await expect(page.locator('.chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 
   // The empty chat opens one terminal stream before a turn starts. Install
   // the gated handler only after that mount so the delayed response belongs to
@@ -63,9 +63,9 @@ test('the first thinking event becomes interactive without moving the row', asyn
 
   await page.getByRole('textbox', { name: 'Message Möbius…' }).fill('Think about this')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(page.locator('.chat__msg--user')).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user')).toBeVisible()
 
-  const placeholder = page.locator('.chat__thinking .chat__activity-header')
+  const placeholder = page.locator('[data-chat-surface="painted"] .chat__thinking .chat__activity-header')
   await expect(placeholder).toBeVisible()
   await expect(placeholder).not.toHaveAttribute('aria-expanded', /.+/)
   const before = await placeholder.boundingBox()
@@ -73,11 +73,11 @@ test('the first thinking event becomes interactive without moving the row', asyn
 
   releaseThinking()
   const thought = page.locator(
-    '.chat__activity--direct-thought > .chat__activity-header[aria-expanded]',
+    '[data-chat-surface="painted"] .chat__activity--direct-thought > .chat__activity-header[aria-expanded]',
   )
   await expect(thought).toBeVisible()
   await expect(thought).toHaveAttribute('aria-expanded', 'false')
-  await expect(page.locator('.chat__thinking')).toHaveCount(0)
+  await expect(page.locator('[data-chat-surface="painted"] .chat__thinking')).toHaveCount(0)
   await page.evaluate(() => new Promise(resolve =>
     requestAnimationFrame(() => requestAnimationFrame(resolve))))
   const after = await thought.boundingBox()
@@ -148,9 +148,9 @@ test('a lone activity is direct and sources render as local compact pills', asyn
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
-  await expect(page.getByText('One command should not create two disclosures.')).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText('One command should not create two disclosures.')).toBeVisible()
 
-  const tools = page.locator('.chat__tools')
+  const tools = page.locator('[data-chat-surface="painted"] .chat__tools')
   await expect(tools.locator('.chat__activity')).toHaveCount(0)
   await expect(tools.locator(':scope > .chat__tool')).toHaveCount(1)
   const toolToggle = tools.locator('.chat__tool-header')
@@ -159,7 +159,7 @@ test('a lone activity is direct and sources render as local compact pills', asyn
   await toolToggle.click()
   await expect(tools.getByText('/workspace/mobius')).toBeVisible()
 
-  const sources = page.locator('.chat__sources')
+  const sources = page.locator('[data-chat-surface="painted"] .chat__sources')
   await expect(sources).toBeVisible()
   await expect(sources.getByRole('listitem')).toHaveCount(2)
   await expect(sources.locator('img')).toHaveCount(0)
@@ -340,9 +340,9 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
-  await expect(page.getByText('The answer stays visually primary.')).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText('The answer stays visually primary.')).toBeVisible()
 
-  const activity = page.locator('.chat__activity')
+  const activity = page.locator('[data-chat-surface="painted"] .chat__activity')
   const activityHeader = activity.locator('.chat__activity-header')
   await expect(activityHeader).toHaveAttribute('aria-expanded', 'false')
   const timeline = activity.locator('.chat__activity-timeline')
@@ -396,23 +396,23 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   }
 
   await thoughtToggle.click()
-  await expect(page.getByText(thoughtPreview)).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(thoughtPreview)).toBeVisible()
   expect(thinkingRequests).toBe(1)
-  await expect(page.getByText('THINKING_FULL_SENTINEL', { exact: false })).toHaveCount(0)
+  await expect(page.locator('[data-chat-surface="painted"]').getByText('THINKING_FULL_SENTINEL', { exact: false })).toHaveCount(0)
   await page.getByRole('button', { name: 'Load full thought' }).click()
-  await expect(page.getByText('THINKING_FULL_SENTINEL', { exact: false })).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText('THINKING_FULL_SENTINEL', { exact: false })).toBeVisible()
   expect(thinkingFullRequests).toBe(1)
   await thoughtToggle.click()
-  await expect(page.getByText(thoughtPreview)).toHaveCount(0)
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(thoughtPreview)).toHaveCount(0)
   await thoughtToggle.click()
-  await expect(page.getByText(thoughtPreview)).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(thoughtPreview)).toBeVisible()
   expect(thinkingRequests).toBe(2)
   await thoughtToggle.click()
 
   await toolToggle.click()
   await expect(activity.getByRole('region')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Copy output' })).toBeEnabled()
-  await expect(page.getByText(/loading output preview/i)).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(/loading output preview/i)).toBeVisible()
   await page.getByRole('button', { name: 'Copy output' }).click()
   await expect.poll(() => page.evaluate(() => window.__copiedToolText.at(-1))).toBe(fullOutput)
   expect(toolCopyRequests).toBe(1)
@@ -422,7 +422,7 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   await toolToggle.click()
   await expect.poll(() => page.evaluate(() => window.__lazyRequestAborts.tool)).toBe(1)
   await toolToggle.click()
-  await expect(page.getByText(fullOutput)).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(fullOutput)).toBeVisible()
   expect(toolPreviewRequests).toBe(3)
   await expect(page.getByRole('button', { name: 'Copy output' })).toBeVisible()
   await page.getByRole('button', { name: 'Copy output' }).click()
@@ -451,7 +451,7 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
     activity.locator('.chat__tool .chat__lazy-status [role="status"]'),
   ).toHaveText('Couldn’t load output preview.')
   await activity.locator('.chat__tool').getByRole('button', { name: 'Retry' }).click()
-  await expect(page.getByText(fullOutput)).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(fullOutput)).toBeVisible()
   expect(toolPreviewRequests).toBe(5)
 
   await thoughtToggle.click()
@@ -459,7 +459,7 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
     activity.locator('.chat__activity-think .chat__lazy-status [role="status"]'),
   ).toHaveText('Thought unavailable.')
   await activity.locator('.chat__activity-think').getByRole('button', { name: 'Retry' }).click()
-  await expect(page.getByText(thoughtPreview)).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(thoughtPreview)).toBeVisible()
   expect(thinkingRequests).toBe(4)
   await thoughtToggle.click()
 
@@ -473,7 +473,7 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   await expect(activity.locator('.chat__activity-timeline')).toBeVisible()
   await expect(activity.locator('.chat__activity-think-toggle')).toHaveAttribute('aria-expanded', 'false')
   await expect(activity.locator('.chat__tool-header')).toHaveAttribute('aria-expanded', 'true')
-  await expect(page.getByText(fullOutput)).toBeVisible()
+  await expect(page.locator('[data-chat-surface="painted"]').getByText(fullOutput)).toBeVisible()
   expect(thinkingRequests).toBe(4)
   expect(thinkingFullRequests).toBe(1)
   expect(toolPreviewRequests).toBe(6)

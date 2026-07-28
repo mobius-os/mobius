@@ -275,7 +275,7 @@ test.describe('Navigation basics', () => {
       assistantContent: '![Navigation preview](/test-image.svg)',
     })
     const initial = await getNavState(page)
-    const image = page.locator('.md-image-frame')
+    const image = page.locator('[data-chat-surface="painted"] .md-image-frame')
     await expect(image).toBeEnabled()
 
     await image.click()

@@ -429,7 +429,7 @@ test.describe('Tabs', () => {
     await expect.poll(() => paneChromeDeltas(page)).toEqual(aligned)
 
     // Native chat content focuses its pane through wrapper capture.
-    await page.locator('.chat').dispatchEvent('pointerdown')
+    await page.locator('[data-chat-surface="painted"] .chat').dispatchEvent('pointerdown')
     await expect(page.locator('.workspace__strip--focused')).toContainText(chat.title)
 
     // Opaque iframe input uses the explicit frame-focus bridge.
@@ -457,6 +457,6 @@ test.describe('Tabs', () => {
     await page.locator('.workspace__strip', { hasText: 'Demo App' }).locator('.shell__tab-close').click()
     await expect(page.locator('.workspace__strip')).toHaveCount(0)
     await expect(page.locator('.shell__tabstrip')).toHaveCount(1)
-    await expect(page.locator('.chat')).toBeVisible()
+    await expect(page.locator('[data-chat-surface="painted"] .chat')).toBeVisible()
   })
 })

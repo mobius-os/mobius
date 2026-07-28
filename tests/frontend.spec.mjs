@@ -39,9 +39,9 @@ async function setup(page, viewport = { width: 412, height: 915 }) {
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
-    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-          || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-          || document.querySelector('[data-chat-surface="painted"] .chat__form')),
+    () => !!(document.querySelector('.chat__empty-wrap')
+          || document.querySelector('.chat__scroll')
+          || document.querySelector('.chat__form')),
     { timeout: 10000 }
   )
 }
@@ -423,22 +423,22 @@ test.describe('Message rendering', () => {
     await sendMessage(page, 'Ask me something')
 
     // Wait for question card to appear.
-    await expect(page.locator('.qcard')).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
 
     // Verify the three supplied choices; custom input is a direct sibling
     // surface rather than a synthetic "Other" radio row.
-    const options = page.locator('.qcard__opt')
+    const options = page.locator('[data-chat-surface="painted"] .qcard__opt')
     await expect(options).toHaveCount(3)
     await expect(page.getByRole('textbox', { name: 'Custom answer for: What color?' }))
       .toBeVisible()
 
     // Select "Blue".
-    await page.locator('.qcard__opt', { hasText: 'Blue' }).click()
-    await expect(page.locator('.qcard__opt--on')).toHaveCount(1)
+    await page.locator('[data-chat-surface="painted"] .qcard__opt', { hasText: 'Blue' }).click()
+    await expect(page.locator('[data-chat-surface="painted"] .qcard__opt--on')).toHaveCount(1)
 
     // Submit.
-    await expect(page.locator('.qcard__submit')).toBeEnabled()
-    await page.locator('.qcard__submit').click()
+    await expect(page.locator('[data-chat-surface="painted"] .qcard__submit')).toBeEnabled()
+    await page.locator('[data-chat-surface="painted"] .qcard__submit').click()
 
     // Wait for the answer to be sent as a second (hidden) message POST.
     await expect.poll(() => sentBodies.length).toBe(2)
@@ -456,8 +456,8 @@ test.describe('Message rendering', () => {
 
     // Verify the question card keeps its geometry and grays out its submit
     // control instead of removing the row underneath the reader.
-    await expect(page.locator('.qcard__submit')).toBeDisabled()
-    await expect(page.locator('.qcard__submit')).toHaveText('Submitted')
+    await expect(page.locator('[data-chat-surface="painted"] .qcard__submit')).toBeDisabled()
+    await expect(page.locator('[data-chat-surface="painted"] .qcard__submit')).toHaveText('Submitted')
   })
 
   test('6c. Question card answer sends hidden message', async ({ page }) => {
@@ -501,9 +501,9 @@ test.describe('Message rendering', () => {
     )
     await newChat(page)
     await sendMessage(page, 'Ask me')
-    await expect(page.locator('.qcard')).toBeVisible({ timeout: 5000 })
-    await page.locator('.qcard__opt', { hasText: 'A' }).click()
-    await page.locator('.qcard__submit').click()
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
+    await page.locator('[data-chat-surface="painted"] .qcard__opt', { hasText: 'A' }).click()
+    await page.locator('[data-chat-surface="painted"] .qcard__submit').click()
 
     await expect.poll(() => sentBodies.length).toBe(2)
     // The answer message MUST have hidden: true
@@ -544,8 +544,8 @@ test.describe('Message rendering', () => {
     await sendMessage(page, 'Ask me')
 
     // Only ONE question card should render (the real one).
-    await expect(page.locator('.qcard')).toHaveCount(1, { timeout: 5000 })
-    await expect(page.locator('.qcard')).toContainText('Real question')
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toHaveCount(1, { timeout: 5000 })
+    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toContainText('Real question')
   })
 })
 
@@ -1032,7 +1032,7 @@ test.describe('Scroll position', () => {
     await page.goto(`${BASE}/shell/?chat=${chatId}`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      const img = document.querySelector('.md-image')
+      const img = document.querySelector('[data-chat-surface="painted"] .md-image')
       return !!el && getComputedStyle(el).visibility !== 'hidden'
         && !!img?.complete && !!document.querySelector('[data-key="entry-anchor"]')
     }, { timeout: 10000 })
@@ -1102,7 +1102,7 @@ test.describe('Scroll position', () => {
 
     await page.waitForFunction(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      const img = document.querySelector('.md-image')
+      const img = document.querySelector('[data-chat-surface="painted"] .md-image')
       return !!el && getComputedStyle(el).visibility !== 'hidden'
         // The retained ChatView deliberately reveals its already-settled DOM
         // immediately. Do not mistake the still-complete initial image for the

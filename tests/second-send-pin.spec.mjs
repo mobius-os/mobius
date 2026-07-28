@@ -232,7 +232,7 @@ test('A tall-composer send lands once without a visible post-paint correction', 
   // about to collapse. The controller must overwrite this stale value in its
   // pre-paint layout pass, before it sizes the reservation or writes scrollTop.
   const preSend = await page.evaluate(() => {
-    const chat = document.querySelector('.chat')
+    const chat = document.querySelector('[data-chat-surface="painted"] .chat')
     const foot = document.querySelector('[data-chat-surface="painted"] .chat__foot')
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!chat || !foot || !scroll) throw new Error('missing chat geometry')

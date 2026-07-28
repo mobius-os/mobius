@@ -205,7 +205,7 @@ test.describe('Chat messages cache (TanStack Query)', () => {
     // appears immediately. With cache MISS + blocked network, loading
     // would stay true forever and empty-wrap would never render.
     const hasEmptyState = await page.evaluate(() =>
-      !!document.querySelector('.chat__empty-wrap')
+      !!document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
     )
     expect(hasEmptyState).toBe(true)
   })
@@ -216,9 +216,9 @@ test.describe('Chat messages cache (TanStack Query)', () => {
     await setup(page)
     const ok = await page.evaluate(() => {
       // Indirect signal: the chat view mounted without throwing.
-      return !!(document.querySelector('.chat__empty-wrap')
-        || document.querySelector('.chat__scroll')
-        || document.querySelector('.chat__form'))
+      return !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+        || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        || document.querySelector('[data-chat-surface="painted"] .chat__form'))
     })
     expect(ok).toBe(true)
   })

@@ -196,7 +196,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     await sendMessage(page, 'queued message')
     // Verify the queued tray rendered with the second message.
     await page.waitForFunction(
-      () => Array.from(document.querySelectorAll('.queued__text'))
+      () => Array.from(document.querySelectorAll('[data-chat-surface="painted"] .queued__text'))
         .some(el => el.textContent?.includes('queued message')),
       { timeout: 5000 },
     )
@@ -227,7 +227,7 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
     let sawResurrection = false
     for (let i = 0; i < 8; i++) {
       const queuedTexts = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('.queued__text'))
+        return Array.from(document.querySelectorAll('[data-chat-surface="painted"] .queued__text'))
           .map(el => el.textContent?.trim() ?? '')
       })
       if (queuedTexts.some(t => t.includes('resurrected-queue-item'))) {
