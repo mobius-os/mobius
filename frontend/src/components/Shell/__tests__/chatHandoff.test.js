@@ -64,6 +64,24 @@ test('each pane holds one outgoing chat over one staging chat', () => {
     'an inert staging composer must not consume a one-shot composer request')
 })
 
+test('only the painted workspace world can expose its handoff layers', () => {
+  assert.match(
+    shell,
+    /const paneActiveKey = paneModel\.activeKeyForOwner\(workspace, paneId\) \|\| tabKey/,
+    'handoff visibility must follow the owner current content, including the synthetic single-screen owner',
+  )
+  assert.match(
+    shell,
+    /const ownerPaints = visibleChatKeys\.has\(paneActiveKey\)/,
+    'a retained owner in the hidden world must remain mounted without becoming visible',
+  )
+  assert.match(
+    shell,
+    /const handoffClass = !settingsOverlay && ownerPaints && role !== 'active'/,
+    'held and staging visibility classes belong only to the world that is actually painting',
+  )
+})
+
 test('app-supplied drafts update retained composers as well as remounted chats', () => {
   assert.match(shell,
     /navTo\('chat', \{ chatId: e\.data\.chatId \}\)[\s\S]*requestComposer\(e\.data\.chatId, \{ draft: draftText \}\)/,

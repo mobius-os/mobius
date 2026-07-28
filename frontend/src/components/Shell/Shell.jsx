@@ -3792,7 +3792,14 @@ export default function Shell() {
             removing the bounded cover never reparents another chat wrapper. */}
         {chatPaneLayers.map(({ paneId, chatId, role }) => {
           const tabKey = `chat:${chatId}`
-          const paneActiveKey = workspace.panes[paneId]?.activeTabKey || tabKey
+          const paneActiveKey = paneModel.activeKeyForOwner(workspace, paneId) || tabKey
+          // A retained chat owner may exist in the hidden workspace world. Its
+          // layers stay mounted for continuity, but must never borrow the
+          // handoff classes that make the painted world's held/staging pair
+          // visible. Key this by the owner's current active content rather than
+          // by an individual layer: the held layer intentionally has the old
+          // chat id while its owner is already painting the destination.
+          const ownerPaints = visibleChatKeys.has(paneActiveKey)
           const isActiveLayer = role === 'active'
           // Beat motion + underlay apply only to the ACTIVE layer (a held/staging
           // handoff cover is orthogonal to a mode beat). Keyed by the pane's active
@@ -3802,7 +3809,7 @@ export default function Shell() {
           const fullBleed = !underlay && !paned && paneActiveKey === fullBleedKey
           const motion = isActiveLayer ? wrapperMotion(paneActiveKey) : null
           const tabPanel = role !== 'held' && paned
-          const handoffClass = !settingsOverlay && role !== 'active'
+          const handoffClass = !settingsOverlay && ownerPaints && role !== 'active'
             ? ` shell__chat-view--${role}`
             : ''
           const posStyle = paned ? { top: paned.y, left: paned.x, width: paned.w, height: paned.h } : null
