@@ -30,6 +30,7 @@ import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
+import ProgressRail from './ProgressRail.jsx'
 import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import ContributionReviewCard from './ContributionReviewCard.jsx'
@@ -105,6 +106,11 @@ import {
   latestBuildPhaseAnnouncement,
   railAtRunStart,
 } from './buildPhaseRail.js'
+import {
+  goalObjectiveFromText,
+  latestGoalObjective,
+  progressRailViewModel,
+} from './goalProgress.js'
 import './ChatView.css'
 
 
@@ -451,6 +457,19 @@ export default function ChatView({
   const [buildPhases, setBuildPhases] = useState(EMPTY_BUILD_PHASE_RAIL)
   const [buildPhaseStatus, setBuildPhaseStatus] = useState('')
   const lastAnnouncedPhaseRef = useRef(null)
+  // The active goal is run-scoped, just like build phases. It is set at every
+  // real run-start seam and left intact across mid-turn steers; a fresh mount
+  // can recover it from the visible run-start message once liveness is known.
+  const [activeGoalObjective, setActiveGoalObjective] = useState(
+    () => cached?.running ? (cached?.activeGoalObjective ?? '') : '',
+  )
+  const setActiveGoalState = useCallback((objective) => {
+    setActiveGoalObjective(objective)
+    queryClient.setQueryData(chatMessagesQueryKey(chatId), existing => {
+      if (existing?.activeGoalObjective === objective) return existing
+      return { ...(existing || {}), activeGoalObjective: objective }
+    })
+  }, [chatId, queryClient])
 
   useEffect(() => () => {
     if (timestampTimerRef.current) clearTimeout(timestampTimerRef.current)
@@ -530,7 +549,11 @@ export default function ChatView({
     restartResumeSavingRef.current = false
     setRestartResumeSaving(false)
     setRestartResumeError('')
-  }, [chatId])
+    setActiveGoalObjective(
+      queryClient.getQueryData(chatMessagesQueryKey(chatId))
+        ?.activeGoalObjective ?? '',
+    )
+  }, [chatId, queryClient])
 
   const handleAutoResumeChange = useCallback(async (next, source = 'card') => {
     if (autoResumeSavingRef.current) return
@@ -1250,6 +1273,7 @@ export default function ChatView({
       // position the live stream did (old-run phases, then reset) and the
       // rail always lands on the run being displayed.
       setBuildPhases(railAtRunStart())
+      setActiveGoalState(goalObjectiveFromText(message?.content))
       const consumedCids = message?._consumed_cids
       const serverRows = Array.isArray(message?._messages)
         ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
@@ -2238,6 +2262,7 @@ export default function ChatView({
             // the rail resets. A plain enqueue (started falsy) must NOT
             // touch the in-flight build's rail.
             setBuildPhases(railAtRunStart())
+            setActiveGoalState(goalObjectiveFromText(text))
             setSending(true)
             setServerRunningState(true)
             // The queued send was promoted straight into the active turn, so
@@ -2315,6 +2340,7 @@ export default function ChatView({
           // Same run-start semantics as the branch above: this send became
           // the first message of a NEW run, so the rail resets here too.
           setBuildPhases(railAtRunStart())
+          setActiveGoalState(goalObjectiveFromText(text))
           // Apply the send rule before appending — see shouldPinSend and
           // the fresh-send path. A message that raced into a started turn
           // is still a new send becoming the active turn, so it pins only
@@ -2397,6 +2423,7 @@ export default function ChatView({
     // above) wiped the in-flight build's rail, which the next catch-up
     // replay then silently repopulated (see buildPhaseRail.js).
     setBuildPhases(railAtRunStart())
+    setActiveGoalState(goalObjectiveFromText(text))
 
     // Direct sends use the same submit-time decision as queued/steered sends.
     // A legitimate pin changes FOLLOW_BOTTOM to PIN_USER_MSG, so reply growth
@@ -2585,6 +2612,7 @@ export default function ChatView({
     restoreFiles,
     releaseFiles,
     online,
+    setActiveGoalState,
   ])
 
   useEffect(() => {
@@ -3307,6 +3335,21 @@ export default function ChatView({
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
   useEffect(() => {
+    if (!turnActive) {
+      if (activeGoalObjective) setActiveGoalState('')
+      return
+    }
+    // Ordinary live turns set this synchronously at their run-start seam. This
+    // branch is the cold remount/reconnect recovery path. The query cache
+    // retains a known goal across keyed chat switches, including after a
+    // steer; latestGoalObjective covers a truly cold attach before this client
+    // has seen that run.
+    if (!activeGoalObjective) {
+      const recovered = latestGoalObjective(messages)
+      if (recovered) setActiveGoalState(recovered)
+    }
+  }, [turnActive, messages, activeGoalObjective, setActiveGoalState])
+  useEffect(() => {
     function freezeStreamingReturn() {
       if (typeof document !== 'undefined'
           && document.visibilityState
@@ -3716,7 +3759,9 @@ export default function ChatView({
     return 'Turn paused — Resume available.'
   })()
   const ariaStatus = turnActive
-    ? 'Assistant is responding…'
+    ? (activeGoalObjective
+        ? `Following goal: ${activeGoalObjective}.`
+        : 'Assistant is responding…')
     : (resumeStatus
         ?? (messages.length > 0
             && messages[messages.length - 1]?.role === 'assistant'
@@ -3728,6 +3773,11 @@ export default function ChatView({
     .map(app => ({ app, vm: openAppCtaViewModel(app, turnActive) }))
     .filter(entry => entry.vm)
   const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
+  const visibleGoalObjective = turnActive ? activeGoalObjective : ''
+  const progressRail = progressRailViewModel(
+    visibleGoalObjective,
+    buildPhaseRail,
+  )
   let lastVisibleMessageIndex = -1
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     if (!messages[i].hidden) {
@@ -4105,21 +4155,10 @@ export default function ChatView({
                 : 'Turn paused — tap to resume'}
             </button>
           )}
-          {buildPhaseRail.length > 0 && (
-            <div className="chat__build-rail" role="group" aria-label="Build progress">
-              {buildPhaseRail.map(phase => (
-                <span
-                  key={phase.ts}
-                  className={`chat__build-phase${
-                    phase.current ? ' chat__build-phase--current' : ''
-                  }`}
-                  aria-current={phase.current ? 'step' : undefined}
-                >
-                  <span className="chat__build-phase-label">{phase.label}</span>
-                </span>
-              ))}
-            </div>
-          )}
+          <ProgressRail
+            items={progressRail}
+            ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
+          />
           </>
         )}
         {/* Contribution staged from THIS chat: approve it where the work

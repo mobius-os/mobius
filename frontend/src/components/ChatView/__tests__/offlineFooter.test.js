@@ -11,7 +11,7 @@ test('footer stacks offline note → notices → rail → connection → queued 
   const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
   const composer = chatView.indexOf('<ChatInputBar', footStart)
   const foot = chatView.slice(footStart, composer)
-  const rail = foot.indexOf('className="chat__build-rail"')
+  const rail = foot.indexOf('<ProgressRail')
   const queued = foot.indexOf('<QueuedMessages')
   const connection = foot.indexOf('<ConnectionStatus')
   const offline = foot.indexOf('className="chat__offline-note"')
@@ -22,7 +22,7 @@ test('footer stacks offline note → notices → rail → connection → queued 
     'the complete footer stack must be present',
   )
   assert.ok(offline < connection, 'the offline explanation stacks above connection/retry')
-  assert.ok(rail < connection, 'the build rail stacks above connection/retry')
+  assert.ok(rail < connection, 'the progress rail stacks above connection/retry')
   assert.ok(connection < queued, 'connection/retry stacks directly above the queued input tray')
   for (const notice of [
     'className="chat__open-app"',
@@ -32,7 +32,7 @@ test('footer stacks offline note → notices → rail → connection → queued 
     const noticeIndex = foot.indexOf(notice)
     assert.ok(noticeIndex >= 0, `${notice} must be present in the footer`)
     assert.ok(noticeIndex < rail,
-      `${notice} must stack above the build rail`)
+      `${notice} must stack above the progress rail`)
   }
 })
 
