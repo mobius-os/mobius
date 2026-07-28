@@ -25,7 +25,7 @@ limit_glibc_arenas()
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy.exc import OperationalError
@@ -1117,6 +1117,20 @@ def health(response: Response):
   """
   response.headers["Cache-Control"] = "no-store"
   return {"status": "ok", "boot_id": _BOOT_ID}
+
+
+@app.get(
+  "/api/browser-bootstrap",
+  response_class=HTMLResponse,
+  include_in_schema=False,
+)
+def browser_bootstrap():
+  """Stable same-origin document for authenticated browser automation setup."""
+  return HTMLResponse(
+    "<!doctype html><meta charset=\"utf-8\">"
+    "<title>Möbius browser bootstrap</title>",
+    headers={"Cache-Control": "no-store"},
+  )
 
 
 @app.get("/api/ready")
