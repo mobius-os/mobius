@@ -1,10 +1,13 @@
 """Regression coverage for authenticated screenshot readiness checks."""
 
+import fcntl
 from pathlib import Path
 import os
 import shutil
 import socket
 import subprocess
+
+import pytest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "agent-screenshot.sh"
@@ -36,6 +39,9 @@ def _fixture_script(tmp_path: Path) -> Path:
 
 def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
   marker = tmp_path / "screenshot-called"
+  sleep = tmp_path / "sleep"
+  sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+  sleep.chmod(0o755)
   png_writer = tmp_path / "fake-png.py"
   png_writer.write_text(
     "import struct, sys\n"
@@ -50,6 +56,10 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
   browser.write_text(
     "#!/bin/sh\n"
     "printf '%s\\n' \"$*\" >> \"$FAKE_BROWSER_LOG\"\n"
+    "printf '%s|%s|%s|%s\\n' "
+    "\"${AGENT_BROWSER_SESSION-}\" \"${AGENT_BROWSER_PROFILE-}\" "
+    "\"${AGENT_BROWSER_ARGS-}\" \"${AGENT_BROWSER_DEFAULT_TIMEOUT-}\" "
+    ">> \"$FAKE_BROWSER_IDENTITY_LOG\"\n"
     "case \"$1\" in\n"
     "  open)\n"
     "    printf '%s\\n' \"$2\" > \"$FAKE_BROWSER_URL_FILE\"\n"
@@ -81,7 +91,20 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
     "      exit 1\n"
     "    fi\n"
     "    ;;\n"
+    "  wait)\n"
+    "    if [ \"${FAKE_WAIT_ERROR:-0}\" = 1 ]; then\n"
+    "      printf '%s\\n' 'renderer disconnected' >&2\n"
+    "      exit 1\n"
+    "    fi\n"
+    "    ;;\n"
     "  screenshot)\n"
+    "    count=$(cat \"$FAKE_SCREENSHOT_COUNT_FILE\" 2>/dev/null || printf 0)\n"
+    "    count=$((count + 1))\n"
+    "    printf '%s\\n' \"$count\" > \"$FAKE_SCREENSHOT_COUNT_FILE\"\n"
+    "    if [ \"${FAKE_SCREENSHOT_FAIL_AFTER_WARMUP:-0}\" = 1 ] && [ \"$count\" -gt 1 ]; then\n"
+    "      printf partial > \"$2\"\n"
+    "      exit 1\n"
+    "    fi\n"
     "    if [ \"${FAKE_SCREENSHOT_FAIL_ONCE:-0}\" = 1 ] && [ ! -e \"$FAKE_SCREENSHOT_RETRY_MARKER\" ]; then\n"
     "      : > \"$FAKE_SCREENSHOT_RETRY_MARKER\"\n"
     "      exit 1\n"
@@ -111,8 +134,13 @@ def _run_helper(
   loaded_asset: str | None = None,
   viewport_fail_once: bool = False,
   screenshot_fail_once: bool = False,
+  screenshot_fail_after_warmup: bool = False,
   canonical_target_url: str | None = None,
   screenshot_tiny_once: bool = False,
+  wait_error: bool = False,
+  existing_output: bytes | None = None,
+  profile_locked: bool = False,
+  subprocess_timeout: float | None = None,
   profile_lock_target: str | None = None,
   profile_lock_artifacts: tuple[str, ...] = (
     "SingletonLock", "SingletonCookie", "SingletonSocket",
@@ -124,24 +152,35 @@ def _run_helper(
   browser_log = tmp_path / "browser.log"
   browser_profile = tmp_path / "browser-profile"
   browser_profile.mkdir()
+  if existing_output is not None:
+    output.write_bytes(existing_output)
   if profile_lock_target is not None:
     for artifact in profile_lock_artifacts:
       (browser_profile / artifact).symlink_to(profile_lock_target)
   env = {
     **os.environ,
     "PATH": f"{tmp_path}:{os.environ['PATH']}",
+    "TMPDIR": str(tmp_path),
     "AGENT_TOKEN": "test-token",
     "API_BASE_URL": "http://mobius.test",
     "VIEWPORT_WIDTH": str(viewport_width),
     "VIEWPORT_HEIGHT": str(viewport_height),
+    "AGENT_BROWSER_SESSION": "test-session",
     "AGENT_BROWSER_PROFILE": str(browser_profile),
+    "AGENT_BROWSER_ARGS": "--test-daemon-identity",
+    "AGENT_BROWSER_DEFAULT_TIMEOUT": "",
     "FAKE_AUTH_OK": "true" if auth_ok else "false",
     "FAKE_LOADED_ASSET": loaded_asset or SHELL_ENTRY,
     "FAKE_BROWSER_LOG": str(browser_log),
+    "FAKE_BROWSER_IDENTITY_LOG": str(tmp_path / "browser-identity.log"),
     "FAKE_SCREENSHOT_MARKER": str(marker),
     "FAKE_VIEWPORT_FAIL_ONCE": "1" if viewport_fail_once else "0",
     "FAKE_VIEWPORT_MARKER": str(tmp_path / "viewport-ready"),
     "FAKE_SCREENSHOT_FAIL_ONCE": "1" if screenshot_fail_once else "0",
+    "FAKE_SCREENSHOT_FAIL_AFTER_WARMUP": (
+      "1" if screenshot_fail_after_warmup else "0"
+    ),
+    "FAKE_SCREENSHOT_COUNT_FILE": str(tmp_path / "screenshot-count"),
     "FAKE_SCREENSHOT_RETRY_MARKER": str(tmp_path / "screenshot-retried"),
     "FAKE_SCREENSHOT_TINY_ONCE": "1" if screenshot_tiny_once else "0",
     "FAKE_SCREENSHOT_TINY_MARKER": str(tmp_path / "screenshot-tiny"),
@@ -150,6 +189,7 @@ def _run_helper(
     "FAKE_BROWSER_NEXT_URL_FILE": str(tmp_path / "browser-next-url"),
     "FAKE_CANONICAL_TARGET_URL": canonical_target_url or "",
     "FAKE_BROWSER_STDIN_LOG": str(tmp_path / "browser-stdin.log"),
+    "FAKE_WAIT_ERROR": "1" if wait_error else "0",
   }
   args = ["bash", str(script)]
   if content_only:
@@ -157,13 +197,23 @@ def _run_helper(
   if preserve_cache:
     args.append("--preserve-cache")
   args.extend([route, str(output)])
-  result = subprocess.run(
-    args,
-    env=env,
-    text=True,
-    capture_output=True,
-    check=False,
-  )
+  lock_handle = None
+  try:
+    if profile_locked:
+      lock_handle = Path(f"{browser_profile}.capture.lock").open("w")
+      fcntl.flock(lock_handle, fcntl.LOCK_EX)
+    result = subprocess.run(
+      args,
+      env=env,
+      text=True,
+      capture_output=True,
+      check=False,
+      timeout=subprocess_timeout,
+    )
+  finally:
+    if lock_handle is not None:
+      fcntl.flock(lock_handle, fcntl.LOCK_UN)
+      lock_handle.close()
   return result, output, marker, browser_log
 
 
@@ -435,10 +485,32 @@ def test_cold_capture_opens_browser_before_configuring_viewport(tmp_path: Path):
   assert "open http://mobius.test/" not in commands
 
 
-def test_browser_commands_never_split_daemons_with_per_call_environment():
-  source = SCRIPT.read_text(encoding="utf-8")
-  assert "AGENT_BROWSER_DEFAULT_TIMEOUT=" not in source
-  assert "timeout 5s agent-browser" in source
+def test_browser_commands_keep_one_daemon_identity(tmp_path: Path):
+  result, _, _, _ = _run_helper(tmp_path, auth_ok=True)
+
+  assert result.returncode == 0, result.stderr
+  identities = (tmp_path / "browser-identity.log").read_text(
+    encoding="utf-8",
+  ).splitlines()
+  expected = (
+    f"test-session|{tmp_path / 'browser-profile'}|--test-daemon-identity|"
+  )
+  assert identities
+  assert set(identities) == {expected}
+
+
+def test_browser_failure_includes_last_command_detail(tmp_path: Path):
+  result, output, marker, _ = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    wait_error=True,
+  )
+
+  assert result.returncode != 0
+  assert "target document did not finish its initial paint" in result.stderr
+  assert "agent-browser: renderer disconnected" in result.stderr
+  assert not output.exists()
+  assert not marker.exists()
 
 
 def test_cold_capture_retries_viewport_until_browser_socket_is_ready(tmp_path: Path):
@@ -474,10 +546,14 @@ def test_final_target_reapplies_the_requested_viewport_at_capture_boundary(tmp_p
     i for i, command in enumerate(commands)
     if command == "set viewport 412 915"
   )
-  final_screenshot_index = next(
+  final_screenshot_index = max(
     i for i, command in enumerate(commands)
-    if command == f"screenshot {output}"
+    if command.startswith("screenshot ")
   )
+  final_capture = Path(commands[final_screenshot_index].split(maxsplit=1)[1])
+  assert final_capture.parent == output.parent
+  assert final_capture.name.startswith(".mobius-screenshot.")
+  assert final_capture.suffix == ".png"
   target_viewports = [
     i for i, command in enumerate(commands)
     if i > target_index and command == "set viewport 412 915"
@@ -512,13 +588,58 @@ def test_capture_primes_the_compositor_before_keeping_evidence(tmp_path: Path):
   ]
   assert len(screenshots) == 2
   assert "/mobius-screenshot-warmup." in screenshots[0]
-  assert screenshots[1] == f"screenshot {output}"
+  final_capture = Path(screenshots[1].split(maxsplit=1)[1])
+  assert final_capture.parent == output.parent
+  assert final_capture.name.startswith(".mobius-screenshot.")
+  assert final_capture.suffix == ".png"
   warmup_index = commands.index(screenshots[0])
   post_warmup_frame = next(
     i for i, command in enumerate(commands[warmup_index + 1:], warmup_index + 1)
     if command.startswith("eval ") and "requestAnimationFrame" in command
   )
   assert warmup_index < post_warmup_frame < commands.index(screenshots[1])
+
+
+def test_failed_final_capture_preserves_last_known_good_output(tmp_path: Path):
+  existing = b"last-known-good"
+  result, output, _, _ = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    existing_output=existing,
+    screenshot_fail_after_warmup=True,
+  )
+
+  assert result.returncode != 0
+  assert "remained too busy to capture" in result.stderr
+  assert output.read_bytes() == existing
+  assert not list(tmp_path.glob(".mobius-screenshot.*.png"))
+  assert not list(tmp_path.glob("mobius-screenshot-warmup.*.png"))
+  assert not list(tmp_path.glob("mobius-agent-browser-error.*"))
+
+
+def test_shared_profile_transaction_waits_before_browser_commands(tmp_path: Path):
+  with pytest.raises(subprocess.TimeoutExpired):
+    _run_helper(
+      tmp_path,
+      auth_ok=True,
+      profile_locked=True,
+      subprocess_timeout=0.5,
+    )
+
+  assert not (tmp_path / "browser.log").exists()
+
+
+def test_malformed_app_route_is_rejected_before_capture(tmp_path: Path):
+  result, output, marker, _ = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    route="/app/42oops",
+  )
+
+  assert result.returncode != 0
+  assert "require a numeric app id" in result.stderr
+  assert not output.exists()
+  assert not marker.exists()
 
 
 def test_shell_capture_retries_a_solid_background_frame(tmp_path: Path):

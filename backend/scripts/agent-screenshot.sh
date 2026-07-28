@@ -43,12 +43,52 @@ set -euo pipefail
 # process-level `timeout` utility instead, which preserves daemon identity and
 # lets the caller inspect/close the same session after this helper returns.
 
+BROWSER_ERROR_FILE=""
+WARMUP_OUT=""
+CAPTURE_OUT=""
+
+cleanup() {
+  local path
+  for path in "$BROWSER_ERROR_FILE" "$WARMUP_OUT" "$CAPTURE_OUT"; do
+    [ -z "$path" ] || rm -f "$path"
+  done
+}
+
+die() {
+  printf 'agent-screenshot.sh: %s\n' "$*" >&2
+  if [ -n "$BROWSER_ERROR_FILE" ] && [ -s "$BROWSER_ERROR_FILE" ]; then
+    tail -n 2 "$BROWSER_ERROR_FILE" | sed 's/^/agent-browser: /' >&2
+  fi
+  exit 1
+}
+
+browser_command() {
+  local timeout_seconds="$1"
+  local status=0
+  shift
+  : > "$BROWSER_ERROR_FILE"
+  timeout "${timeout_seconds}s" agent-browser "$@" \
+    2>"$BROWSER_ERROR_FILE" || status=$?
+  if [ "$status" -eq 124 ] && [ ! -s "$BROWSER_ERROR_FILE" ]; then
+    printf 'command timed out after %ss\n' "$timeout_seconds" \
+      > "$BROWSER_ERROR_FILE"
+  fi
+  return "$status"
+}
+
+browser_wait() {
+  local status=0
+  : > "$BROWSER_ERROR_FILE"
+  agent-browser wait "$@" 2>"$BROWSER_ERROR_FILE" || status=$?
+  return "$status"
+}
+
 browser_eval_retry() {
   local expression="$1"
   local output=""
   local attempt
   for attempt in 1 2 3; do
-    if output="$(timeout 5s agent-browser eval "$expression" 2>/dev/null)"; then
+    if output="$(browser_command 5 eval "$expression")"; then
       printf '%s' "$output"
       return 0
     fi
@@ -65,10 +105,10 @@ browser_screenshot_retry() {
     # Navigation/service-worker handoffs can replace the page after an earlier
     # viewport command. Configure the page that will produce THIS screenshot,
     # not merely the page that existed at helper startup.
-    if ! prepare_capture_viewport; then
+    if ! browser_set_viewport_retry; then
       continue
     fi
-    if timeout 5s agent-browser screenshot "$output_path" >/dev/null 2>&1; then
+    if browser_command 5 screenshot "$output_path" >/dev/null; then
       byte_count="$(wc -c < "$output_path" 2>/dev/null || printf '0')"
       if { [ "${CAPTURE_MIN_BYTES:-0}" -le 0 ] \
             || [ "${byte_count:-0}" -ge "${CAPTURE_MIN_BYTES}" ]; } \
@@ -110,14 +150,14 @@ browser_open_origin_retry() {
   local settled=""
   local attempt
   for attempt in 1 2 3 4 5; do
-    timeout 5s agent-browser open "$url" >/dev/null 2>&1 || true
+    browser_command 5 open "$url" >/dev/null || true
     sleep 0.2
     current="$(
-      timeout 5s agent-browser get url 2>/dev/null || true
+      browser_command 5 get url || true
     )"
     sleep 0.2
     confirmed="$(
-      timeout 5s agent-browser get url 2>/dev/null || true
+      browser_command 5 get url || true
     )"
     if [ "$current" != "$confirmed" ]; then
       # In-shell deep links intentionally canonicalize to `/shell/` after the
@@ -132,7 +172,7 @@ browser_open_origin_retry() {
           esac
           sleep 0.2
           settled="$(
-            timeout 5s agent-browser get url 2>/dev/null || true
+            browser_command 5 get url || true
           )"
           [ "$confirmed" = "$settled" ] && return 0
           ;;
@@ -158,14 +198,14 @@ browser_open_exact_retry() {
   local confirmed=""
   local attempt
   for attempt in 1 2 3 4 5; do
-    timeout 5s agent-browser open "$url" >/dev/null 2>&1 || true
+    browser_command 5 open "$url" >/dev/null || true
     sleep 0.2
     current="$(
-      timeout 5s agent-browser get url 2>/dev/null || true
+      browser_command 5 get url || true
     )"
     sleep 0.2
     confirmed="$(
-      timeout 5s agent-browser get url 2>/dev/null || true
+      browser_command 5 get url || true
     )"
     [ "$current" = "$url" ] && [ "$confirmed" = "$url" ] && return 0
   done
@@ -175,8 +215,8 @@ browser_open_exact_retry() {
 browser_set_viewport_retry() {
   local attempt
   for attempt in 1 2 3 4 5; do
-    if timeout 5s agent-browser set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" \
-        >/dev/null 2>&1; then
+    if browser_command 5 set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" \
+        >/dev/null; then
       return 0
     fi
     sleep 0.2
@@ -244,7 +284,7 @@ ROUTE="${1:-}"
 OUT="${2:-}"
 
 if [ -z "$ROUTE" ]; then
-  echo "agent-screenshot.sh: route required" >&2
+  printf '%s\n' "agent-screenshot.sh: route required" >&2
   echo "Usage: agent-screenshot.sh [--content-only] [--preserve-cache] <route> [out.png]" >&2
   exit 1
 fi
@@ -254,8 +294,7 @@ fi
 # written elsewhere (e.g. /tmp) is viewable by the agent but 404s if embedded.
 if [ -z "$OUT" ]; then
   if [ -z "${CHAT_ID:-}" ]; then
-    echo "agent-screenshot.sh: no out.png given and CHAT_ID unset" >&2
-    exit 1
+    die "no out.png given and CHAT_ID unset"
   fi
   OUT="/data/chats/${CHAT_ID}/media/shot-$(date +%s%N).png"
 fi
@@ -269,13 +308,11 @@ esac
 mkdir -p "$(dirname "$OUT")"
 
 if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${API_BASE_URL:-}" ]; then
-  echo "agent-screenshot.sh: AGENT_TOKEN and API_BASE_URL must be set" >&2
-  exit 1
+  die "AGENT_TOKEN and API_BASE_URL must be set"
 fi
 
 if ! command -v agent-browser >/dev/null 2>&1; then
-  echo "agent-screenshot.sh: agent-browser not on PATH" >&2
-  exit 1
+  die "agent-browser not on PATH"
 fi
 
 # Prefer the runner-provided per-chat session/profile. Fall back from CHAT_ID
@@ -296,8 +333,7 @@ fi
 # they see. chat.py exports VIEWPORT_WIDTH/HEIGHT from the React
 # shell's per-turn payload; screenshots require those values.
 if [ -z "${VIEWPORT_WIDTH:-}" ] || [ -z "${VIEWPORT_HEIGHT:-}" ]; then
-  echo "agent-screenshot.sh: VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be set" >&2
-  exit 1
+  die "VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be set"
 fi
 # Existing agent sessions keep the env snapshot they started with, and manual
 # callers can bypass chat.py entirely. Normalize again at this executable
@@ -322,20 +358,32 @@ if not all(math.isfinite(value) and value > 0 for value in values):
 print(*(max(1, round(value)) for value in values))
 PY
 )"; then
-  echo "agent-screenshot.sh: VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be positive numbers" >&2
-  exit 1
+  die "VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be positive numbers"
 fi
 read -r VIEWPORT_WIDTH VIEWPORT_HEIGHT <<<"$NORMALIZED_VIEWPORT"
 
+# One chat can host parallel agents, but its browser commands target one
+# persistent profile. Serialize the complete navigation/capture transaction so
+# two helpers cannot interleave routes, viewport changes, or output ownership.
+if [ -n "${AGENT_BROWSER_PROFILE:-}" ]; then
+  if ! command -v flock >/dev/null 2>&1; then
+    die "flock is required for shared browser profiles"
+  fi
+  exec 9>"${AGENT_BROWSER_PROFILE}.capture.lock"
+  if ! flock -w 30 9; then
+    die "another capture still owns this browser profile"
+  fi
+fi
+
 clear_stale_browser_profile_lock
+BROWSER_ERROR_FILE="$(mktemp "${TMPDIR:-/tmp}/mobius-agent-browser-error.XXXXXX")"
+trap cleanup EXIT
 
 # Start the browser, then wait narrowly for its command socket before applying
 # viewport state. A cold launch can return before that socket is connectable.
-timeout 5s agent-browser open "${API_BASE_URL}/api/browser-bootstrap" \
-  >/dev/null 2>&1 || true
+browser_command 5 open "${API_BASE_URL}/api/browser-bootstrap" >/dev/null || true
 if ! browser_set_viewport_retry; then
-  echo "agent-screenshot.sh: browser did not become ready for viewport configuration" >&2
-  exit 1
+  die "browser did not become ready for viewport configuration"
 fi
 
 # A retained test profile can start under an older service worker that handles
@@ -351,8 +399,7 @@ if [ "$PRESERVE_CACHE" -eq 0 ]; then
     "(async () => { try { const regs = await navigator.serviceWorker?.getRegistrations?.() || []; await Promise.all(regs.map((r) => r.unregister())); } catch {} return true })()" \
     >/dev/null || true
   if ! browser_open_exact_retry "about:blank"; then
-    echo "agent-screenshot.sh: browser did not detach its stale bootstrap page" >&2
-    exit 1
+    die "browser did not detach its stale bootstrap page"
   fi
 fi
 
@@ -386,14 +433,13 @@ print(
   + visual + reset + " return true })()"
 )
 ' \
-      | timeout 5s agent-browser eval --stdin >/dev/null 2>&1; then
+      | browser_command 5 eval --stdin >/dev/null; then
     TOKEN_READY=1
     break
   fi
 done
 if [ "$TOKEN_READY" -ne 1 ]; then
-  echo "agent-screenshot.sh: browser origin did not remain ready for authentication" >&2
-  exit 1
+  die "browser origin did not remain ready for authentication"
 fi
 
 # A per-chat Chromium profile deliberately survives browser close, which is
@@ -407,8 +453,7 @@ fi
 TARGET_ROUTE="$ROUTE"
 if [ "$PRESERVE_CACHE" -eq 0 ]; then
   if ! browser_open_exact_retry "about:blank"; then
-    echo "agent-screenshot.sh: browser did not detach before target navigation" >&2
-    exit 1
+    die "browser did not detach before target navigation"
   fi
   CAPTURE_NONCE="$(date +%s%N)"
   case "$TARGET_ROUTE" in
@@ -419,19 +464,17 @@ fi
 
 # Now navigate to the actual target route, authenticated.
 if ! browser_open_origin_retry "${API_BASE_URL}${TARGET_ROUTE}" target; then
-  echo "agent-screenshot.sh: browser did not reach the target route" >&2
-  exit 1
+  die "browser did not reach the target route"
 fi
 
 # The URL can canonicalize before the replacement document has committed.
 # Applying device metrics during that gap reports success on the outgoing page,
 # then the newly-created shell page falls back to Chromium's default viewport.
 # Wait on browser paint ownership before configuring the final page.
-if ! agent-browser wait --fn \
+if ! browser_wait --fn \
   "document.readyState === 'complete' && performance.getEntriesByName('first-contentful-paint').length > 0" \
-  >/dev/null 2>&1; then
-  echo "agent-screenshot.sh: target document did not finish its initial paint" >&2
-  exit 1
+  >/dev/null; then
+  die "target document did not finish its initial paint"
 fi
 
 # Let the navigation commit without asking the renderer to poll the transcript.
@@ -442,7 +485,7 @@ sleep 0.3
 
 # Dismiss the PWA install banner if it surfaces — it covers the bottom
 # of the view and would distract from the actual page.
-timeout 2s agent-browser find text "Not now" click >/dev/null 2>&1 || true
+browser_command 2 find text "Not now" click >/dev/null || true
 sleep 0.3
 
 # Token presence alone is not proof of authentication: App mounts Shell from
@@ -454,8 +497,7 @@ AUTH_OK="$(browser_eval_retry \
   "(async () => { const token = localStorage.getItem('token'); if (!token || document.querySelector('input[type=password]')) return false; try { const res = await fetch('/api/chats?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); return res.status === 200 && !!localStorage.getItem('token') && !document.querySelector('input[type=password]'); } catch { return false; } })()" \
   || true)"
 if [ "$AUTH_OK" != "true" ]; then
-  echo "agent-screenshot.sh: authentication failed; the token was rejected or the login page remained visible" >&2
-  exit 1
+  die "authentication failed; the token was rejected or the login page remained visible"
 fi
 
 # For shell routes, prove the browser loaded the same hashed entry asset that
@@ -475,8 +517,7 @@ case "$ROUTE" in
     if [ "$PRESERVE_CACHE" -eq 0 ]; then
       DIST_INDEX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../frontend" && pwd)/dist/index.html"
       if [ ! -f "$DIST_INDEX" ]; then
-        echo "agent-screenshot.sh: current frontend build not found at $DIST_INDEX" >&2
-        exit 1
+        die "current frontend build not found at $DIST_INDEX"
       fi
       CURRENT_SHELL_ENTRY="$(
         python3 - "$DIST_INDEX" <<'PY'
@@ -491,8 +532,7 @@ if not match:
 print(match.group(1).rsplit("/", 1)[-1])
 PY
       )" || {
-        echo "agent-screenshot.sh: current shell entry asset could not be resolved" >&2
-        exit 1
+        die "current shell entry asset could not be resolved"
       }
       LOADED_SHELL_ENTRY_RAW="$(
         browser_eval_retry \
@@ -505,8 +545,7 @@ PY
           2>/dev/null || printf '%s' "$LOADED_SHELL_ENTRY_RAW"
       )"
       if [ "$LOADED_SHELL_ENTRY" != "$CURRENT_SHELL_ENTRY" ]; then
-        echo "agent-screenshot.sh: stale shell loaded (expected $CURRENT_SHELL_ENTRY, got ${LOADED_SHELL_ENTRY:-none})" >&2
-        exit 1
+        die "stale shell loaded (expected $CURRENT_SHELL_ENTRY, got ${LOADED_SHELL_ENTRY:-none})"
       fi
     fi
 
@@ -516,33 +555,23 @@ PY
     # its private handoff classes or compositor attributes. Once the owner says
     # settled, give style/layout two frames to commit.
     SHELL_SETTLED_EXPR="document.querySelector('.shell[data-workspace-visual-state=\"settled\"]') !== null && performance.getEntriesByName('first-contentful-paint').length > 0"
-    if ! agent-browser wait --fn "$SHELL_SETTLED_EXPR" >/dev/null 2>&1; then
-      echo "agent-screenshot.sh: shell did not reach a settled visual state before capture" >&2
-      exit 1
+    if ! browser_wait --fn "$SHELL_SETTLED_EXPR" >/dev/null; then
+      die "shell did not reach a settled visual state before capture"
     fi
     if ! browser_eval_retry \
       "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))" \
       >/dev/null; then
-      echo "agent-screenshot.sh: shell did not commit its settled frame before capture" >&2
-      exit 1
+      die "shell did not commit its settled frame before capture"
     fi
     ;;
 esac
 
 # Device metrics attach to one CDP page. A canonical redirect, a service-worker
 # handoff, or agent-browser's about:blank detach can replace that page after the
-# startup viewport command. Reapply immediately before each capture attempt;
-# browser_screenshot_retry validates the kept PNG's exact IHDR dimensions.
-prepare_capture_viewport() {
-  # Do not insert a separate renderer round-trip here. A document replacement
-  # can land between configuration and that probe; the kept PNG's IHDR below is
-  # the exact, race-free proof of which viewport actually produced evidence.
-  browser_set_viewport_retry
-}
-
-if ! prepare_capture_viewport; then
-  echo "agent-screenshot.sh: target page did not retain the requested viewport" >&2
-  exit 1
+# startup viewport command. Reapply before drawer/app checks and immediately
+# before every capture attempt; the kept PNG's IHDR is the race-free proof.
+if ! browser_set_viewport_retry; then
+  die "target page did not retain the requested viewport"
 fi
 
 # A fresh phone-width shell can restore with the modal navigation drawer open
@@ -553,11 +582,10 @@ browser_eval_retry \
   "(() => { const b = document.querySelector('button[aria-label=\"Toggle navigation\"][aria-expanded=\"true\"]'); if (window.innerWidth < 768 && b) b.click(); return true })()" \
   >/dev/null || true
 if [ "$VIEWPORT_WIDTH" -lt 768 ]; then
-  if ! agent-browser wait --fn \
+  if ! browser_wait --fn \
     "!document.querySelector('.drawer-overlay--blocking') && !document.querySelector('.drawer:not(.drawer--persistent).drawer--open')" \
-    >/dev/null 2>&1; then
-    echo "agent-screenshot.sh: mobile navigation did not finish closing before capture" >&2
-    exit 1
+    >/dev/null; then
+    die "mobile navigation did not finish closing before capture"
   fi
 fi
 
@@ -568,13 +596,17 @@ fi
 # loading skeleton. Keep the predicate as a simple boolean expression —
 # agent-browser's wait parser has timed out on equivalent IIFE forms.
 case "$ROUTE" in
-  /app/[0-9]*)
+  /app/*)
     APP_ID="${ROUTE#/app/}"
     APP_ID="${APP_ID%%[/?#]*}"
+    case "$APP_ID" in
+      ''|*[!0-9]*)
+        die "in-shell app routes require a numeric app id"
+        ;;
+    esac
     READY_EXPR="document.querySelector('iframe[data-app-id=\"${APP_ID}\"]') !== null && document.querySelector('iframe[data-app-id=\"${APP_ID}\"]')?.parentElement.querySelector('.canvas-loading') === null"
-    if ! agent-browser wait --fn "$READY_EXPR" >/dev/null 2>&1; then
-      echo "agent-screenshot.sh: app ${APP_ID} did not reach its mounted frame before capture" >&2
-      exit 1
+    if ! browser_wait --fn "$READY_EXPR" >/dev/null; then
+      die "app ${APP_ID} did not reach its mounted frame before capture"
     fi
     ;;
 esac
@@ -586,24 +618,26 @@ esac
 # wait two frames before keeping evidence. This is a renderer handshake, not a
 # guessed sleep, and the temporary image never enters chat media.
 WARMUP_OUT="$(mktemp "${TMPDIR:-/tmp}/mobius-screenshot-warmup.XXXXXX.png")"
-trap 'rm -f "$WARMUP_OUT"' EXIT
+# Validate the final frame before publishing it. Wrappers intentionally reuse
+# friendly paths such as shell.png and app-42.png; a failed capture must never
+# replace the last known-good image with a partial or misleading frame.
+CAPTURE_OUT="$(mktemp "$(dirname "$OUT")/.mobius-screenshot.XXXXXX.png")"
 if ! browser_screenshot_retry "$WARMUP_OUT"; then
-  echo "agent-screenshot.sh: page remained too busy to prime capture" >&2
-  exit 1
+  die "page remained too busy to prime capture"
 fi
 if ! browser_eval_retry \
   "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))" \
   >/dev/null; then
-  echo "agent-screenshot.sh: page did not commit after capture priming" >&2
-  exit 1
+  die "page did not commit after capture priming"
 fi
 
-if ! browser_screenshot_retry "$OUT"; then
-  echo "agent-screenshot.sh: page remained too busy to capture after bounded retries" >&2
-  exit 1
+if ! browser_screenshot_retry "$CAPTURE_OUT"; then
+  die "page remained too busy to capture after bounded retries"
 fi
+mv -f "$CAPTURE_OUT" "$OUT"
+CAPTURE_OUT=""
 rm -f "$WARMUP_OUT"
-trap - EXIT
+WARMUP_OUT=""
 echo "${OUT}"
 
 # Also print the ready-to-paste chat embed. The partner sees ONLY embedded
