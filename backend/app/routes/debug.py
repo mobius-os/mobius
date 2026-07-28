@@ -35,6 +35,7 @@ from app.memory_observability import (
   process_inventory,
 )
 from app.questions import question_memory_diagnostics
+from app.resource_pressure import resource_status
 from app.runner_registry import RunnerKind, registry
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
@@ -180,7 +181,12 @@ def debug_status(
   result["browser_profiles"] = browser_profile_status()
   # These are on-demand /proc reads plus bounded owner counters. Nothing
   # samples continuously merely because observability exists.
-  result["memory"] = memory_status()
+  memory = memory_status()
+  result["memory"] = memory
+  result["resources"] = resource_status(
+    get_settings().data_dir,
+    memory=memory["cgroup"],
+  )
   result["runtime_memory"] = _runtime_memory_ownership(include_payloads=False)
   if reconciliation_failed:
     result["reconciliation_failed"] = True
