@@ -1,5 +1,10 @@
 import BrainCircuit from 'lucide-react/dist/esm/icons/brain-circuit.mjs'
-import { messageSources, sourceHost, sourceLabel } from './messageSources.js'
+import {
+  messageSources,
+  sourceFaviconUrl,
+  sourceHost,
+  sourceLabel,
+} from './messageSources.js'
 import { messageRecall, noteHref, noteLabel } from './memoryRecall.js'
 
 function sourceMark(host) {
@@ -9,6 +14,10 @@ function sourceMark(host) {
 
 function MemoryMark() {
   return <BrainCircuit className="chat__source-glyph" aria-hidden="true" />
+}
+
+function hideBrokenFavicon(event) {
+  event.currentTarget.hidden = true
 }
 
 // Everything that informed an answer, surfaced ONCE at the end of the message:
@@ -109,9 +118,9 @@ export default function MessageSources({ blocks, onInternalNav }) {
         {sources.map(source => {
           const label = sourceLabel(source)
           const host = sourceHost(source.url)
-          const displayHost = host.replace(/^www\./i, '')
+          const faviconUrl = sourceFaviconUrl(source.url)
           return (
-            <li key={source.url} className="chat__source-item">
+            <li key={source.url} className="chat__source-item chat__source-item--web">
               <a
                 className="chat__source-chip"
                 href={source.url}
@@ -120,20 +129,24 @@ export default function MessageSources({ blocks, onInternalNav }) {
                 title={source.snippet || source.title || source.url}
                 aria-label={`${label}${host && host !== label ? ` — ${host}` : ''} (opens in a new tab)`}
               >
-                {/* A local domain mark is deliberate: remote favicons would
-                    contact every cited site merely by viewing an answer. */}
                 <span className="chat__source-icon" aria-hidden="true">
-                  {sourceMark(host)}
-                </span>
-                <span className="chat__source-copy">
-                  <span className="chat__source-title">{label}</span>
-                  {/* A title-less Codex source already reads as its host. */}
-                  {host && host !== label && (
-                    <span className="chat__source-host" aria-hidden="true">
-                      {displayHost}
-                    </span>
+                  <span className="chat__source-fallback">{sourceMark(host)}</span>
+                  {faviconUrl && (
+                    <img
+                      className="chat__source-favicon"
+                      src={faviconUrl}
+                      alt=""
+                      width="16"
+                      height="16"
+                      loading="lazy"
+                      decoding="async"
+                      fetchPriority="low"
+                      referrerPolicy="no-referrer"
+                      onError={hideBrokenFavicon}
+                    />
                   )}
                 </span>
+                <span className="chat__source-title">{label}</span>
               </a>
             </li>
           )

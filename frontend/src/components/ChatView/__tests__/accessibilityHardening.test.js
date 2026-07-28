@@ -84,6 +84,7 @@ test('QuestionCard gives the custom answer area a durable accessible name', () =
 
 test('message sources expose list semantics, keyboard focus, and touch targets', () => {
   const source = read('../MessageSources.jsx')
+  const webSources = source.slice(source.indexOf('{sources.map('))
   const msgContent = read('../MsgContent.jsx')
   const css = read('../ChatView.css')
 
@@ -97,13 +98,25 @@ test('message sources expose list semantics, keyboard focus, and touch targets',
   assert.match(msgContent,
     /msg\.role === 'assistant' && !isStreaming && \(\s*<MessageSources/,
     'source links should appear once the answer has settled, not move during streaming')
-  assert.match(source, /<li key=\{source\.url\} className="chat__source-item">/)
+  assert.match(source,
+    /<li key=\{source\.url\} className="chat__source-item chat__source-item--web">/)
   assert.match(source, /aria-label=\{`\$\{label\}.*opens in a new tab/)
   assert.match(source, /className="chat__source-icon" aria-hidden="true"/)
-  assert.match(source, /sourceMark\(host\)/,
-    'source recognition stays local instead of loading third-party favicons')
-  assert.doesNotMatch(source, /<img|src=\{?[^\n]*favicon/i,
-    'viewing an answer must not contact every cited site')
+  assert.match(source, /className="chat__source-fallback"/,
+    'a recognisable local mark must remain when a site has no favicon')
+  assert.match(source, /className="chat__source-favicon"/)
+  assert.match(source, /width="16"\s+height="16"/,
+    'source icons should reserve their intrinsic geometry before loading')
+  assert.match(source, /loading="lazy"/,
+    'off-screen source icons should not trigger eager remote requests')
+  assert.match(source, /fetchPriority="low"/,
+    'decorative source icons must not compete with chat content')
+  assert.match(source, /referrerPolicy="no-referrer"/,
+    'source icon requests must not disclose the Möbius chat URL')
+  assert.match(source, /onError=\{hideBrokenFavicon\}/,
+    'all source icons should share one stable failure handler')
+  assert.doesNotMatch(webSources, /chat__source-host/,
+    'web source cards should prioritise the page title rather than repeat its URL host')
   assert.match(css, /\.chat__source-chip:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/s)
   assert.match(css, /\.chat__source-chip\s*\{[^}]*border-radius:\s*999px/s)
   assert.match(css, /@media\s*\(pointer:\s*coarse\)\s*\{\s*\.chat__source-chip\s*\{\s*min-height:\s*44px/s)

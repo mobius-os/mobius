@@ -7,6 +7,7 @@ import {
   boundedMessageSource,
   messageSources,
   safeSourceUrl,
+  sourceFaviconUrl,
   sourceHost,
   sourceLabel,
 } from '../messageSources.js'
@@ -131,6 +132,15 @@ test('non-array input is tolerated (a message with no blocks)', () => {
 test('sourceHost returns the host, and empty string for an unparseable URL', () => {
   assert.equal(sourceHost('https://www.example.com/a/b'), 'www.example.com')
   assert.equal(sourceHost('not a url'), '')
+})
+
+test('sourceFaviconUrl uses the safe source origin and rejects malformed URLs', () => {
+  assert.equal(
+    sourceFaviconUrl('https://www.example.com/a/b?next=1'),
+    'https://www.example.com/favicon.ico',
+  )
+  assert.equal(sourceFaviconUrl('javascript:alert(1)'), '')
+  assert.equal(sourceFaviconUrl('not a url'), '')
 })
 
 // Codex's WebSearchThreadItem exposes a URL only on its openPage/findInPage

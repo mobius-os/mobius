@@ -889,14 +889,14 @@
 }
 
 .chat__source-chip {
-  display: inline-flex;
+  display: flex;
   box-sizing: border-box;
   align-items: center;
   gap: 6px;
   min-width: 0;
   min-height: 32px;
-  width: auto;
-  max-width: 260px;
+  width: 100%;
+  max-width: none;
   padding: 4px 9px 4px 5px;
   border-radius: 999px;
   color: var(--text); /* CONTRACT: readable source text on opaque fill */
@@ -924,6 +924,7 @@
 
 .chat__source-icon {
   display: inline-flex;
+  position: relative;
   align-items: center;
   justify-content: center;
   flex: 0 0 22px;
@@ -992,8 +993,22 @@
   white-space: nowrap;
 }
 
+.chat__source-fallback {
+  line-height: 1;
+}
+
+.chat__source-favicon {
+  position: absolute;
+  inset: 3px;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  background: color-mix(in srgb, var(--accent-dim) 82%, var(--surface));
+}
+
 .chat__source-title {
   min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1018,24 +1033,20 @@
 
 /* The turn's sources, after the answer (MessageSources). */
 .chat__sources {
-  display: flex;
   box-sizing: border-box;
-  align-items: flex-start;
-  flex-wrap: wrap;
   width: 100%;
   max-width: 100%;
-  gap: 5px;
   padding: 2px 8px;
 }
 
 .chat__sources-list {
-  display: flex;
+  display: grid;
   box-sizing: border-box;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   min-width: 0;
+  width: 100%;
   max-width: 100%;
-  flex: 1 1 auto;
-  flex-wrap: wrap;
-  gap: 5px;
+  gap: 6px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1043,9 +1054,16 @@
 
 .chat__source-item {
   display: flex;
-  flex: 0 1 auto;
   min-width: 0;
-  max-width: 100%;
+  width: 100%;
+}
+
+.chat__source-item:not(.chat__source-item--web) {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 340px) {
+  .chat__sources-list { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (pointer: coarse) {

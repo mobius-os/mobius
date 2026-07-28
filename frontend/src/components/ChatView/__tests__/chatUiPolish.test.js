@@ -97,21 +97,34 @@ test('message sources stay inside the assistant row on narrow screens', () => {
   const css = stripComments(chatCss)
   const sourcesRule = css.match(/\.chat__sources\s*\{[^}]*\}/)?.[0] || ''
   const listRule = css.match(/\.chat__sources-list\s*\{[^}]*\}/)?.[0] || ''
+  const itemRule = css.match(/\.chat__source-item\s*\{[^}]*\}/)?.[0] || ''
+  const nonWebItemRule = css.match(/\.chat__source-item:not\(\.chat__source-item--web\)\s*\{[^}]*\}/)?.[0] || ''
+  const chipRule = css.match(/\.chat__source-chip\s*\{[^}]*\}/)?.[0] || ''
 
   assert.match(sourcesRule, /width:\s*100%/,
-    'align-items:flex-start otherwise lets the sources row grow to max-content')
+    'the sources section must fill, but not exceed, the assistant row')
   assert.match(sourcesRule, /max-width:\s*100%/,
     'the source section must not exceed the assistant message')
   assert.match(sourcesRule, /box-sizing:\s*border-box/,
     'section padding must be included in its width, even outside the app reset')
+  assert.match(listRule, /grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/,
+    'source cards should use the available width as two equal columns')
   assert.match(listRule, /min-width:\s*0/,
-    'the flex list must be allowed to shrink long source titles')
+    'the grid must be allowed to shrink long source titles')
+  assert.match(listRule, /width:\s*100%/,
+    'the two source columns should fill the available reading width')
   assert.match(listRule, /max-width:\s*100%/,
     'the source list must stay within its section')
   assert.match(listRule, /margin:\s*0/,
     'browser list margins must not push source cards out of alignment')
   assert.match(listRule, /padding:\s*0/,
     'browser list indentation must not reduce the source card width')
+  assert.match(itemRule, /min-width:\s*0/,
+    'a grid child must be allowed to shrink long source titles')
+  assert.match(nonWebItemRule, /grid-column:\s*1\s*\/\s*-1/,
+    'non-web citations should retain a full row instead of joining the source grid')
+  assert.match(chipRule, /width:\s*100%/,
+    'each source card should fill its grid column')
 })
 
 test('Send, Steer, and Stop never fade through an empty replacement frame', () => {
