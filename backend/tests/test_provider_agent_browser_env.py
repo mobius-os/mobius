@@ -38,6 +38,32 @@ def test_codex_build_env_without_chat_id_does_not_invent_session(tmp_path):
   assert "AGENT_BROWSER_SESSION" not in env
 
 
+def test_codex_build_env_exposes_connected_claude_for_reverse_delegation(
+  tmp_path,
+):
+  claude_dir = tmp_path / "cli-auth" / "claude"
+  claude_dir.mkdir(parents=True)
+  (claude_dir / ".credentials.json").write_text("{}")
+
+  env = CodexProvider().build_env(
+    base_env={},
+    data_dir=str(tmp_path),
+    chat_id="delegating-chat",
+  )
+
+  assert env["CLAUDE_CONFIG_DIR"] == str(claude_dir)
+
+
+def test_codex_build_env_does_not_advertise_unconnected_claude(tmp_path):
+  env = CodexProvider().build_env(
+    base_env={},
+    data_dir=str(tmp_path),
+    chat_id="codex-only",
+  )
+
+  assert "CLAUDE_CONFIG_DIR" not in env
+
+
 def test_claude_and_codex_use_same_agent_browser_session_name(tmp_path):
   claude_env = ClaudeProvider().build_env(
     base_env={},

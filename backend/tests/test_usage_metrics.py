@@ -9,6 +9,7 @@ def _breakdown(
   *,
   input_tokens: int,
   cached_input_tokens: int,
+  cache_write_input_tokens: int = 0,
   output_tokens: int,
   reasoning_output_tokens: int,
   total_tokens: int,
@@ -16,6 +17,7 @@ def _breakdown(
   return SimpleNamespace(
     input_tokens=input_tokens,
     cached_input_tokens=cached_input_tokens,
+    cache_write_input_tokens=cache_write_input_tokens,
     output_tokens=output_tokens,
     reasoning_output_tokens=reasoning_output_tokens,
     total_tokens=total_tokens,
@@ -299,6 +301,65 @@ def test_codex_cost_usd_prices_known_models():
   assert codex_cost_usd(
     "gpt-5.4-mini", {"uncached_input_tokens": 1_000_000}
   ) == 0.75
+
+
+def test_codex_cache_writes_are_normalized_and_priced():
+  from app.usage_metrics import codex_cost_usd
+
+  usage = SimpleNamespace(
+    last=_breakdown(
+      input_tokens=1_000,
+      cached_input_tokens=100,
+      cache_write_input_tokens=600,
+      output_tokens=50,
+      reasoning_output_tokens=20,
+      total_tokens=1_050,
+    ),
+    total=_breakdown(
+      input_tokens=1_000,
+      cached_input_tokens=100,
+      cache_write_input_tokens=600,
+      output_tokens=50,
+      reasoning_output_tokens=20,
+      total_tokens=1_050,
+    ),
+    model_context_window=1_050_000,
+  )
+  metrics = normalize_codex_usage(usage, usage, [usage.last])
+  assert metrics["uncached_input_tokens"] == 300
+  assert metrics["cache_read_input_tokens"] == 100
+  assert metrics["cache_creation_input_tokens"] == 600
+
+  # Sol cache writes cost 1.25 × its $5/M uncached-input rate.
+  assert codex_cost_usd("gpt-5.6-sol", {
+    "cache_creation_input_tokens": 1_000_000,
+  }) == 6.25
+
+
+def test_codex_long_context_is_priced_per_model_call():
+  from app.usage_metrics import codex_cost_usd
+
+  long_call = {
+    "input_tokens": 300_000,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 100_000,
+  }
+  # Sol's full >272K request: input 2× ($10/M), output 1.5× ($45/M).
+  assert codex_cost_usd("gpt-5.6-sol", {
+    "model_calls": [long_call],
+  }) == 7.5
+
+  # Two ordinary calls must not be mistaken for one 400K-token request.
+  ordinary_call = {
+    "input_tokens": 200_000,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 0,
+  }
+  assert codex_cost_usd("gpt-5.6-sol", {
+    "model_calls": [ordinary_call, ordinary_call],
+  }) == 2.0
 
 
 def test_codex_cost_usd_none_for_unpriced_or_missing():

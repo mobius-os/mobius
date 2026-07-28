@@ -85,6 +85,7 @@ def normalize_claude_usage(
 _CODEX_FIELDS = (
   "input_tokens",
   "cached_input_tokens",
+  "cache_write_input_tokens",
   "output_tokens",
   "reasoning_output_tokens",
   "total_tokens",
@@ -95,11 +96,17 @@ def _codex_breakdown(value: Any) -> dict[str, int]:
   if value is None:
     return {field: 0 for field in _CODEX_FIELDS}
   def read(field: str) -> Any:
-    if not isinstance(value, dict):
-      return getattr(value, field, None)
     camel = field.split("_")[0] + "".join(
       part.title() for part in field.split("_")[1:]
     )
+    if not isinstance(value, dict):
+      direct = getattr(value, field, None)
+      if direct is not None:
+        return direct
+      extra = getattr(value, "model_extra", None)
+      if isinstance(extra, dict):
+        return extra.get(field, extra.get(camel))
+      return None
     return value.get(field, value.get(camel))
   return {
     field: _count(read(field))
@@ -129,8 +136,9 @@ def _subtract_counts(
 def normalize_codex_usage(
   first_usage: Any | None,
   final_usage: Any | None,
+  call_usages: list[Any] | None = None,
 ) -> dict | None:
-  """Derive one Möbius-turn aggregate from Codex thread usage updates."""
+  """Derive one turn aggregate plus exact per-model-call billing inputs."""
   if final_usage is None:
     return None
   first_usage = first_usage or final_usage
@@ -159,21 +167,31 @@ def normalize_codex_usage(
 
   input_total = turn["input_tokens"]
   cached = min(turn["cached_input_tokens"], input_total)
+  cache_write = min(
+    turn["cache_write_input_tokens"],
+    max(0, input_total - cached),
+  )
+  model_calls = [
+    _codex_breakdown(call)
+    for call in (call_usages or [])
+    if call is not None
+  ]
   return {
     "provider": "codex",
     "scope": "turn",
     "calculation": calculation,
     "input_tokens": input_total,
-    "uncached_input_tokens": max(0, input_total - cached),
+    "uncached_input_tokens": max(0, input_total - cached - cache_write),
     "output_tokens": turn["output_tokens"],
     "cache_read_input_tokens": cached,
-    "cache_creation_input_tokens": 0,
+    "cache_creation_input_tokens": cache_write,
     "reasoning_output_tokens": turn["reasoning_output_tokens"],
     "total_tokens": turn["total_tokens"],
     "model_context_window": _count(
       _member(final_usage, "model_context_window")
     ) or None,
     "provider_thread_total": final_total,
+    "model_calls": model_calls,
     "provider_usage": {
       "first": _plain(first_usage),
       "final": _plain(final_usage),
@@ -184,9 +202,6 @@ def normalize_codex_usage(
 # OpenAI Codex per-token USD rates as (uncached_input, cached_input_read,
 # output) dollars per 1,000,000 tokens. Sourced from OpenAI's published API
 # pricing (July 2026); cached reads are the standard 90%-discounted input rate.
-# The separate long-context surcharge tier is intentionally NOT modeled — these
-# are the standard-context rates, so a turn that crosses the long-context
-# threshold is a small, bounded underestimate rather than a wrong number.
 # Update these as OpenAI revises pricing; a model absent from this table is left
 # uncharged (cost None) rather than mispriced.
 CODEX_MODEL_RATES: dict[str, tuple[float, float, float]] = {
@@ -197,6 +212,43 @@ CODEX_MODEL_RATES: dict[str, tuple[float, float, float]] = {
   "gpt-5.4": (2.50, 0.25, 15.00),
   "gpt-5.4-mini": (0.75, 0.075, 4.50),
 }
+
+_CACHE_WRITE_MODELS = frozenset({
+  "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+})
+_LONG_CONTEXT_MODELS = _CACHE_WRITE_MODELS
+_LONG_CONTEXT_INPUT_THRESHOLD = 272_000
+
+
+def _codex_call_cost(
+  model: str,
+  counts: dict[str, Any],
+  rates: tuple[float, float, float],
+) -> float:
+  """Price one upstream model call, including request-scoped surcharges."""
+  in_rate, cached_rate, out_rate = rates
+  input_total = _count(counts.get("input_tokens"))
+  cached = min(_count(counts.get("cached_input_tokens")), input_total)
+  cache_write = min(
+    _count(counts.get("cache_write_input_tokens")),
+    max(0, input_total - cached),
+  )
+  uncached = max(0, input_total - cached - cache_write)
+  cache_write_rate = in_rate * (1.25 if model in _CACHE_WRITE_MODELS else 1.0)
+  if (
+    model in _LONG_CONTEXT_MODELS
+    and input_total > _LONG_CONTEXT_INPUT_THRESHOLD
+  ):
+    in_rate *= 2
+    cached_rate *= 2
+    cache_write_rate *= 2
+    out_rate *= 1.5
+  return (
+    uncached * in_rate
+    + cached * cached_rate
+    + cache_write * cache_write_rate
+    + _count(counts.get("output_tokens")) * out_rate
+  ) / 1_000_000
 
 
 def codex_cost_usd(model: str | None, usage_metrics: dict | None) -> float | None:
@@ -215,10 +267,26 @@ def codex_cost_usd(model: str | None, usage_metrics: dict | None) -> float | Non
   if rates is None:
     return None
   in_rate, cached_rate, out_rate = rates
+  model_calls = usage_metrics.get("model_calls")
+  if isinstance(model_calls, list) and model_calls:
+    return round(sum(
+      _codex_call_cost(model, call, rates)
+      for call in model_calls if isinstance(call, dict)
+    ), 6)
+
   uncached = max(0, _count(usage_metrics.get("uncached_input_tokens")))
   cached = max(0, _count(usage_metrics.get("cache_read_input_tokens")))
+  cache_write = max(
+    0, _count(usage_metrics.get("cache_creation_input_tokens"))
+  )
+  cache_write_rate = in_rate * (
+    1.25 if model in _CACHE_WRITE_MODELS else 1.0
+  )
   output = max(0, _count(usage_metrics.get("output_tokens")))
   cost = (
-    uncached * in_rate + cached * cached_rate + output * out_rate
+    uncached * in_rate
+    + cached * cached_rate
+    + cache_write * cache_write_rate
+    + output * out_rate
   ) / 1_000_000
   return round(cost, 6)

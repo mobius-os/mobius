@@ -708,8 +708,9 @@ class CodexProvider(BaseProvider):
   """OpenAI Codex provider.
 
   Live chat runs through the Codex Agent SDK (`codex_sdk_runner`); this
-  class shapes identity, auth, and the subprocess env (`CODEX_HOME` plus
-  the per-chat agent-browser session).
+  class shapes identity, auth, and the subprocess env (`CODEX_HOME`, optional
+  connected Claude credentials for reverse delegation, plus the per-chat
+  agent-browser session).
   """
 
   name = "Codex"
@@ -733,6 +734,16 @@ class CodexProvider(BaseProvider):
   ) -> dict[str, str]:
     env = dict(base_env)
     env["CODEX_HOME"] = str(Path(data_dir) / "cli-auth" / "codex")
+    # Symmetric with ClaudeProvider's CODEX_HOME handoff: when Claude is
+    # connected, a Codex turn that deliberately delegates through
+    # `claude -p ...` inherits the right credential directory instead of
+    # falling back to an empty default. The provider skill/prompt owns when to
+    # delegate; this layer owns making the authenticated subprocess possible.
+    claude_creds = (
+      Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
+    )
+    if claude_creds.exists():
+      env["CLAUDE_CONFIG_DIR"] = str(claude_creds.parent)
     # Match Claude's per-chat agent-browser isolation. Without this, Codex
     # turns that invoke `agent-browser` all attach to the CLI's global
     # "default" session; a browser launched by one Codex chat can then leak

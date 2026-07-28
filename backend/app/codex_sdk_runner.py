@@ -595,6 +595,8 @@ def _sdk_imports() -> dict[str, Any]:
     ReasoningTextDeltaNotification,
     ThreadTokenUsageUpdatedNotification,
     ThreadItem,
+    ThreadTokenUsage,
+    TokenUsageBreakdown,
     TurnCompletedNotification,
     TurnStatus,
     WebSearchThreadItem,
@@ -607,6 +609,11 @@ def _sdk_imports() -> dict[str, Any]:
     completed_notification_type=ItemCompletedNotification,
   )
 
+  _enable_cache_write_usage_passthrough(
+    breakdown_type=TokenUsageBreakdown,
+    thread_usage_type=ThreadTokenUsage,
+    notification_type=ThreadTokenUsageUpdatedNotification,
+  )
   # Multi-agent (collab) types exist only on multi-agent-capable SDKs (the
   # openai-codex multi_agent_v2 line). Import them defensively in their own
   # block so an SDK that predates them still boots — a missing type here must
@@ -729,6 +736,28 @@ def _enable_web_search_results_passthrough(
   thread_item_type.model_rebuild(force=True)
   started_notification_type.model_rebuild(force=True)
   completed_notification_type.model_rebuild(force=True)
+
+
+def _enable_cache_write_usage_passthrough(
+  *,
+  breakdown_type: Any,
+  thread_usage_type: Any,
+  notification_type: Any,
+) -> None:
+  """Preserve Codex's cache-write counter across generated SDK schema lag."""
+  field = "cache_write_input_tokens"
+  if field in getattr(breakdown_type, "model_fields", {}):
+    return
+  if getattr(breakdown_type, "model_config", {}).get("extra") == "allow":
+    return
+  from pydantic import ConfigDict
+
+  config = dict(getattr(breakdown_type, "model_config", {}))
+  config["extra"] = "allow"
+  breakdown_type.model_config = ConfigDict(**config)
+  breakdown_type.model_rebuild(force=True)
+  thread_usage_type.model_rebuild(force=True)
+  notification_type.model_rebuild(force=True)
 
 
 def _extract_rate_limit_reset(snapshot) -> tuple[int | None, bool]:
@@ -2023,12 +2052,10 @@ async def run_codex_sdk_turn(
     )
     model = DEFAULT_MODELS["codex"]
 
-  # Reasoning effort — Codex's `ReasoningEffort` enum accepts
-  # none/minimal/low/medium/high/xhigh; the Möbius picker exposes the
-  # last four. Pass through the string and let the SDK convert; if the
-  # value is unknown (e.g. a future picker addition the SDK doesn't
-  # yet accept), surface the SDK's error rather than silently dropping
-  # the choice.
+  # Reasoning effort comes from Codex's live per-model catalog. The generated
+  # enum implements `_missing_`, so newer wire values such as max/ultra survive
+  # even before codegen grows named members. Pass through the string and let
+  # the SDK convert; a genuinely invalid value degrades to the model default.
   effort_str = agent_settings.get("effort")
   effort = None
   if effort_str:
@@ -2098,6 +2125,7 @@ async def run_codex_sdk_turn(
   completed_message_phases: list[str | None] = []
   first_token_usage: Any | None = None
   final_token_usage: Any | None = None
+  call_token_usages: list[Any] = []
   process_group_id: int | None = None
   task_host_open = False
   task_host_tool_use_id: str | None = None
@@ -2138,7 +2166,11 @@ async def run_codex_sdk_turn(
     """Attaches whatever the turn spent before it ended, however it ended."""
     if final_token_usage is not None:
       result["usage"] = _model_dump(final_token_usage)
-      metrics = normalize_codex_usage(first_token_usage, final_token_usage)
+      metrics = normalize_codex_usage(
+        first_token_usage,
+        final_token_usage,
+        call_token_usages,
+      )
       result["usage_metrics"] = metrics
       # Codex reports tokens but no dollar cost; derive it from the rate card so
       # a Codex chat records real spend like a Claude chat instead of always
@@ -2518,6 +2550,16 @@ async def run_codex_sdk_turn(
           if first_token_usage is None:
             first_token_usage = payload.token_usage
           final_token_usage = payload.token_usage
+          # ``last`` is the exact upstream Responses completion. Attribute only
+          # notifications owned by this turn so a resume-time replay from an
+          # earlier turn cannot be charged again.
+          if (
+            str(getattr(payload, "turn_id", ""))
+            == str(getattr(turn, "id", ""))
+          ):
+            call_token_usages.append(
+              getattr(payload.token_usage, "last", None)
+            )
           continue
 
         if isinstance(

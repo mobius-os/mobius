@@ -34,7 +34,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "21"  # v21: carry exact app and generated-image handles
+SEED_VERSION = "22"  # v22: add symmetric Claude delegation
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
