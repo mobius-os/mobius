@@ -8,7 +8,7 @@ import {
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
   passedSlop, touchMoveIntent, releasedInPlace, holdMsFor, chipOffset,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
-  rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene, paneAcceptsJoin,
+  rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene,
 } from '../dragController.js'
 import * as paneModel from '../paneModel.js'
 import { STRIP_H } from '../paneModel.js'
@@ -273,40 +273,19 @@ test('center never lights over the source pane', () => {
   assert.equal(hitTest({ x: 607, y: 300 }, s).type, 'center')
 })
 
-// ── feasibility gating: a full pane's strip/center never light ───────────────
+// ── tab-count-independent joins ─────────────────────────────────────────────
 
-test('a full pane offers no center or strip zone (feasibility gating)', () => {
-  const full = pane('p0', { x: 0, y: 0, w: 400, h: 600 }, {
-    tabs: [{ key: 'a', left: 10, right: 90 }],
+test('a pane with more than six tabs still offers center and strip joins', () => {
+  const many = pane('p0', { x: 0, y: 0, w: 400, h: 600 }, {
+    tabs: Array.from({ length: 9 }, (_, i) => ({
+      key: `chat:${i}`,
+      left: i * 40,
+      right: (i + 1) * 40,
+    })),
   })
-  full.tabCount = 6 // MAX_PANE_TABS
-  const other = pane('p1', { x: 407, y: 0, w: 400, h: 600 })
-  const s = scene([full, other], { source: { key: 'chat:x', paneId: null, paneTabCount: 0 } })
-  // Center of the full pane → suppressed.
-  assert.equal(hitTest({ x: 200, y: 300 }, s), null)
-  // Over the full pane's strip → suppressed.
-  assert.equal(hitTest({ x: 40, y: 5 }, s), null)
-  // The roomy sibling still joins.
-  assert.equal(hitTest({ x: 607, y: 300 }, s).type, 'center')
-})
-
-test('a same-pane reorder still lights the strip of a full source pane', () => {
-  // The source already lives here, so a reorder never grows the count → allowed.
-  const full = pane('p0', { x: 0, y: 0, w: 400, h: 600 }, {
-    tabs: [{ key: 'a', left: 10, right: 90 }],
-  })
-  full.tabCount = 6
-  const s = scene([full], { source: { key: 'chat:a', paneId: 'p0', paneTabCount: 6 } })
+  const s = scene([many], { source: { key: 'chat:new', paneId: null, paneTabCount: 0 } })
+  assert.equal(hitTest({ x: 200, y: 300 }, s).type, 'center')
   assert.equal(hitTest({ x: 40, y: 5 }, s).type, 'strip')
-})
-
-test('paneAcceptsJoin: room OR same-source-pane', () => {
-  const p = pane('p0', { x: 0, y: 0, w: 400, h: 600 })
-  p.tabCount = 6
-  assert.equal(paneAcceptsJoin(scene([p], { source: null }), p), false)
-  assert.equal(paneAcceptsJoin(scene([p], { source: { paneId: 'p0' } }), p), true)
-  p.tabCount = 2
-  assert.equal(paneAcceptsJoin(scene([p], { source: null }), p), true)
 })
 
 // ── caret hysteresis (jitter damping at a tab midpoint) ──────────────────────
@@ -378,8 +357,6 @@ test('buildScene projects panes and evaluates the shared feasibility predicates'
   assert.equal(s.rootCanSplit.left, true)
   // Tab measurement flowed through.
   assert.equal(s.panes[0].tabs[0].right, 60)
-  // Live tab count is carried for the join-feasibility gate.
-  assert.equal(s.panes[0].tabCount, 1)
 })
 
 test('buildScene suppresses root split at the depth cap', () => {

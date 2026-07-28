@@ -25,11 +25,6 @@ import * as tabModel from './tabModel.js'
 // clamp semantics the drag layer commits with.
 import { clampRatio as clampRatioPx } from '../../lib/splitHelper.js'
 
-// A pane keeps at most this many tabs; it is the per-pane successor of
-// tabModel.MAX_TABS (whose comment reserved exactly this). Only openTab enforces
-// it, and it evicts a background tab rather than blocking the open (§3.6).
-export const MAX_PANE_TABS = 6
-
 // At most four leaf panes, nested at most two splits deep (a balanced binary
 // tree of depth 2 has four leaves). moveTab refuses to cross either bound.
 export const MAX_PANES = 4
@@ -159,12 +154,6 @@ function idSuffix(id) {
 
 // The valid drop edges; anything else is not a split direction and no-ops.
 const EDGES = new Set(['left', 'right', 'top', 'bottom'])
-
-// Keep only the last MAX_PANE_TABS tabs — the legacy readOpenTabs posture, so a
-// pane never persists over its cap.
-function capTabs(tabs) {
-  return tabs.length > MAX_PANE_TABS ? tabs.slice(tabs.length - MAX_PANE_TABS) : tabs
-}
 
 // Ratio is a's fraction, stored clamped to [0.1, 0.9]; a non-finite ratio is a
 // degenerate split and resets to an even 0.5 (px minimums are a render concern).
@@ -442,15 +431,14 @@ function commitBounded(ws, candidate) {
   return deepEqual(result, ws) ? ws : result
 }
 
-// Seed a single-pane workspace from today's flat open set. Tabs are sanitized,
-// deduped, and capped to the last MAX_PANE_TABS (legacy readOpenTabs posture);
-// the last tab is active (the on-screen one under the flat model). A fresh or
-// fallback workspace starts in the standard single-screen world. Persisted valid
-// workspaces keep their chosen mode through normalize(); this seed is only used
-// when there is no usable workspace blob. parseWorkspace returns it DIRECTLY on
+// Seed a single-pane workspace from today's flat open set. Tabs are sanitized
+// and deduped; the last tab is active (the on-screen one under the flat model).
+// A fresh or fallback workspace starts in the standard single-screen world.
+// Persisted valid workspaces keep their chosen mode through normalize(); this
+// seed is only used when there is no usable workspace blob. parseWorkspace returns it DIRECTLY on
 // the fresh/fallback/invalid paths, so the seed itself must carry the render mode.
 export function seedFromFlatTabs(tabs) {
-  const clean = capTabs(dedupTabs(sanitizeTabs(tabs)))
+  const clean = dedupTabs(sanitizeTabs(tabs))
   const paneId = 'p0'
   const keys = clean.map(tabModel.tabKey)
   return {
@@ -775,38 +763,19 @@ export function isValidWorkspaceBlob(raw) {
   }
 }
 
-// Choose which tab a full pane evicts to admit a new one. The OLDEST tab whose
-// key is NOT protected (design §3.6: the source, item, active, and visible tabs
-// are protected); the tab being inserted is never itself a candidate. When every
-// resident is protected, evict the oldest anyway as a last resort so the per-pane
-// cap always holds — the resolver's protect set is small (a handful of keys), so
-// this branch is only reachable for a pathological all-protected pane.
-function pickEvictable(tabs, protect, inserting) {
-  const insertingKey = tabModel.tabKey(inserting)
-  const protectedKeys = protect instanceof Set ? protect : new Set(protect || [])
-  for (const tab of tabs) {
-    const key = tabModel.tabKey(tab)
-    if (key === insertingKey || protectedKeys.has(key)) continue
-    return tab
-  }
-  return tabs[0]
-}
-
-// Open a tab and report whether the open forced an eviction (the reducer needs
-// that to decide undoability — an evicting open is undoable, a plain one is not).
+// Open a tab. A tab remains open until an explicit close, resource deletion, or
+// prune removes it; opening another tab never evicts existing work.
 // Options beyond the flat-strip open:
 //   afterKey  insert directly after the named member tab (a resolver inserting a
 //             built app right after its source chat); absent → append (legacy).
-//   protect   Set/array of tabKeys the eviction must spare (design §3.6); absent
-//             → the legacy tabs[0] eviction (byte-identical to the flat strip).
 //   focus     move focus to the target pane (default true). A BACKGROUND resolver
 //             placement passes focus:false so it can never switch which pane owns
 //             the keyboard/Back or which content is on screen (design §6.2).
 function doOpenTab(ws, tab, {
-  paneId, activate = true, afterKey = null, protect = null, focus = true,
+  paneId, activate = true, afterKey = null, focus = true,
 } = {}) {
   const clean = sanitizeTab(tab)
-  if (!clean) return { ws, evicted: null }
+  if (!clean) return ws
   const key = tabModel.tabKey(clean)
 
   // Already open anywhere: focus that pane and (if activating) make it active —
@@ -824,22 +793,15 @@ function doOpenTab(ws, tab, {
         },
       },
     }
-    return { ws: commit(ws, candidate), evicted: null }
+    return commit(ws, candidate)
   }
 
   const targetId = (paneId && ws.panes[paneId]) ? paneId : ws.focusedPaneId
   const target = ws.panes[targetId]
-  if (!target) return { ws, evicted: null }
+  if (!target) return ws
 
   let tabs = target.tabs
-  let evicted = null
-  if (tabs.length >= MAX_PANE_TABS) {
-    evicted = pickEvictable(tabs, protect, clean)
-    const evIdx = tabs.indexOf(evicted)
-    tabs = [...tabs.slice(0, evIdx), ...tabs.slice(evIdx + 1)]
-  }
-  // Insert after the named anchor (computed against the POST-eviction array so a
-  // dropped older tab can't shift the caret), else append.
+  // Insert after the named anchor, else append.
   let at = tabs.length
   if (afterKey != null) {
     const ai = tabs.findIndex(t => tabModel.tabKey(t) === afterKey)
@@ -858,11 +820,11 @@ function doOpenTab(ws, tab, {
       },
     },
   }
-  return { ws: commit(ws, candidate), evicted }
+  return commit(ws, candidate)
 }
 
 export function openTab(ws, tab, opts) {
-  return doOpenTab(ws, tab, opts).ws
+  return doOpenTab(ws, tab, opts)
 }
 
 // Open a tab AT a drop target (design §3.4) — the single-commit path a drag drop
@@ -884,17 +846,14 @@ export function openTabAt(ws, tab, target) {
   if (paneOf(ws, key)) return moveTab(ws, key, target)
   if (!target) return openTab(ws, clean)
   // Splits build a fresh pane directly — never insert into the target pane and
-  // move out, so a drop onto a six-tab pane's edge cannot evict its oldest tab
-  // or churn its active tab (review B1).
+  // move out, so the target's ownership and active tab stay unchanged.
   if (target.edge != null && target.root === true) return rootSplitOpen(ws, clean, key, target.edge)
   if (target.edge != null && target.paneId != null) {
     // A drag drop is foreground — the drop gesture IS the intent (focus:true).
     return splitPaneWithTab(ws, clean, { paneId: target.paneId, edge: target.edge })
   }
   if (target.paneId != null) {
-    // center-join / strip-caret: this genuinely adds the item to the target
-    // pane. The drag layer only lights these zones when the pane has room
-    // (canJoin), so the cap eviction inside openTab is unreachable from a drop.
+    // center-join / strip-caret: this genuinely adds the item to the target pane.
     const opened = openTab(ws, clean, { paneId: target.paneId, activate: true })
     return target.index != null ? moveTab(opened, key, { paneId: target.paneId, index: target.index }) : opened
   }
@@ -981,11 +940,6 @@ export function moveTab(ws, tabKey, target) {
 function indexMove(ws, src, tab, tabKey, destId, index) {
   const dest = ws.panes[destId]
   if (!dest) return ws
-  // A cross-pane move into a pane already at its cap is refused (same-reference
-  // no-op) — MAX_PANE_TABS is an invariant, and unlike an open there is no
-  // "evict to make room" contract for a drag. A same-pane reorder is exempt: it
-  // does not change the count.
-  if (destId !== src.id && dest.tabs.length >= MAX_PANE_TABS) return ws
   const panes = { ...ws.panes }
   const srcIdx = src.tabs.findIndex(t => tabModel.tabKey(t) === tabKey)
   const srcTabs = src.tabs.filter(t => tabModel.tabKey(t) !== tabKey)
@@ -1202,10 +1156,9 @@ export function flatten(ws) {
   return out
 }
 
-// Rollback ordering for the legacy 'mobius-open-tabs' dual-write. Legacy
-// readOpenTabs keeps the LAST MAX_TABS, so the most relevant tabs must come
-// last: every background (non-focused) pane's tabs first, then the focused
-// pane's other tabs, then its active tab dead last so a rollback keeps it.
+// Rollback ordering for the legacy 'mobius-open-tabs' dual-write. Background
+// panes come first, then the focused pane's other tabs, then its active tab,
+// preserving the old key's focus-oriented ordering for older clients.
 // The Settings tab is filtered out: this projection feeds a chat/app-only
 // rollback mirror (readOpenTabs drops it on read anyway), so it never belongs
 // in the legacy key — dropping it here also keeps a chat/app active-last even
@@ -1593,7 +1546,6 @@ function isValidWorkspace(ws) {
   const seenTab = new Set()
   for (const id of ids) {
     const pane = ws.panes[id]
-    if (pane.tabs.length > MAX_PANE_TABS) return false
     const keys = pane.tabs.map(tabModel.tabKey)
     for (const tab of pane.tabs) {
       if (tab.kind === 'app' && !Number.isFinite(Number(tab.id))) return false
@@ -1698,10 +1650,10 @@ export function initialWorkspaceState(ws) {
 // undo target) or CLEARS it — never leaves a stale one in place.
 //
 //   Sets the slot (undoable):   CLOSE_TAB (user close), CLOSE_PANE, MOVE_TAB /
-//                               edge-splits, OPEN_TAB_AT, an OPEN_TAB that
-//                               evicted, SET_RATIO, APPLY_PLACEMENT.
-//   Clears the slot on change:  SET_ACTIVE, FOCUS, a plain (non-evicting)
-//                               OPEN_TAB, PRUNE, RESET_FLAT, and a CLOSE_TAB
+//                               edge-splits, OPEN_TAB_AT, SET_RATIO,
+//                               APPLY_PLACEMENT.
+//   Clears the slot on change:  SET_ACTIVE, FOCUS, OPEN_TAB, PRUNE,
+//                               RESET_FLAT, and a CLOSE_TAB
 //                               with reason:'deleted'.
 //   Preserves the slot:         SET_VIEW_MODE — a pure view flip is ORTHOGONAL to
 //                               the tree, so it neither creates nor clears an undo
@@ -1729,16 +1681,12 @@ export function workspaceReducer(state, action) {
   const { ws, undo } = state
   switch (action.type) {
     case 'OPEN_TAB': {
-      const { ws: next, evicted } = doOpenTab(ws, action.tab, {
+      const next = doOpenTab(ws, action.tab, {
         paneId: action.paneId,
         activate: action.activate,
       })
       if (next === ws) return state
-      // Only an evicting open is undoable (its snapshot restores the evicted
-      // tab); a plain open clears the slot like any other non-undoable change.
-      return evicted
-        ? { ws: next, undo: { ws, label: 'Opened tab', toast: action.label || 'Opened tab' } }
-        : { ws: next, undo: null }
+      return { ws: next, undo: null }
     }
     case 'CLOSE_TAB': {
       const next = closeTab(ws, action.tabKey)

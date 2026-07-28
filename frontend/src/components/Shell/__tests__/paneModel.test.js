@@ -72,7 +72,6 @@ function assertInvariants(ws) {
   const seenTab = new Set()
   for (const id of ids) {
     const pane = ws.panes[id]
-    assert.ok(pane.tabs.length <= paneModel.MAX_PANE_TABS, 'pane within MAX_PANE_TABS')
     const keys = pane.tabs.map(tabKey)
     for (const key of keys) {
       assert.ok(!seenTab.has(key), 'a tab is unique workspace-wide')
@@ -266,31 +265,21 @@ test('openTab dedups an already-open tab by focusing its pane, never duplicating
   assertInvariants(after)
 })
 
-test('openTab eviction is byte-identical to the legacy flat strip (oldest goes)', () => {
-  // Legacy tabModel.addTab kept the last six and evicted the OLDEST
-  // unconditionally, and reopening an existing tab left the flat array unchanged.
-  // PR1's gate is no visible strip change, so [A..F] -> reopen A -> open G must
-  // still yield [B,C,D,E,F,G] — no active-tab protection (that ships with PR3).
+test('openTab preserves every explicitly opened tab beyond the former six-tab ceiling', () => {
   let ws = paneModel.seedFromFlatTabs([])
-  for (const letter of ['A', 'B', 'C', 'D', 'E', 'F']) {
+  for (const letter of ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']) {
     ws = paneModel.openTab(ws, makeTab('chat', letter))
   }
   assert.deepEqual(
     paneModel.flatten(ws).map(tabKey),
-    ['chat:A', 'chat:B', 'chat:C', 'chat:D', 'chat:E', 'chat:F'],
+    ['chat:A', 'chat:B', 'chat:C', 'chat:D', 'chat:E', 'chat:F', 'chat:G', 'chat:H', 'chat:I'],
   )
 
-  // Reopen A: the flat array (order) is unchanged, exactly like legacy.
+  // Reopening an existing tab changes focus/activation only; ownership and order
+  // remain explicit and duplicate-free.
   const reopened = paneModel.openTab(ws, makeTab('chat', 'A'))
   assert.deepEqual(paneModel.flatten(reopened).map(tabKey), paneModel.flatten(ws).map(tabKey))
-
-  const afterG = paneModel.openTab(reopened, makeTab('chat', 'G'))
-  assert.deepEqual(
-    paneModel.flatten(afterG).map(tabKey),
-    ['chat:B', 'chat:C', 'chat:D', 'chat:E', 'chat:F', 'chat:G'],
-    'oldest (A) evicted despite being reopened/active — legacy parity',
-  )
-  assertInvariants(afterG)
+  assertInvariants(reopened)
 })
 
 test('openTab afterKey inserts after the named member instead of appending (PR4)', () => {
@@ -316,24 +305,6 @@ test('openTab focus:false into another pane never moves focus (PR4 background ru
   assert.equal(out.focusedPaneId, 'p0', 'focus stayed on p0')
   assert.equal(out.panes.p1.activeTabKey, 'chat:b', 'p1 on-screen tab unchanged')
   assert.deepEqual(out.panes.p1.tabs.map(tabKey), ['chat:b', 'app:9'])
-})
-
-test('openTab protect spares named keys when a full pane must evict (PR4)', () => {
-  const full = ['a', 'b', 'c', 'd', 'e', 'f'].map(id => makeTab('chat', id))
-  const ws = paneModel.normalize({
-    v: 1, layout: 'p0',
-    panes: { p0: { id: 'p0', tabs: full, activeTabKey: 'chat:f' } },
-    focusedPaneId: 'p0', nextId: 1,
-  })
-  // Protect the oldest (chat:a); the next-oldest unprotected (chat:b) is evicted.
-  const out = paneModel.openTab(ws, makeTab('app', 9), {
-    paneId: 'p0', activate: false, focus: false, protect: new Set(['chat:a']),
-  })
-  const keys = out.panes.p0.tabs.map(tabKey)
-  assert.equal(keys.length, paneModel.MAX_PANE_TABS)
-  assert.ok(keys.includes('chat:a'), 'the protected oldest survived')
-  assert.ok(!keys.includes('chat:b'), 'the oldest UNPROTECTED tab was evicted')
-  assert.ok(keys.includes('app:9'))
 })
 
 test('splitPaneWithTab places a NEW tab alone in a fresh pane; focus:false stays put (PR4)', () => {
@@ -379,14 +350,14 @@ test('paneIdsInOrder returns live leaves in in-order sequence (PR4)', () => {
   assert.deepEqual(paneModel.paneIdsInOrder(paneModel.seedFromFlatTabs([makeTab('chat', 'x')])), ['p0'])
 })
 
-test('seedFromFlatTabs caps to the last MAX_PANE_TABS after dedup', () => {
-  const tabs = []
-  for (let i = 0; i < paneModel.MAX_PANE_TABS + 3; i += 1) tabs.push(makeTab('chat', `c${i}`))
+test('seedFromFlatTabs preserves more than six deduplicated tabs', () => {
+  const tabs = Array.from({ length: 10 }, (_, i) => makeTab('chat', `c${i}`))
+  tabs.push(makeTab('chat', 'c0'))
   const ws = paneModel.seedFromFlatTabs(tabs)
   const flat = paneModel.flatten(ws).map(tabKey)
-  assert.equal(flat.length, paneModel.MAX_PANE_TABS, 'over-cap seed is trimmed')
-  assert.equal(flat.at(-1), 'chat:c8', 'the last tabs are the ones kept')
-  assert.equal(flat[0], 'chat:c3', 'the oldest overflow is dropped')
+  assert.equal(flat.length, 10)
+  assert.equal(flat[0], 'chat:c0')
+  assert.equal(flat.at(-1), 'chat:c9')
   assertInvariants(ws)
 })
 
@@ -467,27 +438,24 @@ test('moveTab into an existing pane at an index reorders and re-homes the tab', 
   assertInvariants(moved)
 })
 
-test('moveTab into a full destination pane is a no-op; a same-pane reorder is not', () => {
-  // pB is at cap (6 tabs); pA has one tab to move.
-  const full = []
-  for (let i = 0; i < paneModel.MAX_PANE_TABS; i += 1) full.push(makeTab('chat', `b${i}`))
+test('moveTab re-homes a tab into a destination that already has more than six tabs', () => {
+  const many = Array.from({ length: 9 }, (_, i) => makeTab('chat', `b${i}`))
   const ws = paneModel.normalize({
     v: 1,
     layout: { id: 's0', dir: 'row', a: 'pA', b: 'pB', ratio: 0.5 },
     panes: {
       pA: { id: 'pA', tabs: [makeTab('chat', 'a')], activeTabKey: 'chat:a' },
-      pB: { id: 'pB', tabs: full, activeTabKey: 'chat:b0' },
+      pB: { id: 'pB', tabs: many, activeTabKey: 'chat:b0' },
     },
     focusedPaneId: 'pA',
     nextId: 2,
   })
-  assert.equal(paneModel.moveTab(ws, 'chat:a', { paneId: 'pB', index: 0 }), ws,
-    'a cross-pane move into a capped pane is refused (no eviction contract for a drag)')
-
-  // A reorder within the full pane itself is allowed — the count does not change.
-  const reordered = paneModel.moveTab(ws, 'chat:b5', { paneId: 'pB', index: 0 })
-  assert.equal(tabKey(reordered.panes.pB.tabs[0]), 'chat:b5', 'same-pane reorder still works at cap')
-  assertInvariants(reordered)
+  const moved = paneModel.moveTab(ws, 'chat:a', { paneId: 'pB', index: 0 })
+  assert.notEqual(moved, ws)
+  assert.equal(tabKey(moved.panes.pB.tabs[0]), 'chat:a')
+  assert.equal(moved.panes.pB.tabs.length, 10)
+  assert.ok(moved.panes.pB.tabs.some(tab => tabKey(tab) === 'chat:b8'))
+  assertInvariants(moved)
 })
 
 test('moveTab refuses a fifth pane and refuses depth beyond two', () => {
@@ -814,7 +782,7 @@ test('canSplit: minimum pane size within the current projected rect', () => {
     'an unknown pane can not split')
 })
 
-test('flattenRollbackPriority keeps the focused active tab through legacy truncation', () => {
+test('flattenRollbackPriority round-trips every tab with the focused active tab last', () => {
   // Two panes, eight tabs, focus on pB whose active tab is chat:f6.
   const ws = paneModel.normalize({
     v: 1,
@@ -839,15 +807,11 @@ test('flattenRollbackPriority keeps the focused active tab through legacy trunca
   // Background pane first, then focused pane's other tabs, then its active last.
   assert.equal(tabKey(rollback.at(-1)), 'chat:f6', 'the focused active tab is dead last')
 
-  // The legacy key keeps only the last MAX_TABS; the round-trip must preserve the
-  // focused pane's tabs and its active tab.
   const store = fakeStorage()
   tabModel.writeOpenTabs(rollback, store)
   const survivors = tabModel.readOpenTabs(store).map(tabKey)
-  assert.equal(survivors.length, tabModel.MAX_TABS)
-  for (const key of ['chat:f4', 'chat:f5', 'chat:f6', 'chat:f7']) {
-    assert.ok(survivors.includes(key), `focused pane tab ${key} survives rollback`)
-  }
+  assert.equal(survivors.length, 8)
+  for (let i = 0; i < 8; i += 1) assert.ok(survivors.includes(`chat:f${i}`))
   assert.equal(survivors.at(-1), 'chat:f6', 'and its active tab is the last kept')
 })
 
@@ -957,21 +921,19 @@ test('parseWorkspace falls back on a malformed split node', () => {
   assert.deepEqual(paneModel.parseWorkspace(bad, { fallbackTabs }), seed)
 })
 
-test('parseWorkspace falls back when a pane exceeds MAX_PANE_TABS', () => {
-  const fallbackTabs = [makeTab('chat', 'seed')]
-  const seed = paneModel.seedFromFlatTabs(fallbackTabs)
-  const over = []
-  for (let i = 0; i < paneModel.MAX_PANE_TABS + 1; i += 1) over.push(makeTab('chat', `c${i}`))
+test('parseWorkspace accepts a persisted pane with more than six tabs', () => {
+  const many = Array.from({ length: 10 }, (_, i) => makeTab('chat', `c${i}`))
   const raw = JSON.stringify({
     v: 1,
     layout: 'p0',
-    panes: { p0: { id: 'p0', tabs: over, activeTabKey: 'chat:c0' } },
+    panes: { p0: { id: 'p0', tabs: many, activeTabKey: 'chat:c0' } },
     focusedPaneId: 'p0',
     nextId: 1,
   })
-  // normalize does not trim per-pane tab count; the cap is an accepted-on-read
-  // invariant, so an over-cap blob is rejected rather than silently served.
-  assert.deepEqual(paneModel.parseWorkspace(raw, { fallbackTabs }), seed)
+  const parsed = paneModel.parseWorkspace(raw, { fallbackTabs: [makeTab('chat', 'seed')] })
+  assert.deepEqual(parsed.panes.p0.tabs, many)
+  assert.equal(parsed.panes.p0.activeTabKey, 'chat:c0')
+  assertInvariants(parsed)
 })
 
 test('normalize recomputes nextId so a stale generator cannot lose a tab', () => {
@@ -1029,21 +991,17 @@ test('reducer UNDO_LAST restores exactly the pre-action workspace for a move', (
   assert.equal(undone.undo, null, 'and clears the slot')
 })
 
-test('reducer marks only an evicting open undoable', () => {
+test('reducer keeps every opened tab beyond six and treats opens as non-undoable', () => {
   let state = paneModel.initialWorkspaceState(paneModel.seedFromFlatTabs([]))
-  for (let i = 0; i < paneModel.MAX_PANE_TABS; i += 1) {
+  for (let i = 0; i < 10; i += 1) {
     state = paneModel.workspaceReducer(state, {
       type: 'OPEN_TAB', tab: makeTab('chat', `c${i}`), activate: false,
     })
   }
-  assert.equal(state.undo, null, 'plain opens are not undoable')
-
-  const evicting = paneModel.workspaceReducer(state, {
-    type: 'OPEN_TAB', tab: makeTab('chat', 'new'), activate: true,
-  })
-  assert.ok(evicting.undo, 'an open that evicted is undoable')
-  const undone = paneModel.workspaceReducer(evicting, { type: 'UNDO_LAST' })
-  assert.equal(undone.ws, state.ws, 'undo brings the evicted tab back')
+  assert.equal(state.ws.panes.p0.tabs.length, 10)
+  assert.equal(state.ws.panes.p0.tabs[0].id, 'c0')
+  assert.equal(state.ws.panes.p0.tabs.at(-1).id, 'c9')
+  assert.equal(state.undo, null)
 })
 
 test('reducer PRUNE clears the undo slot', () => {

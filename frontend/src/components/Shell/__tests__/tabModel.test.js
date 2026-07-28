@@ -91,6 +91,12 @@ test('writeOpenTabs round-trips through readOpenTabs', () => {
   assert.deepEqual(tabModel.readOpenTabs(store), tabs)
 })
 
+test('readOpenTabs preserves every explicitly open tab beyond six', () => {
+  const tabs = Array.from({ length: 10 }, (_, i) => tabModel.makeTab('chat', `c${i}`))
+  const store = fakeStorage(JSON.stringify(tabs))
+  assert.deepEqual(tabModel.readOpenTabs(store), tabs)
+})
+
 // ── Settings tab (builder mode) ─────────────────────────────────────────────
 
 test('settingsTab is the one canonical single-instance tab', () => {

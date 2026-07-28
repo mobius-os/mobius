@@ -19,6 +19,11 @@ test('drawer suspension reaches the live app frame before paint', () => {
   assert.match(canvas, /moebius:frame-interactivity/)
 })
 
+test('hidden app-frame history is bounded to six without limiting open tabs', () => {
+  assert.match(shell, /const APP_CACHE_MAX = 6/)
+  assert.doesNotMatch(shell, /openTabs\.slice\(/)
+})
+
 test('iframe history retirement runs at the committed layout boundary, never during render', () => {
   assert.match(
     canvas,

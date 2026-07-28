@@ -19,7 +19,7 @@
 // emits its pane rects in. The binding subtracts the content bounding rect once.
 
 import {
-  STRIP_H, PANE_GAP, MAX_PANE_TABS,
+  STRIP_H, PANE_GAP,
   canSplit as paneCanSplit, canRootSplit, projectLayout,
 } from './paneModel.js'
 import { tabKey } from './tabModel.js'
@@ -245,16 +245,6 @@ export function caretZone(point, pane, prevZone = null) {
   }
 }
 
-// Whether a pane can accept a JOIN (center or strip caret) — it has room, or the
-// source already lives there (a same-pane reorder never grows the count). A
-// full pane's strip/center zones must not light, so a drop can't refuse or evict
-// after the preview promised a landing spot (review — feasibility gating).
-export function paneAcceptsJoin(scene, pane) {
-  const src = scene.source
-  if (src && src.paneId === pane.paneId) return true
-  return (pane.tabCount || 0) < MAX_PANE_TABS
-}
-
 // The strip region a caret owns: the strip row plus a small pad below it.
 function overStrip(point, pane) {
   return point.y >= pane.rect.y && point.y <= pane.rect.y + STRIP_H + STRIP_CARET_PAD
@@ -387,11 +377,10 @@ function paneAt(point, scene) {
 // preview geometry) or null (no drop target — the drop cancels).
 export function hitTest(point, scene, prevZone = null) {
   const pane = paneAt(point, scene)
-  const canJoin = pane ? paneAcceptsJoin(scene, pane) : false
+  const canJoin = !!pane
 
   // 1. strip caret — checked first so a drop over the tabs always reads as an
   // insert, even in the outer-margin corner where a root edge would also apply.
-  // A full pane's strip does not light (the caret would refuse at drop).
   if (pane && overStrip(point, pane)) return canJoin ? caretZone(point, pane, prevZone) : null
 
   // 2. workspace-root edge — fine pointers only.
@@ -400,8 +389,7 @@ export function hitTest(point, scene, prevZone = null) {
     if (re) return re
   }
 
-  // 3. pane edge, then 4. center — both need a pane under the point; center only
-  // lights when the pane can accept the join.
+  // 3. pane edge, then 4. center — both need a pane under the point.
   if (pane) {
     const ez = edgeZone(point, pane, scene, prevZone)
     if (ez) return ez
@@ -461,9 +449,6 @@ export function buildScene(ws, projection, mode, contentRect, source, allowRootE
     return {
       paneId,
       rect,
-      // The pane's live tab count gates whether its center/strip zones may light
-      // (paneAcceptsJoin) — a full pane must not offer a join it would refuse.
-      tabCount: paneTabs.length,
       // The key of this pane's SOLE tab (else null): edgeZone suppresses a split
       // that would just rename a single-tab pane, including a drawer drag of the
       // item already open here.

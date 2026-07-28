@@ -486,26 +486,25 @@ test('source missing / not open: degrade to with-focus (append to focused pane)'
   assert.equal(paneModel.paneIdsInOrder(out).length, 2, 'no split on a missing source')
 })
 
-// ── resolver: protected eviction at MAX_PANE_TABS (design §3.6) ──────────────
+// ── resolver: explicit tab ownership ─────────────────────────────────────────
 
-test('pane at MAX_PANE_TABS: protected eviction spares source, item, active, visible', () => {
-  const full = [CHAT('a'), CHAT('b'), CHAT('c'), CHAT('d'), CHAT('e'), APP(7)]
+test('placement adds beyond six tabs without evicting existing work', () => {
+  const existing = [
+    CHAT('a'), CHAT('b'), CHAT('c'), CHAT('d'), CHAT('e'), CHAT('f'), CHAT('g'), APP(7),
+  ]
   const ws = paneModel.normalize({
     v: 1, layout: 'p0',
-    panes: { p0: { id: 'p0', tabs: full, activeTabKey: 'app:7' } },
+    panes: { p0: { id: 'p0', tabs: existing, activeTabKey: 'app:7' } },
     focusedPaneId: 'p0', nextId: 1,
   })
-  assert.equal(ws.panes.p0.tabs.length, paneModel.MAX_PANE_TABS)
   const out = resolveWorkspaceRequest(
     ws, req(APP(9), CHAT('a'), PLACE_BESIDE_SOURCE, ACTIVATE_IN_BACKGROUND),
     env(ws, { mode: 'phone', rect: { w: 400, h: 800 } }),
   )
   const keys = keysOf(out.panes.p0)
-  assert.equal(keys.length, paneModel.MAX_PANE_TABS, 'the per-pane cap still holds')
-  assert.ok(keys.includes('app:9'), 'the item was admitted')
-  assert.ok(keys.includes('chat:a'), 'the source was protected from eviction')
-  assert.ok(keys.includes('app:7'), 'the active/visible tab was protected from eviction')
-  assert.ok(!keys.includes('chat:b'), 'the oldest UNPROTECTED tab was evicted')
+  assert.equal(keys.length, existing.length + 1)
+  for (const tab of existing) assert.ok(keys.includes(tabKey(tab)))
+  assert.equal(keys[1], 'app:9', 'the new item still lands beside its source')
   assert.equal(out.panes.p0.activeTabKey, 'app:7', 'the on-screen tab is unchanged')
 })
 

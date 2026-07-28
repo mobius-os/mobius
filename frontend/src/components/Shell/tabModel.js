@@ -3,8 +3,8 @@
 // A tab is a pinned reference to a chat or app the owner can swap to:
 // `{ kind: 'chat' | 'app', id: string }`, plus the canonical shell-owned
 // Apps and Settings tabs (see below). This module
-// owns the whole tab contract — construction, identity, the open-set invariants
-// (dedup + cap), persistence, how a tab maps to navigation, and whether it is
+// owns the whole tab contract — construction, identity, open-set deduplication,
+// persistence, how a tab maps to navigation, and whether it is
 // the one on screen — so no call site has to re-derive them.
 //
 // It is deliberately dependency-free and pane-agnostic. Today the shell keeps
@@ -14,10 +14,6 @@
 // pane's own view — the same primitives, fed pane state instead of global
 // nav. See ARCHITECTURE.md's "Multi-pane workspace" section for the target
 // model and the scroll/nav constraints that migration must honor.
-
-// Cap the open set so the strip stays legible on a phone; the workspace can
-// raise or drop this per pane later.
-export const MAX_TABS = 6
 
 // The Settings tab — a single-instance builder surface, not a chat/app.
 //
@@ -101,7 +97,7 @@ export function readOpenTabs(storage = sessionStorage) {
       seen.add(key)
       tabs.push(tab)
     }
-    return tabs.slice(-MAX_TABS)
+    return tabs
   } catch {
     return []
   }

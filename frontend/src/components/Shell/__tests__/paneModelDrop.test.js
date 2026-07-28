@@ -73,15 +73,13 @@ test('openTabAt returns the same reference on a no-op', () => {
   assert.equal(paneModel.openTabAt(ws, tabModel.makeTab('chat', '1'), { paneId: 'p0' }), ws)
 })
 
-test('openTabAt edge-split into a FULL pane never evicts or churns the target (review B1)', () => {
-  // A single pane at MAX_PANE_TABS. The old path opened the item into the pane
-  // (evicting the oldest, swapping activeTabKey) before moving it out.
-  const six = Array.from({ length: paneModel.MAX_PANE_TABS }, (_, i) => ({ kind: 'chat', id: `c${i}` }))
-  const ws = paneModel.seedFromFlatTabs(six)
+test('openTabAt edge-split leaves a target with more than six tabs untouched', () => {
+  const many = Array.from({ length: 9 }, (_, i) => ({ kind: 'chat', id: `c${i}` }))
+  const ws = paneModel.seedFromFlatTabs(many)
   const beforeKeys = ws.panes.p0.tabs.map(tabModel.tabKey)
   const beforeActive = ws.panes.p0.activeTabKey
   const next = paneModel.openTabAt(ws, tabModel.makeTab('app', 99), { paneId: 'p0', edge: 'right' })
-  // p0's six tabs AND its active tab are byte-identical — nothing evicted.
+  // The existing pane's ownership and active tab are byte-identical.
   assert.deepEqual(next.panes.p0.tabs.map(tabModel.tabKey), beforeKeys)
   assert.equal(next.panes.p0.activeTabKey, beforeActive)
   // The item landed alone in the newly focused pane.

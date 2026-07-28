@@ -158,19 +158,6 @@ function isOpenItemRequest(request) {
   return true
 }
 
-// The eviction-protection set for placing into an existing pane: every visible
-// pane's on-screen tab (background work must never make an on-screen tab vanish —
-// ARCHITECTURE.md's protect-the-on-screen-tab rule), plus the source and item.
-function protectKeys(ws, extraTabs) {
-  const keys = new Set()
-  for (const paneId of paneModel.paneIdsInOrder(ws)) {
-    const active = ws.panes[paneId]?.activeTabKey
-    if (active) keys.add(active)
-  }
-  for (const tab of extraTabs || []) if (tab) keys.add(tabKey(tab))
-  return keys
-}
-
 // The on-screen content of a workspace in a given mode: the active tab key of
 // every leaf the projection actually shows (wide shows all leaves; compact/phone
 // show a limited pair). This is what the user sees — the level the background
@@ -226,7 +213,6 @@ function insertBesideSource(ws, item, sourcePane, source, { activate, focus }) {
     afterKey: tabKey(source),
     activate,
     focus,
-    protect: protectKeys(ws, [source, item]),
   })
 }
 
@@ -308,7 +294,6 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
         paneId: working.focusedPaneId,
         activate: true,
         focus: true,
-        protect: protectKeys(working, [source, item]),
       })
       sourcePane = paneModel.paneOf(working, tabKey(source))
     } else {
@@ -358,7 +343,6 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
       paneId: working.focusedPaneId,
       activate: activateItem,
       focus: focusItem,
-      protect: protectKeys(working, [item]),
     })
   }
 
@@ -406,7 +390,6 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
       paneId: companion.id,
       activate: activateItem,
       focus: focusItem,
-      protect: protectKeys(working, [source, item]),
     })
   }
   return tryAutoSplit(working, item, sourcePane, env, splitPolicy)
