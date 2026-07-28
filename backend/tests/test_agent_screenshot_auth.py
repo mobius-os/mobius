@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import shutil
+import socket
 import subprocess
 
 
@@ -112,11 +113,20 @@ def _run_helper(
   screenshot_fail_once: bool = False,
   canonical_target_url: str | None = None,
   screenshot_tiny_once: bool = False,
+  profile_lock_target: str | None = None,
+  profile_lock_artifacts: tuple[str, ...] = (
+    "SingletonLock", "SingletonCookie", "SingletonSocket",
+  ),
 ) -> tuple[subprocess.CompletedProcess, Path, Path, Path]:
   _, marker = _fake_browser(tmp_path)
   script = _fixture_script(tmp_path)
   output = tmp_path / "shot.png"
   browser_log = tmp_path / "browser.log"
+  browser_profile = tmp_path / "browser-profile"
+  browser_profile.mkdir()
+  if profile_lock_target is not None:
+    for artifact in profile_lock_artifacts:
+      (browser_profile / artifact).symlink_to(profile_lock_target)
   env = {
     **os.environ,
     "PATH": f"{tmp_path}:{os.environ['PATH']}",
@@ -124,6 +134,7 @@ def _run_helper(
     "API_BASE_URL": "http://mobius.test",
     "VIEWPORT_WIDTH": str(viewport_width),
     "VIEWPORT_HEIGHT": str(viewport_height),
+    "AGENT_BROWSER_PROFILE": str(browser_profile),
     "FAKE_AUTH_OK": "true" if auth_ok else "false",
     "FAKE_LOADED_ASSET": loaded_asset or SHELL_ENTRY,
     "FAKE_BROWSER_LOG": str(browser_log),
@@ -154,6 +165,59 @@ def _run_helper(
     check=False,
   )
   return result, output, marker, browser_log
+
+
+def test_stale_foreign_container_profile_lock_is_repaired_before_launch(tmp_path: Path):
+  profile = tmp_path / "browser-profile"
+  result, output, marker, _ = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    profile_lock_target="previous-container-999999",
+    profile_lock_artifacts=("SingletonLock",),
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  assert not any(
+    (profile / artifact).is_symlink()
+    for artifact in ("SingletonLock", "SingletonCookie", "SingletonSocket")
+  )
+
+
+def test_live_local_profile_lock_is_preserved(tmp_path: Path):
+  profile = tmp_path / "browser-profile"
+  result, output, marker, _ = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    profile_lock_target=f"{socket.gethostname()}-{os.getpid()}",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  assert all(
+    (profile / artifact).is_symlink()
+    for artifact in ("SingletonLock", "SingletonCookie", "SingletonSocket")
+  )
+
+
+def test_unfamiliar_profile_lock_is_preserved(tmp_path: Path):
+  profile = tmp_path / "browser-profile"
+  result, output, marker, _ = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    profile_lock_target="unexpected-owner-format",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert "unfamiliar owner" in result.stderr
+  assert output.exists()
+  assert marker.exists()
+  assert all(
+    (profile / artifact).is_symlink()
+    for artifact in ("SingletonLock", "SingletonCookie", "SingletonSocket")
+  )
 
 
 def test_helper_refuses_to_capture_when_protected_request_rejects_token(tmp_path: Path):
@@ -516,10 +580,13 @@ def test_shell_capture_waits_for_visual_ownership_to_settle(tmp_path: Path):
   settle_index = next(
     i for i, command in enumerate(commands)
     if command.startswith("wait --fn ")
-    and "data-mode-motion" in command
-    and "shell__chat-view--staging" in command
+    and "data-workspace-visual-state" in command
     and "first-contentful-paint" in command
   )
+  settle_command = commands[settle_index]
+  assert "shell__chat-view--staging" not in settle_command
+  assert "shell__chat-view--held" not in settle_command
+  assert "data-mode-motion" not in settle_command
   frame_index = next(
     i for i, command in enumerate(commands)
     if command.startswith("eval ") and "requestAnimationFrame" in command

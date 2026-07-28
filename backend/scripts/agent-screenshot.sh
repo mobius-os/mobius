@@ -184,6 +184,51 @@ browser_set_viewport_retry() {
   return 1
 }
 
+clear_stale_browser_profile_lock() {
+  local lock_path="${AGENT_BROWSER_PROFILE:-}/SingletonLock"
+  local lock_target=""
+  local owner_host=""
+  local owner_pid=""
+  local current_host=""
+  local artifact=""
+
+  [ -n "${AGENT_BROWSER_PROFILE:-}" ] || return 0
+  [ -L "$lock_path" ] || return 0
+
+  lock_target="$(readlink "$lock_path" 2>/dev/null || true)"
+  owner_host="${lock_target%-*}"
+  owner_pid="${lock_target##*-}"
+  case "$owner_pid" in
+    ''|*[!0-9]*)
+      # An unfamiliar lock shape may belong to a newer Chromium contract.
+      # Preserve it rather than guessing that the automation profile is idle.
+      echo "agent-screenshot.sh: browser profile lock has an unfamiliar owner; leaving it untouched" >&2
+      return 0
+      ;;
+  esac
+  if [ -z "$owner_host" ] || [ "$owner_host" = "$lock_target" ]; then
+    echo "agent-screenshot.sh: browser profile lock has an unfamiliar owner; leaving it untouched" >&2
+    return 0
+  fi
+
+  current_host="$(hostname)"
+  if [ "$owner_host" = "$current_host" ] && kill -0 "$owner_pid" 2>/dev/null; then
+    # Never disturb a browser that still owns this profile in this container.
+    return 0
+  fi
+
+  # Chromium records its singleton owner as <hostname>-<pid>. The per-chat
+  # automation profile survives container restarts, while the previous
+  # container and its processes do not. Remove only Chromium's three singleton
+  # symlinks; authenticated browser state, cache, and the partner's real browser
+  # profile remain untouched. A same-host dead PID is the equivalent crash case.
+  for artifact in SingletonLock SingletonCookie SingletonSocket; do
+    if [ -L "${AGENT_BROWSER_PROFILE}/${artifact}" ]; then
+      rm -f "${AGENT_BROWSER_PROFILE}/${artifact}"
+    fi
+  done
+}
+
 CONTENT_ONLY=0
 PRESERVE_CACHE=0
 while [ "${1:-}" = "--content-only" ] || [ "${1:-}" = "--preserve-cache" ]; do
@@ -281,6 +326,8 @@ PY
   exit 1
 fi
 read -r VIEWPORT_WIDTH VIEWPORT_HEIGHT <<<"$NORMALIZED_VIEWPORT"
+
+clear_stale_browser_profile_lock
 
 # Start the browser, then wait narrowly for its command socket before applying
 # viewport state. A cold launch can return before that socket is connectable.
@@ -464,12 +511,11 @@ PY
     fi
 
     # Shell mode changes and chat-to-chat handoffs deliberately retain multiple
-    # fully laid-out surfaces. Mid-transition they can carry compositor opacity
-    # or staging/held classes even though the target content is already in the
-    # DOM; capturing then makes two chats look overlaid and misrepresents the
-    # partner's settled screen. Wait for the shell's own ownership signals, not
-    # a guessed delay, then give style/layout two frames to commit.
-    SHELL_SETTLED_EXPR="document.querySelector('.shell') !== null && document.querySelector('.shell')?.dataset.modePhase === 'idle' && !document.querySelector('.shell__chat-view--staging, .shell__chat-view--held, [data-mode-motion]') && performance.getEntriesByName('first-contentful-paint').length > 0"
+    # fully laid-out surfaces. Shell owns which world is actually painted and
+    # publishes one stable visual-readiness contract; automation must not learn
+    # its private handoff classes or compositor attributes. Once the owner says
+    # settled, give style/layout two frames to commit.
+    SHELL_SETTLED_EXPR="document.querySelector('.shell[data-workspace-visual-state=\"settled\"]') !== null && performance.getEntriesByName('first-contentful-paint').length > 0"
     if ! agent-browser wait --fn "$SHELL_SETTLED_EXPR" >/dev/null 2>&1; then
       echo "agent-screenshot.sh: shell did not reach a settled visual state before capture" >&2
       exit 1
