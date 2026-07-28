@@ -149,6 +149,7 @@ async function seedTwoPaneBuilder(page, firstChatId, secondChatId) {
     { kind: 'chat', id: firstChatId },
     { kind: 'chat', id: secondChatId },
   ])
+  workspace = paneModel.setViewMode(workspace, 'panes')
   workspace = paneModel.moveTab(workspace, `chat:${secondChatId}`, {
     root: true,
     edge: 'right',

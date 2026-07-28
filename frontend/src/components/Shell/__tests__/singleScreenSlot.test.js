@@ -12,10 +12,13 @@ const { makeTab } = tabModel
 
 function reduce(state, action) { return paneModel.workspaceReducer(state, action) }
 function init(ws) { return paneModel.initialWorkspaceState(ws) }
+function builderSeed(tabs) {
+  return paneModel.setViewMode(paneModel.seedFromFlatTabs(tabs), 'panes')
+}
 
 // A two-pane builder workspace: chat 5 on the left (focused), app 42 on the right.
 function tiledBuilder() {
-  let ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  let ws = builderSeed([makeTab('chat', '5')])
   ws = paneModel.splitPaneWithTab(ws, makeTab('app', '42'), {
     paneId: ws.focusedPaneId, edge: 'right',
   })
@@ -32,6 +35,19 @@ test('normalize preserves property ABSENCE as the migration marker', () => {
   assert.equal('singleScreen' in ws, false, 'a fresh seed has no slot (uninitialized)')
   const n = paneModel.normalize(ws)
   assert.equal('singleScreen' in n, false, 'absence survives normalize')
+})
+
+test('a fresh standard seed routes through its focused fallback until the slot initializes', () => {
+  const chat = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  assert.equal('singleScreen' in chat, false)
+  assert.equal(paneModel.activeContentRoute(chat).chatId, '5')
+
+  const app = paneModel.seedFromFlatTabs([makeTab('chat', '5'), makeTab('app', '42')])
+  assert.equal('singleScreen' in app, false)
+  assert.equal(paneModel.activeContentRoute(app).appId, 42)
+
+  const empty = paneModel.seedFromFlatTabs([])
+  assert.equal(paneModel.activeContentRoute(empty).chatId, null, 'an empty first boot starts at home')
 })
 
 test('normalize sanitizes a present slot; corrupt/settings → explicit null', () => {
@@ -222,14 +238,14 @@ test('activeContentRoute reflects the SLOT in single mode, the focused pane in b
 
 test('closing the LAST builder tab auto-returns to single', () => {
   // Single-pane builder with one chat; close it → the tree empties → auto-return.
-  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')]) // viewMode panes
+  const ws = builderSeed([makeTab('chat', '5')])
   const s = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
   assert.equal(s.ws.viewMode, 'single', 'empty builder auto-returns to single')
   assert.equal(s.undo.restoreViewMode, true, 'the undo is flagged one-gesture')
 })
 
 test('undo of the last-tab close restores the tab AND builder mode as one gesture', () => {
-  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  const ws = builderSeed([makeTab('chat', '5')])
   let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
   state = reduce(state, { type: 'UNDO_LAST' })
   assert.equal(state.ws.viewMode, 'panes', 'builder mode restored')
@@ -237,7 +253,7 @@ test('undo of the last-tab close restores the tab AND builder mode as one gestur
 })
 
 test('closing a tab that leaves others does NOT auto-return', () => {
-  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5'), makeTab('chat', '6')])
+  const ws = builderSeed([makeTab('chat', '5'), makeTab('chat', '6')])
   const s = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
   assert.equal(s.ws.viewMode, 'panes', 'still builder — other tabs remain')
   assert.equal(s.undo.restoreViewMode, false)
@@ -251,7 +267,7 @@ test('closing the last tab in SINGLE mode does not auto-return (already single)'
 })
 
 test('CLOSE_PANE that empties the builder auto-returns to single', () => {
-  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  const ws = builderSeed([makeTab('chat', '5')])
   const s = reduce(init(ws), { type: 'CLOSE_PANE', paneId: ws.focusedPaneId })
   assert.equal(s.ws.viewMode, 'single')
   assert.equal(s.undo.restoreViewMode, true)
@@ -260,7 +276,7 @@ test('CLOSE_PANE that empties the builder auto-returns to single', () => {
 test('INV 8: an explicit later toggle rebases a coupled undo to tree-only', () => {
   // Auto-return arms a mode-coupled undo (restoreViewMode). The owner then toggles
   // the mode explicitly; undo must restore the TREE but not yank the mode back.
-  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')]) // panes
+  const ws = builderSeed([makeTab('chat', '5')])
   let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' }) // → single, coupled undo
   assert.equal(state.undo.restoreViewMode, true)
   state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'panes' }) // explicit later intent

@@ -63,7 +63,8 @@ async function bootSeededWorkspace(page, viewport, ws) {
 // `slotKey` seeds the single-screen slot so an exit can be steered to a promote
 // (slot === a visible pane's active key) or a world reveal (slot tree-absent).
 function twoPaneBuilder(slot) {
-  let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }])
+  let ws = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }]), 'panes')
   ws = paneModel.splitPaneWithTab(ws, tabModel.makeTab('chat', 'bbb'), { paneId: ws.focusedPaneId, edge: 'right' })
   const leftId = paneModel.paneOf(ws, 'chat:aaa').id
   ws = paneModel.focusPane(ws, leftId)
@@ -74,7 +75,8 @@ function twoPaneBuilder(slot) {
 // An intentionally asymmetric three-pane tree. Its natural edge vectors differ
 // enough to expose same-duration entry as visibly different pane velocities.
 function unevenThreePaneBuilder(slot) {
-  let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }])
+  let ws = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }]), 'panes')
   ws = paneModel.splitPaneWithTab(ws, tabModel.makeTab('chat', 'bbb'), {
     paneId: ws.focusedPaneId, edge: 'right',
   })
@@ -755,7 +757,9 @@ test('round4-3: a superseding NULL-slot request drains after the older POST with
 // (logo/builder class) and the emptied tree flip in the SAME commit — never an
 // intermediate frame where builder is still true over an emptied single tree.
 test('v2 auto-return flips the descriptor and the tree atomically (no lagging frame)', async ({ page }) => {
-  await bootSeededWorkspace(page, WIDE, paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }]))
+  const builder = paneModel.setViewMode(
+    paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }]), 'panes')
+  await bootSeededWorkspace(page, WIDE, builder)
   await expect.poll(() => builderActive(page)).toBe(true)
   await expect(page.locator('.shell__tabstrip, .workspace__strip').first()).toBeVisible()
   // Sample builder-class vs strip-presence on every frame across the close.

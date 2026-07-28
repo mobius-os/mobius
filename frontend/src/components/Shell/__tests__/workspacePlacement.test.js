@@ -22,6 +22,10 @@ import {
 const CHAT = (id) => makeTab('chat', id)
 const APP = (id) => makeTab('app', id)
 
+function builderSeed(tabs) {
+  return paneModel.setViewMode(paneModel.seedFromFlatTabs(tabs), 'panes')
+}
+
 // A two-pane row workspace: p0 | p1. Each pane's last tab is active unless named.
 function twoPaneWs(aTabs, bTabs, { focused = 'p0', activeA, activeB } = {}) {
   return paneModel.normalize({
@@ -211,7 +215,7 @@ test('resolver ignores an unsupported (future) placement as a strict no-op', () 
 // ── resolver: beside-source × mode (the §6.2 table) ─────────────────────────
 
 test('beside-source + background · phone: a tab after source, no on-screen switch', () => {
-  const ws = paneModel.seedFromFlatTabs([CHAT('a')])
+  const ws = builderSeed([CHAT('a')])
   const out = resolveWorkspaceRequest(
     ws, req(APP(9), CHAT('a'), PLACE_BESIDE_SOURCE, ACTIVATE_IN_BACKGROUND),
     env(ws, { mode: 'phone', rect: { w: 400, h: 800 } }),
@@ -222,7 +226,7 @@ test('beside-source + background · phone: a tab after source, no on-screen swit
 })
 
 test('beside-source + foreground · phone: insert and activate', () => {
-  const ws = paneModel.seedFromFlatTabs([CHAT('a')])
+  const ws = builderSeed([CHAT('a')])
   const out = resolveWorkspaceRequest(
     ws, req(APP(9), CHAT('a'), PLACE_BESIDE_SOURCE, ACTIVATE_FOREGROUND),
     env(ws, { mode: 'phone', rect: { w: 400, h: 800 } }),
@@ -231,7 +235,7 @@ test('beside-source + foreground · phone: insert and activate', () => {
 })
 
 test('beside-source + background · tile single pane: split, item active in the NEW pane, focus stays', () => {
-  const ws = paneModel.seedFromFlatTabs([CHAT('a')])
+  const ws = builderSeed([CHAT('a')])
   const out = resolveWorkspaceRequest(
     ws, req(APP(9), CHAT('a'), PLACE_BESIDE_SOURCE, ACTIVATE_IN_BACKGROUND),
     env(ws, { mode: 'wide', rect: { w: 1400, h: 900 } }),
@@ -246,7 +250,7 @@ test('beside-source + background · tile single pane: split, item active in the 
 })
 
 test('beside-source + foreground · tile single pane: split AND focus the new pane', () => {
-  const ws = paneModel.seedFromFlatTabs([CHAT('a')])
+  const ws = builderSeed([CHAT('a')])
   const out = resolveWorkspaceRequest(
     ws, req(APP(9), CHAT('a'), PLACE_BESIDE_SOURCE, ACTIVATE_FOREGROUND),
     env(ws, { mode: 'wide' }),
