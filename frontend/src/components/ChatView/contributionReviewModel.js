@@ -114,6 +114,37 @@ export function diffStatSummary(value) {
   return lines.at(-1) || ''
 }
 
+/**
+ * Copy for the grouped panel across its whole transition, not just its pending
+ * records. A sent acknowledgement is still a visible row, so it must count
+ * toward the grouping decision until that acknowledgement leaves.
+ */
+export function reviewPanelSummary(pendingCount, sentCount) {
+  const pending = Math.max(0, Number(pendingCount) || 0)
+  const sent = Math.max(0, Number(sentCount) || 0)
+  const count = pending + sent
+
+  if (sent === 0) {
+    return {
+      count,
+      title: `${pending} contributions ready`,
+      copy: 'Each button contributes only its own item.',
+    }
+  }
+  if (pending === 0) {
+    return {
+      count,
+      title: `${sent} contribution${sent === 1 ? '' : 's'} contributed`,
+      copy: 'Each item was contributed separately.',
+    }
+  }
+  return {
+    count,
+    title: `${pending} remaining · ${sent} contributed`,
+    copy: 'Each button contributes only its own item.',
+  }
+}
+
 // ── Swipe-to-dismiss ────────────────────────────────────────────────────────
 //
 // Dismissing is a VIEW decision, never a data one: the contribution stays
