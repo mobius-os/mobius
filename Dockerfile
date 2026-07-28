@@ -8,7 +8,7 @@
 # expensive apt/agent-CLI/browser layers during local E2E builds. The pinned
 # agent-browser requires Node >=24; preship-gate.sh uses this same major so local
 # frontend verification cannot silently pass on an older runtime.
-FROM node:24-slim AS node-runtime
+FROM node:24-trixie-slim AS node-runtime
 
 # -- Stage 1: build the frontend --------------------------------------
 FROM node-runtime AS frontend
@@ -20,7 +20,7 @@ COPY frontend/ .
 RUN npm run build
 
 # -- Stage 2: backend + everything ------------------------------------
-FROM python:3.12-slim
+FROM python:3.12-slim-trixie
 
 # Copy Node.js binary from the frontend stage instead of installing via
 # apt.  The debian nodejs/npm packages pull in ~200MB of system node

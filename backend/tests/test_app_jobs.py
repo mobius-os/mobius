@@ -20,6 +20,17 @@ from app.config import get_settings
 from app.install import _crontab_command_path
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_runtime_image_pins_landlock_capable_setpriv_release():
+  dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+  assert "FROM node:24-trixie-slim AS node-runtime" in dockerfile
+  assert "FROM python:3.12-slim-trixie" in dockerfile
+  assert "setpriv --help 2>&1 | grep -q -- '--landlock-access'" in dockerfile
+
+
 def test_cron_parser_resolves_supervised_command_to_real_job():
   line = (
     "30 5 * * * python3 /app/scripts/app-job-runner.py "
