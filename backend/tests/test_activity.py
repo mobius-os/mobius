@@ -135,7 +135,10 @@ def test_storage_write_debounce_per_key():
 
 
 def test_request_error_storm_appends_only_one_summary_per_window():
-  start = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+  # This test owns the minute-bucket boundary, not weekly log rotation. Keep
+  # its simulated burst near the real write clock so the active file cannot
+  # rotate merely because a fixed fixture date aged past ROTATION_DAYS.
+  start = datetime.now(timezone.utc)
   for offset_ms in range(1000):
     activity.record_request_error(
       "GET", "/api/storage/apps/{app_id}/{path:path}", 404, 66,
