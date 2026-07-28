@@ -51,7 +51,7 @@ test('Send, Steer, and Stop reuse one continuously visible primary action', () =
 
 test('per-row fast-forward dispatches on touchend too', () => {
   const steerBlock = queuedMessages.match(
-    /className="queued__steer"[\s\S]*?aria-label="Send this queued message now"/,
+    /className="queued__action queued__steer"[\s\S]*?aria-label="Send this queued message now"/,
   )?.[0] || ''
   assert.match(steerBlock, /onPointerDown=\{\(e\) => e\.preventDefault\(\)\}/)
   assert.match(steerBlock, /onTouchEnd=\{\(e\) => \{/)
@@ -61,6 +61,6 @@ test('per-row fast-forward dispatches on touchend too', () => {
 test('the shared steer path snapshots scroll before dismissing the mobile composer', () => {
   assert.match(
     chatView,
-    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?steerPinIntentRef\.current = makeSendPinIntent\(steerWillPin\)[\s\S]*?if \(_isTouchPrimary\) inputRef\.current\?\.blur\(\)[\s\S]*?pendingQueue\.reserveForSteer\(consumePendingCids\)/,
+    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?explicitSteerIntent = captureSendIntent\(\{[\s\S]*?previousSendIntent = replaceSendIntent\(steerCid, explicitSteerIntent\)[\s\S]*?if \(_isTouchPrimary\) inputRef\.current\?\.blur\(\)[\s\S]*?pendingQueue\.reserveForSteer\(consumePendingCids\)/,
   )
 })

@@ -143,8 +143,10 @@ offline-safe app uses:
 
 List every imported sibling source file in `source_files`. Set
 `offline_capable` to `true` only when every required read and write works
-without the network. The apply helper applies this flag and the
-versioned `capabilities` object; do not patch the app row separately.
+without the network. The manifest's `icon` is the package-artwork source of
+truth: apply validates and materializes that exact accepted file, so do not
+upload a second copy after applying. The apply helper also applies the offline
+flag and versioned `capabilities` object; do not patch the app row separately.
 
 ### 3. Apply once early, then after each coherent revision
 
@@ -157,11 +159,10 @@ python "$SCRIPTS_DIR/apply_app.py" /data/apps/<slug>
 The helper validates the manifest and complete source tree, compiles and
 commits that exact revision, returns a compact receipt with `app_id`,
 `preview_path`, and `open_path`, and emits one live-preview action tied to this
-building chat. On a phone the shell enters Builder and activates the app tab;
-on a wider screen it opens the app in a companion pane while keyboard focus
-stays in the chat. Reuse that numeric ID for preview, storage, notifications,
-and later actions; do not list apps again after a successful apply. Do not send
-a separate `open_item`.
+building chat. The preview may bloom into a separate visible pane when that
+adds space without hiding anything. When it would have to share a pane, it
+parks as an inactive tab instead of replacing what the partner is using. Reuse
+that numeric ID for preview, storage, notifications, and later actions; do not list apps again after a successful apply. Do not send a separate `open_item`.
 
 Afterward, edit source files normally and run the same command once the change
 is coherent enough to preview. Each successful apply live-swaps the already

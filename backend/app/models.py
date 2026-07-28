@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
   Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text, event, false, true,
+  String, Text, event, false, or_, true,
 )
 
 from sqlalchemy.orm import column_property
@@ -544,15 +544,32 @@ class App(Base):
   # A game declares "fullscreen" so the installed PWA launches with no OS
   # status bar and paints under the phone notch/cutout.
   display = Column(String(16), nullable=True, default=None)
-  # User-uploaded icon for the standalone PWA install (PNG bytes).
-  # Null means fall back to the auto-generated default (first letter
-  # of `name` on a deterministic color). Stored inline because icons
-  # are small (~10-50KB at 512x512) and per-app — avoids needing a
-  # separate file store + cleanup path.
+  # Accepted package icon normalized from the manifest declaration. Legacy
+  # rows also keep their pre-split effective icon here.
   icon_png = Column(LargeBinary, nullable=True, default=None)
-  # Lightweight drawer/catalog projection. This selects only an IS NOT NULL
-  # boolean, so list_apps can advertise artwork without hydrating icon bytes.
-  has_custom_icon = column_property(icon_png.isnot(None))
+  # Owner-chosen home-screen artwork is an explicit override, not a second
+  # writer racing the manifest-owned package icon.
+  icon_override_png = Column(LargeBinary, nullable=True, default=None)
+  # True once legacy effective-icon bytes have been classified as accepted
+  # package artwork or an explicit owner override. The additive migration gives
+  # existing rows FALSE; ordinary ORM-created rows start already split.
+  icon_ownership_split = Column(
+    Boolean, nullable=False, default=True, server_default=false(),
+  )
+  # Lightweight response projection: advertise a canonical icon reference
+  # without hydrating either blob into drawer/catalog queries.
+  has_icon = column_property(or_(
+    icon_override_png.isnot(None), icon_png.isnot(None),
+  ))
+
+  @property
+  def effective_icon_png(self) -> bytes | None:
+    """The owner override when present, otherwise the accepted package icon."""
+    return (
+      self.icon_override_png
+      if self.icon_override_png is not None
+      else self.icon_png
+    )
   # Absolute directory holding this app's source files. Editable app source lives
   # under `/data/apps/<dirname>`. Stored explicitly so source apply can map a
   # directory back to its DB row without slugify-guessing the name.

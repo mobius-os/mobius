@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Secure executors for reviewed ``background_agent`` app jobs.
+"""Secure executors for reviewed scoped-authority app jobs.
 
-The app manifest is normalized into one ``JobAccess`` contract.  Bubblewrap
-and Landlock are replaceable enforcement mechanisms for that contract; neither
-is allowed to reinterpret app permissions.  Selection uses a real probe and
-fails closed when this host cannot enforce the contract.
+The app manifest is normalized into one filesystem ``JobAccess`` contract.
+Bubblewrap and Landlock are replaceable enforcement mechanisms for that
+contract; neither is allowed to reinterpret app permissions. Selection uses
+real primitive probes and fails closed when this host cannot provide a secure
+executor.
 
 Landlock filesystem rules are delegated to util-linux ``setpriv``.  The small
 helper in this file supplies only the two protections setpriv does not:
@@ -240,7 +241,7 @@ def _helper_command(command: list[str]) -> list[str]:
 
 
 def probe_landlock() -> ExecutorProbe:
-  """Probe the complete fallback: scopes, seccomp and filesystem rules."""
+  """Probe the fallback primitives: scopes, seccomp and a filesystem denial."""
 
   abi = landlock_abi()
   if abi < LANDLOCK_MIN_ABI:

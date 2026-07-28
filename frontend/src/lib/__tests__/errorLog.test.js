@@ -68,6 +68,41 @@ test('repeated identical message within the window is debounced', () => {
   assert.equal(fetchCalls.length, 1, 'second identical error within 60s must not re-POST')
 })
 
+test('an identical message POSTs again after its debounce key expires', () => {
+  const originalNow = Date.now
+  let now = 1_000_000
+  Date.now = () => now
+  try {
+    errorLog.recordClientError({ where: 'w', message: 'temporary error' })
+    now += errorLog._ERROR_REPORT_DEBOUNCE_MS - 1
+    errorLog.recordClientError({ where: 'w', message: 'temporary error' })
+    now += 1
+    errorLog.recordClientError({ where: 'w', message: 'temporary error' })
+    assert.equal(fetchCalls.length, 2)
+  } finally {
+    Date.now = originalNow
+  }
+})
+
+test('error diversity does not break the per-message debounce window', () => {
+  const originalNow = Date.now
+  Date.now = () => 1_000_000
+  try {
+    const uniqueErrorCount = 160
+    for (let index = 0; index < uniqueErrorCount; index += 1) {
+      errorLog.recordClientError({ where: 'w', message: `unique-${index}` })
+    }
+    errorLog.recordClientError({ where: 'w', message: 'unique-0' })
+    assert.equal(
+      fetchCalls.length,
+      uniqueErrorCount,
+      'a duplicate stays debounced even after many distinct errors',
+    )
+  } finally {
+    Date.now = originalNow
+  }
+})
+
 test('a different message still POSTs', () => {
   errorLog.recordClientError({ where: 'w', message: 'first' })
   errorLog.recordClientError({ where: 'w', message: 'second' })

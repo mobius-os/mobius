@@ -752,6 +752,149 @@ def test_install_update_path_in_place(client, auth, bypass_url_validation):
   assert jsx_file.read_text() == jsx_v2
 
 
+def test_store_update_removes_package_icon_without_erasing_owner_override(
+  client, auth, db, bypass_url_validation,
+):
+  """Manifest artwork and home-screen customization have distinct owners."""
+  from app import icon_assets, models
+  from PIL import Image
+
+  base = "https://icons.test/repo/"
+  manifest_v1 = {
+    "id": "icon-ownership",
+    "name": "Icon Ownership",
+    "version": "1.0.0",
+    "description": "Icon lifecycle test.",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "permissions": {},
+    "runtime": {"imports": ["react"], "esm_deps": []},
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client({
+      base + "mobius.json": (200, json.dumps(manifest_v1).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "icon.png": (200, _png_bytes()),
+    }),
+  ):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  override_raw = io.BytesIO()
+  Image.new("RGB", (24, 18), (230, 70, 90)).save(
+    override_raw, format="PNG",
+  )
+  expected_override = icon_assets.normalize_icon(override_raw.getvalue())
+  overridden = client.put(
+    f"/api/apps/{app_id}/icon", content=override_raw.getvalue(), headers=auth,
+  )
+  assert overridden.status_code == 204, overridden.text
+
+  manifest_v2 = {**manifest_v1, "version": "2.0.0", "icon": None}
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client({
+      base + "mobius.json": (200, json.dumps(manifest_v2).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+    }),
+  ):
+    updated = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+
+  assert updated.status_code == 201, updated.text
+  assert updated.json()["mode"] == "update"
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.icon_png is None
+  assert row.icon_override_png == expected_override
+  assert client.get(f"/api/apps/{app_id}/icon").content == expected_override
+
+  reset = client.put(f"/api/apps/{app_id}/icon", content=b"", headers=auth)
+  assert reset.status_code == 204, reset.text
+  assert client.get(f"/api/apps/{app_id}/icon").status_code == 404
+
+
+def test_store_update_preserves_pre_split_owner_icon_before_replacing_package(
+  client, auth, db, bypass_url_validation,
+):
+  """A Store update classifies legacy effective bytes before writing package."""
+  from app import icon_assets, models
+  from PIL import Image
+
+  def colored_icon(color):
+    raw = io.BytesIO()
+    Image.new("RGB", (24, 18), color).save(raw, format="PNG")
+    return raw.getvalue()
+
+  base = "https://legacy-icons.test/repo/"
+  package_v1_raw = colored_icon((40, 90, 180))
+  manifest_v1 = {
+    "id": "legacy-icon-ownership",
+    "name": "Legacy Icon Ownership",
+    "version": "1.0.0",
+    "description": "Icon migration test.",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "permissions": {},
+    "runtime": {"imports": ["react"], "esm_deps": []},
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client({
+      base + "mobius.json": (200, json.dumps(manifest_v1).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "icon.png": (200, package_v1_raw),
+    }),
+  ):
+    installed = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  owner_icon = icon_assets.normalize_icon(colored_icon((230, 70, 90)))
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  row.icon_png = owner_icon
+  row.icon_override_png = None
+  row.icon_ownership_split = False
+  db.commit()
+
+  package_v2_raw = colored_icon((50, 180, 100))
+  manifest_v2 = {**manifest_v1, "version": "2.0.0"}
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client({
+      base + "mobius.json": (200, json.dumps(manifest_v2).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "icon.png": (200, package_v2_raw),
+    }),
+  ):
+    updated = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": base + "mobius.json"},
+    )
+
+  assert updated.status_code == 201, updated.text
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.icon_png == icon_assets.normalize_icon(package_v2_raw)
+  assert row.icon_override_png == owner_icon
+  assert row.icon_ownership_split is True
+  assert row.effective_icon_png == owner_icon
+
+  reset = client.put(f"/api/apps/{app_id}/icon", content=b"", headers=auth)
+  assert reset.status_code == 204, reset.text
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.icon_override_png is None
+  assert row.effective_icon_png == icon_assets.normalize_icon(package_v2_raw)
+
+
 @pytest.mark.parametrize("legacy_shape", ["mobius.json", "bare", "trailing"])
 def test_update_matches_legacy_manifest_url_shape_in_place(
     legacy_shape, client, db, auth, bypass_url_validation):

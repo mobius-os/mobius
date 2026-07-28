@@ -17,6 +17,7 @@ export function deriveActiveAssistantSelection({
   turnActive,
   messages,
   streamItems,
+  liveItemsRetired = false,
   findBridgeIndex,
 }) {
   const bridgeMsgIdx = turnActive ? findBridgeIndex(messages) : -1
@@ -31,6 +32,14 @@ export function deriveActiveAssistantSelection({
   const trailingAssistantPartialMsg = trailingAssistantPartialIdx >= 0
     ? messages[trailingAssistantPartialIdx]
     : null
+  // Promotion records the exact streamItems array that was painted when its
+  // content moved into the durable transcript. A query-cache publish can expose
+  // that durable row before React applies clearStreamItems; suppress only that
+  // explicitly retired array. A ref/state mismatch alone is insufficient: a
+  // legitimate continuation can advance latestItemsRef before its next paint.
+  const staleLiveAssistantAfterPromotion = !!(
+    hasLiveAssistantPayload && liveItemsRetired
+  )
   const bridgeAssistantSurface = chooseActiveAssistantSurface(
     bridgeMsg,
     streamItems,
@@ -59,7 +68,7 @@ export function deriveActiveAssistantSelection({
     activeMirrorMsg
     && (!hasLiveAssistantPayload || selectedSurface.suppressStream)
   )
-  const showActiveAssistantSurface = !!(
+  const showActiveAssistantSurface = !staleLiveAssistantAfterPromotion && !!(
     useDbActivePayload ? activeMirrorMsg : hasLiveAssistantPayload
   )
 
@@ -69,6 +78,7 @@ export function deriveActiveAssistantSelection({
     bridgeMsgIdx,
     hasLiveAssistantPayload,
     showActiveAssistantSurface,
+    staleLiveAssistantAfterPromotion,
     trailingAssistantPartialIdx,
     useDbActivePayload,
     activeAssistantIsStreaming: !!(

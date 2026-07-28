@@ -1,9 +1,7 @@
-import { useState, useEffect } from 'react'
-import { createPortal } from 'react-dom'
+import { useEffect, useState } from 'react'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
-import ImageLightbox from './markdown/ImageLightbox.jsx'
-import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
+import ImagePreviewButton from './ImagePreviewButton.jsx'
 
 export default function Attachments({ attachments, chatId }) {
   if (!attachments || attachments.length === 0) return null
@@ -55,32 +53,14 @@ export default function Attachments({ attachments, chatId }) {
 }
 
 function AttachImage({ src, alt }) {
-  const [open, setOpen] = useState(false)
-  const historyDismiss = useHistoryDismiss(() => setOpen(false))
   // Don't render the image until we have a token (src would 403 without one).
   if (!src.includes('?token=')) return null
   return (
-    <>
-      <button
-        type="button"
-        className="chat__attach-thumb-button"
-        aria-label={`Open ${alt || 'attached image'} preview`}
-        onClick={() => {
-          historyDismiss.open()
-          setOpen(true)
-        }}
-      >
-        <img
-          className="chat__attach-thumb"
-          src={src}
-          alt={alt}
-          loading="lazy"
-        />
-      </button>
-      {open && createPortal(
-        <ImageLightbox src={src} alt={alt} onClose={historyDismiss.close} />,
-        document.body,
-      )}
-    </>
+    <ImagePreviewButton
+      src={src}
+      alt={alt || 'attached image'}
+      buttonClassName="chat__attach-thumb-button"
+      imageClassName="chat__attach-thumb"
+    />
   )
 }

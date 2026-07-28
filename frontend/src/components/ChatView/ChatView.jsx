@@ -12,9 +12,7 @@ import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
-import useScrollMode, {
-  shouldPinSend,
-} from './useScrollMode.js'
+import useScrollMode from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useFileUpload from './useFileUpload.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
@@ -583,11 +581,12 @@ export default function ChatView({
   // synchronous access (handleStop's pre-await clear, fetchMessages'
   // cid preservation).
   const pendingQueue = usePendingQueue(cached?.pending_messages || [])
-  const queuedContinuationLocalPromotedRef = useRef(null)
-  const queuedContinuationPinIntentRef = useRef(null)
-  const queuedPinIntentByCidRef = useRef(new Map())
-  const steerPinIntentRef = useRef(null)
-  const inlineSteerPinIntentRef = useRef(null)
+  // Every delayed visible user row carries one opaque scroll intent under the
+  // same stable cid that owns its queue/transcript identity. A queued
+  // continuation temporarily moves its rows + intent into one envelope while
+  // the previous assistant turn finishes.
+  const queuedContinuationRef = useRef(null)
+  const sendIntentByCidRef = useRef(new Map())
   const runtimeReconnectInFlightRef = useRef(false)
   const swReloadHoldTimerRef = useRef(null)
 
@@ -812,35 +811,34 @@ export default function ChatView({
   // keyboard handling, diagnostics, and hide-then-reveal restore on mount.
   //
   // The hook returns:
-  //   • modeRef               — read-only to ChatView for submit snapshots.
-  //                             Lifecycle changes go through the returned
-  //                             semantic controller methods below.
   //   • gestureWindowUntilRef — read by handleScroll to gate pagination
   //                             on user-driven scrolls only.
-  //   • userScrollIntentVersionRef
-  //                           — bumped only by human scroll input; delayed
-  //                             queued/steered sends honor their pin intent
-  //                             only if this has not changed since submit.
+  //   • capture/commit/settle send intent
+  //                           — the only boundary for submit geometry,
+  //                             stale-gesture cancellation, and delayed pins.
   //   • revealed              — apply to .chat__scroll style for the
   //                             hide-then-reveal scroll restore.
   //
   // See useScrollMode.js + ARCHITECTURE.md "Chat scroll + steer
   // contract" for full design.
+  // Promotion may publish the durable assistant row through the query cache
+  // before React paints clearStreamItems. Remember the exact currently-painted
+  // array at that boundary so selection can retire only that surface, never a
+  // later continuation that merely happens to lag latestItemsRef by one render.
+  const retiredAssistantItemsRef = useRef(null)
   const {
-    modeRef,
     gestureWindowUntilRef,
-    userScrollIntentVersionRef,
     revealed,
     anchorPagination,
-    armSentMessage,
-    closePreSendGestureWindow,
+    captureSendIntent,
+    commitSendIntent,
     freezeChatExit,
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
     reapplyActiveMode,
-    settleNonPin,
+    settleSendIntent,
     settleStreamingPin,
     paneResized,
   } = useScrollMode({
@@ -883,41 +881,41 @@ export default function ChatView({
     if (hidden) freezeChatExit()
   }, [hidden, freezeChatExit])
 
-  function makeSendPinIntent(willPin) {
-    return {
-      willPin: !!willPin,
-      userScrollIntentVersion: userScrollIntentVersionRef.current,
-    }
-  }
-
-  function pinIntentStillCurrent(intent) {
-    return !!intent
-      && intent.userScrollIntentVersion === userScrollIntentVersionRef.current
-  }
-
-  function rememberQueuedPinIntent(cid, intent) {
+  function rememberSendIntent(cid, intent) {
     if (!cid || !intent) return
-    queuedPinIntentByCidRef.current.set(cid, intent)
+    sendIntentByCidRef.current.set(cid, intent)
   }
 
-  function forgetQueuedPinIntent({ cid = null, cidList = null } = {}) {
-    if (cid) queuedPinIntentByCidRef.current.delete(cid)
+  function forgetSendIntent({ cid = null, cidList = null } = {}) {
+    if (cid) sendIntentByCidRef.current.delete(cid)
     if (Array.isArray(cidList)) {
-      for (const value of cidList) queuedPinIntentByCidRef.current.delete(value)
+      for (const value of cidList) sendIntentByCidRef.current.delete(value)
     }
   }
 
-  function takeQueuedPinIntent(cid) {
+  function takeSendIntent(cid) {
     if (!cid) return null
-    const intent = queuedPinIntentByCidRef.current.get(cid) || null
-    queuedPinIntentByCidRef.current.delete(cid)
+    const intent = sendIntentByCidRef.current.get(cid) || null
+    sendIntentByCidRef.current.delete(cid)
     return intent
   }
 
-  function forgetAllQueuedPinIntents() {
-    queuedPinIntentByCidRef.current.clear()
-    queuedContinuationPinIntentRef.current = null
-    inlineSteerPinIntentRef.current = null
+  function replaceSendIntent(cid, intent) {
+    if (!cid || !intent) return null
+    const previous = sendIntentByCidRef.current.get(cid) || null
+    sendIntentByCidRef.current.set(cid, intent)
+    return previous
+  }
+
+  function restoreReplacedSendIntent(cid, replacement, previous) {
+    if (!cid || sendIntentByCidRef.current.get(cid) !== replacement) return
+    if (previous) sendIntentByCidRef.current.set(cid, previous)
+    else sendIntentByCidRef.current.delete(cid)
+  }
+
+  function forgetAllSendIntents() {
+    sendIntentByCidRef.current.clear()
+    queuedContinuationRef.current = null
   }
 
   // The first-message exception is shared by every direct/promotion/steer
@@ -930,16 +928,11 @@ export default function ChatView({
     return !stateHasUser && !domHasUser
   }
 
-  // Every send/steer/promote enters the scroll controller through this one
-  // semantic event. ChatView resolves delayed-intent staleness; the controller
-  // owns the actual PIN-vs-hold transition and the later automatic writes. The
-  // pin targets the stable `cid` carried by the DOM row from mint.
-  function pinSentMessage(cid, { willPin, intent } = {}) {
-    armSentMessage({
-      cid,
-      willPin,
-      intentCurrent: !intent || pinIntentStillCurrent(intent),
-    })
+  // Every send/steer/promote lands through one semantic controller event. The
+  // intent stays opaque here; the controller alone decides whether a later real
+  // reader scroll invalidated it.
+  function landSentMessage(cid, { intent, fallbackWillPin = false } = {}) {
+    commitSendIntent({ cid, intent, fallbackWillPin })
   }
 
   // Re-fetch messages from the API. Called when the SSE stream reconnects
@@ -1147,10 +1140,10 @@ export default function ChatView({
         // The local queue was already trimmed when the
         // queued_turn_starting event arrived, so a message queued after
         // that event cannot be accidentally folded into this turn here.
-        const localPromoted = queuedContinuationLocalPromotedRef.current
-        queuedContinuationLocalPromotedRef.current = null
-        const continuationPinIntent = queuedContinuationPinIntentRef.current
-        queuedContinuationPinIntentRef.current = null
+        const continuation = queuedContinuationRef.current
+        queuedContinuationRef.current = null
+        const localPromoted = continuation?.rows || null
+        const continuationPinIntent = continuation?.intent || null
         const promotedRows = continuationRowsFromPromotedMessage(
           promotedMessage,
           localPromoted,
@@ -1164,23 +1157,13 @@ export default function ChatView({
           // below without moving the scroll.
           const contIsFirstUser = isFirstVisibleUserMessage()
           const pinCid = cidOf(promotedRows[0])
-          const fallbackWillPin = () => shouldPinSend({
-            scrollEl: scrollRef.current,
-            mode: modeRef.current,
-            isFirstUserMsg: contIsFirstUser,
-            // The original submit-time intent is unavailable (for example
-            // after a remount). Never infer a delayed pin from the reader's
-            // later position; only the first-message exception remains.
-            wasAtContentBottom: false,
-          })
-          const contWillPin = continuationPinIntent
-            ? continuationPinIntent.willPin
-            : fallbackWillPin()
           commitMessages(prev => appendMessageBatch(prev, promotedRows))
           promotedRef.current = false
-          pinSentMessage(pinCid, {
-            willPin: contWillPin,
+          landSentMessage(pinCid, {
             intent: continuationPinIntent,
+            // A missing delayed intent (for example after remount) degrades to
+            // hold; the first-visible-message exception is the only fallback.
+            fallbackWillPin: contIsFirstUser,
           })
         } else {
           // Server's promoted ts isn't in our local queue (cancel raced
@@ -1191,8 +1174,7 @@ export default function ChatView({
         setSending(true)
         setServerRunningState(true)
       } else {
-        queuedContinuationLocalPromotedRef.current = null
-        queuedContinuationPinIntentRef.current = null
+        queuedContinuationRef.current = null
         setSending(false)
         sendingRef.current = false
         setServerRunningState(false)
@@ -1233,8 +1215,7 @@ export default function ChatView({
       const localPromoted = Array.isArray(consumedCids)
         ? pendingQueue.promoteManyByCid(consumedCids)
         : pendingQueue.promoteAll()
-      queuedContinuationLocalPromotedRef.current =
-        serverRows?.length ? serverRows : localPromoted
+      const continuationRows = serverRows?.length ? serverRows : localPromoted
       // The pin intent was stamped at submit under the queued row's cid; the
       // backend echoes those cids back as _consumed_cids (or the promoted row
       // carries the head cid). Look it up by the head cid.
@@ -1243,7 +1224,11 @@ export default function ChatView({
         || localPromoted
         || (Array.isArray(consumedCids) ? { cid: consumedCids[0] } : null),
       )
-      queuedContinuationPinIntentRef.current = takeQueuedPinIntent(pinCid)
+      queuedContinuationRef.current = {
+        rows: continuationRows,
+        intent: takeSendIntent(pinCid),
+      }
+      forgetSendIntent({ cidList: consumedCids })
     },
     onLiveQuestion: setLiveQuestionId,
     onSteeredIntoTurn: ({ ts, content, messages: steeredBatch }) => {
@@ -1285,26 +1270,18 @@ export default function ChatView({
           }
         })
       const pinCid = cidOf(steeredMessages[0])
-      const pinIntent = steerPinIntentRef.current
-        || inlineSteerPinIntentRef.current
-        || takeQueuedPinIntent(pinCid)
-      inlineSteerPinIntentRef.current = null
+      const pinIntent = takeSendIntent(pinCid)
       promoteStreamToMessages({ keepTurnOpen: true })
       const steeredIsFirstUser = isFirstVisibleUserMessage()
-      const fallbackWillPin = () => shouldPinSend({
-        scrollEl: scrollRef.current,
-        mode: modeRef.current,
-        isFirstUserMsg: steeredIsFirstUser,
-        // A missing submit-time intent must degrade to hold, not infer a pin
-        // from wherever the reader happens to be when the SSE event arrives.
-        wasAtContentBottom: false,
-      })
-      const steerWillPin = pinIntent ? pinIntent.willPin : fallbackWillPin()
       // Arm the scroll mode BEFORE rendering the steered row. EventSource
       // callbacks are outside React's synthetic event layer, and query-cache
       // listeners can observe the transcript update immediately; setting the
       // mode first prevents a one-frame "row appears low, then snaps up" steer.
-      pinSentMessage(pinCid, { willPin: steerWillPin, intent: pinIntent })
+      landSentMessage(pinCid, {
+        intent: pinIntent,
+        // Never infer a delayed pin from the reader's later position.
+        fallbackWillPin: steeredIsFirstUser,
+      })
       // Dedup by ts so a reconnect's catch-up replay of the same event
       // can't double-insert the steered user message. Insert by transcript ts
       // instead of blindly appending: if a fetch/replay already committed the
@@ -1319,9 +1296,14 @@ export default function ChatView({
         const cid = cidOf(msg)
         if (cid != null) pendingQueue.cancelByCid(cid)
       }
-      steerPinIntentRef.current = null
+      forgetSendIntent({ cidList: steeredMessages.map(cidOf) })
     },
   })
+  useEffect(() => {
+    if (retiredAssistantItemsRef.current !== streamItems) {
+      retiredAssistantItemsRef.current = null
+    }
+  }, [streamItems])
 
   // System run activity is a structured sequence, not a running boolean: it
   // preserves coalesced start+finish events. Reconciliation is single-flight
@@ -1641,6 +1623,12 @@ export default function ChatView({
     // Promotion ends this active row. A queued/steered continuation must seed
     // its own anchor instead of inheriting a bridged DB key.
     activeAssistantDataKeyRef.current = null
+    // commitMessages publishes through the query cache synchronously. Mark the
+    // exact painted array before that publish so a render in the narrow
+    // publish→clear gap cannot show both the durable row and its retired live
+    // surface. This deliberately records streamItems (painted state), not
+    // latestItemsRef (which may already contain a newer buffered frame).
+    retiredAssistantItemsRef.current = streamItems
     commitMessages(
       prev => promoteAssistantStream(prev, { items, bridgeTs }),
       undefined,
@@ -2055,20 +2043,13 @@ export default function ChatView({
     // gesture/layout by a frame. Mobile blur can resize/clamp the viewport, so
     // capture the complete decision before it.
     const isFirstUserMsgAtSubmit = isFirstVisibleUserMessage()
-    const willPinAtSubmit = pin && shouldPinSend({
-      scrollEl: scrollRef.current,
-      mode: modeRef.current,
+    const sendPinIntent = captureSendIntent({
+      canPin: pin,
       isFirstUserMsg: isFirstUserMsgAtSubmit,
     })
-    const sendPinIntent = makeSendPinIntent(willPinAtSubmit)
-    // Sending is a newer explicit action than the wheel/touch gesture that
-    // positioned the viewport for that send. Browsers update scrollTop
-    // synchronously but may dispatch the matching `scroll` event later; if the
-    // old gesture window stays open, that delayed event can land after this
-    // snapshot and cancel the brand-new PIN before its spacer is measured.
-    // Close only the PRE-SEND ownership window. Any wheel/touch/key input that
-    // begins after this line opens a fresh window and still wins normally.
-    closePreSendGestureWindow()
+    // captureSendIntent atomically snapshots current geometry and supersedes
+    // the older gesture that positioned it. Any input begun after this point
+    // opens fresh reader ownership and still wins normally.
 
     const queuesBehindActiveTurn = !!(
       sendingRef.current
@@ -2148,12 +2129,10 @@ export default function ChatView({
       // rule as a fresh send. The at-bottom / following decision and the
       // first-user check must reflect the moment of sending — reading them
       // AFTER `await streamSend(...)` lets a scroll during the POST flip the
-      // decision. The user-scroll intent version lets us detect such a scroll
-      // and yield to it (a user-driven scroll after send is the newer intent).
-      const queuedWillPin = willPinAtSubmit
+      // decision. The opaque controller intent detects such a scroll and yields
+      // to it (a user-driven scroll after send is the newer intent).
       const queuedPinIntent = sendPinIntent
-      rememberQueuedPinIntent(cid, queuedPinIntent)
-      inlineSteerPinIntentRef.current = queuedPinIntent
+      rememberSendIntent(cid, queuedPinIntent)
       setComposerInput('')
       clearComposerFilesForSend()
       if (inputRef.current) {
@@ -2185,8 +2164,7 @@ export default function ChatView({
           // Remove only this send's optimistic tray row; an unrelated live
           // turn may still be streaming and must remain attached.
           if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
-          forgetQueuedPinIntent({ cid: queuedMsg.cid })
-          inlineSteerPinIntentRef.current = null
+          forgetSendIntent({ cid: queuedMsg.cid })
           const durableRows = startedMessagesFromResponse(result)
           if (durableRows) {
             commitMessages(prev => appendMessageBatch(prev, durableRows))
@@ -2258,11 +2236,8 @@ export default function ChatView({
             // it's a new visible user message and follows the send rule just
             // like a fresh send. The pin targets the stable cid (the started
             // row carries the same cid the client minted).
-            pinSentMessage(cid, {
-              willPin: queuedWillPin,
-              intent: queuedPinIntent,
-            })
-            forgetQueuedPinIntent({
+            landSentMessage(cid, { intent: queuedPinIntent })
+            forgetSendIntent({
               cid,
               cidList: result.message?._consumed_cids,
             })
@@ -2277,7 +2252,8 @@ export default function ChatView({
             // the message inline; Claude's deferred cut will do so when its
             // interrupt boundary lands. Until then the durable server reserve
             // stays intentionally invisible rather than flashing as queued.
-            forgetQueuedPinIntent({ cid: queuedMsg.cid })
+            // Keep its cid-keyed intent until that authoritative cut consumes
+            // it; response and SSE delivery can arrive in either order.
           } else if (result.cut_deferred) {
             // Claude: the transcript split waits for the runner's interrupt
             // boundary, so the row is STILL queued server-side and its tray
@@ -2304,18 +2280,13 @@ export default function ChatView({
               position: serverRow?.position,
               serverMsg: serverRow,
             })
-            // The pin intent lives on in `inlineSteerPinIntentRef` (set at
-            // submit), which is what `onSteeredIntoTurn` reads at the cut. Its
-            // `takeQueuedPinIntent` fallback is short-circuited by that ref, so
-            // without this the map entry would never be taken and would leak
-            // for the life of the mounted chat.
-            forgetQueuedPinIntent({ cid: queuedMsg.cid })
+            // Its cid-keyed intent remains beside the durable queued row until
+            // the cut consumes both, regardless of response/event order.
           } else {
             // Codex: the split already ran at the route, so the row is in the
             // transcript and `steered_into_turn` (already sent) renders it
             // inline — drop the optimistic queued-tray entry, it never queued.
             pendingQueue.cancelByCid(queuedMsg.cid)
-            forgetQueuedPinIntent({ cid: queuedMsg.cid })
           }
         }
         // Race: server said "started" though we expected queued.
@@ -2330,8 +2301,8 @@ export default function ChatView({
           // the first message of a NEW run, so the rail resets here too.
           setBuildPhases(railAtRunStart())
           setActiveGoalState(goalObjectiveFromText(text))
-          // Apply the send rule before appending — see shouldPinSend and
-          // the fresh-send path. A message that raced into a started turn
+          // Apply the shared send-intent rule before appending. A message that
+          // raced into a started turn
           // is still a new send becoming the active turn, so it pins only
           // when first-or-at-bottom. The decision was captured at send time.
           const startedMessages = startedMessagesFromResponse(result)
@@ -2347,11 +2318,8 @@ export default function ChatView({
           // New visible user msg → pin the stable cid to the top when the rule
           // allows; otherwise the funnel retires any stale pin to the reader's
           // anchor and reservation stays available below.
-          pinSentMessage(cid, {
-            willPin: queuedWillPin,
-            intent: queuedPinIntent,
-          })
-          forgetQueuedPinIntent({
+          landSentMessage(cid, { intent: queuedPinIntent })
+          forgetSendIntent({
             cid,
             cidList: result.message?._consumed_cids,
           })
@@ -2360,9 +2328,6 @@ export default function ChatView({
           // fresh assistant instead of replacing whichever message
           // is currently last.
           bridgeHook.markBridged()
-        }
-        if (result?.status !== 'steered') {
-          inlineSteerPinIntentRef.current = null
         }
         // Invariant: every observable queue-path status must resolve
         // the optimistic entry's in-flight flag. queued/steered/started
@@ -2384,8 +2349,7 @@ export default function ChatView({
       } catch (err) {
         // Roll back optimistic + restore input.
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
-        forgetQueuedPinIntent({ cid: queuedMsg.cid })
-        inlineSteerPinIntentRef.current = null
+        forgetSendIntent({ cid: queuedMsg.cid })
         rememberFailedAttempt({
           cid,
           draftIdentity,
@@ -2417,7 +2381,6 @@ export default function ChatView({
     // Direct sends use the same submit-time decision as queued/steered sends.
     // A legitimate pin changes FOLLOW_BOTTOM to PIN_USER_MSG, so reply growth
     // stays below the prompt until the user manually scrolls to the bottom.
-    const willPin = willPinAtSubmit
     // The send-time pin intent, carried across the async POST so a user scroll
     // that lands during it can still win. The pinned row's identity is the
     // minted `cid`, which the optimistic row and the confirmed server row
@@ -2440,7 +2403,7 @@ export default function ChatView({
     // on every send and, when not pinning, retires any stale PIN to the
     // reader's anchor so their viewport stays fixed. The row carries its final
     // cid from mint, so the pin lands on the first apply.
-    pinSentMessage(cid, { willPin, intent: freshPinIntent })
+    landSentMessage(cid, { intent: freshPinIntent })
     // Fresh turn — not a bridge from a mounted DB partial.
     bridgeHook.markBridged()
 
@@ -2525,20 +2488,18 @@ export default function ChatView({
             pendingQueue.promoteManyByCid(result.message._consumed_cids)
           }
           const startedMessages = startedMessagesFromResponse(result)
-          pinSentMessage(cid, { willPin, intent: freshPinIntent })
+          landSentMessage(cid, { intent: freshPinIntent })
           if (startedMessages) {
             commitMessages(prev => appendMessageBatch(prev, startedMessages))
           }
           return
         }
         if (!result.started) {
-          const queuedPinStillValid = pinIntentStillCurrent(freshPinIntent)
-          if (queuedPinStillValid) {
-            settleNonPin({
-              retireFollow: pin,
-              event: 'send:not-started-hold',
-            })
-          }
+          settleSendIntent({
+            intent: freshPinIntent,
+            retireFollow: pin,
+            event: 'send:not-started-hold',
+          })
           setSending(false)
           setServerRunningState(false)
         }
@@ -2549,7 +2510,7 @@ export default function ChatView({
         // The started row carries the same cid the client minted, so the pin
         // targets that cid directly — no retarget from optimistic to canonical
         // ts, and no last-row fallback. The funnel owns arming + staleness.
-        pinSentMessage(cid, { willPin, intent: freshPinIntent })
+        landSentMessage(cid, { intent: freshPinIntent })
         commitMessages(prev => {
           return replaceOptimisticWithBatch(prev, cid, startedMessages)
         })
@@ -2787,7 +2748,7 @@ export default function ChatView({
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
     pendingQueue.cancelByCid(cid)
-    forgetQueuedPinIntent({ cid })
+    forgetSendIntent({ cid })
     try {
       const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
         method: 'DELETE',
@@ -2895,7 +2856,7 @@ export default function ChatView({
       // at all. pendingQueue.clear() updates pendingMessagesRef.current to
       // [] before this line returns (synchronous).
       fetchGenRef.current += 1
-      forgetAllQueuedPinIntents()
+      forgetAllSendIntents()
       pendingQueue.clear()
 
       let stoppedCleanly = false
@@ -3130,18 +3091,21 @@ export default function ChatView({
     }
     if (!hasSendablePayload(content, attachments)) return
 
+    const steerCid = consumePendingCids[0] || null
+    let explicitSteerIntent = null
+    let previousSendIntent = null
     try {
       const steerIsFirstUser = isFirstVisibleUserMessage()
       // Fast-forward is a deliberate visibility action, unlike automatic
       // queue drain. Capture the reader's ACTUAL position now: bottom pins,
       // reading elsewhere holds. A later real scroll during the POST still
-      // invalidates this snapshot through the intent version.
-      const steerWillPin = shouldPinSend({
-        scrollEl: scrollRef.current,
-        mode: modeRef.current,
+      // invalidates this opaque intent inside the scroll controller. Capturing
+      // also cancels any older quiet settlement, which is what previously
+      // overwrote the new pin and made the row bounce before settling.
+      explicitSteerIntent = captureSendIntent({
         isFirstUserMsg: steerIsFirstUser,
       })
-      steerPinIntentRef.current = makeSendPinIntent(steerWillPin)
+      previousSendIntent = replaceSendIntent(steerCid, explicitSteerIntent)
       // Queue-only sends deliberately retain mobile focus. Fast-forward is
       // the explicit hand-off point, but snapshot reader position BEFORE
       // blurring: keyboard dismissal resizes the viewport and can otherwise
@@ -3178,17 +3142,24 @@ export default function ChatView({
           // cids.
           for (const c of consumePendingCids) pendingQueue.cancelByCid(c)
         }
-        forgetQueuedPinIntent({ cidList: consumePendingCids })
       }
       if (result?.status !== 'steered') {
-        steerPinIntentRef.current = null
+        restoreReplacedSendIntent(
+          steerCid,
+          explicitSteerIntent,
+          previousSendIntent,
+        )
         pendingQueue.releaseSteerReservation(consumePendingCids)
       }
       // not_steered (the turn closed between the gate and the POST) or any
       // other status: release the unchanged queue back to the tray and let it
       // drain at turn-end.
     } catch {
-      steerPinIntentRef.current = null
+      restoreReplacedSendIntent(
+        steerCid,
+        explicitSteerIntent,
+        previousSendIntent,
+      )
       pendingQueue.releaseSteerReservation(consumePendingCids)
       // Network/POST error — show the unchanged queue for the turn-end drain.
     }
@@ -3499,6 +3470,7 @@ export default function ChatView({
     turnActive,
     messages,
     streamItems,
+    liveItemsRetired: retiredAssistantItemsRef.current === streamItems,
     findBridgeIndex: bridgeHook.findBridgeIndex,
   }), [
     bridgeMountInputs,
@@ -3813,6 +3785,7 @@ export default function ChatView({
             )
           ) : (
             <div className="chat__empty">
+              <img className="chat__empty-glyph" src="/moebius.png" alt="" width="120" height="120" />
               <p className="chat__empty-title">What's on your mind?</p>
             </div>
           )}

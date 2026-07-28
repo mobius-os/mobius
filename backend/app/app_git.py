@@ -2017,8 +2017,9 @@ _APP_VERSION_RE = re.compile(
 )
 
 
-def _blob_at(repo: Path, ref: str, rel: str) -> bytes | None:
+def read_blob(source_dir: str | Path, ref: str, rel: str) -> bytes | None:
   """Raw bytes of `rel` at `ref`, or None if the path is absent there."""
+  repo = Path(source_dir)
   proc = subprocess.run(
     ["git", "-C", str(repo), "cat-file", "-p", f"{ref}:{rel}"],
     capture_output=True, timeout=_GIT_TIMEOUT, check=False, env=_git_env(repo),
@@ -2175,9 +2176,9 @@ def resolve_version_only_conflict(
     return None
   resolved: dict[str, bytes] = {}
   for rel in merge_conflicts:
-    ours = _blob_at(repo, LOCAL_BRANCH, rel)
-    theirs = _blob_at(repo, UPSTREAM_BRANCH, rel)
-    base_blob = _blob_at(repo, base_ref, rel)
+    ours = read_blob(repo, LOCAL_BRANCH, rel)
+    theirs = read_blob(repo, UPSTREAM_BRANCH, rel)
+    base_blob = read_blob(repo, base_ref, rel)
     # An add/add or delete conflict (a side missing the file) is not the
     # version-bump shape; leave it to the owner.
     if ours is None or theirs is None or base_blob is None:

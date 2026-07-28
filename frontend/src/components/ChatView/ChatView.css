@@ -107,12 +107,12 @@
 }
 
 /* Empty state: centered in the available chat area, with a FIXED
-   bottom reservation so the composer doesn't overlap the prompt.
-   Centering means the prompt moves up when the visible viewport
+   bottom reservation so the composer doesn't overlap the logo.
+   Centering means the cluster moves up when the visible viewport
    shrinks (keyboard open via `interactive-widget=resizes-content`)
    — the chat container itself gets shorter, so the centerpoint
    moves up. The bottom padding is a CONSTANT (not --composer-h)
-   so multi-line input growth doesn't push the prompt up; only
+   so multi-line input growth doesn't push the cluster up; only
    the keyboard does. 140px clears a typical multi-line composer;
    if the user composes a wall of text on the empty state, slight
    overlap is acceptable. */
@@ -193,10 +193,21 @@
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 24px;
+  padding: 72px 24px 24px;
   gap: 12px;
   max-width: 768px;
   margin: 0 auto;
+  /* Lift the empty-state cluster (logo + title + sub) ~5% above
+     the visual centerline so it doesn't feel buried by the
+     composer at the bottom. */
+  transform: translateY(-5%);
+}
+
+.chat__empty-glyph {
+  width: 96px;
+  height: 96px;
+  opacity: 0.88;
+  margin-bottom: 2px;
 }
 
 /* .chat__empty-title lives in index.css so theme toggles keep it stable. */
@@ -865,6 +876,18 @@
   background: var(--surface);
 }
 
+/* A viewed image is already named by its disclosure row. Expanding it reveals
+   the image directly—not a second path field inside a nested result card. */
+.chat__tool--image.chat__tool--compact .chat__tool-detail,
+.chat__activity-timeline .chat__tool--image .chat__tool-detail {
+  max-height: none;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
 /* The header is a real <button> when there's detail to disclose (keyboard
    operable) and a static div otherwise; the button resets below keep both
    looking identical to the old clickable div. */
@@ -1016,14 +1039,14 @@
 }
 
 .chat__source-chip {
-  display: inline-flex;
+  display: flex;
   box-sizing: border-box;
   align-items: center;
   gap: 6px;
   min-width: 0;
   min-height: 32px;
-  width: auto;
-  max-width: 260px;
+  width: 100%;
+  max-width: none;
   padding: 4px 9px 4px 5px;
   border-radius: 999px;
   color: var(--text); /* CONTRACT: readable source text on opaque fill */
@@ -1076,6 +1099,7 @@
 
 .chat__source-title {
   min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1100,24 +1124,20 @@
 
 /* The turn's sources, after the answer (MessageSources). */
 .chat__sources {
-  display: flex;
   box-sizing: border-box;
-  align-items: flex-start;
-  flex-wrap: wrap;
   width: 100%;
   max-width: 100%;
-  gap: 5px;
   padding: 2px 8px;
 }
 
 .chat__sources-list {
-  display: flex;
+  display: grid;
   box-sizing: border-box;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   min-width: 0;
+  width: 100%;
   max-width: 100%;
-  flex: 1 1 auto;
-  flex-wrap: wrap;
-  gap: 5px;
+  gap: 6px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1125,9 +1145,16 @@
 
 .chat__source-item {
   display: flex;
-  flex: 0 1 auto;
   min-width: 0;
-  max-width: 100%;
+  width: 100%;
+}
+
+.chat__source-item:not(.chat__source-item--web) {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 340px) {
+  .chat__sources-list { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (pointer: coarse) {
@@ -2464,6 +2491,39 @@
   opacity: 0.85;
 }
 
+/* Image-view tools are visual results, not JSON inspectors. Keep a useful
+   in-panel preview while the shared lightbox owns full-size zoom and saving. */
+.chat__tool-image-button {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  cursor: zoom-in;
+}
+
+.chat__tool-image-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chat__tool-image {
+  display: block;
+  width: auto;
+  max-width: min(100%, 520px);
+  max-height: min(420px, 52vh);
+  object-fit: contain;
+}
+
+.chat__tool-image-status {
+  display: block;
+  color: var(--muted);
+}
+
 .chat__attach-file {
   display: inline-flex;
   align-items: center;
@@ -2700,6 +2760,7 @@
 .queued {
   /* Same column as the composer/rail/CTA (720px) — the tray previously sat
      48px wider than the pill it feeds (owner catch, 2026-07-17). */
+  width: 100%;
   max-width: 720px;
   margin: 0 auto 8px;
   background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
@@ -2785,7 +2846,7 @@
 .queued__row {
   display: flex;
   align-items: flex-start;
-  gap: 4px;
+  gap: 0;
   border-radius: 8px;
   transition: background 0.15s;
 }
@@ -2799,6 +2860,7 @@
   display: flex;
   align-items: flex-start;
   gap: 6px;
+  margin-right: 4px;
   padding: 8px 6px 8px 10px;
   background: none;
   border: none;
@@ -2839,7 +2901,8 @@
   text-overflow: ellipsis;
 }
 
-.queued__steer {
+.queued__action {
+  --queued-action-visual-shift: 0px;
   flex-shrink: 0;
   width: 44px;
   height: 44px;
@@ -2847,49 +2910,103 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: none;
+  position: relative;
+  isolation: isolate;
+  background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--muted); /* CONTRACT: low-contrast icon on opaque fill */
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: color 0.15s;
 }
 
-.queued__steer:hover {
-  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
-  color: var(--accent); /* CONTRACT: vivid accent — this action feeds the live turn */
+.queued__action::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border-light); /* CONTRACT: subtle hairline around the visible action well */
+  border-radius: 9px;
+  background: var(--surface2); /* CONTRACT: neutral compact well inside the full 44px target */
+  transform: translateX(var(--queued-action-visual-shift));
+  transition:
+    background-color 0.15s,
+    border-color 0.15s,
+    box-shadow 0.15s,
+    transform 0.08s;
 }
 
-.queued__steer:disabled {
+.queued__action svg {
+  display: block;
+  position: relative;
+  z-index: 1;
+  transform: translateX(var(--queued-action-visual-shift));
+  transition: transform 0.08s;
+}
+
+.queued__steer {
+  --queued-action-visual-shift: 3px;
+}
+
+.queued__cancel {
+  --queued-action-visual-shift: -3px;
+}
+
+.queued__action:hover::before {
+  transform: translate(var(--queued-action-visual-shift), -1px);
+}
+
+.queued__steer:not(:disabled):hover {
+  color: var(--accent); /* CONTRACT: forwarding stays neutral at rest and reveals its meaning on interaction */
+}
+
+.queued__steer:not(:disabled):hover::before {
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
+}
+
+.queued__cancel:not(:disabled):hover,
+.queued__cancel:not(:disabled):active {
+  color: var(--danger); /* CONTRACT: removal becomes destructive only at interaction */
+}
+
+.queued__cancel:not(:disabled):hover::before,
+.queued__cancel:not(:disabled):active::before {
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--border-light));
+}
+
+.queued__action:active::before,
+.queued__action:active svg {
+  transform: translateX(var(--queued-action-visual-shift)) scale(0.9);
+}
+
+.queued__action:disabled {
   opacity: 0.45;
   cursor: default;
 }
 
-.queued__cancel {
-  flex-shrink: 0;
-  width: 44px;
-  height: 44px;
-  margin: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  border-radius: 6px;
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+.queued__action:disabled:hover::before {
+  transform: translateX(var(--queued-action-visual-shift));
 }
 
-.queued__cancel:hover {
-  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
-  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
+@media (prefers-reduced-motion: reduce) {
+  .queued__action::before,
+  .queued__action svg { transition: none; }
+  .queued__action:hover::before,
+  .queued__action:active::before,
+  .queued__action:active svg {
+    transform: translateX(var(--queued-action-visual-shift));
+  }
 }
 
-.queued__steer:focus-visible,
-.queued__cancel:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+.queued__action:focus-visible {
+  outline: none;
+}
+
+.queued__action:focus-visible::before {
+  box-shadow: 0 0 0 2px var(--accent); /* CONTRACT: focus follows the visible 30px well, not its transparent 44px target */
 }
 
 /* ── Screen-reader-only utility ─────────────────────────────────────────── */

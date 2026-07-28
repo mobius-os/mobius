@@ -32,11 +32,6 @@ export default function AppsDirectory({
       <header className="apps-directory__header">
         <div className="apps-directory__title">
           <h1>Apps</h1>
-          {status === 'success' && query && !empty && (
-            <span aria-live="polite">
-              {resultCount} {resultCount === 1 ? 'match' : 'matches'}
-            </span>
-          )}
         </div>
         <label className="apps-directory__search">
           <Search aria-hidden="true" />
@@ -64,18 +59,34 @@ export default function AppsDirectory({
             <p>Check your connection, then try again.</p>
             <button type="button" onClick={onRetry}>Try again</button>
           </div>
-        ) : empty ? (
-          <div className="apps-directory__empty">
-            <h2>No installed apps yet</h2>
-            <p>Installed apps will appear here as soon as you add one.</p>
-          </div>
-        ) : noMatches ? (
-          <div className="apps-directory__empty" aria-live="polite">
-            <h2>No apps found</h2>
-            <p>Try a different name or keyword.</p>
-          </div>
         ) : (
-          <div className="apps-directory__grid">{children}</div>
+          <>
+            <div className="apps-directory__intro">
+              <div>
+                <h2>Your apps</h2>
+                <p>Everything installed in this Möbius workspace.</p>
+              </div>
+              {query && !empty && (
+                <span aria-live="polite">
+                  {resultCount} {resultCount === 1 ? 'match' : 'matches'}
+                </span>
+              )}
+            </div>
+
+            {empty ? (
+              <div className="apps-directory__empty">
+                <h2>No installed apps yet</h2>
+                <p>Installed apps will appear here as soon as you add one.</p>
+              </div>
+            ) : noMatches ? (
+              <div className="apps-directory__empty" aria-live="polite">
+                <h2>No apps found</h2>
+                <p>Try a different name or keyword.</p>
+              </div>
+            ) : (
+              <div className="apps-directory__grid">{children}</div>
+            )}
+          </>
         )}
       </div>
     </section>

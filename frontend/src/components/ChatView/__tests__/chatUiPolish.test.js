@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const queuedMessages = readFileSync(new URL('../QueuedMessages.jsx', import.meta.url), 'utf8')
 const chatSettingsPanel = readFileSync(
   new URL('../ChatSettingsPanel.jsx', import.meta.url),
   'utf8',
@@ -13,6 +14,12 @@ const chatSettingsPanel = readFileSync(
 function stripComments(css) {
   return css.replace(/\/\*[\s\S]*?\*\//g, '')
 }
+
+test('an empty chat keeps the Möbius brand anchor above its prompt', () => {
+  assert.match(chatView, /src="\/moebius\.png"/)
+  assert.match(chatView, /className="chat__empty-glyph"[\s\S]*?What's on your mind\?/)
+  assert.match(chatCss, /\.chat__empty-glyph\s*\{[\s\S]*?width:\s*96px/)
+})
 
 test('theme transition does not animate every descendant or expensive shadows', () => {
   const css = stripComments(indexCss)
@@ -97,21 +104,34 @@ test('message sources stay inside the assistant row on narrow screens', () => {
   const css = stripComments(chatCss)
   const sourcesRule = css.match(/\.chat__sources\s*\{[^}]*\}/)?.[0] || ''
   const listRule = css.match(/\.chat__sources-list\s*\{[^}]*\}/)?.[0] || ''
+  const itemRule = css.match(/\.chat__source-item\s*\{[^}]*\}/)?.[0] || ''
+  const nonWebItemRule = css.match(/\.chat__source-item:not\(\.chat__source-item--web\)\s*\{[^}]*\}/)?.[0] || ''
+  const chipRule = css.match(/\.chat__source-chip\s*\{[^}]*\}/)?.[0] || ''
 
   assert.match(sourcesRule, /width:\s*100%/,
-    'align-items:flex-start otherwise lets the sources row grow to max-content')
+    'the sources section must fill, but not exceed, the assistant row')
   assert.match(sourcesRule, /max-width:\s*100%/,
     'the source section must not exceed the assistant message')
   assert.match(sourcesRule, /box-sizing:\s*border-box/,
     'section padding must be included in its width, even outside the app reset')
+  assert.match(listRule, /grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/,
+    'source cards should use the available width as two equal columns')
   assert.match(listRule, /min-width:\s*0/,
-    'the flex list must be allowed to shrink long source titles')
+    'the grid must be allowed to shrink long source titles')
+  assert.match(listRule, /width:\s*100%/,
+    'the two source columns should fill the available reading width')
   assert.match(listRule, /max-width:\s*100%/,
     'the source list must stay within its section')
   assert.match(listRule, /margin:\s*0/,
     'browser list margins must not push source cards out of alignment')
   assert.match(listRule, /padding:\s*0/,
     'browser list indentation must not reduce the source card width')
+  assert.match(itemRule, /min-width:\s*0/,
+    'a grid child must be allowed to shrink long source titles')
+  assert.match(nonWebItemRule, /grid-column:\s*1\s*\/\s*-1/,
+    'non-web citations should retain a full row instead of joining the source grid')
+  assert.match(chipRule, /width:\s*100%/,
+    'each source card should fill its grid column')
 })
 
 test('Send, Steer, and Stop never fade through an empty replacement frame', () => {
@@ -144,18 +164,45 @@ test('running activity uses a masked solid-text sweep, not gradient-clipped text
     'the base or sweep text must never depend on transparent text fill')
 })
 
-test('queued row actions expose real touch targets and keyboard focus', () => {
+test('queued row actions share full touch targets with compact visible wells', () => {
   const css = stripComments(chatCss)
+  const trayRule = css.match(/\.queued\s*\{[^}]*\}/)?.[0] || ''
+  const rowRule = css.match(/\.queued__row\s*\{[^}]*\}/)?.[0] || ''
+  const toggleRule = css.match(/\.queued__toggle\s*\{[^}]*\}/)?.[0] || ''
+  const actionRule = css.match(/\.queued__action\s*\{[^}]*\}/)?.[0] || ''
+  const wellRule = css.match(/\.queued__action::before\s*\{[^}]*\}/)?.[0] || ''
+  const iconRule = css.match(/\.queued__action svg\s*\{[^}]*\}/)?.[0] || ''
   const steerRule = css.match(/\.queued__steer\s*\{[^}]*\}/)?.[0] || ''
   const cancelRule = css.match(/\.queued__cancel\s*\{[^}]*\}/)?.[0] || ''
-  const focusRule = css.match(
-    /\.queued__steer:focus-visible,\s*\.queued__cancel:focus-visible\s*\{[^}]*\}/,
-  )?.[0] || ''
+  const focusWellRule = css.match(/\.queued__action:focus-visible::before\s*\{[^}]*\}/)?.[0] || ''
 
-  for (const rule of [steerRule, cancelRule]) {
-    assert.match(rule, /width:\s*44px/)
-    assert.match(rule, /height:\s*44px/)
-  }
-  assert.match(focusRule, /outline:\s*2px solid var\(--accent\)/,
-    'both icon-only actions need a visible keyboard focus indicator')
+  assert.match(trayRule, /width:\s*100%/,
+    'the flex-item tray must shrink with the composer instead of resolving to its 720px maximum')
+  assert.match(trayRule, /max-width:\s*720px/)
+  assert.match(rowRule, /gap:\s*0/,
+    'adjacent action targets should not carry an extra flex gap')
+  assert.match(toggleRule, /margin-right:\s*4px/,
+    'text keeps its breathing room independently of the adjacent action pair')
+  assert.match(actionRule, /width:\s*44px/)
+  assert.match(actionRule, /height:\s*44px/)
+  assert.match(wellRule, /width:\s*30px/)
+  assert.match(wellRule, /height:\s*30px/)
+  assert.match(wellRule, /transform:\s*translateX\(var\(--queued-action-visual-shift\)\)/)
+  assert.match(iconRule, /transform:\s*translateX\(var\(--queued-action-visual-shift\)\)/,
+    'the well and icon should move together inside the stationary touch target')
+  assert.match(steerRule, /--queued-action-visual-shift:\s*3px/)
+  assert.match(cancelRule, /--queued-action-visual-shift:\s*-3px/,
+    'the two 30px visuals move inward while their 44px targets remain adjacent')
+  assert.doesNotMatch(steerRule, /\bcolor:|\bbackground:/,
+    'fast-forward should inherit the neutral action treatment at rest')
+  assert.doesNotMatch(css, /\.queued__steer::before\s*\{/,
+    'fast-forward should inherit the neutral action well at rest')
+  assert.match(css, /\.queued__steer:not\(:disabled\):hover/,
+    'disabled fast-forward controls should not pick up hover emphasis')
+  assert.match(focusWellRule, /box-shadow:\s*0 0 0 2px var\(--accent\)/,
+    'keyboard focus should follow the visible well inside the full touch target')
+  assert.match(queuedMessages, /className="queued__action queued__steer"/)
+  assert.match(queuedMessages, /className="queued__action queued__cancel"/)
+  assert.match(queuedMessages, /<DoubleChevronRight width=\{16\} height=\{16\}/)
+  assert.match(queuedMessages, /<X width=\{16\} height=\{16\}/)
 })

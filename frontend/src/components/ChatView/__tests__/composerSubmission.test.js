@@ -43,7 +43,7 @@ test('sendability is decided before submit-time UI and scroll side effects', () 
   for (const sideEffect of [
     'setSendFailure(null)',
     'stopVoiceRef.current?.()',
-    'closePreSendGestureWindow()',
+    'captureSendIntent({',
     'freezeQueuedSubmission()',
     'inputRef.current?.blur()',
   ]) {

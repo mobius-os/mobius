@@ -25,14 +25,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-import warnings as _warnings_mod
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,7 +39,6 @@ from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from fastapi import HTTPException
-from PIL import Image as _PILImage
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
@@ -50,6 +47,8 @@ from app import (
   app_git,
   data_git,
   fs_locks,
+  icon_assets,
+  icon_ownership,
   legacy_platform_apps,
   models,
   source_dirs,
@@ -92,16 +91,6 @@ from app.routes.apps import (
   _derive_source_dir, _reject_if_source_dir_taken, _slugify_for_source_dir,
   allocate_unique_slug,
 )
-
-# Decompression-bomb defense. PIL's default MAX_IMAGE_PIXELS (~89M)
-# is generous enough that a malicious tiny PNG with a giant declared
-# dimension can still allocate gigabytes during `load()`. 32M pixels
-# (~5657×5657) is enough headroom for any reasonable icon while
-# bounding worst-case allocation. The hard ceiling below (4096×4096)
-# is a second gate on raw width/height — checked BEFORE `load()` so
-# we reject the bomb cheaply via metadata.
-_PILImage.MAX_IMAGE_PIXELS = 32_000_000
-_ICON_MAX_DIM = 4096
 
 log = logging.getLogger("mobius.install")
 
@@ -1076,64 +1065,6 @@ def clear_pending_conflict_update(source_dir: str | Path) -> None:
   )
 
 
-def _process_icon(raw: bytes) -> bytes:
-  """PIL pipeline matches routes/apps.py:update_icon — center-square,
-  resize-to-fit, preserve alpha, re-encode as PNG.
-
-  Decompression-bomb defense lives here: we inspect `img.size` BEFORE
-  calling `img.load()` (PIL reads only the IHDR/header to populate
-  `.size`, so the giant allocation is still avoidable at this point).
-  Anything above _ICON_MAX_DIM × _ICON_MAX_DIM is rejected as 415
-  alongside the PIL-bomb signals.
-  """
-  from PIL import Image
-  try:
-    img = Image.open(io.BytesIO(raw))
-    # PIL emits DecompressionBombWarning when an image's pixel count
-    # exceeds MAX_IMAGE_PIXELS. Locally promote it to an error so the
-    # bomb path goes through our 415 instead of a `warnings.warn` that
-    # silently lets `load()` proceed.
-    with _warnings_mod.catch_warnings():
-      _warnings_mod.simplefilter("error", Image.DecompressionBombWarning)
-      w, h = img.size
-      if w > _ICON_MAX_DIM or h > _ICON_MAX_DIM:
-        raise HTTPException(
-          415,
-          f"Icon dimensions {w}x{h} exceed {_ICON_MAX_DIM}x{_ICON_MAX_DIM} cap.",
-        )
-      img.load()
-  except HTTPException:
-    raise
-  except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-    raise HTTPException(415, f"Icon rejected as decompression bomb: {exc}")
-  except Exception:
-    raise HTTPException(415, "Icon is not a valid image.")
-  if img.mode not in ("RGB", "RGBA"):
-    # Palette-mode PNGs carry transparency in a tRNS chunk, not in the
-    # mode string — `"A" in img.mode` reads "P" as opaque, and a convert
-    # to RGB flattens every transparent pixel to black. That is exactly
-    # how the catalog's quantized (palette-mode) icons got a baked black
-    # background at install time. Convert to RGBA whenever the image has
-    # any transparency signal; RGB only when provably opaque.
-    has_alpha = (
-      "A" in img.mode
-      or "transparency" in img.info
-      or img.mode == "P"
-    )
-    img = img.convert("RGBA" if has_alpha else "RGB")
-  w, h = img.size
-  if w != h:
-    side = min(w, h)
-    left = (w - side) // 2
-    top = (h - side) // 2
-    img = img.crop((left, top, left + side, top + side))
-  if img.size[0] > 1024:
-    img = img.resize((1024, 1024), Image.LANCZOS)
-  out = io.BytesIO()
-  img.save(out, format="PNG", optimize=True)
-  return out.getvalue()
-
-
 def _register_cron(slug: str, schedule_expr: str, job_path: Path,
                    app_id: int | None = None) -> None:
   """Runs init-cron-scaffold.sh to install the crontab entry.
@@ -1966,7 +1897,10 @@ async def install_from_manifest(
         icon_raw = await _http_get(
           cli, raw_base + manifest["icon"], _ICON_MAX_BYTES,
         )
-        icon_processed = _process_icon(icon_raw)
+        icon_processed = icon_assets.normalize_icon(icon_raw)
+      except icon_assets.InvalidIcon as exc:
+        icon_warning = f"icon: {exc}"
+        log.info("install: icon skipped — %s", exc)
       except HTTPException as exc:
         # Icon is non-blocking — apps install fine with the auto
         # letter-icon. Surface as a warning, not a hard fail.
@@ -2375,6 +2309,9 @@ async def install_from_manifest(
   try:
     if existing:
       app = existing
+      transition = icon_ownership.split_legacy_icon_ownership(app)
+      if transition.warning:
+        warnings.append(f"icon ownership: {transition.warning}")
       # Reinstalling a tombstoned app REVIVES it: the manifest_url match finds
       # the soft-deleted row (the query is deleted_at-agnostic on purpose), and
       # clearing deleted_at reattaches the SAME id + its preserved storage tree
@@ -3141,8 +3078,11 @@ async def install_from_manifest(
         atomic_write(target, content)
         created_paths.append(target)
 
-    # Icon — re-apply on update so a version bump's new icon lands.
-    if icon_processed:
+    # A successfully resolved manifest declaration owns the package icon.
+    # Omission clears it; a warned fetch/decode failure preserves the last
+    # accepted package icon rather than turning a partial network failure into
+    # destructive state. An explicit owner override is stored separately.
+    if icon_warning is None:
       app.icon_png = icon_processed
 
     # COMMIT FIRST — once the DB row is durable, cron registration

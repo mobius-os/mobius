@@ -32,6 +32,111 @@ HOP_BY_HOP_HEADERS = {
   "upgrade",
 }
 UPSTREAM_TIMEOUT_SECONDS = float(os.environ.get("MOBIUS_GATEWAY_TIMEOUT", "1200"))
+BODY_CHUNK_BYTES = 64 * 1024
+MAX_CHUNK_LINE_BYTES = 64 * 1024
+MAX_CONTENT_LENGTH_DIGITS = 20
+MAX_CHUNK_SIZE_DIGITS = 16
+MAX_TRAILER_BYTES = 64 * 1024
+
+
+class RequestBodyError(ValueError):
+  """The downstream request body has invalid or incomplete framing."""
+
+  status = HTTPStatus.BAD_REQUEST
+
+
+class UnsupportedTransferEncoding(RequestBodyError):
+  """The gateway cannot safely decode the requested transfer coding."""
+
+  status = HTTPStatus.NOT_IMPLEMENTED
+
+
+def _readline_crlf(stream) -> bytes:
+  line = stream.readline(MAX_CHUNK_LINE_BYTES + 1)
+  if len(line) > MAX_CHUNK_LINE_BYTES:
+    raise RequestBodyError("request body framing line is too long")
+  if not line.endswith(b"\r\n"):
+    raise RequestBodyError("request body ended during chunk framing")
+  return line[:-2]
+
+
+def _comma_separated_tokens(values) -> set[str]:
+  return {
+    item.strip().lower()
+    for value in values
+    for item in value.split(",")
+    if item.strip()
+  }
+
+
+class FixedLengthBody:
+  """Expose exactly one Content-Length body as bounded streaming reads."""
+
+  def __init__(self, stream, length: int):
+    self.stream = stream
+    self.remaining = length
+
+  def read(self, size: int = -1) -> bytes:
+    if self.remaining == 0:
+      return b""
+    if size == 0:
+      return b""
+    requested = self.remaining if size < 0 else min(size, self.remaining)
+    requested = min(requested, BODY_CHUNK_BYTES)
+    read = getattr(self.stream, "read1", self.stream.read)
+    chunk = read(requested)
+    if not chunk:
+      raise RequestBodyError("request body ended before Content-Length")
+    self.remaining -= len(chunk)
+    return chunk
+
+
+class ChunkedBody:
+  """Decode downstream HTTP chunks while the upstream re-chunks the stream."""
+
+  def __init__(self, stream):
+    self.stream = stream
+    self.remaining = 0
+    self.done = False
+
+  def __iter__(self):
+    return self
+
+  def __next__(self) -> bytes:
+    if self.done:
+      raise StopIteration
+
+    while self.remaining == 0:
+      size_line = _readline_crlf(self.stream)
+      size_text = size_line.split(b";", 1)[0].strip()
+      if (
+        not size_text
+        or len(size_text) > MAX_CHUNK_SIZE_DIGITS
+        or any(char not in b"0123456789abcdefABCDEF" for char in size_text)
+      ):
+        raise RequestBodyError("invalid chunk size")
+      size = int(size_text, 16)
+      if size == 0:
+        trailer_bytes = 0
+        while True:
+          trailer = _readline_crlf(self.stream)
+          trailer_bytes += len(trailer) + 2
+          if trailer_bytes > MAX_TRAILER_BYTES:
+            raise RequestBodyError("request body trailers are too long")
+          if not trailer:
+            break
+        self.done = True
+        raise StopIteration
+      self.remaining = size
+
+    read = getattr(self.stream, "read1", self.stream.read)
+    chunk = read(min(self.remaining, BODY_CHUNK_BYTES))
+    if not chunk:
+      raise RequestBodyError("request body ended during chunk data")
+    self.remaining -= len(chunk)
+    if self.remaining == 0 and self.stream.read(2) != b"\r\n":
+      raise RequestBodyError("chunk data is missing its terminator")
+    return chunk
 
 
 def is_recovery_path(path: str) -> bool:
@@ -68,19 +173,46 @@ class Gateway(BaseHTTPRequestHandler):
     path = urllib.parse.urlparse(self.path).path
     return self.recovery_upstream if is_recovery_path(path) else self.app_upstream
 
-  def _read_body(self) -> bytes | None:
-    try:
-      length = int(self.headers.get("Content-Length", "0") or "0")
-    except (TypeError, ValueError):
-      length = 0
-    return self.rfile.read(length) if length > 0 else None
+  def _request_body(self) -> tuple[object | None, bool]:
+    content_lengths = self.headers.get_all("Content-Length", [])
+    transfer_encodings = self.headers.get_all("Transfer-Encoding", [])
+    if content_lengths and transfer_encodings:
+      raise RequestBodyError(
+        "Content-Length and Transfer-Encoding cannot be combined"
+      )
+
+    if content_lengths:
+      if len(content_lengths) != 1:
+        raise RequestBodyError("multiple Content-Length headers")
+      raw_length = content_lengths[0].strip()
+      if (
+        not raw_length.isascii()
+        or not raw_length.isdecimal()
+        or len(raw_length) > MAX_CONTENT_LENGTH_DIGITS
+      ):
+        raise RequestBodyError("invalid Content-Length")
+      length = int(raw_length)
+      return (
+        FixedLengthBody(self.rfile, length) if length > 0 else None,
+        False,
+      )
+
+    if transfer_encodings:
+      if (
+        len(transfer_encodings) != 1
+        or transfer_encodings[0].strip().lower() != "chunked"
+      ):
+        raise UnsupportedTransferEncoding(
+          "only chunked Transfer-Encoding is supported"
+        )
+      return ChunkedBody(self.rfile), True
+
+    return None, False
 
   def _headers(self) -> dict[str, str]:
-    connection_tokens = {
-      item.strip().lower()
-      for item in self.headers.get("Connection", "").split(",")
-      if item.strip()
-    }
+    connection_tokens = _comma_separated_tokens(
+      self.headers.get_all("Connection", [])
+    )
     blocked = HOP_BY_HOP_HEADERS | connection_tokens
     headers = {
       key: value
@@ -118,24 +250,49 @@ class Gateway(BaseHTTPRequestHandler):
     self.close_connection = True
 
   def _proxy(self) -> None:
+    try:
+      body, encode_chunked = self._request_body()
+    except RequestBodyError as exc:
+      self._plain(exc.status, str(exc))
+      return
+
     host, port = self._target()
     conn = http.client.HTTPConnection(host, port, timeout=UPSTREAM_TIMEOUT_SECONDS)
     try:
       conn.request(
         self.command,
         self.path,
-        body=self._read_body(),
+        body=body,
         headers=self._headers(),
+        encode_chunked=encode_chunked,
       )
       resp = conn.getresponse()
+    except RequestBodyError as exc:
+      conn.close()
+      self._plain(exc.status, str(exc))
+      return
     except OSError as exc:
+      conn.close()
       self._plain(HTTPStatus.BAD_GATEWAY, f"Mobius upstream unavailable: {exc}")
       return
 
     try:
       self.send_response(resp.status, resp.reason)
-      for key, value in resp.getheaders():
-        if key.lower() in HOP_BY_HOP_HEADERS:
+      response_headers = resp.getheaders()
+      response_connection_tokens = _comma_separated_tokens(
+        value for key, value in response_headers
+        if key.lower() == "connection"
+      )
+      blocked_response_headers = (
+        HOP_BY_HOP_HEADERS | response_connection_tokens
+      )
+      # HTTPResponse decodes upstream chunk framing before read1() returns.
+      # A stray Content-Length alongside Transfer-Encoding therefore no longer
+      # describes the bytes sent downstream; close-delimit that response.
+      if resp.chunked:
+        blocked_response_headers.add("content-length")
+      for key, value in response_headers:
+        if key.lower() in blocked_response_headers:
           continue
         self.send_header(key, value)
       self.send_header("Connection", "close")

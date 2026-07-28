@@ -16,6 +16,7 @@ import pytest
 from jose import jwt
 
 from app import app_jobs, models
+from app.app_capabilities import CONTRACT_SCHEMA, contract_from_manifest
 from app.config import get_settings
 from app.install import _crontab_command_path
 
@@ -114,6 +115,100 @@ def _load_runner():
   return module
 
 
+def test_runner_job_authority_matches_the_reviewed_contract():
+  runner = _load_runner()
+  assert runner.CURRENT_CAPABILITY_CONTRACT_SCHEMA == CONTRACT_SCHEMA
+  assert runner.SUPPORTED_CAPABILITY_CONTRACT_SCHEMAS == {
+    1, 2, CONTRACT_SCHEMA,
+  }
+
+  assert runner._job_authority({}) is None
+  legacy = {"capability_contract": None}
+  no_job = {"capability_contract": contract_from_manifest({})}
+  omitted = {
+    "capability_contract": contract_from_manifest({
+      "schedule": {"job": "job.sh"},
+    }),
+  }
+  assert runner._job_authority(legacy) == runner.PLATFORM_JOB_AUTHORITY
+  assert runner._job_authority(no_job) == runner.PLATFORM_JOB_AUTHORITY
+  assert runner._job_authority(omitted) == runner.PLATFORM_JOB_AUTHORITY
+
+  for declared, expected, legacy_agent, legacy_authority in (
+    (
+      "platform",
+      runner.PLATFORM_JOB_AUTHORITY,
+      False,
+      runner.LEGACY_PLATFORM_JOB_AUTHORITY,
+    ),
+    (
+      "scoped",
+      runner.SCOPED_JOB_AUTHORITY,
+      True,
+      runner.LEGACY_SCOPED_JOB_AUTHORITY,
+    ),
+  ):
+    contract = contract_from_manifest({
+      "schedule": {"job": "job.sh"},
+      "permissions": {"job_authority": declared},
+    })
+    assert contract["background"]["authority"] == expected
+    assert "agent" not in contract["background"]
+    assert runner._job_authority(
+      {"capability_contract": contract},
+    ) == expected
+    for schema in (1, 2):
+      legacy_contract = dict(
+        contract,
+        schema=schema,
+        background={
+          **contract["background"],
+          "agent": legacy_agent,
+          "authority": legacy_authority,
+        },
+      )
+      assert runner._job_authority(
+        {"capability_contract": legacy_contract},
+      ) == expected
+
+
+@pytest.mark.parametrize("contract", [
+  {"schema": CONTRACT_SCHEMA},
+  {
+    "schema": CONTRACT_SCHEMA,
+    "background": {
+      "agent": True,
+      "authority": "scoped",
+    },
+  },
+  {
+    "schema": CONTRACT_SCHEMA,
+    "background": {
+      "authority": "scoped_system_job",
+    },
+  },
+  {
+    "schema": 2,
+    "background": {
+      "agent": False,
+      "authority": "scoped_system_job",
+    },
+  },
+  {
+    "schema": 2,
+    "background": {
+      "agent": 1,
+      "authority": "scoped_system_job",
+    },
+  },
+  {"schema": True, "background": {"authority": "scoped"}},
+  {"schema": CONTRACT_SCHEMA + 1, "background": None},
+])
+def test_runner_rejects_inconsistent_or_unknown_modern_job_authority(contract):
+  runner = _load_runner()
+  assert runner._job_authority({"capability_contract": contract}) is None
+
+
 def test_live_check_calls_real_app_endpoint(monkeypatch):
   runner = _load_runner()
   seen = {}
@@ -163,7 +258,10 @@ def test_bootstrap_waits_for_ready_before_minting_a_job_token(
   )
   monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
   monkeypatch.setattr(
-    runner, "_job_context", lambda *_args: {"source_dir": str(source)},
+    runner, "_job_context", lambda *_args: {
+      "source_dir": str(source),
+      "capability_contract": None,
+    },
   )
   monkeypatch.setattr(
     runner.subprocess, "Popen", lambda *_args, **_kwargs: types.SimpleNamespace(wait=lambda: 0),
@@ -247,7 +345,10 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   monkeypatch.setattr(
     runner,
     "_job_context",
-    lambda app_id, token: {"source_dir": str(source)},
+    lambda app_id, token: {
+      "source_dir": str(source),
+      "capability_contract": None,
+    },
   )
   popen = types.SimpleNamespace(wait=lambda: 0)
   calls = []
@@ -267,6 +368,46 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   assert child_env["APP_JOB_STATE_DIR"].endswith("/apps/57/job-state")
   assert "SERVICE_TOKEN" not in child_env
   assert "AGENT_TOKEN" not in child_env
+
+
+def test_wrapper_does_not_downgrade_invalid_current_job_authority(
+  tmp_path, monkeypatch,
+):
+  runner = _load_runner()
+  data_dir = tmp_path / "data"
+  source = data_dir / "apps" / "memory"
+  source.mkdir(parents=True)
+  job = source / "fetch.sh"
+  job.write_text("#!/bin/sh\nexit 0\n")
+  monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  monkeypatch.setattr(runner, "_mint_app_token", lambda _app_id: "app-token")
+  monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
+  monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
+  monkeypatch.setattr(
+    runner,
+    "_job_context",
+    lambda *_args: {
+      "source_dir": str(source),
+      "capability_contract": {
+        "schema": CONTRACT_SCHEMA,
+        "background": {
+          "authority": "scoped_system_job",
+        },
+      },
+    },
+  )
+  calls = []
+  monkeypatch.setattr(
+    runner.subprocess,
+    "Popen",
+    lambda *args, **kwargs: calls.append((args, kwargs)),
+  )
+  monkeypatch.setattr(
+    runner.sys, "argv", ["app-job-runner.py", "57", str(job)],
+  )
+
+  assert runner.run() == 4
+  assert calls == []
 
 
 def test_wrapper_rejects_a_job_from_another_live_app(tmp_path, monkeypatch):
@@ -332,7 +473,7 @@ def test_wrapper_rejects_job_context_without_exact_app_identity(
   assert calls == []
 
 
-def test_background_agent_policy_contains_only_declared_data_scope(
+def test_scoped_authority_policy_contains_only_declared_data_scope(
   tmp_path, monkeypatch,
 ):
   runner = _load_runner()
@@ -349,7 +490,10 @@ def test_background_agent_policy_contains_only_declared_data_scope(
     "primary": {"provider": "claude"},
     "fallback": None,
     "capability_contract": {
-      "background": {"agent": True},
+      "schema": CONTRACT_SCHEMA,
+      "background": {
+        "authority": "scoped",
+      },
       "data": {"shared_memory": "write"},
     },
   }
@@ -382,7 +526,10 @@ def test_runner_records_executor_and_cleans_job_home(tmp_path, monkeypatch):
     runner, "_job_context", lambda *_args: {
       "source_dir": str(source),
       "capability_contract": {
-        "background": {"agent": True},
+        "schema": CONTRACT_SCHEMA,
+        "background": {
+          "authority": "scoped",
+        },
         "data": {"shared_memory": "none"},
       },
     },
@@ -468,7 +615,10 @@ def test_secure_executors_enforce_the_same_data_contract(executor, monkeypatch):
       "primary": None,
       "fallback": None,
       "capability_contract": {
-        "background": {"agent": True},
+        "schema": CONTRACT_SCHEMA,
+        "background": {
+          "authority": "scoped",
+        },
         "data": {"shared_memory": "write"},
       },
     }
@@ -562,7 +712,10 @@ def test_landlock_fallback_scopes_processes_and_unix_sockets(monkeypatch):
     monkeypatch.setattr(runner, "DATA_DIR", data_dir)
     policy = runner._job_access(57, probe.resolve(), {
       "capability_contract": {
-        "background": {"agent": True},
+        "schema": CONTRACT_SCHEMA,
+        "background": {
+          "authority": "scoped",
+        },
         "data": {"shared_memory": "none"},
       },
     })

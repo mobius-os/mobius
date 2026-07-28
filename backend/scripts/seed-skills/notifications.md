@@ -24,7 +24,7 @@ The `open_item` system event (see `core.md`, "Opening something in the partner's
 
 The platform does NOT auto-notify when you call `AskUserQuestion` or end a turn with a prose clarifying question. You own this explicitly: same `curl POST /api/notifications/send` pattern you use after building an app, with a question-shaped title and body. Firing it from bash means the HTTP response lands in your tool output, so you see success/failure and can react (re-try, fall back to text) on the same turn.
 
-Title: "Möbius needs your answer". Body: the first ~80 chars of your question. Include `source_id: "$CHAT_ID"` and `target: "/shell/?chat=$CHAT_ID"` so the tap routes back here **inside the PWA** — the bare `/chat/<id>` form escapes the service-worker scope and a cold tap opens a browser tab instead. Skip the notify only when you delivered something useful in the same turn AND that delivery already sent a notification.
+Title: "Möbius needs your answer". Body: the first ~80 chars of your question. Include `source_id: "$CHAT_ID"` and `target: "/shell/?chat=$CHAT_ID"` so the tap routes back here **inside the PWA** — the bare `/chat/<id>` form escapes the service-worker scope and a cold tap opens a browser tab instead. Skip the notify only when you delivered something useful in the same turn AND that delivery already sent a notification whose **default target is this chat**. An app-targeted completion notification does not cover an open question: its tap lands in the wrong place, so send the chat-targeted question notification too.
 
 ---
 

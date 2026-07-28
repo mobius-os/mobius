@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from typing import Literal
 
 from sqlalchemy.orm import Session
 
-from app import app_git, models, timeutil
+from app import app_git, icon_assets, icon_ownership, models, timeutil
 from app.app_capabilities import (
   contract_from_app_state,
   local_manifest_runtime_fields,
@@ -31,6 +32,7 @@ from app.compiler import (
   unlink_app_bundle,
 )
 from app.manifest_contract import (
+  ICON_MAX_BYTES,
   MANIFEST_MAX_BYTES,
   ManifestContractError,
   validate_manifest_contract,
@@ -44,6 +46,9 @@ class AppApplyError(RuntimeError):
     super().__init__(message)
     self.code = code
     self.status_code = status_code
+
+
+log = logging.getLogger("mobius.app_apply")
 
 
 @dataclass(frozen=True)
@@ -130,6 +135,70 @@ def _entry_source(snapshot_dir: Path, manifest: dict) -> str:
   return source
 
 
+def _normalize_manifest_icon(relative: str, raw: bytes) -> bytes:
+  if len(raw) > ICON_MAX_BYTES:
+    raise AppApplyError(
+      "icon_too_large",
+      f"Manifest icon {relative!r} exceeds the {ICON_MAX_BYTES}-byte limit.",
+    )
+  try:
+    return icon_assets.normalize_icon(raw)
+  except icon_assets.InvalidIcon as exc:
+    raise AppApplyError("icon_invalid", str(exc)) from exc
+
+
+def _manifest_icon(snapshot_dir: Path, manifest: dict) -> bytes | None:
+  """Normalize the icon declared by this exact accepted source snapshot."""
+  relative = manifest.get("icon")
+  if not relative:
+    return None
+  path = snapshot_dir / relative
+  try:
+    raw = path.read_bytes()
+  except FileNotFoundError as exc:
+    raise AppApplyError(
+      "icon_missing", f"Manifest icon {relative!r} does not exist.",
+    ) from exc
+  except OSError as exc:
+    raise AppApplyError(
+      "icon_unreadable", f"Could not read manifest icon {relative!r}: {exc}",
+    ) from exc
+  return _normalize_manifest_icon(relative, raw)
+
+
+def reconcile_manifest_icons(db: Session) -> tuple[list[int], list[str]]:
+  """Split legacy icon ownership from each app's accepted Git revision.
+
+  The transition is per-row and idempotent. Missing or invalid immutable source
+  never risks old effective artwork: those bytes become an explicit override,
+  while a later accepted revision remains free to populate package artwork.
+  """
+  repaired: list[int] = []
+  warnings: list[str] = []
+  apps = (
+    db.query(models.App)
+    .filter(
+      models.App.deleted_at.is_(None),
+      models.App.icon_ownership_split.is_(False),
+    )
+    .order_by(models.App.id)
+    .all()
+  )
+  for app in apps:
+    try:
+      transition = icon_ownership.split_legacy_icon_ownership(app)
+      db.commit()
+      db.refresh(app)
+      if transition.changed:
+        repaired.append(app.id)
+      if transition.warning:
+        warnings.append(f"app {app.id}: {transition.warning}")
+    except Exception as exc:
+      db.rollback()
+      warnings.append(f"app {app.id}: {exc}")
+  return repaired, warnings
+
+
 def _validate_local_identity(source_dir: Path, manifest: dict) -> None:
   if manifest["id"] != source_dir.name:
     raise AppApplyError(
@@ -206,6 +275,11 @@ async def apply_source_revision(
       if app is None or app.manifest_url is None:
         _validate_local_identity(source_path, manifest)
       source = _entry_source(snapshot_dir, manifest)
+      package_icon = (
+        _manifest_icon(snapshot_dir, manifest)
+        if app is None or app.manifest_url is None
+        else None
+      )
 
       if created:
         app = models.App(
@@ -232,7 +306,16 @@ async def apply_source_revision(
         app.jsx_source,
         app.compiled_path,
         app.source_commit,
+        app.icon_png,
+        app.icon_override_png,
+        app.icon_ownership_split,
       )
+      transition = icon_ownership.split_legacy_icon_ownership(app)
+      if transition.warning:
+        log.warning(
+          "legacy icon ownership for app %s: %s",
+          app.id, transition.warning,
+        )
 
       staged = _compiled_dir() / f"app-{app.id}.js.staging"
       await compile_jsx(
@@ -257,6 +340,7 @@ async def apply_source_revision(
         runtime_fields = local_manifest_runtime_fields(manifest)
         app.name = manifest["name"]
         app.description = manifest["description"]
+        app.icon_png = package_icon
         if "offline_capable" in runtime_fields:
           app.offline_capable = runtime_fields["offline_capable"]
         app.capability_contract = contract_from_app_state(
@@ -292,6 +376,9 @@ async def apply_source_revision(
           source,
           str(published),
           app.source_commit,
+          app.icon_png,
+          app.icon_override_png,
+          app.icon_ownership_split,
         )
       )
       if not changed:

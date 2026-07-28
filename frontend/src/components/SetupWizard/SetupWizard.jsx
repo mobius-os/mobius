@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import mobiusLogoUrl from '../../assets/moebius.svg'
 import { api, setToken } from '../../api/client.js'
 import * as setupSession from '../../lib/setupSession.js'
 import './SetupWizard.css'
@@ -75,7 +74,7 @@ export default function SetupWizard({ onDone }) {
   return (
     <div className="setup">
       <div className="setup__card">
-        <img src={mobiusLogoUrl} alt="Möbius" className="setup__logo" />
+        <img src="/moebius.png" alt="Möbius" className="setup__logo" />
         <h1 className="setup__title">Set up your Möbius</h1>
         <p className="setup__subtitle">
           Choose the username and password you will use to open this Möbius.

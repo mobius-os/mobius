@@ -469,6 +469,23 @@ def run_migrations(eng) -> None:
     with eng.connect() as conn:
       conn.execute(text("ALTER TABLE apps ADD COLUMN icon_png BLOB NULL"))
       conn.commit()
+  if "icon_override_png" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN icon_override_png BLOB NULL"
+      ))
+      conn.commit()
+  if "icon_ownership_split" not in apps_cols:
+    # Existing icon_png values predate package/override separation and must be
+    # classified from accepted source before either writer may replace them.
+    # New ORM-created rows explicitly write TRUE; a raw or interrupted insert
+    # remains safely eligible for startup reconciliation.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN icon_ownership_split "
+        "BOOLEAN NOT NULL DEFAULT FALSE"
+      ))
+      conn.commit()
   # Per-app token nonce. Add the column, then backfill
   # any NULL row with a fresh random nonce so existing apps get the same
   # id-reuse protection as new ones. Two independent idempotent gates so a

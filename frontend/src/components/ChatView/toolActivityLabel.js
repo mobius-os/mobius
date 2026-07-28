@@ -1,3 +1,5 @@
+import { imagePathFromInput } from './toolImageResult.js'
+
 // Owner-facing activity labels for raw tool names. Collapsed summary lines
 // (the activity-group header, a running tool's header) speak in activities —
 // "Reading files", not "Read"/"Glob" — because tool names are implementation
@@ -160,7 +162,8 @@ export function toolCallLabel(tool) {
   // glance. "Nothing relevant" is stated explicitly, because a silent recall
   // is indistinguishable from never having looked.
   if (name === 'MemoryRecall') return memoryRecallLabel(tool)
-  const input = typeof tool?.input === 'string' ? tool.input.trim() : ''
+  let input = typeof tool?.input === 'string' ? tool.input.trim() : ''
+  if (name === 'ViewImage') input = imagePathFromInput(tool?.input) || input
   const verbs = INSTANCE_VERBS.get(name)
   if (!verbs) return name + (input ? `: ${input}` : '')
 
@@ -180,6 +183,12 @@ export function toolCallLabel(tool) {
 // else returns the raw tool name unchanged. Takes the whole tool object
 // because the classification needs its input, not just the name.
 const IMAGE_PATH_RE = /\.(png|jpe?g|gif|webp|bmp|avif)(?:[?#].*)?$/i
+const IMAGE_TOOL_NAMES = new Set([
+  'ViewImage',
+  'view_image',
+  'functions:view_image',
+  'functions.view_image',
+])
 export function effectiveToolName(tool) {
   const name = tool?.tool
   // A Memory lookup is a Bash call the backend already identified from its
@@ -188,14 +197,14 @@ export function effectiveToolName(tool) {
   // point for both runners, and it keeps working after transcript compaction
   // strips the command string from a settled activity block.
   if (tool?.recall && typeof tool.recall === 'object') return 'MemoryRecall'
+  if (IMAGE_TOOL_NAMES.has(name)) return 'ViewImage'
   if (name === 'Read') {
     // On the wire tool.input is the STRING summary the backend builds
     // (summarize_tool_input -> the bare file_path for a Read), never the raw
     // object -- see the useStreamConnection tool-item contract. Read the path
     // from the string; keep the object shape as a defensive fallback so unit
     // fixtures and any future object-shaped source still classify.
-    const raw = tool?.input
-    const path = typeof raw === 'string' ? raw : (raw?.file_path || raw?.path || '')
+    const path = imagePathFromInput(tool?.input)
     if (typeof path === 'string' && IMAGE_PATH_RE.test(path)) return 'ViewImage'
   }
   return name

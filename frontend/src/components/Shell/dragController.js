@@ -161,6 +161,24 @@ export function crossedDrawerExit(pointX, edgeX, gap = DRAWER_EXIT_PX) {
 
 // ── Small geometry helpers ───────────────────────────────────────────────────
 
+// Pointer events and getBoundingClientRect() report painted/client pixels, while
+// projectLayout and inline left/top values use the element's unscaled CSS layout
+// pixels. Those spaces are normally identical, but a CSS zoom/scale on an
+// ancestor makes them diverge. Bridge that boundary once so hit-testing,
+// measured tab edges, and rendered preview rects all use layout-local pixels.
+export function clientPointToLocal(point, clientRect, localSize) {
+  const clientW = Number(clientRect?.width)
+  const clientH = Number(clientRect?.height)
+  const localW = Number(localSize?.w)
+  const localH = Number(localSize?.h)
+  const scaleX = clientW > 0 && localW > 0 ? localW / clientW : 1
+  const scaleY = clientH > 0 && localH > 0 ? localH / clientH : 1
+  return {
+    x: (Number(point?.x) - (Number(clientRect?.left) || 0)) * scaleX,
+    y: (Number(point?.y) - (Number(clientRect?.top) || 0)) * scaleY,
+  }
+}
+
 function contains(rect, point) {
   return point.x >= rect.x && point.x <= rect.x + rect.w
     && point.y >= rect.y && point.y <= rect.y + rect.h

@@ -33,11 +33,14 @@ being external attackers reaching the public HTTPS endpoint.
   the app's exact installed permissions. Opacity protects ambient **owner**
   authority — it is not a promise that ordinary app code never sees its own
   scoped credential.
-- **Background-agent jobs:** apps declaring `permissions.background_agent`
-  run under the reviewed data contract in
+- **Scoped app jobs:** apps declaring `permissions.job_authority: scoped` run
+  under the reviewed data contract in
   [`BACKGROUND_JOBS.md`](BACKGROUND_JOBS.md). Möbius prefers Bubblewrap after a
-  real namespace probe, otherwise uses a fully probed Landlock ABI 6+ boundary,
-  and fails closed if neither executor can enforce the contract.
+  real namespace probe, otherwise uses Landlock ABI 6+ after probing its
+  required filesystem, signal, and socket primitives, and fails closed if
+  neither executor can enforce the reviewed filesystem boundary. This reduces
+  data exposure for reviewed internal jobs; it is not hostile-tenant or
+  resource-quota isolation.
 - **Rate limiting:** 120 req/min global, 3-5/min on auth endpoints.
   Uses TCP peer address (not X-Forwarded-For).
 
@@ -45,6 +48,10 @@ being external attackers reaching the public HTTPS endpoint.
 
 These are intentional design decisions appropriate for a single-owner app:
 
+- **Platform-authority app jobs:** reviewed jobs that do not request the scoped
+  boundary retain the historical authority of the Möbius process. Their
+  capability receipt records `platform`; the launcher must not infer
+  authority from whether the script appears to use an agent.
 - **Owner JWT in shell localStorage:** opaque mini-app frames cannot read it,
   but script execution in the shell document itself remains equivalent to the
   owner. Moving the shell session to an HttpOnly cookie would further reduce

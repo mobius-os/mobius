@@ -1,13 +1,14 @@
 /* Render an internal app deep link as a compact preview that retains normal link fallback. */
 
 import { ChevronRight } from 'lucide-react'
+import { appIconUrl } from '../../appIcon.js'
 import { appQueries } from '../../../hooks/queries.js'
 import AppLinkPreview from './AppLinkPreview.jsx'
 
 export default function AppLinkCard({ card, onInternalNav }) {
   const appsQuery = appQueries.list.useQuery()
   const app = (appsQuery.data || []).find((candidate) => candidate.slug === card.app)
-  const iconSrc = app?.id ? `/api/apps/${app.id}/icon?size=64` : card.iconSrc
+  const iconSrc = appIconUrl(app, 64) || card.iconSrc
   return (
     <a
       className="md-app-card"

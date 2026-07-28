@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_git, app_jobs, app_preview, fs_locks,
-  icon_cache,
+  icon_cache, icon_ownership,
   legacy_platform_apps,
   models, providers, schemas,
   source_dirs, theme,
@@ -703,6 +703,7 @@ async def list_apps(
     .options(
       defer(models.App.jsx_source),
       defer(models.App.icon_png),
+      defer(models.App.icon_override_png),
     )
     .filter(models.App.deleted_at.is_(None))
     .order_by(
@@ -2202,12 +2203,12 @@ async def update_icon(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Owner uploads a custom icon for the app's standalone PWA install.
+  """Owner sets an icon override for the app's standalone PWA install.
 
   Accepts raw PNG / JPEG / WebP bytes (anything Pillow can decode).
   The body is validated, converted to RGB, downscaled to fit
-  within 1024x1024 if larger, and re-encoded as PNG before storing
-  in `App.icon_png`. The standalone icon endpoint at
+  within 1024x1024 if larger, and re-encoded as PNG before storing separately
+  from the package icon. The standalone icon endpoint at
   `/apps/<slug>/icon-<N>.png` resizes from this on the fly per
   request size, so one upload covers every icon size the manifest
   declares.
@@ -2219,8 +2220,8 @@ async def update_icon(
   from `localStorage['token']`; its app component still shares that document
   until the documented opaque-outer-shell migration lands. The scoped branch
   remains for app-frame/direct app callers, not as a claim that today's
-  standalone component is isolated. To revert to the auto-generated letter
-  icon, send a zero-byte body.
+  standalone component is isolated. To return to the manifest-declared icon
+  (or the generated letter when the package has none), send a zero-byte body.
   """
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(
@@ -2241,25 +2242,33 @@ async def update_icon(
   if not app0:
     raise HTTPException(404, "App not found.")
   expected_nonce = app0.token_nonce
-  # Decode/normalize via the SHARED installer pipeline, which inspects the
+  # Decode/normalize via the shared icon boundary, which inspects the
   # image header dimensions BEFORE img.load() so a decompression bomb is
-  # rejected before it can allocate. Done outside
-  # the lock — only the DB mutation needs serializing. Lazy import avoids the
-  # install.py <-> routes.apps circular import.
-  from app.install import _process_icon
-  processed = _process_icon(body) if body else None
+  # rejected before it can allocate. Done outside the lock — only the DB
+  # mutation needs serializing.
+  from app import icon_assets
+  try:
+    processed = icon_assets.normalize_icon(body) if body else None
+  except icon_assets.InvalidIcon as exc:
+    raise HTTPException(415, str(exc)) from exc
   async with fs_locks.app_storage_lock(app_id):
     app = live_app(db, app_id, populate=True)
     if app is None or app.token_nonce != expected_nonce:
       raise HTTPException(404, "App not found.")
-    app.icon_png = processed
+    transition = icon_ownership.split_legacy_icon_ownership(app)
+    if transition.warning:
+      log.warning(
+        "legacy icon ownership for app %s: %s",
+        app.id, transition.warning,
+      )
+    app.icon_override_png = processed
     db.commit()
   return Response(status_code=204)
 
 
 def _downscale_icon(png: bytes, size: int) -> bytes:
   """A `size`x`size` PNG downscale of `png`, preserving the install-time
-  palette/alpha handling (`install._process_icon` already normalized the
+  palette/alpha handling (`icon_assets.normalize_icon` already normalized the
   stored bytes to RGB/RGBA, so a plain LANCZOS resize keeps transparency).
 
   Only ever downscales: a request for a larger box than the stored icon
@@ -2329,7 +2338,8 @@ async def get_icon(
   if size is not None and size not in _ICON_SIZES:
     raise HTTPException(400, f"size must be one of {sorted(_ICON_SIZES)}.")
   app = live_app(db, app_id, populate=True)
-  if app is None or not app.icon_png:
+  icon_png = app.effective_icon_png if app is not None else None
+  if not icon_png:
     raise HTTPException(404, "No icon set.")
   ts_us = int(app.updated_at.timestamp() * 1e6) if app.updated_at else 0
   etag = f'W/"{ts_us}-{size}"' if size else f'W/"{ts_us}"'
@@ -2346,7 +2356,6 @@ async def get_icon(
   if request.headers.get("if-none-match") == etag:
     return Response(status_code=304, headers=headers)
   if size:
-    icon_png = app.icon_png
     content = await icon_cache.get_or_compute(
       app_id=app_id,
       updated_us=ts_us,
@@ -2355,7 +2364,7 @@ async def get_icon(
       compute=lambda: _downscale_icon(icon_png, size),
     )
   else:
-    content = app.icon_png
+    content = icon_png
   return Response(content=content, media_type="image/png", headers=headers)
 
 

@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <!-- Möbius chrome is a fixed application surface. Browser page zoom would
+         scale the toolbar and drawer with the active app; zoomable content owns
+         its gesture locally so it can transform without moving the shell. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
     <!-- Default theme-color; applyTheme updates this to the active theme's --bg. -->
     <meta name="theme-color" content="#0d0d0d" />
     <!-- Android/Chrome consults color-scheme before JS/CSS fully applies.
@@ -21,7 +24,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Möbius" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="icon" type="image/svg+xml" href="/moebius.svg" />
+    <link rel="icon" type="image/png" href="/moebius.png" />
     <!-- Fonts are self-hosted under /vendor/fonts/ (Inter + JetBrains Mono,
          latin subset, woff2). @font-face declarations are in src/index.css.
          Preloading the primary text face (Inter 400) avoids a FOUT on first
@@ -172,7 +175,7 @@
   <body style="margin:0;background:var(--bg,#0d0d0d)">
     <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
     <div id="splash" style="position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:var(--bg,#0d0d0d);z-index:9999;transition:opacity .3s ease;contain:strict">
-      <img src="/moebius.svg" width="56" height="56" alt="" style="opacity:.4;will-change:opacity" />
+      <img src="/moebius.png" width="56" height="56" alt="" style="opacity:.4;will-change:opacity" />
     </div>
     <div id="root"></div>
     <script>

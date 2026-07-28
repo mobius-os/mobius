@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../../api/client.js'
+import { appIconUrl } from '../appIcon.js'
 import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { detectInstallPlatform } from '../../utils/installPlatform.js'
@@ -50,7 +51,8 @@ async function fileToSquarePng(file, size = 512) {
  * reload. The standalone install page keeps its own icon picker for
  * direct (non-shell) visitors.
  */
-export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, onClose }) {
+export default function InstallSheet({ app, onClose }) {
+  const { id: appId, name: appName, slug: appSlug } = app
   const queryClient = useQueryClient()
   const fileRef = useRef(null)
   const cardRef = useRef(null)
@@ -224,12 +226,13 @@ export default function InstallSheet({ appId, appName, appSlug, appUpdatedAt, on
               alt=""
               src={
                 iconPreview ||
-                `/api/apps/${appId}/icon?v=${encodeURIComponent(appUpdatedAt || '')}`
+                appIconUrl(app, null) ||
+                `/apps/${appSlug}/icon-192.png?v=${encodeURIComponent(app.updated_at || '')}`
               }
               onError={e => {
                 // Fall back to the flattened manifest icon if the raw icon
                 // route returns 404 (app uses the auto-generated letter icon).
-                const fallback = `/apps/${appSlug}/icon-192.png?v=${encodeURIComponent(appUpdatedAt || '')}`
+                const fallback = `/apps/${appSlug}/icon-192.png?v=${encodeURIComponent(app.updated_at || '')}`
                 if (e.target.src !== fallback) e.target.src = fallback
               }}
             />

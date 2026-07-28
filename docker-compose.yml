@@ -35,7 +35,7 @@ services:
     container_name: mobius
     init: true
     restart: unless-stopped
-    # Bubblewrap is the preferred boundary for reviewed `background_agent` app
+    # Bubblewrap is the preferred boundary for reviewed scoped-authority app
     # jobs. Nested Docker blocks its namespace setup by default. The image's
     # setuid bwrap keeps only these setup capabilities and drops them before the
     # unprivileged job starts; recoveryd deliberately receives none of them.

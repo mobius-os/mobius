@@ -46,6 +46,18 @@ test('technical command failures stay behind the top-level disclosure', () => {
     'collapsed activity chrome stays visually neutral')
 })
 
+test('viewed images expand directly without repeating their path or result card', () => {
+  assert.match(toolBlock, /open && t\.input && !isImageTool/,
+    'the disclosure row already names a viewed image path')
+  assert.match(toolBlock, /isImageTool \? 'chat__tool-image-result' : 'chat__tool-section'/)
+  assert.match(toolBlock, /isImageTool \? ' chat__tool--image' : ''/)
+  assert.doesNotMatch(toolBlock, /isImageTool \? 'Image'/,
+    'a bare image needs no redundant section label')
+  assert.match(chatCss,
+    /\.chat__tool--image\.chat__tool--compact \.chat__tool-detail[\s\S]*?border:\s*0;[\s\S]*?background:\s*none;/,
+    'the expanded image does not regain the generic nested detail card')
+})
+
 test('a lone tool activity uses the borderless compact disclosure surface', () => {
   assert.match(toolBlock, /compact = false/,
     'ToolBlock exposes an explicit compact surface instead of styling every tool globally')

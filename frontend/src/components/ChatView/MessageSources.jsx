@@ -1,4 +1,8 @@
-import { messageSources, sourceHost, sourceLabel } from './messageSources.js'
+import {
+  messageSources,
+  sourceHost,
+  sourceLabel,
+} from './messageSources.js'
 
 function sourceMark(host) {
   const displayHost = String(host || '').replace(/^www\./i, '')
@@ -18,9 +22,8 @@ export default function MessageSources({ blocks }) {
         {sources.map(source => {
           const label = sourceLabel(source)
           const host = sourceHost(source.url)
-          const displayHost = host.replace(/^www\./i, '')
           return (
-            <li key={source.url} className="chat__source-item">
+            <li key={source.url} className="chat__source-item chat__source-item--web">
               <a
                 className="chat__source-chip"
                 href={source.url}
@@ -29,20 +32,12 @@ export default function MessageSources({ blocks }) {
                 title={source.snippet || source.title || source.url}
                 aria-label={`${label}${host && host !== label ? ` — ${host}` : ''} (opens in a new tab)`}
               >
-                {/* A local domain mark is deliberate: remote favicons would
-                    contact every cited site merely by viewing an answer. */}
+                {/* Keep reading passive: a local domain mark avoids contacting
+                    every cited site merely because its card neared the viewport. */}
                 <span className="chat__source-icon" aria-hidden="true">
                   {sourceMark(host)}
                 </span>
-                <span className="chat__source-copy">
-                  <span className="chat__source-title">{label}</span>
-                  {/* A title-less Codex source already reads as its host. */}
-                  {host && host !== label && (
-                    <span className="chat__source-host" aria-hidden="true">
-                      {displayHost}
-                    </span>
-                  )}
-                </span>
+                <span className="chat__source-title">{label}</span>
               </a>
             </li>
           )

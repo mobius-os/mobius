@@ -50,24 +50,37 @@ fi
 
 # PHASE 3: Boot-attempt counter. Written BEFORE starting uvicorn so a
 # crash during startup (or a SIGKILL before the health probe writes the
-# success sentinel) increments the count on the next boot. Counter is a
-# plain integer in /data/.boot-attempt. On >=3 failures without an
+# success sentinel) increments the count on the next boot. The first field in
+# /data/.boot-attempt is the count. On >=3 failures without an
 # intervening /data/.last-successful-boot reset, we trigger a
 # platform-baked restore and reset the counter, then log a flag that
 # /api/debug/status surfaces.
 #
-# The counter file stores "N TIMESTAMP" — two fields so we can correlate
-# crash times in the log. We read just the first field.
-_boot_counter=0
-if [ -f /data/.boot-attempt ]; then
-  _boot_counter=$(cut -d' ' -f1 /data/.boot-attempt 2>/dev/null || echo 0)
-  # Validate: must be a non-negative integer.
-  case "$_boot_counter" in
-    ''|*[!0-9]*) _boot_counter=0 ;;
-  esac
+# The frozen helper serializes this writer with the health reset and Railway's
+# component-aware rollback. It accepts legacy "N TIMESTAMP" records, then adds
+# this boot id so a delayed writer from another boot cannot overwrite us.
+_boot_counter_enabled=1
+_boot_counter_helper=/app/scripts/boot_attempt_counter.py
+_boot_counter_state=$(
+  python3 -P /app/scripts/boot_attempt_counter.py \
+    begin /data/.boot-attempt "$MOBIUS_BOOT_ID"
+) || _boot_counter_state=""
+set -- $_boot_counter_state
+if [ "$#" -eq 2 ]; then
+  _boot_counter_prior=$1
+  _boot_counter=$2
+  _boot_counter_charged=$2
+else
+  # Recovery and the public gateway must still start when this optional
+  # self-heal ledger is unavailable. Disable only counter-based auto-restore
+  # and component rollback for this boot; never trade away the recovery floor.
+  echo "WARNING: platform boot-attempt ledger unavailable; automatic crash-loop restore is disabled for this boot." >&2
+  _boot_counter_enabled=0
+  _boot_counter_helper=""
+  _boot_counter_prior=0
+  _boot_counter=0
+  _boot_counter_charged=0
 fi
-_boot_counter=$((_boot_counter + 1))
-echo "$_boot_counter $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
 # chown deferred until after the broad /data chown below; done explicitly
 # here only if that chown is not going to happen (Railway fallback path).
 
@@ -76,7 +89,9 @@ echo "$_boot_counter $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
 # loop. Threshold = 3 because a transient OOM or SIGKILL can cause 1-2
 # false failures; three consecutive failures without a health success
 # strongly implies the platform code itself is broken.
-if [ "$_boot_counter" -ge 3 ] && [ -f /data/.last-successful-boot ]; then
+if [ "$_boot_counter_enabled" -eq 1 ] &&
+   [ "$_boot_counter" -ge 3 ] &&
+   [ -f /data/.last-successful-boot ]; then
   echo "PLATFORM-RESTORE: boot-attempt counter = $_boot_counter, re-cloning platform..." >&2
   # Crash-loop escape hatch: the platform imported OK (else the probe would
   # have already fallen back to baked) but keeps crashing at runtime. Move the
@@ -108,13 +123,25 @@ if [ "$_boot_counter" -ge 3 ] && [ -f /data/.last-successful-boot ]; then
   # auto-restores. If it didn't fix things, we'll restore again after 3
   # more attempts (an explicit loop so the operator can see what's
   # happening via the counter file).
-  echo "0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
+  python3 -P /app/scripts/boot_attempt_counter.py \
+    reset /data/.boot-attempt "$MOBIUS_BOOT_ID" >/dev/null || {
+    echo "WARNING: could not reset the platform boot-attempt ledger." >&2
+    _boot_counter_enabled=0
+    _boot_counter_helper=""
+  }
   _boot_counter=0
-elif [ "$_boot_counter" -ge 3 ] && [ ! -f /data/.last-successful-boot ]; then
+elif [ "$_boot_counter_enabled" -eq 1 ] &&
+     [ "$_boot_counter" -ge 3 ] &&
+     [ ! -f /data/.last-successful-boot ]; then
   # Fresh volume or first-ever boot — last-successful-boot not yet written.
   # Don't trigger restore on what is literally the first few boots.
   # Reset counter so it doesn't grow forever on a slow-starting instance.
-  echo "0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
+  python3 -P /app/scripts/boot_attempt_counter.py \
+    reset /data/.boot-attempt "$MOBIUS_BOOT_ID" >/dev/null || {
+    echo "WARNING: could not reset the platform boot-attempt ledger." >&2
+    _boot_counter_enabled=0
+    _boot_counter_helper=""
+  }
   _boot_counter=0
 fi
 
@@ -206,6 +233,13 @@ _gateway_pid=""
 _recovery_pid=""
 _restart_poller_started=0
 
+if [ "$_railway_gateway" -eq 1 ]; then
+  # Baked alongside this entrypoint. recoveryd needs a bounded component-local
+  # relaunch path so its trusted-live crash guard can reach the baked floor
+  # without consuming Railway's whole-container restart budget.
+  . /app/scripts/railway_supervision.sh
+fi
+
 _shutdown_railway_gateway() {
   _status="${1:-0}"
   trap - TERM INT
@@ -219,37 +253,15 @@ _shutdown_railway_gateway() {
   exit "$_status"
 }
 
-_railway_child_running() {
-  _child_pid="$1"
-  _child_state=$(awk '/^State:/ { print $2; exit }' "/proc/${_child_pid}/status" 2>/dev/null) || return 1
-  [ -n "$_child_state" ] && [ "$_child_state" != "Z" ]
-}
-
 _wait_for_railway_child_exit() {
   # Railway sees the gateway as pid1's public service, but the gateway can stay
-  # alive after uvicorn crashes and return 502 forever. Watch BOTH essential
-  # children. Any unexpected exit brings the whole container down so Railway's
-  # ON_FAILURE policy can restart a coherent gateway/app/recovery process set.
-  # kill -0 still succeeds for an exited child that has become a zombie. Read
-  # procfs state so either critical process is reaped and reported promptly.
-  while _railway_child_running "$_gateway_pid" && _railway_child_running "$_app_pid"; do
-    sleep 1
-  done
-
-  if ! _railway_child_running "$_app_pid"; then
-    wait "$_app_pid"
-    _child_status=$?
-    echo "FATAL: Railway app process exited with status $_child_status." >&2
-  else
-    wait "$_gateway_pid"
-    _child_status=$?
-    echo "FATAL: Railway gateway process exited with status $_child_status." >&2
-  fi
-
-  # A clean child exit is still a service failure: with ON_FAILURE, returning
-  # zero would leave the stopped deployment down instead of restarting it.
-  [ "$_child_status" -ne 0 ] || _child_status=1
-  return "$_child_status"
+  # alive after uvicorn or recoveryd crashes and return 502 forever. Watch all
+  # essential children. Any unexpected exit brings the whole container down so
+  # Railway's ON_FAILURE policy restarts a coherent process set.
+  railway_wait_for_essential_child_exit \
+    "$_gateway_pid" "$_app_pid" "$_recovery_pid" \
+    "$_boot_counter_helper" /data/.boot-attempt \
+    "$MOBIUS_BOOT_ID" "$_boot_counter_prior" "$_boot_counter_charged"
 }
 
 _start_platform_restart_poller() {
@@ -347,16 +359,13 @@ if [ "$_railway_gateway" -eq 1 ]; then
   fi
   echo "Railway gateway mode: public :$_public_port, app :$_app_port, recovery :$_recovery_port." >&2
   (
-    while true; do
-      DATA_DIR="${DATA_DIR:-/data}" \
-      RECOVERY_PORT="$_recovery_port" \
-      RECOVERY_PLATFORM_HEALTH_URL="http://127.0.0.1:${_app_port}/api/health" \
-      RECOVERY_ALLOWED_HOSTS="$_recovery_allowed_hosts" \
-        python3 -P /app/recovery/recoveryd.py
-      _code=$?
-      echo "WARNING: recoveryd exited with status $_code; restarting in 1s." >&2
-      sleep 1
-    done
+    export DATA_DIR="${DATA_DIR:-/data}"
+    export RECOVERY_PORT="$_recovery_port"
+    export RECOVERY_PLATFORM_HEALTH_URL="http://127.0.0.1:${_app_port}/api/health"
+    export RECOVERY_ALLOWED_HOSTS="$_recovery_allowed_hosts"
+    railway_supervise_recovery \
+      "http://127.0.0.1:${_recovery_port}/recover/health" \
+      python3 -P /app/recovery/recoveryd.py
   ) &
   _recovery_pid=$!
 
@@ -1132,6 +1141,7 @@ platform.pre-clone.*
 platform.crashloop-prev.*
 # Phase 3 boot-state files — runtime counters, not content the agent manages.
 .boot-attempt
+.boot-attempt.lock
 .last-successful-boot
 .platform-restore-active
 .platform-upgrade-available
@@ -1362,7 +1372,12 @@ fi
       fi
       # Health probe passed — record the success sentinel and reset counter.
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.last-successful-boot
-      echo "0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.boot-attempt
+      if [ "$_boot_counter_enabled" -eq 1 ]; then
+        python3 -P /app/scripts/boot_attempt_counter.py \
+          reset /data/.boot-attempt "$MOBIUS_BOOT_ID" >/dev/null || {
+          echo "WARNING: platform health passed but the boot-attempt ledger could not be reset." >&2
+        }
+      fi
       # Remove the restore-active flag if set — the server is healthy now.
       rm -f /data/.platform-restore-active 2>/dev/null || true
       echo "Platform health probe: /api/health OK — boot success recorded."
@@ -1404,8 +1419,15 @@ fi
 if [ "$_railway_gateway" -eq 1 ]; then
   su -s /bin/sh mobius -c "$_start_cmd" &
   _app_pid=$!
-  if ! kill -0 "$_gateway_pid" 2>/dev/null; then
+  if ! railway_child_running "$_gateway_pid"; then
     echo "FATAL: Railway gateway exited before app startup." >&2
+    if railway_child_running "$_app_pid"; then
+      railway_rollback_platform_boot_attempt \
+        "$_boot_counter_helper" /data/.boot-attempt "$MOBIUS_BOOT_ID" \
+        "$_boot_counter_prior" "$_boot_counter_charged" || {
+        echo "WARNING: could not roll back the early gateway boot attempt." >&2
+      }
+    fi
     _shutdown_railway_gateway 1
   fi
   _wait_for_railway_child_exit
