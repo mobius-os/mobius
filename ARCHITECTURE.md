@@ -255,9 +255,10 @@ Host-mediated device/browser access uses the versioned capability broker; see
 [`CAPABILITIES.md`](CAPABILITIES.md) for the manifest, app API, wire protocol,
 provider contract, lifecycle rules, and trust-tier escape hatches.
 Server-side app jobs have a separate two-tier model: ordinary reviewed scripts
-retain the Möbius process authority, while `background_agent` jobs run through
-one reviewed data contract and the strongest secure executor available on the
-host. See [`BACKGROUND_JOBS.md`](BACKGROUND_JOBS.md) for the contract,
+retain the Möbius process authority, while jobs declaring
+`job_authority: scoped` run through one reviewed data contract and the
+strongest secure executor available on the host. See
+[`BACKGROUND_JOBS.md`](BACKGROUND_JOBS.md) for the contract,
 Bubblewrap/Landlock selection, history, and verification strategy.
 
 | Tier | Boundary and capability | UX / standalone consequence |

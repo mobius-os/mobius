@@ -1,18 +1,24 @@
-# Secure background jobs
+# Server-side app-job authority
 
-Möbius has two server-side app-job tiers:
+Möbius has two server-side app-job authority profiles:
 
-- **Ordinary jobs** run reviewed, owner-installed app scripts with the
-  historical authority of the Möbius process.
-- **Background-agent jobs** declare `permissions.background_agent: true`.
-  They can run an AI agent without an owner watching, so they receive a
-  narrower, owner-reviewed data contract enforced by a process sandbox.
+- **Platform-authority jobs** run reviewed, owner-installed app scripts with
+  the historical authority of the Möbius process.
+- **Scoped jobs** receive a narrower, owner-reviewed data contract enforced by
+  a process sandbox. These jobs declare
+  `permissions.job_authority: scoped`.
 
-This document defines that contract, why its implementation is portable, and
-the verification required to change it. Browser iframe isolation is a separate
-boundary; see [`CAPABILITIES.md`](CAPABILITIES.md) for browser-side apps.
+These names describe operating-system authority, not whether a script happens
+to use AI. Platform-authority jobs may run agents, while a scoped job may run
+ordinary deterministic code. Scheduled versus on-demand execution and
+`embeds_agent` are separate choices.
 
-## The stable design
+This document defines the scoped contract, why its implementation is portable,
+and the verification required to change it. Browser iframe isolation is a
+separate boundary; see [`CAPABILITIES.md`](CAPABILITIES.md) for browser-side
+apps.
+
+## The stable scoped design
 
 The stable part of the system is a small semantic contract:
 
@@ -24,7 +30,7 @@ JobAccess
   extra_write
 ```
 
-For the current manifest vocabulary this means:
+For scoped authority this means:
 
 - app source is readable and not writable;
 - the app's numeric storage is readable and writable;
@@ -33,25 +39,28 @@ For the current manifest vocabulary this means:
   may refresh credentials;
 - the app gets a minimal environment, a short-lived app token, and a unique
   writable home/temp directory;
-- the editable platform checkout, database, service token, other app data,
-  undeclared shared data, sibling-process control, and host UNIX sockets are
-  denied (read-only image runtime under `/app` remains visible);
+- the editable platform checkout, database, service token, other app data, and
+  undeclared shared data are denied (read-only image runtime under `/app`
+  remains visible);
+- sibling signalling and direct memory/file-descriptor inspection are denied;
 - outbound IP networking remains available.
 
-The runner derives this contract once. Executors consume it; they do not
-interpret manifests or contain Memory-specific rules.
+`JobAccess` is deliberately a filesystem contract. The runner derives it once;
+executors consume it without interpreting manifests or adding Memory-specific
+rules. Process and socket isolation are executor properties described below,
+not fields that this four-path value pretends to make identical.
 
 Two executors implement the contract:
 
 1. **Bubblewrap** is preferred when a real namespace probe succeeds. It
    supplies private mount, PID, IPC, and UTS namespaces and hides masked paths.
-2. **Landlock** is the fallback when the kernel exposes ABI 6 or newer and a
-   complete enforcement probe succeeds. `setpriv` installs filesystem rules;
-   a small helper adds Landlock process/abstract-socket scopes and seccomp
-   denials for pathname UNIX sockets and direct sibling-process inspection.
+2. **Landlock** is the fallback when the kernel exposes ABI 6 or newer and its
+   required-primitives probe succeeds. `setpriv` installs filesystem rules; a
+   small helper adds Landlock signal/abstract-socket scopes and seccomp denials
+   for pathname UNIX sockets and direct sibling-process inspection.
 
-If neither probe succeeds, the job does not run. There is no unsandboxed
-fallback for a reviewed background agent.
+If neither probe succeeds, the job does not run. There is no platform-authority
+fallback for a reviewed scoped job.
 
 ### Startup and scheduled execution
 
@@ -78,17 +87,58 @@ An app asks for access, not for Bubblewrap or Landlock. Deployment mechanics
 must not leak into the manifest. This keeps app review stable when kernels,
 container runtimes, and hosting platforms change.
 
+### Keep authority small; express nuance as access
+
+Authority is intentionally a small choice: either a job is confined to its
+reviewed resources or it is trusted with platform process authority. The
+scoped resource contract carries the useful nuance—source, storage, declared
+shared data, provider credentials, and future specific capabilities.
+
+Do not add an authority profile merely to express a new resource permission.
+Add a narrow field to the scoped contract instead. A genuinely new profile is
+justified only when a demonstrated requirement needs a materially different
+enforcement boundary, such as hostile-tenant or resource-quota isolation.
+
+### Name authority directly
+
+An app with a server-side job may declare
+`permissions.job_authority: scoped|platform`. Omitting the field preserves the
+historical platform authority for existing ordinary jobs. The public
+declaration therefore describes the operating-system boundary directly rather
+than implying that sandboxing depends on whether a script uses AI.
+
+The earlier `background_agent` boolean has been removed rather than retained
+as an alias. It had one official consumer, Memory, which migrates to the
+explicit scoped declaration. Rejecting the old spelling is important: silently
+ignoring it would grant that job platform authority.
+
+Capability receipt schema 3 records `authority: scoped|platform` directly and
+does not carry the old redundant agent boolean. The launcher continues to read
+coherent schema 1 and schema 2 receipts already stored on persistent volumes,
+mapping their old boolean/authority pair to the current values. A null receipt
+remains the documented pre-contract platform-authority state. A known receipt
+with `background: null` is also complete: owner-authored or legacy apps can
+have a job discovered from their source tree without a stored manifest job
+declaration.
+
+A missing receipt field, unknown future schema, malformed current authority,
+or contradictory legacy pair fails closed. A future schema must therefore make
+its launcher migration deliberate rather than silently changing an installed
+job's authority.
+
 ### Probe behavior, not host names
 
 Möbius does not branch on Railway, Docker, Kubernetes, architecture, or an
 environment variable claiming a feature exists. Bubblewrap is selected only
 after the namespace operation needed by a real job succeeds. Landlock is
-selected only after its ABI, filesystem restriction, process scoping, and
-socket filter all work together.
+selected only after its ABI, a real filesystem denial, signal scope, and socket
+filter all work together.
 
 The probes run at job launch. They are cheap compared with an agent job and
 avoid a capability cache that can become stale after a container or host
-change.
+change. They answer “can this host provide the required primitives?”, not “has
+every adversarial behavior test just been rerun?” The latter belongs in the
+test suite and deployment smoke checks.
 
 ### Prefer the strongest working executor; fail closed
 
@@ -101,6 +151,28 @@ The shared contract is therefore expressed as allowed and denied operations,
 not as an identical filesystem view. A future job that genuinely requires a
 private PID or mount namespace must become a new explicit requirement; it must
 not silently receive the Landlock executor.
+
+### Deliberate limits
+
+Scoped app jobs are reviewed internal code in a single-owner system. This
+boundary reduces the data exposed to a job; it is not a hostile-tenant
+container or a CPU, memory, and process-count quota.
+
+Landlock does not create a private PID namespace. Same-owner scheduling and
+resource-limit controls may therefore remain possible even though sibling
+signals, process memory, file descriptors, and protected `/proc` contents are
+denied. Its parent-death signal covers the directly launched process, not an
+arbitrary descendant that deliberately creates an independent lifetime. A job
+that creates a separate session owns that session's cleanup, as it owns its
+other application-level resources.
+
+Socket behavior also differs. Landlock blocks `socket(AF_UNIX, ...)`, so a job
+cannot open pathname or abstract UNIX endpoints; private
+`socketpair(AF_UNIX, ...)` IPC remains available. Bubblewrap masks the pathname
+socket locations used by the host, but keeps the network namespace so jobs
+retain outbound IP networking; it does not promise a separate abstract UNIX
+namespace. Apps must not depend on addressable private UNIX sockets unless that
+becomes an explicit reviewed requirement with shared tests.
 
 ### One policy, small adapters
 
@@ -134,8 +206,8 @@ runtime must permit namespace and mount setup. The bundled Docker Compose
 deployment was later given the required capabilities and security profile, so
 that deployment worked. Managed runtimes that do not expose equivalent outer
 container controls can reject Bubblewrap before app code starts. Memory made
-the gap visible because it was the first Store app to combine
-`background_agent` with install-time initialization.
+the gap visible because it was the first Store app to combine scoped job
+authority with install-time initialization.
 
 That initialization exposed three independent integration assumptions in
 sequence: the backend was not ready to mint a scoped token, scheduled jobs
@@ -191,20 +263,20 @@ Each executor also verifies its mechanism-specific boundary:
 
 - Bubblewrap: real namespace creation, masked owner data, and process-group
   revocation.
-- Landlock: ABI 6+, filesystem enforcement, denied sibling signals and process
-  inspection, denied `AF_UNIX` sockets, parent-death termination, and temp
-  cleanup.
+- Landlock: ABI 6+, filesystem enforcement, denied sibling signals and direct
+  process inspection, denied addressable `AF_UNIX` endpoints, direct-launcher
+  parent-death behavior, and temp cleanup.
 
 Selection tests cover Bubblewrap preference, Landlock fallback, and the
 fail-closed case with both diagnostics. CI may skip a real executor only when
 the host cannot provide it; each supported deployment topology must therefore
 run one end-to-end secure-job smoke test rather than treating a skip as proof.
 
-A release-level startup smoke should install a trivial `background_agent` app
-or Memory on a fresh volume, wait for its ready marker, and fail with the
-executor diagnostics if initialization cannot start. This catches image,
-kernel, outer-runtime, callback-address, and startup-order integration failures
-that unit tests cannot.
+A release-level startup smoke should install a trivial app declaring
+`job_authority: scoped`, or Memory, on a fresh volume; wait for its ready
+marker; and fail with the executor diagnostics if initialization cannot start.
+This catches image, kernel, outer-runtime, callback-address, and startup-order
+integration failures that unit tests cannot.
 
 ## Change checklist
 
@@ -214,7 +286,8 @@ When this boundary changes:
 2. State any executor asymmetry explicitly; do not weaken the common contract.
 3. Run the shared adversarial suite against every available executor.
 4. Run one real secure job in each supported deployment topology.
-5. Verify job-group termination, parent-death behavior, and temp cleanup.
+5. Verify job-group revocation, direct-launcher parent-death behavior, and temp
+   cleanup; separately test any sessions an app intentionally creates.
 6. Check both AMD64 and ARM64 images because syscall numbers, system packages,
    and seccomp resolution are architecture-sensitive.
 7. Keep failures actionable and never silently run a background agent as an
