@@ -119,6 +119,7 @@ import useDesktopSidebar, {
   desktopContentWidthAfterSidebarToggle,
 } from './useDesktopSidebar.js'
 import ShellBrand from './ShellBrand.jsx'
+import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
 const SHELL_RELOAD_RECHECK_MS = 6000
 // The builder mode beat durations live in workspaceView.js (MODE_MOTION); the
@@ -295,6 +296,7 @@ export default function Shell() {
     drawerOpenRef,
     appNavPush, appNavPop, appNavReset, appNavForwardResult,
     retireAppHistory, tombstoneRoute,
+    openHistoryDismiss, closeHistoryDismiss, unregisterHistoryDismiss,
   } = useNavigation({
     workspace,
     workspaceStateRef,
@@ -3477,6 +3479,11 @@ export default function Shell() {
       chatsQuery.isFetchedAfterMount, requestEmptySingleNewChat, workspaceStateRef])
 
   return (
+    <HistoryDismissProvider
+      openHistoryDismiss={openHistoryDismiss}
+      closeHistoryDismiss={closeHistoryDismiss}
+      unregisterHistoryDismiss={unregisterHistoryDismiss}
+    >
     <div
       ref={shellRootRef}
       // The logo-release timing vars for the live beat (round 4 item 1); absent when
@@ -4124,5 +4131,6 @@ export default function Shell() {
         )
       })()}
     </div>
+    </HistoryDismissProvider>
   )
 }

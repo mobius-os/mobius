@@ -9,8 +9,9 @@
 //           fallback distinguish Back from Forward without guessing.
 //   route — the restorable shell view at this entry. Forward traversal cannot
 //           be reconstructed from the destructive navStack alone.
-//   kind  — base | drawer | app | nav. Drawer and reversible app entries carry
-//           enough metadata to restore their semantic state on Forward.
+//   kind  — base | drawer | dismissible | app | nav. Drawer, transient
+//           dismissibles, and reversible app entries carry the semantics needed
+//           to consume Back without accidentally popping a shell route.
 //
 // The classic History store and Navigation API store are independent. Every
 // write below is mirrored to both or NavigationEvent.destination.getState()

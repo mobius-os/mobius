@@ -80,6 +80,7 @@
 import { useRef, useState, useEffect, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
 import ImageLightbox from './markdown/ImageLightbox.jsx'
+import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { ArrowUp, Mic, DoubleChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
@@ -250,6 +251,7 @@ function FileChips({ files, onRemove, chatId }) {
   })
   // Index into the attached-image gallery currently shown full-screen.
   const [lightboxIndex, setLightboxIndex] = useState(null)
+  const historyDismiss = useHistoryDismiss(() => setLightboxIndex(null))
   const hasRestoredImage = files?.some(file => (
     file.mime_type?.startsWith('image/') && !file.objectUrl
   ))
@@ -332,7 +334,10 @@ function FileChips({ files, onRemove, chatId }) {
                 // lightbox then moves focus into itself deliberately and
                 // restores this button/text-entry context when it closes.
                 onPointerDown={(e) => e.preventDefault()}
-                onClick={() => setLightboxIndex(galleryIndex)}
+                onClick={() => {
+                  historyDismiss.open()
+                  setLightboxIndex(galleryIndex)
+                }}
                 aria-label={`View ${chip.name} full screen`}
               >
                 <img className="chat__attach-card-thumb" src={previewSrc} alt="" />
@@ -376,7 +381,7 @@ function FileChips({ files, onRemove, chatId }) {
           items={gallery}
           index={openIndex}
           onNavigate={setLightboxIndex}
-          onClose={() => setLightboxIndex(null)}
+          onClose={historyDismiss.close}
         />,
         document.body,
       )}

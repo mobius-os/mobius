@@ -6,6 +6,7 @@ import { mediaTokenParam } from '../../../api/mediaToken.js'
 import { useMathHtml } from './math.js'
 import { parseImageDims, imageVarsFromDims } from './imageDims.js'
 import ImageLightbox from './ImageLightbox.jsx'
+import { useHistoryDismiss } from '../../../hooks/useHistoryDismiss.jsx'
 import '../lightbox.css'
 
 const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
@@ -204,6 +205,7 @@ export function ExpandableImage({
 }) {
   const [open, setOpen] = useState(false)
   const [resolvedSrc, setResolvedSrc] = useState(null)
+  const historyDismiss = useHistoryDismiss(() => setOpen(false))
 
   const rawSrc = safeUrl(href, SAFE_IMAGE_PROTOCOLS)
   const mediaChatId = rawSrc ? getMediaChatId(rawSrc) : null
@@ -257,7 +259,10 @@ export function ExpandableImage({
         onClick={() => {
           if (!resolvedSrc) return
           if (onOpen) onOpen(imageIndex, { href, src: resolvedSrc, alt })
-          else setOpen(true)
+          else {
+            historyDismiss.open()
+            setOpen(true)
+          }
         }}
       >
         {resolvedSrc && (
@@ -282,7 +287,7 @@ export function ExpandableImage({
         )}
       </button>
       {!onOpen && open && resolvedSrc && createPortal(
-        <ImageLightbox src={resolvedSrc} alt={alt} onClose={() => setOpen(false)} />,
+        <ImageLightbox src={resolvedSrc} alt={alt} onClose={historyDismiss.close} />,
         document.body,
       )}
     </>
