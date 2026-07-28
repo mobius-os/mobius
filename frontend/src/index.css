@@ -243,7 +243,11 @@ html, body, #root {
 .app-route-loading {
   position: fixed;
   inset: 0;
+  display: grid;
+  place-items: center;
   background: var(--bg, #0d0d0d);
+  color: var(--muted, #a1a1aa);
+  font-size: 13px;
 }
 
 /* Paint the ROOT element with the theme background so it propagates to the
@@ -257,15 +261,6 @@ html, body, #root {
    landed. Uses var(--bg) (already set pre-paint) so there's no theme flash. */
 html {
   background-color: var(--bg, #0d0d0d);
-}
-
-/* The shell is fixed chrome: pan normally, but never let page-level pinch zoom
-   scale the toolbar, drawer, chat, and active app as one document. The viewport
-   meta is the primary lock; this closes the iOS gap where user-scalable=no may
-   be ignored. Local zoom surfaces still own their gesture with touch-action:none
-   and transform only their content. */
-html, body {
-  touch-action: pan-x pan-y;
 }
 
 /* Accessibility: respect prefers-reduced-motion. Collapses all
@@ -466,8 +461,8 @@ textarea:focus-visible {
 }
 
 .chat__empty-title {
-  font-size: 30px;
-  font-weight: 700;
+  font-size: clamp(22px, 4vw, 26px);
+  font-weight: 650;
   letter-spacing: 0;
   line-height: 1.05;
   color: var(--text);

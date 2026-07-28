@@ -1,4 +1,4 @@
-/* Browser zoom never scales the Möbius shell chrome; each app owns local zoom. */
+/* Browser zoom remains available for the shell; apps may also own local zoom. */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -15,18 +15,16 @@ function viewportContent(html) {
   return html.match(/<meta name="viewport" content="([^"]+)"/)?.[1] || ''
 }
 
-test('browser pinch cannot scale the shell chrome and active app together', () => {
+test('browser zoom remains available throughout the shell', () => {
   const viewport = viewportContent(indexHtml)
   assert.match(viewport, /width=device-width/)
   assert.match(viewport, /initial-scale=1(?:\.0)?/)
-  assert.match(viewport, /maximum-scale=1/)
-  assert.match(viewport, /user-scalable=no/)
+  assert.doesNotMatch(viewport, /maximum-scale=1/)
+  assert.doesNotMatch(viewport, /user-scalable=no/)
   assert.match(viewport, /viewport-fit=cover/)
   assert.match(viewport, /interactive-widget=resizes-content/)
 
-  const rootTouchRule = indexCss.match(/html,\s*body\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(rootTouchRule, /touch-action:\s*pan-x pan-y/)
-  assert.doesNotMatch(rootTouchRule, /pinch-zoom|manipulation/)
+  assert.doesNotMatch(indexCss, /touch-action:\s*pan-x pan-y/)
 })
 
 test('the app frame adds no second viewport lock and leaves local zoom to the app', () => {

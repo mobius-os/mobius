@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { Chats, DotsVerticalMoreMenu, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
-import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import {
@@ -57,9 +56,13 @@ export default function Drawer({
   interactionLocked = false,
   onClose,
   apps,
+  appsStatus = 'success',
+  onRetryApps,
   activeView,
   activeAppId,
   chats,
+  chatsStatus = 'success',
+  onRetryChats,
   activeChatId,
   onChat,
   onApp,
@@ -917,45 +920,50 @@ export default function Drawer({
                 </section>
               )}
 
-              <section className="drawer__section" aria-labelledby="drawer-chats-label">
-                <h2 id="drawer-chats-label" className="drawer__label drawer__label--chats">
-                  <Chats width={16} height={16} aria-hidden="true" />
-                  <span>Chats</span>
-                </h2>
-              {allChats.length > 0 ? visibleChats.map(chat => (
-                <DrawerRow
-                  key={chat.id}
-                  kind="chat"
-                  item={chat}
-                  surface="drawer"
-                  streaming={streamingSet.has(chat.id)}
-                  attention={attentionSet.has(chat.id)}
-                  active={!appsActive && activeView === 'chat' && activeChatId === chat.id}
-                  menuOpen={!!(openMenu
-                    && openMenu.surface === 'drawer'
-                    && openMenu.kind === 'chat'
-                    && openMenu.id === chat.id)}
-                  renaming={!!(renaming
-                    && renaming.surface === 'drawer'
-                    && renaming.kind === 'chat'
-                    && renaming.id === chat.id)}
-                  actions={rowActions}
-                />
-              )) : (
-                <EmptyMessage className="drawer__empty" fill="static">
-                  <EmptyMessage.Description>
-                    No conversations yet
-                  </EmptyMessage.Description>
-                </EmptyMessage>
+              {chatsStatus === 'loading' && (
+                <p className="drawer__list-status" role="status">Loading chats…</p>
               )}
-              {visibleChatCount < allChats.length && (
-                <div
-                  ref={chatSentinelRef}
-                  className="drawer__progressive-sentinel"
-                  aria-hidden="true"
-                />
+              {chatsStatus === 'error' && (
+                <div className="drawer__list-status" role="alert">
+                  <span>Chats unavailable.</span>
+                  <button type="button" onClick={onRetryChats}>Retry</button>
+                </div>
               )}
-              </section>
+              {chatsStatus === 'success' && allChats.length > 0 && (
+                <section className="drawer__section" aria-labelledby="drawer-chats-label">
+                  <h2 id="drawer-chats-label" className="drawer__label drawer__label--chats">
+                    <Chats width={16} height={16} aria-hidden="true" />
+                    <span>Chats</span>
+                  </h2>
+                  {visibleChats.map(chat => (
+                    <DrawerRow
+                      key={chat.id}
+                      kind="chat"
+                      item={chat}
+                      surface="drawer"
+                      streaming={streamingSet.has(chat.id)}
+                      attention={attentionSet.has(chat.id)}
+                      active={!appsActive && activeView === 'chat' && activeChatId === chat.id}
+                      menuOpen={!!(openMenu
+                        && openMenu.surface === 'drawer'
+                        && openMenu.kind === 'chat'
+                        && openMenu.id === chat.id)}
+                      renaming={!!(renaming
+                        && renaming.surface === 'drawer'
+                        && renaming.kind === 'chat'
+                        && renaming.id === chat.id)}
+                      actions={rowActions}
+                    />
+                  ))}
+                  {visibleChatCount < allChats.length && (
+                    <div
+                      ref={chatSentinelRef}
+                      className="drawer__progressive-sentinel"
+                      aria-hidden="true"
+                    />
+                  )}
+                </section>
+              )}
             </div>
           </div>{/* /.drawer__scroll-wrap */}
 
@@ -992,6 +1000,8 @@ export default function Drawer({
       {appsActive && appsHost && createPortal((
         <AppsDirectory
           empty={sortedApps.length === 0}
+          status={appsStatus}
+          onRetry={onRetryApps}
           resultCount={filteredApps.length}
           query={appQuery}
           onQueryChange={setAppQuery}

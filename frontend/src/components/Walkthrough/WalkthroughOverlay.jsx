@@ -78,8 +78,8 @@ export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreAp
   const installButtonLabel = installBusy
     ? 'Opening…'
     : (nativeInstallReady
-        ? 'Install'
-        : (showInstallHelp ? 'Hide' : installCopy.ctaLabel))
+        ? 'Install Möbius'
+        : (showInstallHelp ? 'Hide install help' : 'How to install'))
 
   return (
     <aside
@@ -95,27 +95,27 @@ export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreAp
       >
         <span aria-hidden="true">×</span>
       </button>
-      <div className="wt__mark" aria-hidden="true">
-        <span />
-      </div>
-      <p className="wt__kicker">Your Möbius is ready</p>
-      <h2 id="wt-title" className="wt__title">Start wherever you like.</h2>
+      <h2 id="wt-title" className="wt__title">Your Möbius is ready.</h2>
       <p className="wt__body">
-        You can explore now. Add an agent only when you want chats to act and
-        build on your behalf.
+        Explore now. Connect an agent when you want Möbius to build with you.
       </p>
-      <section className="wt__install" aria-labelledby="wt-install-title">
-        <span className="wt__install-icon" aria-hidden="true">
-          <Download size={18} strokeWidth={2} />
-        </span>
-        <div className="wt__install-copy">
-          <h3 id="wt-install-title">Keep Möbius close</h3>
-          <p>
-            {nativeInstallReady
-              ? 'Install it on this device for a full-screen, one-tap launch.'
-              : installCopy.summary}
-          </p>
-        </div>
+      <div className="wt__paths">
+        <button
+          type="button"
+          className="wt__path"
+          onClick={() => takeAction(onOpenSettings)}
+        >
+          Connect agent
+        </button>
+        <button
+          type="button"
+          className="wt__path"
+          onClick={() => takeAction(onExploreApps)}
+        >
+          Explore apps
+        </button>
+      </div>
+      <div className="wt__install">
         <button
           type="button"
           className="wt__install-btn"
@@ -124,41 +124,20 @@ export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreAp
           aria-expanded={nativeInstallReady ? undefined : showInstallHelp}
           aria-controls={nativeInstallReady ? undefined : 'wt-install-help'}
         >
+          <Download size={15} strokeWidth={2} aria-hidden="true" />
           {installButtonLabel}
         </button>
         {showInstallHelp && (
-          <div className="wt__install-help" id="wt-install-help">
-            <strong>{installCopy.title}</strong>
-            <span>{installCopy.body}</span>
-          </div>
+          <p className="wt__install-help" id="wt-install-help">
+            <strong>{installCopy.title}.</strong> {installCopy.body}
+          </p>
         )}
         {installFeedback && (
           <p className="wt__install-feedback" role="status">
             {installFeedback}
           </p>
         )}
-      </section>
-      <div className="wt__paths">
-        <button
-          type="button"
-          className="wt__path"
-          onClick={() => takeAction(onOpenSettings)}
-        >
-          <span>Connect an agent</span>
-          <small>Open Settings</small>
-        </button>
-        <button
-          type="button"
-          className="wt__path"
-          onClick={() => takeAction(onExploreApps)}
-        >
-          <span>Find useful apps</span>
-          <small>Open the App Store</small>
-        </button>
       </div>
-      <button type="button" className="wt__dismiss" onClick={finish}>
-        I’ll explore
-      </button>
     </aside>
   )
 }

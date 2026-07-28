@@ -50,7 +50,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import activity, catalog_index, install, models, skills
+from app import activity, catalog_index, data_git, install, models, skills
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -394,50 +394,6 @@ def _source_label(source: str) -> str:
   from urllib.parse import urlparse
 
   return urlparse(source).hostname or source
-
-
-def _snapshot_skill_dir(data_dir: Path, name: str) -> tuple[bool, str]:
-  """Commit shared/skills/<name>/ into the /data repo before removal.
-
-  Mirrors install._snapshot_shared_skill but scopes the pathspec to the whole
-  skill directory so a directory skill's resources are captured too. Returns
-  (ok, detail); ok=False means durability could not be guaranteed and the
-  caller must not delete.
-  """
-  env = {
-    k: v for k, v in os.environ.items()
-    if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
-  }
-  base = [
-    "git", "-C", str(data_dir),
-    "-c", "user.name=Mobius", "-c", "user.email=mobius@localhost",
-  ]
-
-  def _run(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-      [*base, *args], capture_output=True, text=True, timeout=30, env=env,
-    )
-
-  def _reason(proc: subprocess.CompletedProcess) -> str:
-    lines = (proc.stderr or proc.stdout or "").strip().splitlines()
-    return lines[0] if lines else f"git exited {proc.returncode}"
-
-  path = f"shared/skills/{name}"
-  status = _run("status", "--porcelain", "--", path)
-  if status.returncode != 0:
-    return False, _reason(status)
-  if not status.stdout.strip():
-    return True, "already committed"
-  add = _run("add", "--", path)
-  if add.returncode != 0:
-    return False, _reason(add)
-  commit = _run(
-    "commit", "--only", "-m", f"pre-uninstall snapshot of skill {name}",
-    "--", path,
-  )
-  if commit.returncode != 0:
-    return False, _reason(commit)
-  return True, "committed"
 
 
 def _skill_row(
@@ -819,7 +775,12 @@ async def uninstall_skill(
 
     if target_kind == "dir" and (data_dir / ".git").is_dir():
       try:
-        ok, detail = await asyncio.to_thread(_snapshot_skill_dir, data_dir, name)
+        ok, detail = await asyncio.to_thread(
+          data_git.snapshot_path,
+          data_dir,
+          f"shared/skills/{name}",
+          f"pre-uninstall snapshot of skill {name}",
+        )
       except Exception as exc:  # pragma: no cover - defensive
         ok, detail = False, repr(exc)
       if not ok:

@@ -78,17 +78,18 @@ ROTATION_DAYS = 7
 RETENTION_DAYS = 90
 
 # Cache for storage_write debounce. Key: (app_id, path). Value: the
-# ISO8601 timestamp string of the most recent emit. Module-level so it
+# timestamp of the most recent emit. Module-level so it
 # survives across requests within the same worker process. Reset by
 # tests via `_reset_for_tests()` so suite ordering doesn't matter.
 _DEBOUNCE_WINDOW_SEC = 60
-_debounce: dict[tuple[int, str], str] = {}
+_debounce: dict[tuple[int, str], datetime] = {}
 
 # Same debounce shape for app_error: a render loop or a retrying fetch can
 # throw the identical error many times a second; collapse to one per window
 # per (app_id, message) so one broken app can't flood the 90-day log file.
 _ERROR_DEBOUNCE_WINDOW_SEC = 60
-_error_debounce: dict[tuple[int | None, str], str] = {}
+_error_debounce: dict[tuple[int | None, str], datetime] = {}
+_debounce_lock = threading.Lock()
 
 # Repeated HTTP failures need their frequency preserved, but emitting one
 # activity row per response would turn the observer into the resource problem.
@@ -282,6 +283,32 @@ def log_event(ev: str, **fields: Any) -> bool:
   return log_events([(ev, fields)])
 
 
+def _should_emit_debounced(
+  cache: dict[tuple, datetime],
+  key: tuple,
+  now: datetime,
+  *,
+  window_seconds: int,
+) -> bool:
+  """Apply one debounce decision and forget keys outside its window."""
+  with _debounce_lock:
+    cutoff = now - timedelta(seconds=window_seconds)
+    while cache:
+      candidate, emitted_at = next(iter(cache.items()))
+      if emitted_at > cutoff:
+        break
+      cache.pop(candidate)
+
+    last = cache.get(key)
+    if last is not None:
+      if (now - last).total_seconds() < window_seconds:
+        return False
+      cache.pop(key, None)
+
+    cache[key] = now
+  return True
+
+
 def should_emit_storage_write(app_id: int, path: str, now: datetime | None = None) -> bool:
   """Debounce gate for storage_write events. Returns True at most
   once per `_DEBOUNCE_WINDOW_SEC` seconds per (app_id, path).
@@ -296,17 +323,12 @@ def should_emit_storage_write(app_id: int, path: str, now: datetime | None = Non
   per (app_id, path), no correctness issue.
   """
   now = now or datetime.now(timezone.utc)
-  key = (app_id, path)
-  last_iso = _debounce.get(key)
-  if last_iso is not None:
-    try:
-      last = datetime.fromisoformat(last_iso)
-    except ValueError:
-      last = None
-    if last is not None and (now - last).total_seconds() < _DEBOUNCE_WINDOW_SEC:
-      return False
-  _debounce[key] = now.isoformat(timespec="seconds")
-  return True
+  return _should_emit_debounced(
+    _debounce,
+    (app_id, path),
+    now,
+    window_seconds=_DEBOUNCE_WINDOW_SEC,
+  )
 
 
 def should_emit_app_error(
@@ -317,17 +339,12 @@ def should_emit_app_error(
   loop throwing the same error 60x/sec would otherwise flood the log.
   Mirrors should_emit_storage_write (in-memory, reset-on-restart)."""
   now = now or datetime.now(timezone.utc)
-  key = (app_id, message)
-  last_iso = _error_debounce.get(key)
-  if last_iso is not None:
-    try:
-      last = datetime.fromisoformat(last_iso)
-    except ValueError:
-      last = None
-    if last is not None and (now - last).total_seconds() < _ERROR_DEBOUNCE_WINDOW_SEC:
-      return False
-  _error_debounce[key] = now.isoformat(timespec="seconds")
-  return True
+  return _should_emit_debounced(
+    _error_debounce,
+    (app_id, message),
+    now,
+    window_seconds=_ERROR_DEBOUNCE_WINDOW_SEC,
+  )
 
 
 def _request_error_event(
@@ -410,8 +427,9 @@ def _reset_for_tests() -> None:
   """Clears the debounce cache. Called from conftest's fresh_db
   fixture so a debounce entry from a prior test can't suppress a
   later test's emit. Underscore-prefixed: not a public API."""
-  _debounce.clear()
-  _error_debounce.clear()
+  with _debounce_lock:
+    _debounce.clear()
+    _error_debounce.clear()
   with _request_error_lock:
     _request_error_buckets.clear()
 

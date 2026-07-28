@@ -1,4 +1,4 @@
-"""Unit tests for `app.path_utils.validate_path_within_base`.
+"""Unit tests for the shared filesystem identifier and path validators.
 
 Covers the three escape vectors the helper exists to block: symlink
 escape, `..` traversal, and absolute-path injection. Also verifies
@@ -12,7 +12,27 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from app.path_utils import validate_path_within_base
+from app.path_utils import validate_chat_id, validate_path_within_base
+
+
+@pytest.mark.parametrize("chat_id", [
+  "123e4567-e89b-42d3-a456-426614174000",
+  "123E4567-E89B-42D3-A456-426614174000",
+])
+def test_validate_chat_id_accepts_dashed_uuid4(chat_id):
+  assert validate_chat_id(chat_id) is None
+
+
+@pytest.mark.parametrize("chat_id", [
+  "not-a-uuid",
+  "123e4567-e89b-12d3-a456-426614174000",
+  "../123e4567-e89b-42d3-a456-426614174000",
+])
+def test_validate_chat_id_preserves_invalid_id_response(chat_id):
+  with pytest.raises(HTTPException) as exc:
+    validate_chat_id(chat_id)
+  assert exc.value.status_code == 400
+  assert exc.value.detail == "Invalid chat id."
 
 
 def test_returns_resolved_path_for_relative_input():

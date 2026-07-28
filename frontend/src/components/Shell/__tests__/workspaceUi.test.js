@@ -123,12 +123,28 @@ test('the undo chord is flag-gated and defers to focused inputs', () => {
 test('the first-run walkthrough stays short and action-first', () => {
   assert.doesNotMatch(walkthrough, /const STEPS/)
   assert.match(walkthrough, /Your Möbius is ready/)
-  assert.match(walkthrough, /Connect an agent/)
-  assert.match(walkthrough, /Open the App Store/)
-  assert.match(walkthrough, /Keep Möbius close/)
+  assert.match(walkthrough, /Connect agent/)
+  assert.match(walkthrough, /Explore apps/)
+  assert.match(walkthrough, /Install Möbius/)
+  assert.match(walkthrough, /How to install/)
   assert.match(walkthrough, /requestInstall/)
-  assert.match(walkthrough, /I’ll explore/)
+  assert.doesNotMatch(walkthrough, /wt__kicker|wt__mark|Open Settings|Open the App Store|I’ll explore/)
   assert.match(walkthrough, /mobius:walkthrough-completed/)
+})
+
+test('the authenticated shell offers a keyboard skip link', () => {
+  assert.match(shell, /href="#main-content"/)
+  assert.match(shell, /event\.preventDefault\(\)[\s\S]*?contentElRef\.current\?\.focus\(\{ preventScroll: true \}\)/)
+  assert.match(shell, /<main className="shell__content" id="main-content" tabIndex=\{-1\}/)
+})
+
+test('drawer lists distinguish loading, error, and confirmed empty data', () => {
+  assert.match(shell, /appsStatus=\{appsStatus\}/)
+  assert.match(shell, /chatsStatus=\{chatsStatus\}/)
+  assert.match(drawer, /chatsStatus === 'loading'/)
+  assert.match(drawer, /chatsStatus === 'error'/)
+  assert.match(drawer, /chatsStatus === 'success' && allChats\.length > 0/)
+  assert.doesNotMatch(drawer, /No conversations yet/)
 })
 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
@@ -722,7 +738,7 @@ test('navigation surfaces keep the brand close path while the workspace is inert
   assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
   assert.doesNotMatch(shell, /const navigationSurfaceOpen = .*apps/,
     'the canonical Apps tab is workspace content, not a modal navigation surface')
-  assert.match(shell, /<main className="shell__content" inert=\{navigationSurfaceOpen\}/)
+  assert.match(shell, /<main className="shell__content"[^>]*inert=\{navigationSurfaceOpen\}/)
   assert.match(shellBrand, /aria-expanded=\{navigationOpen\}/)
   assert.match(shell, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
 })
@@ -742,6 +758,31 @@ test('opening navigation is presentation-only and never refetches whole lists', 
     'app lifecycle events still own their authoritative refresh')
   assert.match(shell, /ev\.type === 'chat_run_finished'[\s\S]*?refreshChats\(\)/,
     'chat lifecycle events still own their authoritative refresh')
+})
+
+test('chat drawer dots distinguish active work from unseen completion', () => {
+  assert.match(
+    shell,
+    /ev\.type === 'chat_run_started'[\s\S]*?markStreamingStart\(ev\.chatId\)/,
+    'a started run must raise the active-work dot',
+  )
+  assert.match(
+    shell,
+    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)[\s\S]*?setAttentionChatIds/,
+    'a finished run must raise attention only while the chat is not visible',
+  )
+  assert.match(
+    shell,
+    /for \(const cid of visibleChatIds\) clearChatAttention\(cid\)/,
+    'viewing a chat must clear its completion dot',
+  )
+  assert.match(
+    drawer,
+    /streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
+    'active work must take precedence over unseen completion in a row',
+  )
+  assert.match(drawerCss, /\.drawer__streaming-dot\s*\{[\s\S]*?background:\s*var\(--accent\)/)
+  assert.match(drawerCss, /\.drawer__attention-dot\s*\{[\s\S]*?border:\s*1\.5px solid var\(--green\)/)
 })
 
 test('live preview reveal keeps the workspace controller distinct from device mode', () => {

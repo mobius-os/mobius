@@ -107,12 +107,12 @@
 }
 
 /* Empty state: centered in the available chat area, with a FIXED
-   bottom reservation so the composer doesn't overlap the logo.
-   Centering means the cluster moves up when the visible viewport
+   bottom reservation so the composer doesn't overlap the prompt.
+   Centering means the prompt moves up when the visible viewport
    shrinks (keyboard open via `interactive-widget=resizes-content`)
    — the chat container itself gets shorter, so the centerpoint
    moves up. The bottom padding is a CONSTANT (not --composer-h)
-   so multi-line input growth doesn't push the cluster up; only
+   so multi-line input growth doesn't push the prompt up; only
    the keyboard does. 140px clears a typical multi-line composer;
    if the user composes a wall of text on the empty state, slight
    overlap is acceptable. */
@@ -193,21 +193,10 @@
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 72px 24px 24px;
+  padding: 24px;
   gap: 12px;
   max-width: 768px;
   margin: 0 auto;
-  /* Lift the empty-state cluster (logo + title + sub) ~5% above
-     the visual centerline so it doesn't feel buried by the
-     composer at the bottom. */
-  transform: translateY(-5%);
-}
-
-.chat__empty-glyph {
-  width: 96px;
-  height: 96px;
-  opacity: 0.88;
-  margin-bottom: 2px;
 }
 
 /* .chat__empty-title lives in index.css so theme toggles keep it stable. */
