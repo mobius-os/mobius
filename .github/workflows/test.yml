@@ -6,6 +6,9 @@ on:
     # same suite for every layer so the chain is reviewable in parallel; main's
     # strict required checks still decide when each retargeted layer can merge.
     branches: [main, 'stack/**']
+  # Run the same required suite on the merge queue's synthetic groups so
+  # 'Require merge queue' has its four checks in the merge_group context.
+  merge_group:
 
 permissions:
   contents: read
@@ -19,7 +22,7 @@ env:
 # number is the canonical identity: unlike a source branch it is unique in this
 # repository, stable across head updates, and independent of fork naming.
 concurrency:
-  group: tests-pr-${{ github.event.pull_request.number }}
+  group: tests-pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
