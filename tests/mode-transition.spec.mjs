@@ -385,8 +385,9 @@ for (const [name, viewport] of [
 const WIDE = { width: 1280, height: 900 }
 
 test('v3 scatter is compositor-only: layout boxes constant while transforms animate, nodes survive', async ({ page }) => {
-  // slot === the focused LEFT pane's chat → PROMOTE it (a real half→full FLIP scale)
-  // and deal the right sibling out. Both are compositor-only participants.
+  // Standard and Builder now retain independent owners even for the same chat.
+  // The full-bleed Standard owner remains underneath while both Builder pane
+  // owners deal toward their durable edges.
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
   await expect.poll(() => builderActive(page)).toBe(true)
   await expect(page.locator('.workspace__strip')).toHaveCount(2)
@@ -404,9 +405,12 @@ test('v3 scatter is compositor-only: layout boxes constant while transforms anim
   // and at least one participant's transform actually CHANGED across frames.
   for (const w of r.wrappers) expect(w.transformsMatrix, 'only matrix transforms').toBe(true)
   expect(r.wrappers.some(w => w.distinctTransforms > 1), 'a transform animated').toBe(true)
-  const departing = r.wrappers.find(w => w.motion === 'deal-out')
-  expect(departing.offsetX, 'the right sibling scatters toward the right edge').toBeGreaterThan(0)
-  expect(departing.offsetY).toBe(0)
+  const departing = r.wrappers.filter(w => w.motion === 'deal-out')
+  expect(departing).toHaveLength(2)
+  expect(departing.some(w => w.offsetX < 0 && w.offsetY === 0),
+    'the left Builder owner scatters toward the left edge').toBe(true)
+  expect(departing.some(w => w.offsetX > 0 && w.offsetY === 0),
+    'the right Builder owner scatters toward the right edge').toBe(true)
   // INV 4 (stable identity): the same DOM nodes survived completion.
   for (const w of r.wrappers) expect(w.survived, 'same node survives completion').toBe(true)
   // The beat settled clean.
@@ -510,11 +514,10 @@ test('uneven panes start and land together on one coordinated progress clock', a
   await expect.poll(() => builderActive(page)).toBe(true)
 })
 
-test('shared Standard chat stays still while its sibling pane assembles above it', async ({ page }) => {
-  // slot === the focused LEFT pane's chat. Exit still promotes that pane; entry
-  // deliberately does not shrink the Standard surface back into place. It stays
-  // full-bleed underneath while the right sibling arrives, then the completion
-  // commit crops it into the left pane.
+test('shared Standard chat stays still while both Builder owners assemble above it', async ({ page }) => {
+  // slot === the focused LEFT pane's chat. Standard keeps a separate full-bleed
+  // owner, so neither Builder owner borrows or transforms that DOM: both pane
+  // owners assemble above it and Standard retires only after the beat.
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder({ kind: 'chat', id: 'aaa' }))
   await toggleMode(page)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
@@ -569,9 +572,11 @@ test('shared Standard chat stays still while its sibling pane assembles above it
   expect(r.started).toBe(true)
   expect(r.underlayTransforms, 'the Standard chat never scales or translates').toEqual(['none'])
   expect(r.minUnderlayOpacity, 'the Standard chat never fades').toBeGreaterThanOrEqual(0.99)
-  expect(r.participants).toHaveLength(1)
-  expect(r.participants[0].x, 'the right sibling enters from the right edge').toBeGreaterThan(0)
-  expect(r.participants[0].y).toBe(0)
+  expect(r.participants).toHaveLength(2)
+  expect(r.participants.some(p => p.x < 0 && p.y === 0),
+    'the left Builder owner enters from the left edge').toBe(true)
+  expect(r.participants.some(p => p.x > 0 && p.y === 0),
+    'the right Builder owner enters from the right edge').toBe(true)
   await expect.poll(() => modePhase(page), { timeout: 2000 }).toBe('idle')
   await expect.poll(() => builderActive(page)).toBe(true)
 })
