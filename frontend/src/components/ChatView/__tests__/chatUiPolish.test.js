@@ -48,17 +48,15 @@ test('stop action has no visible circular shell', () => {
     'Stop keyboard focus should move to the square glyph')
 })
 
-test('mobile hold copies immediately without opening an action menu', () => {
+test('mobile messages preserve native text selection and its action menu', () => {
   const css = stripComments(chatCss)
 
   assert.doesNotMatch(css, /\.chat__copy-menu|\.chat__copy-overlay/,
-    'instant copy should not render a menu or modal backdrop')
-  assert.match(chatView, /void copyMessage\(message, key\)/,
-    'the completed hold should copy the message directly')
-  assert.match(chatView, /navigator\.vibrate\?\.\(8\)/,
-    'successful copy should offer subtle haptic confirmation where supported')
-  assert.match(chatView, /event\.pointerType !== 'touch'/,
-    'desktop text interaction should stay unchanged')
+    'messages should not render a custom copy menu or modal backdrop')
+  assert.doesNotMatch(chatView, /handleMessagePointerDown|cancelMessageHold|copyMessage/,
+    'messages must not intercept the long press used for native text selection')
+  assert.doesNotMatch(chatView, /onContextMenu=/,
+    'messages must not suppress the native selection action menu')
 })
 
 test('web tool activity uses the assistant reading width', () => {

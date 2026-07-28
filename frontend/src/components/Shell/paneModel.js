@@ -103,6 +103,14 @@ export const MIN_PANE_H = 200
 // still finds its tabs.
 export const STORAGE_KEY = 'mobius-workspace'
 
+// sessionStorage key for the maximized ("focus one pane full-screen") presentation.
+// Deliberately SEPARATE from STORAGE_KEY: focusing a pane must never rewrite the
+// persisted split tree or ratios (design §2), so the maximize is a thin presentation
+// overlay stored beside the blob and re-seeded on mount. Without this, the reload
+// that apply-on-idle fires while the tab is backgrounded dropped the maximize, so a
+// full-screen pane came back tiled ("minimized") on return. Colon-style like the flags.
+export const FOCUSED_PANE_VIEW_KEY = 'mobius:workspace-focused-pane'
+
 // The stable synthetic pane id the single-world SLOT (chat or app) mounts + owns
 // its history under when the item is ABSENT from the builder pane tree (two-worlds
 // design: a stable single-world owner rather than assuming paneOf() succeeds). It
@@ -1610,6 +1618,43 @@ export function readWorkspaceRaw(storage) {
   } catch {
     return null
   }
+}
+
+// Forgiving read/write for the maximized-pane overlay (FOCUSED_PANE_VIEW_KEY),
+// mirroring readWorkspaceRaw's throwing-getItem posture. writeFocusedPaneView
+// REMOVES the key when nothing is maximized so a dismissed maximize can never
+// resurrect on a later reload.
+export function readFocusedPaneView(storage) {
+  try {
+    const raw = storage.getItem(FOCUSED_PANE_VIEW_KEY)
+    return typeof raw === 'string' && raw.length > 0 ? raw : null
+  } catch {
+    return null
+  }
+}
+
+export function writeFocusedPaneView(paneId, storage) {
+  try {
+    if (paneId == null) storage.removeItem(FOCUSED_PANE_VIEW_KEY)
+    else storage.setItem(FOCUSED_PANE_VIEW_KEY, String(paneId))
+  } catch { /* private mode / quota — the maximize just won't survive a reload */ }
+}
+
+// Re-seed the maximized-pane presentation on boot from a persisted id, but ONLY
+// when it is still valid for the rehydrated workspace. Mirrors the runtime reset
+// guards EXACTLY so a restored value can never desync the render (which reads the
+// maximized geometry from this id but the active surface from ws.focusedPaneId):
+//   - splits on + a multi-pane 'panes' world (single/immersive have no maximize),
+//   - the pane still exists in the tree,
+//   - and it IS the focused pane (the lockstep invariant toggle/reconcile keep).
+// Any miss returns null → the workspace boots in its normal tiled view.
+export function resolveInitialFocusedPaneView(ws, rawId) {
+  if (!WORKSPACE_SPLITS_ENABLED || rawId == null || !ws || !ws.panes) return null
+  if (ws.viewMode === 'single') return null
+  if (Object.keys(ws.panes).length <= 1) return null
+  if (!ws.panes[rawId]) return null
+  if (rawId !== ws.focusedPaneId) return null
+  return rawId
 }
 
 // Forgiving read: any structural failure — bad JSON, wrong version, or an

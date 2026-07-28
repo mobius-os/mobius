@@ -38,15 +38,63 @@ fi
 VENV="$MAIN/backend/.venv/bin/python"
 WORKTREE_NODE_MODULES="$ROOT/frontend/node_modules"
 SHARED_NODE_MODULES="$MAIN/frontend/node_modules"
+CONTRIB_ROOT="$(dirname "$MAIN")/contrib"
 
-if [ -d "$WORKTREE_NODE_MODULES" ] \
-    && (cd "$ROOT/frontend" && npm ls --depth=0 >/dev/null 2>&1); then
+complete_frontend_deps() {
+  local frontend="$1"
+  [ -d "$frontend/node_modules" ] \
+    && (cd "$frontend" && npm ls --depth=0 >/dev/null 2>&1)
+}
+
+backend_test_node_deps() {
+  local frontend="$1"
+  local modules="$frontend/node_modules"
+  [ -x "$modules/.bin/esbuild" ] || return 1
+  NODE_PATH="$modules" node -e \
+    "require.resolve('acorn'); require.resolve('eslint-scope')" \
+    >/dev/null 2>&1
+}
+
+# An integration worktree may carry a lockfile newer than main while another
+# reviewed worktree already has that exact dependency tree installed. Reuse
+# only an exact lockfile match. Prefer a complete frontend tree; a review in
+# progress can temporarily make `npm ls` reject the root metadata even though
+# the exact-lock tree still has the compiler/imports backend tests actually use,
+# so retain one narrowly verified backend-test fallback.
+matching_contrib_node_modules() {
+  local fallback=""
+  local frontend
+  [ "$ROOT" != "$MAIN" ] || return 1
+  for frontend in "$CONTRIB_ROOT"/*/worktree/frontend; do
+    [ "$frontend" != "$ROOT/frontend" ] || continue
+    [ -f "$frontend/package-lock.json" ] || continue
+    cmp -s "$ROOT/frontend/package-lock.json" "$frontend/package-lock.json" \
+      || continue
+    if complete_frontend_deps "$frontend"; then
+      printf '%s\n' "$frontend/node_modules"
+      return 0
+    fi
+    if [ -z "$fallback" ] && backend_test_node_deps "$frontend"; then
+      fallback="$frontend/node_modules"
+    fi
+  done
+  [ -n "$fallback" ] || return 1
+  printf '%s\n' "$fallback"
+}
+
+if complete_frontend_deps "$ROOT/frontend"; then
   NODE_MODULES="$WORKTREE_NODE_MODULES"
 elif [ "$ROOT" != "$MAIN" ] \
     && cmp -s "$ROOT/frontend/package-lock.json" "$MAIN/frontend/package-lock.json" \
-    && [ -d "$SHARED_NODE_MODULES" ] \
-    && (cd "$MAIN/frontend" && npm ls --depth=0 >/dev/null 2>&1); then
+    && complete_frontend_deps "$MAIN/frontend"; then
   NODE_MODULES="$SHARED_NODE_MODULES"
+elif NODE_MODULES="$(matching_contrib_node_modules)"; then
+  if complete_frontend_deps "$(dirname "$NODE_MODULES")"; then
+    echo "wt-pytest: reusing exact-match dependencies from $(dirname "$NODE_MODULES")" >&2
+  else
+    echo "wt-pytest: reusing exact-lock backend-test dependencies from $(dirname "$NODE_MODULES")" >&2
+    echo "  (verified esbuild/acorn/eslint-scope; not claiming a complete frontend tree)" >&2
+  fi
 else
   echo "wt-pytest: no complete frontend dependencies match this worktree" >&2
   echo "  install them with: (cd \"$ROOT/frontend\" && npm ci)" >&2
@@ -54,9 +102,17 @@ else
 fi
 ESB_DIR="$NODE_MODULES/.bin"
 
-if [ ! -x "$VENV" ]; then
-  echo "wt-pytest: no shared venv at $VENV" >&2
-  echo "  create it once with:" >&2
+if [ -x "$VENV" ]; then
+  PYTHON="$VENV"
+elif python3 -c 'import pytest' >/dev/null 2>&1; then
+  # The running image already carries the backend dependencies. The explicit
+  # MOBIUS_TEST_RUNTIME environment below is the safety boundary; using this
+  # interpreter through the wrapper is not the guarded direct-pytest path.
+  PYTHON="$(command -v python3)"
+  echo "wt-pytest: shared venv absent; using the image's Python test runtime" >&2
+else
+  echo "wt-pytest: neither shared venv nor image pytest is available" >&2
+  echo "  create the shared venv once with:" >&2
   echo "    python3 -m venv \"$MAIN/backend/.venv\" \\" >&2
   echo "      && \"$MAIN/backend/.venv/bin/pip\" install -r \"$MAIN/backend/requirements.txt\"" >&2
   exit 1
@@ -85,4 +141,4 @@ exec env \
   PATH="$ESB_DIR:${PATH:-}" \
   NODE_PATH="$NODE_MODULES${NODE_PATH:+:$NODE_PATH}" \
   SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}" \
-  "$VENV" -m pytest -p no:cacheprovider "$@"
+  "$PYTHON" -m pytest -p no:cacheprovider "$@"

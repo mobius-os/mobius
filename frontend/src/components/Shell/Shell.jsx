@@ -188,10 +188,20 @@ export default function Shell() {
   // workspace boundary can then own every edge into an empty single screen without
   // making early navigation hooks depend on a callback declared later in the render.
   const requestEmptySingleNewChatRef = useRef(null)
-  // Ephemeral presentation state only. Focusing one pane must never rewrite the
-  // persisted split tree or ratios, so this id lives outside the workspace blob.
-  const [focusedPaneViewId, setFocusedPaneViewIdState] = useState(null)
-  const focusedPaneViewIdRef = useRef(null)
+  // Presentation state: which pane (if any) is maximized full-screen. It lives
+  // OUTSIDE the workspace blob so focusing a pane never rewrites the split tree or
+  // ratios — but it IS persisted to its own key and re-seeded here, so a maximize
+  // survives the apply-on-idle reload that fires while the tab is backgrounded
+  // (which otherwise dropped it, un-maximizing the pane on return). Seed the STATE
+  // and the REF together: dispatchWorkspace's reconcile reads the ref and short-
+  // circuits when it is null, so a state-only seed would fail to retarget/collapse
+  // the maximize on the first workspace mutation after boot.
+  const [focusedPaneViewId, setFocusedPaneViewIdState] = useState(
+    () => paneModel.resolveInitialFocusedPaneView(
+      workspace, paneModel.readFocusedPaneView(sessionStorage),
+    ),
+  )
+  const focusedPaneViewIdRef = useRef(focusedPaneViewId)
   const setFocusedPaneViewId = useCallback((paneId) => {
     focusedPaneViewIdRef.current = paneId
     setFocusedPaneViewIdState(paneId)
@@ -390,6 +400,15 @@ export default function Shell() {
       setFocusedPaneViewId(null)
     }
   }, [workspace.viewMode, modeState.transition, setFocusedPaneViewId])
+
+  // Persist the maximized-pane presentation to its own key on every change so it
+  // survives the apply-on-idle reload (and a browser tab discard). Removing the
+  // key when nothing is maximized keeps a dismissed maximize from resurrecting on
+  // a later reload. Kept separate from the workspace-blob dual-write so focusing a
+  // pane never rewrites the tree/ratios.
+  useEffect(() => {
+    paneModel.writeFocusedPaneView(focusedPaneViewId, sessionStorage)
+  }, [focusedPaneViewId])
 
   const toggleFocusedPaneView = useCallback((paneId) => {
     const ws = workspaceStateRef.current.ws
@@ -809,6 +828,10 @@ export default function Shell() {
         paneModel.STORAGE_KEY,
         paneModel.serializeWorkspace(workspaceStateRef.current.ws),
       )
+      // Capture the maximize from the REF (like the ws above): this runs after an
+      // await, so the render-closure focusedPaneViewId is stale. Keeping the (ws,
+      // maximize) pair from refs makes the persisted snapshot atomic.
+      paneModel.writeFocusedPaneView(focusedPaneViewIdRef.current, sessionStorage)
     } catch { /* private mode / quota — the in-memory workspace still boots */ }
     sessionStorage.setItem('shell-reload', JSON.stringify(shellReloadState()))
     // Match the manifest scope so the post-reload page lands inside

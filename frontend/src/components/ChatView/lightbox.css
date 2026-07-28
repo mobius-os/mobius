@@ -13,18 +13,15 @@
   to { opacity: 1 }
 }
 .lightbox-content {
-  position: relative;
-  width: 100vw;
-  height: 100vh;
-  height: 100dvh;
+  position: absolute;
+  inset: 0;
   display: grid;
   place-items: center;
   overflow: hidden;
 }
 .lightbox-image {
-  max-width: calc(100vw - 32px);
-  max-height: calc(100vh - 32px);
-  max-height: calc(100dvh - 32px);
+  max-width: calc(100% - 32px);
+  max-height: calc(100% - 32px);
   object-fit: contain;
   border-radius: 8px;
   touch-action: none;
@@ -128,8 +125,8 @@
 
 @media (max-width: 34rem) {
   .lightbox-image {
-    max-width: calc(100vw - 16px);
-    max-height: calc(100dvh - 96px);
+    max-width: calc(100% - 16px);
+    max-height: calc(100% - 96px);
   }
 
   .lightbox-nav {

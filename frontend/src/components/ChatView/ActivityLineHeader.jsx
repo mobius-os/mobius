@@ -81,7 +81,6 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
   text,
   displayState,
   iconKind,
-  exitCode = null,
   interactive = false,
   open = false,
   ariaLabel,
@@ -110,18 +109,10 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
     >
       <span
         className="chat__activity-icon"
-        data-activity-kind={displayState === 'error' ? undefined : iconKind}
+        data-activity-kind={iconKind}
         aria-hidden="true"
       >
-        {displayState === 'error' ? (
-          <svg viewBox="0 0 16 16" width="13" height="13" fill="none"
-            stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
-            strokeLinejoin="round">
-            <path d="M8 2 15 14H1z" /><path d="M8 6v4" /><path d="M8 12h.01" />
-          </svg>
-        ) : (
-          <ActivityTypeIcon kind={iconKind} />
-        )}
+        <ActivityTypeIcon kind={iconKind} />
       </span>
       <span className="chat__activity-label">
         <span className="chat__activity-label-text">{text}</span>
@@ -133,9 +124,6 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
         // A delegating turn's helper rollup ("2 running · 1 done") — the header
         // owns it so it reads at a glance without expanding the line.
         <span className="chat__activity-count">{count}</span>
-      )}
-      {displayState === 'error' && exitCode != null && (
-        <span className="chat__activity-chip">exit {exitCode}</span>
       )}
     </Header>
   )

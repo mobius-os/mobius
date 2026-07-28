@@ -60,7 +60,6 @@ import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
-import { copyableMessageText, copyPlainText } from './messageCopy.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
 import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
@@ -434,11 +433,7 @@ export default function ChatView({
   const [showInspector, setShowInspector] = useState(false)
   const [showSummary, setShowSummary] = useState(false)
   const [visibleTimestampKey, setVisibleTimestampKey] = useState(null)
-  const [copyStatus, setCopyStatus] = useState('')
   const timestampTimerRef = useRef(null)
-  const messageHoldRef = useRef(null)
-  const suppressMessageClickRef = useRef(null)
-  const copyStatusTimerRef = useRef(null)
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
   // The app id whose CTA is mid recompile-pulse (label swapped to "Preview
   // updated ✓" for ~2s), or null.
@@ -474,64 +469,9 @@ export default function ChatView({
 
   useEffect(() => () => {
     if (timestampTimerRef.current) clearTimeout(timestampTimerRef.current)
-    if (messageHoldRef.current?.timer) clearTimeout(messageHoldRef.current.timer)
-    if (copyStatusTimerRef.current) clearTimeout(copyStatusTimerRef.current)
   }, [])
-
-  const cancelMessageHold = useCallback(() => {
-    if (messageHoldRef.current?.timer) {
-      clearTimeout(messageHoldRef.current.timer)
-    }
-    messageHoldRef.current = null
-  }, [])
-
-  const copyMessage = useCallback(async (message, key) => {
-    const text = copyableMessageText(message)
-    if (!text) return
-    suppressMessageClickRef.current = key
-    const copied = await copyPlainText(text)
-    if (copied) {
-      try { navigator.vibrate?.(8) } catch { /* haptics are optional */ }
-    }
-    setCopyStatus(copied ? 'Copied' : 'Couldn’t copy')
-    if (copyStatusTimerRef.current) clearTimeout(copyStatusTimerRef.current)
-    copyStatusTimerRef.current = setTimeout(() => {
-      copyStatusTimerRef.current = null
-      setCopyStatus('')
-    }, 1800)
-  }, [])
-
-  const handleMessagePointerDown = useCallback((event, message, key) => {
-    if (
-      !_isTouchPrimary
-      || event.pointerType !== 'touch'
-      || event.button !== 0
-      || event.target?.closest?.('button, a, input, textarea, summary, pre, code')
-    ) return
-    cancelMessageHold()
-    const startX = event.clientX
-    const startY = event.clientY
-    const timer = setTimeout(() => {
-      messageHoldRef.current = null
-      void copyMessage(message, key)
-    }, 520)
-    messageHoldRef.current = { timer, startX, startY, key }
-  }, [cancelMessageHold, copyMessage])
-
-  const handleMessagePointerMove = useCallback((event) => {
-    const hold = messageHoldRef.current
-    if (!hold) return
-    if (
-      Math.abs(event.clientX - hold.startX) > 10
-      || Math.abs(event.clientY - hold.startY) > 10
-    ) cancelMessageHold()
-  }, [cancelMessageHold])
 
   const showTimestamp = useCallback((event, key) => {
-    if (suppressMessageClickRef.current === key) {
-      suppressMessageClickRef.current = null
-      return
-    }
     if (window.getSelection?.()?.toString()) return
     if (timestampTimerRef.current) clearTimeout(timestampTimerRef.current)
     setVisibleTimestampKey(key)
@@ -3832,16 +3772,6 @@ export default function ChatView({
           onClose={() => setShowSummary(false)}
         />
       )}
-      {copyStatus && (
-        <div
-          className={`chat__copy-toast${copyStatus === 'Copied' ? ' chat__copy-toast--success' : ''}`}
-          role="status"
-          aria-live="polite"
-        >
-          {copyStatus === 'Copied' && <Check size={15} strokeWidth={2.5} aria-hidden="true" />}
-          {copyStatus}
-        </div>
-      )}
       {showEmpty && (
         <div className="chat__empty-wrap">
           {embedded ? (
@@ -3974,20 +3904,6 @@ export default function ChatView({
               data-key={dataKey}
               data-cid={userCid || undefined}
               data-ts={ownerUserMessage && msg.ts ? String(msg.ts) : undefined}
-              onPointerDown={continuationMarker
-                ? undefined
-                : (event) => handleMessagePointerDown(event, msg, dataKey)}
-              onPointerMove={continuationMarker ? undefined : handleMessagePointerMove}
-              onPointerUp={continuationMarker ? undefined : cancelMessageHold}
-              onPointerCancel={continuationMarker ? undefined : cancelMessageHold}
-              onContextMenu={_isTouchPrimary && !continuationMarker
-                ? (event) => {
-                    if (event.target?.closest?.('button, a, input, textarea, summary, pre, code')) return
-                    event.preventDefault()
-                    cancelMessageHold()
-                    void copyMessage(msg, dataKey)
-                  }
-                : undefined}
               onClick={msg.ts && ownerUserMessage
                 ? (event) => showTimestamp(event, dataKey)
                 : undefined}

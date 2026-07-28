@@ -55,7 +55,25 @@ Keep experimental overlays bounded and cheap. Full-viewport animated gradients a
 
 Read source first, then save your edits under `/data/platform/frontend/src/`. A file watcher runs `vite build` into the served `dist/` on every source change (debounced, atomic swap) — there is NO manual rebuild step and NO restart. Just reload the page to see the change. Batch all edits so the watcher rebuilds once instead of on every save. For CSS-only changes, prefer `theme.css` above (hot-reloaded, no build at all). If the shell breaks, direct the partner to `/recover` → "Restore platform" (see `recovery.md`).
 
-After finishing a burst of shell edits, wait for the watcher build to land before POSTing `{"type":"shell_apply_now"}` to `/api/notify` with the same authenticated call shape as `notify_theme.sh`. The watcher builds within a few seconds of the last save; the rebuild events ride the shell's own system event stream (not the chat), so you won't see them here — give the build a few seconds, then confirm the build actually carried your change: `grep` the served bundle (`/data/platform/frontend/dist/assets/index-*.js`) for a distinctive string you just added. A fresh `dist/` mtime alone can mislead (an incremental/cached build can rewrite the file without your change), which is how a "rebuilt" shell can still serve the old code — grep for the change, don't trust the timestamp.
+After finishing a burst of shell edits, wait for the watcher build to land, then
+request the apply. This endpoint deliberately returns an empty `204` success, so
+discard its body — do **not** pipe it to a JSON parser:
+
+```bash
+curl -fsS -o /dev/null -X POST "$API_BASE_URL/api/notify" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"shell_apply_now"}'
+```
+
+The watcher builds within a few seconds of the last save; the rebuild events
+ride the shell's own system event stream (not the chat), so you won't see them
+here — give the build a few seconds, then confirm the build actually carried
+your change: `grep` the served bundle
+(`/data/platform/frontend/dist/assets/index-*.js`) for a distinctive string you
+just added. A fresh `dist/` mtime alone can mislead (an incremental/cached build
+can rewrite the file without your change), which is how a "rebuilt" shell can
+still serve the old code — grep for the change, don't trust the timestamp.
 
 After a git/platform update, not a normal save, the watcher sees no edit event; kick it explicitly by touching a changed file under `/data/platform/frontend/src`, then restart if prompted. The updater does not auto-detect frontend changes by design, so run the step explicitly after frontend-touching platform updates.
 

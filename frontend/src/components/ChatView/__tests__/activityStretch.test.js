@@ -18,12 +18,11 @@ const tool = (extra = {}) => ({ type: 'tool', ...extra })
 const think = (extra = {}) => ({ type: 'thinking', ...extra })
 const e = item => ({ item })
 
-// A failed shell result — the only failure signal a tool block carries.
 const failOutput = JSON.stringify({ stdout: '', stderr: 'boom', exit_code: 1 })
 
 test('activityStreamState: a live thinking tail forces running (running-wins)', () => {
-  // While the agent is actively reasoning the line reads in-progress, even if an
-  // earlier tool already failed — the failure surfaces at settle, not mid-run.
+  // While the agent is actively reasoning the line reads in-progress, regardless
+  // of the diagnostic result on an earlier command.
   assert.equal(activityStreamState([], { liveThinkingTail: true }), 'running')
   assert.equal(
     activityStreamState([tool({ status: 'done', output: failOutput })], { liveThinkingTail: true }),
@@ -31,10 +30,10 @@ test('activityStreamState: a live thinking tail forces running (running-wins)', 
   )
 })
 
-test('activityStreamState: settles to done/error/running from the tools when not live-thinking', () => {
+test('activityStreamState: settled command failures stay inside expansion', () => {
   assert.equal(activityStreamState([]), 'done')
   assert.equal(activityStreamState([tool({ status: 'done', output: '{}' })]), 'done')
-  assert.equal(activityStreamState([tool({ status: 'done', output: failOutput })]), 'error')
+  assert.equal(activityStreamState([tool({ status: 'done', output: failOutput })]), 'done')
   assert.equal(activityStreamState([tool({ status: 'running' })]), 'running')
 })
 
@@ -123,7 +122,6 @@ test('settled activity labels and icons have neutral unknown-tool fallbacks', ()
 })
 
 test('collapsed label — a live thinking tail after a failed tool still reads "Thinking"', () => {
-  // running-wins: the danger chip waits for settle.
   const entries = [
     e(tool({ tool: 'Bash', status: 'done', output: failOutput })),
     e(think({ content: 'recovering', duration_ms: 1000, lastAt: 2_000_000 })),
@@ -140,32 +138,21 @@ test('thoughtDurationLabel: whole seconds, clamps sub-second to 1s, bare "Though
 test('activityDisplayState: a live stretch stays in-progress through the tool→tool gap', () => {
   // In the gap between one tool ending and the next event no tool is
   // 'running', but the trailing live stretch must keep its in-progress face —
-  // spinner + progressive copy — never the settled glyph, and never the
-  // failure triangle beside present-tense text (failure waits for settle).
+  // spinner + progressive copy — never the settled glyph. Any legacy/internal
+  // error state also projects to the calm settled overview once the turn ends.
   assert.equal(activityDisplayState('done', { live: true }), 'running')
   assert.equal(activityDisplayState('error', { live: true }), 'running')
   assert.equal(activityDisplayState('running', { live: true }), 'running')
   assert.equal(activityDisplayState('done', { live: false }), 'done')
-  assert.equal(activityDisplayState('error', { live: false }), 'error')
+  assert.equal(activityDisplayState('error', { live: false }), 'done')
 })
 
-test('activityMemoSig: an equal-length output replacement that flips the exit code changes the sig', () => {
-  // Claude's plain-text failure marker is START-anchored, so the head slice
-  // must catch it; a JSON envelope can serialize exit_code first or last, so
-  // head + tail together cover both. Same length everywhere by construction.
+test('activityMemoSig: command output and thinking text do not churn the overview', () => {
   const sigOf = output => activityMemoSig([e(tool({ tool: 'Bash', status: 'done', output }))])
   const okJson = '{"exit_code":0,"stdout":"abcdefghijklmnop"}'
   const failJson = '{"exit_code":1,"stdout":"abcdefghijklmnop"}'
-  assert.equal(okJson.length, failJson.length)
-  assert.notEqual(sigOf(okJson), sigOf(failJson))
+  assert.equal(sigOf(okJson), sigOf(failJson))
 
-  const okText = 'all good here padded to length!!'
-  const failText = 'Exit code 1\nboom padded to len!!'
-  assert.equal(okText.length, failText.length)
-  assert.notEqual(sigOf(okText), sigOf(failText))
-
-  // Thinking content stays OUT of the sig: a typewriter delta on the tail
-  // thinking entry must not bust the memo.
   const base = [e(tool({ tool: 'Read', status: 'done' })), e(think({ content: 'a' }))]
   const grown = [e(tool({ tool: 'Read', status: 'done' })), e(think({ content: 'a much longer thought' }))]
   assert.equal(activityMemoSig(base), activityMemoSig(grown))

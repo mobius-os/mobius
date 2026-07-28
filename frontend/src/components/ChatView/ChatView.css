@@ -362,36 +362,6 @@
 }
 .chat__ts--visible { opacity: 1; }
 
-/* Holding a mobile message copies immediately. The only visible UI is this
-   brief confirmation, kept above the composer so it never shifts content. */
-.chat__copy-toast {
-  position: absolute;
-  left: 50%;
-  bottom: calc(var(--composer-h, 72px) + 18px);
-  z-index: 230;
-  transform: translateX(-50%);
-  max-width: calc(100% - 32px);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: blur(16px) saturate(140%);
-  color: var(--text);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-  animation: chat-copy-toast-in 0.18s var(--ease-out-soft, ease-out);
-}
-.chat__copy-toast--success svg { color: var(--accent); }
-
-@keyframes chat-copy-toast-in {
-  from { opacity: 0; transform: translate(-50%, 6px); }
-}
-
 /* ── Evolving chat summary ─────────────────────────── */
 .chat-summary__overlay {
   position: absolute;
@@ -810,8 +780,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* The type icon leads this label. The exit chip hugs the text instead of
-     drifting to the far edge of a wide activity row. */
+  /* The type icon leads this label. When this is a child row already revealed
+     by an expanded activity, its exit chip hugs the text instead of drifting
+     to the far edge. */
   flex: 0 1 auto;
 }
 
@@ -1155,17 +1126,17 @@
   border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border-light)); /* CONTRACT: danger-tinted hairline */
 }
 
-/* The same exit chip on the COLLAPSED tool header, so a failed command shows
-   its nonzero exit without expanding (a tool never carries an 'error' status —
-   the exit code is the only failure signal). */
+/* Inside an expanded multi-step activity, a failed child row keeps the same
+   compact exit chip. A direct top-level compact row waits until its own output
+   is expanded, where `.chat__tool-exit` above renders the exact code. */
 .chat__tool-exit--head {
   flex-shrink: 0;
   align-self: auto;
 }
 
-/* A failed tool's header name tints toward danger so the whole row reads as a
-   failure at a glance, not just the chip. */
-.chat__tool--failed .chat__tool-name {
+/* A failed child inside an already-expanded activity tints toward danger.
+   Direct compact transcript rows stay neutral until explicitly opened. */
+.chat__tool:not(.chat__tool--compact).chat__tool--failed .chat__tool-name {
   color: color-mix(in srgb, var(--danger) 70%, var(--text)); /* CONTRACT: danger-leaning tool name on a failed row */
 }
 
@@ -1217,8 +1188,9 @@
    borderless dim line, so a build turn's pre-prose burst stops burying the
    answer. A lone thought or tool uses its own disclosure directly: hierarchy
    is added only when there is something to group. Structure is neutral; the
-   only hue is --danger for a failed step and --accent for keyboard focus.
-   Collapsed by default; status remains readable without expanding. See
+   only accent hue is the keyboard focus ring. Command-level diagnostics stay
+   inside expansion because a nonzero shell exit is not a turn-level verdict.
+   Collapsed by default; liveness remains readable without expanding. See
    ActivityStretch.jsx + groupBlocks.js. */
 .chat__activity {
   margin: 0;
@@ -1268,15 +1240,9 @@
   color: var(--muted); /* CONTRACT: low-contrast status glyph */
 }
 
-.chat__activity--error .chat__activity-icon {
-  color: var(--danger); /* CONTRACT: vivid danger — a step in the stretch failed */
-}
-
 .chat__activity-label {
-  /* No stretch: the label and its trailing chip group left as one compact
-     unit (the ChatGPT idiom) rather than spreading across the row. The header
-     button is still full-width — only the visual grouping is left-aligned.
-     Long labels truncate before the danger chip clips. */
+  /* No stretch: the calm label stays left-aligned rather than spreading across
+     the row. The header button remains full-width. */
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -1340,17 +1306,6 @@
   0% { -webkit-mask-position: 120% 0; mask-position: 120% 0; }
   42% { -webkit-mask-position: -50% 0; mask-position: -50% 0; }
   100% { -webkit-mask-position: -50% 0; mask-position: -50% 0; }
-}
-
-.chat__activity-chip {
-  flex-shrink: 0;
-  padding: 0 6px;
-  border-radius: 8px;
-  font-family: var(--mono); /* CONTRACT: monospace exit-code chip, matches the tool block */
-  font-size: 11px;
-  color: var(--danger); /* CONTRACT: vivid danger text — a nonzero exit failed */
-  background: color-mix(in srgb, var(--danger) 12%, transparent); /* CONTRACT: faint danger tint on the opaque message-list fill */
-  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border-light)); /* CONTRACT: danger-tinted hairline */
 }
 
 /* Rotating disclosure chevron for the MARKER card (the activity line dropped
