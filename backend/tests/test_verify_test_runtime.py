@@ -480,6 +480,12 @@ def test_hosted_concurrency_is_scoped_to_the_pull_request():
   workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
-  assert "group: tests-pr-${{ github.event.pull_request.number }}" in workflow
+  assert (
+    "group: tests-pr-${{ github.event.pull_request.number || github.ref }}"
+    in workflow
+  )
+  # A required-check merge queue needs the suite to run on merge_group too,
+  # where pull_request.number is null (hence the github.ref fallback above).
+  assert "merge_group:" in workflow
   assert "github.event.pull_request.head.ref" not in workflow
   assert "cancel-in-progress: true" in workflow
