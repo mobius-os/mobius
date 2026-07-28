@@ -5,8 +5,8 @@
    ║   Every rule below has a real-bug history. If a future     ║
    ║   pass quietly violates one, regression-hunt these first.  ║
    ║                                                            ║
-   ║   1. `.chat__foot` is `position: absolute`, tucked above    ║
-   ║      max(0px, env(safe-area-inset-bottom) - 14px),          ║
+   ║   1. `.chat__foot` is `position: absolute`, offset above   ║
+   ║      env(safe-area-inset-bottom),                           ║
    ║      with `pointer-events: none` — chat content scrolls    ║
    ║      *behind* the composer. Only the pill + + + queue +    ║
    ║      attach-tray re-enable pointer-events. The gutter is   ║
@@ -14,7 +14,7 @@
    ║                                                            ║
    ║   2. `--composer-h` is published by a ResizeObserver in    ║
    ║      ChatView.jsx that watches `.chat__foot`. `.chat__list`║
-   ║      reserves --composer-h + the same tucked safe-area     ║
+   ║      reserves --composer-h + the same full safe-area       ║
    ║      expression + 16px so the last message clears the      ║
    ║      pill and gesture area as it grows                     ║
    ║      (chips, queue tray, multi-line input).                ║
@@ -151,13 +151,13 @@
   margin: 0 auto;
   /* Bottom padding clears the absolutely-positioned `.chat__foot`.
      Tracks the foot's measured height via the `--composer-h` CSS
-     var (written by ChatView's ResizeObserver), the tucked safe-area
-     gap below the foot (the SAME max() expression as `.chat__foot`'s
+     var (written by ChatView's ResizeObserver), the full device safe-area
+     gap below the foot (the SAME env() expression as `.chat__foot`'s
      `bottom` — keep them in sync), plus a small breathing-room
      margin so chips/queue tray growing the foot keeps the last
      message clear of the pill. Fallback 80px is for the first
      paint before the RO fires. */
-  padding: 8px 6px calc(var(--composer-h, 80px) + max(0px, env(safe-area-inset-bottom, 0px) - 14px) + 16px);
+  padding: 8px 6px calc(var(--composer-h, 80px) + env(safe-area-inset-bottom, 0px) + 16px);
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -1614,15 +1614,12 @@
    children, so taps on the gutter pass through to the chat. */
 .chat__foot {
   position: absolute;
-  /* iMessage-style tuck: lift the foot by the device bottom inset MINUS 14px,
-     floored at 0. iPhones report a constant 34px home-indicator inset, which
-     left the pill floating visibly higher than on Android (where Chrome's
-     edge-to-edge reports ~0) — the 14px tuck dips the pill into the top of
-     that reserved zone, still clear of the indicator line, so both platforms
-     read consistently. Android/zero-inset devices: max() floors at 0 and
-     nothing moves. Keep the same expression in `.chat__list`'s bottom
-     padding — the two must move together. */
-  bottom: max(0px, calc(env(safe-area-inset-bottom, 0px) - 14px));
+  /* Interactive controls must stay wholly inside the device safe rectangle.
+     Android Chrome paints the shell's gesture backdrop in the unsafe band;
+     dipping the composer into that band makes the backdrop clip the pill.
+     Keep the same full inset in `.chat__list`'s bottom padding so composer
+     placement and transcript clearance remain one geometry contract. */
+  bottom: env(safe-area-inset-bottom, 0px);
   left: 0;
   right: 0;
   padding: 8px 12px;
@@ -1644,8 +1641,10 @@
    ABOVE the scrolling message list (fading the text) but BEHIND the composer pill
    (the pill's backdrop-blur stays crisp). `top` extends above the composer only so
    the ramp's percentage stops map onto the pill; the ramp itself is bottom-weighted.
-   Percentage stops so the embedded (shorter) composer gets a proportional fade.
-   Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
+   `bottom` extends through the device safe area independently of the interactive
+   foot, so keeping the controls safe cannot expose scrolling text beneath the
+   gesture bar. Percentage stops give the embedded (shorter) composer a proportional
+   fade. Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
    colour. */
 .chat__foot::before {
   content: "";
@@ -1653,7 +1652,7 @@
   left: 0;
   right: 0;
   top: -100px;
-  bottom: 0;
+  bottom: calc(0px - env(safe-area-inset-bottom, 0px));
   background: linear-gradient(
     to bottom,
     transparent 0%,

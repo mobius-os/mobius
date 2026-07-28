@@ -14,7 +14,7 @@ const dir = dirname(fileURLToPath(import.meta.url))
 const css = readFileSync(join(dir, '..', 'ChatView.css'), 'utf8')
 
 function ruleBody(selector) {
-  const start = css.indexOf(selector)
+  const start = css.indexOf(`\n${selector} {`)
   assert.notEqual(start, -1, `selector ${selector} not found in ChatView.css`)
   const open = css.indexOf('{', start)
   const close = css.indexOf('}', open)
@@ -34,6 +34,30 @@ test('.chat__scroll contains its overscroll and is a positioning context', () =>
   const body = ruleBody('.chat__scroll')
   assert.match(body, /overscroll-behavior-y:\s*contain/)
   assert.match(body, /position:\s*relative/)
+})
+
+test('the composer and transcript both reserve the full device safe area', () => {
+  const foot = ruleBody('.chat__foot')
+  const list = ruleBody('.chat__list')
+
+  assert.match(foot, /bottom:\s*env\(safe-area-inset-bottom,\s*0px\)/)
+  assert.match(
+    list,
+    /var\(--composer-h,\s*80px\)\s*\+\s*env\(safe-area-inset-bottom,\s*0px\)\s*\+\s*16px/,
+  )
+  assert.doesNotMatch(foot, /safe-area-inset-bottom[\s\S]*-\s*14px/)
+  assert.doesNotMatch(list, /safe-area-inset-bottom[\s\S]*-\s*14px/)
+})
+
+test('the composer backdrop fills the safe area without moving controls into it', () => {
+  const backdrop = ruleBody('.chat__foot::before')
+  const embeddedBackdrop = ruleBody('.chat-embed .chat__foot::before')
+
+  assert.match(
+    backdrop,
+    /bottom:\s*calc\(0px\s*-\s*env\(safe-area-inset-bottom,\s*0px\)\)/,
+  )
+  assert.match(embeddedBackdrop, /bottom:\s*0/)
 })
 
 test('.spacer-dynamic has no CSS transition (instant height change)', () => {
