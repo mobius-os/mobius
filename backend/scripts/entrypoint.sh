@@ -227,16 +227,22 @@ _railway_child_running() {
 
 _wait_for_railway_child_exit() {
   # Railway sees the gateway as pid1's public service, but the gateway can stay
-  # alive after uvicorn crashes and return 502 forever. Watch BOTH essential
-  # children. Any unexpected exit brings the whole container down so Railway's
-  # ON_FAILURE policy can restart a coherent gateway/app/recovery process set.
+  # alive after uvicorn or recoveryd crashes and return 502 forever. Watch all
+  # essential children. Any unexpected exit brings the whole container down so
+  # Railway's ON_FAILURE policy restarts a coherent process set.
   # kill -0 still succeeds for an exited child that has become a zombie. Read
   # procfs state so either critical process is reaped and reported promptly.
-  while _railway_child_running "$_gateway_pid" && _railway_child_running "$_app_pid"; do
+  while _railway_child_running "$_gateway_pid" &&
+        _railway_child_running "$_app_pid" &&
+        _railway_child_running "$_recovery_pid"; do
     sleep 1
   done
 
-  if ! _railway_child_running "$_app_pid"; then
+  if ! _railway_child_running "$_recovery_pid"; then
+    wait "$_recovery_pid"
+    _child_status=$?
+    echo "FATAL: Railway recovery process exited with status $_child_status." >&2
+  elif ! _railway_child_running "$_app_pid"; then
     wait "$_app_pid"
     _child_status=$?
     echo "FATAL: Railway app process exited with status $_child_status." >&2
@@ -346,18 +352,11 @@ if [ "$_railway_gateway" -eq 1 ]; then
     _recovery_allowed_hosts="${RAILWAY_PUBLIC_DOMAIN:-${DOMAIN:-}}"
   fi
   echo "Railway gateway mode: public :$_public_port, app :$_app_port, recovery :$_recovery_port." >&2
-  (
-    while true; do
-      DATA_DIR="${DATA_DIR:-/data}" \
-      RECOVERY_PORT="$_recovery_port" \
-      RECOVERY_PLATFORM_HEALTH_URL="http://127.0.0.1:${_app_port}/api/health" \
-      RECOVERY_ALLOWED_HOSTS="$_recovery_allowed_hosts" \
-        python3 -P /app/recovery/recoveryd.py
-      _code=$?
-      echo "WARNING: recoveryd exited with status $_code; restarting in 1s." >&2
-      sleep 1
-    done
-  ) &
+  DATA_DIR="${DATA_DIR:-/data}" \
+  RECOVERY_PORT="$_recovery_port" \
+  RECOVERY_PLATFORM_HEALTH_URL="http://127.0.0.1:${_app_port}/api/health" \
+  RECOVERY_ALLOWED_HOSTS="$_recovery_allowed_hosts" \
+    python3 -P /app/recovery/recoveryd.py &
   _recovery_pid=$!
 
   python3 /app/scripts/railway_gateway.py \
