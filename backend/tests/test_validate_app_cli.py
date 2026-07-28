@@ -82,7 +82,7 @@ def test_validator_rejects_manifest_type_holes_and_missing_package_files(tmp_pat
   {"id": "Bad/Slug"},
   {"permissions": {"cross_app_access": "admin"}},
   {"permissions": {"shared_memory": "all"}},
-  {"permissions": {"background_agent": "yes"}},
+  {"permissions": {"job_authority": "root"}},
   {"offline": {"writes": "eventually"}},
   {"schedule": {"default": "@daily"}},
   {"schedule": {"default": "0 0 * * * *"}},
@@ -121,16 +121,30 @@ def test_system_prompt_requires_explicit_system_app_identity(tmp_path):
     _validate_manifest(manifest)
 
 
-def test_background_agent_requires_declared_job(tmp_path):
+def test_job_authority_requires_declared_job(tmp_path):
   _write_app(tmp_path, "export default function App(){ return <div /> }")
   manifest = json.loads((tmp_path / "mobius.json").read_text())
-  manifest["permissions"] = {"background_agent": True}
+  manifest["permissions"] = {"job_authority": "scoped"}
   (tmp_path / "mobius.json").write_text(json.dumps(manifest))
 
   result = _run(tmp_path)
   assert result.returncode == 1
   assert "requires `schedule.job`" in result.stderr
   with pytest.raises(HTTPException, match="requires `schedule.job`"):
+    _validate_manifest(manifest)
+
+
+def test_removed_background_agent_permission_fails_clearly(tmp_path):
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  manifest = json.loads((tmp_path / "mobius.json").read_text())
+  manifest["permissions"] = {"background_agent": True}
+  manifest["schedule"] = {"job": "job.sh"}
+  (tmp_path / "mobius.json").write_text(json.dumps(manifest))
+
+  result = _run(tmp_path)
+  assert result.returncode == 1
+  assert "has been removed" in result.stderr
+  with pytest.raises(HTTPException, match="has been removed"):
     _validate_manifest(manifest)
 
 

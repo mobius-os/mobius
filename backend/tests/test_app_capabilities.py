@@ -32,7 +32,7 @@ def _manifest(**over):
     "system_prompt": "memory-core.md",
     "permissions": {
       "chat_log_access": "summary",
-      "background_agent": True,
+      "job_authority": "scoped",
       "shared_memory": "write",
     },
     "schedule": {
@@ -73,9 +73,10 @@ def test_preview_returns_server_derived_contract_and_digest(
     "chat_start"
   )
   assert body["capability_contract"]["background"]["authority"] == (
-    "scoped_system_job"
+    "scoped"
   )
-  assert body["capability_contract"]["schema"] == 2
+  assert "agent" not in body["capability_contract"]["background"]
+  assert body["capability_contract"]["schema"] == 3
   assert body["capability_contract"]["runtime"] == {}
 
 
