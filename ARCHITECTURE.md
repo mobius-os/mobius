@@ -1106,6 +1106,6 @@ cover it deterministically.
 
 - **Build / test / run commands and the dev loop:** `CONTRIBUTING.md`. (The #1 deploy gotcha — a stale `/data/platform/frontend/dist` masking a fresh image — is covered under *Frontend serving priority* above.)
 - **Secure server-side app jobs:** `BACKGROUND_JOBS.md` defines the
-  background-agent data contract, portable executor design, historical
-  rationale, and topology-level verification.
+  scoped-authority data contract, private executor adapters, rationale, and
+  topology-level verification.
 - **Subsystem deep-dives are inlined above** as their own sections: *Stop-chat contract*, *AskUserQuestion interception*, *Chat persistence — single-writer actor*, *Navigation back-stack + drawer model*, *Service worker + offline*, and *Mini-app manifest (mobius.json)*. (The chat-persistence v2 design + staged-rollout notes remain internal/gitignored — the as-built contract is the section above.)

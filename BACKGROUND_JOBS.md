@@ -18,6 +18,20 @@ and the verification required to change it. Browser iframe isolation is a
 separate boundary; see [`CAPABILITIES.md`](CAPABILITIES.md) for browser-side
 apps.
 
+## Decision: one contract, two private executors
+
+The reviewed access contract is portable; Linux enforcement mechanisms are
+not. Some supported hosts deny the namespace and mount operations Bubblewrap
+requires but provide Landlock ABI 6+. Others allow Bubblewrap but lack a usable
+Landlock implementation. Möbius therefore keeps one filesystem policy with two
+private launch adapters, selects by probing required behavior, and fails closed
+if neither works.
+
+This is deliberately not an executor framework. Apps cannot select a mechanism,
+and executor details do not enter manifests or capability policy. Remove
+Bubblewrap when every supported deployment passes the Landlock probe; remove
+Landlock when every supported deployment permits Bubblewrap.
+
 ## The stable scoped design
 
 The stable part of the system is a small semantic contract:
@@ -107,24 +121,12 @@ historical platform authority for existing ordinary jobs. The public
 declaration therefore describes the operating-system boundary directly rather
 than implying that sandboxing depends on whether a script uses AI.
 
-The earlier `background_agent` boolean has been removed rather than retained
-as an alias. It had one official consumer, Memory, which migrates to the
-explicit scoped declaration. Rejecting the old spelling is important: silently
-ignoring it would grant that job platform authority.
-
-Capability receipt schema 3 records `authority: scoped|platform` directly and
-does not carry the old redundant agent boolean. The launcher continues to read
-coherent schema 1 and schema 2 receipts already stored on persistent volumes,
-mapping their old boolean/authority pair to the current values. A null receipt
-remains the documented pre-contract platform-authority state. A known receipt
-with `background: null` is also complete: owner-authored or legacy apps can
-have a job discovered from their source tree without a stored manifest job
-declaration.
-
-A missing receipt field, unknown future schema, malformed current authority,
-or contradictory legacy pair fails closed. A future schema must therefore make
-its launcher migration deliberate rather than silently changing an installed
-job's authority.
+The earlier `background_agent` boolean has been removed rather than retained as
+an alias. Silently ignoring that spelling would grant its sole official
+consumer platform authority. Current receipts record the declared authority
+directly; coherent older receipts remain readable for existing volumes.
+Missing, malformed, contradictory, or unknown receipt data fails closed so a
+future schema cannot silently change an installed job's authority.
 
 ### Probe behavior, not host names
 
@@ -193,56 +195,28 @@ executor qualifies, the durable app-job log records both probe diagnostics.
 This reuses the lease and failure log rather than adding a database or health
 service.
 
-## Why the system reached this point
+## Origin
 
-Background-agent isolation was introduced when Memory moved from
-platform-owned code into a modular system app. Bubblewrap was a sound initial
-executor: it could make the container filesystem read-only, mask owner data,
-mount only reviewed paths, and isolate processes with familiar namespace
-semantics.
+Scoped authority was introduced when Memory moved from platform-owned code into
+a modular app. Bubblewrap was a sound first executor, but its namespace setup
+depends on privileges granted by the outer container runtime; installing the
+binary inside an image cannot recover privileges the host withholds. Landlock
+made the same reviewed data contract enforceable on such hosts without
+namespace creation.
 
-Nested Bubblewrap is not only an image property, though. The outer container
-runtime must permit namespace and mount setup. The bundled Docker Compose
-deployment was later given the required capabilities and security profile, so
-that deployment worked. Managed runtimes that do not expose equivalent outer
-container controls can reject Bubblewrap before app code starts. Memory made
-the gap visible because it was the first Store app to combine scoped job
-authority with install-time initialization.
-
-That initialization exposed three independent integration assumptions in
-sequence: the backend was not ready to mint a scoped token, scheduled jobs
-assumed the old local port and baked runner, and the managed host rejected
-Bubblewrap's namespace setup. Each correction belongs to its owning layer:
-readiness in bootstrap launch, address/runner selection in the shared job
-handoff, and host portability in secure executor selection. None belongs in
-Memory itself.
-
-The resulting lesson is narrower than “build a sandbox framework”:
-Bubblewrap was coupled to one deployment topology, while the reviewed access
-contract was not. Landlock provides a second enforcement path on modern
-restricted hosts without requiring namespace creation. Keeping both small
-preserves stronger isolation where available and portability where it is not.
-
-Related architecture already documented elsewhere:
-
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) defines “solve at the core,” “design for
-  the next change,” and “keep the shared foundation lean.”
-- [`CAPABILITIES.md`](CAPABILITIES.md) establishes the broader pattern that
-  declarations are owner-readable contracts and mechanisms are narrow
-  providers.
-- [`SECURITY.md`](SECURITY.md) distinguishes hardened technical boundaries
-  from accepted trade-offs.
-- The original runner comments explain the narrower background-agent data
-  contract and why jobs write as the `mobius` data owner.
-- The Compose security settings explain why nested Bubblewrap needs explicit
-  outer-runtime support.
+Memory's install-time initialization also exposed readiness, callback-address,
+and stale-runner assumptions. Those corrections live in the shared launch path,
+not in Memory or the sandbox adapters. The durable lesson is to keep app policy
+independent of both application identity and deployment mechanism.
 
 ## Alternatives considered
 
 | Alternative | Why it is not the current design |
 |---|---|
-| Bubblewrap only | Excludes demonstrated managed hosts that deny nested namespaces. |
-| Landlock only | Discards stronger private namespaces and excludes older kernels where Bubblewrap already works. |
+| Bubblewrap only | Excludes supported hosts whose outer runtime denies nested namespaces. |
+| Landlock only | Discards stronger private namespaces and excludes supported hosts where Landlock is disabled or too old. |
+| A different namespace launcher | Cannot recover namespace or mount privileges withheld by the outer runtime. |
+| A container or VM per job | Moves isolation to a host orchestrator and adds deployment-specific images, mounts, credentials, and lifecycle. |
 | Run unsandboxed if probing fails | Silently violates the permission the owner reviewed. |
 | Branch on deployment name | Brittle: the relevant property is kernel/runtime behavior, not branding. |
 | Add retries or a durable job queue | Does not fix an executor that can never start; solves a different problem. |
@@ -290,5 +264,5 @@ When this boundary changes:
    cleanup; separately test any sessions an app intentionally creates.
 6. Check both AMD64 and ARM64 images because syscall numbers, system packages,
    and seccomp resolution are architecture-sensitive.
-7. Keep failures actionable and never silently run a background agent as an
-   ordinary process.
+7. Keep failures actionable and never silently run a scoped job with platform
+   authority.

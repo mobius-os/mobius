@@ -36,7 +36,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # Chromium copy via the symlinks below (~/.agent-browser is where
 # agent-browser looks by default).
 #
-# Background-agent jobs prefer Bubblewrap: its audited setuid mode retains only
+# Scoped-authority jobs prefer Bubblewrap: its audited setuid mode retains only
 # the setup capabilities needed for mount/PID namespaces and drops them before
 # execing the unprivileged job. docker-compose.yml supplies the outer-container
 # grants absent from Docker's defaults. util-linux + libseccomp provide the
