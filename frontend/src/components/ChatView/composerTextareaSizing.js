@@ -6,7 +6,7 @@ function composerPill(textarea) {
   return textarea?.closest?.('.chat__pill') || null
 }
 
-export function composerUsesNativeSizing(css = globalThis.CSS) {
+export function textareaUsesNativeSizing(css = globalThis.CSS) {
   // An injected CSS object keeps the capability boundary directly testable.
   // Cache only the real browser verdict; tests and non-browser runtimes should
   // not freeze a synthetic result for later calls.
@@ -46,7 +46,7 @@ export function resizeComposerTextarea(textarea, value = textarea?.value) {
   // document layout, whose cost grows with every mounted drawer/transcript
   // row. ResizeObserver in ChatInputBar updates the tall alignment only when
   // the browser reports an actual size change.
-  if (composerUsesNativeSizing()) return 0
+  if (textareaUsesNativeSizing()) return 0
 
   // Empty is a semantic one-line state, not a geometry question. During a
   // multi-pane mount / foreground transition Chromium can briefly report an
@@ -75,7 +75,7 @@ export function resizeComposerTextarea(textarea, value = textarea?.value) {
 /** Collapse immediately while React is still committing an empty value. */
 export function resetComposerTextarea(textarea) {
   if (!textarea?.style) return
-  textarea.style.height = composerUsesNativeSizing() ? '' : 'auto'
+  textarea.style.height = textareaUsesNativeSizing() ? '' : 'auto'
   composerPill(textarea)?.classList?.remove?.('chat__pill--tall')
 }
 

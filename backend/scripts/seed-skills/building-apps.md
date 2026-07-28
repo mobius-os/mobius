@@ -910,9 +910,24 @@ useEffect(() => {
 ## Communicating with the shell
 
 ```jsx
-// Open a new chat with pre-filled text
+// Open a new chat with pre-filled text. The owner reviews and sends it.
 window.parent.postMessage({ type: 'moebius:new-chat', draft: 'Hello!' }, '*')
+
+// Create an owner-visible chat and submit its first turn reliably.
+// Open it only after the runtime confirms that the turn was accepted.
+const { chatId } = await window.mobius.chat.start({
+  title: 'Prepare projects',
+  draft: 'Inspect every ready project and prepare the worthwhile ones.',
+})
+window.parent.postMessage({ type: 'moebius:open-chat', chatId }, '*')
 ```
+
+Use `moebius:new-chat` only for an editable draft. Do not add an `autoSend`
+field to that shell message: retained panes and navigation make a
+create-then-send handoff inherently timing-sensitive. `window.mobius.chat.start`
+is the shared first-turn primitive. It creates a visible app-owned chat, waits
+for the first message to be accepted, then returns its id for navigation. Catch
+errors and preserve the source UI so the owner can retry without losing work.
 
 The opaque app document cannot name the shell as a target origin, so raw
 app-to-shell messages use `'*'`. For reply protocols, require

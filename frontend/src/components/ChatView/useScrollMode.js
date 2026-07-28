@@ -663,13 +663,20 @@ export function modeForViewportChange(mode, wasNearScrollBottom, anchorMode = nu
 }
 
 
+/** The plain reading-position hold, excluding the question-submission overlay
+ * that uses the same ANCHOR_AT shape with a stronger transient contract. */
+export function isOrdinaryReadingHold(mode) {
+  return mode?.kind === 'ANCHOR_AT'
+    && !Number.isFinite(mode.questionSubmitViewportH)
+}
+
 /** A focused, content-growing question field gives the browser temporary
  * ownership of caret visibility. If that native adjustment moved an ordinary
  * held viewport, rebase the hold to what is visible now instead of restoring
- * the stale pre-edit anchor. Send pins, reserved-tail holds, and live following
- * keep their stronger contracts and therefore pass through unchanged. */
+ * the stale pre-edit anchor. Send pins, reserved-tail holds, live following,
+ * and the submission overlay keep their stronger contracts. */
 export function modeForQuestionEditingViewportChange(mode, anchorMode = null) {
-  if (mode?.kind !== 'ANCHOR_AT' || !anchorMode) return mode
+  if (!isOrdinaryReadingHold(mode) || !anchorMode) return mode
   if (mode.key === anchorMode.key
       && Math.abs(mode.offset - anchorMode.offset) <= 0.5) return mode
   return anchorMode
@@ -981,24 +988,17 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   Whether authoritative history and any first mount catch-up have settled.
  *
  * @returns {{
- *   modeRef: React.MutableRefObject<
- *     | {kind: 'INITIAL'}
- *     | {kind: 'PIN_USER_MSG', cid: string, followWhenFilled?: boolean}
- *     | {kind: 'FOLLOW_BOTTOM'}
- *     | {kind: 'ANCHOR_AT', key: string, offset: number}
- *   >,
  *   gestureWindowUntilRef: React.MutableRefObject<number>,
- *   userScrollIntentVersionRef: React.MutableRefObject<number>,
  *   revealed: boolean,
  *   anchorPagination: (key: string, offset: number) => void,
- *   armSentMessage: (event: object) => void,
- *   closePreSendGestureWindow: () => void,
+ *   captureSendIntent: (event: object) => object,
+ *   commitSendIntent: (event: object) => void,
  *   freezeChatExit: () => void,
  *   freezeForegroundReturn: () => void,
  *   freezeQuestionSubmission: () => void,
  *   freezeQueuedSubmission: () => void,
  *   revealConversationTail: () => void,
- *   settleNonPin: (event?: object) => void,
+ *   settleSendIntent: (event?: object) => void,
  *   settleStreamingPin: () => void,
  * }}
  */
@@ -1215,18 +1215,56 @@ export default function useScrollMode({
     return anchor ? transitionMode(anchor, event) : modeRef.current
   }, [scrollRef, transitionMode])
 
-  const armSentMessage = useCallback(({
+  // A semantic action snapshots the geometry that the reader just chose, then
+  // supersedes every unfinished part of the older gesture. Keep that ordering
+  // inside the scroll owner: exposing the gesture timer + intent generation to
+  // ChatView made each new send entrypoint responsible for reproducing the same
+  // easy-to-miss sequence.
+  const supersedePendingReaderGesture = useCallback(() => {
+    discardPendingReaderSettleRef.current?.()
+    gestureSequenceRef.current += 1
+    gestureWindowUntilRef.current = 0
+    clearTimeout(pendingGestureTimerRef.current)
+    pendingGestureTimerRef.current = 0
+    cancelAnimationFrame(pendingGestureReleaseRafRef.current)
+    pendingGestureReleaseRafRef.current = 0
+    resumeLayoutAfterGestureRef.current?.()
+  }, [])
+
+  const captureSendIntent = useCallback(({
+    canPin = true,
+    isFirstUserMsg = false,
+  } = {}) => {
+    const intent = {
+      willPin: canPin && shouldPinSend({
+        scrollEl: scrollRef.current,
+        mode: modeRef.current,
+        isFirstUserMsg,
+      }),
+      userScrollIntentVersion: userScrollIntentVersionRef.current,
+    }
+    supersedePendingReaderGesture()
+    return intent
+  }, [scrollRef, supersedePendingReaderGesture])
+
+  const sendIntentIsCurrent = useCallback(intent => (
+    !!intent
+    && intent.userScrollIntentVersion === userScrollIntentVersionRef.current
+  ), [])
+
+  const commitSendIntent = useCallback(({
     cid,
-    willPin,
-    intentCurrent = true,
+    intent,
+    fallbackWillPin = false,
   }) => {
     readerLocationExplicitRef.current = true
-    if (!intentCurrent) {
+    if (intent && !sendIntentIsCurrent(intent)) {
       return settleNonPin({
         retireFollow: true,
         event: 'send:reader-overrode-delayed-pin',
       })
     }
+    const willPin = intent ? intent.willPin : fallbackWillPin
     if (willPin && cid != null) {
       return transitionMode({
         kind: 'PIN_USER_MSG',
@@ -1238,7 +1276,16 @@ export default function useScrollMode({
       retireFollow: true,
       event: 'send:hold-current',
     })
-  }, [settleNonPin, transitionMode])
+  }, [sendIntentIsCurrent, settleNonPin, transitionMode])
+
+  const settleSendIntent = useCallback(({
+    intent,
+    retireFollow = false,
+    event = 'send:hold-current',
+  } = {}) => {
+    if (intent && !sendIntentIsCurrent(intent)) return modeRef.current
+    return settleNonPin({ retireFollow, event })
+  }, [sendIntentIsCurrent, settleNonPin])
 
   const freezeQueuedSubmission = useCallback(() => {
     readerLocationExplicitRef.current = true
@@ -1249,12 +1296,17 @@ export default function useScrollMode({
   }, [scrollRef, transitionMode])
 
   const freezeQuestionSubmission = useCallback(() => {
+    const nextMode = modeForQuestionSubmission(scrollRef.current, modeRef.current)
+    // Submit is a newer semantic reading action. Its current-geometry snapshot
+    // must not be replaced a few milliseconds later by the quiet settlement of
+    // the scroll that positioned the question card.
+    supersedePendingReaderGesture()
     readerLocationExplicitRef.current = true
     return transitionMode(
-      modeForQuestionSubmission(scrollRef.current, modeRef.current),
+      nextMode,
       'send:question-freeze',
     )
-  }, [scrollRef, transitionMode])
+  }, [scrollRef, supersedePendingReaderGesture, transitionMode])
 
   const anchorPagination = useCallback((key, offset) => {
     if (!key) return modeRef.current
@@ -1304,17 +1356,6 @@ export default function useScrollMode({
     nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
     persistMode()
   }, [persistMode, scrollRef, transitionMode, writeMode])
-
-  const closePreSendGestureWindow = useCallback(() => {
-    discardPendingReaderSettleRef.current?.()
-    gestureSequenceRef.current += 1
-    gestureWindowUntilRef.current = 0
-    clearTimeout(pendingGestureTimerRef.current)
-    pendingGestureTimerRef.current = 0
-    cancelAnimationFrame(pendingGestureReleaseRafRef.current)
-    pendingGestureReleaseRafRef.current = 0
-    resumeLayoutAfterGestureRef.current?.()
-  }, [])
 
   useLayoutEffect(() => () => {
     clearTimeout(pendingGestureTimerRef.current)
@@ -2016,6 +2057,10 @@ export default function useScrollMode({
     const onQuestionEditMutation = (event) => {
       if (!questionEditField(event.target)) return
       questionEditSessionRef.current = true
+      // Stronger modes already know where this resize belongs. In particular,
+      // FOLLOW_BOTTOM must absorb the new line in the same ResizeObserver pass
+      // instead of yielding for two painted frames and then snapping back.
+      if (!isOrdinaryReadingHold(modeRef.current)) return
       if (layoutMayOwnScroll(
         gestureWindowUntilRef.current,
         performance.now(),
@@ -2333,20 +2378,18 @@ export default function useScrollMode({
   }, [])
 
   return {
-    modeRef,
     gestureWindowUntilRef,
-    userScrollIntentVersionRef,
     revealed,
     anchorPagination,
-    armSentMessage,
-    closePreSendGestureWindow,
+    captureSendIntent,
+    commitSendIntent,
     freezeChatExit,
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
     reapplyActiveMode,
-    settleNonPin,
+    settleSendIntent,
     settleStreamingPin,
     paneResized,
   }

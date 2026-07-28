@@ -1,4 +1,4 @@
-/* Shell chrome stays fixed while mini-apps retain ownership of local zoom. */
+/* Browser zoom never scales the Möbius shell chrome; each app owns local zoom. */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -15,7 +15,7 @@ function viewportContent(html) {
   return html.match(/<meta name="viewport" content="([^"]+)"/)?.[1] || ''
 }
 
-test('pinch gestures cannot scale the shell chrome and every open pane together', () => {
+test('browser pinch cannot scale the shell chrome and active app together', () => {
   const viewport = viewportContent(indexHtml)
   assert.match(viewport, /width=device-width/)
   assert.match(viewport, /initial-scale=1(?:\.0)?/)

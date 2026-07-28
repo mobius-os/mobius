@@ -125,17 +125,31 @@ test('a deferred steer resolves only its OWN row, in any order', () => {
     'a wholesale reconcile against the pre-cut snapshot is what drops a '
     + 'concurrently-queued row and resurrects a retired one',
   )
-  assert.match(
-    deferred,
-    /forgetQueuedPinIntent\(\{ cid: queuedMsg\.cid \}\)/,
-    'the cut reads the pin intent from inlineSteerPinIntentRef, so the map '
-    + 'entry must be released here or it leaks for the life of the chat',
+  assert.ok(
+    !deferred.includes('forgetSendIntent'),
+    'response and SSE delivery can race, so only the authoritative cut may '
+    + 'consume the cid-keyed send intent',
   )
   assert.match(
     steeredBranch,
     /\} else \{[\s\S]*?pendingQueue\.cancelByCid\(queuedMsg\.cid\)/,
     'a route-split (Codex) steer still drops the tray entry immediately',
   )
+})
+
+test('every delayed send intent uses the same cid-keyed ledger', () => {
+  assert.match(chatViewSource, /const sendIntentByCidRef = useRef\(new Map\(\)\)/)
+  assert.ok(!chatViewSource.includes('steerPinIntentRef'))
+  assert.ok(!chatViewSource.includes('inlineSteerPinIntentRef'))
+  assert.ok(!chatViewSource.includes('queuedPinIntentByCidRef'))
+
+  const cut = sliceBranch(
+    chatViewSource,
+    'onSteeredIntoTurn: ({',
+    '\n  })\n',
+  )
+  assert.match(cut, /const pinIntent = takeSendIntent\(pinCid\)/)
+  assert.match(cut, /forgetSendIntent\(\{ cidList: steeredMessages\.map\(cidOf\) \}\)/)
 })
 
 test('every steered branch resolves the optimistic in-flight mark', () => {

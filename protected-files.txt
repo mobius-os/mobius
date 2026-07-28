@@ -20,4 +20,6 @@
 # Recovery no longer depends on freezing the boot chain; the separate recoveryd
 # container is the floor. Only the baked boot/restore scripts stay frozen.
 /app/scripts/entrypoint.sh
+/app/scripts/boot_attempt_counter.py
+/app/scripts/railway_supervision.sh
 /app/scripts/recovery_restore.sh

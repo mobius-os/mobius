@@ -27,6 +27,28 @@ test('drawer separates pinned chats and apps from ordinary chat history', () => 
   assert.deepEqual(sections.apps.map(app => app.id), [2, 1])
 })
 
+test('ordinary chat order follows owner activity rather than generic row updates', () => {
+  const sections = buildDrawerSections([
+    {
+      id: 'agent-finished',
+      has_messages: true,
+      activity_at: '2026-07-28T09:00:00Z',
+      updated_at: '2026-07-28T12:00:00Z',
+    },
+    {
+      id: 'owner-steered',
+      has_messages: true,
+      activity_at: '2026-07-28T11:00:00Z',
+      updated_at: '2026-07-28T11:00:00Z',
+    },
+  ], [])
+
+  assert.deepEqual(
+    sections.chats.map(chat => chat.id),
+    ['owner-steered', 'agent-finished'],
+  )
+})
+
 test('pinned order is stable across mixed timestamp formats (Z vs naive UTC)', () => {
   // After a drag, optimistic chat stamps carry a trailing Z while a refetched
   // app carries the server's naive-UTC form. Same instants must still interleave

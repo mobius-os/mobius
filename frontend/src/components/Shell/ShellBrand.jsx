@@ -1,5 +1,4 @@
 import { memo, useRef } from 'react'
-import mobiusLogoUrl from '../../assets/moebius.svg'
 import { useLogoModeGesture } from './useLogoModeGesture.js'
 
 /**
@@ -113,7 +112,7 @@ const ShellBrand = memo(function ShellBrand({
               browsers cannot raise a native image preview over the gesture. */}
           <img
             className="shell__logo"
-            src={mobiusLogoUrl}
+            src="/moebius.png"
             alt=""
             width="30"
             height="30"

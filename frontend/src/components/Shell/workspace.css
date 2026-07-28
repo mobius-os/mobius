@@ -178,6 +178,7 @@
 .workspace__strip {
   position: absolute;
   pointer-events: auto;
+  padding-inline-end: 0;
   border-radius: 8px 8px 0 0;
   /* No geometry transition (v2): a divider drag writes strip rects imperatively
      per frame and a mode beat animates the strip's transform, so an interpolated
@@ -191,16 +192,15 @@
   z-index: 5;
 }
 
-/* The explicitly requested per-pane focus toggle occupies one compact control at
-   the strip's trailing edge. Sticky positioning keeps the escape visible while
-   tabs scroll underneath it; focusing a pane is a presentation change only, so
-   the durable split tree and its ratios remain untouched. */
+/* Keep the pane-focus action anchored at the pane's trailing edge in both tiled
+   and focused presentations. Its narrow fixed width leaves more room for tabs;
+   sticky positioning keeps the escape visible when the strip overflows. */
 .workspace__pane-focus {
   position: sticky;
   right: 0;
   display: grid;
   place-items: center;
-  flex: 0 0 34px;
+  flex: 0 0 28px;
   align-self: stretch;
   margin-left: auto;
   border: 1px solid var(--border-light);
@@ -220,7 +220,7 @@
   outline-offset: -2px;
 }
 .workspace__strip .shell__tab {
-  scroll-margin-inline-end: 42px;
+  scroll-margin-inline-end: 34px;
 }
 
 /* Which tab is open in each pane, and which pane has focus, both read from the

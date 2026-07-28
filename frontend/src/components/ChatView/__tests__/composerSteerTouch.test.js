@@ -61,6 +61,6 @@ test('per-row fast-forward dispatches on touchend too', () => {
 test('the shared steer path snapshots scroll before dismissing the mobile composer', () => {
   assert.match(
     chatView,
-    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?steerPinIntentRef\.current = makeSendPinIntent\(steerWillPin\)[\s\S]*?if \(_isTouchPrimary\) inputRef\.current\?\.blur\(\)[\s\S]*?pendingQueue\.reserveForSteer\(consumePendingCids\)/,
+    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?explicitSteerIntent = captureSendIntent\(\{[\s\S]*?previousSendIntent = replaceSendIntent\(steerCid, explicitSteerIntent\)[\s\S]*?if \(_isTouchPrimary\) inputRef\.current\?\.blur\(\)[\s\S]*?pendingQueue\.reserveForSteer\(consumePendingCids\)/,
   )
 })

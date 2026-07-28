@@ -30,12 +30,14 @@ test('unanswered question cards do not have a stale gray state', () => {
     'the custom answer should publish its native caret-scroll ownership')
   assert.doesNotMatch(component, /onInput=\{e => resizeCustomAnswer/,
     'one post-commit measurement should own growth instead of resizing twice per edit')
+  assert.match(component, /if \(!textarea \|\| textareaUsesNativeSizing\(\)\) return/,
+    'current browsers should not run a per-character height measurement cycle')
   assert.match(component, /textarea\.style\.height = 'auto'[\s\S]*?Math\.min\(contentHeight, CUSTOM_ANSWER_MAX_HEIGHT\)/,
-    'the custom answer should grow with its content up to the phone-safe cap')
+    'the older-browser fallback should grow with content up to the phone-safe cap')
   assert.match(component, /useLayoutEffect\(\(\) => \{\s*resizeCustomAnswer\(textareaRef\.current\)\s*\}, \[value\]\)/,
     'confirmed answer values should retain their natural content height')
-  assert.match(component, /new ResizeObserver\(\(\) => \{[\s\S]*?const width = textarea\.clientWidth[\s\S]*?if \(width === lastWidth\) return[\s\S]*?resizeCustomAnswer\(textarea\)/,
-    'settled width changes should trigger one fresh content-height measurement')
+  assert.match(component, /textareaUsesNativeSizing\(\)[\s\S]*?new ResizeObserver\(\(\) => \{[\s\S]*?const width = textarea\.clientWidth[\s\S]*?if \(width === lastWidth\) return[\s\S]*?resizeCustomAnswer\(textarea\)/,
+    'only the measured fallback should observe width changes')
   assert.match(component, /observer\.observe\(textarea\)[\s\S]*?return \(\) => observer\.disconnect\(\)/,
     'the width observer should be released with the answered card')
   assert.match(component, /e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/,
@@ -67,7 +69,7 @@ test('question card css has no stale styling hook', () => {
     'expiration status styling should not come back')
   assert.match(css, /\.qcard__input:disabled\s*\{[\s\S]*?color:\s*var\(--muted\);[\s\S]*?-webkit-text-fill-color:\s*var\(--muted\);[\s\S]*?\}/,
     'a submitted custom answer should visibly gray out in every browser')
-  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*38px;[\s\S]*?overflow-y:\s*hidden;[\s\S]*?resize:\s*none;/,
+  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*38px;[\s\S]*?field-sizing:\s*content;[\s\S]*?overflow-y:\s*auto;[\s\S]*?resize:\s*none;/,
     'the custom answer should span the card and begin as a single growing line')
   assert.match(css, /\.qcard__submit-error\s*\{/,
     'a failed answer should keep its retry notice attached to the card')
@@ -91,8 +93,8 @@ test('question editing lets native caret movement settle before layout reclaims 
   )
   assert.match(
     scrollMode,
-    /scheduleQuestionEditNoScrollRelease[\s\S]*?requestAnimationFrame\(\(\) => \{[\s\S]*?requestAnimationFrame\(\(\) => \{[\s\S]*?releasePendingGesture/,
-    'a no-scroll edit should yield one rendered frame before layout resumes',
+    /onQuestionEditMutation[\s\S]*?!isOrdinaryReadingHold\(modeRef\.current\)\) return[\s\S]*?onUserInput\(event\)/,
+    'tail-follow and other stronger modes must keep layout ownership while the field grows',
   )
   assert.match(
     scrollMode,

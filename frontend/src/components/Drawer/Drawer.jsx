@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { Chats, DotsVerticalMoreMenu, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { Menu } from '@openai/apps-sdk-ui/components/Menu'
+import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import {
@@ -929,13 +930,13 @@ export default function Drawer({
                   <button type="button" onClick={onRetryChats}>Retry</button>
                 </div>
               )}
-              {chatsStatus === 'success' && allChats.length > 0 && (
+              {chatsStatus === 'success' && (
                 <section className="drawer__section" aria-labelledby="drawer-chats-label">
                   <h2 id="drawer-chats-label" className="drawer__label drawer__label--chats">
                     <Chats width={16} height={16} aria-hidden="true" />
                     <span>Chats</span>
                   </h2>
-                  {visibleChats.map(chat => (
+                  {allChats.length > 0 ? visibleChats.map(chat => (
                     <DrawerRow
                       key={chat.id}
                       kind="chat"
@@ -954,7 +955,13 @@ export default function Drawer({
                         && renaming.id === chat.id)}
                       actions={rowActions}
                     />
-                  ))}
+                  )) : (
+                    <EmptyMessage className="drawer__empty" fill="static">
+                      <EmptyMessage.Description>
+                        No conversations yet
+                      </EmptyMessage.Description>
+                    </EmptyMessage>
+                  )}
                   {visibleChatCount < allChats.length && (
                     <div
                       ref={chatSentinelRef}

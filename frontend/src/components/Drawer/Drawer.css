@@ -613,7 +613,17 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-/* ── List status ──────────────────────────────────── */
+/* ── Empty state ──────────────────────────────────── */
+
+/* SDK EmptyMessage carries its own internal padding + typography.
+   We only tighten the surrounding scope (keep it left-aligned and
+   not centred-block) so the empty hint sits flush with the rest
+   of the list. */
+.drawer__empty {
+  padding: 4px 10px 8px;
+  text-align: left;
+  align-items: flex-start;
+}
 
 .drawer__list-status {
   display: flex;
@@ -627,7 +637,6 @@
 }
 
 .drawer__list-status button {
-  min-height: 44px;
   padding: 7px 10px;
   color: var(--text);
   background: transparent;

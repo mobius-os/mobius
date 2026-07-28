@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # test.sh — single entrypoint for Möbius's two test layers.
 #
-# Backend tests run inside the mobius-test Docker image (pytest, real
-# environment with esbuild + node + pip deps). Browser E2E is an explicit,
-# host-only opt-in through the disposable Playwright runner.
+# Fast backend tests run in the checkout's hermetic host test runtime. The full
+# backend suite uses the mobius-test Docker image, and browser E2E is an
+# explicit host-only opt-in through the disposable Playwright runner.
 # Picking the right invocation by hand is a coin-flip and the slow
 # suite often wins by default — this wrapper makes the choice explicit
 # and visible up front.
@@ -21,13 +21,18 @@ _checkout_name="$(basename "$PROJECT_DIR" | tr -cs '[:alnum:]_.-' '-')"
 _checkout_id="$(printf '%s' "$PROJECT_DIR" | cksum | cut -d' ' -f1)"
 TEST_PROJECT="${MOBIUS_TEST_PROJECT:-mobius-test-${_checkout_name}-${_checkout_id}}"
 TEST_IMAGE="${MOBIUS_IMAGE:-mobius-test:ci}"
-# Slow Codex SDK tests — excluded by --fast. The cost is real (each
-# SDK contract test spins up a Thread/TurnHandle dance) and they cover
-# a narrow surface compared to the rest of the suite.
-SLOW_TESTS=(
-  "tests/test_codex_sdk_runner.py"
-  "tests/test_codex_sdk_contract.py"
-  "tests/test_codex_provider.py"
+# A deliberately small cross-section for the iteration loop. These exercise
+# boot/readiness, auth/config, app compilation, source inspection, the test
+# safety boundary, and the task-owned commit primitive. The complete backend
+# suite remains the required --backend/--all closeout gate.
+FAST_TESTS=(
+  "tests/test_readiness.py"
+  "tests/test_auth_helpers.py"
+  "tests/test_app_compile_contract.py"
+  "tests/test_source_status.py"
+  "tests/test_verify_test_runtime.py"
+  "tests/test_pm_commit.py"
+  "tests/test_test_entrypoint.py"
 )
 
 BACKEND_STATUS="SKIP"
@@ -47,8 +52,8 @@ Flags (mutually exclusive):
   --backend   Full pytest suite in the mobius-test image.    (several minutes)
   --frontend  Disposable host-only Playwright stack.         (several minutes)
   --all       Full backend, then disposable Playwright.      (explicit, expensive)
-  --fast      Backend only, skipping the slow Codex SDK tests.
-              Useful for iteration; DEFAULT. Use --backend before landing.
+  --fast      Small hermetic host contract suite (normally seconds).
+              No Docker image needed; DEFAULT. Use --backend before landing.
   --help      Show this message.
 
 Backend runs first under --all because it is slower but catches more
@@ -67,6 +72,13 @@ EOF
 # We surface the right next command instead of letting `docker compose
 # run` chew through a 3-minute build with no explanation.
 check_backend_prereqs() {
+  if ! command -v docker >/dev/null 2>&1; then
+    die "Docker is not available in this runtime. Use --fast for local iteration;
+    run --backend on a Docker-capable host or rely on the complete CI gate."
+  fi
+  if ! docker compose version >/dev/null 2>&1; then
+    die "Docker Compose is not available. Install the compose plugin before --backend."
+  fi
   if ! docker image inspect "${TEST_IMAGE}" >/dev/null 2>&1; then
     die "Image ${TEST_IMAGE} not found. Build it first:
     cd ${PROJECT_DIR} && docker compose -p ${TEST_PROJECT} -f docker-compose.test.yml build"
@@ -105,23 +117,30 @@ check_frontend_prereqs() {
 # ---- Suite runners ----------------------------------------------------------
 run_backend() {
   local mode="${1:-full}"   # "full" or "fast"
-  check_backend_prereqs
-
   local -a pytest_args=("--tb=short" "-q")
   local summary
   if [ "${mode}" = "fast" ]; then
-    for f in "${SLOW_TESTS[@]}"; do
-      pytest_args+=("--ignore=${f}")
-    done
-    summary="pytest (fast — skipping ${#SLOW_TESTS[@]} slow SDK files)"
+    summary="hermetic host contract suite (${#FAST_TESTS[@]} files)"
   else
     summary="pytest (full backend suite, currently ~2,450 tests)"
   fi
 
   log "backend: ${summary}"
+  if [ "${mode}" = "fast" ]; then
+    if (cd "${PROJECT_DIR}" && scripts/wt-pytest.sh "${FAST_TESTS[@]}" "${pytest_args[@]}"); then
+      BACKEND_STATUS="PASS"
+      log "backend: PASS"
+    else
+      BACKEND_STATUS="FAIL"
+      log "backend: FAIL"
+    fi
+    return
+  fi
+
+  check_backend_prereqs
   if (cd "${PROJECT_DIR}" && docker compose -p "${TEST_PROJECT}" \
-        -f docker-compose.test.yml run --rm --no-deps \
-        --entrypoint python pytest -m pytest "${pytest_args[@]}" tests/); then
+      -f docker-compose.test.yml run --rm --no-deps \
+      --entrypoint python pytest -m pytest "${pytest_args[@]}" tests/); then
     BACKEND_STATUS="PASS"
     log "backend: PASS"
   else

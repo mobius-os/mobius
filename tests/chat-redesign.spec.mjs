@@ -510,6 +510,10 @@ test.describe('Q&A atomic write', () => {
     )
     const streamBody = [
       `data: ${JSON.stringify({
+        type: 'text',
+        content: 'Context before the atomic question. '.repeat(160),
+      })}\n\n`,
+      `data: ${JSON.stringify({
         type: 'question',
         question_id: 'q-pick-atomic',
         questions: [{
@@ -546,9 +550,19 @@ test.describe('Q&A atomic write', () => {
       window.__mobiusChatScrollTrace = {
         version: 1, transitions: [], writes: [], events: [],
       }
+      const scroll = document.querySelector('.chat__scroll')
+      const submit = document.querySelector('.qcard__submit')
+      if (!scroll || !submit) throw new Error('question race fixture is incomplete')
+      // The answer action is newer than this just-finished bottom gesture. Its
+      // exact card anchor must not be replaced by the older quiet settlement.
+      scroll.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+      }))
+      scroll.scrollTop = scroll.scrollHeight
+      scroll.dispatchEvent(new Event('scroll'))
+      submit.click()
     })
-    await page.locator('[data-chat-surface="painted"] .qcard__submit').click()
-
     await expect.poll(() => sentBodies.length).toBe(2)
     // The hidden answer message MUST carry the answers field
     // (atomic backend write — no separate /question-answers POST).
@@ -562,6 +576,17 @@ test.describe('Q&A atomic write', () => {
     ))
     expect(questionFreeze).toBeTruthy()
     expect(questionFreeze.to?.kind).toBe('ANCHOR_AT')
+    await page.waitForTimeout(250)
+    const laterReaderBottom = await page.evaluate(() => {
+      const transitions = window.__mobiusChatScrollTrace?.transitions || []
+      const freezeIndex = transitions.findIndex(
+        row => row.event === 'send:question-freeze',
+      )
+      return transitions.slice(freezeIndex + 1).some(
+        row => row.event === 'reader:physical-bottom',
+      )
+    })
+    expect(laterReaderBottom).toBe(false)
   })
 
   test('an Android viewport growth releases a submitted question to its unanswered mode', async ({ page }) => {

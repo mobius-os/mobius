@@ -31,7 +31,7 @@ covers production SQLite's NullPool and deployed Postgres's QueuePool.
 """
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from app import models
 from app.broadcast import create_broadcast, remove_broadcast
@@ -117,7 +117,13 @@ async def test_chat_stream_releases_db_connection_while_open():
   baseline = checked_out_connections()
   db = _pinned_session(baseline)
   setup = SessionLocal()
-  setup.add(models.Chat(id=chat_id, title="sse pool test"))
+  setup.add(models.Chat(
+    id=chat_id,
+    title="sse pool test",
+    messages=[{"role": "user", "content": "x" * 100_000}],
+    live_assistant={"role": "assistant", "blocks": []},
+    pending_messages=[{"role": "user", "content": "queued"}],
+  ))
   setup.commit()
   setup.close()
 
@@ -126,6 +132,13 @@ async def test_chat_stream_releases_db_connection_while_open():
   bc = create_broadcast(chat_id)
   bc.publish({"type": "text", "content": "hello"})
 
+  chat_selects: list[str] = []
+
+  def capture_chat_select(_conn, _cursor, statement, _params, _context, _many):
+    if "FROM chats" in statement:
+      chat_selects.append(statement)
+
+  event.listen(db.bind, "before_cursor_execute", capture_chat_select)
   try:
     response = await stream_chat(
       request=_ConnectedRequest(),
@@ -133,6 +146,11 @@ async def test_chat_stream_releases_db_connection_while_open():
       principal=Principal(owner=models.Owner(username="test"), app_id=None),
       db=db,
     )
+    assert len(chat_selects) == 1
+    selected = chat_selects[0].partition("FROM chats")[0]
+    assert "chats.messages" not in selected
+    assert "chats.live_assistant" not in selected
+    assert "chats.pending_messages" not in selected
     gen = response.body_iterator
     try:
       first = await gen.__anext__()
@@ -141,5 +159,6 @@ async def test_chat_stream_releases_db_connection_while_open():
     finally:
       await gen.aclose()
   finally:
+    event.remove(db.bind, "before_cursor_execute", capture_chat_select)
     db.close()
     remove_broadcast(chat_id)

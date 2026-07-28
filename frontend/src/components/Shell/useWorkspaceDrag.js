@@ -4,7 +4,7 @@ import { STRIP_H } from './paneModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, touchMoveIntent, releasedInPlace, holdMsFor, crossedDrawerExit,
-  rootEdgeAllowed,
+  rootEdgeAllowed, clientPointToLocal,
 } from './dragController.js'
 
 // The thin React binding for the workspace drag controller (design §3). It owns
@@ -113,10 +113,38 @@ export default function useWorkspaceDrag({
     let clearPendingSourceClick = null
 
     function contentBox() {
-      return contentElRef.current?.getBoundingClientRect() || { left: 0, top: 0 }
+      const host = contentElRef.current
+      if (!host) {
+        return {
+          rect: { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight },
+          localSize: { w: window.innerWidth, h: window.innerHeight },
+        }
+      }
+      const rect = host.getBoundingClientRect()
+      return {
+        rect,
+        localSize: {
+          w: host.clientWidth || rect.width,
+          h: host.clientHeight || rect.height,
+        },
+      }
     }
     function toLocal(clientX, clientY, box = contentBox()) {
-      return { x: clientX - box.left, y: clientY - box.top }
+      return clientPointToLocal({ x: clientX, y: clientY }, box.rect, box.localSize)
+    }
+    function toViewportLayout(clientX, clientY) {
+      const root = document.documentElement
+      const rect = root.getBoundingClientRect()
+      return clientPointToLocal(
+        { x: clientX, y: clientY },
+        rect,
+        {
+          // CSS zoom leaves the root's client box in painted pixels, but its
+          // offset box remains in the layout pixels fixed descendants consume.
+          w: root.offsetWidth || root.clientWidth || rect.width,
+          h: root.offsetHeight || root.clientHeight || rect.height,
+        },
+      )
     }
 
     function ensureOverlays() {
@@ -167,11 +195,14 @@ export default function useWorkspaceDrag({
         chipEl.hidden = false
         chipWidth = chipEl.offsetWidth || 0
       }
-      const { left, top } = chipOffset({ x: clientX, y: clientY }, isTouch)
+      const { left, top } = chipOffset(toViewportLayout(clientX, clientY), isTouch)
       // V5 (vizreview): clamp the chip within the viewport so its label never clips
       // at the right edge (the +12 offset pushed a right-edge drag off-screen).
       const margin = 8
-      const maxLeft = Math.max(margin, window.innerWidth - chipWidth - margin)
+      const viewportWidth = document.documentElement.offsetWidth
+        || document.documentElement.clientWidth
+        || window.innerWidth
+      const maxLeft = Math.max(margin, viewportWidth - chipWidth - margin)
       chipEl.style.left = `${Math.max(margin, Math.min(left, maxLeft))}px`
       chipEl.style.top = `${top}px`
     }
@@ -220,7 +251,10 @@ export default function useWorkspaceDrag({
       if (!strip) return []
       return [...strip.querySelectorAll('.shell__tab')].map((el) => {
         const r = el.getBoundingClientRect()
-        return { left: r.left - box.left, right: r.right - box.left }
+        return {
+          left: toLocal(r.left, r.top, box).x,
+          right: toLocal(r.right, r.bottom, box).x,
+        }
       })
     }
 
@@ -328,8 +362,7 @@ export default function useWorkspaceDrag({
       // Strip auto-scroll (§3.2): near an overflowing strip's edge, scroll it
       // 6px/frame and re-measure so the caret keeps tracking under the pointer.
       function updateAutoScroll(clientX, clientY, box = contentBox()) {
-        const xL = clientX - box.left
-        const yL = clientY - box.top
+        const { x: xL, y: yL } = toLocal(clientX, clientY, box)
         let stripEl = null
         let dir = 0
         let pid = null

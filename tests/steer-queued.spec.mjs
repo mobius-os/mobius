@@ -482,6 +482,187 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await expect(page.locator('[data-chat-surface="painted"] .queued__row')).not.toContainText(TEXT1)
   })
 
+  test('an immediate bottom gesture cannot overwrite a newer fast-forward pin', async ({ page }) => {
+    const QUEUE_TS = Date.now() + 50_000
+    const QUEUED_TEXT = 'pin this steer without a bounce'
+    const PRE_STEER = 'streaming room before fast-forward '.repeat(220)
+    const messagePosts = []
+
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
+      let body = {}
+      try { body = JSON.parse(route.request().postData() || '{}') } catch { /* empty */ }
+      messagePosts.push(body)
+      if (body.force_steer) {
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'steered', chat_id: 'mock', pending_messages: [],
+          }),
+        })
+      }
+      if (body.content === 'first message') {
+        return route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'started',
+            message: {
+              role: 'user', content: body.content, ts: Date.now(), cid: body.cid,
+            },
+          }),
+        })
+      }
+      const pendingMessage = {
+        role: 'user', content: body.content, ts: QUEUE_TS, cid: body.cid,
+      }
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'queued',
+          ts: QUEUE_TS,
+          position: 1,
+          pending_message: pendingMessage,
+        }),
+      })
+    })
+
+    // Keep one real fetch stream open so the cut can be emitted in a separate
+    // browser task after the steer response. That response/event ordering is
+    // intentional: the cid ledger must preserve the intent in either order.
+    await page.addInitScript(({ preSteer, queueTs, queuedText }) => {
+      const originalFetch = window.fetch.bind(window)
+      const encoder = new TextEncoder()
+      const encodeSse = events => encoder.encode(
+        events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''),
+      )
+      window.__immediateSteerMock = {
+        initialRequested: false,
+        emitInitial: null,
+        emitSteer: null,
+      }
+      window.fetch = async (input, init) => {
+        const url = typeof input === 'string' ? input : input?.url
+        if (typeof url === 'string' && /\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+          let emitSteer
+          const body = new ReadableStream({
+            start(controller) {
+              const emitInitial = () => controller.enqueue(encodeSse([
+                { type: 'catch_up_done' },
+                { type: 'text', content: preSteer },
+              ]))
+              window.__immediateSteerMock.emitInitial = emitInitial
+              if (window.__immediateSteerMock.initialRequested) emitInitial()
+              emitSteer = cid => controller.enqueue(encodeSse([{
+                type: 'steered_into_turn',
+                ts: queueTs,
+                content: queuedText,
+                messages: [{
+                  role: 'user', ts: queueTs, cid, content: queuedText,
+                }],
+              }]))
+            },
+            cancel() {},
+          })
+          window.__immediateSteerMock.emitSteer = cid => emitSteer?.(cid)
+          return new Response(body, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+          })
+        }
+        return originalFetch(input, init)
+      }
+    }, { preSteer: PRE_STEER, queueTs: QUEUE_TS, queuedText: QUEUED_TEXT })
+
+    await setupChat(page)
+    await newChat(page)
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await sendMessage(page, 'first message')
+    await expect(page.locator('.chat__msg--user')).toBeVisible({ timeout: 5000 })
+    await page.evaluate(() => {
+      const mock = window.__immediateSteerMock
+      if (!mock) return
+      mock.initialRequested = true
+      mock.emitInitial?.()
+    })
+    await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
+    await sendMessage(page, QUEUED_TEXT)
+    const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
+    await expect(steerBtn).toBeVisible({ timeout: 5000 })
+
+    // Reproduce the race in one task: the reader reaches the physical bottom,
+    // its quiet settlement is now pending, and Fast-forward begins before that
+    // timer fires. The newer semantic action must discard the older decision.
+    await page.evaluate(() => {
+      window.__mobiusChatScrollTrace = {
+        version: 1, transitions: [], writes: [], events: [],
+      }
+      const scroll = document.querySelector('.chat__scroll')
+      const steer = document.querySelector(
+        'button[aria-label="Send queued message now"]',
+      )
+      if (!scroll || !steer) throw new Error('steer race fixture is incomplete')
+      scroll.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+      }))
+      scroll.scrollTop = scroll.scrollHeight
+      scroll.dispatchEvent(new Event('scroll'))
+      steer.click()
+    })
+
+    await expect.poll(
+      () => messagePosts.filter(body => body.force_steer).length,
+      { timeout: 5000 },
+    ).toBe(1)
+    const steerPost = messagePosts.find(body => body.force_steer)
+    const cid = steerPost?.consume_pending_cids?.[0]
+    expect(typeof cid).toBe('string')
+    await page.evaluate(
+      steeredCid => window.__immediateSteerMock?.emitSteer?.(steeredCid),
+      cid,
+    )
+
+    const result = await page.evaluate(async (steeredCid) => {
+      const frames = []
+      for (let i = 0; i < 12; i += 1) {
+        await new Promise(resolve => requestAnimationFrame(resolve))
+        const scroll = document.querySelector('.chat__scroll')
+        const row = document.querySelector(`.chat__msg--user[data-cid="${steeredCid}"]`)
+        const sr = scroll?.getBoundingClientRect()
+        const rr = row?.getBoundingClientRect()
+        frames.push(sr && rr ? rr.top - sr.top : null)
+      }
+      return {
+        frames,
+        transitions: window.__mobiusChatScrollTrace?.transitions || [],
+      }
+    }, cid)
+
+    const landedFrames = result.frames.filter(Number.isFinite)
+    expect(landedFrames.length, JSON.stringify(result)).toBeGreaterThanOrEqual(4)
+    for (const visualTop of landedFrames) {
+      expect(visualTop, JSON.stringify(result)).toBeGreaterThanOrEqual(-2)
+      expect(visualTop, JSON.stringify(result)).toBeLessThanOrEqual(12)
+    }
+    expect(
+      Math.max(...landedFrames) - Math.min(...landedFrames),
+      JSON.stringify(result),
+    ).toBeLessThanOrEqual(2)
+
+    const pinIndex = result.transitions.findIndex(
+      row => row.event === 'send:pin-user-message',
+    )
+    expect(pinIndex, JSON.stringify(result.transitions)).toBeGreaterThanOrEqual(0)
+    expect(
+      result.transitions.slice(pinIndex + 1).some(
+        row => row.event === 'reader:physical-bottom',
+      ),
+      JSON.stringify(result.transitions),
+    ).toBe(false)
+  })
+
   test('a steer while reading above the tail preserves the live stream and held position', async ({ page }) => {
     // Regression for bug #1: a force_steer must inject into the LIVE turn,
     // not trigger the fresh-send reset. The old code ran sendMessage's
