@@ -10,6 +10,9 @@ const changeHandler = inputBarSrc.match(
 const historyMoveHandler = inputBarSrc.match(
   /function applyHistoryMove\(historyMove\) \{[\s\S]*?\n    \}/,
 )?.[0] || ''
+const slashCommandHandler = inputBarSrc.match(
+  /function acceptSlashCommand\(command\) \{[\s\S]*?\n  \}/,
+)?.[0] || ''
 
 test('manual textarea changes remain enabled while voice input is active', () => {
   assert.doesNotMatch(changeHandler, /listeningRef\?\.current\) return/,
@@ -32,6 +35,17 @@ test('sent-message recall rebases live dictation before changing the draft', () 
   assert.ok(
     historyMoveHandler.indexOf('onManualVoiceEdit?.(historyMove.value)')
       < historyMoveHandler.indexOf('onInputChange(historyMove.value)'),
+    'the voice baseline must update before the controlled composer value',
+  )
+})
+
+test('accepting a slash command rebases live dictation before changing the draft', () => {
+  assert.match(slashCommandHandler,
+    /if \(listeningRef\?\.current\) onManualVoiceEdit\?\.\(value\)/,
+    'command acceptance must retire the in-flight speech result before updating the draft')
+  assert.ok(
+    slashCommandHandler.indexOf('onManualVoiceEdit?.(value)')
+      < slashCommandHandler.indexOf('onInputChange(value)'),
     'the voice baseline must update before the controlled composer value',
   )
 })

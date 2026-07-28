@@ -90,6 +90,15 @@ import {
   resolveComposerHistoryMove,
 } from './composerHistory.js'
 import { resolveComposerEnterAction } from './composerShortcuts.js'
+import SlashMenu from './SlashMenu.jsx'
+import {
+  applySlashCommand,
+  matchSlashCommands,
+  resolveSlashMenuKey,
+  slashCommandIsAvailable,
+  slashCommandUnavailableReason,
+  visibleSlashCommands,
+} from './slashCommands.js'
 import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import {
@@ -443,6 +452,9 @@ function FileChips({ files, onRemove, chatId }) {
  *                        chat; drafting stays available but send/mic-start do
  *                        not race the transition.
  *   messageHistory     — visible owner-authored message text, oldest first.
+ *   provider           — the chat's provider id ('claude' | 'codex'). Filters
+ *                        the "/" menu to commands that actually dispatch on it;
+ *                        provider-specific commands stay hidden while unknown.
  *
  * The bar does NOT own send state — ChatView's doSend handles that.
  * The bar's only job: composition + the Send/Stop/Mic resolution.
@@ -476,6 +488,7 @@ export default function ChatInputBar({
   rightButtons,
   attachTriggerRef,
   messageHistory = [],
+  provider,
 }) {
   const fileInputRef = useRef(null)
   const historyIndexRef = useRef(null)
@@ -488,6 +501,35 @@ export default function ChatInputBar({
   // unconditionally would pop the soft keyboard up even when the
   // keyboard was down before the `+` tap.
   const wasInputFocusedAtPickerOpenRef = useRef(false)
+
+  // Slash-command menu state. The list itself is derived from the current
+  // text every render rather than stored, so it can never disagree with what
+  // the composer holds; only the highlight and an explicit dismissal are state.
+  const [slashIndex, setSlashIndex] = useState(0)
+  const [slashDismissed, setSlashDismissed] = useState(false)
+  const [slashInputFocused, setSlashInputFocused] = useState(false)
+  const slashCandidates = matchSlashCommands(input)
+  const slashMatches = visibleSlashCommands(slashCandidates, {
+    focused: slashInputFocused,
+    dismissed: slashDismissed,
+  })
+  // Clamped rather than trusted: the list shrinks as the query narrows, and a
+  // stale highlight one past the end would accept `undefined`.
+  const slashActiveIndex = Math.min(slashIndex, Math.max(slashMatches.length - 1, 0))
+  const slashListId = `slash-menu-${chatId}`
+  const slashOptionId = `${slashListId}-active`
+  const slashNames = slashCandidates.map((command) => command.name).join(',')
+
+  // A narrowed query should highlight the new best match, not keep pointing at
+  // wherever the user had arrowed to in the previous, longer list.
+  useEffect(() => { setSlashIndex(0) }, [slashNames])
+
+  // Escape silences the menu for the command being typed — not forever. Once
+  // the composer leaves slash mode (or the query stops matching anything), the
+  // next "/" gets a fresh menu.
+  useEffect(() => {
+    if (slashCandidates.length === 0) setSlashDismissed(false)
+  }, [slashCandidates.length])
 
   // Expose the hidden-file-input trigger to the parent. The parent
   // owns the visible "attach" affordance (now part of ComposerPopover);
@@ -599,7 +641,35 @@ export default function ChatInputBar({
     onAddFiles(files)
   }
 
+  function acceptSlashCommand(command) {
+    if (!command || !slashCommandIsAvailable(command, provider)) return
+    const value = applySlashCommand(command)
+    resetMessageHistory()
+    if (listeningRef?.current) onManualVoiceEdit?.(value)
+    onInputChange(value)
+    // The textarea never lost focus (rows suppress pointerdown), but a click
+    // accept still needs the caret put back after the controlled update.
+    inputRef?.current?.focus({ preventScroll: true })
+  }
+
   function handleKeyDown(e) {
+    // The menu claims Enter and the arrows while it is open — the same keys
+    // that otherwise send and walk sent-message history — so it resolves
+    // BEFORE both. Keys it doesn't claim fall through untouched.
+    const slashAction = resolveSlashMenuKey(e, {
+      open: slashMatches.length > 0,
+      count: slashMatches.length,
+    })
+    if (slashAction) {
+      e.preventDefault()
+      const total = slashMatches.length
+      if (slashAction === 'dismiss') setSlashDismissed(true)
+      else if (slashAction === 'next') setSlashIndex((i) => (i + 1) % total)
+      else if (slashAction === 'previous') setSlashIndex((i) => (i - 1 + total) % total)
+      else if (slashAction === 'accept') acceptSlashCommand(slashMatches[slashActiveIndex])
+      return
+    }
+
     function applyHistoryMove(historyMove) {
       historyIndexRef.current = historyMove.index
       historyDraftRef.current = historyMove.draft
@@ -719,6 +789,15 @@ export default function ChatInputBar({
           {sendFailure}
         </div>
       )}
+      <SlashMenu
+        commands={slashMatches}
+        activeIndex={slashActiveIndex}
+        onSelect={acceptSlashCommand}
+        isAvailable={(command) => slashCommandIsAvailable(command, provider)}
+        unavailableReason={(command) => slashCommandUnavailableReason(command, provider)}
+        listId={slashListId}
+        optionId={slashOptionId}
+      />
       <div className="chat__input-row">
         {leftButtons}
         <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}`}>
@@ -737,11 +816,23 @@ export default function ChatInputBar({
               onChange={handleTextareaChange}
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
+              onFocus={() => setSlashInputFocused(true)}
+              onBlur={() => setSlashInputFocused(false)}
               placeholder="Message Möbius…"
               aria-label="Message Möbius…"
               name="message"
               autoComplete="off"
               rows={1}
+              // Combobox semantics apply only while the menu is open. Left on
+              // permanently they would announce this plain prose textarea as a
+              // picker in every ordinary message the user writes.
+              {...(slashMatches.length > 0 ? {
+                role: 'combobox',
+                'aria-expanded': true,
+                'aria-controls': slashListId,
+                'aria-activedescendant': slashOptionId,
+                'aria-autocomplete': 'list',
+              } : {})}
             />
             {rightButtons}
             <PrimaryAction

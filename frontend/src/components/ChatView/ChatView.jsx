@@ -4203,6 +4203,7 @@ export default function ChatView({
           onRemoveFile={handleComposerRemoveFile}
           attachTriggerRef={attachTriggerRef}
           messageHistory={messageHistory}
+          provider={chatInfo?.provider}
           leftButtons={
             <>
               <ComposerPopover

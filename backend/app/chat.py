@@ -4802,6 +4802,16 @@ def _build_resumed_context(chat_row) -> str | None:
   )
 
 
+# The CLI slash commands Möbius keeps at character 0. Named rather than
+# inlined below because it is half of a cross-language contract: the composer's
+# "/" menu (frontend/src/components/ChatView/slashCommands.js) offers exactly
+# this set, and `test_slash_command_registry_parity` reads both to pin them
+# together. Without that pin the menu could offer a command this dispatch check
+# does not know, and picking it would degrade into ordinary prose with no error
+# shown anywhere.
+CLI_SLASH_COMMANDS = frozenset({"/goal"})
+
+
 def _is_cli_slash_command(text: str) -> bool:
   """True when `text` starts with a supported Claude CLI slash command.
 
@@ -4812,7 +4822,7 @@ def _is_cli_slash_command(text: str) -> bool:
   a command-shaped prompt.
   """
   words = (text or "").lstrip("\n").split(None, 1)
-  return bool(words) and words[0].strip() in {"/goal"}
+  return bool(words) and words[0].strip() in CLI_SLASH_COMMANDS
 
 
 async def run_chat(

@@ -1,0 +1,102 @@
+/* SlashMenu — floating command picker above the composer. */
+
+/* Zero-height anchor: the menu is positioned off this rather than off
+   .chat__form, so the composer's own layout (a flex column whose gap and
+   sizing the pill depends on) is not disturbed by a sibling that appears and
+   disappears as the user types. */
+.slash-menu-anchor {
+  position: relative;
+  height: 0;
+}
+
+.slash-menu {
+  position: absolute;
+  bottom: 8px;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: min(46vh, 320px);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.18);
+  /* Rises the short distance from the composer it is attached to, so it reads
+     as belonging to the input rather than as a dialog dropped over the chat. */
+  animation: slash-menu-in 120ms ease-out;
+}
+
+@keyframes slash-menu-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slash-menu { animation: none; }
+}
+
+.slash-menu__item {
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+/* Highlight is driven by keyboard selection, not :focus — the textarea keeps
+   focus throughout. Hover shares the same treatment so pointer and keyboard
+   never disagree about which row is "the one".
+
+   --surface2 rather than --accent-dim: the accent tint is 8% alpha, which is
+   legible as a wash behind large elements but nearly invisible on a single
+   row against --surface. The inset bar carries the accent instead, where a
+   solid 2px of it actually reads. */
+.slash-menu__item--active,
+.slash-menu__item:hover {
+  background: var(--surface2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.slash-menu__item--unavailable {
+  cursor: default;
+  opacity: 0.68;
+}
+
+.slash-menu__item--unavailable .slash-menu__name {
+  color: var(--muted);
+}
+
+.slash-menu__line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.slash-menu__name {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.slash-menu__args {
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-menu__summary {
+  margin-top: 2px;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+
+.slash-menu__detail {
+  margin-top: 1px;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
