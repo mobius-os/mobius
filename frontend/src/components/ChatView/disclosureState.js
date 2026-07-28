@@ -6,7 +6,6 @@ import { useRef, useState } from 'react'
 // thought, and tool rows the reader opened without writing presentation state
 // into the durable conversation.
 const STORAGE_PREFIX = 'chat-disclosures:'
-const MAX_OPEN_DISCLOSURES = 200
 const cache = new Map()
 
 function storageKey(chatId) {
@@ -22,7 +21,7 @@ function readOpenKeys(chatId) {
     const parsed = JSON.parse(sessionStorage.getItem(storageKey(id)) || '[]')
     if (Array.isArray(parsed)) keys = parsed.filter(key => typeof key === 'string')
   } catch {}
-  const openKeys = new Set(keys.slice(-MAX_OPEN_DISCLOSURES))
+  const openKeys = new Set(keys)
   cache.set(id, openKeys)
   return openKeys
 }
@@ -32,13 +31,8 @@ export function persistDisclosureOpen(chatId, disclosureKey, open) {
   const key = String(disclosureKey || '')
   if (!id || !key) return
   const openKeys = readOpenKeys(id)
-  // Refresh insertion order when opening so the bounded set retains the most
-  // recently used disclosures in an unusually long tool-heavy chat.
-  openKeys.delete(key)
   if (open) openKeys.add(key)
-  while (openKeys.size > MAX_OPEN_DISCLOSURES) {
-    openKeys.delete(openKeys.values().next().value)
-  }
+  else openKeys.delete(key)
   try {
     sessionStorage.setItem(storageKey(id), JSON.stringify([...openKeys]))
   } catch {}

@@ -20,7 +20,21 @@ const BASE = (import.meta.env?.BASE_URL || '/').replace(/\/$/, '')
 // Per-message 60s debounce so a render loop can't storm the network before the
 // server's own debounce collapses the duplicates. Mirrors app-frame.html's
 // reportAppError for the in-iframe path.
+export const _ERROR_REPORT_DEBOUNCE_MS = 60 * 1000
 const _reportSeen = new Map()
+
+function shouldReport(key, now) {
+  for (const [seenKey, seenAt] of _reportSeen) {
+    if (now - seenAt < _ERROR_REPORT_DEBOUNCE_MS) break
+    _reportSeen.delete(seenKey)
+  }
+  const last = _reportSeen.get(key)
+  if (last !== undefined && now - last < _ERROR_REPORT_DEBOUNCE_MS) return false
+  // Keep insertion order chronological so expiry only scans the stale prefix.
+  _reportSeen.delete(key)
+  _reportSeen.set(key, now)
+  return true
+}
 
 /**
  * POST one shell error to /api/client-error → an `app_error` activity event
@@ -34,9 +48,7 @@ function postClientError(record) {
   if (!token || !record.message) return
   const key = String(record.message).slice(0, 200)
   const now = Date.now()
-  const last = _reportSeen.get(key)
-  if (last && now - last < 60000) return
-  _reportSeen.set(key, now)
+  if (!shouldReport(key, now)) return
   try {
     const detail = record.stack || record.componentStack
     fetch(`${BASE}/api/client-error`, {

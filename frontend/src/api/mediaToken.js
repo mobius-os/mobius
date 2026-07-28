@@ -23,6 +23,12 @@ import { BASE, apiFetch, getAuthSessionCacheKey } from './client.js'
 const _CACHE_MS = 10 * 60 * 1000
 const _cache = new Map()
 
+function pruneExpiredMediaTokens(now) {
+  for (const [chatId, entry] of _cache) {
+    if (entry.expiresAt <= now) _cache.delete(chatId)
+  }
+}
+
 /**
  * Returns a ?token=<media-token> query suffix for media URLs on the given chat.
  *
@@ -35,19 +41,24 @@ const _cache = new Map()
  */
 export async function mediaTokenParam(chatId) {
   const authKey = getAuthSessionCacheKey()
+  const now = Date.now()
+  pruneExpiredMediaTokens(now)
   const cached = _cache.get(chatId)
-  if (cached && cached.authKey === authKey && cached.expiresAt > Date.now()) {
+  if (cached && cached.authKey === authKey) {
     return `?token=${cached.token}`
   }
+  // Never retain media authority from a previous embedded auth session.
+  if (cached) _cache.delete(chatId)
   try {
     const res = await apiFetch(`/chats/${chatId}/media-token`, { method: 'POST' })
     if (!res.ok) return ''
     const data = await res.json()
     if (!data.token) return ''
+    const mintedAt = Date.now()
     _cache.set(chatId, {
       token: data.token,
       authKey,
-      expiresAt: Date.now() + _CACHE_MS,
+      expiresAt: mintedAt + _CACHE_MS,
     })
     return `?token=${data.token}`
   } catch {

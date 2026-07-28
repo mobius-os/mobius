@@ -38,3 +38,23 @@ test('disclosure screen state restores per chat and stable surface key', () => {
     globalThis.sessionStorage = original
   }
 })
+
+test('disclosure state preserves large power-user working sets', () => {
+  const original = globalThis.sessionStorage
+  globalThis.sessionStorage = memorySessionStorage()
+  _resetDisclosureStateForTests()
+  try {
+    const disclosureCount = 250
+    for (let index = 0; index < disclosureCount; index += 1) {
+      persistDisclosureOpen('chat-large', `thought-${index}`, true)
+    }
+
+    _resetDisclosureStateForTests()
+    for (let index = 0; index < disclosureCount; index += 1) {
+      assert.equal(disclosureIsOpen('chat-large', `thought-${index}`), true)
+    }
+  } finally {
+    _resetDisclosureStateForTests()
+    globalThis.sessionStorage = original
+  }
+})

@@ -121,8 +121,11 @@ function persist(chatId, state) {
 
 export function getProviderSwitchState(chatId) {
   if (!chatId) return IDLE_STATE
-  if (!states.has(chatId)) states.set(chatId, persistedState(chatId))
-  return states.get(chatId)
+  if (states.has(chatId)) return states.get(chatId)
+  const restored = persistedState(chatId)
+  if (restored === IDLE_STATE) return IDLE_STATE
+  states.set(chatId, restored)
+  return restored
 }
 
 export function subscribeProviderSwitch(chatId, listener) {
@@ -141,7 +144,11 @@ export function subscribeProviderSwitch(chatId, listener) {
 
 function setProviderSwitchState(chatId, next) {
   if (!chatId) return IDLE_STATE
-  states.set(chatId, next)
+  if (next.status === 'idle') {
+    states.delete(chatId)
+  } else {
+    states.set(chatId, next)
+  }
   persist(chatId, next)
   listeners.get(chatId)?.forEach(listener => listener())
   return next
@@ -183,4 +190,8 @@ export function isProviderSwitchBlocking(chatId) {
 export function resetProviderSwitchMemoryForTests() {
   states.clear()
   listeners.clear()
+}
+
+export function _providerSwitchMemorySizeForTests() {
+  return states.size
 }

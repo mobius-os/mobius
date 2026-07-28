@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  _providerSwitchMemorySizeForTests,
   beginProviderSwitch,
   clearProviderSwitch,
   createProviderSwitchId,
@@ -143,6 +144,51 @@ test('reload turns an orphaned in-flight request into an idempotent retry', () =
     assert.equal(restored.status, 'error')
     assert.equal(restored.request.switchId, 'stable-reload-id')
     assert.match(restored.error, /may have completed/i)
+  } finally {
+    resetProviderSwitchMemoryForTests()
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
+test('clearing provider switches removes idle entries instead of caching them', () => {
+  resetProviderSwitchMemoryForTests()
+  for (let index = 0; index < 100; index += 1) {
+    const chatId = `chat-idle-${index}`
+    stageProviderSwitch(chatId, { chatId, switchId: `switch-${index}` })
+    clearProviderSwitch(chatId)
+  }
+  assert.equal(_providerSwitchMemorySizeForTests(), 0)
+})
+
+test('dormant provider switch states preserve a large working set', () => {
+  const items = new Map()
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = {
+    getItem: key => items.get(key) ?? null,
+    setItem: (key, value) => items.set(key, value),
+    removeItem: key => items.delete(key),
+  }
+  try {
+    resetProviderSwitchMemoryForTests()
+    const chatCount = 64
+    for (let index = 0; index < chatCount; index += 1) {
+      const chatId = `chat-dormant-${index}`
+      stageProviderSwitch(chatId, {
+        chatId,
+        switchId: `switch-${index}`,
+      })
+    }
+
+    assert.equal(
+      _providerSwitchMemorySizeForTests(),
+      chatCount,
+    )
+    assert.equal(getProviderSwitchState('chat-dormant-0').status, 'confirming')
+    assert.equal(
+      _providerSwitchMemorySizeForTests(),
+      chatCount,
+    )
   } finally {
     resetProviderSwitchMemoryForTests()
     if (previousStorage === undefined) delete globalThis.sessionStorage
