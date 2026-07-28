@@ -133,17 +133,19 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   steered_into_turn     THE CUT. The transcript split has committed: the
  *                         pre-steer assistant segment is sealed and the
  *                         steered user row(s) are in the transcript
- *                         { ts, content, messages }. Published by the steer
- *                         route for Codex (which splits there) and by the
- *                         Claude runner at its seal. Notifies caller so it
- *                         promotes the live stream into its own message,
+ *                         { ts, content, messages }. Published by the live
+ *                         provider handle at its durable seal. Notifies caller
+ *                         so it promotes the live stream into its own message,
  *                         re-bases streamItems for the continuation, and
  *                         renders the row inline as content growth. There is
- *                         no separate "accepted" event. On the deferred
- *                         (Claude) path an existing queued-row conversion
+ *                         no separate "accepted" event. During deferred
+ *                         settlement an existing queued-row conversion
  *                         remains in the tray until the cut; a direct composer
  *                         steer has no tray row and keeps its durable reserve
  *                         hidden until either the cut or a queued fallback.
+ *   steer_delivery_failed Provider delivery did not settle before the turn
+ *                         ended. The named cids remain durably queued; release
+ *                         their temporary steer reservation and reconcile.
  *   catch_up_done         Replay burst finished; live events follow.
  *   error                 { message }. Surfaced inline.
  *   done                  Turn complete; SSE closes.
@@ -215,6 +217,7 @@ export default function useStreamConnection(chatId, {
   onNeedsRefresh,
   onQueuedTurnStarting,
   onSteeredIntoTurn,
+  onSteerDeliveryFailed,
   onLiveQuestion,
 }) {
   const initialStoredStreamItems = readStoredStreamSnapshot(chatId)
@@ -611,6 +614,8 @@ export default function useStreamConnection(chatId, {
   onQueuedTurnStartingRef.current = onQueuedTurnStarting
   const onSteeredIntoTurnRef = useRef(onSteeredIntoTurn)
   onSteeredIntoTurnRef.current = onSteeredIntoTurn
+  const onSteerDeliveryFailedRef = useRef(onSteerDeliveryFailed)
+  onSteerDeliveryFailedRef.current = onSteerDeliveryFailed
   const onLiveQuestionRef = useRef(onLiveQuestion)
   onLiveQuestionRef.current = onLiveQuestion
   const queuedContinuationRef = useRef(false)
@@ -1123,6 +1128,16 @@ export default function useStreamConnection(chatId, {
                 messages: Array.isArray(event.messages) ? event.messages : null,
               })
             }
+          } else if (event.type === 'steer_delivery_failed') {
+            // Admission succeeded, but the provider control channel never
+            // settled it. The rows are still durable in pending_messages; the
+            // caller releases their temporary hidden reservation and fetches
+            // the authoritative queue.
+            onSteerDeliveryFailedRef.current?.({
+              consumePendingCids: Array.isArray(event.consume_pending_cids)
+                ? event.consume_pending_cids
+                : [],
+            })
           } else if (event.type === 'done') {
             flushBuffer()
             commitCatchUp()

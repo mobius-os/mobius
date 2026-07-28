@@ -39,11 +39,12 @@ function sliceBranch(source, fromNeedle, toNeedle) {
   return source.slice(from, to)
 }
 
-test('a steer has exactly one event and one tray reconciler', () => {
+test('a steer has no duplicate accepted event beside its settlement outcomes', () => {
   // The send's own 202 already carries `cut_deferred` + the still-queued row,
   // so a second "accepted" SSE event would be a parallel channel reconciling
   // the same tray from the same pre-cut snapshot — racing the response it
-  // duplicates. The steer wire has one event: the cut.
+  // duplicates. The steer wire has only terminal settlement outcomes: the
+  // committed cut or a delivery failure that leaves the row queued.
   assert.ok(
     !streamSource.includes('steer_accepted'),
     'no second steer event may reconcile the tray beside the 202',
@@ -54,14 +55,17 @@ test('a steer has exactly one event and one tray reconciler', () => {
   )
   const steerEvents = [...streamSource.matchAll(/event\.type === '(steer[^']*)'/g)]
     .map(m => m[1])
-  assert.deepEqual(steerEvents, ['steered_into_turn'])
+  assert.deepEqual(steerEvents, [
+    'steered_into_turn',
+    'steer_delivery_failed',
+  ])
 })
 
 test('only the cut re-bases the stream, and a replay refetches instead', () => {
   const cut = sliceBranch(
     streamSource,
     "event.type === 'steered_into_turn'",
-    "event.type === 'done'",
+    "event.type === 'steer_delivery_failed'",
   )
   assert.match(
     cut, /flushBuffer\(\)/,
@@ -82,6 +86,35 @@ test('only the cut re-bases the stream, and a replay refetches instead', () => {
     'dropping the replayed segment is only truthful if the sealed message and '
     + 'the steered row are loaded — a socket that died before the cut arrived '
     + 'live has neither, so the replay asks for the authoritative read',
+  )
+})
+
+test('a failed provider settlement restores the durable queued row', () => {
+  const streamHandler = sliceBranch(
+    streamSource,
+    "event.type === 'steer_delivery_failed'",
+    "event.type === 'done'",
+  )
+  assert.match(streamHandler, /onSteerDeliveryFailedRef\.current\?\./)
+
+  const chatHandler = sliceBranch(
+    chatViewSource,
+    'onSteerDeliveryFailed: ({',
+    '\n    },\n  })',
+  )
+  assert.match(
+    chatHandler,
+    /pendingQueue\.releaseSteerReservation\(cids\)/,
+    'the still-pending row must become actionable again',
+  )
+  assert.match(
+    chatHandler,
+    /fetchMessages\(\{ force: true \}\)/,
+    'direct steers have no local tray row, so restore from durable state',
+  )
+  assert.ok(
+    !streamHandler.includes('flushBuffer()'),
+    'a failed delivery is not a transcript cut and must not re-base output',
   )
 })
 
@@ -133,7 +166,7 @@ test('a deferred steer resolves only its OWN row, in any order', () => {
   assert.match(
     steeredBranch,
     /\} else \{[\s\S]*?pendingQueue\.cancelByCid\(queuedMsg\.cid\)/,
-    'a route-split (Codex) steer still drops the tray entry immediately',
+    'an older immediate-cut response still drops the tray entry immediately',
   )
 })
 

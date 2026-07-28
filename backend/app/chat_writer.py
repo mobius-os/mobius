@@ -383,19 +383,19 @@ class AppendPending(_Command):
 class AppendSteeredUserMessage(_Command):
   """Append a mid-turn steered user message at the END of the transcript.
 
-  Used by both steer paths (routes/chats_stream.py + the sink's
-  `split_for_steer`): when a send lands while a turn is streaming and
-  `steer_into_active_turn` accepts it, the user message belongs in the
-  TRANSCRIPT, not the pending queue — the live turn already saw the text,
-  so it is part of this turn rather than a queued follow-up.
+  Used by the live sink's `split_for_steer`: when a send lands while a turn
+  is streaming and the provider acknowledges it, the user message belongs
+  in the TRANSCRIPT, not the pending queue — the live turn already saw the
+  text, so it is part of this turn rather than a queued follow-up.
 
   Placement is at the END so a reload renders Q1, A1, Q2, A2 (the steered
   user row BETWEEN the pre-steer assistant text and the post-steer
   continuation). That ordering is exact for Claude; for Codex the A1/A2 cut
   is best-effort because turn.steer() has no turn boundary (see
-  `_ChatEventSink.split_for_steer`). The split path seals the streamed-so-far assistant text
-  as its own message FIRST, so when this command runs the trailing message
-  is that sealed assistant — appending the user row after it leaves
+  `_ChatEventSink.split_for_steer`). The split path seals the
+  streamed-so-far assistant text as its own message FIRST, so when this
+  command runs the trailing message is that sealed assistant — appending the
+  user row after it leaves
   `chat.messages[-1]` a user message, which makes the runner's next
   `update_last_assistant_message` / `Finalize` snapshot APPEND the
   continuation as a fresh assistant rather than merging it into the

@@ -262,11 +262,10 @@ def steered_into_turn_event(stored_messages: list[dict]) -> dict:
   live stream here and re-base it" signal. It means the transcript split has
   COMMITTED: A1 sealed, these rows appended after it, the sink reset for A2. So
   it may only be published from the instant the split really happens — by the
-  Claude runner immediately after `split_for_steer`, and by the steer route for
-  Codex (whose `turn.steer()` has no interrupt boundary, so the route IS the
-  seal point). Two publishers, one builder, so the wire shape cannot drift.
+  live provider handle through the owning sink, after provider acknowledgement
+  and ``split_for_steer`` both complete.
 
-  Publishing it at HTTP arrival on the deferred (Claude) path is what made a
+  Publishing it at HTTP arrival on a deferred path is what made a
   steer paint duplicated output for the rest of the turn: every block the runner
   streamed between arrival and the real seal was accumulated into the sealed A1
   AND left at the head of the client's freshly re-based stream. The deferred
@@ -290,6 +289,21 @@ def steered_into_turn_event(stored_messages: list[dict]) -> dict:
     # single steered row.
     "ts": stored_messages[-1].get("ts"),
     "content": stored_messages[-1].get("content", ""),
+  }
+
+
+def steer_delivery_failed_event(consume_pending_cids: list[str]) -> dict:
+  """Tell the client that an admitted steer stayed in the durable queue.
+
+  Provider steering is settled by the live runner after the HTTP request has
+  returned. If that provider-side delivery fails or the turn ends first, the
+  rows remain in ``pending_messages`` and are still safe, but the client must
+  release their temporary "being steered" presentation reservation and show
+  them as ordinary queued work again.
+  """
+  return {
+    "type": "steer_delivery_failed",
+    "consume_pending_cids": list(consume_pending_cids),
   }
 
 
@@ -792,20 +806,16 @@ class _ChatEventSink:
     Codex. Stop (interrupt + fresh turn) is the path with a real boundary on
     both providers.
 
-    Called from the RUNNER at turn-end for Claude (`_seal_steer_split`, where
-    the pre-interrupt A1 is complete — the route cannot split at HTTP arrival
-    because A1 has not streamed yet, which merged A1+A2 after the steered row)
-    and from the steer ROUTE for Codex (`_split_steer_at_route`, which injects
-    into the running turn with no interrupt boundary). Both run on the one
-    FastAPI event loop, so it is serialized with this sink's `publish()`
-    snapshots. The pre-steer assistant text (A1) becomes its own trailing
-    assistant message, the steered user message (Q2) is appended at the END,
-    and the
-    sink resets its blocks so the post-steer continuation (A2) accumulates
-    fresh and the next snapshot appends it as a NEW assistant message. The
-    reset is what preserves the durable order A1, Q2, A2: without it A1+A2
-    persist as one message with Q2 inserted before them, reloading as
-    Q1, Q2, A1A2.
+    Called by the live provider handle after steering delivery is acknowledged:
+    Claude at its interrupt boundary, Codex when ``turn.steer()`` returns.
+    Both run on the one FastAPI event loop, so the cut is serialized with this
+    sink's ``publish()`` snapshots. The pre-steer assistant text (A1) becomes
+    its own trailing assistant message, the steered user message (Q2) is
+    appended at the END, and the sink resets its blocks so the post-steer
+    continuation (A2) accumulates fresh and the next snapshot appends it as a
+    NEW assistant message. The reset is what preserves the durable order A1,
+    Q2, A2: without it A1+A2 persist as one message with Q2 inserted before
+    them, reloading as Q1, Q2, A1A2.
 
     Race-free without a lock: `_steering` is set and the blocks captured +
     reset SYNCHRONOUSLY before the first `await`, so any continuation delta
@@ -875,6 +885,41 @@ class _ChatEventSink:
     finally:
       self._steering = False
 
+  async def commit_steer_cut(
+    self, user_msg: dict | list[dict], consume_pending_cids: list[str],
+  ) -> dict:
+    """Commit and publish one authoritative steering cut.
+
+    The sink owns both sides of the boundary: ``split_for_steer`` persists
+    Q1/A1/Q2 ordering, then this method publishes ``steered_into_turn`` on the
+    same broadcast before any caller can mistake provider acceptance for a
+    durable cut. Provider runners call this only after their control channel
+    has acknowledged the steering input.
+    """
+    user_msgs = user_msg if isinstance(user_msg, list) else [user_msg]
+    stored_result = await self.split_for_steer(
+      user_msgs, consume_pending_cids,
+    )
+    stored_messages = (
+      stored_result.get("stored_messages")
+      if isinstance(stored_result, dict)
+      else None
+    )
+    if not isinstance(stored_messages, list) or not stored_messages:
+      stored_messages = user_msgs
+    try:
+      self.bc.publish(steered_into_turn_event(stored_messages))
+    except Exception:
+      # The transcript cut already committed. A lost notification must not be
+      # reported as a delivery failure (which would falsely claim the rows are
+      # still queued and invite a duplicate retry). Turn completion/refetch
+      # repairs the client; durability and exactly-once ownership win here.
+      _get_logger().exception(
+        "publishing the steer cut failed chat_id=%s; the split committed but "
+        "the client must refetch", self.chat_id,
+      )
+    return stored_result
+
   async def publish_question(self, event: ChatEvent) -> None:
     """Save-before-broadcast for an AskUserQuestion card.
 
@@ -941,6 +986,50 @@ class _ChatEventSink:
     # snapshot in publish() doesn't redundantly re-commit the same state
     # immediately after.
     self._last_save = time.monotonic()
+
+
+async def commit_steer_cut(
+  chat_id: str,
+  user_msg: dict | list[dict],
+  consume_pending_cids: list[str],
+  *,
+  sink=None,
+) -> dict:
+  """Commit a provider-acknowledged cut through the owning live sink.
+
+  Production runners pass their exact sink so the cut lands on the same event
+  log as the streamed A1/A2 blocks. The fallback is for out-of-band callers and
+  isolated tests that have no sink: it still consumes the durable rows and
+  publishes on the chat broadcast, preserving the same exactly-once contract.
+  """
+  target = sink or get_active_sink(chat_id)
+  commit = getattr(target, "commit_steer_cut", None)
+  if callable(commit):
+    return await commit(user_msg, consume_pending_cids)
+
+  user_msgs = user_msg if isinstance(user_msg, list) else [user_msg]
+  ack = get_writer().submit(
+    AppendSteeredUserMessage(
+      chat_id=chat_id,
+      run_token="",
+      user_msgs=user_msgs,
+      consume_pending_cids=consume_pending_cids,
+    )
+  )
+  stored_result = await _await_ack(ack)
+  raw_bc = get_broadcast(chat_id)
+  if raw_bc is not None:
+    stored_messages = stored_result.get("stored_messages")
+    if not isinstance(stored_messages, list) or not stored_messages:
+      stored_messages = user_msgs
+    try:
+      raw_bc.publish(steered_into_turn_event(stored_messages))
+    except Exception:
+      _get_logger().exception(
+        "publishing the fallback steer cut failed chat_id=%s; the split "
+        "committed but the client must refetch", chat_id,
+      )
+  return stored_result
 
 
 _SKILL_TEXT_CACHE: str | None = None

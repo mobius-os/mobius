@@ -42,6 +42,19 @@ class _FakeBroadcast:
     self.lifecycle_events.append(event)
 
 
+class _FakeSteerSink:
+  def __init__(self):
+    self.bc = _FakeBroadcast()
+    self.cuts: list[tuple[list[dict], list[str]]] = []
+
+  async def commit_steer_cut(self, user_msgs, consume_pending_cids):
+    self.cuts.append((list(user_msgs), list(consume_pending_cids)))
+    return {
+      "stored_messages": list(user_msgs),
+      "pending": [],
+    }
+
+
 class _FakeCodexConfig:
   def __init__(self, **kwargs):
     self.kwargs = kwargs
@@ -385,40 +398,99 @@ def test_websearch_completed_events_extract_current_sdk_action_url(action_type):
   }]} in events
 
 
-def test_steer_into_active_turn_cleans_dead_handle(monkeypatch):
+def test_steer_closed_turn_releases_reserved_row_without_dropping_handle(
+  monkeypatch,
+):
   sdk = _fake_sdk(async_codex_cls=object)
 
-  async def _scenario() -> bool:
+  async def _scenario():
+    sink = _FakeSteerSink()
     active_turn = codex_sdk_runner.ActiveCodexTurn(
       object(),
       _FakeTurnHandle(
         steer_exc=sdk["InvalidParamsError"](-32602, "turn is not running"),
       ),
       chat_id="chat-1",
+      sink=sink,
     )
     registry.register(active_turn)
-    return await codex_sdk_runner.steer_into_active_turn(
-      "chat-1", "ping",
+    accepted = await active_turn.steer(
+      "ping",
+      [{"role": "user", "content": "ping", "cid": "ping-cid"}],
+      ["ping-cid"],
     )
+    while active_turn.steer_in_flight:
+      await asyncio.sleep(0)
+    return accepted, sink, active_turn
 
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
-  assert asyncio.run(_scenario()) is False
-  assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
+  accepted, sink, active = asyncio.run(_scenario())
+  assert accepted is True
+  assert sink.cuts == []
+  assert sink.bc.events == [{
+    "type": "steer_delivery_failed",
+    "consume_pending_cids": ["ping-cid"],
+  }]
+  # The runner lifecycle still owns unregistering the live handle. A failed
+  # side-channel steer must not make Stop lose reachability to the main turn.
+  assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is active
+  registry.unregister("chat-1", RunnerKind.CODEX_SDK)
 
 
-def test_steer_into_active_turn_reraises_real_errors():
-  async def _scenario() -> None:
-    registry.register(codex_sdk_runner.ActiveCodexTurn(
+def test_steer_provider_error_is_reported_as_queued_delivery_failure():
+  async def _scenario():
+    sink = _FakeSteerSink()
+    active = codex_sdk_runner.ActiveCodexTurn(
       object(),
       _FakeTurnHandle(steer_exc=RuntimeError("real failure")),
       chat_id="chat-1",
-    ))
-    await codex_sdk_runner.steer_into_active_turn(
-      "chat-1", "ping",
+      sink=sink,
     )
+    registry.register(active)
+    accepted = await active.steer(
+      "ping",
+      [{"role": "user", "content": "ping", "cid": "ping-cid"}],
+      ["ping-cid"],
+    )
+    while active.steer_in_flight:
+      await asyncio.sleep(0)
+    registry.unregister("chat-1", RunnerKind.CODEX_SDK)
+    return accepted, sink
 
-  with pytest.raises(RuntimeError, match="real failure"):
-    asyncio.run(_scenario())
+  accepted, sink = asyncio.run(_scenario())
+  assert accepted is True
+  assert sink.cuts == []
+  assert sink.bc.events[-1]["type"] == "steer_delivery_failed"
+
+
+def test_steer_cut_failure_releases_reserved_row():
+  class _FailingSink(_FakeSteerSink):
+    async def commit_steer_cut(self, user_msgs, consume_pending_cids):
+      del user_msgs, consume_pending_cids
+      raise RuntimeError("writer unavailable")
+
+  async def _scenario():
+    sink = _FailingSink()
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), _FakeTurnHandle(), chat_id="cut-failure", sink=sink,
+    )
+    registry.register(active)
+    try:
+      assert await active.steer(
+        "ping",
+        [{"role": "user", "content": "ping", "cid": "ping-cid"}],
+        ["ping-cid"],
+      ) is True
+      while active.steer_in_flight:
+        await asyncio.sleep(0)
+      assert sink.bc.events == [{
+        "type": "steer_delivery_failed",
+        "consume_pending_cids": ["ping-cid"],
+      }]
+    finally:
+      registry.unregister("cut-failure", RunnerKind.CODEX_SDK)
+
+  asyncio.run(_scenario())
 
 
 def test_concurrent_steer_is_refused_while_ack_is_pending():
@@ -434,26 +506,74 @@ def test_concurrent_steer_is_refused_while_ack_is_pending():
         await release.wait()
 
     turn = _BlockingTurn()
+    sink = _FakeSteerSink()
     active = codex_sdk_runner.ActiveCodexTurn(
-      object(), turn, chat_id="atomic-steer",
+      object(), turn, chat_id="atomic-steer", sink=sink,
     )
     registry.register(active)
     try:
-      first = asyncio.create_task(codex_sdk_runner.steer_into_active_turn(
-        "atomic-steer", "first",
-      ))
+      assert await active.steer(
+        "first",
+        [{"role": "user", "content": "first", "cid": "first-cid"}],
+        ["first-cid"],
+      ) is True
       await asyncio.wait_for(entered.wait(), timeout=1)
       assert active.steer_in_flight
-      assert await codex_sdk_runner.steer_into_active_turn(
-        "atomic-steer", "second",
+      settlement = active._steer_attempt.task
+      assert await active.steer(
+        "second",
+        [{"role": "user", "content": "second", "cid": "second-cid"}],
+        ["second-cid"],
       ) is False
       assert turn.steered == ["first"]
 
       release.set()
-      assert await asyncio.wait_for(first, timeout=1) is True
+      await asyncio.wait_for(settlement, timeout=1)
       assert not active.steer_in_flight
+      assert sink.cuts == [(
+        [{"role": "user", "content": "first", "cid": "first-cid"}],
+        ["first-cid"],
+      )]
     finally:
       registry.unregister("atomic-steer", RunnerKind.CODEX_SDK)
+
+  asyncio.run(_scenario())
+
+
+def test_turn_teardown_cancels_a_never_acknowledged_steer():
+  async def _scenario():
+    entered = asyncio.Event()
+
+    class _NeverAckTurn:
+      async def steer(self, _message):
+        entered.set()
+        await asyncio.Event().wait()
+
+    sink = _FakeSteerSink()
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), _NeverAckTurn(), chat_id="teardown-steer", sink=sink,
+    )
+    registry.register(active)
+    try:
+      assert await active.steer(
+        "first",
+        [{"role": "user", "content": "first", "cid": "first-cid"}],
+        ["first-cid"],
+      ) is True
+      await asyncio.wait_for(entered.wait(), timeout=1)
+      task = active._steer_attempt.task
+
+      await active.finish_steer_before_turn_end()
+      await asyncio.sleep(0)
+
+      assert task.cancelled()
+      assert sink.cuts == []
+      assert sink.bc.events == [{
+        "type": "steer_delivery_failed",
+        "consume_pending_cids": ["first-cid"],
+      }]
+    finally:
+      registry.unregister("teardown-steer", RunnerKind.CODEX_SDK)
 
   asyncio.run(_scenario())
 

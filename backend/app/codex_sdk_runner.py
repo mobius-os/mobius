@@ -67,6 +67,7 @@ import re
 import signal
 import shutil
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.codex_appserver import _extract_bash_command
@@ -443,6 +444,19 @@ async def _persist_session_id(db, chat_id: str, session_id: str | None) -> None:
     )
 
 
+@dataclass
+class _CodexSteerAttempt:
+  """One admitted, durably-reserved Codex steering delivery."""
+
+  message: str
+  user_msgs: list[dict]
+  consume_pending_cids: list[str]
+  task: asyncio.Task[None] | None = None
+  commit_started: bool = False
+  settled: bool = False
+  failure_published: bool = False
+
+
 class ActiveCodexTurn:
   """Stop + steer handle registered for SDK-backed Codex turns.
 
@@ -461,11 +475,13 @@ class ActiveCodexTurn:
     turn: Any,
     chat_id: str,
     process_group_id: int | None = None,
+    sink: Any | None = None,
   ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CODEX_SDK
     self.thread = thread
     self.turn = turn
+    self._sink = sink
     self._process_group_id = process_group_id
     # A retained PGID must never be signalled twice: after the first kill the
     # kernel may eventually reuse that number for an unrelated process group.
@@ -474,6 +490,7 @@ class ActiveCodexTurn:
     # synchronously before turn.steer's first await so a not-yet-registered
     # question cannot park the SDK reader ahead of the steer acknowledgement.
     self._steer_in_flight = False
+    self._steer_attempt: _CodexSteerAttempt | None = None
     # Set synchronously before interrupt()'s first await. The SDK reports both
     # user-requested stops and unexpected provider interruption with the same
     # TurnStatus.interrupted value; this local fact is what lets terminal
@@ -489,12 +506,22 @@ class ActiveCodexTurn:
     return self._steer_in_flight
 
   @property
+  def is_steerable(self) -> bool:
+    """Whether this registered handle exposes a live Codex turn."""
+    return (
+      self.turn is not None
+      and not self._finished.done()
+      and not self._interrupt_requested
+    )
+
+  @property
   def interrupt_requested(self) -> bool:
     return self._interrupt_requested
 
   async def interrupt(self) -> None:
     """Signals the live turn and waits for runner-side drain."""
     self._interrupt_requested = True
+    self._reject_pending_steer()
     try:
       await self.turn.interrupt()
     except Exception as exc:
@@ -527,6 +554,7 @@ class ActiveCodexTurn:
 
   async def force_stop(self, timeout: float = 5.0) -> bool:
     """One-shot hard stop for this turn's verified private process group."""
+    self._reject_pending_steer()
     if not self._force_stop_started:
       if self._process_group_id is None:
         return False
@@ -549,8 +577,176 @@ class ActiveCodexTurn:
 
   def mark_finished(self) -> None:
     """Resolves the stop waiter once the runner is fully drained."""
+    self._reject_pending_steer()
     if not self._finished.done():
       self._finished.set_result(None)
+
+  def _steer_broadcast(self):
+    raw_bc = getattr(self._sink, "bc", None)
+    if raw_bc is not None and callable(getattr(raw_bc, "publish", None)):
+      return raw_bc
+    from app.broadcast import get_broadcast
+    return get_broadcast(self.chat_id)
+
+  def _reject_pending_steer(
+    self,
+    attempt: _CodexSteerAttempt | None = None,
+    *,
+    after_commit_failure: bool = False,
+  ) -> None:
+    """Release one uncommitted steer back to the durable pending queue."""
+    attempt = attempt or self._steer_attempt
+    if attempt is None or attempt.settled:
+      return
+    # Once the transcript cut has begun under the queue lock, it owns the row:
+    # Stop waits behind that lock and must observe the consumed queue rather
+    # than simultaneously restoring/resending the same cid.
+    if attempt.commit_started and not after_commit_failure:
+      return
+    attempt.settled = True
+    if attempt.failure_published:
+      return
+    attempt.failure_published = True
+    raw_bc = self._steer_broadcast()
+    if raw_bc is None:
+      return
+    from app.chat import steer_delivery_failed_event
+    raw_bc.publish(
+      steer_delivery_failed_event(attempt.consume_pending_cids)
+    )
+
+  async def _commit_steer_cut(
+    self, attempt: _CodexSteerAttempt,
+  ) -> None:
+    """Persist + publish the accepted cut through the turn's owning sink."""
+    from app.chat import commit_steer_cut
+    await commit_steer_cut(
+      self.chat_id,
+      attempt.user_msgs,
+      attempt.consume_pending_cids,
+      sink=self._sink,
+    )
+
+  async def _deliver_steer(
+    self, attempt: _CodexSteerAttempt,
+  ) -> None:
+    """Settle provider delivery away from the HTTP request and queue lock."""
+    try:
+      await self.turn.steer(attempt.message)
+      if (
+        attempt.settled
+        or self._finished.done()
+        or self._interrupt_requested
+        or registry.get_handle(self.chat_id, RunnerKind.CODEX_SDK) is not self
+      ):
+        self._reject_pending_steer(attempt)
+        return
+
+      # Only the short durable cut takes the queue lock. Provider I/O above can
+      # wait forever without blocking Send or Stop. Recheck after acquisition:
+      # Stop bumps/clears first when it wins, while a cut that wins consumes the
+      # cid before Stop decides which queued rows to resend.
+      from app import chat_queue
+      async with chat_queue.get_lock(self.chat_id):
+        if (
+          attempt.settled
+          or self._finished.done()
+          or self._interrupt_requested
+          or registry.get_handle(
+            self.chat_id, RunnerKind.CODEX_SDK,
+          ) is not self
+        ):
+          self._reject_pending_steer(attempt)
+          return
+        attempt.commit_started = True
+        try:
+          await self._commit_steer_cut(attempt)
+        except Exception:
+          log.exception(
+            "Codex steer cut failed chat_id=%s; row remains queued",
+            self.chat_id,
+          )
+          self._reject_pending_steer(
+            attempt, after_commit_failure=True,
+          )
+          return
+        attempt.settled = True
+    except asyncio.CancelledError:
+      self._reject_pending_steer(attempt)
+      raise
+    except (AttributeError, TypeError):
+      self._reject_pending_steer(attempt)
+    except Exception as exc:
+      if _is_closed_turn_error(exc):
+        log.info(
+          "Codex steer reached a closed turn chat_id=%s", self.chat_id,
+        )
+      else:
+        log.warning(
+          "Codex steer delivery failed chat_id=%s: %s",
+          self.chat_id, exc,
+        )
+      self._reject_pending_steer(attempt)
+    finally:
+      if self._steer_attempt is attempt:
+        self._steer_attempt = None
+        self._steer_in_flight = False
+
+  async def finish_steer_before_turn_end(self) -> None:
+    """Settle a committing cut or reject a still-provider-pending attempt."""
+    attempt = self._steer_attempt
+    if attempt is None or attempt.settled:
+      return
+    if not attempt.commit_started:
+      self._reject_pending_steer(attempt)
+      # The provider control RPC may be the very thing that wedged. Once the
+      # owning turn is ending there is no future acknowledgement worth
+      # retaining, so release its task too; otherwise each recovered turn could
+      # leave one permanently suspended task behind.
+      if attempt.task is not None and not attempt.task.done():
+        attempt.task.cancel()
+      return
+    if attempt.task is not None:
+      await asyncio.shield(attempt.task)
+
+  async def steer(
+    self,
+    message: str,
+    user_msgs: list[dict] | None = None,
+    consume_pending_cids: list[str] | None = None,
+  ) -> bool:
+    """Admit a durable steer and settle its provider RPC in the background."""
+    if not self.is_steerable:
+      return False
+    rows = [dict(row) for row in list(user_msgs or [])]
+    consume = list(consume_pending_cids or [])
+    if not rows or not consume:
+      # A provider delivery without its durable queue identity cannot be
+      # settled exactly once after this request returns.
+      return False
+
+    current = self._steer_attempt
+    if current is not None and not current.settled:
+      # Ambiguous HTTP retries may re-admit the same cids. The first attempt
+      # already owns them; report accepted without delivering twice.
+      if set(consume).issubset(set(current.consume_pending_cids)):
+        return True
+      return False
+
+    attempt = _CodexSteerAttempt(
+      message=message,
+      user_msgs=rows,
+      consume_pending_cids=consume,
+    )
+    self._steer_attempt = attempt
+    self._steer_in_flight = True
+    attempt.task = asyncio.create_task(self._deliver_steer(attempt))
+    # Let the owned task enter the provider call before acknowledging
+    # admission. This is one event-loop turn, not a provider wait: a wedged RPC
+    # remains detached while immediate failures can publish their queue
+    # restoration promptly.
+    await asyncio.sleep(0)
+    return True
 
 
 def _sdk_imports() -> dict[str, Any]:
@@ -2355,6 +2551,7 @@ async def run_codex_sdk_turn(
         turn,
         chat_id=chat_id,
         process_group_id=process_group_id,
+        sink=bc,
       )
       registry.register(active_turn)
       record_memory_checkpoint_once(
@@ -2756,6 +2953,19 @@ async def run_codex_sdk_turn(
     group_already_terminated = False
     if isinstance(current, ActiveCodexTurn) and current.turn is turn:
       group_already_terminated = current._force_stop_started
+      try:
+        await current.finish_steer_before_turn_end()
+      except asyncio.CancelledError as exc:
+        # A committing cut owns its durable queue row. Finish that bounded
+        # writer settlement before honoring cancellation so the wrapper's
+        # terminal Finalize cannot race it and reorder Q1/A1/Q2.
+        deferred_cancel = deferred_cancel or exc
+        await asyncio.shield(current.finish_steer_before_turn_end())
+      except Exception:
+        log.exception(
+          "Codex steer settlement failed during turn teardown chat_id=%s",
+          chat_id,
+        )
       registry.unregister(chat_id, RunnerKind.CODEX_SDK)
       current.mark_finished()
     # AsyncCodex.close() terminates only its direct Popen PID.  Reap the
@@ -2783,43 +2993,24 @@ async def run_codex_sdk_turn(
 async def steer_into_active_turn(
   chat_id: str,
   message: str,
+  user_msgs: list[dict] | None = None,
+  consume_pending_cids: list[str] | None = None,
 ) -> bool:
-  """Delivers a message into the active Codex turn via `steer()`.
+  """Admit a durably-reserved message into the active Codex turn.
 
   Args:
     chat_id: Möbius chat identifier to look up in the registry.
     message: Text to inject into the in-flight turn.
+    user_msgs: Durable queued rows to move into the transcript after provider
+      acknowledgement.
+    consume_pending_cids: Stable ids of those queued rows.
 
   Returns:
-    True when the turn existed and accepted the steering input.
+    True when the live handle accepted ownership of provider settlement.
   """
   current = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
-  if not isinstance(current, ActiveCodexTurn) or current.turn is None:
+  if not isinstance(current, ActiveCodexTurn):
     return False
-  if current.steer_in_flight:
-    return False
-
-  # The pinned SDK's async steer is asyncio.to_thread(sync.turn_steer). The
-  # sync request waits for the sole reader thread to route its response; that
-  # same reader invokes request_user_input handlers synchronously. Mark
-  # admission BEFORE the first await so park_question can reject the losing
-  # side of that race. Do not impose a route-side timeout: cancelling
-  # asyncio.to_thread cannot cancel its underlying JSON-RPC request, so a late
-  # success would be indistinguishable from failure and could duplicate the
-  # still-durable pending row when it later drains.
-  current._steer_in_flight = True
-
-  try:
-    await current.turn.steer(message)
-  except (AttributeError, TypeError):
-    return False
-  except Exception as exc:
-    if _is_closed_turn_error(exc):
-      if registry.get_handle(chat_id, RunnerKind.CODEX_SDK) is current:
-        registry.unregister(chat_id, RunnerKind.CODEX_SDK)
-        current.mark_finished()
-      return False
-    raise
-  finally:
-    current._steer_in_flight = False
-  return True
+  return await current.steer(
+    message, user_msgs, consume_pending_cids,
+  )

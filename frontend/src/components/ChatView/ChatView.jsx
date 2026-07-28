@@ -1241,9 +1241,9 @@ export default function ChatView({
       // `messages`, then append the steered user row, then let future text
       // deltas build a fresh streaming assistant block.
       //
-      // The split is the route's own write for Codex and the runner's seal for
-      // Claude, so this event always arrives AFTER the last block belonging to
-      // the sealed segment. That ordering is what makes promoting the live
+      // The split is owned by the live provider handle through the sink, so
+      // this event always arrives AFTER the last block belonging to the sealed
+      // segment. That ordering is what makes promoting the live
       // stream here correct; it is not a guess about where the server cut.
       //
       // It still follows the one visible-row scroll rule. Automatic queue
@@ -1290,14 +1290,23 @@ export default function ChatView({
       commitMessages(prev => insertMessageBatchByTs(prev, steeredMessages))
       // The rows have now genuinely left `chat.pending_messages`, so retire the
       // tray entries the deferred-cut window kept durably queued but hidden.
-      // A no-op on the route-split (Codex) path, where the send's own 202
-      // already dropped them — the cut is simply the one place that owns the
-      // hand-off.
+      // The cut is the one place that owns the hand-off for both providers.
       for (const msg of steeredMessages) {
         const cid = cidOf(msg)
         if (cid != null) pendingQueue.cancelByCid(cid)
       }
       forgetSendIntent({ cidList: steeredMessages.map(cidOf) })
+    },
+    onSteerDeliveryFailed: ({ consumePendingCids } = {}) => {
+      const cids = Array.isArray(consumePendingCids)
+        ? consumePendingCids
+        : []
+      pendingQueue.releaseSteerReservation(cids)
+      forgetSendIntent({ cidList: cids })
+      // A direct Cmd/Ctrl+Enter steer has no local tray row. The same
+      // authoritative refresh restores it from the durable reserve; existing
+      // fast-forward rows simply become actionable again.
+      fetchMessages({ force: true })
     },
   })
   useEffect(() => {
@@ -2249,20 +2258,18 @@ export default function ChatView({
         // turn. Where the row LIVES right now is what `cut_deferred` states.
         if (result?.status === 'steered') {
           if (directSteer) {
-            // No tray row was ever created. Codex's cut event has already made
-            // the message inline; Claude's deferred cut will do so when its
-            // interrupt boundary lands. Until then the durable server reserve
-            // stays intentionally invisible rather than flashing as queued.
-            // Keep its cid-keyed intent until that authoritative cut consumes
-            // it; response and SSE delivery can arrive in either order.
+            // No tray row was ever created. The deferred cut will make the
+            // message inline when provider delivery settles. Until then the
+            // durable server reserve stays intentionally invisible rather
+            // than flashing as queued. Keep its cid-keyed intent until that
+            // authoritative cut consumes it; response and SSE delivery can
+            // arrive in either order.
           } else if (result.cut_deferred) {
-            // Claude: the transcript split waits for the runner's interrupt
-            // boundary, so the row is STILL queued server-side and its tray
-            // entry stays — dropping it here left the owner's message with
-            // nowhere to render for the whole deferred window. Resolve THIS
-            // send's own row and nothing else: confirm it by cid against the
-            // server's echoed entry (which carries the durable ts fast-forward
-            // needs).
+            // The transcript split waits for provider acknowledgement, so the
+            // row is STILL queued server-side and its tray entry stays.
+            // Resolve THIS send's own row and nothing else: confirm it by cid
+            // against the server's echoed entry (which carries the durable ts
+            // fast-forward needs).
             //
             // Not `hydrate(result.pending_messages)`: that list is a snapshot
             // taken at steer time, and a wholesale reconcile against it is
@@ -2284,9 +2291,8 @@ export default function ChatView({
             // Its cid-keyed intent remains beside the durable queued row until
             // the cut consumes both, regardless of response/event order.
           } else {
-            // Codex: the split already ran at the route, so the row is in the
-            // transcript and `steered_into_turn` (already sent) renders it
-            // inline — drop the optimistic queued-tray entry, it never queued.
+            // Compatibility with an older immediate-cut backend: the row is in
+            // the transcript and `steered_into_turn` renders it inline.
             pendingQueue.cancelByCid(queuedMsg.cid)
           }
         }
@@ -3117,7 +3123,7 @@ export default function ChatView({
       // presentation before the request so the tray closes once, at the
       // deliberate steer action. The records remain in pendingQueue until the
       // authoritative cut, which keeps Stop/reconnect recovery honest while a
-      // Claude cut is deferred.
+      // provider cut is deferred.
       pendingQueue.reserveForSteer(consumePendingCids)
       const result = await streamSend(content, attachments, {
         forceSteer: true,
@@ -3131,12 +3137,11 @@ export default function ChatView({
       })
       if (result?.status === 'steered') {
         if (result.cut_deferred) {
-          // Claude: the split waits for the runner's interrupt boundary. Keep
-          // the accepted rows reserved (and therefore out of the tray) until
-          // onSteeredIntoTurn retires them at that authoritative cut.
+          // The handle owns provider settlement. Keep accepted rows reserved
+          // (and therefore out of the tray) until onSteeredIntoTurn retires
+          // them at the authoritative cut.
         } else if (Array.isArray(result.pending_messages)) {
-          // Codex: the route already split, so the echoed queue no longer holds
-          // these rows and onSteeredIntoTurn has rendered them inline.
+          // Compatibility with an older immediate-cut backend.
           pendingQueue.hydrate(result.pending_messages)
         } else {
           // A backend that echoes no queue at all: remove exactly the steered
@@ -3173,10 +3178,8 @@ export default function ChatView({
   // interrupts the running turn. The backend force-steers (bypassing the
   // steer_enabled opt-in) for BOTH providers; the rows render inline when the
   // `steered_into_turn` SSE event reports the transcript split (onSteeredIntoTurn
-  // above), and THAT is when they leave the local tray. Codex splits at the
-  // route, so the split is already done when the POST resolves; Claude splits at
-  // its next content-block boundary, so its 202 comes back `cut_deferred` and
-  // the rows stay durably queued—but presentation-reserved—until the cut lands.
+  // above), and THAT is when they leave the local tray. Both providers defer
+  // the cut until their live handle settles delivery.
   async function handleSteer() {
     if (handlingSteerRef.current) return
     handlingSteerRef.current = true
