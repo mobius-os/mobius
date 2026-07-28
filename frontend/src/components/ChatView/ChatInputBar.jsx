@@ -105,15 +105,14 @@ let _isTouchPrimary = _touchMql?.matches ?? false
 _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 
-/** The primary action button — FastForward / Send / Stop / Mic —
+/** The primary action button — Steer / Send / Stop / Mic —
  *  auto-resolved from the bar's input/sending/listening/uploading state.
  *
- *  When there are queued messages ready to try (`canSteer`), the Stop square
- *  is swapped for a fast-forward button. The handler reconciles server state
- *  before acting: if a live turn exists, it injects the queued messages into
- *  that turn; if local running state was stale, this still gives the user one
- *  immediate affordance instead of waiting for focus/remount to reveal it.
- *  Stop is NOT lost: clearing the queue (the tray's X) flips canSteer back to
+ *  When queued work exists (`showSteer`), the Stop square is swapped for a
+ *  fast-forward button immediately — including the brief persistence
+ *  round-trip. Its handler waits for that write before acting, so the semantic
+ *  control does not flash Send → Stop → Steer while the server confirms it.
+ *  Stop is NOT lost: clearing the queue (the tray's X) flips showSteer back to
  *  false and the Stop square returns, and while the composer has text the Send
  *  button (queue-another) still wins over both.
  *
@@ -123,11 +122,11 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
  *  must be no empty/black replacement frame between any of them. Mic remains
  *  distinct because it is the idle input affordance rather than a turn action. */
 function PrimaryAction({
-  sending, listening, hasInput, hasUploading, offline, canSteer,
+  sending, listening, hasInput, hasUploading, offline, showSteer, steerReady,
   submissionBlocked,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
-  if (sending && !hasInput && canSteer) {
+  if (sending && !hasInput && showSteer) {
     return (
       <button
         key="primary"
@@ -140,6 +139,8 @@ function PrimaryAction({
         onTouchEnd={(e) => { e.preventDefault(); onSteer() }}
         onClick={onSteer}
         aria-label="Send queued message now"
+        aria-busy={!steerReady}
+        disabled={!steerReady}
       >
         <DoubleChevronRight width={20} height={20} />
       </button>
@@ -407,10 +408,11 @@ function FileChips({ files, onRemove, chatId }) {
  *   onStop             — stop button handler
  *   onSteer            — fast-forward handler (steer queued msgs into the
  *                        live turn). Shown in place of Stop while a turn
- *                        is streaming AND `canSteer` is true.
- *   canSteer           — true when there are queued messages that can be
- *                        steered right now (all server-confirmed). Drives
- *                        the FastForward-vs-Stop choice in PrimaryAction.
+ *                        is streaming AND `showSteer` is true.
+ *   showSteer          — true as soon as queued work exists for a live turn;
+ *                        drives the Steer-vs-Stop identity without waiting for
+ *                        the queue persistence round-trip.
+ *   steerReady         — false only while a steer tap is already in flight.
  *   canRequestSteer    — true when the keyboard shortcut may ask the
  *                        existing steer handler to reconcile/steer queued
  *                        messages, even before the visual fast-forward gate
@@ -455,6 +457,8 @@ export default function ChatInputBar({
   onStop,
   onSteer,
   canSteer,
+  showSteer = canSteer,
+  steerReady = true,
   canRequestSteer = canSteer,
   canSubmitSteer = canRequestSteer,
   offline,
@@ -741,7 +745,8 @@ export default function ChatInputBar({
               hasInput={hasInput}
               hasUploading={hasUploading}
               offline={offline}
-              canSteer={canSteer}
+              showSteer={showSteer}
+              steerReady={steerReady}
               submissionBlocked={submissionBlocked}
               onSubmit={handleSubmit}
               onStop={onStop}

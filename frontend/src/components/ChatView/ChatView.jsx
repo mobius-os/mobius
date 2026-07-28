@@ -2005,6 +2005,11 @@ export default function ChatView({
   // synchronously so repeated keydowns cannot submit a duplicate before the
   // request settles.
   const submitSteerInFlightRef = useRef(false)
+  // Queue POSTs are optimistic: the tray row exists before the backend has
+  // confirmed it. The primary Steer control is visible immediately, and one
+  // early tap waits on these exact requests rather than becoming an inert
+  // click or briefly showing Stop.
+  const queuedSendRequestsRef = useRef(new Map())
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return
@@ -2149,14 +2154,17 @@ export default function ChatView({
         // on each committed value, but the synchronous reset keeps the
         // send transition correct before React commits the empty value.
       }
+      let queueRequest = null
       try {
-        const result = await streamSend(
+        queueRequest = streamSend(
           text,
           attachments.length > 0 ? attachments : undefined,
           directSteer
             ? { directSteer: true, cid }
             : { queueOnly: true, cid },
         )
+        if (!directSteer) queuedSendRequestsRef.current.set(cid, queueRequest)
+        const result = await queueRequest
         clearFailedAttempt()
         releaseComposerFilesAfterAccepted()
         if (result?.status === 'duplicate') {
@@ -2371,6 +2379,11 @@ export default function ChatView({
         })
         restoreComposerAfterFailedSend()
         setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
+      } finally {
+        if (!directSteer
+            && queuedSendRequestsRef.current.get(cid) === queueRequest) {
+          queuedSendRequestsRef.current.delete(cid)
+        }
       }
       return
     }
@@ -3220,15 +3233,21 @@ export default function ChatView({
     handlingSteerRef.current = true
     setSteerBusy(true)
     try {
+      // The UI changes Send → Steer in the same render that adds the
+      // optimistic queue row. If the owner taps during its persistence
+      // round-trip, wait for those exact writes; doSend's continuation
+      // confirms/removes each row before this continuation reads the queue.
+      const queueWrites = [...queuedSendRequestsRef.current.values()]
+      if (queueWrites.length > 0) await Promise.allSettled(queueWrites)
       const snapshot = pendingQueue.pendingMessagesRef.current
       // Only server-confirmed entries can be force-steered: the backend
       // reconstructs the durable rows from chat.pending_messages, so an
       // optimistic-only entry whose queue-POST hasn't acked yet is not visible
       // there and its cid selects nothing. We take the simpler-correct option:
       // only steer when EVERY queued entry is serverTs-confirmed (usePendingQueue
-      // sets that flag on the confirmQueued / hydrate paths). The button gate
-      // (canSteer below) keeps the fast-forward hidden until then, so this
-      // is belt-and-suspenders — if a stray optimistic entry slips in, bail
+      // sets that flag on the confirmQueued / hydrate paths). The awaited writes
+      // above should establish that state, so this is belt-and-suspenders — if a
+      // rejected or otherwise stray optimistic entry slips in, bail
       // and leave the queue intact (it drains at turn-end as usual).
       // Before bailing, run one forced runtime reconcile: a mounted mobile
       // client can have visible queued rows whose serverTs flag is stale
@@ -3285,7 +3304,7 @@ export default function ChatView({
   // NEW tail that grew while hidden, even if it had been following before it
   // left. Returning freezes hold; only a later manual bottom gesture can
   // re-enter FOLLOW_BOTTOM. No-op when the turn isn't active or the tab is hidden.
-  // (The fast-forward affordance is computed separately at `canSteer` below.)
+  // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
   useEffect(() => {
     function freezeStreamingReturn() {
@@ -3520,15 +3539,17 @@ export default function ChatView({
   // steer button here is a dead end. Keep the existing deterministic Stop path
   // available instead: Stop cancels the question first, interrupts the turn,
   // and re-sends the queued rows as one fresh continuation.
-  const canSteer = !hasPendingQuestion
-    && connectionError !== 'disconnected' && !steerBusy
+  const showSteer = !hasPendingQuestion
+    && connectionError !== 'disconnected'
+    && turnActive
+    && pendingQueue.pendingMessages.length > 0
+  const canRequestSteer = showSteer && !steerBusy
+  const canSteer = canRequestSteer
     && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
   const canSubmitSteer = !hasPendingQuestion
     && connectionError !== 'disconnected'
     && !steerBusy
     && turnActive
-  const canRequestSteer = canSubmitSteer
-    && pendingQueue.pendingMessages.length > 0
 
   // ── Sticky "tap to resume" affordance ──────────────────────────────
   // A turn paused by a drain-gated restart, a stall, or a provider-limit park
@@ -4143,6 +4164,8 @@ export default function ChatView({
           onStop={handleStop}
           onSteer={handleSteer}
           canSteer={canSteer}
+          showSteer={showSteer}
+          steerReady={!steerBusy}
           canRequestSteer={canRequestSteer}
           canSubmitSteer={canSubmitSteer}
           offline={!online}

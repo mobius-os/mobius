@@ -19,8 +19,23 @@ test('composer fast-forward dispatches immediately without an incidental blur', 
 })
 
 test('Send, Steer, and Stop reuse one continuously visible primary action', () => {
+  assert.match(
+    inputBar,
+    /if \(sending && !hasInput && showSteer\)[\s\S]*?key="primary"[\s\S]*?disabled=\{!steerReady\}/,
+    'the semantic Steer identity must not wait for serverTs confirmation',
+  )
+  assert.match(
+    chatView,
+    /const showSteer = !hasPendingQuestion[\s\S]*?turnActive[\s\S]*?pendingQueue\.pendingMessages\.length > 0/,
+    'an optimistic visible queue row should choose Steer immediately',
+  )
+  assert.match(
+    chatView,
+    /const queueWrites = \[\.\.\.queuedSendRequestsRef\.current\.values\(\)\][\s\S]*?await Promise\.allSettled\(queueWrites\)[\s\S]*?const snapshot = pendingQueue\.pendingMessagesRef\.current/,
+    'an early Steer tap must await the queue write before reading steerable rows',
+  )
   const steerBlock = inputBar.match(
-    /if \(sending && !hasInput && canSteer\)[\s\S]*?<button[\s\S]*?<\/button>/,
+    /if \(sending && !hasInput && showSteer\)[\s\S]*?<button[\s\S]*?<\/button>/,
   )?.[0] || ''
   const stopBlock = inputBar.match(
     /if \(sending && !hasInput\)[\s\S]*?<button[\s\S]*?<\/button>/,
