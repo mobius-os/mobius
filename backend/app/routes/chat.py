@@ -10,7 +10,7 @@ from app.deps import (
   Principal, get_owner_or_chat_embed_principal, reject_cross_site,
   require_chat_embed_operation,
 )
-from app.resource_access import get_active_chat_for_principal
+from app.resource_access import require_active_chat_access
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -34,6 +34,6 @@ async def chat_stop(
   if principal.scope == "chat_embed" and not body.chat_id:
     raise HTTPException(status_code=403, detail="Embedded chat id is required.")
   if body.chat_id:
-    get_active_chat_for_principal(db, body.chat_id, principal)
+    require_active_chat_access(db, body.chat_id, principal)
   stopped, cleared_pending_cids = await stop_chat(body.chat_id or None, db=db)
   return {"stopped": stopped, "cleared_pending_cids": cleared_pending_cids}
