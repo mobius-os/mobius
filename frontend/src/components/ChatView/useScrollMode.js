@@ -13,10 +13,11 @@
  *                                  — user msg at top (post-send), keyed on
  *                                    the stable client `cid` (data-cid)
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
- *   { kind: 'ANCHOR_AT', key, offset, reserveTail? }
+ *   { kind: 'ANCHOR_AT', key, offset, questionSubmitViewportH?,
+ *     questionSubmitBaseMode? }
  *                                  — anchored at a specific msg; an in-message
- *                                    question may temporarily reserve the
- *                                    exact room needed to keep it reachable
+ *                                    question may temporarily preserve its
+ *                                    submit-time position at one viewport size
  *
  * Send pinning has one rule for direct, queued, and steered messages: the
  * first visible user message always pins; every later message pins when the
@@ -31,8 +32,9 @@
  * restores it. PIN_USER_MSG may reserve before its row lands so a fresh send
  * can pin in one frame; every other ordinary mode reserves only while that
  * latest row is visible. The one explicit exception is the transient
- * question-submit anchor: it reserves exactly enough tail room to keep its
- * target reachable while the mobile viewport grows.
+ * question-submit anchor: it reserves exactly enough tail room for a stable
+ * same-viewport handoff. A keyboard resize restores the pre-submit mode before
+ * sizing, so the answered card moves exactly as the unanswered card would.
  * Gesture-driven bottom detection reads the scroll container's geometry in
  * the scroll event itself. There is no second sentinel/observer authority
  * that can lag behind the reader and contradict the current viewport.
@@ -372,6 +374,39 @@ export function _anchorModeIntersectsContent(row, mode, viewportHeight) {
     && offset > -row.offsetHeight
 }
 
+
+function _durableQuestionSubmissionMode(mode) {
+  if (mode?.kind !== 'ANCHOR_AT') return mode
+  if (!Object.hasOwn(mode, 'questionSubmitViewportH')
+      && !Object.hasOwn(mode, 'questionSubmitBaseMode')
+      && !Object.hasOwn(mode, 'reserveTail')) {
+    return mode
+  }
+  const {
+    questionSubmitViewportH: _transientViewport,
+    questionSubmitBaseMode: _transientBaseMode,
+    reserveTail: _legacyTransientReservation,
+    ...durable
+  } = mode
+  return durable
+}
+
+
+/** A question answer temporarily overlays the reader's existing scroll mode
+ * only while the viewport size is unchanged. Keyboard movement belongs to the
+ * pre-submit mode: release the overlay before spacer sizing so the answered
+ * card receives the same resize behavior as the unanswered card. */
+export function releaseQuestionSubmissionForViewport(mode, viewportHeight) {
+  if (mode?.kind !== 'ANCHOR_AT'
+      || !Number.isFinite(mode.questionSubmitViewportH)
+      || !Number.isFinite(viewportHeight)
+      || Math.abs(mode.questionSubmitViewportH - viewportHeight) <= 1) {
+    return mode
+  }
+  return mode.questionSubmitBaseMode
+    || _durableQuestionSubmissionMode(mode)
+}
+
 /** The ANCHOR_AT twin of `_pinReapplyNeeded` — the SAME two-case repair. A
  *  settled anchor drifts off its reader-chosen position when either the anchor
  *  element's offsetTop SHIFTED (content grew above it) or scrollTop was CLAMPED
@@ -422,10 +457,7 @@ export function _validateSavedMode(saved, messages, scrollEl) {
     // a huge negative offset while the viewport sat wholly in spacer below it.
     // Enforce the same content-intersection invariant used by spacer sizing,
     // self-healing every off-content restore to the real tail.
-    const durable = saved.reserveTail
-      ? { kind: 'ANCHOR_AT', key: saved.key, offset: saved.offset,
-          ...(saved.defaultTail ? { defaultTail: true } : {}) }
-      : saved
+    const durable = _durableQuestionSubmissionMode(saved)
     return _anchorModeIntersectsContent(row, durable, scrollEl?.clientHeight)
       ? durable
       : holdBottom()
@@ -498,7 +530,8 @@ function _latestUserOwnsSpacer(scrollEl, listEl, lastUserMsgEl, mode, viewH) {
 
 /** Spacer height needed so the latest visible user message can sit near the
  *  top of the viewport, with the PIN_OFFSET breathing room above it, or so a
- *  transient question-submit anchor remains reachable through viewport growth.
+ *  transient question-submit anchor remains reachable while the submit-time
+ *  viewport size is unchanged.
  *
  *  Visibility is the defining invariant. The matching latest user pin may
  *  reserve before placement; every other mode gets room only while its real
@@ -521,8 +554,9 @@ function _latestUserOwnsSpacer(scrollEl, listEl, lastUserMsgEl, mode, viewH) {
  *
  *  Once the latest user row leaves the viewport, ordinary reservation
  *  collapses. An older visible user row never receives it. A question-submit
- *  anchor instead reserves only its exact reachability deficit; that transient
- *  intent is stripped before persistence.
+ *  anchor instead reserves only its exact reachability deficit for a
+ *  same-viewport handoff. A keyboard resize restores the mode that owned the
+ *  unanswered card before this function runs again.
  */
 const PIN_OFFSET = 4
 const PIN_BOTTOM_ROOM = 0
@@ -535,7 +569,8 @@ export function _computeSpacerH(
 ) {
   if (!scrollEl || !listEl) return 0
   const viewH = fullViewH || scrollEl.clientHeight
-  if (mode?.kind === 'ANCHOR_AT' && mode.reserveTail) {
+  if (mode?.kind === 'ANCHOR_AT'
+      && Number.isFinite(mode.questionSubmitViewportH)) {
     const anchorEl = _anchorEl(scrollEl, mode.key)
     if (!anchorEl) return 0
     const anchorTarget = Math.max(0, anchorEl.offsetTop - mode.offset)
@@ -794,11 +829,19 @@ export function modeForDisclosureToggle(scrollEl, currentMode) {
  * assistant row and may replace the card's controls immediately. It is not a
  * request to follow the live tail. Freeze the exact visible row/offset before
  * that card-to-stream handoff so neither the control reflow nor resumed output
- * moves the reader. */
+ * moves the reader. The overlay remembers the mode that owned the unanswered
+ * card and is scoped to the current viewport height; a keyboard resize returns
+ * to that base mode before layout is recomputed. */
 export function modeForQuestionSubmission(scrollEl, currentMode) {
   if (!scrollEl) return currentMode
   const anchor = anchorModeFromScroll(scrollEl)
-  return anchor ? { ...anchor, reserveTail: true } : currentMode
+  if (!anchor) return currentMode
+  return {
+    ...anchor,
+    questionSubmitViewportH: scrollEl.clientHeight,
+    questionSubmitBaseMode:
+      currentMode?.questionSubmitBaseMode || currentMode,
+  }
 }
 
 
@@ -1497,6 +1540,18 @@ export default function useScrollMode({
     // forceApply so the current PIN/FOLLOW/ANCHOR survives the viewport clamp.
     function syncLayout({ forceApply = false, viewportChange = false } = {}) {
       const preserveBottom = viewportChange && nearScrollBottomRef.current
+      // Question submission freezes the card-to-stream handoff, not the
+      // keyboard. Restore the unanswered card's mode before sizing a changed
+      // viewport so its ordinary reservation and clamp remain authoritative.
+      if (viewportChange) {
+        const released = releaseQuestionSubmissionForViewport(
+          modeRef.current,
+          scrollEl.clientHeight,
+        )
+        if (released !== modeRef.current) {
+          transitionMode(released, 'layout:question-viewport-release')
+        }
+      }
       sizeSpacer()
       // Input precedes the browser's first `scroll` event. Every layout entry
       // point shares this gate so streaming, footer reflow, keyboard resize,

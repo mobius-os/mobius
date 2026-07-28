@@ -30,6 +30,7 @@ import {
   readerInputActivatesDisclosure,
   readerInputMayScroll,
   readerInputNeedsFrameRelease,
+  releaseQuestionSubmissionForViewport,
   settledPinMode,
   shouldPinSend,
 } from '../useScrollMode.js'
@@ -337,8 +338,31 @@ test('question submission freezes the visible row before same-turn output resume
       kind: 'ANCHOR_AT',
       key: 'assistant-with-question',
       offset: 60,
-      reserveTail: true,
+      questionSubmitViewportH: 600,
+      questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' },
     },
+  )
+})
+
+test('question submission releases to the unanswered mode only after viewport size changes', () => {
+  const baseMode = { kind: 'PIN_USER_MSG', cid: 'latest' }
+  const heldMode = {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-with-question',
+    offset: 60,
+    questionSubmitViewportH: 400,
+    questionSubmitBaseMode: baseMode,
+  }
+
+  assert.equal(
+    releaseQuestionSubmissionForViewport(heldMode, 400),
+    heldMode,
+    'same-size card reflow keeps the submit anchor exact',
+  )
+  assert.equal(
+    releaseQuestionSubmissionForViewport(heldMode, 700),
+    baseMode,
+    'keyboard growth restores the mode that owned the unanswered card',
   )
 })
 
@@ -939,7 +963,7 @@ test('a saved partially-visible anchor remains exact', () => {
     'an anchor whose row still intersects its restored viewport is preserved')
 })
 
-test('question-only tail reservation is never restored as durable reader state', () => {
+test('question-only viewport overlay is never restored as durable reader state', () => {
   const row = {
     offsetTop: 500,
     offsetHeight: 220,
@@ -949,7 +973,8 @@ test('question-only tail reservation is never restored as durable reader state',
     kind: 'ANCHOR_AT',
     key: 'assistant-question',
     offset: 100,
-    reserveTail: true,
+    questionSubmitViewportH: 400,
+    questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' },
   }
   const scrollEl = {
     clientHeight: 700,
@@ -1352,7 +1377,8 @@ test('question submission reserves the exact room that keeps its anchor reachabl
     kind: 'ANCHOR_AT',
     key: 'assistant-question',
     offset: 60,
-    reserveTail: true,
+    questionSubmitViewportH: 600,
+    questionSubmitBaseMode: { kind: 'PIN_USER_MSG', cid: 'c-1' },
   }
   const listEl = { offsetHeight: 1400 }
   const latestUser = {
@@ -1368,7 +1394,51 @@ test('question submission reserves the exact room that keeps its anchor reachabl
   assert.equal(
     _computeSpacerH(scrollEl, listEl, latestUser, 700, mode),
     440,
-    'viewport growth adds exactly the room needed to preserve the anchor',
+    'the same-viewport overlay keeps the exact anchor until resize releases it',
+  )
+})
+
+test('answered question uses the unanswered card spacer when the keyboard closes', () => {
+  const anchor = { offsetTop: 1200, offsetHeight: 220 }
+  const scrollEl = {
+    clientHeight: 700,
+    querySelector(selector) {
+      return selector === '[data-key="assistant-question"]' ? anchor : null
+    },
+  }
+  const baseMode = { kind: 'PIN_USER_MSG', cid: 'c-1' }
+  const heldMode = {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: 60,
+    questionSubmitViewportH: 400,
+    questionSubmitBaseMode: baseMode,
+  }
+  const listEl = { offsetHeight: 1400 }
+  const latestUser = {
+    offsetTop: 1100,
+    offsetHeight: 80,
+    dataset: { cid: 'c-1' },
+  }
+
+  assert.equal(
+    _computeSpacerH(scrollEl, listEl, latestUser, 700, heldMode),
+    440,
+    'without release the answered card would remain locked',
+  )
+  const released = releaseQuestionSubmissionForViewport(heldMode, 700)
+  const answeredSpacer = _computeSpacerH(
+    scrollEl, listEl, latestUser, 700, released,
+  )
+  const unansweredSpacer = _computeSpacerH(
+    scrollEl, listEl, latestUser, 700, baseMode,
+  )
+  assert.equal(answeredSpacer, unansweredSpacer)
+  assert.equal(answeredSpacer, 396)
+  assert.equal(
+    listEl.offsetHeight + answeredSpacer - scrollEl.clientHeight,
+    1096,
+    'ordinary geometry moves the card instead of preserving scrollTop 1140',
   )
 })
 
