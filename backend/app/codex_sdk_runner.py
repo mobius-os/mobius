@@ -584,6 +584,7 @@ def _sdk_imports() -> dict[str, Any]:
     ErrorNotification,
     FileChangePatchUpdatedNotification,
     FileChangeThreadItem,
+    ImageViewThreadItem,
     ItemCompletedNotification,
     ItemGuardianApprovalReviewCompletedNotification,
     ItemGuardianApprovalReviewStartedNotification,
@@ -669,6 +670,7 @@ def _sdk_imports() -> dict[str, Any]:
     "ErrorNotification": ErrorNotification,
     "FileChangePatchUpdatedNotification": FileChangePatchUpdatedNotification,
     "FileChangeThreadItem": FileChangeThreadItem,
+    "ImageViewThreadItem": ImageViewThreadItem,
     "ReasoningEffort": ReasoningEffort,
     "ReasoningSummary": ReasoningSummary,
     "Sandbox": Sandbox,
@@ -1189,6 +1191,13 @@ async def _record_collab_child_links(
 
 def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
   """Builds one Möbius `tool_start` event from a typed item."""
+  image_view_cls = sdk.get("ImageViewThreadItem")
+  if image_view_cls is not None and isinstance(item, image_view_cls):
+    return {
+      "type": "tool_start",
+      "tool": "ViewImage",
+      "input": getattr(item, "path", ""),
+    }
   # The invariant is that Codex collab items are ordinary tool activity because
   # the parent stream exposes no per-helper identity. RUNTIME REALITY (verified
   # live on codex 0.144.5, gpt-5.6-sol delegating a sub-task): the SDK streams
@@ -1262,6 +1271,9 @@ def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
 
 def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any]]:
   """Builds Möbius tool-end events from a completed typed item."""
+  image_view_cls = sdk.get("ImageViewThreadItem")
+  if image_view_cls is not None and isinstance(item, image_view_cls):
+    return [{"type": "tool_end"}]
   # The invariant is that a Codex collab completion closes the ordinary tool
   # activity opened by _tool_start_event and never manufactures task_done. The
   # optional summary remains defensive for a future SDK that populates

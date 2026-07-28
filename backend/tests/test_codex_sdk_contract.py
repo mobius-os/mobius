@@ -173,6 +173,26 @@ def test_subagent_activity_is_natively_modeled_and_fallback_removed():
   assert not hasattr(codex_sdk_runner, "_is_subagent_activity_resume_validation_error")
 
 
+def test_native_image_view_item_is_wired_to_tool_dispatch():
+  """Codex image inspection must not disappear from the visible transcript."""
+  import inspect
+
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+  from app import codex_sdk_runner
+
+  assert getattr(v2_all, "ImageViewThreadItem", None) is not None
+  assert codex_sdk_runner._sdk_imports()["ImageViewThreadItem"] is (
+    v2_all.ImageViewThreadItem
+  )
+  assert "ImageViewThreadItem" in inspect.getsource(
+    codex_sdk_runner._tool_start_event
+  )
+  assert "ImageViewThreadItem" in inspect.getsource(
+    codex_sdk_runner._tool_completed_events
+  )
+
+
 def test_lifecycle_notification_fields_and_status_enums_are_pinned():
   """Fail loudly if the generated lifecycle surface drifts under the runner."""
   pytest.importorskip("openai_codex")
