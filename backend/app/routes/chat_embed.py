@@ -22,7 +22,7 @@ from app.deps import (
   Principal, chat_embed_grant_is_latest_consumed, get_principal,
   reject_cross_site,
 )
-from app.resource_access import get_active_chat_for_principal
+from app.resource_access import require_active_chat_access
 from app.timeutil import now_naive_utc
 from app.theme import theme_data
 
@@ -83,7 +83,7 @@ def mint_embed_capability(
       status_code=403,
       detail="Only an app token may mint an embedded-chat capability.",
     )
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   app = db.query(models.App).filter(
     models.App.id == principal.app_id,
     models.App.deleted_at.is_(None),
@@ -267,7 +267,7 @@ def revoke_embed_sessions(
   """Revoke active/pending sessions for an app-owned frame instance."""
   if principal.scope != "app" or principal.app_id is None:
     raise HTTPException(status_code=403, detail="Only an app token may revoke embeds.")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   now = now_naive_utc()
   count = db.query(models.ChatEmbedGrant).filter(
     models.ChatEmbedGrant.app_id == principal.app_id,

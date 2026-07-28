@@ -30,9 +30,9 @@
  *     non-capable app's /apps/<slug>/ page is never stored, so its offline
  *     open keeps showing the branded offline page exactly as before. Only the
  *     in-shell read path (frame/module) is flag-independent.
- *   - HTML/shell navigations: served from the Workbox precache via
- *     `NavigationRoute(createHandlerBoundToURL('/index.html'))` — NOT
- *     StaleWhileRevalidate; the shell deliberately avoids SWR.
+ *   - HTML/shell navigations: served from the Workbox precache via a pathname
+ *     route bound to `/index.html` — NOT StaleWhileRevalidate; the shell
+ *     deliberately avoids SWR.
  *   - Several `/api/*` routes are cached rather than going straight to
  *     network: `/api/theme` is StaleWhileRevalidate, `/api/chats` and
  *     `/api/apps/` are NetworkFirst (cache fallback when offline), and
@@ -44,11 +44,9 @@ import {
   precacheAndRoute, cleanupOutdatedCaches, matchPrecache,
   createHandlerBoundToURL, addPlugins,
 } from 'workbox-precaching'
+import { registerRoute, setCatchHandler } from 'workbox-routing'
 import {
-  registerRoute, setCatchHandler, NavigationRoute,
-} from 'workbox-routing'
-import {
-  CacheFirst, StaleWhileRevalidate, NetworkFirst,
+  CacheFirst, StaleWhileRevalidate, NetworkFirst, NetworkOnly,
 } from 'workbox-strategies'
 import {
   VENDOR_CACHE,
@@ -77,6 +75,7 @@ import {
   entriesToTrim,
 } from './sw-cache-policy.js'
 import { RETAINED_RUNTIME_ASSETS } from './sw-precache-assets.js'
+import { isShellNavigationDenied } from './lib/swNavigationPolicy.js'
 
 const isOpaqueFramePublicAssetRequest = request => {
   try {
@@ -658,37 +657,19 @@ registerRoute(
 // cached index.html for /recover, so the user landed on the shell instead of the
 // recovery page (and recovery was unreachable exactly when it's needed most).
 
-// Legacy instance-local mounts remain an extension point for installations
-// that predate the reserved /services namespace. Stock Möbius ships none.
-const PROXIED_APP_SUBTREES = []
-
 // Owner-configured backend web services live under one reserved namespace.
 // They are server-served, multi-page applications rather than SPA routes, so
 // every depth below /services/ must reach the guarded backend proxy.  The
 // concrete service map is private data (`/data/local-services.json`), never
 // compiled into the stock shell or edited into this service worker.
-
-registerRoute(new NavigationRoute(
+// Use pathname directly rather than NavigationRoute's pathname+search
+// matching. One predicate now owns online routing and offline fallback, and
+// legacy extension regexes do not need query-string-specific variants.
+registerRoute(
+  ({ request, url }) =>
+    request.mode === 'navigate' && !isShellNavigationDenied(url.pathname),
   createHandlerBoundToURL('/index.html'),
-  {
-    denylist: [
-      /^\/app-assets\//,
-      /^\/app-embeds\//,
-      /^\/apps\//,
-      /^\/recover(\/|$)/,
-      /^\/shell\/embed(\/|$)/,
-      // Published Web Studio sites (/sites/<token>/...) are served by the
-      // backend, NOT the SPA shell. Without this the root-scoped SW served the
-      // cached index.html for a published URL, so opening it showed the Möbius
-      // app instead of the built website.
-      /^\/sites(\/|$)/,
-      /^\/services(\/|$)/,
-      // Legacy instance-local mounts remain supported as an extension point.
-      ...PROXIED_APP_SUBTREES,
-      /^\/(?!(?:shell|apps|recover)(?:\/|$))[A-Za-z0-9_-]+(?:\/(?:index\.html)?)?$/,
-    ],
-  },
-))
+)
 
 // Standalone mini-app navigations: network-first, then stored for
 // offline-capable apps ONLY (gated). The stable `/apps/<slug>/` URL has no
@@ -703,23 +684,28 @@ registerRoute(
   appCodeHandler(STANDALONE_APPS_CACHE, { gated: true }),
 )
 
-// Last resort for any document we still couldn't serve: the cached
-// shell for /shell/*, the branded offline page for standalone +
-// everything else. matchPrecache resolves the content-hashed entry.
+// Give every other server/app-owned document a matched network route. If the
+// network is unavailable, Workbox invokes the shared catch handler below and
+// serves Möbius's branded offline page rather than the browser's generic error.
+registerRoute(
+  ({ request, url }) =>
+    request.mode === 'navigate' && isShellNavigationDenied(url.pathname),
+  new NetworkOnly(),
+)
+
+// Last resort for any document we still couldn't serve: the cached shell for
+// shell-owned routes, and the branded offline page for every server/app-owned
+// route above. matchPrecache resolves the content-hashed entry.
 setCatchHandler(async ({ request, url }) => {
   if (request.destination !== 'document') return Response.error()
-  if (url.pathname.startsWith('/app-assets/')
-      || url.pathname.startsWith('/app-embeds/')) {
+  if (isShellNavigationDenied(url.pathname)) {
     return (await matchPrecache('/offline.html')) || Response.error()
   }
-  if (!url.pathname.startsWith('/apps/')) {
-    return (
-      (await matchPrecache('/index.html')) ||
-      (await matchPrecache('/offline.html')) ||
-      Response.error()
-    )
-  }
-  return (await matchPrecache('/offline.html')) || Response.error()
+  return (
+    (await matchPrecache('/index.html')) ||
+    (await matchPrecache('/offline.html')) ||
+    Response.error()
+  )
 })
 
 // ── Precache warming ────────────────────────────────────────────

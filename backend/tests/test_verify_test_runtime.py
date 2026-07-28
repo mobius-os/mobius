@@ -140,6 +140,37 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   assert "node:22" not in preship
 
 
+def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+  requirements = (ROOT / "backend" / "requirements.txt").read_text(
+    encoding="utf-8"
+  )
+
+  requirements_layer = dockerfile[
+    dockerfile.index("COPY backend/requirements.txt ."):
+    dockerfile.index("# openai-codex Python SDK:")
+  ]
+  assert "pip install --no-cache-dir -r requirements.txt" in requirements_layer
+  assert (
+    'Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"'
+    in requirements_layer
+    and "unlink(missing_ok=True)" in requirements_layer
+    and "assert not p.exists()" in requirements_layer
+  )
+
+  codex_layer = dockerfile[
+    dockerfile.index("# openai-codex Python SDK:"):
+    dockerfile.index("# Capture each installed agent CLI")
+  ]
+  assert "pip install --no-cache-dir --no-deps" in codex_layer
+  assert "pip install --no-cache-dir 'openai-codex-cli-bin==0.144.4'" in codex_layer
+  assert 'rm -rf "${_codex_cli_bin}/bin"' in codex_layer
+  assert 'ln -s /usr/local/bin/codex "${_codex_cli_bin}/bin/codex"' in codex_layer
+  assert "bundled_codex_path().samefile" in codex_layer
+  assert "pip check" in codex_layer
+  assert "declared cli-bin package is retained for SDK compatibility" in requirements
+
+
 def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():
   hook = (ROOT / "scripts" / "githooks" / "pre-push").read_text(
     encoding="utf-8"

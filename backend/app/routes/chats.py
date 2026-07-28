@@ -33,7 +33,11 @@ from app.deps import (
   reject_cross_site,
   require_chat_embed_operation,
 )
-from app.resource_access import get_active_chat_for_principal, get_active_chat_or_404
+from app.resource_access import (
+  get_active_chat_for_principal,
+  get_active_chat_or_404,
+  require_active_chat_access,
+)
 from app.schemas import ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
 
@@ -231,7 +235,7 @@ def issue_media_token(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:media")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   if principal.scope == "chat_embed":
     if (
       principal.app_id is None
@@ -1285,14 +1289,14 @@ def get_tool_output_by_id(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:read")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
 
   # This sync route runs in FastAPI's worker pool, so waiting on the concurrent
   # Future does not block the event loop.
   _drain_writer_before_sidecar_read(db, chat_id, "tool output")
   # The barrier refreshes the request transaction. Recheck the chat so a
   # concurrent soft-delete cannot expose a sidecar after its parent vanished.
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   query = db.query(models.ToolOutput).filter(
     models.ToolOutput.chat_id == chat_id,
     models.ToolOutput.tool_use_id == tool_use_id,
@@ -1340,9 +1344,9 @@ def get_thinking_trace_by_id(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:read")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   _drain_writer_before_sidecar_read(db, chat_id, "thinking trace")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   query = db.query(models.ThinkingTrace).filter(
     models.ThinkingTrace.chat_id == chat_id,
     models.ThinkingTrace.thinking_id == thinking_id,
@@ -1493,7 +1497,11 @@ def get_chat_usage(
   This owner-only diagnostic is deliberately independent of the transcript:
   benchmark tooling can read it without parsing user-visible messages.
   """
-  get_active_chat_or_404(db, chat_id)
+  get_active_chat_or_404(
+    db,
+    chat_id,
+    load_fields=(models.Chat.id,),
+  )
   runs = (
     db.query(models.ChatRun)
     .filter(models.ChatRun.chat_id == chat_id)

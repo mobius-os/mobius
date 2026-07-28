@@ -760,6 +760,31 @@ test('opening navigation is presentation-only and never refetches whole lists', 
     'chat lifecycle events still own their authoritative refresh')
 })
 
+test('chat drawer dots distinguish active work from unseen completion', () => {
+  assert.match(
+    shell,
+    /ev\.type === 'chat_run_started'[\s\S]*?markStreamingStart\(ev\.chatId\)/,
+    'a started run must raise the active-work dot',
+  )
+  assert.match(
+    shell,
+    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)[\s\S]*?setAttentionChatIds/,
+    'a finished run must raise attention only while the chat is not visible',
+  )
+  assert.match(
+    shell,
+    /for \(const cid of visibleChatIds\) clearChatAttention\(cid\)/,
+    'viewing a chat must clear its completion dot',
+  )
+  assert.match(
+    drawer,
+    /streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
+    'active work must take precedence over unseen completion in a row',
+  )
+  assert.match(drawerCss, /\.drawer__streaming-dot\s*\{[\s\S]*?background:\s*var\(--accent\)/)
+  assert.match(drawerCss, /\.drawer__attention-dot\s*\{[\s\S]*?border:\s*1\.5px solid var\(--green\)/)
+})
+
 test('live preview reveal keeps the workspace controller distinct from device mode', () => {
   assert.match(shell, /const deviceMode = paneModel\.modeForRect\(contentRect\)/)
   assert.match(shell, /mode\.toggle\(\{ cause: 'auto', to: 'panes' \}\)/)

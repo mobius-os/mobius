@@ -20,23 +20,9 @@ from app.deps import (
   require_chat_embed_operation, resolve_media_or_header_owner,
 )
 from app.image_previews import discard_image_preview, display_image_preview
-from app.path_utils import validate_path_within_base
+from app.path_utils import validate_chat_id, validate_path_within_base
 from app.resource_access import get_active_chat_for_principal
 from app.storage_io import atomic_write, app_dir_usage
-
-# Chat IDs are UUID4 strings (str(uuid.uuid4()), 36 chars with dashes).
-# Validating the format before constructing any filesystem path prevents
-# a crafted chat_id from escaping the /data/chats/ subtree.
-_CHAT_ID_RE = re.compile(
-  r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
-  re.IGNORECASE,
-)
-
-
-def _validate_chat_id(chat_id: str) -> None:
-  """Raises 400 if chat_id doesn't look like a UUID4."""
-  if not _CHAT_ID_RE.match(chat_id):
-    raise HTTPException(status_code=400, detail="Invalid chat id.")
 
 router = APIRouter(prefix="/api/chats", tags=["uploads"])
 
@@ -106,7 +92,7 @@ async def upload_files(
   db: Session = Depends(get_db),
 ):
   """Saves uploaded files to /data/chats/{id}/uploads/ and records metadata."""
-  _validate_chat_id(chat_id)
+  validate_chat_id(chat_id)
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:uploads")
@@ -187,7 +173,7 @@ def list_uploads(
   db: Session = Depends(get_db),
 ):
   """Returns uploads for an owner or the exact authorized chat embed."""
-  _validate_chat_id(chat_id)
+  validate_chat_id(chat_id)
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:uploads")
@@ -207,7 +193,7 @@ def delete_upload(
   db: Session = Depends(get_db),
 ):
   """Removes an uploaded file from disk and from the chat's upload list."""
-  _validate_chat_id(chat_id)
+  validate_chat_id(chat_id)
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:uploads")
@@ -244,7 +230,7 @@ def serve_upload(
   Owner JWTs are rejected in query strings because they would leak into access
   logs, history and Referer headers. App/chat_embed tokens are rejected here.
   """
-  _validate_chat_id(chat_id)
+  validate_chat_id(chat_id)
   resolve_media_or_header_owner(
     token_src.token, db, chat_id=chat_id, from_query=token_src.from_query,
   )
