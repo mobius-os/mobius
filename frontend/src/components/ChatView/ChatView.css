@@ -924,7 +924,6 @@
 
 .chat__source-icon {
   display: inline-flex;
-  position: relative;
   align-items: center;
   justify-content: center;
   flex: 0 0 22px;
@@ -991,24 +990,6 @@
   flex: 1 1 auto;
   gap: 5px;
   white-space: nowrap;
-}
-
-.chat__source-fallback {
-  line-height: 1;
-}
-
-.chat__source-favicon {
-  position: absolute;
-  inset: 3px;
-  width: 16px;
-  height: 16px;
-  object-fit: contain;
-  background: color-mix(in srgb, var(--accent-dim) 82%, var(--surface));
-  opacity: 0;
-}
-
-.chat__source-favicon--loaded {
-  opacity: 1;
 }
 
 .chat__source-title {

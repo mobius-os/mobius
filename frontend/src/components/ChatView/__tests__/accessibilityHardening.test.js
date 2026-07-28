@@ -101,23 +101,13 @@ test('message sources expose list semantics, keyboard focus, and touch targets',
   assert.match(source,
     /<li key=\{source\.url\} className="chat__source-item chat__source-item--web">/)
   assert.match(source, /aria-label=\{`\$\{label\}.*opens in a new tab/)
-  const favicon = read('../SourceFavicon.jsx')
-  assert.match(favicon, /className="chat__source-icon" aria-hidden="true"/)
-  assert.match(favicon, /className="chat__source-fallback"/,
-    'a recognisable local mark must remain when a site has no favicon')
-  assert.match(favicon, /className=\{`chat__source-favicon/)
-  assert.match(favicon, /width="16"\s+height="16"/,
-    'source icons should reserve their intrinsic geometry before loading')
-  assert.match(source, /<SourceFavicon/,
-    'source icons should use the shared safe loading boundary')
+  assert.match(webSources, /className="chat__source-icon" aria-hidden="true"/)
+  assert.match(webSources, /\{sourceMark\(host\)\}/,
+    'a recognisable local mark should not require a remote request')
   assert.doesNotMatch(webSources, /<img/,
-    'message sources must not fetch cited sites directly from the reader browser')
-  assert.match(favicon, /apiFetch\(path, \{ timeoutMs: FAVICON_TIMEOUT_MS \}\)/,
-    'source icons should use the authenticated server-side proxy')
-  assert.match(favicon, /new IntersectionObserver/,
-    'off-screen source icons should not trigger eager proxy requests')
-  assert.match(favicon, /const pendingFavicons = new Map\(\)/,
-    'repeated citations should share an in-flight icon request')
+    'message sources must not fetch cited sites from the reader browser')
+  assert.doesNotMatch(webSources, /\/proxy|apiFetch|favicon/i,
+    'merely viewing a citation should not make the server contact its site')
   assert.doesNotMatch(webSources, /chat__source-host/,
     'web source cards should prioritise the page title rather than repeat its URL host')
   assert.match(css, /\.chat__source-chip:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/s)

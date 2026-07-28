@@ -92,20 +92,19 @@ test('the first thinking event becomes interactive without moving the row', asyn
 test('a lone activity is direct and sources render as safe compact pills', async ({ page }) => {
   await page.setViewportSize({ width: 412, height: 915 })
   const requestedSourceHosts = []
-  const proxiedFavicons = []
-  const pixel = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-    'base64',
-  )
+  const sourceIconProxyRequests = []
   page.on('request', request => {
-    const host = new URL(request.url()).hostname
+    const url = new URL(request.url())
+    const host = url.hostname
     if (host === 'claude.ai' || host === 'docs.mobius.test') {
       requestedSourceHosts.push(host)
     }
-  })
-  await page.route(/\/api\/proxy\?url=/, route => {
-    proxiedFavicons.push(new URL(route.request().url()).searchParams.get('url'))
-    return route.fulfill({ status: 200, contentType: 'image/png', body: pixel })
+    if (url.pathname.endsWith('/api/proxy')) {
+      const target = url.searchParams.get('url') || ''
+      if (target.includes('claude.ai') || target.includes('docs.mobius.test')) {
+        sourceIconProxyRequests.push(target)
+      }
+    }
   })
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -171,10 +170,6 @@ test('a lone activity is direct and sources render as safe compact pills', async
   const sources = page.locator('[data-chat-surface="painted"] .chat__sources')
   await expect(sources).toBeVisible()
   await expect(sources.getByRole('listitem')).toHaveCount(2)
-  await expect(sources.locator('.chat__source-favicon--loaded')).toHaveCount(2)
-  expect(await sources.locator('.chat__source-favicon').evaluateAll(
-    icons => icons.map(icon => icon.src.startsWith('blob:')),
-  )).toEqual([true, true])
   await expect(sources.locator('.chat__source-icon')).toHaveText(['C', 'D'])
   for (const chip of await sources.locator('.chat__source-chip').all()) {
     const box = await chip.boundingBox()
@@ -183,10 +178,7 @@ test('a lone activity is direct and sources render as safe compact pills', async
     expect(box.height).toBeGreaterThanOrEqual(43)
     expect(box.height).toBeLessThan(52)
   }
-  expect(proxiedFavicons.sort()).toEqual([
-    'https://claude.ai/favicon.ico',
-    'https://docs.mobius.test/favicon.ico',
-  ])
+  expect(sourceIconProxyRequests).toEqual([])
   expect(requestedSourceHosts).toEqual([])
 })
 

@@ -84,18 +84,6 @@ export function sourceHost(url) {
   }
 }
 
-// Sites commonly expose a default icon at their origin root. SourceFavicon owns
-// the authenticated proxy read; this helper only derives that conventional
-// target, keeping us independent of third-party favicon services.
-export function sourceFaviconUrl(url) {
-  try {
-    const safeUrl = safeSourceUrl(url)
-    return safeUrl ? new URL('/favicon.ico', safeUrl).href : ''
-  } catch {
-    return ''
-  }
-}
-
 // What the chip actually reads. A title is only sometimes available: Claude's
 // WebSearch result carries title + snippet, but Codex's WebSearchThreadItem
 // exposes a URL only on its `openPage` / `findInPage` actions and never a

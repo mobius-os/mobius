@@ -1,12 +1,10 @@
 import BrainCircuit from 'lucide-react/dist/esm/icons/brain-circuit.mjs'
 import {
   messageSources,
-  sourceFaviconUrl,
   sourceHost,
   sourceLabel,
 } from './messageSources.js'
 import { messageRecall, noteHref, noteLabel } from './memoryRecall.js'
-import SourceFavicon from './SourceFavicon.jsx'
 
 function sourceMark(host) {
   const displayHost = String(host || '').replace(/^www\./i, '')
@@ -115,7 +113,6 @@ export default function MessageSources({ blocks, onInternalNav }) {
         {sources.map(source => {
           const label = sourceLabel(source)
           const host = sourceHost(source.url)
-          const faviconUrl = sourceFaviconUrl(source.url)
           return (
             <li key={source.url} className="chat__source-item chat__source-item--web">
               <a
@@ -126,10 +123,11 @@ export default function MessageSources({ blocks, onInternalNav }) {
                 title={source.snippet || source.title || source.url}
                 aria-label={`${label}${host && host !== label ? ` — ${host}` : ''} (opens in a new tab)`}
               >
-                <SourceFavicon
-                  faviconUrl={faviconUrl}
-                  fallback={sourceMark(host)}
-                />
+                {/* Keep reading passive: a local domain mark avoids contacting
+                    every cited site merely because its card neared the viewport. */}
+                <span className="chat__source-icon" aria-hidden="true">
+                  {sourceMark(host)}
+                </span>
                 <span className="chat__source-title">{label}</span>
               </a>
             </li>
