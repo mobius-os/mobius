@@ -58,8 +58,11 @@ The note is the chat's durable memory. Its exact shape:
 
 ---
 type: chat
-description: <one-line gist of the chat in the partner's own words — this IS the
-chat's name, e.g. "dialing in a sour espresso shot", not "chat 12">
+description: <the chat's concise one-line NAME in the partner's own words,
+capitalized and normally at most 10 words, e.g. "Dialing in sour espresso", not
+"chat 12". Keep the existing name through ordinary follow-up turns. Rename it
+only when the RECENT conversation has substantially moved to a different main
+topic, then name that current topic rather than the chat's opening topic.>
 ---
 ## Digest
 <ONE short paragraph: what the chat is about, what it produced, and its current
@@ -340,8 +343,15 @@ def _deterministic_note(transcript: str, existing: str) -> str:
     for line in entries
     if line.lower().startswith("user:") and ":" in line
   ]
-  seed = user_entries[0] if user_entries else (entries[0] if entries else "chat")
-  description = re.sub(r"\s+", " ", seed).strip()[:160] or "chat"
+  # A provider-free publication must not replace an already-distilled name with
+  # raw prompt text. This matters when a later LIMIT_PARKED turn deliberately
+  # forces the deterministic path: the cumulative handoff still updates, while
+  # the established name remains stable.
+  kept = re.search(r"^description:\s*(.+)$", existing, re.MULTILINE)
+  description = kept.group(1).strip() if kept else ""
+  if not description:
+    seed = user_entries[0] if user_entries else (entries[0] if entries else "chat")
+    description = re.sub(r"\s+", " ", seed).strip()[:160] or "chat"
   recent = " ".join(entries[-4:])
   digest = re.sub(r"\s+", " ", recent).strip()[:600]
   facts = _existing_section(existing, "Facts & intent")
@@ -452,8 +462,30 @@ def _publish_if_current(
     con.close()
 
 
+def _normalize_chat_name(description: str) -> str:
+  """Normalize a generated name without damaging intentional product casing."""
+  title = re.sub(r"\s+", " ", description).strip()
+  for token_match in re.finditer(r"\S+", title):
+    token = token_match.group(0)
+    alpha_offset = next(
+      (index for index, char in enumerate(token) if char.isalpha()),
+      None,
+    )
+    if alpha_offset is None:
+      continue
+    # ``str.islower`` sees the whole cased token: ordinary "dialing" becomes
+    # "Dialing", while iPhone, macOS, eBay, and already-capitalized words stay
+    # exactly as the summarizer wrote them.
+    if token.islower():
+      index = token_match.start() + alpha_offset
+      title = title[:index] + title[index].upper() + title[index + 1:]
+    break
+  return title
+
+
 def _patch_title(chat_id: str, description: str) -> None:
   """Best-effort title sync (by_agent so it defers to a manual rename)."""
+  description = _normalize_chat_name(description)
   try:
     token = SERVICE_TOKEN_FILE.read_text(encoding="utf-8").strip()
   except OSError:

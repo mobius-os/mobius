@@ -161,6 +161,42 @@ def test_build_prompt_includes_existing_note_to_grow():
   assert "old" in p
 
 
+def test_summary_name_is_stable_until_a_substantial_recent_topic_shift():
+  cn = _load_chat_note()
+  prompt = " ".join(cn.SYSTEM_PROMPT.lower().split())
+  assert "keep the existing name through ordinary follow-up turns" in prompt
+  assert "substantially moved to a different main topic" in prompt
+  assert "current topic rather than the chat's opening topic" in prompt
+  assert "capitalized" in prompt
+
+
+def test_generated_chat_name_capitalizes_without_damaging_product_casing():
+  cn = _load_chat_note()
+  assert cn._normalize_chat_name("dialing in sour espresso") == (
+    "Dialing in sour espresso"
+  )
+  assert cn._normalize_chat_name("iPhone camera workflow") == (
+    "iPhone camera workflow"
+  )
+  assert cn._normalize_chat_name("  2026   planning notes ") == (
+    "2026 Planning notes"
+  )
+
+
+def test_deterministic_note_preserves_an_existing_generated_name():
+  cn = _load_chat_note()
+  existing = (
+    "---\ntype: chat\ndescription: Existing current topic\n---\n"
+    "## Digest\nold\n\n## Summary\nold"
+  )
+  note = cn._deterministic_note(
+    "user: unrelated raw prompt text\n\nassistant: completed",
+    existing,
+  )
+  assert "description: Existing current topic" in note
+  assert "description: unrelated raw prompt text" not in note
+
+
 def test_read_transcript_excludes_derived_provider_handoffs(tmp_path):
   cn = _load_chat_note()
   database = tmp_path / "chat.db"

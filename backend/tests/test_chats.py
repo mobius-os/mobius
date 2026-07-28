@@ -524,3 +524,32 @@ def test_chat_title_naming_precedence(client, auth, db, chat):
   # 5) the agent can fill again once unlocked
   patch({"title": "Espresso dial-in", "by_agent": True})
   assert current().title == "Espresso dial-in"
+
+
+def test_committed_chat_rename_publishes_live_projection_event(
+  client, auth, db, chat,
+):
+  """The summary-owned rename reaches open tabs only after durable commit."""
+  with patch("app.routes.chats.get_system_broadcast") as mock_get_sb:
+    fake_sb = MagicMock()
+    mock_get_sb.return_value = fake_sb
+
+    renamed = client.patch(
+      f"/api/chats/{chat.id}",
+      json={"title": "Current topic", "by_agent": True},
+      headers=auth,
+    )
+    unchanged = client.patch(
+      f"/api/chats/{chat.id}",
+      json={"title": "Current topic", "by_agent": True},
+      headers=auth,
+    )
+
+  assert renamed.status_code == 200
+  assert unchanged.status_code == 200
+  db.expire_all()
+  assert db.query(models.Chat).filter_by(id=chat.id).one().title == "Current topic"
+  fake_sb.publish.assert_called_once_with({
+    "type": "chat_renamed",
+    "chatId": str(chat.id),
+  })
