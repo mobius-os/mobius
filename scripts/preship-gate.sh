@@ -88,7 +88,7 @@ echo "  ok — $(grep -oE '[0-9]+ passed' /tmp/preship-pytest.log | tail -1)"
 
 echo "[5/5] frontend build (Node 24) + offline-build check"
 "$PWD/scripts/docker-probe.sh" --timeout 900 -- \
-  -v "$PWD/frontend":/app -w /app node:24-slim sh -c \
+  -v "$PWD/frontend":/app -w /app node:24-trixie-slim sh -c \
   "npm install --no-audit --no-fund >/tmp/preship-npm.log 2>&1 && \
    npm run build >/tmp/preship-build.log 2>&1 && \
    node scripts/check-offline-build.mjs" >/tmp/preship-fe.log 2>&1 \

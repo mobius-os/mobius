@@ -133,9 +133,9 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
 def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   preship = (ROOT / "scripts" / "preship-gate.sh").read_text(encoding="utf-8")
-  assert "FROM node:24-slim AS node-runtime" in dockerfile
+  assert "FROM node:24-trixie-slim AS node-runtime" in dockerfile
   assert "agent-browser@0.31.1" in dockerfile
-  assert "node:24-slim sh -c" in preship
+  assert "node:24-trixie-slim sh -c" in preship
   assert "node:22" not in dockerfile
   assert "node:22" not in preship
 

@@ -10,18 +10,27 @@ SCRIPT = Path(__file__).parents[1] / "scripts" / "agent-screenshot.sh"
 PREVIEW_APP = Path(__file__).parents[1] / "scripts" / "preview_app.sh"
 SHELL = Path(__file__).parents[2] / "frontend" / "src" / "components" / "Shell" / "Shell.jsx"
 STANDALONE = Path(__file__).parents[1] / "app" / "routes" / "standalone.py"
+SHELL_ENTRY = "index-test-fixture.js"
 
 
-def _current_shell_entry() -> str:
-  import re
+def _fixture_script(tmp_path: Path) -> Path:
+  """Copy the helper beside a minimal built-shell fixture.
 
-  index = SCRIPT.parents[2] / "frontend" / "dist" / "index.html"
-  match = re.search(
-    r'<script[^>]+src="([^"]*/assets/(index-[^"]+\.js))"',
-    index.read_text(encoding="utf-8"),
+  The backend CI job intentionally does not build the frontend. Keeping the
+  fixture under tmp_path makes the helper's dist dependency explicit without
+  mutating the checkout or weakening its production freshness check.
+  """
+  root = tmp_path / "fixture"
+  script = root / "backend" / "scripts" / SCRIPT.name
+  script.parent.mkdir(parents=True)
+  shutil.copy2(SCRIPT, script)
+  dist = root / "frontend" / "dist"
+  dist.mkdir(parents=True)
+  (dist / "index.html").write_text(
+    f'<script type="module" src="/assets/{SHELL_ENTRY}"></script>',
+    encoding="utf-8",
   )
-  assert match
-  return match.group(2)
+  return script
 
 
 def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
@@ -60,6 +69,7 @@ def _run_helper(
   loaded_asset: str | None = None,
 ) -> tuple[subprocess.CompletedProcess, Path, Path, Path]:
   _, marker = _fake_browser(tmp_path)
+  script = _fixture_script(tmp_path)
   output = tmp_path / "shot.png"
   browser_log = tmp_path / "browser.log"
   env = {
@@ -70,11 +80,11 @@ def _run_helper(
     "VIEWPORT_WIDTH": str(viewport_width),
     "VIEWPORT_HEIGHT": str(viewport_height),
     "FAKE_AUTH_OK": "true" if auth_ok else "false",
-    "FAKE_LOADED_ASSET": loaded_asset or _current_shell_entry(),
+    "FAKE_LOADED_ASSET": loaded_asset or SHELL_ENTRY,
     "FAKE_BROWSER_LOG": str(browser_log),
     "FAKE_SCREENSHOT_MARKER": str(marker),
   }
-  args = ["bash", str(SCRIPT)]
+  args = ["bash", str(script)]
   if content_only:
     args.append("--content-only")
   if preserve_cache:
