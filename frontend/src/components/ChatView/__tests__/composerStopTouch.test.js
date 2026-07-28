@@ -3,7 +3,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 const src = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
-const stopBlock = src.match(/key="stop"[\s\S]*?aria-label="Stop"/)?.[0] || ''
+const stopBlock = src.match(
+  /className="chat__action chat__stop"[\s\S]*?aria-label="Stop"/,
+)?.[0] || ''
 
 test('Stop dispatches on touchend and preserves composer focus on pointerdown', () => {
   assert.match(stopBlock, /onPointerDown=\{\(e\) => e\.preventDefault\(\)\}/,
