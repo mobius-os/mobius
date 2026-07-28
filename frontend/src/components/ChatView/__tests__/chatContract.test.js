@@ -67,21 +67,26 @@ test('ChatView only consumes methods returned by the scroll controller', () => {
     `ChatView consumes missing useScrollMode members: ${missing.join(', ')}`)
 })
 
-test('owner contract freezes question answers with one transient reachability exception', () => {
+test('owner contract freezes question answers without locking keyboard movement', () => {
   const architecture = readFileSync(
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.9 \(2026-07-24\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.10 \(2026-07-26\)/)
   assert.match(
     architecture,
-    /In-process question is answered \| any \| `ANCHOR_AT` on current visible row; same active assistant row/,
+    /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,
     'question submission must freeze the reader while preserving the R6 row',
   )
   assert.match(
     architecture,
-    /question-submit hold is the sole exception: it may reserve only the exact tail\s+deficit required to keep the answered card at its frozen offset/,
-    'question submission may reserve only its documented reachability deficit',
+    /question-submit hold is the sole exception: it may reserve only the exact tail\s+deficit required for a stable card handoff while the viewport size is unchanged/,
+    'question submission may reserve only its same-viewport reachability deficit',
+  )
+  assert.match(
+    architecture,
+    /Viewport\/keyboard changes after question submission \| transient question anchor \| pre-submit unanswered-card mode/,
+    'keyboard movement must return to the unanswered card baseline',
   )
 })
 
