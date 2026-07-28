@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
-  composerUsesNativeSizing,
+  textareaUsesNativeSizing,
   reconcileComposerTextarea,
   resetComposerTextarea,
   resizeComposerTextarea,
@@ -89,13 +89,13 @@ test('authoritative empty state clears stale native inline geometry', () => {
 })
 
 test('native content sizing is capability-gated without browser sniffing', () => {
-  assert.equal(composerUsesNativeSizing({
+  assert.equal(textareaUsesNativeSizing({
     supports: (property, value) => (
       property === 'field-sizing' && value === 'content'
     ),
   }), true)
-  assert.equal(composerUsesNativeSizing({ supports: () => false }), false)
-  assert.equal(composerUsesNativeSizing(null), false)
+  assert.equal(textareaUsesNativeSizing({ supports: () => false }), false)
+  assert.equal(textareaUsesNativeSizing(null), false)
 })
 
 test('native resize observation owns only the tall alignment class', () => {

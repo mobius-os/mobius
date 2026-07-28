@@ -619,12 +619,15 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   escape hatch for any interrupted no-scroll gesture.
   A marked Q&A custom-answer field is the deliberate exception to "ordinary
   typing cannot scroll": changing its value can grow the field and cause the
-  browser to move the transcript to keep the native caret visible. From
-  `beforeinput` through one complete rendered frame, that mutation uses the
-  same reader-ownership gate as a possible scroll. If no scroll lands, layout
-  resumes immediately after that frame; if one does, the ordinary quiet-settle
-  path records the resulting hold. The controller must not restore a stale
-  anchor between those two outcomes.
+  browser to move the transcript to keep the native caret visible. Only an
+  ordinary `ANCHOR_AT` reading hold yields from `beforeinput` through one
+  complete rendered frame; if no scroll lands, layout resumes immediately
+  after that frame, and if one does, the ordinary quiet-settle path records the
+  resulting hold. Stronger location contracts keep layout ownership:
+  `FOLLOW_BOTTOM` absorbs the new line in its normal ResizeObserver pass, while
+  pins, reserved-tail holds, and the question-submission overlay remain fixed.
+  The controller must not restore a stale anchor between those two outcomes or
+  interrupt live tail-follow with a delayed snap.
 - **R5a — Attention nudges reveal the usable tail.** Tapping an offscreen question
   or paused-turn nudge is an explicit one-shot reading action: it lands at the
   physical tail, including the list's composer-clearance padding, so the card's

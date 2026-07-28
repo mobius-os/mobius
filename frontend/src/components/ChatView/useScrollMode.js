@@ -663,13 +663,20 @@ export function modeForViewportChange(mode, wasNearScrollBottom, anchorMode = nu
 }
 
 
+/** The plain reading-position hold, excluding the question-submission overlay
+ * that uses the same ANCHOR_AT shape with a stronger transient contract. */
+export function isOrdinaryReadingHold(mode) {
+  return mode?.kind === 'ANCHOR_AT'
+    && !Number.isFinite(mode.questionSubmitViewportH)
+}
+
 /** A focused, content-growing question field gives the browser temporary
  * ownership of caret visibility. If that native adjustment moved an ordinary
  * held viewport, rebase the hold to what is visible now instead of restoring
- * the stale pre-edit anchor. Send pins, reserved-tail holds, and live following
- * keep their stronger contracts and therefore pass through unchanged. */
+ * the stale pre-edit anchor. Send pins, reserved-tail holds, live following,
+ * and the submission overlay keep their stronger contracts. */
 export function modeForQuestionEditingViewportChange(mode, anchorMode = null) {
-  if (mode?.kind !== 'ANCHOR_AT' || !anchorMode) return mode
+  if (!isOrdinaryReadingHold(mode) || !anchorMode) return mode
   if (mode.key === anchorMode.key
       && Math.abs(mode.offset - anchorMode.offset) <= 0.5) return mode
   return anchorMode
@@ -2016,6 +2023,10 @@ export default function useScrollMode({
     const onQuestionEditMutation = (event) => {
       if (!questionEditField(event.target)) return
       questionEditSessionRef.current = true
+      // Stronger modes already know where this resize belongs. In particular,
+      // FOLLOW_BOTTOM must absorb the new line in the same ResizeObserver pass
+      // instead of yielding for two painted frames and then snapping back.
+      if (!isOrdinaryReadingHold(modeRef.current)) return
       if (layoutMayOwnScroll(
         gestureWindowUntilRef.current,
         performance.now(),
