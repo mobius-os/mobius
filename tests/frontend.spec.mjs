@@ -425,9 +425,12 @@ test.describe('Message rendering', () => {
     // Wait for question card to appear.
     await expect(page.locator('.qcard')).toBeVisible({ timeout: 5000 })
 
-    // Verify options rendered (3 options + Other).
+    // Verify the three supplied choices; custom input is a direct sibling
+    // surface rather than a synthetic "Other" radio row.
     const options = page.locator('.qcard__opt')
-    await expect(options).toHaveCount(4)
+    await expect(options).toHaveCount(3)
+    await expect(page.getByRole('textbox', { name: 'Custom answer for: What color?' }))
+      .toBeVisible()
 
     // Select "Blue".
     await page.locator('.qcard__opt', { hasText: 'Blue' }).click()

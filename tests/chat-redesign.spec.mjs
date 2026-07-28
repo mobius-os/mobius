@@ -223,8 +223,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
 
     const card = page.locator('.qcard')
     await expect(card).toBeVisible({ timeout: 5000 })
-    await page.getByRole('radio', { name: 'Other' }).click()
-    const customAnswer = card.getByRole('textbox', { name: 'Other answer for: Which route?' })
+    const customAnswer = card.getByRole('textbox', { name: 'Custom answer for: Which route?' })
     await customAnswer.fill('Take the quiet streets')
 
     const geometry = () => card.evaluate(el => ({
@@ -261,7 +260,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await page.getByRole('button', { name: 'Submit' }).click()
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
     await expect(card.locator('.qcard__hint')).toHaveText('Choose one')
-    await expect(card.locator('.qcard__opt')).toHaveCount(3)
+    await expect(card.locator('.qcard__opt')).toHaveCount(2)
     await expect(customAnswer).toBeDisabled()
     await expect(customAnswer).toHaveValue('Take the quiet streets')
 
@@ -320,9 +319,11 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // The single card has the FINAL options (replace happened), not
     // the empty partial options.
     await expect(page.locator('.qcard__opt')).toHaveCount(
-      3, // 2 real options + "Other"
+      2,
       { timeout: 2000 }
     )
+    await expect(page.getByRole('textbox', { name: 'Custom answer for: What change?' }))
+      .toBeVisible()
     // Options are radios (single-select) — single AskUserQuestion radiogroup.
     await expect(page.getByRole('radio', { name: 'Fix' })).toBeVisible()
     await expect(page.getByRole('radio', { name: 'Skip' })).toBeVisible()
