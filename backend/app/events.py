@@ -701,7 +701,9 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # the parent turn's Task tool call that spawned it. Enrich that block in
     # place so the persisted transcript carries the chip data for historical
     # chats (ToolBlock.jsx / SubagentChips read block["subagent"]); the same
-    # events also drive the LIVE chip on the wire. Route-through-the-actor is
+    # events also drive the LIVE chip on the wire. Codex opens one synthetic
+    # Task host per delegating turn and points each activation at it, so the
+    # same persistence path serves both providers. Route-through-the-actor is
     # implicit: process_event mutates assistant_blocks and returns True, so the
     # sink's normal PersistTranscript/Finalize path persists it — this never
     # writes Chat.messages directly (the single-writer guardrail).
@@ -710,9 +712,8 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
     # summary}} — status is "running" until task_done, then the terminal status
     # verbatim (done/failed/killed/stopped). task_progress stays LIVE-ONLY: its
     # per-tick usage/last_tool_name is not worth persisting (it falls through to
-    # `return False` below). Codex has no host Task tool block, so this enriches
-    # Claude turns only. A missing id, or a tool_use_id with no matching block
-    # (unknown), no-ops so a stray event can never append a phantom block.
+    # `return False` below). A missing id, or a tool_use_id with no matching
+    # block (unknown), no-ops so a stray event can never append a phantom block.
     task_id = event.get("task_id")
     if task_id is None:
       return False

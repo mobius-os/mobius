@@ -1142,6 +1142,40 @@ def test_codex_input_to_running_child_is_progress_and_nested_spawn_uses_current_
   assert "Confidential customer list" not in repr(normalized)
 
 
+def test_codex_lifecycle_maps_to_shared_task_chip_contract():
+  started = {
+    "event_type": "agent_spawned",
+    "provider_agent_id": "child",
+    "provider_activation_id": "thread-started:child",
+    "agent_type": "researcher",
+    "state": "running",
+  }
+  done = {
+    **started,
+    "event_type": "agent_terminal",
+    "state": "done",
+    "summary": "Found the cause",
+  }
+  assert codex_sdk_runner._public_task_event(
+    started, tool_use_id="host-1",
+  ) == {
+    "type": "task_start",
+    "task_id": "thread-started:child",
+    "description": "researcher",
+    "task_type": "researcher",
+    "tool_use_id": "host-1",
+  }
+  assert codex_sdk_runner._public_task_event(
+    done, tool_use_id="host-1",
+  ) == {
+    "type": "task_done",
+    "task_id": "thread-started:child",
+    "status": "done",
+    "summary": "Found the cause",
+    "tool_use_id": "host-1",
+  }
+
+
 def test_run_codex_sdk_turn_dispatches_lifecycle_sequence_with_late_exact_fact(
   monkeypatch,
 ):
@@ -1266,6 +1300,39 @@ def test_run_codex_sdk_turn_dispatches_lifecycle_sequence_with_late_exact_fact(
   assert completed["provider_activation_id"] == "call-b:child"
   assert interrupted["provider_activation_id"] == "call-b:child"
   assert all(event.get("type") != "agent_lifecycle" for event in bus.events)
+  hosts = [
+    event for event in bus.events
+    if event.get("type") == "tool_start" and event.get("tool") == "Task"
+  ]
+  assert len(hosts) == 1
+  host_id = hosts[0]["tool_use_id"]
+  starts = {
+    event["task_id"]
+    for event in bus.events if event.get("type") == "task_start"
+  }
+  assert starts == {
+    "thread-started:child",
+    "call-b:child",
+    "thread-started:grandchild",
+  }
+  assert any(
+    event.get("type") == "task_done"
+    and event.get("task_id") == "thread-started:child"
+    and event.get("status") == "done"
+    for event in bus.events
+  )
+  assert any(
+    event.get("type") == "task_done"
+    and event.get("task_id") == "thread-started:grandchild"
+    and event.get("status") == "stopped"
+    for event in bus.events
+  )
+  assert all(
+    event.get("tool_use_id") == host_id
+    for event in bus.events
+    if event.get("type") in ("task_start", "task_done")
+  )
+  assert bus.events[-1] == {"type": "tool_end", "tool_use_id": host_id}
 
 
 def test_run_codex_sdk_turn_aborts_after_turn_before_stream_registration(monkeypatch):
