@@ -51,7 +51,7 @@ test('offline explanation has one owner while send failures stay in the composer
 test('connection failure hides queued actions and disables composer steering', () => {
   assert.match(chatView, /\{connectionError !== 'disconnected' && \([\s\S]*?<QueuedMessages/,
     'the lost-connection state should own the footer stack until Retry succeeds')
-  assert.match(chatView, /const showSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?turnActive[\s\S]*?pendingQueue\.pendingMessages\.length > 0/,
+  assert.match(chatView, /const showSteer = !hasPendingQuestion[\s\S]*?connectionError !== 'disconnected'[\s\S]*?turnActive[\s\S]*?pendingQueue\.visiblePendingMessages\.length > 0/,
     'the visible composer steer identity must be gated by pending QA and connection health')
   assert.match(chatView, /const canSteer = canRequestSteer[\s\S]*?canFastForwardQueue/,
     'server-confirmed steering must remain stricter than the optimistic visual identity')

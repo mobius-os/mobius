@@ -63,6 +63,63 @@ test('confirmQueued preserves cid while updating ts and position (no remount)', 
   assert.equal(list[0].serverTs, true)
 })
 
+test('a steer reservation hides a row without removing its durable queue record', () => {
+  const { result } = renderHook(() => usePendingQueue([
+    { role: 'user', content: 'first', ts: 1, cid: 'a' },
+    { role: 'user', content: 'second', ts: 2, cid: 'b' },
+  ]))
+
+  result.current.reserveForSteer(['a'])
+
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(m => m.cid),
+    ['a', 'b'],
+    'Stop/reconnect recovery still sees the complete persisted queue',
+  )
+  assert.deepEqual(
+    result.current.visiblePendingMessages.map(m => m.cid),
+    ['b'],
+    'the accepted row is no longer presented as an actionable queue item',
+  )
+  assert.deepEqual(
+    result.current.getVisiblePendingMessages().map(m => m.cid),
+    ['b'],
+    'event handlers read the same synchronous visible queue as render',
+  )
+})
+
+test('a deferred-cut hydrate keeps a reserved row hidden until its cut', () => {
+  const { result } = renderHook(() => usePendingQueue([
+    { role: 'user', content: 'first', ts: 1, cid: 'a' },
+  ]))
+
+  result.current.reserveForSteer(['a'])
+  result.current.hydrate([
+    { role: 'user', content: 'first', ts: 1, cid: 'a' },
+  ])
+
+  assert.equal(result.current.pendingMessagesRef.current.length, 1)
+  assert.deepEqual(result.current.visiblePendingMessages, [])
+
+  result.current.cancelByCid('a')
+  assert.deepEqual(result.current.pendingMessagesRef.current, [])
+  assert.deepEqual(result.current.visiblePendingMessages, [])
+})
+
+test('a rejected steer releases its unchanged row back to the tray', () => {
+  const { result } = renderHook(() => usePendingQueue([
+    { role: 'user', content: 'first', ts: 1, cid: 'a' },
+  ]))
+
+  result.current.reserveForSteer(['a'])
+  result.current.releaseSteerReservation(['a'])
+
+  assert.deepEqual(
+    result.current.visiblePendingMessages.map(m => m.cid),
+    ['a'],
+  )
+})
+
 test('confirmQueued can replace optimistic content with the server canonical row', () => {
   const { result } = renderHook(usePendingQueue)
   result.current.add(fixtureMsg({ cid: 'stable-x', ts: 999, content: 'clean draft' }), { inFlight: true })

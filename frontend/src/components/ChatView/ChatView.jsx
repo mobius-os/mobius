@@ -1312,9 +1312,10 @@ export default function ChatView({
       // post-steer assistant row, the steered user still belongs before it.
       commitMessages(prev => insertMessageBatchByTs(prev, steeredMessages))
       // The rows have now genuinely left `chat.pending_messages`, so retire the
-      // tray entries the deferred-cut window kept visible. A no-op on the
-      // route-split (Codex) path, where the send's own 202 already dropped
-      // them — the cut is simply the one place that owns the hand-off.
+      // tray entries the deferred-cut window kept durably queued but hidden.
+      // A no-op on the route-split (Codex) path, where the send's own 202
+      // already dropped them — the cut is simply the one place that owns the
+      // hand-off.
       for (const msg of steeredMessages) {
         const cid = cidOf(msg)
         if (cid != null) pendingQueue.cancelByCid(cid)
@@ -2834,11 +2835,9 @@ export default function ChatView({
     handlingStopRef.current = true
     try {
       // An in-flight steer POST must settle before Stop snapshots: its
-      // optimistic promote has already hidden rows this snapshot would
-      // otherwise miss, and Stop's clear() would suppress the steer's
-      // restore guard — the not_steered path would then lose those rows
-      // everywhere (see steerInFlightRef). Bounded so a hung POST can't
-      // wedge Stop; on timeout we continue with the current queue snapshot.
+      // outcome determines whether those rows still belong to the queue or
+      // have already moved into the transcript. Bounded so a hung POST can't
+      // wedge Stop; on timeout we continue with the durable queue snapshot.
       const steerInFlight = steerInFlightRef.current
       if (steerInFlight) {
         await Promise.race([
@@ -3077,13 +3076,9 @@ export default function ChatView({
   // finally.
   const handlingSteerRef = useRef(false)
   // The in-flight steer POST as an awaitable, so Stop can serialize behind
-  // it. Without this, a Stop tapped mid-steer snapshots a queue the steer
-  // already optimistically emptied, clear()s (suppressing the steer's
-  // restore identity guard), and wipes server pending — a not_steered
-  // resolution then has nowhere to put the rows back: silent loss
-  // (review 2026-07-17). Stop awaiting the steer first sees post-steer
-  // truth in both resolutions: steered rows are in the transcript, or the
-  // restore has already returned them to the queue.
+  // it. Stop awaiting the steer first sees post-steer truth in both
+  // resolutions: steered rows have moved into the transcript, or they remain
+  // in the durable queue after a rejected request.
   const steerInFlightRef = useRef(null)
   const [steerBusy, setSteerBusy] = useState(false)
 
@@ -3097,14 +3092,13 @@ export default function ChatView({
   // above), and THAT is when they leave the local tray. Codex splits at the
   // route, so the split is already done when the POST resolves; Claude splits at
   // its next content-block boundary, so its 202 comes back `cut_deferred` and
-  // the rows stay in the tray until the cut lands.
+  // the rows stay durably queued—but presentation-reserved—until the cut lands.
   // The shared force-steer core: given serverTs-CONFIRMED queue rows (in
-  // queue order), optimistically hide them, POST one force_steer selecting
-  // them by cid, and reconcile or restore. Restore re-hydrates the full
-  // confirmed queue snapshot (not just the steered rows) so a single-row
-  // steer can never downgrade its still-queued siblings — hydrate marks every
-  // passed row serverTs-confirmed, and rows the snapshot omits would be
-  // demoted by preserveMissing.
+  // queue order), reserve them from further queue actions, POST one
+  // force_steer selecting them by cid, and reconcile the accepted cut. The
+  // durable rows stay in pendingQueue until the backend commits the transcript
+  // cut; only their tray presentation is hidden in that window. A rejected
+  // request releases the reservation and shows the unchanged queue again.
   async function steerRows(steerRowsList) {
     // A Stop that has already begun owns the queue's fate (it clears and
     // resends); starting a steer under it would race the teardown.
@@ -3137,23 +3131,6 @@ export default function ChatView({
     }
     if (!hasSendablePayload(content, attachments)) return
 
-    const fullConfirmedSnapshot = (pendingQueue.pendingMessagesRef.current || [])
-      .filter(m => typeof m.ts === 'number' && m.serverTs === true)
-    let queueAfterOptimisticPromote = null
-    function restoreOptimisticSteerQueue() {
-      // If another path touched the queue while the POST was in flight
-      // (notably the natural turn-end drain, or a deferred steer's own cut
-      // arriving before its 202 resolves), every pendingQueue mutation assigns
-      // a fresh array. In that case the other path won the race, so restoring
-      // our stale snapshot would resurrect duplicate chips.
-      if (
-        queueAfterOptimisticPromote !== null
-        && pendingQueue.pendingMessagesRef.current === queueAfterOptimisticPromote
-      ) {
-        pendingQueue.hydrate(fullConfirmedSnapshot, { preserveMissing: true })
-      }
-    }
-
     try {
       const steerIsFirstUser = isFirstVisibleUserMessage()
       // Fast-forward is a deliberate visibility action, unlike automatic
@@ -3172,21 +3149,12 @@ export default function ChatView({
       // corrupt the pin decision. Both composer and per-row steer actions
       // share this path.
       if (_isTouchPrimary) inputRef.current?.blur()
-      // The queued tray is part of the footer height. If it stays visible
-      // until after the steered row is inserted, the scroll system pins with
-      // one layout and then immediately reflows when the tray disappears — the
-      // visible "down, then up" fast-forward jump. Hide only the confirmed
-      // rows this request is steering; restore the snapshot below if the
-      // backend says the turn was not steered.
-      //
-      // A `cut_deferred` steer (Claude) puts these rows straight back below:
-      // they are still queued server-side until the runner's seal, and the pin
-      // is armed at the cut, not here, so this hide buys nothing there. We
-      // cannot know which case it is before the POST resolves, and the response
-      // restores them in the same round-trip, so the deferred path just doesn't
-      // get the pre-pin hide.
-      pendingQueue.promoteManyByCid(consumePendingCids)
-      queueAfterOptimisticPromote = pendingQueue.pendingMessagesRef.current
+      // The queued tray is part of the footer height. Reserve these rows from
+      // presentation before the request so the tray closes once, at the
+      // deliberate steer action. The records remain in pendingQueue until the
+      // authoritative cut, which keeps Stop/reconnect recovery honest while a
+      // Claude cut is deferred.
+      pendingQueue.reserveForSteer(consumePendingCids)
       const result = await streamSend(content, attachments, {
         forceSteer: true,
         consumePendingCids,
@@ -3199,16 +3167,9 @@ export default function ChatView({
       })
       if (result?.status === 'steered') {
         if (result.cut_deferred) {
-          // Claude: the split waits for the runner's interrupt boundary, so
-          // these rows are still queued server-side and the optimistic hide
-          // above has to come back. Undo it with the SAME identity-guarded
-          // restore the not_steered path uses, not with the response's echoed
-          // queue: that list is a snapshot from steer time, so re-adding from
-          // it would resurrect a row the cut had already retired (the cut can
-          // land before this 202 resolves) and would drop a row queued while
-          // the POST was in flight. The guard makes the restore a no-op exactly
-          // when something else — the cut included — already owns the queue.
-          restoreOptimisticSteerQueue()
+          // Claude: the split waits for the runner's interrupt boundary. Keep
+          // the accepted rows reserved (and therefore out of the tray) until
+          // onSteeredIntoTurn retires them at that authoritative cut.
         } else if (Array.isArray(result.pending_messages)) {
           // Codex: the route already split, so the echoed queue no longer holds
           // these rows and onSteeredIntoTurn has rendered them inline.
@@ -3222,16 +3183,15 @@ export default function ChatView({
       }
       if (result?.status !== 'steered') {
         steerPinIntentRef.current = null
-        restoreOptimisticSteerQueue()
+        pendingQueue.releaseSteerReservation(consumePendingCids)
       }
       // not_steered (the turn closed between the gate and the POST) or any
-      // other status: restore the queue and let it drain at turn-end. The
-      // tray may disappear briefly during the optimistic steer attempt, but
-      // it never gets lost.
+      // other status: release the unchanged queue back to the tray and let it
+      // drain at turn-end.
     } catch {
       steerPinIntentRef.current = null
-      restoreOptimisticSteerQueue()
-      // Network/POST error — restore the queue for the turn-end drain.
+      pendingQueue.releaseSteerReservation(consumePendingCids)
+      // Network/POST error — show the unchanged queue for the turn-end drain.
     }
   }
 
@@ -3245,7 +3205,7 @@ export default function ChatView({
   // above), and THAT is when they leave the local tray. Codex splits at the
   // route, so the split is already done when the POST resolves; Claude splits at
   // its next content-block boundary, so its 202 comes back `cut_deferred` and
-  // the rows stay in the tray until the cut lands.
+  // the rows stay durably queued—but presentation-reserved—until the cut lands.
   async function handleSteer() {
     if (handlingSteerRef.current) return
     handlingSteerRef.current = true
@@ -3257,7 +3217,7 @@ export default function ChatView({
       // confirms/removes each row before this continuation reads the queue.
       const queueWrites = [...queuedSendRequestsRef.current.values()]
       if (queueWrites.length > 0) await Promise.allSettled(queueWrites)
-      const snapshot = pendingQueue.pendingMessagesRef.current
+      const snapshot = pendingQueue.getVisiblePendingMessages()
       // Only server-confirmed entries can be force-steered: the backend
       // reconstructs the durable rows from chat.pending_messages, so an
       // optimistic-only entry whose queue-POST hasn't acked yet is not visible
@@ -3276,7 +3236,7 @@ export default function ChatView({
       )) {
         await reconcileRuntimeState()
       }
-      const confirmedSnapshot = pendingQueue.pendingMessagesRef.current
+      const confirmedSnapshot = pendingQueue.getVisiblePendingMessages()
       const allServerConfirmed = confirmedSnapshot.length > 0 && confirmedSnapshot.every(
         m => typeof m.ts === 'number' && m.serverTs === true,
       )
@@ -3580,10 +3540,10 @@ export default function ChatView({
   const showSteer = !hasPendingQuestion
     && connectionError !== 'disconnected'
     && turnActive
-    && pendingQueue.pendingMessages.length > 0
+    && pendingQueue.visiblePendingMessages.length > 0
   const canRequestSteer = showSteer && !steerBusy
   const canSteer = canRequestSteer
-    && canFastForwardQueue(pendingQueue.pendingMessages, turnActive)
+    && canFastForwardQueue(pendingQueue.visiblePendingMessages, turnActive)
   const canSubmitSteer = !hasPendingQuestion
     && connectionError !== 'disconnected'
     && !steerBusy
@@ -4152,7 +4112,7 @@ export default function ChatView({
         />
         {connectionError !== 'disconnected' && (
           <QueuedMessages
-            items={pendingQueue.pendingMessages}
+            items={pendingQueue.visiblePendingMessages}
             onCancel={handleCancelPending}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion}

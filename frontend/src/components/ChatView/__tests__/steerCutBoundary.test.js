@@ -167,7 +167,7 @@ test('every steered branch resolves the optimistic in-flight mark', () => {
   )
 })
 
-test('the fast-forward path undoes its own optimistic hide, guarded', () => {
+test('the fast-forward path keeps an accepted deferred row hidden until the cut', () => {
   const ff = sliceBranch(
     chatViewSource,
     'async function steerRowsImpl(steerRowsList) {',
@@ -175,21 +175,18 @@ test('the fast-forward path undoes its own optimistic hide, guarded', () => {
   )
   const deferred = sliceBranch(ff, 'if (result.cut_deferred) {', '} else if (')
   assert.match(
-    deferred, /restoreOptimisticSteerQueue\(\)/,
-    'the rows are still queued server-side, so the pre-pin hide is undone with '
-    + 'the identity-guarded local restore',
+    ff,
+    /pendingQueue\.reserveForSteer\(consumePendingCids\)/,
+    'the accepted rows leave the actionable tray before the request',
   )
   assert.ok(
-    !deferred.includes('pendingQueue.hydrate'),
-    're-adding rows from the pre-cut snapshot resurrects whatever the cut '
-    + 'already retired',
+    !/releaseSteerReservation|pendingQueue\.hydrate|pendingQueue\.cancelByCid/
+      .test(deferred),
+    'a deferred acknowledgement must not re-show or retire rows before the cut',
   )
-  // The guard is what makes it order-independent: any other writer to the
-  // queue (the cut included) wins and the restore becomes a no-op.
-  const restore = sliceBranch(ff, 'function restoreOptimisticSteerQueue() {', '\n    }\n')
   assert.match(
-    restore,
-    /pendingQueue\.pendingMessagesRef\.current === queueAfterOptimisticPromote/,
-    'restore only when nothing else has touched the queue since the promote',
+    ff,
+    /if \(result\?\.status !== 'steered'\)[\s\S]*?releaseSteerReservation\(consumePendingCids\)/,
+    'only a rejected request should return the rows to the actionable tray',
   )
 })

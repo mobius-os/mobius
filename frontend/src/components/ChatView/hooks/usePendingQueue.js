@@ -59,6 +59,10 @@ import { cidOf } from '../chatRuntimeState.js'
  * @returns {{
  *   pendingMessages: PendingMsg[],
  *   pendingMessagesRef: React.MutableRefObject<PendingMsg[]>,
+ *   visiblePendingMessages: PendingMsg[],
+ *   getVisiblePendingMessages: () => PendingMsg[],
+ *   reserveForSteer: (cidList: string[]) => void,
+ *   releaseSteerReservation: (cidList: string[]) => void,
  *   add: (msg: PendingMsg, opts?: {inFlight?: boolean}) => void,
  *   confirmQueued: (cid: string, patch?: {ts?: number, position?: number, serverMsg?: object}) => void,
  *   promoteByCid: (cid: string) => PendingMsg | null,
@@ -116,6 +120,14 @@ export default function usePendingQueue(initialServerList = []) {
   const initialPending = _fromServerList(initialServerList)
   const [pendingMessages, setPendingMessages] = useState(initialPending)
   const pendingMessagesRef = useRef(initialPending)
+  // Rows accepted for an explicit steer stay durably pending until the
+  // provider publishes the transcript cut. They are no longer actionable
+  // queue items during that window, though, so keep their presentation state
+  // separate from the persisted queue. This prevents the tray from
+  // disappearing for the request, reappearing for a deferred cut, then
+  // disappearing again at the cut.
+  const [steerReservedCids, setSteerReservedCids] = useState(() => new Set())
+  const steerReservedCidsRef = useRef(steerReservedCids)
   // Cids of optimistic entries whose persistence POST is still in flight
   // (added locally, server ts not yet confirmed). hydrate() consults this so a
   // reconcile-fetch that lands while the POST is unresolved does NOT wipe the
@@ -128,6 +140,44 @@ export default function usePendingQueue(initialServerList = []) {
   // drop it (a cancelled message must not resurrect). This is orthogonal to
   // identity — it guards the POST-vs-reconcile race, not the ts-swap.
   const inFlightCidsRef = useRef(new Set())
+
+  const applySteerReservations = useCallback((updater) => {
+    const next = typeof updater === 'function'
+      ? updater(steerReservedCidsRef.current)
+      : updater
+    steerReservedCidsRef.current = next
+    setSteerReservedCids(next)
+  }, [])
+
+  const reserveForSteer = useCallback((cidList) => {
+    const cids = (cidList || []).filter(cid => cid != null)
+    if (cids.length === 0) return
+    applySteerReservations(prev => {
+      const next = new Set(prev)
+      for (const cid of cids) next.add(cid)
+      return next
+    })
+  }, [applySteerReservations])
+
+  const releaseSteerReservation = useCallback((cidList) => {
+    const cids = (cidList || []).filter(cid => cid != null)
+    if (cids.length === 0) return
+    applySteerReservations(prev => {
+      const next = new Set(prev)
+      for (const cid of cids) next.delete(cid)
+      return next
+    })
+  }, [applySteerReservations])
+
+  const getVisiblePendingMessages = useCallback(
+    () => pendingMessagesRef.current.filter(
+      msg => !steerReservedCidsRef.current.has(cidOf(msg)),
+    ),
+    [],
+  )
+  const visiblePendingMessages = pendingMessages.filter(
+    msg => !steerReservedCids.has(cidOf(msg)),
+  )
 
   // Internal helper: synchronously update both the ref and React state. Every
   // public operation funnels through this so the "ref updates before render"
@@ -194,8 +244,9 @@ export default function usePendingQueue(initialServerList = []) {
     const rest = current.filter((_, i) => i !== idx)
     pendingMessagesRef.current = rest
     setPendingMessages(rest)
+    releaseSteerReservation([cidOf(promoted)])
     return promoted
-  }, [])
+  }, [releaseSteerReservation])
 
   const promoteAll = useCallback((cid) => {
     const current = pendingMessagesRef.current
@@ -210,8 +261,9 @@ export default function usePendingQueue(initialServerList = []) {
     const promoted = _combinePromoted(promotedGroup)
     pendingMessagesRef.current = kept
     setPendingMessages(kept)
+    releaseSteerReservation(promotedGroup.map(m => cidOf(m)))
     return promoted
-  }, [])
+  }, [releaseSteerReservation])
 
   const promoteManyByCid = useCallback((cidList) => {
     const wanted = new Set((cidList || []).filter(c => c != null))
@@ -226,15 +278,17 @@ export default function usePendingQueue(initialServerList = []) {
     const promoted = _combinePromoted(promotedGroup)
     pendingMessagesRef.current = kept
     setPendingMessages(kept)
+    releaseSteerReservation(promotedGroup.map(m => cidOf(m)))
     return promoted
-  }, [])
+  }, [releaseSteerReservation])
 
   const cancelByCid = useCallback((cid) => {
     // A cancelled entry is genuinely gone; drop its in-flight mark so it
     // cannot resurrect on the next hydrate.
     inFlightCidsRef.current.delete(cid)
     apply(prev => prev.filter(m => cidOf(m) !== cid))
-  }, [apply])
+    releaseSteerReservation([cid])
+  }, [apply, releaseSteerReservation])
 
   // Restore one optimistically-cancelled row after both the DELETE and its
   // authoritative fallback read fail. Reinsert into the CURRENT queue rather
@@ -302,13 +356,19 @@ export default function usePendingQueue(initialServerList = []) {
     const next = [...reconciled, ...preservedInFlight, ...preservedMissing]
     pendingMessagesRef.current = next
     setPendingMessages(next)
-  }, [])
+    const nextCidSet = new Set(next.map(m => cidOf(m)))
+    applySteerReservations(prev => {
+      const kept = new Set([...prev].filter(cid => nextCidSet.has(cid)))
+      return kept.size === prev.size ? prev : kept
+    })
+  }, [applySteerReservations])
 
   const clear = useCallback(() => {
     inFlightCidsRef.current.clear()
     pendingMessagesRef.current = []
     setPendingMessages([])
-  }, [])
+    applySteerReservations(new Set())
+  }, [applySteerReservations])
 
   // Explicit in-flight controls. add() already marks an optimistic entry
   // in-flight and the standard resolve paths clear it, so most callers never
@@ -326,6 +386,10 @@ export default function usePendingQueue(initialServerList = []) {
   return {
     pendingMessages,
     pendingMessagesRef,
+    visiblePendingMessages,
+    getVisiblePendingMessages,
+    reserveForSteer,
+    releaseSteerReservation,
     add,
     confirmQueued,
     promoteByCid,
