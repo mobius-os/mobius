@@ -214,13 +214,17 @@ test.describe('Chat messages cache (TanStack Query)', () => {
     // Smoke test: the query layer is wired up at all. If the provider
     // is missing, useQueryClient throws and the app fails to mount.
     await setup(page)
-    const ok = await page.evaluate(() => {
-      // Indirect signal: the chat view mounted without throwing.
-      return !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-        || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-        || document.querySelector('[data-chat-surface="painted"] .chat__form'))
-    })
-    expect(ok).toBe(true)
+    const [chatId] = await ensureChats(page, 1)
+    expect(chatId).toBeTruthy()
+    await visitChat(page, chatId)
+    // A fresh Standard workspace can intentionally have no selected chat.
+    // Seed an explicit destination before using the painted ChatView mount as
+    // the provider smoke signal; hidden retained owners are not interactive.
+    await expect(page.locator(
+      '[data-chat-surface="painted"] .chat__empty-wrap, '
+      + '[data-chat-surface="painted"] .chat__scroll, '
+      + '[data-chat-surface="painted"] .chat__form'
+    ).first()).toBeVisible()
   })
 
   test('3. IndexedDB persister key exists after a chat-view visit', async ({ page }) => {
