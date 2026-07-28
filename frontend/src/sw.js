@@ -832,7 +832,7 @@ function _safeTarget(raw) {
   let path = raw
   let search = ''
   try {
-    if (/^https?:\/\//.test(raw)) {
+    if (/^https?:\/\//i.test(raw)) {
       const u = new URL(raw)
       if (u.origin !== self.location.origin) return '/'
       path = u.pathname

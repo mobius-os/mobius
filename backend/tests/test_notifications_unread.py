@@ -1,5 +1,7 @@
 """Unread tracking for the notifications page (bell badge, seen-on-open)."""
 
+from datetime import UTC, datetime
+
 from app import models
 from app.auth import create_app_token
 from app.broadcast import get_system_broadcast
@@ -27,6 +29,7 @@ def test_seen_on_open_lifecycle(client, auth):
   listed = client.get("/api/notifications", headers=auth).json()
   row = next(n for n in listed if n["id"] == sent_id)
   assert row["read_at"] is None
+  assert datetime.fromisoformat(row["sent_at"]).tzinfo == UTC
 
   first = client.post("/api/notifications/read-all", headers=auth)
   assert first.status_code == 200, first.text
@@ -35,6 +38,7 @@ def test_seen_on_open_lifecycle(client, auth):
   listed = client.get("/api/notifications", headers=auth).json()
   row = next(n for n in listed if n["id"] == sent_id)
   assert row["read_at"] is not None
+  assert datetime.fromisoformat(row["read_at"]).tzinfo == UTC
 
   # Idempotent: a repeat call touches nothing and stamps nothing anew.
   second = client.post("/api/notifications/read-all", headers=auth)
@@ -44,6 +48,46 @@ def test_seen_on_open_lifecycle(client, auth):
   # A notification arriving after read-all counts as unread again.
   _send(client, auth, title="Later")
   assert _count(client, auth) == 1
+
+
+def test_history_cursor_is_stable_when_timestamps_tie(client, auth, db):
+  """Keyset pagination must neither skip nor repeat same-instant rows."""
+  owner = db.query(models.Owner).first()
+  sent_at = datetime(2026, 7, 27, 2, 0, tzinfo=UTC)
+  for notification_id in ("n-a", "n-b", "n-c"):
+    db.add(models.Notification(
+      id=notification_id,
+      owner_id=owner.id,
+      source_type="system",
+      title=notification_id,
+      sent_at=sent_at,
+    ))
+  db.commit()
+
+  first = client.get(
+    "/api/notifications", headers=auth, params={"limit": 2},
+  )
+  assert first.status_code == 200, first.text
+  first_ids = [row["id"] for row in first.json()]
+  assert first_ids == ["n-c", "n-b"]
+
+  second = client.get(
+    "/api/notifications",
+    headers=auth,
+    params={"limit": 2, "before": first_ids[-1]},
+  )
+  assert second.status_code == 200, second.text
+  assert [row["id"] for row in second.json()] == ["n-a"]
+
+
+def test_history_rejects_an_unknown_cursor(client, auth):
+  response = client.get(
+    "/api/notifications",
+    headers=auth,
+    params={"before": "not-a-notification"},
+  )
+  assert response.status_code == 400
+  assert response.json()["detail"] == "Invalid notification cursor."
 
 
 def test_notification_created_published_on_system_bus(client, auth):

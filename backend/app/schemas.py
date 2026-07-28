@@ -1,6 +1,6 @@
 """Pydantic request and response schemas."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -653,5 +653,20 @@ class NotificationOut(BaseModel):
   # badge). Owner-only surfaces return this schema, so it never reaches
   # app-scoped tokens.
   read_at: datetime | None
+
+  @field_validator("sent_at", "clicked_at", "read_at", mode="before")
+  @classmethod
+  def restore_utc_offset(cls, value: datetime | None) -> datetime | None:
+    """Make SQLite's naive notification datetimes honest at the API edge.
+
+    Notification timestamps are written in UTC, but SQLite drops timezone
+    metadata when reading them back. Without restoring it, JSON contains no
+    offset and browsers reinterpret UTC wall time as local time.
+    """
+    if value is None:
+      return None
+    if value.tzinfo is None:
+      return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
   model_config = {"from_attributes": True}

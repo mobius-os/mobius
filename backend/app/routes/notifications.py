@@ -3,10 +3,10 @@
 import logging
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app import models
@@ -117,12 +117,29 @@ def list_notifications(
   q = (
     db.query(models.Notification)
     .filter(models.Notification.owner_id == owner.id)
-    .order_by(models.Notification.sent_at.desc())
+    .order_by(
+      models.Notification.sent_at.desc(),
+      models.Notification.id.desc(),
+    )
   )
   if before:
-    ref = db.get(models.Notification, before)
-    if ref:
-      q = q.filter(models.Notification.sent_at < ref.sent_at)
+    ref = (
+      db.query(models.Notification)
+      .filter(
+        models.Notification.owner_id == owner.id,
+        models.Notification.id == before,
+      )
+      .one_or_none()
+    )
+    if ref is None:
+      raise HTTPException(status_code=400, detail="Invalid notification cursor.")
+    q = q.filter(or_(
+      models.Notification.sent_at < ref.sent_at,
+      and_(
+        models.Notification.sent_at == ref.sent_at,
+        models.Notification.id < ref.id,
+      ),
+    ))
   return [
     NotificationOut.model_validate(n) for n in q.limit(limit).all()
   ]

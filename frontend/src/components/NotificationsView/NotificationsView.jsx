@@ -4,6 +4,7 @@ import BotMessageSquare from 'lucide-react/dist/esm/icons/bot-message-square.mjs
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
 import Settings2 from 'lucide-react/dist/esm/icons/settings-2.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
+import { useEffect, useState } from 'react'
 import { notificationQueries } from '../../hooks/queries.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { formatRelativeTime, iconKindForSource } from './notificationsModel.js'
@@ -23,6 +24,16 @@ const ICONS = {
 export default function NotificationsView({ active = false, onClose, onOpenTarget }) {
   const { data, isLoading, isError } = notificationQueries.list.useQuery({ enabled: active })
   const rows = data ?? []
+  const [now, setNow] = useState(() => Date.now())
+
+  // Relative labels are live information, not a one-time formatting pass.
+  // Refreshing once a minute keeps an open preview from saying "now" forever.
+  useEffect(() => {
+    if (!active) return undefined
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000)
+    return () => window.clearInterval(timer)
+  }, [active])
 
   return (
     <section
@@ -77,7 +88,7 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
                   className="notifications__row-time"
                   dateTime={n.sent_at}
                 >
-                  {formatRelativeTime(n.sent_at)}
+                  {formatRelativeTime(n.sent_at, now)}
                 </time>
               </>
             )

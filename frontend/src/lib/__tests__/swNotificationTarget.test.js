@@ -49,6 +49,10 @@ test('intent rides a same-origin absolute target and a numeric app id', () => {
     safeTarget('https://mobius.test/shell/?app=88&intent=artifact:deck-01'),
     '/shell/?app=88&intent=artifact%3Adeck-01',
   )
+  assert.equal(
+    safeTarget('HTTPS://mobius.test/shell/?chat=abc'),
+    '/shell/?chat=abc',
+  )
 })
 
 test('a malformed intent is dropped but the app still opens', () => {
