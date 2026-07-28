@@ -25,7 +25,7 @@ limit_glibc_arenas()
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy.exc import OperationalError
@@ -1140,6 +1140,20 @@ def health(response: Response):
   return {"status": "ok", "boot_id": _BOOT_ID}
 
 
+@app.get(
+  "/api/browser-bootstrap",
+  response_class=HTMLResponse,
+  include_in_schema=False,
+)
+def browser_bootstrap():
+  """Stable same-origin document for authenticated browser automation setup."""
+  return HTMLResponse(
+    "<!doctype html><meta charset=\"utf-8\">"
+    "<title>Möbius browser bootstrap</title>",
+    headers={"Cache-Control": "no-store"},
+  )
+
+
 @app.get("/api/ready")
 def ready(response: Response):
   """Readiness probe: 200 only when chat persistence can actually serve.
@@ -1183,13 +1197,17 @@ def _served_platform_identity(data_dir: str) -> dict:
   out = {"serving_source": "unknown", "served_sha": None, "platform_sha": None,
          "platform_dirty": None, "baked_sha": None}
   try:
-    sentinel = Path("/tmp/serving-source").read_text(encoding="utf-8").strip()
+    sentinel = Path(
+      os.environ.get("MOBIUS_SERVING_SOURCE_FILE", "/tmp/serving-source")
+    ).read_text(encoding="utf-8").strip()
     if sentinel:
       out["serving_source"] = sentinel
   except Exception:  # incl. UnicodeError, which is not an OSError — never raise
     pass
   try:
-    served_sha = Path("/tmp/serving-sha").read_text(encoding="utf-8").strip()
+    served_sha = Path(
+      os.environ.get("MOBIUS_SERVING_SHA_FILE", "/tmp/serving-sha")
+    ).read_text(encoding="utf-8").strip()
     out["served_sha"] = served_sha or None
   except Exception:
     pass

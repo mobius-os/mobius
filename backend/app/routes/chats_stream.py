@@ -49,6 +49,7 @@ from app.deps import (
 )
 from app.resource_access import (
   get_active_chat_for_principal, get_active_chat_or_404,
+  require_active_chat_access,
 )
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
@@ -1177,7 +1178,7 @@ async def cancel_pending_message(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:send")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
 
   # The actor's CancelPending removes the matching cid and commits — the
   # SOLE runtime mutator of pending_messages, so a DELETE racing a
@@ -1213,7 +1214,7 @@ async def stream_chat(
   # Gate before touching the broadcast. Raises 404 (missing/deleted) or
   # 403 (app token, foreign chat) — matching send_message's surface.
   require_chat_embed_operation(principal, "chat:stream")
-  get_active_chat_for_principal(db, chat_id, principal)
+  require_active_chat_access(db, chat_id, principal)
   embed_session_id = (
     principal.embed_session_id if principal.scope == "chat_embed" else None
   )

@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from py_vapid import Vapid
-from pywebpush import webpush, WebPushException
 from sqlalchemy.orm import Session
 
 from app import models, presence
@@ -107,6 +106,10 @@ def send_push(subscription_info: dict, payload: dict) -> bool:
   """Send a Web Push notification. Returns True on success, False on gone."""
   if _vapid is None:
     raise RuntimeError("VAPID not initialized — call init_vapid() first")
+  # Startup and suppressed notifications do not need the delivery stack.
+  # Import it only once a push is actually ready to be sent.
+  from pywebpush import WebPushException, webpush
+
   try:
     # Pass the Vapid instance directly — pywebpush accepts it and
     # avoids the PEM-vs-raw-key parsing ambiguity in from_string().

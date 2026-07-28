@@ -46,7 +46,7 @@ preserving the brief and safety contracts.
 ## The contract for the whole run
 
 - **Be conservative and reversible.** You are operating on the partner's live platform while they sleep. Everything you change is in `/data`'s git history — but prefer changes you'd be comfortable explaining in the morning. **Never auto-apply anything risky** (security fixes with behavior change, destructive data ops, dependency major-bumps, anything that hits paid external APIs or notifies other people). Surface those in the brief as a proposal with a one-tap question, don't do them.
-- **Commit as you go.** After each discrete chunk — a skill edit, a system-improvement note, an app fix — `pm-commit '<area>: <what and why>'`. One green-on-green sweep is hard to undo; small commits are easy.
+- **Commit as you go, by ownership.** Before each discrete `/data` chunk, record `git -C /data rev-parse HEAD`. After the edit, run `pm-commit --from <that-sha> '<area>: <what and why>' -- <exact paths>`. It commits only those paths and stops if another commit changed one of them. One green-on-green sweep is hard to undo; small path-owned commits are easy.
 - **Anti-noise is the whole game.** Every item that reaches the brief MUST carry **trigger** (what you observed), **why** (why it matters to the partner), and **next-action** (the one concrete thing — ideally a tap). An item without all three is noise; drop it or keep digging until it has them. The same rule applies to your own diagnostics: a command without a fresh trigger or an explicit due date is resource noise. A short brief the partner reads fully beats a long one they skim.
 - **Leverage the other skills — don't reinvent them.** Batch-read the complete
   set implied by the work: `building-apps-quickstart.md` +
@@ -178,7 +178,7 @@ Capture each answer to a working file (e.g. `/data/apps/reflection/runs/<date>/i
 
 The interviews just told you where the skills failed today's agents. Act on it.
 
-- For each skill-improvement the interviews surfaced, `Read` the named skill under `/data/shared/skills/`, make the **smallest edit that fixes the real gap** (a new gotcha line, a corrected contract, a sharper rule), and `pm-commit 'skill(<name>): <what and why>'`. One commit per skill so each is reversible on its own.
+- For each skill-improvement the interviews surfaced, `Read` the named skill under `/data/shared/skills/`, record the `/data` revision, make the **smallest edit that fixes the real gap** (a new gotcha line, a corrected contract, a sharper rule), and `pm-commit --from <sha-before-edit> 'skill(<name>): <what and why>' -- shared/skills/<name>.md`. One commit per skill so each is reversible on its own.
 - **Edit THIS skill (`/data/shared/skills/reflection.md`) too.** Reflection is a skill like any other, and you're the agent best placed to improve it. If a phase wasted time, a question got shallow answers, the brief was too long, or you found a better order — change the rule and commit it. Adapt what you prioritize, what you stop doing, how you phrase the interviews. This is the loop that makes each night's reflection better than the last.
 - **Treat the prompt as a distilled procedure, not the learning log.** Edit it only when evidence supports a rule that will generalize across future runs. Prefer replacing or removing a stale rule over appending another exception. Record the finding and why it changed the procedure in the bounded meta-learning log described in phase 6.
 - **Act on your own run-history (`inputs/reflection-run-history.txt`), not just the interviews.** A failure or friction that recurs across nights (e.g. repeated `exit=2` max_turns nights) is a real signal: if the cause is in this skill, make the smallest durable fix and commit it; if it's code you can't change here — the runner's `max_turns`, the wrapper, the timeout — put a one-line proposal in the brief instead (a daytime `/app` edit doesn't survive a container rebake). Skim your recent self-edits first so you don't re-add a rule a past night removed.
@@ -225,7 +225,7 @@ Then act on the **system** signal:
 
 Use `/data/shared/skills/memory.md` as the contract for what Memory should have
 done, not as permission for Reflection to do that work. When you make a
-system-facing change, commit it with `pm-commit 'memory-system: <what and why>'`.
+system-facing change, commit it with `pm-commit --from <sha-before-edit> 'memory-system: <what and why>' -- <exact memory paths>`.
 
 ### 3.5. IMPROVE THE SYSTEM — follow the strongest operational signal
 
@@ -326,7 +326,7 @@ Then, for the apps the digest + interviews confirm the partner actually uses:
 - **Suggest a NEW app when a topic recurs with no home for it.** Improving existing apps is only half of it. Scan the day's chats, the interviews, and Memory's `about-the-user` interests for a topic the partner **keeps returning to that no app serves** — they keep asking you about films, tracking the same thing by hand, re-deriving the same numbers in chat. That recurring pull is the signal to propose building one. Same anti-noise bar (trigger: the recurring signal you saw; why: what an app would save them; next-action: a one-tap "build it?") and the same ranking (recurrence × usefulness ÷ effort). At most one strong new-app idea per night; a generic "you could build an app for X" with no usage behind it is noise. A proposal for the brief, never an unattended build.
 - **Light security pass (surface, don't auto-fix the risky ones).** A SAST-ish read of changed/owned app source for the usual mini-app footguns — unsanitized HTML injection (needs DOMPurify), secrets or tokens written to storage or logs, a `connect-src`-violating external fetch, an over-broad token scope, an `eval`/`dangerouslySetInnerHTML` on untrusted input. Plus a dependency sanity check (anything pinned to a known-bad or wildly-stale version). **Auto-apply only the trivially-safe, behavior-preserving fixes** (wrap a render in DOMPurify, tighten a token scope) and only when you're certain. **Surface everything else as a proposal** — a security fix that changes behavior is exactly the kind of thing that must wait for a tap.
 
-Commit each fix on its own: `pm-commit 'app(<slug>): <what and why>'`.
+Commit each `/data` fix on its own: `pm-commit --from <sha-before-edit> 'app(<slug>): <what and why>' -- <exact paths>`.
 
 ### Turn-budget guide
 
@@ -491,7 +491,7 @@ After the brief is written, one cheap closing step remains — and one thing you
    ```
    (Bare JSON object, no envelope. `<one-line headline>` is the exec-summary's single most important line.)
 
-Commit the brief + run artifacts: `pm-commit 'reflection: brief for <date>'`.
+Commit the brief + run artifacts: `pm-commit --from <sha-before-write> 'reflection: brief for <date>' -- <brief and run-artifact paths>`.
 
 ---
 
