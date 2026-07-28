@@ -209,6 +209,44 @@ def test_lifecycle_notification_fields_and_status_enums_are_pinned():
   }
 
 
+def test_web_search_results_survive_generated_sdk_schema_lag():
+  """App-server result URLs must reach the source-pill extractor.
+
+  Codex 0.145's Rust protocol emits ``webSearch.results`` while the generated
+  Python leaf model still omits that field. The runner installs a narrow
+  passthrough at import time; validate the real notification union so a future
+  SDK refactor cannot silently resume dropping every search result.
+  """
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+  from app import codex_sdk_runner
+
+  codex_sdk_runner._sdk_imports()
+  payload = v2_all.ItemCompletedNotification.model_validate({
+    "completedAtMs": 1,
+    "threadId": "thread-1",
+    "turnId": "turn-1",
+    "item": {
+      "id": "search-1",
+      "type": "webSearch",
+      "query": "Möbius parity",
+      "results": [{
+        "title": "Structured search result",
+        "url": "https://example.test/result",
+      }],
+    },
+  })
+  item = payload.item.root
+  assert getattr(item, "results") == [{
+    "title": "Structured search result",
+    "url": "https://example.test/result",
+  }]
+  assert codex_sdk_runner._web_search_sources(item) == [{
+    "title": "Structured search result",
+    "url": "https://example.test/result",
+  }]
+
+
 def test_turn_terminal_status_and_message_phase_contracts_are_pinned():
   """The runner must not confuse a terminal envelope with a final answer."""
   pytest.importorskip("openai_codex")
