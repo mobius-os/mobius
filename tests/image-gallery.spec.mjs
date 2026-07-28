@@ -85,13 +85,13 @@ async function setupGallery(page, viewport) {
   await page.goto(BASE, {
     waitUntil: 'domcontentloaded',
   })
-  await expect(page.locator('.md-image-gallery')).toBeVisible({ timeout: 10_000 })
-  await expect(page.locator('.md-image-gallery__item')).toHaveCount(IMAGES.length)
-  await expect(page.locator('.md-image-gallery img')).toHaveCount(IMAGES.length)
+  const paintedChat = page.locator('[data-chat-surface="painted"]')
+  await expect(paintedChat.locator('.md-image-gallery')).toBeVisible({ timeout: 10_000 })
+  await expect(paintedChat.locator('.md-image-gallery__item')).toHaveCount(IMAGES.length)
+  await expect(paintedChat.locator('.md-image-gallery img')).toHaveCount(IMAGES.length)
 }
 
-async function dispatchSwipe(page, selector, fromX, toX) {
-  const target = page.locator(selector)
+async function dispatchSwipe(page, target, fromX, toX) {
   const box = await target.boundingBox()
   if (!box) throw new Error(`No box for ${selector}`)
   const client = await page.context().newCDPSession(page)
@@ -119,7 +119,8 @@ async function dispatchSwipe(page, selector, fromX, toX) {
 test('desktop filmstrip is compact and supports buttons, keyboard, and viewer navigation', async ({ page }) => {
   await setupGallery(page, { width: 1180, height: 820 })
 
-  const rail = page.locator('.md-image-gallery__rail')
+  const paintedChat = page.locator('[data-chat-surface="painted"]')
+  const rail = paintedChat.locator('.md-image-gallery__rail')
   const geometry = await rail.evaluate(element => {
     const item = element.querySelector('.md-image-gallery__item')
     return {
@@ -132,7 +133,7 @@ test('desktop filmstrip is compact and supports buttons, keyboard, and viewer na
   expect(geometry.itemWidth / geometry.railWidth).toBeLessThan(0.35)
   expect(geometry.scrollWidth).toBeGreaterThan(geometry.railWidth)
 
-  const next = page.getByRole('button', { name: 'Next images' })
+  const next = paintedChat.getByRole('button', { name: 'Next images' })
   await expect(next).toBeEnabled()
   await next.click()
   await expect.poll(() => rail.evaluate(element => element.scrollLeft)).toBeGreaterThan(20)
@@ -144,7 +145,7 @@ test('desktop filmstrip is compact and supports buttons, keyboard, and viewer na
   const railBox = await rail.boundingBox()
   if (!railBox) throw new Error('Gallery rail did not render')
 
-  const forestPreview = page.getByRole('button', { name: 'Open Forest path preview' })
+  const forestPreview = paintedChat.getByRole('button', { name: 'Open Forest path preview' })
   const previewBox = await forestPreview.boundingBox()
   if (!previewBox) throw new Error('Gallery preview did not render')
   await page.mouse.move(previewBox.x + previewBox.width / 2, previewBox.y + previewBox.height / 2)
@@ -199,7 +200,8 @@ test('mobile filmstrip uses native touch scrolling and viewer swipe navigation',
   })
   await setupGallery(page, { width: 390, height: 844 })
 
-  const rail = page.locator('.md-image-gallery__rail')
+  const paintedChat = page.locator('[data-chat-surface="painted"]')
+  const rail = paintedChat.locator('.md-image-gallery__rail')
   const widthRatio = await rail.evaluate(element => (
     element.querySelector('.md-image-gallery__item').getBoundingClientRect().width
     / element.getBoundingClientRect().width
@@ -207,12 +209,12 @@ test('mobile filmstrip uses native touch scrolling and viewer swipe navigation',
   expect(widthRatio).toBeGreaterThan(0.74)
   expect(widthRatio).toBeLessThan(0.82)
 
-  await dispatchSwipe(page, '.md-image-gallery__rail', 0.82, 0.18)
+  await dispatchSwipe(page, rail, 0.82, 0.18)
   await expect.poll(() => rail.evaluate(element => element.scrollLeft)).toBeGreaterThan(30)
 
-  await page.getByRole('button', { name: 'Open Forest path preview' }).click()
+  await paintedChat.getByRole('button', { name: 'Open Forest path preview' }).click()
   await expect(page.locator('.lightbox-count')).toHaveText('2 / 4')
-  await dispatchSwipe(page, '.lightbox-image', 0.82, 0.18)
+  await dispatchSwipe(page, page.locator('.lightbox-image'), 0.82, 0.18)
   await expect(page.locator('.lightbox-count')).toHaveText('3 / 4')
   await expect(page.locator('.lightbox-image')).toHaveAttribute('alt', 'Ocean cliff')
 })

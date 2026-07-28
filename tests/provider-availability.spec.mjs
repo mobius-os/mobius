@@ -49,9 +49,10 @@ test('picker exposes configured providers without leaking unavailable registry r
   await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
     waitUntil: 'domcontentloaded',
   })
-  await expect(page.locator('.chat__form')).toBeVisible()
+  const paintedChat = page.locator('[data-chat-surface="painted"]')
+  await expect(paintedChat.locator('.chat__form')).toBeVisible()
 
-  await page.getByRole('button', { name: 'Attach or change model' }).click()
+  await paintedChat.getByRole('button', { name: 'Attach or change model' }).click()
 
   const configuredRows = page.locator('button.csp-row:not([disabled])')
     .filter({ hasText: 'OpenAI Codex' })

@@ -89,10 +89,11 @@ async function mockOwnedApp(page, chatId) {
 }
 
 async function sendMessage(page, text) {
-  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  const paintedChat = page.locator('[data-chat-surface="painted"]')
+  const input = paintedChat.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
   await page.keyboard.press('Enter')
-  await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 4000 })
+  await expect(paintedChat.locator('.chat__scroll')).toBeVisible({ timeout: 4000 })
   await page.evaluate(() => new Promise(r =>
     requestAnimationFrame(() => requestAnimationFrame(r))))
 }
@@ -123,9 +124,10 @@ async function persistMockedMessageOnReload(page, chat, text) {
 async function measure(page) {
   return page.evaluate(() => {
     const content = document.querySelector('.shell__content')
-    const chat = document.querySelector('.chat')
-    const scroll = document.querySelector('.chat__scroll')
-    const spacer = document.querySelector('.spacer-dynamic')
+    const surface = document.querySelector('[data-chat-surface="painted"]')
+    const chat = surface?.querySelector('.chat')
+    const scroll = surface?.querySelector('.chat__scroll')
+    const spacer = surface?.querySelector('.spacer-dynamic')
     return {
       contentH: content?.offsetHeight || 0,
       chatH: chat?.offsetHeight || 0,
@@ -272,7 +274,8 @@ test.describe('Tabs', () => {
 
     // Tap the chat tab (the one that is NOT the app) — back to the chat.
     await page.getByRole('button', { name: chat.title, exact: true }).click()
-    await expect(page.locator('.chat__scroll')).toBeVisible({ timeout: 3000 })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toBeVisible({ timeout: 3000 })
 
     // Close the app tab — one fewer tab, and the strip STAYS: builder shows its
     // chrome even at a single tab (owner: "builder strip always visible").
@@ -363,7 +366,10 @@ test.describe('Tabs', () => {
     // (string id → Number()). Waiting between taps keeps the sequence
     // deterministic under multi-worker load.
     await page.getByRole('button', { name: chat.title, exact: true }).click()
-    await expect(page.locator('.chat__scroll, .chat__empty-wrap')).toBeVisible({ timeout: 3000 })
+    await expect(page.locator(
+      '[data-chat-surface="painted"] .chat__scroll, '
+      + '[data-chat-surface="painted"] .chat__empty-wrap',
+    )).toBeVisible({ timeout: 3000 })
     await page.locator('.shell__tab', { hasText: 'Demo App' }).locator('.shell__tab-open').click()
     await expect(page.locator('.shell__view--active')).toBeVisible({ timeout: 3000 })
     await page.waitForTimeout(400)
