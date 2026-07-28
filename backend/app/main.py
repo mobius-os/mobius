@@ -1162,13 +1162,17 @@ def _served_platform_identity(data_dir: str) -> dict:
   out = {"serving_source": "unknown", "served_sha": None, "platform_sha": None,
          "platform_dirty": None, "baked_sha": None}
   try:
-    sentinel = Path("/tmp/serving-source").read_text(encoding="utf-8").strip()
+    sentinel = Path(
+      os.environ.get("MOBIUS_SERVING_SOURCE_FILE", "/tmp/serving-source")
+    ).read_text(encoding="utf-8").strip()
     if sentinel:
       out["serving_source"] = sentinel
   except Exception:  # incl. UnicodeError, which is not an OSError — never raise
     pass
   try:
-    served_sha = Path("/tmp/serving-sha").read_text(encoding="utf-8").strip()
+    served_sha = Path(
+      os.environ.get("MOBIUS_SERVING_SHA_FILE", "/tmp/serving-sha")
+    ).read_text(encoding="utf-8").strip()
     out["served_sha"] = served_sha or None
   except Exception:
     pass
