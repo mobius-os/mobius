@@ -345,7 +345,14 @@ for (const [name, viewport] of [
   })
 
   test(`[${name}] the builder root class always agrees with the logo state (no reducer/render split)`, async ({ page }) => {
-    await bootShell(page, viewport)
+    // Give both worlds real content. An empty Builder workspace correctly has
+    // no tab strip, so using strip presence as its rendered-world witness would
+    // conflate "Builder is active" with "Builder has at least one tab".
+    await bootSeededWorkspace(
+      page,
+      viewport,
+      twoPaneBuilder({ kind: 'chat', id: 'aaa' }),
+    )
     for (let i = 0; i < 6; i += 1) {
       await toggleMode(page)
       await page.waitForTimeout(120)
