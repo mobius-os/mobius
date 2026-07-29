@@ -43,18 +43,51 @@ set -euo pipefail
 # process-level `timeout` utility instead, which preserves daemon identity and
 # lets the caller inspect/close the same session after this helper returns.
 
+ORIGINAL_ARGS=("$@")
 BROWSER_ERROR_FILE=""
+BROWSER_TIMEOUT_FILE=""
 WARMUP_OUT=""
 CAPTURE_OUT=""
+BROWSER_PHASE="browser startup"
+SCREENSHOT_RECOVERY_COUNT="${MOBIUS_SCREENSHOT_RECOVERY_COUNT:-0}"
+
+case "$SCREENSHOT_RECOVERY_COUNT" in
+  0|1) : ;;
+  *) SCREENSHOT_RECOVERY_COUNT=1 ;;
+esac
 
 cleanup() {
   local path
-  for path in "$BROWSER_ERROR_FILE" "$WARMUP_OUT" "$CAPTURE_OUT"; do
+  for path in \
+    "$BROWSER_ERROR_FILE" "$BROWSER_TIMEOUT_FILE" "$WARMUP_OUT" "$CAPTURE_OUT"
+  do
     [ -z "$path" ] || rm -f "$path"
   done
 }
 
 die() {
+  local timed_out_phase=""
+  if [ -n "$BROWSER_TIMEOUT_FILE" ] && [ -s "$BROWSER_TIMEOUT_FILE" ]; then
+    timed_out_phase="$(head -n 1 "$BROWSER_TIMEOUT_FILE")"
+    if [ "$SCREENSHOT_RECOVERY_COUNT" -eq 0 ]; then
+      printf 'agent-screenshot.sh: %s timed out; restarting this chat\047s isolated browser session once\n' \
+        "$timed_out_phase" >&2
+      # Do not queue `agent-browser close` behind the timed-out daemon. It can
+      # create a competing supervisor while the old command is still in flight.
+      # Go straight to the exact profile-owned process boundary instead.
+      if python3 "$(dirname "${BASH_SOURCE[0]}")/agent_browser_session_reset.py" \
+          "$AGENT_BROWSER_PROFILE"; then
+        clear_stale_browser_profile_lock
+        cleanup
+        export MOBIUS_SCREENSHOT_RECOVERY_COUNT=1
+        exec bash "${BASH_SOURCE[0]}" "${ORIGINAL_ARGS[@]}"
+      fi
+      echo "agent-screenshot.sh: the isolated browser session could not be reset safely" >&2
+    else
+      printf 'agent-screenshot.sh: %s timed out again after one isolated browser-session restart\n' \
+        "$timed_out_phase" >&2
+    fi
+  fi
   printf 'agent-screenshot.sh: %s\n' "$*" >&2
   if [ -n "$BROWSER_ERROR_FILE" ] && [ -s "$BROWSER_ERROR_FILE" ]; then
     tail -n 2 "$BROWSER_ERROR_FILE" | sed 's/^/agent-browser: /' >&2
@@ -66,21 +99,30 @@ browser_command() {
   local timeout_seconds="$1"
   local status=0
   shift
+  if [ -n "$BROWSER_TIMEOUT_FILE" ] && [ -s "$BROWSER_TIMEOUT_FILE" ]; then
+    return 124
+  fi
   : > "$BROWSER_ERROR_FILE"
-  timeout "${timeout_seconds}s" agent-browser "$@" \
+  # The browser daemon outlives this process. Never let it inherit the capture
+  # transaction's flock descriptor or every later capture would block behind a
+  # lock whose owning helper already exited.
+  timeout "${timeout_seconds}s" agent-browser "$@" 9>&- \
     2>"$BROWSER_ERROR_FILE" || status=$?
   if [ "$status" -eq 124 ] && [ ! -s "$BROWSER_ERROR_FILE" ]; then
     printf 'command timed out after %ss\n' "$timeout_seconds" \
       > "$BROWSER_ERROR_FILE"
   fi
+  if [ "$status" -eq 124 ] && [ -n "$BROWSER_TIMEOUT_FILE" ]; then
+    printf '%s\n' "$BROWSER_PHASE" > "$BROWSER_TIMEOUT_FILE"
+  fi
   return "$status"
 }
 
 browser_wait() {
-  local status=0
-  : > "$BROWSER_ERROR_FILE"
-  agent-browser wait "$@" 2>"$BROWSER_ERROR_FILE" || status=$?
-  return "$status"
+  # agent-browser's DOM wait normally returns after its own 25s deadline. The
+  # outer bound is solely for a daemon already poisoned by an earlier caller;
+  # it converts that infrastructure hang into the same one-reset recovery path.
+  browser_command 30 wait "$@"
 }
 
 browser_eval_retry() {
@@ -92,6 +134,7 @@ browser_eval_retry() {
       printf '%s' "$output"
       return 0
     fi
+    [ ! -s "$BROWSER_TIMEOUT_FILE" ] || return 1
     sleep 0.3
   done
   return 1
@@ -137,6 +180,7 @@ PY
         "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))" \
         >/dev/null || true
     fi
+    [ ! -s "$BROWSER_TIMEOUT_FILE" ] || return 1
     sleep 0.5
   done
   return 1
@@ -151,14 +195,17 @@ browser_open_origin_retry() {
   local attempt
   for attempt in 1 2 3 4 5; do
     browser_command 5 open "$url" >/dev/null || true
+    [ ! -s "$BROWSER_TIMEOUT_FILE" ] || return 1
     sleep 0.2
     current="$(
       browser_command 5 get url || true
     )"
+    [ ! -s "$BROWSER_TIMEOUT_FILE" ] || return 1
     sleep 0.2
     confirmed="$(
       browser_command 5 get url || true
     )"
+    [ ! -s "$BROWSER_TIMEOUT_FILE" ] || return 1
     if [ "$current" != "$confirmed" ]; then
       # In-shell deep links intentionally canonicalize to `/shell/` after the
       # router consumes their intent. That redirect can land between these two
@@ -199,14 +246,17 @@ browser_open_exact_retry() {
   local attempt
   for attempt in 1 2 3 4 5; do
     browser_command 5 open "$url" >/dev/null || true
+    [ ! -s "$BROWSER_TIMEOUT_FILE" ] || return 1
     sleep 0.2
     current="$(
       browser_command 5 get url || true
     )"
+    [ ! -s "$BROWSER_TIMEOUT_FILE" ] || return 1
     sleep 0.2
     confirmed="$(
       browser_command 5 get url || true
     )"
+    [ ! -s "$BROWSER_TIMEOUT_FILE" ] || return 1
     [ "$current" = "$url" ] && [ "$confirmed" = "$url" ] && return 0
   done
   return 1
@@ -219,6 +269,7 @@ browser_set_viewport_retry() {
         >/dev/null; then
       return 0
     fi
+    [ ! -s "$BROWSER_TIMEOUT_FILE" ] || return 1
     sleep 0.2
   done
   return 1
@@ -377,6 +428,7 @@ fi
 
 clear_stale_browser_profile_lock
 BROWSER_ERROR_FILE="$(mktemp "${TMPDIR:-/tmp}/mobius-agent-browser-error.XXXXXX")"
+BROWSER_TIMEOUT_FILE="$(mktemp "${TMPDIR:-/tmp}/mobius-agent-browser-timeout.XXXXXX")"
 trap cleanup EXIT
 
 # Start the browser, then wait narrowly for its command socket before applying
@@ -395,6 +447,7 @@ fi
 # bootstrap URL below. The later detach still protects the final target
 # navigation from a controller installed between authentication and capture.
 if [ "$PRESERVE_CACHE" -eq 0 ]; then
+  BROWSER_PHASE="retained browser-state cleanup"
   browser_eval_retry \
     "(async () => { try { const regs = await navigator.serviceWorker?.getRegistrations?.() || []; await Promise.all(regs.map((r) => r.unregister())); } catch {} return true })()" \
     >/dev/null || true
@@ -408,6 +461,7 @@ fi
 # cannot restore the last chat or disappear like Chromium's JSON viewer.
 # The JWT travels via stdin, never argv or /proc/<pid>/cmdline.
 TOKEN_READY=0
+BROWSER_PHASE="authentication setup"
 for attempt in 1 2 3; do
   if ! browser_open_origin_retry \
     "${API_BASE_URL}/api/browser-bootstrap" bootstrap; then
@@ -452,6 +506,7 @@ fi
 # and bounded. The owner's real browser/profile is never touched.
 TARGET_ROUTE="$ROUTE"
 if [ "$PRESERVE_CACHE" -eq 0 ]; then
+  BROWSER_PHASE="target controller detachment"
   if ! browser_open_exact_retry "about:blank"; then
     die "browser did not detach before target navigation"
   fi
@@ -463,6 +518,7 @@ if [ "$PRESERVE_CACHE" -eq 0 ]; then
 fi
 
 # Now navigate to the actual target route, authenticated.
+BROWSER_PHASE="target navigation"
 if ! browser_open_origin_retry "${API_BASE_URL}${TARGET_ROUTE}" target; then
   die "browser did not reach the target route"
 fi
@@ -471,6 +527,7 @@ fi
 # Applying device metrics during that gap reports success on the outgoing page,
 # then the newly-created shell page falls back to Chromium's default viewport.
 # Wait on browser paint ownership before configuring the final page.
+BROWSER_PHASE="target initial paint"
 if ! browser_wait --fn \
   "document.readyState === 'complete' && performance.getEntriesByName('first-contentful-paint').length > 0" \
   >/dev/null; then
@@ -485,6 +542,7 @@ sleep 0.3
 
 # Dismiss the PWA install banner if it surfaces — it covers the bottom
 # of the view and would distract from the actual page.
+BROWSER_PHASE="target preparation"
 browser_command 2 find text "Not now" click >/dev/null || true
 sleep 0.3
 
@@ -493,6 +551,7 @@ sleep 0.3
 # clear it, and reload onto LoginForm. Verify the token with a protected request
 # at the FINAL capture boundary, after the settle/banner work above. The token is
 # read inside the page and never appears in argv or output.
+BROWSER_PHASE="authentication verification"
 AUTH_OK="$(browser_eval_retry \
   "(async () => { const token = localStorage.getItem('token'); if (!token || document.querySelector('input[type=password]')) return false; try { const res = await fetch('/api/chats?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); return res.status === 200 && !!localStorage.getItem('token') && !document.querySelector('input[type=password]'); } catch { return false; } })()" \
   || true)"
@@ -534,6 +593,7 @@ PY
       )" || {
         die "current shell entry asset could not be resolved"
       }
+      BROWSER_PHASE="shell freshness verification"
       LOADED_SHELL_ENTRY_RAW="$(
         browser_eval_retry \
           "(() => { const src = document.querySelector('script[type=\"module\"][src*=\"/assets/index-\"]')?.src || ''; return src.split('/').pop() })()" \
@@ -555,6 +615,7 @@ PY
     # its private handoff classes or compositor attributes. Once the owner says
     # settled, give style/layout two frames to commit.
     SHELL_SETTLED_EXPR="document.querySelector('.shell[data-workspace-visual-state=\"settled\"]') !== null && performance.getEntriesByName('first-contentful-paint').length > 0"
+    BROWSER_PHASE="shell visual readiness"
     if ! browser_wait --fn "$SHELL_SETTLED_EXPR" >/dev/null; then
       die "shell did not reach a settled visual state before capture"
     fi
@@ -570,6 +631,7 @@ esac
 # handoff, or agent-browser's about:blank detach can replace that page after the
 # startup viewport command. Reapply before drawer/app checks and immediately
 # before every capture attempt; the kept PNG's IHDR is the race-free proof.
+BROWSER_PHASE="final viewport configuration"
 if ! browser_set_viewport_retry; then
   die "target page did not retain the requested viewport"
 fi
@@ -578,6 +640,7 @@ fi
 # or still exiting, which makes an otherwise-correct app screenshot capture the
 # scrim/drawer transition. Close only the mobile modal form; the desktop docked
 # sidebar is part of the partner's actual layout and stays untouched.
+BROWSER_PHASE="mobile navigation preparation"
 browser_eval_retry \
   "(() => { const b = document.querySelector('button[aria-label=\"Toggle navigation\"][aria-expanded=\"true\"]'); if (window.innerWidth < 768 && b) b.click(); return true })()" \
   >/dev/null || true
@@ -597,6 +660,7 @@ fi
 # agent-browser's wait parser has timed out on equivalent IIFE forms.
 case "$ROUTE" in
   /app/*)
+    BROWSER_PHASE="app frame readiness"
     APP_ID="${ROUTE#/app/}"
     APP_ID="${APP_ID%%[/?#]*}"
     case "$APP_ID" in
@@ -622,6 +686,7 @@ WARMUP_OUT="$(mktemp "${TMPDIR:-/tmp}/mobius-screenshot-warmup.XXXXXX.png")"
 # friendly paths such as shell.png and app-42.png; a failed capture must never
 # replace the last known-good image with a partial or misleading frame.
 CAPTURE_OUT="$(mktemp "$(dirname "$OUT")/.mobius-screenshot.XXXXXX.png")"
+BROWSER_PHASE="screenshot capture"
 if ! browser_screenshot_retry "$WARMUP_OUT"; then
   die "page remained too busy to prime capture"
 fi

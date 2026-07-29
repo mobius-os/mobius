@@ -11,6 +11,9 @@ import pytest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "agent-screenshot.sh"
+SESSION_RESET = (
+  Path(__file__).parents[1] / "scripts" / "agent_browser_session_reset.py"
+)
 PREVIEW_APP = Path(__file__).parents[1] / "scripts" / "preview_app.sh"
 SHELL = Path(__file__).parents[2] / "frontend" / "src" / "components" / "Shell" / "Shell.jsx"
 STANDALONE = Path(__file__).parents[1] / "app" / "routes" / "standalone.py"
@@ -28,6 +31,7 @@ def _fixture_script(tmp_path: Path) -> Path:
   script = root / "backend" / "scripts" / SCRIPT.name
   script.parent.mkdir(parents=True)
   shutil.copy2(SCRIPT, script)
+  shutil.copy2(SESSION_RESET, script.with_name(SESSION_RESET.name))
   dist = root / "frontend" / "dist"
   dist.mkdir(parents=True)
   (dist / "index.html").write_text(
@@ -60,9 +64,28 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
     "\"${AGENT_BROWSER_SESSION-}\" \"${AGENT_BROWSER_PROFILE-}\" "
     "\"${AGENT_BROWSER_ARGS-}\" \"${AGENT_BROWSER_DEFAULT_TIMEOUT-}\" "
     ">> \"$FAKE_BROWSER_IDENTITY_LOG\"\n"
+    "if [ -e /proc/$$/fd/9 ]; then : > \"$FAKE_CAPTURE_LOCK_INHERITED\"; fi\n"
+    "if [ \"$1\" = eval ] && [ \"${2:-}\" != --stdin ]; then\n"
+    "  case \"${FAKE_TIMEOUT_EVAL_MODE:-}\" in\n"
+    "    always) exit 124 ;;\n"
+    "    once)\n"
+    "      if [ ! -e \"$FAKE_TIMEOUT_EVAL_MARKER\" ]; then\n"
+    "        : > \"$FAKE_TIMEOUT_EVAL_MARKER\"\n"
+    "        exit 124\n"
+    "      fi\n"
+    "      ;;\n"
+    "  esac\n"
+    "fi\n"
     "case \"$1\" in\n"
     "  open)\n"
-    "    printf '%s\\n' \"$2\" > \"$FAKE_BROWSER_URL_FILE\"\n"
+    "    if [ \"${FAKE_BOOTSTRAP_INTERCEPT_ONCE:-0}\" = 1 ] "
+    "&& [ \"$2\" = http://mobius.test/api/browser-bootstrap ] "
+    "&& [ ! -e \"$FAKE_BOOTSTRAP_INTERCEPT_MARKER\" ]; then\n"
+    "      : > \"$FAKE_BOOTSTRAP_INTERCEPT_MARKER\"\n"
+    "      printf '%s\\n' http://mobius.test/shell/ > \"$FAKE_BROWSER_URL_FILE\"\n"
+    "    else\n"
+    "      printf '%s\\n' \"$2\" > \"$FAKE_BROWSER_URL_FILE\"\n"
+    "    fi\n"
     "    if [ -n \"${FAKE_CANONICAL_TARGET_URL:-}\" ]; then\n"
     "      case \"$2\" in\n"
     "        */chat/*) printf '%s\\n' \"$FAKE_CANONICAL_TARGET_URL\" > \"$FAKE_BROWSER_NEXT_URL_FILE\" ;;\n"
@@ -138,6 +161,8 @@ def _run_helper(
   canonical_target_url: str | None = None,
   screenshot_tiny_once: bool = False,
   wait_error: bool = False,
+  timeout_eval_mode: str = "",
+  bootstrap_intercept_once: bool = False,
   existing_output: bytes | None = None,
   profile_locked: bool = False,
   subprocess_timeout: float | None = None,
@@ -173,6 +198,7 @@ def _run_helper(
     "FAKE_LOADED_ASSET": loaded_asset or SHELL_ENTRY,
     "FAKE_BROWSER_LOG": str(browser_log),
     "FAKE_BROWSER_IDENTITY_LOG": str(tmp_path / "browser-identity.log"),
+    "FAKE_CAPTURE_LOCK_INHERITED": str(tmp_path / "capture-lock-inherited"),
     "FAKE_SCREENSHOT_MARKER": str(marker),
     "FAKE_VIEWPORT_FAIL_ONCE": "1" if viewport_fail_once else "0",
     "FAKE_VIEWPORT_MARKER": str(tmp_path / "viewport-ready"),
@@ -190,6 +216,10 @@ def _run_helper(
     "FAKE_CANONICAL_TARGET_URL": canonical_target_url or "",
     "FAKE_BROWSER_STDIN_LOG": str(tmp_path / "browser-stdin.log"),
     "FAKE_WAIT_ERROR": "1" if wait_error else "0",
+    "FAKE_TIMEOUT_EVAL_MODE": timeout_eval_mode,
+    "FAKE_TIMEOUT_EVAL_MARKER": str(tmp_path / "timeout-eval-once"),
+    "FAKE_BOOTSTRAP_INTERCEPT_ONCE": "1" if bootstrap_intercept_once else "0",
+    "FAKE_BOOTSTRAP_INTERCEPT_MARKER": str(tmp_path / "bootstrap-intercepted"),
   }
   args = ["bash", str(script)]
   if content_only:
@@ -355,9 +385,9 @@ def test_default_capture_detaches_pwa_state_and_verifies_current_shell(tmp_path:
   detach_indexes = [
     i for i, command in enumerate(commands) if command == "open about:blank"
   ]
-  assert len(detach_indexes) == 2
-  assert detach_indexes[0] < seed_index < detach_indexes[1]
-  assert detach_indexes[1] < target_index < build_index < screenshot_index
+  assert any(index < seed_index for index in detach_indexes)
+  assert any(seed_index < index < target_index for index in detach_indexes)
+  assert target_index < build_index < screenshot_index
 
 
 def test_default_capture_detaches_a_stale_controller_before_requiring_bootstrap(
@@ -380,6 +410,72 @@ def test_default_capture_detaches_a_stale_controller_before_requiring_bootstrap(
     if command == "open http://mobius.test/api/browser-bootstrap"
   )
   assert first_bootstrap < preflight_unregister < first_detach < second_bootstrap
+
+
+def test_stale_worker_bootstrap_interception_recovers_before_authentication(
+  tmp_path: Path,
+):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    bootstrap_intercept_once=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  assert (tmp_path / "bootstrap-intercepted").exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  first_detach = commands.index("open about:blank")
+  authenticated_bootstrap = next(
+    i for i, command in enumerate(commands[first_detach + 1:], first_detach + 1)
+    if command == "open http://mobius.test/api/browser-bootstrap"
+  )
+  assert first_detach < authenticated_bootstrap
+
+
+def test_timeout_stops_queueing_commands_and_restarts_the_one_profile(
+  tmp_path: Path,
+):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    timeout_eval_mode="once",
+    subprocess_timeout=10,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  assert "retained browser-state cleanup timed out" in result.stderr
+  assert "restarting this chat's isolated browser session once" in result.stderr
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  timed_eval = next(
+    i for i, command in enumerate(commands)
+    if command.startswith("eval ") and "serviceWorker" in command
+  )
+  # No navigation/eval/close request is queued behind the poisoned daemon. The
+  # process-scoped reset is invisible to this command log; capture starts fresh.
+  assert commands[timed_eval + 1] == "open http://mobius.test/api/browser-bootstrap"
+
+
+def test_second_timeout_reports_the_failed_phase_without_an_infinite_restart(
+  tmp_path: Path,
+):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    timeout_eval_mode="always",
+    subprocess_timeout=10,
+  )
+
+  assert result.returncode != 0
+  assert "retained browser-state cleanup timed out again" in result.stderr
+  assert "after one isolated browser-session restart" in result.stderr
+  assert not output.exists()
+  assert not marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  assert "close" not in commands
 
 
 def test_stale_shell_fails_instead_of_capturing_misleading_evidence(tmp_path: Path):
@@ -497,6 +593,15 @@ def test_browser_commands_keep_one_daemon_identity(tmp_path: Path):
   )
   assert identities
   assert set(identities) == {expected}
+
+
+def test_browser_daemon_does_not_inherit_the_capture_transaction_lock(
+  tmp_path: Path,
+):
+  result, _, _, _ = _run_helper(tmp_path, auth_ok=True)
+
+  assert result.returncode == 0, result.stderr
+  assert not (tmp_path / "capture-lock-inherited").exists()
 
 
 def test_browser_failure_includes_last_command_detail(tmp_path: Path):
