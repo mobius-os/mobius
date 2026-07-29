@@ -81,6 +81,128 @@ class _FakeTurnStatus(Enum):
   in_progress = "inProgress"
 
 
+class _FakeThreadGoalStatus(Enum):
+  active = "active"
+  paused = "paused"
+  blocked = "blocked"
+  usage_limited = "usageLimited"
+  budget_limited = "budgetLimited"
+  complete = "complete"
+
+
+class _FakeGoalState:
+  def __init__(self, thread_id: str, notifications=None, *, started=False):
+    self.thread_id = thread_id
+    self.logical_turn_id = "goal-turn" if started else None
+    self._current_turn_id = "physical-turn" if started else None
+    self.notifications = list(notifications or [])
+    self.finished = False
+    self.woken = False
+    self.status = None
+
+  def start(self):
+    self.logical_turn_id = "goal-turn"
+    self._current_turn_id = "physical-turn"
+
+  def wait_for_start(self, _timeout: float):
+    return self.logical_turn_id
+
+  def current_turn(self):
+    return self._current_turn_id
+
+  def active_turn(self, *, after=None):
+    if self.finished:
+      return None
+    if self._current_turn_id != after:
+      return self._current_turn_id
+    return None
+
+  def finish(self):
+    self.finished = True
+    self._current_turn_id = None
+
+  def wake_notification_reader(self):
+    self.woken = True
+
+
+class _FakeAsyncGoalNotificationStream:
+  def __init__(
+    self, state, _next_notification, unregister, _cancel_goal,
+  ):
+    self.state = state
+    self.unregister = unregister
+
+  async def __aiter__(self):
+    for notification in self.state.notifications:
+      yield notification
+    self.unregister()
+
+
+class _FakeGoalClient:
+  def __init__(self, goal=None):
+    self.goal = goal
+    self.state: _FakeGoalState | None = None
+    self.register_calls: list[str] = []
+    self.start_calls: list[tuple[str, str]] = []
+    self.set_calls: list[tuple[str, _FakeThreadGoalStatus]] = []
+    self.clear_calls: list[str] = []
+    self.steer_calls: list[tuple[str, str, str]] = []
+    self.cancel_calls: list[_FakeGoalState] = []
+    self.unregister_calls: list[_FakeGoalState] = []
+
+  async def request(self, method, params, *, response_model):
+    assert method == "thread/goal/get"
+    assert params == {"threadId": "thread-1"}
+    assert response_model is not None
+    return SimpleNamespace(goal=self.goal)
+
+  def register_goal_operation(self, thread_id):
+    self.register_calls.append(thread_id)
+    self.state = _FakeGoalState(thread_id)
+    self.state.status = self.goal.status
+    return self.state
+
+  async def start_goal_operation(self, thread_id, objective):
+    self.start_calls.append((thread_id, objective))
+    self.state = _FakeGoalState(
+      thread_id, _goal_completion_notifications(), started=True,
+    )
+    return self.state, self.state.logical_turn_id
+
+  async def thread_goal_set(self, thread_id, *, status=None, objective=None):
+    assert objective is None
+    self.set_calls.append((thread_id, status))
+    assert self.state is not None
+    self.state.start()
+    self.state.notifications = _goal_completion_notifications()
+    return SimpleNamespace()
+
+  async def thread_goal_clear(self, thread_id):
+    self.clear_calls.append(thread_id)
+    self.goal = None
+    return SimpleNamespace(cleared=True)
+
+  async def turn_steer(self, thread_id, expected_turn_id, message):
+    self.steer_calls.append((thread_id, expected_turn_id, message))
+
+  async def next_goal_notification(self, _state):
+    raise AssertionError("fake goal stream reads its state directly")
+
+  async def cancel_goal_operation(self, state):
+    self.cancel_calls.append(state)
+
+  def unregister_goal_operation(self, state):
+    self.unregister_calls.append(state)
+
+
+def _goal_completion_notifications():
+  completed = SimpleNamespace(id="goal-turn", usage=None, error=None)
+  return [SimpleNamespace(
+    method="turn/completed",
+    payload=_FakeTurnCompletedNotification(completed),
+  )]
+
+
 class _FakeTurnCompletedNotification:
   def __init__(self, turn):
     self.turn = turn
@@ -155,6 +277,13 @@ def _fake_sdk(async_codex_cls):
       self.message = message
       self.data = data
 
+  class _FakeInvalidRequestError(RuntimeError):
+    def __init__(self, code: int, message: str, data=None):
+      super().__init__(f"JSON-RPC error {code}: {message}")
+      self.code = code
+      self.message = message
+      self.data = data
+
   class _FakeCodexRpcError(RuntimeError):
     def __init__(self, code: int, message: str, data=None):
       super().__init__(f"JSON-RPC error {code}: {message}")
@@ -167,6 +296,7 @@ def _fake_sdk(async_codex_cls):
     "AgentMessageThreadItem": _Dummy,
     "ApprovalMode": _FakeApprovalMode,
     "AsyncCodex": async_codex_cls,
+    "AsyncGoalNotificationStream": _FakeAsyncGoalNotificationStream,
     "CodexConfig": _FakeCodexConfig,
     "CodexRpcError": _FakeCodexRpcError,
     "CommandExecutionOutputDeltaNotification": _Dummy,
@@ -178,6 +308,7 @@ def _fake_sdk(async_codex_cls):
     "FileChangeThreadItem": _Dummy,
     "ImageViewThreadItem": type("_FakeImageViewThreadItem", (), {}),
     "InvalidParamsError": _FakeInvalidParamsError,
+    "InvalidRequestError": _FakeInvalidRequestError,
     "ReasoningEffort": _FakeReasoningEffort(),
     "ReasoningSummary": _FakeReasoningSummary(),
     "Sandbox": _FakeSandbox,
@@ -190,6 +321,8 @@ def _fake_sdk(async_codex_cls):
     "ReasoningSummaryTextDeltaNotification": _Dummy,
     "ReasoningTextDeltaNotification": _Dummy,
     "ThreadTokenUsageUpdatedNotification": _Dummy,
+    "ThreadGoalGetResponse": type("ThreadGoalGetResponse", (), {}),
+    "ThreadGoalStatus": _FakeThreadGoalStatus,
     "TransportClosedError": _SdkTransportClosedError,
     "TurnCompletedNotification": _FakeTurnCompletedNotification,
     "TurnStatus": _FakeTurnStatus,
@@ -777,6 +910,301 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
     "session_id": "requested-thread",
   }]
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
+
+
+def test_new_goal_uses_sdk_logical_operation_not_ordinary_turn(monkeypatch):
+  ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
+  thread = _FakeThread("thread-1", ordinary_turn)
+
+  class FakeAsyncCodex:
+    last = None
+
+    def __init__(self, config=None):
+      self.config = config
+      self._client = _FakeGoalClient()
+      type(self).last = self
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, **_kwargs):
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="/goal Repair every failing test",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-goal",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    goal_objective="Repair every failing test",
+    goal_mode=True,
+  ))
+
+  assert result["error"] is None
+  assert FakeAsyncCodex.last._client.start_calls == [
+    ("thread-1", "Repair every failing test"),
+  ]
+  assert thread.turn_args is None
+
+
+def test_active_goal_route_exists_before_resume_and_auto_continues(monkeypatch):
+  goal = SimpleNamespace(status=_FakeThreadGoalStatus.active)
+  ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
+  thread = _FakeThread("thread-1", ordinary_turn)
+
+  class FakeAsyncCodex:
+    last = None
+
+    def __init__(self, config=None):
+      self.config = config
+      self._client = _FakeGoalClient(goal)
+      type(self).last = self
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_resume(self, thread_id, **_kwargs):
+      assert self._client.register_calls == [thread_id]
+      assert self._client.state is not None
+      self._client.state.start()
+      self._client.state.notifications = _goal_completion_notifications()
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="continue",
+    session_id="thread-1",
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-goal",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    goal_mode=True,
+    goal_continue=True,
+  ))
+
+  client = FakeAsyncCodex.last._client
+  assert result["error"] is None
+  assert client.register_calls == ["thread-1"]
+  assert client.set_calls == []
+  assert client.steer_calls == []
+  assert thread.turn_args is None
+
+
+def test_missing_goal_thread_keeps_existing_fresh_thread_recovery(monkeypatch):
+  ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
+  replacement_thread = _FakeThread("thread-2", ordinary_turn)
+  sdk_holder = {}
+
+  class MissingGoalThreadClient(_FakeGoalClient):
+    async def request(self, method, params, *, response_model):
+      assert method == "thread/goal/get"
+      raise sdk_holder["sdk"]["InvalidRequestError"](
+        -32600, "thread not found: thread-1",
+      )
+
+  class FakeAsyncCodex:
+    last = None
+
+    def __init__(self, config=None):
+      self.config = config
+      self._client = MissingGoalThreadClient()
+      type(self).last = self
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_resume(self, _thread_id, **_kwargs):
+      return replacement_thread
+
+  sdk_holder["sdk"] = _fake_sdk(FakeAsyncCodex)
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: sdk_holder["sdk"],
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="continue",
+    session_id="thread-1",
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-goal",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    goal_mode=True,
+    goal_continue=True,
+    fallback_goal_objective="legacy objective",
+  ))
+
+  client = FakeAsyncCodex.last._client
+  assert result["error"] is None
+  assert result["session_id"] == "thread-2"
+  assert client.start_calls == []
+  assert replacement_thread.turn_args is not None
+
+
+def test_paused_goal_reactivates_and_steers_real_owner_message(monkeypatch):
+  goal = SimpleNamespace(status=_FakeThreadGoalStatus.paused)
+  ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
+  thread = _FakeThread("thread-1", ordinary_turn)
+
+  class FakeAsyncCodex:
+    last = None
+
+    def __init__(self, config=None):
+      self.config = config
+      self._client = _FakeGoalClient(goal)
+      type(self).last = self
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_resume(self, thread_id, **_kwargs):
+      assert self._client.register_calls == [thread_id]
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="Use the smaller durable design",
+    session_id="thread-1",
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-goal",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    goal_mode=True,
+  ))
+
+  client = FakeAsyncCodex.last._client
+  assert result["error"] is None
+  assert client.set_calls == [
+    ("thread-1", _FakeThreadGoalStatus.active),
+  ]
+  assert client.steer_calls == [
+    ("thread-1", "physical-turn", "Use the smaller durable design"),
+  ]
+  assert thread.turn_args is None
+
+
+def test_goal_turn_interrupt_uses_sdk_pause_and_interrupt_operation():
+  async def scenario():
+    client = _FakeGoalClient()
+    state = _FakeGoalState("thread-1", started=True)
+    turn = codex_sdk_runner._CodexGoalTurn(
+      client,
+      state,
+      _FakeAsyncGoalNotificationStream,
+      RuntimeError,
+    )
+    await turn.interrupt()
+    assert client.cancel_calls == [state]
+
+  asyncio.run(scenario())
+
+
+def test_goal_turn_steer_follows_physical_turn_rollover():
+  async def scenario():
+    sdk = _fake_sdk(object)
+    state = _FakeGoalState("thread-1", started=True)
+
+    class RolloverClient(_FakeGoalClient):
+      async def turn_steer(self, thread_id, expected_turn_id, message):
+        self.steer_calls.append((thread_id, expected_turn_id, message))
+        if expected_turn_id == "physical-turn":
+          state._current_turn_id = "physical-turn-2"
+          raise sdk["InvalidRequestError"](
+            -32600,
+            "expected active turn id `physical-turn` but found "
+            "`physical-turn-2`",
+          )
+
+    client = RolloverClient()
+    turn = codex_sdk_runner._CodexGoalTurn(
+      client,
+      state,
+      _FakeAsyncGoalNotificationStream,
+      sdk["InvalidRequestError"],
+    )
+    await turn.steer("keep the owner message")
+    assert client.steer_calls == [
+      ("thread-1", "physical-turn", "keep the owner message"),
+      ("thread-1", "physical-turn-2", "keep the owner message"),
+    ]
+
+  asyncio.run(scenario())
+
+
+def test_goal_clear_uses_sdk_without_starting_an_ordinary_turn(monkeypatch):
+  goal = SimpleNamespace(status=_FakeThreadGoalStatus.active)
+  ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
+  thread = _FakeThread("thread-1", ordinary_turn)
+
+  class FakeAsyncCodex:
+    last = None
+
+    def __init__(self, config=None):
+      self.config = config
+      self._client = _FakeGoalClient(goal)
+      type(self).last = self
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_resume(self, _thread_id, **_kwargs):
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
+  )
+
+  bc = _FakeBroadcast()
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="/goal clear",
+    session_id="thread-1",
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-goal",
+    bc=bc,
+    pending_questions={},
+    db=None,
+    goal_clear=True,
+    goal_mode=True,
+  ))
+
+  assert result["error"] is None
+  assert FakeAsyncCodex.last._client.clear_calls == ["thread-1"]
+  assert thread.turn_args is None
+  assert {"type": "text", "content": "Goal cleared."} in bc.events
 
 
 def test_run_codex_sdk_turn_reports_all_model_calls_in_turn(monkeypatch):
@@ -2592,8 +3020,16 @@ def test_codex_config_overrides_kill_switch(monkeypatch):
   from app import codex_sdk_runner as runner
   monkeypatch.setenv("MOEBIUS_CODEX_MULTI_AGENT", "off")
   ov = runner._codex_config_overrides()
-  assert ov == ["features.default_mode_request_user_input=true"]
+  assert ov == [
+    "features.default_mode_request_user_input=true",
+    "features.goals=true",
+  ]
   assert not any("multi_agent_v2" in o for o in ov)
+
+
+def test_codex_config_overrides_enable_native_goal_runtime(monkeypatch):
+  monkeypatch.delenv("MOEBIUS_CODEX_MULTI_AGENT", raising=False)
+  assert "features.goals=true" in codex_sdk_runner._codex_config_overrides()
 
 
 def test_codex_app_server_launch_args_preserve_overrides_under_setsid(

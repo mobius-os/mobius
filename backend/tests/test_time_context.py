@@ -8,13 +8,19 @@ import re
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
-from app import models
+from app import models, schemas
 from app.chat import (
   CLI_SLASH_COMMANDS,
   _build_time_context,
+  _chat_has_goal_intent,
+  _goal_clear_requested,
+  _goal_objective,
+  _goal_resume_requested,
   _human_elapsed,
   _is_cli_slash_command,
+  _latest_goal_objective,
   _last_user_message_elapsed,
 )
 from app.database import SessionLocal
@@ -115,6 +121,64 @@ def test_goal_slash_command_is_detected_without_matching_paths():
   assert not _is_cli_slash_command("/")
   assert not _is_cli_slash_command("/data/apps/x is broken")
   assert not _is_cli_slash_command("please run /goal later")
+
+
+def test_goal_objective_is_extracted_from_clean_persisted_message():
+  assert _goal_objective("/goal repair every failing test") == (
+    "repair every failing test"
+  )
+  assert _goal_objective("\n/goal\n  inspect first\nthen fix  ") == (
+    "inspect first\nthen fix"
+  )
+  assert _goal_objective("/goal") is None
+  assert _goal_objective("/goal clear") is None
+  assert _goal_objective("/goal CLEAR") is None
+  assert _goal_clear_requested("/goal clear")
+  assert not _goal_clear_requested("/goal clear the backlog")
+  assert _goal_objective("please /goal later") is None
+
+
+def test_goal_intent_and_latest_objective_scan_durable_history():
+  messages = [
+    schemas.ChatMessage(role="user", content="hello"),
+    schemas.ChatMessage(role="assistant", content="hi"),
+    schemas.ChatMessage(role="user", content="/goal first objective"),
+    schemas.ChatMessage(role="user", content="continue"),
+  ]
+  assert _chat_has_goal_intent(messages)
+  assert _latest_goal_objective(messages) == "first objective"
+
+  cleared = messages + [
+    schemas.ChatMessage(role="user", content="/goal clear"),
+    schemas.ChatMessage(role="user", content="continue"),
+  ]
+  assert _latest_goal_objective(cleared) is None
+
+  changed_subject = messages[:-1] + [
+    schemas.ChatMessage(role="user", content="different request"),
+    schemas.ChatMessage(role="user", content="continue"),
+  ]
+  assert _latest_goal_objective(changed_subject) is None
+
+
+def test_legacy_goal_migration_requires_a_durable_resume_intent():
+  assert _goal_resume_requested(SimpleNamespace(messages=[
+    {"role": "assistant", "blocks": [{"type": "error", "resumable": True}]},
+    {"role": "user", "content": "continue"},
+  ]), "continue")
+  assert _goal_resume_requested(SimpleNamespace(messages=[
+    {"role": "user", "content": "continue", "kind": "auto_continuation"},
+  ]), "continue")
+  assert not _goal_resume_requested(SimpleNamespace(messages=[
+    {"role": "assistant", "content": "ordinary reply"},
+    {"role": "user", "content": "continue"},
+  ]), "continue")
+
+
+def test_textless_send_is_not_a_slash_command():
+  """An attachment-only send has no text; this used to raise IndexError."""
+  for textless in ("", "   ", "\n\n", None):
+    assert not _is_cli_slash_command(textless)
 
 
 def test_slash_command_registry_parity():

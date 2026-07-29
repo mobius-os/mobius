@@ -35,6 +35,7 @@ See CLAUDE.md "Codex `_approval_handler` patch — known fragility" for
 the broader context.
 """
 
+import inspect
 import json
 
 import pytest
@@ -348,3 +349,54 @@ def test_transport_closed_error_is_still_exposed_by_the_sdk():
   # Not a RuntimeError: the runner relies on that to keep provider
   # ErrorNotifications (reraised as plain RuntimeErrors) out of this branch.
   assert not issubclass(TransportClosedError, RuntimeError)
+
+
+def test_native_goal_resume_sdk_contract_is_pinned():
+  """Fail at build time if Codex moves the goal lifecycle Möbius relies on."""
+  pytest.importorskip("openai_codex")
+  from openai_codex import AsyncCodex
+  from openai_codex._goal import (
+    _AsyncGoalNotificationStream,
+    _GoalOperationState,
+  )
+  from openai_codex.errors import InvalidRequestError
+  from openai_codex.generated.v2_all import (
+    ThreadGoalGetResponse,
+    ThreadGoalStatus,
+  )
+
+  client = AsyncCodex()._client
+  for method in (
+    "request",
+    "register_goal_operation",
+    "unregister_goal_operation",
+    "start_goal_operation",
+    "next_goal_notification",
+    "cancel_goal_operation",
+    "thread_goal_clear",
+    "thread_goal_set",
+    "turn_steer",
+  ):
+    assert callable(getattr(client, method, None)), (
+      f"openai_codex removed AsyncCodex._client.{method}; update the native "
+      "goal adapter before accepting this SDK bump"
+    )
+  assert _AsyncGoalNotificationStream is not None
+  assert issubclass(InvalidRequestError, Exception)
+  assert list(inspect.signature(_AsyncGoalNotificationStream).parameters)[:4] == [
+    "state", "next_notification", "unregister", "cancel_goal",
+  ]
+  state = _GoalOperationState(thread_id="contract-thread")
+  for method in (
+    "active_turn",
+    "wait_for_start",
+    "finish",
+    "wake_notification_reader",
+  ):
+    assert callable(getattr(state, method, None))
+  assert hasattr(state, "_condition")
+  assert hasattr(state, "_failure")
+  assert set(ThreadGoalGetResponse.model_fields) == {"goal"}
+  assert {status.value for status in ThreadGoalStatus} == {
+    "active", "paused", "blocked", "usageLimited", "budgetLimited", "complete",
+  }

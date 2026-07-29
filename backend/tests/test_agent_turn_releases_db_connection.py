@@ -207,6 +207,70 @@ async def test_agent_turn_returns_connection_while_provider_is_running(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("provider_id", "provider_name"),
+  (("codex", "Codex"), ("claude", "Claude Code")),
+)
+async def test_superseded_runner_cannot_overwrite_successor_session(
+  chat, db, monkeypatch, provider_id, provider_name,
+):
+  """A late terminal write belongs to its generation, not the next run."""
+  chat.provider = provider_id
+  chat.session_id = "successor-session"
+  chat.agent_settings_json = {"model": "gpt-5.4"}
+  db.commit()
+  run_gen = chat_mod.current_run_generation(chat.id)
+
+  async def stale_runner(**_kwargs):
+    chat_mod.bump_run_generation(chat.id)
+    return {
+      "session_id": "stale-run-session",
+      "cost_usd": 0.0,
+      "error": None,
+    }
+
+  async def fake_complete_turn(**kwargs):
+    kwargs["db"].close()
+    return chat_queue.TerminalDisposition.STALE_NO_ACTION
+
+  async def fake_record_run_metrics(**_kwargs):
+    return None
+
+  monkeypatch.setattr(
+    chat_mod, "get_provider", lambda _provider_id: _Provider(provider_name),
+  )
+  monkeypatch.setattr(chat_mod, "_complete_turn", fake_complete_turn)
+  monkeypatch.setattr(chat_mod, "_record_run_metrics", fake_record_run_metrics)
+  if provider_id == "codex":
+    from app import codex_sdk_runner
+    monkeypatch.setattr(codex_sdk_runner, "run_codex_sdk_turn", stale_runner)
+  else:
+    from app import claude_sdk_runner
+    monkeypatch.setattr(claude_sdk_runner, "run_claude_sdk_turn", stale_runner)
+    monkeypatch.setattr(claude_sdk_runner, "_resumable", lambda *_a, **_k: True)
+
+  create_broadcast(chat.id)
+  try:
+    result = await chat_mod._run_chat_impl(
+      messages=[schemas.ChatMessage(role="user", content="hello")],
+      chat_id=chat.id,
+      session_id="successor-session",
+      provider_id=provider_id,
+      run_gen=run_gen,
+    )
+  finally:
+    remove_broadcast(chat.id)
+
+  assert result is chat_queue.TerminalDisposition.STALE_NO_ACTION
+  verify = SessionLocal()
+  try:
+    stored = verify.query(models.Chat).filter(models.Chat.id == chat.id).one()
+    assert stored.session_id == "successor-session"
+  finally:
+    verify.close()
+
+
+@pytest.mark.asyncio
 async def test_agent_setup_exception_always_returns_connection(monkeypatch):
   """Unexpected setup failures are covered by the outer session owner."""
   _wait_for_writer_connection()

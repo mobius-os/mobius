@@ -4818,6 +4818,84 @@ def _build_resumed_context(chat_row) -> str | None:
 CLI_SLASH_COMMANDS = frozenset({"/goal"})
 
 
+def _goal_argument(text: str) -> str | None:
+  match = re.match(r"^\s*/goal(?:\s+([\s\S]+))?\s*$", text or "")
+  if match is None:
+    return None
+  return (match.group(1) or "").strip() or None
+
+
+def _goal_clear_requested(text: str) -> bool:
+  argument = _goal_argument(text)
+  return bool(argument and argument.lower() == "clear")
+
+
+def _goal_objective(text: str) -> str | None:
+  """Return the clean objective from a leading ``/goal`` command."""
+  objective = _goal_argument(text)
+  if objective is None or objective.lower() == "clear":
+    return None
+  return objective
+
+
+def _chat_has_goal_intent(messages: list[schemas.ChatMessage]) -> bool:
+  """Whether this durable transcript has ever requested native goal mode."""
+  return any(
+    message.role == "user"
+    and re.match(r"^\s*/goal(?:\s|$)", message.content or "") is not None
+    for message in messages
+  )
+
+
+def _latest_goal_objective(
+  messages: list[schemas.ChatMessage],
+) -> str | None:
+  """Find the still-relevant legacy objective before a Resume message."""
+  for message in reversed(messages):
+    if message.role != "user":
+      continue
+    content = message.content or ""
+    if content.strip().lower() == "continue":
+      continue
+    if _goal_clear_requested(content):
+      return None
+    objective = _goal_objective(message.content)
+    if objective is not None:
+      return objective
+    # An intervening owner request changed the subject. Do not resurrect a
+    # historical pre-native goal merely because a later message says continue.
+    return None
+  return None
+
+
+def _goal_resume_requested(chat_row, text: str) -> bool:
+  """Whether this ``continue`` is a recovery action rather than ordinary prose."""
+  if (text or "").strip().lower() != "continue" or chat_row is None:
+    return False
+  durable = list(chat_row.messages or [])
+  if not durable:
+    return False
+  current = durable[-1] if isinstance(durable[-1], dict) else {}
+  if current.get("kind") == "auto_continuation":
+    return True
+  # The visible Resume button is rendered only for a resumable tail block and
+  # sends the same short text as an automatic continuation. The persisted tail
+  # is the durable intent signal; plain "continue" elsewhere must not revive an
+  # old goal that may already have finished before native goal storage existed.
+  for message in reversed(durable[:-1]):
+    if not isinstance(message, dict):
+      continue
+    if message.get("role") == "user":
+      return False
+    if message.get("role") != "assistant":
+      continue
+    return any(
+      isinstance(block, dict) and block.get("resumable") is True
+      for block in list(message.get("blocks") or [])
+    )
+  return False
+
+
 def _is_cli_slash_command(text: str) -> bool:
   """True when `text` starts with a supported Claude CLI slash command.
 
@@ -5297,7 +5375,12 @@ async def _run_chat_impl_with_db(
   """Run a turn with a session whose lifetime is owned by the wrapper."""
   log = _get_logger()
   settings = get_settings()
-  user_message = messages[-1].content
+  raw_user_message = messages[-1].content
+  user_message = raw_user_message
+  goal_objective = _goal_objective(raw_user_message)
+  goal_clear = _goal_clear_requested(raw_user_message)
+  goal_mode = _chat_has_goal_intent(messages)
+  goal_continue = (raw_user_message or "").strip().lower() == "continue"
   is_slash_command = _is_cli_slash_command(user_message)
   if is_slash_command:
     # The CLI dispatches a slash command only when it sits at position 0, so the
@@ -5330,6 +5413,23 @@ async def _run_chat_impl_with_db(
       log.exception(
         "failed to load per-chat agent_settings chat_id=%s", chat_id,
       )
+
+  # Chats created before native Codex goal handling have the /goal objective in
+  # their durable transcript but no provider-side ThreadGoal yet.  Either the
+  # automatic restart handoff or the visible one-tap Resume sends "continue";
+  # carrying the newest objective lets the runner adopt that old chat into the
+  # native goal store.  A native completed goal still wins authoritatively and
+  # is never restarted by this fallback.
+  fallback_goal_objective = (
+    _latest_goal_objective(messages)
+    if (
+      goal_continue
+      and goal_mode
+      and goal_objective is None
+      and _goal_resume_requested(chat_row, raw_user_message)
+    )
+    else None
+  )
 
   # Durable run marker: the turn's StartTurn (initial send) or
   # PromotePending (continuation / stale-pending drain) writer-actor
@@ -5748,6 +5848,11 @@ async def _run_chat_impl_with_db(
         system_prompt=system_prompt,
         resumed_context=resumed_context_fallback,
         should_abort=lambda: _run_generation_superseded(chat_id, run_gen),
+        goal_objective=goal_objective,
+        goal_clear=goal_clear,
+        goal_mode=goal_mode,
+        goal_continue=goal_continue,
+        fallback_goal_objective=fallback_goal_objective,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -5759,7 +5864,12 @@ async def _run_chat_impl_with_db(
         cost_usd=runner_result.get("cost_usd"),
         usage=usage_metrics,
       )
-      if not err and new_session_id and chat_id:
+      if (
+        not err
+        and new_session_id
+        and chat_id
+        and not _run_generation_superseded(chat_id, run_gen)
+      ):
         chat_obj = db.query(models.Chat).filter(
           models.Chat.id == chat_id
         ).first()
@@ -5893,7 +6003,12 @@ async def _run_chat_impl_with_db(
         cost_usd=runner_result.get("cost_usd"),
         usage=usage_metrics,
       )
-      if not err and new_session_id and chat_id:
+      if (
+        not err
+        and new_session_id
+        and chat_id
+        and not _run_generation_superseded(chat_id, run_gen)
+      ):
         chat_obj = db.query(models.Chat).filter(
           models.Chat.id == chat_id
         ).first()
