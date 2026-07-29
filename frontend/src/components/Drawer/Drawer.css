@@ -428,47 +428,6 @@
   touch-action: pan-y pinch-zoom;
 }
 
-.drawer__more {
-  flex: 0 0 40px;
-  align-self: stretch;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s, color 0.12s, background 0.12s, transform 0.08s;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.drawer__more:active {
-  color: var(--text);
-  background: var(--surface);
-  transform: scale(0.92);
-}
-
-.drawer__more[aria-expanded="true"] {
-  opacity: 1;
-  color: var(--accent);
-  background: var(--accent-dim);
-}
-
-.drawer__row:focus-within .drawer__more { opacity: 1; }
-
-@media (hover: hover) and (pointer: fine) {
-  .drawer__row:hover .drawer__more { opacity: 1; }
-  .drawer__more:hover {
-    color: var(--text);
-    background: var(--surface);
-  }
-}
-
-@media (hover: none) {
-  .drawer__more { opacity: 0.5; }
-}
-
 /* App cards and drawer rows share one action-menu placement path. Pointer
    coordinates are converted to root layout space so shell density never shifts
    a menu away from the click. */

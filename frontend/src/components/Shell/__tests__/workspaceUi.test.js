@@ -36,13 +36,25 @@ test('the workspace menu avoids an oversized border-and-shadow card', () => {
   assert.doesNotMatch(rule, /box-shadow:[^;]*(?:1[6-9]|[2-9]\d)px/)
 })
 
-test('the workspace menu is labeled, edge-clamped, and arrow-key navigable', () => {
+test('the workspace menu stays close-only, edge-clamped, and keyboard navigable', () => {
+  const menuMarkup = shell.slice(
+    shell.indexOf('{tabMenu &&'),
+    shell.indexOf('</HistoryDismissProvider>'),
+  )
   assert.match(shell, /aria-label="Tab actions"/)
-  assert.match(shell, /window\.innerWidth - rect\.width - gutter/)
-  assert.match(shell, /e\.key === 'ArrowDown'/)
+  assert.match(menuMarkup, /Close tab/)
+  assert.match(menuMarkup, /Close all other tabs/)
+  assert.match(menuMarkup, /Close tabs to the right/)
+  assert.doesNotMatch(
+    menuMarkup,
+    /type: 'MOVE_TAB'|type: 'CLOSE_PANE'|Split |Move to |Close pane/,
+  )
+  assert.match(shell, /placeContextMenu\(\{/)
+  assert.match(shell, /event\.key === 'ArrowDown'/)
   assert.match(shell, /querySelector\('\[role="menuitem"\]'\)\?\.focus\(\)/)
-  assert.match(shell, /tabMenuReturnFocusRef\.current = e\.currentTarget/)
+  assert.match(shell, /tabMenuReturnFocusRef\.current = event\.currentTarget/)
   assert.match(shell, /returnTarget\?\.focus\?\.\(\{ preventScroll: true \}\)/)
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*?\.workspace__menu-header/)
 })
 
 test('an implicit home tab does not engage the single-pane tab strip', () => {
@@ -185,15 +197,13 @@ test('the divider drag tears down from the window, surviving a mid-drag unmount'
   assert.match(chrome, /document\.body\.style\.userSelect = prevUserSelect/)
 })
 
-test('the context menu offers Close pane when another pane can absorb the space', () => {
-  assert.match(shell, /type: 'CLOSE_PANE', paneId: tabMenu\.paneId/)
-  assert.match(shell, /Close pane/)
-})
-
-test('the context menu offers Close all other tabs only when a sibling tab exists', () => {
-  assert.match(shell, /menuPane && menuPane\.tabs\.length >= 2/)
-  assert.match(shell, /type: 'CLOSE_OTHER_TABS', tabKey: tabMenu\.tabKey/)
+test('the context menu offers pane-scoped bulk close actions only when useful', () => {
+  assert.match(shell, /const hasSiblingTabs = Boolean\(menuPane && menuPane\.tabs\.length > 1\)/)
+  assert.match(shell, /type: 'CLOSE_OTHER_TABS',[\s\S]*?tabKey: tabMenu\.tabKey/)
   assert.match(shell, /Close all other tabs/)
+  assert.match(shell, /const hasTabsToRight = Boolean\(/)
+  assert.match(shell, /type: 'CLOSE_TABS_TO_RIGHT',[\s\S]*?tabKey: tabMenu\.tabKey/)
+  assert.match(shell, /Close tabs to the right/)
 })
 
 test('tab labels resolve through memoized id Maps, not per-render linear scans', () => {
@@ -841,14 +851,18 @@ test('large drawer lists memoize ordering and row actions without changing row o
   assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
 })
 
-test('row-owned context menus keep a visible trigger without hidden anchors', () => {
+test('row-owned context menus need no permanent kebab or hidden anchor', () => {
   assert.match(drawer, /<DrawerItemActionMenu[\s\S]*?itemKind=\{kind\}/)
-  assert.doesNotMatch(drawer, /triggerHidden|drawer__menu-anchor/)
-  assert.match(drawer,
-    /className="drawer__more"[\s\S]*?aria-label=\{`More actions for \$\{label\}`\}/,
-    'drawer rows must retain an explicit keyboard and touch action trigger')
-  assert.match(drawerCss, /\.drawer__more\s*\{/)
-  assert.doesNotMatch(drawerCss, /drawer__menu-anchor/)
+  assert.doesNotMatch(
+    drawer,
+    /triggerHidden|drawer__menu-anchor|drawer__more|DotsVerticalMoreMenu/,
+  )
+  assert.doesNotMatch(drawerCss, /drawer__menu-anchor|drawer__more/)
+  assert.match(drawer, /onContextMenu=\{openItemMenu\}/)
+  assert.match(
+    drawer,
+    /event\.key === 'ContextMenu' \|\| \(event\.shiftKey && event\.key === 'F10'\)/,
+  )
   assert.match(drawer, /if \(openMenu\) return[\s\S]*?onClose\?\.\(\)/,
     'Escape must close a row menu before dismissing the mobile drawer beneath it')
 })

@@ -9,7 +9,7 @@
  *   (b) a FOLLOW_BOTTOM chat keeps following AND does not remount across a
  *       divider resize and a cross-pane move (same root DOM object);
  *   (c) an app iframe survives a cross-pane move with no second frame-init;
- *   (d) split is absent from the context menu at caps;
+ *   (d) close-only tab actions remain available while model split caps hold;
  *   (e) a projection flip to phone preserves the persisted tree and pane focus;
  *
  * The flag is enabled per-test (localStorage 'mobius:workspace-splits' = '1')
@@ -297,15 +297,16 @@ async function gestureRememberedChatToBottom(page) {
   })
 }
 
-/** Open a one-tab pane's context menu and click "Move to <label>". */
-async function moveOnlyTabToOtherPane(page, paneId) {
-  await page.locator(`[data-pane-strip="${paneId}"] .shell__tab-open`)
-    .filter({ has: page.locator('.shell__tab-text') })
-    .first()
-    .click({ button: 'right' })
-  await expect(page.locator('.workspace__menu')).toBeVisible({ timeout: 3000 })
-  await page.locator('.workspace__menu-item', { hasText: /^Move to / }).first().click()
-  await expect(page.locator('.workspace__menu')).toHaveCount(0)
+/** Move the active tab to the other pane through the existing drag contract. */
+async function moveActiveTabToOtherPane(page, paneId) {
+  const source = page.locator(
+    `[data-pane-strip="${paneId}"] .shell__tab--active .shell__tab-open`,
+  )
+  const target = await page.locator(
+    `[data-pane-strip]:not([data-pane-strip="${paneId}"]) .shell__tab--active .shell__tab-open`,
+  ).first().boundingBox()
+  expect(target, 'the destination pane has an active tab').not.toBeNull()
+  await mouseDrag(page, source, target.x + target.width / 2, target.y + target.height / 2)
 }
 
 test.describe('Workspace panes (PR2 gate)', () => {
@@ -409,7 +410,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
 
     // 2) Cross-pane move of chat A itself (p0 collapses to a single pane; the
     //    ChatView must not remount and FOLLOW must re-apply).
-    await moveOnlyTabToOtherPane(page, 'p0')
+    await moveActiveTabToOtherPane(page, 'p0')
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 150)))))
     await expect.poll(() => rememberedChatRootIsCurrent(page), {
@@ -581,12 +582,8 @@ test.describe('Workspace panes (PR2 gate)', () => {
     // Exactly one iframe wrapper for the app before the move.
     await expect(page.locator(`[data-tab-key="app:${APP_ID}"]`)).toHaveCount(1)
 
-    // Move the app tab from p0 to p1 via its pane-strip context menu.
-    await page.locator(`[data-pane-strip="p0"] .shell__tab--active .shell__tab-open`)
-      .click({ button: 'right' })
-    await expect(page.locator('.workspace__menu')).toBeVisible({ timeout: 3000 })
-    await page.locator('.workspace__menu-item', { hasText: /^Move to / }).first().click()
-    await expect(page.locator('.workspace__menu')).toHaveCount(0)
+    // Move the app tab from p0 to p1 through the existing drag contract.
+    await moveActiveTabToOtherPane(page, 'p0')
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 200)))))
 
@@ -599,7 +596,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await expect(page.locator(`[data-tab-key="app:${APP_ID}"]`)).toHaveCount(1)
   })
 
-  test('(d) split is absent from the context menu at caps', async ({ page }) => {
+  test('(d) tab actions stay close-only while model split caps hold', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'wpCapA')
     const b = await createTaggedChat(page, 'wpCapB')
@@ -631,15 +628,19 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.goto(`${BASE}/shell/?chat=${c.id}`, { waitUntil: 'domcontentloaded' })
     await waitTiled(page)
 
-    // Open the context menu on p1's active tab.
-    await page.locator(`[data-pane-strip="p1"] .shell__tab--active .shell__tab-open`)
-      .click({ button: 'right' })
-    await expect(page.locator('.workspace__menu')).toBeVisible({ timeout: 3000 })
-    // No "Split *" item — the caps gate removed every direction.
-    await expect(page.locator('.workspace__menu-item', { hasText: /^Split / })).toHaveCount(0)
-    // The menu is still functional (Move / Close remain).
-    await expect(page.locator('.workspace__menu-item', { hasText: /^Move to / }))
-      .not.toHaveCount(0)
+    const activeTab = page.locator(
+      `[data-pane-strip="p1"] .shell__tab--active .shell__tab-open`,
+    )
+    const keptKey = await activeTab.getAttribute('data-drag-key')
+    await activeTab.click({ button: 'right' })
+    await expect(page.getByRole('menu', { name: 'Tab actions' })).toBeVisible()
+    await expect(page.getByRole('menuitem', { name: 'Close tab', exact: true })).toBeVisible()
+    await expect(page.getByRole('menuitem', { name: 'Close all other tabs' })).toBeVisible()
+    await expect(page.getByRole('menuitem', { name: /^Split |^Move to |^Close pane$/ }))
+      .toHaveCount(0)
+    await page.getByRole('menuitem', { name: 'Close all other tabs' }).click()
+    await expect.poll(async () => (await readWs(page)).panes.p1.tabs
+      .map(tab => `${tab.kind}:${tab.id}`)).toEqual([keptKey])
   })
 
   test('(e) a projection flip to phone preserves the persisted tree and pane focus', async ({ page }) => {

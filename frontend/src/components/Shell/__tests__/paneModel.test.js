@@ -1125,6 +1125,49 @@ test('CLOSE_OTHER_TABS is pane-scoped — a sibling pane keeps its tabs', () => 
   )
 })
 
+test('CLOSE_TABS_TO_RIGHT removes only later siblings and is undoable', () => {
+  const ws = paneModel.seedFromFlatTabs([
+    makeTab('chat', 'a'),
+    makeTab('app', 42),
+    makeTab('chat', 'c'),
+    makeTab('chat', 'd'),
+  ])
+  const paneId = ws.focusedPaneId
+  const start = paneModel.initialWorkspaceState(ws)
+  const closed = paneModel.workspaceReducer(start, {
+    type: 'CLOSE_TABS_TO_RIGHT',
+    tabKey: 'app:42',
+  })
+  assert.deepEqual(closed.ws.panes[paneId].tabs.map(tabKey), ['chat:a', 'app:42'])
+  assert.equal(closed.ws.panes[paneId].activeTabKey, 'app:42',
+    'the menu tab becomes active when the prior active tab was closed')
+  assert.equal(closed.undo.toast, 'Closed tabs to the right')
+  assert.equal(paneModel.workspaceReducer(closed, {
+    type: 'CLOSE_TABS_TO_RIGHT',
+    tabKey: 'app:42',
+  }), closed, 'the last tab has no right-side action')
+  assert.equal(paneModel.workspaceReducer(closed, { type: 'UNDO_LAST' }).ws, ws)
+})
+
+test('closeTabsToRight preserves a surviving active tab and other panes', () => {
+  let ws = paneModel.seedFromFlatTabs([
+    makeTab('chat', 'a'),
+    makeTab('chat', 'b'),
+    makeTab('chat', 'c'),
+  ])
+  const leftPane = ws.focusedPaneId
+  ws = paneModel.setActiveTab(ws, leftPane, 'chat:a')
+  ws = paneModel.splitPaneWithTab(ws, makeTab('app', 42), {
+    paneId: leftPane,
+    edge: 'right',
+  })
+  const closed = paneModel.closeTabsToRight(ws, 'chat:b')
+  assert.deepEqual(closed.panes[leftPane].tabs.map(tabKey), ['chat:a', 'chat:b'])
+  assert.equal(closed.panes[leftPane].activeTabKey, 'chat:a')
+  assert.ok(paneModel.flatten(closed).map(tabKey).includes('app:42'))
+  assert.equal(paneModel.closeTabsToRight(ws, 'chat:nope'), ws)
+})
+
 test('reducer APPLY_PLACEMENT composes batched dispatches instead of clobbering', () => {
   // The former bug: two placements resolved against the same stale render
   // snapshot, so the second REPLACED the first. A resolve function run against

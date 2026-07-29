@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { Chats, DotsVerticalMoreMenu, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
+import { Chats, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
@@ -1545,16 +1545,6 @@ const DrawerRow = memo(function DrawerRow({
           />
         ) : null}
         <span className="drawer__item-text">{label}</span>
-      </button>
-      <button
-        type="button"
-        className="drawer__more"
-        aria-label={`More actions for ${label}`}
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
-        onClick={openItemMenu}
-      >
-        <DotsVerticalMoreMenu width={16} height={16} aria-hidden="true" />
       </button>
       <DrawerItemMenu
         kind={kind}

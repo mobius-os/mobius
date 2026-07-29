@@ -242,6 +242,17 @@ async function seedSingleModeChat(page, chatId) {
   }, [paneModel.STORAGE_KEY, workspace])
 }
 
+async function mouseDrag(page, sourceLocator, toX, toY) {
+  const box = await sourceLocator.boundingBox()
+  const sx = box.x + box.width / 2
+  const sy = box.y + box.height / 2
+  await page.mouse.move(sx, sy)
+  await page.mouse.down()
+  await page.mouse.move(sx + 10, sy, { steps: 3 })
+  await page.mouse.move(toX, toY, { steps: 14 })
+  await page.mouse.up()
+}
+
 test.describe('Tabs', () => {
   test('strip shows pinned tabs, switches, closes, and the last close auto-returns to single', async ({ page }) => {
     const chat = await bootAndCreateChat(page, 'tabs')
@@ -389,8 +400,14 @@ test.describe('Tabs', () => {
     await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
 
     const appTab = page.locator('.shell__tab', { hasText: 'Demo App' }).locator('.shell__tab-open')
-    await appTab.click({ button: 'right' })
-    await page.getByRole('menuitem', { name: 'Split right' }).click()
+    const content = await page.locator('.shell__content').boundingBox()
+    expect(content, 'the workspace has a visible drop surface').not.toBeNull()
+    await mouseDrag(
+      page,
+      appTab,
+      content.x + content.width - 8,
+      content.y + content.height / 2,
+    )
 
     await expect(page.locator('.workspace__strip')).toHaveCount(2)
     await expect(page.locator('.shell__view--paned')).toHaveCount(2)

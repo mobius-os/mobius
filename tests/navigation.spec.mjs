@@ -998,7 +998,9 @@ test.describe('Delete response boundaries', () => {
     })
 
     await openDrawer(page)
-    await page.getByRole('button', { name: `More actions for ${target.title}` }).click()
+    await page.getByLabel('Primary navigation')
+      .getByRole('button', { name: target.title, exact: true })
+      .click({ button: 'right' })
     await page.getByRole('menuitem', { name: 'Delete' }).click()
 
     await expect.poll(() => deleteAttempts).toBe(1)

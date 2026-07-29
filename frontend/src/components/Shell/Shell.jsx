@@ -1,6 +1,6 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { CollapseSm } from '@openai/apps-sdk-ui/components/Icon'
+import { CollapseSm, X } from '@openai/apps-sdk-ui/components/Icon'
 import {
   AppsNavIcon,
   NewChatNavIcon,
@@ -23,6 +23,7 @@ import useNavigation, {
   deepLink,
 } from '../../hooks/useNavigation.js'
 import { replaceNavEntry } from '../../lib/navHistory.js'
+import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
@@ -1575,26 +1576,33 @@ export default function Shell() {
     recoveredChatIdsRef.current.delete(chatId)
   }, [])
 
-  // The tab context menu is the ONLY split path in PR2. Split/Move items exist
-  // only when the workspace-splits flag is on (stage-A inert default); Close tab
-  // is always offered. The top strip attaches this handler only when the flag is
-  // on, so single-pane right-click keeps today's native menu (parity).
+  // Tabs expose a compact browser-style close menu without adding permanent
+  // chrome: right-click or the keyboard menu key on desktop, stationary hold on
+  // touch. The same state drives both the single strip and tiled pane strips.
   const [tabMenu, setTabMenu] = useState(null)
   const tabMenuRef = useRef(null)
   const tabMenuReturnFocusRef = useRef(null)
-  const openTabMenu = useCallback((e, tab, paneId) => {
-    e.preventDefault()
+  const openTabMenu = useCallback((event, tab, paneId) => {
+    event.preventDefault()
     const owner = paneId || paneModel.paneOf(workspace, tabModel.tabKey(tab))?.id
     if (!owner) return
-    tabMenuReturnFocusRef.current = e.currentTarget
-    setTabMenu({ x: e.clientX, y: e.clientY, tab, tabKey: tabModel.tabKey(tab), paneId: owner })
+    const triggerRect = event.currentTarget.getBoundingClientRect()
+    const keyboardPlacement = event.clientX === 0 && event.clientY === 0
+    tabMenuReturnFocusRef.current = event.currentTarget
+    setTabMenu({
+      x: keyboardPlacement
+        ? triggerRect.left + Math.min(triggerRect.width / 2, 28)
+        : event.clientX,
+      y: keyboardPlacement ? triggerRect.bottom : event.clientY,
+      tab,
+      tabKey: tabModel.tabKey(tab),
+      paneId: owner,
+    })
   }, [workspace])
-  // Coordinate variant for the drag controller's touch lift→release-in-place
-  // path (design §3.1) — same menu, opened at a point with no trigger element to
-  // restore focus to. Reads the workspace from the ref so an async open (a
-  // settled drag) sees the current tree.
   const openTabMenuAt = useCallback((x, y, tab, paneId) => {
-    const owner = paneId || paneModel.paneOf(workspaceStateRef.current.ws, tabModel.tabKey(tab))?.id
+    if (!tab) return
+    const owner = paneId
+      || paneModel.paneOf(workspaceStateRef.current.ws, tabModel.tabKey(tab))?.id
     if (!owner) return
     tabMenuReturnFocusRef.current = null
     setTabMenu({ x, y, tab, tabKey: tabModel.tabKey(tab), paneId: owner })
@@ -1605,34 +1613,46 @@ export default function Shell() {
     const returnTarget = tabMenuReturnFocusRef.current
     queueMicrotask(() => returnTarget?.focus?.({ preventScroll: true }))
   }, [])
-  // A context menu must be keyboard-ready when it appears, and pointer
-  // coordinates near a viewport edge must not place actions off-screen.
   useLayoutEffect(() => {
     if (!tabMenu || !tabMenuRef.current) return
     const menu = tabMenuRef.current
-    const rect = menu.getBoundingClientRect()
-    const gutter = 8
-    menu.style.left = `${Math.max(gutter, Math.min(tabMenu.x, window.innerWidth - rect.width - gutter))}px`
-    menu.style.top = `${Math.max(gutter, Math.min(tabMenu.y, window.innerHeight - rect.height - gutter))}px`
+    const root = document.documentElement
+    const rootRect = root.getBoundingClientRect()
+    const position = placeContextMenu({
+      clientPoint: { x: tabMenu.x, y: tabMenu.y },
+      clientViewport: rootRect,
+      layoutViewport: {
+        width: root.offsetWidth || root.clientWidth || rootRect.width,
+        height: root.offsetHeight || root.clientHeight || rootRect.height,
+      },
+      menuSize: { width: menu.offsetWidth, height: menu.offsetHeight },
+    })
+    menu.style.setProperty('--workspace-menu-x', `${position.x}px`)
+    menu.style.setProperty('--workspace-menu-y', `${position.y}px`)
+    menu.dataset.positioned = 'true'
     menu.querySelector('[role="menuitem"]')?.focus()
   }, [tabMenu])
-  const handleTabMenuKeyDown = useCallback((e) => {
+  const handleTabMenuKeyDown = useCallback((event) => {
     const items = [...(tabMenuRef.current?.querySelectorAll('[role="menuitem"]') || [])]
     if (items.length === 0) return
     const current = Math.max(0, items.indexOf(document.activeElement))
     let next = null
-    if (e.key === 'ArrowDown') next = (current + 1) % items.length
-    else if (e.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
-    else if (e.key === 'Home') next = 0
-    else if (e.key === 'End') next = items.length - 1
+    if (event.key === 'ArrowDown') next = (current + 1) % items.length
+    else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = items.length - 1
     if (next == null) return
-    e.preventDefault()
+    event.preventDefault()
     items[next].focus()
   }, [])
   useEffect(() => {
-    if (!tabMenu) return
-    const onDown = (e) => { if (!e.target.closest?.('.workspace__menu')) closeTabMenu(false) }
-    const onKey = (e) => { if (e.key === 'Escape') closeTabMenu() }
+    if (!tabMenu) return undefined
+    const onDown = (event) => {
+      if (!event.target.closest?.('.workspace__menu')) closeTabMenu(false)
+    }
+    const onKey = (event) => {
+      if (event.key === 'Escape') closeTabMenu()
+    }
     document.addEventListener('pointerdown', onDown, true)
     document.addEventListener('keydown', onKey, true)
     return () => {
@@ -3814,9 +3834,7 @@ export default function Shell() {
                   if (tab.kind === 'chat') focusDesktopChatPaneComposer(tab.id)
                 }}
                 onClose={() => closeTab(tab)}
-                onContextMenu={paneModel.WORKSPACE_SPLITS_ENABLED
-                  ? (e) => openTabMenu(e, tab, null)
-                  : undefined}
+                onContextMenu={(event) => openTabMenu(event, tab, null)}
               />
             )
           })}
@@ -4222,105 +4240,89 @@ export default function Shell() {
         action={toast?.action}
         onDismiss={dismissToast}
       />
-      {/* Tab context menu — the ONLY split path in PR2. Fixed-position at the
-          pointer; dismisses on outside pointerdown/Escape (effect above). Split
-          and Move items exist only when the workspace-splits flag is on, so with
-          the flag off (stage-A default) the menu never even opens (the strip
-          handlers are omitted). */}
       {tabMenu && (() => {
         const menuPane = workspace.panes[tabMenu.paneId]
-        const otherPaneIds = Object.keys(workspace.panes).filter(pid => pid !== tabMenu.paneId)
-        const canOfferSplit = paneModel.WORKSPACE_SPLITS_ENABLED
-          && menuPane && menuPane.tabs.length >= 2
+        const menuTabIndex = menuPane?.tabs.findIndex(
+          tab => tabModel.tabKey(tab) === tabMenu.tabKey,
+        ) ?? -1
+        const hasSiblingTabs = Boolean(menuPane && menuPane.tabs.length > 1)
+        const hasTabsToRight = Boolean(
+          menuPane && menuTabIndex >= 0 && menuTabIndex < menuPane.tabs.length - 1,
+        )
         return (
-          <div
-            ref={tabMenuRef}
-            className="workspace__menu"
-            role="menu"
-            aria-label="Tab actions"
-            style={{ left: tabMenu.x, top: tabMenu.y }}
-            onKeyDown={handleTabMenuKeyDown}
-          >
-            {canOfferSplit && [
-              ['right', 'Split right'], ['left', 'Split left'],
-              ['top', 'Split up'], ['bottom', 'Split down'],
-            ]
-              .filter(([edge]) => paneModel.canSplit(workspace, tabMenu.paneId, edge, workspaceMode, contentRect))
-              .map(([edge, label]) => (
-                <button
-                  key={edge}
-                  type="button"
-                  role="menuitem"
-                  className="workspace__menu-item"
-                  onClick={() => {
-                    dispatchWorkspace({ type: 'MOVE_TAB', tabKey: tabMenu.tabKey, target: { paneId: tabMenu.paneId, edge } })
-                    closeTabMenu()
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            {paneModel.WORKSPACE_SPLITS_ENABLED && otherPaneIds.length >= 1 && otherPaneIds.map(pid => {
-              const pane = workspace.panes[pid]
-              const active = pane?.tabs.find(t => tabModel.tabKey(t) === pane.activeTabKey)
-              return (
-                <button
-                  key={pid}
-                  type="button"
-                  role="menuitem"
-                  className="workspace__menu-item"
-                  onClick={() => {
-                    dispatchWorkspace({ type: 'MOVE_TAB', tabKey: tabMenu.tabKey, target: { paneId: pid } })
-                    closeTabMenu()
-                  }}
-                >
-                  Move to {active ? labelForTab(active) : 'pane'}
-                </button>
-              )
-            })}
-            <button
-              type="button"
-              role="menuitem"
-              className="workspace__menu-item"
-              onClick={() => {
-                closeTab(tabMenu.tab)
-                closeTabMenu()
+          <div className="workspace__menu-layer">
+            <div
+              ref={tabMenuRef}
+              className="workspace__menu"
+              role="menu"
+              aria-label="Tab actions"
+              style={{
+                '--workspace-menu-x': `${tabMenu.x}px`,
+                '--workspace-menu-y': `${tabMenu.y}px`,
               }}
+              onKeyDown={handleTabMenuKeyDown}
             >
-              Close tab
-            </button>
-            {/* Close all other tabs — keep only the right-clicked tab in its
-                pane. Only when a sibling exists (never a no-op menu item);
-                other panes are untouched — the menu stays pane-scoped. */}
-            {menuPane && menuPane.tabs.length >= 2 && (
-              <button
-                type="button"
-                role="menuitem"
-                className="workspace__menu-item"
-                onClick={() => {
-                  dispatchWorkspace({ type: 'CLOSE_OTHER_TABS', tabKey: tabMenu.tabKey })
-                  closeTabMenu()
-                }}
-              >
-                Close all other tabs
-              </button>
-            )}
-            {/* Close pane — a keyboard/menu affordance so a multi-tab pane need
-                not be dismissed one ✕ at a time (design §3.6). Only when there is
-                another pane to fall back to (never the single-pane strip). */}
-            {paneModel.WORKSPACE_SPLITS_ENABLED && tabMenu.paneId != null && otherPaneIds.length >= 1 && (
-              <button
-                type="button"
-                role="menuitem"
-                className="workspace__menu-item"
-                onClick={() => {
-                  dispatchWorkspace({ type: 'CLOSE_PANE', paneId: tabMenu.paneId })
-                  closeTabMenu()
-                }}
-              >
-                Close pane
-              </button>
-            )}
+              <div className="workspace__menu-handle" aria-hidden="true" />
+              <header className="workspace__menu-header">
+                <div>
+                  <span>Tab actions</span>
+                  <strong>{labelForTab(tabMenu.tab)}</strong>
+                </div>
+                <button
+                  type="button"
+                  className="workspace__menu-close"
+                  aria-label="Close tab actions"
+                  onClick={() => closeTabMenu()}
+                >
+                  <X width={18} height={18} aria-hidden="true" />
+                </button>
+              </header>
+              <div className="workspace__menu-items">
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="workspace__menu-item"
+                  onClick={() => {
+                    closeTab(tabMenu.tab)
+                    closeTabMenu()
+                  }}
+                >
+                  Close tab
+                </button>
+                {hasSiblingTabs && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="workspace__menu-item"
+                    onClick={() => {
+                      dispatchWorkspace({
+                        type: 'CLOSE_OTHER_TABS',
+                        tabKey: tabMenu.tabKey,
+                      })
+                      closeTabMenu()
+                    }}
+                  >
+                    Close all other tabs
+                  </button>
+                )}
+                {hasTabsToRight && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="workspace__menu-item"
+                    onClick={() => {
+                      dispatchWorkspace({
+                        type: 'CLOSE_TABS_TO_RIGHT',
+                        tabKey: tabMenu.tabKey,
+                      })
+                      closeTabMenu()
+                    }}
+                  >
+                    Close tabs to the right
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         )
       })()}
