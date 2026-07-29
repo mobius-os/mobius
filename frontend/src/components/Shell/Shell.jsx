@@ -829,6 +829,15 @@ export default function Shell() {
     requestComposer(chatId, { focus: true })
   }
 
+  // Route restoration and direct chat links do not pass through a click
+  // handler. Treat the active desktop chat as the same open intent so a web
+  // session always lands at the next typing point. The modality gate keeps
+  // phones and tablets from opening their software keyboard on navigation.
+  useEffect(() => {
+    if (activeView !== 'chat' || activeChatId == null) return
+    focusDesktopChatPaneComposer(activeChatId)
+  }, [activeView, activeChatId])
+
   const handleComposerRequestHandled = useCallback((token) => {
     setComposerRequest(prev => (
       prev?.token === token ? null : prev
@@ -3328,6 +3337,7 @@ export default function Shell() {
   function selectChat(id) {
     clearChatAttention(id)
     navTo('chat', { chatId: id })
+    focusDesktopChatPaneComposer(id)
   }
 
   async function deleteChat(id) {
@@ -3792,6 +3802,7 @@ export default function Shell() {
                 onActivate={() => {
                   const { view, opts } = tabModel.tabNavTarget(tab)
                   navTo(view, opts)
+                  if (tab.kind === 'chat') focusDesktopChatPaneComposer(tab.id)
                 }}
                 onClose={() => closeTab(tab)}
                 onContextMenu={paneModel.WORKSPACE_SPLITS_ENABLED

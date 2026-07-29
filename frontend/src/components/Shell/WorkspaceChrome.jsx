@@ -113,19 +113,19 @@ export default function WorkspaceChrome({
   // ALREADY-ACTIVE tab, though, is a focus-only action — focus is UI-local and
   // must NOT push history (design §5); navTo would push a duplicate entry so Back
   // appears to do nothing (finding: dup history entry for a focus-only click). So
-  // that case just focuses the pane.
+  // that case just focuses the pane. Either route hands a selected chat to its
+  // composer on desktop, so the tab click finishes where typing begins.
   const activateTab = useCallback((paneId, tab) => {
     const pane = workspace.panes[paneId]
     const key = tabModel.tabKey(tab)
-    const newlyFocused = workspace.focusedPaneId !== paneId
     if (pane && pane.activeTabKey === key) {
       dispatchWorkspace({ type: 'FOCUS', paneId })
-      if (newlyFocused && tab.kind === 'chat') onChatPaneSelected?.(tab.id)
+      if (tab.kind === 'chat') onChatPaneSelected?.(tab.id)
       return
     }
     const { view, opts } = tabModel.tabNavTarget(tab)
     navTo(view, { ...opts, paneId })
-    if (newlyFocused && tab.kind === 'chat') onChatPaneSelected?.(tab.id)
+    if (tab.kind === 'chat') onChatPaneSelected?.(tab.id)
   }, [navTo, workspace, dispatchWorkspace, onChatPaneSelected])
 
   // ── Divider drag (imperative, React-free per frame) ──────────────────────

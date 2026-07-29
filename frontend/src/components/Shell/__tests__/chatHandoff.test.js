@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 const chatSurfaceModel = readFileSync(new URL('../chatSurfaceModel.js', import.meta.url), 'utf8')
+const workspaceChrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
@@ -107,6 +108,30 @@ test('app-supplied drafts update retained composers as well as remounted chats',
     'a retained ChatView must apply the requested draft to controlled state')
   assert.match(chatView, /if \(!composerRequest\.focus\) \{[\s\S]*onComposerRequestHandled\?\.\(token\)/,
     'a draft-only handoff must settle without stealing focus')
+})
+
+test('direct desktop chat opens hand focus to the destination composer', () => {
+  assert.match(shell,
+    /useEffect\(\(\) => \{[\s\S]*activeView !== 'chat' \|\| activeChatId == null[\s\S]*focusDesktopChatPaneComposer\(activeChatId\)[\s\S]*\}, \[activeView, activeChatId\]\)/,
+    'restored and directly linked chats must focus without relying on a click handler')
+  assert.match(shell,
+    /newChat\(\{ focusComposer: true, recordHistory: true \}\)/,
+    'the direct New chat action must request composer focus')
+  assert.match(shell,
+    /if \(focusComposer\) requestComposer\(chatId, \{ focus: true \}\)/,
+    'New chat must deliver its focus request after the destination is known')
+  const selectChat = shell.match(/function selectChat\(id\) \{([\s\S]*?)\n  \}/)?.[1] || ''
+  assert.match(selectChat,
+    /navTo\('chat', \{ chatId: id \}\)[\s\S]*focusDesktopChatPaneComposer\(id\)/,
+    'drawer and settings chat selection must focus after requesting navigation')
+  assert.match(shell,
+    /onActivate=\{\(\) => \{[\s\S]*tabModel\.tabNavTarget\(tab\)[\s\S]*navTo\(view, opts\)[\s\S]*tab\.kind === 'chat'[\s\S]*focusDesktopChatPaneComposer\(tab\.id\)/,
+    'the single-pane tab strip must focus a selected chat composer')
+  const selectedChatHandoffs = workspaceChrome.match(
+    /if \(tab\.kind === 'chat'\) onChatPaneSelected\?\.\(tab\.id\)/g,
+  ) || []
+  assert.equal(selectedChatHandoffs.length, 2,
+    'both active-tab and tab-switch paths in a tiled pane must focus chat composers')
 })
 
 test('the held chat is an opaque layer above staging until the atomic swap', () => {
