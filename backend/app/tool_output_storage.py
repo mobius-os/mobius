@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import codecs
 import zlib
 
 from sqlalchemy import Text, text as sql_text
@@ -108,7 +109,13 @@ def decode_tool_output(
     ) from exc
 
   try:
-    text = raw.decode("utf-8")
+    if max_chars is None:
+      text = raw.decode("utf-8")
+    else:
+      # ``max_length`` may stop in the middle of a multibyte code point.
+      # Preview reads need only the complete prefix; an incremental decoder
+      # keeps that trailing fragment buffered rather than rejecting valid text.
+      text = codecs.getincrementaldecoder("utf-8")().decode(raw, final=False)
   except UnicodeDecodeError as exc:
     raise ToolOutputDecodeError(
       "invalid tool-output UTF-8 payload"

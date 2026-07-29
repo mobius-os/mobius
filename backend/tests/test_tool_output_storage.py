@@ -33,6 +33,16 @@ def test_preview_decode_does_not_use_the_full_inflate_path(monkeypatch):
     ) == output[:123]
 
 
+def test_preview_decode_keeps_complete_unicode_when_byte_limit_splits_a_codepoint():
+    output = "x" + ("🙂" * 10_000)
+    stored = tool_output_storage.encode_tool_output(output)
+
+    assert tool_output_storage.decode_tool_output(
+        stored,
+        max_chars=123,
+    ) == output[:123]
+
+
 def test_plain_legacy_rows_remain_readable():
     assert tool_output_storage.decode_tool_output("legacy", max_chars=3) == "leg"
     assert tool_output_storage.tool_output_length("legacy") == 6
