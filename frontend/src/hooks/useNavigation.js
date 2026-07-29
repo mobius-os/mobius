@@ -1502,6 +1502,10 @@ export default function useNavigation({
         try { sourceEntry = navigation.currentEntry } catch { /* wedged engine */ }
         let sourceEntryState
         try { sourceEntryState = sourceEntry?.getState?.() } catch { sourceEntryState = undefined }
+        let currentEntryIndex
+        try { currentEntryIndex = sourceEntry?.index } catch { currentEntryIndex = undefined }
+        let destinationEntryIndex
+        try { destinationEntryIndex = e.destination?.index } catch { destinationEntryIndex = undefined }
         const source = sourceEntryState || currentNavStateRef.current
         // A drawer-sentinel consumption is recognized FIRST — before the
         // phantom guard, and even when the destination's mirror state is
@@ -1552,8 +1556,8 @@ export default function useNavigation({
         }
         if (!e.canIntercept) return
         const direction = navTraversalDirection(source, destination, {
-          currentEntryIndex: sourceEntry?.index,
-          destinationEntryIndex: e.destination?.index,
+          currentEntryIndex,
+          destinationEntryIndex,
         })
         const sourceRoute = snapshotRoute()
         // Phantom-entry guard: ignore a traversal landing on an UNTAGGED entry —

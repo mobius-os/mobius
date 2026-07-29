@@ -62,7 +62,13 @@ test('every Navigation-store read in onNavigate is defensive', () => {
   // The wedged engine throws from its entry accessors just as it does from
   // updateCurrentEntry. Each mirror read must be try/catch-wrapped so a
   // throwing accessor cannot kill traversal handling.
-  for (const read of ['e.destination.getState()', 'navigation.currentEntry', 'sourceEntry?.getState?.()']) {
+  for (const read of [
+    'e.destination.getState()',
+    'navigation.currentEntry',
+    'sourceEntry?.getState?.()',
+    'sourceEntry?.index',
+    'e.destination?.index',
+  ]) {
     const at = onNavigate.indexOf(read)
     assert.ok(at > -1, `${read} is read in onNavigate`)
     const before = onNavigate.slice(Math.max(0, at - 120), at)
