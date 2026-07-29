@@ -22,6 +22,7 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
   const [now, setNow] = useState(() => Date.now())
   const [isClearing, setIsClearing] = useState(false)
   const [clearError, setClearError] = useState(false)
+  const [confirmClear, setConfirmClear] = useState(false)
 
   // Relative labels are live information, not a one-time formatting pass.
   // Refreshing once a minute keeps an open preview from saying "now" forever.
@@ -38,6 +39,7 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
     setClearError(false)
     try {
       await onClearAll?.()
+      setConfirmClear(false)
     } catch {
       setClearError(true)
     } finally {
@@ -56,14 +58,37 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
           Notifications
         </h2>
         {rows.length > 0 && (
-          <button
-            type="button"
-            className="notifications__clear"
-            onClick={handleClearAll}
-            disabled={isClearing}
-          >
-            {isClearing ? 'Clearing…' : 'Clear all'}
-          </button>
+          confirmClear ? (
+            <div className="notifications__clear-actions" role="group" aria-label="Confirm clearing notifications">
+              <button
+                type="button"
+                className="notifications__clear"
+                onClick={() => setConfirmClear(false)}
+                disabled={isClearing}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="notifications__clear notifications__clear--confirm"
+                onClick={handleClearAll}
+                disabled={isClearing}
+              >
+                {isClearing ? 'Clearing…' : 'Confirm clear'}
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="notifications__clear"
+              onClick={() => {
+                setClearError(false)
+                setConfirmClear(true)
+              }}
+            >
+              Clear all
+            </button>
+          )
         )}
         <button
           type="button"

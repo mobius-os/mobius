@@ -43,6 +43,20 @@
   cursor: pointer;
 }
 
+.notifications__clear-actions {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.notifications__clear-actions .notifications__clear {
+  margin-left: 0;
+}
+
+.notifications__clear--confirm {
+  color: var(--danger);
+}
+
 .notifications__clear:hover:not(:disabled) {
   background: var(--surface);
 }
