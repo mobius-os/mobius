@@ -251,6 +251,12 @@
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  /* Chat recency changes deliberately reorder keyed rows. Native scroll
+     anchoring treats that move as inserted/removed content and adjusts
+     scrollTop, so sending in the current chat nudges the navigation scrollbar.
+     The drawer owns a stable list position instead: keep its numeric scroll
+     offset while the row moves to its new recency slot. */
+  overflow-anchor: none;
   overscroll-behavior: contain;
   scrollbar-width: var(--shell-scrollbar-width, none);
   /* Bottom room keeps the final chat clear of the Settings divider.
