@@ -246,7 +246,7 @@ export default function ChatView({
   onOpenApp,
   onInternalNav,
   onMessageStart,
-  onQuestionAnswered,
+  onOwnerActivity,
   onVoiceListeningChange,
   showPicker = true,
   embedded = false,
@@ -774,8 +774,8 @@ export default function ChatView({
   // declared further down.
   const onMessageStartRef = useRef(onMessageStart)
   onMessageStartRef.current = onMessageStart
-  const onQuestionAnsweredRef = useRef(onQuestionAnswered)
-  onQuestionAnsweredRef.current = onQuestionAnswered
+  const onOwnerActivityRef = useRef(onOwnerActivity)
+  onOwnerActivityRef.current = onOwnerActivity
   const onFirstMessageRef = useRef(onFirstMessage)
   onFirstMessageRef.current = onFirstMessage
   const onStreamEndRef = useRef(onStreamEnd)
@@ -1298,6 +1298,10 @@ export default function ChatView({
         if (cid != null) pendingQueue.cancelByCid(cid)
       }
       forgetSendIntent({ cidList: steeredMessages.map(cidOf) })
+      // This event is the backend's authoritative transcript commit. Refresh
+      // the shell's chat list here so a deferred steer advances drawer recency
+      // at the cut, rather than waiting for the entire agent turn to finish.
+      onOwnerActivityRef.current?.()
     },
   })
   useEffect(() => {
@@ -2290,6 +2294,13 @@ export default function ChatView({
             pendingQueue.cancelByCid(queuedMsg.cid)
           }
         }
+        if (result?.status === 'queued' || result?.status === 'steered') {
+          // The server has accepted deliberate owner activity. In particular,
+          // queueing behind an active turn does not emit a new-run event, so
+          // the drawer must refresh from this commit boundary instead of
+          // remaining stale until the current run ends.
+          onOwnerActivityRef.current?.()
+        }
         // Race: server said "started" though we expected queued.
         if (result?.status === 'started') {
           if (Array.isArray(result.message?._consumed_cids)) {
@@ -2694,7 +2705,7 @@ export default function ChatView({
       // owner's chat list now makes this deliberate interaction visible in
       // drawer recency immediately, instead of waiting for the resumed turn to
       // finish and emit its terminal refresh.
-      onQuestionAnsweredRef.current?.()
+      onOwnerActivityRef.current?.()
       if (questionId) setLiveQuestionId(prev => prev === questionId ? null : prev)
       return true
     } catch (err) {
@@ -3143,6 +3154,10 @@ export default function ChatView({
           // cids.
           for (const c of consumePendingCids) pendingQueue.cancelByCid(c)
         }
+        // This can expose the row's already-durable enqueue recency
+        // immediately. The later steered_into_turn event refreshes again at
+        // the authoritative transcript cut, when steer recency itself moves.
+        onOwnerActivityRef.current?.()
       }
       if (result?.status !== 'steered') {
         restoreReplacedSendIntent(

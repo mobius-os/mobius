@@ -102,7 +102,7 @@ function PaneChatView({
         onOpenApp={handleOpenApp}
         onInternalNav={onInternalNav}
         onMessageStart={handleMessageStart}
-        onQuestionAnswered={refreshChats}
+        onOwnerActivity={refreshChats}
         onVoiceListeningChange={markVoiceListening}
         composerRequest={composerRequest}
         onComposerRequestHandled={onComposerRequestHandled}
