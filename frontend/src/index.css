@@ -515,9 +515,9 @@ textarea:focus-visible {
   -webkit-user-select: none;
 }
 
-/* Tool block header row (collapse toggle, status badge).  The block
-   body that shows code / tool output stays selectable. */
-.chat__tool-header,
+/* Legacy tool-block chrome stays non-selectable. Current chat tool
+   disclosures own their selection behavior in ChatView.css so the visible
+   call text can participate in an ordinary transcript selection. */
 .tool-block__header {
   user-select: none;
   -webkit-user-select: none;

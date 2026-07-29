@@ -119,6 +119,10 @@
 
 .notifications__row--link {
   cursor: pointer;
+  /* Notification title/body are reading content, not button chrome. */
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
 }
 
 .notifications__row--link:hover {

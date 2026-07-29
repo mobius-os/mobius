@@ -916,7 +916,10 @@
   min-height: 32px;
   padding: 5px 10px;
   cursor: pointer;
-  user-select: none;
+  /* This disclosure label is transcript content, not control chrome. */
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
   background: none;
   border: 0;
   text-align: left;
@@ -2899,9 +2902,14 @@
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   cursor: pointer;
   min-width: 0;
+  /* Queued text is user-authored transcript content even though a long row is
+     also a disclosure control. Override the global button selection lock. */
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
 }
 
-.queued__toggle:disabled {
+.queued__toggle--static {
   cursor: default;
 }
 

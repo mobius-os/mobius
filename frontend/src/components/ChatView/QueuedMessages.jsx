@@ -1,7 +1,11 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { ChevronDown, DoubleChevronRight, X } from '@openai/apps-sdk-ui/components/Icon'
 import { stripAugmentation } from './msgText.js'
 import { cidOf } from './chatRuntimeState.js'
+import {
+  pointerSelectionChangedWithin,
+  textSelectionSnapshot,
+} from '../../lib/selectableTextControl.js'
 
 const TRUNCATE_AT = 80
 
@@ -25,6 +29,7 @@ export default function QueuedMessages({
 }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
+  const pointerSelectionRef = useRef(null)
 
   if (!items || items.length === 0) return null
 
@@ -101,6 +106,7 @@ export default function QueuedMessages({
             const preview = firstLine.length > TRUNCATE_AT
               ? firstLine.slice(0, TRUNCATE_AT) + '…'
               : firstLine + (text.includes('\n') ? ' …' : '')
+            const MessageSurface = needsTruncation ? 'button' : 'div'
 
             return (
               <div
@@ -108,14 +114,28 @@ export default function QueuedMessages({
                 className={`queued__row${isExpanded ? ' queued__row--expanded' : ''}`}
                 role="listitem"
               >
-                <button
-                  type="button"
-                  className="queued__toggle"
-                  onPointerDown={(e) => e.preventDefault()}
-                  onClick={() => needsTruncation && toggle(key)}
-                  aria-expanded={isExpanded}
-                  aria-label={isExpanded ? 'Collapse message' : 'Expand message'}
-                  disabled={!needsTruncation}
+                <MessageSurface
+                  type={needsTruncation ? 'button' : undefined}
+                  className={`queued__toggle${needsTruncation ? '' : ' queued__toggle--static'}`}
+                  onPointerDown={needsTruncation ? () => {
+                    pointerSelectionRef.current = textSelectionSnapshot()
+                  } : undefined}
+                  onClick={needsTruncation ? (event) => {
+                    const selectionBeforePointer = pointerSelectionRef.current
+                    pointerSelectionRef.current = null
+                    if (
+                      event.detail !== 0
+                      && pointerSelectionChangedWithin(
+                        selectionBeforePointer,
+                        event.currentTarget,
+                      )
+                    ) return
+                    toggle(key)
+                  } : undefined}
+                  aria-expanded={needsTruncation ? isExpanded : undefined}
+                  aria-label={needsTruncation
+                    ? (isExpanded ? 'Collapse message' : 'Expand message')
+                    : undefined}
                 >
                   {needsTruncation && (
                     <ChevronDown
@@ -128,7 +148,7 @@ export default function QueuedMessages({
                   <span className="queued__text">
                     {isExpanded ? text : preview}
                   </span>
-                </button>
+                </MessageSurface>
                 {steerActive && (
                   // Per-row fast-forward (owner ask, 2026-07-17): the same
                   // double-chevron as the composer's steer button, in the
