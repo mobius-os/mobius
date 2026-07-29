@@ -841,10 +841,14 @@ test('large drawer lists memoize ordering and row actions without changing row o
   assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
 })
 
-test('row-owned context menus have no detached hidden-anchor path', () => {
+test('row-owned context menus keep a visible trigger without hidden anchors', () => {
   assert.match(drawer, /<DrawerItemActionMenu[\s\S]*?itemKind=\{kind\}/)
   assert.doesNotMatch(drawer, /triggerHidden|drawer__menu-anchor/)
-  assert.doesNotMatch(drawerCss, /drawer__more|drawer__menu-anchor/)
+  assert.match(drawer,
+    /className="drawer__more"[\s\S]*?aria-label=\{`More actions for \$\{label\}`\}/,
+    'drawer rows must retain an explicit keyboard and touch action trigger')
+  assert.match(drawerCss, /\.drawer__more\s*\{/)
+  assert.doesNotMatch(drawerCss, /drawer__menu-anchor/)
   assert.match(drawer, /if \(openMenu\) return[\s\S]*?onClose\?\.\(\)/,
     'Escape must close a row menu before dismissing the mobile drawer beneath it')
 })
