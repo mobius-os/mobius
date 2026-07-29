@@ -44,9 +44,10 @@ export const COMPACT_MIN_H = 520
 // Tiled and focused panes both use the full content rect edge-to-edge.
 export const PANE_GAP = 7
 
-// Height of a per-pane tab strip. A pane's CONTENT rect is its pane rect minus
-// this strip row (design §2). The renderer and the divider drag both subtract
-// it, so it lives here as the single source of truth.
+// Height of every workspace tab strip, including the flow strip used by a
+// one-leaf workspace. A pane's CONTENT rect is its pane rect minus this strip
+// row (design §2). Shell publishes it as --shell-tabstrip-height so the flow
+// and positioned renderers cannot drift.
 export const STRIP_H = 34
 
 // Multi-pane exposure waits for the pane-aware back/sentinel work (stage B).

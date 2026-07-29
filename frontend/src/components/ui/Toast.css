@@ -6,7 +6,7 @@
   position: fixed;
   top: calc(
     var(--shell-bar-height, 58px)
-    + var(--shell-tabstrip-height, 41px)
+    + var(--shell-tabstrip-height, 34px)
     + 0.5rem
     + env(safe-area-inset-top, 0px)
   );

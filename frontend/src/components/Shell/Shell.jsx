@@ -474,6 +474,7 @@ export default function Shell() {
   const shellRootStyle = useMemo(() => ({
     ...(beatRootVars || {}),
     '--desktop-sidebar-width': `${desktopSidebarWidth}px`,
+    '--shell-tabstrip-height': `${paneModel.STRIP_H}px`,
   }), [beatRootVars, desktopSidebarWidth])
   // The key SINGLE mode paints beneath / within either directional beat. It drives
   // destination AppCanvas insets before the first frame so neither direction jumps.

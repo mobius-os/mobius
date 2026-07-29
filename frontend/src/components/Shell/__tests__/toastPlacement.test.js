@@ -18,6 +18,10 @@ const shellCss = readFileSync(
   new URL('../Shell.css', import.meta.url),
   'utf8',
 )
+const paneModel = readFileSync(
+  new URL('../paneModel.js', import.meta.url),
+  'utf8',
+)
 const intentNavigation = readFileSync(
   new URL('../useAppIntentNavigation.js', import.meta.url),
   'utf8',
@@ -39,11 +43,13 @@ test('Shell keeps timeout identity stable and remounts repeated notices', () => 
 })
 
 test('toast uses shell-owned chrome geometry, not composer or font guesses', () => {
+  const stripHeight = paneModel.match(/export const STRIP_H = (\d+)/)?.[1]
+  assert.ok(stripHeight, 'paneModel must publish a numeric tab-strip height')
   assert.match(css, /right:\s*max\(1rem,\s*env\(safe-area-inset-right/)
   assert.match(css, /var\(--shell-bar-height,\s*58px\)/)
-  assert.match(css, /var\(--shell-tabstrip-height,\s*41px\)/)
+  assert.match(css, new RegExp(`var\\(--shell-tabstrip-height,\\s*${stripHeight}px\\)`))
   assert.match(shellCss, /--shell-bar-height:\s*58px/)
-  assert.match(shellCss, /--shell-tabstrip-height:\s*41px/)
+  assert.match(shell, /'--shell-tabstrip-height': `\$\{paneModel\.STRIP_H\}px`/)
   assert.match(shellCss, /height:\s*calc\(var\(--shell-bar-height\)/)
   assert.match(shellCss, /height:\s*var\(--shell-tabstrip-height\)/)
   assert.match(css, /@media \(max-width: 700px\)/)

@@ -10,9 +10,9 @@
 .shell {
   --desktop-sidebar-width: 320px;
   /* Shared geometry contract for fixed shell-level overlays. The notice rail
-     reads these instead of guessing at chrome height from the root font size. */
+     reads this instead of guessing at chrome height from the root font size.
+     Shell publishes --shell-tabstrip-height from paneModel.STRIP_H. */
   --shell-bar-height: 58px;
-  --shell-tabstrip-height: 41px;
   position: fixed;
   inset: 0;
   display: flex;
