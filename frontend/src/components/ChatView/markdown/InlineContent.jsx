@@ -37,6 +37,10 @@ function InlineToken({ token, onInternalNav, mediaDimensions }) {
     return token.text
   }
 
+  if (token.type === 'escape') {
+    return token.text
+  }
+
   // Math from marked-katex-extension.
   // displayMode:true means block-style math ($$...$$) that happened
   // to be on one line — render as block.  displayMode:false is inline.
