@@ -690,9 +690,10 @@ test.describe('Scroll position', () => {
     const initialTop = await page.evaluate(
       () => document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop ?? 0,
     )
-    await page.locator(
-      '[data-chat-surface="painted"] .chat__activity-header',
-    ).last().focus()
+    await page.getByRole('button', {
+      name: 'Ran verify keyboard scrolling',
+      exact: true,
+    }).focus()
     await page.keyboard.press('PageUp')
     await expect.poll(
       () => page.evaluate(() => (
