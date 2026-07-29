@@ -25,6 +25,7 @@ from sqlalchemy.orm import column_property
 
 from app.database import Base
 from app.timeutil import now_naive_utc
+from app.tool_output_storage import CompressedToolOutputText
 
 
 CONTINUATION_RUN_STATUSES = ("parked", "resume_pending")
@@ -777,7 +778,7 @@ class Notification(Base):
 
 
 class ToolOutput(Base):
-  """Full text of a large tool result, stored out-of-band (contract rule 6).
+  """Full text of a large tool result, stored compactly out-of-band.
 
   The chat transcript blob (`Chat.messages`) and the live / catch-up event
   stream carry only a bounded head+tail excerpt of a big tool output; the full
@@ -790,9 +791,12 @@ class ToolOutput(Base):
   lifecycle for free — soft-delete keeps them (a recovered chat re-shows its
   outputs), the hard-purge sweep drops them with their chat. Written via the
   single-writer actor's `StashToolOutput` command as an insert/upsert on the
-  composite PK (race-immune; see chat_writer.py). `create_all` builds this table
-  on the next boot — a new table needs no ALTER migration (see run_migrations,
-  which only ALTERs existing tables)."""
+  composite PK (race-immune; see chat_writer.py). The TEXT payload is a
+  self-describing compressed frame; the read boundary also accepts legacy
+  plain text while a bounded background fix-forward updates old rows. Keeping
+  one column preserves SQLite/PostgreSQL portability without a schema migration.
+  `create_all` builds this table on the next boot — a new table needs no ALTER
+  migration (see run_migrations, which only ALTERs existing tables)."""
 
   __tablename__ = "tool_outputs"
 
@@ -802,7 +806,7 @@ class ToolOutput(Base):
   # The tool_use_id (Claude) / ThreadItem id (Codex) — stable emit→read and
   # unique within the chat, which is all the composite PK needs.
   tool_use_id = Column(String(128), primary_key=True)
-  output = Column(Text, nullable=False, default="")
+  output = Column(CompressedToolOutputText(), nullable=False, default="")
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 

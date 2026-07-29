@@ -194,10 +194,16 @@ Use the exact model string from the composer's `+` picker. Effort levels vary by
 
 ```bash
 curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/status" | python3 -m json.tool
+curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/memory?process_limit=20&allocation_limit=25" | python3 -m json.tool
 curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/logs?lines=50&chat_id=$CHAT_ID" | python3 -m json.tool
 ```
 
-Use these when debugging instead of adding temporary endpoints.
+Use these when debugging instead of adding temporary endpoints. `status` is the
+cheap health view and intentionally omits variable-sized runtime payload totals;
+its `runtime_memory.payload_sizing` field points to the detailed `memory`
+report. Query flags on `status` do not enable payload sizing. Use `memory` for
+processes, maps, runtime-owner payload sizes, GC diagnostics, and optional
+allocation tracing; add `deep=true` only when a GC object-type walk is needed.
 
 ### The workspace
 

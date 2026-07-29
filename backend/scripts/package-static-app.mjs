@@ -307,7 +307,22 @@ export function packageStaticApp(opts) {
   fs.mkdirSync(path.dirname(entryPath), { recursive: true })
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
   fs.writeFileSync(entryPath, wrapperSource(opts.id, opts.name))
-  return { manifestPath, entryPath, assetCount: files.length, warnings: rewrite.warnings }
+  // Imported projects need node_modules to produce build/ or dist/, but the
+  // generated Möbius package serves only those static assets. Reclaim the
+  // dependency tree only after validation and both package files succeed, so a
+  // failed packaging attempt remains immediately rebuildable.
+  const nodeModulesPath = path.join(outDir, 'node_modules')
+  const removedNodeModules = fs.existsSync(nodeModulesPath)
+  if (removedNodeModules) {
+    fs.rmSync(nodeModulesPath, { recursive: true, force: true })
+  }
+  return {
+    manifestPath,
+    entryPath,
+    assetCount: files.length,
+    warnings: rewrite.warnings,
+    removedNodeModules,
+  }
 }
 
 function main() {
@@ -324,6 +339,9 @@ function main() {
     console.log(`package-static-app: wrote ${result.manifestPath}`)
     console.log(`package-static-app: wrote ${result.entryPath}`)
     console.log(`package-static-app: ${result.assetCount} static assets`)
+    if (result.removedNodeModules) {
+      console.log('package-static-app: removed imported node_modules')
+    }
   } catch (err) {
     console.error(`package-static-app: ${err.message}`)
     console.error(usage())

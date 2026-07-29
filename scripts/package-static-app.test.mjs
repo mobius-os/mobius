@@ -36,6 +36,7 @@ test('packages a built static app and rewrites root asset refs', () => {
   write(path.join(build, 'static/media/pixel.png'), 'png')
   write(path.join(build, 'fonts.css'), '@font-face{src:url("/fonts/commando.ttf")}')
   write(path.join(build, 'fonts/commando.ttf'), 'font')
+  write(path.join(repo, 'node_modules/demo/package.json'), '{"name":"demo"}')
 
   const result = packageStaticApp({
     id: '3d-demo',
@@ -64,6 +65,8 @@ test('packages a built static app and rewrites root asset refs', () => {
   assert.equal(manifest.static_assets['static/js/main.js'], 'build/static/js/main.js')
   assert.equal(manifest.static_assets['static/js/main.js.map'], undefined)
   assert.equal(manifest.permissions.cross_app_access, 'none')
+  assert.equal(result.removedNodeModules, true)
+  assert.equal(fs.existsSync(path.join(repo, 'node_modules')), false)
 
   const wrapper = fs.readFileSync(path.join(repo, 'index.jsx'), 'utf8')
   assert.match(wrapper, /function Mobius3dDemoApp/)
@@ -76,6 +79,7 @@ test('fails when CSS references an unresolved local asset', () => {
   const build = path.join(repo, 'dist')
   write(path.join(build, 'index.html'), '<link rel="stylesheet" href="./main.css">')
   write(path.join(build, 'main.css'), '.missing{background:url(/missing.png)}')
+  write(path.join(repo, 'node_modules/demo/package.json'), '{"name":"demo"}')
 
   assert.throws(
     () => packageStaticApp({
@@ -88,6 +92,7 @@ test('fails when CSS references an unresolved local asset', () => {
     }),
     /unresolved CSS url/,
   )
+  assert.equal(fs.existsSync(path.join(repo, 'node_modules')), true)
 })
 
 test('refuses to overwrite package files without force', () => {

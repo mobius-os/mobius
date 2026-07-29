@@ -40,6 +40,11 @@ from app.resource_access import (
 )
 from app.schemas import ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
+from app.tool_output_storage import (
+  TOOL_OUTPUT_STORAGE_PREFIX,
+  decode_tool_output,
+  tool_output_length,
+)
 
 log = logging.getLogger(__name__)
 
@@ -63,11 +68,10 @@ app_chat_router = APIRouter(prefix="/api/app-chats", tags=["app-chats"])
 # browser's sessionStorage, which is the user's problem to preserve.
 EMPTY_CHAT_GRACE = timedelta(hours=24)
 
-# The expanded tool UI renders at most this much text. Slice in SQLite so a
-# multi-megabyte result is never materialized in the API process or browser just
-# to paint the preview. Read one extra sentinel character to detect truncation
-# without making SQLite scan the full value with ``length()``. The exact value
-# remains available through the same endpoint when the user explicitly copies.
+# The expanded tool UI renders at most this much text. Compressed rows inflate
+# only this bounded prefix for preview; legacy plain-text rows are sliced after
+# their normal database read. The exact value remains available through the
+# same endpoint when the user explicitly copies.
 TOOL_OUTPUT_PREVIEW_CHARS = 20_000
 THINKING_TRACE_PREVIEW_CHARS = 20_000
 
@@ -99,31 +103,44 @@ def _project_legacy_memory_recall_sidecars(
   if not tool_ids:
     return messages
 
-  # ``substr(text, start, length)`` and this CASE expression work on both
-  # SQLite and PostgreSQL. Avoid SQLite's convenient negative-start extension
-  # so the read contract stays portable.
-  output_length = func.length(models.ToolOutput.output)
-  tail_start = case(
+  # Keep legacy plain-text reads bounded in SQL. A compressed frame must be
+  # selected whole so the codec can inflate its tail, but it is already much
+  # smaller than the original note bodies.
+  stored_output = cast(models.ToolOutput.output, Text)
+  output_length = func.length(stored_output)
+  legacy_tail_start = case(
     (
       output_length > MAX_RECALL_RESULT_SCAN_CHARS,
       output_length - MAX_RECALL_RESULT_SCAN_CHARS + 1,
     ),
     else_=1,
   )
-  rows = db.query(
-    models.ToolOutput.tool_use_id,
-    func.substr(
-      models.ToolOutput.output,
-      tail_start,
+  stored_or_legacy_tail = case(
+    (
+      func.substr(
+        stored_output, 1, len(TOOL_OUTPUT_STORAGE_PREFIX),
+      ) == TOOL_OUTPUT_STORAGE_PREFIX,
+      stored_output,
+    ),
+    else_=func.substr(
+      stored_output,
+      legacy_tail_start,
       MAX_RECALL_RESULT_SCAN_CHARS,
     ),
+  )
+  rows = db.query(
+    models.ToolOutput.tool_use_id,
+    stored_or_legacy_tail,
   ).filter(
     models.ToolOutput.chat_id == chat_id,
     models.ToolOutput.tool_use_id.in_(tool_ids),
   ).all()
   return project_legacy_memory_recalls(
     messages,
-    output_tails={tool_use_id: tail for tool_use_id, tail in rows},
+    output_tails={
+      tool_use_id: decode_tool_output(stored)[-MAX_RECALL_RESULT_SCAN_CHARS:]
+      for tool_use_id, stored in rows
+    },
     live_message=live_message,
   )
 
@@ -1368,29 +1385,33 @@ def get_tool_output_by_id(
     models.ToolOutput.chat_id == chat_id,
     models.ToolOutput.tool_use_id == tool_use_id,
   )
-  if preview:
-    row = query.with_entities(
-      func.substr(models.ToolOutput.output, 1, TOOL_OUTPUT_PREVIEW_CHARS + 1),
-    ).first()
-  else:
-    row = query.first()
+  # Cast away the ORM compression type so preview decoding can inflate only
+  # the requested prefix rather than materializing the full original value.
+  row = query.with_entities(
+    cast(models.ToolOutput.output, Text),
+  ).first()
   if row is None:
     if is_chat_running(chat_id):
       return Response(status_code=202, headers={"Retry-After": "1"})
     raise HTTPException(status_code=404, detail="tool output not found")
 
   if preview:
-    output = (row[0] or "")
-    preview_complete = len(output) <= TOOL_OUTPUT_PREVIEW_CHARS
+    preview_complete = tool_output_length(
+      row[0]
+    ) <= TOOL_OUTPUT_PREVIEW_CHARS
+    output = decode_tool_output(
+      row[0],
+      max_chars=TOOL_OUTPUT_PREVIEW_CHARS,
+    )
     return PlainTextResponse(
-      output[:TOOL_OUTPUT_PREVIEW_CHARS],
+      output,
       headers={
         "Cache-Control": "private, no-store",
         "X-Tool-Output-Complete": "1" if preview_complete else "0",
       },
     )
   return PlainTextResponse(
-    row.output or "",
+    decode_tool_output(row[0]),
     headers={"Cache-Control": "private, no-store"},
   )
 

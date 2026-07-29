@@ -7,7 +7,7 @@ carrying tool identity + truncation metadata onto the persisted block."""
 import json
 import uuid
 
-from sqlalchemy import event as sqlalchemy_event
+from sqlalchemy import Text, cast, event as sqlalchemy_event, text as sql_text
 
 from app import models
 from app.chat_transcript import project_messages_for_detail
@@ -22,11 +22,27 @@ from app.events import (
     process_event,
 )
 from app.routes.chats import TOOL_OUTPUT_PREVIEW_CHARS
+from app.tool_output_storage import (
+    TOOL_OUTPUT_STORAGE_PREFIX,
+    compress_legacy_tool_output_batch,
+    decode_tool_output,
+)
 
 
 def _flush_writer():
     """Barrier proves the fire-and-forget stash already processed."""
     get_writer().submit(Barrier()).result(timeout=5)
+
+
+def _raw_tool_output(db, chat_id, tool_use_id):
+    return db.execute(
+        models.ToolOutput.__table__.select()
+        .with_only_columns(cast(models.ToolOutput.output, Text))
+        .where(
+            models.ToolOutput.chat_id == chat_id,
+            models.ToolOutput.tool_use_id == tool_use_id,
+        )
+    ).scalar_one()
 
 
 # -- actor round-trip -----------------------------------------------------
@@ -41,6 +57,9 @@ def test_stash_round_trip_insert_and_read_back(db):
     ).first()
     assert row is not None
     assert row.output == big
+    stored = _raw_tool_output(db, "c1", "tu_1")
+    assert stored.startswith(TOOL_OUTPUT_STORAGE_PREFIX)
+    assert decode_tool_output(stored) == big
 
 
 def test_stash_upsert_last_write_wins(db):
@@ -56,6 +75,32 @@ def test_stash_upsert_last_write_wins(db):
     ).all()
     assert len(rows) == 1
     assert rows[0].output == "second"
+
+
+def test_legacy_tool_output_backfill_is_bounded_and_idempotent(db):
+    big = "legacy\n" * 5000
+    db.execute(sql_text(
+        "INSERT INTO tool_outputs (chat_id, tool_use_id, output) "
+        "VALUES (:chat_id, :tool_use_id, :output)"
+    ), {"chat_id": "c1", "tool_use_id": "legacy", "output": big})
+    db.commit()
+
+    from app.database import SessionLocal
+    first = compress_legacy_tool_output_batch(
+        SessionLocal,
+        batch_size=1,
+    )
+    assert first["compressed"] == 1
+    db.expire_all()
+    stored = _raw_tool_output(db, "c1", "legacy")
+    assert stored.startswith(TOOL_OUTPUT_STORAGE_PREFIX)
+    assert decode_tool_output(stored) == big
+
+    second = compress_legacy_tool_output_batch(
+        SessionLocal,
+        batch_size=1,
+    )
+    assert second["compressed"] == 0
 
 
 def test_stash_ignores_empty_key(db):
@@ -80,7 +125,7 @@ def test_tool_output_by_id_endpoint_serves_full_text(client, auth, db):
     assert r.headers["cache-control"] == "private, no-store"
 
 
-def test_tool_output_preview_is_sliced_in_database(client, auth, db):
+def test_tool_output_preview_inflates_only_the_bounded_prefix(client, auth, db):
     chat_id = str(uuid.uuid4())
     db.add(models.Chat(id=chat_id, title="t", messages=[]))
     db.commit()
@@ -89,31 +134,19 @@ def test_tool_output_preview_is_sliced_in_database(client, auth, db):
         StashToolOutput(chat_id=chat_id, tool_use_id="tu_preview", output=big)
     ).result(timeout=5)
 
-    statements = []
-    engine = db.get_bind()
-
-    def capture_sql(_, __, statement, *args):
-        statements.append(statement.lower())
-
-    sqlalchemy_event.listen(engine, "before_cursor_execute", capture_sql)
-    try:
-        r = client.get(
-            f"/api/chats/{chat_id}/tool-output/tu_preview?preview=1",
-            headers=auth,
-        )
-    finally:
-        sqlalchemy_event.remove(engine, "before_cursor_execute", capture_sql)
+    r = client.get(
+        f"/api/chats/{chat_id}/tool-output/tu_preview?preview=1",
+        headers=auth,
+    )
 
     assert r.status_code == 200
     assert r.text == big[:TOOL_OUTPUT_PREVIEW_CHARS]
     assert r.headers["x-tool-output-complete"] == "0"
     assert r.headers["cache-control"] == "private, no-store"
-    preview_sql = next(
-        statement for statement in statements
-        if "from tool_outputs" in statement
-    )
-    assert "substr(" in preview_sql
-    assert "length(" not in preview_sql
+    db.expire_all()
+    stored = _raw_tool_output(db, chat_id, "tu_preview")
+    assert stored.startswith(TOOL_OUTPUT_STORAGE_PREFIX)
+    assert len(stored) < len(big)
 
 
 def test_tool_output_barrier_observes_latest_queued_stash(client, auth, db):

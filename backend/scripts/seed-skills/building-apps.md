@@ -65,7 +65,7 @@ node /app/scripts/package-static-app.mjs \
   --icon icon.png
 ```
 
-The packager writes `mobius.json` and an iframe `index.jsx`, enumerates every build file as `static_assets`, rewrites root-relative HTML/CSS asset references such as `/static/js/main.js` or `/fonts/foo.ttf` when the target exists inside the build, and fails on unresolved local CSS URLs. Re-run with `--force` after edits. Verify the generated package before installing:
+The packager writes `mobius.json` and an iframe `index.jsx`, enumerates every build file as `static_assets`, rewrites root-relative HTML/CSS asset references such as `/static/js/main.js` or `/fonts/foo.ttf` when the target exists inside the build, and fails on unresolved local CSS URLs. Once packaging succeeds it removes the imported repo's `node_modules`; failed packaging leaves dependencies in place so the build can be repaired and retried. Re-run with `npm install`, rebuild, and `--force` after later source edits. Verify the generated package before installing:
 
 ```bash
 node /app/scripts/package-static-app.mjs --help

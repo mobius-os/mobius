@@ -52,7 +52,7 @@ _SECRET_KEY_CHANGED_FLAG = Path(
 
 def _runtime_memory_ownership(*, include_payloads: bool = True) -> dict:
   """Cheap cardinality/payload diagnostics from each long-lived owner."""
-  return {
+  report = {
     "runner_handles": {
       kind.value: len(registry.handles_by_kind(kind))
       for kind in RunnerKind
@@ -67,6 +67,18 @@ def _runtime_memory_ownership(*, include_payloads: bool = True) -> dict:
     "writer": writer_memory_diagnostics(),
     "questions": question_memory_diagnostics(),
   }
+  report["payload_sizing"] = {
+    "included": include_payloads,
+    **(
+      {}
+      if include_payloads
+      else {
+        "omitted": True,
+        "detail_url": "/api/debug/memory",
+      }
+    ),
+  }
+  return report
 
 
 @router.get("/status")
@@ -90,6 +102,11 @@ def debug_status(
 
   `media_migration_failed` follows the same absent-when-healthy contract. When
   present, old chat image paths may require recovery before they render.
+
+  Runtime payload sizing is deliberately omitted from this cheap endpoint.
+  The response says so under ``runtime_memory.payload_sizing`` and points to
+  ``/api/debug/memory``; query options do not turn the status probe into the
+  detailed report.
   """
   now_monotonic = time.monotonic()
   now_wall = datetime.now(UTC).replace(tzinfo=None)

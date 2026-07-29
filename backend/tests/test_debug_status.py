@@ -64,6 +64,11 @@ def test_debug_status_shape_matches_golden(client, auth):
   assert isinstance(runtime_memory["active_sinks"], list)
   assert "present" in runtime_memory["writer"]
   assert runtime_memory["questions"]["pending_count"] >= 0
+  assert runtime_memory["payload_sizing"] == {
+    "included": False,
+    "omitted": True,
+    "detail_url": "/api/debug/memory",
+  }
   golden_path = Path(__file__).with_name("golden_debug_status.json")
   expected = json.loads(golden_path.read_text(encoding="utf-8"))
   assert payload == expected
@@ -98,3 +103,20 @@ def test_debug_memory_report_is_authenticated_and_bounded(client, auth):
   assert "top_tracked_types" not in payload["gc"]
   assert "enabled" in payload["allocations"]
   assert "checkpoints" in payload
+  assert payload["runtime_memory"]["payload_sizing"] == {"included": True}
+
+
+def test_debug_status_does_not_silently_enable_guessed_payload_option(
+  client, auth,
+):
+  response = client.get(
+    "/api/debug/status?include_payloads=true",
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  assert response.json()["runtime_memory"]["payload_sizing"] == {
+    "included": False,
+    "omitted": True,
+    "detail_url": "/api/debug/memory",
+  }

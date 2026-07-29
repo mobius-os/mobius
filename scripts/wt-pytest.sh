@@ -14,6 +14,7 @@
 # Usage (from anywhere inside a worktree or the main checkout):
 #   scripts/wt-pytest.sh                       # full suite
 #   scripts/wt-pytest.sh tests/test_foo.py -q  # a subset — args pass through
+#   scripts/wt-pytest.sh backend/tests/test_foo.py -q  # repo-relative also works
 #   scripts/wt-pytest.sh -k name -x            # any pytest args
 #
 # Bypass the deps resolution by exporting SECRET_KEY yourself; this script
@@ -85,6 +86,18 @@ else
 fi
 ESB_DIR="$NODE_MODULES/.bin"
 
+# The runner changes cwd to backend/ before invoking pytest. Accept both the
+# backend-relative paths documented by pytest and the natural repo-relative
+# paths callers get from search output, so a harmless path prefix does not
+# require a failed run and retry.
+PYTEST_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    backend/tests/*) PYTEST_ARGS+=("${arg#backend/}") ;;
+    *) PYTEST_ARGS+=("$arg") ;;
+  esac
+done
+
 if [ -x "$VENV" ]; then
   PYTHON="$VENV"
 elif python3 -c 'import pytest' >/dev/null 2>&1; then
@@ -119,4 +132,4 @@ exec env \
   PATH="$ESB_DIR:${PATH:-}" \
   NODE_PATH="$NODE_MODULES${NODE_PATH:+:$NODE_PATH}" \
   SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}" \
-  "$PYTHON" -m pytest -p no:cacheprovider "$@"
+  "$PYTHON" -m pytest -p no:cacheprovider "${PYTEST_ARGS[@]}"

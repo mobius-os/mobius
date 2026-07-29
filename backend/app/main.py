@@ -538,6 +538,7 @@ async def lifespan(app):
   _reset_park_task = None
   _browser_profile_task = None
   _writer_supervisor_task = None
+  _tool_output_compression_task = None
   try:
     from app.chat import (
       sweep_idle_pending_chats,
@@ -622,6 +623,55 @@ async def lifespan(app):
         len(_restart_fallback_chats),
         len(_startup_continuations),
       )
+
+    async def _compress_legacy_tool_outputs():
+      """Fix old side-table rows forward without delaying readiness."""
+      from app.tool_output_storage import compress_legacy_tool_output_batch
+
+      total_rows = 0
+      raw_chars = 0
+      stored_chars = 0
+      after_chat_id = None
+      after_tool_use_id = None
+      try:
+        while True:
+          report = await _asyncio.to_thread(
+            compress_legacy_tool_output_batch,
+            _SweepSession,
+            batch_size=16,
+            after_chat_id=after_chat_id,
+            after_tool_use_id=after_tool_use_id,
+          )
+          if not int(report["scanned"]):
+            break
+          count = int(report["compressed"])
+          total_rows += count
+          raw_chars += int(report["raw_chars"])
+          stored_chars += int(report["stored_chars"])
+          after_chat_id = report["last_chat_id"]
+          after_tool_use_id = report["last_tool_use_id"]
+          await _asyncio.sleep(0.01)
+      except _asyncio.CancelledError:
+        raise
+      except Exception as _exc:
+        _log.error(
+          "legacy tool-output compression failed: %s", _exc, exc_info=True,
+        )
+        return
+      if total_rows:
+        _log.info(
+          "compressed %d legacy tool output(s): %d -> %d stored characters",
+          total_rows,
+          raw_chars,
+          stored_chars,
+        )
+
+    # Starts only after lifespan yields, so compression never delays the
+    # readiness transition. Exact-value compare-and-swap protects a tool row
+    # refreshed concurrently while short transactions yield between batches.
+    _tool_output_compression_task = _asyncio.create_task(
+      _compress_legacy_tool_outputs()
+    )
 
     async def _reset_park_loop():
       try:
@@ -715,6 +765,8 @@ async def lifespan(app):
       _browser_profile_task.cancel()
     if _writer_supervisor_task is not None:
       _writer_supervisor_task.cancel()
+    if _tool_output_compression_task is not None:
+      _tool_output_compression_task.cancel()
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.
