@@ -711,8 +711,8 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
-    margin-top: 58px;
+    gap: 0;
+    margin-top: 54px;
   }
 
   .shell__rail-action {
@@ -754,11 +754,24 @@
     display: none;
   }
 
+  /* Keep the panel within the drawer gutter while it is narrow, then move its
+     left edge so the capped panel continues to follow the resizable right edge. */
   .shell--drawer-docked .notifications {
+    --notifications-panel-max-width: 390px;
     top: 66px;
     right: auto;
-    left: 12px;
-    width: min(390px, calc(var(--desktop-sidebar-width) - 24px));
+    left: max(
+      12px,
+      calc(
+        var(--desktop-sidebar-width)
+        - var(--notifications-panel-max-width)
+        - 12px
+      )
+    );
+    width: min(
+      var(--notifications-panel-max-width),
+      calc(var(--desktop-sidebar-width) - 24px)
+    );
     max-height: calc(100dvh - 78px);
   }
 

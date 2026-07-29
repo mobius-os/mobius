@@ -170,28 +170,20 @@
 
 /* ── New chat ──────────────────────────────────────── */
 
-/* Outlined pill — visually distinct from the chat/app rows below
-   so a tap-friendly "start fresh" affordance reads as a primary
-   action, not just another list item. The hairline border sets it
-   apart; no horizontal margin so its left/right edges align with
-   the chat rows + Settings row (all at the drawer's 12px gutter).
-   Earlier the pill had `margin: 0 4px` which pushed its content
-   16px from the drawer edge while every other row was at 12px —
-   the misalignment read as a layout bug to the eye. New chat and Apps
-   are consecutive primary navigation actions, so they share the same
-   uninterrupted row rhythm. */
+/* Placement and weight distinguish the fixed primary action; keeping the base
+   row treatment makes New chat feel like part of the navigation rather than a
+   separate card. */
 .drawer__item--new {
   color: var(--text);
   font-weight: 500;
   margin: 0;
   padding: 11px 12px;
-  border: 1px solid var(--border);
+  min-height: 44px;
 }
 
 .drawer__item--new:hover {
   color: var(--text);
   background: var(--surface);
-  border-color: var(--border-light);
 }
 
 /* ── Navigation sections ──────────────────────────── */
@@ -781,8 +773,10 @@
    larger 15px labels preserve the rail's stronger visual weight when expanded.
    Mobile has no collapsed rail, so it keeps its existing compact drawer scale. */
 @media (min-width: 1024px) {
+  /* 58px drawer header + 8px body inset matches the collapsed rail's 66px
+     action start; the shared 40px row height keeps Apps aligned too. */
   .drawer__body {
-    padding: 12px 8px max(12px, env(safe-area-inset-bottom));
+    padding: 8px 8px max(12px, env(safe-area-inset-bottom));
   }
 
   .drawer__item,
