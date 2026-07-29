@@ -87,35 +87,49 @@ test('QuestionCard gives the custom answer area a durable accessible name', () =
   assert.match(source, /placeholder=\{answered \? 'No custom answer' : 'Or type your own answer…'\}/)
 })
 
-test('message sources expose list semantics, keyboard focus, and touch targets', () => {
+test('message references are an accessible lazy disclosure with safe links', () => {
   const source = read('../MessageSources.jsx')
-  const webSources = source.slice(source.indexOf('{sources.map('))
   const msgContent = read('../MsgContent.jsx')
   const css = read('../ChatView.css')
+  const favicon = read('../SourceFavicon.jsx')
 
+  assert.match(source, />References<\/span>/)
+  assert.match(source, /aria-expanded=\{open\}/)
+  assert.match(source, /aria-controls=\{bodyId\}/)
+  assert.match(source, /hidden=\{!open\}/)
+  assert.match(source, /\{open && loadedSources !== null && \(/,
+    'reference links and favicons must not mount while collapsed')
+  assert.match(source, /message-sources.*message_index=/s,
+    'historical metadata should have a dedicated lazy read path')
+  assert.match(source, /if \(!open \|\| loadedSources !== null/,
+    'the metadata read must not begin before expansion')
   assert.match(source,
-    /<section className="chat__sources" aria-label="Sources for this answer">/)
-  assert.doesNotMatch(source, />Sources</,
-    'source links should stand on their own at the end of the answer')
-  assert.match(source, /<ul className="chat__sources-list">/)
+    /<ul className="chat__sources-list" aria-label="References for this answer">/)
   assert.match(msgContent,
     /msg\.role === 'assistant' && !isStreaming && \(\s*<MessageSources/,
-    'source links should appear once the answer has settled, not move during streaming')
+    'the collapsed reference row should appear only after the answer settles')
+  assert.match(msgContent, /sourceRef=\{msg\.source_ref\}/)
   assert.match(source,
     /<li key=\{source\.url\} className="chat__source-item chat__source-item--web">/)
   assert.match(source, /aria-label=\{`\$\{label\}.*opens in a new tab/)
-  assert.match(webSources, /className="chat__source-icon" aria-hidden="true"/)
-  assert.match(webSources, /\{sourceMark\(host\)\}/,
-    'a recognisable local mark should not require a remote request')
-  assert.doesNotMatch(webSources, /<img/,
-    'message sources must not fetch cited sites from the reader browser')
-  assert.doesNotMatch(webSources, /\/proxy|apiFetch|favicon/i,
-    'merely viewing a citation should not make the server contact its site')
-  assert.doesNotMatch(webSources, /chat__source-host/,
+  assert.match(source, /<SourceFavicon/,
+    'expanded references should use the shared safe icon loader')
+  assert.doesNotMatch(source, /<img/,
+    'message sources must not fetch cited sites directly from the reader browser')
+  assert.match(favicon,
+    /apiFetch\(sourceFaviconProxyPath\(candidate\),\s*\{\s*timeoutMs:\s*FAVICON_TIMEOUT_MS/s,
+    'every favicon candidate should use the authenticated server-side proxy')
+  assert.match(favicon, /new IntersectionObserver/,
+    'off-screen source icons should not trigger eager proxy requests')
+  assert.match(favicon, /const pendingFavicons = new Map\(\)/,
+    'repeated citations should share one in-flight proxy read')
+  assert.doesNotMatch(source, /chat__source-host/,
     'web source cards should prioritise the page title rather than repeat its URL host')
   assert.match(css, /\.chat__source-chip:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/s)
   assert.match(css, /\.chat__source-chip\s*\{[^}]*border-radius:\s*999px/s)
-  assert.match(css, /@media\s*\(pointer:\s*coarse\)\s*\{\s*\.chat__source-chip\s*\{\s*min-height:\s*44px/s)
+  assert.match(css,
+    /@media\s*\(pointer:\s*coarse\)\s*\{\s*\.chat__sources-toggle,\s*\.chat__source-chip\s*\{\s*min-height:\s*44px/s,
+    'both the disclosure and its links should keep full touch targets')
 })
 
 test('the Memory search is a collapsed disclosure with linked result summaries', () => {

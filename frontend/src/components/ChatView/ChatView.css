@@ -1091,6 +1091,7 @@
 
 .chat__source-icon {
   display: inline-flex;
+  position: relative;
   align-items: center;
   justify-content: center;
   flex: 0 0 22px;
@@ -1103,6 +1104,24 @@
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
+}
+
+.chat__source-fallback {
+  line-height: 1;
+}
+
+.chat__source-favicon {
+  position: absolute;
+  inset: 3px;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  background: color-mix(in srgb, var(--accent-dim) 82%, var(--surface));
+  opacity: 0;
+}
+
+.chat__source-favicon--loaded {
+  opacity: 1;
 }
 
 .chat__source-copy {
@@ -1147,6 +1166,74 @@
   padding: 2px 8px;
 }
 
+.chat__sources-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  max-width: 100%;
+  margin: 0;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat__sources-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) {
+  .chat__sources-toggle:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--surface2) 54%, transparent);
+  }
+}
+
+.chat__sources-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.chat__sources-count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  opacity: .78;
+}
+
+.chat__sources-chevron {
+  flex: 0 0 auto;
+  transition: transform 140ms ease;
+}
+
+.chat__sources--open .chat__sources-chevron {
+  transform: rotate(180deg);
+}
+
+.chat__sources-body {
+  min-width: 0;
+  padding-top: 4px;
+}
+
+.chat__sources-status {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .chat__sources-list {
   display: grid;
   box-sizing: border-box;
@@ -1175,10 +1262,12 @@
 }
 
 @media (pointer: coarse) {
+  .chat__sources-toggle,
   .chat__source-chip { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .chat__sources-chevron,
   .chat__source-chip { transition: none; }
 }
 .chat__tool-output-more {

@@ -1263,6 +1263,32 @@ def get_chat_runtime(
   }
 
 
+@router.get("/{chat_id}/message-sources")
+def get_chat_message_sources(
+  chat_id: str,
+  message_index: int = Query(ge=0),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Return one answer's references only after its disclosure is opened."""
+  from app.chat_transcript import (
+    materialized_messages,
+    message_sources_for_detail,
+  )
+
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:read")
+  chat = get_active_chat_for_principal(db, chat_id, principal)
+  messages = materialized_messages(chat)
+  if message_index >= len(messages):
+    raise HTTPException(status_code=404, detail="Reference message not found.")
+  message = messages[message_index]
+  if not isinstance(message, dict) or message.get("role") != "assistant":
+    raise HTTPException(status_code=404, detail="Reference message not found.")
+  return {"sources": message_sources_for_detail(message)}
+
+
 @router.get("/{chat_id}/activity-detail")
 def get_chat_activity_detail(
   chat_id: str,

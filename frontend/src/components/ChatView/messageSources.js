@@ -1,11 +1,12 @@
 // Pure derivation behind the MessageSources component, kept separate so the
 // collection/dedupe contract is directly testable.
 //
-// The data already rides on the turn's tool blocks: both runners emit a
-// `tool_sources` event, backend events.py stamps it onto the WebSearch tool
-// block, and `_persisted_block` keeps tool blocks whole — so these survive
-// streaming, promotion, and reload with no second pathway and no migration.
-// Deriving rather than adding a `sources` content block is deliberate:
+// Live source data rides on the turn's tool blocks: both runners emit a
+// `tool_sources` event and the reducer stamps it onto the WebSearch block.
+// Historical compact reads replace those arrays with a message-level
+// `source_ref`; MessageSources fetches the same persisted metadata only when
+// its References disclosure opens. Deriving rather than adding a `sources`
+// content block is deliberate:
 // `tool_sources` is in the reducer's mutate-only, thinking-transparent set
 // (events.py `_THINKING_INTERRUPTING_TYPES`), so appending a sibling block
 // from it would fragment one continuous reasoning pass into many one-second
@@ -80,6 +81,18 @@ export function sourceHost(url) {
     return safeUrl ? new URL(safeUrl).host : ''
   } catch {
     // Unparseable URLs have no meaningful host chip; the title keeps the label.
+    return ''
+  }
+}
+
+// Sites commonly expose a default icon at their origin root. SourceFavicon owns
+// the authenticated proxy read; this helper only derives that conventional
+// target, keeping us independent of third-party favicon services.
+export function sourceFaviconUrl(url) {
+  try {
+    const safeUrl = safeSourceUrl(url)
+    return safeUrl ? new URL('/favicon.ico', safeUrl).href : ''
+  } catch {
     return ''
   }
 }
@@ -181,9 +194,8 @@ export function messageSources(blocks) {
   let scannedRows = 0
   outer:
   for (const block of blocks) {
-    // Compact historical activity carries the same bounded source metadata on
-    // its summary block, so citations remain visible without loading the full
-    // tool timeline merely to rediscover them.
+    // Activity support keeps older stored transcripts readable. New compact
+    // reads omit these arrays and expose a source_ref for on-demand detail.
     if (!['tool', 'activity'].includes(block?.type)
         || !Array.isArray(block.sources)) continue
     for (const rawSource of block.sources) {
@@ -191,9 +203,9 @@ export function messageSources(blocks) {
       if (scannedRows > MAX_SOURCE_ROWS_SCANNED) break outer
       const source = boundedMessageSource(rawSource)
       // The backend enforces http(s) (tool_sources.py `_safe_http_url`), but
-      // this value ends up in an <a href> that now renders unconditionally
-      // rather than behind a disclosure, so re-check the scheme here instead
-      // of trusting two upstream call sites to stay correct forever.
+      // this value ends up in an <a href> after disclosure expansion, so
+      // re-check the scheme here instead of trusting the live and lazy
+      // upstream call sites to stay correct forever.
       if (!source) continue
       const existingIndex = indexByUrl.get(source.url)
       if (existingIndex != null) {

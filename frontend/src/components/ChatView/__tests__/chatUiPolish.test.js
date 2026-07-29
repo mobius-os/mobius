@@ -109,7 +109,7 @@ test('web tool activity uses the assistant reading width', () => {
     'tool activity should grow to the assistant reading measure on web')
 })
 
-test('message sources stay inside the assistant row on narrow screens', () => {
+test('message references use a bounded responsive two-column grid', () => {
   const css = stripComments(chatCss)
   const sourcesRule = css.match(/\.chat__sources\s*\{[^}]*\}/)?.[0] || ''
   const listRule = css.match(/\.chat__sources-list\s*\{[^}]*\}/)?.[0] || ''
@@ -123,8 +123,10 @@ test('message sources stay inside the assistant row on narrow screens', () => {
     'the source section must not exceed the assistant message')
   assert.match(sourcesRule, /box-sizing:\s*border-box/,
     'section padding must be included in its width, even outside the app reset')
+  assert.match(listRule, /display:\s*grid/,
+    'expanded references should use the established grid')
   assert.match(listRule, /grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/,
-    'source cards should use the available width as two equal columns')
+    'wide reference disclosures should use two equal columns')
   assert.match(listRule, /min-width:\s*0/,
     'the grid must be allowed to shrink long source titles')
   assert.match(listRule, /width:\s*100%/,
@@ -137,10 +139,15 @@ test('message sources stay inside the assistant row on narrow screens', () => {
     'browser list indentation must not reduce the source card width')
   assert.match(itemRule, /min-width:\s*0/,
     'a grid child must be allowed to shrink long source titles')
+  assert.match(itemRule, /width:\s*100%/,
+    'each grid item should fill its column')
   assert.match(nonWebItemRule, /grid-column:\s*1\s*\/\s*-1/,
     'non-web citations should retain a full row instead of joining the source grid')
   assert.match(chipRule, /width:\s*100%/,
     'each source card should fill its grid column')
+  assert.match(css,
+    /@media\s*\(max-width:\s*340px\)\s*\{\s*\.chat__sources-list\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
+    'narrow panes should fall back to one reference column')
 })
 
 test('Send, Steer, and Stop never fade through an empty replacement frame', () => {

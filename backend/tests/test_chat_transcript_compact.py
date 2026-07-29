@@ -78,10 +78,15 @@ def test_compacts_multi_step_activity_and_preserves_render_metadata():
         "idx": 3,
       },
     ],
-    "sources": [source],
   }
+  assert compact[0]["source_ref"] == {
+    "message_index": 40,
+    "count": 1,
+  }
+  assert all("sources" not in block for block in compact[0]["blocks"])
   assert compact[0]["blocks"][2] == {"type": "text", "content": "After"}
   assert messages[0]["blocks"][2]["output"] == "large output"
+  assert messages[0]["blocks"][2]["sources"] == [source]
 
 
 def test_repeated_activity_metadata_is_bounded_by_variety():
@@ -249,6 +254,75 @@ def test_compact_route_defers_activity_detail_until_expansion(client, auth):
   entries = detail.json()["entries"]
   assert entries[0]["item"]["content"] == "private trace"
   assert entries[1]["item"]["output"] == "hello"
+
+
+def test_compact_route_defers_reference_metadata_until_expansion(client, auth):
+  first = {
+    "title": "First title",
+    "url": "https://example.com/first",
+  }
+  enriched = {
+    "title": "Useful duplicate title",
+    "url": "https://example.com/duplicate",
+    "snippet": "Context loaded only after expansion.",
+  }
+  messages = [{
+    "role": "assistant",
+    "content": "Sourced answer",
+    "blocks": [
+      {
+        "type": "tool",
+        "tool": "WebSearch",
+        "status": "done",
+        "sources": [
+          first,
+          {
+            "title": "https://example.com/duplicate",
+            "url": "https://example.com/duplicate",
+          },
+        ],
+      },
+      {
+        "type": "tool",
+        "tool": "WebSearch",
+        "status": "done",
+        "sources": [enriched, first],
+      },
+      {"type": "text", "content": "Sourced answer"},
+    ],
+  }]
+  created = client.post(
+    "/api/chats",
+    headers=auth,
+    json={"title": "Lazy references", "messages": messages},
+  )
+  assert created.status_code == 200
+  chat_id = created.json()["id"]
+
+  compact = client.get(
+    f"/api/chats/{chat_id}?limit=20&compact=1",
+    headers=auth,
+  )
+  assert compact.status_code == 200
+  message = compact.json()["messages"][0]
+  assert message["source_ref"] == {"message_index": 0, "count": 2}
+  assert all(
+    "sources" not in block
+    for block in message["blocks"]
+    if isinstance(block, dict)
+  )
+  assert "Context loaded only after expansion." not in compact.text
+
+  sources = client.get(
+    f"/api/chats/{chat_id}/message-sources?message_index=0",
+    headers=auth,
+  )
+  assert sources.status_code == 200
+  assert sources.json() == {"sources": [first, enriched]}
+  assert client.get(
+    f"/api/chats/{chat_id}/message-sources?message_index=9",
+    headers=auth,
+  ).status_code == 404
 
 
 def test_activity_detail_queries_only_candidate_tool_sidecars(

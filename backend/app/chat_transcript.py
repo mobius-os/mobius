@@ -9,6 +9,7 @@ from app.memory_recall import (
   recall_from_tool_block,
   settle_recall,
 )
+from app.tool_sources import normalize_tool_sources
 
 
 _QUESTION_TOOLS = {"AskUserQuestion", "request_user_input"}
@@ -16,7 +17,7 @@ _IMAGE_PATH_RE = re.compile(
   r"\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)(?:[?#].*)?$",
   re.IGNORECASE,
 )
-_MAX_COMPACT_SOURCES = 24
+_MAX_SOURCE_ROWS_SCANNED = 512
 MAX_ACTIVITY_DETAIL_BLOCKS = 2000
 
 
@@ -118,6 +119,33 @@ def historical_tool_output_ids(
         continue
       ids.add(block["tool_use_id"])
   return ids
+
+
+def message_sources_for_detail(message: dict) -> list[dict[str, str]]:
+  """Return one answer's bounded, safe, first-seen web references.
+
+  Persisted source metadata belongs to the tool blocks that discovered it.
+  Compact transcript reads expose only a count + message index, while the
+  dedicated read endpoint calls this same derivation when the owner expands
+  References. Keeping both projections behind one function prevents the
+  collapsed count and expanded list from drifting.
+  """
+  blocks = message.get("blocks") if isinstance(message, dict) else None
+  if not isinstance(blocks, list):
+    return []
+
+  rows: list[dict] = []
+  for block in blocks:
+    if not isinstance(block, dict) or not isinstance(block.get("sources"), list):
+      continue
+    remaining = _MAX_SOURCE_ROWS_SCANNED - len(rows)
+    if remaining <= 0:
+      break
+    rows.extend(
+      source for source in block["sources"][:remaining]
+      if isinstance(source, dict)
+    )
+  return normalize_tool_sources(rows)
 
 
 def legacy_memory_recall_output_ids(
@@ -335,22 +363,6 @@ def _compact_activity_run(
   *,
   message_index: int,
 ) -> dict:
-  sources: list[dict] = []
-  seen_source_urls: set[str] = set()
-  for _, block in blocks:
-    for source in block.get("sources") or []:
-      if not isinstance(source, dict):
-        continue
-      url = source.get("url")
-      if not isinstance(url, str) or not url or url in seen_source_urls:
-        continue
-      seen_source_urls.add(url)
-      sources.append(source)
-      if len(sources) >= _MAX_COMPACT_SOURCES:
-        break
-    if len(sources) >= _MAX_COMPACT_SOURCES:
-      break
-
   start = blocks[0][0]
   end = blocks[-1][0] + 1
   return {
@@ -363,7 +375,6 @@ def _compact_activity_run(
     "tool_count": sum(
       block.get("type") == "tool" for _, block in blocks
     ),
-    **({"sources": sources} if sources else {}),
   }
 
 
@@ -394,6 +405,7 @@ def compact_messages_for_detail(
     if not isinstance(blocks, list):
       continue
 
+    sources = message_sources_for_detail(message)
     has_question = any(
       isinstance(block, dict) and block.get("type") == "question"
       for block in blocks
@@ -451,16 +463,38 @@ def compact_messages_for_detail(
         next_blocks.append(block)
     flush()
 
-    if not changed:
+    if not changed and not sources:
       continue
     if projected is None:
       projected = list(messages)
     next_message = dict(message)
+    if sources:
+      # Historical source cards are deliberately absent from the ordinary
+      # transcript payload. A single source_ref paints the collapsed row and
+      # names the exact immutable message the expansion endpoint must read.
+      # Single-tool answers do not pass through _compact_activity_run, so
+      # remove source arrays from those blocks here as well.
+      source_free_blocks: list[dict] | None = None
+      for block_index, block in enumerate(next_blocks):
+        if not isinstance(block, dict) or "sources" not in block:
+          continue
+        if source_free_blocks is None:
+          source_free_blocks = list(next_blocks)
+        next_block = dict(block)
+        next_block.pop("sources", None)
+        source_free_blocks[block_index] = next_block
+      if source_free_blocks is not None:
+        next_blocks = source_free_blocks
+      next_message["source_ref"] = {
+        "message_index": message_offset + page_index,
+        "count": len(sources),
+      }
     next_message["blocks"] = next_blocks
     # Assistant content duplicates its text blocks. Once blocks are present,
     # copying and rendering already read those blocks, so the duplicate string
     # only inflates parse/cache cost.
-    next_message.pop("content", None)
+    if changed:
+      next_message.pop("content", None)
     projected[page_index] = next_message
 
   return projected if projected is not None else messages

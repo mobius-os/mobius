@@ -8,6 +8,7 @@ import {
   messageSources,
   safeSourceUrl,
   sourceDisplayLabels,
+  sourceFaviconUrl,
   sourceHost,
   sourceLabel,
 } from '../messageSources.js'
@@ -29,7 +30,7 @@ test('collects sources across every tool block in the message', () => {
   assert.deepEqual(messageSources(blocks).map(s => s.title), ['A', 'B'])
 })
 
-test('compact activity summaries preserve message-level source chips', () => {
+test('legacy compact activity source metadata remains readable', () => {
   const blocks = [{
     type: 'activity',
     entries: [],
@@ -107,10 +108,10 @@ test('valid URLs are trimmed before rendering and deduping', () => {
   assert.equal(safeSourceUrl('  HTTPS://ok.example/z  '), 'HTTPS://ok.example/z')
 })
 
-// The chips now render unconditionally at the end of every answer rather than
-// behind a disclosure, so the scheme is re-checked here instead of trusting the
-// two runner call sites to stay correct forever. A `javascript:` string is a
-// perfectly ordinary non-empty string, so an emptiness check is not a guard.
+// The chips render after disclosure expansion, so the scheme is re-checked here
+// instead of trusting the live stream and lazy endpoint to stay correct forever.
+// A `javascript:` string is an ordinary non-empty string, so emptiness is not a
+// safety guard.
 test('only http(s) URLs are collected — no javascript:/data:/mailto:', () => {
   const blocks = [tool([
     { title: 'xss', url: 'javascript:alert(1)' },
@@ -132,6 +133,15 @@ test('non-array input is tolerated (a message with no blocks)', () => {
 test('sourceHost returns the host, and empty string for an unparseable URL', () => {
   assert.equal(sourceHost('https://www.example.com/a/b'), 'www.example.com')
   assert.equal(sourceHost('not a url'), '')
+})
+
+test('sourceFaviconUrl uses the safe source origin and rejects malformed URLs', () => {
+  assert.equal(
+    sourceFaviconUrl('https://www.example.com/a/b?next=1'),
+    'https://www.example.com/favicon.ico',
+  )
+  assert.equal(sourceFaviconUrl('javascript:alert(1)'), '')
+  assert.equal(sourceFaviconUrl('not a url'), '')
 })
 
 // Codex's WebSearchThreadItem exposes a URL only on its openPage/findInPage
