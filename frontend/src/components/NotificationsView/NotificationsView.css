@@ -30,13 +30,40 @@
   font-weight: 650;
 }
 
+.notifications__clear {
+  margin-left: auto;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.notifications__clear:hover:not(:disabled) {
+  background: var(--surface);
+}
+
+.notifications__clear:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.notifications__clear:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .notifications__close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 44px;
   height: 44px;
-  margin-left: auto;
+  margin-left: 2px;
   padding: 0;
   border: 0;
   border-radius: 10px;
@@ -66,6 +93,11 @@
   padding: 24px 16px;
   color: var(--muted);
   font-size: 14px;
+}
+
+.notifications__hint--error {
+  padding-block: 12px;
+  color: var(--danger);
 }
 
 .notifications__empty {

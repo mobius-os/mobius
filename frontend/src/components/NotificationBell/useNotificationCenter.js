@@ -23,6 +23,12 @@ export default function useNotificationCenter(queryClient) {
       .catch(() => { /* Offline is safe: the unread count retries later. */ })
   ), [queryClient])
 
+  const clearAll = useCallback(async () => {
+    await api.notifications.clearAll()
+    queryClient.setQueryData(notificationQueries.list.key, [])
+    queryClient.setQueryData(notificationQueries.unreadCount.key, 0)
+  }, [queryClient])
+
   useEffect(() => {
     if (open) void markSeen()
   }, [open, markSeen])
@@ -59,7 +65,7 @@ export default function useNotificationCenter(queryClient) {
 
   return {
     state: { open, unreadCount },
-    actions: { toggle, close, reconcile, onCreated },
+    actions: { toggle, close, clearAll, reconcile, onCreated },
     meta: { rootRef, bellRef },
   }
 }

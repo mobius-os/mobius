@@ -70,3 +70,26 @@ def test_notification_action_targets_round_trip(client, auth):
   actions = {a["action"]: a["target"] for a in (row["actions"] or [])}
   assert actions["open_app"] == "/shell/?app=7"
   assert actions["open_chat"] == "/shell/?chat=c-7"
+
+
+def test_clear_notifications_deletes_owner_history(client, auth):
+  for title in ["One", "Two"]:
+    r = client.post(
+      "/api/notifications/send",
+      headers=auth,
+      json={"title": title, "body": "Body"},
+    )
+    assert r.status_code == 200, r.text
+
+  assert len(client.get("/api/notifications", headers=auth).json()) == 2
+
+  cleared = client.delete("/api/notifications", headers=auth)
+  assert cleared.status_code == 200, cleared.text
+  assert cleared.json()["deleted"] == 2
+  assert client.get("/api/notifications", headers=auth).json() == []
+  assert client.get("/api/notifications/unread-count", headers=auth).json() == {"count": 0}
+
+  # Idempotent: a second clear is safe when the preview is already empty.
+  cleared_again = client.delete("/api/notifications", headers=auth)
+  assert cleared_again.status_code == 200, cleared_again.text
+  assert cleared_again.json()["deleted"] == 0

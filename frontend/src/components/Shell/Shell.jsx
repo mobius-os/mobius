@@ -663,6 +663,7 @@ export default function Shell() {
     actions: {
       toggle: toggleNotifications,
       close: closeNotifications,
+      clearAll: clearNotifications,
       reconcile: reconcileNotifications,
       onCreated: onNotificationCreated,
     },
@@ -3750,6 +3751,7 @@ export default function Shell() {
                 active
                 onClose={closeNotifications}
                 onOpenTarget={handleNotificationOpen}
+                onClearAll={clearNotifications}
               />
             )}
           </div>

@@ -71,6 +71,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.codex_appserver import _extract_bash_command
+from app.json_safety import json_safe
 from app.providers import MODEL_LABELS, get_skill_path
 from app.runtime_types import RunnerResult
 from app.usage_metrics import codex_cost_usd, normalize_codex_usage
@@ -1116,12 +1117,8 @@ def _extract_rate_limit_reset(snapshot) -> tuple[int | None, bool]:
 
 
 def _model_dump(value: Any) -> Any:
-  """Turns pydantic models into plain JSON-safe values."""
-  if value is None:
-    return None
-  if hasattr(value, "model_dump"):
-    return value.model_dump(by_alias=True, exclude_none=True, mode="json")
-  return value
+  """Turns provider SDK objects into plain JSON-safe values."""
+  return json_safe(value)
 
 
 def _format_json(value: Any) -> str:
