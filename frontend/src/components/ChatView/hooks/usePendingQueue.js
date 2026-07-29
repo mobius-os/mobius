@@ -27,8 +27,8 @@ import { cidOf } from '../chatRuntimeState.js'
  *   - queued:      true (marker)
  *   - serverTs:    boolean — true once the server has confirmed the row
  *                  (a confirmQueued ack or a hydrate). An optimistic add
- *                  starts false. Read by ChatView's steer gate: only a
- *                  server-confirmed row can be force-steered.
+ *                  starts false. ChatView may show steer immediately, but it
+ *                  waits for confirmation before force-steering the row.
  *   - position?:   number (server-assigned)
  *   - attachments?: array
  *
@@ -206,7 +206,8 @@ export default function usePendingQueue(initialServerList = []) {
         position: msg.position ?? prev.length + 1,
         // serverTs marks an entry whose ts is the SERVER's, not an optimistic
         // Date.now(). An optimistic add starts unconfirmed; confirmQueued flips
-        // it once the POST acks. The steer gate reads this.
+        // it once the POST acks. The steer action reads this after awaiting
+        // an optimistic row's queue write.
         serverTs: msg.serverTs === true,
       },
     ])

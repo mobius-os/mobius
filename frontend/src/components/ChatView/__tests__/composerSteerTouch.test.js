@@ -49,13 +49,28 @@ test('Send, Steer, and Stop reuse one continuously visible primary action', () =
   assert.match(sendBlock, /key="primary"/)
 })
 
-test('per-row fast-forward dispatches on touchend too', () => {
+test('per-row fast-forward appears with the optimistic row and dispatches on touchend', () => {
+  assert.match(
+    queuedMessages,
+    /\{steerActive && \(/,
+    'the row action should render before serverTs confirmation, alongside cancel',
+  )
+  assert.doesNotMatch(
+    queuedMessages,
+    /steerActive && msg\.serverTs === true/,
+    'server confirmation must not delay the row action from appearing',
+  )
   const steerBlock = queuedMessages.match(
     /className="queued__action queued__steer"[\s\S]*?aria-label="Send this queued message now"/,
   )?.[0] || ''
   assert.match(steerBlock, /onPointerDown=\{\(e\) => e\.preventDefault\(\)\}/)
   assert.match(steerBlock, /onTouchEnd=\{\(e\) => \{/)
   assert.match(steerBlock, /e\.preventDefault\(\)[\s\S]*?onSteerOne\?\.\(cidOf\(msg\)\)/)
+  assert.match(
+    chatView,
+    /async function handleSteerOne\(cid\) \{[\s\S]*?const queueWrite = queuedSendRequestsRef\.current\.get\(cid\)[\s\S]*?if \(queueWrite\) await Promise\.allSettled\(\[queueWrite\]\)[\s\S]*?const findRow/,
+    'an early row tap should await that row\'s exact queue write before steering',
+  )
 })
 
 test('the shared steer path snapshots scroll before dismissing the mobile composer', () => {

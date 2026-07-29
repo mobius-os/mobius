@@ -3288,15 +3288,17 @@ export default function ChatView({
   // cancel-X sends exactly THAT queued message into the live turn, leaving
   // its siblings queued. Same core as the fast-forward button — one cid in
   // consume_pending_cids instead of all of them; the backend already selects
-  // pending rows by cid. Only the tapped row needs server confirmation (the
-  // all-confirmed gate above exists because handleSteer consumes the whole
-  // queue); an unconfirmed row gets one reconcile retry, then bails and
-  // stays queued.
+  // pending rows by cid. The arrow renders with the optimistic row. If it is
+  // tapped before persistence settles, wait for that row's exact queue write
+  // before reading it; the existing reconcile remains the recovery path for
+  // a stale mounted client whose local confirmation flag lagged the server.
   async function handleSteerOne(cid) {
     if (handlingSteerRef.current) return
     handlingSteerRef.current = true
     setSteerBusy(true)
     try {
+      const queueWrite = queuedSendRequestsRef.current.get(cid)
+      if (queueWrite) await Promise.allSettled([queueWrite])
       const findRow = () => (pendingQueue.pendingMessagesRef.current || [])
         .find(m => cidOf(m) === cid)
       let row = findRow()
