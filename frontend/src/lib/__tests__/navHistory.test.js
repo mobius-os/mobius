@@ -198,6 +198,37 @@ test('pushNavEntry writes the tag to BOTH the History and Navigation stores', ()
   }
 })
 
+test('a Navigation store that throws cannot take down the primary History write', () => {
+  // WebKit regression (observed on an iOS standalone PWA, 2026-07-29): the
+  // Navigation API can wedge into a state where updateCurrentEntry throws
+  // InvalidStateError on every call until the page reloads. The throw used to escape AFTER
+  // history.pushState had run, killing openDrawer mid-flight on every tap.
+  // The mirror is best-effort: the classic write must land and the helper
+  // must return normally.
+  const { history } = installBrowserMocks()
+  globalThis.navigation.updateCurrentEntry = () => {
+    throw new DOMException('The object is in an invalid state.', 'InvalidStateError')
+  }
+  try {
+    const route = { view: 'chat', chatId: 'a', appId: null }
+    const pushed = pushNavEntry('drawer', route)
+    assert.equal(isMobiusNavState(pushed), true)
+    assert.equal(history.calls.length, 1)
+    assert.equal(history.calls[0].method, 'pushState')
+
+    const replaced = replaceNavEntry('base', '/shell/')
+    assert.equal(isMobiusNavState(replaced), true)
+    assert.equal(history.calls.length, 2)
+    assert.equal(history.calls[1].method, 'replaceState')
+
+    const updated = updateCurrentNavEntry(route)
+    assert.equal(isMobiusNavState(updated), true)
+    assert.equal(history.calls.length, 3)
+  } finally {
+    clearBrowserMocks()
+  }
+})
+
 test('replaceNavEntry writes the tag to BOTH stores and forwards the URL', () => {
   const { history, navigation } = installBrowserMocks()
   try {
