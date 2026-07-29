@@ -236,7 +236,7 @@ test('beside-source + foreground · phone: insert and activate', () => {
   assert.equal(out.panes.p0.activeTabKey, 'app:9', 'foreground activates the item')
 })
 
-test('live preview · phone: enters Builder without replacing its source chat', () => {
+test('live preview · phone: enters Builder and activates the app tab', () => {
   const ws = {
     ...paneModel.setViewMode(builderSeed([CHAT('a')]), 'single'),
     singleScreen: { kind: 'chat', id: 'a' },
@@ -248,8 +248,20 @@ test('live preview · phone: enters Builder without replacing its source chat', 
   )
   assert.equal(out.viewMode, 'panes', 'the live preview reveals the Builder world')
   assert.deepEqual(keysOf(out.panes.p0), ['chat:a', 'app:9'])
-  assert.equal(out.panes.p0.activeTabKey, 'chat:a',
-    'the preview is parked until the owner opens it')
+  assert.equal(out.panes.p0.activeTabKey, 'app:9',
+    'the one visible phone surface switches to the live app')
+  assert.equal(out.focusedPaneId, 'p0')
+})
+
+test('live preview · phone update: activates an app already parked beside its chat', () => {
+  const ws = builderSeed([CHAT('a'), APP(9)])
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('a', 9),
+    env(ws, { mode: 'phone', rect: { w: 400, h: 800 } }),
+  )
+  assert.equal(out.panes.p0.activeTabKey, 'app:9',
+    'later coherent updates return the phone to the live app')
   assert.equal(out.focusedPaneId, 'p0')
 })
 

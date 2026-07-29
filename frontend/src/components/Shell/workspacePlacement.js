@@ -11,10 +11,10 @@ export const PLACE_WITH_SOURCE = 'with-source'
 export const PLACE_WITH_FOCUS = 'with-focus'
 export const ACTIVATE_IN_BACKGROUND = 'background'
 export const ACTIVATE_FOREGROUND = 'foreground'
-// A live build preview is non-displacing: it may reveal the app in a new pane,
-// but it never replaces an already-visible tab. When no separate pane is
-// available it parks beside its source until the owner opens it. This is an
-// internal lifecycle intent, not an `open_item` wire value.
+// A live build preview is device-aware: wide layouts reveal it in a companion
+// pane without taking keyboard focus from chat, while phones activate the app
+// tab because there is only one visible surface. This is an internal lifecycle
+// intent, not an `open_item` wire value.
 export const ACTIVATE_LIVE_PREVIEW = 'live-preview'
 
 const PLACEMENTS = new Set([PLACE_BESIDE_SOURCE, PLACE_WITH_SOURCE, PLACE_WITH_FOCUS])
@@ -256,11 +256,13 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   const preview = activation === ACTIVATE_LIVE_PREVIEW
   const foreground = activation === ACTIVATE_FOREGROUND
   const mode = env.mode || 'wide'
-  // Foreground is the ONLY permission to replace an active tab. A preview can
-  // still become visible by creating a new pane, whose sole tab is naturally
-  // active, but an existing pane keeps whatever the owner is using.
-  const activateItem = foreground
-  const focusItem = foreground
+  // Foreground is normally the only permission to replace an active tab. A
+  // phone live preview is the deliberate exception requested by the product:
+  // its one visible Builder surface switches to the app automatically. Wider
+  // layouts keep chat active and reveal the preview in a companion pane.
+  const phonePreview = preview && mode === 'phone'
+  const activateItem = foreground || phonePreview
+  const focusItem = foreground || phonePreview
 
   // Two-worlds (finding F4): in the SINGLE world the only visible surface is the
   // slot, so a FOREGROUND agent open must SET THE SLOT — mutating the hidden pane
@@ -369,8 +371,8 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
 
   // beside-source, the device-aware table.
   if (mode === 'phone') {
-    // Phone stack: previews and generic background placements remain parked;
-    // only an explicit foreground request changes the on-screen item.
+    // Phone stack: a live preview activates the app tab automatically; generic
+    // background placements remain parked and explicit foreground still wins.
     return insertBesideSource(working, item, sourcePane, source, {
       activate: activateItem,
       focus: focusItem,
