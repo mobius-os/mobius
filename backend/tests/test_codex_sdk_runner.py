@@ -2685,6 +2685,27 @@ def test_codex_terminal_status_is_validated(
   )
 
 
+def test_chatgpt_model_rejection_explains_connection_and_recovery():
+  error = (
+    "{\"detail\":\"The 'gpt-5.6-sol' model is not supported when using "
+    "Codex with a ChatGPT account.\"}"
+  )
+
+  message = codex_sdk_runner._codex_user_error(error)
+
+  assert message == (
+    "GPT-5.6 Sol isn’t available for this ChatGPT account. Codex is "
+    "connected, but this account’s current plan or model rollout does not "
+    "include it. Choose another Codex model from this chat’s Model menu, "
+    "then try again."
+  )
+
+
+def test_unknown_codex_error_stays_verbatim():
+  error = "upstream returned 503"
+  assert codex_sdk_runner._codex_user_error(error) == error
+
+
 def test_codex_completed_turn_without_agent_message_is_not_success():
   sdk = _fake_sdk(object)
   turn = SimpleNamespace(

@@ -24,7 +24,6 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   const [code, setCode] = useState('')
   const [copyState, setCopyState] = useState(null)
   const [error, setError] = useState('')
-  const [openedAuthWindow, setOpenedAuthWindow] = useState(true)
   const pollRef = useRef(null)
   const copyTimerRef = useRef(null)
   // Generation counter for in-flight poll fetches. setInterval gets
@@ -34,10 +33,11 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   // Each startLogin bumps the gen; each poll captures it and bails
   // if it no longer matches.
   const pollGenRef = useRef(0)
-  // The sign-in tab is reserved before the auth URL exists, so every path that
-  // ends without navigating it -- failed start, network error, a cancel or
-  // unmount mid-fetch -- has to close it, or the owner is left staring at a
-  // blank tab. Holding the handle here is what lets those later paths reach it.
+  // The sign-in tab is reserved by the Copy action, not by startLogin. That
+  // ordering keeps the one-time code visible before ChatGPT opens while still
+  // satisfying popup blockers' requirement that a tab originate in a user
+  // gesture. Holding the handle here lets unmount clean up the brief blank tab
+  // if the clipboard promise is still settling.
   const authWindowRef = useRef(null)
 
   // Three callers can be checking status at once: the interval poll, a pageshow
@@ -85,12 +85,18 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
   }, [stopPolling, releaseAuthWindow])
 
-  async function copyCodeToClipboard(value = code) {
+  async function copyCodeAndOpen(value = code) {
     if (!value) return
+    const authWindow = reserveAuthWindow('Opening ChatGPT sign-in…')
+    authWindowRef.current = authWindow
     try {
       await navigator.clipboard.writeText(value)
-      showCopyState('copied')
+      const opened = navigateAuthWindow(authWindow, url)
+      if (opened) authWindowRef.current = null
+      else releaseAuthWindow()
+      showCopyState(opened ? 'copied-opened' : 'copied')
     } catch {
+      releaseAuthWindow()
       showCopyState('failed')
     }
   }
@@ -133,12 +139,9 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
   }
 
   async function startLogin() {
-    const authWindow = reserveAuthWindow('Opening Codex sign-in...')
-    authWindowRef.current = authWindow
     setError('')
     setStatus('connecting')
     setCopyState(null)
-    setOpenedAuthWindow(!!authWindow)
     // Capture the gen as of this call so a login that completes
     // after unmount/cancel doesn't transition the state machine.
     pollGenRef.current += 1
@@ -160,12 +163,6 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
       setUrl(data.url)
       setCode(data.code)
       setStatus('pending')
-      const navigated = navigateAuthWindow(authWindow, data.url)
-      setOpenedAuthWindow(navigated)
-      // Once navigated the tab belongs to the owner's sign-in flow, so stop
-      // tracking it; if it never navigated it is a blank tab worth closing.
-      if (navigated) authWindowRef.current = null
-      else releaseAuthWindow()
 
       // Poll for completion. Bump the generation again for the poll
       // loop so cancel/unmount invalidates pending /status fetches.
@@ -233,42 +230,43 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
     return (
       <div className="codex-auth">
         <p className="pa__muted">
-          Complete sign-in in your browser. {openedAuthWindow ? 'The page opened in a new tab;' : 'Open the page below;'}
-          {' '}if it asks for a code, copy this one.
+          Copy this one-time code. ChatGPT opens after it is safely on your
+          clipboard, ready for you to paste.
         </p>
         <div className="codex-auth__device">
           <div className="codex-auth__step">
-            <span className="codex-auth__step-num">1</span>
-            <span>
-              Open{' '}
-              <a href={url} target="_blank" rel="noopener noreferrer">
-                verification page
-              </a>
-            </span>
-          </div>
-          <div className="codex-auth__step">
-            <span className="codex-auth__step-num">2</span>
+            <span className="codex-auth__step-num">3</span>
             <span className="codex-auth__code-copy">
-              <span className="codex-auth__code-label">Enter code</span>
+              <span className="codex-auth__code-label">Copy your sign-in code</span>
               <code
                 className="codex-auth__code"
                 title="Click to copy"
-                onClick={() => copyCodeToClipboard()}
+                onClick={() => copyCodeAndOpen()}
               >
                 {code}
               </code>
               <button
                 type="button"
                 className="pa__btn pa__btn--sm codex-auth__copy-btn"
-                onClick={() => copyCodeToClipboard()}
+                onClick={() => copyCodeAndOpen()}
               >
-                {copyState === 'copied' ? 'Copied' : 'Copy code'}
+                {copyState?.startsWith('copied') ? 'Copied' : 'Copy code'}
               </button>
             </span>
           </div>
           {copyState === 'failed' && (
             <p className="pa__error codex-auth__copy-error" role="alert">
               Could not copy. Select the code above.
+            </p>
+          )}
+          {copyState === 'copied-opened' && (
+            <p className="pa__success codex-auth__copy-result" role="status">
+              Copied — ChatGPT opened in a new tab.
+            </p>
+          )}
+          {copyState === 'copied' && (
+            <p className="pa__muted codex-auth__copy-result" role="status">
+              Copied. If ChatGPT did not open, use Open page below.
             </p>
           )}
         </div>
@@ -310,9 +308,10 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
           <div className="codex-auth__preflight-head">
             <span className="codex-auth__step-num" aria-hidden="true">1</span>
             <div>
-              <strong>Allow device access</strong>
+              <strong>Connect ChatGPT</strong>
               <p className="pa__muted codex-auth__hint">
-                In ChatGPT, open <strong>Settings → Security</strong> and turn on
+                Open <strong>Settings → Security</strong>, scroll to the very
+                bottom, and turn on
                 {' '}<strong>Enable device code authorization for Codex</strong>.
                 This is a one-time account setting.
               </p>
@@ -324,28 +323,34 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
             target="_blank"
             rel="noopener noreferrer"
           >
-            Open ChatGPT security
+            Open ChatGPT settings
           </a>
-          <p className="pa__muted codex-auth__privacy">
-            Prefer not to have new conversations used to improve OpenAI’s
-            models? In ChatGPT, open <strong>Settings → Data Controls</strong>
-            {' '}and turn off <strong>Improve the model for everyone</strong>.
-            {' '}<a href={OPENAI_DATA_CONTROLS_URL} target="_blank" rel="noopener noreferrer">
-              OpenAI’s data-controls guide
-            </a>
-          </p>
+          <div className="codex-auth__privacy">
+            <span className="codex-auth__step-num" aria-hidden="true">2</span>
+            <div>
+              <strong>Optional: disable data sharing</strong>
+              <p className="pa__muted codex-auth__hint">
+                If you do not want new Codex conversations used to improve
+                OpenAI’s models, open <strong>Settings → Data Controls</strong>
+                {' '}and turn off <strong>Improve the model for everyone</strong>.
+                {' '}<a href={OPENAI_DATA_CONTROLS_URL} target="_blank" rel="noopener noreferrer">
+                  OpenAI’s data-controls guide
+                </a>
+              </p>
+            </div>
+          </div>
         </div>
       )}
       <div className="codex-auth__connect-step">
-        {showSetupHint && <span className="codex-auth__step-num" aria-hidden="true">2</span>}
+        {showSetupHint && <span className="codex-auth__step-num" aria-hidden="true">3</span>}
         <div>
-          {showSetupHint && <strong>Connect Codex</strong>}
+          {showSetupHint && <strong>Copy your sign-in code</strong>}
           <button
             className="pa__btn"
             onClick={startLogin}
             disabled={status === 'connecting'}
           >
-            {status === 'connecting' ? 'Starting…' : 'Continue with ChatGPT'}
+            {status === 'connecting' ? 'Getting code…' : 'Get sign-in code'}
           </button>
         </div>
       </div>

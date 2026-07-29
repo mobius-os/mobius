@@ -71,7 +71,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.codex_appserver import _extract_bash_command
-from app.providers import get_skill_path
+from app.providers import MODEL_LABELS, get_skill_path
 from app.runtime_types import RunnerResult
 from app.usage_metrics import codex_cost_usd, normalize_codex_usage
 from app.runner_registry import RunnerKind, registry
@@ -1771,6 +1771,37 @@ def _enum_wire_value(value: Any) -> str | None:
   return raw if isinstance(raw, str) else str(raw)
 
 
+_CHATGPT_MODEL_UNAVAILABLE_RE = re.compile(
+  r"[\"'](?P<model>[^\"']+)[\"'] model is not supported when using Codex "
+  r"with a ChatGPT account",
+  re.IGNORECASE,
+)
+
+
+def _codex_user_error(error_text: str | None) -> str | None:
+  """Turns a known account/model rejection into a useful next action.
+
+  The live Codex catalog can advertise a model that the signed-in account's
+  plan or staged rollout cannot actually run. The upstream 400 is technically
+  precise but reads like a broken connection and offers no recovery path.
+  Preserve every unknown provider error verbatim; only this exact, observed
+  contract gets product wording.
+  """
+  if not error_text:
+    return error_text
+  match = _CHATGPT_MODEL_UNAVAILABLE_RE.search(error_text)
+  if match is None:
+    return error_text
+  model_id = match.group("model")
+  model_name = MODEL_LABELS.get(model_id, model_id)
+  return (
+    f"{model_name} isn’t available for this ChatGPT account. Codex is "
+    "connected, but this account’s current plan or model rollout does not "
+    "include it. Choose another Codex model from this chat’s Model menu, "
+    "then try again."
+  )
+
+
 def _agent_message_phase(item: Any, sdk: dict[str, Any]) -> str | None:
   """Returns a completed agent message's native SDK phase."""
   if not isinstance(item, sdk["AgentMessageThreadItem"]):
@@ -3127,7 +3158,7 @@ async def run_codex_sdk_turn(
       result: RunnerResult = with_usage({
         "session_id": current_session_id,
         "cost_usd": None,
-        "error": error_text,
+        "error": _codex_user_error(error_text),
       })
       if terminal_status is not None:
         result["terminal_status"] = terminal_status
@@ -3166,7 +3197,7 @@ async def run_codex_sdk_turn(
     return with_usage({
       "session_id": current_session_id,
       "cost_usd": None,
-      "error": str(exc),
+      "error": _codex_user_error(str(exc)),
     })
   finally:
     if task_host_open and task_host_tool_use_id is not None:

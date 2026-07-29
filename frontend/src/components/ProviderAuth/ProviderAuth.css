@@ -156,6 +156,7 @@
 }
 
 .codex-auth__preflight-head,
+.codex-auth__privacy,
 .codex-auth__connect-step {
   display: flex;
   align-items: flex-start;
@@ -163,6 +164,7 @@
 }
 
 .codex-auth__preflight-head > div,
+.codex-auth__privacy > div,
 .codex-auth__connect-step > div {
   display: grid;
   gap: 8px;
@@ -171,6 +173,7 @@
 }
 
 .codex-auth__preflight-head strong,
+.codex-auth__privacy strong,
 .codex-auth__connect-step strong {
   color: var(--text);
   font-size: 14px;
@@ -184,7 +187,7 @@
 }
 
 .codex-auth__privacy {
-  margin: 2px 0 0 32px;
+  margin: 2px 0 0;
   padding-top: 11px;
   border-top: 1px solid var(--border-light);
   line-height: 1.5;
@@ -281,6 +284,11 @@
   margin: 2px 0 0 32px;
 }
 
+.codex-auth__copy-result {
+  margin: 2px 0 0 32px;
+  font-size: 13px;
+}
+
 .codex-auth__pending-actions {
   display: flex;
   align-items: center;
@@ -296,8 +304,7 @@
 }
 
 @media (max-width: 520px) {
-  .codex-auth__settings-link,
-  .codex-auth__privacy {
+  .codex-auth__settings-link {
     margin-left: 0;
   }
 }

@@ -4,7 +4,7 @@ const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
 test.use({ serviceWorkers: 'block' })
 
-test('Codex connects from Settings and stays authoritative when status revalidation fails', async ({ page }) => {
+test('Codex shows the code before opening ChatGPT and stays authoritative', async ({ page }) => {
   await page.addInitScript(() => {
     // Older builds persisted this provider-wizard marker. It must never pull a
     // returning owner out of the shell now that agent setup is contextual.
@@ -73,13 +73,28 @@ test('Codex connects from Settings and stays authoritative when status revalidat
 
   const codexRow = page.locator('.provider-row').filter({ hasText: 'OpenAI Codex' })
   await codexRow.getByRole('button', { name: 'Connect OpenAI Codex' }).click()
-  await expect(codexRow.getByText('Allow device access', { exact: true })).toBeVisible()
-  await expect(codexRow.getByRole('link', { name: 'Open ChatGPT security' }))
+  await expect(codexRow.getByText('Connect ChatGPT', { exact: true })).toBeVisible()
+  await expect(codexRow.getByText(/scroll to the very bottom/)).toBeVisible()
+  await expect(codexRow.getByRole('link', { name: 'Open ChatGPT settings' }))
     .toHaveAttribute('href', 'https://chatgpt.com/#settings/Security')
+  await expect(codexRow.getByText('Optional: disable data sharing', { exact: true })).toBeVisible()
   await expect(codexRow.getByText(/Improve the model for everyone/)).toBeVisible()
 
-  await codexRow.getByRole('button', { name: 'Continue with ChatGPT' }).click()
-  await expect(page.getByText('Complete sign-in in your browser.')).toBeVisible()
+  let popupCount = 0
+  page.on('popup', () => { popupCount += 1 })
+  await codexRow.getByRole('button', { name: 'Get sign-in code' }).click()
+  await expect(codexRow.getByText('TEST-CODE', { exact: true })).toBeVisible()
+  expect(popupCount).toBe(0)
+
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
+    origin: BASE,
+  })
+  const popupPromise = page.waitForEvent('popup')
+  await codexRow.getByRole('button', { name: 'Copy code' }).click()
+  const signInPage = await popupPromise
+  await expect(signInPage).toHaveURL(`${BASE}/codex-test-login`)
+  await expect(codexRow.getByText('Copied — ChatGPT opened in a new tab.')).toBeVisible()
+
   await page.evaluate(() => window.dispatchEvent(new Event('pageshow')))
 
   await expect(codexRow.getByText('Connected', { exact: true })).toBeVisible()
