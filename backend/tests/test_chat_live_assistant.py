@@ -82,7 +82,14 @@ def test_materialized_snapshot_replaces_question_barrier_row():
 
 
 def test_codex_path_wrappers_are_normalized_before_json_storage(db):
-  from openai_codex.generated.v2_all import LegacyAppPathString
+  class ProviderPathWrapper:
+    """Minimal stand-in for the Codex SDK's Pydantic root path wrapper."""
+
+    def __init__(self, value):
+      self.value = value
+
+    def model_dump(self, **_kwargs):
+      return self.value
 
   chat, _history = _chat(db)
 
@@ -91,8 +98,8 @@ def test_codex_path_wrappers_are_normalized_before_json_storage(db):
     "blocks": [{
       "type": "tool",
       "name": "exec_command",
-      "cwd": LegacyAppPathString("/data"),
-      "paths": [LegacyAppPathString("/data/platform")],
+      "cwd": ProviderPathWrapper("/data"),
+      "paths": [ProviderPathWrapper("/data/platform")],
     }],
   }) is True
 
@@ -104,7 +111,7 @@ def test_codex_path_wrappers_are_normalized_before_json_storage(db):
   outcome = finalize_response_outcome(db, chat.id, [{
     "type": "tool",
     "name": "exec_command",
-    "cwd": LegacyAppPathString("/data"),
+    "cwd": ProviderPathWrapper("/data"),
   }])
 
   db.refresh(chat)
