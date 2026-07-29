@@ -2470,7 +2470,14 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
   assert create_call[-2:] == ("--base", "main")
   assert ("push", "fork", "HEAD:refs/heads/fix/demo-polish") in git_calls
   assert sum(call[:1] == ("fetch",) for call in git_calls) == 1
-  assert not any(call[:2] == ("pr", "list") for call in gh_calls)
+  # Exactly one pre-publication truth check (`--state all`), and no
+  # ambiguous-create recovery probe on this clean-create path.
+  assert sum(
+    call[:2] == ("pr", "list") and "all" in call for call in gh_calls
+  ) == 1
+  assert not any(
+    call[:2] == ("pr", "list") and "all" not in call for call in gh_calls
+  )
   assert ("checkout", "-q", "develop") in git_calls
   assert upstream_pool_counts
   assert set(upstream_pool_counts) == {baseline_checked_out}
@@ -2609,8 +2616,18 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
   )
 
   creates = [call for call in gh_calls if call[:2] == ("pr", "create")]
-  probes = [call for call in gh_calls if call[:2] == ("pr", "list")]
+  # The pre-publication truth check is a separate `--state all` lookup; the
+  # ambiguous-create RECOVERY probe queries open PRs only. Count them apart.
+  preflights = [
+    call for call in gh_calls
+    if call[:2] == ("pr", "list") and "all" in call
+  ]
+  probes = [
+    call for call in gh_calls
+    if call[:2] == ("pr", "list") and "all" not in call
+  ]
   assert len(creates) == 1, "an ambiguous response must never trigger a second create"
+  assert len(preflights) == 1
   assert len(probes) == 1
   assert creates[0][-2:] == ("--base", "main")
   assert "url,headRefName,headRefOid,headRepositoryOwner" in probes[0]
@@ -4716,3 +4733,184 @@ def test_submit_records_where_the_owner_pressed_send(
   assert submitted.status_code == 200, submitted.text
   record_path, _ = github_routes._record_paths(app_id, "provenance")
   assert json.loads(record_path.read_text())["submitter"] == "chat-review-card"
+
+
+# ── Pre-publication branch truth check ──────────────────────────────────────
+# The reviewed-diff preflights prove WHAT would be sent; _existing_branch_pr
+# proves WHETHER it was already sent, from GitHub itself, because the
+# agent-writable ledger row can regress (2026-07-29: a merged PR's record was
+# rewritten back to `prepared`; one more Send would have force-pushed the
+# merged branch and opened a duplicate PR).
+
+
+def _branch_pr_row(url, state, branch, owner):
+  return {
+    "url": url,
+    "state": state,
+    "headRefName": branch,
+    "headRepositoryOwner": {"login": owner},
+  }
+
+
+def test_existing_branch_pr_classifies_states(tmp_path, monkeypatch):
+  from app.routes.github import _existing_branch_pr
+
+  rows = []
+
+  def fake_gh(repo_path, *args, check=True):
+    assert args[:2] == ("pr", "list") and "all" in args
+    return _cp(json.dumps(rows))
+
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+  call = lambda: _existing_branch_pr(
+    tmp_path, "mobius-os/app-demo", "octocat", "fix/x",
+  )
+
+  # Closed-without-merging stays sendable: rework-and-resend is legitimate.
+  rows = [_branch_pr_row("https://github.com/mobius-os/app-demo/pull/1",
+                         "CLOSED", "fix/x", "octocat")]
+  assert call() is None
+
+  # A different owner's or branch's PR never blocks this send.
+  rows = [
+    _branch_pr_row("https://github.com/mobius-os/app-demo/pull/2",
+                   "OPEN", "fix/x", "someone-else"),
+    _branch_pr_row("https://github.com/mobius-os/app-demo/pull/3",
+                   "OPEN", "fix/other", "octocat"),
+  ]
+  assert call() is None
+
+  rows = [_branch_pr_row("https://github.com/mobius-os/app-demo/pull/4",
+                         "MERGED", "fix/x", "octocat")]
+  assert call() == ("https://github.com/mobius-os/app-demo/pull/4", "merged")
+
+  # An open PR outranks a merged one: the message should name the row the
+  # send would collide with first.
+  rows = [
+    _branch_pr_row("https://github.com/mobius-os/app-demo/pull/4",
+                   "MERGED", "fix/x", "octocat"),
+    _branch_pr_row("https://github.com/mobius-os/app-demo/pull/5",
+                   "OPEN", "fix/x", "octocat"),
+  ]
+  assert call() == ("https://github.com/mobius-os/app-demo/pull/5", "open")
+
+
+def test_existing_branch_pr_fails_closed_when_lookup_fails(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import ContributionSubmitError, _existing_branch_pr
+
+  # The lookup failing must STOP the send, not let it proceed blind: the
+  # whole point is refusing to trust local state about public reality.
+  monkeypatch.setattr(
+    "app.routes.github._gh",
+    lambda repo_path, *args, check=True: _cp("boom", returncode=1),
+  )
+  with pytest.raises(ContributionSubmitError) as err:
+    _existing_branch_pr(tmp_path, "mobius-os/app-demo", "octocat", "fix/x")
+  assert "Nothing was pushed" in err.value.message
+
+  monkeypatch.setattr(
+    "app.routes.github._gh",
+    lambda repo_path, *args, check=True: _cp("not-json"),
+  )
+  with pytest.raises(ContributionSubmitError):
+    _existing_branch_pr(tmp_path, "mobius-os/app-demo", "octocat", "fix/x")
+
+
+def test_send_refuses_branch_with_existing_pr_before_any_push(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import ContributionSubmitError, _submit_prepared_pr
+
+  _write_token(login="octocat")
+  record_id = "already-sent-guard"
+  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  (repo / ".git").mkdir(parents=True)
+  branch = "stack/demo-flow/01-model"
+  base = "b" * 40
+  head = "a" * 40
+  diff_text = "diff --git a/model.py b/model.py\n+reviewed\n"
+  diff_path = tmp_path / "layer.diff"
+  diff_path.write_text(diff_text)
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "submitting",
+    "title": "Model layer",
+    "branch": branch,
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "title": "Model layer",
+      "body_draft": "Reviewed model layer.",
+      "branch": branch,
+      "repo_path": str(repo),
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+    },
+  }
+  monkeypatch.setattr("app.routes.github.shutil.which", lambda name: f"/bin/{name}")
+  git_calls = []
+
+  def fake_git(repo_path, *args, check=True):
+    git_calls.append(args)
+    if (preflight := _submit_preflight_response(args)) is not None:
+      return preflight
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp(branch + "\n")
+    if args == ("status", "--porcelain"):
+      return _cp("")
+    if args == ("rev-parse", branch) or args == ("rev-parse", "HEAD"):
+      return _cp(head + "\n")
+    if args == ("rev-parse", "--verify", f"{base}^{{commit}}"):
+      return _cp(base + "\n")
+    if args == ("rev-parse", "--verify", f"{head}^{{commit}}"):
+      return _cp(head + "\n")
+    if args[-1:] == (f"{base}..{head}",) and "diff" in args:
+      return _cp(diff_text)
+    if args == ("log", "-1", "--format=%B", branch):
+      return _cp(
+        "Model layer\n\n"
+        "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>\n"
+      )
+    if args[:3] == (
+      "show", "-s", "--format=%H%x00%T%x00%an%x00%ae%x00%cn%x00%ce%x00%aI",
+    ):
+      return _commit_metadata(head)
+    return _cp("")
+
+  gh_calls = []
+
+  def fake_gh(repo_path, *args, check=True):
+    gh_calls.append(args)
+    if args[:2] == ("repo", "view"):
+      return _cp("main\n")
+    if args[:2] == ("pr", "list") and "all" in args:
+      # GitHub's truth: this exact branch was already sent and merged.
+      return _cp(json.dumps([_branch_pr_row(
+        "https://github.com/mobius-os/app-demo/pull/61",
+        "MERGED", branch, "mobius-os",
+      )]))
+    if args[:2] == ("pr", "list"):
+      return _cp("[]")
+    if args[:2] == ("pr", "create"):
+      raise AssertionError("a duplicate send must never reach pr create")
+    return _cp("")
+
+  monkeypatch.setattr("app.routes.github._git", fake_git)
+  monkeypatch.setattr("app.routes.github._gh", fake_gh)
+
+  with pytest.raises(ContributionSubmitError) as err:
+    _submit_prepared_pr(record, diff_path, direct_base_branch="main")
+
+  # The refusal names the public truth…
+  assert "pull/61" in err.value.message
+  assert "merged" in err.value.message
+  assert "Nothing was pushed" in err.value.message
+  # …and, unlike the pre-guard flow, nothing public was touched: no git push
+  # of any kind and no PR creation.
+  assert not any("push" in call for call in git_calls)
+  assert not any(call[:2] == ("pr", "create") for call in gh_calls)
