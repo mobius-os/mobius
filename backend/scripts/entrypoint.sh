@@ -1268,9 +1268,9 @@ su -s /bin/sh mobius -c '
   git config --global credential.helper "!gh auth git-credential"
 ' 2>/dev/null || true
 
-# Only copy the pm-commit helper if missing or if the image version
-# differs from the on-disk copy. Blindly overwriting on every boot wipes
-# any instance-local edits the agent or operator may have made.
+# Seed a usable image-floor helper before the app starts. FastAPI lifespan
+# replaces this target with a launcher to the served platform copy, so later
+# source updates remain authoritative without another container rebuild.
 if [ ! -f /data/.pm-commit ] || ! cmp -s /app/scripts/pm-commit /data/.pm-commit; then
   cp /app/scripts/pm-commit /data/.pm-commit
   chmod +x /data/.pm-commit

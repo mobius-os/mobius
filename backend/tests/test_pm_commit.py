@@ -6,6 +6,10 @@ import os
 from pathlib import Path
 import subprocess
 
+import pytest
+
+from app.main import _install_pm_commit_launcher
+
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "pm-commit"
 
@@ -84,3 +88,36 @@ def test_broad_snapshot_mode_does_not_exist(tmp_path):
 
   assert result.returncode == 2
   assert git(work, "status", "--short") == "M owned.txt"
+
+
+def test_launcher_follows_live_helper_updates_without_reinstall(tmp_path):
+  source = tmp_path / "platform" / "pm-commit"
+  target = tmp_path / "data" / ".pm-commit"
+  source.parent.mkdir()
+  target.parent.mkdir()
+  target.write_text("stale image copy\n")
+
+  source.write_text("#!/bin/sh\nprintf 'first:%s\\n' \"$1\"\n")
+  source.chmod(0o755)
+  assert _install_pm_commit_launcher(source, target)
+  assert subprocess.run(
+    [str(target), "one argument"], check=True, capture_output=True, text=True,
+  ).stdout == "first:one argument\n"
+
+  source.write_text("#!/bin/sh\nprintf 'second:%s\\n' \"$1\"\n")
+  assert subprocess.run(
+    [str(target), "same launcher"], check=True, capture_output=True, text=True,
+  ).stdout == "second:same launcher\n"
+  assert not _install_pm_commit_launcher(source, target)
+
+
+def test_launcher_preserves_seed_when_live_helper_is_missing(tmp_path):
+  source = tmp_path / "platform" / "pm-commit"
+  target = tmp_path / "data" / ".pm-commit"
+  target.parent.mkdir()
+  target.write_text("usable image copy\n")
+
+  with pytest.raises(FileNotFoundError):
+    _install_pm_commit_launcher(source, target)
+
+  assert target.read_text() == "usable image copy\n"

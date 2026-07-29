@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import os
 import re
+import shlex
 import time
 from contextlib import asynccontextmanager
 from datetime import timezone
@@ -41,6 +42,7 @@ from app.database import (
 )
 from app.http_caching import strip_range
 from app.memory_observability import record_memory_checkpoint
+from app.storage_io import atomic_write
 from app import activity, models
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
@@ -58,6 +60,23 @@ from app.routes import (
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
+
+
+def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
+  """Point the stable command path at the helper in the served checkout."""
+  if not source.is_file():
+    raise FileNotFoundError(source)
+  launcher = (
+    f"#!/bin/sh\nexec {shlex.quote(str(source))} \"$@\"\n"
+  ).encode()
+  try:
+    if target.read_bytes() == launcher and target.stat().st_mode & 0o111:
+      return False
+  except FileNotFoundError:
+    pass
+  atomic_write(target, launcher)
+  target.chmod(0o755)
+  return True
 
 
 def _init_db():
@@ -142,6 +161,14 @@ async def lifespan(app):
   import asyncio as _asyncio
   import logging as _logging
   _log = _logging.getLogger(__name__)
+  try:
+    _install_pm_commit_launcher(
+      Path(__file__).resolve().parents[1] / "scripts" / "pm-commit",
+      Path(get_settings().data_dir) / ".pm-commit",
+    )
+  except Exception as exc:
+    # Agent commit tooling must never make the owner-facing service unbootable.
+    _log.error("pm-commit launcher refresh failed: %s", exc, exc_info=True)
   record_memory_checkpoint("lifespan_start")
   # Wrapped: providers.py is on the agent's write surface. A broken
   # providers.py shouldn't take down the server — log and skip the
