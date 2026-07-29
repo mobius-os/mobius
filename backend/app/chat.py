@@ -5344,10 +5344,17 @@ async def _run_chat_impl_with_db(
   # the separate Stop-handoff marker clear; continuation handoff keeps the
   # marker continuously set across the whole chain of turns.
 
-  # On the first message of a session, prepend only bounded recent-chat digests.
-  # Knowledge-graph data is never pulled here; an installed system app may teach
-  # the agent to make a separate prompt-scoped recall call. The system prompt
-  # stays static for API-level caching; dynamic chat continuity travels here.
+  # On the first message of a session, gather bounded recent-chat digests and
+  # the skills inventory as one-time startup context. Knowledge-graph data is
+  # never pulled here; an installed system app may teach the agent to make a
+  # separate prompt-scoped recall call.
+  #
+  # Startup context belongs to the first-turn system prompt, not the user
+  # message. CLI slash commands claim their entire message as an argument, so
+  # appending this context to `/goal` both pollutes its objective and can exceed
+  # the command's length limit. Keep it out of the persisted prompt snapshot as
+  # well, so later turns reuse the stable constitution bytes.
+  startup_context = ""
   if not session_id:
     # `build_memory_block` is pure; the activity emit + envelope live here.
     eligible_chat_ids = {
@@ -5406,10 +5413,6 @@ async def _run_chat_impl_with_db(
       startup_context = experience_block
       if skills_block:
         startup_context = f"{startup_context}\n\n{skills_block}"
-      if is_slash_command:
-        user_message = f"{user_message}\n\n{startup_context}"
-      else:
-        user_message = f"{startup_context}\n\n{user_message}"
 
   if app_context_block:
     # The report BODY goes right after the </app_context> line, but only on
@@ -5619,6 +5622,11 @@ async def _run_chat_impl_with_db(
       _publish_chat_run_finished(chat_id)
     db.close()
     return disposition
+
+  # This is deliberately request-scoped rather than part of the immutable
+  # snapshot persisted above. On resumed turns `startup_context` is empty.
+  if startup_context:
+    system_prompt = f"{system_prompt}\n\n{startup_context}"
 
   # A close() below detaches chat_row. Precompute the only provider-time value
   # that still reads it (the bounded Claude fallback for a missing CLI

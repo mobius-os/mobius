@@ -731,7 +731,8 @@ def test_run_chat_passes_deployed_skill_and_picker_settings(
        ):
     asyncio.run(_scenario())
 
-  assert captured["skill_text"] == "DEPLOYED-SKILL"
+  assert captured["skill_text"].startswith("DEPLOYED-SKILL\n\n")
+  assert "<agent_experience>" in captured["skill_text"]
   assert captured["agent_settings"]["model"] == "claude-opus-4-5"
   db.expire_all()
   persisted = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
