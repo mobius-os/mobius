@@ -7,7 +7,7 @@ import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 
 const CSS = `
 .aci__overlay {
-  position: fixed;
+  position: absolute;
   inset: 0;
   z-index: 1000;
   display: grid;
@@ -23,8 +23,7 @@ const CSS = `
 
 .aci {
   width: min(680px, 100%);
-  max-height: calc(100vh - 36px);
-  max-height: calc(100dvh - 36px);
+  max-height: calc(100% - 36px);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -243,7 +242,7 @@ const CSS = `
   }
 
   .aci {
-    max-height: calc(100dvh - 20px);
+    max-height: calc(100% - 20px);
     border-radius: 18px;
   }
 

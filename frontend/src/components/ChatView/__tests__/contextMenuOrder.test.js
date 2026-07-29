@@ -15,6 +15,10 @@ const inspectorSource = readFileSync(
   new URL('../AgentContextInspector.jsx', import.meta.url),
   'utf8',
 )
+const chatViewCss = readFileSync(
+  new URL('../ChatView.css', import.meta.url),
+  'utf8',
+)
 
 
 test('chat context actions follow model selection and continuation policy', () => {
@@ -38,4 +42,14 @@ test('agent context inspector keeps continuity and active turn context visible',
   assert.match(inspectorSource, /title: 'Current app context'/)
   assert.match(inspectorSource, /title: 'App report'/)
   assert.match(inspectorSource, /title: 'Compaction handoff'/)
+})
+
+
+test('agent context inspector is centered inside its owning chat', () => {
+  const overlayCss = inspectorSource.match(/\.aci__overlay\s*\{([^}]+)\}/)?.[1] || ''
+  const chatCss = chatViewCss.match(/\.chat\s*\{([^}]+)\}/)?.[1] || ''
+
+  assert.match(overlayCss, /position:\s*absolute/)
+  assert.doesNotMatch(overlayCss, /position:\s*fixed/)
+  assert.match(chatCss, /position:\s*relative/)
 })
