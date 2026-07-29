@@ -786,34 +786,47 @@ export function readerInputActivatesDisclosure(
 }
 
 
-/** Wheel and keyboard input have no pointer/touch release event. Keyboard
- * input keeps the next-frame no-scroll release. A wheel gets that fast release
- * only when its requested direction is exactly clamped at the corresponding
- * edge (or has no vertical delta). A proximity epsilon is not sufficient: a
- * wheel can still move through that final gap, and its compositor scroll can
- * arrive after rAF. For a wheel that can move, the actual scroll event owns the
- * release. */
-/**
- * `readGeometry` is a THUNK, not a value, because only the `wheel` branch below
- * ever reads it.
+/** Wheel and keyboard input have no pointer/touch release event. They get a
+ * next-frame no-scroll release only when their requested direction is exactly
+ * clamped at the corresponding edge (or cannot move this vertical scroller).
+ * A proximity epsilon is not sufficient: browser-owned wheel and keyboard
+ * scrolling can arrive after rAF. When movement is possible, the actual scroll
+ * event owns the release.
+ *
+ * `readGeometry` is a THUNK, not a value, because only wheel and scroll-key
+ * branches below ever read it.
  *
  * This function is called from the shared user-input handler, which is bound to
- * touchstart and touchmove as well as wheel. Passing an eagerly-built object
- * meant `scrollTop`/`scrollHeight`/`clientHeight` were read on every touch
- * event and then discarded at the `type !== 'wheel'` line - and reading
- * `scrollHeight` forces a synchronous layout of the whole (unvirtualized)
- * transcript. On desktop that cost is at least paid for something: wheel
- * genuinely needs the values, and fires roughly once per notch. Touch paid it
- * for nothing, at digitizer rate, starting with the first event of the gesture
- * - which is why the lag is felt as a scroll STARTS rather than during it.
+ * touchstart and touchmove as well as wheel/keydown. Passing an eagerly-built
+ * object meant `scrollTop`/`scrollHeight`/`clientHeight` were read on every
+ * touch event and then discarded - and reading `scrollHeight` forces a
+ * synchronous layout of the whole (unvirtualized) transcript. Wheel and the
+ * comparatively rare scroll keys genuinely need the values; touch does not.
  *
- * Deferring is deliberately done HERE rather than by guarding the call site on
- * `type === 'wheel'`. Which input types need geometry is this function's own
+ * Deferring is deliberately done HERE rather than by guarding the call site.
+ * Which input types need geometry is this function's own
  * rule; duplicating it at the caller would let the two drift apart silently.
  */
-export function readerInputNeedsFrameRelease(type, readGeometry) {
-  if (type === 'keydown') return true
-  if (type !== 'wheel') return false
+export function readerInputNeedsFrameRelease(
+  type,
+  readGeometry,
+  key = '',
+  shiftKey = false,
+) {
+  if (type !== 'wheel' && type !== 'keydown') return false
+
+  let towardStart = false
+  let towardEnd = false
+  if (type === 'keydown') {
+    towardStart = ['ArrowUp', 'PageUp', 'Home'].includes(key)
+      || (shiftKey && [' ', 'Spacebar'].includes(key))
+    towardEnd = ['ArrowDown', 'PageDown', 'End'].includes(key)
+      || (!shiftKey && [' ', 'Spacebar'].includes(key))
+    // Tab may reveal a newly-focused control, but has no stable direction to
+    // prove against this scroller. Keep its old fast no-scroll release; focus
+    // management owns any later reveal. It does not need a layout read.
+    if (!towardStart && !towardEnd) return true
+  }
 
   const {
     deltaY = 0,
@@ -822,9 +835,14 @@ export function readerInputNeedsFrameRelease(type, readGeometry) {
     clientHeight = 0,
   } = (typeof readGeometry === 'function' ? readGeometry() : readGeometry) || {}
 
+  const maxScrollTop = Math.max(0, scrollHeight - clientHeight)
+
+  if (type === 'keydown') {
+    return towardStart ? scrollTop <= 0 : scrollTop >= maxScrollTop
+  }
+
   if (!Number.isFinite(deltaY) || deltaY === 0) return true
 
-  const maxScrollTop = Math.max(0, scrollHeight - clientHeight)
   if (deltaY < 0) return scrollTop <= 0
   return scrollTop >= maxScrollTop
 }
@@ -2013,15 +2031,23 @@ export default function useScrollMode({
       pendingGestureTimerRef.current = setTimeout(() => {
         releasePendingGesture(sequence)
       }, PENDING_GESTURE_CAP_MS)
-      // Thunk, not an object literal: these three property reads force a
-      // synchronous layout, and only the wheel branch consumes them. See
+      // Thunk, not an object literal: these property reads force a synchronous
+      // layout, and only wheel/scroll-key branches consume them. See
       // readerInputNeedsFrameRelease.
-      if (readerInputNeedsFrameRelease(event?.type, () => ({
-        deltaY: event?.deltaY,
-        scrollTop: scrollEl.scrollTop,
-        scrollHeight: scrollEl.scrollHeight,
-        clientHeight: scrollEl.clientHeight,
-      }))) {
+      // Space/Enter on a disclosure button cannot natively scroll; preserve its
+      // existing one-frame release rather than waiting for the safety cap.
+      const keyboardDisclosure = activatesDisclosure && event?.type === 'keydown'
+      if (keyboardDisclosure || readerInputNeedsFrameRelease(
+          event?.type,
+          () => ({
+            deltaY: event?.deltaY,
+            scrollTop: scrollEl.scrollTop,
+            scrollHeight: scrollEl.scrollHeight,
+            clientHeight: scrollEl.clientHeight,
+          }),
+          event?.key,
+          event?.shiftKey,
+        )) {
         scheduleNoScrollRelease()
       }
     }

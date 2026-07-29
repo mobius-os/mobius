@@ -7,6 +7,7 @@ import {
   boundedMessageSource,
   messageSources,
   safeSourceUrl,
+  sourceDisplayLabels,
   sourceHost,
   sourceLabel,
 } from '../messageSources.js'
@@ -150,6 +151,44 @@ test('a title equal to the URL is not treated as a real title', () => {
 test('a real title (Claude) wins over the host', () => {
   assert.equal(sourceLabel({ title: 'Node.js Releases', url: 'https://nodejs.org/x' }),
     'Node.js Releases')
+})
+
+test('colliding source titles stay distinct without dropping citations', () => {
+  const sources = [
+    {
+      title: 'Apple Accessibility Conformance Report',
+      url: 'https://support.apple.com/content/otherassets/vpat_macbookpro_2023.pdf',
+    },
+    {
+      title: 'Apple Accessibility Conformance Report',
+      url: 'https://support.apple.com/content/otherassets/vpat_macbookair_2024.pdf',
+    },
+  ]
+  assert.deepEqual(sourceDisplayLabels(sources), [
+    'vpat_macbookpro_2023.pdf · support.apple.com — Apple Accessibility Conformance Report',
+    'vpat_macbookair_2024.pdf · support.apple.com — Apple Accessibility Conformance Report',
+  ])
+  assert.equal(sources.length, 2, 'both distinct URLs remain available')
+})
+
+test('same-title locale variants use their path and exact repeats remain numbered', () => {
+  const title = 'Add a website shortcut to your home screen on iOS'
+  assert.deepEqual(sourceDisplayLabels([
+    { title, url: 'https://support.mozilla.org/en-US/kb/add-website-shortcut' },
+    { title, url: 'https://support.mozilla.org/eu/kb/add-website-shortcut' },
+    { title, url: 'https://support.mozilla.org/eu/kb/add-website-shortcut?variant=2' },
+  ]), [
+    `en-US/kb/add-website-shortcut · support.mozilla.org — ${title}`,
+    `eu/kb/add-website-shortcut · support.mozilla.org (1) — ${title}`,
+    `eu/kb/add-website-shortcut · support.mozilla.org (2) — ${title}`,
+  ])
+})
+
+test('unique source labels remain unchanged', () => {
+  assert.deepEqual(sourceDisplayLabels([
+    { title: 'Node.js Releases', url: 'https://nodejs.org/releases' },
+    { url: 'https://example.com/docs' },
+  ]), ['Node.js Releases', 'example.com'])
 })
 
 test('an unparseable URL still yields a usable label', () => {

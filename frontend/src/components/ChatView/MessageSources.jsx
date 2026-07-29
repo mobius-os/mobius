@@ -1,5 +1,6 @@
 import {
   messageSources,
+  sourceDisplayLabels,
   sourceHost,
   sourceLabel,
 } from './messageSources.js'
@@ -15,12 +16,14 @@ function sourceMark(host) {
 export default function MessageSources({ blocks }) {
   const sources = messageSources(blocks)
   if (sources.length === 0) return null
+  const labels = sourceDisplayLabels(sources)
 
   return (
     <section className="chat__sources" aria-label="Sources for this answer">
       <ul className="chat__sources-list">
-        {sources.map(source => {
-          const label = sourceLabel(source)
+        {sources.map((source, index) => {
+          const label = labels[index]
+          const baseLabel = sourceLabel(source)
           const host = sourceHost(source.url)
           return (
             <li key={source.url} className="chat__source-item chat__source-item--web">
@@ -30,7 +33,7 @@ export default function MessageSources({ blocks }) {
                 target="_blank"
                 rel="noopener noreferrer"
                 title={source.snippet || source.title || source.url}
-                aria-label={`${label}${host && host !== label ? ` — ${host}` : ''} (opens in a new tab)`}
+                aria-label={`${label}${host && label === baseLabel && host !== label ? ` — ${host}` : ''} (opens in a new tab)`}
               >
                 {/* Keep reading passive: a local domain mark avoids contacting
                     every cited site merely because its card neared the viewport. */}

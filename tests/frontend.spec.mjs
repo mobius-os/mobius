@@ -624,24 +624,33 @@ test.describe('App canvas', () => {
 })
 
 test.describe('Scroll position', () => {
-  test('10. Scroll position saved on navigate, restored on return', async ({ page }) => {
+  test('10. PageUp position saved on navigate, restored on return', async ({ page }) => {
     await setup(page)
     await newChat(page)
 
     const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
     expect(chatId).toBeTruthy()
 
+    const textBlocks = Array.from({ length: 36 }, (_, i) => ({
+      type: 'text',
+      content: `Scroll restore paragraph ${i + 1}. ${'Persisted content. '.repeat(10)}`,
+    }))
     const messages = [
       { role: 'user', content: 'Scroll restore prompt', ts: 1700000000000 },
       {
         role: 'assistant',
-        content: Array.from({ length: 36 }, (_, i) =>
-          `Scroll restore paragraph ${i + 1}. ${'Persisted content. '.repeat(10)}`
-        ).join('\n\n'),
-        blocks: Array.from({ length: 36 }, (_, i) => ({
-          type: 'text',
-          content: `Scroll restore paragraph ${i + 1}. ${'Persisted content. '.repeat(10)}`,
-        })),
+        content: textBlocks.map(block => block.content).join('\n\n'),
+        blocks: [
+          ...textBlocks,
+          {
+            type: 'tool',
+            tool: 'Bash',
+            input: 'verify keyboard scrolling',
+            output: 'done',
+            status: 'done',
+            tool_use_id: 'keyboard-scroll-tool',
+          },
+        ],
       },
     ]
 
@@ -676,20 +685,22 @@ test.describe('Scroll position', () => {
       { timeout: 10000 }
     )
 
-    // Stamp an ANCHOR_AT mode with a real wheel gesture; the scroll state
-    // machine intentionally ignores non-gesture scroll events.
-    await page.evaluate(() => {
-      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      if (!el) return
-      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
-      el.scrollTop = Math.floor(el.scrollHeight / 3)
-    })
-    await page.waitForFunction(() => {
-      const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      if (!el) return false
-      const gap = el.scrollHeight - el.scrollTop - el.clientHeight
-      return el.scrollTop > 0 && gap > 100
-    }, { timeout: 3000 })
+    // Use the same browser-owned delayed key scroll that exposed the bug. A
+    // synthetic scrollTop write would bypass the ownership race entirely.
+    const initialTop = await page.evaluate(
+      () => document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop ?? 0,
+    )
+    await page.locator(
+      '[data-chat-surface="painted"] .chat__activity-header',
+    ).last().focus()
+    await page.keyboard.press('PageUp')
+    await expect.poll(
+      () => page.evaluate(() => (
+        document.querySelector('[data-chat-surface="painted"] .chat__scroll')?.scrollTop ?? 0
+      )),
+      { timeout: 3000 },
+    ).toBeLessThan(initialTop - 100)
+    await waitForChatMode(page, chatId, 'ANCHOR_AT')
     const scrollBefore = await page.evaluate(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       return el ? el.scrollTop : null

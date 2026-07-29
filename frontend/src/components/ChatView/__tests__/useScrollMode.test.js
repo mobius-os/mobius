@@ -222,7 +222,7 @@ test('disclosure toggles follow only in FOLLOW_BOTTOM and otherwise hold the rea
   )
 })
 
-test('only provably clamped wheel input gets a next-frame no-scroll release', () => {
+test('only provably clamped wheel and keyboard input gets a next-frame release', () => {
   const middle = {
     scrollTop: 500,
     scrollHeight: 2000,
@@ -260,7 +260,25 @@ test('only provably clamped wheel input gets a next-frame no-scroll release', ()
     ...middle,
     deltaY: 0,
   }), true, 'a horizontal-only wheel cannot move this vertical controller')
-  assert.equal(readerInputNeedsFrameRelease('keydown'), true)
+  assert.equal(readerInputNeedsFrameRelease('keydown', middle, 'PageUp'), false,
+    'PageUp waits for the browser scroll before releasing reader ownership')
+  assert.equal(readerInputNeedsFrameRelease('keydown', {
+    ...middle,
+    scrollTop: 0,
+  }, 'PageUp'), true, 'PageUp at the top is already clamped')
+  assert.equal(readerInputNeedsFrameRelease('keydown', middle, 'PageDown'), false)
+  assert.equal(readerInputNeedsFrameRelease('keydown', {
+    ...middle,
+    scrollTop: 1200,
+  }, 'PageDown'), true, 'PageDown at the bottom is already clamped')
+  assert.equal(readerInputNeedsFrameRelease('keydown', middle, ' ', true), false,
+    'Shift+Space owns upward movement')
+  assert.equal(readerInputNeedsFrameRelease('keydown', {
+    ...middle,
+    scrollTop: 0,
+  }, ' ', true), true, 'Shift+Space fast-releases at the top')
+  assert.equal(readerInputNeedsFrameRelease('keydown', middle, 'Tab'), true,
+    'focus traversal has no stable scroll direction')
   assert.equal(readerInputNeedsFrameRelease('pointerdown'), false)
   assert.equal(readerInputNeedsFrameRelease('touchmove'), false)
 })
@@ -283,12 +301,15 @@ test('touch input never reads scroll geometry, so it cannot force a layout', () 
   readerInputNeedsFrameRelease('pointerdown', readGeometry)
   assert.equal(geometryReads, 0, 'touch and pointer input must not measure the scroller')
 
-  readerInputNeedsFrameRelease('keydown', readGeometry)
-  assert.equal(geometryReads, 0, 'keydown short-circuits before measuring')
+  // Scroll keys are rare and need the same exact-edge proof as wheel input.
+  readerInputNeedsFrameRelease('keydown', readGeometry, 'PageUp')
+  assert.equal(geometryReads, 1, 'keydown reads the scroller once')
+  readerInputNeedsFrameRelease('keydown', readGeometry, 'Tab')
+  assert.equal(geometryReads, 1, 'Tab fast-releases without measuring')
 
   // Wheel genuinely needs the values, so it must still read them - exactly once.
   readerInputNeedsFrameRelease('wheel', readGeometry)
-  assert.equal(geometryReads, 1, 'wheel reads the scroller once')
+  assert.equal(geometryReads, 2, 'wheel reads the scroller once')
 })
 
 test('scroll diagnostics expose behavior without message identity', () => {

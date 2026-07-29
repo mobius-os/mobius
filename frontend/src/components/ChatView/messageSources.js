@@ -96,6 +96,82 @@ export function sourceLabel(source) {
   return sourceHost(source?.url) || source?.url || ''
 }
 
+function sourceUrlParts(source) {
+  try {
+    const parsed = new URL(safeSourceUrl(source?.url))
+    return {
+      host: parsed.host.replace(/^www\./i, ''),
+      parts: parsed.pathname
+        .split('/')
+        .filter(Boolean)
+        .map(part => {
+          try { return decodeURIComponent(part) } catch { return part }
+        }),
+    }
+  } catch {
+    return { host: '', parts: [], fallback: source?.url || '' }
+  }
+}
+
+function boundedSourceHint(value) {
+  if (value.length <= 96) return value
+  return `${value.slice(0, 47)}…${value.slice(-48)}`
+}
+
+function sourceUrlHint(parsed, expanded = false) {
+  const path = expanded
+    ? parsed.parts.join('/')
+    : parsed.parts.at(-1) || ''
+  if (path && parsed.host) return boundedSourceHint(`${path} · ${parsed.host}`)
+  return boundedSourceHint(path || parsed.host || parsed.fallback || '')
+}
+
+/** Keep every distinct citation while making repeated visible titles honest.
+ * Search results commonly reuse generic titles across different documents;
+ * URL-only dedupe correctly preserves those links, but identical chips make
+ * them look like duplicated UI. Only colliding labels gain a compact URL hint,
+ * placed first so the chip's ellipsis cannot hide the distinguishing part.
+ */
+export function sourceDisplayLabels(sources) {
+  if (!Array.isArray(sources)) return []
+  const baseLabels = sources.map(sourceLabel)
+  const indexesByLabel = new Map()
+  baseLabels.forEach((label, index) => {
+    const indexes = indexesByLabel.get(label) || []
+    indexes.push(index)
+    indexesByLabel.set(label, indexes)
+  })
+
+  const labels = [...baseLabels]
+  for (const [baseLabel, indexes] of indexesByLabel) {
+    if (indexes.length === 1) continue
+    const parsed = indexes.map(index => sourceUrlParts(sources[index]))
+    const compactHints = parsed.map(parts => sourceUrlHint(parts))
+    const compactCounts = new Map()
+    for (const hint of compactHints) {
+      compactCounts.set(hint, (compactCounts.get(hint) || 0) + 1)
+    }
+    const hints = compactHints.map((hint, index) => (
+      compactCounts.get(hint) > 1 ? sourceUrlHint(parsed[index], true) : hint
+    ))
+    const hintCounts = new Map()
+    for (const hint of hints) {
+      hintCounts.set(hint, (hintCounts.get(hint) || 0) + 1)
+    }
+    const occurrences = new Map()
+    hints.forEach((hint, groupIndex) => {
+      let distinctHint = hint
+      if (hintCounts.get(hint) > 1) {
+        const occurrence = (occurrences.get(hint) || 0) + 1
+        occurrences.set(hint, occurrence)
+        distinctHint = `${hint} (${occurrence})`
+      }
+      labels[indexes[groupIndex]] = `${distinctHint} — ${baseLabel}`
+    })
+  }
+  return labels
+}
+
 // First occurrence owns the position, so search order is kept. A later copy may
 // fill missing title/snippet metadata without moving or duplicating the card.
 export function messageSources(blocks) {
