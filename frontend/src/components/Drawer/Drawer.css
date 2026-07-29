@@ -312,7 +312,11 @@
   font-weight: 400;
   text-align: left;
   cursor: pointer;
-  transition: color 0.12s, background 0.12s;
+  /* Selection feedback should never animate the glyphs themselves: tweening
+     the row color makes the title shimmer while a chat handoff is settling.
+     Keep only the quiet background wash; the selected title snaps to its
+     authoritative color in the same frame as the selection. */
+  transition: background-color 0.12s;
   -webkit-tap-highlight-color: transparent;
   /* Pairs with .drawer__scroll's scroll-padding-bottom so a row revealed via
      scroll-into-view never lands inside the bottom fade / against the divider. */
@@ -861,6 +865,7 @@
   .drawer,
   .drawer-overlay { transition: none; }
   .drawer__item-action-menu { animation: none; }
+  .drawer__item { transition: none; }
 }
 
 /* ── Settings warning dot ──────────────────────────── */

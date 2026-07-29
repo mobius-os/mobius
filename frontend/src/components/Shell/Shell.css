@@ -290,6 +290,20 @@
   background: var(--bg);
 }
 
+/* The incoming transcript is already fully laid out below the opaque held
+   chat. Keep its content very slightly softened while staging, then let that
+   SAME mounted ChatView settle to full opacity when Shell atomically removes
+   the held cover. Because the wrapper background remains opaque and the held
+   layer is gone before this transition becomes visible, two text layers never
+   crossfade or ghost over one another. */
+.shell__chat-view > .chat {
+  transition: opacity 90ms ease-out;
+}
+
+.shell__chat-view--staging > .chat {
+  opacity: 0.94;
+}
+
 .shell__chat-view--staging {
   visibility: visible;
   pointer-events: none;
@@ -598,6 +612,7 @@
   .shell__logo { transition: none; }
   .shell__wordmark { transition: none; }
   .shell__tab-text-inner { animation: none !important; }
+  .shell__chat-view > .chat { transition: none; }
   /* No completion motion under reduced motion — the ignite/snap AND the hold's
      descriptor-owned release are both skipped (the toggle commits instantly, so
      is-beat-held is never even emitted; this is the belt-and-braces). The direct

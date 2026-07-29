@@ -4,14 +4,15 @@ import assert from 'node:assert/strict'
 
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
+const drawerCss = readFileSync(new URL('../../Drawer/Drawer.css', import.meta.url), 'utf8')
 const chatSurfaceModel = readFileSync(new URL('../chatSurfaceModel.js', import.meta.url), 'utf8')
 const workspaceChrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
-function ruleBody(selector) {
+function ruleBody(selector, source = shellCss) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return shellCss.match(new RegExp(`${escaped}\\s*\\{([\\s\\S]*?)\\}`))?.[1] || ''
+  return source.match(new RegExp(`${escaped}\\s*\\{([\\s\\S]*?)\\}`))?.[1] || ''
 }
 
 test('chat display readiness preserves the authoritative transcript reveal gate', () => {
@@ -145,4 +146,25 @@ test('the held chat is an opaque layer above staging until the atomic swap', () 
   assert.match(ruleBody('.shell__chat-view--held'), /visibility:\s*visible/)
   assert.match(ruleBody('.shell__chat-view--held'), /z-index:\s*2/,
     'the last painted frame must stay above the staging mount')
+})
+
+test('chat selection settles without flashing or crossfading text layers', () => {
+  const drawerItem = ruleBody('.drawer__item', drawerCss)
+  assert.equal(
+    drawerItem.match(/transition:\s*([^;]+);/)?.[1],
+    'background-color 0.12s',
+    'the selected title color must snap instead of tweening its glyphs')
+
+  assert.match(ruleBody('.shell__chat-view > .chat'), /transition:\s*opacity 90ms ease-out/,
+    'the ready transcript should settle on its existing mounted surface')
+  assert.match(ruleBody('.shell__chat-view--staging > .chat'), /opacity:\s*0\.94/,
+    'only the incoming transcript should be softened while the opaque cover is held')
+  assert.doesNotMatch(ruleBody('.shell__chat-view--held'), /opacity:/,
+    'the outgoing transcript must stay opaque instead of ghosting over incoming text')
+  assert.match(shellCss,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.shell__chat-view > \.chat \{\s*transition:\s*none;/,
+    'the transcript settle should disappear under reduced motion')
+  assert.match(drawerCss,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.drawer__item \{\s*transition:\s*none;/,
+    'the drawer background wash should disappear under reduced motion')
 })
