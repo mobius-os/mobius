@@ -83,6 +83,10 @@ async function setupShellBasics(page) {
       body: '{}',
     })
   })
+  await page.route(/\/api\/apps\/\d+\/opened$/, route => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    route.fulfill({ status: 204, body: '' })
+  })
   await page.route(/\/api\/health$/, route =>
     route.fulfill({
       status: 200,
