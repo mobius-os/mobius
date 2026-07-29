@@ -14,13 +14,26 @@ function oldestPinnedFirst(a, b) {
   return pinnedAt(a.item).localeCompare(pinnedAt(b.item))
 }
 
+function recentAt({ kind, item }) {
+  if (kind === 'chat') {
+    return item?.activity_at || item?.updated_at || item?.created_at || ''
+  }
+  return item?.last_opened_at || item?.updated_at || item?.created_at || ''
+}
+
+function newestRecentFirst(a, b) {
+  return recentAt(b).localeCompare(recentAt(a))
+}
+
 /**
  * Build the drawer's navigation projection without mutating query-cache arrays.
  *
  * Pinned chats and apps share one stable section ordered oldest-pin-first, so a
- * new pin appends at the bottom and manual drag-to-reorder owns the rest. The
- * ordinary chat history stays recency ordered; the apps grid keeps its
- * pinned-first ordering (also oldest-pin-first) then stable creation order.
+ * new pin appends at the bottom and manual drag-to-reorder owns the rest.
+ * Unpinned chats and apps share one newest-first Recents section. Chat activity
+ * follows owner conversation activity; app activity follows explicit opens,
+ * falling back to the bundle update/creation time until the first open. The
+ * searchable apps grid keeps its pinned-first then stable creation ordering.
  */
 export function buildDrawerSections(chats = [], apps = []) {
   const chatRows = chats
@@ -51,9 +64,18 @@ export function buildDrawerSections(chats = [], apps = []) {
       .map(item => ({ kind: 'app', item })),
   ].sort(oldestPinnedFirst)
 
+  const recents = [
+    ...chatRows
+      .filter(chat => !chat.pinned_at)
+      .map(item => ({ kind: 'chat', item })),
+    ...appRows
+      .filter(app => !app.pinned_at)
+      .map(item => ({ kind: 'app', item })),
+  ].sort(newestRecentFirst)
+
   return {
     pinned,
-    chats: chatRows.filter(chat => !chat.pinned_at),
+    recents,
     apps: appRows,
   }
 }

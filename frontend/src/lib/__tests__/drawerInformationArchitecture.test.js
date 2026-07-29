@@ -7,14 +7,14 @@ import {
   filterInstalledApps,
 } from '../../components/Drawer/drawerInformationArchitecture.js'
 
-test('drawer separates pinned chats and apps from ordinary chat history', () => {
+test('drawer separates mixed pins from mixed recents ordered by activity', () => {
   const sections = buildDrawerSections([
     { id: 'empty', has_messages: false, updated_at: '2026-07-30' },
     { id: 'old-chat', has_messages: true, updated_at: '2026-07-20' },
     { id: 'new-chat', has_messages: true, activity_at: '2026-07-29' },
     { id: 'pinned-chat', has_messages: true, pinned_at: '2026-07-25', updated_at: '2026-07-01' },
   ], [
-    { id: 1, created_at: '2026-07-01' },
+    { id: 1, created_at: '2026-07-01', last_opened_at: '2026-07-27' },
     { id: 2, created_at: '2026-07-02', pinned_at: '2026-07-26' },
   ])
 
@@ -23,7 +23,11 @@ test('drawer separates pinned chats and apps from ordinary chat history', () => 
     ['chat', 'pinned-chat'],
     ['app', 2],
   ])
-  assert.deepEqual(sections.chats.map(chat => chat.id), ['new-chat', 'old-chat'])
+  assert.deepEqual(sections.recents.map(entry => [entry.kind, entry.item.id]), [
+    ['chat', 'new-chat'],
+    ['app', 1],
+    ['chat', 'old-chat'],
+  ])
   assert.deepEqual(sections.apps.map(app => app.id), [2, 1])
 })
 
@@ -44,9 +48,28 @@ test('ordinary chat order follows owner activity rather than generic row updates
   ], [])
 
   assert.deepEqual(
-    sections.chats.map(chat => chat.id),
+    sections.recents.map(entry => entry.item.id),
     ['owner-steered', 'agent-finished'],
   )
+})
+
+test('app opens outrank bundle updates without changing catalogue order', () => {
+  const sections = buildDrawerSections([], [
+    {
+      id: 1,
+      created_at: '2026-07-01',
+      updated_at: '2026-07-29T12:00:00Z',
+      last_opened_at: '2026-07-29T13:00:00Z',
+    },
+    {
+      id: 2,
+      created_at: '2026-07-02',
+      updated_at: '2026-07-29T12:30:00Z',
+    },
+  ])
+
+  assert.deepEqual(sections.recents.map(entry => entry.item.id), [1, 2])
+  assert.deepEqual(sections.apps.map(app => app.id), [1, 2])
 })
 
 test('pinned order is stable across mixed timestamp formats (Z vs naive UTC)', () => {

@@ -114,6 +114,9 @@ class AppOut(BaseModel):
   chat_id: str | None = None
   source_dir: str | None = None
   pinned_at: datetime | None = None
+  # Owner navigation recency. Kept separate from updated_at so opening an app
+  # never rotates its executable-bundle cache key.
+  last_opened_at: datetime | None = None
   # A durable app-attributed notification landed since this app was last
   # opened. The shell renders the same quiet activity dot used for chats.
   has_unseen_activity: bool = False

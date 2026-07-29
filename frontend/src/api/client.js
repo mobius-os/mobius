@@ -432,6 +432,9 @@ export const api = {
   },
   apps: {
     list: () => apiFetch('/apps/'),
+    markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {
+      method: 'POST',
+    }),
     markActivitySeen: (appId, activityVersion) => apiFetch(`/apps/${appId}/activity/seen`, {
       method: 'POST',
       body: JSON.stringify({ activity_version: activityVersion }),

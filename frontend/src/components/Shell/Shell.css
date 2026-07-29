@@ -75,7 +75,7 @@
   padding-left: 16px;
   padding-right: 16px;
   background: var(--bg); /* CONTRACT: opaque — bar floats above content, must hide whatever scrolls under it */
-  border-bottom: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline; pairs with --bg above */
+  border-bottom: 0;
   position: relative;
   z-index: 100;
   -webkit-tap-highlight-color: transparent;
@@ -679,7 +679,7 @@
     padding: 8px 12px;
     flex-direction: row;
     align-items: center;
-    border-bottom: 1px solid var(--border-light);
+    border-bottom: 0;
   }
 
   .shell--drawer-docked .shell__bar-actions {

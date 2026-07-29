@@ -622,6 +622,42 @@ export default function Shell() {
 
   const { loadTheme } = useTheme()
   const queryClient = useQueryClient()
+  const recencyMarkedAppRef = useRef(null)
+  useEffect(() => {
+    if (activeView !== 'canvas' || activeAppId == null) {
+      recencyMarkedAppRef.current = null
+      return
+    }
+    const appId = Number(activeAppId)
+    if (!Number.isSafeInteger(appId) || appId <= 0) return
+    const key = String(appId)
+    if (recencyMarkedAppRef.current === key) return
+    recencyMarkedAppRef.current = key
+
+    // The navigation is already authoritative locally, so move the app in
+    // Recents immediately while the durable cross-session marker catches up.
+    const lastOpenedAt = new Date().toISOString()
+    const promoteCachedApp = () => {
+      queryClient.setQueryData(appQueries.keys.all, rows => (
+        Array.isArray(rows)
+          ? rows.map(app => (
+            Number(app.id) === appId
+              ? { ...app, last_opened_at: lastOpenedAt }
+              : app
+          ))
+          : rows
+      ))
+    }
+    promoteCachedApp()
+    void api.apps.markOpened(appId)
+      .then(response => {
+        if (response.ok) promoteCachedApp()
+        else appQueries.list.invalidate(queryClient)
+      })
+      // Offline navigation remains useful and keeps the optimistic order for
+      // this session; the next live list fetch restores server truth.
+      .catch(() => {})
+  }, [activeAppId, activeView, queryClient])
   const {
     state: { open: notificationsOpen, unreadCount: notificationUnreadCount },
     actions: {

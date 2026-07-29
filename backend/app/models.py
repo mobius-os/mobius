@@ -722,6 +722,21 @@ class AppActivityState(Base):
   unseen = Column(Boolean, nullable=False, default=True, server_default=true())
 
 
+class AppRecencyState(Base):
+  """Durable last-opened timestamp for one installed app.
+
+  This stays outside ``apps`` so opening an app does not advance
+  ``App.updated_at``, which is the executable-bundle cache key.
+  """
+
+  __tablename__ = "app_recency_state"
+
+  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
+  last_opened_at = Column(
+    DateTime, nullable=False, default=lambda: now_naive_utc()
+  )
+
+
 class AppPreviewState(Base):
   """Durable acknowledgement of the exact app build opened from its chat CTA.
 

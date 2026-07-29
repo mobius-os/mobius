@@ -1,7 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { Chats, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
@@ -33,9 +32,9 @@ import {
 import ShareAppSheet from './ShareAppSheet.jsx'
 import { isDrawerAppShareEligible } from './appShareState.js'
 import {
-  clampDrawerChatCount,
-  initialDrawerChatCount,
-  nextDrawerChatCount,
+  clampDrawerRowCount,
+  initialDrawerRowCount,
+  nextDrawerRowCount,
 } from './drawerProgressiveRows.js'
 import {
   clampDesktopSidebarWidth,
@@ -90,8 +89,7 @@ export default function Drawer({
   // Set of app ids that first appeared in the fetched list this session
   // (freshly built or App-Store-installed). Rendered as the same green
   // dot as chat attention, cleared by Shell when the app is opened —
-  // an arrival cue for an app that otherwise lands silently at the bottom
-  // of the oldest-first list.
+  // an arrival cue before normal open recency takes over.
   newAppIds,
   // Truthy when local provider credentials are missing or their status could
   // not be checked. Drives a small warning dot on Settings.
@@ -109,17 +107,17 @@ export default function Drawer({
   const resizeRef = useRef(null)
   const {
     pinned: pinnedItems,
-    chats: allChats,
+    recents: allRecents,
     apps: sortedApps,
   } = useMemo(() => buildDrawerSections(chats, apps), [chats, apps])
-  const [visibleChatCount, setVisibleChatCount] = useState(
-    () => initialDrawerChatCount(allChats.length),
+  const [visibleRecentCount, setVisibleRecentCount] = useState(
+    () => initialDrawerRowCount(allRecents.length),
   )
-  const chatScrollRef = useRef(null)
-  const chatSentinelRef = useRef(null)
-  const visibleChats = useMemo(
-    () => allChats.slice(0, visibleChatCount),
-    [allChats, visibleChatCount],
+  const navigationScrollRef = useRef(null)
+  const recentSentinelRef = useRef(null)
+  const visibleRecents = useMemo(
+    () => allRecents.slice(0, visibleRecentCount),
+    [allRecents, visibleRecentCount],
   )
 
   // Preserve the revealed window across recency reorders. Only clamp when
@@ -127,31 +125,31 @@ export default function Drawer({
   // batch available. Resetting to one batch on every query-cache refresh would
   // make rows disappear beneath someone who was already scrolling.
   useEffect(() => {
-    setVisibleChatCount(current => clampDrawerChatCount(
+    setVisibleRecentCount(current => clampDrawerRowCount(
       current,
-      allChats.length,
+      allRecents.length,
     ))
-  }, [allChats.length])
+  }, [allRecents.length])
 
   // One continuous list, progressively materialized as its sentinel nears the
-  // viewport. The chat summaries are already the shell's small navigation
-  // projection; this boundary avoids mounting hundreds of interactive menu
+  // viewport. Chat summaries and app metadata are already small navigation
+  // projections; this boundary avoids mounting hundreds of interactive menu
   // trees before they can be seen. Browsers without IntersectionObserver keep
-  // the old fully-rendered behavior rather than making history unreachable.
+  // the fully-rendered behavior rather than making history unreachable.
   useEffect(() => {
-    if (!open || visibleChatCount >= allChats.length) return undefined
-    const root = chatScrollRef.current
-    const sentinel = chatSentinelRef.current
+    if (!open || visibleRecentCount >= allRecents.length) return undefined
+    const root = navigationScrollRef.current
+    const sentinel = recentSentinelRef.current
     if (!root || !sentinel) return undefined
     if (typeof IntersectionObserver === 'undefined') {
-      setVisibleChatCount(allChats.length)
+      setVisibleRecentCount(allRecents.length)
       return undefined
     }
     const observer = new IntersectionObserver(entries => {
       if (!entries.some(entry => entry.isIntersecting)) return
-      setVisibleChatCount(current => nextDrawerChatCount(
+      setVisibleRecentCount(current => nextDrawerRowCount(
         current,
-        allChats.length,
+        allRecents.length,
       ))
     }, {
       root,
@@ -160,7 +158,7 @@ export default function Drawer({
     })
     observer.observe(sentinel)
     return () => observer.disconnect()
-  }, [allChats.length, open, visibleChatCount])
+  }, [allRecents.length, open, visibleRecentCount])
 
   // One row at a time can be in rename or open-menu mode. Tracking the
   // active id (rather than per-row state) lets a click on another row's
@@ -875,7 +873,7 @@ export default function Drawer({
               <span className="drawer__item-text">New chat</span>
             </button>
 
-            <div className="drawer__scroll drawer__scroll--navigation" ref={chatScrollRef}>
+            <div className="drawer__scroll drawer__scroll--navigation" ref={navigationScrollRef}>
               <button
                 ref={appsButtonRef}
                 type="button"
@@ -892,7 +890,6 @@ export default function Drawer({
               {pinnedItems.length > 0 && (
                 <section className="drawer__section" aria-labelledby="drawer-pinned-label">
                   <h2 id="drawer-pinned-label" className="drawer__label">
-                    <PinFilled width={15} height={15} aria-hidden="true" />
                     <span>Pinned</span>
                   </h2>
                   {pinnedItems.map(({ kind, item }) => (
@@ -931,62 +928,72 @@ export default function Drawer({
                 </section>
               )}
 
-              {chatsStatus === 'loading' && (
-                <p className="drawer__list-status" role="status">Loading chats…</p>
-              )}
-              {chatsStatus === 'error' && (
-                <div className="drawer__list-status" role="alert">
-                  <span>Chats unavailable.</span>
-                  <button type="button" onClick={onRetryChats}>Retry</button>
-                </div>
-              )}
-              {chatsStatus === 'success' && (
-                <section className="drawer__section" aria-labelledby="drawer-chats-label">
-                  <h2 id="drawer-chats-label" className="drawer__label drawer__label--chats">
-                    <Chats width={16} height={16} aria-hidden="true" />
-                    <span>Chats</span>
-                  </h2>
-                  {allChats.length > 0 ? visibleChats.map(chat => (
-                    <DrawerRow
-                      key={chat.id}
-                      kind="chat"
-                      item={chat}
-                      surface="drawer"
-                      streaming={streamingSet.has(chat.id)}
-                      attention={attentionSet.has(chat.id)}
-                      active={!appsActive && activeView === 'chat' && activeChatId === chat.id}
-                      menuOpen={!!(openMenu
-                        && openMenu.surface === 'drawer'
-                        && openMenu.kind === 'chat'
-                        && openMenu.id === chat.id)}
-                      menuPlacement={openMenu
-                        && openMenu.surface === 'drawer'
-                        && openMenu.kind === 'chat'
-                        && openMenu.id === chat.id
-                        ? openMenu.placement
-                        : null}
-                      renaming={!!(renaming
-                        && renaming.surface === 'drawer'
-                        && renaming.kind === 'chat'
-                        && renaming.id === chat.id)}
-                      actions={rowActions}
-                    />
-                  )) : (
-                    <EmptyMessage className="drawer__empty" fill="static">
-                      <EmptyMessage.Description>
-                        No conversations yet
-                      </EmptyMessage.Description>
-                    </EmptyMessage>
-                  )}
-                  {visibleChatCount < allChats.length && (
-                    <div
-                      ref={chatSentinelRef}
-                      className="drawer__progressive-sentinel"
-                      aria-hidden="true"
-                    />
-                  )}
-                </section>
-              )}
+              <section className="drawer__section" aria-labelledby="drawer-recents-label">
+                <h2 id="drawer-recents-label" className="drawer__label drawer__label--recents">
+                  <span>Recents</span>
+                </h2>
+                {allRecents.length > 0 ? visibleRecents.map(({ kind, item }) => (
+                  <DrawerRow
+                    key={`${kind}:${item.id}`}
+                    kind={kind}
+                    item={item}
+                    surface="drawer"
+                    streaming={kind === 'chat' && streamingSet.has(item.id)}
+                    building={kind === 'app' && !!(item.chat_id && streamingSet.has(item.chat_id))}
+                    attention={kind === 'chat'
+                      ? attentionSet.has(item.id)
+                      : newAppSet.has(Number(item.id))}
+                    active={!appsActive && (
+                      kind === 'chat'
+                        ? activeView === 'chat' && activeChatId === item.id
+                        : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
+                    )}
+                    menuOpen={!!(openMenu
+                      && openMenu.surface === 'drawer'
+                      && openMenu.kind === kind
+                      && openMenu.id === item.id)}
+                    menuPlacement={openMenu
+                      && openMenu.surface === 'drawer'
+                      && openMenu.kind === kind
+                      && openMenu.id === item.id
+                      ? openMenu.placement
+                      : null}
+                    renaming={!!(renaming
+                      && renaming.surface === 'drawer'
+                      && renaming.kind === kind
+                      && renaming.id === item.id)}
+                    actions={rowActions}
+                  />
+                )) : chatsStatus === 'loading' || appsStatus === 'loading' ? (
+                  <p className="drawer__list-status" role="status">Loading recents…</p>
+                ) : chatsStatus === 'error' || appsStatus === 'error' ? (
+                  <div className="drawer__list-status" role="alert">
+                    <span>Recents unavailable.</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onRetryChats?.()
+                        onRetryApps?.()
+                      }}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : (
+                  <EmptyMessage className="drawer__empty" fill="static">
+                    <EmptyMessage.Description>
+                      Nothing recent yet
+                    </EmptyMessage.Description>
+                  </EmptyMessage>
+                )}
+                {visibleRecentCount < allRecents.length && (
+                  <div
+                    ref={recentSentinelRef}
+                    className="drawer__progressive-sentinel"
+                    aria-hidden="true"
+                  />
+                )}
+              </section>
             </div>
           </div>{/* /.drawer__scroll-wrap */}
 

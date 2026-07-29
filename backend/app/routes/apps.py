@@ -23,8 +23,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, defer
 
 from app import (
-  activity, app_activity, app_apply, app_git, app_jobs, app_preview, fs_locks,
-  icon_cache, icon_ownership,
+  activity, app_activity, app_apply, app_git, app_jobs, app_preview,
+  app_recency, fs_locks, icon_cache, icon_ownership,
   legacy_platform_apps,
   models, providers, schemas,
   source_dirs, theme,
@@ -415,6 +415,9 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   db.query(models.AppActivityState).filter(
     models.AppActivityState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
+  db.query(models.AppRecencyState).filter(
+    models.AppRecencyState.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
   db.query(models.AppPreviewState).filter(
     models.AppPreviewState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
@@ -748,8 +751,10 @@ async def list_apps(
     )
     .all()
   )
-  return app_preview.annotate_apps(
-    db, app_activity.annotate_apps(db, apps)
+  return app_recency.annotate_apps(
+    db, app_preview.annotate_apps(
+      db, app_activity.annotate_apps(db, apps)
+    )
   )
 
 
@@ -2099,9 +2104,28 @@ def get_app(
 ):
   """Returns a single mini-app by ID (404 for a tombstoned one)."""
   app = live_app_or_404(db, app_id)
-  return app_preview.annotate_apps(
-    db, app_activity.annotate_apps(db, [app])
+  return app_recency.annotate_apps(
+    db, app_preview.annotate_apps(
+      db, app_activity.annotate_apps(db, [app])
+    )
   )[0]
+
+
+@router.post(
+  "/{app_id}/opened",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+def mark_app_opened(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Record owner navigation recency without changing the app bundle version."""
+  live_app_or_404(db, app_id)
+  app_recency.mark_opened(db, app_id)
+  db.commit()
+  return Response(status_code=204)
 
 
 class AppActivitySeenRequest(BaseModel):

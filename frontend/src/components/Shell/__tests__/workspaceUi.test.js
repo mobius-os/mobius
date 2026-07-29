@@ -178,10 +178,11 @@ test('the authenticated shell offers a keyboard skip link', () => {
 test('drawer lists distinguish loading, error, and confirmed empty data', () => {
   assert.match(shell, /appsStatus=\{appsStatus\}/)
   assert.match(shell, /chatsStatus=\{chatsStatus\}/)
-  assert.match(drawer, /chatsStatus === 'loading'/)
-  assert.match(drawer, /chatsStatus === 'error'/)
-  assert.match(drawer, /chatsStatus === 'success'/)
-  assert.match(drawer, /No conversations yet/)
+  assert.match(drawer, /chatsStatus === 'loading' \|\| appsStatus === 'loading'/)
+  assert.match(drawer, /chatsStatus === 'error' \|\| appsStatus === 'error'/)
+  assert.match(drawer, /Loading recents…/)
+  assert.match(drawer, /Recents unavailable\./)
+  assert.match(drawer, /Nothing recent yet/)
 })
 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
@@ -846,9 +847,52 @@ test('large drawer lists memoize ordering and row actions without changing row o
   assert.match(drawer, /const filteredApps = useMemo\(/)
   assert.match(drawer, /const rowActions = useMemo\(/)
   assert.match(drawer, /const DrawerRow = memo\(function DrawerRow/)
-  assert.match(drawer, /item=\{chat\}[\s\S]*?actions=\{rowActions\}/)
+  assert.match(drawer, /visibleRecents\.map\(\(\{ kind, item \}\)[\s\S]*?item=\{item\}[\s\S]*?actions=\{rowActions\}/)
   assert.match(drawer, /item=\{app\}[\s\S]*?actions=\{rowActions\}/)
   assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
+})
+
+test('mixed recents reserve artwork for apps and separate sections without a second type scale', () => {
+  assert.match(drawer, /kind === 'app'[\s\S]*?<AppIcon/)
+  assert.doesNotMatch(drawer, /drawer__chat-icon|<Chat\b|<Clock\b|<PinFilled\b/)
+  assert.match(
+    drawerCss,
+    /\.drawer__label\s*\{[\s\S]*?font-size:\s*14px[\s\S]*?font-weight:\s*600[\s\S]*?color:\s*var\(--text\)[\s\S]*?padding:\s*6px 12px[\s\S]*?margin:\s*12px 0 4px/,
+  )
+  assert.match(
+    drawerCss,
+    /\.drawer__item\s*\{[\s\S]*?font-size:\s*14px/,
+  )
+  assert.match(
+    drawerCss,
+    /@media \(min-width: 1024px\)[\s\S]*?\.drawer__item,[\s\S]*?font-size:\s*15px[\s\S]*?\.drawer__label\s*\{[\s\S]*?font-size:\s*15px/,
+  )
+  assert.doesNotMatch(
+    drawerCss,
+    /\.drawer__row \.drawer__item\s*\{[^}]*font-size:/,
+  )
+})
+
+test('New chat and Apps share one compact navigation rhythm', () => {
+  assert.match(
+    drawerCss,
+    /\.drawer__item--new\s*\{[\s\S]*?margin:\s*0;/,
+  )
+  assert.match(
+    drawerCss,
+    /\.drawer__scroll--navigation\s*\{[\s\S]*?margin-top:\s*0;[\s\S]*?padding-top:\s*0;/,
+  )
+})
+
+test('the Möbius header flows into navigation without a divider', () => {
+  assert.match(
+    shellCss,
+    /\.shell__bar\s*\{[\s\S]*?border-bottom:\s*0;/,
+  )
+  assert.match(
+    shellCss,
+    /\.shell--drawer-docked \.shell__bar\s*\{[\s\S]*?border-bottom:\s*0;/,
+  )
 })
 
 test('row-owned context menus need no permanent kebab or hidden anchor', () => {
