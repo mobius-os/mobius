@@ -11,6 +11,10 @@ const shellBrand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), '
 const newChatLanding = readFileSync(new URL('../NewChatLanding.jsx', import.meta.url), 'utf8')
 const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
 const drawer = readFileSync(new URL('../../Drawer/Drawer.jsx', import.meta.url), 'utf8')
+const drawerItemActionMenu = readFileSync(
+  new URL('../../Drawer/DrawerItemActionMenu.jsx', import.meta.url),
+  'utf8',
+)
 const paneModelSrc = readFileSync(new URL('../paneModel.js', import.meta.url), 'utf8')
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const dragBinding = readFileSync(new URL('../useWorkspaceDrag.js', import.meta.url), 'utf8')
@@ -837,9 +841,34 @@ test('large drawer lists memoize ordering and row actions without changing row o
   assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
 })
 
+test('row-owned context menus have no detached hidden-anchor path', () => {
+  assert.match(drawer, /<DrawerItemActionMenu[\s\S]*?itemKind=\{kind\}/)
+  assert.doesNotMatch(drawer, /triggerHidden|drawer__menu-anchor/)
+  assert.doesNotMatch(drawerCss, /drawer__more|drawer__menu-anchor/)
+  assert.match(drawer, /if \(openMenu\) return[\s\S]*?onClose\?\.\(\)/,
+    'Escape must close a row menu before dismissing the mobile drawer beneath it')
+})
+
+test('chat deletion is immediate while app deletion still requires confirmation', () => {
+  assert.match(
+    drawerItemActionMenu,
+    /function handleDeleteAction\(\)[\s\S]*?itemKind === 'chat'[\s\S]*?run\(onDelete, \{ restoreFocus: false \}\)[\s\S]*?return[\s\S]*?setConfirmation\('delete'\)/,
+  )
+  assert.match(
+    drawerItemActionMenu,
+    /className="drawer__item-action-item drawer__item-action-item--danger"\s*\n\s*onClick=\{handleDeleteAction\}/,
+  )
+  assert.match(
+    drawerItemActionMenu,
+    /confirmation === 'delete-data'[\s\S]*?confirmation === 'delete'/,
+    'app and app-data deletion must retain their confirmation paths',
+  )
+})
+
 test('drawer row menus use one semantic context-menu path across pointer types', () => {
-  assert.match(drawer, /function openRowMenu\(event\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface\)/)
-  assert.match(drawer, /onContextMenu=\{openRowMenu\}/)
+  assert.match(drawer, /function openItemMenu\(event\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
+  assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
+    'app cards, app rows, and chat rows must share one opening function')
   assert.match(dragBinding, /srcEl\.dispatchEvent\(new window\.MouseEvent\('contextmenu'/)
   assert.doesNotMatch(
     dragBinding,
@@ -853,12 +882,19 @@ test('a secondary-button release cannot immediately select a flipped drawer menu
   assert.match(drawer, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)
   assert.match(drawer, /window\.addEventListener\('pointerup', onSecondaryPointerUp, true\)/)
   assert.match(drawer, /upEvent\.pointerId !== pointerId \|\| upEvent\.button !== 2/)
-  assert.match(drawer, /cleanup\(\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface\)/)
+  assert.match(drawer, /cleanup\(\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface, placement\)/)
   assert.match(drawer, /timer = setTimeout\(cleanup, 1500\)/)
 })
 
+test('launcher cards and drawer rows share the same long-press threshold and movement slop', () => {
+  assert.match(drawer, /import \{ DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX \} from '\.\.\/Shell\/dragController\.js'/)
+  assert.match(drawer, /\}, DRAWER_HOLD_MS\)/)
+  assert.match(drawer, /> PRE_HOLD_MOVE_PX/)
+  assert.doesNotMatch(drawer, /520/)
+})
+
 test('double-click edits a drawer row name instead of duplicating its context menu', () => {
-  assert.match(drawer, /onDoubleClick=\{event => \{[\s\S]*?actions\.startRename\(kind, id\)/)
+  assert.match(drawer, /onDoubleClick=\{event => \{[\s\S]*?actions\.startRename\(kind, id, surface\)/)
 })
 
 test('the Settings surface responds to PANE width via a query container', () => {

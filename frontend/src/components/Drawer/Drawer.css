@@ -345,9 +345,6 @@
    the composer pill's focus halo so the platform reads as a
    single design system. */
 .drawer__item:focus-visible,
-.drawer__more:focus-visible,
-.drawer__menu-item:focus-visible,
-.drawer__menu-confirm-btn:focus-visible,
 .drawer__rename-input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -405,12 +402,8 @@
   visibility: hidden;
 }
 
-/* ── Row + three-dots menu ─────────────────────────── */
+/* ── Context-menu row ──────────────────────────────── */
 
-/* The row stacks two siblings (button + menu trigger) horizontally so
- * the trigger isn't nested inside the row button (nested <button>
- * elements are invalid HTML and Chrome silently hoists the inner one
- * out, breaking layout). The menu floats below the row absolutely. */
 .drawer__row {
   position: relative;
   display: flex;
@@ -429,168 +422,287 @@
   touch-action: pan-y pinch-zoom;
 }
 
-/* The ⋮ button matches the row height so its hit area aligns
-   with the row's vertical bounds. Width bumped 32 → 40 for a
-   compliant touch target (44 is the strict guideline but the
-   button stretches vertically so the full hit area is the row
-   height ≈ 40px). align-self: stretch makes it grow to the row's
-   full height set by the .drawer__item padding. */
-.drawer__more {
-  flex-shrink: 0;
-  align-self: stretch;
-  width: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  border-radius: 8px;
-  color: var(--muted);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s, color 0.12s, background 0.12s, transform 0.08s;
-  -webkit-tap-highlight-color: transparent;
+/* App cards and drawer rows share one action-menu placement path. Pointer
+   coordinates are converted to root layout space so shell density never shifts
+   a menu away from the click. */
+.drawer__item-action-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: transparent;
 }
 
-/* Pressed — the load-bearing feedback fix. tap-highlight is transparent
-   above, so without an explicit :active the kebab reads as dead on touch
-   until the menu portal paints. Scale + tint acknowledges the tap instantly. */
-.drawer__more:active {
-  color: var(--text);
-  background: var(--surface);
-  transform: scale(0.92);
-}
-
-/* Open trigger — Radix stamps data-state="open" on the trigger; keep it lit
-   and accent-tinted (and fully opaque, overriding the touch opacity:0 reveal)
-   so the open menu visibly belongs to this row's kebab. */
-.drawer__more[data-state="open"] {
-  opacity: 1;
-  color: var(--accent);
-  background: var(--accent-dim);
-}
-
-.drawer__row:focus-within .drawer__more { opacity: 1; }
-
-/* Hover-only desktop reveal — keeps the trigger hidden until the
-   user actually hovers a row with a mouse. */
-@media (hover: hover) and (pointer: fine) {
-  .drawer__row:hover .drawer__more { opacity: 1; }
-  .drawer__more:hover {
-    color: var(--text);
-    background: var(--surface);
-  }
-}
-
-/* Always show on touch devices — :hover never fires there, and the
- * menu trigger has to be reachable without a hover state. */
-@media (hover: none) {
-  .drawer__more { opacity: 0.5; }
-}
-
-/* Menu roundness — outer 12px so the floating popover reads as a
-   softer surface than the underlying 8px rows; inner items match
-   row radius (8px) so a hovered menu item visually rhymes with
-   the row's selected/active background. */
-.drawer__menu {
-  position: absolute;
-  right: 4px;
-  top: calc(100% - 4px);
-  z-index: 2;
-  min-width: 200px;
+.drawer__item-action-menu {
+  position: fixed;
+  left: var(--item-action-x);
+  top: var(--item-action-y);
+  width: 220px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+  visibility: hidden;
   padding: 6px;
-  background: var(--bg);
   border: 1px solid var(--border-light);
   border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-}
-
-/* Flip the menu upward when the parent .drawer__row has the
-   --flip-up modifier (set by DrawerRow when there's not enough
-   space below — last row in the scroll area). */
-.drawer__row--flip-up .drawer__menu {
-  top: auto;
-  bottom: calc(100% - 4px);
-}
-
-.drawer__menu-item {
-  width: 100%;
-  display: block;
-  padding: 8px 10px;
-  background: none;
-  border: none;
-  border-radius: 8px;
+  background: var(--surface);
   color: var(--text);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.38);
+  scrollbar-width: none;
+}
+
+.drawer__item-action-menu[data-positioned="true"] {
+  visibility: visible;
+}
+
+.drawer__item-action-handle,
+.drawer__item-action-header {
+  display: none;
+}
+
+.drawer__item-action-items {
+  display: grid;
+  gap: 1px;
+}
+
+.drawer__item-action-item {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
   font-size: 13px;
-  font-family: var(--font);
   text-align: left;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Icon-bearing menu items (Pin / Unpin) get a flex row so
-   the leading icon stays aligned with the row's text baseline. */
-.drawer__menu-item--icon {
-  display: flex;
-  align-items: center;
+.drawer__item-action-item--icon {
   gap: 8px;
 }
-.drawer__menu-item--icon svg { flex-shrink: 0; opacity: 0.85; }
 
-@media (hover: hover) and (pointer: fine) {
-  .drawer__menu-item:hover {
-    background: var(--surface);
-  }
+.drawer__item-action-item--icon svg {
+  flex: 0 0 auto;
+  opacity: 0.85;
 }
 
-.drawer__menu-item--danger {
+.drawer__item-action-item--danger {
   color: var(--danger);
 }
 
-.drawer__menu-confirm {
-  padding: 6px 10px 8px;
+.drawer__item-action-item:focus-visible,
+.drawer__item-action-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
-.drawer__menu-confirm-label {
-  display: block;
-  font-size: 12px;
-  color: var(--muted);
-  margin-bottom: 6px;
+@media (hover: hover) and (pointer: fine) {
+  .drawer__item-action-item:hover {
+    background: color-mix(in srgb, var(--bg) 68%, transparent);
+  }
 }
 
-.drawer__menu-confirm-actions {
-  display: flex;
-  gap: 6px;
+.drawer__item-action-separator {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--border-light);
 }
 
-.drawer__menu-confirm-btn {
-  flex: 1;
-  padding: 6px 8px;
-  background: var(--surface);
-  border: 1px solid var(--border-light);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 12px;
-  font-family: var(--font);
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.drawer__menu-confirm-btn--yes {
-  background: var(--danger);
-  border-color: var(--danger);
-  color: #fff;
-}
-
-.drawer__menu-note {
-  margin: 6px 4px 0;
-  padding: 4px 6px;
+.drawer__item-action-note {
+  margin: 5px 4px 0;
+  padding: 8px 6px 4px;
   border-top: 1px solid var(--border-light);
-  padding-top: 8px;
+  color: var(--muted);
   font-size: 11px;
   font-style: italic;
-  color: var(--muted);
   line-height: 1.35;
+}
+
+.drawer__item-action-confirm {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+}
+
+.drawer__item-action-confirm > strong {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.drawer__item-action-confirm > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.drawer__item-action-confirm > div {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.drawer__item-action-confirm .drawer__item-action-item {
+  justify-content: center;
+  border: 1px solid var(--border-light);
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .drawer__item-action-layer {
+    background: rgba(0, 0, 0, 0.46);
+    backdrop-filter: blur(2px);
+  }
+
+  .drawer__item-action-menu,
+  .drawer__item-action-menu[data-positioned="true"] {
+    top: auto;
+    right: 12px;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    left: 12px;
+    width: auto;
+    max-width: none;
+    max-height: calc(100dvh - 24px - env(safe-area-inset-bottom));
+    visibility: visible;
+    padding: 7px;
+    border-radius: 20px;
+    background: var(--surface);
+    box-shadow: 0 22px 54px rgba(0, 0, 0, 0.46);
+    animation: drawer-item-sheet-in 170ms cubic-bezier(0.2, 0.75, 0.2, 1);
+  }
+
+  .drawer__item-action-handle {
+    width: 34px;
+    height: 4px;
+    display: block;
+    margin: 2px auto 7px;
+    border-radius: 999px;
+    background: var(--border);
+  }
+
+  .drawer__item-action-header {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 4px 5px 10px;
+  }
+
+  .drawer__item-action-icon {
+    position: relative;
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    border-radius: 11px;
+    background: var(--app-color, var(--accent));
+    color: var(--accent-fg, #fff);
+    font-size: 12px;
+    font-weight: 750;
+  }
+
+  .drawer__item-action-icon img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+
+  .drawer__item-action-icon.is-image {
+    overflow: visible;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .drawer__item-action-icon.is-image > span {
+    visibility: hidden;
+  }
+
+  .drawer__item-action-icon--chat {
+    background: var(--accent-dim);
+    color: var(--accent);
+  }
+
+  .drawer__item-action-heading {
+    min-width: 0;
+    flex: 1;
+    display: grid;
+    gap: 2px;
+  }
+
+  .drawer__item-action-heading > span {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .drawer__item-action-heading > strong {
+    overflow: hidden;
+    font-size: 16px;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .drawer__item-action-close {
+    width: 40px;
+    height: 40px;
+    flex: 0 0 40px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg) 72%, transparent);
+    color: var(--muted);
+  }
+
+  .drawer__item-action-items {
+    gap: 2px;
+  }
+
+  .drawer__item-action-item {
+    min-height: 48px;
+    padding: 11px 13px;
+    border-radius: 12px;
+    font-size: 15px;
+  }
+
+  .drawer__item-action-note {
+    margin: 5px 7px 2px;
+    padding: 9px 6px 5px;
+    font-size: 11px;
+  }
+
+  .drawer__item-action-confirm {
+    gap: 9px;
+    padding: 10px 8px 6px;
+  }
+
+  .drawer__item-action-confirm > strong {
+    font-size: 16px;
+  }
+
+  .drawer__item-action-confirm > span {
+    font-size: 13px;
+  }
+
+  .drawer__item-action-confirm > div {
+    gap: 8px;
+    margin-top: 6px;
+  }
+}
+
+@keyframes drawer-item-sheet-in {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* ── Inline rename ─────────────────────────────────── */
@@ -742,7 +854,7 @@
 @media (prefers-reduced-motion: reduce) {
   .drawer,
   .drawer-overlay { transition: none; }
-  .drawer__more:active { transform: none; }
+  .drawer__item-action-menu { animation: none; }
 }
 
 /* ── Settings warning dot ──────────────────────────── */

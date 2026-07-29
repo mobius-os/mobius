@@ -1,8 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { Chats, DotsVerticalMoreMenu, Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
-import { Menu } from '@openai/apps-sdk-ui/components/Menu'
+import { Chats, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
@@ -22,8 +21,10 @@ import {
   clearDrawerGestureStyles,
 } from '../../lib/drawerLifecycle.js'
 import { WORKSPACE_SPLITS_ENABLED } from '../Shell/paneModel.js'
+import { DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX } from '../Shell/dragController.js'
 import InstallSheet from './InstallSheet.jsx'
 import AppsDirectory from './AppsDirectory.jsx'
+import DrawerItemActionMenu from './DrawerItemActionMenu.jsx'
 import {
   appInitials,
   buildDrawerSections,
@@ -163,9 +164,8 @@ export default function Drawer({
 
   // One row at a time can be in rename or open-menu mode. Tracking the
   // active id (rather than per-row state) lets a click on another row's
-  // ⋮ button close any open menu without needing a global outside-click
-  // handler per row.
-  const [openMenu, setOpenMenu] = useState(null) // { kind, id } | null
+  // context action replace any open menu without a global listener per row.
+  const [openMenu, setOpenMenu] = useState(null) // { kind, id, surface, placement } | null
   // Belt-and-braces orphan cleanup: if the row whose menu was open
   // disappears from the list (delete, chat soft-delete, agent-side
   // removal), openMenu would still reference a dead id and the next
@@ -241,8 +241,13 @@ export default function Drawer({
       if (kind === 'chat') current.onChat(id)
       else current.onApp(id)
     },
-    toggleMenu(kind, id, next, surface = 'drawer') {
-      rowActionInputsRef.current.setOpenMenu(next ? { kind, id, surface } : null)
+    toggleMenu(kind, id, next, surface = 'drawer', placement = null) {
+      rowActionInputsRef.current.setOpenMenu(next ? {
+        kind,
+        id,
+        surface,
+        placement,
+      } : null)
     },
     startRename(kind, id, surface = 'drawer') {
       rowActionInputsRef.current.setRenaming({ kind, id, surface })
@@ -458,13 +463,17 @@ export default function Drawer({
     if (!open || persistent || interactionLocked) return
     function onKeyDown(e) {
       if (e.key === 'Escape') {
+        // A row-owned menu is the topmost surface. Its own Escape handler
+        // closes it and restores focus to the row; only a second Escape should
+        // dismiss the mobile drawer underneath.
+        if (openMenu) return
         e.stopPropagation()
         onClose?.()
       }
     }
     document.addEventListener('keydown', onKeyDown, { capture: true })
     return () => document.removeEventListener('keydown', onKeyDown, { capture: true })
-  }, [open, persistent, interactionLocked, onClose])
+  }, [open, persistent, interactionLocked, onClose, openMenu])
 
   // Swipe-left-to-close. Mirror of the mobius-design-iter pattern:
   // touchstart captures origin, touchmove drags the panel 1:1 with
@@ -906,6 +915,12 @@ export default function Drawer({
                         && openMenu.surface === 'drawer'
                         && openMenu.kind === kind
                         && openMenu.id === item.id)}
+                      menuPlacement={openMenu
+                        && openMenu.surface === 'drawer'
+                        && openMenu.kind === kind
+                        && openMenu.id === item.id
+                        ? openMenu.placement
+                        : null}
                       renaming={!!(renaming
                         && renaming.surface === 'drawer'
                         && renaming.kind === kind
@@ -944,6 +959,12 @@ export default function Drawer({
                         && openMenu.surface === 'drawer'
                         && openMenu.kind === 'chat'
                         && openMenu.id === chat.id)}
+                      menuPlacement={openMenu
+                        && openMenu.surface === 'drawer'
+                        && openMenu.kind === 'chat'
+                        && openMenu.id === chat.id
+                        ? openMenu.placement
+                        : null}
                       renaming={!!(renaming
                         && renaming.surface === 'drawer'
                         && renaming.kind === 'chat'
@@ -1022,6 +1043,12 @@ export default function Drawer({
                 && openMenu.surface === 'directory'
                 && openMenu.kind === 'app'
                 && openMenu.id === app.id)}
+              menuPlacement={openMenu
+                && openMenu.surface === 'directory'
+                && openMenu.kind === 'app'
+                && openMenu.id === app.id
+                ? openMenu.placement
+                : null}
               renaming={!!(renaming
                 && renaming.surface === 'directory'
                 && renaming.kind === 'app'
@@ -1067,6 +1094,7 @@ const DrawerRow = memo(function DrawerRow({
   building,
   attention,
   menuOpen,
+  menuPlacement,
   renaming,
   actions,
 }) {
@@ -1078,6 +1106,7 @@ const DrawerRow = memo(function DrawerRow({
   const inputRef = useRef(null)
   const holdTimerRef = useRef(null)
   const holdOriginRef = useRef(null)
+  const itemButtonRef = useRef(null)
   const suppressCardClickRef = useRef(false)
   const suppressRowClickRef = useRef(false)
   const reorderCleanupRef = useRef(null)
@@ -1151,6 +1180,63 @@ const DrawerRow = memo(function DrawerRow({
     else if (e.key === 'Escape') { e.preventDefault(); actions.cancelRename() }
   }
 
+  // Every app card and drawer row enters the same placed action-menu path.
+  // Pointer gestures use their real release point; keyboard invocations fall
+  // back to the bottom-center of the focused item instead of the event's 0,0.
+  function itemMenuPlacement(point) {
+    const rect = itemButtonRef.current?.getBoundingClientRect()
+    const hasPoint = Number.isFinite(Number(point?.x))
+      && Number.isFinite(Number(point?.y))
+      && (Number(point.x) !== 0 || Number(point.y) !== 0)
+    return {
+      clientX: hasPoint ? Number(point.x) : (rect?.left || 0) + (rect?.width || 0) / 2,
+      clientY: hasPoint ? Number(point.y) : rect?.bottom || 0,
+    }
+  }
+
+  function openItemMenu(event) {
+    event.preventDefault()
+    event.stopPropagation()
+    // Chromium raises mouse contextmenu on secondary-button DOWN. The matching
+    // UP below owns that gesture and opens only after release, so focus cannot
+    // snap back to the source or select a collision-flipped menu item.
+    if (event.type === 'contextmenu' && secondaryReleaseCleanupRef.current) return
+    actions.toggleMenu(kind, id, true, surface, itemMenuPlacement({
+      x: event.clientX,
+      y: event.clientY,
+    }))
+  }
+
+  function beginSecondaryMenuPress(event) {
+    if (event.pointerType !== 'mouse' || event.button !== 2) return false
+    event.preventDefault()
+    secondaryReleaseCleanupRef.current?.()
+    const pointerId = event.pointerId
+    const placement = itemMenuPlacement({ x: event.clientX, y: event.clientY })
+    let timer = null
+    const cleanup = () => {
+      window.removeEventListener('pointerup', onSecondaryPointerUp, true)
+      window.removeEventListener('pointercancel', cleanup, true)
+      window.removeEventListener('blur', cleanup, true)
+      if (timer !== null) clearTimeout(timer)
+      if (secondaryReleaseCleanupRef.current === cleanup) {
+        secondaryReleaseCleanupRef.current = null
+      }
+    }
+    const onSecondaryPointerUp = upEvent => {
+      if (upEvent.pointerId !== pointerId || upEvent.button !== 2) return
+      upEvent.preventDefault()
+      cleanup()
+      actions.toggleMenu(kind, id, true, surface, placement)
+    }
+    window.addEventListener('pointerup', onSecondaryPointerUp, true)
+    window.addEventListener('pointercancel', cleanup, true)
+    window.addEventListener('blur', cleanup, true)
+    timer = setTimeout(cleanup, 1500)
+    secondaryReleaseCleanupRef.current = cleanup
+    return true
+  }
+
   if (renaming) {
     if (variant === 'card') {
       return (
@@ -1180,48 +1266,7 @@ const DrawerRow = memo(function DrawerRow({
     )
   }
 
-  function openRowMenu(event) {
-    event.preventDefault()
-    event.stopPropagation()
-    // Chromium raises mouse contextmenu on secondary-button DOWN. The matching
-    // UP is owned by beginSecondaryMenuPress below, which opens only after that
-    // release; do not mount the collision-flipped menu underneath a held pointer.
-    if (event.type === 'contextmenu' && secondaryReleaseCleanupRef.current) return
-    actions.toggleMenu(kind, id, true, surface)
-  }
-
-  function beginSecondaryMenuPress(event) {
-    if (event.pointerType !== 'mouse' || event.button !== 2) return
-    event.preventDefault()
-    secondaryReleaseCleanupRef.current?.()
-    const pointerId = event.pointerId
-    let timer = null
-    const cleanup = () => {
-      window.removeEventListener('pointerup', onSecondaryPointerUp, true)
-      window.removeEventListener('pointercancel', cleanup, true)
-      window.removeEventListener('blur', cleanup, true)
-      if (timer !== null) clearTimeout(timer)
-      if (secondaryReleaseCleanupRef.current === cleanup) {
-        secondaryReleaseCleanupRef.current = null
-      }
-    }
-    const onSecondaryPointerUp = upEvent => {
-      if (upEvent.pointerId !== pointerId || upEvent.button !== 2) return
-      upEvent.preventDefault()
-      cleanup()
-      actions.toggleMenu(kind, id, true, surface)
-    }
-    window.addEventListener('pointerup', onSecondaryPointerUp, true)
-    window.addEventListener('pointercancel', cleanup, true)
-    window.addEventListener('blur', cleanup, true)
-    timer = setTimeout(cleanup, 1500)
-    secondaryReleaseCleanupRef.current = cleanup
-  }
-
   if (variant === 'card') {
-    function openCardMenu(event) {
-      openRowMenu(event)
-    }
     function beginCardHold(event) {
       if (event.pointerType === 'mouse' || event.button !== 0) return
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
@@ -1229,8 +1274,14 @@ const DrawerRow = memo(function DrawerRow({
       holdTimerRef.current = setTimeout(() => {
         holdTimerRef.current = null
         suppressCardClickRef.current = true
-        actions.toggleMenu(kind, id, true, surface)
-      }, 520)
+        actions.toggleMenu(
+          kind,
+          id,
+          true,
+          surface,
+          itemMenuPlacement(holdOriginRef.current),
+        )
+      }, DRAWER_HOLD_MS)
     }
     function cancelCardHold() {
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
@@ -1240,6 +1291,7 @@ const DrawerRow = memo(function DrawerRow({
     return (
       <div className="apps-directory__card">
         <button
+          ref={itemButtonRef}
           type="button"
           className="apps-directory__card-main"
           aria-label={`Open ${label}`}
@@ -1250,22 +1302,22 @@ const DrawerRow = memo(function DrawerRow({
             }
             actions.select(kind, id)
           }}
-          onContextMenu={openCardMenu}
+          onContextMenu={openItemMenu}
           onPointerDown={event => {
-            beginSecondaryMenuPress(event)
+            if (beginSecondaryMenuPress(event)) return
             beginCardHold(event)
           }}
           onPointerUp={cancelCardHold}
           onPointerCancel={cancelCardHold}
           onPointerMove={event => {
             const origin = holdOriginRef.current
-            if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 8) {
+            if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > PRE_HOLD_MOVE_PX) {
               cancelCardHold()
             }
           }}
           onKeyDown={event => {
             if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-              openCardMenu(event)
+              openItemMenu(event)
             }
           }}
         >
@@ -1286,8 +1338,8 @@ const DrawerRow = memo(function DrawerRow({
           pinned={pinned}
           menuOpen={menuOpen}
           actions={actions}
-          triggerClassName="drawer__more apps-directory__card-menu-anchor"
-          triggerHidden
+          menuPlacement={menuPlacement}
+          restoreFocusRef={itemButtonRef}
         />
       </div>
     )
@@ -1428,9 +1480,15 @@ const DrawerRow = memo(function DrawerRow({
     window.addEventListener('pointercancel', onCancel, true)
   }
 
+  function onRowPointerDown(event) {
+    if (beginSecondaryMenuPress(event)) return
+    beginPinnedReorder(event)
+  }
+
   return (
     <div className="drawer__row" ref={wrapRef}>
       <button
+        ref={itemButtonRef}
         type="button"
         className={`drawer__item ${active ? 'drawer__item--active' : ''}`}
         aria-current={active ? 'page' : undefined}
@@ -1440,10 +1498,7 @@ const DrawerRow = memo(function DrawerRow({
         // in the focused pane (the controller never arms without slop/hold).
         data-drag-key={WORKSPACE_SPLITS_ENABLED ? `${kind}:${id}` : undefined}
         data-pinned-key={pinned ? `${kind}:${id}` : undefined}
-        onPointerDown={event => {
-          beginSecondaryMenuPress(event)
-          beginPinnedReorder(event)
-        }}
+        onPointerDown={onRowPointerDown}
         onClick={() => {
           if (suppressRowClickRef.current) {
             suppressRowClickRef.current = false
@@ -1453,12 +1508,12 @@ const DrawerRow = memo(function DrawerRow({
         }}
         onDoubleClick={event => {
           event.preventDefault()
-          actions.startRename(kind, id)
+          actions.startRename(kind, id, surface)
         }}
-        onContextMenu={openRowMenu}
+        onContextMenu={openItemMenu}
         onKeyDown={event => {
           if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-            openRowMenu(event)
+            openItemMenu(event)
           }
         }}
       >
@@ -1498,7 +1553,8 @@ const DrawerRow = memo(function DrawerRow({
         pinned={pinned}
         menuOpen={menuOpen}
         actions={actions}
-        triggerClassName="drawer__more drawer__menu-anchor"
+        menuPlacement={menuPlacement}
+        restoreFocusRef={itemButtonRef}
       />
     </div>
   )
@@ -1541,193 +1597,40 @@ function DrawerItemMenu({
   surface,
   pinned,
   menuOpen,
+  menuPlacement,
+  restoreFocusRef,
   actions,
-  triggerClassName = 'drawer__more',
-  triggerHidden = false,
 }) {
   const id = item.id
   const label = kind === 'chat' ? item.title : item.name
-  const slug = item.slug
-  const [confirmingDelete, setConfirmingDelete] = useState(false)
-  const [confirmingDeleteData, setConfirmingDeleteData] = useState(false)
-
-  useEffect(() => {
-    if (!menuOpen) {
-      setConfirmingDelete(false)
-      setConfirmingDeleteData(false)
-    }
-  }, [menuOpen])
 
   return (
-    <Menu
-        forceOpen={menuOpen}
-        onOpen={() => actions.toggleMenu(kind, id, true, surface)}
-        onClose={() => actions.toggleMenu(kind, id, false, surface)}
-      >
-        <Menu.Trigger>
-          {/* No Tooltip wrap here. Both Menu.Trigger and Tooltip
-              are Radix asChild wrappers that merge their props
-              onto the first child element. Nesting them breaks
-              the click-prop chain — Menu's onClick lands on the
-              Tooltip wrapper instead of the button, so tapping
-              ⋮ did nothing. The aria-label below covers screen
-              readers; visible tooltip discovery is a nice-to-have
-              we can revisit later with a different composition. */}
-          <button
-            type="button"
-            className={triggerClassName}
-            aria-label={`More actions for ${label}`}
-            aria-hidden={triggerHidden ? 'true' : undefined}
-            tabIndex={triggerHidden ? -1 : undefined}
-          >
-            <DotsVerticalMoreMenu width={16} height={16} aria-hidden="true" />
-          </button>
-        </Menu.Trigger>
-        <Menu.Content side="bottom" align="end" sideOffset={4} minWidth={200}>
-          {!confirmingDelete && !confirmingDeleteData ? (
-            <>
-              <Menu.Item
-                onSelect={() => actions.pin(kind, id, !pinned)}
-                className="drawer__menu-item--icon"
-              >
-                {pinned
-                  ? <Pin width={14} height={14} aria-hidden="true" />
-                  : <PinFilled width={14} height={14} aria-hidden="true" />}
-                <span>{pinned ? 'Unpin' : 'Pin'}</span>
-              </Menu.Item>
-              <Menu.Item onSelect={() => actions.startRename(kind, id, surface)}>Rename</Menu.Item>
-              {kind === 'app' && slug && (
-                // Opens the in-PWA InstallSheet to set the home-screen
-                // name + icon first; the sheet saves, then navigates
-                // same-tab to `/apps/<slug>/?install=1`. Same-tab keeps
-                // the user in the installed Möbius PWA context — no
-                // jarring browser-tab pop-out — and lets engagement
-                // from the parent shell count toward the per-origin
-                // Site Engagement score that gates beforeinstallprompt.
-                <Menu.Item onSelect={() => actions.install(item)}>
-                  Install to home screen
-                </Menu.Item>
-              )}
-              {kind === 'app' && isDrawerAppShareEligible(item) && (
-                <Menu.Item onSelect={() => actions.share(item)}>
-                  Share app
-                </Menu.Item>
-              )}
-              {kind === 'chat' ? (
-                // Chats soft-delete with 7-day recovery, so no
-                // confirm step — one tap deletes, the note below
-                // tells the user how to undo via the agent.
-                // Close the parent's menu state BEFORE onDelete fires:
-                // the row unmounts as soon as the refetch lands, but
-                // the parent's openMenu still references this row's
-                // id, leaving a Radix trigger looking "pressed" on
-                // whichever row slides up into the slot.
-                <Menu.Item
-                  onSelect={() => {
-                    actions.toggleMenu(kind, id, false, surface)
-                    actions.remove(kind, id)
-                  }}
-                  className="drawer__menu-item--danger"
-                >
-                  Delete
-                </Menu.Item>
-              ) : (
-                // Deleting an app is a reversible soft-delete (the agent
-                // can recover it for 7 days, like a chat), but we still
-                // want a confirm step. `preventDefault` on onSelect stops
-                // Radix from auto-closing the menu when the item is
-                // selected — we want the menu to stay open and swap
-                // to the confirm-chip below.
-                <Menu.Item
-                  onSelect={(e) => { e.preventDefault(); setConfirmingDelete(true) }}
-                  className="drawer__menu-item--danger"
-                >
-                  Delete
-                </Menu.Item>
-              )}
-              {kind === 'app' && (
-                // Wipes the app's stored data but keeps it installed — a
-                // separate action from Delete (which removes the whole app).
-                // Same preventDefault-to-hold-open + confirm-chip pattern as
-                // the app Delete above; the wording stays exactly "Delete
-                // data" (no "keeps your data" phrasing).
-                <Menu.Item
-                  onSelect={(e) => { e.preventDefault(); setConfirmingDeleteData(true) }}
-                  className="drawer__menu-item--danger"
-                >
-                  Delete data
-                </Menu.Item>
-              )}
-            </>
-          ) : confirmingDeleteData ? (
-            <div className="drawer__menu-confirm">
-              <span className="drawer__menu-confirm-label">Delete data?</span>
-              <div className="drawer__menu-confirm-actions">
-                <button
-                  type="button"
-                  className="drawer__menu-confirm-btn drawer__menu-confirm-btn--cancel"
-                  onClick={() => setConfirmingDeleteData(false)}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="drawer__menu-confirm-btn drawer__menu-confirm-btn--yes"
-                  onClick={() => {
-                    // Close the parent's menu state before the wipe fires,
-                    // matching the Delete confirm below — keeps Radix's
-                    // open-trigger bookkeeping in sync. The app STAYS in the
-                    // list here (only its data is wiped), so no row unmounts.
-                    setConfirmingDeleteData(false)
-                    actions.toggleMenu(kind, id, false, surface)
-                    actions.removeData(id)
-                  }}
-                >
-                  Delete data
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="drawer__menu-confirm">
-              <span className="drawer__menu-confirm-label">Confirm delete?</span>
-              <div className="drawer__menu-confirm-actions">
-                <button
-                  type="button"
-                  className="drawer__menu-confirm-btn drawer__menu-confirm-btn--cancel"
-                  onClick={() => setConfirmingDelete(false)}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="drawer__menu-confirm-btn drawer__menu-confirm-btn--yes"
-                  onClick={() => {
-                    // Order matters. Closing the parent's openMenu
-                    // state BEFORE the delete fires keeps Radix's
-                    // open-trigger bookkeeping in sync with the row
-                    // that's about to unmount. Without this, the
-                    // three-dots button on whatever row slides up
-                    // into the deleted slot looks stuck pressed
-                    // because openMenu still references the dead id.
-                    setConfirmingDelete(false)
-                    actions.toggleMenu(kind, id, false, surface)
-                    actions.remove(kind, id)
-                  }}
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          )}
-          {/* The 7-day recovery note applies to Delete (soft-delete), not
-              to the immediate, non-recoverable "Delete data" wipe — hide it
-              while that confirm chip is showing. */}
-          {!confirmingDeleteData && (
-            <p className="drawer__menu-note">
-              The agent can recover deleted {kind === 'chat' ? 'chats' : 'apps'} for 7 days.
-            </p>
-          )}
-        </Menu.Content>
-      </Menu>
+    <DrawerItemActionMenu
+      open={menuOpen}
+      itemKind={kind}
+      itemName={label}
+      icon={kind === 'app'
+        ? (
+          <AppIcon
+            item={item}
+            label={label}
+            className="drawer__item-action-icon"
+            size={64}
+          />
+        )
+        : null}
+      pinned={pinned}
+      canInstall={kind === 'app' && Boolean(item.slug)}
+      canShare={kind === 'app' && isDrawerAppShareEligible(item)}
+      placement={menuPlacement}
+      restoreFocusRef={restoreFocusRef}
+      onClose={() => actions.toggleMenu(kind, id, false, surface)}
+      onPin={() => actions.pin(kind, id, !pinned)}
+      onRename={() => actions.startRename(kind, id, surface)}
+      onInstall={() => actions.install(item)}
+      onShare={() => actions.share(item)}
+      onDelete={() => actions.remove(kind, id)}
+      onDeleteData={() => actions.removeData(id)}
+    />
   )
 }

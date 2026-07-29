@@ -9,7 +9,13 @@ const src = resolve(here, '../..')
 const drawer = readFileSync(resolve(src, 'components/Drawer/Drawer.jsx'), 'utf8')
 const directory = readFileSync(resolve(src, 'components/Drawer/AppsDirectory.jsx'), 'utf8')
 const css = readFileSync(resolve(src, 'components/Drawer/AppsDirectory.css'), 'utf8')
+const drawerCss = readFileSync(resolve(src, 'components/Drawer/Drawer.css'), 'utf8')
+const itemActionMenu = readFileSync(
+  resolve(src, 'components/Drawer/DrawerItemActionMenu.jsx'),
+  'utf8',
+)
 const shell = readFileSync(resolve(src, 'components/Shell/Shell.jsx'), 'utf8')
+const shellCss = readFileSync(resolve(src, 'components/Shell/Shell.css'), 'utf8')
 const tabModel = readFileSync(resolve(src, 'components/Shell/tabModel.js'), 'utf8')
 const navigationIcons = readFileSync(resolve(src, 'components/navigationIcons.js'), 'utf8')
 
@@ -23,8 +29,8 @@ test('Apps is a single drawer destination and the old full app list is gone', ()
 test('the directory preserves app management on every card', () => {
   assert.match(drawer, /variant="card"/)
   assert.match(drawer, /<DrawerItemMenu[\s\S]*?surface=\{surface\}/)
-  for (const action of ['Install to home screen', 'Delete data', 'Rename']) {
-    assert.match(drawer, new RegExp(action))
+  for (const action of ['Install to home screen', 'Share app', 'Delete data', 'Rename']) {
+    assert.match(itemActionMenu, new RegExp(action))
   }
 })
 
@@ -35,14 +41,34 @@ test('phone and web share one searchable launcher tab', () => {
   assert.match(tabModel, /APPS_TAB_KEY = 'apps:apps'/)
   assert.match(shell, /const APPS_KEY = tabModel\.APPS_TAB_KEY/)
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*?grid-template-columns: repeat\(4/)
-  assert.match(drawer, /onContextMenu=\{openCardMenu\}/)
-  assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?toggleMenu[\s\S]*?520\)/)
-  assert.match(
-    drawer,
-    /triggerClassName="drawer__more apps-directory__card-menu-anchor"\s+triggerHidden/,
-    'the invisible menu anchor must not add a ghost keyboard focus stop',
-  )
+  assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
+    'launcher cards and drawer rows must enter the same context-menu path')
+  assert.match(drawer, /DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX/)
+  assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?toggleMenu[\s\S]*?DRAWER_HOLD_MS\)/)
+  assert.doesNotMatch(drawer, /520/)
+  assert.match(drawer, /menuPlacement=\{openMenu/)
+  assert.match(itemActionMenu, /placeContextMenu/)
+  assert.match(itemActionMenu, /stopImmediatePropagation/)
+  assert.match(drawerCss, /@media \(max-width: 720px\)[\s\S]*?drawer__item-action-menu/)
+  assert.match(drawerCss, /bottom: max\(12px, env\(safe-area-inset-bottom\)\)/)
   assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
+})
+
+test('chat and app rows share one placed action menu contract', () => {
+  assert.match(drawer, /<DrawerItemActionMenu[\s\S]*?itemKind=\{kind\}[\s\S]*?itemName=\{label\}/)
+  assert.doesNotMatch(drawer, /@openai\/apps-sdk-ui\/components\/Menu/)
+  assert.doesNotMatch(drawer, /triggerHidden|drawer__menu-anchor/)
+  assert.match(itemActionMenu, /itemKind === 'chat' \? 'Chat' : 'App'/)
+  assert.match(itemActionMenu, /itemKind === 'chat' \? 'chats' : 'apps'/)
+  assert.match(itemActionMenu, /<Chat width=\{20\} height=\{20\}/)
+  assert.match(itemActionMenu, /itemKind === 'app' && \(/,
+    'Delete data must stay app-only')
+})
+
+test('desktop density keeps shell chrome and pointer geometry in one coordinate system', () => {
+  const desktop = shellCss.match(/@media \(min-width: 1024px\) \{[\s\S]*$/)?.[0] || ''
+  assert.doesNotMatch(desktop, /(?:^|[;{])\s*zoom\s*:/,
+    'desktop density must not scale the viewport away from pointer coordinates')
 })
 
 test('the app directory distinguishes loading, errors, and confirmed emptiness', () => {
