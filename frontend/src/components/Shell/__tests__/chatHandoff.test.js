@@ -112,8 +112,11 @@ test('app-supplied drafts update retained composers as well as remounted chats',
 
 test('direct desktop chat opens hand focus to the destination composer', () => {
   assert.match(shell,
-    /useEffect\(\(\) => \{[\s\S]*activeView !== 'chat' \|\| activeChatId == null[\s\S]*focusDesktopChatPaneComposer\(activeChatId\)[\s\S]*\}, \[activeView, activeChatId\]\)/,
-    'restored and directly linked chats must focus without relying on a click handler')
+    /startupChatComposerFocusPendingRef = useRef\([\s\S]*activeView === 'chat' && effectiveViewMode === 'single'[\s\S]*\)/,
+    'only a restored single-screen chat may retain the startup focus intent')
+  assert.match(shell,
+    /if \(!startupChatComposerFocusPendingRef\.current\) return[\s\S]*activeView !== 'chat' \|\| activeChatId == null[\s\S]*startupChatComposerFocusPendingRef\.current = false[\s\S]*focusDesktopChatPaneComposer\(activeChatId\)/,
+    'restored chat focus must be one-shot rather than following later mode changes')
   assert.match(shell,
     /newChat\(\{ focusComposer: true, recordHistory: true \}\)/,
     'the direct New chat action must request composer focus')

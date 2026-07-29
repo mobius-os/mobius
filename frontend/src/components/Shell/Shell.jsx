@@ -829,12 +829,16 @@ export default function Shell() {
     requestComposer(chatId, { focus: true })
   }
 
-  // Route restoration and direct chat links do not pass through a click
-  // handler. Treat the active desktop chat as the same open intent so a web
-  // session always lands at the next typing point. The modality gate keeps
-  // phones and tablets from opening their software keyboard on navigation.
+  // A restored single-screen chat has no click handler to request focus. Keep
+  // that one startup intent separate from later workspace projection changes:
+  // entering Standard mode must not turn a mode toggle into composer focus.
+  const startupChatComposerFocusPendingRef = useRef(
+    activeView === 'chat' && effectiveViewMode === 'single',
+  )
   useEffect(() => {
+    if (!startupChatComposerFocusPendingRef.current) return
     if (activeView !== 'chat' || activeChatId == null) return
+    startupChatComposerFocusPendingRef.current = false
     focusDesktopChatPaneComposer(activeChatId)
   }, [activeView, activeChatId])
 
