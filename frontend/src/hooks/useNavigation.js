@@ -1529,6 +1529,17 @@ export default function useNavigation({
               ? destination
               : (isMobiusNavState(history.state) ? history.state : null)
             if (committed) currentNavStateRef.current = committed
+            // Untagged in the CLASSIC store too? Then this is not a wedged
+            // mirror read but a GENUINE phantom beneath the sentinel (a
+            // sandboxed iframe pushed it before the drawer opened): the
+            // close's tagged home is still deeper. Keep the close pending and
+            // keep seeking — the same behavior the phantom guard gives a
+            // healthy engine — instead of finishing here, which would clear
+            // the pending flags and strand the shell on an untagged entry.
+            if (!committed && drawerClosePendingRef.current) {
+              continueDrawerCloseAfterPhantom()
+              return
+            }
             handleBack(committed, source)
           }
           // Intercept when the engine allows it (suppresses the traversal

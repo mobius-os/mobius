@@ -39,6 +39,25 @@ test('onNavigate consumes a pending drawer close BEFORE the phantom guard', () =
     'pending-close consumption must precede the canIntercept early-return')
 })
 
+test('a pending close landing on a classic-store phantom keeps seeking, not finishing', () => {
+  // The wedged-mirror recovery must not swallow the HEALTHY-engine phantom
+  // seek: when the committed entry is untagged in the authoritative classic
+  // store too, the landing is a genuine iframe phantom beneath the sentinel —
+  // the close's tagged home is deeper. Finishing there would clear the pending
+  // flags and strand the shell on the untagged entry (caught by e2e
+  // navigation 31, "seeks through phantom history").
+  const consume = onNavigate.slice(
+    onNavigate.indexOf('const consume = () =>'),
+    onNavigate.indexOf('if (e.canIntercept)'),
+  )
+  assert.match(consume,
+    /if \(!committed && drawerClosePendingRef\.current\) \{\s*\n\s*continueDrawerCloseAfterPhantom\(\)\s*\n\s*return/,
+    'an untagged classic-store landing during a pending close continues the seek')
+  // And the finish path still runs only after that guard.
+  assert.ok(consume.indexOf('continueDrawerCloseAfterPhantom()') < consume.indexOf('handleBack(committed, source)'),
+    'the phantom-seek continuation is decided before the close is finished')
+})
+
 test('every Navigation-store read in onNavigate is defensive', () => {
   // The wedged engine throws from its entry accessors just as it does from
   // updateCurrentEntry. Each mirror read must be try/catch-wrapped so a
