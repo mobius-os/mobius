@@ -221,10 +221,10 @@ test('A tall-composer send lands once without a visible post-paint correction', 
   ].join('\n')
   await input.fill(multiline)
   await expect(page.locator('[data-chat-surface="painted"] .chat__pill')).toHaveClass(/chat__pill--tall/)
-  // Growing the absolutely-positioned composer increases the list's bottom
-  // clearance. Re-establish the test's stated send-rule precondition after
-  // that geometry change: this case is about the collapse race while the
-  // reader is following, not about overriding a reader away from the tail.
+  // Re-establish FOLLOW_BOTTOM after the composer grows. Footer geometry may
+  // intentionally remain deferred while this gesture owns the viewport, so
+  // the semantic mode — not an intermediate raw content gap — is the send-rule
+  // precondition this test needs.
   await gestureToBottom(page)
 
   // Recreate the real race deterministically: the passive foot observer still
@@ -237,14 +237,7 @@ test('A tall-composer send lands once without a visible post-paint correction', 
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!chat || !foot || !scroll) throw new Error('missing chat geometry')
     chat.style.setProperty('--composer-h', `${foot.offsetHeight + 48}px`)
-    const spacer = scroll.querySelector('.spacer-dynamic')
     window.__tallComposerPreSend = {
-      contentGap: Math.round(
-        scroll.scrollHeight
-          - (spacer?.offsetHeight || 0)
-          - scroll.scrollTop
-          - scroll.clientHeight,
-      ),
       composer: getComputedStyle(chat).getPropertyValue('--composer-h').trim(),
       foot: foot.offsetHeight,
       mode: scroll.dataset.scrollMode || null,
@@ -266,8 +259,8 @@ test('A tall-composer send lands once without a visible post-paint correction', 
     }, { passive: true })
     return window.__tallComposerPreSend
   })
-  expect(preSend.contentGap).toBeGreaterThanOrEqual(0)
-  expect(preSend.contentGap).toBeLessThan(50)
+  expect(preSend.mode).toBe('FOLLOW_BOTTOM')
+  expect(Number.parseFloat(preSend.composer)).toBe(preSend.foot + 48)
 
   await page.keyboard.press('Enter')
   await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user')).toHaveCount(2, { timeout: 3000 })
