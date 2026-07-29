@@ -75,7 +75,7 @@
   padding-left: 16px;
   padding-right: 16px;
   background: var(--bg); /* CONTRACT: opaque — bar floats above content, must hide whatever scrolls under it */
-  border-bottom: 0;
+  border-bottom: 1px solid var(--border-light); /* Phone header keeps a subtle edge; desktop removes it below. */
   position: relative;
   z-index: 100;
   -webkit-tap-highlight-color: transparent;
