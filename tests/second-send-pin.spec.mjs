@@ -237,9 +237,17 @@ test('A tall-composer send lands once without a visible post-paint correction', 
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!chat || !foot || !scroll) throw new Error('missing chat geometry')
     chat.style.setProperty('--composer-h', `${foot.offsetHeight + 48}px`)
+    // The synthetic stale measurement changes list height after the reader's
+    // gesture. Restore the same real-content-tail precondition so this test
+    // isolates the post-submit collapse race rather than manufacturing a
+    // scrolled-up send.
+    scroll.scrollTop = scroll.scrollHeight
     window.__tallComposerPreSend = {
       composer: getComputedStyle(chat).getPropertyValue('--composer-h').trim(),
       foot: foot.offsetHeight,
+      contentGap: Math.round(
+        scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+      ),
       mode: scroll.dataset.scrollMode || null,
     }
     window.__mobiusChatScrollTrace = {
@@ -261,6 +269,7 @@ test('A tall-composer send lands once without a visible post-paint correction', 
   })
   expect(preSend.mode).toBe('FOLLOW_BOTTOM')
   expect(Number.parseFloat(preSend.composer)).toBe(preSend.foot + 48)
+  expect(preSend.contentGap).toBeLessThanOrEqual(1)
 
   await page.keyboard.press('Enter')
   await expect(page.locator('[data-chat-surface="painted"] .chat__msg--user')).toHaveCount(2, { timeout: 3000 })
