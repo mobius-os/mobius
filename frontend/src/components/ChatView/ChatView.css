@@ -2013,11 +2013,22 @@
    — the no-auto-scroll contract stays intact). Same frosted accent chip
    recipe as .chat__open-app-btn: it must read as a card over the chat
    scrolling behind the transparent foot. Centered, because it speaks for
-   the whole conversation rather than the queued tray. */
+   the whole conversation rather than the queued tray. The positioning layer
+   sits immediately above the flow-owned footer: viewport visibility may mount
+   or unmount either nudge without changing transcript geometry. */
+.chat__offscreen-nudges {
+  position: absolute;
+  right: 12px;
+  bottom: 100%;
+  left: 12px;
+  pointer-events: none;
+}
+
 .chat__question-nudge,
 .chat__resume-nudge {
   display: block;
-  margin: 0 auto 8px;
+  max-width: 100%;
+  margin: 0 auto;
   padding: 5px 14px;
   border-radius: 999px;
   border: 1px solid var(--accent); /* CONTRACT: vivid accent line */
@@ -2042,6 +2053,8 @@
 }
 .chat__question-nudge:active,
 .chat__resume-nudge:active { transform: scale(0.96); }
+
+.chat__offscreen-nudges > button + button { margin-top: 8px; }
 
 /* ── Voice input ──────────────────────────────────── */
 .chat__mic {

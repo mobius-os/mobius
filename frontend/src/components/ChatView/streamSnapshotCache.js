@@ -25,6 +25,7 @@
  */
 
 export const STREAM_SNAPSHOT_VERSION = 2
+const STREAM_SNAPSHOT_PREFIX = `chat-stream-items:v${STREAM_SNAPSHOT_VERSION}:`
 
 // Trailing-edge coalescing window applied only while >1 chat is mounted.
 export const STREAM_SNAPSHOT_THROTTLE_MS = 250
@@ -39,7 +40,7 @@ let mountedChatCount = 0
 const pendingWrites = new Map()
 
 export function streamSnapshotKey(chatId) {
-  return `chat-stream-items:v${STREAM_SNAPSHOT_VERSION}:${chatId}`
+  return `${STREAM_SNAPSHOT_PREFIX}${chatId}`
 }
 
 function defaultStorage() {
@@ -145,6 +146,40 @@ export function clearStoredStreamSnapshot(chatId, storage = defaultStorage()) {
   } catch {
     // Best-effort cache; ignore storage failures.
   }
+}
+
+/**
+ * Reclaim every regenerable stream snapshot in one storage area.
+ *
+ * Composer drafts are owner-authored data; stream snapshots are a remount cache
+ * backed by the durable partial plus SSE catch-up. If Web Storage fills up,
+ * callers may clear this cache before retrying an owner-data write. Pending
+ * throttled writes for the same storage are dropped as part of the transaction
+ * so they cannot immediately resurrect the bytes that were just reclaimed.
+ */
+export function reclaimStoredStreamSnapshots(storage = defaultStorage()) {
+  if (!storage) return 0
+
+  for (const [chatId, entry] of pendingWrites) {
+    if (entry.storage === storage) dropPending(chatId)
+  }
+
+  let reclaimed = 0
+  try {
+    const keys = []
+    for (let index = 0; index < storage.length; index++) {
+      const key = storage.key(index)
+      if (key?.startsWith(STREAM_SNAPSHOT_PREFIX)) keys.push(key)
+    }
+    for (const key of keys) {
+      storage.removeItem(key)
+      reclaimed += 1
+    }
+  } catch {
+    // Best-effort emergency cleanup. The draft store still has its independent
+    // memory + IndexedDB path when Web Storage is unavailable.
+  }
+  return reclaimed
 }
 
 // Test-only: reset the module's throttle state so specs run in isolation

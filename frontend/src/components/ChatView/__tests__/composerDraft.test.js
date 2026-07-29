@@ -1,8 +1,18 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import 'fake-indexeddb/auto'
 
-import { persistComposerDraft, readComposerDraft } from '../composerDraft.js'
+import {
+  _clearComposerDraftMemoryForTests,
+  clearComposerDraft,
+  clearDurableComposerDrafts,
+  flushComposerDraftPersistence,
+  persistComposerDraft,
+  readComposerDraft,
+  readComposerDraftAsync,
+} from '../composerDraft.js'
+import { streamSnapshotKey } from '../streamSnapshotCache.js'
 
 function storageStub(initial = {}) {
   const values = new Map(Object.entries(initial))
@@ -18,7 +28,15 @@ function storageStub(initial = {}) {
 test('persists and clears a chat draft synchronously', () => {
   const storage = storageStub()
   assert.equal(persistComposerDraft('chat-a', 'unfinished thought', storage), true)
-  assert.equal(storage.getItem('draft:chat-a'), 'unfinished thought')
+  const stored = JSON.parse(storage.getItem('draft:chat-a'))
+  assert.equal(stored.type, 'mobius-composer-draft')
+  assert.equal(stored.version, 2)
+  assert.equal(stored.input, 'unfinished thought')
+  assert.equal(Number.isFinite(stored.updated_at), true)
+  assert.deepEqual(readComposerDraft('chat-a', storage), {
+    input: 'unfinished thought',
+    attachments: [],
+  })
 
   assert.equal(persistComposerDraft('chat-a', '', storage), true)
   assert.equal(storage.getItem('draft:chat-a'), null)
@@ -108,23 +126,105 @@ test('rejects status-bearing attachments injected into a stored envelope', () =>
   )
 })
 
-test('evicts one draft and retries when session storage is full', () => {
-  const storage = storageStub({ 'draft:chat-a': 'older' })
-  const normalSet = storage.setItem.bind(storage)
-  let first = true
-  storage.setItem = (key, value) => {
-    if (first) {
-      first = false
-      const error = new Error('full')
-      error.name = 'QuotaExceededError'
-      throw error
-    }
-    normalSet(key, value)
-  }
+test('quota recovery sacrifices only transient cache and keeps every owner draft', async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
+  const storage = storageStub()
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    configurable: true,
+    value: storage,
+  })
 
-  assert.equal(persistComposerDraft('chat-b', 'latest', [], storage), true)
-  assert.equal(storage.getItem('draft:chat-a'), null)
-  assert.equal(storage.getItem('draft:chat-b'), 'latest')
+  try {
+    await clearDurableComposerDrafts()
+
+    persistComposerDraft('chat-a', 'older owner draft')
+    storage.setItem(streamSnapshotKey('running-chat'), JSON.stringify([
+      { type: 'text', content: 'regenerable partial' },
+    ]))
+
+    const normalSet = storage.setItem.bind(storage)
+    storage.setItem = (key, value) => {
+      if (key === 'draft:chat-b' && storage.getItem(streamSnapshotKey('running-chat'))) {
+        const error = new Error('full')
+        error.name = 'QuotaExceededError'
+        throw error
+      }
+      normalSet(key, value)
+    }
+
+    assert.equal(persistComposerDraft('chat-b', 'new owner draft'), true)
+    assert.equal(storage.getItem(streamSnapshotKey('running-chat')), null)
+    assert.equal(readComposerDraft('chat-a').input, 'older owner draft')
+    assert.equal(readComposerDraft('chat-b').input, 'new owner draft')
+
+    // If Web Storage remains unavailable even after cache reclamation, the
+    // dedicated draft database still survives a document-memory reset. Rapid
+    // updates are coalesced latest-wins rather than queuing one transaction per
+    // keystroke.
+    storage.setItem = (key, value) => {
+      if (key === 'draft:chat-c') {
+        const error = new Error('still full')
+        error.name = 'QuotaExceededError'
+        throw error
+      }
+      normalSet(key, value)
+    }
+    persistComposerDraft('chat-c', 'one')
+    persistComposerDraft('chat-c', 'one two')
+    persistComposerDraft('chat-c', 'one two three')
+    await flushComposerDraftPersistence()
+
+    _clearComposerDraftMemoryForTests()
+    assert.equal(storage.getItem('draft:chat-c'), null)
+    assert.deepEqual(await readComposerDraftAsync('chat-c'), {
+      input: 'one two three',
+      attachments: [],
+    })
+
+    // Session may contain an older successful write while later writes fit
+    // only in IndexedDB. Even several changes inside one wall-clock tick carry
+    // a strict order, so hydration selects the actual latest value.
+    persistComposerDraft('chat-d', 'old session copy')
+    storage.setItem = (key, value) => {
+      if (key === 'draft:chat-d') {
+        const error = new Error('full again')
+        error.name = 'QuotaExceededError'
+        throw error
+      }
+      normalSet(key, value)
+    }
+    const realNow = Date.now
+    Date.now = () => 1_000
+    try {
+      persistComposerDraft('chat-d', 'newer durable copy')
+      persistComposerDraft('chat-d', 'newest durable copy')
+    } finally {
+      Date.now = realNow
+    }
+    await flushComposerDraftPersistence()
+    _clearComposerDraftMemoryForTests()
+    assert.equal(readComposerDraft('chat-d').input, 'old session copy')
+    assert.equal((await readComposerDraftAsync('chat-d')).input, 'newest durable copy')
+
+    clearComposerDraft('chat-d')
+    await flushComposerDraftPersistence()
+    _clearComposerDraftMemoryForTests()
+    assert.deepEqual(await readComposerDraftAsync('chat-d'), {
+      input: '',
+      attachments: [],
+    })
+
+    await clearDurableComposerDrafts()
+    _clearComposerDraftMemoryForTests()
+    assert.deepEqual(await readComposerDraftAsync('chat-c'), {
+      input: '',
+      attachments: [],
+    })
+  } finally {
+    await clearDurableComposerDrafts()
+    if (previous) Object.defineProperty(globalThis, 'sessionStorage', previous)
+    else delete globalThis.sessionStorage
+  }
 })
 
 test('the composer state boundary saves before scheduling React state', () => {
@@ -137,4 +237,22 @@ test('the composer state boundary saves before scheduling React state', () => {
   const render = body.indexOf('setInputState(nextInput)')
   assert.ok(save >= 0, 'all composer changes must be persisted directly')
   assert.ok(render > save, 'draft persistence must happen before navigation can unmount React')
+})
+
+test('shell draft handoffs use the same owner instead of writing around its live mirror', () => {
+  const shellSource = readFileSync(
+    new URL('../../Shell/Shell.jsx', import.meta.url),
+    'utf8',
+  )
+  const chatSource = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+  const directDraftWrite = /sessionStorage\.(?:setItem|removeItem)\(`draft:/
+  assert.doesNotMatch(shellSource, directDraftWrite,
+    'shell handoffs and deletion must not bypass the draft owner')
+  assert.doesNotMatch(chatSource, directDraftWrite,
+    'chat cleanup must clear memory, session, and durable copies together')
+  assert.match(shellSource, /persistComposerDraft\(buildingChatId, report\)/)
+  assert.match(shellSource, /persistComposerDraft\(e\.data\.chatId, draftText\)/)
+  assert.match(shellSource, /persistComposerDraft\(chatId, draftText\)/)
+  assert.match(shellSource, /clearComposerDraft\(id\)/)
+  assert.match(chatSource, /clearComposerDraft\(chatId\)/)
 })

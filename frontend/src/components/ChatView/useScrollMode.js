@@ -1000,6 +1000,7 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   revealConversationTail: () => void,
  *   settleSendIntent: (event?: object) => void,
  *   settleStreamingPin: () => void,
+ *   composerResized: () => void,
  * }}
  */
 export default function useScrollMode({
@@ -1073,6 +1074,11 @@ export default function useScrollMode({
   // paneResized() forwards to it (null when no scroll DOM is mounted). Mirrors
   // the forceRevealRef / resumeLayoutAfterGestureRef effect-bridge pattern.
   const paneResizeRunRef = useRef(null)
+  // Footer height changes are scroll geometry: `.chat__list` consumes the
+  // published composer height and the dynamic spacer compensates that padding.
+  // The observer in ChatView notifies this runner rather than writing the CSS
+  // variable itself, so both mutations share the reader-gesture gate.
+  const composerResizeRunRef = useRef(null)
   // Tracks physical tail position independently from modeRef. A stale
   // PIN_USER_MSG can survive after the reader manually returns to the bottom;
   // when the keyboard opens, visualViewport fires AFTER the viewport has
@@ -1469,6 +1475,18 @@ export default function useScrollMode({
         if (scrollRef.current === scrollEl) syncLayout({ forceApply: true })
       }, delay)
     }
+    const replayDeferredLayoutNow = () => {
+      if (!deferredGestureLayoutPending || !layoutOwnsScroll()) return false
+      clearTimeout(deferredGestureLayoutTimer)
+      deferredGestureLayoutTimer = 0
+      deferredGestureLayoutPending = false
+      // The footer CSS variable, compensating spacer, and semantic mode write
+      // must commit in ONE task. If CSS padding + spacer land first and the
+      // HOLD/ANCHOR write waits for the next timer, browser scroll anchoring
+      // can paint one frame 36px away before the controller corrects it.
+      syncLayout({ forceApply: true })
+      return true
+    }
     const resumeLayoutAfterGesture = () => {
       if (!deferredGestureLayoutPending) return
       deferLayoutUntilReaderYields()
@@ -1676,6 +1694,15 @@ export default function useScrollMode({
       settlePinnedMode()
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
     }
+    function runComposerResize() {
+      if (!layoutOwnsScroll()) {
+        deferLayoutUntilReaderYields()
+        return
+      }
+      syncLayout()
+    }
+    composerResizeRunRef.current = runComposerResize
+
     syncLayout()
 
     // The scrollApi.paneResized(projectedHeightPx) contract (design §2,
@@ -1901,9 +1928,12 @@ export default function useScrollMode({
           if (anchor) transitionMode(anchor, 'reader:hold-anchor')
         }
         persistMode()
-        // Visibility, not mode, owns reservation. Recompute once against the
-        // final viewport after momentum, never underneath the gesture itself.
-        sizeSpacer()
+        // Recompute once against the final viewport after momentum, never
+        // underneath the gesture itself.
+        // When a footer resize was deferred, replay geometry + the newly
+        // settled semantic mode atomically; a bare sizeSpacer here would let
+        // native scroll anchoring paint an intermediate displaced frame.
+        if (!replayDeferredLayoutNow()) sizeSpacer()
       }
 
       nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
@@ -2217,6 +2247,9 @@ export default function useScrollMode({
       mountMutationObserver?.disconnect()
       ro.disconnect()
       if (paneResizeRunRef.current === runPaneResize) paneResizeRunRef.current = null
+      if (composerResizeRunRef.current === runComposerResize) {
+        composerResizeRunRef.current = null
+      }
       scrollEl.removeEventListener('scroll', onScroll)
       scrollEl.removeEventListener('pointerdown', onUserInput)
       scrollEl.removeEventListener('touchstart', onTouchStartInput)
@@ -2377,6 +2410,10 @@ export default function useScrollMode({
     if (run) run(projectedHeightPx)
   }, [])
 
+  const composerResized = useCallback(() => {
+    composerResizeRunRef.current?.()
+  }, [])
+
   return {
     gestureWindowUntilRef,
     revealed,
@@ -2391,6 +2428,7 @@ export default function useScrollMode({
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,
+    composerResized,
     paneResized,
   }
 }

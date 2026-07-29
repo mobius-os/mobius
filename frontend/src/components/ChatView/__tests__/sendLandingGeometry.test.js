@@ -30,3 +30,39 @@ test('ChatView gives its existing composer measurement to the scroll owner', () 
   const args = chatView.slice(callStart, callEnd)
   assert.match(args, /syncComposerGeometry:\s*measureComposerHeight/)
 })
+
+test('footer resizes enter through the scroll owner instead of mutating geometry directly', () => {
+  const commentStart = chatView.indexOf("// Publish `.chat__foot`'s rendered height")
+  const effectStart = chatView.indexOf('useEffect(() => {', commentStart)
+  const effectEnd = chatView.indexOf('\n  useEffect(() => {', effectStart + 20)
+  assert.ok(commentStart >= 0 && effectStart > commentStart && effectEnd > effectStart,
+    'footer resize effect exists')
+  const footerEffect = chatView.slice(effectStart, effectEnd)
+
+  assert.match(footerEffect, /new ResizeObserver\(applySoon\)/)
+  assert.match(footerEffect, /composerResized\(\)/)
+  assert.doesNotMatch(footerEffect, /measureComposerHeight\(\)/,
+    'the footer observer must not bypass reader-gesture ownership')
+
+  const bridgeStart = controller.indexOf('function runComposerResize()')
+  const bridgeEnd = controller.indexOf('\n    composerResizeRunRef.current', bridgeStart)
+  assert.ok(bridgeStart >= 0 && bridgeEnd > bridgeStart, 'composer resize bridge exists')
+  const bridge = controller.slice(bridgeStart, bridgeEnd)
+  assert.match(bridge, /deferLayoutUntilReaderYields\(\)/)
+  assert.match(bridge, /syncLayout\(\)/)
+})
+
+test('gesture settlement replays deferred footer geometry and mode in one task', () => {
+  const replayStart = controller.indexOf('const replayDeferredLayoutNow = () => {')
+  const replayEnd = controller.indexOf('\n    const resumeLayoutAfterGesture', replayStart)
+  assert.ok(replayStart >= 0 && replayEnd > replayStart, 'atomic replay exists')
+  const replay = controller.slice(replayStart, replayEnd)
+  assert.match(replay, /syncLayout\(\{ forceApply: true \}\)/)
+
+  const settleStart = controller.indexOf('const settleReaderScroll = () => {')
+  const settleEnd = controller.indexOf('\n    const scheduleReaderSettle', settleStart)
+  assert.ok(settleStart >= 0 && settleEnd > settleStart, 'reader settlement exists')
+  const settle = controller.slice(settleStart, settleEnd)
+  assert.match(settle, /if \(!replayDeferredLayoutNow\(\)\) sizeSpacer\(\)/,
+    'settlement must not publish footer geometry before its compensating mode write')
+})

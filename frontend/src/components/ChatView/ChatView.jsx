@@ -92,7 +92,13 @@ import {
   saveFailedSendAttempt,
   sendAttemptIsDurable,
 } from './sendAttemptRecovery.js'
-import { persistComposerDraft, readComposerDraft } from './composerDraft.js'
+import {
+  clearComposerDraft,
+  composerDraftRevision,
+  persistComposerDraft,
+  readComposerDraft,
+  readComposerDraftAsync,
+} from './composerDraft.js'
 import {
   reconcileComposerTextarea,
   resetComposerTextarea,
@@ -183,7 +189,7 @@ function findUserIndexByCid(messages, cid) {
 // NOTE: if deletion ever moves inside ChatView's own scope, call this inline
 // instead of leaving the orphaned key behind.
 export function deleteChatDraft(chatId) {
-  try { sessionStorage.removeItem(`draft:${chatId}`) } catch { /* private browsing */ }
+  clearComposerDraft(chatId)
   clearFailedSendAttempt(chatId)
   clearChatQuestionDrafts(chatId)
 }
@@ -221,13 +227,20 @@ function readInitialComposer(chatId, { acceptPending = true } = {}) {
     return {
       input,
       autoSend: !!input && autoSendDraft === input,
+      source: pending ? 'pending' : (failedAttempt ? 'failed' : 'saved'),
       failedAttempt: pending ? null : failedAttempt,
       attachments: pending
         ? []
         : (failedAttempt?.attachments || saved.attachments),
     }
   } catch {
-    return { input: '', autoSend: false, failedAttempt: null, attachments: [] }
+    return {
+      input: '',
+      autoSend: false,
+      source: 'empty',
+      failedAttempt: null,
+      attachments: [],
+    }
   }
 }
 
@@ -371,7 +384,15 @@ export default function ChatView({
 
   useEffect(() => {
     if (hidden) return
-    const initial = initialComposerRef.current.input
+    const initialComposer = initialComposerRef.current
+    const initial = initialComposer.input
+    if ((initialComposer.source === 'pending' || initialComposer.source === 'failed')
+        && (initial || initialComposer.attachments.length > 0)) {
+      // A global navigation handoff or failed-send recovery outranks any older
+      // per-chat draft. Adopt it into the live + durable draft owner before the
+      // one-shot handoff keys are removed.
+      persistComposerDraft(chatId, initial, initialComposer.attachments)
+    }
     try {
       if (sessionStorage.getItem(PENDING_DRAFT_KEY) === initial) {
         sessionStorage.removeItem(PENDING_DRAFT_KEY)
@@ -841,6 +862,7 @@ export default function ChatView({
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,
+    composerResized,
     paneResized,
   } = useScrollMode({
     chatId,
@@ -1431,6 +1453,31 @@ export default function ChatView({
     },
   })
 
+  useEffect(() => {
+    let cancelled = false
+    const revision = composerDraftRevision(chatId)
+    readComposerDraftAsync(chatId).then(saved => {
+      if (cancelled || composerDraftRevision(chatId) !== revision) return
+
+      const currentFiles = draftAttachmentsRef.current
+      const sameFiles = currentFiles.length === saved.attachments.length
+        && currentFiles.every((file, index) => {
+          const other = saved.attachments[index]
+          return file?.name === other?.name
+            && file?.size === other?.size
+            && file?.mime_type === other?.mime_type
+            && file?.status === other?.status
+        })
+      if (saved.input === inputValueRef.current && sameFiles) return
+
+      inputValueRef.current = saved.input
+      setInputState(saved.input)
+      draftAttachmentsRef.current = saved.attachments
+      restoreFiles(saved.attachments)
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [chatId, restoreFiles])
+
   const wasHiddenRef = useRef(hidden)
   useLayoutEffect(() => {
     const becameVisible = wasHiddenRef.current && !hidden
@@ -1682,12 +1729,12 @@ export default function ChatView({
     let raf1 = 0
     let raf2 = 0
     const applySoon = () => {
-      measureComposerHeight()
+      composerResized()
       if (raf1) cancelAnimationFrame(raf1)
       if (raf2) cancelAnimationFrame(raf2)
       raf1 = requestAnimationFrame(() => {
-        measureComposerHeight()
-        raf2 = requestAnimationFrame(measureComposerHeight)
+        composerResized()
+        raf2 = requestAnimationFrame(composerResized)
       })
     }
     const reconcileForegroundGeometry = () => {
@@ -1723,13 +1770,13 @@ export default function ChatView({
       window.visualViewport?.removeEventListener('scroll', applySoon)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [measureComposerHeight])
+  }, [composerResized])
 
   useEffect(() => {
-    measureComposerHeight()
-    const raf = requestAnimationFrame(measureComposerHeight)
+    composerResized()
+    const raf = requestAnimationFrame(composerResized)
     return () => cancelAnimationFrame(raf)
-  }, [builtApps, sending, buildPhases, measureComposerHeight])
+  }, [builtApps, sending, buildPhases, composerResized])
 
   useEffect(() => {
     const latest = buildPhases[buildPhases.length - 1]
@@ -4042,26 +4089,28 @@ export default function ChatView({
               })}
             </div>
           )}
-          {hasPendingQuestion && pendingCardOffscreen && (
-            <button
-              type="button"
-              className="chat__question-nudge"
-              onClick={revealConversationTail}
-            >
-              Möbius asked you something — tap to answer
-            </button>
-          )}
-          {hasPendingResume && resumeCardOffscreen && (
-            <button
-              type="button"
-              className="chat__resume-nudge"
-              onClick={revealConversationTail}
-            >
-              {pendingResumeBlock?.pause?.resets_at
-                ? 'Rate limit reached — tap to resume'
-                : 'Turn paused — tap to resume'}
-            </button>
-          )}
+          <div className="chat__offscreen-nudges">
+            {hasPendingQuestion && pendingCardOffscreen && (
+              <button
+                type="button"
+                className="chat__question-nudge"
+                onClick={revealConversationTail}
+              >
+                Möbius asked you something — tap to answer
+              </button>
+            )}
+            {hasPendingResume && resumeCardOffscreen && (
+              <button
+                type="button"
+                className="chat__resume-nudge"
+                onClick={revealConversationTail}
+              >
+                {pendingResumeBlock?.pause?.resets_at
+                  ? 'Rate limit reached — tap to resume'
+                  : 'Turn paused — tap to resume'}
+              </button>
+            )}
+          </div>
           <ProgressRail
             items={progressRail}
             ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}

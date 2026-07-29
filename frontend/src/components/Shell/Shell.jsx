@@ -86,6 +86,10 @@ import {
   withoutConfirmedDeletions,
 } from './confirmedDeletion.js'
 import {
+  clearComposerDraft,
+  persistComposerDraft,
+} from '../ChatView/composerDraft.js'
+import {
   reloadWhenWorkerTakesOver,
   shouldRearmShellApply,
   watchForShellUpdateOnForeground,
@@ -2377,9 +2381,9 @@ export default function Shell() {
     const buildingChat = buildingChatId
       && chatsRef.current.find(c => c.id === buildingChatId)
     if (buildingChat) {
+      persistComposerDraft(buildingChatId, report)
       try {
         sessionStorage.setItem('pending-draft', report)
-        sessionStorage.setItem(`draft:${buildingChatId}`, report)
         sessionStorage.removeItem('pending-draft-autosend')
         sessionStorage.removeItem(`draft-autosend:${buildingChatId}`)
       } catch {}
@@ -2959,9 +2963,9 @@ export default function Shell() {
           return
         }
         if (draftText != null) {
+          persistComposerDraft(e.data.chatId, draftText)
           try {
             sessionStorage.setItem('pending-draft', draftText)
-            sessionStorage.setItem(`draft:${e.data.chatId}`, draftText)
             sessionStorage.removeItem('pending-draft-autosend')
             sessionStorage.removeItem(`draft-autosend:${e.data.chatId}`)
           } catch {}
@@ -3269,9 +3273,9 @@ export default function Shell() {
       && !!(draft || forceNew || drawerPushedRef.current || recordHistory)
     if (draft) {
       const draftText = String(draft)
+      persistComposerDraft(chatId, draftText)
       try {
         sessionStorage.setItem('pending-draft', draftText)
-        sessionStorage.setItem(`draft:${chatId}`, draftText)
         if (autoSend) {
           sessionStorage.setItem('pending-draft-autosend', draftText)
           sessionStorage.setItem(`draft-autosend:${chatId}`, draftText)
@@ -3359,7 +3363,7 @@ export default function Shell() {
     // any navigation work; every later list completion is filtered by the same
     // session tombstone until recovery succeeds.
     confirmChatDeleted(id)
-    try { sessionStorage.removeItem(`draft:${id}`) } catch {}
+    clearComposerDraft(id)
     // Evict the cached messages so a future chat-ID collision (e.g.
     // recovery) can't surface stale content.
     chatQueries.messages.remove(queryClient, id)

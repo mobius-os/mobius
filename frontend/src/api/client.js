@@ -7,6 +7,7 @@ import { del as idbDel } from 'idb-keyval'
 import * as setupSession from '../lib/setupSession.js'
 import { clearLatchedTokens } from '../lib/appToken.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
+import { clearDurableComposerDrafts } from '../components/ChatView/composerDraft.js'
 import { verifyConnectivity } from '../lib/connectivityStore.js'
 import { SHELL_DATA_CACHE } from '../sw-cache-policy.js'
 
@@ -133,6 +134,7 @@ export function clearQueryCache() {
     import('./mediaToken.js').then(m => m.clearMediaTokenCache()).catch(() => {})
   } catch {}
   return Promise.all([
+    clearDurableComposerDrafts().catch(() => {}),
     idbDel('mobius-query-cache').catch(() => {}),
     delOutboxDb().catch(() => {}),
     delDatabase('mobius-signals', 'signal queue').catch(() => {}),

@@ -1,9 +1,121 @@
+import {
+  clear as clearIdbStore,
+  createStore,
+  del as delIdbValue,
+  get as getIdbValue,
+  set as setIdbValue,
+} from 'idb-keyval'
+import { reclaimStoredStreamSnapshots } from './streamSnapshotCache.js'
+
 function availableStorage(storage) {
   if (storage !== undefined) return storage
   try { return globalThis.sessionStorage ?? null } catch { return null }
 }
 
 const DRAFT_ENVELOPE = 'mobius-composer-draft'
+const DRAFT_VERSION = 2
+const DURABLE_DRAFT_DB = 'mobius-owner-drafts'
+const DURABLE_DRAFT_STORE = 'drafts-v1'
+const durableDraftStore = createStore(DURABLE_DRAFT_DB, DURABLE_DRAFT_STORE)
+
+// Same-document navigation must never depend on a fallible browser-storage
+// round-trip. A present entry with raw:null is an intentional empty tombstone;
+// absence means this module has not learned the chat's current value yet.
+const liveDrafts = new Map()
+const draftRevisions = new Map()
+
+const NO_DURABLE_WRITE = Symbol('no-durable-draft-write')
+const durableWrites = new Map()
+let durableGeneration = 0
+let lastDraftTimestamp = 0
+
+function draftId(chatId) {
+  return String(chatId)
+}
+
+function revisionOf(chatId) {
+  return draftRevisions.get(draftId(chatId)) || 0
+}
+
+function rememberLiveDraft(chatId, raw, source, { advance = false } = {}) {
+  const id = draftId(chatId)
+  if (advance) draftRevisions.set(id, revisionOf(id) + 1)
+  liveDrafts.set(id, { raw, source })
+}
+
+function queueDurableDraftWrite(chatId, raw) {
+  const id = draftId(chatId)
+  let state = durableWrites.get(id)
+  if (state) {
+    state.latest = raw
+    return state.done
+  }
+
+  const generation = durableGeneration
+  let resolveDone
+  state = {
+    latest: raw,
+    done: new Promise(resolve => { resolveDone = resolve }),
+  }
+  durableWrites.set(id, state)
+
+  const drain = async () => {
+    while (state.latest !== NO_DURABLE_WRITE && generation === durableGeneration) {
+      const next = state.latest
+      state.latest = NO_DURABLE_WRITE
+      try {
+        if (next == null) await delIdbValue(id, durableDraftStore)
+        else await setIdbValue(id, next, durableDraftStore)
+      } catch {
+        // The synchronous memory mirror remains authoritative for this page.
+        // Session storage is attempted independently by persistComposerDraft.
+      }
+    }
+  }
+
+  const finishDrain = () => {
+    // A microtask may enqueue a fresher value after drain's final loop check
+    // but before its promise continuation runs. Re-open the drain rather than
+    // resolving a write that never reached the database.
+    if (state.latest !== NO_DURABLE_WRITE && generation === durableGeneration) {
+      void drain().finally(finishDrain)
+      return
+    }
+    if (durableWrites.get(id) === state) durableWrites.delete(id)
+    resolveDone()
+  }
+  void drain().finally(finishDrain)
+  return state.done
+}
+
+export function composerDraftRevision(chatId) {
+  if (chatId == null) return 0
+  return revisionOf(chatId)
+}
+
+export async function flushComposerDraftPersistence() {
+  while (durableWrites.size > 0) {
+    await Promise.all([...durableWrites.values()].map(state => state.done))
+  }
+}
+
+/** Clear both the live mirror and the dedicated owner-draft database on logout. */
+export async function clearDurableComposerDrafts() {
+  durableGeneration += 1
+  liveDrafts.clear()
+  draftRevisions.clear()
+  lastDraftTimestamp = 0
+  for (const state of durableWrites.values()) state.latest = NO_DURABLE_WRITE
+  await Promise.all([...durableWrites.values()].map(state => state.done))
+  try { await clearIdbStore(durableDraftStore) } catch {}
+}
+
+// Test-only: emulate a document reload without deleting the durable database.
+export function _clearComposerDraftMemoryForTests() {
+  liveDrafts.clear()
+  draftRevisions.clear()
+  lastDraftTimestamp = 0
+}
 
 function attachmentMetadata(attachment) {
   return {
@@ -46,45 +158,129 @@ function storedAttachments(attachments) {
     .map(attachment => ({ ...attachmentMetadata(attachment), status: 'done' }))
 }
 
+function decodeDraft(raw) {
+  if (!raw) return { input: '', attachments: [], updatedAt: null }
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed?.type === DRAFT_ENVELOPE
+        && (parsed.version === 1 || parsed.version === DRAFT_VERSION)) {
+      if (Number.isFinite(parsed.updated_at)) {
+        lastDraftTimestamp = Math.max(lastDraftTimestamp, parsed.updated_at)
+      }
+      return {
+        input: typeof parsed.input === 'string' ? parsed.input : '',
+        attachments: storedAttachments(parsed.attachments),
+        updatedAt: Number.isFinite(parsed.updated_at) ? parsed.updated_at : null,
+      }
+    }
+  } catch { /* legacy plain text */ }
+  return {
+    input: typeof raw === 'string' ? raw : '',
+    attachments: [],
+    updatedAt: null,
+  }
+}
+
+function publicDraft(decoded) {
+  return { input: decoded.input, attachments: decoded.attachments }
+}
+
+function encodeDraft(input, attachments) {
+  const safeAttachments = completedAttachments(attachments)
+  if (!input && safeAttachments.length === 0) return null
+  // Date.now() can repeat across several keystrokes. A strictly monotonic
+  // value lets async hydration distinguish a newer durable write from the
+  // older session copy even when quota failed within the same millisecond.
+  lastDraftTimestamp = Math.max(Date.now(), lastDraftTimestamp + 1)
+  return JSON.stringify({
+    type: DRAFT_ENVELOPE,
+    version: DRAFT_VERSION,
+    updated_at: lastDraftTimestamp,
+    input: typeof input === 'string' ? input : '',
+    attachments: safeAttachments.map(({ status: _status, ...attachment }) => attachment),
+  })
+}
+
 /**
  * Reads either the current structured draft or a legacy plain-text draft.
  * Object URLs are deliberately not stored: they stop working when the chat
  * unmounts. Restored image cards point at the already-uploaded chat file.
  */
 export function readComposerDraft(chatId, storage) {
+  if (chatId == null) return { input: '', attachments: [] }
+  const useLiveMirror = storage === undefined
+  const id = draftId(chatId)
+  if (useLiveMirror && liveDrafts.has(id)) {
+    return publicDraft(decodeDraft(liveDrafts.get(id).raw))
+  }
+
   const target = availableStorage(storage)
-  if (!target || chatId == null) return { input: '', attachments: [] }
+  if (!target) return { input: '', attachments: [] }
   try {
     const raw = target.getItem(`draft:${chatId}`)
-    if (!raw) return { input: '', attachments: [] }
-    try {
-      const parsed = JSON.parse(raw)
-      if (parsed?.type === DRAFT_ENVELOPE && parsed.version === 1) {
-        return {
-          input: typeof parsed.input === 'string' ? parsed.input : '',
-          attachments: storedAttachments(parsed.attachments),
-        }
-      }
-    } catch { /* legacy plain text */ }
-    return { input: raw, attachments: [] }
+    if (useLiveMirror && raw) rememberLiveDraft(id, raw, 'session')
+    return publicDraft(decodeDraft(raw))
   } catch {
     return { input: '', attachments: [] }
   }
 }
 
-function evictOneDraft(storage) {
-  try {
-    const draftKeys = []
-    for (let i = 0; i < storage.length; i++) {
-      const key = storage.key(i)
-      if (key?.startsWith('draft:')) draftKeys.push(key)
-    }
-    if (draftKeys.length === 0) return
-    // Chat ids may be integers or UUIDs. Stable lexical order is sufficient:
-    // quota recovery only needs to free one older best-effort draft.
-    draftKeys.sort()
-    storage.removeItem(draftKeys[0])
-  } catch { /* best-effort storage */ }
+/**
+ * Resolve the durable fallback after mount without overwriting a newer local
+ * edit. Versioned session and IndexedDB values carry the same timestamp, so a
+ * reload can recover a newer durable write even when quota left an older
+ * session value behind. Legacy plain-text session drafts win over durable data
+ * because app-to-chat handoffs still intentionally use that format.
+ */
+export async function readComposerDraftAsync(chatId) {
+  if (chatId == null) return { input: '', attachments: [] }
+  const id = draftId(chatId)
+  const revisionAtStart = revisionOf(id)
+  const current = liveDrafts.get(id)
+  if (current?.source === 'live' || current?.source === 'durable') {
+    return publicDraft(decodeDraft(current.raw))
+  }
+
+  let durableRaw = null
+  try { durableRaw = await getIdbValue(id, durableDraftStore) } catch {}
+
+  if (revisionOf(id) !== revisionAtStart) {
+    return publicDraft(decodeDraft(liveDrafts.get(id)?.raw))
+  }
+
+  const latestCurrent = liveDrafts.get(id)
+  const currentDecoded = decodeDraft(latestCurrent?.raw)
+  const durableDecoded = decodeDraft(durableRaw)
+  const currentIsLegacy = latestCurrent?.raw && currentDecoded.updatedAt == null
+  const durableIsNewer = durableRaw && !currentIsLegacy && (
+    !latestCurrent?.raw
+    || (durableDecoded.updatedAt ?? -1) > (currentDecoded.updatedAt ?? -1)
+  )
+
+  if (durableIsNewer) {
+    rememberLiveDraft(id, durableRaw, 'durable')
+    return publicDraft(durableDecoded)
+  }
+  if (latestCurrent?.raw) {
+    queueDurableDraftWrite(id, latestCurrent.raw)
+    return publicDraft(currentDecoded)
+  }
+  if (durableRaw) {
+    rememberLiveDraft(id, durableRaw, 'durable')
+    return publicDraft(durableDecoded)
+  }
+  return { input: '', attachments: [] }
+}
+
+export function clearComposerDraft(chatId, storage) {
+  if (chatId == null) return
+  if (storage === undefined) {
+    rememberLiveDraft(chatId, null, 'live', { advance: true })
+    queueDurableDraftWrite(chatId, null)
+  }
+  const target = availableStorage(storage)
+  if (!target) return
+  try { target.removeItem(`draft:${chatId}`) } catch {}
 }
 
 /**
@@ -103,32 +299,44 @@ export function persistComposerDraft(chatId, input, attachments = [], storage) {
     ? attachments
     : undefined
   const draftAttachments = Array.isArray(attachments) ? attachments : []
-  const target = availableStorage(storage ?? legacyStorage)
-  if (!target || chatId == null) return false
+  const storageOverride = storage ?? legacyStorage
+  const useDurableStore = storageOverride === undefined
+  if (chatId == null) return false
   const key = `draft:${chatId}`
-  const safeAttachments = completedAttachments(draftAttachments)
-  const value = safeAttachments.length > 0
-    ? JSON.stringify({
-        type: DRAFT_ENVELOPE,
-        version: 1,
-        input: typeof input === 'string' ? input : '',
-        attachments: safeAttachments,
-      })
-    : (typeof input === 'string' ? input : '')
+  const value = encodeDraft(input, draftAttachments)
+
+  if (useDurableStore) {
+    rememberLiveDraft(chatId, value, 'live', { advance: true })
+    queueDurableDraftWrite(chatId, value)
+  }
+
+  const target = availableStorage(storageOverride)
+  // Dedicated memory + IndexedDB ownership does not depend on Web Storage
+  // being exposed (private/opaque contexts can deny it altogether).
+  if (!target) return useDurableStore
 
   try {
     if (value) target.setItem(key, value)
     else target.removeItem(key)
     return true
   } catch (error) {
-    if (error?.name !== 'QuotaExceededError' && error?.code !== 22) return false
-    evictOneDraft(target)
+    const quotaExceeded = error?.name === 'QuotaExceededError' || error?.code === 22
+    if (!useDurableStore) return false
+    if (!quotaExceeded) {
+      // Security/privacy modes may expose a Storage object whose writes still
+      // fail. The live mirror and independent durable write remain valid.
+      return true
+    }
+
+    // Owner text outranks a regenerable stream-remount cache. Reclaim that
+    // cache and retry once, but never delete this or another chat's draft.
+    reclaimStoredStreamSnapshots(target)
     try {
       if (value) target.setItem(key, value)
       else target.removeItem(key)
-      return true
     } catch {
-      return false
+      // The live mirror + dedicated IndexedDB write still preserve the draft.
     }
+    return true
   }
 }

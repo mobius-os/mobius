@@ -165,6 +165,30 @@ test('ChatView routes both offscreen attention nudges through the controller', (
     'the resume nudge reuses the question-nudge visual style')
 })
 
+test('viewport-derived nudges never participate in footer geometry', () => {
+  const layer = sliceElement(chatView, '<div className="chat__offscreen-nudges">')
+  assert.match(layer, /className="chat__question-nudge"/,
+    'the question cue belongs to the geometry-neutral layer')
+  assert.match(layer, /className="chat__resume-nudge"/,
+    'the resume cue shares the same geometry owner')
+
+  const layerCss = css.match(/\.chat__offscreen-nudges\s*\{[\s\S]*?\}/)?.[0] ?? ''
+  assert.match(layerCss, /position:\s*absolute/,
+    'showing or hiding a viewport cue must not resize the footer')
+  assert.match(layerCss, /bottom:\s*100%/,
+    'the cue remains immediately above the flow-owned footer controls')
+  assert.match(layerCss, /pointer-events:\s*none/,
+    'the overlay lane itself must not block transcript interaction')
+
+  const nudgeCss = css.match(
+    /\.chat__question-nudge,\s*\n\.chat__resume-nudge\s*\{[\s\S]*?\}/,
+  )?.[0] ?? ''
+  assert.match(nudgeCss, /margin:\s*0 auto/,
+    'the absolute lane, not a flow margin, owns nudge placement')
+  assert.doesNotMatch(nudgeCss, /margin:\s*0 auto 8px/,
+    'a viewport-derived nudge cannot reserve footer height')
+})
+
 test('both attention nudges observe a node published by the card, not a lookup', () => {
   // The nudges track a card that changes DOM node mid-turn: the live streaming
   // surface renders the pending question while the turn runs, the durable

@@ -9,6 +9,7 @@ import {
   readStoredStreamSnapshot,
   writeStoredStreamSnapshot,
   clearStoredStreamSnapshot,
+  reclaimStoredStreamSnapshots,
   flushStoredStreamSnapshot,
   flushAllStreamSnapshots,
   registerMountedChat,
@@ -22,6 +23,8 @@ function makeStorage() {
   const map = new Map()
   return {
     map,
+    get length() { return map.size },
+    key(index) { return [...map.keys()][index] ?? null },
     getItem(key) { return map.has(key) ? map.get(key) : null },
     setItem(key, value) { map.set(key, value) },
     removeItem(key) { map.delete(key) },
@@ -69,6 +72,23 @@ test('clear removes the current key', () => {
   clearStoredStreamSnapshot('chat-a', storage)
 
   assert.equal(storage.map.has(streamSnapshotKey('chat-a')), false)
+})
+
+test('quota reclamation drops only stream cache, including pending writes', (t) => {
+  _resetStreamSnapshotThrottleForTests()
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const storage = makeStorage()
+  storage.setItem('draft:chat-a', 'owner data')
+  storage.setItem(streamSnapshotKey('settled'), '[{"type":"text"}]')
+  registerMountedChat(); registerMountedChat()
+  writeStoredStreamSnapshot('pending', [{ type: 'text', content: 'later' }], storage)
+
+  assert.equal(reclaimStoredStreamSnapshots(storage), 1)
+  assert.equal(storage.getItem('draft:chat-a'), 'owner data')
+  assert.equal(storage.getItem(streamSnapshotKey('settled')), null)
+  t.mock.timers.tick(STREAM_SNAPSHOT_THROTTLE_MS + 10)
+  assert.equal(storage.getItem(streamSnapshotKey('pending')), null)
+  _resetStreamSnapshotThrottleForTests()
 })
 
 test('read returns [] for corrupt or absent values', () => {
