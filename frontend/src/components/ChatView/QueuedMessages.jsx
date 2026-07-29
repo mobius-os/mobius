@@ -129,14 +129,14 @@ export default function QueuedMessages({
                     {isExpanded ? text : preview}
                   </span>
                 </button>
-                {steerActive && msg.serverTs === true && (
+                {steerActive && (
                   // Per-row fast-forward (owner ask, 2026-07-17): the same
                   // double-chevron as the composer's steer button, in the
                   // queue action's compact neutral well — send exactly THIS
                   // message into the running turn now.
-                  // Rendered only while a turn is live and the row is
-                  // server-confirmed (an optimistic row's cid selects nothing
-                  // on the backend).
+                  // Render it with the optimistic row so the action well and
+                  // cancel-X arrive together. An early tap waits for this
+                  // row's queue write in ChatView before force-steering it.
                   <button
                     type="button"
                     className="queued__action queued__steer"
