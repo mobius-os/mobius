@@ -974,7 +974,11 @@ useEffect(() => {
   - `env(safe-area-inset-*)` works directly — the iframe's `viewport-fit=cover` makes it resolve to the real device insets (e.g. `padding-top: max(12px, env(safe-area-inset-top))`). This matches how a standalone PWA pads, so the same code works in both contexts.
   - `--mobius-safe-top/right/bottom/left` CSS variables on `:root` — the shell forwards the real insets and **zeroes them while your app is windowed**, so a control padded with `padding-top: var(--mobius-safe-top)` clears the notch immersive and sits flush when not. Use these when you want inset padding *only* while immersive; use `env()` when you want it always. They also re-forward on rotation, so a landscape flip (cutout moves to a side) re-pads correctly.
 - The shell renders its own floating exit button at the top-left (safe-area inset) while immersive. Don't draw a competing exit control, and keep critical tap targets out of that corner. If the user taps it, the shell stays in normal chrome until your app remounts and posts again — respect that choice; don't re-post on a timer.
-- Standalone opens (`/apps/<slug>/`) have no shell; the message is harmlessly ignored. The postMessage is the whole opt-in for *hiding the Möbius bar* — covering the OS status bar is separate (see below). `env(safe-area-inset-*)` resolves natively in a standalone PWA (and now in-shell too), so a build that pads with `env()` is portable across both; `--mobius-safe-*` stays 0 in standalone (no shell to forward them).
+- Standalone opens (`/apps/<slug>/`) use the same AppCanvas host without the
+  workspace chrome. The host still receives this message and tracks immersive
+  state; covering the OS status bar is separate (see below).
+  `env(safe-area-inset-*)` and the forwarded `--mobius-safe-*` variables remain
+  portable across workspace and installed entry points.
 
 ### Covering the notch on Android (the OS status bar)
 
@@ -1036,7 +1040,7 @@ async function openDetail(item) {
     handle.close()
     return
   }
-  if (status !== 'owned' && status !== 'standalone') {
+  if (status !== 'owned') {
     navRef.current = null
     return
   }
@@ -1050,12 +1054,10 @@ function closeDetail() {
 }
 ```
 
-`outcome.status` tells the app what happened to the requested **shell back
+`outcome.status` tells the app what happened to the requested **host back
 target**:
 
-- `owned` — the shell installed it; render the nested view.
-- `standalone` — there is no shell host; render the view, but provide your own
-  visible in-app back/close control.
+- `owned` — the current AppCanvas host installed it; render the nested view.
 - `rejected` — the shell refused the request, so no back target exists; stay on
   the current view.
 - `timeout` — shell ownership is unknown. Stay on the current view; the helper
@@ -1064,15 +1066,16 @@ target**:
   current view.
 - `cancelled` — your code called `close()` before the shell answered; do not
   render the abandoned view.
+- `unavailable` — the runtime was invoked outside AppCanvas; do not render the
+  nested view. This is a degraded or unsupported mount, not a second host mode.
 
 Unknown future statuses should be treated like failure. `handle.ready` remains
 as a compatibility promise (`true` only for `owned`), but its historical
-`false` folded all other outcomes together. New code should use `outcome` so a
-standalone app continues to work without mistaking that fallback for rejection.
+`false` folded all other outcomes together. New code should use `outcome`.
 
-### Android back-preview — shell-mediated back protocol
+### Android back-preview — host-mediated back protocol
 
-The swipe-back gesture renders a preview of the previous screen from a top-level history snapshot. Iframe `history.pushState` is invisible to that mechanism, so iframe-history-only apps get a blank preview. `window.mobius.nav.open(...)` wraps the shell-mediated protocol below, including timeout and standalone handling; use the raw postMessage form only for shell-only legacy apps or custom choreography.
+The swipe-back gesture renders a preview of the previous screen from a top-level history snapshot. Iframe `history.pushState` is invisible to that mechanism, so iframe-history-only apps get a blank preview. `window.mobius.nav.open(...)` wraps the AppCanvas-mediated protocol below, including timeout handling; use the raw postMessage form only for legacy apps or custom choreography.
 
 ```jsx
 function navPushAndAwaitAck(label) {

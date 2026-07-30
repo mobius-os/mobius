@@ -1,8 +1,7 @@
-// Shared mini-app runtime — exposes `window.mobius` to apps running in
-// both the in-shell iframe (app-frame.html) and the standalone shell
-// (routes/standalone.py). Imported at an absolute path
-// (`/mobius-runtime.js`) so it resolves identically from
-// `/api/apps/{id}/frame` and `/apps/{slug}/`. It lives in `public/`,
+// Shared mini-app runtime — exposes `window.mobius` to apps running in the
+// opaque app frame. Both the workspace and the installed standalone host use
+// AppCanvas to mount that same frame. Imported at an absolute path
+// (`/mobius-runtime.js`) from `/api/apps/{id}/frame`. It lives in `public/`,
 // so Vite copies it to the build root and Workbox precaches it
 // (content-revisioned per deploy → fresh online, available offline).
 //
@@ -12,14 +11,13 @@
 // when the connection returns. Reads are read-through: an online get() mirrors
 // the value into IndexedDB so a later offline get() serves the last-known
 // value (overlaid with any pending write — read-your-writes). This is the
-// SAME runtime for both hosts: the standalone PWA (standalone.py) and the
-// in-shell iframe (app-frame.html) both `init()` it.
+// SAME runtime for both entry points because both mount the same opaque frame.
 //
 // API — intentionally small; grow it when a real app needs more. Reads/writes
 // are TYPED: pick the method for your data shape (json is the default). A read
 // of the wrong type for a path throws a clear error rather than corrupting:
 //   window.mobius.appId
-//   window.mobius.online                          -> probed reachability verdict (the shell's /api/health probe forwarded by AppCanvas; navigator.onLine is only the standalone-host seed/fallback)
+//   window.mobius.online                          -> probed reachability verdict (the shell's /api/health probe forwarded by AppCanvas; navigator.onLine is only the initial seed)
 //   window.mobius.storage.get(path)               -> JSON value | null  (offline-capable, SWR)
 //   window.mobius.storage.set(path, data)         -> {synced} | {queued}
 //   window.mobius.storage.getText(path)           -> string | null      (offline-capable, SWR)
@@ -46,8 +44,8 @@
 //     handle.setGuidance(text), and handle.destroy(). See the
 //     "Agent-chat embed" block below.
 //   window.mobius.nav.open(label, onBack)        -> { ready, outcome, close }
-//     outcome distinguishes shell ownership from standalone fallback and
-//     request failures; see building-apps.md.
+//     outcome distinguishes host ownership from request failures; see
+//     building-apps.md.
 //   window.mobius.capabilities.available(name, version?)
 //   window.mobius.capabilities.open(name, input)  -> capability session
 //     session.ready, session.result, session.on(event, cb), finish(), cancel()
@@ -3598,11 +3596,11 @@ export function makeNav() {
     if (window.parent === window) {
       clearTimeout(timer)
       entry.settled = true
-      // There is no shell-owned history slot to revisit in standalone mode.
-      // Keep the visible close control, but do not retain a dormant Forward
-      // closure after that control is used.
+      // App runtimes are required to be hosted by AppCanvas. Treat a direct
+      // top-level invocation as unavailable rather than growing a second
+      // navigation implementation.
       entry.reversible = false
-      settleOutcome('standalone')
+      settleOutcome('unavailable')
       window.removeEventListener('message', onMessage)
       return {
         ready,
@@ -3643,10 +3641,9 @@ export function makeNav() {
 
 // ── P1-A: probed-online reactive backing ─────────────────────────────────────
 // window.mobius.online returns this value (seeded from navigator.onLine).
-// AppCanvas (the in-shell iframe host) posts `moebius:online-status` whenever
-// the shell's probed reachability verdict changes; the message listener below
-// updates _online and notifies subscribers. Standalone context (no AppCanvas)
-// falls back to navigator.onLine via the seed — still a useful signal.
+// AppCanvas posts `moebius:online-status` whenever the trusted host's probed
+// reachability verdict changes; the listener below updates _online and
+// notifies subscribers.
 //
 // Kept in a deliberately-delimited block so concurrent worktree merges stay
 // clean — edits to this runtime should land near existing connectivity code.
@@ -3662,8 +3659,7 @@ function _setOnline(next) {
   }
 }
 
-// Listen for the probed verdict from AppCanvas. Ignored in standalone context
-// (window.parent === window, no AppCanvas, navigator.onLine is the fallback).
+// Listen for the probed verdict from AppCanvas.
 if (typeof window !== 'undefined') {
   window.addEventListener('message', (e) => {
     if (e.origin !== window.location.origin) return
@@ -3673,8 +3669,7 @@ if (typeof window !== 'undefined') {
       _setOnline(msg.online)
     }
   })
-  // Keep the seed roughly current while in the standalone host (no AppCanvas).
-  // In the in-shell host AppCanvas drives _online; these are harmless extras.
+  // Keep the seed roughly current before AppCanvas's first probed verdict.
   window.addEventListener('online', () => _setOnline(true))
   window.addEventListener('offline', () => _setOnline(false))
 }
@@ -3722,122 +3717,6 @@ function asCapabilityError(msg, capability) {
   )
 }
 
-function standaloneMicrophoneProvider({ input, declaration, channel }) {
-  let stream
-  let context
-  let source
-  let processor
-  let silent
-  let timer
-  let settled = false
-  let finishRequested = false
-  let cancelRequested = false
-  const chunks = []
-  let sampleCount = 0
-
-  function cleanup() {
-    clearTimeout(timer)
-    if (processor) processor.onaudioprocess = null
-    for (const node of [processor, silent, source]) {
-      try { node?.disconnect?.() } catch (e) {}
-    }
-    stream?.getTracks?.().forEach((track) => track.stop())
-    try { context?.close?.() } catch (e) {}
-  }
-
-  function finish(cancelled = false) {
-    if (settled) return
-    settled = true
-    cleanup()
-    if (cancelled) {
-      channel.error(new CapabilityError('aborted', 'Recording cancelled.', {
-        name: 'AbortError', capability: 'media.microphone.capture',
-      }))
-      return
-    }
-    const samples = new Float32Array(sampleCount)
-    let offset = 0
-    for (const chunk of chunks) {
-      samples.set(chunk, offset)
-      offset += chunk.length
-    }
-    channel.result({ samples, sampleRate: context?.sampleRate || 44100 })
-  }
-
-  ;(async () => {
-    try {
-      const mediaDevices = globalThis.navigator?.mediaDevices
-      const AudioContextCtor = globalThis.AudioContext || globalThis.webkitAudioContext
-      if (!mediaDevices?.getUserMedia) {
-        throw new CapabilityError('unavailable', 'Microphone recording is unavailable in this browser.')
-      }
-      if (!AudioContextCtor) {
-        throw new CapabilityError('unavailable', 'Audio recording is unavailable in this browser.')
-      }
-      stream = await mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-      })
-      if (cancelRequested) { finish(true); return }
-
-      context = new AudioContextCtor()
-      if (context.state === 'suspended') await context.resume?.()
-      source = context.createMediaStreamSource(stream)
-      processor = context.createScriptProcessor(4096, 1, 1)
-      silent = context.createGain()
-      silent.gain.value = 0
-      source.connect(processor)
-      processor.connect(silent)
-      silent.connect(context.destination)
-
-      const declaredMax = Number(declaration?.limits?.max_duration_ms) || 30000
-      const requestedMax = Number(input?.maxDurationMs)
-      const durationMs = Math.max(100, Math.min(
-        declaredMax,
-        Number.isFinite(requestedMax) ? requestedMax : declaredMax,
-      ))
-      const maxFrames = Math.max(1, Math.round(context.sampleRate * durationMs / 1000))
-      processor.onaudioprocess = (event) => {
-        if (settled) return
-        const samples = event.inputBuffer.getChannelData(0)
-        const remaining = maxFrames - sampleCount
-        if (remaining <= 0) { finish(false); return }
-        const chunk = new Float32Array(samples.subarray(0, Math.min(samples.length, remaining)))
-        chunks.push(chunk)
-        sampleCount += chunk.length
-        let peak = 0
-        for (let i = 0; i < chunk.length; i += 1) peak = Math.max(peak, Math.abs(chunk[i]))
-        channel.event('level', Math.min(1, peak))
-        if (sampleCount >= maxFrames) finish(false)
-      }
-      timer = setTimeout(() => finish(false), durationMs + 100)
-      channel.ready({ sampleRate: context.sampleRate })
-      if (cancelRequested) finish(true)
-      else if (finishRequested) finish(false)
-    } catch (error) {
-      cleanup()
-      if (settled) return
-      settled = true
-      channel.error(error)
-    }
-  })()
-
-  return {
-    control(action) {
-      if (action === 'cancel') {
-        cancelRequested = true
-        finish(true)
-      } else if (action === 'finish') {
-        finishRequested = true
-        if (context) finish(false)
-      }
-    },
-  }
-}
-
-const STANDALONE_CAPABILITY_PROVIDERS = {
-  'media.microphone.capture': standaloneMicrophoneProvider,
-}
-
 export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } = {}) {
   const ownWindow = selfWindow || globalThis.window
   const parentWindow = hostWindow || ownWindow?.parent
@@ -3854,7 +3733,7 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } =
     const declaration = describe(name)
     if (!declaration) return false
     if (version !== undefined && declaration.version !== version) return false
-    return embedded || typeof STANDALONE_CAPABILITY_PROVIDERS[name] === 'function'
+    return embedded
   }
 
   function settle(session, mode, value) {
@@ -3943,59 +3822,27 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } =
       },
       control(action, value) {
         if (internal.settled || typeof action !== 'string') return result
-        if (embedded) {
-          parentWindow.postMessage({
-            type: 'moebius:capability-control', requestId, capability, action, value,
-          }, ownWindow.location.origin)
-        } else {
-          internal.localControl?.control?.(action, value)
-        }
+        parentWindow.postMessage({
+          type: 'moebius:capability-control', requestId, capability, action, value,
+        }, ownWindow.location.origin)
         return result
       },
       finish() { return this.control('finish') },
       cancel() {
         if (internal.settled) return
-        if (embedded) {
-          parentWindow.postMessage({
-            type: 'moebius:capability-control', requestId, capability, action: 'cancel',
-          }, ownWindow.location.origin)
-        } else {
-          internal.localControl?.control?.('cancel')
-        }
+        parentWindow.postMessage({
+          type: 'moebius:capability-control', requestId, capability, action: 'cancel',
+        }, ownWindow.location.origin)
         settle(internal, 'error', new CapabilityError('aborted', 'Capability request cancelled.', {
           name: 'AbortError', capability,
         }))
       },
     }
 
-    if (embedded) {
-      parentWindow.postMessage({
-        type: 'moebius:capability-open', requestId, capability,
-        version: declaration.version, input,
-      }, ownWindow.location.origin)
-    } else {
-      const provider = STANDALONE_CAPABILITY_PROVIDERS[capability]
-      const channel = {
-        ready(value) {
-          if (internal.readySettled || internal.settled) return
-          internal.readySettled = true
-          internal.readyResolve(value)
-        },
-        event(event, value) {
-          if (internal.settled) return
-          for (const listener of internal.listeners.get(event) || []) {
-            try { listener(value) } catch (e) {}
-          }
-        },
-        result(value) { settle(internal, 'result', value) },
-        error(error) { settle(internal, 'error', error) },
-      }
-      try {
-        internal.localControl = provider({ input, declaration, channel })
-      } catch (error) {
-        settle(internal, 'error', error)
-      }
-    }
+    parentWindow.postMessage({
+      type: 'moebius:capability-open', requestId, capability,
+      version: declaration.version, input,
+    }, ownWindow.location.origin)
     return session
   }
 
@@ -4079,8 +3926,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
   const api = {
     appId,
     // Returns the probed reachability verdict (not raw navigator.onLine).
-    // In the in-shell iframe AppCanvas forwards the shell's /api/health probe
-    // result; in the standalone PWA host it seeds from navigator.onLine.
+    // AppCanvas forwards the trusted host's /api/health probe result.
     get online() { return _online },
     // Subscribe to online/offline changes. `cb(boolean)` fires immediately
     // with the current value and again whenever the value changes.
@@ -4114,8 +3960,8 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
   storage._drain()    // flush anything left from a previous offline session
   storage._drainSignals() // independently flush retained telemetry
   // Ask for durable storage so the offline mirror + queued blob writes survive
-  // storage pressure. Fired here (not only in the shell's index.html) so a
-  // standalone mini-app PWA opened WITHOUT the shell still gets it. Best-effort.
+  // storage pressure. The opaque frame and trusted host share the origin's
+  // quota even though app code cannot access host state. Best-effort.
   try {
     if (navigator.storage && navigator.storage.persist) {
       navigator.storage.persisted().then((p) => p || navigator.storage.persist()).catch(() => {})
@@ -4133,8 +3979,9 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
 //   logout clears `mobius-*` CacheStorage but the OUTBOX/CACHE IndexedDB is a
 //   separate DB — confirm logout also deletes it (delOutboxDb handles the
 //   outbox DB; the cache store rides the same DB, so it's covered).
-// - The standalone and in-shell hosts both provide a refreshable app-token
-//   broker. Runtime fetches retry one 401 through getToken({forceRefresh:true});
+// - AppCanvas provides the refreshable app-token broker for both workspace and
+//   standalone entry points. Runtime fetches retry one 401 through
+//   getToken({forceRefresh:true});
 //   queued writes remain intact if refresh is temporarily offline.
 // - setBlob enforces a per-blob size cap (MAX_BLOB_BYTES) BEFORE any IDB/outbox
 //   write, but the read-through cache has NO total-size eviction yet. A true LRU

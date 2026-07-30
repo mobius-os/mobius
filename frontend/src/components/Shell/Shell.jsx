@@ -138,6 +138,11 @@ import ShellBrand from './ShellBrand.jsx'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
 const SHELL_RELOAD_RECHECK_MS = 6000
+const APP_SETTINGS_SECTIONS = new Set([
+  'ai-providers',
+  'background-agents',
+  'models',
+])
 // The builder mode beat durations live in workspaceView.js (MODE_MOTION); the
 // reconcile clock reads the latched plan's totalMs, and completion is keyed to the
 // beat's Web-Animations `finished` promises, not a bare timer — so no BUILDER_ENTER
@@ -849,7 +854,9 @@ export default function Shell() {
   const [composerRequest, setComposerRequest] = useState(null)
   const composerRequestTokenRef = useRef(0)
 
-  function requestComposer(chatId, { draft, focus = false } = {}) {
+  const requestComposer = useCallback((chatId, {
+    draft, focus = false,
+  } = {}) => {
     if (chatId == null) return
     if (draft == null && !focus) return
     composerRequestTokenRef.current += 1
@@ -859,7 +866,7 @@ export default function Shell() {
       draft: draft == null ? null : String(draft),
       focus: focus === true,
     })
-  }
+  }, [])
 
   function focusDesktopChatPaneComposer(chatId) {
     if (!supportsDesktopPaneComposerFocus()) return
@@ -2464,6 +2471,64 @@ export default function Shell() {
     }
   }, [refreshChats, workspaceStateRef])
 
+  // AppCanvas owns exact-window attribution and wire-format narrowing for
+  // every frame request. This callback owns the workspace outcome only, so the
+  // standalone host and workspace cannot drift into separate message routers.
+  const handleAppHostRequest = useCallback((_appId, request) => {
+    void (async () => {
+      if (request.type === 'moebius:new-chat') {
+        await newChatRef.current?.({
+          draft: request.draft || undefined,
+          forceNew: true,
+          autoSend: request.autoSend,
+        })
+        return
+      }
+      if (request.type === 'moebius:open-chat') {
+        const draftText = request.draft || null
+        // Do not stage a dead chat and wait for ChatView's later 404 repair:
+        // that briefly paints a destination which immediately disappears. The
+        // direct resource probe is the shell's authoritative deletion signal.
+        // Unknown (offline/timeout/auth) is deliberately not deletion evidence.
+        const targetState = await probeDeletion(
+          `/chats/${encodeURIComponent(request.chatId)}?limit=1&compact=1`,
+        )
+        if (targetState === 'deleted') {
+          await newChatRef.current?.({
+            draft: draftText || undefined,
+            forceNew: true,
+          })
+          refreshChats()
+          return
+        }
+        if (draftText != null) {
+          persistComposerDraft(request.chatId, draftText)
+          try {
+            sessionStorage.setItem('pending-draft', draftText)
+            sessionStorage.removeItem('pending-draft-autosend')
+            sessionStorage.removeItem(`draft-autosend:${request.chatId}`)
+          } catch {}
+        }
+        navToRef.current('chat', { chatId: request.chatId })
+        // Storage covers an unmounted target. The explicit request also updates
+        // an already-retained ChatView, whose controlled composer state would
+        // otherwise keep showing its old value until a full remount.
+        if (draftText != null) requestComposer(request.chatId, { draft: draftText })
+        refreshChats()
+        return
+      }
+      if (request.type === 'moebius:open-app') {
+        await openAppWithIntent(request.appId, request.intent)
+        return
+      }
+      const section = APP_SETTINGS_SECTIONS.has(request.section)
+        ? request.section
+        : 'ai-providers'
+      setSettingsFocusTarget({ section, nonce: Date.now() })
+      if (activeViewRef.current !== 'settings') navToRef.current('settings')
+    })()
+  }, [openAppWithIntent, refreshChats, requestComposer])
+
   // Restore the active chat after Shell mount. Two cache layers can
   // satisfy this effect: (1) the persisted TanStack cache hydrated
   // from IndexedDB (flips `isFetched` to true with `dataUpdatedAt`
@@ -2959,109 +3024,10 @@ export default function Shell() {
   ])
   useSystemEventStream(handleSystemEvent, { onOpen: reconcileSystemStateOnOpen })
 
-  // Listen for postMessage events from mini-app iframes:
-  //   moebius:app-error — route crash report to the chat that built the app
-  //     (stored as chat_id on the app record). Falls back to a new chat if
-  //     the building chat was deleted. Error is set as a draft (not auto-sent)
-  //     so the user can review before sending.
-  //   moebius:new-chat — open a new chat with optional pre-filled draft text.
-  //     Payload may include autoSend:true, which sends that exact draft after
-  //     ChatView mounts. Used only for explicit app approval flows.
-  //   moebius:open-chat — open an existing chat, optionally pre-filling a draft.
-  //     A direct 404 falls back to a fresh chat carrying that draft; apps can
-  //     safely link durable records to chats that the owner may later delete.
-  //   moebius:open-app — switch the shell to an installed app. Payload
-  //     {appId} accepts either the numeric DB id or the slug; we match
-  //     against the installed apps list and silently ignore unknown ids
-  //     (don't crash the shell on a stale or malicious payload). Mirrors
-  //     the drawer's onApp wiring (navTo('canvas', { appId })) so the
-  //     existing iframe LRU + back-stack behavior applies.
-  //   moebius:open-settings — switch to Settings and focus a known section.
-  //     Used by setup prompts inside catalog apps; unknown section names
-  //     degrade to the provider area.
+  // Service-worker messages arrive on navigator.serviceWorker, not the window
+  // message bus used by AppCanvas. Keep this listener limited to notification
+  // routing; frame requests are source-attributed and normalized by AppCanvas.
   useEffect(() => {
-    const settingsSections = new Set([
-      'ai-providers',
-      'background-agents',
-      'models',
-    ])
-    async function onMessage(e) {
-      // window 'message' events are for cross-frame postMessage from app
-      // frames. NOT service-worker messages —
-      // those arrive on navigator.serviceWorker, handled separately
-      // below.
-      //
-      // Sandboxed app frames intentionally have the opaque `null` origin. A
-      // null origin alone is not identity, so require the event source to be
-      // one of the AppCanvas windows currently mounted by this shell. This also
-      // keeps same-origin popups or stale frames from driving navigation.
-      if (e.origin !== 'null' && e.origin !== window.location.origin) return
-      const fromMountedApp = [...document.querySelectorAll('iframe.canvas')]
-        .some((frame) => frame.contentWindow === e.source)
-      if (!fromMountedApp) return
-      if (e.data?.type === 'moebius:new-chat') {
-        newChat({
-          draft: e.data.draft,
-          forceNew: true,
-          autoSend: e.data.autoSend === true,
-        })
-      } else if (e.data?.type === 'moebius:open-chat') {
-        if (typeof e.data.chatId !== 'string' || !e.data.chatId) return
-        let draftText = null
-        if (e.data.draft) {
-          draftText = String(e.data.draft)
-        }
-        // Do not stage a dead chat and wait for ChatView's later 404 repair:
-        // that briefly paints a destination which immediately disappears. The
-        // direct resource probe is the shell's authoritative deletion signal.
-        // Unknown (offline/timeout/auth) is deliberately not deletion evidence.
-        const targetState = await probeDeletion(
-          `/chats/${encodeURIComponent(e.data.chatId)}?limit=1&compact=1`,
-        )
-        if (targetState === 'deleted') {
-          await newChatRef.current?.({
-            draft: draftText || undefined,
-            forceNew: true,
-          })
-          refreshChats()
-          return
-        }
-        if (draftText != null) {
-          persistComposerDraft(e.data.chatId, draftText)
-          try {
-            sessionStorage.setItem('pending-draft', draftText)
-            sessionStorage.removeItem('pending-draft-autosend')
-            sessionStorage.removeItem(`draft-autosend:${e.data.chatId}`)
-          } catch {}
-        }
-        navTo('chat', { chatId: e.data.chatId })
-        // Storage covers an unmounted target. The explicit request also updates
-        // an already-retained ChatView, whose controlled composer state would
-        // otherwise keep showing its old value until a full remount.
-        if (draftText != null) requestComposer(e.data.chatId, { draft: draftText })
-        refreshChats()
-      } else if (e.data?.type === 'moebius:open-app') {
-        // Match against installed apps by numeric id OR slug, so the
-        // sender can use whichever it has on hand. String() coercion
-        // covers the numeric-id case without trusting the payload's type.
-        //
-        // App installs can complete while the shell is holding a stale
-        // persisted /api/apps snapshot (common in installed PWAs). In that
-        // state the App Store iframe knows the installed DB id, but this
-        // handler's current list does not, and a silent return leaves the
-        // user on the previous chat. Refetch once before giving up so
-        // newly-installed external apps open from their own detail screen.
-        await openAppWithIntent(e.data.appId, e.data.intent)
-      } else if (e.data?.type === 'moebius:open-settings') {
-        const rawSection = typeof e.data.section === 'string' ? e.data.section : ''
-        const section = settingsSections.has(rawSection) ? rawSection : 'ai-providers'
-        setSettingsFocusTarget({ section, nonce: Date.now() })
-        if (activeViewRef.current !== 'settings') {
-          navTo('settings')
-        }
-      }
-    }
-
     function onSwMessage(e) {
       // Service-worker client.postMessage delivers here via
       // navigator.serviceWorker — NOT via window.message. (Subtle
@@ -3074,17 +3040,15 @@ export default function Shell() {
       else if (target?.view === 'chat') navTo('chat', { chatId: target.chatId })
     }
 
-    window.addEventListener('message', onMessage)
     if (navigator.serviceWorker) {
       navigator.serviceWorker.addEventListener('message', onSwMessage)
     }
     return () => {
-      window.removeEventListener('message', onMessage)
       if (navigator.serviceWorker) {
         navigator.serviceWorker.removeEventListener('message', onSwMessage)
       }
     }
-  }, [navTo, openAppWithIntent, refreshChats])
+  }, [navTo, openAppWithIntent])
 
   // Resolve the chat id a New-chat action lands on: a validated reusable empty row, or
   // a freshly created one. Split out of newChat (round 4 item 3) so BOTH the ordinary
@@ -3941,6 +3905,7 @@ export default function Shell() {
               onImmersive={handleImmersive}
               onIntentDelivered={handleAppIntentDelivered}
               onAppError={handleAppError}
+              onHostRequest={handleAppHostRequest}
             />
             </ErrorBoundary>
           </div>

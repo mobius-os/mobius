@@ -42,6 +42,14 @@ MARKDOWN_DIRECT_IMPORTS = {
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRAME = REPO_ROOT / "frontend" / "public" / "app-frame.html"
 STANDALONE = REPO_ROOT / "backend" / "app" / "routes" / "standalone.py"
+STANDALONE_APP = (
+  REPO_ROOT
+  / "frontend"
+  / "src"
+  / "components"
+  / "StandaloneApp"
+  / "StandaloneApp.jsx"
+)
 INJECT = REPO_ROOT / "backend" / "app" / "app_runtime_inject.js"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 
@@ -255,8 +263,12 @@ def test_app_hosts_have_no_runtime_import_map_or_static_module_imports():
     assert 'await import("react")' not in source
     assert "await import('/mobius-runtime.js')" not in source
     assert 'await import("/mobius-runtime.js")' not in source
-    assert "__mobiusRuntimeConfig" in source
-    assert "__mobiusCompiledRuntime" in source
+  assert "__mobiusRuntimeConfig" in frame
+  assert "__mobiusCompiledRuntime" in frame
+  assert "__mobiusRuntimeConfig" not in standalone
+  assert "__mobiusCompiledRuntime" not in standalone
+  assert "__mobius-standalone-app__" in standalone
+  assert "AppCanvas" in STANDALONE_APP.read_text()
 
 
 def test_image_does_not_build_obsolete_package_facades():
@@ -275,13 +287,15 @@ def test_image_does_not_build_obsolete_package_facades():
   assert "katex.min.css" in dockerfile
 
 
-def test_compiler_and_both_hosts_agree_on_runtime_abi():
+def test_compiler_and_shared_frame_agree_on_runtime_abi():
   inject = INJECT.read_text()
   frame = FRAME.read_text()
   standalone = STANDALONE.read_text()
   assert f"abi: {COMPILED_RUNTIME_ABI}" in inject
   assert f"COMPILED_RUNTIME_ABI = {COMPILED_RUNTIME_ABI}" in frame
-  assert f"compiledRuntime.abi !== {COMPILED_RUNTIME_ABI}" in standalone
+  # The standalone URL mounts this same frame through AppCanvas. It must not
+  # grow a second ABI check or executable runtime of its own.
+  assert "compiledRuntime.abi" not in standalone
   assert (
     f"artifact-revision:{COMPILED_RUNTIME_ARTIFACT_REVISION}"
     in COMPILED_RUNTIME_BANNER

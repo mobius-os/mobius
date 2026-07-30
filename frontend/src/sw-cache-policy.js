@@ -31,7 +31,11 @@ export const SHELL_DATA_CACHE = 'mobius-shell-data'
 // the old response policy once (or indefinitely offline), so activation must
 // evict v3 and make the first post-upgrade frame load use the new CSP.
 export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v4'
-export const STANDALONE_APPS_CACHE = 'mobius-standalone-v2'
+// Bumped -v2 → -v3 (2026-07-30): v2 standalone documents executed app-authored
+// modules directly at owner origin. The secure host now mounts the shared
+// opaque AppCanvas frame; activation must evict every cached v2 document so an
+// offline launch cannot retain the retired credential-bearing execution path.
+export const STANDALONE_APPS_CACHE = 'mobius-standalone-v3'
 // app-assets bumped to -v2 ONCE (2026-06-12) to evict entries poisoned by
 // ranged-request bodies: CubeRun's probe GET with `Range: bytes=0-0` came
 // back from Chromium's HTTP cache as a status-200 response holding only the
