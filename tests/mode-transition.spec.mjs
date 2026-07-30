@@ -95,10 +95,12 @@ function unevenThreePaneBuilder(slot) {
 // transient wrapper classes or transforms.
 async function sampleSceneTransition(page) {
   return page.evaluate(async () => {
+    const initialDirection = document.documentElement.dataset.modeViewTransition || null
     let direction = null
     let records = []
     for (let frames = 0; frames < 180; frames += 1) {
-      direction ||= document.documentElement.dataset.modeViewTransition || null
+      const currentDirection = document.documentElement.dataset.modeViewTransition || null
+      if (currentDirection && currentDirection !== initialDirection) direction ||= currentDirection
       const animations = document.documentElement.getAnimations({ subtree: true })
       records = animations.flatMap((animation) => {
         const effect = animation.effect
@@ -579,8 +581,6 @@ async function pressHoldLogo(page, holdMs = 650) {
 async function sampleLogoBeat(page) {
   return page.evaluate(async () => {
     const root = document.querySelector('.shell')
-    const brand = document.querySelector('.shell__brand')
-    const logo = document.querySelector('.shell__logo')
     let beatHeldSeen = false
     let minScale = 1
     let epochMismatch = false
@@ -588,10 +588,11 @@ async function sampleLogoBeat(page) {
     await new Promise((resolve) => {
       let frames = 0
       const tick = () => {
-        const cls = root.className
         const beatClass = !!document.documentElement.dataset.modeViewTransition
         if (beatClass) sawBeatClass = true
-        if (brand.classList.contains('is-beat-held')) {
+        const brand = document.querySelector('.shell__brand')
+        const logo = document.querySelector('.shell__logo')
+        if (brand?.classList.contains('is-beat-held')) {
           beatHeldSeen = true
           const s = parseFloat(getComputedStyle(logo).scale)
           if (Number.isFinite(s)) minScale = Math.min(minScale, s)
@@ -605,7 +606,7 @@ async function sampleLogoBeat(page) {
       }
       requestAnimationFrame(tick)
     })
-    const settledScale = parseFloat(getComputedStyle(logo).scale)
+    const settledScale = parseFloat(getComputedStyle(document.querySelector('.shell__logo')).scale)
     return { beatHeldSeen, minScale, epochMismatch, sawBeatClass, settledScale }
   })
 }
