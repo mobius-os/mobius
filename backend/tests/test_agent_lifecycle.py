@@ -385,7 +385,9 @@ def test_owner_endpoint_rejects_app_token(client, owner_token):
   assert response.status_code == 403
 
 
-def test_stale_chat_hard_purge_removes_lifecycle_before_run(client, auth, db):
+def test_stale_chat_hard_purge_removes_lifecycle_before_run(db):
+  from app.chat_retention import purge_expired_chat_tombstones
+
   _chat_run(db, "chat-stale", "run-stale", deleted=True)
   values = normalize_chat_event(
     chat_id="chat-stale",
@@ -399,8 +401,7 @@ def test_stale_chat_hard_purge_removes_lifecycle_before_run(client, auth, db):
   )
   assert record_event(db, values) is True
 
-  response = client.get("/api/chats", headers=auth)
-  assert response.status_code == 200, response.text
+  purge_expired_chat_tombstones(db)
   db.expire_all()
   assert db.query(models.AgentLifecycleEvent).filter_by(
     event_key=values["event_key"]

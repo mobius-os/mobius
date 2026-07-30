@@ -192,6 +192,22 @@ async def lifespan(app):
     _log.error("legacy global auto-resume cleanup failed: %s", exc, exc_info=True)
   _init_db()
   record_memory_checkpoint("startup_database_initialized")
+  # Expired chat tombstones are permanent lifecycle cleanup, not a side effect
+  # of reading the drawer. Reclaim them once at boot and again on future chat
+  # deletes; both are existing lifecycle boundaries, so no polling task or
+  # resource ceiling is needed.
+  try:
+    from app.chat_retention import purge_expired_chat_tombstones
+    with SessionLocal() as _chat_retention_db:
+      _purged_chat_ids = purge_expired_chat_tombstones(_chat_retention_db)
+    if _purged_chat_ids:
+      _log.info(
+        "purged %s expired chat tombstone(s)", len(_purged_chat_ids),
+      )
+  except Exception as exc:
+    # Retention hygiene must not block recovery. A failed sweep retries on the
+    # next explicit chat delete or boot.
+    _log.error("expired chat tombstone cleanup failed: %s", exc, exc_info=True)
   # Upgrade hygiene for lifecycle observability. The append-only link table is
   # new, but older chats can already carry a current provider session pointer.
   # Seed those once after create_all has made the table; future sightings are
