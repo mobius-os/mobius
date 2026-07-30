@@ -89,6 +89,146 @@ test('the first thinking event becomes interactive without moving the row', asyn
   expect(Math.abs(after.height - before.height)).toBeLessThanOrEqual(0.5)
 })
 
+test('cold historical activity reveals once at its final height', async ({ page }) => {
+  await page.setViewportSize({ width: 1180, height: 820 })
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+      || document.querySelector('.chat__scroll')
+      || document.querySelector('.chat__form')),
+    { timeout: 10000 },
+  )
+  const chat = await createTaggedChat(page, 'atomic-activity-detail')
+  const messages = [
+    { role: 'user', content: 'Inspect this saved run.', ts: 1700000000000 },
+    {
+      role: 'assistant',
+      content: '',
+      ts: 1700000001000,
+      blocks: [{
+        type: 'activity',
+        activity_id: '1:0:2',
+        message_index: 1,
+        start: 0,
+        end: 2,
+        tool_count: 1,
+        entries: [
+          {
+            item: {
+              type: 'thinking',
+              thinking_id: 'cold-thought',
+              duration_ms: 900,
+            },
+            idx: 0,
+          },
+          {
+            item: {
+              type: 'tool',
+              tool: 'Bash',
+              status: 'done',
+              tool_use_id: 'cold-command',
+            },
+            idx: 1,
+          },
+        ],
+      }, {
+        type: 'text',
+        content: 'Saved answer after the activity.',
+      }],
+    },
+  ]
+  await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ...chat,
+        messages,
+        total: messages.length,
+        offset: 0,
+        running: false,
+        pending_messages: [],
+      }),
+    })
+  })
+  await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), route =>
+    route.fulfill({ status: 204, body: '' }))
+
+  let markDetailRequested
+  let releaseDetail
+  const detailRequested = new Promise(resolve => { markDetailRequested = resolve })
+  const detailGate = new Promise(resolve => { releaseDetail = resolve })
+  await page.route(new RegExp(`/api/chats/${chat.id}/activity-detail\\?.*`), async route => {
+    markDetailRequested()
+    await detailGate
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        entries: [
+          {
+            item: {
+              type: 'thinking',
+              thinking_id: 'cold-thought',
+              duration_ms: 900,
+            },
+            idx: 0,
+          },
+          {
+            item: {
+              type: 'tool',
+              tool: 'Bash',
+              status: 'done',
+              tool_use_id: 'cold-command',
+              input: 'printf atomic',
+              output: 'atomic',
+            },
+            idx: 1,
+          },
+        ],
+      }),
+    })
+  })
+
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
+  const painted = page.locator('[data-chat-surface="painted"]')
+  await expect(painted.getByText('Saved answer after the activity.')).toBeVisible()
+  const activity = painted.locator('.chat__activity')
+  const toggle = activity.locator('.chat__activity-header')
+  const timeline = activity.locator('.chat__activity-timeline')
+  await timeline.evaluate(element => {
+    window.__coldActivityHeights = []
+    window.__coldActivityObserver = new ResizeObserver(entries => {
+      window.__coldActivityHeights.push(Math.round(entries[0].contentRect.height))
+    })
+    window.__coldActivityObserver.observe(element)
+  })
+
+  await toggle.click()
+  await detailRequested
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(toggle).toHaveAttribute('aria-busy', 'true')
+  await expect(timeline).toBeHidden()
+  await expect(activity.getByText('Loading activity…')).toHaveCount(0)
+  releaseDetail()
+
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(toggle).not.toHaveAttribute('aria-busy', 'true')
+  await expect(activity.getByText('printf atomic')).toBeVisible()
+  await page.evaluate(() => new Promise(resolve =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  const heights = await page.evaluate(() => {
+    window.__coldActivityObserver.disconnect()
+    return window.__coldActivityHeights
+  })
+  const firstExpanded = heights.findIndex(height => height > 0)
+  expect(firstExpanded).toBeGreaterThanOrEqual(0)
+  expect(new Set(heights.slice(firstExpanded)).size).toBe(1)
+})
+
 test('a lone activity is direct and sources render as safe compact pills', async ({ page }) => {
   await page.setViewportSize({ width: 412, height: 915 })
   const requestedSourceHosts = []
@@ -418,38 +558,41 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   await thoughtToggle.click()
 
   await toolToggle.click()
-  await expect(activity.getByRole('region')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Copy output' })).toBeEnabled()
-  await expect(page.locator('[data-chat-surface="painted"]').getByText(/loading output preview/i)).toBeVisible()
-  await page.getByRole('button', { name: 'Copy output' }).click()
-  await expect.poll(() => page.evaluate(() => window.__copiedToolText.at(-1))).toBe(fullOutput)
-  expect(toolCopyRequests).toBe(1)
+  await expect(toolToggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(toolToggle).toHaveAttribute('aria-busy', 'true')
+  await expect(activity.getByRole('region')).toBeHidden()
+  await expect(
+    page.locator('[data-chat-surface="painted"]').getByText(/loading output preview/i),
+  ).toHaveCount(0)
+  expect(toolPreviewRequests).toBe(1)
 
-  // Collapse before the delayed response lands: the browser request is really
-  // aborted, not merely ignored, and reopening starts a fresh bounded fetch.
+  // A second activation cancels first-open preparation before the delayed
+  // response lands. The browser request is really aborted, not merely ignored,
+  // and reopening starts a fresh bounded fetch.
   await toolToggle.click()
   await expect.poll(() => page.evaluate(() => window.__lazyRequestAborts.tool)).toBe(1)
   await toolToggle.click()
+  await expect(activity.getByRole('region')).toBeVisible()
   await expect(page.locator('[data-chat-surface="painted"]').getByText(fullOutput)).toBeVisible()
   expect(toolPreviewRequests).toBe(3)
   await expect(page.getByRole('button', { name: 'Copy output' })).toBeVisible()
   await page.getByRole('button', { name: 'Copy output' }).click()
   await expect.poll(() => page.evaluate(() => window.__copiedToolText.at(-1))).toBe(fullOutput)
-  expect(toolCopyRequests).toBe(1)
+  expect(toolCopyRequests).toBe(0)
 
   // The complete bounded preview is now the exact copy source, avoiding a
   // duplicate request. Clipboard failures remain visible and retryable.
   await page.evaluate(() => { window.__clipboardShouldFail = true })
   await activity.locator('.chat__tool-copy').click()
   await expect(activity.getByText('Copy failed')).toBeVisible()
-  expect(toolCopyRequests).toBe(1)
+  expect(toolCopyRequests).toBe(0)
   await page.evaluate(() => { window.__clipboardShouldFail = false })
   await page.getByRole('button', { name: 'Could not copy output' }).click()
   await expect(page.getByRole('button', { name: 'Output copied' })).toBeVisible()
   await expect(activity.locator('.chat__tool-copy + [role="status"]')).toHaveText(
     'Output copied',
   )
-  expect(toolCopyRequests).toBe(1)
+  expect(toolCopyRequests).toBe(0)
 
   // A transient sidecar failure is announced and retries in place. It should
   // not require collapsing the detail or retaining another hidden payload.
@@ -485,5 +628,5 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   expect(thinkingRequests).toBe(4)
   expect(thinkingFullRequests).toBe(1)
   expect(toolPreviewRequests).toBe(6)
-  expect(toolCopyRequests).toBe(1)
+  expect(toolCopyRequests).toBe(0)
 })

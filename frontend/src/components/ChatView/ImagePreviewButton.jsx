@@ -9,6 +9,9 @@ export default function ImagePreviewButton({
   alt = '',
   buttonClassName,
   imageClassName,
+  intrinsicWidth,
+  intrinsicHeight,
+  imageLoading = 'lazy',
   onPointerDown,
   onError,
 }) {
@@ -33,7 +36,9 @@ export default function ImagePreviewButton({
           className={imageClassName}
           src={src}
           alt={alt}
-          loading="lazy"
+          width={intrinsicWidth || undefined}
+          height={intrinsicHeight || undefined}
+          loading={imageLoading}
           draggable={false}
           onError={onError}
         />

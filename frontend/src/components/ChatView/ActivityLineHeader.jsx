@@ -39,10 +39,13 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
   ariaLabel,
   controlsId,
   onToggle,
+  onPrepare,
+  preparing = false,
   count = null,
   reserveInteractiveGeometry = false,
 }, ref) {
   const Header = interactive ? 'button' : 'div'
+  const visibleText = preparing ? `${text}…` : text
 
   return (
     <Header
@@ -55,7 +58,14 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
             : '')
       }
       onClick={interactive ? onToggle : undefined}
+      onPointerDown={interactive ? onPrepare : undefined}
+      onKeyDown={interactive && onPrepare
+        ? (event) => {
+            if (event.key === 'Enter' || event.key === ' ') onPrepare()
+          }
+        : undefined}
       aria-expanded={interactive ? open : undefined}
+      aria-busy={interactive && preparing ? true : undefined}
       aria-controls={interactive ? controlsId : undefined}
       aria-label={ariaLabel}
       role={interactive ? undefined : 'status'}
@@ -68,9 +78,9 @@ const ActivityLineHeader = forwardRef(function ActivityLineHeader({
         <ActivityTypeIcon kind={iconKind} />
       </span>
       <span className="chat__activity-label">
-        <span className="chat__activity-label-text">{text}</span>
+        <span className="chat__activity-label-text">{visibleText}</span>
         {displayState === 'running' && (
-          <span className="chat__activity-label-sweep" aria-hidden="true">{text}</span>
+          <span className="chat__activity-label-sweep" aria-hidden="true">{visibleText}</span>
         )}
       </span>
       {count && (
