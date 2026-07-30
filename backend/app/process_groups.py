@@ -7,6 +7,8 @@ import os
 import signal
 import time
 
+BACKGROUND_PROCESS_NICE = 5
+
 
 def isolated_process_group_id(pid: object) -> int | None:
   """Return ``pid`` only when it provably leads a private process group."""
@@ -19,6 +21,38 @@ def isolated_process_group_id(pid: object) -> int | None:
   if pgid != pid or pgid == os.getpgrp():
     return None
   return pgid
+
+
+def lower_process_group_priority(
+  pgid: int | None,
+  *,
+  logger: logging.Logger,
+  label: str,
+) -> bool:
+  """Give one proven-private process group a modest background priority.
+
+  Setting the group leader before it creates most descendants also makes the
+  inherited priority the default for later children. Failure is intentionally
+  non-fatal: isolation and cleanup remain useful even on a runtime without
+  ``setpriority`` support.
+  """
+  if not isinstance(pgid, int) or isolated_process_group_id(pgid) != pgid:
+    return False
+  try:
+    os.setpriority(
+      os.PRIO_PGRP,
+      pgid,
+      BACKGROUND_PROCESS_NICE,
+    )
+  except (AttributeError, OSError) as exc:
+    logger.warning(
+      "%s priority adjustment failed pgid=%s: %s",
+      label,
+      pgid,
+      exc,
+    )
+    return False
+  return True
 
 
 def terminate_process_group(

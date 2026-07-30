@@ -592,6 +592,48 @@ def test_source_edit_during_vite_discards_staging_and_requests_rerun(
   assert publish_calls[0][0] == fw_dirs["staging"]
 
 
+def test_demand_build_lowers_vite_process_group_priority(
+  fw_dirs, monkeypatch,
+):
+  src = fw_dirs["frontend"] / "src"
+  src.mkdir()
+  source_file = src / "Shell.jsx"
+  source_file.write_text("export default 1\n", encoding="utf-8")
+  monkeypatch.setattr(fw, "_ensure_node_modules", lambda: None)
+  monkeypatch.setattr(
+    fw.subprocess,
+    "Popen",
+    lambda *args, **kwargs: _FakeViteProcess(
+      lambda: _write_build(fw_dirs["staging"], "priority"),
+    ),
+  )
+  monkeypatch.setattr(fw, "_publish_built_dir", lambda *_args: True)
+  monkeypatch.setattr(fw, "_publish_system_event", lambda _event: None)
+  monkeypatch.setattr(
+    fw,
+    "isolated_process_group_id",
+    lambda pid: pid,
+  )
+  priority_calls = []
+  monkeypatch.setattr(
+    fw,
+    "lower_process_group_priority",
+    lambda pgid, **kwargs: priority_calls.append((pgid, kwargs)) or True,
+  )
+  loop = asyncio.new_event_loop()
+  handler = fw._FrontendHandler(loop, start_threads=False)
+  try:
+    handler._run_demand_build(str(source_file))
+  finally:
+    handler.close()
+    loop.close()
+
+  assert priority_calls == [(
+    12345,
+    {"logger": fw.log, "label": "Frontend build"},
+  )]
+
+
 def test_idle_observer_requests_build_for_source_edit(fw_dirs, monkeypatch):
   src = fw_dirs["frontend"] / "src"
   src.mkdir()

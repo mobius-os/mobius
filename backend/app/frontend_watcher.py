@@ -32,6 +32,11 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserverVFS
 
+from app.process_groups import (
+  isolated_process_group_id,
+  lower_process_group_priority,
+)
+
 log = logging.getLogger(__name__)
 
 _DEBOUNCE_SECS = 1.75
@@ -1013,6 +1018,11 @@ class _FrontendHandler(FileSystemEventHandler):
         stderr=subprocess.STDOUT,
         text=True,
         start_new_session=True,
+      )
+      lower_process_group_priority(
+        isolated_process_group_id(proc.pid),
+        logger=log,
+        label="Frontend build",
       )
       with self._proc_lock:
         self._watch_proc = proc

@@ -72,6 +72,7 @@ from typing import Any, Callable
 
 from app.codex_appserver import _extract_bash_command
 from app.json_safety import json_safe
+from app.process_groups import lower_process_group_priority
 from app.providers import MODEL_LABELS, get_skill_path
 from app.runtime_types import RunnerResult
 from app.usage_metrics import codex_cost_usd, normalize_codex_usage
@@ -2549,6 +2550,11 @@ async def run_codex_sdk_turn(
         chat_id=chat_id,
       )
       process_group_id = _codex_process_group_id(codex)
+      lower_process_group_priority(
+        process_group_id,
+        logger=log,
+        label="Codex app-server",
+      )
       if process_group_capture_stop is not None:
         process_group_capture_stop.set()
       # Do NOT await the capture task here. Cancellation immediately after
@@ -3230,6 +3236,11 @@ async def run_codex_sdk_turn(
         captured_during_start = process_group_capture_task.result()
         if process_group_id is None:
           process_group_id = captured_during_start
+          lower_process_group_priority(
+            process_group_id,
+            logger=log,
+            label="Codex app-server",
+          )
       except asyncio.CancelledError:
         # A task owned only by this runner should not be cancelled, but a
         # proven PGID captured synchronously after __aenter__ still permits

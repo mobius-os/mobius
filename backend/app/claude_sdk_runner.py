@@ -114,6 +114,7 @@ from app import activity
 from app.pending_questions import PendingQuestion
 from app.process_groups import (
   isolated_process_group_id,
+  lower_process_group_priority,
   terminate_process_group,
 )
 from app.runner_registry import RunnerKind, registry
@@ -1550,7 +1551,13 @@ async def run_claude_sdk_turn(
           "cost_usd": None,
           "error": "connect timeout",
         }
-      active_client.set_process_group_id(_claude_process_group_id(client))
+      process_group_id = _claude_process_group_id(client)
+      lower_process_group_priority(
+        process_group_id,
+        logger=log,
+        label="Claude CLI",
+      )
+      active_client.set_process_group_id(process_group_id)
       await client.query(turn_message)
 
       # At most one automatic re-query per turn (see the synthetic-resume
