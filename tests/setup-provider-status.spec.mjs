@@ -97,6 +97,8 @@ test('Codex shows the code before opening ChatGPT and stays authoritative', asyn
 
   await page.evaluate(() => window.dispatchEvent(new Event('pageshow')))
 
-  await expect(codexRow.getByText('Connected', { exact: true })).toBeVisible()
+  await expect(codexRow.getByRole('button', {
+    name: /^Plan: .+, show usage$/,
+  })).toBeVisible()
   await expect.poll(() => settingsWrites).toBe(1)
 })
