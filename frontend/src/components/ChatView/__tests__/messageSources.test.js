@@ -8,6 +8,7 @@ import {
   messageSources,
   safeSourceUrl,
   sourceDisplayLabels,
+  sourceFaviconDiscoveryUrl,
   sourceFaviconUrl,
   sourceHost,
   sourceLabel,
@@ -142,6 +143,15 @@ test('sourceFaviconUrl uses the safe source origin and rejects malformed URLs', 
   )
   assert.equal(sourceFaviconUrl('javascript:alert(1)'), '')
   assert.equal(sourceFaviconUrl('not a url'), '')
+})
+
+test('sourceFaviconDiscoveryUrl keeps only the safe source origin', () => {
+  assert.equal(
+    sourceFaviconDiscoveryUrl('https://www.example.com/a/b?next=1'),
+    'https://www.example.com/',
+  )
+  assert.equal(sourceFaviconDiscoveryUrl('javascript:alert(1)'), '')
+  assert.equal(sourceFaviconDiscoveryUrl('not a url'), '')
 })
 
 // Codex's WebSearchThreadItem exposes a URL only on its openPage/findInPage

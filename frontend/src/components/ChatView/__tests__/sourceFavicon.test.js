@@ -5,6 +5,7 @@ import {
   safeSvgFavicon,
   sourceFaviconCandidateUrls,
   sourceFaviconProxyPath,
+  sourceFaviconResolverPath,
   validatedFaviconBlob,
 } from '../SourceFavicon.jsx'
 
@@ -21,6 +22,11 @@ test('favicon URLs become authenticated same-origin proxy reads', () => {
   )
   assert.equal(sourceFaviconProxyPath('http://user:pass@example.com/favicon.ico'), '')
   assert.equal(sourceFaviconProxyPath('data:image/png;base64,eA=='), '')
+  assert.equal(
+    sourceFaviconResolverPath('https://www.example.com/'),
+    '/proxy/favicon?url=https%3A%2F%2Fwww.example.com%2F',
+  )
+  assert.equal(sourceFaviconResolverPath('http://user:pass@example.com/'), '')
 })
 
 test('favicon candidates cover common root icon conventions without third parties', () => {
@@ -115,4 +121,49 @@ test('a missing favicon.ico falls through to a safe favicon.svg', async (t) => {
   assert.equal(reads.length, 2)
   assert.match(reads[0], /favicon\.ico/)
   assert.match(reads[1], /favicon\.svg/)
+})
+
+test('the site resolver is preferred when available', async (t) => {
+  const originalFetch = globalThis.fetch
+  const reads = []
+  globalThis.fetch = async (url) => {
+    reads.push(String(url))
+    if (String(url).includes('/proxy/favicon?')) return response(ico)
+    return response('missing', 'text/plain', 404)
+  }
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const icon = await loadSourceFavicon(
+    'https://declared.example/favicon.ico',
+    'https://declared.example/',
+  )
+  assert.equal(icon.type, 'image/x-icon')
+  assert.equal(reads.length, 1)
+  assert.match(reads[0], /\/proxy\/favicon\?url=/)
+})
+
+test('root conventions remain available while the resolver awaits restart', async (t) => {
+  const originalFetch = globalThis.fetch
+  const reads = []
+  globalThis.fetch = async (url) => {
+    reads.push(String(url))
+    if (String(url).includes('/proxy/favicon?')) {
+      return response('missing', 'application/json', 404)
+    }
+    if (String(url).includes('favicon.ico')) {
+      return response('missing', 'text/plain', 404)
+    }
+    return response(ico)
+  }
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const icon = await loadSourceFavicon(
+    'https://restart.example/favicon.ico',
+    'https://restart.example/',
+  )
+  assert.equal(icon.type, 'image/x-icon')
+  assert.equal(reads.length, 3)
+  assert.match(reads[0], /\/proxy\/favicon\?url=/)
+  assert.match(reads[1], /favicon\.ico/)
+  assert.match(reads[2], /favicon\.svg/)
 })

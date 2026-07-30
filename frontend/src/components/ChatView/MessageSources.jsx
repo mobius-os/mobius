@@ -4,6 +4,7 @@ import { apiFetch, jsonOrThrow } from '../../api/client.js'
 import {
   messageSources,
   sourceDisplayLabels,
+  sourceFaviconDiscoveryUrl,
   sourceFaviconUrl,
   sourceHost,
   sourceLabel,
@@ -150,6 +151,7 @@ export default function MessageSources({
               const baseLabel = sourceLabel(source)
               const host = sourceHost(source.url)
               const faviconUrl = sourceFaviconUrl(source.url)
+              const faviconDiscoveryUrl = sourceFaviconDiscoveryUrl(source.url)
               return (
                 <li key={source.url} className="chat__source-item chat__source-item--web">
                   <a
@@ -162,6 +164,7 @@ export default function MessageSources({
                   >
                     <SourceFavicon
                       faviconUrl={faviconUrl}
+                      discoveryUrl={faviconDiscoveryUrl}
                       fallback={sourceMark(host)}
                     />
                     <span className="chat__source-title">{label}</span>

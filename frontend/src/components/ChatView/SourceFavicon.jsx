@@ -69,6 +69,17 @@ export function sourceFaviconProxyPath(faviconUrl) {
   }
 }
 
+export function sourceFaviconResolverPath(discoveryUrl) {
+  try {
+    const parsed = new URL(discoveryUrl)
+    if (!['http:', 'https:'].includes(parsed.protocol)) return ''
+    if (!parsed.host || parsed.username || parsed.password) return ''
+    return `/proxy/favicon?url=${encodeURIComponent(parsed.href)}`
+  } catch {
+    return ''
+  }
+}
+
 export function sourceFaviconCandidateUrls(faviconUrl) {
   try {
     const parsed = new URL(faviconUrl)
@@ -123,18 +134,31 @@ export async function validatedFaviconBlob(response) {
     : new Blob([blob], { type: detectedType })
 }
 
-export function loadSourceFavicon(faviconUrl) {
+export function loadSourceFavicon(faviconUrl, discoveryUrl = '') {
   const candidates = sourceFaviconCandidateUrls(faviconUrl)
   if (candidates.length === 0) {
     return Promise.reject(new Error('Invalid favicon URL'))
   }
 
-  const key = candidates.join('\n')
+  const resolverPath = sourceFaviconResolverPath(discoveryUrl)
+  const key = [...candidates, resolverPath].join('\n')
   const existing = pendingFavicons.get(key)
   if (existing) return existing
 
   const request = (async () => {
     let lastError = new Error('Favicon unavailable')
+    if (resolverPath) {
+      try {
+        const response = await apiFetch(resolverPath, {
+          timeoutMs: FAVICON_TIMEOUT_MS,
+        })
+        return await validatedFaviconBlob(response)
+      } catch (error) {
+        // Keep the direct candidates as a compatibility path while a newly
+        // added resolver is waiting for a server restart.
+        lastError = error
+      }
+    }
     for (const candidate of candidates) {
       try {
         const response = await apiFetch(sourceFaviconProxyPath(candidate), {
@@ -172,7 +196,7 @@ function useNearViewport() {
   return [ref, near]
 }
 
-export default function SourceFavicon({ faviconUrl, fallback }) {
+export default function SourceFavicon({ faviconUrl, discoveryUrl, fallback }) {
   const [hostRef, near] = useNearViewport()
   const [objectUrl, setObjectUrl] = useState('')
   const [loaded, setLoaded] = useState(false)
@@ -183,7 +207,7 @@ export default function SourceFavicon({ faviconUrl, fallback }) {
     let ownedUrl = ''
     setLoaded(false)
 
-    loadSourceFavicon(faviconUrl).then((blob) => {
+    loadSourceFavicon(faviconUrl, discoveryUrl).then((blob) => {
       const nextUrl = URL.createObjectURL(blob)
       if (disposed) {
         URL.revokeObjectURL(nextUrl)
@@ -199,7 +223,7 @@ export default function SourceFavicon({ faviconUrl, fallback }) {
       disposed = true
       if (ownedUrl) URL.revokeObjectURL(ownedUrl)
     }
-  }, [faviconUrl, near])
+  }, [discoveryUrl, faviconUrl, near])
 
   const discardObjectUrl = () => {
     if (objectUrl) URL.revokeObjectURL(objectUrl)

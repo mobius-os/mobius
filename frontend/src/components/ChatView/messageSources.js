@@ -97,6 +97,18 @@ export function sourceFaviconUrl(url) {
   }
 }
 
+// Declared-icon discovery fetches only the site's origin, not the full cited
+// article path. Besides preserving reader privacy, this gives repeated links
+// from one host the same request/cache key.
+export function sourceFaviconDiscoveryUrl(url) {
+  try {
+    const safeUrl = safeSourceUrl(url)
+    return safeUrl ? new URL('/', safeUrl).href : ''
+  } catch {
+    return ''
+  }
+}
+
 // What the chip actually reads. A title is only sometimes available: Claude's
 // WebSearch result carries title + snippet, but Codex's WebSearchThreadItem
 // exposes a URL only on its `openPage` / `findInPage` actions and never a

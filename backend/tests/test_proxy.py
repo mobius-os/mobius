@@ -7,13 +7,20 @@ and the integration tests drive it through the proxy endpoints.
 
 import asyncio
 from unittest.mock import patch
+from urllib.parse import urlparse
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import Response
 
 from app.net_utils import validate_url_safe
-from app.routes.proxy import _capped_response
+from app.routes.proxy import (
+  _ExternalRead,
+  _capped_response,
+  _declared_favicon_urls,
+  _read_external_get,
+)
 from test_app_fixtures import create_local_app
 
 
@@ -313,6 +320,128 @@ def test_proxy_forwards_rate_limit_headers():
   assert response.headers["x-ratelimit-remaining"] == "0"
   assert response.headers["x-ratelimit-reset"] == "1783620000"
   assert "x-not-forwarded" not in response.headers
+
+
+def test_declared_favicon_urls_accepts_unquoted_and_relative_icon_links():
+  source = """
+    <link rel=icon href=/img/logos/favicon.ico>
+    <link rel="apple-touch-icon" href="../touch.png">
+    <link rel="stylesheet" href="/not-an-icon.png">
+    <link rel="icon" href="http://user:pass@example.com/private.ico">
+  """
+  assert _declared_favicon_urls(
+    source, "https://docs.example.com/reference/start",
+  ) == [
+    "https://docs.example.com/img/logos/favicon.ico",
+    "https://docs.example.com/touch.png",
+  ]
+
+
+def test_favicon_redirects_revalidate_and_pin_every_hop(monkeypatch):
+  class _Upstream:
+    def __init__(self, status_code, body=b"", headers=None):
+      self.status_code = status_code
+      self._body = body
+      self.headers = headers or {}
+
+    async def aiter_bytes(self):
+      yield self._body
+
+    async def aclose(self):
+      pass
+
+  class _Client:
+    def __init__(self):
+      self.requests = []
+
+    def build_request(self, method, url, headers=None):
+      return httpx.Request(method, url, headers=headers)
+
+    async def send(self, req, stream=True):
+      self.requests.append(req)
+      if len(self.requests) == 1:
+        return _Upstream(302, headers={"location": "https://cdn.example/icon.ico"})
+      return _Upstream(
+        200, b"\x00\x00\x01\x00", {"content-type": "image/x-icon"},
+      )
+
+  validated = []
+
+  def fake_validate(url):
+    validated.append(url)
+    host = urlparse(url).hostname
+    return url.replace(host, "93.184.216.34"), host, host
+
+  monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate)
+  client = _Client()
+  result = asyncio.run(
+    _read_external_get(client, "https://site.example/", 1024),
+  )
+  assert validated == [
+    "https://site.example/",
+    "https://cdn.example/icon.ico",
+  ]
+  assert result.body == b"\x00\x00\x01\x00"
+  assert result.final_url == "https://cdn.example/icon.ico"
+  assert client.requests[1].headers["host"] == "cdn.example"
+  assert client.requests[1].extensions["sni_hostname"] == "cdn.example"
+
+
+def test_favicon_endpoint_resolves_a_declared_custom_icon(
+  client, owner_token, monkeypatch,
+):
+  reads = []
+
+  async def fake_read(_client, url, max_bytes):
+    reads.append((url, max_bytes))
+    if url in {
+      "https://docs.example/favicon.ico",
+      "https://docs.example/favicon.svg",
+      "https://docs.example/favicon.png",
+      "https://docs.example/apple-touch-icon.png",
+    }:
+      return _ExternalRead(
+        body=b"missing",
+        status_code=404,
+        content_type="text/plain",
+        final_url=url,
+        truncated=False,
+      )
+    if url == "https://docs.example/":
+      return _ExternalRead(
+        body=b'<link rel=icon href="/assets/site.svg">',
+        status_code=200,
+        content_type="text/html; charset=utf-8",
+        final_url=url,
+        truncated=False,
+      )
+    if url == "https://docs.example/assets/site.svg":
+      return _ExternalRead(
+        body=b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+        status_code=200,
+        content_type="image/svg+xml",
+        final_url=url,
+        truncated=False,
+      )
+    raise AssertionError(f"unexpected icon read: {url}")
+
+  monkeypatch.setattr("app.routes.proxy._read_external_get", fake_read)
+  response = client.get(
+    "/api/proxy/favicon",
+    params={"url": "https://docs.example/"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 200
+  assert response.headers["content-type"] == "image/svg+xml"
+  assert response.content.startswith(b"<svg")
+  assert reads == [
+    ("https://docs.example/favicon.ico", 256 * 1024),
+    ("https://docs.example/favicon.svg", 256 * 1024),
+    ("https://docs.example/favicon.png", 256 * 1024),
+    ("https://docs.example/apple-touch-icon.png", 256 * 1024),
+    ("https://docs.example/", 512 * 1024),
+    ("https://docs.example/assets/site.svg", 256 * 1024),
+  ]
 
 
 def test_validate_url_rejects_if_any_ip_is_private():

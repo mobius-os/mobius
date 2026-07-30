@@ -326,6 +326,7 @@ const CACHEABLE_PROXY_EXT =
 registerRoute(
   ({ url }) => {
     if (url.origin !== self.location.origin) return false
+    if (url.pathname === '/api/proxy/favicon') return true
     if (url.pathname !== '/api/proxy') return false
     const upstream = url.searchParams.get('url') || ''
     return CACHEABLE_PROXY_EXT.test(upstream)
