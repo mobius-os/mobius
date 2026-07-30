@@ -1,13 +1,13 @@
-"""Canonical resolution of which background AI agent a scheduled app runs with.
+"""Canonical resolution of which background AI agent a scheduled app uses.
 
 A "background agent" is a nightly cron app (Reflection, Memory/dreaming, News)
 that drives a Claude/Codex turn, with a fallback provider for the nights the
-primary is unavailable (usage limit, outage). Every one of them used to hand-roll
-its own copy of this resolution in its runner script, and those copies drifted
-into five divergent models across the platform repo and the per-app catalog
-repos. This module is the ONE source of truth: the runners import
-``resolve_background_agents`` instead of carrying their own copy, so the logic
-can never diverge again even if a catalog runner file goes stale.
+primary is unavailable (usage limit, outage). The platform once carried several
+copies of this resolution and they drifted. This module is the source of truth
+for the system ordering and for platform-owned runners such as Reflection.
+Installable app jobs do not import platform internals: ``job-context`` gives
+them the resolved system primary/fallback without credentials, and an app may
+then layer its explicit local override.
 
 Two layers:
 
@@ -30,9 +30,12 @@ Two layers:
 A "choice" is ``{"provider", "model", "effort"}``; model/effort stay None when
 unset so the provider SDK uses its own default (this is deliberately NOT
 ``providers.background_agent_settings``, which fills ``effort="medium"`` for the
-Settings UI's display — the runner path wants the SDK default). This module is
-stdlib + ``app.providers`` only (both stdlib-at-import), so a cron script with a
-near-empty environment can import it after putting the backend root on sys.path.
+Settings UI's display — the runner path wants the SDK default).
+
+This scheduled-agent policy is intentionally separate from the optional
+Subagents app. That app governs explicit, bounded coding delegation from a live
+chat, including its own enable switches and recursion limit; it is not a
+dependency of Memory, Reflection, or another scheduled app.
 """
 
 from __future__ import annotations

@@ -25,7 +25,7 @@ being external attackers reaching the public HTTPS endpoint.
   host/path-scoped service adapter have narrowly different frame policies.
   Scoped server-verified principals and response sandboxing remain the actual
   authorization boundaries.
-- **Mini-app isolation and tokens:** shell-mounted app frames omit
+- **Mini-app isolation and tokens:** `AppCanvas`-mounted app frames omit
   `allow-same-origin`, giving them an opaque origin. They cannot read shell
   localStorage or the owner JWT. Each receives a refreshable app JWT bound to
   the live app id, installation nonce and owner token epoch; app code must be
@@ -33,6 +33,12 @@ being external attackers reaching the public HTTPS endpoint.
   the app's exact installed permissions. Opacity protects ambient **owner**
   authority — it is not a promise that ordinary app code never sees its own
   scoped credential.
+- **Standalone mini-app host:** `/apps/<slug>/` is a signed platform host, not
+  a second app runtime. It renders the same `AppCanvas` opaque frame used by
+  the workspace, so app-authored code never executes in the top-level owner
+  origin. The host keeps the owner credential and gives the frame only its
+  app-scoped token; the retired direct-execution cache is evicted on service
+  worker activation.
 - **Rate limiting:** 120 req/min global, 3-5/min on auth endpoints.
   Uses TCP peer address (not X-Forwarded-For).
 
@@ -48,11 +54,6 @@ These are intentional design decisions appropriate for a single-owner app:
   but script execution in the shell document itself remains equivalent to the
   owner. Moving the shell session to an HttpOnly cookie would further reduce
   that shell-XSS exposure if the threat model changes.
-- **Standalone mini-app gap:** `/apps/<slug>/` still executes the component in
-  the top-level Möbius origin and therefore does not inherit the shell-mounted
-  iframe's opaque boundary. The required follow-up is a trusted installable
-  outer PWA shell which hosts the existing opaque app-frame protocol. Until
-  then, standalone launch must not be presented as isolated from owner storage.
 - **`null` CORS origin:** Required for sandboxed mini-app iframes to call
   the API. Mitigated by scoped tokens — even if a mini-app reads or copies its
   bearer, it can reach only routes authorized by that app's installed
@@ -61,9 +62,9 @@ These are intentional design decisions appropriate for a single-owner app:
   evolve, and there is no synchronous `/api/ai` surface.
 - **`unsafe-inline` in style-src CSP:** Required for server-injected theme
   CSS. The owner controls the theme content.
-- **90-day service token:** Used by cron scripts. Stored at
-  `/data/service-token.txt` (chmod 600, mobius user only). Acceptable
-  because only the container's mobius user can read it.
+- **90-day service token:** The app-job supervisor reads it only to mint a
+  short-lived app token; job scripts do not inherit it. It is stored at
+  `/data/service-token.txt` (chmod 600, mobius user only).
 
 ## Agent security model
 

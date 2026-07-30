@@ -1059,8 +1059,8 @@ const AppCanvas = forwardRef(function AppCanvas({
   // The iframe may not be loaded yet when `online` first changes; the onLoad
   // handler is the init path, the useEffect below is the update path.
   //
-  // Standalone context (routes/standalone.py) has no AppCanvas, so the
-  // runtime's navigator.onLine fallback is the only signal there — graceful.
+  // Both the workspace and the trusted standalone host render AppCanvas, so
+  // this is the canonical connectivity path for every ordinary mini-app.
   function sendOnlineStatus(v) {
     postToFrame(v, { type: 'moebius:online-status', online })
   }

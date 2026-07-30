@@ -1,7 +1,8 @@
-"""Tests for the canonical background-agent resolver (app.background_agents).
+"""Tests for the canonical scheduled background-agent policy.
 
-One resolver now serves every nightly agent (Reflection, Memory, News); these
-lock in the system-vs-app layering and the two owner toggles
+Platform runners call it directly and installable jobs receive its system
+ordering through ``job-context``. These tests lock in the system-vs-app layering
+and the two owner toggles
 (primary_agent_mode, secondary_agent_mode), including the behavior-preserving
 legacy-default heuristic that keeps prod's live config (app pins provider=claude
 with no model) inheriting the system model rather than dropping it.

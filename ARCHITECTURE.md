@@ -230,7 +230,7 @@ Each module exposes a `router`; registration is in `routes/__init__.py`.
 | `media.py` | Owner-authenticated per-chat image serving from the canonical `/media/` path |
 | `proxy.py` | Server-side CORS-bypass proxy for mini-apps |
 | `local_services.py` | Guarded loopback proxy plus the shared gateway-origin adapter for owner-trusted backend web apps. Each service requires explicit `upstream_auth` and gateway opt-in; Möbius authority headers are stripped, cookies and redirects stay confined to `/services/<slug>`, the gateway hostname is reserved to enabled prefixes, frame blockers are relaxed only there, and invalid configuration fails closed |
-| `standalone.py` | Top-level install/manifest shell for mini-app PWAs. **Known boundary gap:** its current loader executes the app component in the top-level shell origin; it is not yet equivalent to the opaque in-shell app frame |
+| `standalone.py` | Trusted install/manifest host for mini-app PWAs. It injects inert app identity into the signed frontend, which renders the same `AppCanvas` opaque-frame boundary used by the workspace; app-authored code never executes in the top-level owner origin |
 | `published.py` | Serves published site snapshots at `/sites/<token>/` — token-validated, traversal-confined static files from `/data/published/<token>/` (created by `POST /api/apps/{id}/publish` in `apps.py`; token stable per project) |
 | `platform.py` | Owner-gated platform self-update: `GET /api/platform/status`, `POST /apply`, `POST /restart` (drives Settings → Updates; thin caller of `platform_update.py`) |
 | `notify.py` | System-event notifications to active broadcasts |
@@ -271,7 +271,7 @@ are not presented as a process sandbox.
 
 | Tier | Boundary and capability | UX / standalone consequence |
 |---|---|---|
-| Ordinary mini-app | Shell-owned iframe without `allow-same-origin`; opaque origin, app-scoped JWT, memory-backed localStorage facade and `window.mobius.storage` | Safest default inside the shell. The shell owns install/offline identity; a home-screen shortcut may deep-link through the shell, but opacity alone does not create an independent PWA |
+| Ordinary mini-app | `AppCanvas`-owned iframe without `allow-same-origin`; opaque origin, app-scoped JWT, memory-backed localStorage facade and `window.mobius.storage` | Safest default in both the workspace and `/apps/<slug>/`. The trusted standalone host owns manifest/offline identity while app-authored code stays behind the same opaque frame |
 | Packaged nested document | `/app-embeds/by-id/<id>/…`; every response carries CSP `sandbox` without `allow-same-origin`, scoped `Access-Control-Allow-Origin: null`, and no frame denial | For a game/tool build nested below an ordinary wrapper. Relative subresources work online but an opaque child is not controlled by the shell SW, so only the entry document may be SW-cached; readiness must be a source-bound post-commit heartbeat, never iframe `load` or a null-origin prefetch probe |
 | Owner-trusted full web service | Shared service-gateway origin distinct from the shell, shell-owned direct adapter, path-scoped host-only cookies and exact shell+gateway ancestor policy; never nested below the opaque wrapper | Lowest-friction path for existing full web apps. The gateway isolates the trust group from Möbius, but services on it share an origin and can reach one another |
 | Independent or mutually untrusted service/PWA | Dedicated distinct origin (prefer a same-site subdomain), host-only cookies and exact shell+service ancestor policy | Strong service-to-service isolation plus independent manifest/SW/storage identity; costs one managed origin per isolated service |
@@ -297,17 +297,17 @@ Railway domain or one self-hosted DNS record), while each service must still opt
 in through `local-services.json`. The gateway host serves no shell, API,
 recovery or non-enabled service paths.
 
-**Standalone gap (not resolved by the table above).** `/apps/<slug>/` currently
-boots the mini-app component directly in a trusted top-level Möbius document and
-reads the owner JWT there. The component can therefore read shell localStorage
-even though its in-shell version cannot. The bounded follow-up is to turn that
-route into a trusted installable outer shell which owns auth/manifest/SW/error
-chrome and hosts the existing `app-frame.html` protocol in an opaque iframe.
-Until that lands, do not describe ordinary mini-app isolation as applying to
-standalone launches or use `/apps/<slug>/` as the security boundary for
-untrusted/high-capability code. CubeRun's nested game document remains opaque,
-but its current standalone wrapper does not; Tandoor's service surface opens
-only through the authenticated shell adapter and is not a standalone mini-app.
+**Standalone host.** `/apps/<slug>/` is a trusted installable outer shell, not
+a second app runtime. It owns auth, manifest identity, offline navigation,
+installation and error chrome, then renders the app through the same
+`AppCanvas` → `app-frame.html` protocol as the workspace. The owner credential
+stays in signed platform code; only the short-lived app-scoped token crosses
+into the opaque frame. The route fails closed if the signed frontend seam is
+missing and the service worker evicts the retired direct-execution cache. See
+[`STANDALONE_HOST_DESIGN.md`](STANDALONE_HOST_DESIGN.md) for the complete
+invariant and verification contract. Full backend services still use the
+shared service gateway or a dedicated origin according to their trust needs;
+they are not ordinary standalone mini-apps.
 
 ## Frontend (`frontend/src/`)
 
@@ -380,7 +380,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 | File | Role |
 |------|------|
-| `frontend/public/mobius-runtime.js` | The `window.mobius` runtime injected into mini-apps; used by the opaque in-shell iframe and the current (not yet opaque) standalone loader. Offline outbox + read-through cache live here |
+| `frontend/public/mobius-runtime.js` | The `window.mobius` runtime injected into mini-apps inside the shared opaque frame used by both workspace and standalone hosts. Offline outbox + read-through cache live here |
 | `frontend/public/app-frame.html` | The opaque mini-app frame: error UI, parent module broker, runtime bootstrap, and postMessage isolation |
 | `frontend/src/sw.js` | Service worker: precache + cache strategy, incl. the offline-capable-app handler |
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see *Service worker + offline* below) |
@@ -871,6 +871,17 @@ Memory app is not installed. Its consumers:
 - **Compaction + provider switch.** The cumulative Summary is the source for compacting a
   long chat and for the provider-switch handoff below — preferred over a from-scratch
   default compaction.
+
+Two agent mechanisms with similar names deliberately remain separate.
+`app.background_agents` resolves the owner’s primary/fallback ordering for
+scheduled agents; installable jobs such as Memory receive the non-secret system
+choices through their scoped `job-context`, then apply any explicit app-local
+override. Memory executes those choices through its own tool-free,
+temporary-directory text boundary because retrieval and consolidation must not
+gain coding tools or depend on another app. The optional Subagents app instead
+owns explicit, bounded Claude/Codex delegation from a live chat, including
+provider enable switches, recursion limits and read/write task scope. Installing
+or pausing Subagents therefore does not enable, disable or reconfigure Memory.
 
 ### Provider switch (compaction handoff)
 

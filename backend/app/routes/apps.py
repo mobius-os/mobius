@@ -2899,7 +2899,7 @@ def get_app_job_context(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Return non-secret system agent choices to this app's job token.
+  """Return non-secret identity, agent choices and review receipt to a job.
 
   Jobs should not import platform internals or read owner settings files.  This
   narrow surface lets a short-lived app token inherit the owner's configured
@@ -2917,13 +2917,14 @@ def get_app_job_context(
   return {
     "app_id": app_id,
     # The supervisor binds the scheduled script to this exact app before
-    # granting its token and filesystem contract. This is non-secret durable
-    # identity, not owner configuration.
+    # granting its token. This is non-secret durable identity, not owner
+    # configuration or a filesystem grant.
     "source_dir": app.source_dir,
     "primary": choices.get("primary"),
     "fallback": choices.get("fallback"),
     # This is the same normalized, non-secret receipt the owner reviewed.
-    # The job supervisor uses it to construct declared filesystem mounts.
+    # Jobs such as Memory may verify their installed data/schedule contract
+    # against it; it is not a filesystem sandbox or mount plan.
     "capability_contract": app.capability_contract,
   }
 
