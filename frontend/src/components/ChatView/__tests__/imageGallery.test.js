@@ -118,7 +118,7 @@ test('gallery navigation has explicit keyboard and lightbox alternatives', () =>
   assert.match(lightboxSource, /event\.key === 'ArrowLeft'/)
   assert.match(lightboxSource, /event\.key === 'ArrowRight'/)
   assert.match(lightboxSource, /gallerySwipeTarget/)
-  assert.match(lightboxSource, /\[baseCenter, galleryItems, index, metrics, toggleZoomAt\]/)
+  assert.match(lightboxSource, /\[baseCenter, galleryItems, goToIndex, index, metrics, toggleZoomAt\]/)
   assert.match(lightboxSource, /\{index \+ 1\} \/ \{galleryItems\.length\}/)
 })
 
@@ -130,6 +130,20 @@ test('lightbox dismissal is owned by the shell Back stack', () => {
     navigationSource,
     /if \(source\?\.kind === 'dismissible'\) \{[\s\S]{0,300}?dismissal\?\.onDismiss\(\)/,
   )
+})
+
+test('lightbox navigation keeps the painted image until its replacement decodes', () => {
+  assert.match(lightboxSource, /const \[paintedSrc, setPaintedSrc\] = useState\(activeSrc\)/)
+  assert.match(lightboxSource, /const imageIsPending = paintedSrc !== activeSrc/)
+  assert.match(lightboxSource, /await image\.decode\?\.\(\)/)
+  assert.match(lightboxSource, /imgRef\.current !== image/)
+  assert.match(lightboxSource, /lightbox-image lightbox-image--previous/)
+  assert.match(lightboxSource, /key=\{paintedSrc\}/)
+  assert.match(lightboxSource, /imageIsPending \? ' is-pending' : ''/)
+  assert.match(lightboxSource, /if \(nextIndex !== null\) goToIndex\(nextIndex\)/)
+  assert.match(lightboxCss, /\.lightbox-image\.is-pending\s*\{[^}]*opacity:\s*0;[^}]*pointer-events:\s*none;/s)
+  assert.match(lightboxCss, /\.lightbox-image--previous\s*\{[^}]*pointer-events:\s*none;/s)
+  assert.doesNotMatch(lightboxCss, /lightbox-image-in/)
 })
 
 test('lightbox fills its actual overlay and dismisses from every backdrop edge', () => {
@@ -227,8 +241,11 @@ test('viewer swipes use the latest adjacent-image readiness', () => {
   }), null)
 })
 
-test('the compact strip has no gallery label, dots, borders, or card shadows', () => {
-  assert.doesNotMatch(gallerySource, />\s*Gallery\s*[·<]/)
+test('the compact strip names the gallery without adding cards or pagination dots', () => {
+  assert.match(gallerySource, /md-image-gallery__header/)
+  assert.match(gallerySource, />Gallery</)
+  assert.match(gallerySource, /\{count\} \{count === 1 \? 'image' : 'images'\}/)
+  assert.match(markdownCss, /\.md-image-gallery__header\s*\{/)
   assert.doesNotMatch(gallerySource, /gallery__dots|gallery__dot/)
 
   const itemRule = markdownCss.match(/\.md-image-gallery__item\s*\{([^}]*)\}/)?.[1] || ''

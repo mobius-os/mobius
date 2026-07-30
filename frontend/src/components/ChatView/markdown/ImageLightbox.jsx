@@ -32,6 +32,8 @@ export default function ImageLightbox({
   const activeItem = galleryItems[index]?.src ? galleryItems[index] : { src, alt }
   const activeSrc = activeItem.src
   const activeAlt = activeItem.alt || ''
+  const [paintedSrc, setPaintedSrc] = useState(activeSrc)
+  const imageIsPending = paintedSrc !== activeSrc
   const hasGallery = galleryItems.length > 1
   const canPrevious = hasGallery && index > 0 && !!galleryItems[index - 1]?.src
   const canNext = hasGallery
@@ -103,6 +105,18 @@ export default function ImageLightbox({
   useEffect(() => {
     reset()
   }, [activeSrc, reset])
+
+  const revealActiveImage = useCallback(async (event) => {
+    const image = event.currentTarget
+    try { await image.decode?.() } catch { /* the load event already confirmed a fallback */ }
+    if (imgRef.current !== image) return
+    setPaintedSrc(activeSrc)
+  }, [activeSrc])
+
+  const revealImageError = useCallback((event) => {
+    if (imgRef.current !== event.currentTarget) return
+    setPaintedSrc(activeSrc)
+  }, [activeSrc])
 
   useEffect(() => {
     if (!hasGallery) return undefined
@@ -259,7 +273,7 @@ export default function ImageLightbox({
           const nextIndex = gallerySwipeTarget({
             deltaX, deltaY, index, items: galleryItems,
           })
-          if (nextIndex !== null) navigateRef.current?.(nextIndex)
+          if (nextIndex !== null) goToIndex(nextIndex)
         }
         const tap = tapStartRef.current
         if (tap && !tap.moved) {
@@ -289,7 +303,7 @@ export default function ImageLightbox({
       el.removeEventListener('touchend', onTouchEnd)
       el.removeEventListener('touchcancel', onTouchEnd)
     }
-  }, [baseCenter, galleryItems, index, metrics, toggleZoomAt])
+  }, [baseCenter, galleryItems, goToIndex, index, metrics, toggleZoomAt])
 
   // Keep the image reachable if the viewport changes while it is enlarged.
   useEffect(() => {
@@ -333,12 +347,24 @@ export default function ImageLightbox({
           ? `Image ${index + 1} of ${galleryItems.length}${activeAlt ? `: ${activeAlt}` : ''}`
           : activeAlt || 'Image viewer'}
       >
+        {imageIsPending && (
+          <img
+            key={paintedSrc}
+            src={paintedSrc}
+            alt=""
+            className="lightbox-image lightbox-image--previous"
+            aria-hidden="true"
+            draggable={false}
+          />
+        )}
         <img
           key={activeSrc}
           ref={imgRef}
           src={activeSrc}
           alt={activeAlt}
-          className={`lightbox-image${dragging ? ' is-dragging' : ''}`}
+          className={`lightbox-image${imageIsPending ? ' is-pending' : ''}${dragging ? ' is-dragging' : ''}`}
+          onLoad={revealActiveImage}
+          onError={revealImageError}
           onClick={(event) => event.stopPropagation()}
           onDoubleClick={handleDoubleClick}
           onWheel={handleWheel}
