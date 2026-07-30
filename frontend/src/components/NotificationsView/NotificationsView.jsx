@@ -1,4 +1,4 @@
-import { Agent, Bell, Chat, Grid, SettingsSlider, X } from '@openai/apps-sdk-ui/components/Icon'
+import { Agent, Bell, Chat, Grid, SettingsSlider } from '@openai/apps-sdk-ui/components/Icon'
 import { useEffect, useState } from 'react'
 import { notificationQueries } from '../../hooks/queries.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
@@ -16,13 +16,12 @@ const ICONS = {
 // A deliberately small shell preview, not a new navigation world. TRUST:
 // app-authored title/body stay plain text, app-authored icon URLs are ignored,
 // and targets pass through the fail-closed shared parser before navigation.
-export default function NotificationsView({ active = false, onClose, onOpenTarget, onClearAll }) {
+export default function NotificationsView({ active = false, onOpenTarget, onClearAll }) {
   const { data, isLoading, isError } = notificationQueries.list.useQuery({ enabled: active })
   const rows = data ?? []
   const [now, setNow] = useState(() => Date.now())
   const [isClearing, setIsClearing] = useState(false)
   const [clearError, setClearError] = useState(false)
-  const [confirmClear, setConfirmClear] = useState(false)
 
   // Relative labels are live information, not a one-time formatting pass.
   // Refreshing once a minute keeps an open preview from saying "now" forever.
@@ -38,8 +37,7 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
     setIsClearing(true)
     setClearError(false)
     try {
-      await onClearAll?.()
-      setConfirmClear(false)
+      await onClearAll()
     } catch {
       setClearError(true)
     } finally {
@@ -58,46 +56,15 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
           Notifications
         </h2>
         {rows.length > 0 && (
-          confirmClear ? (
-            <div className="notifications__clear-actions" role="group" aria-label="Confirm clearing notifications">
-              <button
-                type="button"
-                className="notifications__clear"
-                onClick={() => setConfirmClear(false)}
-                disabled={isClearing}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="notifications__clear notifications__clear--confirm"
-                onClick={handleClearAll}
-                disabled={isClearing}
-              >
-                {isClearing ? 'Clearing…' : 'Confirm clear'}
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              className="notifications__clear"
-              onClick={() => {
-                setClearError(false)
-                setConfirmClear(true)
-              }}
-            >
-              Clear all
-            </button>
-          )
+          <button
+            type="button"
+            className="notifications__clear"
+            onClick={handleClearAll}
+            disabled={isClearing}
+          >
+            {isClearing ? 'Clearing…' : 'Clear all'}
+          </button>
         )}
-        <button
-          type="button"
-          className="notifications__close"
-          aria-label="Close notifications"
-          onClick={onClose}
-        >
-          <X width={18} height={18} aria-hidden="true" />
-        </button>
       </div>
       <div className="notifications__content">
         {isLoading && (

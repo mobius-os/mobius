@@ -122,23 +122,20 @@ test('bell opens a bounded preview and seen-on-open clears its badge', async ({ 
   await expect(page.locator('.notification-bell__badge')).toHaveCount(0)
   await expect(bell).toHaveAttribute('aria-expanded', 'true')
 
-  await page.locator('.notifications__close').click()
+  await expect(page.locator('.notifications__close')).toHaveCount(0)
+  await page.locator('.notification-bell').click()
   await expect(page.locator('.notifications')).toBeHidden()
   await expect(bell).toHaveAttribute('aria-expanded', 'false')
 })
 
-test('clear all requires confirmation, then removes the preview rows and badge', async ({ page }) => {
+test('clear all immediately removes the preview rows and badge', async ({ page }) => {
   const state = await mockNotifications(page)
   await setup(page)
   await openPreview(page)
 
   await expect(page.locator('.notifications__row')).toHaveCount(2)
   await page.getByRole('button', { name: 'Clear all' }).click()
-  await expect(page.getByRole('button', { name: 'Confirm clear' })).toBeVisible()
-  expect(state.deleteCalls).toBe(0)
-  await expect(page.locator('.notifications__row')).toHaveCount(2)
-  await page.getByRole('button', { name: 'Confirm clear' }).click()
-  expect(state.deleteCalls).toBe(1)
+  await expect.poll(() => state.deleteCalls).toBe(1)
   await expect(page.locator('.notifications__row')).toHaveCount(0)
   await expect(page.locator('.notifications__empty')).toBeVisible()
   await expect(page.locator('.notification-bell__badge')).toHaveCount(0)

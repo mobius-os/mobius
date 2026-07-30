@@ -10,9 +10,7 @@ import Drawer from '../Drawer/Drawer.jsx'
 import Toast from '../ui/Toast.jsx'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
-import NotificationBell from '../NotificationBell/NotificationBell.jsx'
-import useNotificationCenter from '../NotificationBell/useNotificationCenter.js'
-import NotificationsView from '../NotificationsView/NotificationsView.jsx'
+import NotificationCenter from '../NotificationBell/NotificationCenter.jsx'
 import {
   api, apiFetch, jsonOrThrow, probeDeletion, BASE, clearAppRuntimeData,
   invalidateShellListCache,
@@ -658,17 +656,13 @@ export default function Shell() {
       // this session; the next live list fetch restores server truth.
       .catch(() => {})
   }, [activeAppId, activeView, queryClient])
-  const {
-    state: { open: notificationsOpen, unreadCount: notificationUnreadCount },
-    actions: {
-      toggle: toggleNotifications,
-      close: closeNotifications,
-      clearAll: clearNotifications,
-      reconcile: reconcileNotifications,
-      onCreated: onNotificationCreated,
-    },
-    meta: { rootRef: notificationCenterRef, bellRef: notificationBellRef },
-  } = useNotificationCenter(queryClient)
+  const notificationCenterActionsRef = useRef(null)
+  const reconcileNotifications = useCallback(() => {
+    notificationCenterActionsRef.current?.reconcile()
+  }, [])
+  const onNotificationCreated = useCallback(() => {
+    notificationCenterActionsRef.current?.onCreated()
+  }, [])
   // Confirmed writes outrank offline-capable list reads. These session-scoped
   // tombstones filter every query completion (including an in-flight,
   // pre-delete NetworkFirst fallback) until a recovery succeeds.
@@ -2399,13 +2393,12 @@ export default function Shell() {
   })
 
   const handleNotificationOpen = useCallback((target) => {
-    closeNotifications()
     if (target?.view === 'canvas') {
       void openAppWithIntent(target.app, target.intent)
     } else if (target?.view === 'chat') {
       navToRef.current('chat', { chatId: target.chatId })
     }
-  }, [closeNotifications, openAppWithIntent])
+  }, [openAppWithIntent])
 
   const coldDeepLinkHandledRef = useRef(false)
   useEffect(() => {
@@ -3739,22 +3732,10 @@ export default function Shell() {
               Offline
             </span>
           )}
-          <div ref={notificationCenterRef} className="notification-center">
-            <NotificationBell
-              buttonRef={notificationBellRef}
-              unreadCount={notificationUnreadCount}
-              active={notificationsOpen}
-              onClick={toggleNotifications}
-            />
-            {notificationsOpen && (
-              <NotificationsView
-                active
-                onClose={closeNotifications}
-                onOpenTarget={handleNotificationOpen}
-                onClearAll={clearNotifications}
-              />
-            )}
-          </div>
+          <NotificationCenter
+            ref={notificationCenterActionsRef}
+            onOpenTarget={handleNotificationOpen}
+          />
         </div>
       </header>
 

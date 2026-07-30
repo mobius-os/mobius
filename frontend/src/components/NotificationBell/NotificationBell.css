@@ -17,9 +17,14 @@
   cursor: pointer;
 }
 
-.notification-bell:hover,
 .notification-bell--active {
   background: var(--surface);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .notification-bell:hover {
+    background: var(--surface);
+  }
 }
 
 .notification-bell:focus-visible {
