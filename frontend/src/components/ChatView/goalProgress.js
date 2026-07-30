@@ -18,21 +18,71 @@ export function goalObjectiveFromText(text) {
   return objective
 }
 
+function isContinue(text) {
+  return typeof text === 'string' && text.trim().toLowerCase() === 'continue'
+}
+
+function hasResumableTail(message) {
+  if (message?.role !== 'assistant' || !Array.isArray(message.blocks)) return false
+  const tail = message.blocks[message.blocks.length - 1]
+  return tail?.type === 'error' && tail.resumable === true
+}
+
+function previousVisibleMessageIndex(messages, beforeIndex) {
+  for (let i = beforeIndex - 1; i >= 0; i -= 1) {
+    if (!messages[i]?.hidden) return i
+  }
+  return -1
+}
+
+function priorGoalObjective(messages, beforeIndex) {
+  for (let i = beforeIndex - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message?.role !== 'user' || message.hidden) continue
+    if (isContinue(message.content)) continue
+    return goalObjectiveFromText(message.content)
+  }
+  return ''
+}
+
 /**
  * Recover a goal when mounting into a turn that is already running.
  *
- * The latest visible owner message is the run-start message on an ordinary
- * attach. Live steers do not replace the in-memory goal state; this fallback is
- * only for a fresh mount/reconnect where that local state does not yet exist.
+ * An ordinary attach reads the objective from the latest visible owner
+ * message. A resumed goal instead starts with the synthetic owner message
+ * "continue"; accept that as goal continuity only when it directly follows
+ * the same resumable assistant tail that exposes the Resume action.
  */
 export function latestGoalObjective(messages) {
   if (!Array.isArray(messages)) return ''
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i]
     if (message?.role !== 'user' || message.hidden) continue
-    return goalObjectiveFromText(message.content)
+    const directObjective = goalObjectiveFromText(message.content)
+    if (directObjective) return directObjective
+    if (!isContinue(message.content)) return ''
+    const resumeTailIndex = previousVisibleMessageIndex(messages, i)
+    if (resumeTailIndex < 0 || !hasResumableTail(messages[resumeTailIndex])) return ''
+    return priorGoalObjective(messages, resumeTailIndex)
   }
   return ''
+}
+
+/**
+ * Resolve the goal at the synchronous run-start seam.
+ *
+ * Before a one-tap Resume is appended, the resumable assistant note is still
+ * the visible transcript tail. This mirrors latestGoalObjective's cold-attach
+ * rule so live starts and reconnects cannot disagree about the active goal.
+ */
+export function goalObjectiveAtRunStart(text, messages) {
+  const directObjective = goalObjectiveFromText(text)
+  if (directObjective || !isContinue(text) || !Array.isArray(messages)) {
+    return directObjective
+  }
+  const tailIndex = previousVisibleMessageIndex(messages, messages.length)
+  if (tailIndex < 0 || !hasResumableTail(messages[tailIndex])) return ''
+  return priorGoalObjective(messages, tailIndex)
 }
 
 /**

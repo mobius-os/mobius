@@ -107,8 +107,14 @@ test('image-load failures settle without fetching unrelated app metadata', () =>
     new URL('../ImagePreviewButton.jsx', import.meta.url),
     'utf8',
   )
+  const preview = readFileSync(
+    new URL('../useToolImagePreview.js', import.meta.url),
+    'utf8',
+  )
 
-  assert.doesNotMatch(result, /apiFetch|\/apps\//)
-  assert.match(result, /onError=\{\(\) => setResolved/)
+  assert.doesNotMatch(result + preview, /apiFetch|\/apps\//)
+  assert.match(preview, /status: 'failed'/)
+  assert.match(result, /current\.status !== 'ready'/)
+  assert.doesNotMatch(result, /useEffect|useState/)
   assert.match(trigger, /onError=\{onError\}/)
 })
