@@ -2,9 +2,9 @@
 
 The reconcile plumbing is covered exhaustively in ``test_platform_update.py``
 against throwaway clones; these assert the HTTP surface: owner-gating and the
-degrade-to-empty contract the Settings review step relies on. There is no real
-``/data/platform`` clone in the test env, so ``GET /update-preview`` returns the
-empty preview — which is exactly the "nothing to review" shape the sheet reads.
+degrade-to-empty contract the Settings review step relies on. The empty-preview
+case injects a failure at the route seam, so the test remains hermetic even when
+its runner lives inside a real Möbius installation.
 """
 
 
@@ -12,7 +12,16 @@ def test_update_preview_requires_owner(client):
   assert client.get("/api/platform/update-preview").status_code == 401
 
 
-def test_update_preview_returns_empty_shape_without_a_clone(client, auth):
+def test_update_preview_returns_empty_shape_when_preview_fails(
+  client, auth, monkeypatch,
+):
+  def fail_preview():
+    raise RuntimeError("platform clone unavailable")
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.platform_update_preview",
+    fail_preview,
+  )
   res = client.get("/api/platform/update-preview", headers=auth)
   assert res.status_code == 200
   body = res.json()
