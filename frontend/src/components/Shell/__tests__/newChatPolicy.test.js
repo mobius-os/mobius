@@ -180,10 +180,12 @@ test('a canonical create response becomes an authoritative empty detail cache', 
       auto_resume_on_limit: false,
       auto_resume_on_restart: true,
       offset: 0,
+      updated_at: '2026-07-30T12:00:00Z',
     }),
   })
 
   assert.deepEqual(cache, {
+    updated_at: '2026-07-30T12:00:00Z',
     messages: [],
     pending_messages: [],
     pending_question_id: null,

@@ -31,24 +31,29 @@ test('chat display readiness preserves the authoritative transcript reveal gate'
     'the callback dependency is the owner-change signal; a parallel mutable ref would obscure it')
 })
 
-test('authoritative running history releases the held chat before stream catch-up', () => {
+test('activation reuses an unchanged retained transcript before stream catch-up', () => {
   const initialLoad = chatView.match(
-    /apiFetch\(`\/chats\/\$\{chatId\}\?limit=20&compact=1`,[\s\S]*?\n  \}, \[chatId, loadNonce, hidden\]\)/,
+    /const loadActivation = async \(\) => \{[\s\S]*?\n    loadActivation\(\)/,
   )?.[0] || ''
   assert.match(
     initialLoad,
-    /if \(serverSnapshotBehindLocal[\s\S]*setInitialEntryPhase\('ready'\)/,
-    'a useful local frame must be revealed after the authoritative detail read',
+    /\/runtime`[\s\S]*chatSnapshotMatchesRuntime\(activationCache, runtime\)[\s\S]*reused = true/,
+    'an unchanged row version must reuse the retained transcript',
   )
   assert.match(
     initialLoad,
-    /setInitialEntryPhase\('ready'\)[\s\S]*if \(data\.running\) \{[\s\S]*connectToStream\(false\)/,
-    'stream catch-up should continue after the persisted frame becomes paintable',
+    /if \(!reused\) \{[\s\S]*\/chats\/\$\{chatId\}\?limit=20&compact=1/,
+    'missing or changed versions must fail closed to the full detail route',
   )
-  assert.doesNotMatch(
+  assert.match(
     initialLoad,
-    /setInitialEntryPhase\(data\.running \? 'catch-up' : 'ready'\)/,
-    'a running marker must not turn replay settlement into navigation latency',
+    /if \(reused\) \{[\s\S]*updateChatRuntimeCache[\s\S]*settleRuntime\(runtime, msgs\)[\s\S]*return/,
+    'the fast path may update liveness but must not republish messages',
+  )
+  assert.match(
+    chatView,
+    /setInitialEntryPhase\('ready'\)[\s\S]*if \(running\) \{[\s\S]*connectToStream\(false\)/,
+    'stream catch-up should continue after the persisted frame becomes paintable',
   )
 })
 
@@ -56,8 +61,8 @@ test('a staging chat cannot leave the outgoing transcript held on a wedged reque
   assert.match(chatView, /const CHAT_FETCH_TIMEOUT_MS = 15000/)
   assert.match(
     chatView,
-    /apiFetch\(`\/chats\/\$\{chatId\}\?limit=20&compact=1`, \{\s*timeoutMs: CHAT_FETCH_TIMEOUT_MS,\s*signal: initialLoadController\.signal,\s*\}\)/,
-    'the initial load must share the bounded message-fetch deadline',
+    /const requestJson = async \(path, label\) => \{[\s\S]*apiFetch\(path, \{\s*timeoutMs: CHAT_FETCH_TIMEOUT_MS,\s*signal: initialLoadController\.signal,\s*\}\)/,
+    'both version and detail reads must share the bounded activation deadline',
   )
   assert.match(chatView, /initialLoadController\.abort\(\)/,
     'hiding or unmounting a staging chat must release its request immediately')

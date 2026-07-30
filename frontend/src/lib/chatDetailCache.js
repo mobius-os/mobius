@@ -25,8 +25,20 @@ export function chatEntryPhase(cached) {
   return cached ? 'cached' : 'history'
 }
 
+// A detail cache carries the Chat row version it was built from. Runtime reads
+// expose the same version without hydrating transcript JSON, so a retained
+// chat can prove that its already-painted messages are still current.
+// Missing versions fail closed during rolling updates and use the full detail
+// path once to seed the contract.
+export function chatSnapshotMatchesRuntime(cached, runtime) {
+  return typeof cached?.updated_at === 'string'
+    && typeof runtime?.updated_at === 'string'
+    && cached.updated_at === runtime.updated_at
+}
+
 export function chatDetailCacheValue(data = {}) {
   return {
+    updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
     messages: Array.isArray(data.messages)
       ? data.messages.map(settledToolBlocks)
       : [],

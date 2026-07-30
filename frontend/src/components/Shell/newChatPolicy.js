@@ -118,6 +118,9 @@ export function createdChatDetailCache(created) {
   if (typeof detail.has_assistant_turns !== 'boolean') return null
 
   return {
+    updated_at: typeof detail.updated_at === 'string'
+      ? detail.updated_at
+      : null,
     messages: detail.messages,
     pending_messages: detail.pending_messages,
     pending_question_id: detail.pending_question_id,

@@ -57,8 +57,12 @@ import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
 import { sameMessageList } from './chatMessageList.js'
-import { chatDetailCacheValue, chatEntryPhase } from '../../lib/chatDetailCache.js'
 import { updateChatRuntimeCache } from './chatRuntimeCache.js'
+import {
+  chatDetailCacheValue,
+  chatEntryPhase,
+  chatSnapshotMatchesRuntime,
+} from '../../lib/chatDetailCache.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
 import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
@@ -309,7 +313,8 @@ export default function ChatView({
   // for already-warm in-memory caches (same session) this is exact;
   // for IndexedDB-restored caches it's best-effort. The initial fetch
   // useEffect below always fires regardless and writes the fresh data
-  // back via `commitMessages`, so any miss self-heals on next remount.
+  // back through the versioned activation handoff, so any miss self-heals on
+  // the first authoritative detail read.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
   const [messages, setMessages] = useState(() => cached?.messages ?? [])
   const messageHistory = useMemo(
@@ -346,10 +351,14 @@ export default function ChatView({
   // does not fall back to Mic while a turn is still running with queued work.
   const [serverRunning, setServerRunning] = useState(() => !!cached?.running)
   const serverRunningRef = useRef(!!cached?.running)
-  function setServerRunningState(v) {
+  function setServerRunningLocalState(v) {
     const running = !!v
     serverRunningRef.current = running
     setServerRunning(running)
+  }
+  function setServerRunningState(v) {
+    const running = !!v
+    setServerRunningLocalState(running)
     updateChatRuntimeCache(
       queryClient,
       chatMessagesQueryKey(chatId),
@@ -612,6 +621,27 @@ export default function ChatView({
   const runtimeReconnectInFlightRef = useRef(false)
   const swReloadHoldTimerRef = useRef(null)
 
+  // Apply a resolved message snapshot to the mounted view without publishing
+  // it. Detail activation uses this after one complete cache publication;
+  // ordinary local/stream mutations go through commitMessages below.
+  const applyMessagesToView = useCallback((next, nextOffset, force = false) => {
+    const prev = messagesRef.current
+    // Advance messagesRef synchronously so back-to-back commits within the
+    // same React batch compose correctly.
+    messagesRef.current = next
+    if (nextOffset !== undefined) offsetRef.current = nextOffset
+    if (!force && sameMessageList(prev, next)) {
+      if (nextOffset !== undefined) {
+        setOffset(o => o === nextOffset ? o : nextOffset)
+      }
+      return
+    }
+    setMessages(next)
+    if (nextOffset !== undefined) {
+      setOffset(o => o === nextOffset ? o : nextOffset)
+    }
+  }, [])
+
   // Single setter that updates local state AND the query cache.
   //
   // ALWAYS writes the query cache (so even empty chats have an entry,
@@ -635,30 +665,18 @@ export default function ChatView({
     const force = opts?.force === true
     const prev = messagesRef.current
     const next = typeof updater === 'function' ? updater(prev) : updater
-    // Advance messagesRef synchronously so back-to-back commitMessages
-    // calls within the same React batch (e.g. handleStop's promote +
-    // doSend's user-msg append) compose correctly. Without this, the
-    // second call's updater reads the pre-batch prev and overwrites
-    // the first call's result on setMessages.
-    messagesRef.current = next
-    if (nextOffset !== undefined) offsetRef.current = nextOffset
     queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
       ...(existing || {}),
+      // This composite is newer than the last complete detail read. Clearing
+      // its proof makes the next activation fail closed to one authoritative
+      // detail snapshot instead of treating local or streamed rows as a
+      // server-versioned response.
+      updated_at: null,
       messages: next,
       offset: nextOffset !== undefined ? nextOffset : (existing?.offset ?? 0),
     }))
-    if (!force && sameMessageList(prev, next)) {
-      // Offset may still have changed (older-messages pagination).
-      if (nextOffset !== undefined) {
-        setOffset(o => o === nextOffset ? o : nextOffset)
-      }
-      return
-    }
-    setMessages(next)
-    if (nextOffset !== undefined) {
-      setOffset(o => o === nextOffset ? o : nextOffset)
-    }
-  }, [chatId, queryClient])
+    applyMessagesToView(next, nextOffset, force)
+  }, [applyMessagesToView, chatId, queryClient])
 
   // DOM refs
   const scrollRef = useRef(null)
@@ -1834,116 +1852,143 @@ export default function ChatView({
   // Fetch messages and connect to an in-progress stream if the agent is running.
   useEffect(() => {
     // A hidden retained pane is not an active runtime. Returning to visibility
-    // changes this dependency and re-runs the authoritative history + stream
-    // handshake, matching the former unmount/remount behavior without losing
-    // the pane's DOM identity.
+    // changes this dependency and re-runs the version + stream handshake
+    // without losing the pane's DOM identity.
     if (hidden) return
     let cancelled = false
     const initialLoadController = new AbortController()
+    const queryKey = chatMessagesQueryKey(chatId)
+    const activationCache = queryClient.getQueryData(queryKey)
     chatIdStaleRef.current = false
     setLoadError(false)
-    setInitialEntryPhase(cachedEntryPhase)
+    setInitialEntryPhase(chatEntryPhase(activationCache))
 
     const gen = fetchGenRef.current
-    apiFetch(`/chats/${chatId}?limit=20&compact=1`, {
-      timeoutMs: CHAT_FETCH_TIMEOUT_MS,
-      signal: initialLoadController.signal,
-    })
-      .then(r => {
-        if (r.status === 404) throw new Error('CHAT_NOT_FOUND')
-        if (!r.ok) throw new Error(`CHAT_LOAD_FAILED_${r.status}`)
-        return r.json()
+    const requestJson = async (path, label) => {
+      const response = await apiFetch(path, {
+        timeoutMs: CHAT_FETCH_TIMEOUT_MS,
+        signal: initialLoadController.signal,
       })
-      .then(data => {
-        if (cancelled) return
-        if (fetchGenRef.current !== gen) return
-        const detailCache = chatDetailCacheValue(data)
-        const msgs = detailCache.messages
-        const failedAttempt = failedSendAttemptRef.current
-        if (failedAttempt) {
-          if (sendAttemptIsDurable(failedAttempt, msgs, data.pending_messages)) {
-            clearFailedAttempt()
-            setComposerInput('')
-            clearFiles()
-            setSendFailure(null)
-          } else {
-            setSendFailure(
-              'That message didn’t reach the chat. It’s ready in the composer—try again.',
-            )
-          }
+      if (response.status === 404) throw new Error('CHAT_NOT_FOUND')
+      if (!response.ok) throw new Error(`${label}_${response.status}`)
+      return response.json()
+    }
+
+    const settleRuntime = (runtime, visibleMessages) => {
+      const running = !!runtime.running
+      setServerRunningLocalState(running)
+      hadMessagesRef.current = visibleMessages.length > 0
+      setLiveQuestionId(runtime.pending_question_id || null)
+      setBridgeMountInputs({
+        runningAtMount: running,
+        lastMsgAtMount: visibleMessages.length > 0
+          ? visibleMessages[visibleMessages.length - 1]
+          : null,
+      })
+      setInitialEntryPhase('ready')
+      setLoading(false)
+      pendingQueue.hydrate(runtime.pending_messages || [])
+      if (running) {
+        setSending(true)
+        connectToStream(false)
+      } else {
+        setSending(false)
+        sendingRef.current = false
+      }
+    }
+
+    const loadActivation = async () => {
+      let runtime = null
+      let detailCache = null
+      let reused = false
+
+      if (typeof activationCache?.updated_at === 'string') {
+        runtime = await requestJson(
+          `/chats/${chatId}/runtime`,
+          'CHAT_RUNTIME_FAILED',
+        )
+        if (chatSnapshotMatchesRuntime(activationCache, runtime)) {
+          detailCache = activationCache
+          reused = true
         }
-        // Snapshot the per-chat runtime config (provider/model/effort) BEFORE
-        // the behind-local guard below. This is independent of the messages
-        // snapshot, and the guard's early-return used to skip it — so after any
-        // interaction (local optimistic state ahead of the server snapshot) the
-        // `+` popover's model picker silently vanished, leaving only Attach +
-        // "What the agent knows". Setting it here keeps the picker present
-        // regardless of the messages fast-path.
-        const nextChatInfo = detailCache.chatInfo
-        setChatInfo(nextChatInfo)
-        queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
-          ...(existing || {}),
-          running: detailCache.running,
-          pending_messages: detailCache.pending_messages,
-          pending_question_id: detailCache.pending_question_id,
-          chatInfo: nextChatInfo,
-        }))
-        if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
-          // The successful detail read is the authoritative entry frame even
-          // when a live tail still needs to catch up. Keeping that already
-          // useful transcript hidden until stream settlement turns the replay
-          // safety deadline into chat-navigation latency.
-          setInitialEntryPhase('ready')
-          setLoading(false)
-          return
-        }
+      }
+      if (!reused) {
+        runtime = await requestJson(
+          `/chats/${chatId}?limit=20&compact=1`,
+          'CHAT_LOAD_FAILED',
+        )
+        detailCache = chatDetailCacheValue(runtime)
+      }
 
-        // Keep the DB partial when the agent is still running. The user sees
-        // the most recent persisted state immediately; SSE catch-up makes the
-        // same active MsgContent swap to the live payload. On done,
-        // promoteStreamToMessages replaces this partial with the final version.
-        // Previously we stripped this and waited for SSE — caused the "message
-        // disappears on choppy return" bug.
-
-        const refreshed = mergeRecentMessagesIntoLoadedWindow({
-          loadedMessages: messagesRef.current,
-          loadedOffset: offsetRef.current,
-          recentMessages: msgs,
-          recentOffset: data.offset || 0,
-        })
-        commitMessages(refreshed.messages, refreshed.offset)
-        setServerRunningState(!!data.running)
-        hadMessagesRef.current = refreshed.messages.length > 0
-        setLiveQuestionId(data.pending_question_id || null)
-        // (chatInfo — the model/effort picker config — is snapshotted above,
-        // before the behind-local guard, so the picker survives interactions.)
-        // Feed the bridge gate with the data.running + last-msg
-        // snapshot. useBridgePartial captures the kept-partial ts
-        // on first valid input and stays sticky from there — only
-        // the very first turn after mount is a "bridge"; subsequent
-        // turns always APPEND (markBridged retires the gate on the
-        // first promote).
-        setBridgeMountInputs({
-          runningAtMount: !!data.running,
-          lastMsgAtMount: msgs.length > 0 ? msgs[msgs.length - 1] : null,
-        })
-        setInitialEntryPhase('ready')
-        setLoading(false)
-
-        // Hydrate pending queue from backend so a reload mid-queue
-        // doesn't drop the visible "queued" tray. The server list is
-        // authoritative for confirmed rows; hydrate() still preserves
-        // optimistic in-flight rows if a queue POST is racing this fetch.
-        pendingQueue.hydrate(data.pending_messages || [])
-
-        if (data.running) {
-          setSending(true)
-          connectToStream(false)
+      if (cancelled || fetchGenRef.current !== gen) return
+      const msgs = detailCache.messages
+      const failedAttempt = failedSendAttemptRef.current
+      if (failedAttempt) {
+        if (sendAttemptIsDurable(
+          failedAttempt,
+          msgs,
+          runtime.pending_messages,
+        )) {
+          clearFailedAttempt()
+          setComposerInput('')
+          clearFiles()
+          setSendFailure(null)
         } else {
-          setSending(false)
-          sendingRef.current = false
+          setSendFailure(
+            'That message didn’t reach the chat. It’s ready in the composer—try again.',
+          )
         }
+      }
+
+      if (reused) {
+        // One narrow publication updates queue/liveness only when those fields
+        // changed. The retained messages and their DOM remain untouched.
+        updateChatRuntimeCache(queryClient, queryKey, {
+          running: !!runtime.running,
+          pending_messages: runtime.pending_messages || [],
+          pending_question_id: runtime.pending_question_id || null,
+        })
+        settleRuntime(runtime, msgs)
+        return
+      }
+
+      // Snapshot provider/model settings before checking for optimistic local
+      // rows. Runtime config belongs to this server response even when the
+      // mounted transcript is temporarily ahead of it.
+      setChatInfo(detailCache.chatInfo)
+      if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
+        queryClient.setQueryData(queryKey, existing => ({
+          ...detailCache,
+          // The local suffix is not proven by this server version. Preserve it
+          // for the visible optimistic handoff but make the next activation
+          // take the authoritative detail path.
+          updated_at: null,
+          messages: existing?.messages || messagesRef.current,
+          offset: existing?.offset ?? offsetRef.current,
+        }))
+        settleRuntime(runtime, messagesRef.current)
+        return
+      }
+
+      // Keep an already-loaded older prefix while replacing its overlapping
+      // recent page. Publish the complete detail snapshot once, then update the
+      // mounted view without a second query-cache notification.
+      const refreshed = mergeRecentMessagesIntoLoadedWindow({
+        loadedMessages: messagesRef.current,
+        loadedOffset: offsetRef.current,
+        recentMessages: msgs,
+        recentOffset: runtime.offset || 0,
       })
+      queryClient.setQueryData(queryKey, {
+        ...detailCache,
+        messages: refreshed.messages,
+        offset: refreshed.offset,
+      })
+      applyMessagesToView(refreshed.messages, refreshed.offset)
+      settleRuntime(runtime, refreshed.messages)
+    }
+
+    loadActivation()
       .catch((err) => {
         if (cancelled) return
         setInitialEntryPhase('ready')

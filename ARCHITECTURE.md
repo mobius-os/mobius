@@ -937,9 +937,14 @@ count. Only an explicit disclosure resolves that exact range through
 `GET /api/chats/{id}/activity-detail`; the live assistant stays self-contained.
 Mounted runtime reconciliation uses `GET /api/chats/{id}/runtime`, whose ORM
 projection raiseloads every unrequested field so polling can never silently
-decode `Chat.messages`. These are read projections, never a second persistence
-format: provider context, recovery, export, and writer commands continue to
-use the full transcript.
+decode `Chat.messages`. Both projections carry the row's `updated_at` as the
+detail-snapshot version. On activation, a retained ChatView reads the runtime
+projection first and reuses its painted transcript only when those explicit
+versions match; a missing or changed version fails closed to the compact detail
+read. Any local, streamed, or paginated message-cache mutation clears the
+cached version until a complete detail response proves it again. These are read
+projections, never a second persistence format: provider context, recovery,
+export, and writer commands continue to use the full transcript.
 
 - **Commit-before-ack (strict paths):** the caller's `await` on `QuestionCommit`/`Finalize`/`AnswerQuestion`/`Barrier`/`DrainAndStop` doesn't unblock until the commit succeeds; `PersistTranscript` and `PersistError` are fire-and-forget (submitted without awaiting the ack).
 - **Questions commit-before-broadcast:** a question row is durable before its SSE push fires, so a reconnect's catch-up burst always finds it.

@@ -415,6 +415,7 @@ def _chat_detail_response(
   return {
     "id": chat.id,
     "title": chat.title,
+    "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
     # Settled large-output excerpts are omitted here because the disclosure
     # already fetches them from their durable sidecar on demand. Live turns
     # retain excerpts so the in-progress surface remains self-contained.
@@ -1113,7 +1114,10 @@ def get_chat_runtime(
     db,
     chat_id,
     principal,
-    load_fields=(models.Chat.pending_messages,),
+    load_fields=(
+      models.Chat.pending_messages,
+      models.Chat.updated_at,
+    ),
   )
   pending_question = questions.get(chat.id)
   return {
@@ -1122,6 +1126,7 @@ def get_chat_runtime(
     "pending_question_id": (
       pending_question.question_id if pending_question is not None else None
     ),
+    "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
   }
 
 

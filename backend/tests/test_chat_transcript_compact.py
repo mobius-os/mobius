@@ -332,6 +332,7 @@ def test_runtime_route_does_not_select_transcript_json(
     "running": True,
     "pending_messages": [],
     "pending_question_id": None,
+    "updated_at": created.json()["updated_at"],
   }
   chat_select = next(
     statement
@@ -339,4 +340,5 @@ def test_runtime_route_does_not_select_transcript_json(
     if "from chats" in statement and "chats.pending_messages" in statement
   )
   assert "chats.pending_messages" in chat_select
+  assert "chats.updated_at" in chat_select
   assert "chats.messages as" not in chat_select

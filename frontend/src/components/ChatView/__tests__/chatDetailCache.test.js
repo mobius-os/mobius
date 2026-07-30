@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   chatDetailCacheValue,
   chatEntryPhase,
+  chatSnapshotMatchesRuntime,
 } from '../../../lib/chatDetailCache.js'
 
 test('a cached running chat paints immediately while catch-up runs', () => {
@@ -14,6 +15,7 @@ test('a cached running chat paints immediately while catch-up runs', () => {
 
 test('prefetched chat detail matches the synchronous ChatView cache contract', () => {
   const source = {
+    updated_at: '2026-07-30T12:00:00Z',
     messages: [{
       role: 'assistant',
       blocks: [{ type: 'tool', status: 'running' }, { type: 'text', text: 'done' }],
@@ -34,6 +36,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
   const cached = chatDetailCacheValue(source)
 
   assert.equal(cached.messages[0].blocks[0].status, 'done')
+  assert.equal(cached.updated_at, source.updated_at)
   assert.equal(source.messages[0].blocks[0].status, 'running', 'projection does not mutate the response')
   assert.equal(cached.offset, 12)
   assert.equal(cached.pending_question_id, 'question-1')
@@ -46,4 +49,18 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     auto_resume_on_limit: true,
     auto_resume_on_restart: false,
   })
+})
+
+test('a retained snapshot is reusable only at the same explicit row version', () => {
+  const cached = { updated_at: '2026-07-30T12:00:00Z' }
+  assert.equal(chatSnapshotMatchesRuntime(cached, {
+    updated_at: '2026-07-30T12:00:00Z',
+  }), true)
+  assert.equal(chatSnapshotMatchesRuntime(cached, {
+    updated_at: '2026-07-30T12:00:01Z',
+  }), false)
+  assert.equal(chatSnapshotMatchesRuntime(cached, {}), false)
+  assert.equal(chatSnapshotMatchesRuntime({}, {
+    updated_at: '2026-07-30T12:00:00Z',
+  }), false)
 })
