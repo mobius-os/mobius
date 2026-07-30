@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  AMBIGUOUS_FAILURE_CONFIRM_MS,
+  AMBIGUOUS_VERDICT_CONFIRM_MS,
   createConnectivityStore,
 } from '../connectivityStore.js'
 
@@ -16,6 +16,9 @@ function eventTarget(extra = {}) {
     },
     removeEventListener(type, listener) {
       listeners.get(type)?.delete(listener)
+    },
+    emit(type) {
+      for (const listener of listeners.get(type) || []) listener()
     },
     listenerCount(type) {
       return listeners.get(type)?.size || 0
@@ -99,7 +102,7 @@ test('a stale-online failure is confirmed promptly and published once', async ()
   await flushMicrotasks()
 
   assert.equal(h.store.getSnapshot(), true)
-  h.timers.runTimeout(AMBIGUOUS_FAILURE_CONFIRM_MS)
+  h.timers.runTimeout(AMBIGUOUS_VERDICT_CONFIRM_MS)
   await flushMicrotasks()
 
   assert.equal(h.store.getSnapshot(), false)
@@ -133,7 +136,7 @@ test('a live mutation response repairs a stale offline verdict immediately', asy
   let notifications = 0
   const stop = h.store.subscribe(() => { notifications += 1 })
   await flushMicrotasks()
-  h.timers.runTimeout(AMBIGUOUS_FAILURE_CONFIRM_MS)
+  h.timers.runTimeout(AMBIGUOUS_VERDICT_CONFIRM_MS)
   await flushMicrotasks()
   assert.equal(h.store.getSnapshot(), false)
 
@@ -155,6 +158,30 @@ test('a live mutation response outranks an older in-flight failed probe', async 
 
   assert.equal(h.store.getSnapshot(), true)
   assert.equal(h.timers.timeoutCount(), 0)
+  stop()
+})
+
+test('returning to a stale-false browser flag confirms recovery promptly', async () => {
+  let reachable = false
+  const h = harness(async () => {
+    if (!reachable) throw new TypeError('offline')
+    return { ok: true }
+  })
+  h.navigatorTarget.onLine = false
+  const stop = h.store.subscribe(() => {})
+  await flushMicrotasks()
+
+  assert.equal(h.store.getSnapshot(), false)
+
+  reachable = true
+  h.documentTarget.emit('visibilitychange')
+  await flushMicrotasks()
+
+  assert.equal(h.store.getSnapshot(), false, 'one success still rejects the device anomaly')
+  h.timers.runTimeout(AMBIGUOUS_VERDICT_CONFIRM_MS)
+  await flushMicrotasks()
+
+  assert.equal(h.store.getSnapshot(), true, 'the prompt second success completes recovery')
   stop()
 })
 

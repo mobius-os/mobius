@@ -6,22 +6,21 @@ const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8
 const chatInputBar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
 const connectionStatus = readFileSync(new URL('../ConnectionStatus.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
 
-test('footer stacks offline note → notices → rail → connection → queued → composer', () => {
+test('footer stacks notices → rail → connection → queued → composer', () => {
   const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
   const composer = chatView.indexOf('<ChatInputBar', footStart)
   const foot = chatView.slice(footStart, composer)
   const rail = foot.indexOf('<ProgressRail')
   const queued = foot.indexOf('<QueuedMessages')
   const connection = foot.indexOf('<ConnectionStatus')
-  const offline = foot.indexOf('className="chat__offline-note"')
 
   assert.ok(
     footStart >= 0 && composer > footStart && rail >= 0 && queued >= 0
-      && connection >= 0 && offline >= 0,
+      && connection >= 0,
     'the complete footer stack must be present',
   )
-  assert.ok(offline < connection, 'the offline explanation stacks above connection/retry')
   assert.ok(rail < connection, 'the progress rail stacks above connection/retry')
   assert.ok(connection < queued, 'connection/retry stacks directly above the queued input tray')
   for (const notice of [
@@ -36,10 +35,10 @@ test('footer stacks offline note → notices → rail → connection → queued 
   }
 })
 
-test('offline explanation has one owner while send failures stay in the composer', () => {
-  const offlineText = "You're offline — chat needs a connection."
-
-  assert.equal(chatView.split(offlineText).length - 1, 1)
+test('the shell is the one persistent connection owner while send failures stay contextual', () => {
+  assert.match(shell, /\{!online && \([\s\S]*?className="shell__offline"[\s\S]*?Offline/)
+  assert.doesNotMatch(shell, /Reconnecting/)
+  assert.doesNotMatch(chatView, /You're offline — chat needs a connection\./)
   assert.doesNotMatch(chatInputBar, /You're offline — chat needs a connection\./)
   assert.match(
     chatInputBar,
@@ -61,7 +60,7 @@ test('connection failure hides queued actions and disables composer steering', (
     'the empty-composer keyboard path must share the optimistic visible steer gate')
 })
 
-test('connection status matches the composer column while the offline note stays compact', () => {
+test('connection status matches the composer column while send failures stay compact', () => {
   assert.match(
     chatCss,
     /\.connection-status\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*720px;/,
@@ -75,7 +74,7 @@ test('connection status matches the composer column while the offline note stays
   assert.match(
     chatCss,
     /\.chat__offline-note\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?width:\s*fit-content;[\s\S]*?max-width:\s*min\(680px,\s*100%\);/,
-    'the compact note must be bounded by its pane rather than the global viewport',
+    'the contextual send failure must be bounded by its pane rather than the global viewport',
   )
 })
 

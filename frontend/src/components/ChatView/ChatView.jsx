@@ -4060,20 +4060,9 @@ export default function ChatView({
 
       <div ref={footRef} className="chat__foot">
         {/* Foot order, top to bottom:
-            offline explanation → attention actions → build-progress rail →
-            connection/retry → queued messages → composer. Queued messages are
-            the input's extension, and connection recovery belongs immediately
-            above that input area. */}
-        {!online && (
-          <div
-            className="chat__offline-note"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-          >
-            You're offline — chat needs a connection.
-          </div>
-        )}
+            attention actions → build-progress rail → connection/retry → queued
+            messages → composer. The shell owns the one persistent offline
+            explanation; the composer retains contextual send-failure copy. */}
         {/* A LOST connection empties the stack: while the terminal
             'disconnected' state is set, nudges, rail, and the queued tray
             hide so the one thing on screen is the problem and its Retry

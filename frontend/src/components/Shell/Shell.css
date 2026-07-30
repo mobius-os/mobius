@@ -425,9 +425,7 @@
    guidance. The old drawer banner stays retired. Sub-app installation
    lives in the standalone card surfaced from drawer ⋮ on a mini-app. */
 
-  /* Global offline indicator pill in the top bar. Shown only when the
-     browser reports offline (useOnlineStatus). Keeps the user oriented
-     so they aren't guessing about connectivity. */
+  /* The one persistent offline indicator. */
   .shell__offline {
     align-self: center;
     padding: 3px 10px;

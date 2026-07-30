@@ -20,9 +20,10 @@ export const PROBE_TIMEOUT_MS = 3000
 // as truth. Android can emit it transiently while moving between radios.
 export const OFFLINE_EVENT_GRACE_MS = 2500
 export const POLL_INTERVAL_MS = 20000
-// navigator=true + probe=false is ambiguous and needs two failures. Confirm the
-// first quickly instead of leaving chat Send enabled until the regular poll.
-export const AMBIGUOUS_FAILURE_CONFIRM_MS = 1000
+// A browser hint that disagrees with the probe is ambiguous in either
+// direction. Confirm the first result quickly instead of leaving Send enabled
+// or a recovered PWA labelled offline until the regular poll.
+export const AMBIGUOUS_VERDICT_CONFIRM_MS = 1000
 
 /**
  * One reachability monitor shared by every shell consumer. The dependency
@@ -129,10 +130,22 @@ export function createConnectivityStore({
         const next = applyProbe(reachable)
         if (confirmTimer !== null) clearTimeoutFn(confirmTimer)
         confirmTimer = null
-        // A stale-true navigator flag needs two failures. Run the confirming
-        // probe promptly instead of leaving Send enabled until the 20s poll.
-        if (!reachable && next.online && next.failureStreak === 1) {
-          confirmTimer = setTimeoutFn(() => { void check() }, AMBIGUOUS_FAILURE_CONFIRM_MS)
+        // Either stale browser hint needs two matching probes. Run the second
+        // promptly in BOTH directions: otherwise a stale-false navigator flag
+        // leaves a genuinely reconnected PWA looking offline until the 20s
+        // interval, the exact resume-from-background failure this streak is
+        // meant to prevent.
+        const needsFailureConfirmation = (
+          !reachable && next.online && next.failureStreak === 1
+        )
+        const needsRecoveryConfirmation = (
+          reachable && !next.online && next.successStreak === 1
+        )
+        if (needsFailureConfirmation || needsRecoveryConfirmation) {
+          confirmTimer = setTimeoutFn(
+            () => { void check() },
+            AMBIGUOUS_VERDICT_CONFIRM_MS,
+          )
         }
         return reachable
       })().finally(() => {

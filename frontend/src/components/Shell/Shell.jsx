@@ -1095,9 +1095,9 @@ export default function Shell() {
   useEffect(() => {
     checkPendingShellReload()
   }, [activeView, activeChatId, multiPaneBuilderVisible])
-  // Global connectivity indicator. The composer already disables send when
-  // offline (ChatView); this surfaces the state shell-wide so the user is
-  // never tapping in the dark about whether they're connected.
+  // One shell-wide indicator owns the persistent offline explanation. Chat
+  // still disables sends while unavailable, but does not repeat this status
+  // beside the composer.
   const online = useOnlineStatus()
   const chatsLoadedRef = useRef(false)
   const knownExistingOffListChatIdsRef = useRef(new Set())
