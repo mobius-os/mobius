@@ -2452,6 +2452,18 @@ async def run_codex_sdk_turn(
   # and the MOEBIUS_CODEX_MULTI_AGENT kill switch, in _codex_config_overrides().
   codex_bin = shutil.which("codex")
   config_overrides = _codex_config_overrides()
+  # Owner-registered connectors (Settings → Connectors): config overrides
+  # declare the MCP servers; decrypted keys ride env vars (never argv).
+  # Read fresh each turn; a registry failure must never break the turn.
+  try:
+    from app.connectors import codex_config as _connectors_codex_config
+    _connector_overrides, _connector_env = _connectors_codex_config(db)
+  except Exception:
+    log.warning("connector injection skipped (registry read failed)",
+                exc_info=True)
+    _connector_overrides, _connector_env = [], {}
+  config_overrides = config_overrides + _connector_overrides
+  env.update(_connector_env)
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,

@@ -553,3 +553,85 @@
 .settings__section--server .settings__subtext--tight {
   margin: -10px 0 0;
 }
+
+/* ── Connectors section ─────────────────────────────────────────────
+   List rows + add form for external MCP connectors. Reuses the shared
+   settings button/notice vocabulary; only layout is new. */
+.settings-connectors__intro {
+  margin: -6px 0 12px;
+}
+.settings-connectors__list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.settings-connectors__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.settings-connectors__row:last-child {
+  border-bottom: none;
+}
+.settings-connectors__main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.settings-connectors__meta {
+  font-size: 12.5px;
+  color: var(--text-secondary, var(--text));
+  opacity: 0.75;
+}
+.settings-connectors__error {
+  font-size: 12.5px;
+  color: var(--danger);
+}
+.settings-connectors__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.settings-connectors__danger {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+.settings-connectors__add {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+.settings-connectors__input {
+  width: 100%;
+  max-width: 480px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+.settings-connectors__input--header {
+  max-width: 240px;
+}
+.settings-connectors__key-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+.settings-connectors__key-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
