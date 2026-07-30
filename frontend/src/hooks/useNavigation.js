@@ -24,6 +24,14 @@ const RETURN_VIEW_KEY = 'mobius:return-view'
 
 const MAX_APP_SENTINELS = 20
 
+// How long a drawer close may wait for its history traversal before openDrawer
+// treats the traversal as LOST and reconciles from the classic store (see
+// openDrawer). Real same-document commits land within tens of milliseconds;
+// this is deliberately far above that so a merely-slow traversal is never
+// raced, while a wedged-engine loss (WebKit Navigation API) stays recoverable
+// by the user's next tap instead of requiring a full relaunch.
+const DRAWER_CLOSE_TRAVERSAL_GRACE_MS = 1500
+
 // Returns true if ANY (paneId, appId) owner in the per-owner sentinel map has
 // pending back-targets. Used by the popstate / onNavigate early-return guards:
 // even when the currently-visible app has zero sentinels (e.g. you just switched
@@ -311,6 +319,12 @@ export default function useNavigation({
   // reaches the tagged entry beneath the drawer sentinel. Keep that traversal
   // serialized so the modal stays inert until the sentinel is truly consumed.
   const drawerClosePendingRef = useRef(false)
+  // When that close began (ms epoch). A wedged WebKit Navigation API can LOSE
+  // the close's traversal outright (never fired, dropped mid-flight, or
+  // misrouted while the mirror store is unreadable — see onNavigate). The
+  // pending flag must not brick the drawer forever: openDrawer reconciles from
+  // the classic History store once the traversal is provably stale.
+  const drawerClosePendingAtRef = useRef(0)
   // Per-(pane, app) pending nav-sentinel counts installed via the
   // moebius:nav-push postMessage protocol. Keyed by ownerKeyOf(paneId, appId).
   const appSentinelCountsRef = useRef(new Map())
@@ -560,7 +574,30 @@ export default function useNavigation({
     // sentinel while that traversal is unresolved: the cursor may already have
     // left it even though popstate has not run, and treating the boolean flag as
     // proof that it is still current makes the next close over-pop a real route.
-    if (drawerClosePendingRef.current) return
+    //
+    // …unless the traversal is provably LOST. A wedged WebKit Navigation API
+    // can drop the close's traversal outright, and a permanently-pending close
+    // used to refuse every later open until a full relaunch. Real commits land
+    // in tens of milliseconds; once the close is far staler than that, the
+    // user's open must win. Reconcile from the authoritative classic store:
+    // the sentinel still being the CURRENT entry means the back() never
+    // committed — re-adopt it (logically open again, one sentinel, no second
+    // push). Otherwise the traversal landed but its consumption never reached
+    // handleBack — clear the stranded flags and open fresh.
+    if (drawerClosePendingRef.current) {
+      if (Date.now() - drawerClosePendingAtRef.current < DRAWER_CLOSE_TRAVERSAL_GRACE_MS) {
+        return
+      }
+      drawerClosePendingRef.current = false
+      if (drawerPushedRef.current
+          && isMobiusNavState(history.state) && history.state.kind === 'drawer') {
+        drawerOpenRef.current = true
+        setDrawerVisible(true)
+        return
+      }
+      drawerOpenRef.current = false
+      drawerPushedRef.current = false
+    }
     // Synchronous guard for a rapid double activation before React has rendered
     // `drawerOpen=true`. One drawer owns exactly one physical sentinel.
     if (drawerOpenRef.current) return
@@ -586,6 +623,7 @@ export default function useNavigation({
     if (!drawerOpenRef.current || drawerClosePendingRef.current) return
     if (drawerPushedRef.current) {
       drawerClosePendingRef.current = true
+      drawerClosePendingAtRef.current = Date.now()
       // A tap/swipe close should acknowledge immediately. Keep the logical ref
       // true until Back consumes the drawer sentinel (so handleBack still owns
       // navigation correctness), but begin the visual close before that async
@@ -1452,14 +1490,74 @@ export default function useNavigation({
     if (typeof navigation !== 'undefined' && navigation.addEventListener) {
       function onNavigate(e) {
         if (e.navigationType !== 'traverse') return
+        // The Navigation store is a best-effort MIRROR of the authoritative
+        // classic History store (see navHistory.mirrorCurrentEntry) — on the
+        // READ side too. A wedged WebKit Navigation API (iOS 18.4+) throws
+        // from its own entry accessors just as it does from
+        // updateCurrentEntry, and returns undefined for entries whose mirror
+        // write failed. Treat every mirror read as optional.
+        let destination
+        try { destination = e.destination.getState() } catch { destination = undefined }
+        let sourceEntry = null
+        try { sourceEntry = navigation.currentEntry } catch { /* wedged engine */ }
+        let sourceEntryState
+        try { sourceEntryState = sourceEntry?.getState?.() } catch { sourceEntryState = undefined }
+        let currentEntryIndex
+        try { currentEntryIndex = sourceEntry?.index } catch { currentEntryIndex = undefined }
+        let destinationEntryIndex
+        try { destinationEntryIndex = e.destination?.index } catch { destinationEntryIndex = undefined }
+        const source = sourceEntryState || currentNavStateRef.current
+        // A drawer-sentinel consumption is recognized FIRST — before the
+        // phantom guard, and even when the destination's mirror state is
+        // unreadable. On a wedged engine the sentinel's mirror write failed, so
+        // destination.getState() comes back untagged and the phantom guard
+        // below misreads our own close as an iframe phantom: it re-issues
+        // history.back() per traversal (walking the session history all the
+        // way out of the shell) and drawerClosePendingRef never clears, so
+        // every later open is silently refused until a full relaunch
+        // (observed in the field 2026-07-29, standalone iOS PWA, alongside
+        // the mirrorCurrentEntry InvalidStateError reports). Our own state —
+        // the close intent with a drawer-tagged source, or an open drawer
+        // whose live sentinel a Back gesture is consuming — is stronger
+        // evidence than a missing mirror tag. (An iframe-owned traversal
+        // never raises the TOP window's navigate event, so a top-level
+        // traverse with the sentinel live is ours.)
+        const pendingDrawerClose = drawerClosePendingRef.current && source?.kind === 'drawer'
+        const unreadableSentinelConsumption = !isMobiusNavState(destination)
+          && drawerOpenRef.current && drawerPushedRef.current
+        if (pendingDrawerClose || unreadableSentinelConsumption) {
+          const consume = () => {
+            // Post-commit the CLASSIC store is authoritative for where we
+            // landed; fall back to it when the mirror state is untagged.
+            const committed = isMobiusNavState(destination)
+              ? destination
+              : (isMobiusNavState(history.state) ? history.state : null)
+            if (committed) currentNavStateRef.current = committed
+            // Untagged in the CLASSIC store too? Then this is not a wedged
+            // mirror read but a GENUINE phantom beneath the sentinel (a
+            // sandboxed iframe pushed it before the drawer opened): the
+            // close's tagged home is still deeper. Keep the close pending and
+            // keep seeking — the same behavior the phantom guard gives a
+            // healthy engine — instead of finishing here, which would clear
+            // the pending flags and strand the shell on an untagged entry.
+            if (!committed && drawerClosePendingRef.current) {
+              continueDrawerCloseAfterPhantom()
+              return
+            }
+            handleBack(committed, source)
+          }
+          // Intercept when the engine allows it (suppresses the traversal
+          // slide); otherwise let the traversal commit and consume right
+          // after — the drawer branch of handleBack keys on our own refs,
+          // not on the destination.
+          if (e.canIntercept) e.intercept({ handler: consume })
+          else setTimeout(consume, 0)
+          return
+        }
         if (!e.canIntercept) return
-        const destination = e.destination.getState()
-        const sourceEntry = navigation.currentEntry
-        const source = sourceEntry?.getState?.()
-          || currentNavStateRef.current
         const direction = navTraversalDirection(source, destination, {
-          currentEntryIndex: sourceEntry?.index,
-          destinationEntryIndex: e.destination?.index,
+          currentEntryIndex,
+          destinationEntryIndex,
         })
         const sourceRoute = snapshotRoute()
         // Phantom-entry guard: ignore a traversal landing on an UNTAGGED entry —
@@ -1488,17 +1586,6 @@ export default function useNavigation({
             appLocalPopInFlightRef.current = false
             appLocalPopInFlightEntryRef.current = null
             setTimeout(resumeLocalAppPops, 0)
-          } })
-          return
-        }
-        // The pending-close intent is stronger evidence than direction here.
-        // Navigation API indices normally classify this as Back, but a browser
-        // may omit or duplicate shell indices. The source tag still proves that
-        // this traversal is consuming the drawer's own physical sentinel.
-        if (drawerClosePendingRef.current && source?.kind === 'drawer') {
-          e.intercept({ handler() {
-            currentNavStateRef.current = destination
-            handleBack(destination, source)
           } })
           return
         }

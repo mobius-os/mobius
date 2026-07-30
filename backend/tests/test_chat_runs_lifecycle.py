@@ -9,9 +9,10 @@ from datetime import UTC, datetime
 
 from app import chat as chat_mod
 from app import models
+from app.chat_retention import purge_expired_chat_tombstones
 from app.chat_writer import Barrier, get_writer
 from app.database import SessionLocal
-from app.routes.chats import SOFT_DELETE_TTL
+from app.timeutil import SOFT_DELETE_TTL
 
 
 def _seed_chat(chat_id, *, messages=None, run_status=None, deleted_at=None):
@@ -88,8 +89,8 @@ def test_soft_delete_closes_the_running_run_record(client, auth):
   assert state["deleted_at"] is not None, "chat is soft-deleted"
 
 
-def test_hard_purge_deletes_orphaned_run_records(client, auth):
-  """The list_chats TTL purge hard-deletes the Chat row; its run records must
+def test_hard_purge_deletes_orphaned_run_records():
+  """The tombstone lifecycle purge hard-deletes the Chat row; its run records must
   go with it (no FK cascade on SQLite) rather than orphaning + growing the
   table unbounded."""
   old = datetime.now(UTC).replace(tzinfo=None) - SOFT_DELETE_TTL - (
@@ -98,9 +99,11 @@ def test_hard_purge_deletes_orphaned_run_records(client, auth):
   _seed_chat("purge-me", deleted_at=old)
   _seed_run("rt-p1", "purge-me", status="completed")
   _seed_run("rt-p2", "purge-me", status="interrupted")
-  # Listing chats runs the purge sweep.
-  r = client.get("/api/chats", headers=auth)
-  assert r.status_code == 200
+  db = SessionLocal()
+  try:
+    purge_expired_chat_tombstones(db)
+  finally:
+    db.close()
   assert _chat_state("purge-me") is None, "chat row hard-deleted"
   assert _runs("purge-me") == {}, "run records purged with the chat, not orphaned"
 
@@ -127,7 +130,7 @@ def _session_links(chat_id):
     db.close()
 
 
-def test_hard_purge_deletes_session_links(client, auth):
+def test_hard_purge_deletes_session_links():
   """A chat's append-only session->chat link rows (subagent observability) must
   be purged with the chat — same no-FK-cascade lifecycle as chat_runs, else the
   table grows unbounded and the endpoint returns links to a dead chat."""
@@ -135,9 +138,11 @@ def test_hard_purge_deletes_session_links(client, auth):
   _seed_chat("purge-links", deleted_at=old)
   _seed_session_link("claude", "sess-purge-1", "purge-links")
   _seed_session_link("codex", "sess-purge-2", "purge-links")
-  # Listing chats runs the purge sweep.
-  r = client.get("/api/chats", headers=auth)
-  assert r.status_code == 200
+  db = SessionLocal()
+  try:
+    purge_expired_chat_tombstones(db)
+  finally:
+    db.close()
   assert _chat_state("purge-links") is None, "chat row hard-deleted"
   assert _session_links("purge-links") == [], "session links purged with the chat"
 

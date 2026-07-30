@@ -21,28 +21,46 @@ test('one open drawer owns at most one physical sentinel', () => {
 // closeDrawer hides the panel immediately but keeps drawerOpenRef true until Back
 // consumes the sentinel. Safari can classify that popstate as same/unknown when
 // shell indices are missing. Resolve the pending close at the event boundary;
-// never infer from drawerPushedRef that the sentinel is still current while a
-// traversal is in flight, because the next close could then over-pop a real route.
+// never infer from drawerPushedRef ALONE that the sentinel is still current
+// while a traversal is in flight, because the next close could then over-pop a
+// real route. A wedged WebKit Navigation API can also LOSE the traversal
+// outright (2026-07-29): after a bounded grace window openDrawer reconciles
+// from the CLASSIC store — which, unlike the boolean, can prove whether the
+// history cursor still sits on the sentinel — so a lost close can never refuse
+// every later open until relaunch.
 test('a pending drawer close consumes its tagged source before direction fallback', () => {
   const open = navigation.slice(
     navigation.indexOf('function openDrawer()'),
     navigation.indexOf('function closeDrawer('),
   )
   const guard = open.indexOf('if (drawerOpenRef.current) return')
-  const pending = open.indexOf('if (drawerClosePendingRef.current) return')
+  const pending = open.indexOf('if (drawerClosePendingRef.current) {')
   assert.ok(pending >= 0 && guard > pending,
-    'an unresolved traversal blocks another open before the ordinary open guard')
+    'an unresolved traversal is resolved or blocks another open before the ordinary open guard')
+  const pendingBlock = open.slice(pending, guard)
+  // Within the grace window the original serialization holds: the open returns
+  // while the close's history cursor may still legitimately be moving.
+  assert.match(pendingBlock, /DRAWER_CLOSE_TRAVERSAL_GRACE_MS[\s\S]{0,80}?return/,
+    'a fresh pending close still blocks the open')
+  // Re-adopting the sentinel after a LOST traversal requires classic-store
+  // proof that the cursor never left it — never the boolean alone.
+  assert.match(
+    pendingBlock,
+    /drawerPushedRef\.current\s*&&\s*isMobiusNavState\(history\.state\) && history\.state\.kind === 'drawer'/,
+    're-adoption is gated on the classic store still showing the drawer sentinel',
+  )
   assert.doesNotMatch(open, /if \(drawerPushedRef\.current\) \{\s*drawerOpenRef\.current = true/,
     'a boolean cannot prove that an async history cursor still sits on the sentinel')
-  assert.equal(
-    (navigation.match(
-      /if \(drawerClosePendingRef\.current && source\?\.kind === 'drawer'\) \{/g,
-    ) || []).length,
-    2,
-    'both Navigation API and popstate paths consume a pending tagged drawer source',
-  )
+  // Both traversal paths consume a pending tagged drawer source. The popstate
+  // path reads the classic store directly; the Navigation API path recognizes
+  // the consumption through its own refs BEFORE the phantom guard, because a
+  // wedged mirror store returns untagged reads for our own entries.
   assert.match(navigation,
-    /if \(drawerClosePendingRef\.current && source\?\.kind === 'drawer'\) \{[\s\S]{0,180}?handleBack\(destination, source\)/)
+    /const pendingDrawerClose = drawerClosePendingRef\.current && source\?\.kind === 'drawer'/)
+  assert.match(navigation,
+    /if \(pendingDrawerClose \|\| unreadableSentinelConsumption\) \{/)
+  assert.match(navigation,
+    /if \(drawerClosePendingRef\.current && source\?\.kind === 'drawer'\) \{\s*\n\s*handleBack\(destination, source\)/)
   // Whoever else resolves the drawer's history state clears the pending flag too,
   // so a later open cannot remain latched behind a hidden panel.
   assert.match(navigation, /drawerClosePendingRef\.current = false\s*\n\s*drawerOpenRef\.current = false\s*\n\s*setDrawerVisible\(false\)/)

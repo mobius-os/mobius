@@ -15,7 +15,10 @@
 //
 // The classic History store and Navigation API store are independent. Every
 // write below is mirrored to both or NavigationEvent.destination.getState()
-// would see shell entries as phantoms in modern Chromium.
+// would see shell entries as phantoms in modern Chromium. The mirror is
+// best-effort — see mirrorCurrentEntry.
+
+import { recordClientError } from './errorLog.js'
 
 let _entrySequence = 0
 
@@ -140,9 +143,29 @@ export function dropPopsForEntry(queue, entryId) {
   return next.length === queue.length ? queue : next
 }
 
+// The Navigation-store mirror is BEST-EFFORT. The classic History write that
+// precedes every call below is the authoritative store: all shell logic reads
+// history.state (navEntryIndex), and WebKit traversals resolve through the
+// popstate fallback. The mirror exists only so Chromium's
+// NavigationEvent.destination.getState() doesn't see shell entries as
+// phantoms.
+//
+// WebKit (iOS 18.4+ ships the Navigation API) can wedge that API into a state
+// where `updateCurrentEntry` throws InvalidStateError from native code on
+// EVERY call until the page reloads (observed in the field on an iOS
+// standalone-PWA install, 2026-07-29). Unguarded, that throw escaped AFTER
+// history.pushState had already run, killing openDrawer mid-flight on every
+// tap — the drawer opened once per fresh launch and never again, and every
+// other nav-writing tap died the same way. A failed mirror must never take
+// down the interaction that triggered it: swallow the throw and report it
+// through the debounced client-error channel so the broken engine state
+// stays diagnosable rather than silently absorbed.
 function mirrorCurrentEntry(state) {
-  if (typeof navigation !== 'undefined' && navigation.updateCurrentEntry) {
+  if (typeof navigation === 'undefined' || !navigation.updateCurrentEntry) return
+  try {
     navigation.updateCurrentEntry({ state })
+  } catch (error) {
+    recordClientError({ where: 'navHistory.mirrorCurrentEntry', error })
   }
 }
 

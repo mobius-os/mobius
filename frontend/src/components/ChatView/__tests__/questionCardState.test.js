@@ -7,6 +7,21 @@ const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8
 const scrollMode = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../QuestionCard.css', import.meta.url), 'utf8')
 
+test('question option explanations remain selectable without choosing them', () => {
+  const optionRule = css.match(/\.qcard__opt\s*\{[^}]*\}/s)?.[0] || ''
+
+  assert.match(optionRule, /user-select:\s*text/)
+  assert.match(optionRule, /-webkit-user-select:\s*text/)
+  assert.match(optionRule, /-webkit-touch-callout:\s*default/)
+  assert.match(component, /const OptionSurface = inactive \? 'div' : 'button'/,
+    'answered or disabled options should become static selectable content')
+  assert.match(
+    component,
+    /event\.detail !== 0[\s\S]*pointerSelectionChangedWithin\([\s\S]*event\.currentTarget[\s\S]*\) return[\s\S]*selectOption/,
+    'a pointer selection should not also choose the live option',
+  )
+})
+
 test('unanswered question cards do not have a stale gray state', () => {
   assert.doesNotMatch(component, /const stale = disabled && !answered/,
     'QuestionCard should not model unanswered questions as stale')

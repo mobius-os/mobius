@@ -42,6 +42,7 @@ async function mockNotifications(page, { rows = notifRows(), unreadCount } = {})
     rows,
     unreadCount,
     readAllCalls: 0,
+    deleteCalls: 0,
     get unread() {
       return this.unreadCount ?? this.rows.filter(row => row.read_at == null).length
     },
@@ -63,6 +64,15 @@ async function mockNotifications(page, { rows = notifRows(), unreadCount } = {})
     })
   })
   await page.route(/\/api\/notifications(?:\?.*)?$/, route => {
+    if (route.request().method() === 'DELETE') {
+      state.deleteCalls += 1
+      const deleted = state.rows.length
+      state.rows = []
+      state.unreadCount = 0
+      return route.fulfill({
+        status: 200, contentType: 'application/json', body: JSON.stringify({ deleted }),
+      })
+    }
     if (route.request().method() !== 'GET') return route.fallback()
     return route.fulfill({
       status: 200, contentType: 'application/json', body: JSON.stringify(state.rows.slice(0, 8)),
@@ -112,9 +122,23 @@ test('bell opens a bounded preview and seen-on-open clears its badge', async ({ 
   await expect(page.locator('.notification-bell__badge')).toHaveCount(0)
   await expect(bell).toHaveAttribute('aria-expanded', 'true')
 
-  await page.locator('.notifications__close').click()
+  await expect(page.locator('.notifications__close')).toHaveCount(0)
+  await page.locator('.notification-bell').click()
   await expect(page.locator('.notifications')).toBeHidden()
   await expect(bell).toHaveAttribute('aria-expanded', 'false')
+})
+
+test('clear all immediately removes the preview rows and badge', async ({ page }) => {
+  const state = await mockNotifications(page)
+  await setup(page)
+  await openPreview(page)
+
+  await expect(page.locator('.notifications__row')).toHaveCount(2)
+  await page.getByRole('button', { name: 'Clear all' }).click()
+  await expect.poll(() => state.deleteCalls).toBe(1)
+  await expect(page.locator('.notifications__row')).toHaveCount(0)
+  await expect(page.locator('.notifications__empty')).toBeVisible()
+  await expect(page.locator('.notification-bell__badge')).toHaveCount(0)
 })
 
 test('bell toggles; Escape and outside click dismiss without navigation', async ({ page }) => {

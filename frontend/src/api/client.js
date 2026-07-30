@@ -550,6 +550,8 @@ export const api = {
     unreadCount: () => apiFetch('/notifications/unread-count'),
     // Seen-on-open: idempotent bulk mark-read (clears the bell badge).
     readAll: () => apiFetch('/notifications/read-all', { method: 'POST' }),
+    // Owner action from the preview: remove all stored notifications.
+    clearAll: () => apiFetch('/notifications', { method: 'DELETE' }),
   },
   admin: {
     restart: () => apiFetch('/admin/restart', { method: 'POST' }),

@@ -79,3 +79,41 @@ def test_materialized_snapshot_replaces_question_barrier_row():
   projected = materialized_messages(Row())
   assert len(projected) == 1
   assert projected[0] == Row.live_assistant
+
+
+def test_codex_path_wrappers_are_normalized_before_json_storage(db):
+  class ProviderPathWrapper:
+    """Minimal stand-in for the Codex SDK's Pydantic root path wrapper."""
+
+    def __init__(self, value):
+      self.value = value
+
+    def model_dump(self, **_kwargs):
+      return self.value
+
+  chat, _history = _chat(db)
+
+  assert update_live_assistant(db, chat.id, {
+    "role": "assistant",
+    "blocks": [{
+      "type": "tool",
+      "name": "exec_command",
+      "cwd": ProviderPathWrapper("/data"),
+      "paths": [ProviderPathWrapper("/data/platform")],
+    }],
+  }) is True
+
+  db.refresh(chat)
+  block = chat.live_assistant["blocks"][0]
+  assert block["cwd"] == "/data"
+  assert block["paths"] == ["/data/platform"]
+
+  outcome = finalize_response_outcome(db, chat.id, [{
+    "type": "tool",
+    "name": "exec_command",
+    "cwd": ProviderPathWrapper("/data"),
+  }])
+
+  db.refresh(chat)
+  assert outcome.value == "applied"
+  assert chat.messages[-1]["blocks"][0]["cwd"] == "/data"

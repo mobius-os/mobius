@@ -119,6 +119,10 @@
   /* Press feedback on touch — a brief opacity dip on active is the
      low-cost equivalent of a scale transform without triggering layout. */
   -webkit-tap-highlight-color: transparent;
+  /* Choice labels and explanations are reading content as well as controls. */
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
 }
 /* Option description — inline under the label (a title= tooltip is invisible
    on touch). Quiet by design: small, muted, left-aligned with the label. The
@@ -139,14 +143,14 @@
   color: var(--muted);
   line-height: 1.35;
 }
-.qcard__opt:active:not(:disabled) {
+.qcard__opt:active:not(.qcard__opt--static) {
   opacity: .75;
 }
 .qcard__opt:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-.qcard__opt:hover:not(:disabled) {
+.qcard__opt:hover:not(.qcard__opt--static) {
   background: var(--surface2, rgba(128,128,128,.1));
 }
 .qcard__opt--on {
@@ -154,10 +158,10 @@
   color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
 }
-.qcard__opt--on:hover:not(:disabled) {
+.qcard__opt--on:hover:not(.qcard__opt--static) {
   background: color-mix(in srgb, var(--accent) 16%, var(--surface));
 }
-.qcard__opt:disabled {
+.qcard__opt--static {
   cursor: default;
   opacity: .6;
 }

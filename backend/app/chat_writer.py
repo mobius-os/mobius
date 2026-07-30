@@ -52,6 +52,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import models, schemas
+from app.json_safety import json_safe
 from app.events import (
   TOOL_OUTPUT_INLINE_THRESHOLD,
   build_assistant_message,
@@ -3548,6 +3549,9 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
   """
   if not chat_id:
     return _WriteOutcome.NOOP
+  message = json_safe(copy.deepcopy(message))
+  if not isinstance(message, dict):
+    return _WriteOutcome.NOOP
   # `_active_chat` filters soft-deleted rows, so a finalize/snapshot enqueued
   # before a delete maps to NOOP here instead of resurrecting the dead row.
   chat = _active_chat(db, chat_id)
@@ -3644,7 +3648,9 @@ def update_live_assistant(
   if row is None:
     return None if require_row else True
   existing = row[0] if isinstance(row[0], dict) else None
-  snapshot = copy.deepcopy(message)
+  snapshot = json_safe(copy.deepcopy(message))
+  if not isinstance(snapshot, dict):
+    return True
   state = None
   answer_source = existing
   if existing is None:

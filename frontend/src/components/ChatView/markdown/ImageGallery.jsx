@@ -166,6 +166,12 @@ export default function ImageGallery({ images, mediaDimensions }) {
       className={`md-image-gallery md-image-gallery--${Math.min(count, 3)}`}
       aria-label={`Related images, ${count} items`}
     >
+      <div className="md-image-gallery__header" aria-hidden="true">
+        <span className="md-image-gallery__title">Gallery</span>
+        <span className="md-image-gallery__count">
+          {count} {count === 1 ? 'image' : 'images'}
+        </span>
+      </div>
       <div
         ref={railRef}
         className="md-image-gallery__rail"

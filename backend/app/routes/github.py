@@ -439,6 +439,19 @@ def _record_pending_equivalence(record: dict) -> str | None:
   if repos is None:
     return None
   source_repo, review_repo = repos
+  plan_base_sha = str(plan.get("base_sha") or "")
+  plan_head_sha = str(plan.get("head_sha") or "")
+  # Older cleanup could remove a linked review worktree before the merged-state
+  # poll created its durable witness. The reviewed commits remain in the live
+  # repository, but only reuse it when both immutable commits still resolve.
+  if (
+    not app_git.ref_exists(review_repo, f"{plan_base_sha}^{{commit}}")
+    or not app_git.ref_exists(review_repo, f"{plan_head_sha}^{{commit}}")
+  ) and (
+    app_git.ref_exists(source_repo, f"{plan_base_sha}^{{commit}}")
+    and app_git.ref_exists(source_repo, f"{plan_head_sha}^{{commit}}")
+  ):
+    review_repo = source_repo
   source_sha = str(plan.get("source_sha") or "").strip()
   current_source = app_git.head_sha(source_repo, "HEAD")
   if not source_sha:
@@ -455,8 +468,8 @@ def _record_pending_equivalence(record: dict) -> str | None:
   if not source_sha:
     return None
   kwargs = {
-    "base_sha": str(plan.get("base_sha") or ""),
-    "head_sha": str(plan.get("head_sha") or ""),
+    "base_sha": plan_base_sha,
+    "head_sha": plan_head_sha,
     "diff_sha256": str(plan.get("diff_sha256") or ""),
     "contribution_id": str(record.get("id") or ""),
     "review_source_dir": review_repo,
@@ -547,16 +560,21 @@ def _settle_equivalence(record: dict, upstream_sha: str | None = None) -> str | 
   repo, _review_repo = repos
   digest = str(plan.get("diff_sha256") or "")
   if record.get("status") == "merged":
-    return app_git.mark_equivalent_change_landed(
+    equivalent = app_git.mark_equivalent_change_landed(
       repo, digest, upstream_sha=upstream_sha,
     )
+    if equivalent is None and _record_pending_equivalence(record) is not None:
+      equivalent = app_git.mark_equivalent_change_landed(
+        repo, digest, upstream_sha=upstream_sha,
+      )
+    return equivalent
   if record.get("status") == "closed":
     app_git.discard_pending_equivalent_change(repo, digest)
   return None
 
 
 def _cleanup_terminal_staging_checkout(record: dict) -> bool:
-  """Remove only disposable contribution clones for terminal records."""
+  """Remove a terminal contribution checkout through its owning Git shape."""
   if record.get("status") not in {"merged", "closed"}:
     return False
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
@@ -565,8 +583,73 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
   roots = (data_dir / "contrib", data_dir / "contributions")
   if not any(repo.is_relative_to(root) for root in roots):
     return False
-  if not (repo / ".git").exists():
+  marker = repo / ".git"
+  if not marker.exists() or marker.is_symlink():
     return False
+
+  # A linked worktree has a .git *file*. Deleting its directory directly
+  # strands the registration and branch lock in the source repository. Ask Git
+  # to remove it instead, using the common directory as the stable owner even
+  # while the checkout itself disappears.
+  if marker.is_file():
+    env = dict(os.environ)
+    for name in (
+      "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+      "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+    ):
+      env.pop(name, None)
+    probe = subprocess.run(
+      [
+        "git", "-C", str(repo), "rev-parse", "--path-format=absolute",
+        "--git-dir", "--git-common-dir",
+      ],
+      cwd=str(repo.parent),
+      capture_output=True,
+      text=True,
+      check=False,
+      env=env,
+    )
+    paths = [Path(line).resolve() for line in probe.stdout.splitlines() if line]
+    if probe.returncode != 0 or len(paths) != 2:
+      return False
+    git_dir, common_dir = paths
+    if not common_dir.is_relative_to(data_dir):
+      return False
+
+    if git_dir != common_dir:
+      removed = subprocess.run(
+        [
+          "git", f"--git-dir={common_dir}",
+          "worktree", "remove", "--force", str(repo),
+        ],
+        cwd=str(data_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+      )
+      if removed.returncode != 0:
+        detail = (removed.stderr or removed.stdout or "git worktree remove failed").strip()
+        raise ContributionSubmitError(detail[:600])
+      subprocess.run(
+        ["git", f"--git-dir={common_dir}", "worktree", "prune"],
+        cwd=str(data_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+      )
+      return True
+
+    # Manifest-installed apps use `--separate-git-dir=<record-root>/git`.
+    # That is a main checkout rather than a linked worktree, so remove both
+    # halves only when the git directory is the documented sibling.
+    shutil.rmtree(repo)
+    if common_dir.name == "git" and common_dir.parent == repo.parent:
+      shutil.rmtree(common_dir, ignore_errors=True)
+    return True
+
+  # Ordinary standalone clones keep a real .git directory inside the checkout.
   shutil.rmtree(repo)
   return True
 
@@ -1959,6 +2042,77 @@ def _find_existing_pr(
   return None
 
 
+def _existing_branch_pr(
+  repo: Path,
+  upstream_repo: str,
+  login: str,
+  branch: str,
+  *,
+  same_repo: bool = False,
+) -> tuple[str, str] | None:
+  """Truth check before first publication: this branch's existing OPEN or
+  MERGED pull request in the upstream repo, as ``(url, state)``, else None.
+
+  The submit preflights above prove WHAT would be sent (the exact reviewed
+  diff); only the agent-writable ledger row claims the record was never sent
+  before — and that row can lie (field incident 2026-07-29: a freshly-merged
+  PR's record was rewritten back to ``prepared`` by a stale re-stage, so one
+  more Send would have force-pushed the merged branch and opened a duplicate
+  PR). GitHub is the one store that cannot drift from the public truth, so
+  ask it directly. Fail CLOSED: a lookup that cannot complete raises instead
+  of letting the send proceed blind — the send needs GitHub reachable anyway.
+  A PR closed WITHOUT merging is not returned: rework-and-resend of a
+  rejected branch stays legitimate. An open PR outranks a merged one in the
+  report so the message names the row that would collide first.
+  """
+  could_not_verify = (
+    "Could not verify whether this branch already has a pull request. "
+    "Nothing was pushed; try again once GitHub is reachable."
+  )
+  expected_owner = upstream_repo.split("/", 1)[0] if same_repo else login
+  try:
+    proc = _gh(
+      repo,
+      "pr", "list",
+      "-R", upstream_repo,
+      "--head", branch,
+      "--state", "all",
+      "--json", "url,state,headRefName,headRepositoryOwner",
+      "--limit", "20",
+      check=False,
+    )
+  except (subprocess.TimeoutExpired, OSError) as exc:
+    raise ContributionSubmitError(could_not_verify) from exc
+  if proc.returncode != 0:
+    detail = (proc.stderr or proc.stdout or "").strip()
+    suffix = f" ({detail[:200]})" if detail else ""
+    raise ContributionSubmitError(could_not_verify + suffix)
+  try:
+    rows = json.loads(proc.stdout or "[]")
+  except ValueError:
+    raise ContributionSubmitError(could_not_verify) from None
+  merged: tuple[str, str] | None = None
+  if isinstance(rows, list):
+    for row in rows:
+      if not isinstance(row, dict):
+        continue
+      owner = row.get("headRepositoryOwner")
+      owner_login = owner.get("login") if isinstance(owner, dict) else ""
+      if str(owner_login or "").casefold() != expected_owner.casefold():
+        continue
+      if str(row.get("headRefName") or "") != branch:
+        continue
+      url = row.get("url")
+      if not (isinstance(url, str) and url.startswith("https://github.com/")):
+        continue
+      state_label = str(row.get("state") or "").upper()
+      if state_label == "OPEN":
+        return (url, "open")
+      if state_label == "MERGED" and merged is None:
+        merged = (url, "merged")
+  return merged
+
+
 def _is_workflow_scope_push_error(message: str) -> bool:
   """Recognize GitHub's stable OAuth workflow-scope rejection."""
   detail = str(message or "").lower()
@@ -2521,6 +2675,33 @@ def _submit_prepared_pr(
     submit_base = direct_base or _validate_branch(
       str(merge_patch.get("last_submit_upstream_branch") or "")
     )
+
+    # Pre-publication truth check: everything above proves WHAT would be sent;
+    # only the ledger row says WHETHER it was already sent, and that row is
+    # agent-writable state that can regress (see _existing_branch_pr). Ask
+    # GitHub before touching anything public — an OPEN or MERGED pull request
+    # from this exact branch means this send can only be a duplicate, and
+    # today's flow would push FIRST (silently rewriting that PR's public
+    # branch) before GitHub refused the create. The resume path
+    # (expected_existing_pr_number) legitimately expects its open PR and
+    # keeps its own stricter exact-commit verification below.
+    if expected_existing_pr_number is None:
+      conflict = _existing_branch_pr(
+        repo,
+        upstream_repo,
+        login,
+        branch,
+        same_repo=bool(direct_base),
+      )
+      if conflict is not None:
+        conflict_url, conflict_state = conflict
+        raise ContributionSubmitError(
+          f"This branch already has a {conflict_state} pull request: "
+          f"{conflict_url}. Nothing was pushed. Reconcile this card with "
+          "that pull request — or re-stage the work on a fresh branch — "
+          "instead of sending it again.",
+          record_patch=record_patch,
+        )
 
     push_source = "HEAD"
     if direct_base:

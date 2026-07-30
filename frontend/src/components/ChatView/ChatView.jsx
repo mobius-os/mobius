@@ -875,9 +875,7 @@ export default function ChatView({
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
     turnRunning: sending || serverRunning,
-    initialEntryCanReveal: initialEntryPhase === 'cached'
-      || initialEntryPhase === 'ready',
-    initialEntrySettled: initialEntryPhase === 'ready',
+    initialEntryPhase,
   })
 
   // Forward committed pane-geometry changes to the scroll controller. A new
@@ -1888,7 +1886,11 @@ export default function ChatView({
           chatInfo: nextChatInfo,
         }))
         if (serverSnapshotBehindLocal(msgs, messagesRef.current)) {
-          setInitialEntryPhase(data.running ? 'catch-up' : 'ready')
+          // The successful detail read is the authoritative entry frame even
+          // when a live tail still needs to catch up. Keeping that already
+          // useful transcript hidden until stream settlement turns the replay
+          // safety deadline into chat-navigation latency.
+          setInitialEntryPhase('ready')
           setLoading(false)
           return
         }
@@ -1922,7 +1924,7 @@ export default function ChatView({
           runningAtMount: !!data.running,
           lastMsgAtMount: msgs.length > 0 ? msgs[msgs.length - 1] : null,
         })
-        setInitialEntryPhase(data.running ? 'catch-up' : 'ready')
+        setInitialEntryPhase('ready')
         setLoading(false)
 
         // Hydrate pending queue from backend so a reload mid-queue
@@ -3372,18 +3374,8 @@ export default function ChatView({
   // only a commit bumps it, so this skips the initial mount.
   useLayoutEffect(() => {
     if (catchUpCommitSeq === 0) return
-    setInitialEntryPhase(phase => phase === 'catch-up' ? 'ready' : phase)
     reapplyActiveMode()
   }, [catchUpCommitSeq, reapplyActiveMode])
-
-  // A stale `running` history snapshot can be followed by an authoritative
-  // terminal response without a catch-up commit. Release the bounded entry
-  // gate instead of waiting for its safety deadline.
-  useEffect(() => {
-    if (initialEntryPhase === 'catch-up' && !turnActive) {
-      setInitialEntryPhase('ready')
-    }
-  }, [initialEntryPhase, turnActive])
 
   // Promotion and this sequence update share one React batch, so the terminal
   // pin decision runs after the settled assistant DOM is committed and before

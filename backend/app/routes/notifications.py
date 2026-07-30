@@ -104,6 +104,21 @@ def read_all(
   return {"updated": int(updated)}
 
 
+@router.delete("", dependencies=[Depends(reject_cross_site)])
+def clear_notifications(
+  owner: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Delete all stored notifications for the owner. Idempotent."""
+  deleted = (
+    db.query(models.Notification)
+    .filter(models.Notification.owner_id == owner.id)
+    .delete(synchronize_session=False)
+  )
+  db.commit()
+  return {"deleted": int(deleted)}
+
+
 @router.get("")
 def list_notifications(
   # Owner-only: the notification history is the owner's. App tokens have no

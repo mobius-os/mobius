@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 const drawerCss = readFileSync(new URL('../../Drawer/Drawer.css', import.meta.url), 'utf8')
+const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 const chatSurfaceModel = readFileSync(new URL('../chatSurfaceModel.js', import.meta.url), 'utf8')
 const workspaceChrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
@@ -28,6 +29,27 @@ test('chat display readiness preserves the authoritative transcript reveal gate'
     'an already-ready chat must re-announce when a cross-pane move changes its handoff owner')
   assert.doesNotMatch(chatView, /onDisplayReadyRef/,
     'the callback dependency is the owner-change signal; a parallel mutable ref would obscure it')
+})
+
+test('authoritative running history releases the held chat before stream catch-up', () => {
+  const initialLoad = chatView.match(
+    /apiFetch\(`\/chats\/\$\{chatId\}\?limit=20&compact=1`,[\s\S]*?\n  \}, \[chatId, loadNonce, hidden\]\)/,
+  )?.[0] || ''
+  assert.match(
+    initialLoad,
+    /if \(serverSnapshotBehindLocal[\s\S]*setInitialEntryPhase\('ready'\)/,
+    'a useful local frame must be revealed after the authoritative detail read',
+  )
+  assert.match(
+    initialLoad,
+    /setInitialEntryPhase\('ready'\)[\s\S]*if \(data\.running\) \{[\s\S]*connectToStream\(false\)/,
+    'stream catch-up should continue after the persisted frame becomes paintable',
+  )
+  assert.doesNotMatch(
+    initialLoad,
+    /setInitialEntryPhase\(data\.running \? 'catch-up' : 'ready'\)/,
+    'a running marker must not turn replay settlement into navigation latency',
+  )
 })
 
 test('a staging chat cannot leave the outgoing transcript held on a wedged request', () => {
@@ -102,7 +124,7 @@ test('only the painted workspace world can expose its handoff layers', () => {
 
 test('app-supplied drafts update retained composers as well as remounted chats', () => {
   assert.match(shell,
-    /navTo\('chat', \{ chatId: e\.data\.chatId \}\)[\s\S]*requestComposer\(e\.data\.chatId, \{ draft: draftText \}\)/,
+    /navToRef\.current\('chat', \{ chatId: request\.chatId \}\)[\s\S]*requestComposer\(request\.chatId, \{ draft: draftText \}\)/,
     'the open-chat handoff must target the live composer after navigation')
   assert.match(chatView,
     /typeof composerRequest\.draft === 'string'[\s\S]*handleComposerInputChange\(composerRequest\.draft\)/,
@@ -150,10 +172,17 @@ test('the held chat is an opaque layer above staging until the atomic swap', () 
 
 test('chat selection settles without flashing or crossfading text layers', () => {
   const drawerItem = ruleBody('.drawer__item', drawerCss)
+  const drawerPress = ruleBody('.drawer__item:not(.drawer__item--active):active', drawerCss)
   assert.equal(
     drawerItem.match(/transition:\s*([^;]+);/)?.[1],
     'background-color 0.12s',
     'the selected title color must snap instead of tweening its glyphs')
+  assert.doesNotMatch(indexCss, /\.drawer__item:active\b/,
+    'drawer press feedback must stay out of the global scale contract')
+  assert.match(drawerPress, /background-color:\s*var\(--surface\)/,
+    'an unselected row should retain quiet press feedback')
+  assert.doesNotMatch(drawerPress, /transform:/,
+    'drawer press feedback must keep the row geometry fixed')
 
   assert.match(ruleBody('.shell__chat-view > .chat'), /transition:\s*opacity 90ms ease-out/,
     'the ready transcript should settle on its existing mounted surface')

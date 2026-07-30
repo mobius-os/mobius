@@ -18,13 +18,13 @@ import pytest
 
 import app.main as main
 import app.frontend_watcher as fw
+from app.frontend_assets import reset_frontend_dir_cache
 
 
 def _reset_memo():
   """Force _resolve_static_dir to recompute (its ~1s memo would otherwise pin
   a stale choice across the deliberate dist mutations these tests make)."""
-  main._static_dir_memo["dir"] = None
-  main._static_dir_memo["at"] = 0.0
+  reset_frontend_dir_cache()
 
 
 def _write_build(root, marker):

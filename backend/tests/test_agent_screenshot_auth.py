@@ -16,7 +16,14 @@ SESSION_RESET = (
 )
 PREVIEW_APP = Path(__file__).parents[1] / "scripts" / "preview_app.sh"
 SHELL = Path(__file__).parents[2] / "frontend" / "src" / "components" / "Shell" / "Shell.jsx"
-STANDALONE = Path(__file__).parents[1] / "app" / "routes" / "standalone.py"
+STANDALONE = (
+  Path(__file__).parents[2]
+  / "frontend"
+  / "src"
+  / "components"
+  / "StandaloneApp"
+  / "StandaloneApp.jsx"
+)
 SHELL_ENTRY = "index-test-fixture.js"
 
 
@@ -875,7 +882,7 @@ def test_content_mode_suppresses_modals_without_dom_surgery():
 
   assert "querySelectorAll('.wt__overlay, #install-backdrop')" not in helper
   assert "const showWalkthrough = !visualContentOnly" in shell
-  assert "if (visualContentOnly) return;" in standalone
+  assert "!visualContentOnly && (" in standalone
 
 
 def test_app_preview_requests_ephemeral_content_only_mode():

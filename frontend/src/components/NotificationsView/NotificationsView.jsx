@@ -1,7 +1,11 @@
-import { Agent, Bell, Chat, Grid, SettingsSlider, X } from '@openai/apps-sdk-ui/components/Icon'
-import { useEffect, useState } from 'react'
+import { Agent, Bell, Chat, Grid, SettingsSlider } from '@openai/apps-sdk-ui/components/Icon'
+import { useEffect, useRef, useState } from 'react'
 import { notificationQueries } from '../../hooks/queries.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
+import {
+  pointerSelectionChangedWithin,
+  textSelectionSnapshot,
+} from '../../lib/selectableTextControl.js'
 import { formatRelativeTime, iconKindForSource } from './notificationsModel.js'
 import './NotificationsView.css'
 
@@ -16,10 +20,13 @@ const ICONS = {
 // A deliberately small shell preview, not a new navigation world. TRUST:
 // app-authored title/body stay plain text, app-authored icon URLs are ignored,
 // and targets pass through the fail-closed shared parser before navigation.
-export default function NotificationsView({ active = false, onClose, onOpenTarget }) {
+export default function NotificationsView({ active = false, onOpenTarget, onClearAll }) {
   const { data, isLoading, isError } = notificationQueries.list.useQuery({ enabled: active })
   const rows = data ?? []
   const [now, setNow] = useState(() => Date.now())
+  const pointerSelectionRef = useRef(null)
+  const [isClearing, setIsClearing] = useState(false)
+  const [clearError, setClearError] = useState(false)
 
   // Relative labels are live information, not a one-time formatting pass.
   // Refreshing once a minute keeps an open preview from saying "now" forever.
@@ -29,6 +36,19 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
     const timer = window.setInterval(() => setNow(Date.now()), 60_000)
     return () => window.clearInterval(timer)
   }, [active])
+
+  const handleClearAll = async () => {
+    if (!rows.length || isClearing) return
+    setIsClearing(true)
+    setClearError(false)
+    try {
+      await onClearAll()
+    } catch {
+      setClearError(true)
+    } finally {
+      setIsClearing(false)
+    }
+  }
 
   return (
     <section
@@ -40,14 +60,16 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
         <h2 id="notification-preview-title" className="notifications__title">
           Notifications
         </h2>
-        <button
-          type="button"
-          className="notifications__close"
-          aria-label="Close notifications"
-          onClick={onClose}
-        >
-          <X width={18} height={18} aria-hidden="true" />
-        </button>
+        {rows.length > 0 && (
+          <button
+            type="button"
+            className="notifications__clear"
+            onClick={handleClearAll}
+            disabled={isClearing}
+          >
+            {isClearing ? 'Clearing…' : 'Clear all'}
+          </button>
+        )}
       </div>
       <div className="notifications__content">
         {isLoading && (
@@ -56,6 +78,11 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
         {isError && !rows.length && (
           <p className="notifications__hint" role="alert">
             Couldn’t load notifications. They’ll retry automatically.
+          </p>
+        )}
+        {clearError && (
+          <p className="notifications__hint notifications__hint--error" role="alert">
+            Couldn’t clear notifications. Try again when you’re online.
           </p>
         )}
         {!isLoading && !isError && rows.length === 0 && (
@@ -93,7 +120,21 @@ export default function NotificationsView({ active = false, onClose, onOpenTarge
                   <button
                     type="button"
                     className="notifications__row notifications__row--link"
-                    onClick={() => onOpenTarget?.(nav)}
+                    onPointerDown={() => {
+                      pointerSelectionRef.current = textSelectionSnapshot()
+                    }}
+                    onClick={(event) => {
+                      const selectionBeforePointer = pointerSelectionRef.current
+                      pointerSelectionRef.current = null
+                      if (
+                        event.detail !== 0
+                        && pointerSelectionChangedWithin(
+                          selectionBeforePointer,
+                          event.currentTarget,
+                        )
+                      ) return
+                      onOpenTarget?.(nav)
+                    }}
                   >
                     {body}
                   </button>

@@ -884,10 +884,14 @@ test('New chat and Apps share one compact navigation rhythm', () => {
   )
 })
 
-test('the Möbius header flows into navigation without a divider', () => {
+test('the Möbius header keeps its phone divider but flows into desktop navigation', () => {
   assert.match(
     shellCss,
-    /\.shell__bar\s*\{[\s\S]*?border-bottom:\s*0;/,
+    /\.shell__bar\s*\{[\s\S]*?border-bottom:\s*1px solid var\(--border-light\);/,
+  )
+  assert.match(
+    shellCss,
+    /@media \(min-width: 1024px\)[\s\S]*?\.shell__bar\s*\{[\s\S]*?border:\s*0;/,
   )
   assert.match(
     shellCss,

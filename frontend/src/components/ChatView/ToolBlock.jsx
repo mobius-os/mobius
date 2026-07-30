@@ -17,6 +17,10 @@ import {
   durableImageReference,
   toolImageReference,
 } from './toolImageResult.js'
+import {
+  pointerSelectionChangedWithin,
+  textSelectionSnapshot,
+} from '../../lib/selectableTextControl.js'
 
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
 // output reads as a terminal (stdout / stderr / exit code) and a structured
@@ -105,6 +109,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const [copyState, setCopyState] = useState('idle')
   const copyTimerRef = useRef(null)
   const copyControllerRef = useRef(null)
+  const pointerSelectionRef = useRef(null)
   const effectiveName = effectiveToolName(t)
   const isShell = effectiveName === 'Bash' || effectiveName === 'shell'
   const label = toolCallLabel(t)
@@ -368,7 +373,19 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
           id={headerId}
           type="button"
           className="chat__tool-header"
-          onClick={() => {
+          onPointerDown={() => {
+            pointerSelectionRef.current = textSelectionSnapshot()
+          }}
+          onClick={(event) => {
+            const selectionBeforePointer = pointerSelectionRef.current
+            pointerSelectionRef.current = null
+            if (
+              event.detail !== 0
+              && pointerSelectionChangedWithin(
+                selectionBeforePointer,
+                headerRef.current,
+              )
+            ) return
             preserveTogglePosition(headerRef.current, detailRef.current)
             setOpen(o => !o)
           }}
