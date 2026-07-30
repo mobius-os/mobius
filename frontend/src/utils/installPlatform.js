@@ -55,10 +55,11 @@ export function detectInstallPlatform(ua, maxTouchPoints) {
 export function installCopyForPlatform(
   p = detectInstallPlatform(),
   standaloneMode = false,
+  productName = 'Möbius',
 ) {
   if (standaloneMode) {
     return {
-      title: 'Möbius is installed',
+      title: `${productName} is installed`,
       summary: 'It already opens as an app on this device.',
       body: 'You’re already using the installed app.',
       ctaLabel: 'Got it',
@@ -67,7 +68,7 @@ export function installCopyForPlatform(
 
   if (p.ios) {
     return {
-      title: 'Add Möbius to your Home Screen',
+      title: `Add ${productName} to your Home Screen`,
       summary: 'Use Share, then Add to Home Screen.',
       body: 'Open your browser’s Share menu, choose Add to Home Screen, keep Open as Web App turned on, then tap Add.',
       ctaLabel: 'Show me',
@@ -76,25 +77,25 @@ export function installCopyForPlatform(
 
   if (p.firefox && p.android) {
     return {
-      title: 'Install Möbius',
+      title: `Install ${productName}`,
       summary: 'Use the Firefox menu to add it.',
-      body: 'Open the Firefox menu, tap Install, then add Möbius to your Home Screen.',
+      body: `Open the Firefox menu, tap Install, then add ${productName} to your Home Screen.`,
       ctaLabel: 'Show me',
     }
   }
 
   if (p.firefox && p.windows) {
     return {
-      title: 'Install Möbius',
+      title: `Install ${productName}`,
       summary: 'Pin it to your Windows taskbar.',
-      body: 'Click the web-app button in the Firefox address bar. Möbius will open in its own window and appear in your taskbar and Start menu.',
+      body: `Click the web-app button in the Firefox address bar. ${productName} will open in its own window and appear in your taskbar and Start menu.`,
       ctaLabel: 'Show me',
     }
   }
 
   if (p.chromium && p.android) {
     return {
-      title: 'Install Möbius',
+      title: `Install ${productName}`,
       summary: 'Use your browser menu to add it.',
       body: 'Open the browser menu, then choose Install app or Add to Home screen.',
       ctaLabel: 'Show me',
@@ -103,34 +104,34 @@ export function installCopyForPlatform(
 
   if (p.chromium && p.desktop) {
     return {
-      title: 'Install Möbius',
+      title: `Install ${productName}`,
       summary: 'Keep it in your dock or taskbar.',
-      body: 'Click the install icon in the address bar, or open the browser menu and choose Install Möbius.',
+      body: `Click the install icon in the address bar, or open the browser menu and choose Install ${productName}.`,
       ctaLabel: 'Show me',
     }
   }
 
   if (p.desktopSafari && p.mac) {
     return {
-      title: 'Add Möbius to your Dock',
+      title: `Add ${productName} to your Dock`,
       summary: 'Open it like a Mac app.',
-      body: 'In Safari, open the File menu and choose Add to Dock.',
+      body: `In Safari, open the File menu and choose Add to Dock.`,
       ctaLabel: 'Show me',
     }
   }
 
   if (p.firefox && p.desktop) {
     return {
-      title: 'Keep Möbius close',
+      title: `Keep ${productName} close`,
       summary: 'This Firefox version cannot install web apps.',
-      body: 'Open Möbius in Chrome, Edge, or Safari to install it as an app, or bookmark this page in Firefox.',
+      body: `Open ${productName} in Chrome, Edge, or Safari to install it as an app, or bookmark this page in Firefox.`,
       ctaLabel: 'Options',
       unsupported: true,
     }
   }
 
   return {
-    title: 'Install Möbius',
+    title: `Install ${productName}`,
     summary: 'Keep it one click away.',
     body: 'Look for Install, Add to Home Screen, or Add to Dock in your browser’s address bar or menu.',
     ctaLabel: 'Show me',

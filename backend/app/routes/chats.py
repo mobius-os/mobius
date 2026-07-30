@@ -4,9 +4,7 @@ import hashlib
 import json
 import logging
 import re
-import shutil
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse, Response
@@ -19,13 +17,13 @@ from app.config import get_settings
 from app.chat import (
   _clear_run_status,
   bump_run_generation,
-  forget_chat,
   is_chat_running,
   mark_chat_deleted,
   recover_chat_generation,
   stop_chat_for,
 )
 from app.broadcast import get_system_broadcast
+from app.chat_retention import purge_expired_chat_tombstones
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
 from app.deps import (
@@ -59,19 +57,11 @@ app_chat_router = APIRouter(prefix="/api/app-chats", tags=["app-chats"])
 # SOFT_DELETE_TTL is imported from app.timeutil — one shared window for chat +
 # app soft-delete so the two recovery periods can't drift.
 
-# How long an untouched empty chat (no session, no messages, no pending
-# queue) survives before the list_chats sweeper hard-deletes it. Long
-# enough that a user who opened a chat, started a draft in the browser,
-# and walked away for the afternoon doesn't lose it; short enough that
-# abandoned empties don't pile up across weeks. Hard-delete (not soft)
-# because there's nothing to recover — content lived only in the
-# browser's sessionStorage, which is the user's problem to preserve.
-EMPTY_CHAT_GRACE = timedelta(hours=24)
-
-# The expanded tool UI renders at most this much text. Compressed rows inflate
-# only this bounded prefix for preview; legacy plain-text rows are sliced after
-# their normal database read. The exact value remains available through the
-# same endpoint when the user explicitly copies.
+# The expanded tool UI renders at most this much text. Slice in SQLite so a
+# multi-megabyte result is never materialized in the API process or browser just
+# to paint the preview. Read one extra sentinel character to detect truncation
+# without making SQLite scan the full value with ``length()``. The exact value
+# remains available through the same endpoint when the user explicitly copies.
 TOOL_OUTPUT_PREVIEW_CHARS = 20_000
 THINKING_TRACE_PREVIEW_CHARS = 20_000
 
@@ -166,42 +156,6 @@ def _drain_writer_before_sidecar_read(
   # this request-scoped session. End that read-only snapshot after the barrier
   # so the query can see the writer's just-committed stash.
   db.rollback()
-
-
-def _purge_chat_dir(chat_id: str) -> None:
-  """Removes per-chat dirs left on disk after a chat is gone.
-
-  Three locations get cleaned: the chat's data dir
-  (`/data/chats/{chat_id}/` — uploads, media, scratch),
-  its agent-browser Chromium profile
-  (`/data/agent-browser-profiles/chat-{chat_id}/` — IndexedDB,
-  cache, cookies; typically 50-200 MB per profile that's seen any
-  use), and its memory note dir
-  (`/data/shared/memory/chats/{chat_id}/`). Without the second
-  rmtree, profiles accumulated across every chat that ever invoked
-  agent-browser and were never reclaimed by chat-delete or the
-  7-day soft-delete purge — a slow disk leak proportional to chat
-  count, not time. The note is DERIVED from the chat, so the
-  owner's delete intent covers it; by hard-purge time the 7-day
-  soft-delete window plus nightly reflection have had time to
-  promote durable facts into topic notes, and an orphan note would
-  otherwise linger as a memory entry pointing at a chat that no
-  longer exists.
-
-  All rmtrees use `ignore_errors=True` so chats that never wrote
-  to a given location don't raise.
-  """
-  data_dir = Path(get_settings().data_dir)
-  shutil.rmtree(data_dir / "chats" / chat_id, ignore_errors=True)
-  shutil.rmtree(
-    data_dir / "agent-browser-profiles" / f"chat-{chat_id}",
-    ignore_errors=True,
-  )
-  shutil.rmtree(
-    data_dir / "shared" / "memory" / "chats" / chat_id,
-    ignore_errors=True,
-  )
-
 
 
 class ChatUpdate(BaseModel):
@@ -370,6 +324,17 @@ def _owner_chat_summary_projection(chat) -> dict:
   }
 
 
+def _reclaim_expired_tombstones_after_chat_write(db: Session) -> None:
+  """Run unrelated retention cleanup without changing the write's outcome."""
+  try:
+    purge_expired_chat_tombstones(db)
+  except Exception:
+    db.rollback()
+    # The requested create/delete is already committed. Retention retries at
+    # the next chat lifecycle write or boot rather than falsifying its result.
+    log.exception("Expired chat tombstone cleanup failed after chat write")
+
+
 def _chat_detail_response(
   chat: models.Chat,
   *,
@@ -486,110 +451,6 @@ def list_chats(
 ):
   """Returns all active chats ordered by most recently updated."""
   record_memory_checkpoint_once("shell_chat_list_first_request")
-  # Purge chats soft-deleted more than TTL ago.
-  # Use naive datetime to match SQLite's naive UTC storage — comparing an
-  # aware datetime against a naive DB value throws TypeError in Python 3.11+.
-  cutoff = now_naive_utc() - SOFT_DELETE_TTL
-  stale = db.query(models.Chat).filter(
-    models.Chat.deleted_at.isnot(None),
-    models.Chat.deleted_at < cutoff,
-  ).all()
-  for c in stale:
-    questions.cancel(c.id)
-    forget_chat(c.id)
-    _purge_chat_dir(c.id)
-    # Drop the chat's durable run records (077 Step 3) with it. chat_runs has
-    # no ON DELETE CASCADE and SQLite leaves FK enforcement off, so a hard
-    # chat delete would otherwise orphan its run rows and grow the table
-    # unbounded over the instance's life.
-    # Lifecycle rows can reference both the chat and one of its runs, so delete
-    # them before either parent for FK-correctness on stricter databases.
-    db.query(models.AgentLifecycleEvent).filter(
-      models.AgentLifecycleEvent.chat_id == c.id
-    ).delete(synchronize_session=False)
-    db.query(models.AgentLifecycleRunUpdate).filter(
-      models.AgentLifecycleRunUpdate.chat_id == c.id
-    ).delete(synchronize_session=False)
-    db.query(models.ChatRun).filter(
-      models.ChatRun.chat_id == c.id
-    ).delete(synchronize_session=False)
-    # Drop the chat's stashed large tool outputs (contract rule 6) with it —
-    # same lifecycle, same no-FK-cascade reasoning as chat_runs above. The
-    # rows rode the soft-delete window (a recovered chat re-showed its
-    # outputs); at hard-purge time the chat is gone for good, so are they.
-    db.query(models.ToolOutput).filter(
-      models.ToolOutput.chat_id == c.id
-    ).delete(synchronize_session=False)
-    db.query(models.ThinkingTrace).filter(
-      models.ThinkingTrace.chat_id == c.id
-    ).delete(synchronize_session=False)
-    # Drop the chat's session->chat link rows (subagent observability) with it —
-    # same no-FK-cascade lifecycle as chat_runs. A link records every provider
-    # session this chat was ever seen under; once the chat is gone for good the
-    # links resolve to nothing, so purge them here rather than leak dead rows.
-    db.query(models.ChatSessionLink).filter(
-      models.ChatSessionLink.chat_id == c.id
-    ).delete(synchronize_session=False)
-    db.delete(c)
-  # Hard-delete abandoned empties — chats that were created, never had
-  # a message sent (no session_id, no messages, no pending queue), and
-  # have been sitting that way for over EMPTY_GRACE. The soft-delete
-  # TTL above is for chats the user EXPLICITLY deleted — those have
-  # content worth a 7-day recovery window. An untouched empty has
-  # nothing to recover; the soft-delete dance just defers reclaim.
-  # The grace protects a chat opened minutes ago with a draft in the
-  # browser's sessionStorage from being nuked out from under the user
-  # between draft autosaves. JSON-column emptiness is checked in Python
-  # rather than SQL because cross-dialect `JSON = '[]'` is fragile;
-  # the SQL prefilter (NULL session, NULL deleted_at, older than the
-  # grace) keeps the candidate set small.
-  empty_cutoff = now_naive_utc() - EMPTY_CHAT_GRACE
-  candidates = db.query(models.Chat).filter(
-    models.Chat.deleted_at.is_(None),
-    models.Chat.session_id.is_(None),
-    models.Chat.created_at < empty_cutoff,
-  ).all()
-  for c in candidates:
-    if c.messages or c.pending_messages:
-      continue
-    # An app-attributed chat is a mini-app's durable anchor: the app persists
-    # its id (window.mobius.chat persist -> chat_id.json) and resumes it across
-    # mounts, so an empty app-chat is not abandoned scratch the way an owner's
-    # new-chat-then-leave is. Hard-deleting it left the app's persisted id
-    # pointing at a dead row, so the next mount's resume PATCH 404'd. Leave
-    # app-chats for the app + the soft-delete TTL to manage.
-    if c.created_by_app_id is not None:
-      continue
-    questions.cancel(c.id)
-    forget_chat(c.id)
-    _purge_chat_dir(c.id)
-    # Drop the chat's run records with it (see the stale-purge note above —
-    # no FK cascade on SQLite, so these would orphan otherwise).
-    db.query(models.AgentLifecycleEvent).filter(
-      models.AgentLifecycleEvent.chat_id == c.id
-    ).delete(synchronize_session=False)
-    db.query(models.AgentLifecycleRunUpdate).filter(
-      models.AgentLifecycleRunUpdate.chat_id == c.id
-    ).delete(synchronize_session=False)
-    db.query(models.ChatRun).filter(
-      models.ChatRun.chat_id == c.id
-    ).delete(synchronize_session=False)
-    db.query(models.ChatSessionLink).filter(
-      models.ChatSessionLink.chat_id == c.id
-    ).delete(synchronize_session=False)
-    db.delete(c)
-  # Notification TTL: rows are written by agent-driven push calls
-  # (POST /api/notifications/send), and nothing else deletes them. Keep
-  # the table from growing unbounded by dropping anything older than
-  # 90 days alongside the chat purge above — same cadence, same
-  # transaction. Naive UTC matches `Notification.sent_at`'s storage
-  # format (see the chat cutoff above for the same TypeError-avoidance
-  # rationale).
-  notification_cutoff = now_naive_utc() - timedelta(days=90)
-  db.query(models.Notification).filter(
-    models.Notification.sent_at < notification_cutoff,
-  ).delete(synchronize_session=False)
-  db.commit()
 
   # Pinned chats sort first (newest pin at top of the pinned group),
   # then unpinned by owner-send recency. `activity_at` is the drawer
@@ -831,6 +692,7 @@ def create_chat(
   db.commit()
   db.refresh(chat)
   activity.log_event("chat_created", chat_id=chat.id)
+  _reclaim_expired_tombstones_after_chat_write(db)
   # Preserve the flat summary + messages fields existing callers consume while
   # carrying the exact detail contract under its own forward-compatible key.
   detail = _chat_detail_response(chat, db=db)
@@ -1712,6 +1574,9 @@ async def delete_chat(
       "Chat %s was deleted but its durable run marker could not be cleared",
       chat_id,
     )
+  # The current chat has just entered its recovery window and therefore cannot
+  # be selected when this existing lifecycle boundary reclaims older tombstones.
+  _reclaim_expired_tombstones_after_chat_write(db)
 
 
 @router.post("/{chat_id}/recover", dependencies=[Depends(reject_cross_site)])

@@ -198,7 +198,11 @@ async function setupAppRoutes(page, appId, frameHTML) {
   )
 }
 
-async function setupOpenAppRoutesWithStaleInitialList(page, appId, frameHTML) {
+async function setupOpenAppRoutesWithStaleInitialList(
+  page,
+  sourceAppId,
+  targetAppId,
+) {
   await page.setViewportSize({ width: 412, height: 915 })
   await page.addInitScript(() => {
     localStorage.setItem('token', 'mock-owner-token')
@@ -217,17 +221,20 @@ async function setupOpenAppRoutesWithStaleInitialList(page, appId, frameHTML) {
     running: false,
     run_status: null,
   }
-  const app = {
-    id: appId,
-    name: 'CubeRun',
-    slug: 'cuberun',
+  const app = (id, name, slug) => ({
+    id,
+    name,
+    slug,
     description: 'test',
-    compiled_path: `/data/compiled/app-${appId}.js`,
+    compiled_path: `/data/compiled/app-${id}.js`,
     chat_id: null,
-    source_dir: `/data/apps/cuberun`,
+    source_dir: `/data/apps/${slug}`,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-  }
+  })
+  const sourceApp = app(sourceAppId, 'Launcher', 'launcher')
+  const targetApp = app(targetAppId, 'CubeRun', 'cuberun')
+  let targetVisible = false
 
   await page.route(/\/api\/chats$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
@@ -254,7 +261,7 @@ async function setupOpenAppRoutesWithStaleInitialList(page, appId, frameHTML) {
     route.fulfill({
       status: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(appsFetches === 1 ? [] : [app]),
+      body: JSON.stringify(targetVisible ? [sourceApp, targetApp] : [sourceApp]),
     })
   })
   await page.route(/\/api\/auth\/app-token$/, route =>
@@ -264,18 +271,24 @@ async function setupOpenAppRoutesWithStaleInitialList(page, appId, frameHTML) {
       body: JSON.stringify({ token: 'mock-app-token' }),
     })
   )
-  await page.route(new RegExp(`/api/apps/${appId}/frame`), route =>
-    route.fulfill({
+  await page.route(/\/api\/apps\/(\d+)\/frame/, route => {
+    const match = route.request().url().match(/\/api\/apps\/(\d+)\/frame/)
+    const appId = Number(match?.[1])
+    if (appId !== sourceAppId && appId !== targetAppId) return route.fallback()
+    return route.fulfill({
       status: 200,
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-cache',
       },
-      body: frameHTML,
+      body: mockFrameHTML(appId, { sendMounted: true }),
     })
-  )
+  })
 
-  return { getAppsFetches: () => appsFetches }
+  return {
+    getAppsFetches: () => appsFetches,
+    revealTarget: () => { targetVisible = true },
+  }
 }
 
 /** Wait for the browser frame behind an iframe element, not just the DOM node.
@@ -294,22 +307,6 @@ async function waitForContentFrame(page, selector, timeout = 10000) {
   }).toBe(true)
   return frame
 }
-
-async function postFromOpaqueCanvasFrame(page, data) {
-  await page.evaluate(() => {
-    const frame = document.createElement('iframe')
-    frame.className = 'canvas canvas--test-sender'
-    frame.setAttribute('sandbox', 'allow-scripts')
-    frame.srcdoc = '<!doctype html><script>window.__ready = true<\/script>'
-    document.body.appendChild(frame)
-  })
-  const frame = await waitForContentFrame(page, 'iframe.canvas--test-sender')
-  await frame.waitForFunction(() => window.__ready === true)
-  await frame.evaluate((message) => {
-    window.parent.postMessage(message, '*')
-  }, data)
-}
-
 
 test.describe('AppCanvas: iframe-mount contract', () => {
   test('loading spinner hides as soon as frame posts moebius:frame-mounted', async ({ page }) => {
@@ -609,29 +606,32 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await expect(page.locator('.canvas-loading')).toBeVisible()
   })
 
-  test('open-app message refetches stale app list before staying on chat', async ({ page }) => {
-    const appId = 55
+  test('open-app request from a live app frame refetches a stale app list', async ({ page }) => {
+    const sourceAppId = 44
+    const targetAppId = 55
     const routes = await setupOpenAppRoutesWithStaleInitialList(
       page,
-      appId,
-      mockFrameHTML(appId, { sendMounted: true })
+      sourceAppId,
+      targetAppId,
     )
 
-    await page.goto(`${BASE}/shell/?chat=open-app-chat`, { waitUntil: 'domcontentloaded' })
-    await page.waitForFunction(() => window.location.pathname === '/shell/')
-
-    // A real app frame cannot post before the lazy Shell has mounted it and
-    // installed its receiver. Mirror that topology before adding our synthetic
-    // opaque sender.
-    await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeVisible()
-
-    await postFromOpaqueCanvasFrame(page, {
-      type: 'moebius:open-app', appId,
-    })
-
-    await expect(page.locator(`iframe[data-app-id="${appId}"]`)).toBeVisible({ timeout: 8000 })
+    await page.goto(`${BASE}/app/${sourceAppId}`, { waitUntil: 'domcontentloaded' })
+    const sourceSelector = `iframe[data-app-id="${sourceAppId}"]`
+    await expect(page.locator(sourceSelector)).toBeVisible({ timeout: 8000 })
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 8000 })
-    expect(routes.getAppsFetches()).toBeGreaterThanOrEqual(2)
+    const sourceFrame = await waitForContentFrame(page, sourceSelector)
+
+    const fetchesBeforeRequest = routes.getAppsFetches()
+    routes.revealTarget()
+    await sourceFrame.evaluate((appId) => {
+      window.parent.postMessage({ type: 'moebius:open-app', appId }, '*')
+    }, targetAppId)
+
+    await expect(page.locator(`iframe[data-app-id="${targetAppId}"]`)).toBeVisible({
+      timeout: 8000,
+    })
+    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 8000 })
+    expect(routes.getAppsFetches()).toBeGreaterThan(fetchesBeforeRequest)
   })
 
   test('app-error from a hidden incoming frame is swallowed; the live frame forwards a crash draft', async ({ page }) => {

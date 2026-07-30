@@ -7,6 +7,10 @@ import {
   writeQuestionDraft,
 } from './questionDraft.js'
 import { textareaUsesNativeSizing } from './composerTextareaSizing.js'
+import {
+  pointerSelectionChangedWithin,
+  textSelectionSnapshot,
+} from '../../lib/selectableTextControl.js'
 
 
 function resolveAnswer(answer, otherText) {
@@ -121,6 +125,7 @@ export default function QuestionCard({
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
   const [submitError, setSubmitError] = useState('')
+  const pointerSelectionRef = useRef(null)
 
   const answered = submitted || !!answeredMap
   const displayAnswers = answeredMap || {}
@@ -309,15 +314,30 @@ export default function QuestionCard({
                     ? isChosen
                     : (isMulti ? selectedArr.includes(opt.label) : selected === opt.label)
                   const dimmed = answered && !isChosen
+                  const OptionSurface = inactive ? 'div' : 'button'
                   return (
-                    <button
+                    <OptionSurface
                       key={oi}
-                      type="button"
+                      type={inactive ? undefined : 'button'}
                       role={isMulti ? 'checkbox' : 'radio'}
                       aria-checked={isActive}
-                      className={`qcard__opt${isActive ? ' qcard__opt--on' : ''}${dimmed ? ' qcard__opt--dim' : ''}`}
-                      onClick={answered ? undefined : () => selectOption(q.question, opt.label)}
-                      disabled={inactive}
+                      aria-disabled={inactive || undefined}
+                      className={`qcard__opt${isActive ? ' qcard__opt--on' : ''}${dimmed ? ' qcard__opt--dim' : ''}${inactive ? ' qcard__opt--static' : ''}`}
+                      onPointerDown={inactive ? undefined : () => {
+                        pointerSelectionRef.current = textSelectionSnapshot()
+                      }}
+                      onClick={inactive ? undefined : (event) => {
+                        const selectionBeforePointer = pointerSelectionRef.current
+                        pointerSelectionRef.current = null
+                        if (
+                          event.detail !== 0
+                          && pointerSelectionChangedWithin(
+                            selectionBeforePointer,
+                            event.currentTarget,
+                          )
+                        ) return
+                        selectOption(q.question, opt.label)
+                      }}
                       title={opt.description || ''}
                     >
                       <span
@@ -335,7 +355,7 @@ export default function QuestionCard({
                       ) : (
                         opt.label
                       )}
-                    </button>
+                    </OptionSurface>
                   )
                 })
               })()}

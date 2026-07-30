@@ -151,6 +151,9 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     }
     const { app } = await applyApp(request, token, options)
     const standaloneUrl = `${BASE}/apps/${app.slug}/`
+    const standaloneMarker = () => page
+      .frameLocator(`iframe[data-app-id="${app.id}"]`)
+      .locator('#standalone-revision')
 
     try {
       await page.evaluate(async () => {
@@ -165,9 +168,9 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       )).toBe(true)
 
       await page.goto(standaloneUrl, { waitUntil: 'domcontentloaded' })
-      await expect(page.locator('#standalone-revision')).toHaveText(firstMarker)
+      await expect(standaloneMarker()).toHaveText(firstMarker)
       await expect.poll(() => page.evaluate(async url => {
-        const cache = await caches.open('mobius-standalone-v2')
+        const cache = await caches.open('mobius-standalone-v3')
         return !!await cache.match(url)
       }, standaloneUrl)).toBe(true)
 
@@ -184,12 +187,12 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       // cache-first standalone route serves revision one here and only refreshes
       // the cache in the background, forcing a second reload to see the update.
       await page.goto(standaloneUrl, { waitUntil: 'domcontentloaded' })
-      await expect(page.locator('#standalone-revision')).toHaveText(secondMarker)
+      await expect(standaloneMarker()).toHaveText(secondMarker)
 
       // The same authoritative response is now the offline fallback.
       await context.setOffline(true)
       await page.reload({ waitUntil: 'domcontentloaded' })
-      await expect(page.locator('#standalone-revision')).toHaveText(secondMarker)
+      await expect(standaloneMarker()).toHaveText(secondMarker)
     } finally {
       await context.setOffline(false)
       await request.delete(`${BASE}/api/apps/${app.id}`, {

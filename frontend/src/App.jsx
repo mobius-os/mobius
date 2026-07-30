@@ -10,6 +10,7 @@ import { shellReload } from './lib/shellReloadState.js'
 import { beginEmbedBootstrap } from './lib/chatEmbedBootstrap.js'
 import { startInstallPromptCapture } from './lib/installPrompt.js'
 import { safeReturnPath } from './lib/safeReturnPath.js'
+import { readStandaloneBoot } from './lib/standaloneBoot.js'
 
 // These flows are mutually exclusive. Keep setup, login, the full shell, and
 // the opaque embed out of one another's startup path; first boot should not
@@ -18,6 +19,7 @@ const SetupWizard = lazy(() => import('./components/SetupWizard/SetupWizard.jsx'
 const LoginForm = lazy(() => import('./components/LoginForm/LoginForm.jsx'))
 const Shell = lazy(() => import('./components/Shell/Shell.jsx'))
 const ChatEmbed = lazy(() => import('./components/ChatEmbed/ChatEmbed.jsx'))
+const StandaloneApp = lazy(() => import('./components/StandaloneApp/StandaloneApp.jsx'))
 
 // True when this SPA load is the stripped-chrome chat embed
 // (capability A). The SPA catch-all serves index.html for any non-API
@@ -37,6 +39,7 @@ function isEmbedRoute() {
 }
 
 const EMBED_ROUTE = isEmbedRoute()
+const STANDALONE_APP = readStandaloneBoot()
 if (EMBED_ROUTE) {
   beginEphemeralAuth()
   beginEmbedBootstrap()
@@ -242,7 +245,9 @@ function AppRoot() {
   )
   return (
     <Suspense fallback={<RouteLoading label="Loading Möbius" />}>
-      <Shell />
+      {STANDALONE_APP
+        ? <StandaloneApp initialApp={STANDALONE_APP} />
+        : <Shell />}
     </Suspense>
   )
 }

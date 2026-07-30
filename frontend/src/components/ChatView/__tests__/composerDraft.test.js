@@ -251,7 +251,7 @@ test('shell draft handoffs use the same owner instead of writing around its live
   assert.doesNotMatch(chatSource, directDraftWrite,
     'chat cleanup must clear memory, session, and durable copies together')
   assert.match(shellSource, /persistComposerDraft\(buildingChatId, report\)/)
-  assert.match(shellSource, /persistComposerDraft\(e\.data\.chatId, draftText\)/)
+  assert.match(shellSource, /persistComposerDraft\(request\.chatId, draftText\)/)
   assert.match(shellSource, /persistComposerDraft\(chatId, draftText\)/)
   assert.match(shellSource, /clearComposerDraft\(id\)/)
   assert.match(chatSource, /clearComposerDraft\(chatId\)/)

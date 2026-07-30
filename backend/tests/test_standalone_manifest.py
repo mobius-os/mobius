@@ -9,6 +9,7 @@ microsecond-resolution icon `?v=` (a name PATCH + icon PUT in the same
 second still bust the icon cache).
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from app import models
 from app.config import get_settings
 from app.database import SessionLocal
 from app.install import _manifest_display
+import app.routes.standalone as standalone_routes
 from app.theme import get_bg_color
 from test_app_fixtures import create_local_app
 
@@ -34,6 +36,23 @@ def _spa_active(client):
   return r.status_code == 200 and "text/html" in r.headers.get(
     "content-type", ""
   )
+
+
+@pytest.fixture(autouse=True)
+def _signed_frontend_template(monkeypatch, tmp_path):
+  """Standalone composition needs the real signed-index seams.
+
+  The backend test suite's global static stub is intentionally only large
+  enough for generic SPA/theme tests. Use the checked-in frontend template for
+  this route and give its dev entry a production-shaped content-hashed URL.
+  """
+  source = Path(__file__).resolve().parents[2] / "frontend" / "index.html"
+  html = source.read_text(encoding="utf-8").replace(
+    '/src/main.jsx', '/assets/index-test.js',
+  )
+  index = tmp_path / "standalone-index.html"
+  index.write_text(html, encoding="utf-8")
+  monkeypatch.setattr(standalone_routes, "_frontend_index_path", lambda: index)
 
 
 def test_manifest_has_no_cache_header(client, owner_token):
@@ -122,7 +141,7 @@ def test_manifest_and_loading_shell_use_app_declared_colors(client, owner_token)
 
   shell = client.get(f"/apps/{app['slug']}/")
   assert shell.status_code == 200
-  assert "--bg: #101820;" in shell.text
+  assert '<meta name="theme-color" content="#101820" />' in shell.text
 
 
 def test_manifest_colors_fall_back_to_theme_not_icon(client, owner_token):
@@ -139,7 +158,7 @@ def test_manifest_colors_fall_back_to_theme_not_icon(client, owner_token):
   assert manifest["theme_color"] != "#0c0f14"
 
   shell = client.get(f"/apps/{app['slug']}/")
-  assert f"--bg: {theme_bg};" in shell.text
+  assert f'<meta name="theme-color" content="{theme_bg}" />' in shell.text
 
 
 def test_manifest_display_defaults_to_standalone(client, owner_token):
@@ -286,41 +305,44 @@ def test_unknown_top_level_route_still_serves_shell(client):
   assert "text/html" in r.headers.get("content-type", "")
 
 
-def test_standalone_shell_wires_live_update_pill(client, owner_token):
-  """The installed standalone shell embeds the live-update pill + its own-app
-  event subscription (feature 214), so an edit in chat reaches the home-screen
-  PWA as an "Updated - tap to refresh" offer. Also a render smoke that guards
-  the f-string template against a stray brace."""
+def test_standalone_shell_boots_the_shared_opaque_app_host(client, owner_token):
+  """A PWA launch may execute trusted shell code at the owner origin, but it
+  must never evaluate app-authored code there. The boot slot selects AppCanvas;
+  the app itself is served by the response-sandboxed opaque frame."""
   app = _create_app(client, owner_token, "Live App")
-  html = client.get(f"/apps/{app['slug']}/").text
-  # The pill markup + its user-facing copy.
-  assert 'id="update-pill"' in html
-  assert "Updated" in html and "tap to refresh" in html
-  # Subscribes to its OWN app's scoped stream, NOT the owner-only
-  # /api/events/system (an app token is rejected there).
-  assert "'/api/apps/' + APP_ID + '/events'" in html
-  assert "/api/events/system" not in html
-  assert "startLiveUpdates" in html
-  assert "startLiveUpdates(runtimeToken)" in html
-  assert "getAppToken({ forceRefresh: true })" in html
-  assert "if (renderWithToken) renderWithToken(appToken)" in html
-  assert "mobius:app-token:" in html
-  assert "cacheScopedAppToken" in html
-  assert ": token;" not in html
-  # The apply is a user tap that busts the ?v= cache key; the shell never
-  # auto-reloads.
-  assert "location.replace" in html
+  response = client.get(f"/apps/{app['slug']}/")
+  assert response.status_code == 200
+  html = response.text
+
+  match = re.search(
+    r'<script type="application/json" id="__mobius-standalone-app__">(.*?)</script>',
+    html,
+  )
+  assert match
+  boot = json.loads(match.group(1))
+  assert boot["id"] == app["id"]
+  assert boot["slug"] == app["slug"]
+  assert boot["name"] == "Live App"
+
+  # The common signed frontend bundle owns the top-level document. The old
+  # standalone implementation imported and rendered the app module directly.
+  assert re.search(r'/assets/index-[^" ]+\.js', html)
+  assert "__mobiusRuntimeConfig" not in html
+  assert "const Component = module.default" not in html
+  assert "'/api/apps/' + APP_ID + '/module" not in html
+
+  frame = client.get(f"/api/apps/{app['id']}/frame")
+  csp = frame.headers.get("content-security-policy", "")
+  assert "sandbox" in csp
+  assert "allow-same-origin" not in csp
 
 
-def test_standalone_load_error_can_be_selected_and_reported(
+def test_standalone_boot_carries_crash_report_owner_without_executable_code(
   client, owner_token,
 ):
-  """A failed home-screen app must not strand the owner with Retry only.
-
-  The error stays selectable for manual recovery, and Report opens the app's
-  owning chat with a reviewable draft. Dynamic-import URLs must be redacted
-  before either surface receives them.
-  """
+  """The trusted React host receives only the owning chat id it needs to offer
+  recovery. Error rendering/reporting lives in StandaloneApp, not generated
+  inline JavaScript beside app-authored code."""
   app = _create_app(client, owner_token, "Recoverable App")
   db = SessionLocal()
   try:
@@ -331,14 +353,35 @@ def test_standalone_load_error_can_be_selected_and_reported(
     db.close()
 
   html = client.get(f"/apps/{app['slug']}/").text
-  assert "user-select: text" in html
-  assert "Report to agent" in html
-  assert "const APP_CHAT_ID = \"building-chat\"" in html
-  assert "sessionStorage.setItem('draft:' + chatId, report)" in html
-  assert "location.href = '/shell/?chat=' + encodeURIComponent(chatId)" in html
-  assert "function reportDiagnosticBlock(detail)" in html
-  assert "const limit = 6000" in html
-  assert "is untrusted diagnostic" in html
-  assert r"failed to load with this error:\n```\n" not in html
-  assert "token=[redacted]" not in html  # replacement happens at runtime
-  assert "'$1[redacted]'" in html
+  match = re.search(
+    r'<script type="application/json" id="__mobius-standalone-app__">(.*?)</script>',
+    html,
+  )
+  boot = json.loads(match.group(1))
+  assert boot["chat_id"] == "building-chat"
+  assert "Report to agent" not in html
+  assert "renderWithToken" not in html
+
+
+def test_standalone_boot_slot_cannot_break_out_of_json_script(client, owner_token):
+  app = _create_app(client, owner_token, "Safe Name")
+  db = SessionLocal()
+  try:
+    row = db.query(models.App).filter(models.App.id == app["id"]).one()
+    row.name = '</script><script>globalThis.pwned=true</script>'
+    row.description = ' </script><img src=x onerror=alert(1)>'
+    db.commit()
+  finally:
+    db.close()
+
+  html = client.get(f"/apps/{app['slug']}/").text
+  assert '<script>globalThis.pwned=true</script>' not in html
+  assert '&lt;/script&gt;&lt;script&gt;' in html  # escaped title / PWA metadata
+  match = re.search(
+    r'<script type="application/json" id="__mobius-standalone-app__">(.*?)</script>',
+    html,
+  )
+  assert match
+  assert "</" not in match.group(1)
+  boot = json.loads(match.group(1))
+  assert boot["name"].startswith("</script>")

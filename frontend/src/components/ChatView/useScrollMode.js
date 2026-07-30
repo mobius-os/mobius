@@ -60,7 +60,7 @@ import { isPerfProbeEnabled, perfMark, perfTime } from '../../lib/perfProbe.js'
 
 // Hide-then-reveal safety cap. The ordinary path reveals after authoritative
 // history and one quiet layout window; this is only the escape hatch for a
-// stalled history/catch-up handshake. Image bytes are deliberately NOT part of
+// stalled history/layout handshake. Image bytes are deliberately NOT part of
 // readiness: inline media owns a reserved frame and ResizeObserver keeps the
 // saved anchor stable as lazy previews arrive after reveal.
 const REVEAL_CAP_MS = 1500
@@ -1000,10 +1000,10 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  * @param {boolean} args.turnRunning
  *   Whether a reader-owned move to the latest user's reserved bottom should
  *   arm the ordinary spacer-exhaustion handoff while output is still live.
- * @param {boolean} args.initialEntryCanReveal
- *   Whether entry has a trustworthy idle cache or settled server history.
- * @param {boolean} args.initialEntrySettled
- *   Whether authoritative history and any first mount catch-up have settled.
+ * @param {'history'|'cached'|'ready'} args.initialEntryPhase
+ *   One entry-readiness state: history blocks reveal, cached permits an
+ *   immediate first paint while layout stabilizes, and ready means the
+ *   authoritative history read has settled.
  *
  * @returns {{
  *   gestureWindowUntilRef: React.MutableRefObject<number>,
@@ -1032,8 +1032,7 @@ export default function useScrollMode({
   pendingMessagesLength,
   loadingOlderRef,
   turnRunning,
-  initialEntryCanReveal,
-  initialEntrySettled,
+  initialEntryPhase,
 }) {
   const [revealed, setRevealed] = useState(false)
   // A tiny React mirror reruns the layout effect when a semantic transition
@@ -1112,12 +1111,11 @@ export default function useScrollMode({
   // observer/listener whenever the boolean changes.
   const turnRunningRef = useRef(!!turnRunning)
   turnRunningRef.current = !!turnRunning
-  const initialEntryCanRevealRef = useRef(!!initialEntryCanReveal)
-  initialEntryCanRevealRef.current = !!initialEntryCanReveal
-  const initialEntrySettledRef = useRef(!!initialEntrySettled)
-  initialEntrySettledRef.current = !!initialEntrySettled
+  const initialEntryPhaseRef = useRef(initialEntryPhase)
+  initialEntryPhaseRef.current = initialEntryPhase
   // A normal reveal ends entry stabilization. A forced safety-cap reveal keeps
-  // the saved anchor under layout ownership until history/catch-up/media settle.
+  // the saved anchor under layout ownership until authoritative history and
+  // transcript layout settle.
   const mountStabilizingRef = useRef(true)
   const forceRevealRef = useRef(null)
 
@@ -1761,14 +1759,15 @@ export default function useScrollMode({
     }
     paneResizeRunRef.current = runPaneResize
 
-    // Reveal from trusted idle cache or after authoritative history/first
-    // catch-up once transcript layout stays quiet for 50ms. Lazy image previews
+    // Reveal from trusted cache or after authoritative history once transcript
+    // layout stays quiet for 50ms. Lazy image previews
     // are not a reveal dependency: their frames already reserve space and the
     // same ResizeObserver keeps ANCHOR_AT stable if a measured ratio differs.
     // REVEAL_CAP_MS remains the escape hatch for a request that stalls.
     let revealTimer = 0
     let mountMutationObserver = null
-    const entryReady = () => initialEntryCanRevealRef.current
+    const entryReady = () => initialEntryPhaseRef.current === 'cached'
+      || initialEntryPhaseRef.current === 'ready'
     const requestRevealOnQuiet = () => {
       clearTimeout(revealTimer)
       if (revealedRef.current && !mountStabilizingRef.current) return
@@ -1777,7 +1776,7 @@ export default function useScrollMode({
         if (scrollRef.current !== scrollEl || !entryReady()) return
         syncLayout()
         revealedRef.current = true
-        mountStabilizingRef.current = !initialEntrySettledRef.current
+        mountStabilizingRef.current = initialEntryPhaseRef.current !== 'ready'
         setRevealed(true)
         if (!mountStabilizingRef.current) mountMutationObserver?.disconnect()
       }, 50)
@@ -2302,8 +2301,7 @@ export default function useScrollMode({
     messages,
     pendingMessagesLength,
     chatId,
-    initialEntryCanReveal,
-    initialEntrySettled,
+    initialEntryPhase,
     pinModeActive,
     syncComposerGeometry,
   ])

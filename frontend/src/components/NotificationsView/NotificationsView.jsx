@@ -1,7 +1,11 @@
 import { Agent, Bell, Chat, Grid, SettingsSlider } from '@openai/apps-sdk-ui/components/Icon'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { notificationQueries } from '../../hooks/queries.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
+import {
+  pointerSelectionChangedWithin,
+  textSelectionSnapshot,
+} from '../../lib/selectableTextControl.js'
 import { formatRelativeTime, iconKindForSource } from './notificationsModel.js'
 import './NotificationsView.css'
 
@@ -20,6 +24,7 @@ export default function NotificationsView({ active = false, onOpenTarget, onClea
   const { data, isLoading, isError } = notificationQueries.list.useQuery({ enabled: active })
   const rows = data ?? []
   const [now, setNow] = useState(() => Date.now())
+  const pointerSelectionRef = useRef(null)
   const [isClearing, setIsClearing] = useState(false)
   const [clearError, setClearError] = useState(false)
 
@@ -115,7 +120,21 @@ export default function NotificationsView({ active = false, onOpenTarget, onClea
                   <button
                     type="button"
                     className="notifications__row notifications__row--link"
-                    onClick={() => onOpenTarget?.(nav)}
+                    onPointerDown={() => {
+                      pointerSelectionRef.current = textSelectionSnapshot()
+                    }}
+                    onClick={(event) => {
+                      const selectionBeforePointer = pointerSelectionRef.current
+                      pointerSelectionRef.current = null
+                      if (
+                        event.detail !== 0
+                        && pointerSelectionChangedWithin(
+                          selectionBeforePointer,
+                          event.currentTarget,
+                        )
+                      ) return
+                      onOpenTarget?.(nav)
+                    }}
                   >
                     {body}
                   </button>

@@ -875,9 +875,7 @@ export default function ChatView({
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
     turnRunning: sending || serverRunning,
-    initialEntryCanReveal: initialEntryPhase === 'cached'
-      || initialEntryPhase === 'ready',
-    initialEntrySettled: initialEntryPhase === 'ready',
+    initialEntryPhase,
   })
 
   // Forward committed pane-geometry changes to the scroll controller. A new

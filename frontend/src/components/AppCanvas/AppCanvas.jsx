@@ -19,6 +19,7 @@ import { createCapabilityHost } from '../../lib/capabilityHost.js'
 import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
 import { fetchAppModuleBytes } from '../../lib/appModuleBroker.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
+import { appHostRequest } from '../../lib/appHostRequest.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
@@ -135,16 +136,13 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      shell wrapper. The live frame signals the parent so its pane becomes the
 //      focused owner of keyboard and immersive state.
 //
-// Shell-level messages (handled by Shell.jsx, NOT this file):
-//   - {type: 'moebius:app-error', appId, error, chatId?}    frame → shell
-//   - {type: 'moebius:new-chat', draft?, autoSend?}          frame → shell
-//   - {type: 'moebius:open-chat', chatId, draft?}           frame → shell
-//   - {type: 'moebius:open-app', appId}                     frame → shell
-//     Switch the shell to another installed app. `appId` may be the
-//     numeric DB id or the slug; Shell matches against its apps list
-//     and silently ignores unknown ids. This is app-SWITCHING (closes
-//     the source iframe's view, opens another app's iframe), distinct
-//     from `nav-push` which is intra-app routing within one iframe.
+// Host-level messages (attributed and narrowed here, outcomes owned by the
+// `onHostRequest` callback):
+//   - {type: 'moebius:new-chat', draft?, autoSend?}          frame → host
+//   - {type: 'moebius:open-chat', chatId, draft?}            frame → host
+//   - {type: 'moebius:open-app', appId, intent?}             frame → host
+//   - {type: 'moebius:open-settings', section?}              frame → host
+// App crashes are separately attributed here and sent to `onAppError`.
 //
 // Why token-free frame URL: `GET /api/apps/{id}/frame?v={version}` is
 // unauthenticated. Token arrives via postMessage so the long-lived JWT
@@ -256,7 +254,7 @@ export default function AppCanvas({
   interactive = visible,
   pendingIntent = null,
   onNavPush, onNavPop, onNavReset, onNavForwardResult,
-  onAppFocus, onImmersive, onIntentDelivered, onAppError,
+  onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
 }) {
   const queryClient = useQueryClient()
   const [serviceSurface, setServiceSurface] = useState(null)
@@ -784,6 +782,15 @@ export default function AppCanvas({
         return
       }
 
+      // Navigation outside the app belongs to its trusted host. Keep source
+      // attribution and wire-format narrowing here, beside every other frame
+      // request, so no host needs to rediscover iframe identity.
+      const hostRequest = appHostRequest(msg)
+      if (hostRequest && onHostRequest) {
+        onHostRequest(appId, hostRequest)
+        return
+      }
+
       if (capabilityHostRef.current.handle(e.source, msg)) return
 
       if (msg.type === 'moebius:open-service') {
@@ -870,7 +877,7 @@ export default function AppCanvas({
     return () => window.removeEventListener('message', onMessage)
   }, [
     appId, appSlug, onNavPush, onNavPop, onNavForwardResult,
-    onAppFocus, onImmersive, onAppError, queryClient,
+    onAppFocus, onImmersive, onAppError, onHostRequest, queryClient,
   ])
 
   // Capabilities belong to a visible workspace pane, not merely the focused

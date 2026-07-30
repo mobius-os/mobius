@@ -114,6 +114,22 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
   ]
 
 
+def test_startup_retires_integrated_app_provenance(client, auth, db):
+  source = _source()
+  created = _apply(client, auth, source)
+  assert created.status_code == 200, created.text
+  upstream = app_git.head_sha(source, app_git.UPSTREAM_BRANCH)
+
+  with patch.object(
+    app_git, "retire_landed_equivalent_changes", return_value=2,
+  ) as retire:
+    retired, warnings = app_apply.retire_integrated_app_provenance(db)
+
+  assert retired == 2
+  assert warnings == []
+  retire.assert_called_once_with(source, upstream)
+
+
 def test_local_manifest_icon_is_materialized_with_its_accepted_revision(
   client, auth, db,
 ):
