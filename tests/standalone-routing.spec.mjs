@@ -52,6 +52,8 @@ test('legacy /cuberun route opens the standalone app, not the Mobius shell', asy
 
   await page.goto(`${BASE}/cuberun`, { waitUntil: 'domcontentloaded' })
   await expect(page).toHaveURL(`${BASE}/apps/cuberun/`)
-  await expect(page.locator('#root')).toContainText('CubeRun standalone smoke')
+  await expect(
+    page.frameLocator('iframe[data-app-id]').getByTestId('cuberun-smoke'),
+  ).toHaveText('CubeRun standalone smoke')
   expect(await page.title()).toBe('CubeRun')
 })
