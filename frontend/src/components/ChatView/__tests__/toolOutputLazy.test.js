@@ -9,8 +9,10 @@ test('expansion keeps ordinary output bounded and image fallback cancellable', (
   const end = src.indexOf('// Show the larger bounded preview', start)
   const effect = src.slice(start, end)
 
-  assert.match(effect, /if \(!open\) \{\s*setLoadingPreview\(false\)\s*return\s*\}/,
-    'closing the disclosure clears the visible loading state')
+  assert.match(effect, /if \(!prepareRequested\) \{\s*setLoadingPreview\(false\)\s*return\s*\}/,
+    'canceling first-open preparation clears its loading state')
+  assert.match(src, /function releaseClosedDetail\(\) \{[\s\S]*setLoadingPreview\(false\)/,
+    'closing a visible disclosure releases its transient loading state')
   assert.match(effect, /if \(t\.status === 'running'\) return/,
     'an intermediate sidecar is never read before the matching tool settles')
   assert.match(effect, /\+ \(isImageTool \? '' : '\?preview=1'\)/,

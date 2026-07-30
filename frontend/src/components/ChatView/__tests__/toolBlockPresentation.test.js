@@ -3,6 +3,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 const toolBlock = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
+const toolImageResult = readFileSync(new URL('../ToolImageResult.jsx', import.meta.url), 'utf8')
+const toolImagePreview = readFileSync(new URL('../useToolImagePreview.js', import.meta.url), 'utf8')
 const activityHeader = readFileSync(new URL('../ActivityLineHeader.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
@@ -56,6 +58,39 @@ test('viewed images expand directly without repeating their path or result card'
   assert.match(chatCss,
     /\.chat__tool--image\.chat__tool--compact \.chat__tool-detail[\s\S]*?border:\s*0;[\s\S]*?background:\s*none;/,
     'the expanded image does not regain the generic nested detail card')
+})
+
+test('cold tool and image detail reveal only after their final layout is ready', () => {
+  assert.match(
+    toolBlock,
+    /const detailReady = previewReady && imageReady\s*const open = desiredOpen && detailReady/,
+    'user intent is distinct from the one rendered open boundary',
+  )
+  assert.match(toolBlock, /onPointerDown=\{\(\) => setPrepareRequested\(true\)\}/,
+    'pointer-down starts preparation before the click boundary')
+  assert.match(
+    toolBlock,
+    /onKeyDown=\{\(event\) => \{[\s\S]*event\.key === 'Enter' \|\| event\.key === ' '[\s\S]*setPrepareRequested\(true\)/,
+    'keyboard activation gets the same first-open preparation without prefetching every tab stop',
+  )
+  assert.match(
+    toolBlock,
+    /if \(!isImageTool\) revealBeforeReady\(\)\s*setPreviewOutput\(text\)/,
+    'bounded text output preserves position immediately before it becomes revealable',
+  )
+  assert.match(toolImagePreview, /const image = new window\.Image\(\)/,
+    'viewed images decode through a detached browser image')
+  assert.match(toolImagePreview, /await image\.decode\(\)/)
+  assert.match(
+    toolImagePreview,
+    /onSettledRef\.current\?\.\(\)\s*setPreview\(\{\s*reference,\s*status: 'ready'/,
+    'the disclosure boundary is armed before decoded dimensions enter state',
+  )
+  assert.match(toolImageResult, /preview\?\.reference === reference/)
+  assert.match(toolImageResult, /imageLoading="eager"/,
+    'the already-decoded resource is painted immediately when inserted')
+  assert.doesNotMatch(toolImageResult, /aria-busy|Loading image|useEffect/,
+    'the visible image body has no transient loading layout')
 })
 
 test('a lone tool activity uses the borderless compact disclosure surface', () => {

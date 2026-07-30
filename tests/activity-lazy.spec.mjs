@@ -89,6 +89,146 @@ test('the first thinking event becomes interactive without moving the row', asyn
   expect(Math.abs(after.height - before.height)).toBeLessThanOrEqual(0.5)
 })
 
+test('cold historical activity reveals once at its final height', async ({ page }) => {
+  await page.setViewportSize({ width: 1180, height: 820 })
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('.chat__empty-wrap')
+      || document.querySelector('.chat__scroll')
+      || document.querySelector('.chat__form')),
+    { timeout: 10000 },
+  )
+  const chat = await createTaggedChat(page, 'atomic-activity-detail')
+  const messages = [
+    { role: 'user', content: 'Inspect this saved run.', ts: 1700000000000 },
+    {
+      role: 'assistant',
+      content: '',
+      ts: 1700000001000,
+      blocks: [{
+        type: 'activity',
+        activity_id: '1:0:2',
+        message_index: 1,
+        start: 0,
+        end: 2,
+        tool_count: 1,
+        entries: [
+          {
+            item: {
+              type: 'thinking',
+              thinking_id: 'cold-thought',
+              duration_ms: 900,
+            },
+            idx: 0,
+          },
+          {
+            item: {
+              type: 'tool',
+              tool: 'Bash',
+              status: 'done',
+              tool_use_id: 'cold-command',
+            },
+            idx: 1,
+          },
+        ],
+      }, {
+        type: 'text',
+        content: 'Saved answer after the activity.',
+      }],
+    },
+  ]
+  await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ...chat,
+        messages,
+        total: messages.length,
+        offset: 0,
+        running: false,
+        pending_messages: [],
+      }),
+    })
+  })
+  await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), route =>
+    route.fulfill({ status: 204, body: '' }))
+
+  let markDetailRequested
+  let releaseDetail
+  const detailRequested = new Promise(resolve => { markDetailRequested = resolve })
+  const detailGate = new Promise(resolve => { releaseDetail = resolve })
+  await page.route(new RegExp(`/api/chats/${chat.id}/activity-detail\\?.*`), async route => {
+    markDetailRequested()
+    await detailGate
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        entries: [
+          {
+            item: {
+              type: 'thinking',
+              thinking_id: 'cold-thought',
+              duration_ms: 900,
+            },
+            idx: 0,
+          },
+          {
+            item: {
+              type: 'tool',
+              tool: 'Bash',
+              status: 'done',
+              tool_use_id: 'cold-command',
+              input: 'printf atomic',
+              output: 'atomic',
+            },
+            idx: 1,
+          },
+        ],
+      }),
+    })
+  })
+
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
+  const painted = page.locator('[data-chat-surface="painted"]')
+  await expect(painted.getByText('Saved answer after the activity.')).toBeVisible()
+  const activity = painted.locator('.chat__activity')
+  const toggle = activity.locator('.chat__activity-header')
+  const timeline = activity.locator('.chat__activity-timeline')
+  await timeline.evaluate(element => {
+    window.__coldActivityHeights = []
+    window.__coldActivityObserver = new ResizeObserver(entries => {
+      window.__coldActivityHeights.push(Math.round(entries[0].contentRect.height))
+    })
+    window.__coldActivityObserver.observe(element)
+  })
+
+  await toggle.click()
+  await detailRequested
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(toggle).toHaveAttribute('aria-busy', 'true')
+  await expect(timeline).toBeHidden()
+  await expect(activity.getByText('Loading activity…')).toHaveCount(0)
+  releaseDetail()
+
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(toggle).not.toHaveAttribute('aria-busy', 'true')
+  await expect(activity.getByText('printf atomic')).toBeVisible()
+  await page.evaluate(() => new Promise(resolve =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  const heights = await page.evaluate(() => {
+    window.__coldActivityObserver.disconnect()
+    return window.__coldActivityHeights
+  })
+  const firstExpanded = heights.findIndex(height => height > 0)
+  expect(firstExpanded).toBeGreaterThanOrEqual(0)
+  expect(new Set(heights.slice(firstExpanded)).size).toBe(1)
+})
+
 test('a lone activity is direct and sources render as safe compact pills', async ({ page }) => {
   await page.setViewportSize({ width: 412, height: 915 })
   const requestedSourceHosts = []
