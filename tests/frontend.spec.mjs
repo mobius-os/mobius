@@ -967,7 +967,7 @@ test.describe('Scroll position', () => {
     expect(restored.scrollTop).toBeGreaterThan(0)
   })
 
-  test('10d. Previous-chat entry stays visually fixed through delayed history, image decode, and first catch-up', async ({ page }) => {
+  test('10d. Previous-chat entry reveals authoritative history before catch-up and stays visually fixed', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
     await newChat(page)
 
@@ -976,6 +976,7 @@ test.describe('Scroll position', () => {
 
     let returning = false
     let streamCount = 0
+    let catchUpServed = false
     let returnImageServed = false
     const squarePng = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=',
@@ -1029,7 +1030,8 @@ test.describe('Scroll position', () => {
     await page.route(new RegExp(`/api/chats/${chatId}/stream$`), async route => {
       streamCount += 1
       if (streamCount > 1) return route.fulfill({ status: 204, body: '' })
-      await new Promise(resolve => setTimeout(resolve, 500))
+      await new Promise(resolve => setTimeout(resolve, 1200))
+      catchUpServed = true
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
@@ -1122,7 +1124,8 @@ test.describe('Scroll position', () => {
         && !!img?.src.includes('entry-image-return.png') && !!img.complete
         && !!document.querySelector('[data-key="entry-anchor"]')
     }, { timeout: 10000 })
-    await page.waitForTimeout(500)
+    expect(catchUpServed).toBe(false)
+    await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
 
     const trajectory = await page.evaluate(() => window.__entryTrajectory || [])
     const visibleRows = trajectory.filter(row => row.visible)

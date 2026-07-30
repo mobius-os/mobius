@@ -30,6 +30,27 @@ test('chat display readiness preserves the authoritative transcript reveal gate'
     'the callback dependency is the owner-change signal; a parallel mutable ref would obscure it')
 })
 
+test('authoritative running history releases the held chat before stream catch-up', () => {
+  const initialLoad = chatView.match(
+    /apiFetch\(`\/chats\/\$\{chatId\}\?limit=20&compact=1`,[\s\S]*?\n  \}, \[chatId, loadNonce, hidden\]\)/,
+  )?.[0] || ''
+  assert.match(
+    initialLoad,
+    /if \(serverSnapshotBehindLocal[\s\S]*setInitialEntryPhase\('ready'\)/,
+    'a useful local frame must be revealed after the authoritative detail read',
+  )
+  assert.match(
+    initialLoad,
+    /setInitialEntryPhase\('ready'\)[\s\S]*if \(data\.running\) \{[\s\S]*connectToStream\(false\)/,
+    'stream catch-up should continue after the persisted frame becomes paintable',
+  )
+  assert.doesNotMatch(
+    initialLoad,
+    /setInitialEntryPhase\(data\.running \? 'catch-up' : 'ready'\)/,
+    'a running marker must not turn replay settlement into navigation latency',
+  )
+})
+
 test('a staging chat cannot leave the outgoing transcript held on a wedged request', () => {
   assert.match(chatView, /const CHAT_FETCH_TIMEOUT_MS = 15000/)
   assert.match(
