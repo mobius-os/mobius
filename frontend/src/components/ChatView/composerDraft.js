@@ -16,6 +16,9 @@ const DRAFT_ENVELOPE = 'mobius-composer-draft'
 const DRAFT_VERSION = 2
 const DURABLE_DRAFT_DB = 'mobius-owner-drafts'
 const DURABLE_DRAFT_STORE = 'drafts-v1'
+const PENDING_HANDOFF_KEY = 'pending-draft'
+const PENDING_HANDOFF_AUTOSEND_KEY = 'pending-draft-autosend'
+const HANDOFF_AUTOSEND_PREFIX = 'draft-autosend:'
 const durableDraftStore = createStore(DURABLE_DRAFT_DB, DURABLE_DRAFT_STORE)
 
 // Same-document navigation must never depend on a fallible browser-storage
@@ -339,4 +342,93 @@ export function persistComposerDraft(chatId, input, attachments = [], storage) {
     }
     return true
   }
+}
+
+/**
+ * Stage text for a chat that another app surface is about to open.
+ *
+ * The per-chat draft is the durable owner. The unkeyed pending value lets the
+ * destination claim the handoff immediately, while the exact-text autosend
+ * markers are reserved for cross-document navigation where no mounted
+ * ChatView can acknowledge a direct submit request.
+ */
+export function stageComposerHandoff(
+  chatId,
+  input,
+  { autoSend = false, storage } = {},
+) {
+  if (chatId == null || typeof input !== 'string' || input.length === 0) return false
+  const persisted = persistComposerDraft(chatId, input, [], storage)
+  const target = availableStorage(storage)
+  if (!target) return persisted
+
+  try {
+    // A session has one navigation handoff at a time. Retire abandoned keyed
+    // autosends before staging the replacement so visiting an older chat later
+    // cannot unexpectedly submit a stale approval.
+    const keepAutoSendKey = autoSend
+      ? `${HANDOFF_AUTOSEND_PREFIX}${chatId}`
+      : null
+    const staleAutoSendKeys = []
+    for (let i = 0; i < target.length; i += 1) {
+      const key = target.key(i)
+      if (key?.startsWith(HANDOFF_AUTOSEND_PREFIX) && key !== keepAutoSendKey) {
+        staleAutoSendKeys.push(key)
+      }
+    }
+    for (const key of staleAutoSendKeys) target.removeItem(key)
+
+    target.setItem(PENDING_HANDOFF_KEY, input)
+    if (autoSend) {
+      target.setItem(PENDING_HANDOFF_AUTOSEND_KEY, input)
+      target.setItem(`${HANDOFF_AUTOSEND_PREFIX}${chatId}`, input)
+    } else {
+      target.removeItem(PENDING_HANDOFF_AUTOSEND_KEY)
+      target.removeItem(`${HANDOFF_AUTOSEND_PREFIX}${chatId}`)
+    }
+  } catch {
+    // The keyed draft still survives through the live/durable owner whenever
+    // the browser exposes it, so a failed convenience marker is non-fatal.
+  }
+  return persisted
+}
+
+export function readComposerHandoff(chatId, storage) {
+  const target = availableStorage(storage)
+  if (!target) return { draft: null, autoSendDraft: null }
+  try {
+    return {
+      draft: target.getItem(PENDING_HANDOFF_KEY),
+      // Prefer the chat-bound marker. The global key exists for compatibility
+      // with the pre-chat-id handoff window but must never outrank identity.
+      autoSendDraft: (chatId == null
+        ? null
+        : target.getItem(`${HANDOFF_AUTOSEND_PREFIX}${chatId}`))
+        || target.getItem(PENDING_HANDOFF_AUTOSEND_KEY),
+    }
+  } catch {
+    return { draft: null, autoSendDraft: null }
+  }
+}
+
+/** Remove only markers that still belong to `input`; a newer handoff wins. */
+export function consumeComposerHandoff(
+  chatId,
+  input,
+  { autoSend = false, storage } = {},
+) {
+  const target = availableStorage(storage)
+  if (!target || typeof input !== 'string') return
+  try {
+    if (target.getItem(PENDING_HANDOFF_KEY) === input) {
+      target.removeItem(PENDING_HANDOFF_KEY)
+    }
+    if (target.getItem(PENDING_HANDOFF_AUTOSEND_KEY) === input) {
+      target.removeItem(PENDING_HANDOFF_AUTOSEND_KEY)
+    }
+    const keyedAutoSend = `${HANDOFF_AUTOSEND_PREFIX}${chatId}`
+    if (autoSend && target.getItem(keyedAutoSend) === input) {
+      target.removeItem(keyedAutoSend)
+    }
+  } catch { /* unavailable browser storage */ }
 }

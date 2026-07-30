@@ -1,4 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
+import {
+  forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo,
+  useReducer, useRef, useState,
+} from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { appQueries, themeQueries } from '../../hooks/queries.js'
@@ -223,7 +226,7 @@ function CanvasLoadingBrand({ appName }) {
 // are short-lived but stable across React remounts — a 5-minute staleTime is
 // well within the server-side validity window. The token is app-scoped (keyed
 // by appId server-side), so it is identical for both buffered versions.
-export default function AppCanvas({
+const AppCanvas = forwardRef(function AppCanvas({
   appId, version = 0, appName, appSlug, offlineCapable = false,
   capabilityContract = null,
   immersive = false,
@@ -255,7 +258,7 @@ export default function AppCanvas({
   pendingIntent = null,
   onNavPush, onNavPop, onNavReset, onNavForwardResult,
   onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
-}) {
+}, hostRef) {
   const queryClient = useQueryClient()
   const [serviceSurface, setServiceSurface] = useState(null)
   const serviceRequestRef = useRef(0)
@@ -481,6 +484,27 @@ export default function AppCanvas({
     // checks on replies plus the frame's parent-origin check on receipt.
     framesRef.current.get(v)?.contentWindow?.postMessage(message, '*')
   }
+
+  // A host that owns the browser-history cursor may ask the visible app to
+  // follow it. Keep exact contentWindow selection here rather than making the
+  // host query iframe DOM or gain a generic postMessage escape hatch.
+  useImperativeHandle(hostRef, () => ({
+    sendNavigation(direction, requestId) {
+      const type = direction === 'back'
+        ? 'moebius:nav-back'
+        : direction === 'forward'
+          ? 'moebius:nav-forward'
+          : null
+      if (!type) return false
+      const win = framesRef.current.get(liveVersionRef.current)?.contentWindow
+      if (!win) return false
+      win.postMessage({
+        type,
+        ...(typeof requestId === 'string' ? { requestId } : {}),
+      }, '*')
+      return true
+    },
+  }), [])
 
   // Send the init handshake to ONE frame. Idempotent on the frame side — its own
   // `initialized` flag dedups. We deliberately do NOT track sent-state on the
@@ -1387,4 +1411,6 @@ export default function AppCanvas({
       )}
     </div>
   )
-}
+})
+
+export default AppCanvas

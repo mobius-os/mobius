@@ -86,7 +86,8 @@ import {
 } from './confirmedDeletion.js'
 import {
   clearComposerDraft,
-  persistComposerDraft,
+  consumeComposerHandoff,
+  stageComposerHandoff,
 } from '../ChatView/composerDraft.js'
 import {
   reloadWhenWorkerTakesOver,
@@ -887,9 +888,13 @@ export default function Shell() {
   }, [activeView, activeChatId])
 
   const handleComposerRequestHandled = useCallback((token) => {
-    setComposerRequest(prev => (
-      prev?.token === token ? null : prev
-    ))
+    setComposerRequest(prev => {
+      if (prev?.token !== token) return prev
+      if (typeof prev.draft === 'string') {
+        consumeComposerHandoff(prev.chatId, prev.draft)
+      }
+      return null
+    })
   }, [])
 
   function shellReloadState() {
@@ -2440,10 +2445,10 @@ export default function Shell() {
   // sending. AppCanvas forwards ONLY its LIVE frame's app-error here (it
   // swallows a hidden incoming preview frame's), so there is no window-level
   // e.source guard to make — source attribution now lives entirely in
-  // AppCanvas. STABLE `useCallback([])`: it reads the live apps/chats through
+  // AppCanvas. This stable callback reads the live apps/chats through
   // refs and calls the current newChat through `newChatRef`, so its identity
   // never changes and AppCanvas's message listener (which deps on it) never
-  // re-registers.
+  // re-registers. Its dependencies are stable owners rather than render data.
   const handleAppError = useCallback((appId, error, chatId) => {
     const appEntry = appsRef.current.find(a => String(a.id) === String(appId))
     const appName = appEntry?.name || `app ${appId}`
@@ -2452,12 +2457,7 @@ export default function Shell() {
     const buildingChat = buildingChatId
       && chatsRef.current.find(c => c.id === buildingChatId)
     if (buildingChat) {
-      persistComposerDraft(buildingChatId, report)
-      try {
-        sessionStorage.setItem('pending-draft', report)
-        sessionStorage.removeItem('pending-draft-autosend')
-        sessionStorage.removeItem(`draft-autosend:${buildingChatId}`)
-      } catch {}
+      stageComposerHandoff(buildingChatId, report)
       // Open the building chat in the crashed app's OWN pane (fallback: focused
       // pane) so a background app's crash report lands beside it (contract §1.4.7).
       const ownerPane = paneModel.paneOf(
@@ -2465,11 +2465,12 @@ export default function Shell() {
         tabModel.tabKey(tabModel.makeTab('app', appId)),
       )
       navToRef.current('chat', { chatId: buildingChatId, paneId: ownerPane?.id })
+      requestComposer(buildingChatId, { draft: report })
       refreshChats()
     } else {
       newChatRef.current?.({ draft: report, forceNew: true })
     }
-  }, [refreshChats, workspaceStateRef])
+  }, [refreshChats, requestComposer, workspaceStateRef])
 
   // AppCanvas owns exact-window attribution and wire-format narrowing for
   // every frame request. This callback owns the workspace outcome only, so the
@@ -2502,12 +2503,7 @@ export default function Shell() {
           return
         }
         if (draftText != null) {
-          persistComposerDraft(request.chatId, draftText)
-          try {
-            sessionStorage.setItem('pending-draft', draftText)
-            sessionStorage.removeItem('pending-draft-autosend')
-            sessionStorage.removeItem(`draft-autosend:${request.chatId}`)
-          } catch {}
+          stageComposerHandoff(request.chatId, draftText)
         }
         navToRef.current('chat', { chatId: request.chatId })
         // Storage covers an unmounted target. The explicit request also updates
@@ -3301,17 +3297,7 @@ export default function Shell() {
       && !!(draft || forceNew || drawerPushedRef.current || recordHistory)
     if (draft) {
       const draftText = String(draft)
-      persistComposerDraft(chatId, draftText)
-      try {
-        sessionStorage.setItem('pending-draft', draftText)
-        if (autoSend) {
-          sessionStorage.setItem('pending-draft-autosend', draftText)
-          sessionStorage.setItem(`draft-autosend:${chatId}`, draftText)
-        } else {
-          sessionStorage.removeItem('pending-draft-autosend')
-          sessionStorage.removeItem(`draft-autosend:${chatId}`)
-        }
-      } catch {}
+      stageComposerHandoff(chatId, draftText, { autoSend })
     }
     // Keep history writes inside useNavigation so the entry gets its route,
     // unique identity, and monotonic cursor synchronously. The former direct

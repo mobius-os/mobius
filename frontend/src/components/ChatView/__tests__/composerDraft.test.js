@@ -7,10 +7,13 @@ import {
   _clearComposerDraftMemoryForTests,
   clearComposerDraft,
   clearDurableComposerDrafts,
+  consumeComposerHandoff,
   flushComposerDraftPersistence,
   persistComposerDraft,
+  readComposerHandoff,
   readComposerDraft,
   readComposerDraftAsync,
+  stageComposerHandoff,
 } from '../composerDraft.js'
 import { streamSnapshotKey } from '../streamSnapshotCache.js'
 
@@ -92,6 +95,46 @@ test('keeps legacy plain-text drafts readable', () => {
     input: 'unfinished thought',
     attachments: [],
   })
+})
+
+test('chat handoffs keep exact draft and autosend text under one owner', () => {
+  const storage = storageStub({
+    'pending-draft-autosend': 'stale',
+    'draft-autosend:chat-a': 'stale',
+    'draft-autosend:abandoned-chat': 'abandoned approval',
+  })
+
+  assert.equal(stageComposerHandoff('chat-a', 'Review this exactly', {
+    autoSend: true,
+    storage,
+  }), true)
+  assert.equal(readComposerDraft('chat-a', storage).input, 'Review this exactly')
+  assert.equal(storage.getItem('pending-draft'), 'Review this exactly')
+  assert.equal(storage.getItem('pending-draft-autosend'), 'Review this exactly')
+  assert.equal(storage.getItem('draft-autosend:chat-a'), 'Review this exactly')
+  assert.equal(storage.getItem('draft-autosend:abandoned-chat'), null)
+  assert.deepEqual(readComposerHandoff('chat-a', storage), {
+    draft: 'Review this exactly',
+    autoSendDraft: 'Review this exactly',
+  })
+
+  consumeComposerHandoff('chat-a', 'Review this exactly', { storage })
+  assert.equal(storage.getItem('pending-draft'), null)
+  assert.equal(storage.getItem('pending-draft-autosend'), null)
+  assert.equal(storage.getItem('draft-autosend:chat-a'), 'Review this exactly',
+    'the retry marker survives until the send attempt actually starts')
+  assert.deepEqual(readComposerHandoff('chat-a', storage), {
+    draft: null,
+    autoSendDraft: 'Review this exactly',
+  })
+  consumeComposerHandoff('chat-a', 'Review this exactly', { autoSend: true, storage })
+  assert.equal(storage.getItem('draft-autosend:chat-a'), null)
+
+  assert.equal(stageComposerHandoff('chat-a', 'Leave this for review', { storage }), true)
+  consumeComposerHandoff('chat-a', 'Review this exactly', { autoSend: true, storage })
+  assert.equal(storage.getItem('pending-draft'), 'Leave this for review')
+  assert.equal(storage.getItem('pending-draft-autosend'), null)
+  assert.equal(storage.getItem('draft-autosend:chat-a'), null)
 })
 
 test('does not restore attachments that never finished uploading', () => {
@@ -250,9 +293,14 @@ test('shell draft handoffs use the same owner instead of writing around its live
     'shell handoffs and deletion must not bypass the draft owner')
   assert.doesNotMatch(chatSource, directDraftWrite,
     'chat cleanup must clear memory, session, and durable copies together')
-  assert.match(shellSource, /persistComposerDraft\(buildingChatId, report\)/)
-  assert.match(shellSource, /persistComposerDraft\(request\.chatId, draftText\)/)
-  assert.match(shellSource, /persistComposerDraft\(chatId, draftText\)/)
+  assert.match(shellSource, /stageComposerHandoff\(buildingChatId, report\)/)
+  assert.match(shellSource, /stageComposerHandoff\(request\.chatId, draftText\)/)
+  assert.match(shellSource, /stageComposerHandoff\(chatId, draftText, \{ autoSend \}\)/,
+    'new-chat handoffs must preserve the reviewed autosend intent')
+  assert.match(shellSource, /consumeComposerHandoff\(prev\.chatId, prev\.draft\)/,
+    'an acknowledged direct handoff must retire its global fallback')
+  assert.match(shellSource, /requestComposer\(buildingChatId, \{ draft: report \}\)/,
+    'a crash report must update a retained destination composer too')
   assert.match(shellSource, /clearComposerDraft\(id\)/)
   assert.match(chatSource, /clearComposerDraft\(chatId\)/)
 })

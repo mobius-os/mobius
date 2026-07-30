@@ -95,7 +95,9 @@ import {
 import {
   clearComposerDraft,
   composerDraftRevision,
+  consumeComposerHandoff,
   persistComposerDraft,
+  readComposerHandoff,
   readComposerDraft,
   readComposerDraftAsync,
 } from './composerDraft.js'
@@ -205,10 +207,6 @@ function tailResumableBlock(messages) {
   return null
 }
 
-const PENDING_DRAFT_KEY = 'pending-draft'
-const PENDING_DRAFT_AUTOSEND_KEY = 'pending-draft-autosend'
-const DRAFT_AUTOSEND_PREFIX = 'draft-autosend:'
-
 function readInitialComposer(chatId, { acceptPending = true } = {}) {
   try {
     const failedAttempt = loadFailedSendAttempt(chatId)
@@ -216,17 +214,16 @@ function readInitialComposer(chatId, { acceptPending = true } = {}) {
     // navigation draft or its one-shot autosend. Only the currently painted
     // world accepts that handoff; otherwise Standard + Builder duplicates could
     // both start the same message when their shared chat id becomes visible.
-    const pending = acceptPending ? sessionStorage.getItem(PENDING_DRAFT_KEY) : null
+    const handoff = acceptPending
+      ? readComposerHandoff(chatId)
+      : { draft: null, autoSendDraft: null }
+    const pending = handoff.draft
     if (pending && failedAttempt) clearFailedSendAttempt(chatId)
     const saved = readComposerDraft(chatId)
     const input = pending || failedAttempt?.text || saved.input
-    const autoSendDraft = acceptPending
-      ? (sessionStorage.getItem(PENDING_DRAFT_AUTOSEND_KEY)
-        || sessionStorage.getItem(`${DRAFT_AUTOSEND_PREFIX}${chatId}`))
-      : null
     return {
       input,
-      autoSend: !!input && autoSendDraft === input,
+      autoSend: !!input && handoff.autoSendDraft === input,
       source: pending ? 'pending' : (failedAttempt ? 'failed' : 'saved'),
       failedAttempt: pending ? null : failedAttempt,
       attachments: pending
@@ -377,10 +374,16 @@ export default function ChatView({
       ? 'Möbius is checking whether your previous message reached the chat…'
       : null
   ))
-  const [autoSendPendingDraft, setAutoSendPendingDraft] = useState(
-    () => initialComposerRef.current.autoSend,
-  )
-  const autoSendAttemptedRef = useRef(false)
+  const [pendingComposerSubmit, setPendingComposerSubmit] = useState(() => (
+    initialComposerRef.current.autoSend
+      ? {
+          token: `stored-handoff:${chatId}`,
+          text: initialComposerRef.current.input,
+          storedHandoff: true,
+        }
+      : null
+  ))
+  const submittedComposerRequestTokenRef = useRef(null)
 
   useEffect(() => {
     if (hidden) return
@@ -393,14 +396,9 @@ export default function ChatView({
       // one-shot handoff keys are removed.
       persistComposerDraft(chatId, initial, initialComposer.attachments)
     }
-    try {
-      if (sessionStorage.getItem(PENDING_DRAFT_KEY) === initial) {
-        sessionStorage.removeItem(PENDING_DRAFT_KEY)
-      }
-      if (sessionStorage.getItem(PENDING_DRAFT_AUTOSEND_KEY) === initial) {
-        sessionStorage.removeItem(PENDING_DRAFT_AUTOSEND_KEY)
-      }
-    } catch { /* private browsing */ }
+    // The per-chat autosend marker remains until the actual send attempt. If
+    // this surface unmounts while loading, a remount can still finish safely.
+    consumeComposerHandoff(chatId, initial)
   }, [hidden])
 
   // Per-chat agent runtime config (provider, agent_settings_json,
@@ -2643,18 +2641,33 @@ export default function ChatView({
 
   useEffect(() => {
     if (hidden) return
-    if (!autoSendPendingDraft || autoSendAttemptedRef.current) return
+    const request = pendingComposerSubmit
+    if (!request || submittedComposerRequestTokenRef.current === request.token) return
     if (loading || loadError) return
-    const text = input.trim()
+    const text = request.text.trim()
     if (!text) {
-      setAutoSendPendingDraft(false)
+      setPendingComposerSubmit(null)
+      if (!request.storedHandoff) onComposerRequestHandled?.(request.token)
       return
     }
-    autoSendAttemptedRef.current = true
-    setAutoSendPendingDraft(false)
-    try { sessionStorage.removeItem(`${DRAFT_AUTOSEND_PREFIX}${chatId}`) } catch {}
+    submittedComposerRequestTokenRef.current = request.token
+    setPendingComposerSubmit(null)
+    if (request.storedHandoff) {
+      // Consume before sending so a failed/reloaded attempt becomes a visible
+      // recoverable draft, never an automatic retry loop.
+      consumeComposerHandoff(chatId, request.text, { autoSend: true })
+    }
     doSend(text)
-  }, [autoSendPendingDraft, loading, loadError, input, chatId, doSend, hidden])
+    if (!request.storedHandoff) onComposerRequestHandled?.(request.token)
+  }, [
+    pendingComposerSubmit,
+    loading,
+    loadError,
+    doSend,
+    chatId,
+    hidden,
+    onComposerRequestHandled,
+  ])
 
   // Sends the answer without a visible user message bubble.
   // Sends the answer to an AskUserQuestion as a hidden user message.
