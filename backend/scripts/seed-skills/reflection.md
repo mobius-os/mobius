@@ -122,7 +122,7 @@ brief is a weak channel signal, never a durable partner preference.
 
 ### 1. INTROSPECTION — interview the agents worth interviewing (summary-first triage)
 
-**Adaptive rule.** Before starting interviews, check whether today had any user chat activity. Read `activity.jsonl` (already staged in `inputs/`) and count the user-turn signal — but **derive the event name from the data, don't assume `chat_sent`**: some schemas emit `chat_sent`, this one emits `chat_created` + `chat_log_read` and no `chat_sent` at all, so blindly grepping `chat_sent` returns 0 on a busy night and makes EVERY night look cron-only. Print the `ev` histogram first (`Counter(ev)`), then treat new/live user chats as the signal (`app_open` tracks app usage, not chatting). **Cross-check against the DB, which is authoritative**: `select count(*) … where created_at >= datetime('now','-24 hours')` for genuinely new chats, and filter empty stubs (`length(messages) <= 2`, `session_id NULL`). Do NOT trust chats.md `updated_at` for this — Memory's ~05:30 consolidation batch-touches `updated_at` on all queued chats (often 20–30) at one timestamp, so a quiet night's chats.md can look like 20 live conversations when only stubs were created. If **tonight is a cron-only night** (no user chat activity, only background jobs ran), do a **light pass** on phase 1 — scan the cron session jsonls for any unexpected errors, but spend the saved attention where the value compounds: Memory-system review from the update log (phase 3), the apps the partner uses most (phase 4), a platform improvement you've been deferring, and **brainstorming what would be genuinely useful to the partner next** — new-app ideas, features on their most-touched apps, preparations for what they'll ask tomorrow. Ideas ship as ranked proposals in the brief (same anti-noise bar), not unattended builds. A calm night is not a skipped night; it's the night for the improvement work no busy day leaves room for. Write one sentence in the brief noting it was a cron-only night.
+**Adaptive rule.** Before starting interviews, check whether today had any user chat activity. When the staged activity source is healthy, count `ev == "chat_sent"` events — the platform emits one for every genuine user turn, whether it starts, queues, or resumes a chat. Do **not** substitute `chat_created` (it records new rows and misses resumed-chat turns) or `chat_log_read` (an audit event emitted when an app reads redacted chat logs). Zero `chat_sent` events in a validated 24-hour window means the window was quiet; it does not prove that the event schema changed. If the activity snapshot is unavailable, inspect timestamps on recent user messages as a fallback — never infer activity from `Chat.created_at`, which also misses resumed chats. Treat `chats.md`'s `updated_at` only as a triage hint: maintenance jobs can batch-touch old rows. Attribute a batch to a specific subsystem only after its timestamp and responsible code/log path agree; a shared timestamp alone is not evidence that Memory caused it. If **tonight is a cron-only night** (no user chat activity, only background jobs ran), do a **light pass** on phase 1 — scan the cron session jsonls for any unexpected errors, but spend the saved turns where the value compounds: Memory-system review from the update log (phase 3), the apps the partner uses most (phase 4), a platform improvement you've been deferring, and **brainstorming what would be genuinely useful to the partner next** — new-app ideas, features on their most-touched apps, preparations for what they'll ask tomorrow. Ideas ship as ranked proposals in the brief (same anti-noise bar), not unattended builds. A calm night is not a skipped night; it's the night for the improvement work no busy day leaves room for. Write one sentence in the brief noting it was a cron-only night.
 
 On nights with user activity, this is the first phase and the one you may not skip. The agents that did today's work hold context you don't: what surprised them, what they'd warn future-you about, where a skill let them down. You recover it by **forking their session and asking them.**
 
@@ -480,13 +480,16 @@ Copy this skeleton — the template (and the base style the app injects into eve
 
 Be ruthless below the lede: a section with nothing that clears the trigger/why/next-action bar gets deleted, not padded, and a one-item night is a fine brief. The exec-summary is never collapsed; everything else defaults shut.
 
-**Use one adaptive brief style.** There is no length or steering setting. Always
-use the concise shape above: a 3–6 sentence TL;DR, 3–5 one-line keypoints, and
-collapsed detail only where it earns its space. Decide what deserves attention
-from observed behavior: recent chats, apps actually opened, explicit feedback,
-brief-discussion chats, question-card answers, and the absence of answers to
-cards that were actually shown. Do not mistake silence for a content preference;
-use it only to lower the frequency of that interaction channel.
+**Adapt the brief instead of obeying a fixed style control.** Start concise: a
+TL;DR, keypoints, and only items that clear the trigger/why/next-action bar.
+Compare `prev-report.html` with what changed tonight; compress repeated context
+and spend detail only where it improves a decision or explains a concrete
+result. Use the report-aligned engagement evidence above to ask fewer, sharper
+questions when cards are low-yield, but do not treat one unanswered brief as a
+request for less writing. The collapsed details can carry necessary narrative;
+the TL;DR cap and collapsed-by-default contract remain fixed. There is no
+`verbosity`, `focus`, or `avoid` setting to honor — editorial judgment belongs
+to the Reflection agent each run.
 
 **Put the questions IN the brief as tappable cards — the in-report contract.** The partner answers your decisions by tapping cards rendered *in the brief itself*, and those answers are saved for your **NEXT run** — not collected by a live agent. This is the durable replacement for the old "post AskUserQuestion cards in a morning chat" flow: a background/morning agent that calls `AskUserQuestion` parks a synchronous in-memory future that a server reset orphans, freezing the night. Instead, **emit the questions declaratively inside the brief HTML** and let the app render the cards.
 
