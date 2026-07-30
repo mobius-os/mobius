@@ -95,6 +95,93 @@ def test_publish_registry_binds_live_generation_and_serves(client, auth, db):
   assert client.get(f"/sites/{token}/").status_code == 200
 
 
+def test_publish_injects_absolute_link_preview_into_snapshot_only(
+  client, auth,
+):
+  app_id = _create_app(client, auth)
+  project_id = "rich-preview"
+  original = "<!doctype html><html><head><title>Original</title></head><body>Page</body></html>"
+  _seed_site(app_id, project_id, original)
+  site = _build_dir(app_id, project_id) / "site"
+  (site / "preview.png").write_bytes(b"\x89PNG\r\n\x1a\npreview")
+
+  response = client.post(
+    f"/api/apps/{app_id}/publish",
+    headers=auth,
+    json={
+      "project_id": project_id,
+      "link_preview": {
+        "title": 'A safer "preview" & page',
+        "description": "A useful public page.",
+        "image_path": "preview.png",
+        "image_alt": "A visual preview",
+        "image_width": 1200,
+        "image_height": 630,
+        "site_name": "Möbius",
+      },
+    },
+  )
+
+  assert response.status_code == 200, response.text
+  payload = response.json()
+  assert payload["public_url"] == (
+    f"{get_settings().frontend_origin}/sites/{payload['token']}/"
+  )
+  published = client.get(f"/sites/{payload['token']}/").text
+  assert (
+    f'<meta property="og:url" content="{payload["public_url"]}">'
+    in published
+  )
+  assert (
+    f'<meta property="og:image" '
+    f'content="{payload["public_url"]}preview.png">'
+    in published
+  )
+  assert '<meta property="og:image:width" content="1200">' in published
+  assert '<meta property="og:image:height" content="630">' in published
+  assert 'A safer &quot;preview&quot; &amp; page' in published
+  assert '<meta name="twitter:card" content="summary_large_image">' in published
+  assert (site / "index.html").read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+  ("image_path", "expected_status"),
+  [
+    ("../private.png", 422),
+    ("missing.png", 400),
+    ("preview.svg", 422),
+  ],
+)
+def test_publish_rejects_unsafe_or_unavailable_link_preview_images(
+  client, auth, image_path, expected_status,
+):
+  app_id = _create_app(client, auth)
+  project_id = "bad-preview"
+  _seed_site(
+    app_id, project_id,
+    "<!doctype html><html><head></head><body>Page</body></html>",
+  )
+  site = _build_dir(app_id, project_id) / "site"
+  (site / "preview.svg").write_text("<svg/>", encoding="utf-8")
+
+  response = client.post(
+    f"/api/apps/{app_id}/publish",
+    headers=auth,
+    json={
+      "project_id": project_id,
+      "link_preview": {
+        "title": "Preview",
+        "image_path": image_path,
+      },
+    },
+  )
+
+  assert response.status_code == expected_status
+  assert apps_route._registry_records_for_app(
+    get_settings(), app_id,
+  )[0].state != "active"
+
+
 def test_registry_parent_directory_is_fsynced_after_create_and_replace(
   monkeypatch,
 ):

@@ -2,9 +2,11 @@
 
 import asyncio
 import hashlib
+import html
 import io
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
@@ -14,8 +16,9 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, UTC
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -3681,8 +3684,137 @@ async def artifact_data_value(
   return Response(status_code=204)
 
 
+class LinkPreviewRequest(BaseModel):
+  title: str = Field(min_length=1, max_length=200)
+  description: str | None = Field(default=None, max_length=500)
+  image_path: str | None = Field(default=None, max_length=240)
+  image_alt: str | None = Field(default=None, max_length=300)
+  image_width: int | None = Field(default=None, ge=1, le=10000)
+  image_height: int | None = Field(default=None, ge=1, le=10000)
+  site_name: str | None = Field(default=None, max_length=100)
+
+
 class PublishRequest(BaseModel):
   project_id: str | None = None
+  link_preview: LinkPreviewRequest | None = None
+
+
+def _publication_url(settings, token: str) -> str:
+  origin = settings.frontend_origin.rstrip("/")
+  return f"{origin}/sites/{token}/"
+
+
+def _validated_preview_image(
+  site_dir: Path,
+  image_path: str | None,
+) -> tuple[str, str] | None:
+  if image_path is None:
+    return None
+  raw = image_path.strip()
+  rel = PurePosixPath(raw)
+  if (
+    not raw
+    or rel.is_absolute()
+    or any(part in ("", ".", "..") for part in rel.parts)
+    or "\\" in raw
+  ):
+    raise HTTPException(422, "invalid link preview image_path")
+  target = site_dir.joinpath(*rel.parts)
+  if not target.is_file() or target.is_symlink():
+    raise HTTPException(400, "Link preview image is missing from the site.")
+  content_type, _encoding = mimetypes.guess_type(raw)
+  if content_type not in {
+    "image/gif", "image/jpeg", "image/png", "image/webp",
+  }:
+    raise HTTPException(422, "unsupported link preview image type")
+  return quote(raw, safe="/"), content_type
+
+
+def _link_preview_markup(
+  settings,
+  token: str,
+  preview: LinkPreviewRequest,
+  site_dir: Path,
+) -> bytes:
+  title = preview.title.strip()
+  if not title:
+    raise HTTPException(422, "link preview title cannot be blank")
+  canonical = _publication_url(settings, token)
+  image = _validated_preview_image(site_dir, preview.image_path)
+  tags = [
+    '<meta property="og:type" content="website">',
+    f'<meta property="og:title" content="{html.escape(title, quote=True)}">',
+    f'<meta property="og:url" content="{html.escape(canonical, quote=True)}">',
+    f'<link rel="canonical" href="{html.escape(canonical, quote=True)}">',
+  ]
+  description = (preview.description or "").strip()
+  if description:
+    escaped = html.escape(description, quote=True)
+    tags.append(f'<meta property="og:description" content="{escaped}">')
+  site_name = (preview.site_name or "").strip()
+  if site_name:
+    tags.append(
+      f'<meta property="og:site_name" '
+      f'content="{html.escape(site_name, quote=True)}">',
+    )
+  if image:
+    image_path, content_type = image
+    image_url = f"{canonical}{image_path}"
+    escaped_url = html.escape(image_url, quote=True)
+    tags.extend((
+      f'<meta property="og:image" content="{escaped_url}">',
+      f'<meta property="og:image:type" content="{content_type}">',
+    ))
+    if preview.image_width is not None:
+      tags.append(
+        f'<meta property="og:image:width" content="{preview.image_width}">',
+      )
+    if preview.image_height is not None:
+      tags.append(
+        f'<meta property="og:image:height" content="{preview.image_height}">',
+      )
+    image_alt = (preview.image_alt or "").strip()
+    if image_alt:
+      escaped_alt = html.escape(image_alt, quote=True)
+      tags.append(f'<meta property="og:image:alt" content="{escaped_alt}">')
+    tags.extend((
+      '<meta name="twitter:card" content="summary_large_image">',
+      f'<meta name="twitter:title" '
+      f'content="{html.escape(title, quote=True)}">',
+    ))
+    if description:
+      tags.append(
+        f'<meta name="twitter:description" '
+        f'content="{html.escape(description, quote=True)}">',
+      )
+    tags.append(f'<meta name="twitter:image" content="{escaped_url}">')
+    if image_alt:
+      tags.append(
+        f'<meta name="twitter:image:alt" content="{escaped_alt}">',
+      )
+  block = (
+    "\n<!-- mobius:link-preview:start -->\n"
+    + "\n".join(tags)
+    + "\n<!-- mobius:link-preview:end -->"
+  )
+  return block.encode("utf-8")
+
+
+def _inject_link_preview(
+  settings,
+  token: str,
+  preview: LinkPreviewRequest,
+  site_dir: Path,
+) -> None:
+  index = site_dir / "index.html"
+  if not index.is_file() or index.is_symlink():
+    raise HTTPException(400, "Link previews require a site index.html.")
+  source = index.read_bytes()
+  head = re.search(br"<head(?:\s[^>]*)?>", source, flags=re.IGNORECASE)
+  if head is None:
+    raise HTTPException(400, "Link previews require an HTML head.")
+  markup = _link_preview_markup(settings, token, preview, site_dir)
+  atomic_write(index, source[:head.end()] + markup + source[head.end():])
 
 
 def _publish_paths(settings, app, project_id: str | None):
@@ -3798,6 +3930,10 @@ async def publish_app_site(
           400, "Built site contains symlinks; refusing to publish.",
         )
       shutil.copytree(site_dir, stage, symlinks=True)
+      if body.link_preview is not None:
+        _inject_link_preview(
+          settings, token, body.link_preview, stage,
+        )
 
     promoted = False
     preserve_stage = False
@@ -3851,7 +3987,11 @@ async def publish_app_site(
           await asyncio.to_thread(shutil.rmtree, stage)
         except OSError:
           pass
-  return {"token": token, "url": f"/sites/{token}/"}
+  return {
+    "token": token,
+    "url": f"/sites/{token}/",
+    "public_url": _publication_url(settings, token),
+  }
 
 
 @router.delete("/{app_id}/publish", dependencies=[Depends(reject_cross_site)])
