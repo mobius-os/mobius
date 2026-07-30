@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from typing import Any
 
 
@@ -149,9 +150,14 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
   perms = manifest.get("permissions") or {}
   schedule = manifest.get("schedule") or {}
   requested_logs = perms.get("chat_log_access", "none")
-  # The only chat-log route is structurally redacted.  A historical ``full``
-  # declaration therefore has summary effectiveness, never silent full access.
-  effective_logs = "summary" if requested_logs in ("summary", "full") else "none"
+  # Both readable tiers use structural redaction. The higher tier widens only
+  # the lifecycle scope to recoverable soft-deleted chats; there is no raw/full
+  # transcript capability.
+  effective_logs = (
+    requested_logs
+    if requested_logs in ("summary", "summary_with_deleted")
+    else "none"
+  )
   job = schedule.get("job")
   cron = schedule.get("default")
   system_prompt = manifest.get("system_prompt")
@@ -174,7 +180,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "chat_logs": {
         "requested": requested_logs,
         "effective": effective_logs,
-        "redaction": "structural" if effective_logs == "summary" else "none",
+        "redaction": "structural" if effective_logs != "none" else "none",
       },
       "filesystem_api": bool(perms.get("filesystem_access", False)),
       "shared_memory": perms.get("shared_memory", "none"),
@@ -263,6 +269,35 @@ def contract_from_app_state(
     "capabilities": capabilities,
   }
   return contract_from_manifest(manifest)
+
+
+def contract_with_chat_log_access(
+  contract: dict[str, Any] | None,
+  access: str,
+) -> dict[str, Any] | None:
+  """Update only the accepted chat-log scope in a reviewed contract.
+
+  Store contracts contain package-owned facts (skills, background work,
+  runtime limits, and more) that an owner permission change must preserve.
+  Rebuilding one from the App row would silently discard those facts.  This
+  narrow immutable projection keeps the complete reviewed contract intact
+  while recording the owner's explicit requested/effective scope choice.
+  """
+  if not isinstance(contract, dict):
+    return None
+  updated = deepcopy(contract)
+  data = updated.get("data")
+  if not isinstance(data, dict):
+    data = {}
+    updated["data"] = data
+  chat_logs = data.get("chat_logs")
+  if not isinstance(chat_logs, dict):
+    chat_logs = {}
+    data["chat_logs"] = chat_logs
+  chat_logs["requested"] = access
+  chat_logs["effective"] = access
+  chat_logs["redaction"] = "structural" if access != "none" else "none"
+  return updated
 
 
 def canonical_contract_json(contract: dict[str, Any]) -> str:

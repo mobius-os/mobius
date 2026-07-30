@@ -126,7 +126,8 @@ brief is a weak channel signal, never a durable partner preference.
 
 On nights with user activity, this is the first phase and the one you may not skip. The agents that did today's work hold context you don't: what surprised them, what they'd warn future-you about, where a skill let them down. You recover it by **forking their session and asking them.**
 
-**Find every chat and subagent run with activity in the last 24h.**
+**Find every active chat and subagent run with activity in the last 24h, plus
+every recoverable deleted chat from the last 7 days.**
 
 User chats — query the DB directly (no auth needed; the container has no `sqlite3` CLI, use `python3`):
 
@@ -139,16 +140,27 @@ con = sqlite3.connect("/data/db/ultimate.db")
 # build the cutoff with Python utcnow().isoformat() — its 'T' separator sorts
 # AFTER the stored ' ', silently dropping rows whose timestamp lands on the
 # cutoff's date boundary.
-for cid, title, prov in con.execute(
-    "select id, title, coalesce(provider,'claude') from chats "
-    "where deleted_at is null and session_id is not null "
-    "and updated_at >= datetime('now','-24 hours') "
-    "order by updated_at desc"):
-  print(cid, "|", prov, "|", title)
+for cid, title, prov, deleted_at in con.execute(
+    "select id, title, coalesce(provider,'claude'), deleted_at from chats "
+    "where ((deleted_at is null and session_id is not null "
+    "and updated_at >= datetime('now','-24 hours')) "
+    "or deleted_at >= datetime('now','-7 days')) "
+    "order by coalesce(deleted_at, updated_at) desc"):
+  state = "deleted" if deleted_at else "active"
+  print(cid, "|", prov, "|", state, "|", title)
 PY
 ```
 
 This query intentionally includes app-attributed chats (`created_by_app_id` set): those are hidden from the owner's drawer but are real conversations an app's agent had, and they often hold the most interview-worthy context. Do not filter them out.
+
+Recoverable deleted chats remain evidence: deletion removes them from the
+partner's workspace, not from Reflection's ability to learn what worked, what
+failed, or what future agents should know. Treat a `deleted` row as read-only
+evidence. Read its platform-owned summary while it exists and fall back to its
+stored transcript directly; **never fork it, recover it, open it for the
+partner, or put its id/link in the brief, a Memory note, or another durable
+artifact.** Refer only to the lesson or outcome. Permanent purge after the
+seven-day recovery window ends access naturally.
 
 App subagent runs — cron jobs (news, gym, etc.) whose sessions are NOT chat rows. Find recently-modified session jsonls under the CLI projects dir:
 

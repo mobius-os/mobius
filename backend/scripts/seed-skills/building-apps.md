@@ -40,6 +40,25 @@ required by the advanced feature below. An installable app starts as a
 root-level repository package and is installed from its raw `mobius.json` URL;
 an ordinary local app stays on the quickstart path.
 
+### Accepting a local chat-history scope for an installed app
+
+Editing and applying a Store-installed app's source never silently widens its
+chat-history grant. After the partner explicitly approves the precise scope,
+accept that one live permission separately:
+
+```bash
+curl -s -X PATCH "$API_BASE_URL/api/apps/<app-id>" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_log_access":"summary_with_deleted"}'
+```
+
+Allowed values are `none`, `summary`, and `summary_with_deleted`; there is no
+raw/`full` tier. The update preserves the rest of the Store-reviewed capability
+contract instead of rebuilding or replacing it. Keep the same scope declared
+in `mobius.json`, then verify the returned `chat_log_access`. This is an owner
+permission action, not a substitute for applying the source revision.
+
 ---
 
 ## Packaging / wrapping a pre-built or third-party web app

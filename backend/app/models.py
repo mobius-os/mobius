@@ -653,14 +653,13 @@ class App(Base):
   #               stripped; surviving text secret-scrubbed). "Reduced
   #               exposure," not "safe" — regex can't catch pasted
   #               documents or encoded secrets.
-  #   'full'    — legacy declaration accepted for compatibility; the only
-  #               route still serves the same structurally redacted view as
-  #               'summary', and the reviewed contract says so explicitly.
+  #   'summary_with_deleted' — the same structural redaction widened only to
+  #               chats still inside the seven-day recovery window.
   # App frames receive only their scoped JWT and run in opaque-origin
   # sandboxes, so this live-row permission is an enforceable boundary in
   # addition to recording owner consent.
   chat_log_access = Column(
-    String(16), nullable=False, default="none"
+    String(24), nullable=False, default="none"
   )
   # Per-app git model: `upstream_commit` is the sha of the last
   # pristine-manifest commit on the app's `upstream` branch — the merge

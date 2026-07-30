@@ -196,10 +196,12 @@ def validate_manifest_contract(manifest) -> None:
   for field in ("cross_app_access", "share_with_apps", "shared_memory"):
     if permissions.get(field, "none") not in ("none", "read", "write"):
       _fail(f"Manifest `permissions.{field}` must be one of none/read/write.")
-  if permissions.get("chat_log_access", "none") not in ("none", "summary", "full"):
+  if permissions.get("chat_log_access", "none") not in (
+    "none", "summary", "summary_with_deleted",
+  ):
     _fail(
       "Manifest `permissions.chat_log_access` must be one of "
-      "none/summary/full."
+      "none/summary/summary_with_deleted."
     )
   removed_job_permissions = {
     "background_agent", "job_authority",

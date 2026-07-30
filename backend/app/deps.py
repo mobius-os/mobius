@@ -580,7 +580,11 @@ def get_owner_app_or_chat_embed_for_models(
 # routes/storage.py (two-sided, not a single-principal gate) and are
 # deliberately NOT folded in here.
 _PERMISSION_LADDERS: dict[str, dict[str, int]] = {
-  "chat_log_access": {"none": 0, "summary": 1, "full": 2},
+  "chat_log_access": {
+    "none": 0,
+    "summary": 1,
+    "summary_with_deleted": 2,
+  },
 }
 
 
@@ -596,7 +600,8 @@ def require_app_permission(
   owner. For an app token, the granted level is read from the App row
   at request time (`getattr(app, key)`), so flipping the column revokes
   access on the very next call without rotating the 8h app JWT. This is
-  the common gate for ladder-style app permissions (none/summary/full);
+  the common gate for ladder-style app permissions
+  (none/summary/summary_with_deleted);
   the boolean grants below (manage_apps, github_access) use their own
   small owner-or-app gates instead.
 

@@ -48,6 +48,7 @@ class TokenResponse(BaseModel):
 # Cross-app traffic passes only when BOTH sides permit. Defaults to
 # 'none' on both; the agent opts an app in when the partner asks.
 ShareLevel = Literal["none", "read", "write"]
+ChatLogAccess = Literal["none", "summary", "summary_with_deleted"]
 
 
 class AppApply(BaseModel):
@@ -77,6 +78,9 @@ class AppUpdate(BaseModel):
   pinned: bool | None = None
   cross_app_access: ShareLevel | None = None
   share_with_apps: ShareLevel | None = None
+  # Owner-approved requested/effective scope. Source apply never grants this
+  # implicitly, especially for Store apps; the owner accepts it explicitly.
+  chat_log_access: ChatLogAccess | None = None
   # Public install manifest attached after a local app is published. Empty
   # string clears it; None means omitted. This is deliberately separate from
   # App.manifest_url, which controls Store install/update identity.
@@ -177,7 +181,7 @@ class AppOut(BaseModel):
   # live. Informational so install UIs can surface the privileged declaration.
   system_prompt_file: str | None = None
   system_app: bool = False
-  chat_log_access: Literal["none", "summary", "full"] = "none"
+  chat_log_access: ChatLogAccess = "none"
   capability_contract: dict | None = None
   created_at: datetime
   updated_at: datetime

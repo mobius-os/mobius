@@ -1,5 +1,6 @@
 """App registry lifecycle tests."""
 
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -94,6 +95,80 @@ def test_update_app_rejects_non_public_share_url(client, auth):
     headers=auth,
   )
   assert response.status_code == 422
+
+
+def test_owner_can_accept_deleted_chat_scope_without_replacing_store_contract(
+  client, auth, db,
+):
+  app = create_local_app(
+    client, auth, name="Reflector", description="test",
+  )
+  row = db.query(models.App).filter(models.App.id == app["id"]).one()
+  reviewed = deepcopy(row.capability_contract)
+  reviewed["agent"]["skills"] = ["reflection.md"]
+  reviewed["background"] = {
+    "job": "fetch.sh", "mode": "scheduled", "cron": "0 6 * * *",
+    "user_configurable": True, "initialize_on_install": False,
+  }
+  row.manifest_url = "https://store.example/reflection/mobius.json"
+  row.capability_contract = reviewed
+  db.commit()
+
+  response = client.patch(
+    f"/api/apps/{app['id']}",
+    json={"chat_log_access": "summary_with_deleted"},
+    headers=auth,
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["chat_log_access"] == "summary_with_deleted"
+  row = db.query(models.App).populate_existing().filter_by(id=app["id"]).one()
+  assert row.chat_log_access == "summary_with_deleted"
+  assert row.capability_contract["agent"] == reviewed["agent"]
+  assert row.capability_contract["background"] == reviewed["background"]
+  assert row.capability_contract["data"]["chat_logs"] == {
+    "requested": "summary_with_deleted",
+    "effective": "summary_with_deleted",
+    "redaction": "structural",
+  }
+
+
+def test_owner_chat_log_scope_rejects_retired_full_value(client, auth):
+  app = create_local_app(client, auth, name="No raw logs", description="test")
+
+  response = client.patch(
+    f"/api/apps/{app['id']}",
+    json={"chat_log_access": "full"},
+    headers=auth,
+  )
+
+  assert response.status_code == 422
+
+
+def test_owner_chat_log_scope_backfills_a_legacy_store_contract(
+  client, auth, db,
+):
+  app = create_local_app(
+    client, auth, name="Legacy reflector", description="test",
+  )
+  row = db.query(models.App).filter(models.App.id == app["id"]).one()
+  row.manifest_url = "https://store.example/legacy/mobius.json"
+  row.capability_contract = None
+  db.commit()
+
+  response = client.patch(
+    f"/api/apps/{app['id']}",
+    json={"chat_log_access": "summary_with_deleted"},
+    headers=auth,
+  )
+
+  assert response.status_code == 200, response.text
+  chat_logs = response.json()["capability_contract"]["data"]["chat_logs"]
+  assert chat_logs == {
+    "requested": "summary_with_deleted",
+    "effective": "summary_with_deleted",
+    "redaction": "structural",
+  }
 
 
 def test_list_apps_does_not_hydrate_source_or_icon_payloads(client, auth, db):

@@ -1086,6 +1086,16 @@ def test_seed_skill_uses_chat_sent_without_false_activity_substitutes():
   assert "this schema has no `chat_sent`" not in seed
 
 
+def test_seed_skill_reads_deleted_chats_without_reopening_them():
+  seed = (
+    Path(dr.__file__).resolve().parent / "seed-skills" / "reflection.md"
+  ).read_text(encoding="utf-8")
+  assert "deleted_at >= datetime('now','-7 days')" in seed
+  assert "deleted_at is null and session_id is not null" in seed
+  assert "never fork it, recover it, open it" in seed
+  assert "put its id/link in the brief" in seed
+
+
 def test_seed_skill_aligns_question_engagement_and_owns_brief_style():
   seed = (
     Path(dr.__file__).resolve().parent / "seed-skills" / "reflection.md"

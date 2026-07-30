@@ -2212,7 +2212,7 @@ async def update_app(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Update app metadata. Source and manifest authority live in app apply."""
+  """Update owner-controlled app metadata and narrow permission grants."""
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
@@ -2230,6 +2230,8 @@ async def update_app(
       app.share_with_apps = body.share_with_apps
     if body.cross_app_access is not None:
       app.cross_app_access = body.cross_app_access
+    if body.chat_log_access is not None:
+      app.chat_log_access = body.chat_log_access
     if body.share_manifest_url is not None:
       app.share_manifest_url = body.share_manifest_url or None
     if body.manage_skills is not None:
@@ -2245,12 +2247,27 @@ async def update_app(
           ),
         )
       app.manage_skills = body.manage_skills
-    # Keep a local app's owner-readable server-permission projection current.
-    # Runtime capabilities and offline declaration come only from mobius.json
-    # in the explicit source-apply transaction.
+    # Keep the owner-readable server-permission projection current. Runtime
+    # capabilities and offline declarations still come only from reviewed
+    # manifest/application flows. Store contracts must retain every other
+    # reviewed package fact when the owner changes this one live grant.
     if app.manifest_url is None:
       from app.app_capabilities import contract_from_app_state
       app.capability_contract = contract_from_app_state(app)
+    elif body.chat_log_access is not None:
+      from app.app_capabilities import (
+        contract_from_app_state,
+        contract_with_chat_log_access,
+      )
+      app.capability_contract = (
+        contract_with_chat_log_access(
+          app.capability_contract, body.chat_log_access,
+        )
+        # A legacy Store row may predate contracts entirely. There are no
+        # package facts to preserve in that case, so construct the smallest
+        # honest live-state projection instead of leaving review data absent.
+        or contract_from_app_state(app)
+      )
     db.commit()
     db.refresh(app)
     # A pin toggle is drawer-local ORDERING, not a change to the app itself, so
@@ -2263,7 +2280,8 @@ async def update_app(
       field is None
       for field in (
         body.name, body.description, body.chat_id, body.share_with_apps,
-        body.cross_app_access, body.share_manifest_url, body.manage_skills,
+        body.cross_app_access, body.chat_log_access, body.share_manifest_url,
+        body.manage_skills,
       )
     )
     if not pin_only:

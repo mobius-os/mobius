@@ -540,7 +540,7 @@ def run_migrations(eng) -> None:
     if null_nonce:
       conn.commit()
   if "chat_log_access" not in apps_cols:
-    # Chat-log read tier (none/summary/full) gating GET /api/chat-logs.
+    # Chat-log read tier gating GET /api/chat-logs.
     # Defaults to 'none'; an app gains read access by declaring
     # permissions.chat_log_access in its manifest (validated in
     # install.py) and the owner consenting at install. See models.App.
@@ -548,6 +548,16 @@ def run_migrations(eng) -> None:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN chat_log_access VARCHAR(16) "
         "NOT NULL DEFAULT 'none'"
+      ))
+      conn.commit()
+  else:
+    # `full` was a legacy spelling for the same structurally redacted active
+    # chat view as `summary`; it never exposed raw transcripts. Move existing
+    # grants forward deliberately before the stricter schema/ladders load.
+    with eng.connect() as conn:
+      conn.execute(text(
+        "UPDATE apps SET chat_log_access = 'summary' "
+        "WHERE chat_log_access = 'full'"
       ))
       conn.commit()
   # Per-app git model (feature 084). Both columns are nullable with no
