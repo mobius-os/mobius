@@ -20,3 +20,11 @@ export function clampDrawerRowCount(current, total) {
     Math.max(0, total),
   )
 }
+
+export function drawerRowCountToReveal(current, total, rowIndex) {
+  const boundedCurrent = clampDrawerRowCount(current, total)
+  if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= total) {
+    return boundedCurrent
+  }
+  return Math.max(boundedCurrent, rowIndex + 1)
+}

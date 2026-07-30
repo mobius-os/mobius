@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   DRAWER_ROW_BATCH_SIZE,
   clampDrawerRowCount,
+  drawerRowCountToReveal,
   initialDrawerRowCount,
   nextDrawerRowCount,
 } from '../../components/Drawer/drawerProgressiveRows.js'
@@ -23,4 +24,13 @@ test('drawer count survives reorder and clamps only when the list shrinks', () =
   assert.equal(clampDrawerRowCount(144, 426), 144)
   assert.equal(clampDrawerRowCount(144, 80), 80)
   assert.equal(clampDrawerRowCount(12, 426), DRAWER_ROW_BATCH_SIZE)
+})
+
+test('revealing a chat mounts its row without shrinking the existing window', () => {
+  assert.equal(drawerRowCountToReveal(DRAWER_ROW_BATCH_SIZE, 426, 275), 276)
+  assert.equal(drawerRowCountToReveal(300, 426, 275), 300)
+  assert.equal(
+    drawerRowCountToReveal(DRAWER_ROW_BATCH_SIZE, 426, -1),
+    DRAWER_ROW_BATCH_SIZE,
+  )
 })

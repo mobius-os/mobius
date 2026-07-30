@@ -33,6 +33,7 @@ import ShareAppSheet from './ShareAppSheet.jsx'
 import { isDrawerAppShareEligible } from './appShareState.js'
 import {
   clampDrawerRowCount,
+  drawerRowCountToReveal,
   initialDrawerRowCount,
   nextDrawerRowCount,
 } from './drawerProgressiveRows.js'
@@ -115,6 +116,7 @@ export default function Drawer({
   )
   const navigationScrollRef = useRef(null)
   const recentSentinelRef = useRef(null)
+  const revealedActiveChatRef = useRef(null)
   const visibleRecents = useMemo(
     () => allRecents.slice(0, visibleRecentCount),
     [allRecents, visibleRecentCount],
@@ -130,6 +132,53 @@ export default function Drawer({
       allRecents.length,
     ))
   }, [allRecents.length])
+
+  // Selecting a chat from a workspace tab should reveal that same chat in the
+  // drawer. Older chats may sit outside the progressively mounted window, so
+  // first grow the window through the target row, then reveal it before paint.
+  // Remember the completed reveal so recency refreshes cannot fight a later
+  // manual scroll; leaving the chat or closing the drawer arms the next reveal.
+  useLayoutEffect(() => {
+    if (!open || activeView !== 'chat' || activeChatId == null) {
+      revealedActiveChatRef.current = null
+      return
+    }
+
+    const chatId = String(activeChatId)
+    if (revealedActiveChatRef.current === chatId) return
+
+    const isPinned = pinnedItems.some(({ kind, item }) => (
+      kind === 'chat' && String(item.id) === chatId
+    ))
+    const recentIndex = allRecents.findIndex(({ kind, item }) => (
+      kind === 'chat' && String(item.id) === chatId
+    ))
+    if (!isPinned && recentIndex < 0) return
+
+    if (recentIndex >= visibleRecentCount) {
+      setVisibleRecentCount(current => drawerRowCountToReveal(
+        current,
+        allRecents.length,
+        recentIndex,
+      ))
+      return
+    }
+
+    const activeRow = [...(navigationScrollRef.current
+      ?.querySelectorAll('[data-drawer-key]') || [])]
+      .find(row => row.dataset.drawerKey === `chat:${chatId}`)
+    if (!activeRow) return
+
+    activeRow.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    revealedActiveChatRef.current = chatId
+  }, [
+    activeChatId,
+    activeView,
+    allRecents,
+    open,
+    pinnedItems,
+    visibleRecentCount,
+  ])
 
   // One continuous list, progressively materialized as its sentinel nears the
   // viewport. Chat summaries and app metadata are already small navigation
@@ -1503,6 +1552,7 @@ const DrawerRow = memo(function DrawerRow({
         // pointerdown reads this to lift the row out of the drawer and into a
         // pane. Only present when the splits flag is on; a plain tap still opens
         // in the focused pane (the controller never arms without slop/hold).
+        data-drawer-key={`${kind}:${id}`}
         data-drag-key={WORKSPACE_SPLITS_ENABLED ? `${kind}:${id}` : undefined}
         data-pinned-key={pinned ? `${kind}:${id}` : undefined}
         onPointerDown={onRowPointerDown}
