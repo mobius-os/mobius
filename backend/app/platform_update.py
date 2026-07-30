@@ -1243,6 +1243,13 @@ def reconcile_clone(
   # is fully in main, so a prior conflict/rollback for it is moot). The working
   # tree is untouched — any uncommitted local edits stay on disk.
   if _is_ancestor(repo, target, local):
+    try:
+      app_git.retire_landed_equivalent_changes(repo, target)
+    except Exception:
+      log.warning(
+        "platform: could not retire contribution provenance",
+        exc_info=True,
+      )
     _set_upstream(repo, target)
     CONFLICT_FLAG.unlink(missing_ok=True)
     ROLLED_BACK_FLAG.unlink(missing_ok=True)

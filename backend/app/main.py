@@ -360,6 +360,26 @@ async def lifespan(app):
   except Exception as exc:
     _log.error("manifest-icon reconciliation failed: %s", exc, exc_info=True)
   record_memory_checkpoint("startup_icons_reconciled")
+  try:
+    from app.app_apply import retire_integrated_app_provenance
+    from app.database import SessionLocal as _ProvenanceSession
+    _provenance_db = _ProvenanceSession()
+    try:
+      _retired_refs, _provenance_warnings = (
+        retire_integrated_app_provenance(_provenance_db)
+      )
+      if _retired_refs or _provenance_warnings:
+        _log.info(
+          "app provenance retirement: retired=%d warnings=%d",
+          _retired_refs, len(_provenance_warnings),
+        )
+      for _warning in _provenance_warnings:
+        _log.warning("app provenance retirement: %s", _warning)
+    finally:
+      _provenance_db.close()
+  except Exception as exc:
+    _log.error("app provenance retirement failed: %s", exc, exc_info=True)
+  record_memory_checkpoint("startup_app_provenance_retired")
   # Start the single-writer chat-persistence actor AFTER db init and
   # crash reconciliation. Order is load-bearing: reconcile_startup_chats must
   # run BEFORE the actor exists — recovery has to work even when

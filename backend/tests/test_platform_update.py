@@ -179,6 +179,22 @@ def test_clean_update_fast_forwards(clone_env):
   assert pu.reconcile_clone(platform, at_boot=True).status == "up_to_date"
 
 
+def test_up_to_date_retires_integrated_provenance(clone_env, monkeypatch):
+  _origin, platform = clone_env
+  target = _served_sha(platform)
+  calls = []
+  monkeypatch.setattr(
+    app_git,
+    "retire_landed_equivalent_changes",
+    lambda repo, upstream: calls.append((repo, upstream)) or 2,
+  )
+
+  result = pu.reconcile_clone(platform, at_boot=True)
+
+  assert result.status == "up_to_date"
+  assert calls == [(platform, target)]
+
+
 def test_clean_shallow_fast_forward_does_not_fetch_full_history(
   clone_env, monkeypatch,
 ):

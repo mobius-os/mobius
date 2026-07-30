@@ -2276,6 +2276,65 @@ def test_standalone_app_review_persists_equivalence_in_installed_repo():
   assert app_git.ref_exists(live, landed)
 
 
+def test_cleanup_terminal_staging_checkout_unregisters_linked_worktree():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  owner = data_dir / "contrib" / "terminal-cleanup-owner"
+  checkout = data_dir / "contrib" / "terminal-cleanup-linked" / "worktree"
+  owner.mkdir(parents=True)
+  subprocess.run(["git", "init", "-q", str(owner)], check=True)
+  subprocess.run(["git", "-C", str(owner), "config", "user.name", "Test"], check=True)
+  subprocess.run(
+    ["git", "-C", str(owner), "config", "user.email", "test@example.invalid"],
+    check=True,
+  )
+  (owner / "tracked.txt").write_text("base\n")
+  subprocess.run(["git", "-C", str(owner), "add", "tracked.txt"], check=True)
+  subprocess.run(["git", "-C", str(owner), "commit", "-qm", "base"], check=True)
+  checkout.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(owner), "worktree", "add", "-qb", "fix/cleanup-test", str(checkout)],
+    check=True,
+  )
+
+  record = {
+    "status": "merged",
+    "plan": {"repo_path": str(checkout)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not checkout.exists()
+  listed = subprocess.run(
+    ["git", "-C", str(owner), "worktree", "list", "--porcelain"],
+    check=True,
+    capture_output=True,
+    text=True,
+  ).stdout
+  assert str(checkout) not in listed
+
+
+def test_cleanup_terminal_staging_checkout_removes_separate_git_dir():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  root = data_dir / "contrib" / "terminal-cleanup-separated"
+  checkout = root / "worktree"
+  git_dir = root / "git"
+  root.mkdir(parents=True)
+  subprocess.run(
+    ["git", "init", "-q", f"--separate-git-dir={git_dir}", str(checkout)],
+    check=True,
+  )
+
+  record = {
+    "status": "closed",
+    "plan": {"repo_path": str(checkout)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not checkout.exists()
+  assert not git_dir.exists()
+
+
 def test_ensure_owner_fork_remote_runs_in_repo_after_pinning_origin(
   tmp_path, monkeypatch,
 ):
