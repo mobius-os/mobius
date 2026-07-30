@@ -191,7 +191,7 @@ async def test_access_token_returned_verbatim_when_fresh(tmp_path):
   """A token with comfortable life left is used as-is — no refresh call."""
   future = int(time.time() * 1000) + 60 * 60 * 1000  # +1h
   _write_creds(tmp_path, access="fresh-tok", refresh="r", expires_at=future)
-  token = await providers._claude_access_token(str(tmp_path))
+  token = await providers.claude_access_token(str(tmp_path))
   assert token == "fresh-tok"
 
 
@@ -218,7 +218,7 @@ async def test_expired_token_is_refreshed_and_persisted(tmp_path, monkeypatch):
 
   _install_mock_transport(monkeypatch, handler)
 
-  token = await providers._claude_access_token(str(tmp_path))
+  token = await providers.claude_access_token(str(tmp_path))
   assert token == "new-access-tok"
   # Correct refresh-grant shape sent upstream.
   assert captured["url"] == providers._CLAUDE_OAUTH_TOKEN_URL
@@ -264,7 +264,7 @@ async def test_refresh_preserves_sibling_credential_keys(tmp_path, monkeypatch):
 
   _install_mock_transport(monkeypatch, handler)
 
-  token = await providers._claude_access_token(str(tmp_path))
+  token = await providers.claude_access_token(str(tmp_path))
   assert token == "new-access-tok"
 
   saved = json.loads(creds_path.read_text())

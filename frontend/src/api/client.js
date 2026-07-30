@@ -481,6 +481,9 @@ export const api = {
   },
   settings: {
     get: () => apiFetch('/settings'),
+    providerUsage: (provider) => apiFetch(
+      `/settings/provider-usage/${encodeURIComponent(provider)}`,
+    ),
     save: (payload) => apiFetch('/settings', {
       method: 'POST',
       body: JSON.stringify(payload),

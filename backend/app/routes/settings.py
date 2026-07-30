@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from app import models, providers
+from app import models, provider_usage, providers
 from app.config import get_settings as get_app_settings
 from app.database import get_db
 from app.deps import (
@@ -279,7 +279,22 @@ def get_settings_view(
     "skills_enabled": providers.skills_enabled(data_dir),
     "claude_version": _format_cli_version(_cli_version("claude")),
     "codex_version": _format_cli_version(_cli_version("codex")),
+    "provider_plans": provider_usage.configured_plan_labels(data_dir),
   }
+
+
+@settings_router.get("/provider-usage/{provider_id}")
+async def get_provider_usage(
+  provider_id: str,
+  _: models.Owner = Depends(get_current_owner),
+) -> dict:
+  """Returns one connected provider's current plan allowance windows."""
+  if provider_id not in providers.PROVIDERS:
+    raise HTTPException(status_code=404, detail="Unknown provider.")
+  return await provider_usage.read_provider_usage(
+    provider_id,
+    get_app_settings().data_dir,
+  )
 
 
 @settings_router.post("", dependencies=[Depends(reject_cross_site)])

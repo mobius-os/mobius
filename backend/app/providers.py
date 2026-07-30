@@ -22,6 +22,7 @@ it in PROVIDERS.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -666,7 +667,7 @@ class ClaudeProvider(BaseProvider):
     than blocking every turn here.
     """
     try:
-      await _claude_access_token(data_dir)
+      await claude_access_token(data_dir)
     except Exception as exc:  # noqa: BLE001 - best-effort; never block a turn
       log.warning("claude pre-turn token refresh failed: %s", exc)
 
@@ -1056,7 +1057,7 @@ async def _refresh_claude_access_token(oauth: dict) -> dict:
   return refreshed
 
 
-async def _claude_access_token(data_dir: str) -> str:
+async def claude_access_token(data_dir: str) -> str:
   """Returns a non-expired Claude OAuth access token, refreshing it when the
   stored one has expired (or is within the refresh margin).
 
@@ -1103,6 +1104,51 @@ async def _claude_access_token(data_dir: str) -> str:
     return refreshed["accessToken"]
 
 
+def claude_subscription_type(data_dir: str) -> str | None:
+  """Return the non-secret Claude plan identifier stored with OAuth."""
+  try:
+    _, oauth = _read_claude_oauth(data_dir)
+  except (OSError, RuntimeError, ValueError):
+    return None
+  value = oauth.get("subscriptionType")
+  return value if isinstance(value, str) and value.strip() else None
+
+
+def codex_subscription_type(data_dir: str) -> str | None:
+  """Return the non-secret Codex plan identifier stored in its ID token.
+
+  This is display metadata only. Runtime authentication and live usage still
+  go through the Codex app-server, which remains authoritative.
+  """
+  path = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
+  try:
+    auth = json.loads(path.read_text())
+    tokens = auth.get("tokens") if isinstance(auth, dict) else None
+    id_token = (
+      tokens.get("id_token")
+      if isinstance(tokens, dict)
+      else auth.get("id_token") if isinstance(auth, dict) else None
+    )
+    if not isinstance(id_token, str):
+      return None
+    parts = id_token.split(".")
+    if len(parts) != 3:
+      return None
+    encoded = parts[1] + "=" * (-len(parts[1]) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(encoded))
+  except (OSError, ValueError, UnicodeError):
+    return None
+  if not isinstance(payload, dict):
+    return None
+  namespace = payload.get("https://api.openai.com/auth")
+  value = (
+    namespace.get("chatgpt_plan_type")
+    if isinstance(namespace, dict)
+    else payload.get("chatgpt_plan_type")
+  )
+  return value if isinstance(value, str) and value.strip() else None
+
+
 async def _fetch_claude_models(data_dir: str) -> list[str]:
   """Calls Anthropic's /v1/models with the stored OAuth access token.
 
@@ -1112,13 +1158,13 @@ async def _fetch_claude_models(data_dir: str) -> list[str]:
   httpx (already a requirement) instead of pulling the `anthropic`
   SDK to keep dependency surface flat.
 
-  The access token is refreshed in `_claude_access_token` when expired —
+  The access token is refreshed in `claude_access_token` when expired —
   without that, an expired CLI token 401s here and the picker is stuck on
   the static KNOWN_MODELS fallback until the container restarts.
   """
   import httpx  # local import — only the registry path needs it
 
-  token = await _claude_access_token(data_dir)
+  token = await claude_access_token(data_dir)
   headers = {
     "Authorization": f"Bearer {token}",
     "anthropic-version": "2023-06-01",

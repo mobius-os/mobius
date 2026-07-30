@@ -26,6 +26,8 @@ import './ProviderAuth.css'
  *   statusNode      — optional node replacing the default Connected/Not
  *                     connected StatusDot (e.g. "Configured", or the
  *                     chat model's "Last model: Opus 4.8").
+ *   detailNode      — optional richer read-only detail below the status
+ *                     (e.g. current plan allowance windows in Settings).
  *   actionLabel     — optional override for the action button text
  *                     (e.g. "Reconfigure" / "Configure"); the default
  *                     is the Connect/Reconnect/Close verb below.
@@ -33,10 +35,10 @@ import './ProviderAuth.css'
  */
 export default function ProviderRow({
   name, connected, expanded, onToggleExpand, children,
-  badge, version, subtitle, statusNode, actionLabel, disabled = false,
+  badge, version, subtitle, statusNode, detailNode, actionLabel, disabled = false,
 }) {
-  // Name + installed CLI/SDK version + status are informational. The explicit
-  // action button is the only interactive target in the row.
+  // Name + installed CLI/SDK version are informational. The status slot can
+  // optionally carry a compact disclosure; auth remains a separate action.
   const info = (
     <span className="provider-row__info">
       <span className="provider-row__name-line">
@@ -60,6 +62,7 @@ export default function ProviderRow({
           {connected ? 'Connected' : 'Not connected'}
         </StatusDot>
       )}
+      {detailNode}
     </span>
   )
 

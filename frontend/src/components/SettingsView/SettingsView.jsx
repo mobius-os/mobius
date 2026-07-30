@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
+import { ChevronDown, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
@@ -30,6 +30,8 @@ import ModelSheet from '../ui/ModelSheet.jsx'
 import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
+import ProviderUsage from './ProviderUsage.jsx'
+import { formatPlanStatus } from './providerUsage.js'
 import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/ChatSettingsPanel.jsx'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
@@ -81,6 +83,27 @@ function defaultBackgroundModel(provider) {
 
 function isKnownProvider(provider) {
   return PROVIDER_CHOICES.some(p => p.id === provider)
+}
+
+function PlanUsageToggle({ provider, label, expanded, onToggle }) {
+  return (
+    <button
+      type="button"
+      className="provider-plan-toggle"
+      onClick={onToggle}
+      aria-expanded={expanded}
+      aria-controls={`provider-usage-${provider}`}
+      aria-label={`${label}, ${expanded ? 'hide' : 'show'} usage`}
+    >
+      <span>{label}</span>
+      <ChevronDown
+        className="provider-plan-toggle__chevron"
+        width={13}
+        height={13}
+        aria-hidden="true"
+      />
+    </button>
+  )
 }
 
 function providerFromSettings(settings) {
@@ -335,6 +358,9 @@ export default function SettingsView({
   const [themeSwitching, setThemeSwitching] = useState(false)
   // Which provider has its inline auth panel expanded. null = none.
   const [expandedAuth, setExpandedAuth] = useState(null)
+  // Usage is deliberately on demand. Only the disclosed provider fetches,
+  // and keeping this separate from auth preserves the row's two clear actions.
+  const [expandedUsage, setExpandedUsage] = useState(null)
   // Surface failures from the dark-mode toggle: a failed theme
   // persist would otherwise bounce the knob without telling the user
   // why.
@@ -413,6 +439,18 @@ export default function SettingsView({
   //   LOADING — no data yet and no error: the initial in-flight fetch.
   const providerReady = settingsQuery.data !== undefined
     && providerAvailability.phase === PROVIDER_AVAILABILITY_PHASE.READY
+  const codexUsageQuery = settingsQueries.providerUsage.useQuery('codex', {
+    enabled: (
+      active && providerReady && codexAuthenticated
+      && expandedUsage === 'codex'
+    ),
+  })
+  const claudeUsageQuery = settingsQueries.providerUsage.useQuery('claude', {
+    enabled: (
+      active && providerReady && claudeAuthenticated
+      && expandedUsage === 'claude'
+    ),
+  })
   // Registry and provider/settings probes are independent. Starting them
   // together avoids an unnecessary request waterfall on a first open.
   const modelRegistryQuery = modelQueries.registry.useQuery()
@@ -740,23 +778,37 @@ export default function SettingsView({
   // render, which combined with the row's CSS transitions made the
   // panel feel jittery. With the updater form, deps are empty.
   const toggleClaudeAuth = useCallback(
-    () => setExpandedAuth(prev => {
-      if (prev !== 'claude') {
-        authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
-      }
-      return prev === 'claude' ? null : 'claude'
-    }),
+    () => {
+      setExpandedUsage(null)
+      setExpandedAuth(prev => {
+        if (prev !== 'claude') {
+          authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
+        }
+        return prev === 'claude' ? null : 'claude'
+      })
+    },
     [],
   )
   const toggleCodexAuth = useCallback(
-    () => setExpandedAuth(prev => {
-      if (prev !== 'codex') {
-        authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
-      }
-      return prev === 'codex' ? null : 'codex'
-    }),
+    () => {
+      setExpandedUsage(null)
+      setExpandedAuth(prev => {
+        if (prev !== 'codex') {
+          authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
+        }
+        return prev === 'codex' ? null : 'codex'
+      })
+    },
     [],
   )
+  const toggleClaudeUsage = useCallback(() => {
+    setExpandedAuth(null)
+    setExpandedUsage(prev => prev === 'claude' ? null : 'claude')
+  }, [])
+  const toggleCodexUsage = useCallback(() => {
+    setExpandedAuth(null)
+    setExpandedUsage(prev => prev === 'codex' ? null : 'codex')
+  }, [])
   const onProviderConnected = useCallback(async (provider) => {
     const providersBefore = authProvidersAtStartRef.current || configuredProviders
     const newlyConnected = !providersBefore.has(provider)
@@ -787,6 +839,7 @@ export default function SettingsView({
     }
     authProvidersAtStartRef.current = null
     settingsQueries.owner.invalidate(queryClient)
+    settingsQueries.providerUsage.invalidate(queryClient, provider)
     setExpandedAuth(null)
   }, [configuredProviders, persistBackgroundAgents, queryClient, settingsQuery.data])
   const onClaudeAuthDone = useCallback(() => {
@@ -1347,6 +1400,16 @@ export default function SettingsView({
     ? (modelsForProvider(defaultChatProvider).find(m => m.id === defaultChatModelId)?.label
         || defaultChatModelId)
     : ''
+  const codexPlanLabel = (
+    codexUsageQuery.data?.plan_label
+    || settingsQuery.data?.provider_plans?.codex
+    || ''
+  )
+  const claudePlanLabel = (
+    claudeUsageQuery.data?.plan_label
+    || settingsQuery.data?.provider_plans?.claude
+    || ''
+  )
 
   return (
     <div className="settings">
@@ -1368,6 +1431,22 @@ export default function SettingsView({
                   name="OpenAI Codex"
                   connected={codexAuthenticated}
                   version={codexVersion}
+                  statusNode={codexAuthenticated ? (
+                    <PlanUsageToggle
+                      provider="codex"
+                      label={formatPlanStatus(codexPlanLabel)}
+                      expanded={expandedUsage === 'codex'}
+                      onToggle={toggleCodexUsage}
+                    />
+                  ) : undefined}
+                  detailNode={codexAuthenticated && expandedUsage === 'codex' ? (
+                    <ProviderUsage
+                      id="provider-usage-codex"
+                      snapshot={codexUsageQuery.data}
+                      loading={codexUsageQuery.isPending}
+                      failed={codexUsageQuery.isError}
+                    />
+                  ) : null}
                   expanded={expandedAuth === 'codex'}
                   onToggleExpand={toggleCodexAuth}
                 >
@@ -1378,6 +1457,22 @@ export default function SettingsView({
                   name="Claude Code"
                   connected={claudeAuthenticated}
                   version={claudeVersion}
+                  statusNode={claudeAuthenticated ? (
+                    <PlanUsageToggle
+                      provider="claude"
+                      label={formatPlanStatus(claudePlanLabel)}
+                      expanded={expandedUsage === 'claude'}
+                      onToggle={toggleClaudeUsage}
+                    />
+                  ) : undefined}
+                  detailNode={claudeAuthenticated && expandedUsage === 'claude' ? (
+                    <ProviderUsage
+                      id="provider-usage-claude"
+                      snapshot={claudeUsageQuery.data}
+                      loading={claudeUsageQuery.isPending}
+                      failed={claudeUsageQuery.isError}
+                    />
+                  ) : null}
                   expanded={expandedAuth === 'claude'}
                   onToggleExpand={toggleClaudeAuth}
                 >

@@ -16,6 +16,8 @@ const themeKey = ['theme']
 const themeModeKey = ['theme-mode']
 const setupStatusKey = ['auth', 'setup', 'status']
 const settingsKey = ['settings']
+const providerUsageRootKey = ['settings', 'provider-usage']
+const providerUsageKey = (provider) => [...providerUsageRootKey, provider]
 const appsKey = ['apps']
 const chatsKey = ['chats']
 const providersStatusKey = ['auth', 'providers', 'status']
@@ -68,6 +70,21 @@ function useSetupStatusQuery({ enabled = true } = {}) {
 async function fetchSettings() {
   const res = await api.settings.get()
   return jsonOrThrow(res, 'settings fetch failed:')
+}
+
+async function fetchProviderUsage(provider) {
+  const res = await api.settings.providerUsage(provider)
+  return jsonOrThrow(res, 'provider usage fetch failed:')
+}
+
+function useProviderUsageQuery(provider, { enabled = true } = {}) {
+  return useQuery({
+    queryKey: providerUsageKey(provider),
+    queryFn: () => fetchProviderUsage(provider),
+    enabled: enabled && Boolean(provider),
+    staleTime: 60_000,
+    retry: 0,
+  })
 }
 
 function useSettingsQuery() {
@@ -320,6 +337,15 @@ export const settingsQueries = {
     fetch: fetchSettings,
     useQuery: useSettingsQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: settingsKey }),
+  },
+  providerUsage: {
+    key: providerUsageRootKey,
+    keyFor: providerUsageKey,
+    fetch: fetchProviderUsage,
+    useQuery: useProviderUsageQuery,
+    invalidate: (queryClient, provider) => queryClient.invalidateQueries({
+      queryKey: provider ? providerUsageKey(provider) : providerUsageRootKey,
+    }),
   },
 }
 
