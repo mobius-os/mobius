@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
+  goalObjectiveAtRunStart,
   goalObjectiveFromText,
   latestGoalObjective,
   progressRailViewModel,
@@ -30,7 +31,7 @@ test('goalObjectiveFromText does not present clear or an empty command as active
   assert.equal(goalObjectiveFromText('/goal CLEAR'), '')
 })
 
-test('latestGoalObjective recovers only the latest visible owner turn', () => {
+test('latestGoalObjective recovers only the current visible owner turn', () => {
   assert.equal(latestGoalObjective([
     { role: 'user', content: '/goal old objective' },
     { role: 'assistant', content: 'Done' },
@@ -41,6 +42,54 @@ test('latestGoalObjective recovers only the latest visible owner turn', () => {
     { role: 'user', content: 'hidden answer', hidden: true },
     { role: 'assistant', content: 'Working', partial: true },
   ]), 'build the indicator')
+})
+
+test('a resumable continue keeps the same goal through live start and cold attach', () => {
+  const interruptedGoal = [
+    { role: 'user', content: '/goal finish the migration' },
+    {
+      role: 'assistant',
+      content: 'Partly done',
+      blocks: [{
+        type: 'error',
+        message: 'Interrupted',
+        resumable: true,
+      }],
+    },
+  ]
+  assert.equal(
+    goalObjectiveAtRunStart('continue', interruptedGoal),
+    'finish the migration',
+  )
+  assert.equal(
+    latestGoalObjective([
+      ...interruptedGoal,
+      { role: 'user', content: 'continue' },
+      { role: 'assistant', content: 'Working', partial: true },
+    ]),
+    'finish the migration',
+  )
+})
+
+test('continue does not revive a completed, cleared, or superseded goal', () => {
+  assert.equal(goalObjectiveAtRunStart('continue', [
+    { role: 'user', content: '/goal old objective' },
+    { role: 'assistant', content: 'Done' },
+  ]), '')
+  assert.equal(latestGoalObjective([
+    { role: 'user', content: '/goal old objective' },
+    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
+    { role: 'user', content: '/goal clear' },
+    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
+    { role: 'user', content: 'continue' },
+  ]), '')
+  assert.equal(latestGoalObjective([
+    { role: 'user', content: '/goal old objective' },
+    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
+    { role: 'user', content: 'new subject' },
+    { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
+    { role: 'user', content: 'continue' },
+  ]), '')
 })
 
 test('the goal reuses the progress rail and stays as context for build phases', () => {
@@ -76,8 +125,8 @@ test('ChatView binds goal state to the existing run-start and turn-end lifecycle
   assert.equal(runStarts.length, 4, 'every current run-start seam should be covered')
   for (const suffix of runStarts) {
     assert.match(
-      suffix.slice(0, 260),
-      /setActiveGoalState\(goalObjectiveFromText\(/,
+      suffix.slice(0, 380),
+      /setActiveGoalState\(goalObjectiveAtRunStart\(/,
       'goal and build progress must reset together at each run boundary',
     )
   }
