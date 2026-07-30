@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 const drawerCss = readFileSync(new URL('../../Drawer/Drawer.css', import.meta.url), 'utf8')
+const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 const chatSurfaceModel = readFileSync(new URL('../chatSurfaceModel.js', import.meta.url), 'utf8')
 const workspaceChrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
@@ -150,10 +151,17 @@ test('the held chat is an opaque layer above staging until the atomic swap', () 
 
 test('chat selection settles without flashing or crossfading text layers', () => {
   const drawerItem = ruleBody('.drawer__item', drawerCss)
+  const drawerPress = ruleBody('.drawer__item:not(.drawer__item--active):active', drawerCss)
   assert.equal(
     drawerItem.match(/transition:\s*([^;]+);/)?.[1],
     'background-color 0.12s',
     'the selected title color must snap instead of tweening its glyphs')
+  assert.doesNotMatch(indexCss, /\.drawer__item:active\b/,
+    'drawer press feedback must stay out of the global scale contract')
+  assert.match(drawerPress, /background-color:\s*var\(--surface\)/,
+    'an unselected row should retain quiet press feedback')
+  assert.doesNotMatch(drawerPress, /transform:/,
+    'drawer press feedback must keep the row geometry fixed')
 
   assert.match(ruleBody('.shell__chat-view > .chat'), /transition:\s*opacity 90ms ease-out/,
     'the ready transcript should settle on its existing mounted surface')

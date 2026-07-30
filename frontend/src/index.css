@@ -404,11 +404,11 @@ textarea:focus-visible {
    transcript stays visually still while the scroll state machine works. */
 
 /* Tap feedback on shell-bar buttons. Component-specific transitions
-   for .chat__send, .chat__mic, .chat__stop, .drawer__item live in
-   their own CSS files — `transition` is a shorthand that REPLACES,
-   not extends, so listing them here would clobber the component
-   contracts. The :active scale below still applies via the per-class
-   selectors. */
+   for .chat__send, .chat__mic, and .chat__stop live in their own CSS
+   files — `transition` is a shorthand that REPLACES, not extends, so
+   listing them here would clobber the component contracts. Drawer rows
+   deliberately keep their glyph geometry fixed and use a background wash
+   for press feedback instead (Drawer.css). */
 .shell__bar button {
   transition: transform 100ms ease, background 180ms ease,
               color 180ms ease, border-color 180ms ease,
@@ -416,7 +416,6 @@ textarea:focus-visible {
 }
 .chat__send:active,
 .chat__mic:active,
-.drawer__item:active,
 .shell__bar button:active {
   transform: scale(0.96);
 }

@@ -322,6 +322,14 @@
   background: var(--accent-dim);
 }
 
+/* Press feedback stays on the row surface rather than scaling the button.
+   Scaling a drawer row rasterizes its text at a transient smaller size, which
+   makes chat names visibly shrink and grow during otherwise unrelated chat
+   handoffs. The selected row already has its own steady accent wash. */
+.drawer__item:not(.drawer__item--active):active {
+  background-color: var(--surface);
+}
+
 /* The lifted row while it is being dragged to a new spot. It reads as "picked
    up" — raised surface + shadow — rather than faded, so the movement is legible.
    The vertical follow/settle transform lives on the parent .drawer__row. */
