@@ -181,14 +181,18 @@ class ReconciliationReceipt:
   """Explain one update decision without exposing merge implementation details."""
 
   proven_present: tuple[str, ...] = ()
+  local_only_paths: tuple[str, ...] = ()
   new_upstream_paths: tuple[str, ...] = ()
+  compatible_paths: tuple[str, ...] = ()
   unresolved_conflict_paths: tuple[str, ...] = ()
   provenance_refs_used: tuple[str, ...] = ()
 
   def as_dict(self) -> dict[str, list[str]]:
     return {
       "proven_present": list(self.proven_present),
+      "local_only_paths": list(self.local_only_paths),
       "new_upstream_paths": list(self.new_upstream_paths),
+      "compatible_paths": list(self.compatible_paths),
       "unresolved_conflict_paths": list(self.unresolved_conflict_paths),
       "provenance_refs_used": list(self.provenance_refs_used),
     }
@@ -643,23 +647,30 @@ def describe_reconciliation(
   shared_base: str,
   upstream: str,
   *,
+  local: str | None = None,
   conflict_paths: Iterable[str] = (),
   proven_changes: Iterable[EquivalentChange] = (),
 ) -> ReconciliationReceipt:
   """Return the common platform/app receipt for one semantic merge base.
 
   ``shared_base`` already contains every reviewed change proven present on
-  both sides. Its diff to ``upstream`` is therefore the genuinely new upstream
-  path set, while ``conflict_paths`` is the residual owner decision. Callers do
-  not need to reconstruct either fact from warnings or Git topology.
+  both sides. Its diffs to ``local`` and ``upstream`` are therefore the
+  genuinely local and genuinely incoming path sets, while ``conflict_paths``
+  is the residual owner decision. Callers do not need to reconstruct any fact
+  from warnings or Git topology.
   """
   repo = Path(source_dir)
   proven = tuple(proven_changes)
-  new_paths = _diff_paths(repo, shared_base, upstream)
+  local_paths = (_diff_paths(repo, shared_base, local) if local else set()) or set()
+  new_paths = _diff_paths(repo, shared_base, upstream) or set()
+  conflicts = set(conflict_paths)
+  compatible = local_paths & new_paths - conflicts
   return ReconciliationReceipt(
     proven_present=tuple(change.contribution_id for change in proven),
-    new_upstream_paths=tuple(sorted(new_paths or ())),
-    unresolved_conflict_paths=tuple(sorted(set(conflict_paths))),
+    local_only_paths=tuple(sorted(local_paths - new_paths)),
+    new_upstream_paths=tuple(sorted(new_paths - local_paths)),
+    compatible_paths=tuple(sorted(compatible)),
+    unresolved_conflict_paths=tuple(sorted(conflicts)),
     provenance_refs_used=tuple(change.ref for change in proven),
   )
 
@@ -1185,10 +1196,44 @@ def merge_with_equivalent_changes(
     repo,
     shared_tree,
     upstream,
+    local=local,
     conflict_paths=merged.conflict_paths,
     proven_changes=applied,
   )
   return merged
+
+
+def preview_reconciliation(
+  source_dir: str | Path,
+  local: str,
+  upstream: str,
+) -> ReconciliationReceipt:
+  """Classify two refs with the same semantic proof used by real updates.
+
+  This is the read-only inventory seam for both platform and app source maps.
+  It never fetches, moves a ref, or touches the worktree. Proven contribution
+  anchors replace Git's historical base when available; otherwise the ordinary
+  merge base and conflict verdict remain authoritative.
+  """
+  repo = Path(source_dir)
+  equivalent = merge_with_equivalent_changes(repo, local, upstream)
+  if equivalent is not None:
+    return equivalent.reconciliation
+  base = _run(repo, "merge-base", local, upstream, check=False).stdout.strip()
+  if not base:
+    return ReconciliationReceipt()
+  try:
+    ordinary = merge_refs(repo, local, upstream)
+    conflicts = ordinary.conflict_paths
+  except (OSError, subprocess.SubprocessError, RuntimeError):
+    conflicts = ()
+  return describe_reconciliation(
+    repo,
+    base,
+    upstream,
+    local=local,
+    conflict_paths=conflicts,
+  )
 
 
 def retire_landed_equivalent_changes(
@@ -1880,6 +1925,7 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
       repo,
       ordinary_base,
       UPSTREAM_BRANCH,
+      local=LOCAL_BRANCH,
       conflict_paths=ordinary.conflict_paths,
     )
   if ordinary.status == "clean":

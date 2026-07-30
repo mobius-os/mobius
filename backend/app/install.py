@@ -2713,7 +2713,9 @@ async def install_from_manifest(
               conflict_paths = [entry_key]
               reconciliation = app_git.ReconciliationReceipt(
                 proven_present=reconciliation.proven_present,
+                local_only_paths=reconciliation.local_only_paths,
                 new_upstream_paths=reconciliation.new_upstream_paths,
+                compatible_paths=reconciliation.compatible_paths,
                 unresolved_conflict_paths=(entry_key,),
                 provenance_refs_used=reconciliation.provenance_refs_used,
               )
@@ -2774,7 +2776,9 @@ async def install_from_manifest(
                   )
                   reconciliation = app_git.ReconciliationReceipt(
                     proven_present=reconciliation.proven_present,
+                    local_only_paths=reconciliation.local_only_paths,
                     new_upstream_paths=reconciliation.new_upstream_paths,
+                    compatible_paths=reconciliation.compatible_paths,
                     provenance_refs_used=reconciliation.provenance_refs_used,
                   )
                   # Exec bits come from the same merged tree the resolution was

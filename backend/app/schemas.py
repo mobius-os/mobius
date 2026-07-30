@@ -236,7 +236,9 @@ class AppPreviewOut(BaseModel):
 
 class ReconciliationReceiptOut(BaseModel):
   proven_present: list[str] = Field(default_factory=list)
+  local_only_paths: list[str] = Field(default_factory=list)
   new_upstream_paths: list[str] = Field(default_factory=list)
+  compatible_paths: list[str] = Field(default_factory=list)
   unresolved_conflict_paths: list[str] = Field(default_factory=list)
   provenance_refs_used: list[str] = Field(default_factory=list)
 

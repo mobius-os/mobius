@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from app import app_git
 from app.config import get_settings
 
 _GIT_TIMEOUT = 8
@@ -138,14 +139,14 @@ def _install_managed_paths(
   return managed
 
 
-def _diff_summary(
+def _diff_inventory(
   repo: Path,
   left: str,
   right: str,
   *,
   classify_install: bool = False,
-) -> dict[str, Any]:
-  """Count endpoint tree differences without returning source content."""
+) -> tuple[dict[str, Any], set[str]]:
+  """Count endpoint differences and retain their complete managed path set."""
   proc = _git(repo, "diff", "--numstat", "--no-renames", left, right, "--")
   if proc.returncode != 0:
     return {
@@ -154,7 +155,7 @@ def _diff_summary(
       "authored_insertions": 0, "authored_deletions": 0,
       "managed_insertions": 0, "managed_deletions": 0,
       "paths": [], "truncated": False,
-    }
+    }, set()
   files = insertions = deletions = binaries = 0
   authored_files = managed_files = 0
   authored_insertions = authored_deletions = 0
@@ -217,6 +218,92 @@ def _diff_summary(
     "managed_deletions": managed_deletions,
     "paths": paths,
     "truncated": files > len(paths),
+  }, managed_paths
+
+
+def _diff_summary(
+  repo: Path,
+  left: str,
+  right: str,
+  *,
+  classify_install: bool = False,
+) -> dict[str, Any]:
+  """Return the bounded, source-free endpoint comparison."""
+  summary, _managed_paths = _diff_inventory(
+    repo, left, right, classify_install=classify_install,
+  )
+  return summary
+
+
+def _endpoint_diff_paths(repo: Path, left: str, right: str) -> set[str] | None:
+  """Return path names whose endpoint bytes differ, independent of topology."""
+  proc = _git(repo, "diff", "--name-only", "--no-renames", "-z", left, right, "--")
+  if proc.returncode != 0:
+    return None
+  return {path for path in proc.stdout.split("\0") if path}
+
+
+def _reconciliation_summary(
+  repo: Path,
+  local: str,
+  upstream: str,
+  *,
+  managed_paths: set[str] | None = None,
+) -> dict[str, Any]:
+  """Bound the shared semantic receipt for Contribute's read-only source map."""
+  empty = {
+    "available": False,
+    "proven_present": [],
+    "proven_present_count": 0,
+    "local_only_paths": [],
+    "local_only_count": 0,
+    "new_upstream_paths": [],
+    "new_upstream_count": 0,
+    "compatible_paths": [],
+    "compatible_count": 0,
+    "unresolved_conflict_paths": [],
+    "unresolved_conflict_count": 0,
+    "truncated": False,
+  }
+  try:
+    receipt = app_git.preview_reconciliation(repo, local, upstream)
+    endpoint_paths = _endpoint_diff_paths(repo, upstream, local)
+  except (OSError, subprocess.SubprocessError, RuntimeError):
+    return empty
+  if endpoint_paths is None:
+    return empty
+
+  managed = managed_paths or set()
+
+  def source_paths(values: tuple[str, ...]) -> list[str]:
+    # A path that finished byte-identical on both endpoints is not remaining
+    # local or incoming work, even if both histories independently touched it.
+    return sorted(set(values) & endpoint_paths - managed)
+
+  proven = list(receipt.proven_present)
+  local_paths = source_paths(receipt.local_only_paths)
+  upstream_paths = source_paths(receipt.new_upstream_paths)
+  compatible_paths = source_paths(receipt.compatible_paths)
+  conflict_paths = source_paths(receipt.unresolved_conflict_paths)
+  truncated = any(
+    len(values) > _PATH_PREVIEW
+    for values in (
+      proven, local_paths, upstream_paths, compatible_paths, conflict_paths,
+    )
+  )
+  return {
+    "available": True,
+    "proven_present": proven[:_PATH_PREVIEW],
+    "proven_present_count": len(proven),
+    "local_only_paths": local_paths[:_PATH_PREVIEW],
+    "local_only_count": len(local_paths),
+    "new_upstream_paths": upstream_paths[:_PATH_PREVIEW],
+    "new_upstream_count": len(upstream_paths),
+    "compatible_paths": compatible_paths[:_PATH_PREVIEW],
+    "compatible_count": len(compatible_paths),
+    "unresolved_conflict_paths": conflict_paths[:_PATH_PREVIEW],
+    "unresolved_conflict_count": len(conflict_paths),
+    "truncated": truncated,
   }
 
 
@@ -385,6 +472,7 @@ def _project_status(
     "ahead": None,
     "behind": None,
     "tree": None,
+    "reconciliation": None,
     "working": None,
     "state": "unavailable",
   }
@@ -427,22 +515,56 @@ def _project_status(
     return response
 
   ahead, behind = _comparison_counts(repo, base_ref, "HEAD")
-  tree = _diff_summary(
+  tree, managed_paths = _diff_inventory(
     repo, base_ref, "HEAD", classify_install=(kind == "app"),
   )
-  response.update({"behind": behind, "ahead": ahead, "tree": tree})
+  reconciliation = _reconciliation_summary(
+    repo,
+    "HEAD",
+    base_ref,
+    managed_paths=managed_paths,
+  )
+  response.update({
+    "behind": behind,
+    "ahead": ahead,
+    "tree": tree,
+    "reconciliation": reconciliation,
+  })
 
   has_working = bool(working.get("files"))
-  has_conflict = bool(working.get("conflicts") or working.get("merge_active"))
-  has_local = bool(tree.get("authored_files", tree.get("files")))
+  semantic = reconciliation.get("available")
+  has_conflict = bool(
+    working.get("conflicts")
+    or working.get("merge_active")
+    or (
+      semantic
+      and reconciliation.get("unresolved_conflict_count")
+    )
+  )
+  has_local = bool(
+    (
+      reconciliation.get("local_only_count")
+      or reconciliation.get("compatible_count")
+      or reconciliation.get("unresolved_conflict_count")
+    )
+    if semantic else tree.get("authored_files", tree.get("files"))
+  )
+  has_incoming = bool(
+    (
+      reconciliation.get("new_upstream_count")
+      or reconciliation.get("compatible_count")
+      or reconciliation.get("unresolved_conflict_count")
+    )
+    if semantic else behind
+  )
   has_managed = bool(tree.get("managed_files"))
   if has_conflict:
     state = "conflict"
   elif has_working:
     state = "working"
-  elif behind and (ahead or has_local):
+  elif has_incoming and has_local:
     state = "diverged"
-  elif behind:
+  elif has_incoming:
     state = "incoming"
   elif has_local:
     state = "customized"

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 
-from app import source_status
+import pytest
+
+from app import app_git, source_status
 from app.config import get_settings
 
 
@@ -67,6 +70,8 @@ def test_aligned_and_history_only_ahead_keep_tree_magnitude_zero():
   assert ahead["ahead"] == 1
   assert ahead["tree"]["files"] == 0
   assert ahead["state"] == "aligned"
+  assert ahead["reconciliation"]["local_only_count"] == 0
+  assert ahead["reconciliation"]["new_upstream_count"] == 0
 
 
 def test_committed_and_working_deltas_are_reported_separately():
@@ -235,10 +240,165 @@ def test_diverged_counts_and_sanitized_github_identity():
   assert result["state"] == "diverged"
   assert result["behind"] == 1
   assert result["ahead"] == 1
+  assert result["reconciliation"]["local_only_paths"] == ["local.js"]
+  assert result["reconciliation"]["new_upstream_paths"] == ["remote.js"]
+  assert result["reconciliation"]["unresolved_conflict_paths"] == []
   assert result["canonical_repo"] == "example/private-demo"
   payload = repr(result)
   assert str(repo) not in payload
   assert "git@github.com" not in payload
+
+
+def test_endpoint_equal_sibling_histories_are_semantically_aligned():
+  repo = _repo("same-endpoint")
+  base = _git(repo, "rev-parse", "HEAD")
+  (repo / "index.jsx").write_text("export default 2\n", encoding="utf-8")
+  _git(repo, "add", "index.jsx")
+  _commit(repo, "local spelling")
+
+  _git(repo, "checkout", "-q", "upstream")
+  (repo / "index.jsx").write_text("export default 2\n", encoding="utf-8")
+  _git(repo, "add", "index.jsx")
+  _commit(repo, "shared spelling")
+  _git(repo, "checkout", "-q", "main")
+
+  result = source_status.build_app_status(_app(repo))
+
+  assert result is not None
+  assert result["ahead"] == 1
+  assert result["behind"] == 1
+  assert result["tree"]["files"] == 0
+  assert result["reconciliation"]["local_only_count"] == 0
+  assert result["reconciliation"]["new_upstream_count"] == 0
+  assert result["state"] == "aligned"
+  assert _git(repo, "merge-base", "main", "upstream") == base
+
+
+def test_disjoint_same_file_edits_are_classified_as_compatible():
+  repo = _repo("compatible-overlap")
+  (repo / "index.jsx").write_text(
+    "first = 1\nkeep_a = 2\nkeep_b = 3\nlast = 4\n",
+    encoding="utf-8",
+  )
+  _git(repo, "add", "index.jsx")
+  _commit(repo, "shared multiline base")
+  _git(repo, "branch", "-f", "upstream", "HEAD")
+
+  (repo / "index.jsx").write_text(
+    "first = 10\nkeep_a = 2\nkeep_b = 3\nlast = 4\n",
+    encoding="utf-8",
+  )
+  _git(repo, "add", "index.jsx")
+  _commit(repo, "local first line")
+
+  _git(repo, "checkout", "-q", "upstream")
+  (repo / "index.jsx").write_text(
+    "first = 1\nkeep_a = 2\nkeep_b = 3\nlast = 40\n",
+    encoding="utf-8",
+  )
+  _git(repo, "add", "index.jsx")
+  _commit(repo, "upstream second line")
+  _git(repo, "checkout", "-q", "main")
+
+  result = source_status.build_app_status(_app(repo))
+
+  assert result is not None
+  receipt = result["reconciliation"]
+  assert receipt["local_only_paths"] == []
+  assert receipt["new_upstream_paths"] == []
+  assert receipt["compatible_paths"] == ["index.jsx"]
+  assert receipt["compatible_count"] == 1
+  assert receipt["unresolved_conflict_paths"] == []
+  assert result["state"] == "diverged"
+
+
+def test_managed_classification_does_not_depend_on_the_path_preview(monkeypatch):
+  repo = _repo("managed-beyond-preview")
+  (repo / "authored.js").write_text("owner\n", encoding="utf-8")
+  _git(repo, "add", "authored.js")
+  _commit(repo, "owner change")
+  (repo / "managed.js").write_text("installer\n", encoding="utf-8")
+  _git(repo, "add", "managed.js")
+  _commit(repo, "install: adapt package")
+  monkeypatch.setattr(source_status, "_PATH_PREVIEW", 1)
+
+  result = source_status.build_app_status(_app(repo))
+
+  assert result is not None
+  assert result["tree"]["truncated"] is True
+  assert result["tree"]["managed_files"] == 1
+  assert result["reconciliation"]["local_only_paths"] == ["authored.js"]
+  assert result["reconciliation"]["local_only_count"] == 1
+
+
+def test_reconciliation_degrades_only_for_expected_runtime_failures(
+  monkeypatch,
+):
+  repo = _repo("reconciliation-failures")
+
+  def expected_failure(*_args, **_kwargs):
+    raise RuntimeError("git comparison failed")
+
+  monkeypatch.setattr(app_git, "preview_reconciliation", expected_failure)
+  assert source_status._reconciliation_summary(
+    repo, "main", "upstream",
+  )["available"] is False
+
+  def programming_error(*_args, **_kwargs):
+    raise AssertionError("classifier invariant broke")
+
+  monkeypatch.setattr(app_git, "preview_reconciliation", programming_error)
+  with pytest.raises(AssertionError, match="classifier invariant broke"):
+    source_status._reconciliation_summary(repo, "main", "upstream")
+
+
+def test_reviewed_shared_change_is_removed_from_remaining_source_inventory():
+  repo = _repo("semantic-source-map")
+  base = _git(repo, "rev-parse", "upstream")
+
+  (repo / "index.jsx").write_text("export default 'shared'\n", encoding="utf-8")
+  _git(repo, "add", "index.jsx")
+  reviewed = _commit(repo, "reviewed contribution")
+  reviewed_diff = app_git._canonical_diff(repo, base, reviewed)
+  assert reviewed_diff is not None
+  digest = hashlib.sha256(reviewed_diff).hexdigest()
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="source-map-shared",
+  )
+
+  (repo / "index.jsx").write_text(
+    "export default 'local followup'\n", encoding="utf-8",
+  )
+  _git(repo, "add", "index.jsx")
+  _commit(repo, "later local work")
+
+  _git(repo, "checkout", "-q", "upstream")
+  (repo / "index.jsx").write_text("export default 'shared'\n", encoding="utf-8")
+  (repo / "incoming.js").write_text(
+    "export default 'incoming'\n", encoding="utf-8",
+  )
+  _git(repo, "add", ".")
+  upstream = _commit(repo, "squash plus independent upstream")
+  _git(repo, "checkout", "-q", "main")
+  landed = app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream,
+  )
+  assert landed
+
+  result = source_status.build_app_status(_app(repo))
+
+  assert result is not None
+  receipt = result["reconciliation"]
+  assert receipt["proven_present"] == ["source-map-shared"]
+  assert receipt["local_only_paths"] == ["index.jsx"]
+  assert receipt["new_upstream_paths"] == ["incoming.js"]
+  assert receipt["unresolved_conflict_paths"] == []
+  assert result["state"] == "diverged"
 
 
 def test_local_only_and_invalid_source_paths_degrade_safely(tmp_path):

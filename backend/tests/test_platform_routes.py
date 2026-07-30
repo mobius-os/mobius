@@ -80,7 +80,9 @@ def test_apply_forwards_exact_reviewed_plan(client, auth, monkeypatch):
       "phase": "complete",
       "reconciliation": {
         "proven_present": [],
+        "local_only_paths": [],
         "new_upstream_paths": [],
+        "compatible_paths": [],
         "unresolved_conflict_paths": [],
         "provenance_refs_used": [],
       },

@@ -2726,6 +2726,7 @@ def test_flag_on_clean_update_without_local_edits_is_fast_forward(
   assert payload["divergence"] == "fast_forward"
   assert "index.jsx" in payload["reconciliation"]["new_upstream_paths"]
   assert payload["reconciliation"]["proven_present"] == []
+  assert payload["reconciliation"]["local_only_paths"] == []
   # With no local edits the served source must be the new upstream verbatim.
   # The latent bug let a failed in-memory merge leave the OLD bytes on disk
   # while still bumping the version, so assert the new content actually
@@ -2909,7 +2910,9 @@ def test_app_store_update_recognizes_squashed_local_contribution(
   assert any("already present upstream" in item for item in body["warnings"])
   assert body["reconciliation"] == {
     "proven_present": ["app-store-reviewed-change"],
+    "local_only_paths": ["index.jsx"],
     "new_upstream_paths": [],
+    "compatible_paths": [],
     "unresolved_conflict_paths": [],
     "provenance_refs_used": [landed],
   }

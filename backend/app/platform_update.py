@@ -1315,14 +1315,16 @@ def reconcile_clone(
       # an `upstream` marker that could drift and let `reset --hard` silently
       # discard committed local edits.
       _git("reset", "--hard", target, repo=repo)
-      reconciliation = app_git.describe_reconciliation(repo, pre, target)
+      reconciliation = app_git.describe_reconciliation(
+        repo, pre, target, local=pre,
+      )
     else:
       ordinary_base = _git(
         "merge-base", pre, target, repo=repo, check=False,
       ).stdout.strip()
       if ordinary_base:
         reconciliation = app_git.describe_reconciliation(
-          repo, ordinary_base, target,
+          repo, ordinary_base, target, local=pre,
         )
       # Main and target diverged: merge the reviewed upstream tree ONCE. This
       # preserves local commit identities and makes one resolver pass see every
@@ -1399,6 +1401,7 @@ def reconcile_clone(
                 repo,
                 ordinary_base,
                 target,
+                local=pre,
                 conflict_paths=conflict_paths,
               )
             ),

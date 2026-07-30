@@ -1050,6 +1050,7 @@ def test_landed_equivalent_change_rebases_later_local_edit_without_agent(
 
   assert result.status == "clean"
   assert result.equivalent_change_refs == (landed,)
+  assert result.reconciliation.local_only_paths == ("index.jsx",)
   tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
   assert tree["index.jsx"] == b'mode = "local followup"\n'
   assert tree["upstream.js"] == b"export const upstream = true\n"
@@ -1117,9 +1118,13 @@ def test_partial_equivalence_materializes_only_residual_app_conflicts(tmp_path):
   assert result.equivalent_change_refs == (landed,)
   assert result.reconciliation.proven_present == ("partial-shared-change",)
   assert result.reconciliation.provenance_refs_used == (landed,)
-  assert result.reconciliation.new_upstream_paths == (
-    "config.js", "upstream.js",
+  assert result.reconciliation.local_only_paths == (
+    "index.jsx",
   )
+  assert result.reconciliation.new_upstream_paths == (
+    "upstream.js",
+  )
+  assert result.reconciliation.compatible_paths == ()
   assert result.reconciliation.unresolved_conflict_paths == ("config.js",)
 
   conflicts = app_git.start_conflict_merge(
