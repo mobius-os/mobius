@@ -582,3 +582,34 @@ def test_committed_chat_rename_publishes_live_projection_event(
     "type": "chat_renamed",
     "chatId": str(chat.id),
   })
+
+
+def test_clearing_chat_title_uses_the_same_first_message_preview_limit(
+  client, auth, db, chat,
+):
+  """Resetting a name preserves the same 80-character drawer fallback."""
+  content = [
+    {"type": "text", "text": (
+      "Explain how the chat drawer derives a temporary title"
+    )},
+    {"type": "text", "text": (
+      "from the opening message before a summary is available"
+    )},
+  ]
+  first_message = " ".join(part["text"] for part in content)
+  chat.messages = [{"role": "user", "content": content}]
+  chat.title = "Drawer title behavior"
+  chat.title_locked = True
+  db.commit()
+
+  response = client.patch(
+    f"/api/chats/{chat.id}",
+    json={"clear_title": True},
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  db.expire_all()
+  current = db.query(models.Chat).filter_by(id=chat.id).first()
+  assert current.title == first_message[:80]
+  assert current.title_locked is False

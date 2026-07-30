@@ -52,6 +52,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import models, schemas
+from app.chat_titles import first_message_title
 from app.json_safety import json_safe
 from app.events import (
   TOOL_OUTPUT_INLINE_THRESHOLD,
@@ -1958,7 +1959,7 @@ class ChatWriterActor:
       "ts": next_message_ts(existing + pending),
     }
     if len(existing) == 1:
-      chat.title = cmd.title_source[:40] or "New chat"
+      chat.title = first_message_title(cmd.title_source) or "New chat"
     chat.run_status = "running"
     chat.run_started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)

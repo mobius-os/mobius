@@ -24,6 +24,7 @@ from app.chat import (
 )
 from app.broadcast import get_system_broadcast
 from app.chat_retention import purge_expired_chat_tombstones
+from app.chat_titles import first_user_message_title
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
 from app.deps import (
@@ -752,25 +753,6 @@ async def update_chat(
   return {"ok": True}
 
 
-def _first_message_title(chat) -> str:
-  """The 'first message' fallback name: the first user message's text trimmed
-  to a sane length (mirrors the StartTurn initial-title behavior)."""
-  for m in (chat.messages or []):
-    if (
-      not isinstance(m, dict)
-      or m.get("role") != "user"
-      or m.get("kind") == "auto_continuation"
-    ):
-      continue
-    c = m.get("content")
-    if isinstance(c, list):
-      c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
-    c = (c or "").strip()
-    if c:
-      return c[:80]
-  return ""
-
-
 @router.patch("/{chat_id}", dependencies=[Depends(reject_cross_site)])
 async def patch_chat(
   body: ChatPatch,
@@ -830,7 +812,7 @@ async def patch_chat(
     # it isn't locked, so it can never clobber a name the owner chose.
     previous_title = chat.title
     if body.clear_title:
-      chat.title = _first_message_title(chat) or "New chat"
+      chat.title = first_user_message_title(chat.messages) or "New chat"
       chat.title_locked = False
     elif body.title is not None:
       new_title = body.title.strip()
