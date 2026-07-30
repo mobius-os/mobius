@@ -1115,6 +1115,12 @@ def test_partial_equivalence_materializes_only_residual_app_conflicts(tmp_path):
   assert result.conflict_paths == ["config.js"]
   assert result.merge_base_oid
   assert result.equivalent_change_refs == (landed,)
+  assert result.reconciliation.proven_present == ("partial-shared-change",)
+  assert result.reconciliation.provenance_refs_used == (landed,)
+  assert result.reconciliation.new_upstream_paths == (
+    "config.js", "upstream.js",
+  )
+  assert result.reconciliation.unresolved_conflict_paths == ("config.js",)
 
   conflicts = app_git.start_conflict_merge(
     repo, merge_base=result.merge_base_oid,

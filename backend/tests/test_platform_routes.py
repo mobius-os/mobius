@@ -78,6 +78,12 @@ def test_apply_forwards_exact_reviewed_plan(client, auth, monkeypatch):
       "conflict_paths": [],
       "chat_id": None,
       "phase": "complete",
+      "reconciliation": {
+        "proven_present": [],
+        "new_upstream_paths": [],
+        "unresolved_conflict_paths": [],
+        "provenance_refs_used": [],
+      },
     }
 
   monkeypatch.setattr(

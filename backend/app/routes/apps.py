@@ -874,7 +874,10 @@ async def install_app(
   # overlap lets one delete what the other just wrote
   # (fs_locks.install_uninstall_lock has the full rationale).
   async with fs_locks.install_uninstall_lock():
-    app, mode, warnings, manifest, conflict_paths, divergence = (
+    (
+      app, mode, warnings, manifest, conflict_paths, divergence,
+      reconciliation,
+    ) = (
       await install_from_manifest(
         db,
         manifest_url=body.manifest_url,
@@ -939,6 +942,9 @@ async def install_app(
     warnings=warnings,
     conflict_paths=conflict_paths,
     divergence=divergence,
+    reconciliation=schemas.ReconciliationReceiptOut(
+      **reconciliation.as_dict(),
+    ),
   )
 
 
@@ -2056,7 +2062,7 @@ async def resolve_app_update(
     # icon, skills, seeds, and schedule. Re-enter it without holding the inner
     # app/source locks; it acquires those in the global order itself.
     try:
-      reapplied, mode, warnings, _, conflict_paths, _ = (
+      reapplied, mode, warnings, _, conflict_paths, _, reconciliation = (
         await install.install_from_manifest(
           db,
           manifest_url=None,
@@ -2095,6 +2101,9 @@ async def resolve_app_update(
     app=reapplied,
     warnings=warnings,
     conflict_paths=conflict_paths,
+    reconciliation=schemas.ReconciliationReceiptOut(
+      **reconciliation.as_dict(),
+    ),
   )
 
 
