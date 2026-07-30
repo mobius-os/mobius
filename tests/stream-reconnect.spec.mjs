@@ -983,41 +983,57 @@ test.describe('Stream reconnection', () => {
     // frozen on an unanswered question. Crucially `pending_question_id`
     // is null (the live in-process registry hint is absent — the path
     // that used to wedge), forcing the durable fallback.
-    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=20&compact=1$/, route => {
+    const updatedAt = '2026-07-30T18:00:00'
+    const detail = {
+      id: CHAT_ID,
+      title: 'frozen chat',
+      updated_at: updatedAt,
+      messages: [
+        { role: 'user', content: 'help me pick', ts: TURN_TS - 1000 },
+        {
+          role: 'assistant',
+          ts: TURN_TS,
+          blocks: [
+            { type: 'text', content: 'A couple of choices:' },
+            {
+              type: 'question',
+              question_id: QUESTION_ID,
+              questions: [
+                {
+                  question: 'Which color?',
+                  options: [{ label: 'Red' }, { label: 'Blue' }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      pending_messages: [],
+      total: 2,
+      offset: 0,
+      running: true,
+      pending_question_id: null,
+      session_id: 'sess-1',
+      provider: 'claude',
+    }
+    await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=(?:1|20&compact=1)$/, route => {
+      if (route.request().method() !== 'GET') { route.continue(); return }
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(detail),
+      })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime$/, route => {
       if (route.request().method() !== 'GET') { route.continue(); return }
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          id: CHAT_ID,
-          title: 'frozen chat',
-          messages: [
-            { role: 'user', content: 'help me pick', ts: TURN_TS - 1000 },
-            {
-              role: 'assistant',
-              ts: TURN_TS,
-              blocks: [
-                { type: 'text', content: 'A couple of choices:' },
-                {
-                  type: 'question',
-                  question_id: QUESTION_ID,
-                  questions: [
-                    {
-                      question: 'Which color?',
-                      options: [{ label: 'Red' }, { label: 'Blue' }],
-                    },
-                  ],
-                },
-              ],
-            },
-          ],
-          pending_messages: [],
-          total: 2,
-          offset: 0,
           running: true,
+          pending_messages: [],
           pending_question_id: null,
-          session_id: 'sess-1',
-          provider: 'claude',
+          updated_at: updatedAt,
         }),
       })
     })
