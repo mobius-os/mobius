@@ -201,17 +201,16 @@ def validate_manifest_contract(manifest) -> None:
       "Manifest `permissions.chat_log_access` must be one of "
       "none/summary/full."
     )
-  if "background_agent" in permissions:
-    _fail(
-      "Manifest `permissions.background_agent` has been removed; use "
-      "`permissions.job_authority: scoped`."
+  removed_job_permissions = {
+    "background_agent", "job_authority",
+  }.intersection(permissions)
+  if removed_job_permissions:
+    names = ", ".join(
+      f"`permissions.{name}`" for name in sorted(removed_job_permissions)
     )
-  if (
-    "job_authority" in permissions
-    and permissions["job_authority"] not in ("platform", "scoped")
-  ):
     _fail(
-      "Manifest `permissions.job_authority` must be one of platform/scoped."
+      f"Manifest permission {names} has been removed; server-side app jobs "
+      "run as ordinary Möbius processes."
     )
   for field in (
     "manage_apps",
@@ -354,10 +353,3 @@ def validate_manifest_contract(manifest) -> None:
       _fail(
         "Manifest `schedule.initialize_on_install` requires `schedule.job`."
       )
-
-  if "job_authority" in permissions and not (
-    isinstance(schedule, Mapping) and schedule.get("job")
-  ):
-    _fail(
-      "Manifest `permissions.job_authority` requires `schedule.job`."
-    )

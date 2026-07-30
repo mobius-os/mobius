@@ -45,6 +45,64 @@ def now_utc():
     return dt.datetime.now(dt.timezone.utc)
 
 
+def api_json(path):
+    """Read one owner API JSON response; return None on any unavailable input."""
+    base = os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
+    token = os.environ.get("AGENT_TOKEN")
+    if not token:
+        return None
+    req = urllib.request.Request(
+        base + path,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def installed_app(slug):
+    apps = api_json("/api/apps/")
+    if not isinstance(apps, list):
+        return None
+    return next(
+        (
+            app for app in apps
+            if isinstance(app, dict) and app.get("slug") == slug
+        ),
+        None,
+    )
+
+
+def latest_cron_outcome(app_id, hours=168):
+    since = (now_utc() - dt.timedelta(hours=hours)).isoformat()
+    base = os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
+    token = os.environ.get("AGENT_TOKEN")
+    if not token:
+        return None
+    query = urllib.parse.urlencode({"since": since, "app_id": app_id})
+    req = urllib.request.Request(
+        f"{base}/api/admin/activity?{query}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    latest = None
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            for raw in resp:
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                if row.get("ev") != "cron_outcome":
+                    continue
+                if latest is None or str(row.get("ts") or "") > str(latest.get("ts") or ""):
+                    latest = row
+    except Exception:
+        return None
+    return latest
+
+
 def parse_ts(value):
     """Parse an ISO-8601 timestamp defensively; return an aware datetime or None."""
     if not value or not isinstance(value, str):
@@ -54,6 +112,13 @@ def parse_ts(value):
         return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
     except (ValueError, TypeError):
         return None
+
+
+def nonzero_exit(value):
+    try:
+        return int(value) != 0
+    except (TypeError, ValueError):
+        return True
 
 
 def short(text, width=64):
@@ -105,6 +170,10 @@ def chat_titles(con, ids):
 def section_memory(limit):
     sub("MEMORY — scheduled consolidation agent")
 
+    app = installed_app("memory")
+    supervisor = (
+        latest_cron_outcome(app.get("id")) if isinstance(app, dict) else None
+    )
     status = None
     try:
         with open(MEM_RUN_STATUS) as fh:
@@ -127,6 +196,26 @@ def section_memory(limit):
             de = _delta(after.get("edges"), before.get("edges"))
             print(f"  graph now: {after.get('nodes','?')} nodes ({dn}) / "
                   f"{after.get('edges','?')} edges ({de}) / {after.get('problems','?')} problems")
+    if supervisor:
+        print(
+            f"  supervisor: exit={supervisor.get('exit_code','?')}  "
+            f"at={supervisor.get('ts','?')}  job={supervisor.get('job','?')}"
+        )
+        status_at = parse_ts(
+            (status or {}).get("finished_at") or (status or {}).get("started_at")
+        )
+        supervisor_at = parse_ts(supervisor.get("ts"))
+        if (
+            supervisor_at
+            and (status_at is None or supervisor_at > status_at)
+            and nonzero_exit(supervisor.get("exit_code"))
+        ):
+            print(
+                "  WARNING: the latest scheduled attempt failed after the "
+                "current run-status; do not report Memory healthy."
+            )
+    elif app:
+        print("  supervisor: (no canonical outcome recorded in the last 7 days)")
         queued = status.get("queued_chat_count")
         sourced = status.get("source_chat_count")
         starved = status.get("chat_input_starved")
@@ -296,8 +385,8 @@ def _applied_memory_diff(outcome):
 
 
 def section_memory_writer_packet():
-    """One bounded, read-only packet for a stateless writer interview."""
-    sub("MEMORY WRITER — latest reconstructed-interview packet")
+    """One bounded packet with native testimony and reconstruction evidence."""
+    sub("MEMORY WRITER — latest decision-evidence packet")
     outcomes = _read_update_log(1)
     if not outcomes:
         print("  (no published Memory outcome available)")
@@ -306,17 +395,30 @@ def section_memory_writer_packet():
     run_id = outcome.get("run_id")
     audits = _recall_audits_for_run(run_id)
     status = _read_json(MEM_RUN_STATUS)
+    app = installed_app("memory")
+    supervisor = (
+        latest_cron_outcome(app.get("id")) if isinstance(app, dict) else None
+    )
     skill = _read_text(MEMORY_SKILL)
     prompt_builder = _function_source(MEMORY_RUNNER, "_proposal_prompt")
 
     print(f"  run_id={run_id or '?'}  status={outcome.get('status','?')}  "
           f"audits={len(audits)}  changed={len(outcome.get('changed_paths') or [])}  "
           f"deleted={len(outcome.get('deleted_paths') or [])}")
+    native = outcome.get("writer_self_reviews") or []
+    if native:
+        print("  testimony=native writer self-review captured during the run")
+    else:
+        print("  testimony=unavailable; any later interview is a stateless reconstruction")
     if status and status.get("run_id") != run_id:
         print("  WARNING: current run-status belongs to a different run; "
               "the outcome below is the latest published writer outcome.")
     print("\nLATEST RUN STATUS (operational input):")
     print(json.dumps(status or {}, ensure_ascii=False, indent=2, sort_keys=True))
+    print("\nLATEST SUPERVISOR OUTCOME:")
+    print(json.dumps(supervisor or {}, ensure_ascii=False, indent=2, sort_keys=True))
+    print("\nNATIVE WRITER SELF-REVIEWS:")
+    print(json.dumps(native, ensure_ascii=False, indent=2, sort_keys=True))
     print("\nLATEST WRITER OUTCOME:")
     print(json.dumps(outcome, ensure_ascii=False, indent=2, sort_keys=True))
     print("\nAPPLIED MEMORY DIFF (changed/deleted paths only):")
@@ -431,50 +533,74 @@ def section_read_traces(con, hours, traces_n):
         at = parse_ts(obj.get("at"))
         if not at or at < cutoff:
             continue
-        rows.append((at, name[:-5], len(obj.get("files") or [])))
+        traversal = obj.get("traversal") if isinstance(obj.get("traversal"), dict) else {}
+        decisions = traversal.get("decisions") or []
+        attempts = [
+            attempt
+            for decision in decisions if isinstance(decision, dict)
+            for attempt in (decision.get("attempts") or []) if isinstance(attempt, dict)
+        ]
+        failures = sum(
+            1 for attempt in attempts
+            if not attempt.get("skipped") and attempt.get("outcome") != "ok"
+        )
+        rows.append((
+            at, name[:-5], len(obj.get("files") or []),
+            traversal.get("elapsed_ms"), len(decisions), failures,
+        ))
 
     rows.sort(reverse=True)
     if not rows:
         print(f"  0 read-traces in the last {hours}h.")
         return
 
-    titles = chat_titles(con, [cid for _, cid, _ in rows])
-    chat_attributed = sum(1 for _, cid, _ in rows if cid in titles)
+    titles = chat_titles(con, [cid for _, cid, *_ in rows])
+    chat_attributed = sum(1 for _, cid, *_ in rows if cid in titles)
     print(f"  {len(rows)} read-traces in window "
           f"({chat_attributed} map to a chat, {len(rows) - chat_attributed} app/acceptance):")
-    for at, cid, nfiles in rows[:traces_n]:
+    for at, cid, nfiles, elapsed_ms, decisions, failures in rows[:traces_n]:
         title = titles.get(cid)
         label = short(title, 52) if title else f"(non-chat: {cid[:12]})"
-        print(f"    {at.strftime('%Y-%m-%d %H:%M')}  {label:52}  {nfiles} notes")
+        latency = f"{elapsed_ms / 1000:.1f}s" if isinstance(elapsed_ms, (int, float)) else "?s"
+        print(f"    {at.strftime('%Y-%m-%d %H:%M')}  {label:52}  "
+              f"{nfiles} notes  {decisions} decisions  {latency}  "
+              f"provider_failures={failures}")
 
 
 # --------------------------------------------------------------------------- #
-# Section: platform-wide skill loads
+# Section: platform-wide skill reads
 # --------------------------------------------------------------------------- #
 def section_skill_loads(hours):
-    sub(f"SKILL LOADS — platform-wide (last {hours}h, /api/admin/activity/skills)")
+    sub(f"SKILL READS — platform-wide (last {hours}h, /api/admin/activity/skills)")
 
-    base = os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
-    token = os.environ.get("AGENT_TOKEN")
-    if not token:
-        print("  (AGENT_TOKEN not set — skipping API call)")
-        return
     since = (now_utc() - dt.timedelta(hours=hours)).isoformat()
-    url = f"{base}/api/admin/activity/skills?since={urllib.parse.quote(since)}"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001 - any failure is non-fatal here
-        print(f"  (skills API unavailable: {exc})")
+    data = api_json(
+        f"/api/admin/activity/skills?since={urllib.parse.quote(since)}"
+    )
+    if data is None:
+        print("  (skills API unavailable)")
         return
 
     skills = data.get("skills") if isinstance(data, dict) else None
     if not skills:
-        print("  (no skill loads recorded — Codex-only window or skills disabled)")
+        print("  (no skill reads recorded)")
         return
     for row in skills:
-        print(f"    {short(row.get('skill','?'), 32):32}  {row.get('count','?')}")
+        modern = any(
+            key in row
+            for key in ("complete", "partial", "failed", "unverified", "unknown")
+        )
+        complete = row.get("complete", 0)
+        partial = row.get("partial", 0)
+        failed = row.get("failed", 0)
+        unverified = row.get("unverified", 0)
+        legacy = row.get("unknown", 0 if modern else row.get("count", 0))
+        print(
+            f"    {short(row.get('skill','?'), 28):28}  "
+            f"total={row.get('count','?')} complete={complete} "
+            f"partial={partial} failed={failed} "
+            f"unverified={unverified} legacy={legacy}"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -527,7 +653,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="One-call performance bundle for a manager session.")
     ap.add_argument("--hours", type=int, default=72,
-                    help="lookback window for read-traces and skill loads (default 72)")
+                    help="lookback window for read-traces and skill reads (default 72)")
     ap.add_argument("--limit", type=int, default=5,
                     help="how many recent memory/reflection runs to list (default 5)")
     ap.add_argument("--traces", type=int, default=12,

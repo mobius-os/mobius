@@ -121,23 +121,16 @@ def test_system_prompt_requires_explicit_system_app_identity(tmp_path):
     _validate_manifest(manifest)
 
 
-def test_job_authority_requires_declared_job(tmp_path):
+@pytest.mark.parametrize(("removed_permission", "value"), [
+  ("background_agent", True),
+  ("job_authority", "scoped"),
+])
+def test_removed_job_authority_permissions_fail_clearly(
+  tmp_path, removed_permission, value,
+):
   _write_app(tmp_path, "export default function App(){ return <div /> }")
   manifest = json.loads((tmp_path / "mobius.json").read_text())
-  manifest["permissions"] = {"job_authority": "scoped"}
-  (tmp_path / "mobius.json").write_text(json.dumps(manifest))
-
-  result = _run(tmp_path)
-  assert result.returncode == 1
-  assert "requires `schedule.job`" in result.stderr
-  with pytest.raises(HTTPException, match="requires `schedule.job`"):
-    _validate_manifest(manifest)
-
-
-def test_removed_background_agent_permission_fails_clearly(tmp_path):
-  _write_app(tmp_path, "export default function App(){ return <div /> }")
-  manifest = json.loads((tmp_path / "mobius.json").read_text())
-  manifest["permissions"] = {"background_agent": True}
+  manifest["permissions"] = {removed_permission: value}
   manifest["schedule"] = {"job": "job.sh"}
   (tmp_path / "mobius.json").write_text(json.dumps(manifest))
 

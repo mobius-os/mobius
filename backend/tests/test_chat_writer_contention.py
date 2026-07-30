@@ -592,6 +592,26 @@ def test_start_turn_is_atomic(actor):
   assert chat["run_started_at"] is not None
 
 
+def test_start_turn_keeps_a_useful_first_message_title_preview(actor):
+  """The drawer fallback keeps 80 characters while the agent name is pending."""
+  first_message = (
+    "Explain how the chat drawer derives a temporary title from the opening "
+    "message before a summary is available"
+  )
+  _seed_chat(messages=[])
+
+  _await(actor.submit(
+    StartTurn(
+      chat_id="c1",
+      run_token="rt-title-preview",
+      user_msg={"role": "user", "content": first_message, "ts": 5},
+      title_source=first_message,
+    )
+  ))
+
+  assert _load_chat()["title"] == first_message[:80]
+
+
 def test_start_turn_retry_after_completion_is_idempotent(actor):
   """A lost response retried after the run settled must not wake the agent."""
   original = {

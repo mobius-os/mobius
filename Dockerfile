@@ -36,13 +36,8 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # Chromium copy via the symlinks below (~/.agent-browser is where
 # agent-browser looks by default).
 #
-# Scoped-authority jobs prefer Bubblewrap: its audited setuid mode retains only
-# the setup capabilities needed for mount/PID namespaces and drops them before
-# execing the unprivileged job. docker-compose.yml supplies the outer-container
-# grants absent from Docker's defaults. util-linux + libseccomp provide the
-# Landlock fallback on modern kernels whose runtimes deny nested namespaces.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cron curl ca-certificates git sudo procps util-linux bubblewrap libseccomp2 age \
+    cron curl ca-certificates git sudo procps util-linux age \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
@@ -53,10 +48,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm install -g agent-browser@0.31.1 \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
-    && setpriv --help 2>&1 | grep -q -- '--landlock-access' \
-    && python3 -c 'import ctypes; ctypes.CDLL("libseccomp.so.2")' \
-    && chmod 4755 /usr/bin/bwrap \
-    && test "$(stat -c '%a' /usr/bin/bwrap)" = 4755 \
     && git_version="$(git --version | awk '{print $3}')" \
     && [ "$(printf '%s\n' "2.38" "$git_version" | sort -V | head -n1)" = "2.38" ] \
     && apt-get autoremove -y \

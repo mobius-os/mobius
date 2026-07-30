@@ -21,6 +21,57 @@ SPEC.loader.exec_module(manager_evidence)
 
 
 class ManagerSessionEvidenceTests(unittest.TestCase):
+  def test_skill_section_labels_old_aggregate_counts_as_legacy_unknown(self):
+    output = io.StringIO()
+    with (
+      mock.patch.object(
+        manager_evidence,
+        "api_json",
+        return_value={"skills": [{"skill": "memory", "count": 7}]},
+      ),
+      contextlib.redirect_stdout(output),
+    ):
+      manager_evidence.section_skill_loads(24)
+
+    self.assertIn("complete=0", output.getvalue())
+    self.assertIn("legacy=7", output.getvalue())
+
+  def test_memory_section_never_calls_stale_status_healthy_after_newer_failure(self):
+    with tempfile.TemporaryDirectory() as raw:
+      root = Path(raw)
+      status = root / "run-status.json"
+      status.write_text(json.dumps({
+        "status": "published",
+        "started_at": "2026-07-28T05:30:00+00:00",
+        "finished_at": "2026-07-28T05:35:00+00:00",
+      }))
+      output = io.StringIO()
+      with (
+        mock.patch.object(manager_evidence, "MEM_RUN_STATUS", str(status)),
+        mock.patch.object(
+          manager_evidence, "MEM_UPDATE_LOG", str(root / "missing-updates"),
+        ),
+        mock.patch.object(
+          manager_evidence, "installed_app", return_value={"id": 57},
+        ),
+        mock.patch.object(
+          manager_evidence,
+          "latest_cron_outcome",
+          return_value={
+            "ev": "cron_outcome",
+            "app_id": 57,
+            "job": "fetch.sh",
+            "exit_code": 4,
+            "ts": "2026-07-29T05:30:00+00:00",
+          },
+        ),
+        contextlib.redirect_stdout(output),
+      ):
+        manager_evidence.section_memory(3)
+
+    self.assertIn("supervisor: exit=4", output.getvalue())
+    self.assertIn("do not report Memory healthy", output.getvalue())
+
   def test_reflection_section_marks_metric_backed_run_without_interview(self):
     with tempfile.TemporaryDirectory() as raw:
       root = Path(raw)
@@ -100,6 +151,32 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
     self.assertIn("selected update", diff)
     self.assertNotIn("unrelated update", diff)
     self.assertNotIn("notes/unrelated.md", diff)
+
+  def test_writer_packet_prefers_native_run_testimony(self):
+    output = io.StringIO()
+    outcome = {
+      "run_id": "run-1",
+      "status": "published",
+      "writer_self_reviews": [{
+        "hardest_decision": "Which route to shorten.",
+        "possibly_missed": "none",
+        "prompt_change": "none",
+      }],
+    }
+    with (
+      mock.patch.object(manager_evidence, "_read_update_log", return_value=[outcome]),
+      mock.patch.object(manager_evidence, "_recall_audits_for_run", return_value=[]),
+      mock.patch.object(manager_evidence, "_read_json", return_value={"run_id": "run-1"}),
+      mock.patch.object(manager_evidence, "installed_app", return_value=None),
+      mock.patch.object(manager_evidence, "_read_text", return_value="skill"),
+      mock.patch.object(manager_evidence, "_function_source", return_value="prompt"),
+      mock.patch.object(manager_evidence, "_applied_memory_diff", return_value="diff"),
+      contextlib.redirect_stdout(output),
+    ):
+      manager_evidence.section_memory_writer_packet()
+
+    self.assertIn("testimony=native writer self-review", output.getvalue())
+    self.assertIn("Which route to shorten", output.getvalue())
 
 
 if __name__ == "__main__":

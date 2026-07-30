@@ -41,6 +41,13 @@ The numbered phases below are evidence sources and safety rails. They are not a
 quota and need not receive equal attention. Follow the strongest signal while
 preserving the brief and safety contracts.
 
+After phase 0, name tonight's **mandatory assessment gates** from the live
+evidence (for example, the Memory writer 1-on-1 when Memory consolidated).
+Complete those gates before discretionary investigations. If a gate does not
+run, the brief must call that subsystem **not assessed**; never infer healthy
+or failed from evidence you did not examine. A skipped item names the concrete
+reason — do not turn your own prioritization into a claimed platform limit.
+
 ---
 
 ## The contract for the whole run
@@ -79,6 +86,14 @@ graph here; the Memory app's scheduled job owns that.
 ### 0. REVIEW YOUR OWN RECENT RUNS — one read, first
 
 Read `inputs/meta-state.md` first. It is your compact current operating model of the partner, system, near-term hypotheses, watchlist, and your own approach. Then read `inputs/meta-learning.jsonl` and `inputs/reflection-run-history.txt`: the reasons the model changed, recent exit codes and durations, log friction, and recent self-edits. Treat the state as revisable, not truth; correct it when today's evidence disagrees. If a failure or friction recurs, carry the smallest durable fix into tonight's chosen work.
+
+Then read `inputs/tool-friction.json` once. It is the deterministic 24-hour
+summary of recent tool calls, failures, truncation, output volume, repeated
+commands, recorded cost, and the broad mechanical surfaces those calls touched.
+Use it to distinguish a common owning-primitive problem from a memorable
+one-off. Prefer simplifying the most repeated surface while preserving observed
+behaviour; never add a rule or workaround for an isolated signature. The raw
+chat remains the authority when the aggregate points to a specific incident.
 
 **Causal evidence gate.** Keep direct observations separate from explanations. Before promoting “X caused Y” into the operating model, prompt, or durable learning, verify that the chronology is possible and identify the responsible write/code path, log, or reproduction. If either is missing, label it `hypothesis:` and record what would confirm it; do not restate “likely” as observed fact later in the run. When new evidence disproves an earlier durable claim, append a concise correction naming that entry's timestamp, remove the false claim from the current model/prompt, and preserve the useful observation that led to it.
 
@@ -150,7 +165,7 @@ The directory name is the cwd with `/` → `-` (e.g. `-data-apps-news-2` == `/da
 - Chats: `/data/apps/reflection/fork-chat.sh <chat_id> "<interview>"` (runtime wrapper around the platform script; looks up provider + session, forks a throwaway copy, prints the answer to stdout). The original transcript is never modified.
 - App subagent runs: `bash "$SCRIPTS_DIR/fork-session.sh" <session_id> <cwd> "<interview>"`.
 
-**Time-box each fork, and fall back to the transcript when it comes back empty.** The Bash tool's DEFAULT wall is 120s, so an inner `timeout 150` never fires — the tool kills the call at 120s and you get an EMPTY file; this has happened even to a mid-sized Codex fork. Two fixes, use both: pass the Bash `timeout` param explicitly (e.g. `timeout: 170000`) AND set the inner shell timeout just below it (`timeout 150`), so the inner one wins and you capture partial output instead of nothing. Codex forks are slow to first token — even a *small* (<50k) codex chat can blow past 120s, so don't assume "small = fast"; budget the higher Bash timeout for any codex fork. A chat over ~150k chars (check `length(messages)` in the phase-1 triage query) will strain the timeout — but these giants usually hold the richest struggle-testimony, and the resumed agent already carries its own context (you pay resume latency, not a re-read), so do NOT reflexively skip them. Fork the single highest-struggle giant of the night with an explicit long budget (Bash `timeout: 300000`, inner `timeout 280`) and a tightly scoped prompt. Use the DB messages-tail synthesis (last ~5 messages, role + truncated text) only for the OTHER giants, and whenever that long fork still fails. Long chats run past the harness limit and return nothing; a `claude --resume` of an aged-off session jsonl exits 0 with *no output at all* (Claude Code prunes jsonls aggressively). After a fork, **validate the body, not just the size** (`[ -s <out> ]` catches only an empty file): treat the interview as FAILED if the output is empty, under ~200 chars, matches a provider-error signature (spend/usage limit, rate limit, closed stdout, auth/credits), or lacks the structure you asked for. On FAILED, read the chat's `messages` JSON straight from the DB and synthesize from its tail — AND state plainly in the run notes and the brief that the interview did not complete, so its facts stay flagged as unverified. A non-empty error string is NOT testimony. Forks are a convenience; the transcript is always there.
+**Time-box each fork, and fall back to the transcript when it comes back empty.** The Bash tool's default wall is shorter than the inner interview timeout, so the outer tool can kill the call first and leave an empty file. Two fixes, use both: pass the Bash `timeout` param explicitly (e.g. `timeout: 170000`) AND set the inner shell timeout just below it (`timeout 150`), so the inner one wins and you capture partial output instead of nothing. Codex forks are slow to first token — even a *small* (<50k) codex chat can blow past 120s, so don't assume "small = fast"; budget the higher Bash timeout for any codex fork. A chat over ~150k chars (check `length(messages)` in the phase-1 triage query) will strain the timeout — but these giants usually hold the richest struggle-testimony, and the resumed agent already carries its own context (you pay resume latency, not a re-read), so do NOT reflexively skip them. Fork the single highest-struggle giant of the night with an explicit long budget (Bash `timeout: 300000`, inner `timeout 280`) and a tightly scoped prompt. Use the DB messages-tail synthesis (last ~5 messages, role + truncated text) only for the OTHER giants, and whenever that long fork still fails. Long chats run past the harness limit and return nothing; a `claude --resume` of an aged-off session jsonl exits 0 with *no output at all* (Claude Code prunes jsonls aggressively). After a fork, **validate the body, not just the size** (`[ -s <out> ]` catches only an empty file): treat the interview as FAILED if the output is empty, under ~200 chars, matches a provider-error signature (spend/usage limit, rate limit, closed stdout, auth/credits), or lacks the structure you asked for. On FAILED, read the chat's `messages` JSON straight from the DB and synthesize from its tail — AND state plainly in the run notes and the brief that the interview did not complete, so its facts stay flagged as unverified. A non-empty error string is NOT testimony. Forks are a convenience; the transcript is always there.
 
 **What to ask** (specialize per chat — read what the agent actually did first, then ask about *that*; a generic template gets shallow answers):
 
@@ -170,7 +185,7 @@ For either, confirm the change is actually on disk before treating the bug as fi
 
 **Verify the shipped finding early and cheap.** When a night produces a flagship diagnosis you will present as root-caused, run its adversarial verification FIRST — before broad exploration — with a small fixed quota (~3 independent refuters, never a large fan-out), gated on remaining budget. If the budget can't cover three refuters, shrink the night's breadth rather than skip the verification. Never label a diagnosis "verified" or "root-caused" when the verify pass never actually ran.
 
-**Cross-check skill usage against the log.** Beyond what each agent says it used, read the objective record: query `GET $API_BASE_URL/api/admin/activity/skills?since=<24h-ago-ISO>` with `$AGENT_TOKEN` for a ready-ranked `{"skills":[{"skill","count"}]}` (or read the raw `skill_loaded` lines from the absolute path `/data/apps/reflection/inputs/activity.jsonl`). Fold the most-used Claude-loaded skills into the brief's "what I learned": which skills the platform actually leaned on, whether a heavily-used skill is the one agents complained about (a fix-priority signal), and which skills never load (dead weight). If `skills_enabled` is off, or the night was Codex-only, no skill loads are recorded and this section is correctly empty.
+**Cross-check skill usage against the log.** Beyond what each agent says it used, read the objective record: query `GET $API_BASE_URL/api/admin/activity/skills?since=<24h-ago-ISO>` with `$AGENT_TOKEN`. Each row distinguishes `complete`, `partial`, `failed`, `unverified`, and legacy `unknown` reads. Treat only `complete` as evidence that the full entry document reached the agent; a path mention, a truncated read, or an old unclassified event is not proof. Fold the strongest signal into the brief's "what I learned": whether a heavily-used skill is being read completely, whether partial/failed reads align with agent friction, and which relevant skills never appear. An empty section is a valid observation, not evidence that agents ignored instructions.
 
 Capture each answer to a working file (e.g. `/data/apps/reflection/runs/<date>/interviews.md`) so phases 2–6 can mine it. The interviews are your primary signal for everything that follows — treat their answers as evidence, not chatter.
 
@@ -181,7 +196,7 @@ The interviews just told you where the skills failed today's agents. Act on it.
 - For each skill-improvement the interviews surfaced, `Read` the named skill under `/data/shared/skills/`, record the `/data` revision, make the **smallest edit that fixes the real gap** (a new gotcha line, a corrected contract, a sharper rule), and `pm-commit --from <sha-before-edit> 'skill(<name>): <what and why>' -- shared/skills/<name>.md`. One commit per skill so each is reversible on its own.
 - **Edit THIS skill (`/data/shared/skills/reflection.md`) too.** Reflection is a skill like any other, and you're the agent best placed to improve it. If a phase wasted time, a question got shallow answers, the brief was too long, or you found a better order — change the rule and commit it. Adapt what you prioritize, what you stop doing, how you phrase the interviews. This is the loop that makes each night's reflection better than the last.
 - **Treat the prompt as a distilled procedure, not the learning log.** Edit it only when evidence supports a rule that will generalize across future runs. Prefer replacing or removing a stale rule over appending another exception. Record the finding and why it changed the procedure in the bounded meta-learning log described in phase 6.
-- **Act on your own run-history (`inputs/reflection-run-history.txt`), not just the interviews.** A failure or friction that recurs across nights (e.g. repeated `exit=2` max_turns nights) is a real signal: if the cause is in this skill, make the smallest durable fix and commit it; if it's code you can't change here — the runner's `max_turns`, the wrapper, the timeout — put a one-line proposal in the brief instead (a daytime `/app` edit doesn't survive a container rebake). Skim your recent self-edits first so you don't re-add a rule a past night removed.
+- **Act on your own run-history (`inputs/reflection-run-history.txt`), not just the interviews.** A failure or friction that recurs across nights is a real signal: if the cause is in this skill, make the smallest durable fix and commit it; if it belongs to the wrapper or another owner, put a one-line proposal in the brief instead. Skim your recent self-edits first so you don't re-add a rule a past night removed.
 - **Escalate or close a persistent issue — never a third silent re-note.** Any issue carried across nights (a cross-provider capability gap, a recurring failure, an unapplied fix) gets a first-seen date in the meta-state watchlist. On the 3rd consecutive still-open night it MUST either become a decisive brief card with a concrete proposed fix, or be explicitly closed with a one-line rationale — re-verify it's still open before assuming so. No third silent re-note.
 - Bar for a skill edit: it must help **any** future run, not just tonight. A one-off quirk goes to Memory (phase 3) or nowhere; a reusable procedure goes to a skill. (Same split the daytime agent uses: general technique → skill; fact about the partner → memory.)
 - **Keep a skill edit general and de-dated.** When a failure earns a skill edit, write the durable *rule plus the check that proves it* ("verify a claimed shell edit landed: `grep` the diff token, `stat` the mtime"), never a fixed-date anecdote ("on 2026-06-11, agent X claimed a fix that…") — generic run-relative phrasing ("tonight," "today's agents") is fine; it's *dated incidents* that rot. The incident itself, if worth keeping, is a Memory note you `[[link]]` (phase 3 owns that note) — the skill stays a clean ruleset a future run reads cold. A skill that accretes dated anecdotes gets longer and slower to read every night, which is exactly the noise this phase exists to remove.
@@ -196,14 +211,40 @@ Memory alone.
 
 Read, in this order:
 
-1. `/data/shared/memory/app-state/update-log/*.jsonl` — Memory's recent scheduled
-   consolidation records. Prefer the latest few files.
-2. `/data/apps/<memory-app-id>/job-state/memory.log` (using the live app id
-   returned by the API) and the installed app's schedule state — only enough to
-   see whether Memory ran, failed, timed out, or repeatedly reported the same
-   followup.
+1. Run `python3 /data/shared/skills/manager-session-evidence.py --limit 3`.
+   Its Memory section joins the app's own run-status to the platform
+   supervisor's canonical scheduled-job outcome. **The newer timestamp wins:**
+   if a failed supervisor outcome is newer than the run-status, Memory is
+   failed/not assessed, never healthy because yesterday's status file remains.
+2. `/data/shared/memory/app-state/update-log/*.jsonl` — only for completed
+   consolidations that match the latest operational evidence. Prefer the latest
+   few files; an old publication is history, not proof that tonight ran.
 3. The interviews' Memory answers from phase 1 — complaints about missing,
    stale, misleading, or over-broad recall.
+
+When a recent Memory consolidation completed, review its **native writer
+self-review** before judging the system. The writer records its hardest decision,
+possibly missed evidence, and proposed prompt change while the run context is
+still present; this is the primary testimony. Verify it against the update-log
+outcome, applied diff, and recall-audit verdicts. Only when native testimony is
+absent may a read-only subagent reconstruct the run from those artifacts. Label
+that fallback **stateless reconstructed interview** and never present it as the
+writer's own recollection. Prefer no prompt change over invented coaching. If
+the run made no proposal, review the failure evidence instead. This review may
+recommend changes to Memory's owning app, but it never writes the graph.
+
+Gather that successful-run packet in one call rather than reopening those
+files individually:
+
+```bash
+python3 /data/shared/skills/manager-session-evidence.py --limit 1 --memory-writer-packet
+```
+
+Only open raw Memory evidence or the bounded job log afterward when the packet
+names a specific gap. Never infer health from update-log recency alone.
+Save the verified interview to
+`/data/apps/reflection/runs/<YYYY-MM-DD>/memory-writer-1on1.md` so the next
+manager bundle can show whether this mandatory gate actually ran.
 
 Then act on the **system** signal:
 
@@ -260,6 +301,27 @@ Start with `inputs/resource-snapshot.json`, the bounded
   expiry, add a low-water quota, and retain a bounded metric. Reflection may
   clean the odd residue tonight; it should not become the garbage collector for
   a deterministic lifecycle bug.
+- **Treat contribution worktrees as ledger-owned lifecycle state.** Review this
+  area every night, but do not spend agent turns recreating its deterministic
+  inventory. The wrapper runs the bounded helper first and stages
+  `inputs/housekeeping.json`: read its measured outcome and
+  `needs_reasoning` list, trust its preserved/actionable classifications, and
+  investigate only the exceptions that genuinely need judgment. The helper
+  joins registered worktrees to Contribute's `plan.repo_path`, `status`, and
+  reviewed `head_sha`; it may retire a local checkout only when it is clean, no
+  process has a cwd beneath it, its head stayed stable across the audit, no
+  `prepared`/`draft`/`open`/`submitting` record references it, and an exact-head
+  record is `merged` with a public URL. Patch-equivalence against
+  upstream is computed programmatically too, but an unreferenced equivalent
+  worktree remains in `needs_reasoning`: topology and intent make that evidence,
+  not unattended deletion authority. The helper rechecks immediately before
+  `git worktree remove`, prunes only registrations whose gitdirs are already
+  missing, removes parent directories only when empty, and preserves records
+  and stored diffs. Dirty, active, uncertain, closed-unmerged, and
+  abandoned-unmerged work remains for reasoning; public branches always remain
+  owner-approved actions. If the staged handoff says `unavailable` or `partial`,
+  diagnose that helper boundary rather than launching a broad replacement scan.
+  Broad disk scans and recursive inventories remain separately trigger-based.
 - **Automatic cleanup has a high evidence bar.** You may remove a narrowly
   resolved target only when it is demonstrably regenerable or expired, is not
   active or referenced, and the deletion is reversible or its owner contract
@@ -328,23 +390,7 @@ Then, for the apps the digest + interviews confirm the partner actually uses:
 
 Commit each `/data` fix on its own: `pm-commit --from <sha-before-edit> 'app(<slug>): <what and why>' -- <exact paths>`.
 
-### Turn-budget guide
-
-The whole run — interviews, skill edits, Memory-system review, app triage, research, brief — must fit within 60 turns. **The brief is the deliverable, not the work that precedes it.** Phases eat turns fast; here is a guide for a typical night (cron-only nights shorten 1 and spend a little more on system review):
-
-| Phase | Turns | Notes |
-|---|---|---|
-| 1. Interviews | ≤12 | Light pass on cron-only nights (≤5) |
-| 2. Skill edits | ≤5 | Only confirmed gaps from interviews |
-| 3. Memory-system review | ≤7 | Read Memory update logs/outcomes and improve the process only when there is real signal |
-| 3.5. System meta-review | ≤5 | Pick one evidenced opportunity; resource diagnostics only when due/triggered |
-| 4. App triage + fixes | ≤13 | Digest-first; skip apps with 0 opens |
-| 5. Research | ≤5 | Only if a clear topic cleared the bar; otherwise skip |
-| 6. Brief | ≤10 | Hard stop at 10 — never let this exceed budget |
-
-The slices leave a small margin; they are a guide, not a hard meter — you can't see your own turn count, the runner speaks it to you when you near the budget.
-
-**At turn 40, stop any phase still in progress, commit what's done, and jump to phase 6.** A partial night that shipped a clear brief beats a "complete" night that produced no report. Note in the brief what you skipped.
+Keep the brief current as the run progresses rather than deferring the whole deliverable until the end. A partial night that shipped a clear brief beats a "complete" night that produced no report; state honestly what remains unfinished.
 
 ### 5. RESEARCH tailored to the partner's known interests
 
