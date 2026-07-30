@@ -21,6 +21,7 @@ import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
+import { useToolImagePreview } from './useToolImagePreview.js'
 
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
 // output reads as a terminal (stdout / stderr / exit code) and a structured
@@ -87,11 +88,17 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   // (the last producer, the legacy compaction path, renders as CompactionCard;
   // a legacy persisted `defaultOpen` field is ignored and renders collapsed
   // like everything else).
-  const [open, setOpen] = useDisclosureState(chatId, disclosureKey)
+  const [desiredOpen, setDesiredOpen] = useDisclosureState(chatId, disclosureKey)
   const headerRef = useRef(null)
   const detailRef = useRef(null)
+  const desiredOpenRef = useRef(desiredOpen)
+  const visibleOpenRef = useRef(false)
   const headerId = useId()
   const detailId = useId()
+  // Pointer/keyboard activation prepares only the row the owner chose. If the
+  // load crosses the click boundary, desiredOpen records the request while the
+  // rendered disclosure waits for its first complete layout.
+  const [prepareRequested, setPrepareRequested] = useState(desiredOpen)
   // Expansion normally fetches only the renderer-sized preview. The exact full
   // output is fetched on explicit copy and never stored in component state, so
   // a huge Read or shell result cannot inflate the transcript or retained JS
@@ -130,7 +137,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     // cleanup, and mark the in-flight request cancelled before the response
     // could be accepted. Closing the disclosure resets the visible loading
     // state; reopening starts a fresh request if the first one was abandoned.
-    if (!open) {
+    if (!prepareRequested) {
       setLoadingPreview(false)
       return
     }
@@ -159,22 +166,33 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     fetchLazyText(url, { signal: controller.signal })
       .then(({ response, text }) => {
         if (!cancelled) {
+          setLoadingPreview(false)
+          // A text preview is the last missing layout input for an ordinary
+          // tool. Viewed images still need to decode before their body can be
+          // revealed, so their image-preparation hook owns that boundary.
+          if (!isImageTool) revealBeforeReady()
           setPreviewOutput(text)
           setPreviewComplete(response.headers.get('X-Tool-Output-Complete') !== '0')
         }
       })
       .catch(error => {
         if (cancelled) return
-        if (error?.status === 404) setMissingOutput(true)
-        else if (error?.name !== 'AbortError') setLoadError(true)
+        if (error?.status === 404) {
+          setLoadingPreview(false)
+          if (!isImageTool) revealBeforeReady()
+          setMissingOutput(true)
+        } else if (error?.name !== 'AbortError') {
+          setLoadingPreview(false)
+          if (!isImageTool) revealBeforeReady()
+          setLoadError(true)
+        }
       })
-      .finally(() => { if (!cancelled) setLoadingPreview(false) })
     return () => {
       cancelled = true
       controller.abort()
     }
   }, [
-    open,
+    prepareRequested,
     t.status,
     t.output_truncated,
     t.tool_use_id,
@@ -185,18 +203,6 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     isImageTool,
     durableImage,
   ])
-
-  useEffect(() => {
-    if (!open) {
-      setPreviewOutput(null)
-      setPreviewComplete(true)
-      setLoadError(false)
-      clearTimeout(copyTimerRef.current)
-      copyControllerRef.current?.abort()
-      copyControllerRef.current = null
-      setCopyState('idle')
-    }
-  }, [open])
 
   // Show the larger bounded preview once it lands; until then the inline
   // excerpt remains immediately useful.
@@ -217,10 +223,8 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     || !!t.output_truncated
     || (t.status !== 'running' && shownOutput === '')
   const imageReference = useMemo(
-    () => (isImageTool && open
-      ? toolImageReference(t.input, shownOutput)
-      : null),
-    [isImageTool, open, shownOutput, t.input],
+    () => (isImageTool ? toolImageReference(t.input, shownOutput) : null),
+    [isImageTool, shownOutput, t.input],
   )
   const r = useMemo(
     () => (hasOutput && !isImageTool
@@ -228,6 +232,32 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
       : null),
     [shownOutput, hasOutput, isShell, isImageTool],
   )
+  const waitsForPreview = !!(
+    t.output_truncated
+    && t.status !== 'running'
+    && !durableImage
+    && previewOutput === null
+    && !missingOutput
+    && !loadError
+    && chatId
+    && t.tool_use_id
+  )
+  const previewReady = !waitsForPreview
+  const wantsPreparation = prepareRequested || desiredOpen
+  const imagePreview = useToolImagePreview(imageReference, {
+    enabled: isImageTool && wantsPreparation && previewReady,
+    onSettled: revealBeforeReady,
+  })
+  const imageReady = !isImageTool || (
+    imageReference
+      ? imagePreview.status === 'ready' || imagePreview.status === 'failed'
+      : previewReady
+  )
+  const detailReady = previewReady && imageReady
+  const open = desiredOpen && detailReady
+  const opening = desiredOpen && !open
+  desiredOpenRef.current = desiredOpen
+  visibleOpenRef.current = open
   // Failure exit code, field-or-parse (contract rule 6): a block reduced at the
   // funnel carries an explicit output_exit_code, so read that rather than
   // re-parsing a possibly-carved excerpt; else fall back to the parsed terminal
@@ -257,6 +287,22 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
     clearTimeout(copyTimerRef.current)
     copyControllerRef.current?.abort()
   }, [])
+
+  function revealBeforeReady() {
+    if (!desiredOpenRef.current || visibleOpenRef.current) return
+    preserveTogglePosition(headerRef.current, detailRef.current)
+  }
+
+  function releaseClosedDetail() {
+    setPreviewOutput(null)
+    setPreviewComplete(true)
+    setLoadingPreview(false)
+    setLoadError(false)
+    clearTimeout(copyTimerRef.current)
+    copyControllerRef.current?.abort()
+    copyControllerRef.current = null
+    setCopyState('idle')
+  }
 
   async function copyOutput() {
     if (!r || copyState === 'copying') return
@@ -295,6 +341,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   }
 
   function retryPreview() {
+    if (open) preserveTogglePosition(headerRef.current, detailRef.current)
     setLoadError(false)
     setLoadAttempt(value => value + 1)
   }
@@ -347,7 +394,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
       {/* The group header names the category ("Ran commands"); each child row
           names the concrete operation ("Ran git status -sb"). */}
       <span className="chat__tool-name" title={label}>
-        {label}{t.status === 'running' ? '…' : ''}
+        {label}{t.status === 'running' || opening ? '…' : ''}
       </span>
       {/* A direct compact row IS the collapsed transcript overview, so its
           technical code waits inside the disclosed result. A grouped child is
@@ -375,6 +422,12 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
           className="chat__tool-header"
           onPointerDown={() => {
             pointerSelectionRef.current = textSelectionSnapshot()
+            setPrepareRequested(true)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              setPrepareRequested(true)
+            }
           }}
           onClick={(event) => {
             const selectionBeforePointer = pointerSelectionRef.current
@@ -385,11 +438,27 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
                 selectionBeforePointer,
                 headerRef.current,
               )
-            ) return
-            preserveTogglePosition(headerRef.current, detailRef.current)
-            setOpen(o => !o)
+            ) {
+              setPrepareRequested(false)
+              releaseClosedDetail()
+              return
+            }
+            const nextOpen = !desiredOpen
+            if (nextOpen) {
+              setPrepareRequested(true)
+              if (detailReady) {
+                preserveTogglePosition(headerRef.current, detailRef.current)
+              }
+            } else {
+              if (open) preserveTogglePosition(headerRef.current, detailRef.current)
+              setPrepareRequested(false)
+              releaseClosedDetail()
+            }
+            desiredOpenRef.current = nextOpen
+            setDesiredOpen(nextOpen)
           }}
           aria-expanded={open}
+          aria-busy={opening || undefined}
           aria-controls={detailId}
         >
           {headerContent}
@@ -462,7 +531,12 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
                 </div>
               )}
               {imageReference
-                ? <ToolImageResult reference={imageReference} />
+                ? (
+                  <ToolImageResult
+                    reference={imageReference}
+                    preview={imagePreview}
+                  />
+                )
                 : isImageTool && !showLazyStatus
                   ? (
                     <span className="chat__tool-image-status" role="status">

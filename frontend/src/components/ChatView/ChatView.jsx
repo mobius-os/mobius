@@ -112,7 +112,7 @@ import {
   railAtRunStart,
 } from './buildPhaseRail.js'
 import {
-  goalObjectiveFromText,
+  goalObjectiveAtRunStart,
   latestGoalObjective,
   progressRailViewModel,
 } from './goalProgress.js'
@@ -1228,7 +1228,10 @@ export default function ChatView({
       // position the live stream did (old-run phases, then reset) and the
       // rail always lands on the run being displayed.
       setBuildPhases(railAtRunStart())
-      setActiveGoalState(goalObjectiveFromText(message?.content))
+      setActiveGoalState(goalObjectiveAtRunStart(
+        message?.content,
+        messagesRef.current,
+      ))
       const consumedCids = message?._consumed_cids
       const serverRows = Array.isArray(message?._messages)
         ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
@@ -2292,7 +2295,10 @@ export default function ChatView({
             // the rail resets. A plain enqueue (started falsy) must NOT
             // touch the in-flight build's rail.
             setBuildPhases(railAtRunStart())
-            setActiveGoalState(goalObjectiveFromText(text))
+            setActiveGoalState(goalObjectiveAtRunStart(
+              text,
+              messagesRef.current,
+            ))
             setSending(true)
             setServerRunningState(true)
             // The queued send was promoted straight into the active turn, so
@@ -2367,7 +2373,10 @@ export default function ChatView({
           // Same run-start semantics as the branch above: this send became
           // the first message of a NEW run, so the rail resets here too.
           setBuildPhases(railAtRunStart())
-          setActiveGoalState(goalObjectiveFromText(text))
+          setActiveGoalState(goalObjectiveAtRunStart(
+            text,
+            messagesRef.current,
+          ))
           // Apply the shared send-intent rule before appending. A message that
           // raced into a started turn
           // is still a new send becoming the active turn, so it pins only
@@ -2443,7 +2452,7 @@ export default function ChatView({
     // above) wiped the in-flight build's rail, which the next catch-up
     // replay then silently repopulated (see buildPhaseRail.js).
     setBuildPhases(railAtRunStart())
-    setActiveGoalState(goalObjectiveFromText(text))
+    setActiveGoalState(goalObjectiveAtRunStart(text, messagesRef.current))
 
     // Direct sends use the same submit-time decision as queued/steered sends.
     // A legitimate pin changes FOLLOW_BOTTOM to PIN_USER_MSG, so reply growth

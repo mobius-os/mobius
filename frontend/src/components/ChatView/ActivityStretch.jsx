@@ -194,10 +194,13 @@ function GroupedActivityStretch({
   )
   const headerRef = useRef(null)
   const timelineRef = useRef(null)
+  const userOpenRef = useRef(userOpen)
+  const visibleOpenRef = useRef(false)
   const timelineId = useId()
   const [detailEntries, setDetailEntries] = useState(null)
   const [detailError, setDetailError] = useState(false)
   const [detailAttempt, setDetailAttempt] = useState(0)
+  const [detailRequested, setDetailRequested] = useState(userOpen)
   const detailMessageIndex = detailRef?.message_index
   const detailStart = detailRef?.start
   const detailEnd = detailRef?.end
@@ -208,10 +211,16 @@ function GroupedActivityStretch({
   useEffect(() => {
     setDetailEntries(null)
     setDetailError(false)
+    setDetailRequested(userOpenRef.current)
   }, [detailKey])
 
   useEffect(() => {
-    if (!userOpen || !detailRef || detailEntries || detailError) return undefined
+    if (
+      !detailRequested
+      || !detailRef
+      || detailEntries
+      || detailError
+    ) return undefined
     const controller = new AbortController()
     let current = true
     apiFetch(activityDetailUrl(chatId, {
@@ -224,10 +233,12 @@ function GroupedActivityStretch({
       .then(res => jsonOrThrow(res, 'Activity detail failed'))
       .then(data => {
         if (!current) return
+        revealBeforeReady()
         setDetailEntries(Array.isArray(data.entries) ? data.entries : [])
       })
       .catch(error => {
         if (!current || error?.name === 'AbortError') return
+        revealBeforeReady()
         setDetailError(true)
       })
     return () => {
@@ -243,7 +254,7 @@ function GroupedActivityStretch({
     detailKey,
     detailMessageIndex,
     detailStart,
-    userOpen,
+    detailRequested,
   ])
 
   const lastItem = entries[entries.length - 1]?.item
@@ -318,9 +329,15 @@ function GroupedActivityStretch({
     [sig, live], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
-  // The user's toggle is the ONLY open/close signal — no force-open (see the
-  // header comment). While collapsed, the header status carries liveness.
-  const open = userOpen
+  // The user's toggle is the ONLY open/close intent — no force-open (see the
+  // header comment). Historical detail may delay the rendered open state until
+  // its first complete timeline is ready, so the disclosure never paints a
+  // one-line placeholder and then changes height again.
+  const detailReady = !detailRef || detailEntries !== null || detailError
+  const open = userOpen && detailReady
+  const opening = userOpen && !open
+  userOpenRef.current = userOpen
+  visibleOpenRef.current = open
 
   // The step count rides in the accessible name. Command diagnostics do not:
   // screen-reader users get the same calm overview and can inspect the same
@@ -332,6 +349,11 @@ function GroupedActivityStretch({
   const stateNote = displayState === 'running' ? ', in progress' : ''
   const iconKind = thinkingOnly ? 'reasoning' : leadToolIcon
   const timelineEntries = detailRef ? detailEntries : entries
+
+  function revealBeforeReady() {
+    if (!userOpenRef.current || visibleOpenRef.current) return
+    preserveTogglePosition(headerRef.current, timelineRef.current)
+  }
 
   return (
     <div className={
@@ -345,14 +367,26 @@ function GroupedActivityStretch({
         iconKind={iconKind}
         interactive
         open={open}
-        ariaLabel={`${text}${stepNote}${stateNote}`}
+        preparing={opening}
+        onPrepare={() => setDetailRequested(true)}
+        ariaLabel={`${text}${stepNote}${stateNote}${opening ? ', loading details' : ''}`}
         controlsId={timelineId}
         // Togglable at any time, running or not: with default-collapse there is
         // no forced-open state for a tap to fight, so the user can peek into a
         // live run and close it again.
         onToggle={() => {
-          preserveTogglePosition(headerRef.current, timelineRef.current)
-          setUserOpen(o => !o)
+          const nextOpen = !userOpen
+          if (nextOpen) {
+            setDetailRequested(true)
+            if (detailReady) {
+              preserveTogglePosition(headerRef.current, timelineRef.current)
+            }
+          } else if (open) {
+            preserveTogglePosition(headerRef.current, timelineRef.current)
+          }
+          if (!nextOpen) setDetailRequested(false)
+          userOpenRef.current = nextOpen
+          setUserOpen(nextOpen)
         }}
         // A delegating turn's helper rollup ("2 running · 1 done"); the header
         // owns it so it reads without expanding the line.
@@ -373,11 +407,6 @@ function GroupedActivityStretch({
             subagent={tool.subagent}
           />
         ))}
-        {open && detailRef && !timelineEntries && !detailError && (
-          <span className="chat__reasoning-load" role="status" aria-live="polite">
-            Loading activity…
-          </span>
-        )}
         {open && detailError && (
           <div className="chat__lazy-status">
             <span className="chat__reasoning-load" role="status" aria-live="polite">
@@ -387,6 +416,7 @@ function GroupedActivityStretch({
               type="button"
               className="chat__lazy-retry"
               onClick={() => {
+                preserveTogglePosition(headerRef.current, timelineRef.current)
                 setDetailError(false)
                 setDetailAttempt(attempt => attempt + 1)
               }}
