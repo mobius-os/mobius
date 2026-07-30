@@ -104,6 +104,12 @@ export default function useModeViewTransition({ rootRef, durationMs }) {
 
     const html = document.documentElement
     const shell = rootRef?.current
+    // Publish the descriptor before startViewTransition returns control to the
+    // caller. A completed logo hold uses the run receipt to hand its compression
+    // to this exact descriptor; waiting for the browser's asynchronous update
+    // callback left one render with no active beat, so the gesture correctly
+    // cleared its ownership latch before the scene had even begun.
+    flushSync(() => setActive(descriptor))
     html.dataset.modeViewTransition = direction
     // Capture names only exist while the root transaction attribute is present.
     // Enable it before reading the departing scene; entry reads after the final
@@ -117,14 +123,16 @@ export default function useModeViewTransition({ rootRef, durationMs }) {
     try {
       transition = document.startViewTransition(() => {
         flushSync(() => {
-          setActive(descriptor)
           update()
         })
         if (direction === 'enter') snapshots = participantSnapshots(shell, plan.offsets)
       })
     } catch {
       delete html.dataset.modeViewTransition
-      flushSync(update)
+      flushSync(() => {
+        setActive(null)
+        update()
+      })
       return { animated: false, totalMs: 0, transitionId: null, to }
     }
 

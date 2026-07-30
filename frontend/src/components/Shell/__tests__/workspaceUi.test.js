@@ -560,7 +560,8 @@ test('the Builder brand indicator is static and has no perpetual frame loop', ()
 
 test('mode changes animate captured scenes rather than live chat layout', () => {
   assert.match(modeViewTransitionSrc, /document\.startViewTransition/)
-  assert.match(modeViewTransitionSrc, /flushSync\(\(\) => \{[\s\S]*?setActive\(descriptor\)[\s\S]*?update\(\)/)
+  assert.match(modeViewTransitionSrc, /flushSync\(\(\) => setActive\(descriptor\)\)[\s\S]*?document\.startViewTransition/)
+  assert.match(modeViewTransitionSrc, /document\.startViewTransition\(\(\) => \{[\s\S]*?flushSync\(\(\) => \{[\s\S]*?update\(\)/)
   assert.match(css, /html\[data-mode-view-transition\] \.shell__content \{\s*view-transition-name: mode-workspace;/)
   assert.doesNotMatch(css, /@keyframes shell-mode-slide|data-mode-motion|shell__view--exit-underlay/)
   assert.doesNotMatch(shell, /wrapperMotion|beatParticipants|modeUnderlayKey/)
