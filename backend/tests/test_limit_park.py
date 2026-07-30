@@ -140,6 +140,7 @@ def _run_row(token: str):
       "park_reason": run.park_reason,
       "restart_nonce": run.restart_nonce,
       "ended_at": run.ended_at,
+      "initiated_by_app_id": run.initiated_by_app_id,
     }
   finally:
     db.close()
@@ -563,6 +564,7 @@ def test_park_run_strict_tokenless_falls_back_to_marker_clear():
 def _due_park(
   cid: str, token: str, *, pending=None, deleted=False, auto_resume=False,
   auto_restart=True, park_reason=None, messages=None, restart_nonce=None,
+  initiated_by_app_id=None,
 ):
   _seed_chat(
     cid, pending=pending, deleted=deleted, auto_resume=auto_resume,
@@ -571,7 +573,8 @@ def _due_park(
   _seed_run(cid, token, status="parked",
             parked_until=datetime.now(UTC).replace(tzinfo=None)
             - timedelta(minutes=1), park_reason=park_reason,
-            restart_nonce=restart_nonce)
+            restart_nonce=restart_nonce,
+            initiated_by_app_id=initiated_by_app_id)
 
 
 def _run_sweep():
@@ -821,6 +824,133 @@ def test_restart_park_auto_continues_with_product_marker(
     assert marker["cid"] == f"restart-resume-{token}"
     assert notifications[0]["title"] == "Möbius restarted"
     assert "limit" not in notifications[0]["body"].lower()
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def test_app_initiated_restart_preserves_attribution_and_continues(
+  owner_token, monkeypatch,
+):
+  """The restart policy applies to app chats without losing ownership."""
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  cid = "restart-app-attributed"
+  token = f"rt-{cid}"
+  nonce = "restart-nonce-app-attributed"
+  app_id = 42
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_restart_nonce", lambda: nonce,
+  )
+  _due_park(
+    cid,
+    token,
+    auto_restart=True,
+    park_reason="restart",
+    restart_nonce=nonce,
+    initiated_by_app_id=app_id,
+  )
+
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    resumed_run = _run_row(scheduled[0]["run_token"])
+    assert resumed_run["initiated_by_app_id"] == app_id
+    marker = scheduled[0]["next_user"]["_messages"][-1]
+    assert marker["kind"] == "auto_continuation"
+    assert marker["continuation_reason"] == "restart"
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def test_restart_does_not_absorb_newly_queued_app_work(
+  owner_token, monkeypatch,
+):
+  """A restart restores its exact run, not later unattended app messages."""
+  del owner_token
+  notifications = []
+  monkeypatch.setattr(
+    "app.push.notify_owner",
+    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+  )
+  resumes = []
+
+  async def _fake_resume(*args, **kwargs):
+    resumes.append((args, kwargs))
+    return True
+
+  monkeypatch.setattr(chat_mod, "_auto_resume_chat", _fake_resume)
+  cid = "restart-app-work-queued"
+  token = f"rt-{cid}"
+  nonce = "restart-nonce-app-work-queued"
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_restart_nonce", lambda: nonce,
+  )
+  _due_park(
+    cid,
+    token,
+    auto_restart=True,
+    park_reason="restart",
+    restart_nonce=nonce,
+    pending=[{
+      "role": "user",
+      "content": "new app work",
+      "ts": 3,
+      "_initiated_by_app_id": 42,
+    }],
+  )
+
+  assert _run_sweep() == [cid]
+  assert resumes == []
+  assert _run_row(token)["status"] == "interrupted"
+  assert notifications[0]["title"] == "Möbius restarted"
+
+
+def test_owner_message_queued_after_app_restart_takes_over_attribution(
+  owner_token, monkeypatch,
+):
+  """New owner input outranks the parked app when forming the next run."""
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  cid = "restart-app-owner-takeover"
+  token = f"rt-{cid}"
+  nonce = "restart-nonce-app-owner-takeover"
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_restart_nonce", lambda: nonce,
+  )
+  _due_park(
+    cid,
+    token,
+    auto_restart=True,
+    park_reason="restart",
+    restart_nonce=nonce,
+    initiated_by_app_id=42,
+    pending=[{
+      "role": "user",
+      "content": "owner follow-up",
+      "ts": 3,
+    }],
+  )
+
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    resumed_run = _run_row(scheduled[0]["run_token"])
+    assert resumed_run["initiated_by_app_id"] is None
+    assert "owner follow-up" in scheduled[0]["next_user"]["content"]
   finally:
     chat_mod.discard_starting(cid)
 

@@ -2768,8 +2768,11 @@ async def _auto_resume_chat(
               .first()
             )
             latest_id = latest[0] if latest is not None else None
+            restart_park = (
+              park is not None and park.park_reason == "restart"
+            )
             restart_authorized = True
-            if park is not None and park.park_reason == "restart":
+            if restart_park:
               if restart_authorization is _RESTART_AUTHORIZATION_UNSET:
                 from app.restart_ledger import authorized_restart_nonce
                 accepted_nonce = authorized_restart_nonce()
@@ -2796,7 +2799,13 @@ async def _auto_resume_chat(
               or _has_unanswered_question(chat)
               or park is None
               or park.status != "resume_pending"
-              or park.initiated_by_app_id is not None
+              # Provider-limit retries remain owner-only. A planned restart
+              # instead restores the exact authenticated turn and carries its
+              # app attribution into the synthetic continuation below.
+              or (
+                park.initiated_by_app_id is not None
+                and not restart_park
+              )
               or latest_id != park.id
               or any(
                 isinstance(msg, dict)
@@ -2807,7 +2816,10 @@ async def _auto_resume_chat(
               return False
             current_provider = chat.provider or "claude"
             resume_reason = (
-              "restart" if park.park_reason == "restart" else "usage_limit"
+              "restart" if restart_park else "usage_limit"
+            )
+            resume_app_id = (
+              park.initiated_by_app_id if restart_park else None
             )
           if not mark_starting(chat_id):
             return False
@@ -2830,6 +2842,7 @@ async def _auto_resume_chat(
                   else f"limit-resume-{park_token or chat_id}"
                 ),
               },
+              initiated_by_app_id=resume_app_id,
             )
           )
           await _await_ack(ack)
@@ -2911,11 +2924,14 @@ async def sweep_reset_parks(
     - A park whose chat was deleted resolves silently.
     - Auto-resume is controlled per chat. Provider-limit retries are staggered:
       at most one starts per sweep and launches are spaced even when unrelated
-      chats are live. Planned-restart continuations reclaim the exact set that
-      was already live before the restart, so every eligible chat in the batch
-      may resume independently. A staggered enabled chat stays pending for a
-      later tick, while notify-only chats in the same due batch still resolve
-      normally. App-attributed runs and queues never auto-resume.
+      chats are live. App-attributed provider-limit runs never auto-resume.
+      Planned-restart continuations reclaim the exact set that was already live
+      before the restart, preserve each run's attribution, and may resume
+      independently. A staggered enabled chat stays pending for a later tick,
+      while notify-only chats in the same due batch still resolve normally.
+      App-attributed messages newly queued behind either kind of park still
+      require an ordinary app-owned handoff rather than being swept into the
+      synthetic continuation.
 
   Stands down while draining — a restart is in progress, and the fresh
   process's immediate sweep picks everything up. Never raises.
@@ -3005,11 +3021,13 @@ async def sweep_reset_parks(
     )
     if chat is None or chat.deleted_at is not None:
       return "chat unavailable"
-    if run.initiated_by_app_id is not None or app_work_queued:
+    restart_park = run.park_reason == "restart"
+    if app_work_queued:
+      return "app-attributed work"
+    if run.initiated_by_app_id is not None and not restart_park:
       return "app-attributed work"
     if _has_unanswered_question(chat):
       return "waiting for an answer"
-    restart_park = run.park_reason == "restart"
     policy_enabled = bool(
       chat.auto_resume_on_restart
       if restart_park else chat.auto_resume_on_limit

@@ -803,22 +803,26 @@ presentation, never restart-cause evidence.
 | Event | Durable result | Boot/sweep result |
 |-------|----------------|-------------------|
 | Provider usage/rate limit | exact run `parked` until reset | notify; continue if the usage policy is on |
-| Accepted planned restart, exact park + boot nonce match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if the restart policy is on |
+| Accepted planned restart, exact park + boot nonce match | exact run `parked`, reason `restart`, nonce, due now | continue immediately if the restart policy is on; preserve app attribution unless newer owner input takes over |
 | Accepted planned restart, stop/finalize did not settle | exact latest run remains `running` with the authenticated nonce | finalize partials, convert to due restart park, then continue in the same pre-yield pass |
 | Crash/OOM before supervisor acknowledgement | unacknowledged park or generic `running` evidence | resolve/reconcile to manual resumable interruption |
 | Repeated/unrelated boot before claim | acknowledgement is retired by boot-id mismatch | manual resumable interruption |
-| Policy off, unanswered question, app-owned run, or app-queued work | due park resolves without an automatic send | notify/manual owner action |
+| Policy off, unanswered question, or app work queued after the parked run | due park resolves without an automatic send | notify/manual owner action |
 | Owner sends, switches provider, deletes the chat, or a newer run wins | old park is superseded by the existing latest-run fence | no stale continuation |
 | Restart task creation fails after promotion | exact promoted rows roll back; restart park becomes `interrupted` | manual recovery; one-shot cause is not retried |
 
 Eligibility is rechecked under the per-chat transition lock immediately before
 promotion. Provider-limit retries are staggered one at a time; an authenticated
 planned restart restores the exact set that was already concurrent, so its
-eligible batch may start together. The provider still receives a synthetic user
-`continue`, but the durable row is tagged `kind="auto_continuation"` with reason
-`restart` or `usage_limit`; the UI, copy behavior, title selection, time
-context, compaction, provider-switch handoff, chat-note summarization, and
-redacted chat logs treat it as a product marker rather than owner speech.
+eligible batch may start together. An app-initiated restart continuation carries
+the same app id into the next durable run unless a newer owner send is already
+queued and becomes the next run's actor; provider-limit retries remain
+owner-only, and app work queued after a park is never absorbed. The provider
+still receives a synthetic user `continue`, but the durable row is tagged
+`kind="auto_continuation"` with reason `restart` or `usage_limit`; the UI, copy
+behavior, title selection, time context, compaction, provider-switch handoff,
+chat-note summarization, and redacted chat logs treat it as a product marker
+rather than owner speech.
 
 The sweep is cheap: one indexed due-row query immediately at boot, on
 `chat_run_finished`, and on a 60-second fallback. Startup captures the boot
