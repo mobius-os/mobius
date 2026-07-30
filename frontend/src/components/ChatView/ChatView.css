@@ -379,6 +379,54 @@
 }
 .chat__ts--visible { opacity: 1; }
 
+/* ── One-tap message copy ──────────────────────────────
+   The explicit mobile affordance: native long-press selection stays fully
+   available (this is a plain tap target — never a press/hold interception,
+   see chatUiPolish.test), but a single tap now copies the whole message
+   with a visible "Copied" acknowledgement. Quiet ghost button, always
+   visible on touch devices, hover/focus-revealed on fine pointers. */
+.chat__msg-actions {
+  display: flex;
+  margin-top: 2px;
+}
+/* Every copy affordance lands in the same LOWER-RIGHT corner: code blocks
+   pin right:7px, user bubbles inherit their column's flex-end, and the
+   response row opts out of the assistant column's flex-start here. */
+.chat__msg--assistant .chat__msg-actions { align-self: flex-end; }
+.chat__msg-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 2px 7px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 140ms ease, color 140ms ease, background 140ms ease;
+}
+.chat__msg-copy:active { transform: scale(0.94); }
+.chat__msg-copy--copied { color: var(--accent); opacity: 1; }
+.chat__msg-copy:focus-visible {
+  outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
+  outline-offset: -2px;
+  opacity: 1;
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat__msg-copy { opacity: 0; }
+  .chat__msg:hover .chat__msg-copy,
+  .chat__msg-copy:focus-visible,
+  .chat__msg-copy--copied { opacity: 1; }
+  .chat__msg-copy:hover {
+    background: var(--surface2); /* CONTRACT: secondary opaque fill */
+    color: var(--text);
+  }
+}
+
 /* ── Evolving chat summary ─────────────────────────── */
 .chat-summary__overlay {
   position: absolute;

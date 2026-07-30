@@ -14,6 +14,8 @@ import {
   suppressedQuestionToolIndices,
 } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
+import { messageCopyText } from './messageCopy.js'
+import MessageCopyButton from './MessageCopyButton.jsx'
 import ErrorCard from './ErrorCard.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 
@@ -83,6 +85,10 @@ function MsgContentInner({
   // scalar props (no function prop needed from ChatView).
   const isQuestionAnswerable = (block) =>
     blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnswer })
+  // One-tap copy for settled prose. A streaming answer is still changing
+  // under the reader, so the affordance appears when the turn settles —
+  // the same gate MessageSources uses.
+  const copyableText = isStreaming ? '' : messageCopyText(msg)
   if (msg.kind === 'compaction') {
     // Render the compaction as its own labeled card rather than the generic
     // ToolBlock — see CompactionCard. The stored `content` is untouched, so
@@ -354,6 +360,11 @@ function MsgContentInner({
         {msg.role === 'assistant' && !isStreaming && (
           <MessageSources blocks={msg.blocks} />
         )}
+        {copyableText && (
+          <div className="chat__msg-actions">
+            <MessageCopyButton text={copyableText} />
+          </div>
+        )}
       </>
     )
   }
@@ -385,6 +396,11 @@ function MsgContentInner({
             : text}
         </div>
       ) : null}
+      {copyableText && (
+        <div className="chat__msg-actions">
+          <MessageCopyButton text={copyableText} />
+        </div>
+      )}
     </>
   )
 }
