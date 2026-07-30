@@ -27,6 +27,10 @@ import { test, expect } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
+// Every scenario controls the shell API with page.route(). Letting the service
+// worker handle those requests would bypass the mocks and make the spec hybrid.
+test.use({ serviceWorkers: 'block' })
+
 
 /** Minimal mock frame HTML: listens for moebius:frame-init and
  *  posts moebius:frame-mounted back to the parent. Mirrors the
@@ -66,26 +70,18 @@ function mockFrameHTML(appId, opts = {}) {
 }
 
 async function setupShellBasics(page) {
-  // Safety net registered FIRST so it has the LOWEST precedence (Playwright
-  // matches routes last-registered-first). Any /api/ call the mounted Shell
-  // makes that no specific mock below covers gets a benign 200 instead of
-  // falling through to the real container, where the test's fake owner token
-  // 401s and the api client reloads the page mid-test (the failure mode that
-  // broke this whole spec when a new mount-time query — /api/owner/model-prefs
-  // — was added upstream). The specific mocks below still win on their paths;
-  // this only catches the gaps, so a future Shell-mount query can't silently
-  // reintroduce the 401-reload flake.
+  // Register the safety net first: Playwright gives later, scenario-specific
+  // routes precedence. Incidental shell reads get empty JSON and incidental
+  // actions succeed without escaping this fully mocked spec.
   await page.route(url => url.pathname.startsWith('/api/'), route => {
-    if (route.request().method() !== 'GET') return route.fallback()
-    route.fulfill({
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-    })
-  })
-  await page.route(/\/api\/apps\/\d+\/opened$/, route => {
-    if (route.request().method() !== 'POST') return route.fallback()
-    route.fulfill({ status: 204, body: '' })
+    if (route.request().method() === 'GET') {
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+    }
+    return route.fulfill({ status: 204, body: '' })
   })
   await page.route(/\/api\/health$/, route =>
     route.fulfill({
@@ -108,14 +104,7 @@ async function setupShellBasics(page) {
       body: JSON.stringify({ providers: {} }),
     })
   )
-  // Shell fires this on mount whenever a chat is active (the composer's
-  // model picker prefetch — `modelQueries.prefs`, enabled on activeChatId).
-  // The saved auth storageState restores `moebius_active_chat`, so it IS
-  // active here. Leaving it unmocked sends the test's fake owner token to
-  // the real container, which 401s, and the api client's 401 handler calls
-  // `window.location.reload()` — that reload destroys the page mid-test
-  // (iframe goes null → contentWindow throws; "execution context destroyed").
-  // Mock EVERY endpoint the mounted Shell touches so no real 401 can fire.
+  // An active chat prefetches these preferences during shell startup.
   await page.route(/\/api\/owner\/model-prefs$/, route =>
     route.fulfill({
       status: 200,
@@ -323,23 +312,6 @@ async function postFromOpaqueCanvasFrame(page, data) {
 
 
 test.describe('AppCanvas: iframe-mount contract', () => {
-  // Block the service worker for this whole file. Every test here relies on
-  // Playwright's page.route intercepting the /api calls the shell makes — but
-  // sw.js serves /api/chats and /api/apps/ NetworkFirst and /api/theme
-  // StaleWhileRevalidate, and once the SW activates + claims the page (~1s into
-  // the first load) its own fetch()es go straight to the network, BYPASSING
-  // page.route. A test that outlives that claim window then leaks a mount-time
-  // GET to the real container, which 401s the fake owner token; the api
-  // client's global 401 handler clears the token and reloads, and the reload
-  // loop tears the page down mid-assertion. (The app-error swap test below is
-  // the one long enough to trip it — its live-frame crash forwards correctly
-  // and POSTs /api/chats, but the follow-up refreshApps/refreshChats GETs ride
-  // the SW to a real 401 and the new chat's composer never survives the
-  // reload.) Blocking the SW keeps every request on the page-route path — the
-  // same reason auth.setup.mjs blocks it. None of these tests exercise SW
-  // behavior, so nothing is lost.
-  test.use({ serviceWorkers: 'block' })
-
   test('loading spinner hides as soon as frame posts moebius:frame-mounted', async ({ page }) => {
     const appId = 99
     // Mount only on the test's signal — NOT a timer. The old
