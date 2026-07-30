@@ -598,3 +598,114 @@ test('signal helper never queues an event above the server ASCII byte budget', a
     globalThis.clearTimeout = previousClearTimeout
   }
 })
+
+// ── makeChat embed bootstrap watchdog ────────────────────────────────────────
+//
+// A nested embed frame whose document never executes (an ancestor frame
+// policy blocking it, a failed asset) posts NOTHING: no BOOTSTRAP_READY, no
+// EMBED_ERROR — so without a watchdog the mount looks alive while the panel
+// stays blank forever. These tests pin the bounded-silence contract: silence
+// past the deadline emits the sticky 'error'; any authentic embed message
+// stands the watchdog down.
+
+function fakeEmbedDocument() {
+  const frames = []
+  const doc = {
+    createElement(tag) {
+      const el = {
+        tag,
+        style: {},
+        attributes: {},
+        setAttribute(name, value) { this.attributes[name] = value },
+        addEventListener() {},
+        removeEventListener() {},
+        contentWindow: {
+          messages: [],
+          postMessage(data) { this.messages.push(data) },
+        },
+        parentNode: null,
+      }
+      if (tag === 'iframe') frames.push(el)
+      return el
+    },
+  }
+  const mount = {
+    children: [],
+    appendChild(el) {
+      this.children.push(el)
+      el.parentNode = this
+    },
+    removeChild(el) {
+      this.children = this.children.filter((child) => child !== el)
+      el.parentNode = null
+    },
+  }
+  return { doc, mount, frames }
+}
+
+test('embedded chat mount reports a frame that never boots', async () => {
+  await withFakeWindow(async () => {
+    const { doc, mount } = fakeEmbedDocument()
+    const previousDocument = globalThis.document
+    globalThis.document = doc
+    try {
+      const chat = makeChat({
+        appId: 81,
+        getToken: async () => 'app-token',
+        storage: null,
+      })
+      const handle = await chat({
+        mount,
+        chatId: 'chat-silent',
+        bootstrapTimeoutMs: 20,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      // Attach AFTER the deadline: the sticky emitter must replay the error
+      // to a late listener, exactly like the mount-time READY contract.
+      const seen = []
+      handle.on('error', (detail) => seen.push(detail))
+      assert.equal(seen.length, 1)
+      assert.equal(seen[0].chatId, 'chat-silent')
+      assert.match(seen[0].error, /did not start/)
+      handle.destroy()
+    } finally {
+      globalThis.document = previousDocument
+    }
+  })
+})
+
+test('embedded chat watchdog stands down once the frame posts', async () => {
+  await withFakeWindow(async ({ window: fakeWindow }) => {
+    const { doc, mount, frames } = fakeEmbedDocument()
+    const previousDocument = globalThis.document
+    globalThis.document = doc
+    try {
+      const chat = makeChat({
+        appId: 82,
+        getToken: async () => 'app-token',
+        storage: null,
+      })
+      const handle = await chat({
+        mount,
+        chatId: 'chat-booted',
+        bootstrapTimeoutMs: 30,
+      })
+      const seen = []
+      handle.on('error', (detail) => seen.push(detail))
+      // The child's first authentic message (bootstrap-ready from the exact
+      // mounted frame) proves the document booted.
+      fakeWindow.emit(
+        { type: 'moebius:chat-embed:bootstrap-ready' },
+        { origin: 'null', source: frames[0].contentWindow },
+      )
+      await new Promise((resolve) => setTimeout(resolve, 90))
+      assert.equal(
+        seen.filter((detail) => /did not start/.test(detail.error)).length,
+        0,
+      )
+      handle.destroy()
+    } finally {
+      globalThis.document = previousDocument
+    }
+  })
+})

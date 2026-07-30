@@ -2475,6 +2475,19 @@ export function makeEmbedAuthorizationHandoff({
   }
 }
 
+// How long a freshly mounted embed frame may stay completely silent before
+// makeChat reports it dead. The child's very first message (BOOTSTRAP_READY)
+// normally arrives within a couple of seconds of the document load; 15s
+// tolerates a cold cache on a slow link while still bounding the
+// silent-black-panel failure — a frame whose document never executes posts
+// nothing, fires no 'error', and otherwise leaves apps staring at an
+// invisible (opacity:0) embed forever. Observed in the field when an edge
+// proxy stamped `frame-ancestors 'self'`/X-Frame-Options onto the embed
+// route: its ancestor app frame is intentionally opaque, so the browser
+// refused the document without any signal the parent could hear.
+// Overridable per mount via opts.bootstrapTimeoutMs (tests, unusual hosts).
+const EMBED_BOOTSTRAP_TIMEOUT_MS = 15000
+
 export function makeChat({ appId, getToken, storage }) {
   // Lazily create a chat the agent turn can be attributed to, via the
   // app-attributed backend contract (design §1.1: POST /api/app-chats).
@@ -2774,6 +2787,37 @@ export function makeChat({ appId, getToken, storage }) {
 
     let frameReveal = makeFrameRevealController(iframe)
 
+    // Watchdog for a frame that can never boot. Every failure PAST first
+    // contact has a reporter (authorization attempts emit 'error'; the child
+    // posts EMBED_ERROR for load/stream problems) — but a document that never
+    // executes at all posts nothing, and the panel stays silently blank.
+    // Report-only: the frame is left in place, so a genuinely slow boot that
+    // completes after the deadline still authorizes and fires 'ready'
+    // normally; 'error' is sticky, so a handler attached later still
+    // observes it.
+    const bootstrapTimeoutMs = (
+      Number.isFinite(opts.bootstrapTimeoutMs) && opts.bootstrapTimeoutMs > 0
+    ) ? opts.bootstrapTimeoutMs : EMBED_BOOTSTRAP_TIMEOUT_MS
+    let bootstrapTimer = null
+    function disarmBootstrapWatchdog() {
+      if (bootstrapTimer != null) {
+        clearTimeout(bootstrapTimer)
+        bootstrapTimer = null
+      }
+    }
+    function armBootstrapWatchdog() {
+      disarmBootstrapWatchdog()
+      const watchedFrame = iframe
+      bootstrapTimer = setTimeout(() => {
+        bootstrapTimer = null
+        if (watchedFrame !== iframe) return
+        emit('error', {
+          chatId,
+          error: 'embedded chat did not start (its frame was blocked or failed to load)',
+        })
+      }, bootstrapTimeoutMs)
+    }
+
     // Keep the older prompt-chip contract for apps that still use it. Newer
     // apps can provide one calm guidance line instead; guidance wins in the
     // renderer when both are present.
@@ -2965,6 +3009,7 @@ export function makeChat({ appId, getToken, storage }) {
       hasAuthorizedOnce = false
       authorizationHandoff = createAuthorizationHandoff()
       if (previous.parentNode) previous.parentNode.replaceChild(iframe, previous)
+      armBootstrapWatchdog()
     }
 
     function postGuidance() {
@@ -2984,6 +3029,9 @@ export function makeChat({ appId, getToken, storage }) {
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
       if (typeof msg.type !== 'string' || !msg.type.startsWith(EMBED_NS)) return
+      // Any authentic embed message from the current frame (the source check
+      // above) proves its document booted — the watchdog's only question.
+      disarmBootstrapWatchdog()
       // A lazy route can finish document loading before its React effect has
       // installed the INIT listener. Mint the one-use grant only after the
       // exact child WindowProxy says that receiver is ready.
@@ -3054,6 +3102,7 @@ export function makeChat({ appId, getToken, storage }) {
     authorizationHandoff = createAuthorizationHandoff()
     window.addEventListener('message', onMessage)
     frameMount.appendChild(iframe)
+    armBootstrapWatchdog()
     if (controlsShell) {
       mount.appendChild(controlsShell)
       refreshChatOptions().catch(() => {})
@@ -3081,6 +3130,7 @@ export function makeChat({ appId, getToken, storage }) {
       },
       destroy() {
         window.removeEventListener('message', onMessage)
+        disarmBootstrapWatchdog()
         authorizationHandoff?.destroy()
         frameReveal?.destroy()
         revokeEmbed(chatId, instanceId)
