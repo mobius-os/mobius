@@ -199,6 +199,34 @@ def reconcile_manifest_icons(db: Session) -> tuple[list[int], list[str]]:
   return repaired, warnings
 
 
+def retire_integrated_app_provenance(db: Session) -> tuple[int, list[str]]:
+  """Bound app provenance metadata at the existing startup maintenance edge."""
+  retired = 0
+  warnings: list[str] = []
+  apps = (
+    db.query(models.App)
+    .filter(
+      models.App.deleted_at.is_(None),
+      models.App.source_dir.isnot(None),
+    )
+    .order_by(models.App.id)
+    .all()
+  )
+  for app in apps:
+    source = Path(app.source_dir)
+    try:
+      if (
+        not app_git.is_repo(source)
+        or not app_git.ref_exists(source, app_git.UPSTREAM_BRANCH)
+      ):
+        continue
+      upstream = app_git.head_sha(source, app_git.UPSTREAM_BRANCH)
+      retired += app_git.retire_landed_equivalent_changes(source, upstream)
+    except Exception as exc:
+      warnings.append(f"app {app.id}: {exc}")
+  return retired, warnings
+
+
 def _validate_local_identity(source_dir: Path, manifest: dict) -> None:
   if manifest["id"] != source_dir.name:
     raise AppApplyError(

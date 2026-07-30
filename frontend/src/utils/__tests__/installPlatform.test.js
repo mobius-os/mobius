@@ -139,3 +139,20 @@ test('standalone mode reports installation instead of browser-chrome steps', () 
   assert.equal(copy.title, 'Möbius is installed')
   assert.match(copy.body, /already/)
 })
+
+test('custom app identity replaces Möbius throughout install guidance', () => {
+  for (const ua of [
+    UA.iosSafari,
+    UA.androidChrome,
+    UA.androidFirefox,
+    UA.desktopChrome,
+    UA.windowsFirefox,
+    UA.linuxFirefox,
+    UA.macSafari,
+  ]) {
+    const copy = installCopyForPlatform(detectInstallPlatform(ua), false, 'Atlas')
+    const guidance = `${copy.title} ${copy.body}`
+    assert.match(guidance, /Atlas/)
+    assert.doesNotMatch(guidance, /Möbius/)
+  }
+})

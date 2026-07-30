@@ -558,38 +558,41 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   await thoughtToggle.click()
 
   await toolToggle.click()
-  await expect(activity.getByRole('region')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Copy output' })).toBeEnabled()
-  await expect(page.locator('[data-chat-surface="painted"]').getByText(/loading output preview/i)).toBeVisible()
-  await page.getByRole('button', { name: 'Copy output' }).click()
-  await expect.poll(() => page.evaluate(() => window.__copiedToolText.at(-1))).toBe(fullOutput)
-  expect(toolCopyRequests).toBe(1)
+  await expect(toolToggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(toolToggle).toHaveAttribute('aria-busy', 'true')
+  await expect(activity.getByRole('region')).toBeHidden()
+  await expect(
+    page.locator('[data-chat-surface="painted"]').getByText(/loading output preview/i),
+  ).toHaveCount(0)
+  expect(toolPreviewRequests).toBe(1)
 
-  // Collapse before the delayed response lands: the browser request is really
-  // aborted, not merely ignored, and reopening starts a fresh bounded fetch.
+  // A second activation cancels first-open preparation before the delayed
+  // response lands. The browser request is really aborted, not merely ignored,
+  // and reopening starts a fresh bounded fetch.
   await toolToggle.click()
   await expect.poll(() => page.evaluate(() => window.__lazyRequestAborts.tool)).toBe(1)
   await toolToggle.click()
+  await expect(activity.getByRole('region')).toBeVisible()
   await expect(page.locator('[data-chat-surface="painted"]').getByText(fullOutput)).toBeVisible()
   expect(toolPreviewRequests).toBe(3)
   await expect(page.getByRole('button', { name: 'Copy output' })).toBeVisible()
   await page.getByRole('button', { name: 'Copy output' }).click()
   await expect.poll(() => page.evaluate(() => window.__copiedToolText.at(-1))).toBe(fullOutput)
-  expect(toolCopyRequests).toBe(1)
+  expect(toolCopyRequests).toBe(0)
 
   // The complete bounded preview is now the exact copy source, avoiding a
   // duplicate request. Clipboard failures remain visible and retryable.
   await page.evaluate(() => { window.__clipboardShouldFail = true })
   await activity.locator('.chat__tool-copy').click()
   await expect(activity.getByText('Copy failed')).toBeVisible()
-  expect(toolCopyRequests).toBe(1)
+  expect(toolCopyRequests).toBe(0)
   await page.evaluate(() => { window.__clipboardShouldFail = false })
   await page.getByRole('button', { name: 'Could not copy output' }).click()
   await expect(page.getByRole('button', { name: 'Output copied' })).toBeVisible()
   await expect(activity.locator('.chat__tool-copy + [role="status"]')).toHaveText(
     'Output copied',
   )
-  expect(toolCopyRequests).toBe(1)
+  expect(toolCopyRequests).toBe(0)
 
   // A transient sidecar failure is announced and retries in place. It should
   // not require collapsing the detail or retaining another hidden payload.
@@ -625,5 +628,5 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   expect(thinkingRequests).toBe(4)
   expect(thinkingFullRequests).toBe(1)
   expect(toolPreviewRequests).toBe(6)
-  expect(toolCopyRequests).toBe(1)
+  expect(toolCopyRequests).toBe(0)
 })

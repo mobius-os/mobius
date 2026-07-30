@@ -1845,8 +1845,11 @@ async def install_from_manifest(
   expected_app_id: int | None = None,
   expected_upstream_commit: str | None = None,
   expected_candidate_digest: str | None = None,
-) -> tuple[models.App, str, list[str], dict, list[str], str]:
-  """Returns `(app, mode, warnings, manifest, conflict_paths, divergence)`.
+) -> tuple[
+  models.App, str, list[str], dict, list[str], str,
+  app_git.ReconciliationReceipt,
+]:
+  """Returns app state plus a shared structured reconciliation receipt.
 
   The parsed manifest dict comes back so callers can read fields the
   App row doesn't store (notably `version`) without re-fetching.
@@ -2260,6 +2263,7 @@ async def install_from_manifest(
   warnings: list[str] = []
   conflict_paths: list[str] = []
   divergence: str = "none"
+  reconciliation = app_git.ReconciliationReceipt()
   # Set when upstream content is actually folded into the served `main`
   # branch (a clean merge, or a forced take-upstream). The post-write
   # commit then replays the result on the upstream tip as its sole parent
@@ -2697,9 +2701,22 @@ async def install_from_manifest(
             # fast-forward the served bundle — treat it as a conflict for the
             # agent to resolve, mirroring the clean-merge branch below, rather
             # than half-applying a tree with no entry.
+            if prev_upstream_commit:
+              reconciliation = await asyncio.to_thread(
+                app_git.describe_reconciliation,
+                git_source_dir,
+                prev_upstream_commit,
+                app_git.UPSTREAM_BRANCH,
+              )
             if entry_key not in source_tree:
               mode = "conflict"
               conflict_paths = [entry_key]
+              reconciliation = app_git.ReconciliationReceipt(
+                proven_present=reconciliation.proven_present,
+                new_upstream_paths=reconciliation.new_upstream_paths,
+                unresolved_conflict_paths=(entry_key,),
+                provenance_refs_used=reconciliation.provenance_refs_used,
+              )
             else:
               divergence = "fast_forward"
               merge_applied = True
@@ -2718,6 +2735,7 @@ async def install_from_manifest(
             merge = await asyncio.to_thread(
               app_git.merge_upstream, git_source_dir,
             )
+            reconciliation = merge.reconciliation
             if merge.status == "conflict":
               if force_core_store_update:
                 # Core App Store self-update: published upstream wins, keep the
@@ -2753,6 +2771,11 @@ async def install_from_manifest(
                   warnings.append(
                     "auto-resolved a version-only update conflict "
                     "(took the upstream version)"
+                  )
+                  reconciliation = app_git.ReconciliationReceipt(
+                    proven_present=reconciliation.proven_present,
+                    new_upstream_paths=reconciliation.new_upstream_paths,
+                    provenance_refs_used=reconciliation.provenance_refs_used,
                   )
                   # Exec bits come from the same merged tree the resolution was
                   # built on, mirroring the clean-merge branch above.
@@ -3092,7 +3115,10 @@ async def install_from_manifest(
       activity.log_event(
         "app_install", app_id=app.id, slug=app.slug, source=source,
       )
-      return app, mode, warnings, manifest, conflict_paths, divergence
+      return (
+        app, mode, warnings, manifest, conflict_paths, divergence,
+        reconciliation,
+      )
 
     # Storage seeds — fresh installs always seed; updates only fill in keys
     # that don't exist yet so user data isn't clobbered. Under the per-app lock
@@ -3334,7 +3360,10 @@ async def install_from_manifest(
       log.exception("install: initialization job failed to start")
       warnings.append(f"initialization failed to start — {exc!r}")
 
-  return app, mode, warnings, manifest, conflict_paths, divergence
+  return (
+    app, mode, warnings, manifest, conflict_paths, divergence,
+    reconciliation,
+  )
 
 
 def _cleanup(paths: list[Path]) -> None:

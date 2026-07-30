@@ -7,6 +7,7 @@ const toolImageResult = readFileSync(new URL('../ToolImageResult.jsx', import.me
 const toolImagePreview = readFileSync(new URL('../useToolImagePreview.js', import.meta.url), 'utf8')
 const activityHeader = readFileSync(new URL('../ActivityLineHeader.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 
 test('activity and child tool disclosures use icons without chevrons', () => {
   const activityIcon = activityHeader.indexOf('className="chat__activity-icon"')
@@ -21,6 +22,28 @@ test('activity and child tool disclosures use icons without chevrons', () => {
     'parent and tool rows should not render disclosure chevrons')
   assert.match(toolBlock, /aria-expanded=\{open\}/,
     'the real button communicates disclosure state')
+})
+
+test('tool call labels participate in native transcript text selection', () => {
+  const headerRule = chatCss.match(
+    /(?:^|\n)\.chat__tool-header\s*\{[^}]*\}/s,
+  )?.[0] || ''
+  assert.match(headerRule, /user-select:\s*text/,
+    'desktop drag selection should include the visible tool call')
+  assert.match(headerRule, /-webkit-user-select:\s*text/,
+    'WebKit should not inherit the global button selection lock')
+  assert.match(headerRule, /-webkit-touch-callout:\s*default/,
+    'touch selection keeps the native action menu')
+  assert.doesNotMatch(
+    indexCss,
+    /\.chat__tool-header\s*,\s*\.tool-block__header\s*\{[^}]*user-select:\s*none/s,
+    'the global chrome lock must not compete with the current disclosure owner',
+  )
+  assert.match(
+    toolBlock,
+    /onPointerDown=\{\(\) => \{[\s\S]*pointerSelectionRef\.current = textSelectionSnapshot\(\)[\s\S]*pointerSelectionChangedWithin\([\s\S]*headerRef\.current[\s\S]*setPrepareRequested\(false\)[\s\S]*releaseClosedDetail\(\)[\s\S]*return[\s\S]*const nextOpen/,
+    'releasing a pointer selection must cancel preparation without toggling',
+  )
 })
 
 test('tool detail is a third nested level with labeled command and output', () => {
@@ -66,7 +89,9 @@ test('cold tool and image detail reveal only after their final layout is ready',
     /const detailReady = previewReady && imageReady\s*const open = desiredOpen && detailReady/,
     'user intent is distinct from the one rendered open boundary',
   )
-  assert.match(toolBlock, /onPointerDown=\{\(\) => setPrepareRequested\(true\)\}/,
+  assert.match(
+    toolBlock,
+    /onPointerDown=\{\(\) => \{[\s\S]*textSelectionSnapshot\(\)[\s\S]*setPrepareRequested\(true\)\s*\}/,
     'pointer-down starts preparation before the click boundary')
   assert.match(
     toolBlock,

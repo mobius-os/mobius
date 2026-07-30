@@ -48,6 +48,8 @@ test('runtime cache cleanup evicts old offline app caches', () => {
   assert.equal(isStaleRuntimeCache(OFFLINE_APPS_CACHE), false)
   assert.equal(isStaleRuntimeCache('mobius-standalone'), true)
   assert.equal(isStaleRuntimeCache('mobius-standalone-v1'), true)
+  // v2 contains the retired direct-at-owner-origin standalone document.
+  assert.equal(isStaleRuntimeCache('mobius-standalone-v2'), true)
 })
 
 test('only public executable assets cross the opaque app-frame origin', () => {

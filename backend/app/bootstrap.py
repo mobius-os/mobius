@@ -193,7 +193,10 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
       bootstrap_app.name, bootstrap_app.manifest_url,
     )
     try:
-      app, mode, warnings, _manifest, _conflicts, _divergence = (
+      (
+        app, mode, warnings, _manifest, _conflicts, _divergence,
+        _reconciliation,
+      ) = (
         await install_from_manifest(
           db,
           manifest_url=bootstrap_app.manifest_url,

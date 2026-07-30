@@ -874,7 +874,10 @@ async def install_app(
   # overlap lets one delete what the other just wrote
   # (fs_locks.install_uninstall_lock has the full rationale).
   async with fs_locks.install_uninstall_lock():
-    app, mode, warnings, manifest, conflict_paths, divergence = (
+    (
+      app, mode, warnings, manifest, conflict_paths, divergence,
+      reconciliation,
+    ) = (
       await install_from_manifest(
         db,
         manifest_url=body.manifest_url,
@@ -939,6 +942,9 @@ async def install_app(
     warnings=warnings,
     conflict_paths=conflict_paths,
     divergence=divergence,
+    reconciliation=schemas.ReconciliationReceiptOut(
+      **reconciliation.as_dict(),
+    ),
   )
 
 
@@ -1659,10 +1665,10 @@ async def stream_app_events(
 ):
   """Per-app SSE stream of this app's own `app_updated` events.
 
-  This is what lets an installed standalone PWA (`/apps/<slug>/`) offer a
-  live "Updated — tap to refresh" pill: the standalone shell subscribes
-  with its app-scoped token and reloads onto the fresh bundle when its own
-  app is edited mid-build.
+  This lets an installed standalone PWA (`/apps/<slug>/`) offer a live
+  "Updated — tap to refresh" pill. Its trusted host subscribes with the owner
+  credential; app-authored code remains in the opaque frame and has only its
+  app-scoped token.
 
   Auth boundary (least privilege): an app-scoped token may open ONLY its
   own app's stream — a token whose `app_id` claim differs from the path id
@@ -1754,7 +1760,9 @@ async def create_conflict_resolver_chat(
 
     if materialize_on_new_chat:
       conflict_paths = await asyncio.to_thread(
-        app_git.start_conflict_merge, repo,
+        app_git.start_conflict_merge,
+        repo,
+        merge_base=merge.merge_base_oid,
       ) or conflict_paths
       if not conflict_paths:
         raise HTTPException(
@@ -2054,7 +2062,7 @@ async def resolve_app_update(
     # icon, skills, seeds, and schedule. Re-enter it without holding the inner
     # app/source locks; it acquires those in the global order itself.
     try:
-      reapplied, mode, warnings, _, conflict_paths, _ = (
+      reapplied, mode, warnings, _, conflict_paths, _, reconciliation = (
         await install.install_from_manifest(
           db,
           manifest_url=None,
@@ -2093,6 +2101,9 @@ async def resolve_app_update(
     app=reapplied,
     warnings=warnings,
     conflict_paths=conflict_paths,
+    reconciliation=schemas.ReconciliationReceiptOut(
+      **reconciliation.as_dict(),
+    ),
   )
 
 
@@ -2287,12 +2298,11 @@ async def update_icon(
   Authorized for the owner OR for an app-scoped token whose
   `app_id` matches the path — the app can manage its own visual
   identity, but cannot touch a sibling app's icon. The current standalone
-  install page is a trusted top-level Möbius document and reads the owner JWT
-  from `localStorage['token']`; its app component still shares that document
-  until the documented opaque-outer-shell migration lands. The scoped branch
-  remains for app-frame/direct app callers, not as a claim that today's
-  standalone component is isolated. To return to the manifest-declared icon
-  (or the generated letter when the package has none), send a zero-byte body.
+  install page is a trusted top-level Möbius document and may use the owner
+  credential. App-authored code runs only in the opaque AppCanvas frame and
+  cannot access that document or credential. The scoped branch remains for
+  reviewed app-frame callers. To return to the manifest-declared icon (or the
+  generated letter when the package has none), send a zero-byte body.
   """
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(
@@ -2300,7 +2310,7 @@ async def update_icon(
       detail="App token can only modify its own icon.",
     )
   # 12 MB cap on the wire — phone camera photos routinely run 5-8 MB. The
-  # standalone shell downscales client-side before upload, so well-behaved
+  # trusted standalone host downscales client-side before upload, so well-behaved
   # clients never approach this. Stream-cap the read (Content-Length precheck +
   # running-total abort) rather than buffering an unbounded body first, so a
   # giant direct-API upload can't OOM the host.

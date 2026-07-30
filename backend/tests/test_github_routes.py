@@ -2172,6 +2172,78 @@ def test_contribution_lifecycle_persists_equivalence_in_live_linked_repo():
   assert app_git.ref_exists(live, landed)
 
 
+def test_merged_legacy_record_reconstructs_witness_after_worktree_cleanup():
+  """A pre-witness linked review remains attributable after its worktree left."""
+  from app import app_git
+  from app.routes.github import _settle_equivalence
+
+  data_dir = Path(get_settings().data_dir)
+  live = data_dir / "apps" / "equivalence-legacy-live"
+  review = data_dir / "contrib" / "equivalence-legacy-review" / "worktree"
+  live.mkdir(parents=True)
+  subprocess.run(["git", "init", "-qb", "main", str(live)], check=True)
+  subprocess.run(["git", "-C", str(live), "config", "user.name", "Test"], check=True)
+  subprocess.run(
+    ["git", "-C", str(live), "config", "user.email", "test@example.invalid"],
+    check=True,
+  )
+  (live / "index.jsx").write_text("base\n")
+  subprocess.run(["git", "-C", str(live), "add", "index.jsx"], check=True)
+  subprocess.run(["git", "-C", str(live), "commit", "-qm", "base"], check=True)
+  base = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", "HEAD"], text=True,
+  ).strip()
+  (live / "index.jsx").write_text("reviewed\n")
+  subprocess.run(["git", "-C", str(live), "commit", "-qam", "reviewed"], check=True)
+  source = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", "HEAD"], text=True,
+  ).strip()
+  review.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(live), "worktree", "add", "-qb", "fix/legacy",
+     str(review), source],
+    check=True,
+  )
+  diff = app_git._canonical_diff(review, base, source)
+  assert diff is not None
+  digest = hashlib.sha256(diff).hexdigest()
+  tree = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", f"{source}^{{tree}}"], text=True,
+  ).strip()
+  upstream = subprocess.check_output(
+    [
+      "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+      "-C", str(live), "commit-tree", tree, "-p", base, "-m", "squash",
+    ],
+    text=True,
+  ).strip()
+  subprocess.run(
+    ["git", "-C", str(live), "worktree", "remove", "--force", str(review)],
+    check=True,
+  )
+  assert not review.exists()
+
+  record = {
+    "id": "equivalence-legacy-review",
+    "status": "merged",
+    "plan": {
+      "repo_path": str(review),
+      "source_repo_path": str(live),
+      "source_sha": source,
+      "base_sha": base,
+      "head_sha": source,
+      "diff_sha256": digest,
+    },
+  }
+  landed = _settle_equivalence(record, upstream)
+
+  assert landed and app_git.ref_exists(live, landed)
+  witness = app_git._read_equivalent_change(live, landed)
+  assert witness is not None
+  assert witness.source_sha == source
+  assert witness.upstream_sha == upstream
+
+
 def test_standalone_app_review_persists_equivalence_in_installed_repo():
   """A no-origin app's disposable review clone cannot own the only witness."""
   from app import app_git
@@ -2274,6 +2346,65 @@ def test_standalone_app_review_persists_equivalence_in_installed_repo():
   assert _cleanup_terminal_staging_checkout(record) is True
   assert not review.exists()
   assert app_git.ref_exists(live, landed)
+
+
+def test_cleanup_terminal_staging_checkout_unregisters_linked_worktree():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  owner = data_dir / "contrib" / "terminal-cleanup-owner"
+  checkout = data_dir / "contrib" / "terminal-cleanup-linked" / "worktree"
+  owner.mkdir(parents=True)
+  subprocess.run(["git", "init", "-q", str(owner)], check=True)
+  subprocess.run(["git", "-C", str(owner), "config", "user.name", "Test"], check=True)
+  subprocess.run(
+    ["git", "-C", str(owner), "config", "user.email", "test@example.invalid"],
+    check=True,
+  )
+  (owner / "tracked.txt").write_text("base\n")
+  subprocess.run(["git", "-C", str(owner), "add", "tracked.txt"], check=True)
+  subprocess.run(["git", "-C", str(owner), "commit", "-qm", "base"], check=True)
+  checkout.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(owner), "worktree", "add", "-qb", "fix/cleanup-test", str(checkout)],
+    check=True,
+  )
+
+  record = {
+    "status": "merged",
+    "plan": {"repo_path": str(checkout)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not checkout.exists()
+  listed = subprocess.run(
+    ["git", "-C", str(owner), "worktree", "list", "--porcelain"],
+    check=True,
+    capture_output=True,
+    text=True,
+  ).stdout
+  assert str(checkout) not in listed
+
+
+def test_cleanup_terminal_staging_checkout_removes_separate_git_dir():
+  from app.routes.github import _cleanup_terminal_staging_checkout
+
+  data_dir = Path(get_settings().data_dir)
+  root = data_dir / "contrib" / "terminal-cleanup-separated"
+  checkout = root / "worktree"
+  git_dir = root / "git"
+  root.mkdir(parents=True)
+  subprocess.run(
+    ["git", "init", "-q", f"--separate-git-dir={git_dir}", str(checkout)],
+    check=True,
+  )
+
+  record = {
+    "status": "closed",
+    "plan": {"repo_path": str(checkout)},
+  }
+  assert _cleanup_terminal_staging_checkout(record) is True
+  assert not checkout.exists()
+  assert not git_dir.exists()
 
 
 def test_ensure_owner_fork_remote_runs_in_repo_after_pinning_origin(

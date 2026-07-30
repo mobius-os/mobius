@@ -17,6 +17,10 @@ import {
   durableImageReference,
   toolImageReference,
 } from './toolImageResult.js'
+import {
+  pointerSelectionChangedWithin,
+  textSelectionSnapshot,
+} from '../../lib/selectableTextControl.js'
 import { useToolImagePreview } from './useToolImagePreview.js'
 
 // Render an already-formatted tool result (see toolResultFormat.js) so shell
@@ -112,6 +116,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const [copyState, setCopyState] = useState('idle')
   const copyTimerRef = useRef(null)
   const copyControllerRef = useRef(null)
+  const pointerSelectionRef = useRef(null)
   const effectiveName = effectiveToolName(t)
   const isShell = effectiveName === 'Bash' || effectiveName === 'shell'
   const label = toolCallLabel(t)
@@ -415,13 +420,29 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
           id={headerId}
           type="button"
           className="chat__tool-header"
-          onPointerDown={() => setPrepareRequested(true)}
+          onPointerDown={() => {
+            pointerSelectionRef.current = textSelectionSnapshot()
+            setPrepareRequested(true)
+          }}
           onKeyDown={(event) => {
             if (event.key === 'Enter' || event.key === ' ') {
               setPrepareRequested(true)
             }
           }}
-          onClick={() => {
+          onClick={(event) => {
+            const selectionBeforePointer = pointerSelectionRef.current
+            pointerSelectionRef.current = null
+            if (
+              event.detail !== 0
+              && pointerSelectionChangedWithin(
+                selectionBeforePointer,
+                headerRef.current,
+              )
+            ) {
+              setPrepareRequested(false)
+              releaseClosedDetail()
+              return
+            }
             const nextOpen = !desiredOpen
             if (nextOpen) {
               setPrepareRequested(true)

@@ -215,3 +215,27 @@ test('queued row actions share full touch targets with compact visible wells', (
   assert.match(queuedMessages, /<DoubleChevronRight width=\{16\} height=\{16\}/)
   assert.match(queuedMessages, /<X width=\{16\} height=\{16\}/)
 })
+
+test('queued message content participates in native text selection', () => {
+  const css = stripComments(chatCss)
+  const toggleRule = css.match(/\.queued__toggle\s*\{[^}]*\}/)?.[0] || ''
+
+  assert.match(toggleRule, /user-select:\s*text/,
+    'desktop drag selection should include queued user text')
+  assert.match(toggleRule, /-webkit-user-select:\s*text/,
+    'WebKit should not inherit the global button selection lock')
+  assert.match(toggleRule, /-webkit-touch-callout:\s*default/,
+    'touch selection should keep the native action menu')
+  assert.match(queuedMessages, /const MessageSurface = needsTruncation \? 'button' : 'div'/,
+    'a non-disclosure queued message should be ordinary selectable content')
+  assert.match(
+    queuedMessages,
+    /event\.detail !== 0[\s\S]*pointerSelectionChangedWithin\([\s\S]*event\.currentTarget[\s\S]*\) return[\s\S]*toggle\(key\)/,
+    'selecting a long queued message must not also toggle its disclosure',
+  )
+  assert.doesNotMatch(
+    queuedMessages,
+    /className="queued__toggle"[\s\S]{0,160}onPointerDown=\{\(e\) => e\.preventDefault\(\)/,
+    'the queued message surface must not cancel selection at pointer-down',
+  )
+})
