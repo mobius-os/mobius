@@ -11,6 +11,7 @@ container image. For ad-hoc DB queries the agent should use raw
 `sqlite3` from stdlib — that path doesn't touch this file at all.
 """
 
+import json
 import logging
 import os
 import threading
@@ -215,6 +216,36 @@ def _agent_lifecycle_width_migrations(
   return statements
 
 
+def _upgrade_app_capability_contract(value):
+  """Drop the retired job-authority fields from known contract versions."""
+  if isinstance(value, str):
+    try:
+      value = json.loads(value)
+    except (TypeError, ValueError):
+      return None
+  if not isinstance(value, dict):
+    return None
+  schema = value.get("schema")
+  if type(schema) is not int or schema not in (1, 2, 3, 4):
+    return None
+
+  upgraded = dict(value)
+  changed = schema != 4
+  background = value.get("background")
+  if isinstance(background, dict):
+    next_background = {
+      key: item for key, item in background.items()
+      if key not in ("agent", "authority")
+    }
+    if next_background != background:
+      upgraded["background"] = next_background
+      changed = True
+  if not changed:
+    return None
+  upgraded["schema"] = 4
+  return upgraded
+
+
 def run_migrations(eng) -> None:
   """Run schema migrations on startup.
 
@@ -223,7 +254,7 @@ def run_migrations(eng) -> None:
   up to date.  Skips entirely on fresh installs (no tables yet) since
   create_all will build the correct schema from scratch.
   """
-  from sqlalchemy import inspect as sa_inspect, text
+  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
   inspector = sa_inspect(eng)
   tables = inspector.get_table_names()
   if "apps" not in tables:
@@ -591,6 +622,27 @@ def run_migrations(eng) -> None:
       conn.execute(text(
         "ALTER TABLE apps ADD COLUMN capability_contract JSON NULL"
       ))
+      conn.commit()
+  # Authority used to be an execution-policy switch in capability receipts.
+  # Server-side jobs now have one owner-trusted process path, so rewrite known
+  # historical receipts once rather than leaving inert policy vocabulary in
+  # owner-visible app reviews forever. Unknown future schemas remain untouched.
+  with eng.connect() as conn:
+    rows = conn.execute(text(
+      "SELECT id, capability_contract FROM apps "
+      "WHERE capability_contract IS NOT NULL"
+    )).fetchall()
+    update_contract = text(
+      "UPDATE apps SET capability_contract = :contract WHERE id = :app_id"
+    ).bindparams(bindparam("contract", type_=SAJSON))
+    changed_contracts = 0
+    for app_id, contract in rows:
+      upgraded = _upgrade_app_capability_contract(contract)
+      if upgraded is None:
+        continue
+      conn.execute(update_contract, {"contract": upgraded, "app_id": app_id})
+      changed_contracts += 1
+    if changed_contracts:
       conn.commit()
   if "chats" in tables:
     chats_cols = {c["name"] for c in inspector.get_columns("chats")}

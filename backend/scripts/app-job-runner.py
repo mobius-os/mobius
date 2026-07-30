@@ -7,7 +7,6 @@ import fcntl
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,24 +16,15 @@ import uuid
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-if str(_SCRIPT_DIR) not in sys.path:
-  sys.path.insert(0, str(_SCRIPT_DIR))
 _BACKEND_DIR = _SCRIPT_DIR.parent
 if str(_BACKEND_DIR) not in sys.path:
   sys.path.insert(0, str(_BACKEND_DIR))
-from app_job_sandbox import JobAccess, select_executor
 from app import cron_tz
 
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 TOKEN_FILE = DATA_DIR / "service-token.txt"
-CURRENT_CAPABILITY_CONTRACT_SCHEMA = 3
-SUPPORTED_CAPABILITY_CONTRACT_SCHEMAS = frozenset({1, 2, 3})
-PLATFORM_JOB_AUTHORITY = "platform"
-SCOPED_JOB_AUTHORITY = "scoped"
-LEGACY_PLATFORM_JOB_AUTHORITY = "app_job_process"
-LEGACY_SCOPED_JOB_AUTHORITY = "scoped_system_job"
 
 # Cron discards this supervisor's stdout, so every FAILURE must leave
 # a durable line — a silent early exit (bad path, dead token, missing
@@ -231,88 +221,6 @@ def _job_env(app_token: str) -> dict[str, str]:
   return env
 
 
-def _job_access(
-  app_id: int, resolved: Path, context: dict,
-) -> JobAccess:
-  """Resolve the reviewed data contract once for every sandbox backend."""
-  contract = context["capability_contract"]
-  storage = DATA_DIR / "apps" / str(app_id)
-  storage.mkdir(parents=True, exist_ok=True)
-  read_only: list[Path] = []
-  read_write: list[Path] = []
-  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
-  shared_level = data.get("shared_memory", "none")
-  if shared_level in ("read", "write"):
-    shared = DATA_DIR / "shared" / "memory"
-    if shared_level == "write":
-      shared.mkdir(parents=True, exist_ok=True)
-    if shared.is_dir() and not shared.is_symlink():
-      (read_write if shared_level == "write" else read_only).append(shared)
-  # Scoped authority grants access to connected provider credentials. The
-  # app's own settings may select a provider at runtime (Memory is one such
-  # app). The job context deliberately excludes app storage settings, so
-  # restricting mounts to the system primary/fallback
-  # silently breaks a valid app-level override. Mount every supported provider
-  # directory that actually exists; the masked /data tree still exposes no
-  # other owner/platform state and ordinary app jobs never take this path.
-  auth_root = DATA_DIR / "cli-auth"
-  for provider in ("claude", "codex"):
-    auth = auth_root / provider
-    if auth.is_dir() and not auth.is_symlink():
-      read_write.append(auth)
-  return JobAccess(
-    source_read=resolved.parent,
-    storage_write=storage,
-    extra_read=tuple(read_only),
-    extra_write=tuple(read_write),
-  )
-
-
-def _job_authority(context: dict) -> str | None:
-  """Resolve trusted job authority without weakening modern receipts.
-
-  A null contract is a legitimate pre-contract platform-authority state.
-  Schemas 1 and 2 retain the old boolean/authority pair; schema 3 carries the
-  manifest's explicit authority directly. Reject contradictory, incomplete,
-  or unknown receipts instead of silently granting platform process authority.
-  """
-  if "capability_contract" not in context:
-    return None
-  contract = context["capability_contract"]
-  if contract is None:
-    return PLATFORM_JOB_AUTHORITY
-  if not isinstance(contract, dict):
-    return None
-
-  schema = contract.get("schema")
-  if (
-    type(schema) is not int
-    or schema not in SUPPORTED_CAPABILITY_CONTRACT_SCHEMAS
-    or "background" not in contract
-  ):
-    return None
-  background = contract["background"]
-  if background is None:
-    return PLATFORM_JOB_AUTHORITY
-  if not isinstance(background, dict):
-    return None
-
-  authority = background.get("authority")
-  if schema == CURRENT_CAPABILITY_CONTRACT_SCHEMA:
-    if "agent" in background:
-      return None
-    if authority in (PLATFORM_JOB_AUTHORITY, SCOPED_JOB_AUTHORITY):
-      return authority
-    return None
-
-  agent = background.get("agent")
-  if agent is True and authority == LEGACY_SCOPED_JOB_AUTHORITY:
-    return SCOPED_JOB_AUTHORITY
-  if agent is False and authority == LEGACY_PLATFORM_JOB_AUTHORITY:
-    return PLATFORM_JOB_AUTHORITY
-  return None
-
-
 def run() -> int:
   argv = sys.argv[1:]
   wait_for_ready = argv[:1] == ["--wait-for-ready"]
@@ -373,7 +281,6 @@ def run() -> int:
     "job": str(resolved),
   }
   _atomic_json(lease, lease_value)
-  sandbox_home: Path | None = None
   try:
     if wait_for_ready and not _wait_for_ready():
       _log(app_id, "failed: timed out waiting for platform readiness")
@@ -402,44 +309,6 @@ def run() -> int:
     job_state.mkdir(parents=True, exist_ok=True)
     child_env["APP_JOB_STATE_DIR"] = str(job_state)
     command = ["bash", str(resolved), str(app_id)]
-    executor = "process"
-    authority = _job_authority(context)
-    if authority is None:
-      _log(app_id, "failed: invalid capability contract for app job")
-      return 4
-    if authority == SCOPED_JOB_AUTHORITY:
-      sandbox_home = Path(tempfile.mkdtemp(prefix=f"mobius-job-{app_id}-"))
-      if os.geteuid() == 0:
-        os.chown(sandbox_home, 1000, 1000)
-      launch, probes = select_executor(
-        _job_access(app_id, resolved, context),
-        command,
-        child_env,
-        sandbox_home,
-      )
-      if launch is None:
-        reasons = "; ".join(
-          f"{probe.executor}: {probe.detail}" for probe in probes
-        )
-        _log(
-          app_id,
-          f"failed: no supported secure background-job executor ({reasons})",
-        )
-        return 5
-      command = launch.command
-      child_env = launch.env
-      executor = launch.executor
-      if executor == "landlock":
-        rejected = next(
-          probe.detail for probe in probes
-          if probe.executor == "bubblewrap"
-        )
-        _log(
-          app_id,
-          f"sandbox: selected landlock; bubblewrap unavailable ({rejected})",
-        )
-    lease_value["executor"] = executor
-    _atomic_json(lease, lease_value)
     child = subprocess.Popen(
       command,
       cwd=str(resolved.parent),
@@ -450,8 +319,6 @@ def run() -> int:
       _log(app_id, f"job exited rc={rc}: {resolved}")
     return rc
   finally:
-    if sandbox_home is not None:
-      shutil.rmtree(sandbox_home, ignore_errors=True)
     lease.unlink(missing_ok=True)
     try:
       lease.parent.rmdir()

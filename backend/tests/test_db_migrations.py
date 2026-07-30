@@ -1,6 +1,7 @@
 import pytest
 from sqlalchemy import String, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app import models
 from app.database import _agent_lifecycle_width_migrations, run_migrations
@@ -27,6 +28,44 @@ def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
   chat_columns = {column["name"] for column in inspector.get_columns("chats")}
   assert "gemini_api_key_enc" not in owner_columns
   assert "generated_images" not in chat_columns
+
+
+def test_run_migrations_removes_retired_job_authority_receipts(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'job-authority.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    memory = models.App(
+      name="Memory",
+      description="",
+      jsx_source="export default () => null",
+      capability_contract={
+        "schema": 3,
+        "data": {"shared_memory": "write"},
+        "background": {
+          "job": "fetch.sh",
+          "mode": "scheduled",
+          "agent": True,
+          "authority": "scoped",
+        },
+      },
+    )
+    session.add(memory)
+    session.commit()
+    app_id = memory.id
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  with Session(eng) as session:
+    contract = session.get(models.App, app_id).capability_contract
+  assert contract == {
+    "schema": 4,
+    "data": {"shared_memory": "write"},
+    "background": {
+      "job": "fetch.sh",
+      "mode": "scheduled",
+    },
+  }
 
 
 def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
