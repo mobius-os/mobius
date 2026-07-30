@@ -124,10 +124,12 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      windowed app whose chrome already owns the inset padding can't
 //      double-pad. See lib/safeAreaInsets.js for the read contract.
 //
-//   6. {type: 'moebius:app-intent', intent}                parent → frame
-//      One-shot shell intent delivered after the app has mounted. Used by
-//      catalog surfaces that open an app directly into a setup/settings path
-//      without inventing app-specific deep links.
+//   6. {type: 'moebius:app-intent', intent, nonce}         parent → frame
+//      One-shot shell intent delivered after the app has mounted. The frame
+//      answers with {type:'moebius:app-intent-applied', nonce} after app message
+//      handlers and their resulting React commits have had a chance to run.
+//      AppCanvas keeps the destination covered until that acknowledgement, so
+//      a direct link never flashes the app's home screen first.
 //
 //   7. moebius:capability-*                                bidirectional
 //      One versioned session protocol for every host-mediated browser feature.
@@ -350,6 +352,12 @@ const AppCanvas = forwardRef(function AppCanvas({
   // VERSION — a Map, not a single ref, because two iframes are alive during the
   // swap window and each must be addressable independently.
   const framesRef = useRef(new Map())
+  // Message attribution lives in one intentionally stable listener below, so
+  // keep the current one-shot intent in a ref rather than re-registering that
+  // listener on every deep link. The nonce prevents a late acknowledgement for
+  // an older destination from uncovering a newer handoff.
+  const pendingIntentRef = useRef(pendingIntent)
+  pendingIntentRef.current = pendingIntent
   const storageHost = useMemo(() => createAppStorageHost({
     appId,
     getCurrentToken: () => hostTokenRef.current,
@@ -801,6 +809,13 @@ const AppCanvas = forwardRef(function AppCanvas({
       // directly — it is the verified sender window.
       if (srcVersion !== liveVersionRef.current) return
 
+      if (msg.type === 'moebius:app-intent-applied') {
+        const pending = pendingIntentRef.current
+        if (!pending || msg.nonce !== pending.nonce) return
+        onIntentDelivered?.(appId, pending)
+        return
+      }
+
       if (msg.type === 'moebius:frame-focus') {
         onAppFocus?.(appId)
         return
@@ -901,7 +916,8 @@ const AppCanvas = forwardRef(function AppCanvas({
     return () => window.removeEventListener('message', onMessage)
   }, [
     appId, appSlug, onNavPush, onNavPop, onNavForwardResult,
-    onAppFocus, onImmersive, onAppError, onHostRequest, queryClient,
+    onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
+    queryClient,
   ])
 
   // Capabilities belong to a visible workspace pane, not merely the focused
@@ -1035,7 +1051,9 @@ const AppCanvas = forwardRef(function AppCanvas({
 
   // One-shot shell intent, delivered to the VISIBLE frame once it has mounted.
   // Re-delivers to the promoted frame after a swap (dep on swap.liveVersion):
-  // the new module didn't receive the intent the old one did.
+  // the new module didn't receive the intent the old one did. The frame's
+  // applied acknowledgement clears the pending value; posting alone does not,
+  // because revealing now would briefly paint the app's previous/home state.
   useEffect(() => {
     if (!pendingIntent || !swap.liveLoaded) return
     if (!framesRef.current.get(swap.liveVersion)?.contentWindow) return
@@ -1044,8 +1062,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       intent: pendingIntent.intent,
       nonce: pendingIntent.nonce,
     })
-    onIntentDelivered?.(appId, pendingIntent)
-  }, [appId, swap.liveLoaded, swap.liveVersion, pendingIntent, onIntentDelivered])
+  }, [swap.liveLoaded, swap.liveVersion, pendingIntent])
 
   // ── P1-A: probed-online forwarding ──────────────────────────────
   // Forward the shell's real reachability verdict (from useOnlineStatus, which
@@ -1343,6 +1360,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   const frameVersions = [swap.liveVersion]
   if (swap.incomingVersion != null) frameVersions.push(swap.incomingVersion)
   frameVersions.sort(compareVersions)
+  const intentHandoffPending = pendingIntent != null
 
   // The iframe key OMITS `token` (a token refresh must not remount and drop
   // in-app state) — only appId+version identify a frame. During a swap the
@@ -1359,7 +1377,9 @@ const AppCanvas = forwardRef(function AppCanvas({
           <iframe
             ref={frameRefCb(v)}
             key={`${appId}-${v}`}
-            className={`canvas ${isLive ? 'canvas--live' : 'canvas--incoming'}`}
+            className={`canvas ${isLive ? 'canvas--live' : 'canvas--incoming'}${
+              isLive && intentHandoffPending ? ' canvas--intent-pending' : ''
+            }`}
             src={appFrameRequestUrl(appId, v, frameRev)}
             title={appName || 'Mini-app'}
             // data-app-id marks the app's VISIBLE browsing context. Exactly one
@@ -1384,8 +1404,12 @@ const AppCanvas = forwardRef(function AppCanvas({
       {swap.swaps > 0 && (
         <div className="canvas-swap-flash" key={`flash-${swap.swaps}`} aria-hidden="true" />
       )}
-      {!swap.liveLoaded && (
-        <div className="canvas-loading" aria-live="polite">
+      {(!swap.liveLoaded || intentHandoffPending) && (
+        <div
+          className={`canvas-loading${intentHandoffPending
+            ? ' canvas-loading--intent-handoff' : ''}`}
+          aria-live="polite"
+        >
           {!online && !offlineCapable ? (
             // A non-offline-capable app whose frame + module aren't cached
             // yet (never opened while online) can't load offline, so the

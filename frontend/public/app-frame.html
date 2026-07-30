@@ -560,7 +560,10 @@
     //   7. parent posts {type:'moebius:frame-interactivity', interactive}
     //      whenever a shell modal (currently the navigation drawer) suspends or
     //      restores direct input without unpainting/reloading the app.
-    //   8. pointer input posts {type:'moebius:frame-focus'} so the shell can focus
+    //   8. parent may post {type:'moebius:app-intent', intent, nonce}; after
+    //      app message handlers and their resulting React commits can run, the
+    //      frame answers {type:'moebius:app-intent-applied', appId, nonce}.
+    //   9. pointer input posts {type:'moebius:frame-focus'} so the shell can focus
     //      this app's pane; iframe events do not bubble into the parent wrapper.
     //
     // Origin check: the opaque iframe still sees the parent shell's concrete
@@ -589,6 +592,31 @@
     // well as the document scroller, without walking every node when the drawer
     // opens. Nested third-party frames stay covered by the outer iframe guard.
     const gestureScrollers = new Set();
+
+    // App intent listeners live in app code, alongside this runtime listener.
+    // The parent keeps an opaque cover over the frame until we acknowledge.
+    // Two animation turns give a listener's state update and a follow-on effect
+    // (for example: resolve an id, then open its detail panel) time to commit.
+    // Background/hidden frames may pause rAF entirely, so the bounded timer is
+    // the equivalent task-turn fallback; the parent nonce-rejects stale acks.
+    function acknowledgeAppIntent(nonce) {
+      let sent = false;
+      const send = () => {
+        if (sent) return;
+        sent = true;
+        window.parent.postMessage(
+          { type: 'moebius:app-intent-applied', appId: _FRAME_APP_ID, nonce },
+          window.location.origin
+        );
+      };
+      const fallback = setTimeout(send, 120);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          clearTimeout(fallback);
+          send();
+        });
+      });
+    }
 
     // A module request has two independent failure modes, and one deadline
     // cannot measure both. LIVENESS: the parent never takes the request at all
@@ -1164,6 +1192,12 @@
           window.mobius && window.mobius.storage &&
             window.mobius.storage._receiveDeadLetter(msg.payload);
         } catch (e) {}
+        return;
+      }
+      if (msg.type === 'moebius:app-intent') {
+        acknowledgeAppIntent(msg.nonce);
+        // Returning from this runtime listener does not stop the message event:
+        // the app's own listener still receives the same intent synchronously.
         return;
       }
       if (msg.type === 'moebius:frame-init') {

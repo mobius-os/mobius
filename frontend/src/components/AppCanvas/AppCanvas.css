@@ -42,6 +42,14 @@
   opacity: 1;
 }
 
+/* A shell deep link is a destination handoff, not a visit to the app's home
+   screen followed by a second navigation. Keep the old/home frame inert under
+   the opaque loading cover until the frame confirms its intent handlers have
+   committed the destination. */
+.canvas--intent-pending {
+  pointer-events: none;
+}
+
 /* One-shot shimmer confirming the preview refreshed in place. A faint accent
    veil that pulses and fades; opacity-only + pointer-events:none so it never
    blocks input or forces layout. Sits above the frames but below nothing that
@@ -96,6 +104,13 @@
   pointer-events: none;
   z-index: 1;
   animation: canvas-loading-in 80ms ease-out;
+}
+
+/* The ordinary first-load fade intentionally lets a fast app feel immediate.
+   A direct-intent cover has the opposite job: it must be opaque on its first
+   frame so the app's previous/home state cannot flash through. */
+.canvas-loading--intent-handoff {
+  animation: none;
 }
 
 @keyframes canvas-loading-in {
