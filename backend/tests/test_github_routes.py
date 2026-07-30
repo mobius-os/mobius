@@ -2172,6 +2172,78 @@ def test_contribution_lifecycle_persists_equivalence_in_live_linked_repo():
   assert app_git.ref_exists(live, landed)
 
 
+def test_merged_legacy_record_reconstructs_witness_after_worktree_cleanup():
+  """A pre-witness linked review remains attributable after its worktree left."""
+  from app import app_git
+  from app.routes.github import _settle_equivalence
+
+  data_dir = Path(get_settings().data_dir)
+  live = data_dir / "apps" / "equivalence-legacy-live"
+  review = data_dir / "contrib" / "equivalence-legacy-review" / "worktree"
+  live.mkdir(parents=True)
+  subprocess.run(["git", "init", "-qb", "main", str(live)], check=True)
+  subprocess.run(["git", "-C", str(live), "config", "user.name", "Test"], check=True)
+  subprocess.run(
+    ["git", "-C", str(live), "config", "user.email", "test@example.invalid"],
+    check=True,
+  )
+  (live / "index.jsx").write_text("base\n")
+  subprocess.run(["git", "-C", str(live), "add", "index.jsx"], check=True)
+  subprocess.run(["git", "-C", str(live), "commit", "-qm", "base"], check=True)
+  base = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", "HEAD"], text=True,
+  ).strip()
+  (live / "index.jsx").write_text("reviewed\n")
+  subprocess.run(["git", "-C", str(live), "commit", "-qam", "reviewed"], check=True)
+  source = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", "HEAD"], text=True,
+  ).strip()
+  review.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(live), "worktree", "add", "-qb", "fix/legacy",
+     str(review), source],
+    check=True,
+  )
+  diff = app_git._canonical_diff(review, base, source)
+  assert diff is not None
+  digest = hashlib.sha256(diff).hexdigest()
+  tree = subprocess.check_output(
+    ["git", "-C", str(live), "rev-parse", f"{source}^{{tree}}"], text=True,
+  ).strip()
+  upstream = subprocess.check_output(
+    [
+      "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+      "-C", str(live), "commit-tree", tree, "-p", base, "-m", "squash",
+    ],
+    text=True,
+  ).strip()
+  subprocess.run(
+    ["git", "-C", str(live), "worktree", "remove", "--force", str(review)],
+    check=True,
+  )
+  assert not review.exists()
+
+  record = {
+    "id": "equivalence-legacy-review",
+    "status": "merged",
+    "plan": {
+      "repo_path": str(review),
+      "source_repo_path": str(live),
+      "source_sha": source,
+      "base_sha": base,
+      "head_sha": source,
+      "diff_sha256": digest,
+    },
+  }
+  landed = _settle_equivalence(record, upstream)
+
+  assert landed and app_git.ref_exists(live, landed)
+  witness = app_git._read_equivalent_change(live, landed)
+  assert witness is not None
+  assert witness.source_sha == source
+  assert witness.upstream_sha == upstream
+
+
 def test_standalone_app_review_persists_equivalence_in_installed_repo():
   """A no-origin app's disposable review clone cannot own the only witness."""
   from app import app_git

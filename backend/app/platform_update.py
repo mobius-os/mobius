@@ -113,6 +113,9 @@ LOCAL_BRANCH = "main"
 # The canonical release ref a reconcile targets. A configured release channel
 # could override this later; for now it is the remote-tracking ``origin/main``.
 DEFAULT_TARGET_REF = "origin/main"
+# Keeps an off-tree semantic merge-base tree reachable while an owner may leave
+# a platform conflict unresolved across Git maintenance or server restarts.
+_CONFLICT_MERGE_BASE_REF = "refs/mobius/platform-conflict-base"
 
 # The platform tree is larger than an app but still small; a git op slower than
 # this is wedged, not busy. Fetch gets its own (network-bound) budget.
@@ -756,24 +759,29 @@ def _atomic_write_text(path: Path, content: str) -> None:
 
 
 def _write_conflict_flag(
-  target: str | None, paths: list[str], chat_id: str | None = None
+  target: str | None,
+  paths: list[str],
+  chat_id: str | None = None,
+  merge_base: str | None = None,
 ) -> None:
   """Persist a conflict so Settings keeps surfacing it across reloads.
 
-  Line 0 is the target (``origin/main``) sha; an optional ``chat:<id>`` line
-  records the resolver chat; the remaining lines are the conflicting paths. The
-  ``chat:`` prefix keeps the format backward compatible — a flag written before
-  the chat id is recorded simply lacks that line and reads back as no chat id.
+  Line 0 is the target (``origin/main``) sha; optional ``chat:<id>`` and
+  ``base:<tree>`` lines record the resolver chat and a proven semantic merge
+  base; the remaining lines are conflicting paths. Prefixes keep the format
+  backward compatible with conflict flags written before either field existed.
   """
   body = [target or ""]
   if chat_id:
     body.append(f"chat:{chat_id}")
+  if merge_base:
+    body.append(f"base:{merge_base}")
   body.extend(paths)
   _atomic_write_text(CONFLICT_FLAG, "\n".join(body))
 
 
 def _read_conflict_flag() -> dict | None:
-  """Parse :data:`CONFLICT_FLAG` into ``{upstream, chat_id, paths}`` or None.
+  """Parse the conflict target, chat, semantic base, and paths, or return None.
 
   ``upstream`` is the target sha (named for backward compatibility with the
   status field, not the ``upstream`` branch)."""
@@ -782,6 +790,7 @@ def _read_conflict_flag() -> dict | None:
   lines = CONFLICT_FLAG.read_text().splitlines()
   target = lines[0].strip() if lines else ""
   chat_id: str | None = None
+  merge_base: str | None = None
   paths: list[str] = []
   for line in lines[1:]:
     stripped = line.strip()
@@ -789,9 +798,16 @@ def _read_conflict_flag() -> dict | None:
       continue
     if stripped.startswith("chat:"):
       chat_id = stripped[len("chat:"):] or None
+    elif stripped.startswith("base:"):
+      merge_base = stripped[len("base:"):] or None
     else:
       paths.append(stripped)
-  return {"upstream": target or None, "chat_id": chat_id, "paths": paths}
+  return {
+    "upstream": target or None,
+    "chat_id": chat_id,
+    "merge_base": merge_base,
+    "paths": paths,
+  }
 
 
 def _write_offline_flag(error: str) -> None:
@@ -1316,7 +1332,8 @@ def reconcile_clone(
         # squash/batch case: ordinary Git sees two edits to the same lines, while
         # the causal record says one side is the already-contributed predecessor
         # of the other.  The engine is off-tree and fail-closed; no proof (or a
-        # genuine later conflict) returns None and preserves the resolver path.
+        # genuine later conflict) returns the reduced conflict set plus its
+        # semantic base so the resolver preserves every proven elimination.
         equivalent = app_git.merge_with_equivalent_changes(repo, pre, target)
         if equivalent is not None and equivalent.merged_tree_oid:
           _commit_equivalent_merge_tree(
@@ -1328,12 +1345,29 @@ def reconcile_clone(
           )
         else:
           # Genuine/unproven content conflict: record it, clear any stale
-          # rollback flag, and let the caller open a resolver chat.
-          _write_conflict_flag(target, paths)
+          # rollback flag, and let the caller open a resolver chat. A partially
+          # proven semantic base narrows both the path list and the real merge
+          # the resolver will materialize; no proof keeps the ordinary result.
+          conflict_paths = (
+            equivalent.conflict_paths
+            if equivalent is not None and equivalent.conflict_paths
+            else paths
+          )
+          merge_base = (
+            equivalent.merge_base_oid if equivalent is not None else None
+          )
+          if merge_base:
+            _git(
+              "update-ref", _CONFLICT_MERGE_BASE_REF, merge_base,
+              repo=repo,
+            )
+          _write_conflict_flag(
+            target, conflict_paths, merge_base=merge_base,
+          )
           ROLLED_BACK_FLAG.unlink(missing_ok=True)
           _clear_reconcile_pre()
           return ReconcileResult(
-            "conflict", pre, pre, target, conflict_paths=paths,
+            "conflict", pre, pre, target, conflict_paths=conflict_paths,
           )
 
     # Post-reconcile import probe: a text-clean ff/merge can still produce a
@@ -1883,9 +1917,12 @@ async def create_platform_conflict_resolver_chat(
 
   conflict_paths = flag.get("paths") or _unmerged_paths(repo)
   target_sha = flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF)
+  merge_base = flag.get("merge_base")
   if not target_sha:
     raise PlatformUpdateError("Platform conflict target is unavailable.")
-  result = await spawn_platform_conflict_chat(db, conflict_paths, target_sha)
+  result = await spawn_platform_conflict_chat(
+    db, conflict_paths, target_sha, merge_base,
+  )
   if result is None:
     raise PlatformUpdateError("Could not open resolver chat.")
 
@@ -1893,16 +1930,54 @@ async def create_platform_conflict_resolver_chat(
     target_sha,
     conflict_paths,
     result["chat_id"],
+    merge_base,
   )
   return result
+
+
+def materialize_platform_conflict(
+  target_sha: str,
+  merge_base: str,
+  repo: Path = PLATFORM_REPO,
+) -> list[str]:
+  """Start the owner-approved platform conflict from its proven semantic base."""
+  target = _rev(repo, target_sha)
+  base = _git(
+    "rev-parse", "--verify", "--quiet", f"{merge_base}^{{tree}}",
+    repo=repo, check=False,
+  ).stdout.strip()
+  if target != target_sha or not base:
+    raise PlatformUpdateError("Platform conflict merge proof is unavailable.")
+  return app_git.start_conflict_merge(
+    repo,
+    merge_base=base,
+    local_branch=_local_branch(repo),
+    upstream_branch=target,
+  )
 
 
 def _platform_conflict_resolver_message(
   target_sha: str,
   conflict_paths: list[str],
+  merge_base: str | None = None,
 ) -> str:
   """Instructions bound to the exact release the owner reviewed and applied."""
   files = ", ".join(conflict_paths) if conflict_paths else "some files"
+  if merge_base:
+    start_merge = (
+      "Start the prepared merge from its proven reviewed-change base: "
+      "`cd /data/platform/backend && python3 -c \"from "
+      "app.platform_update import materialize_platform_conflict as m; "
+      f"print('\\\\n'.join(m('{target_sha}', '{merge_base}')))\"`. "
+      "This preserves the updater's already-landed-change analysis and writes "
+      "markers only for the residual conflicts."
+    )
+  else:
+    start_merge = (
+      "Resolve it with ordinary git: `git -C /data/platform merge --no-ff "
+      f"{target_sha}` compares the complete local and reviewed upstream trees "
+      "once and stops with every conflicting file marked."
+    )
   return (
     "A platform update is ready but conflicts with local edits — the new "
     "version and the local changes both touched the same lines, so they can't "
@@ -1911,10 +1986,8 @@ def _platform_conflict_resolver_message(
     f"The exact reviewed version is commit `{target_sha}`; local edits are on "
     "the checked-out working branch. "
     f"Reconcile these conflicting files by hand: {files}.\n\n"
-    "Resolve it with ordinary git: `git -C /data/platform merge --no-ff "
-    f"{target_sha}` compares the complete local and reviewed upstream trees "
-    "once and stops with every conflicting file marked; combine the intent of "
-    "the local version and upstream's, save each file, then `git add` it and "
+    f"{start_merge} Combine the intent of the local version and upstream's, "
+    "save each file, then `git add` it and "
     "`git commit --no-edit` (this finishes the merge non-interactively from the "
     "prepared merge message). When the merge finishes, the working branch "
     "carries both histories.\n\n"
@@ -1927,7 +2000,10 @@ def _platform_conflict_resolver_message(
 
 
 async def spawn_platform_conflict_chat(
-  db: Session, conflict_paths: list[str], target_sha: str,
+  db: Session,
+  conflict_paths: list[str],
+  target_sha: str,
+  merge_base: str | None = None,
 ) -> PlatformConflictResolverChatOut | None:
   """Open a visible agent chat to reconcile the new platform version into
   the checked-out working branch — the platform analogue of a per-app
@@ -1964,7 +2040,9 @@ async def spawn_platform_conflict_chat(
     get_settings().data_dir, owner.provider,
   )
 
-  content = _platform_conflict_resolver_message(target_sha, conflict_paths)
+  content = _platform_conflict_resolver_message(
+    target_sha, conflict_paths, merge_base,
+  )
 
   chat_id = str(uuid.uuid4())
   chat = models.Chat(

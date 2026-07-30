@@ -439,6 +439,19 @@ def _record_pending_equivalence(record: dict) -> str | None:
   if repos is None:
     return None
   source_repo, review_repo = repos
+  plan_base_sha = str(plan.get("base_sha") or "")
+  plan_head_sha = str(plan.get("head_sha") or "")
+  # Older cleanup could remove a linked review worktree before the merged-state
+  # poll created its durable witness. The reviewed commits remain in the live
+  # repository, but only reuse it when both immutable commits still resolve.
+  if (
+    not app_git.ref_exists(review_repo, f"{plan_base_sha}^{{commit}}")
+    or not app_git.ref_exists(review_repo, f"{plan_head_sha}^{{commit}}")
+  ) and (
+    app_git.ref_exists(source_repo, f"{plan_base_sha}^{{commit}}")
+    and app_git.ref_exists(source_repo, f"{plan_head_sha}^{{commit}}")
+  ):
+    review_repo = source_repo
   source_sha = str(plan.get("source_sha") or "").strip()
   current_source = app_git.head_sha(source_repo, "HEAD")
   if not source_sha:
@@ -455,8 +468,8 @@ def _record_pending_equivalence(record: dict) -> str | None:
   if not source_sha:
     return None
   kwargs = {
-    "base_sha": str(plan.get("base_sha") or ""),
-    "head_sha": str(plan.get("head_sha") or ""),
+    "base_sha": plan_base_sha,
+    "head_sha": plan_head_sha,
     "diff_sha256": str(plan.get("diff_sha256") or ""),
     "contribution_id": str(record.get("id") or ""),
     "review_source_dir": review_repo,
@@ -547,9 +560,14 @@ def _settle_equivalence(record: dict, upstream_sha: str | None = None) -> str | 
   repo, _review_repo = repos
   digest = str(plan.get("diff_sha256") or "")
   if record.get("status") == "merged":
-    return app_git.mark_equivalent_change_landed(
+    equivalent = app_git.mark_equivalent_change_landed(
       repo, digest, upstream_sha=upstream_sha,
     )
+    if equivalent is None and _record_pending_equivalence(record) is not None:
+      equivalent = app_git.mark_equivalent_change_landed(
+        repo, digest, upstream_sha=upstream_sha,
+      )
+    return equivalent
   if record.get("status") == "closed":
     app_git.discard_pending_equivalent_change(repo, digest)
   return None

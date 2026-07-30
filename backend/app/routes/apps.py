@@ -1754,7 +1754,9 @@ async def create_conflict_resolver_chat(
 
     if materialize_on_new_chat:
       conflict_paths = await asyncio.to_thread(
-        app_git.start_conflict_merge, repo,
+        app_git.start_conflict_merge,
+        repo,
+        merge_base=merge.merge_base_oid,
       ) or conflict_paths
       if not conflict_paths:
         raise HTTPException(

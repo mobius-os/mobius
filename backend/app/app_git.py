@@ -185,6 +185,10 @@ class MergeResult:
   back. `status` is 'conflict' when at least one tracked file conflicted;
   `conflict_paths` names them and `merged_tree_oid` is None — the caller must NOT
   write anything, leaving the local edits intact for an agent to resolve.
+  `merge_base_oid` is normally None. When reviewed contribution provenance
+  proves a newer semantic base but a later genuine conflict remains, it names
+  that synthetic base tree so the owner-gated resolver can materialize only the
+  residual conflicts instead of repeating Git's older historical conflict set.
 
   There is one path for one and many files: a single-file app is just a tree
   with one source key (`index.jsx`), so the caller always reads the merged tree
@@ -193,6 +197,7 @@ class MergeResult:
   status: str
   conflict_paths: list[str] = field(default_factory=list)
   merged_tree_oid: str | None = None
+  merge_base_oid: str | None = None
   equivalent_change_refs: tuple[str, ...] = ()
 
 
@@ -1065,13 +1070,15 @@ def merge_with_equivalent_changes(
   ``upstream`` *and still contains the exact reviewed delta* (or strict
   tree-subsumption proves the latter directly against the target when GitHub
   could not provide a merge oid). A final off-tree merge with that semantic
-  base is accepted only when Git itself produces a clean tree. No ref or
-  working tree moves here; callers keep their existing rollback transaction.
+  base returns either a clean tree or the strictly reduced residual conflict
+  set plus the semantic base needed to materialize it. No ref or working tree
+  moves here; callers keep their existing rollback transaction.
 
   Anchors are applied in deterministic passes.  A dependent anchor that cannot
   merge onto the current shared tree is deferred until another anchor supplies
   its prerequisite.  Any anchor still unprovable is simply omitted; the final
-  merge then remains conflicted and the existing agent fallback owns it.
+  merge then remains conflicted and the owner-gated agent fallback owns only
+  those residual paths.
   """
   repo = Path(source_dir)
   real_base = _run(repo, "merge-base", local, upstream, check=False)
@@ -1120,8 +1127,11 @@ def merge_with_equivalent_changes(
     merged = merge_refs(repo, local, upstream, merge_base=shared_tree)
   except (OSError, subprocess.SubprocessError, RuntimeError):
     return None
-  if merged.status != "clean" or not merged.merged_tree_oid:
+  if merged.status not in {"clean", "conflict"}:
     return None
+  if merged.status == "clean" and not merged.merged_tree_oid:
+    return None
+  merged.merge_base_oid = shared_tree
   merged.equivalent_change_refs = tuple(change.ref for change in applied)
   return merged
 
@@ -1939,7 +1949,13 @@ def read_tree_exec_paths(
   return frozenset(out)
 
 
-def start_conflict_merge(source_dir: str | Path) -> list[str]:
+def start_conflict_merge(
+  source_dir: str | Path,
+  *,
+  merge_base: str | None = None,
+  local_branch: str = LOCAL_BRANCH,
+  upstream_branch: str = UPSTREAM_BRANCH,
+) -> list[str]:
   """Starts a REAL merge of `upstream` into the working tree on `main`.
 
   Unlike `merge_upstream` (an in-memory verdict that never touches the tree),
@@ -1955,17 +1971,99 @@ def start_conflict_merge(source_dir: str | Path) -> list[str]:
   pre-merge (committed local) state. Call only after `merge_upstream` verdicted
   a conflict, and under `source_dir_lock`.
 
+  When ``merge_base`` is supplied, it is the proven semantic base returned by
+  :func:`merge_with_equivalent_changes`. Git's ordinary merge command cannot
+  accept an explicit base, so this path performs the same three-tree merge in
+  the real index with ``read-tree -m -u``, writes conflict markers, and records
+  the normal MERGE_HEAD/ORIG_HEAD state. Abort/finalize therefore remain the
+  same as an ordinary merge while already-landed contribution conflicts stay
+  eliminated for both platform and app resolvers.
+
   Returns the conflicting repo-relative paths. In the pathological case where
-  the real merge resolves clean (it shares ort machinery with `merge_upstream`,
-  so they agree in practice), the in-progress merge is aborted and an empty list
-  is returned so the caller never strands a half-merge.
+  the materialized merge resolves clean, it resets to the committed local state
+  and returns an empty list so the caller never strands a half-merge.
   """
   repo = Path(source_dir)
   ensure_repo(repo)
-  _unshallow_if_no_merge_base(repo)
-  merged = _run(
-    repo, "merge", "--no-commit", "--no-ff", UPSTREAM_BRANCH, check=False,
-  )
+  _unshallow_if_no_merge_base(repo, local_branch, upstream_branch)
+  local_sha = head_sha(repo, local_branch)
+  upstream_sha = head_sha(repo, upstream_branch)
+  if _run(repo, "status", "--porcelain").stdout.strip():
+    raise RuntimeError("cannot start conflict merge with local source edits")
+  if merge_base is None:
+    merged = _run(
+      repo, "merge", "--no-commit", "--no-ff", upstream_branch, check=False,
+    )
+  else:
+    verdict = merge_refs(
+      repo, local_branch, upstream_branch, merge_base=merge_base,
+    )
+    if verdict.status != "conflict" or not verdict.conflict_paths:
+      return []
+    try:
+      # read-tree resolves every clean path directly and leaves only residual
+      # conflicts as staged 1/2/3 entries. The follow-up checkout writes the
+      # familiar markers without collapsing the unmerged index, so binary
+      # conflicts remain gated by has_unresolved_binary_conflicts.
+      _run(
+        repo, "read-tree", "-m", "-u",
+        merge_base, local_branch, upstream_branch,
+      )
+      # read-tree prepares the exact three-stage index but deliberately does
+      # only trivial whole-blob resolution. Run Git's standard content driver
+      # so disjoint hunks inside one file merge cleanly; a nonzero result is
+      # expected while any genuine conflict remains and is classified below.
+      _run(
+        repo, "merge-index", "-o", "git-merge-one-file", "-a", check=False,
+      )
+      stages_by_path: dict[str, set[int]] = {}
+      for row in _run(repo, "ls-files", "-u", "-z").stdout.split("\0"):
+        if "\t" not in row:
+          continue
+        meta, path = row.split("\t", 1)
+        try:
+          stage = int(meta.rsplit(" ", 1)[1])
+        except (IndexError, ValueError):
+          continue
+        stages_by_path.setdefault(path, set()).add(stage)
+      # git-merge-one-file predates Git's modern merge engine and leaves a
+      # stage-1-only entry when both sides deleted the same path (it can even
+      # misdescribe this as a delete/mode conflict). The off-tree verdict
+      # correctly treats that as clean, so finish that unambiguous deletion
+      # before exposing the real residual set.
+      for path, stages in stages_by_path.items():
+        if stages == {1}:
+          _run(repo, "update-index", "--force-remove", "--", path)
+      unresolved = sorted(
+        path for path, stages in stages_by_path.items() if stages != {1}
+      )
+      if unresolved:
+        # Limit marker checkout to paths that remain unmerged. A blanket "."
+        # also consults Git's resolve-undo cache and can resurrect conflicts
+        # that merge-index just resolved cleanly inside the same file. Render
+        # each path independently because delete/modify and binary conflicts
+        # legitimately have no pair of text blobs from which Git can write
+        # markers. Their nonzero checkout is expected: the three-stage index
+        # remains the authoritative unresolved state while other text paths
+        # still receive familiar markers for the resolver.
+        for path in unresolved:
+          _run(
+            repo, "checkout", "--conflict=merge", "--", path, check=False,
+          )
+      _run(repo, "update-ref", "ORIG_HEAD", local_sha)
+      git_dir = repo / ".git"
+      (git_dir / "MERGE_HEAD").write_text(upstream_sha + "\n")
+      (git_dir / "MERGE_MSG").write_text(
+        f"Merge {upstream_branch} with reviewed contribution base\n"
+      )
+      merged = subprocess.CompletedProcess(
+        args=("git", "read-tree"), returncode=1, stdout="", stderr="",
+      )
+    except Exception:
+      _run(repo, "reset", "--hard", local_sha, check=False)
+      for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
+        (repo / ".git" / name).unlink(missing_ok=True)
+      raise
   # Unmerged paths show in `git status --porcelain` with a U in either status
   # column (UU/AU/UA/UD/DU) or the AA/DD both-added/both-deleted codes.
   status = _run(repo, "status", "--porcelain").stdout
@@ -1978,9 +2076,11 @@ def start_conflict_merge(source_dir: str | Path) -> list[str]:
     detail = merged.stderr.strip() or merged.stdout.strip()
     raise RuntimeError(f"git merge failed (rc={merged.returncode}): {detail}")
   if not conflict_paths and (repo / ".git" / "MERGE_HEAD").exists():
-    # Real merge resolved clean (vs the conflict verdict). Don't strand a
-    # dangling --no-commit merge; abort back to the committed local state.
-    _run(repo, "merge", "--abort", check=False)
+    # Real/explicit-base materialization resolved clean despite the earlier
+    # verdict. Don't strand a dangling merge; restore the committed local state.
+    _run(repo, "reset", "--hard", local_sha, check=False)
+    for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
+      (repo / ".git" / name).unlink(missing_ok=True)
   return conflict_paths
 
 

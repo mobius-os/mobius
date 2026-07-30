@@ -1058,6 +1058,125 @@ def test_landed_equivalent_change_rebases_later_local_edit_without_agent(
   assert (repo / "index.jsx").read_text() == 'mode = "local followup"\n'
 
 
+def test_partial_equivalence_materializes_only_residual_app_conflicts(tmp_path):
+  """Proven shared work stays out of a later owner-gated conflict merge."""
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b'mode = "base"\n',
+      "config.js": b'choice = "base"\n',
+    },
+    "https://x/mobius.json",
+    "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+
+  _write(repo, 'mode = "shared contribution"\n')
+  reviewed = app_git.commit_local(repo, "reviewed contribution")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="partial-shared-change",
+  )
+
+  _write(repo, 'mode = "local followup"\n')
+  (repo / "config.js").write_text('choice = "local"\n')
+  local = app_git.commit_local(repo, "later local edits")
+  assert local
+  upstream = app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b'mode = "shared contribution"\n',
+      "config.js": b'choice = "upstream"\n',
+      "upstream.js": b"export const added = true\n",
+    },
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+  landed = app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream,
+  )
+  assert landed
+
+  ordinary = app_git.merge_refs(
+    repo, app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
+  )
+  assert set(ordinary.conflict_paths) == {"index.jsx", "config.js"}
+  result = app_git.merge_upstream(repo)
+  assert result.status == "conflict"
+  assert result.conflict_paths == ["config.js"]
+  assert result.merge_base_oid
+  assert result.equivalent_change_refs == (landed,)
+
+  conflicts = app_git.start_conflict_merge(
+    repo, merge_base=result.merge_base_oid,
+  )
+  assert conflicts == ["config.js"]
+  assert (repo / "index.jsx").read_text() == 'mode = "local followup"\n'
+  assert "export const added = true" in (repo / "upstream.js").read_text()
+  config = (repo / "config.js").read_text()
+  assert "<<<<<<< ours" in config
+  assert 'choice = "local"' in config
+  assert 'choice = "upstream"' in config
+
+  assert app_git.abort_in_progress_merge(repo) is True
+  assert app_git.head_sha(repo, app_git.LOCAL_BRANCH) == local
+  assert (repo / "config.js").read_text() == 'choice = "local"\n'
+  assert not (repo / "upstream.js").exists()
+
+
+def test_explicit_base_materializes_delete_modify_conflict(tmp_path):
+  """Marker rendering must not abort a valid non-text-shaped conflict."""
+  repo = tmp_path / "app"
+  app_git.ensure_repo(repo)
+  app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b"export default true\n",
+      "obsolete.svg": b"<svg />\n",
+      "retired.js": b"export const value = 'base'\n",
+    },
+    "https://x/mobius.json",
+    "1.0.0",
+  )
+  app_git.align_local_to_upstream(repo)
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+
+  (repo / "retired.js").unlink()
+  (repo / "obsolete.svg").unlink()
+  local = app_git.commit_local(repo, "remove retired module")
+  assert local
+  app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b"export default true\n",
+      "retired.js": b"export const value = 'upstream'\n",
+    },
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+
+  conflicts = app_git.start_conflict_merge(
+    repo, merge_base=app_git._tree_oid(repo, base),
+  )
+
+  assert conflicts == ["retired.js"]
+  assert app_git.has_unresolved_conflicts(repo) is True
+  assert (repo / ".git" / "MERGE_HEAD").exists()
+  assert not (repo / "obsolete.svg").exists()
+  assert app_git.abort_in_progress_merge(repo) is True
+  assert app_git.head_sha(repo, app_git.LOCAL_BRANCH) == local
+  assert not (repo / "retired.js").exists()
+
+
 def test_agent_resolved_local_projection_becomes_a_durable_shared_base(
   tmp_path,
 ):

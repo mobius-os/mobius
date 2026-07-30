@@ -341,6 +341,79 @@ def test_contributed_squash_uses_provenance_for_both_histories(clone_env):
   assert not app_git.ref_exists(platform, landed)
 
 
+def test_partial_provenance_persists_reduced_platform_conflict(clone_env):
+  """A genuine later conflict keeps the proven contribution out of resolution."""
+  origin, platform = clone_env
+  base = _served_sha(platform)
+  shared = _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'SHARED REVIEW'")
+  reviewed = _local_commit(
+    platform,
+    edits={"backend/app/main.py": shared},
+    msg="reviewed contribution",
+  )
+  diff = app_git._canonical_diff(platform, base, reviewed)
+  assert diff is not None
+  digest = hashlib.sha256(diff).hexdigest()
+  assert app_git.record_pending_equivalent_change(
+    platform,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="partial-platform-change",
+  )
+
+  followup = shared.replace("SHARED REVIEW", "LOCAL FOLLOWUP")
+  pre = _local_commit(
+    platform,
+    edits={
+      "backend/app/main.py": followup,
+      "backend/app/foo.py": "VALUE = 'LOCAL'\n",
+    },
+    msg="later local edits",
+  )
+  target = _advance_origin(
+    origin,
+    edits={
+      "backend/app/main.py": shared.replace("LINE_C = 3", "LINE_C = 9001"),
+      "backend/app/foo.py": "VALUE = 'UPSTREAM'\n",
+    },
+    msg="squash plus genuine conflict",
+  )
+  landed = app_git.mark_equivalent_change_landed(
+    platform, digest, upstream_sha=target,
+  )
+  assert landed
+
+  _git(platform, "fetch", "-q", "origin")
+  ordinary = app_git.merge_refs(platform, pre, target)
+  assert set(ordinary.conflict_paths) == {
+    "backend/app/main.py", "backend/app/foo.py",
+  }
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "conflict"
+  assert res.conflict_paths == ["backend/app/foo.py"]
+  assert _served_sha(platform) == pre
+  flag = pu._read_conflict_flag()
+  assert flag["paths"] == ["backend/app/foo.py"]
+  assert flag["merge_base"]
+
+  conflicts = pu.materialize_platform_conflict(
+    target, flag["merge_base"], platform,
+  )
+  assert conflicts == ["backend/app/foo.py"]
+  assert "LINE_A = 'LOCAL FOLLOWUP'" in (
+    platform / "backend/app/main.py"
+  ).read_text()
+  assert "LINE_C = 9001" in (platform / "backend/app/main.py").read_text()
+  assert "<<<<<<< ours" in (platform / "backend/app/foo.py").read_text()
+
+  _git(platform, "merge", "--abort")
+  assert _served_sha(platform) == pre
+  assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'LOCAL'\n"
+
+
 def test_diverged_update_surfaces_all_net_conflicts_together(clone_env):
   origin, platform = clone_env
   _local_commit(platform, edits={"backend/app/main.py":
@@ -1016,8 +1089,8 @@ async def test_platform_conflict_resolver_chat_is_click_gated(
   pu._write_conflict_flag(target, ["backend/app/main.py"])
   calls = []
 
-  async def fake_spawn(db, paths, target_sha):
-    calls.append((db, paths, target_sha))
+  async def fake_spawn(db, paths, target_sha, merge_base):
+    calls.append((db, paths, target_sha, merge_base))
     return {
       "chat_id": "resolver-chat",
       "created": True,
@@ -1034,11 +1107,12 @@ async def test_platform_conflict_resolver_chat_is_click_gated(
     "created": True,
     "started": True,
   }
-  assert calls == [(db, ["backend/app/main.py"], target)]
+  assert calls == [(db, ["backend/app/main.py"], target, None)]
   flag = pu._read_conflict_flag()
   assert flag["upstream"] == target
   assert flag["paths"] == ["backend/app/main.py"]
   assert flag["chat_id"] == "resolver-chat"
+  assert flag["merge_base"] is None
 
 
 def test_platform_conflict_resolver_message_pins_reviewed_target():
@@ -1056,6 +1130,20 @@ def test_platform_conflict_resolver_message_pins_reviewed_target():
   # editor and hangs/errors; it must finish non-interactively instead.
   assert "commit --no-edit" in content
   assert "merge --continue" not in content
+
+
+def test_platform_conflict_resolver_message_preserves_semantic_base():
+  target = "a" * 40
+  merge_base = "b" * 40
+
+  content = pu._platform_conflict_resolver_message(
+    target, ["backend/app/main.py"], merge_base,
+  )
+
+  assert "materialize_platform_conflict" in content
+  assert target in content
+  assert merge_base in content
+  assert f"merge --no-ff {target}" not in content
 
 
 def test_status_restart_needed_when_disk_head_changed_after_boot(clone_env):
@@ -1274,14 +1362,21 @@ def test_offline_boot_clears_stale_restart_flag(clone_env):
 # --- conflict flag format round-trips (chat id, legacy) ---------------------
 
 def test_conflict_flag_roundtrips_chat_id_and_reads_legacy(clone_env):
-  pu._write_conflict_flag("tgt-sha", ["backend/app/a.py", "backend/app/b.py"], "chat-42")
+  pu._write_conflict_flag(
+    "tgt-sha",
+    ["backend/app/a.py", "backend/app/b.py"],
+    "chat-42",
+    "base-tree",
+  )
   assert pu._read_conflict_flag() == {
     "upstream": "tgt-sha", "chat_id": "chat-42",
+    "merge_base": "base-tree",
     "paths": ["backend/app/a.py", "backend/app/b.py"],
   }
   pu.CONFLICT_FLAG.write_text("tgt-sha\nbackend/app/a.py")
   legacy = pu._read_conflict_flag()
   assert legacy["chat_id"] is None
+  assert legacy["merge_base"] is None
   assert legacy["paths"] == ["backend/app/a.py"]
 
 
