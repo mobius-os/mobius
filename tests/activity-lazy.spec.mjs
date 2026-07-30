@@ -169,6 +169,13 @@ test('a lone activity is direct and sources render as safe compact pills', async
 
   const sources = page.locator('[data-chat-surface="painted"] .chat__sources')
   await expect(sources).toBeVisible()
+  await expect(sources.getByRole('button', { name: /References/ }))
+    .toHaveAttribute('aria-expanded', 'false')
+  await expect(sources.getByRole('listitem')).toHaveCount(0)
+  expect(sourceIconProxyRequests).toEqual([])
+  expect(requestedSourceHosts).toEqual([])
+
+  await sources.getByRole('button', { name: /References/ }).click()
   await expect(sources.getByRole('listitem')).toHaveCount(2)
   await expect(sources.locator('.chat__source-icon')).toHaveText(['C', 'D'])
   for (const chip of await sources.locator('.chat__source-chip').all()) {
@@ -178,7 +185,7 @@ test('a lone activity is direct and sources render as safe compact pills', async
     expect(box.height).toBeGreaterThanOrEqual(43)
     expect(box.height).toBeLessThan(52)
   }
-  expect(sourceIconProxyRequests).toEqual([])
+  await expect.poll(() => sourceIconProxyRequests.length).toBeGreaterThanOrEqual(2)
   expect(requestedSourceHosts).toEqual([])
 })
 
