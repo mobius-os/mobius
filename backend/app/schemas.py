@@ -199,13 +199,6 @@ class AppApplyOut(BaseModel):
   app: AppOut
 
 
-class AppResolveUpdateOut(BaseModel):
-  mode: Literal["updated", "conflict"]
-  app: AppOut
-  warnings: list[str] = Field(default_factory=list)
-  conflict_paths: list[str] = Field(default_factory=list)
-
-
 class AppInstall(BaseModel):
   """Body for POST /api/apps/install — atomic install from a manifest.
 
@@ -241,6 +234,23 @@ class AppPreviewOut(BaseModel):
   capability_diff: dict
 
 
+class ReconciliationReceiptOut(BaseModel):
+  proven_present: list[str] = Field(default_factory=list)
+  new_upstream_paths: list[str] = Field(default_factory=list)
+  unresolved_conflict_paths: list[str] = Field(default_factory=list)
+  provenance_refs_used: list[str] = Field(default_factory=list)
+
+
+class AppResolveUpdateOut(BaseModel):
+  mode: Literal["updated", "conflict"]
+  app: AppOut
+  warnings: list[str] = Field(default_factory=list)
+  conflict_paths: list[str] = Field(default_factory=list)
+  reconciliation: ReconciliationReceiptOut = Field(
+    default_factory=ReconciliationReceiptOut,
+  )
+
+
 class AppInstallOut(AppOut):
   """Install endpoint response — AppOut plus install-only fields."""
   # 'install' for a fresh row, 'update' if a same-manifest app already
@@ -269,6 +279,9 @@ class AppInstallOut(AppOut):
   # carried. Meaningful only when per-app git is enabled; conflicts are
   # carried by `mode == "conflict"`, not this field.
   divergence: Literal["none", "fast_forward", "clean_merge"] = "none"
+  reconciliation: ReconciliationReceiptOut = Field(
+    default_factory=ReconciliationReceiptOut,
+  )
 
 
 class AppScheduleUpdate(BaseModel):

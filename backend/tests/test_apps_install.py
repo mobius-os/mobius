@@ -2724,6 +2724,8 @@ def test_flag_on_clean_update_without_local_edits_is_fast_forward(
   payload = r2.json()
   assert payload["mode"] == "update"
   assert payload["divergence"] == "fast_forward"
+  assert "index.jsx" in payload["reconciliation"]["new_upstream_paths"]
+  assert payload["reconciliation"]["proven_present"] == []
   # With no local edits the served source must be the new upstream verbatim.
   # The latent bug let a failed in-memory merge leave the OLD bytes on disk
   # while still bumping the version, so assert the new content actually
@@ -2905,6 +2907,12 @@ def test_app_store_update_recognizes_squashed_local_contribution(
   assert body["mode"] == "update"
   assert body["divergence"] == "clean_merge"
   assert any("already present upstream" in item for item in body["warnings"])
+  assert body["reconciliation"] == {
+    "proven_present": ["app-store-reviewed-change"],
+    "new_upstream_paths": [],
+    "unresolved_conflict_paths": [],
+    "provenance_refs_used": [landed],
+  }
   assert "LOCAL FOLLOWUP" in entry.read_text()
   assert not app_git.ref_exists(source, landed)
 
@@ -2946,6 +2954,9 @@ def test_flag_on_conflicting_update_leaves_source_unchanged_until_resolve(
   assert payload["version"] == "1.0.0"
   assert payload["upstream_version"] == "2.0.0"
   assert "index.jsx" in payload["conflict_paths"]
+  assert payload["reconciliation"]["unresolved_conflict_paths"] == [
+    "index.jsx",
+  ]
 
   # The update attempt itself does not write conflict markers or leave a merge
   # in progress. The owner must click Resolve in chat before that happens.

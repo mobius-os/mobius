@@ -240,6 +240,7 @@ class PlatformApplyResult(TypedDict):
   conflict_paths: list[str]
   chat_id: str | None
   phase: str
+  reconciliation: dict[str, list[str]]
 
 
 class PlatformRestartResponse(TypedDict):
@@ -324,6 +325,9 @@ class ReconcileResult:
   # still held. Hook refresh reads every allowlisted blob from this immutable
   # generation rather than trusting a locally merged HEAD or a moving ref.
   hook_source_sha: str | None = None
+  reconciliation: app_git.ReconciliationReceipt = field(
+    default_factory=app_git.ReconciliationReceipt,
+  )
 
 
 def platform_update_progress() -> PlatformUpdateProgress:
@@ -1254,6 +1258,8 @@ def reconcile_clone(
     _write_offline_flag("no_target_ref")
     return ReconcileResult("offline", pre, pre, None, error="no_target_ref")
 
+  reconciliation = app_git.ReconciliationReceipt()
+
   # Already integrated: local main contains origin/main. Nothing to apply. Sync
   # the upstream marker and clear any stale conflict/rollback flag (this target
   # is fully in main, so a prior conflict/rollback for it is moot). The working
@@ -1309,7 +1315,15 @@ def reconcile_clone(
       # an `upstream` marker that could drift and let `reset --hard` silently
       # discard committed local edits.
       _git("reset", "--hard", target, repo=repo)
+      reconciliation = app_git.describe_reconciliation(repo, pre, target)
     else:
+      ordinary_base = _git(
+        "merge-base", pre, target, repo=repo, check=False,
+      ).stdout.strip()
+      if ordinary_base:
+        reconciliation = app_git.describe_reconciliation(
+          repo, ordinary_base, target,
+        )
       # Main and target diverged: merge the reviewed upstream tree ONCE. This
       # preserves local commit identities and makes one resolver pass see every
       # net conflict instead of stopping once per historical local commit.
@@ -1342,6 +1356,8 @@ def reconcile_clone(
         # genuine later conflict) returns the reduced conflict set plus its
         # semantic base so the resolver preserves every proven elimination.
         equivalent = app_git.merge_with_equivalent_changes(repo, pre, target)
+        if equivalent is not None:
+          reconciliation = equivalent.reconciliation
         if equivalent is not None and equivalent.merged_tree_oid:
           _commit_equivalent_merge_tree(
             repo,
@@ -1374,7 +1390,18 @@ def reconcile_clone(
           ROLLED_BACK_FLAG.unlink(missing_ok=True)
           _clear_reconcile_pre()
           return ReconcileResult(
-            "conflict", pre, pre, target, conflict_paths=conflict_paths,
+            "conflict", pre, pre, target,
+            conflict_paths=conflict_paths,
+            reconciliation=(
+              equivalent.reconciliation
+              if equivalent is not None
+              else app_git.describe_reconciliation(
+                repo,
+                ordinary_base,
+                target,
+                conflict_paths=conflict_paths,
+              )
+            ),
           )
 
     # Post-reconcile import probe: a text-clean ff/merge can still produce a
@@ -1420,7 +1447,10 @@ def reconcile_clone(
   if at_boot:
     RESTART_NEEDED_FLAG.unlink(missing_ok=True)
   _clear_reconcile_pre()
-  return ReconcileResult("updated", pre, new_sha, target, error=None)
+  return ReconcileResult(
+    "updated", pre, new_sha, target, error=None,
+    reconciliation=reconciliation,
+  )
 
 
 def _reconcile_under_lock(
@@ -1886,6 +1916,7 @@ async def apply_platform_update(
         conflict_paths=res.conflict_paths,
         chat_id=chat_id,
         phase=final_phase.value,
+        reconciliation=res.reconciliation.as_dict(),
       )
     except Exception as exc:
       _set_update_progress(

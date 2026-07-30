@@ -356,37 +356,15 @@ test('microphone capability can cancel while permission is still pending', async
   })
 })
 
-test('standalone microphone can stop while permission is still pending', async () => {
+test('capabilities reject direct top-level use instead of bypassing the host', async () => {
   const previousWindow = globalThis.window
-  const previousNavigator = globalThis.navigator
-  const previousAudioContext = globalThis.AudioContext
-  let grant
-  let trackStopped = false
-  const node = () => ({ connect() {}, disconnect() {} })
-  class FakeAudioContext {
-    constructor() { this.sampleRate = 8000; this.state = 'running'; this.destination = node() }
-    createMediaStreamSource() { return node() }
-    createScriptProcessor() { return { ...node(), onaudioprocess: null } }
-    createGain() { return { ...node(), gain: { value: 1 } } }
-    close() {}
-  }
-  const standalone = {
+  const topLevel = {
     location: { origin: 'https://mobius.test' },
-    AudioContext: FakeAudioContext,
     addEventListener() {},
     removeEventListener() {},
   }
-  standalone.parent = standalone
-  globalThis.window = standalone
-  globalThis.AudioContext = FakeAudioContext
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true,
-    value: {
-      mediaDevices: {
-        getUserMedia: () => new Promise((resolve) => { grant = resolve }),
-      },
-    },
-  })
+  topLevel.parent = topLevel
+  globalThis.window = topLevel
   try {
     const capabilities = makeCapabilities({
       declarations: {
@@ -395,22 +373,14 @@ test('standalone microphone can stop while permission is still pending', async (
         },
       },
     })
-    const session = capabilities.open('media.microphone.capture', { maxDurationMs: 2000 })
-    session.finish()
-    grant({ getTracks: () => [{ stop: () => { trackStopped = true } }] })
-    assert.deepEqual(await session.ready, { sampleRate: 8000 })
-    const result = await session.result
-    assert.equal(result.sampleRate, 8000)
-    assert.equal(result.samples.length, 0)
-    assert.equal(trackStopped, true)
+    assert.equal(capabilities.available('media.microphone.capture'), false)
+    assert.throws(
+      () => capabilities.open('media.microphone.capture', { maxDurationMs: 2000 }),
+      { code: 'unavailable' },
+    )
     capabilities._destroy()
   } finally {
     globalThis.window = previousWindow
-    globalThis.AudioContext = previousAudioContext
-    Object.defineProperty(globalThis, 'navigator', {
-      configurable: true,
-      value: previousNavigator,
-    })
   }
 })
 
@@ -475,7 +445,7 @@ test('nav helper auto-pops a late ack after local close', async () => {
   })
 })
 
-test('nav helper distinguishes standalone fallback from shell failure', async () => {
+test('nav helper rejects direct top-level use instead of growing a second host', async () => {
   const previousWindow = globalThis.window
   const listeners = new Set()
   const standalone = {
@@ -487,7 +457,7 @@ test('nav helper distinguishes standalone fallback from shell failure', async ()
   globalThis.window = standalone
   try {
     const handle = makeNav().open('detail')
-    assert.deepEqual(await handle.outcome, { status: 'standalone' })
+    assert.deepEqual(await handle.outcome, { status: 'unavailable' })
     assert.equal(await handle.ready, false)
     assert.equal(listeners.size, 0)
   } finally {

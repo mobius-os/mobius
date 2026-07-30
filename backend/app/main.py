@@ -41,6 +41,11 @@ from app.database import (
   set_database_request_label,
 )
 from app.http_caching import strip_range
+from app.frontend_assets import (
+  baked_frontend_dir,
+  live_frontend_dir,
+  resolve_frontend_dir,
+)
 from app.memory_observability import record_memory_checkpoint
 from app.storage_io import atomic_write
 from app import activity, models
@@ -1447,48 +1452,20 @@ def root_redirect():
 # Prefer the agent-editable whole-repo build at /data/platform/frontend/dist/
 # if it exists and is complete (Vite root files + assets/ must be present).
 # Fall back to the baked-in build at /app/static/ on any error.
-_live_dir = Path(settings.data_dir) / "platform" / "frontend" / "dist"
+_live_dir = live_frontend_dir(settings.data_dir)
 # The baked SPA is at the IMAGE path /app/static, NOT relative to __file__.
 # Under the clone serve model __file__ is /data/platform/backend/app/main.py, so
 # `__file__.parent.parent / "static"` would resolve to /data/platform/backend/
 # static (nonexistent) and the baked-frontend recovery fallback would be dead
 # whenever /data/platform/frontend/dist is incomplete. Resolve it absolutely
 # (overridable via MOBIUS_BAKED_STATIC_DIR for non-standard image layouts).
-_baked_dir = Path(os.environ.get("MOBIUS_BAKED_STATIC_DIR", "/app/static"))
-
-
-def _is_complete_build(d: Path) -> bool:
-  """Returns True only if the directory looks like a complete Vite build."""
-  return (
-    d.is_dir()
-    and (d / "assets").is_dir()
-    and (d / "index.html").is_file()
-    and (d / "sw.js").is_file()
-    and (d / "manifest.webmanifest").is_file()
-  )
-
-
-# The served frontend is resolved PER REQUEST, never frozen at module load: the
-# live build when it is complete, else the baked image floor. A dist that
-# appears or rebuilds after boot is then served with no restart, and a dist
-# gone incomplete mid-swap transparently falls back to the floor. A ~1s memo
-# keeps the stat cost off the hot asset path without pinning a stale choice
-# across a rebuild (a swap settles well inside one TTL).
-_STATIC_DIR_TTL_SECS = 1.0
-_static_dir_memo: dict = {"dir": None, "at": 0.0}
+_baked_dir = baked_frontend_dir()
 
 
 def _resolve_static_dir() -> Path:
   """Return the frontend dir serving this request: live dist if complete, else
-  the baked floor. Memoized for ``_STATIC_DIR_TTL_SECS``."""
-  now = time.monotonic()
-  memo = _static_dir_memo
-  if memo["dir"] is not None and now - memo["at"] < _STATIC_DIR_TTL_SECS:
-    return memo["dir"]
-  resolved = _live_dir if _is_complete_build(_live_dir) else _baked_dir
-  memo["dir"] = resolved
-  memo["at"] = now
-  return resolved
+  the baked floor. Kept as the historical import seam for tests/callers."""
+  return resolve_frontend_dir(settings.data_dir)
 
 
 # The asset attic — frontend_watcher hardlinks each OUTGOING generation's

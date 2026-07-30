@@ -66,6 +66,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Iterable
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +177,24 @@ _DIFF_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass
+class ReconciliationReceipt:
+  """Explain one update decision without exposing merge implementation details."""
+
+  proven_present: tuple[str, ...] = ()
+  new_upstream_paths: tuple[str, ...] = ()
+  unresolved_conflict_paths: tuple[str, ...] = ()
+  provenance_refs_used: tuple[str, ...] = ()
+
+  def as_dict(self) -> dict[str, list[str]]:
+    return {
+      "proven_present": list(self.proven_present),
+      "new_upstream_paths": list(self.new_upstream_paths),
+      "unresolved_conflict_paths": list(self.unresolved_conflict_paths),
+      "provenance_refs_used": list(self.provenance_refs_used),
+    }
+
+
+@dataclass
 class MergeResult:
   """Verdict of merging `upstream` into the local `main` branch.
 
@@ -199,6 +218,9 @@ class MergeResult:
   merged_tree_oid: str | None = None
   merge_base_oid: str | None = None
   equivalent_change_refs: tuple[str, ...] = ()
+  reconciliation: ReconciliationReceipt = field(
+    default_factory=ReconciliationReceipt,
+  )
 
 
 @dataclass(frozen=True)
@@ -614,6 +636,32 @@ def _diff_paths(repo: Path, left: str, right: str) -> set[str] | None:
   if proc.returncode != 0:
     return None
   return {path for path in proc.stdout.split("\0") if path}
+
+
+def describe_reconciliation(
+  source_dir: str | Path,
+  shared_base: str,
+  upstream: str,
+  *,
+  conflict_paths: Iterable[str] = (),
+  proven_changes: Iterable[EquivalentChange] = (),
+) -> ReconciliationReceipt:
+  """Return the common platform/app receipt for one semantic merge base.
+
+  ``shared_base`` already contains every reviewed change proven present on
+  both sides. Its diff to ``upstream`` is therefore the genuinely new upstream
+  path set, while ``conflict_paths`` is the residual owner decision. Callers do
+  not need to reconstruct either fact from warnings or Git topology.
+  """
+  repo = Path(source_dir)
+  proven = tuple(proven_changes)
+  new_paths = _diff_paths(repo, shared_base, upstream)
+  return ReconciliationReceipt(
+    proven_present=tuple(change.contribution_id for change in proven),
+    new_upstream_paths=tuple(sorted(new_paths or ())),
+    unresolved_conflict_paths=tuple(sorted(set(conflict_paths))),
+    provenance_refs_used=tuple(change.ref for change in proven),
+  )
 
 
 def _source_is_resolved_projection(
@@ -1133,6 +1181,13 @@ def merge_with_equivalent_changes(
     return None
   merged.merge_base_oid = shared_tree
   merged.equivalent_change_refs = tuple(change.ref for change in applied)
+  merged.reconciliation = describe_reconciliation(
+    repo,
+    shared_tree,
+    upstream,
+    conflict_paths=merged.conflict_paths,
+    proven_changes=applied,
+  )
   return merged
 
 
@@ -1817,6 +1872,16 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
   ensure_repo(repo)
   _unshallow_if_no_merge_base(repo)
   ordinary = merge_refs(repo, LOCAL_BRANCH, UPSTREAM_BRANCH)
+  ordinary_base = _run(
+    repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
+  ).stdout.strip()
+  if ordinary_base:
+    ordinary.reconciliation = describe_reconciliation(
+      repo,
+      ordinary_base,
+      UPSTREAM_BRANCH,
+      conflict_paths=ordinary.conflict_paths,
+    )
   if ordinary.status == "clean":
     return ordinary
   # A normal three-way merge can conflict when both sides carry the same

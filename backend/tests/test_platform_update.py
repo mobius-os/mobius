@@ -410,6 +410,14 @@ def test_partial_provenance_persists_reduced_platform_conflict(clone_env):
 
   assert res.status == "conflict"
   assert res.conflict_paths == ["backend/app/foo.py"]
+  assert res.reconciliation.proven_present == ("partial-platform-change",)
+  assert res.reconciliation.provenance_refs_used == (landed,)
+  assert res.reconciliation.new_upstream_paths == (
+    "backend/app/foo.py", "backend/app/main.py",
+  )
+  assert res.reconciliation.unresolved_conflict_paths == (
+    "backend/app/foo.py",
+  )
   assert _served_sha(platform) == pre
   flag = pu._read_conflict_flag()
   assert flag["paths"] == ["backend/app/foo.py"]
