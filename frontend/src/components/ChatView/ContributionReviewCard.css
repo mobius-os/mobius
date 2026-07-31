@@ -106,18 +106,10 @@
   border-top: 1px solid var(--border-light);
 }
 
-.contrib-card-stack--grouped .contrib-card--blocked {
-  border-left-color: var(--muted);
-}
-
 .contrib-card-stack--grouped .contrib-card__badge {
   margin: 0;
   padding: 0;
   border-bottom: 0;
-  background: transparent;
-}
-
-.contrib-card-stack--grouped .contrib-card--blocked .contrib-card__badge {
   background: transparent;
 }
 
@@ -129,10 +121,6 @@
 
 .contrib-card--dragging {
   transition: none;
-}
-
-.contrib-card--blocked {
-  border-left-color: var(--muted);
 }
 
 .contrib-card--stack {
@@ -157,11 +145,6 @@
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--accent);
-}
-
-.contrib-card--blocked .contrib-card__badge {
-  background: color-mix(in srgb, var(--muted) 12%, transparent);
-  color: var(--muted);
 }
 
 /* The swipe's visible equivalent. This follows the shell's quiet Lucide close
@@ -200,13 +183,13 @@
 }
 
 .contrib-card__meta,
-.contrib-card__blocker {
+.contrib-card__error {
   font-size: 0.75rem;
   line-height: 1.35;
   color: var(--muted);
 }
 
-.contrib-card__blocker {
+.contrib-card__error {
   color: var(--danger);
 }
 

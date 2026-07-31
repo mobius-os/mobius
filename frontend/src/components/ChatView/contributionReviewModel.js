@@ -70,11 +70,10 @@ export function autopilotOnSend(payload) {
 // an app's repository reaches that app's users instead.
 export const PLATFORM_REPO = 'mobius-os/mobius'
 
-/** The one-line status word shown on the card. */
-export function statusLabel(record, blocked) {
+/** The one-line status word shown on a card the chat can act on. */
+export function statusLabel(record) {
   if (record?.status === 'submitting') return 'Publishing'
   if (record?.stack || record?.is_stack) return 'Review together'
-  if (blocked) return 'Needs attention'
   return 'Ready to contribute'
 }
 
@@ -297,7 +296,19 @@ function reviewItemDismissIdentity(item) {
 
 export function visibleReviewItems(payload, storage) {
   return reviewItems(payload).filter(
-    item => !isDismissed(reviewItemDismissIdentity(item), storage),
+    item => {
+      if (isDismissed(reviewItemDismissIdentity(item), storage)) return false
+      // Chat is the quick happy path. If a single contribution needs repair,
+      // Contribute remains its durable home; rendering a disabled attention
+      // card above the composer only creates a dead end. Stacks are different:
+      // their one useful chat action is to open the ordered review in Contribute.
+      if (item.kind === 'record') {
+        return !sendBlocker(item.record, {
+          connected: payload?.connected !== false,
+        })
+      }
+      return true
+    },
   )
 }
 

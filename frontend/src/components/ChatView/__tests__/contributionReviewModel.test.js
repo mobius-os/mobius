@@ -125,14 +125,39 @@ test('autopilot on send mirrors the owner default and the backend capability', (
   assert.equal(autopilotOnSend(null), false)
 })
 
-test('the status word distinguishes waiting, blocked, and in-flight', () => {
-  assert.equal(statusLabel({ status: 'prepared' }, false), 'Ready to contribute')
-  assert.equal(statusLabel({ status: 'prepared' }, true), 'Needs attention')
+test('the status word distinguishes waiting and in-flight', () => {
+  assert.equal(statusLabel({ status: 'prepared' }), 'Ready to contribute')
   assert.equal(
-    statusLabel({ status: 'prepared', stack: { id: 'demo' } }, true),
+    statusLabel({ status: 'prepared', stack: { id: 'demo' } }),
     'Review together',
   )
-  assert.equal(statusLabel({ status: 'submitting' }, false), 'Publishing')
+  assert.equal(statusLabel({ status: 'submitting' }), 'Publishing')
+})
+
+test('records that need attention stay in Contribute instead of blocking chat', () => {
+  const payload = {
+    connected: true,
+    records: [
+      { id: 'ready', status: 'prepared', review: { state: 'ready' } },
+      { id: 'drifted', status: 'prepared', review: { state: 'needs_refresh' } },
+      { id: 'unreviewed', status: 'prepared' },
+      { id: 'publishing', status: 'submitting' },
+    ],
+  }
+  assert.deepEqual(
+    visibleReviewItems(payload, fakeStorage()).map(item => item.id),
+    ['ready', 'publishing'],
+  )
+  assert.deepEqual(
+    visibleReviewItems({ ...payload, connected: false }, fakeStorage())
+      .map(item => item.id),
+    ['publishing'],
+  )
+  // Filtering is presentation-only: the durable ledger still owns every item.
+  assert.deepEqual(
+    actionableRecords(payload).map(record => record.id),
+    ['ready', 'drifted', 'unreviewed', 'publishing'],
+  )
 })
 
 test('multiple independent review items share one bounded review panel', () => {
@@ -233,14 +258,14 @@ test('independent cards can submit in parallel without duplicating one record', 
   assert.match(cardSrc, /if \(activeSendRef\.current\) return/)
   assert.match(cardSrc, /activeSendRef\.current = true/)
   assert.match(cardSrc, /const \[busy, setBusy\] = useState\(false\)/)
-  assert.match(cardSrc, /disabled=\{busy \|\| submitting \|\| !!blocker\}/)
+  assert.match(cardSrc, /disabled=\{busy \|\| submitting\}/)
   assert.doesNotMatch(cardSrc, /busyIds|errorsById/)
   assert.match(cardSrc, /item => item\.kind !== 'record' \|\| !sentIds\.has\(item\.record\.id\)/)
 })
 
 test('a grouped panel does not repeat the same audience payoff on every card', () => {
   assert.match(cardSrc, /showPayoff=\{!grouped\}/)
-  assert.match(cardSrc, /showPayoff && !blocker && !error && !submitting/)
+  assert.match(cardSrc, /showPayoff && !error && !submitting/)
 })
 
 // The action names the value of contributing, not the mechanism of sending, and

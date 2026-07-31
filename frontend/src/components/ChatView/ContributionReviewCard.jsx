@@ -14,7 +14,6 @@ import {
   payoffLine,
   rememberReviewItemDismissed,
   reviewPanelSummary,
-  sendBlocker,
   statusLabel,
   visibleReviewItems,
 } from './contributionReviewModel.js'
@@ -156,7 +155,6 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
           <ReviewRow
             key={item.id}
             record={record}
-            connected={data?.connected !== false}
             autopilot={autopilotOnSend(data)}
             showPayoff={!grouped}
             onSubmit={submit}
@@ -372,7 +370,7 @@ function StackReviewRow({ item, onOpenContribute, onDismiss }) {
 }
 
 function ReviewRow({
-  record, connected, autopilot, showPayoff, onSubmit, onSent,
+  record, autopilot, showPayoff, onSubmit, onSent,
   onOpenContribute, onDismiss,
 }) {
   const [open, setOpen] = useState(false)
@@ -381,7 +379,6 @@ function ReviewRow({
   // Each row owns its own in-flight guard. That keeps sibling rows independent
   // while closing the same-frame double-click window for this record.
   const activeSendRef = useRef(false)
-  const blocker = sendBlocker(record, { connected })
   const diffStat = diffStatSummary(record.diff_stat)
   const submitting = record.status === 'submitting'
   const cardRef = useSwipeToDismiss(onDismiss)
@@ -406,15 +403,12 @@ function ReviewRow({
   }
 
   return (
-    <div
-      ref={cardRef}
-      className={`contrib-card${blocker ? ' contrib-card--blocked' : ''}`}
-    >
+    <div ref={cardRef} className="contrib-card">
       {/* Header band, then what it is, then the actions. The band also carries
           dismissal, so the swipe has a visible, pointer- and keyboard-reachable
           equivalent rather than being a touch-only secret. */}
       <div className="contrib-card__badge">
-        <span>{statusLabel(record, !!blocker)}</span>
+        <span>{statusLabel(record)}</span>
         <button
           type="button"
           className="contrib-card__dismiss"
@@ -433,24 +427,21 @@ function ReviewRow({
         {diffStat ? <span> · {diffStat}</span> : null}
       </p>
 
-      {/* The payoff, but never next to a problem: a blocked review needs the
-          reason, not encouragement. */}
-      {showPayoff && !blocker && !error && !submitting && (
+      {showPayoff && !error && !submitting && (
         <p className="contrib-card__payoff">{payoffLine(record)}</p>
       )}
-      {autopilot && !blocker && !error && !submitting && (
+      {autopilot && !error && !submitting && (
         <p className="contrib-card__meta">
           Möbius will also handle review feedback after you contribute.
         </p>
       )}
-      {blocker && <p className="contrib-card__blocker">{blocker}</p>}
-      {error && <p className="contrib-card__blocker">{error}</p>}
+      {error && <p className="contrib-card__error">{error}</p>}
 
       <div className="contrib-card__actions">
         <button
           type="button"
           className="contrib-card__send"
-          disabled={busy || submitting || !!blocker}
+          disabled={busy || submitting}
           onClick={send}
         >
           {submitting || busy ? 'Contributing…' : contributeLabel(record)}
@@ -463,9 +454,9 @@ function ReviewRow({
         >
           {open ? 'Hide details' : 'Details'}
         </button>
-        {/* Only when something needs sorting out — the happy path stays two
-            buttons, and Contribute owns every state this card cannot fix. */}
-        {(blocker || error) && onOpenContribute && (
+        {/* A failed submit may reveal a server-side change after this ready
+            card loaded. Contribute owns that repair path. */}
+        {error && onOpenContribute && (
           <button
             type="button"
             className="contrib-card__toggle"
