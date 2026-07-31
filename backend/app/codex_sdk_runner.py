@@ -1471,6 +1471,20 @@ async def run_codex_sdk_turn(
   # and the MOEBIUS_CODEX_MULTI_AGENT kill switch, in _codex_config_overrides().
   codex_bin = shutil.which("codex")
   config_overrides = _codex_config_overrides()
+  # Owner-registered connectors (Settings → Connectors). In app-server
+  # mode MCP servers are governed by the THREAD's config (passed to
+  # thread_start/thread_resume below) — process-level --config overrides
+  # are ignored for them. Decrypted keys ride the app-server process env
+  # (never argv, never the thread-config JSON). Read fresh each turn; a
+  # registry failure must never break the turn.
+  try:
+    from app.connectors import codex_config as _connectors_codex_config
+    _connector_thread_config, _connector_env = _connectors_codex_config(db)
+  except Exception:
+    log.warning("connector injection skipped (registry read failed)",
+                exc_info=True)
+    _connector_thread_config, _connector_env = None, {}
+  env.update(_connector_env)
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
@@ -1677,6 +1691,7 @@ async def run_codex_sdk_turn(
           approval_mode=sdk["ApprovalMode"].auto_review,
           sandbox=_sandbox,
           base_instructions=base_instructions,
+          config=_connector_thread_config,
           cwd=cwd,
           model=model,
         )
@@ -1693,6 +1708,7 @@ async def run_codex_sdk_turn(
           approval_mode=sdk["ApprovalMode"].auto_review,
           sandbox=_sandbox,
           base_instructions=base_instructions,
+          config=_connector_thread_config,
           cwd=cwd,
           model=model,
         )

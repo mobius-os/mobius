@@ -30,6 +30,7 @@ import ModelSheet from '../ui/ModelSheet.jsx'
 import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
+import ConnectorsSection from './ConnectorsSection.jsx'
 import ProviderUsage from './ProviderUsage.jsx'
 import { formatPlanStatus } from './providerUsage.js'
 import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/ChatSettingsPanel.jsx'
@@ -1612,6 +1613,8 @@ export default function SettingsView({
             </div>
           )}
         </section>
+
+        <ConnectorsSection />
 
         <section className="settings__section settings__section--compact settings__section--appearance">
           <div className="settings__appearance">

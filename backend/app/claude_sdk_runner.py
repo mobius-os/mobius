@@ -988,6 +988,19 @@ async def run_claude_sdk_turn(
     # Passed via --settings as inline JSON.
     _cli_settings = {"ultracode": True} if _ultracode else {"disableWorkflows": True}
     options_kwargs["extra_args"] = {"settings": json.dumps(_cli_settings)}
+    # Owner-registered connectors (Settings → Connectors) ride the SDK's
+    # native mcp_servers option. Read fresh each turn so registry edits
+    # apply without a restart; a registry failure must never break the
+    # turn — the agent just runs without connectors.
+    try:
+      from app.connectors import claude_mcp_servers
+      _connector_servers = claude_mcp_servers(db)
+    except Exception:
+      log.warning("connector injection skipped (registry read failed)",
+                  exc_info=True)
+      _connector_servers = {}
+    if _connector_servers:
+      options_kwargs["mcp_servers"] = _connector_servers
     options = ClaudeAgentOptions(**options_kwargs)
 
     client = ClaudeSDKClient(options)
