@@ -50,19 +50,21 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
     wasActive.current = turnActive
   }, [turnActive, queryClient, queryKey])
 
-  const [sentRows, setSentRows] = useState([])
+  // The server remains authoritative, but a successful item leaves this
+  // composer surface immediately rather than waiting for its ledger refetch.
+  const [contributedItems, setContributedItems] = useState([])
   // Dismissals are persisted, so this only forces the re-render; the stored
   // decision is what actually filters the list.
   const [dismissRevision, setDismissRevision] = useState(0)
 
   const storage = typeof localStorage !== 'undefined' ? localStorage : null
-  const sentIds = new Set(sentRows.map(row => row.id))
   // Remove a successful single record locally before the ledger refetch
   // returns. Stack review items never send from chat and stay untouched.
   const pendingItems = visibleReviewItems(data, storage).filter(
-    item => item.kind !== 'record' || !sentIds.has(item.record.id),
+    item => item.kind !== 'record'
+      || !contributedItems.some(done => done.id === item.record.id),
   )
-  const panel = reviewPanelSummary(pendingItems.length, sentRows.length)
+  const panel = reviewPanelSummary(pendingItems.length)
   const grouped = panel.count > 1
   void dismissRevision
   if (!appId) return null
@@ -82,14 +84,7 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
             : 'Could not contribute this. Open Contribute for the details.',
         }
       }
-      return {
-        sent: {
-          id: record.id,
-          number: body?.number ?? body?.record?.number ?? null,
-          url: body?.url || body?.record?.url || null,
-          repo: record.repo,
-        },
-      }
+      return { contributed: true }
     } catch {
       return { error: 'Could not reach the server. Nothing was contributed.' }
     } finally {
@@ -97,11 +92,12 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
     }
   }
 
-  function rememberSent(sent) {
-    setSentRows(rows => [
-      ...rows.filter(row => row.id !== sent.id),
-      sent,
-    ])
+  function rememberContributed(recordId) {
+    setContributedItems(items => (
+      items.some(item => item.id === recordId)
+        ? items
+        : [...items, { id: recordId }]
+    ))
   }
 
   return (
@@ -123,15 +119,6 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
           <span className="contrib-card-stack__count">{panel.count}</span>
         </div>
       )}
-      {sentRows.map(sent => (
-        <SentRow
-          key={`sent:${sent.id}`}
-          sent={sent}
-          onDismiss={() => setSentRows(rows => (
-            rows.filter(row => row.id !== sent.id)
-          ))}
-        />
-      ))}
       {pendingItems.map(item => {
         const onOpenContribute = contributeApp && onOpenApp
           ? () => onOpenApp(contributeApp, { final: true })
@@ -158,7 +145,7 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
             autopilot={autopilotOnSend(data)}
             showPayoff={!grouped}
             onSubmit={submit}
-            onSent={rememberSent}
+            onContributed={rememberContributed}
             onOpenContribute={onOpenContribute}
             onDismiss={onDismiss}
           />
@@ -178,9 +165,8 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
  * (WebKit does not implement the pan-* keywords). Claiming is what stops the
  * surface underneath from taking the drag.
  *
- * It lives as a hook rather than inside one card because EVERY card here needs an
- * exit — the confirmation shipped without one, and an undismissable box above the
- * composer is worse than no confirmation at all.
+ * It lives as a hook rather than inside one card because every actionable card
+ * here needs the same exit.
  */
 function useSwipeToDismiss(onDismiss) {
   const cardRef = useRef(null)
@@ -260,53 +246,6 @@ function useSwipeToDismiss(onDismiss) {
 }
 
 
-/**
- * The acknowledgement after this card's own Send.
- *
- * It is an acknowledgement, NOT a permanent record — the Contribute app owns the
- * history and the chat reply carries the link. It gets every explicit exit the
- * other cards have (swipe and the band control), but no timed exit: the
- * acknowledgement and its GitHub link stay available until the owner dismisses
- * it or leaves the current chat surface.
- */
-function SentRow({ sent, onDismiss }) {
-  const cardRef = useSwipeToDismiss(onDismiss)
-
-  return (
-    <div ref={cardRef} className="contrib-card contrib-card--sent" role="status">
-      <div className="contrib-card__badge">
-        <span>Contributed</span>
-        <button
-          type="button"
-          className="contrib-card__dismiss"
-          aria-label="Dismiss"
-          onClick={() => onDismiss?.()}
-        >
-          <X width={14} height={14} aria-hidden="true" />
-        </button>
-      </div>
-      <p className="contrib-card__summary">
-        {sent.number
-          ? `Pull request #${sent.number} is with the maintainers.`
-          : 'It is with the maintainers now.'}
-      </p>
-      {sent.repo && <p className="contrib-card__meta">{sent.repo}</p>}
-      {sent.url && (
-        <div className="contrib-card__actions">
-          <a
-            className="contrib-card__link-btn"
-            href={sent.url}
-            target="_blank"
-            rel="noreferrer noopener"
-          >
-            View on GitHub
-          </a>
-        </div>
-      )}
-    </div>
-  )
-}
-
 function StackReviewRow({ item, onOpenContribute, onDismiss }) {
   const [open, setOpen] = useState(false)
   const cardRef = useSwipeToDismiss(onDismiss)
@@ -370,7 +309,7 @@ function StackReviewRow({ item, onOpenContribute, onDismiss }) {
 }
 
 function ReviewRow({
-  record, autopilot, showPayoff, onSubmit, onSent,
+  record, autopilot, showPayoff, onSubmit, onContributed,
   onOpenContribute, onDismiss,
 }) {
   const [open, setOpen] = useState(false)
@@ -397,8 +336,8 @@ function ReviewRow({
     }
     if (outcome?.error) {
       setError(outcome.error)
-    } else if (outcome?.sent) {
-      onSent(outcome.sent)
+    } else if (outcome?.contributed) {
+      onContributed(record.id)
     }
   }
 

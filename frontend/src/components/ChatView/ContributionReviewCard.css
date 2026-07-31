@@ -328,32 +328,6 @@
   overflow-wrap: anywhere;
 }
 
-/* The acknowledgement after this card's own Send. Same shape as every other card
-   — band, body, actions — so it inherits the swipe and the band's dismiss control
-   instead of being a special layout with no way out. */
-.contrib-card--sent {
-  border-left-color: var(--green, var(--accent));
-}
-
-.contrib-card--sent .contrib-card__badge {
-  background: color-mix(in srgb, var(--green, var(--accent)) 12%, transparent);
-  color: var(--green, var(--accent));
-}
-
-.contrib-card__link-btn {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 36px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  color: var(--accent);
-  text-decoration: none;
-}
-
 @media (max-width: 560px) {
   .contrib-card-stack {
     width: 100%;

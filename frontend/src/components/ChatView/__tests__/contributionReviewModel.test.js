@@ -161,7 +161,7 @@ test('records that need attention stay in Contribute instead of blocking chat', 
 })
 
 test('multiple independent review items share one bounded review panel', () => {
-  assert.match(cardSrc, /const panel = reviewPanelSummary\(pendingItems\.length, sentRows\.length\)/)
+  assert.match(cardSrc, /const panel = reviewPanelSummary\(pendingItems\.length\)/)
   assert.match(cardSrc, /const grouped = panel\.count > 1/)
   assert.match(cardSrc, /contrib-card-stack--grouped/)
   assert.match(cardSrc, /\{panel\.title\}/)
@@ -230,26 +230,22 @@ test('the renderer gives a stack one review-together card, not one card per laye
   assert.match(cardSrc, /Review in Contribute/)
 })
 
-test('the grouped panel survives pending-to-contributed transitions', () => {
-  assert.deepEqual(reviewPanelSummary(3, 0), {
+test('the grouped panel describes only work that remains', () => {
+  assert.deepEqual(reviewPanelSummary(3), {
     count: 3,
     title: '3 reviews ready',
     copy: 'Each item keeps its own review and action.',
   })
-  assert.deepEqual(reviewPanelSummary(2, 1), {
-    count: 3,
-    title: '2 remaining · 1 contributed',
+  assert.deepEqual(reviewPanelSummary(1), {
+    count: 1,
+    title: '1 review ready',
     copy: 'Each item keeps its own review and action.',
   })
-  assert.deepEqual(reviewPanelSummary(0, 2), {
-    count: 2,
-    title: '2 items contributed',
-    copy: 'Each item was contributed separately.',
+  assert.deepEqual(reviewPanelSummary(0), {
+    count: 0,
+    title: '0 reviews ready',
+    copy: 'Each item keeps its own review and action.',
   })
-  assert.match(cardSrc, /const \[sentRows, setSentRows\] = useState\(\[\]\)/)
-  assert.match(cardSrc, /setSentRows\(rows => \[/)
-  assert.match(cardSrc, /\{sentRows\.map\(sent => \(/)
-  assert.match(cardSrc, /rows\.filter\(row => row\.id !== sent\.id\)/)
 })
 
 test('independent cards can submit in parallel without duplicating one record', () => {
@@ -260,7 +256,7 @@ test('independent cards can submit in parallel without duplicating one record', 
   assert.match(cardSrc, /const \[busy, setBusy\] = useState\(false\)/)
   assert.match(cardSrc, /disabled=\{busy \|\| submitting\}/)
   assert.doesNotMatch(cardSrc, /busyIds|errorsById/)
-  assert.match(cardSrc, /item => item\.kind !== 'record' \|\| !sentIds\.has\(item\.record\.id\)/)
+  assert.match(cardSrc, /!contributedItems\.some\(done => done\.id === item\.record\.id\)/)
 })
 
 test('a grouped panel does not repeat the same audience payoff on every card', () => {
@@ -429,7 +425,7 @@ test('the swipe has a visible, focusable equivalent', () => {
   assert.match(cardSrc, /import \{ X \} from '@openai\/apps-sdk-ui\/components\/Icon'/)
   assert.equal(
     (cardSrc.match(/<X width=\{14\} height=\{14\} aria-hidden="true" \/>/g) || []).length,
-    3,
+    2,
   )
   assert.doesNotMatch(cardSrc, /title="Dismiss/)
   assert.doesNotMatch(cardSrc, /✕|✖|❌/)
@@ -443,33 +439,18 @@ test('the dismissal gesture is claimed with a non-passive touchmove', () => {
   assert.doesNotMatch(cardSrc, /onTouchMove=\{/)
 })
 
-// The first version of the acknowledgement had NO exit: no swipe (its handlers
-// lived in the other card shape) and no control in a band it never rendered.
-// Every card shape must remain explicitly dismissible, while the acknowledgement
-// and its interactive GitHub link must never disappear on a timer.
-test('the post-send acknowledgement persists until an explicit user or navigation exit', () => {
-  const sentRow = cardSrc.slice(
-    cardSrc.indexOf('function SentRow('),
-    cardSrc.indexOf('function StackReviewRow('),
-  )
-  assert.ok(sentRow.length > 0, 'the acknowledgement is its own card shape')
-  // Same swipe binding as every other card, not a bespoke layout.
-  assert.match(sentRow, /useSwipeToDismiss\(onDismiss\)/)
-  // A band with a real dismiss control.
-  assert.match(sentRow, /className="contrib-card__badge"/)
-  assert.match(sentRow, /className="contrib-card__dismiss"/)
-  // Interactive content stays until one of those user exits or component
-  // navigation owns its lifecycle; elapsed time never removes it.
-  assert.doesNotMatch(sentRow, /setTimeout|setInterval/)
-  assert.doesNotMatch(cardSrc, /SENT_VISIBLE_MS/)
-  assert.match(sentRow, /View on GitHub/)
+test('a completed contribution leaves the composer with no acknowledgement card', () => {
+  assert.match(cardSrc, /const \[contributedItems, setContributedItems\] = useState/)
+  assert.match(cardSrc, /!contributedItems\.some\(done => done\.id === item\.record\.id\)/)
+  assert.match(cardSrc, /return \{ contributed: true \}/)
+  assert.match(cardSrc, /onContributed\(record\.id\)/)
+  assert.doesNotMatch(cardSrc, /function SentRow|contrib-card--sent/)
 })
 
-// One gesture implementation for every card shape here. Two copies is how the
-// acknowledgement ended up without one.
+// One gesture implementation for every actionable card shape here.
 test('every card shape shares one swipe implementation', () => {
   assert.equal((cardSrc.match(/function useSwipeToDismiss\(/g) || []).length, 1)
-  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 3)
+  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 2)
   assert.equal((cardSrc.match(/addEventListener\('touchmove'/g) || []).length, 1)
 })
 
