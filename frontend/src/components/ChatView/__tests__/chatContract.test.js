@@ -97,6 +97,10 @@ test('owner contract freezes question answers without locking keyboard movement'
 
 test('a retained chat crosses the old unmount lifecycle while hidden', () => {
   const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+  const scrollController = readFileSync(
+    new URL('../useScrollMode.js', import.meta.url),
+    'utf8',
+  )
   assert.match(
     chatView,
     /useLayoutEffect\(\(\) => \{\s*if \(hidden\) freezeChatExit\(\)/,
@@ -106,6 +110,11 @@ test('a retained chat crosses the old unmount lifecycle while hidden', () => {
     chatView,
     /if \(hidden\) return[\s\S]*?\}, \[chatId, loadNonce, hidden\]\)/,
     'hidden chats must disconnect and refresh history when they become visible again',
+  )
+  assert.match(
+    scrollController,
+    /const freezeChatExit = useCallback\(\(\) => \{[\s\S]*?readerLocationExplicitRef\.current = true[\s\S]*?persistMode\(\{ freezeToCurrentPosition: true \}\)/,
+    'chat navigation must preserve an automatic tail hold through the later unmount cleanup',
   )
 })
 

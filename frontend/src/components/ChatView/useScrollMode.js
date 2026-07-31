@@ -1352,6 +1352,12 @@ export default function useScrollMode({
   // the transcript in the background. Keeping this as a controller event
   // avoids exposing persistMode/modeRef mutation to ChatView.
   const freezeChatExit = useCallback(() => {
+    // Leaving this chat is an explicit navigation action even when its initial
+    // location came from the automatic latest-content fallback. Promote the
+    // currently painted location before persisting it so the later unmount
+    // cleanup cannot delete the snapshot and reopen a growing turn at its new
+    // tail when the reader returns.
+    readerLocationExplicitRef.current = true
     persistMode({ freezeToCurrentPosition: true })
   }, [persistMode])
 
