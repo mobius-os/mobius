@@ -43,8 +43,8 @@ test('reset formatting distinguishes today from another day', () => {
   const today = formatUsageReset(new Date(2026, 6, 30, 17, 5), now)
   const later = formatUsageReset(new Date(2026, 7, 3, 7, 0), now)
 
-  assert.equal(today, 'resets 17:05')
-  assert.equal(later, 'resets Mon 07:00')
+  assert.equal(today, 'Resets 17:05')
+  assert.equal(later, 'Resets Mon 07:00')
 })
 
 test('only four valid allowance windows are rendered', () => {

@@ -31,9 +31,9 @@ export function formatUsageReset(value, now = new Date()) {
     minute: '2-digit',
     hourCycle: 'h23',
   }).format(reset)
-  if (sameDay) return `resets ${time}`
+  if (sameDay) return `Resets ${time}`
   const day = new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(reset)
-  return `resets ${day} ${time}`
+  return `Resets ${day} ${time}`
 }
 
 export function visibleUsageWindows(snapshot) {
