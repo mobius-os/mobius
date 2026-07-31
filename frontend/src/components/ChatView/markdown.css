@@ -484,21 +484,23 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   object-fit: contain;
   filter: drop-shadow(0 0.375rem 0.75rem rgba(0,0,0,.18));
 }
+/* Keep a desktop-width layout viewport inside the compact card, but shrink the
+   already-painted frame with a compositor transform. CSS zoom makes Chromium
+   re-rasterize the browsing context during parent scroll and flashes its white
+   backing at the clip boundary. */
 .md-app-card__visual iframe {
   position: absolute;
   inset: 0;
+  display: block;
   width: 200%;
   height: 200%;
   border: 0;
-  background: white;
-  zoom: 0.5;
+  background: transparent;
   pointer-events: none;
-}
-@supports not (zoom: 0.5) {
-  .md-app-card__visual iframe {
-    transform: scale(0.5);
-    transform-origin: 0 0;
-  }
+  transform: scale(0.5);
+  transform-origin: 0 0;
+  will-change: transform;
+  backface-visibility: hidden;
 }
 .md-app-card__map,
 .md-app-card__map-tiles { position: absolute; inset: 0; }
