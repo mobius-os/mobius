@@ -1587,7 +1587,7 @@ def _tool_start_event(item: Any, sdk: dict[str, Any]) -> dict[str, Any] | None:
     return {
       "type": "tool_start",
       "tool": "ViewImage",
-      "input": getattr(item, "path", ""),
+      "input": _format_json(getattr(item, "path", "")),
     }
   # Standalone dispatch keeps collab items as ordinary Task activity. The live
   # loop now groups all such items under one per-turn host and enriches it with

@@ -194,6 +194,31 @@ def test_native_image_view_item_is_wired_to_tool_dispatch():
   )
 
 
+def test_native_image_view_path_is_plain_text_before_sse_replay():
+  """The SDK's root-model path must not poison every stream reconnect."""
+  import json
+
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+  from app import codex_sdk_runner
+
+  item = v2_all.ImageViewThreadItem(
+    id="image-1",
+    path="/data/chats/chat-1/media/diagram.png",
+    type="imageView",
+  )
+  event = codex_sdk_runner._tool_start_event(
+    item, {"ImageViewThreadItem": v2_all.ImageViewThreadItem},
+  )
+
+  assert event == {
+    "type": "tool_start",
+    "tool": "ViewImage",
+    "input": "/data/chats/chat-1/media/diagram.png",
+  }
+  assert json.loads(json.dumps(event)) == event
+
+
 def test_lifecycle_notification_fields_and_status_enums_are_pinned():
   """Fail loudly if the generated lifecycle surface drifts under the runner."""
   pytest.importorskip("openai_codex")
