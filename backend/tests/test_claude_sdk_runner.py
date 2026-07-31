@@ -37,7 +37,7 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import claude_sdk_runner, models
+from app import claude_events, claude_sdk_runner, models
 from app.claude_sdk_runner import (
   ActiveClaudeClient,
   dispatch_sdk_message,
@@ -879,7 +879,7 @@ def test_dispatch_text_delta_emits_text():
 
 
 def test_dispatch_thinking_delta_emits_thinking(monkeypatch):
-  monkeypatch.setattr(claude_sdk_runner.time, "time", lambda: 1.234)
+  monkeypatch.setattr(claude_events.time, "time", lambda: 1.234)
   bus = _Bus()
   msg = _stream_delta("thinking_delta", thinking="planning...")
   msg.event["index"] = 2
@@ -1325,9 +1325,9 @@ def test_dispatch_task_started_accepts_sdk_shape_without_identity_attrs(
     task_type = "explore"
     tool_use_id = None
 
-  monkeypatch.setattr(claude_sdk_runner, "SystemMessage", MinimalTaskStarted)
+  monkeypatch.setattr(claude_events, "SystemMessage", MinimalTaskStarted)
   monkeypatch.setattr(
-    claude_sdk_runner, "TaskStartedMessage", MinimalTaskStarted,
+    claude_events, "TaskStartedMessage", MinimalTaskStarted,
   )
   bus = _Bus()
   dispatch_sdk_message(MinimalTaskStarted(), bus, "known-session")

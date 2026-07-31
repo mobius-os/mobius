@@ -1072,13 +1072,17 @@ def test_both_runners_emit_text_boundary():
   from pathlib import Path
 
   app_dir = Path(__file__).resolve().parents[1] / "app"
-  for runner in ("claude_sdk_runner.py", "codex_sdk_runner.py"):
-    src = (app_dir / runner).read_text()
+  for provider in ("claude", "codex"):
+    owners = (
+      f"{provider}_sdk_runner.py",
+      f"{provider}_events.py",
+    )
+    src = "\n".join((app_dir / owner).read_text() for owner in owners)
     assert '"text_boundary"' in src, (
-      f"{runner} never publishes a text_boundary event — consecutive "
+      f"{provider} never publishes a text_boundary event — consecutive "
       f"assistant message items will concatenate without a paragraph break "
       f"on this provider. Keep the streaming event vocabulary symmetric "
-      f"across runners (see events.process_event)."
+      f"across providers (see events.process_event)."
     )
 
 

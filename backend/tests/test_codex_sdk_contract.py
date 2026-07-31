@@ -287,7 +287,9 @@ def test_web_search_results_survive_generated_sdk_schema_lag():
     "title": "Structured search result",
     "url": "https://example.test/result",
   }]
-  assert codex_sdk_runner._web_search_sources(item) == [{
+  from app.codex_events import _web_search_sources
+
+  assert _web_search_sources(item) == [{
     "title": "Structured search result",
     "url": "https://example.test/result",
   }]

@@ -19,7 +19,7 @@ class _FakeBroadcast:
 
 
 def test_claude_runner_registers_then_unregisters_handle():
-  from app import claude_sdk_runner as runner
+  from app import claude_events, claude_sdk_runner as runner
 
   class FakeStreamEvent:
     def __init__(self, session_id, event):
@@ -95,9 +95,10 @@ def test_claude_runner_registers_then_unregisters_handle():
   with patch.object(runner, "ClaudeSDKClient", FakeClaudeSDKClient), \
        patch.object(runner, "StreamEvent", FakeStreamEvent), \
        patch.object(runner, "ResultMessage", FakeResultMessage), \
-       patch.object(runner, "SystemMessage", type("FakeSystemMessage", (), {})), \
        patch.object(runner, "AssistantMessage", type("FakeAssistantMessage", (), {})), \
-       patch.object(runner, "UserMessage", type("FakeUserMessage", (), {})):
+       patch.object(runner, "UserMessage", type("FakeUserMessage", (), {})), \
+       patch.object(claude_events, "StreamEvent", FakeStreamEvent), \
+       patch.object(claude_events, "ResultMessage", FakeResultMessage):
     asyncio.run(_scenario())
 
 
