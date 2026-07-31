@@ -6,7 +6,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
-from app.database import _agent_lifecycle_width_migrations, run_migrations
+import app.database as database
+from app.database import (
+  _agent_lifecycle_width_migrations,
+  run_migrations,
+  schema_migration_history,
+)
 
 
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
@@ -502,3 +507,49 @@ def test_run_migrations_adds_read_at_and_backfills_notifications(tmp_path):
       "SELECT read_at FROM notifications WHERE id = 'n-legacy'"
     )).scalar_one()
   assert str(read_at) == "2026-01-02 03:04:05"
+def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'migration-ledger.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps ("
+      "id INTEGER PRIMARY KEY, name VARCHAR(255), slug VARCHAR(128), "
+      "token_nonce VARCHAR(32), capability_contract JSON"
+      ")"
+    ))
+
+  run_migrations(eng)
+  first = schema_migration_history(eng)
+  run_migrations(eng)
+  second = schema_migration_history(eng)
+
+  assert [row["version"] for row in first] == [
+    "0001_legacy_schema_convergence",
+  ]
+  assert second == first
+
+
+def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
+  eng = create_engine(f"sqlite:///{tmp_path / 'migration-retry.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+  attempts = 0
+
+  def fail_once(_eng):
+    nonlocal attempts
+    attempts += 1
+    raise RuntimeError("interrupted migration")
+
+  monkeypatch.setattr(
+    database,
+    "_SCHEMA_MIGRATIONS",
+    (("9000_retry_contract", fail_once),),
+  )
+
+  with pytest.raises(RuntimeError, match="interrupted migration"):
+    run_migrations(eng)
+  assert schema_migration_history(eng) == []
+  with pytest.raises(RuntimeError, match="interrupted migration"):
+    run_migrations(eng)
+  assert attempts == 2

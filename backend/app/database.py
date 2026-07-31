@@ -248,8 +248,8 @@ def _upgrade_app_capability_contract(value):
   return upgraded
 
 
-def run_migrations(eng) -> None:
-  """Run schema migrations on startup.
+def _converge_legacy_schema(eng) -> None:
+  """Converge every schema that predates the versioned migration ledger.
 
   Uses SQLAlchemy's database-agnostic inspector so this works for both
   SQLite and PostgreSQL.  Safe to call on every boot — no-ops if already
@@ -934,6 +934,68 @@ def run_migrations(eng) -> None:
           "UPDATE notifications SET read_at = sent_at WHERE read_at IS NULL"
         ))
         conn.commit()
+
+
+_SCHEMA_MIGRATIONS = (
+  ("0001_legacy_schema_convergence", _converge_legacy_schema),
+)
+
+
+def schema_migration_history(eng) -> list[dict]:
+  """Return the durable migration ledger in application order."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if "schema_migrations" not in sa_inspect(eng).get_table_names():
+    return []
+  with eng.connect() as conn:
+    rows = conn.execute(text(
+      "SELECT version, applied_at FROM schema_migrations ORDER BY applied_at, version"
+    )).all()
+  return [
+    {"version": version, "applied_at": applied_at}
+    for version, applied_at in rows
+  ]
+
+
+def run_migrations(eng) -> None:
+  """Apply each unapplied, append-only schema migration exactly once.
+
+  The first migration freezes the historical inspector-based convergence path.
+  Existing installs run it once and record the outcome; fresh installs record
+  the same baseline after ``create_all``. Future schema work appends a named
+  function to ``_SCHEMA_MIGRATIONS`` instead of extending a boot-time scan.
+
+  Each migration remains internally idempotent so a crash before its ledger
+  insert safely retries it. The ledger row is committed only after the migration
+  returns successfully.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if "apps" not in sa_inspect(eng).get_table_names():
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, "
+      "applied_at TIMESTAMP NOT NULL"
+      ")"
+    ))
+  applied = {
+    row["version"] for row in schema_migration_history(eng)
+  }
+  for version, migration in _SCHEMA_MIGRATIONS:
+    if version in applied:
+      continue
+    migration(eng)
+    with eng.begin() as conn:
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, :applied_at)"
+      ), {
+        "version": version,
+        "applied_at": datetime.now(UTC).replace(tzinfo=None),
+      })
+    applied.add(version)
 
 
 def get_db():
