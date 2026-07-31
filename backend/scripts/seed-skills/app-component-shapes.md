@@ -431,11 +431,12 @@ A full-width form-submit adds `width: 100%` via a `.ma-btn-block` modifier.
 ```css
 /* mobius-ui:Segmented — app-owned; a future-library candidate (no sync owed). */
 .ma-seg {
-  display: inline-flex; gap: 2px; padding: 3px;
-  background: var(--surface2, var(--surface)); border: 1px solid var(--border); border-radius: 10px;
+  display: inline-flex; gap: 2px; height: 44px;
+  background: var(--surface2, var(--surface)); border: 0; border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 .ma-seg-btn {
-  min-height: 44px; padding: 6px 14px; border: 0; border-radius: 7px;
+  box-sizing: border-box; min-height: 44px; padding: 6px 14px; border: 0; border-radius: 7px;
   background: transparent; color: var(--muted); font-family: var(--font);
   font-size: 13px; font-weight: 650; cursor: pointer; transition: background 0.15s, color 0.15s;
 }

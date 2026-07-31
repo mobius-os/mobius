@@ -175,9 +175,11 @@
 
 .settings__appearance-toggle {
   flex-shrink: 0;
+  box-sizing: border-box;
   display: inline-grid;
   grid-template-columns: repeat(2, 34px);
   align-items: center;
+  height: 44px;
   padding: 3px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -196,7 +198,7 @@
   display: grid;
   place-items: center;
   width: 34px;
-  height: 30px;
+  height: 36px;
   border-radius: 5px;
   color: var(--muted);
   opacity: 0.68;
