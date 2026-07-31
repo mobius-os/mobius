@@ -404,6 +404,7 @@ def test_runtime_route_does_not_select_transcript_json(
   assert runtime.status_code == 200
   assert runtime.json() == {
     "running": True,
+    "active_goal_objective": None,
     "pending_messages": [],
     "pending_question_id": None,
     "updated_at": created.json()["updated_at"],
