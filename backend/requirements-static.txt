@@ -2,7 +2,9 @@
 # contributors. Runtime dependencies remain fully resolved, hashed, and pinned
 # in requirements.lock. pip-tools 7.6 still requires pip's pre-26 internal API.
 coverage==7.15.2
+mypy==2.3.0
 pip==25.3
+pip-audit==2.10.1
 pip-tools==7.6.0
 pytest-cov==7.1.0
 ruff==0.16.1

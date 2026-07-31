@@ -12,16 +12,29 @@ import inspect
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Protocol
 
 from app.database import SessionLocal
 from app.memory_observability import record_memory_checkpoint
 
 
+class StartupState(Protocol):
+  media_migration_failed: bool
+  reconciliation_failed: bool
+
+
+class StartupApp(Protocol):
+  state: StartupState
+
+
+class StartupSettings(Protocol):
+  data_dir: str
+
+
 @dataclass
 class StartupContext:
-  app: object
-  settings: object
+  app: StartupApp
+  settings: StartupSettings
   boot_id: str
   init_db: Callable[[], None]
   install_pm_commit_launcher: Callable[[Path, Path], bool]

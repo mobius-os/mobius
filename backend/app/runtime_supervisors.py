@@ -14,12 +14,16 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Protocol
 
 from app.database import SessionLocal
 
 
 LagSleep = Callable[..., Awaitable[str | None]]
+
+
+class RuntimeSettings(Protocol):
+  data_dir: str
 
 
 class RuntimeSupervisors:
@@ -28,7 +32,7 @@ class RuntimeSupervisors:
   def __init__(
     self,
     *,
-    settings,
+    settings: RuntimeSettings,
     logger: logging.Logger,
     restart_authorization: str | None,
     restart_fallback_chats: list[str],

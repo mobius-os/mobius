@@ -13,7 +13,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-from jose import jwt
+import jwt
 
 from app import app_cron, app_jobs, models
 from app.config import get_settings
@@ -445,7 +445,11 @@ def test_job_token_is_app_scoped_and_expires_within_two_hours(
   )
 
   assert response.status_code == 200, response.text
-  claims = jwt.get_unverified_claims(response.json()["token"])
+  claims = jwt.decode(
+    response.json()["token"],
+    options={"verify_signature": False},
+    algorithms=["HS256"],
+  )
   assert claims["scope"] == "app"
   assert claims["app_id"] == app.id
   assert 0 < claims["exp"] - time.time() <= 2 * 60 * 60 + 5

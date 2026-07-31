@@ -26,11 +26,13 @@ from app.install import _is_historical_platform_app_source_dir, install_from_man
 
 log = logging.getLogger("mobius.bootstrap")
 
-# Pinned to `main` for v1 — the app-store repo doesn't have tagged
-# releases yet. TODO: switch to a tagged release URL once we cut one,
-# so a fresh container doesn't pick up an in-flight store commit.
+# The Store is part of the recovery path, so first boot must install the exact
+# revision reviewed with this platform release rather than whatever happens to
+# be at a mutable branch tip. The catalog has no release tags yet; pinning the
+# reviewed commit provides the same immutable input until it does.
 BOOTSTRAP_STORE_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-store/main/mobius.json"
+  "https://raw.githubusercontent.com/mobius-os/app-store/"
+  "44468e72008d6b9a4a5a0344e8148d69e7b58fa1/mobius.json"
 )
 
 # The Skills app (browse/install ecosystem skills + the skill-agent chat).
