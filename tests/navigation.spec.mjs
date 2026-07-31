@@ -24,7 +24,6 @@ const NAV_CHATS = [
   created_by_app_id: null,
   has_messages: true,
   running: false,
-  run_status: null,
 }))
 
 function navChatDetail(id, assistantContent = 'Fixture response') {

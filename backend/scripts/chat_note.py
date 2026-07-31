@@ -171,7 +171,10 @@ def _read_chat_snapshot(chat_id: str) -> tuple[str, str] | None:
     con = sqlite3.connect(str(DB))
     row = con.execute(
       "select messages, updated_at from chats "
-      "where id=? and deleted_at is null and run_status is null",
+      "where id=? and deleted_at is null "
+      "and not exists (select 1 from chat_runs "
+      "where chat_runs.chat_id=chats.id "
+      "and status in ('running','parked','resume_pending'))",
       (chat_id,),
     ).fetchone()
     con.close()
@@ -432,7 +435,10 @@ def _publish_if_current(
     con.execute("begin immediate")
     row = con.execute(
       "select updated_at from chats "
-      "where id=? and deleted_at is null and run_status is null",
+      "where id=? and deleted_at is null "
+      "and not exists (select 1 from chat_runs "
+      "where chat_runs.chat_id=chats.id "
+      "and status in ('running','parked','resume_pending'))",
       (chat_id,),
     ).fetchone()
     if (
@@ -446,7 +452,10 @@ def _publish_if_current(
     published_at = datetime.now(UTC).replace(tzinfo=None).isoformat(sep=" ")
     changed = con.execute(
       "update chats set updated_at=? "
-      "where id=? and deleted_at is null and run_status is null "
+      "where id=? and deleted_at is null "
+      "and not exists (select 1 from chat_runs "
+      "where chat_runs.chat_id=chats.id "
+      "and status in ('running','parked','resume_pending')) "
       "and updated_at=?",
       (published_at, chat_id, expected_updated_at),
     ).rowcount

@@ -2060,18 +2060,25 @@ async def spawn_platform_conflict_chat(
   from app.chat_writer import StartTurn, alloc_run_token, await_ack, get_writer
   from app.config import get_settings
   from app.push import notify_owner
+  from app.run_state import running_chat_ids
 
   title = "Resolve platform update conflict"
-  running = (
-    db.query(models.Chat.id)
-    .filter(models.Chat.title == title)
-    .filter(models.Chat.run_status == "running")
-    .filter(models.Chat.deleted_at.is_(None))
-    .first()
+  candidate_ids = [
+    row.id for row in (
+      db.query(models.Chat.id)
+      .filter(models.Chat.title == title)
+      .filter(models.Chat.deleted_at.is_(None))
+      .all()
+    )
+  ]
+  running_ids = running_chat_ids(db, candidate_ids)
+  running_id = next(
+    (chat_id for chat_id in candidate_ids if chat_id in running_ids),
+    None,
   )
-  if running is not None:
+  if running_id is not None:
     return PlatformConflictResolverChatOut(
-      chat_id=running.id, created=False, started=False,
+      chat_id=running_id, created=False, started=False,
     )
 
   owner = db.query(models.Owner).first()

@@ -45,8 +45,6 @@ def _seed(chat_id: str, *, pending=None, age_secs=30):
       pending_messages=pending or [],
       session_id="sess",
       provider="claude",
-      run_status="running",
-      run_started_at=started,
     ))
     db.add(models.ChatRun(
       id=f"rt-{chat_id}",
@@ -75,7 +73,6 @@ def _chat(chat_id: str):
     return {
       "messages": materialized_messages(row),
       "pending": list(row.pending_messages or []),
-      "run_status": row.run_status,
     }
   finally:
     db.close()

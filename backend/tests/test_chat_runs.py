@@ -1,13 +1,12 @@
-"""Durable per-run record tests (persistence redesign 077 Step 3).
+"""Durable per-run state tests.
 
-`chat_runs` is the per-turn successor to the single `Chat.run_status` column:
-one row per turn keyed by run_token, dual-written with run_status (in the same
-actor commit) so the two never diverge, closed terminal on a clean turn end and
-marked interrupted by boot reconciliation when a process died mid-turn.
+`chat_runs` is the sole durable state: one row per turn keyed by run_token,
+closed terminal on a clean turn end and marked interrupted by boot
+reconciliation when a process died mid-turn.
 
 These drive the REAL `get_writer()` actor (the conftest `fresh_db` fixture
 starts one bound to the test DB) and the real `reconcile_interrupted_chats`, so
-they cover the wired dual-write + reconciliation maintenance, not a mock.
+they cover the wired lifecycle + reconciliation maintenance, not a mock.
 """
 
 import asyncio
@@ -16,15 +15,13 @@ from concurrent.futures import Future
 from app import chat as chat_mod
 from app import models
 from app.chat_writer import (
-  AppendPending, Barrier, ClearRunStatus, PromotePending, StartTurn,
+  AppendPending, Barrier, FinishRun, PromotePending, StartTurn,
   RecordRunMetrics, alloc_run_token, get_writer,
 )
 from app.database import SessionLocal
 
 
-def _seed_chat(chat_id, messages=None, pending=None, run_status=None):
-  from datetime import UTC, datetime
-
+def _seed_chat(chat_id, messages=None, pending=None):
   db = SessionLocal()
   try:
     chat = models.Chat(
@@ -33,9 +30,6 @@ def _seed_chat(chat_id, messages=None, pending=None, run_status=None):
       pending_messages=pending if pending is not None else [],
       session_id="sess", provider="claude",
     )
-    if run_status is not None:
-      chat.run_status = run_status
-      chat.run_started_at = datetime.now(UTC)
     db.add(chat)
     db.commit()
   finally:
@@ -71,11 +65,16 @@ def _runs(chat_id):
     db.close()
 
 
-def _run_status(chat_id):
+def _active_status(chat_id):
   db = SessionLocal()
   try:
-    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    return chat.run_status
+    from app.run_state import latest_run
+    run = latest_run(db, chat_id)
+    return (
+      run.status
+      if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES
+      else None
+    )
   finally:
     db.close()
 
@@ -92,42 +91,41 @@ def _start(chat_id, run_token):
   )).result(timeout=5)
 
 
-# -- dual-write on start --------------------------------------------------
+# -- durable start --------------------------------------------------------
 def test_start_turn_opens_a_running_run_record():
   _seed_chat("r1")
   _start("r1", "rt-1")
   _drain()
   runs = _runs("r1")
   assert runs == {"rt-1": ("running", False)}
-  assert _run_status("r1") == "running"
+  assert _active_status("r1") == "running"
 
 
 # -- clean close ----------------------------------------------------------
-def test_clear_run_status_completes_the_run_record():
+def test_finish_run_completes_the_run_record():
   _seed_chat("r2")
   _start("r2", "rt-2")
   get_writer().submit(
-    ClearRunStatus(chat_id="r2", run_token="rt-2")
+    FinishRun(chat_id="r2", run_token="rt-2")
   ).result(timeout=5)
   _drain()
   runs = _runs("r2")
   assert runs["rt-2"] == ("completed", True)
-  assert _run_status("r2") is None
+  assert _active_status("r2") is None
 
 
-def test_clear_run_status_preserves_failed_outcome():
-  """An idle marker is not proof of success: a provider-error turn closes
-  durably as failed while clearing the same per-chat recovery marker."""
+def test_finish_run_preserves_failed_outcome():
+  """A provider-error turn closes durably as failed."""
   _seed_chat("r2-failed")
   _start("r2-failed", "rt-2-failed")
-  get_writer().submit(ClearRunStatus(
+  get_writer().submit(FinishRun(
     chat_id="r2-failed",
     run_token="rt-2-failed",
     terminal_status="failed",
   )).result(timeout=5)
   _drain()
   assert _runs("r2-failed")["rt-2-failed"] == ("failed", True)
-  assert _run_status("r2-failed") is None
+  assert _active_status("r2-failed") is None
 
 
 def test_record_run_metrics_updates_exact_run_without_touching_transcript():
@@ -225,8 +223,7 @@ def test_promote_closes_prior_run_and_opens_the_continuation():
   # The prior run is closed completed; the continuation is the live record.
   assert runs["rt-3a"] == ("completed", True)
   assert runs["rt-3b"] == ("running", False)
-  # The per-chat marker stays set across the handoff (the continuation runs).
-  assert _run_status("r3") == "running"
+  assert _active_status("r3") == "running"
 
 
 def test_error_handoff_marks_prior_run_failed_before_continuation():
@@ -247,27 +244,24 @@ def test_error_handoff_marks_prior_run_failed_before_continuation():
   runs = _runs("r3-failed")
   assert runs["rt-3-failed-a"] == ("failed", True)
   assert runs["rt-3-failed-b"] == ("running", False)
-  assert _run_status("r3-failed") == "running"
+  assert _active_status("r3-failed") == "running"
 
 
 # -- identity-keyed dying-run clear ---------------------------------------
-def test_dying_run_clear_closes_own_record_but_keeps_successor_marker():
-  """A fresh turn took the marker; the dying run's late tokened clear must
-  not wipe the successor's run_status, and must not touch the successor's
-  run record — only its own (which the fresh start already superseded)."""
+def test_dying_run_finish_closes_own_record_but_keeps_successor():
+  """A dying run's late finish must not touch its durable successor."""
   _seed_chat("r4")
-  _start("r4", "rt-4a")          # rt-4a owns the marker
+  _start("r4", "rt-4a")
   _start("r4", "rt-4b")          # fresh turn supersedes: rt-4a → interrupted
-  # The dying rt-4a now issues its late clear. owner is rt-4b, so the marker
-  # is the successor's — the clear must no-op on it.
+  # The dying rt-4a now issues its late finish.
   get_writer().submit(
-    ClearRunStatus(chat_id="r4", run_token="rt-4a")
+    FinishRun(chat_id="r4", run_token="rt-4a")
   ).result(timeout=5)
   _drain()
   runs = _runs("r4")
   assert runs["rt-4a"][0] == "interrupted"  # superseded by the fresh start
   assert runs["rt-4b"] == ("running", False)  # successor untouched
-  assert _run_status("r4") == "running", "successor's marker must survive"
+  assert _active_status("r4") == "running"
 
 
 # -- tokenless clear closes everything still running ----------------------
@@ -277,21 +271,18 @@ def test_tokenless_clear_closes_all_running_records():
   # A tokenless clear (Stop with no live handle / reconciliation handoff)
   # takes the chat idle and closes every still-running record.
   get_writer().submit(
-    ClearRunStatus(chat_id="r5", run_token="")
+    FinishRun(chat_id="r5", run_token="")
   ).result(timeout=5)
   _drain()
   assert _runs("r5")["rt-5"] == ("completed", True)
-  assert _run_status("r5") is None
+  assert _active_status("r5") is None
 
 
 # -- reconciliation maintains the record ----------------------------------
 def test_reconcile_marks_interrupted_run_record():
-  """An interrupted turn (run_status running + a running run record, no live
-  registry entry) is reconciled: transcript finalized, marker cleared, and the
-  run record moved to interrupted in the same pass."""
+  """A running durable row with no live registry entry is reconciled."""
   _seed_chat(
     "r6", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    run_status="running",
   )
   _seed_run("rt-6", "r6", status="running")
   db = SessionLocal()
@@ -301,17 +292,13 @@ def test_reconcile_marks_interrupted_run_record():
     db.close()
   assert "r6" in reconciled
   assert _runs("r6")["rt-6"][0] == "interrupted"
-  assert _run_status("r6") is None
+  assert _active_status("r6") is None
 
 
-def test_reconcile_orphan_sweep_closes_record_without_run_status():
-  """A run record left running whose run_status was already cleared (a dropped
-  close, not an interruption) is closed by the non-destructive orphan sweep —
-  the record converges, but the transcript is NOT touched (run_status, the
-  authoritative trigger, said the chat was idle)."""
+def test_reconcile_uses_running_row_as_the_recovery_authority():
+  """A running ChatRun is sufficient durable evidence for transcript repair."""
   _seed_chat(
     "r7", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    run_status=None,
   )
   _seed_run("rt-7", "r7", status="running")
   db = SessionLocal()
@@ -319,14 +306,14 @@ def test_reconcile_orphan_sweep_closes_record_without_run_status():
     reconciled = chat_mod.reconcile_interrupted_chats(db)
   finally:
     db.close()
-  assert "r7" not in reconciled, "no destructive recovery without run_status"
+  assert "r7" in reconciled
   assert _runs("r7")["rt-7"][0] == "interrupted"
-  # Transcript untouched: still the lone user message, no interruption note.
   db = SessionLocal()
   try:
     chat = db.query(models.Chat).filter(models.Chat.id == "r7").first()
-    assert len(chat.messages) == 1
-    assert chat.messages[0]["role"] == "user"
+    assert [message["role"] for message in chat.messages] == [
+      "user", "assistant",
+    ]
   finally:
     db.close()
 
@@ -361,16 +348,16 @@ def test_start_turn_coexists_with_surviving_terminal_run_records():
   _drain()
   runs = _runs("rr")
   assert runs[token] == ("running", False), "fresh turn opened, no PK collision"
-  assert _run_status("rr") == "running"
+  assert _active_status("rr") == "running"
 
 
 # -- orphan sweep must not touch a live chat ------------------------------
 def test_orphan_sweep_skips_a_live_chat():
   """The boot orphan sweep closes a dead chat's lingering running record but
   must NOT touch a chat the registry reports alive (the is_alive `continue`)."""
-  _seed_chat("dead", run_status=None)
+  _seed_chat("dead")
   _seed_run("rt-dead", "dead", status="running")
-  _seed_chat("live", run_status=None)
+  _seed_chat("live")
   _seed_run("rt-live", "live", status="running")
   chat_mod.registry.mark_starting("live")  # live chat is mid-spawn
   db = SessionLocal()

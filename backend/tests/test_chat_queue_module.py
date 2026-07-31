@@ -22,7 +22,7 @@ from app import chat_queue, models
 
 
 def _record_clear(sink: list):
-  """Build an async `clear_run_status_strict` stub recording its chat_id.
+  """Build an async `finish_run_strict` stub recording its chat_id.
 
   drain_and_release awaits this strict clear INSIDE the lock for the
   empty-queue case (clear-before-forget) and never for a promoted
@@ -150,7 +150,7 @@ def test_drain_and_release_promotes_then_holds_starting(db):
       db, "cq-drain-with-head", run_gen=7, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
-      clear_run_status_strict=_record_clear(cleared),
+      finish_run_strict=_record_clear(cleared),
       current_generation=lambda _cid: 7,  # still ours → owns the turn
     )
 
@@ -188,7 +188,7 @@ def test_drain_and_release_releases_when_queue_empty(db):
       db, "cq-drain-empty", run_gen=7, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
-      clear_run_status_strict=_record_clear(cleared),
+      finish_run_strict=_record_clear(cleared),
       current_generation=lambda _cid: 7,  # still ours → owns the turn
     )
 
@@ -226,7 +226,7 @@ def test_drain_and_release_no_op_when_not_owning_generation(db):
       db, "cq-not-owner", run_gen=7, run_token="rt-cq",
       discard_starting=discarded.append,
       forget_chat=forgotten.append,
-      clear_run_status_strict=_record_clear(cleared),
+      finish_run_strict=_record_clear(cleared),
       current_generation=lambda _cid: 8,  # Stop bumped past run_gen → stale
     )
 
@@ -273,7 +273,7 @@ def test_drain_serializes_with_concurrent_lock_holder(db):
       db, "cq-serialize", run_gen=7, run_token="rt-cq",
       discard_starting=lambda _cid: None,
       forget_chat=lambda _cid: None,
-      clear_run_status_strict=_noop_clear,
+      finish_run_strict=_noop_clear,
       current_generation=lambda _cid: 7,  # still ours → owns the turn
     )
     observed_order.append("drain-finished")

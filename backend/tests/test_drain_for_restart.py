@@ -45,7 +45,7 @@ def _drain_writer():
   get_writer().submit(Barrier()).result(timeout=5)
 
 
-def _seed(chat_id: str, *, pending=None, messages=None, run_status="running"):
+def _seed(chat_id: str, *, pending=None, messages=None):
   db = SessionLocal()
   try:
     started = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=30)
@@ -56,17 +56,14 @@ def _seed(chat_id: str, *, pending=None, messages=None, run_status="running"):
       pending_messages=pending or [],
       session_id="sess",
       provider="claude",
-      run_status=run_status,
-      run_started_at=started if run_status else None,
     ))
-    if run_status == "running":
-      db.add(models.ChatRun(
-        id=f"rt-{chat_id}",
-        chat_id=chat_id,
-        status="running",
-        provider="claude",
-        started_at=started,
-      ))
+    db.add(models.ChatRun(
+      id=f"rt-{chat_id}",
+      chat_id=chat_id,
+      status="running",
+      provider="claude",
+      started_at=started,
+    ))
     db.commit()
   finally:
     db.close()
@@ -76,10 +73,11 @@ def _chat(chat_id: str):
   db = SessionLocal()
   try:
     row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    from app.run_state import has_running_run
     return {
       "messages": materialized_messages(row),
       "pending": list(row.pending_messages or []),
-      "run_status": row.run_status,
+      "running_status": "running" if has_running_run(db, chat_id) else None,
     }
   finally:
     db.close()
@@ -212,7 +210,7 @@ def test_drain_finalizes_running_tool_before_clearing_reconcile_marker():
     if block.get("type") == "tool"
   )
   assert tool["status"] == "done"
-  assert state["run_status"] is None
+  assert state["running_status"] is None
 
 
 # -- (a) DrainForRestart preserves the queue; stop_chat_for clears it ---------
@@ -227,7 +225,7 @@ def test_drain_preserves_pending_while_stop_clears_it():
   _drain_writer()
   drained_state = _chat("drain-keep")
   assert drained_state["pending"] == queued
-  assert drained_state["run_status"] is None
+  assert drained_state["running_status"] is None
   assert _run("drain-keep")["status"] == "parked"
   assert _run("drain-keep")["park_reason"] == "restart"
 
@@ -284,7 +282,7 @@ def test_drain_park_failure_leaves_authenticated_marker_for_boot_recovery(
   }]
   _drain_writer()
 
-  assert _chat(cid)["run_status"] == "running"
+  assert _chat(cid)["running_status"] == "running"
   assert _run(cid)["status"] == "running"
   assert _run(cid)["restart_nonce"] == "restart-nonce-drain"
 
@@ -308,7 +306,7 @@ def test_drain_stop_timeout_keeps_authenticated_restart_intent():
   _drain_writer()
 
   assert handle.stop_calls == 1
-  assert _chat(cid)["run_status"] == "running"
+  assert _chat(cid)["running_status"] == "running"
   run = _run(cid)
   assert run["status"] == "running"
   assert run["restart_nonce"] == "restart-nonce-drain"
@@ -364,7 +362,7 @@ def test_drain_terminal_snapshot_failure_keeps_authenticated_restart_intent(
   }]
   _drain_writer()
 
-  assert _chat(cid)["run_status"] == "running"
+  assert _chat(cid)["running_status"] == "running"
   run = _run(cid)
   assert run["status"] == "running"
   assert run["restart_nonce"] == "restart-nonce-drain"
@@ -382,7 +380,7 @@ def test_drain_without_exact_run_token_stays_manual():
   assert _run_drain() == []
   _drain_writer()
 
-  assert _chat(cid)["run_status"] == "running"
+  assert _chat(cid)["running_status"] == "running"
   assert _run(cid)["status"] == "running"
 
 
@@ -411,7 +409,7 @@ def test_authenticated_restart_fallback_becomes_due_park():
 
   assert result.manual == []
   assert result.restart_parks == [cid]
-  assert _chat(cid)["run_status"] is None
+  assert _chat(cid)["running_status"] is None
   run = _run(cid)
   assert run["status"] == "parked"
   assert run["park_reason"] == "restart"
@@ -546,7 +544,7 @@ def test_reconcile_marks_paused_note_resumable_without_double_note():
 
   assert cid in reconciled
   state = _chat(cid)
-  assert state["run_status"] is None
+  assert state["running_status"] is None
   assert _run(cid)["status"] == "interrupted"
   blocks = state["messages"][-1]["blocks"]
   errors = [b for b in blocks if b.get("type") == "error"]
@@ -781,15 +779,15 @@ def test_stop_during_drain_preserves_pending():
 def test_wedged_sweep_stands_down_while_draining():
   """The wedged-marker sweep must not clear a marker the drain deliberately
   left set (design §2.3 — the sweeps stand down during a drain)."""
-  _seed("sweep-drain", run_status="running")
+  _seed("sweep-drain")
   chat_mod.draining = True
   try:
     db = SessionLocal()
     try:
-      swept = asyncio.run(chat_mod.sweep_wedged_run_markers(db))
+      swept = asyncio.run(chat_mod.sweep_wedged_runs(db))
     finally:
       db.close()
   finally:
     chat_mod.draining = False
   assert swept == []
-  assert _chat("sweep-drain")["run_status"] == "running"
+  assert _chat("sweep-drain")["running_status"] == "running"

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 from sqlalchemy import String, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
@@ -172,6 +174,45 @@ def test_run_migrations_adds_park_columns_to_existing_chat_runs(tmp_path):
     "model_context_window",
     "usage_json",
   } <= cols
+
+
+def test_run_migrations_moves_legacy_running_marker_into_chat_runs(tmp_path):
+  """The authority cutover preserves an interrupted live turn before dropping
+  the two legacy Chat columns, and is safe to resume after a partial boot."""
+  eng = create_engine(f"sqlite:///{tmp_path / 'legacy-run-marker.db'}")
+  models.Base.metadata.create_all(eng)
+  started = datetime(2026, 7, 30, 23, 45, 12)
+  with Session(eng) as session:
+    session.add(models.Chat(
+      id="legacy-running",
+      title="Interrupted turn",
+      provider="codex",
+      messages=[{"role": "user", "content": "keep this turn"}],
+    ))
+    session.commit()
+  with eng.connect() as conn:
+    conn.execute(text("ALTER TABLE chats ADD COLUMN run_status VARCHAR(16)"))
+    conn.execute(text("ALTER TABLE chats ADD COLUMN run_started_at DATETIME"))
+    conn.execute(text(
+      "UPDATE chats SET run_status='running', "
+      "run_started_at=:started WHERE id='legacy-running'"
+    ), {"started": started})
+    conn.commit()
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  chat_columns = {c["name"] for c in inspect(eng).get_columns("chats")}
+  assert "run_status" not in chat_columns
+  assert "run_started_at" not in chat_columns
+  with Session(eng) as session:
+    runs = session.query(models.ChatRun).filter_by(
+      chat_id="legacy-running",
+    ).all()
+  assert len(runs) == 1
+  assert runs[0].status == "running"
+  assert runs[0].provider == "codex"
+  assert runs[0].started_at == started
 
 
 def test_agent_lifecycle_width_migration_is_postgres_only_and_idempotent():

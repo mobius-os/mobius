@@ -13,6 +13,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app import models
+from app.run_state import running_chat_ids
 
 
 _CHAT_PROFILE = re.compile(r"^chat-([0-9a-fA-F-]{36})$")
@@ -215,13 +216,13 @@ def chat_activity_snapshot(db: Session) -> dict[str, dict]:
     models.Chat.activity_at,
     models.Chat.updated_at,
     models.Chat.deleted_at,
-    models.Chat.run_status,
   ).all()
+  running = running_chat_ids(db, (str(row.id) for row in rows))
   return {
     str(row.id): {
       "activity_at": row.activity_at or row.updated_at,
       "deleted_at": row.deleted_at,
-      "run_status": row.run_status,
+      "running": str(row.id) in running,
     }
     for row in rows
   }
@@ -288,7 +289,7 @@ def enforce_browser_profile_quota(
       active = (
         path.name in active_profile_names
         or (chat_id is not None and chat_id in active_chat_ids)
-        or (chat and chat.get("run_status") == "running")
+        or bool(chat and chat.get("running"))
       )
       if chat_id is None:
         # Named/legacy profiles are included in the byte budget and cache

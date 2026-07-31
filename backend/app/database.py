@@ -16,6 +16,8 @@ import logging
 import os
 import threading
 import time
+import uuid
+from datetime import UTC, datetime
 from contextvars import ContextVar, Token
 from pathlib import Path
 
@@ -251,8 +253,9 @@ def run_migrations(eng) -> None:
 
   Uses SQLAlchemy's database-agnostic inspector so this works for both
   SQLite and PostgreSQL.  Safe to call on every boot — no-ops if already
-  up to date.  Skips entirely on fresh installs (no tables yet) since
-  create_all will build the correct schema from scratch.
+  up to date. Production creates missing tables before calling this function,
+  which lets migrations move legacy column data into newly introduced tables.
+  Direct callers with no application tables still no-op.
   """
   from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
   inspector = sa_inspect(eng)
@@ -277,6 +280,51 @@ def run_migrations(eng) -> None:
         conn.execute(text(
           "ALTER TABLE chats DROP COLUMN generated_images"
         ))
+        conn.commit()
+  # Retire the pre-ChatRun per-chat marker without losing an interrupted turn
+  # across the upgrade. ``main._init_db`` creates ``chat_runs`` first, then this
+  # migration copies every still-running legacy marker that lacks a durable run
+  # identity. Only after the recovery handle exists do we drop both old
+  # columns. Each insert is independently idempotent by the NOT EXISTS query,
+  # and each DROP is independently schema-gated for crash-safe retries.
+  if "chats" in tables and "chat_runs" in tables:
+    chats_cols = {c["name"] for c in inspector.get_columns("chats")}
+    if "run_status" in chats_cols:
+      provider_expr = "c.provider" if "provider" in chats_cols else "NULL"
+      started_expr = (
+        "c.run_started_at" if "run_started_at" in chats_cols else "NULL"
+      )
+      with eng.connect() as conn:
+        legacy = conn.execute(text(
+          f"SELECT c.id, {provider_expr}, {started_expr} "
+          "FROM chats c "
+          "WHERE c.run_status = 'running' "
+          "AND NOT EXISTS ("
+          "SELECT 1 FROM chat_runs r "
+          "WHERE r.chat_id = c.id AND r.status = 'running'"
+          ")"
+        )).all()
+        insert_run = text(
+          "INSERT INTO chat_runs "
+          "(id, chat_id, status, provider, started_at) "
+          "VALUES (:id, :chat_id, 'running', :provider, :started_at)"
+        )
+        now = datetime.now(UTC).replace(tzinfo=None)
+        for chat_id, provider, started_at in legacy:
+          conn.execute(insert_run, {
+            "id": str(uuid.uuid4()),
+            "chat_id": chat_id,
+            "provider": provider,
+            "started_at": started_at or now,
+          })
+        conn.commit()
+      with eng.connect() as conn:
+        conn.execute(text("ALTER TABLE chats DROP COLUMN run_status"))
+        conn.commit()
+      chats_cols.remove("run_status")
+    if "run_started_at" in chats_cols:
+      with eng.connect() as conn:
+        conn.execute(text("ALTER TABLE chats DROP COLUMN run_started_at"))
         conn.commit()
   apps_cols = {c["name"] for c in inspector.get_columns("apps")}
   if "chats" in tables:
@@ -701,15 +749,6 @@ def run_migrations(eng) -> None:
     if "pinned_at" not in chats_cols:
       # NOT NULL = pinned. Drawer sort key (see routes/chats.py).
       _add.append("ALTER TABLE chats ADD COLUMN pinned_at DATETIME NULL")
-    if "run_status" not in chats_cols:
-      # Crash-recovery run marker. "running" while a turn is in
-      # flight, NULL otherwise. Existing rows default to NULL (idle),
-      # which is correct: a row written before this column existed was
-      # not mid-turn at the moment we add the column. See
-      # models.Chat.run_status and chat.reconcile_interrupted_chats.
-      _add.append("ALTER TABLE chats ADD COLUMN run_status VARCHAR(16) NULL")
-    if "run_started_at" not in chats_cols:
-      _add.append("ALTER TABLE chats ADD COLUMN run_started_at DATETIME NULL")
     if "created_by_app_id" not in chats_cols:
       # App that opened this chat via the app-attributed chat contract
       # (design §1). NULL = an ordinary owner chat. No FK constraint in

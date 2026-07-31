@@ -6,7 +6,7 @@ Locks in the six contracts of the limit-park feature:
       30-minute fallback, clamped, and it NEVER raises.
   (b) A limit kill PARKS the run row (parked_until + park_reason) and
       clears the per-chat marker; ownership is identity-keyed like
-      ClearRunStatus (a superseded run never parks onto a fresh marker).
+      FinishRun (a superseded run never parks onto a fresh marker).
   (c) Latest-run-wins: the park probe + stall exemption honor a park only
       while the chat's newest run row is the parked one, and a fresh
       StartTurn closes a stale park (no orphaned notify/auto-resume).
@@ -32,7 +32,7 @@ from app import chat as chat_mod
 from app import models
 from app.chat_writer import (
   Barrier,
-  ClearRunStatus,
+  FinishRun,
   ParkRun,
   PrepareAutoResume,
   PromotePending,
@@ -73,7 +73,7 @@ def _drain_writer():
 
 
 def _seed_chat(
-  chat_id: str, *, pending=None, run_status=None, deleted=False,
+  chat_id: str, *, pending=None, deleted=False,
   auto_resume=False, auto_restart=True, messages=None,
 ):
   db = SessionLocal()
@@ -91,10 +91,6 @@ def _seed_chat(
       provider="claude",
       auto_resume_on_limit=auto_resume,
       auto_resume_on_restart=auto_restart,
-      run_status=run_status,
-      run_started_at=(
-        datetime.now(UTC).replace(tzinfo=None) if run_status else None
-      ),
       deleted_at=(
         datetime.now(UTC).replace(tzinfo=None) if deleted else None
       ),
@@ -150,8 +146,9 @@ def _chat_row(chat_id: str):
   db = SessionLocal()
   try:
     row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    from app.run_state import has_running_run
     return {
-      "run_status": row.run_status,
+      "running_status": "running" if has_running_run(db, chat_id) else None,
       "messages": materialized_messages(row),
       "pending": list(row.pending_messages or []),
     }
@@ -280,7 +277,7 @@ def test_limit_exit_bare_429_synthesizes_the_card_block():
 
 def test_park_run_parks_row_and_clears_marker():
   cid = "park-basic"
-  _seed_chat(cid, run_status="running")
+  _seed_chat(cid)
   _seed_run(cid, "rt-park-basic")
   until = datetime(2026, 7, 11, 1, 40)
 
@@ -295,13 +292,13 @@ def test_park_run_parks_row_and_clears_marker():
   assert row["park_reason"] == "usage_limit"
   assert row["ended_at"] is not None
   # The per-chat marker is cleared: the turn is over, the chat is not busy.
-  assert _chat_row(cid)["run_status"] is None
+  assert _chat_row(cid)["running_status"] is None
 
 
 def test_restart_park_carries_one_shot_intent_nonce():
   cid = "park-restart-nonce"
   token = "rt-park-restart-nonce"
-  _seed_chat(cid, run_status="running")
+  _seed_chat(cid)
   _seed_run(cid, token)
 
   get_writer().submit(ParkRun(
@@ -350,10 +347,9 @@ def test_restart_park_idempotency_requires_the_same_nonce():
   assert _run_row(token)["restart_nonce"] == "nonce-first-1234"
 
 
-def test_park_run_missing_exact_row_keeps_generic_marker():
-  """Losing the exact identity must fail safe into manual crash recovery."""
+def test_park_run_missing_exact_row_is_a_noop():
   cid = "park-missing-exact-row"
-  _seed_chat(cid, run_status="running")
+  _seed_chat(cid)
 
   parked = get_writer().submit(ParkRun(
     chat_id=cid, run_token="rt-does-not-exist",
@@ -361,13 +357,13 @@ def test_park_run_missing_exact_row_keeps_generic_marker():
   )).result(timeout=5)
 
   assert parked is False
-  assert _chat_row(cid)["run_status"] == "running"
+  assert _chat_row(cid)["running_status"] is None
 
 
 def test_park_run_superseded_owner_completes_without_parking():
   """A dying run whose marker a fresh turn took must NOT park (a stale park
   would fire a spurious notify) — its own row closes 'completed' and the
-  fresh turn's marker survives, mirroring ClearRunStatus ownership."""
+  fresh turn's marker survives, mirroring FinishRun ownership."""
   cid = "park-superseded"
   _seed_chat(cid)
   # A fresh StartTurn claims the marker under rt-new (records ownership).
@@ -387,7 +383,7 @@ def test_park_run_superseded_owner_completes_without_parking():
   assert _run_row("rt-old")["status"] == "completed"
   assert _run_row("rt-old")["parked_until"] is None
   assert _run_row("rt-new")["status"] == "running"
-  assert _chat_row(cid)["run_status"] == "running"
+  assert _chat_row(cid)["running_status"] == "running"
 
 
 def test_resolve_park_is_idempotent():
@@ -482,10 +478,10 @@ def test_auto_resume_rollback_cannot_unwind_a_newer_successor():
   assert rolled_back is False
   assert _run_row(successor_token)["status"] == "running"
   state = _chat_row(cid)
-  assert state["run_status"] == "running"
+  assert state["running_status"] == "running"
   assert state["messages"][-1]["cid"] == "new-owner-turn"
 
-  get_writer().submit(ClearRunStatus(
+  get_writer().submit(FinishRun(
     chat_id=cid, run_token=successor_token,
   )).result(timeout=5)
 
@@ -547,16 +543,17 @@ def test_fresh_start_turn_closes_stale_park():
     db.close()
 
 
-def test_park_run_strict_tokenless_falls_back_to_marker_clear():
+def test_park_run_strict_tokenless_finishes_all_running_rows():
   cid = "park-tokenless"
-  _seed_chat(cid, run_status="running")
+  _seed_chat(cid)
+  _seed_run(cid, "rt-park-tokenless")
 
   asyncio.run(chat_mod._park_run_strict(
     cid, "", datetime(2026, 7, 11, 1, 40), "rate_limit",
   ))
   _drain_writer()
 
-  assert _chat_row(cid)["run_status"] is None
+  assert _chat_row(cid)["running_status"] is None
 
 
 # -- (d) the reset sweep -------------------------------------------------------
@@ -737,7 +734,7 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
     assert promoted["_messages"][-1]["continuation_reason"] == "usage_limit"
     state = _chat_row("sweep-auto")
     assert state["pending"] == []
-    assert state["run_status"] == "running"  # PromotePending set the marker
+    assert state["running_status"] == "running"  # PromotePending set the marker
   finally:
     # _schedule_continuation was stubbed, so release the claim it would have
     # handed to the spawned turn.
@@ -1188,7 +1185,7 @@ def test_restart_spawn_failure_retires_one_shot_authorization(
   assert row["status"] == "interrupted"
   assert row["restart_nonce"] is None
   state = _chat_row(cid)
-  assert state["run_status"] is None
+  assert state["running_status"] is None
   assert state["pending"][-1]["cid"] == f"restart-resume-{token}"
   assert _run_sweep() == []
   db = SessionLocal()
@@ -1501,7 +1498,7 @@ def test_auto_resume_spawn_failure_rolls_back_and_retries_once(
   ]
   assert _run_row(park_token)["status"] == "resume_pending"
   state = _chat_row(cid)
-  assert state["run_status"] is None
+  assert state["running_status"] is None
   assert [m.get("cid") for m in state["pending"]] == [
     "queued-before-limit", f"limit-resume-{park_token}",
   ]
@@ -1557,7 +1554,7 @@ def test_post_promote_process_death_recovers_as_manual_resume_boundary():
   finally:
     db.close()
   state = _chat_row(cid)
-  assert state["run_status"] is None
+  assert state["running_status"] is None
   assert state["pending"] == []
   assert _run_row(park_token)["status"] == "completed"
   assert _run_row(promoted_token)["status"] == "interrupted"
@@ -1566,7 +1563,7 @@ def test_post_promote_process_death_recovers_as_manual_resume_boundary():
 
   # reconcile normally runs before the writer starts. This test drives it
   # against the fixture's live actor, so clear its in-memory owner bookkeeping.
-  get_writer().submit(ClearRunStatus(
+  get_writer().submit(FinishRun(
     chat_id=cid, run_token="",
   )).result(timeout=5)
 
@@ -1719,7 +1716,7 @@ def test_auto_resume_rechecks_app_work_inside_queue_handoff():
   ) is False
   state = _chat_row(cid)
   assert state["pending"] == [app_msg]
-  assert state["run_status"] is None
+  assert state["running_status"] is None
   assert not chat_mod.is_chat_running(cid)
 
 
@@ -1853,7 +1850,7 @@ def _limit_complete_turn(cid, *, parked_until, monkeypatch=None,
   """Drive _complete_turn's limit branch with a real bc + sink + seeded run."""
   from app.broadcast import create_broadcast
 
-  _seed_chat(cid, run_status="running")
+  _seed_chat(cid)
   _seed_run(cid, f"rt-{cid}")
   bc = create_broadcast(cid)
   sink = chat_mod._ChatEventSink(bc, cid, run_token=f"rt-{cid}")
@@ -1917,7 +1914,7 @@ def test_park_false_result_uses_same_manual_recovery_fallback(monkeypatch):
   )
 
   assert disposition.value == "failed_leave_marker"
-  assert _chat_row(cid)["run_status"] == "running"
+  assert _chat_row(cid)["running_status"] == "running"
   tail = _chat_row(cid)["messages"][-1]["blocks"][-1]
   assert "could not be scheduled" in tail["message"]
   assert not tail.get("pause")

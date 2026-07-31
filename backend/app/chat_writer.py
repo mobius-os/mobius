@@ -310,11 +310,11 @@ class MigrateChat(_Command):
   live server's writer runs. The plain `_active_chat` re-read + commit the other
   commands use is NOT cross-process safe (the lost-update race the guardrail
   closes only holds WITHIN a single-actor process). So the write is an
-  optimistic compare-and-swap: `UPDATE ... WHERE run_status IS NULL AND
-  updated_at = <snapshot>`. Any concurrent live write (StartTurn sets
-  run_status; every row write bumps updated_at) makes the UPDATE match 0 rows,
-  so this command defers the chat instead of clobbering the turn. Idle-gating
-  keeps deferrals rare; the deferred chats are reported for a re-run.
+  optimistic compare-and-swap: `UPDATE ... WHERE no nonterminal ChatRun AND
+  updated_at = <snapshot>`. Any concurrent live write inserts a run row and
+  bumps updated_at, making the UPDATE match 0 rows, so this command defers the
+  chat instead of clobbering the turn. Idle-gating keeps deferrals rare; the
+  deferred chats are reported for a re-run.
 
   Idempotent + dry-run: an already-migrated row/block is a no-op (a cid is
   present, or a block already carries `output_truncated`); `dry_run` reports the
@@ -520,30 +520,24 @@ class ReplaceTranscript(_Command):
 
 
 @dataclass
-class ClearRunStatus(_Command):
-  """Clear the durable run marker once a turn has ended.
-
-  Replicates `_clear_run_status`: clears `run_status` / `run_started_at`
-  when either is set, commits.  Returns None.
-  """
+class FinishRun(_Command):
+  """Close one durable run once its turn has ended."""
 
   chat_id: str = ""
   run_token: str = ""
-  # Durable outcome for the run row.  Clearing Chat.run_status only means the
-  # chat is idle; it must not collapse a provider/setup failure into a
-  # successful "completed" run in the observability record.
+  # Preserve the real provider/setup/user-stop outcome in the run record.
   terminal_status: str = "completed"
 
 
 @dataclass
 class RecoverWedgedRun(_Command):
-  """Atomically materialize an interrupted turn and clear its stale marker.
+  """Atomically materialize an interrupted turn and close its durable run.
 
   Runtime recovery must never clear the only durable recovery handle while
   leaving a trailing user message unanswered.  This command folds the saved
   live assistant snapshot (when one exists) into history, appends the supplied
-  interruption block, closes the exact run row, and clears the marker in one
-  commit.  It preserves ``pending_messages`` unchanged.
+  interruption block, and closes the exact run row in one commit. It preserves
+  ``pending_messages`` unchanged.
   """
 
   chat_id: str = ""
@@ -555,18 +549,16 @@ class RecoverWedgedRun(_Command):
 class ParkRun(_Command):
   """Park a turn for a due continuation (design §2.4).
 
-  The identity-keyed sibling of `ClearRunStatus` for the limit exit: the
-  turn is over, so the per-chat marker (`Chat.run_status`) is cleared the
-  same way — but instead of closing the run's `chat_runs` row "completed",
-  the row moves to ``status="parked"`` carrying `parked_until` (the due time,
+  The identity-keyed sibling of `FinishRun` for the limit exit: instead of
+  closing the run's `chat_runs` row "completed", the row moves to
+  ``status="parked"`` carrying `parked_until` (the due time,
   naive UTC) and `park_reason`. Provider limits use their parsed reset time;
   a successfully drained planned restart uses ``park_reason="restart"`` and
   a due time of now. That parked row IS the durable continuation signal; no
   separate state enum exists. Same ownership discipline as
-  ClearRunStatus: a dying run whose marker was taken by a fresh turn still
-  closes its OWN row (as "completed", NOT parked — the owner already moved
-  on, so a stale park must not resurrect a notify) but leaves the fresh
-  marker and owner map untouched.
+  FinishRun: a dying run superseded by a fresh turn still closes its OWN row
+  (as "completed", NOT parked — the owner already moved on, so a stale park
+  must not resurrect a notify) but leaves the fresh owner untouched.
   """
 
   chat_id: str = ""
@@ -719,7 +711,7 @@ _FENCE_COMMANDS = (
   CancelPending,
   ClearPending,
   ReplaceTranscript,
-  ClearRunStatus,
+  FinishRun,
   RecoverWedgedRun,
   ParkRun,
   ResolvePark,
@@ -785,14 +777,10 @@ class ChatWriterActor:
     # `_session_factory()` hasn't returned yet (or hangs) must not report ready.
     # Stays clear if session-open fails (the thread goes fatal instead).
     self._session_ready = threading.Event()
-    # Per-chat owner of the durable run marker: the run_token whose StartTurn /
-    # PromotePending most recently set `run_status='running'`. `ClearRunStatus`
-    # is an identity-keyed compare-and-clear against this — a clear that names a
-    # run_token clears ONLY if that token still owns the marker, so a dying
-    # run's stale clear can't wipe the marker a fresh turn just set (the
-    # markerless-run race). Touched only on the consumer thread, so no lock; a
-    # tokenless clear (run_token="") stays unconditional for paths that already
-    # know they own the marker.
+    # Per-chat in-process owner of the latest durable ChatRun. Durable ownership
+    # is checked against ChatRun itself; this map is the faster same-process
+    # fence that keeps a dying run from touching a successor. Touched only on
+    # the consumer thread, so no lock.
     self._run_token_owner: dict[str, str] = {}
     # Serializes the check-and-set in `start()` so two concurrent callers
     # can't both pass the `_thread is None` check and each spawn a consumer
@@ -1438,8 +1426,8 @@ class ChatWriterActor:
       return self._clear_pending(db, cmd)
     if isinstance(cmd, ReplaceTranscript):
       return self._replace_transcript(db, cmd)
-    if isinstance(cmd, ClearRunStatus):
-      return self._clear_run_status(db, cmd)
+    if isinstance(cmd, FinishRun):
+      return self._finish_run(db, cmd)
     if isinstance(cmd, RecoverWedgedRun):
       return self._recover_wedged_run(db, cmd)
     if isinstance(cmd, ParkRun):
@@ -1720,23 +1708,24 @@ class ChatWriterActor:
     committing a block whose full text the side table can't reproduce — the
     actor's `except` rolls the transaction back and keeps serving other chats.
     """
-    from app.models import Chat, ToolOutput
+    from app.models import Chat, ChatRun, ToolOutput
 
     cid = cmd.chat_id
     row = db.execute(
       select(
-        Chat.messages, Chat.pending_messages, Chat.run_status, Chat.updated_at
+        Chat.messages, Chat.pending_messages, Chat.updated_at
       ).where(Chat.id == cid)
     ).first()
     if row is None:
       return {"chat_id": cid, "status": "missing"}
-    messages, pending, run_status, snap_updated_at = row
+    messages, pending, snap_updated_at = row
 
-    # Never touch a chat with a live turn in flight: the durable run marker is
-    # set atomically with the turn's first write, so a "running" row is one a
-    # live actor owns right now. Defer + re-check after (the script re-runs the
-    # skipped set once).
-    if run_status is not None:
+    # Never touch a chat with live or parked work. The ChatRun row is created
+    # atomically with the turn's first transcript write.
+    if db.query(ChatRun.id).filter(
+      ChatRun.chat_id == cid,
+      ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    ).first() is not None:
       return {"chat_id": cid, "status": "skipped_active"}
 
     plan = plan_chat_migration(messages or [], pending or [])
@@ -1800,14 +1789,18 @@ class ChatWriterActor:
       self._verify_thinking_round_trip(db, cid, plan.thinking_stashes)
 
       # Optimistic CAS: commit the rewritten blobs only while the chat is still
-      # idle AND unchanged since the snapshot. A concurrent live turn (another
-      # process's actor) sets run_status and/or bumps updated_at, matching 0 rows
-      # here — we roll back (dropping the flushed stashes too) and defer the chat.
+      # idle AND unchanged since the snapshot. A concurrent live turn inserts a
+      # nonterminal ChatRun and bumps updated_at, matching 0 rows here — we roll
+      # back (dropping the flushed stashes too) and defer the chat.
+      active_run_exists = select(ChatRun.id).where(
+        ChatRun.chat_id == cid,
+        ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+      ).exists()
       result = db.execute(
         update(Chat)
         .where(
           Chat.id == cid,
-          Chat.run_status.is_(None),
+          ~active_run_exists,
           Chat.updated_at == snap_updated_at,
         )
         .values(messages=plan.new_messages, pending_messages=plan.new_pending)
@@ -1960,28 +1953,25 @@ class ChatWriterActor:
     }
     if len(existing) == 1:
       chat.title = first_message_title(cmd.title_source) or "New chat"
-    chat.run_status = "running"
-    chat.run_started_at = datetime.now(UTC)
+    started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
     # Owner-send: advance the drawer ordering key (see models.Chat.activity_at).
     chat.activity_at = datetime.now(UTC)
-    # Durable per-run record (077 Step 3), inserted in the SAME commit as the
-    # run_status marker so the two can never diverge. Keyed on this turn's
-    # run_token — the one identity the sink and ClearRunStatus also carry.
+    # The durable run row is inserted in the SAME commit as the user message.
+    # Its id is the one identity the sink and FinishRun also carry.
     # A fresh start claims an idle chat (mark_starting guarantees no live run),
     # so any still-running row is a prior run whose clear was dropped — mark it
     # interrupted before opening this one (at most one run is ever live).
     from app.models import ChatRun
-    self._close_running_runs(db, cmd.chat_id, "interrupted")
+    self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
-      provider=chat.provider, started_at=chat.run_started_at,
+      provider=chat.provider, started_at=started_at,
       initiated_by_app_id=cmd.initiated_by_app_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
-    # This run_token now owns the marker — a later ClearRunStatus naming a
-    # different token (a dying run) must not clear it.
+    # This run_token now owns the in-process handoff fence.
     self._run_token_owner[cmd.chat_id] = cmd.run_token
     return {
       "history": history,
@@ -2143,6 +2133,8 @@ class ChatWriterActor:
     """Commit a provider handoff if its source chat is still idle/current."""
     from datetime import UTC, datetime
 
+    from app.models import ChatRun
+
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed(
@@ -2169,13 +2161,8 @@ class ChatWriterActor:
           "agent_settings_json": chat.agent_settings_json,
         }
 
-    from app.models import ChatRun
-
-    has_running_row = db.query(ChatRun).filter(
-      ChatRun.chat_id == cmd.chat_id,
-      ChatRun.status == "running",
-    ).first() is not None
-    if chat.run_status is not None or chat.pending_messages or has_running_row:
+    from app.run_state import has_running_run
+    if chat.pending_messages or has_running_run(db, cmd.chat_id):
       return {"status": "conflict", "reason": "busy"}
     if (chat.provider or "claude") != cmd.expected_provider:
       return {"status": "conflict", "reason": "provider_changed"}
@@ -2255,11 +2242,8 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("PersistCompaction: chat not found or deleted")
     messages = list(chat.messages or [])
-    has_active_run = db.query(ChatRun).filter(
-      ChatRun.chat_id == cmd.chat_id,
-      ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
-    ).first() is not None
-    if chat.run_status is not None or chat.pending_messages or has_active_run:
+    from app.run_state import has_nonterminal_run
+    if chat.pending_messages or has_nonterminal_run(db, cmd.chat_id):
       return {"status": "conflict", "reason": "busy"}
     if (chat.provider or "claude") != cmd.expected_provider:
       return {"status": "conflict", "reason": "provider_changed"}
@@ -2369,26 +2353,23 @@ class ChatWriterActor:
         chat.messages + list(chat.pending_messages or [])
       ),
     }
-    chat.run_status = "running"
-    chat.run_started_at = datetime.now(UTC)
+    started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
     # The prior turn finished (the queue had more) and hands off to this
-    # continuation. Close its run record completed and open the continuation's,
-    # all in the SAME commit as the marker (077 Step 3). A continuation never
-    # gets a ClearRunStatus of its own — the marker stays set across the
-    # handoff — so this is where the prior run's record is closed.
+    # continuation. Close its run record and open the continuation's in the
+    # SAME commit as the queue handoff.
     from app.models import ChatRun
-    self._close_running_runs(
+    self._close_nonterminal_runs(
       db, cmd.chat_id, cmd.ending_status, except_token=cmd.run_token
     )
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
-      provider=chat.provider, started_at=chat.run_started_at,
+      provider=chat.provider, started_at=started_at,
       initiated_by_app_id=initiated_by_app_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("PromotePending did not persist")
-    # The promoted continuation now owns the marker under its run_token.
+    # The promoted continuation now owns the in-process handoff fence.
     self._run_token_owner[cmd.chat_id] = cmd.run_token
     return {
       "history": history,
@@ -2466,16 +2447,13 @@ class ChatWriterActor:
     return True
 
   @staticmethod
-  def _close_running_runs(db, chat_id, status, except_token=None):
-    """Mark every still-running `chat_runs` row for a chat terminal.
+  def _close_nonterminal_runs(db, chat_id, status, except_token=None):
+    """Mark every superseded nonterminal run for a chat terminal.
 
-    At most one run is ever live per chat (the run marker is per-chat and
-    single-owner), so when a new run takes over or the chat goes idle, any
-    OTHER row still ``status == "running"`` is by definition stale and is
-    moved to `status` ("completed" / "interrupted"). `except_token` keeps the
-    incoming run's own row untouched. Keyed off the per-chat single-run
-    invariant, so it needs no run-token side bookkeeping. Returns True when it
-    changed a row (the caller folds the commit in).
+    At most one run is current per chat. When a new run takes over or the chat
+    goes idle, any OTHER running/parked/resume-pending row is superseded.
+    `except_token` keeps the incoming run's own row untouched. Returns True
+    when it changed a row (the caller folds the commit in).
     """
     from datetime import UTC, datetime
 
@@ -2505,32 +2483,17 @@ class ChatWriterActor:
       changed = True
     return changed
 
-  def _clear_run_status(self, db, cmd: ClearRunStatus):
-    """Clear the durable run marker when set; commit.
+  def _finish_run(self, db, cmd: FinishRun):
+    """Close the exact durable run, or every nonterminal row tokenlessly.
 
-    Identity-keyed compare-and-clear: when `cmd.run_token` is set, clear ONLY
-    if that token still owns the marker (`_run_token_owner`). A dying run's
-    stale clear thus can't wipe the marker a fresh turn just set — the
-    fresh turn's StartTurn recorded itself as the owner, so the dying token
-    no longer matches and this is a no-op (the markerless-run race). A
-    tokenless clear (run_token="") is unconditional, for paths that already
-    know they own the marker (reconciliation, no-handoff cleanup).
-
-    The per-run `chat_runs` record (077 Step 3) is closed in the SAME commit:
-    a tokened clear marks its own run's row with `cmd.terminal_status` IF it is
-    still running. The default is the clean-success outcome "completed";
-    provider/setup errors, explicit Stop, and live interruption callers pass a
-    more specific terminal outcome.
-    A run superseded by a fresh StartTurn is already terminal ("interrupted",
-    set by that StartTurn's `_close_running_runs`), so its dying
-    no-op-on-the-marker clear correctly leaves the row terminal rather than
-    re-stamping it — either way the run's record is closed, never left
-    "running". A tokenless clear closes every still-running row for the chat
-    (the chat is going idle, so any lingering record is stale).
+    A tokened finish never mutates a successor: it can close only its own row,
+    and releases the in-process owner only when the same token still owns it.
+    Tokenless finish is reserved for lifecycle paths (such as deletion) that
+    intentionally retire all nonterminal work for the chat.
     """
     from datetime import UTC, datetime
 
-    from app.models import Chat, ChatRun
+    from app.models import ChatRun
 
     if cmd.terminal_status not in _TERMINAL_RUN_STATUSES:
       raise _PersistFailed(
@@ -2538,56 +2501,39 @@ class ChatWriterActor:
       )
 
     owner = self._run_token_owner.get(cmd.chat_id)
-    marker_is_ours = not (
-      cmd.run_token and owner is not None and owner != cmd.run_token
-    )
     changed = False
     if cmd.run_token:
-      run = (
-        db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
-      )
+      run = db.query(ChatRun).filter(
+        ChatRun.id == cmd.run_token,
+        ChatRun.chat_id == cmd.chat_id,
+      ).first()
       if run is not None and run.status == "running":
         run.status = cmd.terminal_status
         run.ended_at = datetime.now(UTC)
         run.restart_nonce = None
         changed = True
-    elif marker_is_ours:
-      changed = self._close_running_runs(
+    else:
+      changed = self._close_nonterminal_runs(
         db, cmd.chat_id, cmd.terminal_status
       ) or changed
-    if not marker_is_ours:
-      # A dying run's stale clear: its own run record is closed above, but the
-      # per-chat marker belongs to the fresh turn — don't touch it or the
-      # owner map.
-      if changed and not _commit_or_rollback(db):
-        raise _PersistFailed("ClearRunStatus did not persist")
-      return None
-    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
-    if chat is not None and (
-      chat.run_status is not None or chat.run_started_at is not None
-    ):
-      chat.run_status = None
-      chat.run_started_at = None
-      changed = True
     if changed and not _commit_or_rollback(db):
-      raise _PersistFailed("ClearRunStatus did not persist")
-    self._run_token_owner.pop(cmd.chat_id, None)
+      raise _PersistFailed("FinishRun did not persist")
+    if not cmd.run_token or owner == cmd.run_token:
+      self._run_token_owner.pop(cmd.chat_id, None)
     return None
 
   def _recover_wedged_run(self, db, cmd: RecoverWedgedRun):
     """Recover a finished turn without creating a silent transcript gap.
 
-    The ownership check is the same identity fence as ``ClearRunStatus``.  A
-    stale recovery command may close its own old run row, but it cannot alter a
-    newer owner's transcript or marker.  When this run still owns the marker,
-    transcript recovery and marker/run closure land in the same transaction.
+    The exact run must still be latest and own the in-process fence before its
+    transcript can change. A stale command may close only its own old row.
     """
     from datetime import UTC, datetime
 
     from app.models import Chat, ChatRun
 
     owner = self._run_token_owner.get(cmd.chat_id)
-    marker_is_ours = not (
+    owner_is_ours = not (
       cmd.run_token and owner is not None and owner != cmd.run_token
     )
     changed = False
@@ -2595,13 +2541,19 @@ class ChatWriterActor:
       ChatRun.id == cmd.run_token,
       ChatRun.chat_id == cmd.chat_id,
     ).first()
+    run_is_current = bool(
+      run is not None
+      and run.status == "running"
+      and owner_is_ours
+      and self._run_is_latest(db, run)
+    )
     if run is not None and run.status == "running":
       run.status = "interrupted"
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True
 
-    if not marker_is_ours:
+    if not run_is_current:
       if changed and not _commit_or_rollback(db):
         raise _PersistFailed("RecoverWedgedRun did not persist stale close")
       return False
@@ -2659,37 +2611,27 @@ class ChatWriterActor:
 
       chat.messages = messages
       chat.live_assistant = None
-      if chat.run_status is not None or chat.run_started_at is not None:
-        chat.run_status = None
-        chat.run_started_at = None
       changed = True
 
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("RecoverWedgedRun did not persist")
-    self._run_token_owner.pop(cmd.chat_id, None)
+    if owner is None or owner == cmd.run_token:
+      self._run_token_owner.pop(cmd.chat_id, None)
     return True
 
   def _park_run(self, db, cmd: ParkRun):
-    """Park the run's row for continuation + clear the per-chat marker.
+    """Park the current durable run for continuation.
 
-    Mirrors `_clear_run_status`'s ownership discipline exactly — the same
-    identity-keyed compare against `_run_token_owner` — with one difference:
-    when this token still owns the marker, its `chat_runs` row becomes
-    ``status="parked"`` (carrying `parked_until` + `park_reason`) instead of
-    "completed". A dying run whose marker a fresh turn already took closes
-    its own row "completed" WITHOUT parking: the owner has moved on, and a
-    stale park would fire a spurious reset notify later. The per-chat marker
-    (`Chat.run_status`) is cleared either way the marker is ours — the turn
-    IS over, so the chat must not look busy, must not be reaped by the
-    wedged sweep, and must not get a spurious "server restarted" note from
-    boot reconcile.
+    The exact run must still be latest and own the in-process fence. A stale
+    dying run is completed instead, so it cannot resurrect a continuation
+    after a successor has taken over.
     """
     from datetime import UTC, datetime
 
-    from app.models import Chat, ChatRun
+    from app.models import ChatRun
 
     owner = self._run_token_owner.get(cmd.chat_id)
-    marker_is_ours = not (
+    owner_is_ours = not (
       cmd.run_token and owner is not None and owner != cmd.run_token
     )
     changed = False
@@ -2699,9 +2641,6 @@ class ChatWriterActor:
         db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
       )
       # A tokened transition is useful only when the exact running row exists.
-      # Do not clear the generic chat marker on a missing/terminal row: leaving
-      # it set lets startup reconciliation recover manually instead of losing
-      # the only durable evidence that work was interrupted.
       if run is None or run.status != "running":
         return bool(
           run is not None
@@ -2712,7 +2651,8 @@ class ChatWriterActor:
             or run.restart_nonce == (cmd.restart_nonce or None)
           )
         )
-      if marker_is_ours:
+      run_is_current = owner_is_ours and self._run_is_latest(db, run)
+      if run_is_current:
         run.status = "parked"
         run.parked_until = cmd.parked_until
         run.park_reason = (cmd.park_reason or None)
@@ -2725,20 +2665,14 @@ class ChatWriterActor:
         run.restart_nonce = None
       run.ended_at = datetime.now(UTC)
       changed = True
-    if not marker_is_ours:
+    if not owner_is_ours or not parked:
       if changed and not _commit_or_rollback(db):
         raise _PersistFailed("ParkRun did not persist")
       return False
-    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
-    if chat is not None and (
-      chat.run_status is not None or chat.run_started_at is not None
-    ):
-      chat.run_status = None
-      chat.run_started_at = None
-      changed = True
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("ParkRun did not persist")
-    self._run_token_owner.pop(cmd.chat_id, None)
+    if owner is None or owner == cmd.run_token:
+      self._run_token_owner.pop(cmd.chat_id, None)
     return parked
 
   def _prepare_restart_intents(
@@ -2772,7 +2706,6 @@ class ChatWriterActor:
       chat = db.query(Chat).filter(
         Chat.id == chat_id,
         Chat.deleted_at.is_(None),
-        Chat.run_status == "running",
       ).first()
       if run is None or chat is None or not self._run_is_latest(db, run):
         continue
@@ -2846,17 +2779,8 @@ class ChatWriterActor:
 
   @staticmethod
   def _run_is_latest(db, run) -> bool:
-    """Whether ``run`` is the deterministic latest run for its chat."""
-    from app.models import ChatRun
-
-    latest = (
-      db.query(ChatRun.id)
-      .filter(ChatRun.chat_id == run.chat_id)
-      .order_by(ChatRun.started_at.desc(), ChatRun.id.desc())
-      .first()
-    )
-    latest_id = latest[0] if latest is not None else None
-    return latest_id == run.id
+    from app.run_state import run_is_latest
+    return run_is_latest(db, run)
 
   def _rollback_auto_resume(self, db, cmd: RollbackAutoResume) -> bool:
     """Reverse only the exact unscheduled PromotePending handoff."""
@@ -2877,7 +2801,6 @@ class ChatWriterActor:
       or promoted_run.status != "running"
       or not self._run_is_latest(db, promoted_run)
       or self._run_token_owner.get(cmd.chat_id) != cmd.promoted_run_token
-      or chat.run_status != "running"
     ):
       return False
 
@@ -2896,8 +2819,6 @@ class ChatWriterActor:
 
     chat.messages = messages[:-len(promoted_pending)]
     chat.pending_messages = promoted_pending + list(chat.pending_messages or [])
-    chat.run_status = None
-    chat.run_started_at = None
     db.delete(promoted_run)
     if cmd.retry_park:
       park.status = "resume_pending"

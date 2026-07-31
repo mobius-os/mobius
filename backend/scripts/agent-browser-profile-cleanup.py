@@ -38,7 +38,7 @@ class ProfileRow:
   age_days: float
   chat_id: str | None = None
   chat_inactive_days: float | None = None
-  run_status: str | None = None
+  running: bool = False
   selected: bool = False
   reason: str = ""
 
@@ -68,7 +68,7 @@ class ChatDbUnavailable(Exception):
   Distinct from "the database is reachable and has zero chats". Selection must
   fail CLOSED on this: if we cannot tell which profiles belong to live chats,
   every chat profile would otherwise be misread as an orphan and reaped on age
-  alone, bypassing the run-status and inactivity guards. Reaping is the
+  alone, bypassing the active-run and inactivity guards. Reaping is the
   mutating side, so it forgives nothing here.
   """
 
@@ -82,22 +82,12 @@ def _load_chats(db_path: Path) -> dict[str, dict[str, Any]]:
     raise ChatDbUnavailable(f"cannot open {db_path}: {exc}") from exc
   conn.row_factory = sqlite3.Row
   try:
-    try:
-      rows = conn.execute(
-        "select id, deleted_at, updated_at, activity_at, run_status from chats"
-      ).fetchall()
-    except sqlite3.OperationalError as exc:
-      # `run_status` is slated for retirement (models.py: the Step-3b follow-up
-      # once ChatRun fully replaces it). Degrade gracefully rather than treating
-      # the column drop as an unreadable database: without run_status, the
-      # 14-day inactivity guard alone still protects any active chat, because an
-      # active chat has recent activity_at. Any OTHER operational error (locked,
-      # I/O, missing table) is a genuine read failure and must fail closed.
-      if "run_status" not in str(exc).lower():
-        raise ChatDbUnavailable(f"cannot read chats from {db_path}: {exc}") from exc
-      rows = conn.execute(
-        "select id, deleted_at, updated_at, activity_at from chats"
-      ).fetchall()
+    rows = conn.execute(
+      "select c.id, c.deleted_at, c.updated_at, c.activity_at, "
+      "exists(select 1 from chat_runs r "
+      "where r.chat_id=c.id and r.status='running') as running "
+      "from chats c"
+    ).fetchall()
   except sqlite3.Error as exc:
     raise ChatDbUnavailable(f"cannot read chats from {db_path}: {exc}") from exc
   finally:
@@ -105,7 +95,7 @@ def _load_chats(db_path: Path) -> dict[str, dict[str, Any]]:
   chats: dict[str, dict[str, Any]] = {}
   for row in rows:
     record = dict(row)
-    record.setdefault("run_status", None)
+    record["running"] = bool(record["running"])
     chats[str(row["id"])] = record
   return chats
 
@@ -199,7 +189,7 @@ def collect(args: argparse.Namespace) -> tuple[list[ProfileRow], dict[str, Any]]
       chat_id: str | None = None
       category = "non_chat_named"
       inactive_days: float | None = None
-      run_status: str | None = None
+      running = False
       match = CHAT_PROFILE_RE.fullmatch(name)
       if match:
         chat_id = match.group(1)
@@ -210,7 +200,7 @@ def collect(args: argparse.Namespace) -> tuple[list[ProfileRow], dict[str, Any]]
           category = "soft_deleted_chat"
         else:
           category = "existing_chat"
-          run_status = chat.get("run_status")
+          running = bool(chat.get("running"))
           activity_ts = (
             _parse_sqlite_datetime(chat.get("activity_at"))
             or _parse_sqlite_datetime(chat.get("updated_at"))
@@ -225,7 +215,7 @@ def collect(args: argparse.Namespace) -> tuple[list[ProfileRow], dict[str, Any]]
         age_days=age_days,
         chat_id=chat_id,
         chat_inactive_days=inactive_days,
-        run_status=run_status,
+        running=running,
       ))
 
   for row in rows:
@@ -245,7 +235,7 @@ def collect(args: argparse.Namespace) -> tuple[list[ProfileRow], dict[str, Any]]
       and args.include_existing_chats
       and old_enough
       and inactive_enough
-      and row.run_status != "running"
+      and not row.running
     ):
       row.selected = True
       row.reason = (

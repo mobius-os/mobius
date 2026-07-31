@@ -219,7 +219,6 @@ async function setupOpenAppRoutesWithStaleInitialList(
     updated_at: new Date().toISOString(),
     has_messages: true,
     running: false,
-    run_status: null,
   }
   const app = (id, name, slug) => ({
     id,
@@ -730,7 +729,6 @@ test.describe('AppCanvas: iframe-mount contract', () => {
             updated_at: new Date().toISOString(),
             has_messages: false,
             running: false,
-            run_status: null,
           }),
         })
       }
@@ -750,7 +748,6 @@ test.describe('AppCanvas: iframe-mount contract', () => {
           messages: [],
           has_messages: false,
           running: false,
-          run_status: null,
           provider: 'claude',
         }),
       })

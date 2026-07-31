@@ -1160,6 +1160,7 @@ async def _start_conflict_resolver_turn(
     run_chat,
   )
   from app.chat_writer import StartTurn, alloc_run_token, await_ack, get_writer
+  from app.run_state import has_running_run
 
   chat = (
     db.query(models.Chat)
@@ -1167,7 +1168,7 @@ async def _start_conflict_resolver_turn(
     .first()
   )
   if (
-    chat is None or chat.messages or chat.run_status == "running" or
+    chat is None or chat.messages or has_running_run(db, chat_id) or
     is_chat_running(chat_id)
   ):
     return False

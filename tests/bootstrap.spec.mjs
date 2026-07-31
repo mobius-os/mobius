@@ -133,7 +133,6 @@ async function routeShell(page, {
         activity_at: null,
         pinned_at: null,
         created_by_app_id: null,
-        run_status: null,
         running: false,
         messages: [],
         detail,

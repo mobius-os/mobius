@@ -212,7 +212,6 @@ def backfill_started_chat_prompt_snapshots(
       chat.messages
       or chat.pending_messages
       or chat.session_id
-      or chat.run_status
       or chat.id in run_chat_ids
     )
     if not started:

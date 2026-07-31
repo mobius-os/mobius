@@ -16,12 +16,12 @@ def _seed_pending(
   chat_id: str,
   *,
   age_secs: float,
-  run_status: str | None = None,
+  running: bool = False,
 ) -> None:
   now_ms = int(time.time() * 1000)
   db = SessionLocal()
   try:
-    db.add(models.Chat(
+    chat = models.Chat(
       id=chat_id,
       title="pending",
       provider="claude",
@@ -32,9 +32,17 @@ def _seed_pending(
         "ts": now_ms - int(age_secs * 1000),
         "cid": f"cid-{chat_id}",
       }],
-      run_status=run_status,
-      run_started_at=(datetime.now(UTC) if run_status else None),
-    ))
+    )
+    db.add(chat)
+    db.flush()
+    if running:
+      db.add(models.ChatRun(
+        id=f"rt-{chat_id}",
+        chat_id=chat_id,
+        status="running",
+        provider="claude",
+        started_at=datetime.now(UTC),
+      ))
     db.commit()
   finally:
     db.close()
@@ -60,8 +68,14 @@ def _read(chat_id: str):
   db = SessionLocal()
   try:
     chat = db.get(models.Chat, chat_id)
+    from app.run_state import latest_run
+    run = latest_run(db, chat_id)
     return (
-      chat.run_status,
+      (
+        run.status
+        if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES
+        else None
+      ),
       list(chat.messages or []),
       list(chat.pending_messages or []),
     )
@@ -96,7 +110,7 @@ def test_idle_pending_sweep_claims_and_starts_old_queue(monkeypatch):
 
 def test_idle_pending_sweep_leaves_running_chat_untouched(monkeypatch):
   chat_id = "running-old-pending"
-  _seed_pending(chat_id, age_secs=180, run_status="running")
+  _seed_pending(chat_id, age_secs=180, running=True)
 
   swept, scheduled = _sweep(monkeypatch)
 
@@ -133,7 +147,6 @@ def test_idle_pending_sweep_candidate_query_does_not_load_transcripts(
       provider="codex",
       messages=[{"role": "assistant", "content": "x" * 1_000_000}],
       pending_messages=[],
-      run_status=None,
     ))
     db.commit()
   finally:
@@ -142,7 +155,7 @@ def test_idle_pending_sweep_candidate_query_does_not_load_transcripts(
   statements = []
 
   def capture(_conn, _cursor, statement, _parameters, _context, _many):
-    if "FROM chats" in statement and "chats.run_status IS NULL" in statement:
+    if "FROM chats" in statement and "chats.pending_messages" in statement:
       statements.append(statement)
 
   event.listen(engine, "before_cursor_execute", capture)
@@ -183,8 +196,7 @@ def _park_latest_run(chat_id: str, *, minutes_out: float) -> None:
 def test_idle_pending_sweep_leaves_limit_parked_queue_alone(monkeypatch):
   """LIMIT_PARKED preserves pending so it is NOT refired into the limit.
 
-  The park row outlives run_status (ParkRun clears the marker), so a
-  parked chat looks idle to the run_status filter. Draining it would
+  A parked chat has no running row. Draining it would
   consume the owner's queued work into a doomed turn and bypass the
   auto-resume opt-in that sweep_reset_parks enforces.
   """
@@ -196,8 +208,8 @@ def test_idle_pending_sweep_leaves_limit_parked_queue_alone(monkeypatch):
 
   assert swept == []
   assert scheduled == []
-  run_status, _messages, pending = _read(chat_id)
-  assert run_status is None
+  active_status, _messages, pending = _read(chat_id)
+  assert active_status == "parked"
   assert [m["content"] for m in pending] == ["recover me"]
 
 
@@ -215,7 +227,7 @@ def test_idle_pending_sweep_skips_past_park_until_user_or_optin(monkeypatch):
 
   assert swept == []
   assert scheduled == []
-  _run_status, _messages, pending = _read(chat_id)
+  _active_status, _messages, pending = _read(chat_id)
   assert [m["content"] for m in pending] == ["recover me"]
 
 
@@ -229,5 +241,5 @@ def test_idle_pending_sweep_stands_down_while_draining(monkeypatch):
 
   assert swept == []
   assert scheduled == []
-  _run_status, _messages, pending = _read(chat_id)
+  _active_status, _messages, pending = _read(chat_id)
   assert [m["content"] for m in pending] == ["recover me"]

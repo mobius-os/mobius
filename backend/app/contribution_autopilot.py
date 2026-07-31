@@ -800,13 +800,18 @@ async def spawn_round_turn(
     run_chat,
   )
   from app.chat_writer import StartTurn, alloc_run_token, await_ack, get_writer
+  from app.run_state import has_running_run
 
   chat = (
     db.query(models.Chat)
     .filter(models.Chat.id == chat_id, models.Chat.deleted_at.is_(None))
     .first()
   )
-  if chat is None or chat.run_status == "running" or is_chat_running(chat_id):
+  if (
+    chat is None
+    or has_running_run(db, chat_id)
+    or is_chat_running(chat_id)
+  ):
     return False
   if not mark_starting(chat_id):
     return False

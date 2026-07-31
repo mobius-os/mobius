@@ -318,7 +318,7 @@ def test_quota_prunes_regenerable_cache_before_profile(tmp_path):
   result = enforce_browser_profile_quota(
     tmp_path,
     {old: {"activity_at": now - timedelta(days=40),
-           "deleted_at": None, "run_status": None}},
+           "deleted_at": None, "running": False}},
     set(),
     now=now,
     max_bytes=90,
@@ -340,7 +340,7 @@ def test_quota_never_prunes_a_live_chat_profile(tmp_path):
   result = enforce_browser_profile_quota(
     tmp_path,
     {live: {"activity_at": now - timedelta(days=90),
-            "deleted_at": None, "run_status": "running"}},
+            "deleted_at": None, "running": True}},
     {live},
     now=now,
     max_bytes=1,
@@ -363,9 +363,9 @@ def test_quota_prunes_recent_closed_cache_before_old_durable_profile(tmp_path):
     tmp_path,
     {
       recent: {"activity_at": now - timedelta(days=1),
-               "deleted_at": None, "run_status": None},
+               "deleted_at": None, "running": False},
       old: {"activity_at": now - timedelta(days=90),
-            "deleted_at": None, "run_status": None},
+            "deleted_at": None, "running": False},
     },
     set(),
     now=now,
@@ -400,9 +400,9 @@ def test_quota_retires_oldest_recent_profile_when_grace_exceeds_budget(
     tmp_path,
     {
       older: {"activity_at": now - timedelta(days=2),
-              "deleted_at": None, "run_status": None},
+              "deleted_at": None, "running": False},
       newer: {"activity_at": now - timedelta(days=1),
-              "deleted_at": None, "run_status": None},
+              "deleted_at": None, "running": False},
     },
     set(),
     now=now,
@@ -435,9 +435,9 @@ def test_triggered_quota_finishes_at_low_water_after_partial_cache_reclaim(
     tmp_path,
     {
       older: {"activity_at": now - timedelta(days=2),
-              "deleted_at": None, "run_status": None},
+              "deleted_at": None, "running": False},
       newer: {"activity_at": now - timedelta(days=1),
-              "deleted_at": None, "run_status": None},
+              "deleted_at": None, "running": False},
     },
     set(),
     now=now,
@@ -464,7 +464,7 @@ def test_quota_reports_when_live_profiles_alone_exceed_the_budget(tmp_path):
   result = enforce_browser_profile_quota(
     tmp_path,
     {live: {"activity_at": now, "deleted_at": None,
-            "run_status": "running"}},
+            "running": True}},
     {live},
     now=now,
     max_bytes=50,

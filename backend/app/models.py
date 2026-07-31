@@ -160,27 +160,6 @@ class Chat(Base):
   # column DESC (newest pin at top of pinned group). PATCH
   # /api/chats/{id} accepts `pinned: bool` to toggle.
   pinned_at = Column(DateTime, nullable=True, default=None)
-  # Crash-recovery run marker. "running" while a turn is in flight,
-  # NULL otherwise. The runner registry holds the same truth in
-  # memory; this column is the DURABLE copy that survives an OOM /
-  # SIGKILL. On the next process start, lifespan reconciliation
-  # (chat.reconcile_interrupted_chats) finds any row still marked
-  # "running" — the in-memory registry is always empty at boot, so
-  # such a row is by definition a turn the dead process never
-  # finished — and resolves it (finalize the transcript, clear the
-  # marker, drop stranded pending_messages) instead of stranding the
-  # chat "running" forever in the user's view. Set at the top of
-  # chat._run_chat_impl, cleared in chat.run_chat's finally under the
-  # same generation-ownership guard that releases the _starting claim.
-  run_status = Column(String(16), nullable=True, default=None)
-  # When the in-flight turn started (UTC). Set alongside run_status;
-  # cleared to NULL when the turn ends. Not consulted by the startup
-  # reconciliation decision (run_status alone is sufficient — a boot
-  # with an empty registry makes every "running" row stale regardless
-  # of age) but kept for observability: the reconciliation log line
-  # reports how long the interrupted turn had been running, and a
-  # future liveness probe can read it without another migration.
-  run_started_at = Column(DateTime, nullable=True, default=None)
   # App that created this chat, when it was opened through the
   # app-attributed chat contract (design §1) rather than by the owner
   # in the shell. NULL = an ordinary owner chat. Set, this chat is
@@ -207,29 +186,20 @@ class Chat(Base):
 
 
 class ChatRun(Base):
-  """Durable per-turn run record (persistence redesign 077 Step 3).
+  """Durable per-turn run record and persisted run-state authority.
 
   One row per turn, keyed by the in-memory run_token (which IS this row's
   `id` — the same identity the actor commands and the sink already carry, not
-  a second one). This is the per-run successor to the single `Chat.run_status`
-  column: a row left ``status == "running"`` by a process that died is an
+  a second one). A row left ``status == "running"`` by a process that died is an
   interrupted turn that boot reconciliation resolves. It also carries the
   per-run attribution one shared column never could (provider, cost, the
   initiating app), which the app-attributed-chat contract (077 §1) and the
   redacted chat-log read API (Capability B) build on.
 
-  Transitional dual-write: `Chat.run_status` is still set/cleared in lockstep
-  with this row (in the same actor commit) for one deploy cycle, so a rollback
-  to pre-Step-3 code keeps recovering, and so reconciliation still catches a
-  turn that was in flight ACROSS the deploy (started under old code, with no
-  `chat_runs` row). Reconciliation reads the UNION of both signals during the
-  transition; retiring the `run_status` column is the Step-3b follow-up (along
-  with collapsing the in-memory generation onto this same run identity, which
-  is what finally closes 080 item 4's split source of truth).
-
-  `create_all` builds this table on the next boot (a new table, so no ALTER
-  migration is needed — see `run_migrations`, which only ALTERs existing
-  tables); existing rows are untouched.
+  The writer creates and transitions this row in the same transaction as the
+  transcript mutation that starts, parks, or completes a turn. Startup and
+  runtime recovery therefore consume the exact same identity the live sink
+  carries instead of maintaining a second per-chat status marker.
   """
 
   __tablename__ = "chat_runs"

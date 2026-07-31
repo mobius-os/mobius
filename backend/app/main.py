@@ -85,11 +85,17 @@ def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
 
 
 def _init_db():
-  """Run migrations and create tables, retrying on transient failures."""
+  """Create missing tables, then migrate existing ones, with retries.
+
+  Creating tables first lets a migration move legacy data into a newly
+  introduced table before retiring its old columns. ``create_all`` never
+  mutates existing tables, so column upgrades remain owned by
+  ``run_migrations``.
+  """
   for attempt in range(10):
     try:
-      run_migrations(engine)
       Base.metadata.create_all(bind=engine)
+      run_migrations(engine)
       return
     except OperationalError as e:
       if attempt < 9:
@@ -585,7 +591,7 @@ async def lifespan(app):
       sweep_idle_pending_chats,
       sweep_reset_parks,
       sweep_stalled_live_runs,
-      sweep_wedged_run_markers,
+      sweep_wedged_runs,
     )
     from app.database import SessionLocal as _SweepSession
 
@@ -595,7 +601,7 @@ async def lifespan(app):
         try:
           _sw_db = _SweepSession()
           try:
-            await sweep_wedged_run_markers(_sw_db)
+            await sweep_wedged_runs(_sw_db)
             await sweep_idle_pending_chats(_sw_db)
           finally:
             _sw_db.close()

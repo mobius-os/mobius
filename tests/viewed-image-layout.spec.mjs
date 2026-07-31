@@ -19,7 +19,6 @@ function chatListItem() {
     created_by_app_id: null,
     has_messages: true,
     running: false,
-    run_status: null,
   }
 }
 

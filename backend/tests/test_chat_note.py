@@ -203,11 +203,15 @@ def test_read_transcript_excludes_derived_provider_handoffs(tmp_path):
   con = sqlite3.connect(database)
   con.execute(
     "create table chats (id text primary key, messages text, "
-    "updated_at text, run_status text, deleted_at text)"
+    "updated_at text, deleted_at text)"
   )
   con.execute(
-    "insert into chats (id, messages, updated_at, run_status, deleted_at) "
-    "values (?, ?, ?, null, null)",
+    "create table chat_runs ("
+    "id text primary key, chat_id text, status text, started_at text)"
+  )
+  con.execute(
+    "insert into chats (id, messages, updated_at, deleted_at) "
+    "values (?, ?, ?, null)",
     ("c1", json.dumps([
       {"role": "user", "content": "original request"},
       {
@@ -440,12 +444,16 @@ def _snapshot_db(cn, tmp_path):
   con.execute(
     "create table chats ("
     "id text primary key, messages text, updated_at text, "
-    "run_status text, deleted_at text)"
+    "deleted_at text)"
+  )
+  con.execute(
+    "create table chat_runs ("
+    "id text primary key, chat_id text, status text, started_at text)"
   )
   con.execute("create table owner (provider text)")
   con.execute("insert into owner values ('codex')")
   con.execute(
-    "insert into chats values (?, ?, ?, null, null)",
+    "insert into chats values (?, ?, ?, null)",
     (
       "c1",
       json.dumps([
@@ -494,7 +502,11 @@ def test_new_turn_or_delete_makes_summary_publication_stale(tmp_path):
   _existing, note_revision = cn._read_note_snapshot(note)
   con = sqlite3.connect(db_path)
   con.execute(
-    "update chats set run_status='running', updated_at=? where id='c1'",
+    "insert into chat_runs values "
+    "('run-c1', 'c1', 'running', '2026-07-13 10:00:01.000000')"
+  )
+  con.execute(
+    "update chats set updated_at=? where id='c1'",
     ("2026-07-13 10:00:01.000000",),
   )
   con.commit()
@@ -506,9 +518,9 @@ def test_new_turn_or_delete_makes_summary_publication_stale(tmp_path):
   assert not note.exists()
 
   con = sqlite3.connect(db_path)
+  con.execute("delete from chat_runs where chat_id='c1'")
   con.execute(
-    "update chats set run_status=null, deleted_at='2026-07-13', "
-    "updated_at=? where id='c1'",
+    "update chats set deleted_at='2026-07-13', updated_at=? where id='c1'",
     (revision,),
   )
   con.commit()

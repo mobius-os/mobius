@@ -336,7 +336,6 @@ def test_app_chat_patch_rejects_provider_switch_after_first_user_turn(
   chat_id = response.json()["id"]
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
   row.messages = [{"role": "user", "content": "first request"}]
-  row.run_status = "running"
   db.add(models.ChatRun(
     id="app-first-live-turn",
     chat_id=chat_id,

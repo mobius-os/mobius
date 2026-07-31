@@ -6,7 +6,7 @@ round-trip verification + rollback-on-failure contract, and the
 `scripts/migrate_chat_identity` orchestration.
 """
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 
 from app import models
 from app.chat_writer import (
@@ -36,13 +36,20 @@ def _fat_tool_msg(ts=100, full=None, **blk_extra) -> dict:
     return {"role": "assistant", "ts": ts, "content": "", "blocks": [blk]}
 
 
-def _make_chat(db, cid, messages, pending=None, run_status=None,
+def _make_chat(db, cid, messages, pending=None, running=False,
                deleted_at=None):
     chat = models.Chat(
         id=cid, title="t", messages=messages, pending_messages=pending or [],
-        run_status=run_status, deleted_at=deleted_at,
+        deleted_at=deleted_at,
     )
     db.add(chat)
+    if running:
+        db.add(models.ChatRun(
+            id=f"run-{cid}",
+            chat_id=cid,
+            status="running",
+            provider="claude",
+        ))
     db.commit()
     return chat
 
@@ -298,7 +305,7 @@ def test_migrate_skips_active_chat(db):
     _make_chat(db, "c5", [
         {"role": "user", "ts": 1},
         _fat_tool_msg(ts=2),
-    ], run_status="running")
+    ], running=True)
     res = _migrate("c5")
     assert res["status"] == "skipped_active"
     reread = _reread(db, "c5")
@@ -324,7 +331,7 @@ def test_migrate_includes_soft_deleted_chat(db):
 
 
 # -- optimistic CAS guard (the cross-process safety mechanism) ------------
-def test_cas_guard_run_status_and_updated_at(db):
+def test_cas_guard_nonterminal_run_and_updated_at(db):
     from datetime import timedelta
     _make_chat(db, "cx", [], [])
     snap = db.execute(
@@ -335,8 +342,16 @@ def test_cas_guard_run_status_and_updated_at(db):
     # exact snapshot + idle -> applies (rowcount 1)
     r1 = db.execute(
         update(models.Chat)
-        .where(models.Chat.id == "cx", models.Chat.run_status.is_(None),
-               models.Chat.updated_at == snap)
+        .where(
+            models.Chat.id == "cx",
+            models.Chat.updated_at == snap,
+            ~exists().where(
+                models.ChatRun.chat_id == models.Chat.id,
+                models.ChatRun.status.in_(
+                    ("running", "parked", "resume_pending")
+                ),
+            ),
+        )
         .values(messages=[{"a": 1}])
     )
     assert r1.rowcount == 1
@@ -352,17 +367,29 @@ def test_cas_guard_run_status_and_updated_at(db):
     assert r2.rowcount == 0
     db.rollback()
 
-    # run_status set (a live turn started) -> no-op even with fresh updated_at
-    db.execute(update(models.Chat).where(models.Chat.id == "cx")
-               .values(run_status="running"))
+    # A live run started -> no-op even with a fresh updated_at snapshot.
+    db.add(models.ChatRun(
+        id="run-cx",
+        chat_id="cx",
+        status="running",
+        provider="claude",
+    ))
     db.commit()
     snap2 = db.execute(
         select(models.Chat.updated_at).where(models.Chat.id == "cx")
     ).scalar_one()
     r3 = db.execute(
         update(models.Chat)
-        .where(models.Chat.id == "cx", models.Chat.run_status.is_(None),
-               models.Chat.updated_at == snap2)
+        .where(
+            models.Chat.id == "cx",
+            models.Chat.updated_at == snap2,
+            ~exists().where(
+                models.ChatRun.chat_id == models.Chat.id,
+                models.ChatRun.status.in_(
+                    ("running", "parked", "resume_pending")
+                ),
+            ),
+        )
         .values(messages=[{"c": 3}])
     )
     assert r3.rowcount == 0

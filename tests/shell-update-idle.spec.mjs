@@ -445,7 +445,6 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
         body: JSON.stringify([{
           ...idleChat,
           running: false,
-          run_status: 'idle',
         }]),
       })
     })

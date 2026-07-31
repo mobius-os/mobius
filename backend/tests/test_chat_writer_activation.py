@@ -50,10 +50,13 @@ def _load(chat_id):
   db = SessionLocal()
   try:
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    running = db.query(models.ChatRun.id).filter_by(
+      chat_id=chat_id, status="running",
+    ).first() is not None
     return None if chat is None else {
       "messages": list(chat.messages or []),
       "pending_messages": list(chat.pending_messages or []),
-      "run_status": chat.run_status,
+      "running": running,
     }
   finally:
     db.close()
@@ -325,15 +328,17 @@ def test_finalize_failure_via_run_chat_leaves_marker_for_reconciliation(
   # branch).
   db = SessionLocal()
   try:
-    from datetime import UTC, datetime
     from app import auth as auth_mod
     db.add(models.Owner(
       username="o", hashed_password=auth_mod.hash_password("x"),
       provider="claude",
     ))
-    c = db.query(models.Chat).filter(models.Chat.id == "c-fin").one()
-    c.run_status = "running"
-    c.run_started_at = datetime.now(UTC)
+    db.add(models.ChatRun(
+      id="rt-fin",
+      chat_id="c-fin",
+      status="running",
+      provider="claude",
+    ))
     db.commit()
   finally:
     db.close()
@@ -395,7 +400,7 @@ def test_finalize_failure_via_run_chat_leaves_marker_for_reconciliation(
   assert "done" in published
   assert "queued_turn_starting" not in published
   chat_state = _load("c-fin")
-  assert chat_state["run_status"] == "running"  # left for reconciliation
+  assert chat_state["running"] is True  # left for reconciliation
   assert len(chat_state["pending_messages"]) == 1  # not promoted/executed
 
 

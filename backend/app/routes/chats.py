@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app import activity, auth, models, providers, questions
 from app.config import get_settings
 from app.chat import (
-  _clear_run_status,
+  _finish_run,
   bump_run_generation,
   is_chat_running,
   mark_chat_deleted,
@@ -36,6 +36,11 @@ from app.resource_access import (
   get_active_chat_for_principal,
   get_active_chat_or_404,
   require_active_chat_access,
+)
+from app.run_state import (
+  has_nonterminal_run,
+  has_running_run,
+  running_chat_ids,
 )
 from app.schemas import ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
@@ -288,7 +293,7 @@ def issue_media_token(
   return {"token": token, "expires_in": 900}
 
 
-def _owner_chat_summary(chat: models.Chat) -> dict:
+def _owner_chat_summary(chat: models.Chat, *, durable_running: bool = False) -> dict:
   """Canonical shape shared by create and the owner drawer list."""
   return {
     "id": chat.id,
@@ -298,12 +303,11 @@ def _owner_chat_summary(chat: models.Chat) -> dict:
     "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
     "has_messages": bool(chat.messages and len(chat.messages) > 0),
     "created_by_app_id": chat.created_by_app_id,
-    "run_status": chat.run_status,
-    "running": chat.run_status == "running" or is_chat_running(chat.id),
+    "running": durable_running or is_chat_running(chat.id),
   }
 
 
-def _owner_chat_summary_projection(chat) -> dict:
+def _owner_chat_summary_projection(chat, *, durable_running: bool = False) -> dict:
   """Serialize the lightweight row projection used by the drawer list.
 
   ``GET /api/chats`` used to hydrate every complete ``Chat`` ORM object merely
@@ -320,8 +324,7 @@ def _owner_chat_summary_projection(chat) -> dict:
     "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
     "has_messages": bool(chat.message_count),
     "created_by_app_id": chat.created_by_app_id,
-    "run_status": chat.run_status,
-    "running": chat.run_status == "running" or is_chat_running(chat.id),
+    "running": durable_running or is_chat_running(chat.id),
   }
 
 
@@ -355,7 +358,7 @@ def _chat_detail_response(
   from app.providers import effective_agent_settings
 
   all_msgs = materialized_messages(chat)
-  running = is_chat_running(chat.id)
+  running = is_chat_running(chat.id) or has_running_run(db, chat.id)
   live_snapshot = chat.live_assistant
   live_message = (
     all_msgs[-1]
@@ -482,7 +485,6 @@ def list_chats(
     # chats normally keep this NULL, so this remains a tiny projection rather
     # than pulling transcript/runtime JSON into the hot path.
     models.Chat.agent_settings_json,
-    models.Chat.run_status,
     case(
       (cast(models.Chat.messages, Text) != "[]", 1),
       else_=0,
@@ -501,11 +503,17 @@ def list_chats(
     # embedded app panels and stay hidden; an app can opt a spawned, first-class
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
+  durable_running = running_chat_ids(db, (chat.id for chat in chats))
   record_memory_checkpoint_once(
     "shell_chat_list_first_response",
     chat_count=len(chats),
   )
-  return [_owner_chat_summary_projection(c) for c in chats]
+  return [
+    _owner_chat_summary_projection(
+      chat, durable_running=chat.id in durable_running,
+    )
+    for chat in chats
+  ]
 
 
 @router.get("/session-links")
@@ -902,15 +910,10 @@ async def patch_chat(
       and latest_message.get("from_provider") == (chat.provider or "claude")
     )
     if provider_changing:
-      active_run = db.query(models.ChatRun).filter(
-        models.ChatRun.chat_id == chat_id,
-        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
-      ).first()
       if (
         is_chat_running(chat_id)
-        or chat.run_status
         or chat.pending_messages
-        or active_run is not None
+        or has_nonterminal_run(db, chat_id)
       ):
         raise HTTPException(
           status_code=409,
@@ -1568,16 +1571,15 @@ async def delete_chat(
   questions.cancel(chat_id)
   mark_chat_deleted(chat_id)
   # Close the chat's durable run state as part of the delete. A delete with a
-  # LIVE handle stops the runner but does NOT clear the marker (that is handed
-  # to run_chat's finally), and the dying run then bows out STALE_NO_ACTION on
-  # the +inf generation — so without this the soft-deleted chat keeps a stale
-  # run_status=="running" AND a "running" chat_runs record until the next boot
-  # sweep. A tokenless ClearRunStatus closes every running run record + clears
-  # run_status + drops the actor's _run_token_owner entry; it is best-effort
+  # LIVE handle stops the runner but hands durable closure to run_chat's finally,
+  # and the dying run then bows out STALE_NO_ACTION on the +inf generation — so
+  # without this the soft-deleted chat keeps a running ChatRun until the next
+  # boot sweep. A tokenless FinishRun closes every nonterminal run record and
+  # drops the actor's _run_token_owner entry; it is best-effort
   # and safe on a soft-deleted row (clear commands don't resurrect), and
   # idempotent when the run state is already clean (the common idle delete).
   try:
-    await _clear_run_status(chat_id, terminal_status="stopped")
+    await _finish_run(chat_id, terminal_status="stopped")
   except Exception:
     # The tombstone is already committed and published. Returning a 500 now
     # would make the client treat an authoritative deletion as inconclusive,
@@ -1721,7 +1723,11 @@ async def _compact_chat_locked(
     raise HTTPException(
       status_code=409, detail="This chat already uses that provider."
     )
-  if is_chat_running(chat_id) or chat.run_status or chat.pending_messages:
+  if (
+    is_chat_running(chat_id)
+    or chat.pending_messages
+    or has_running_run(db, chat_id)
+  ):
     raise HTTPException(
       status_code=409,
       detail="Chat is busy — finish or stop the current turn before switching.",
@@ -1869,15 +1875,10 @@ async def compact_chat(
         status_code=409,
         detail="App chats cannot change provider after they are created.",
       )
-    active_run = db.query(models.ChatRun).filter(
-      models.ChatRun.chat_id == chat_id,
-      models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
-    ).first()
     if (
       is_chat_running(chat_id)
-      or chat.run_status
       or chat.pending_messages
-      or active_run is not None
+      or has_nonterminal_run(db, chat_id)
     ):
       raise HTTPException(
         status_code=409,
@@ -2266,17 +2267,12 @@ async def patch_app_chat(
   async with get_transition_lock(chat_id):
     chat = get_active_chat_for_principal(db, chat_id, principal)
     if body.system_prompt is not None:
-      active_run = db.query(models.ChatRun).filter(
-        models.ChatRun.chat_id == chat_id,
-        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
-      ).first()
       if (
         chat.system_prompt_snapshot_id
-        or chat.run_status
         or chat.messages
         or chat.pending_messages
         or chat.session_id
-        or active_run is not None
+        or has_nonterminal_run(db, chat_id)
       ):
         raise HTTPException(
           status_code=409,
@@ -2300,17 +2296,12 @@ async def patch_app_chat(
           status_code=422, detail=f"unknown provider: {body.provider}"
         )
       if chat.provider != body.provider:
-        active_run = db.query(models.ChatRun).filter(
-          models.ChatRun.chat_id == chat_id,
-          models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
-        ).first()
         if (
           is_chat_running(chat_id)
-          or chat.run_status
           or chat.pending_messages
           or chat.messages
           or chat.session_id
-          or active_run is not None
+          or has_nonterminal_run(db, chat_id)
         ):
           raise HTTPException(
             status_code=409,

@@ -363,7 +363,9 @@ def test_turn_start_during_synthesis_wins_without_partial_switch(
   db.expire_all()
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
   assert row.provider == "claude"
-  assert row.run_status == "running"
+  assert db.query(models.ChatRun).filter_by(
+    chat_id=chat_id, status="running",
+  ).count() == 1
   assert row.messages[-1]["content"] == "racing send"
   assert not any(m.get("kind") == "compaction" for m in row.messages)
 
@@ -507,8 +509,12 @@ def test_busy_chat_rejects_before_synthesis(client, auth, db, monkeypatch):
     {"role": "user", "content": "hi"},
     {"role": "assistant", "content": "hello"},
   ])
-  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-  row.run_status = "running"
+  db.add(models.ChatRun(
+    id="busy-provider-switch",
+    chat_id=chat_id,
+    status="running",
+    provider="claude",
+  ))
   db.commit()
   response = client.post(
     f"/api/chats/{chat_id}/provider-switch", headers=auth, json=_payload(),

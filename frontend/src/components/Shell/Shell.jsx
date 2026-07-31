@@ -1817,7 +1817,7 @@ export default function Shell() {
   const streamingChatIds = useMemo(() => {
     const next = new Set(localStreamingChatIds)
     for (const chat of chats) {
-      if (chat.running || chat.run_status === 'running') next.add(chat.id)
+      if (chat.running) next.add(chat.id)
     }
     return next
   }, [localStreamingChatIds, chats])

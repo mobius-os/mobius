@@ -19,8 +19,8 @@ Walks every chat's transcript once and does BOTH:
 
 Both mutations run through the single-writer `chat_writer` actor's `MigrateChat`
 command — the whole per-chat read-modify-write happens on the actor thread under
-an optimistic compare-and-swap (`WHERE run_status IS NULL AND updated_at =
-<snapshot>`), so a chat with a live turn in flight is DEFERRED, not clobbered,
+an optimistic compare-and-swap (`WHERE updated_at = <snapshot>` plus no
+nonterminal `ChatRun`), so a chat with a live turn in flight is DEFERRED, not clobbered,
 even though this script runs as a second writer process alongside the live
 server. Idle-gate the run to keep deferrals rare; deferred chats are reported
 for a re-run.

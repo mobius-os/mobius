@@ -613,8 +613,10 @@ def section_focus_chat(con, chat_id):
         return
     try:
         row = con.execute(
-            "select title, provider, created_at, updated_at, run_status, "
-            "coalesce(session_id,''), messages from chats where id=?",
+            "select c.title, c.provider, c.created_at, c.updated_at, "
+            "(select r.status from chat_runs r where r.chat_id=c.id "
+            "order by r.started_at desc, r.id desc limit 1), "
+            "coalesce(c.session_id,''), c.messages from chats c where c.id=?",
             (chat_id,),
         ).fetchone()
     except sqlite3.Error as exc:
@@ -623,13 +625,13 @@ def section_focus_chat(con, chat_id):
     if not row:
         print("  (no such chat)")
         return
-    title, provider, created, updated, run_status, session, messages = row
+    title, provider, created, updated, run_state, session, messages = row
     try:
         nmsg = len(json.loads(messages)) if messages else 0
     except (ValueError, TypeError):
         nmsg = "?"
     print(f"  title:    {title}")
-    print(f"  provider: {provider or 'claude'}   messages: {nmsg}   run_status: {run_status or '-'}")
+    print(f"  provider: {provider or 'claude'}   messages: {nmsg}   run: {run_state or '-'}")
     print(f"  created:  {created}   updated: {updated}")
     print(f"  session:  {session or '(none)'}")
 

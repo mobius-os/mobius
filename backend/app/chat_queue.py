@@ -61,7 +61,7 @@ from app import schemas
 # Bound on EVERY terminal lock acquisition (the turn-end drain, the
 # no-owner / auth-error / unsupported-provider cleanup, and Stop's queue
 # cleanup). = 2·ACK_TIMEOUT_SECS + busy_timeout: a terminal transition may
-# await two sequential strict acks (PromotePending → ClearRunStatus) plus
+# await two sequential strict acks (PromotePending → FinishRun) plus
 # SQLite's 5s busy_timeout, so a healthy-but-contended terminal lock holder
 # completes well inside this bound. Exceeding it means the holder is wedged
 # — the timeout converts that hang into a FAILED_LEAVE_MARKER disposition
@@ -292,7 +292,7 @@ async def drain_and_release(
   *,
   discard_starting,
   forget_chat,
-  clear_run_status_strict,
+  finish_run_strict,
   current_generation,
   ending_run_token: str = "",
   ending_status: str = "completed",
@@ -308,7 +308,7 @@ async def drain_and_release(
       continuously set (PromotePending re-set it for the next turn) and
       ownership passes to the scheduled continuation; do NOT clear/forget.
     - If nothing to promote AND we_own_gen, clears the durable run marker
-      (strict `ClearRunStatus`, identity-keyed on `ending_run_token`), then
+      (strict `FinishRun`, identity-keyed on `ending_run_token`), then
       releases _starting, then forgets the chat — the clear-before-forget
       ordering, ALL inside this lock. The clear naming the finishing run's
       token means a fresh `StartTurn` that set a new marker mid-drain isn't
@@ -334,12 +334,12 @@ async def drain_and_release(
   Bounding: the lock acquisition is wrapped in
   `asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)`. A lock-acquisition timeout
   (another task holds the lock past the bound) OR a failed strict ack
-  (PromotePending / ClearRunStatus didn't land, timed out, or hit a
+  (PromotePending / FinishRun didn't land, timed out, or hit a
   malformed pending entry) raises out of this function; the caller maps that
   to `FAILED_LEAVE_MARKER`, leaving the marker set for reconciliation
   rather than scheduling a continuation / clearing on a lost write.
 
-  `discard_starting`, `forget_chat`, and `clear_run_status_strict` are
+  `discard_starting`, `forget_chat`, and `finish_run_strict` are
   injected so this module stays free of an import cycle back into chat.py /
   runner_registry. Caller (chat.py:_complete_turn) keeps responsibility for
   the post-lock `_schedule_continuation` call — this function does NOT
@@ -373,7 +373,7 @@ async def drain_and_release(
         # keyed on the finishing run's token, so even a StartTurn that lands
         # mid-drain (no generation bump → we_own_gen still true) keeps its
         # marker — the actor no-ops a clear that names the old owner.
-        await clear_run_status_strict(
+        await finish_run_strict(
           chat_id, ending_run_token, ending_status,
         )
         discard_starting(chat_id)

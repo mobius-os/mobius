@@ -24,7 +24,6 @@ const empty = (id, extra = {}) => ({
   id,
   has_messages: false,
   running: false,
-  run_status: null,
   ...extra,
 })
 
@@ -101,7 +100,6 @@ test('the most recent concrete chat route can resume standard-mode composition',
 test('running, excluded, recovered, and populated active chats are rejected', () => {
   const options = { activeChatId: 'active' }
   assert.equal(currentReusableEmptyChat([empty('active', { running: true })], options), null)
-  assert.equal(currentReusableEmptyChat([empty('active', { run_status: 'running' })], options), null)
   assert.equal(currentReusableEmptyChat([empty('active', { has_messages: true })], options), null)
   assert.equal(currentReusableEmptyChat([empty('active')], {
     ...options, exclude: 'active',
@@ -221,7 +219,6 @@ test('a created chat enters the cache without displacing pinned chats', () => {
     pinned_at: null,
     has_messages: false,
     created_by_app_id: null,
-    run_status: null,
     running: false,
     messages: [],
     detail: untouchedDetail(),

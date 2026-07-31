@@ -820,7 +820,6 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           pinned_at: null,
           has_messages: durableMessages.length > 0,
           created_by_app_id: null,
-          run_status: durableRunning ? 'running' : 'idle',
           running: durableRunning,
         }]),
       })

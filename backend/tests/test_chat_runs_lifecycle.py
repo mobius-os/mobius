@@ -15,16 +15,13 @@ from app.database import SessionLocal
 from app.timeutil import SOFT_DELETE_TTL
 
 
-def _seed_chat(chat_id, *, messages=None, run_status=None, deleted_at=None):
+def _seed_chat(chat_id, *, messages=None, deleted_at=None):
   db = SessionLocal()
   try:
     c = models.Chat(
       id=chat_id, title="t", messages=messages or [], pending_messages=[],
       session_id="sess", provider="claude",
     )
-    if run_status is not None:
-      c.run_status = run_status
-      c.run_started_at = datetime.now(UTC)
     if deleted_at is not None:
       c.deleted_at = deleted_at
     db.add(c)
@@ -61,8 +58,9 @@ def _chat_state(chat_id):
   db = SessionLocal()
   try:
     c = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    from app.run_state import has_running_run
     return None if c is None else {
-      "run_status": c.run_status, "deleted_at": c.deleted_at,
+      "running": has_running_run(db, chat_id), "deleted_at": c.deleted_at,
     }
   finally:
     db.close()
@@ -73,19 +71,17 @@ def _drain():
 
 
 def test_soft_delete_closes_the_running_run_record(client, auth):
-  """Deleting a chat that carries a live run marker closes its durable run
-  record + clears run_status, instead of leaving a stale "running" record for
-  the next boot sweep to mop up."""
-  _seed_chat("del-live", run_status="running")
+  """Deleting a chat closes its durable run instead of leaving it for boot."""
+  _seed_chat("del-live")
   _seed_run("rt-del", "del-live", status="running")
   # Not in the registry, so is_chat_running is False — delete skips
-  # stop_chat_for and reaches the tokenless ClearRunStatus directly.
+  # stop_chat_for and reaches the tokenless FinishRun directly.
   r = client.delete("/api/chats/del-live", headers=auth)
   assert r.status_code == 204
   _drain()
   assert _runs("del-live")["rt-del"] != "running", "run record must be closed"
   state = _chat_state("del-live")
-  assert state["run_status"] is None, "run_status must be cleared on delete"
+  assert state["running"] is False
   assert state["deleted_at"] is not None, "chat is soft-deleted"
 
 
@@ -148,22 +144,18 @@ def test_hard_purge_deletes_session_links():
 
 
 def test_orphan_sweep_does_not_mask_a_failed_destructive_reconcile(monkeypatch):
-  """If a chat's destructive reconcile FAILS + rolls back (run_status stays
-  "running"), the non-destructive orphan sweep must NOT flip its run record to
-  "interrupted" — that would diverge the two signals and hide the failure from
-  the next boot's destructive retry."""
+  """A failed destructive reconcile must leave its run open for retry."""
   _seed_chat(
     "recon-fail",
     messages=[
       {"role": "user", "content": "hi", "ts": 1},
       {"role": "assistant", "blocks": [], "ts": 2},
     ],
-    run_status="running",
   )
   _seed_run("rt-rf", "recon-fail", status="running")
 
   # Force the destructive per-chat finalize to raise so its branch rolls back,
-  # leaving run_status=="running" (the failed-reconcile state).
+  # leaving the durable run open.
   def _boom(_blocks):
     raise RuntimeError("simulated finalize failure")
 
@@ -176,9 +168,7 @@ def test_orphan_sweep_does_not_mask_a_failed_destructive_reconcile(monkeypatch):
     db.close()
 
   assert "recon-fail" not in reconciled, "destructive reconcile failed"
-  assert _chat_state("recon-fail")["run_status"] == "running", (
-    "failed reconcile leaves run_status running for next boot"
-  )
+  assert _chat_state("recon-fail")["running"] is True
   assert _runs("recon-fail")["rt-rf"] == "running", (
     "orphan sweep must NOT flip a record whose chat is still authoritatively "
     "running — that would mask the failed reconcile"

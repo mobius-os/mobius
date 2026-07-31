@@ -48,7 +48,7 @@ export function currentReusableEmptyChat(chats, {
   if (!chat || chat.has_messages) return null
   if (excludedId != null && activeId === excludedId) return null
   if (recoveredIds.has(activeId) || streamingIds.has(activeId)) return null
-  if (chat.running || chat.run_status === 'running') return null
+  if (chat.running) return null
   return chat
 }
 

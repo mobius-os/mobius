@@ -63,8 +63,8 @@ def _seed_owner_and_creds():
   }), encoding="utf-8")
 
 
-def _seed_chat(chat_id, messages=None, pending=None, run_status=None,
-               session_id="sess"):
+def _seed_chat(chat_id, messages=None, pending=None, running=None,
+               session_id="sess", run_token=None):
   from datetime import UTC, datetime
 
   db = SessionLocal()
@@ -75,10 +75,19 @@ def _seed_chat(chat_id, messages=None, pending=None, run_status=None,
       pending_messages=pending if pending is not None else [],
       session_id=session_id, provider="claude",
     )
-    if run_status is not None:
-      chat.run_status = run_status
-      chat.run_started_at = datetime.now(UTC)
     db.add(chat)
+    if running:
+      run_id = run_token or (
+        f"rt-{chat_id[1:]}" if chat_id.startswith("t")
+        else f"rt-{chat_id}"
+      )
+      db.add(models.ChatRun(
+        id=run_id,
+        chat_id=chat_id,
+        status="running",
+        provider="claude",
+        started_at=datetime.now(UTC),
+      ))
     db.commit()
   finally:
     db.close()
@@ -89,10 +98,14 @@ def _load(chat_id):
   db = SessionLocal()
   try:
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    running = db.query(models.ChatRun.id).filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.status == "running",
+    ).first() is not None
     return None if chat is None else {
       "messages": list(chat.messages or []),
       "pending_messages": list(chat.pending_messages or []),
-      "run_status": chat.run_status,
+      "running": running,
     }
   finally:
     db.close()
@@ -103,13 +116,20 @@ def _seed_run(run_id, chat_id, *, provider="claude"):
 
   db = SessionLocal()
   try:
-    db.add(models.ChatRun(
-      id=run_id,
-      chat_id=chat_id,
-      status="running",
-      provider=provider,
-      started_at=datetime.now(UTC),
-    ))
+    run = db.query(models.ChatRun).filter(models.ChatRun.id == run_id).first()
+    if run is None:
+      db.query(models.ChatRun).filter(
+        models.ChatRun.chat_id == chat_id,
+        models.ChatRun.status == "running",
+      ).delete(synchronize_session=False)
+      run = models.ChatRun(
+        id=run_id,
+        chat_id=chat_id,
+        started_at=datetime.now(UTC),
+      )
+      db.add(run)
+    run.status = "running"
+    run.provider = provider
     db.commit()
   finally:
     db.close()
@@ -181,7 +201,7 @@ def test_empty_queue_terminal_clears_marker(monkeypatch):
   _seed_owner_and_creds()
   _seed_chat(
     "t1", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[], run_status="running",
+    pending=[], running="running",
   )
   _patch_claude_runner(monkeypatch)
 
@@ -192,7 +212,7 @@ def test_empty_queue_terminal_clears_marker(monkeypatch):
   _drain_actor()
 
   state = _load("t1")
-  assert state["run_status"] is None, "empty-queue terminal must clear marker"
+  assert state["running"] is False, "empty-queue terminal must clear marker"
   assert "queued_turn_starting" not in published
   assert "done" in published
   # The chat was forgotten (generation dropped) after the clear.
@@ -210,7 +230,7 @@ def test_provider_error_clears_marker_but_records_failed_run(monkeypatch):
   _seed_owner_and_creds()
   _seed_chat(
     "t1-failed", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[], run_status="running",
+    pending=[], running="running",
   )
   _seed_run("rt-1-failed", "t1-failed")
 
@@ -235,7 +255,7 @@ def test_provider_error_clears_marker_but_records_failed_run(monkeypatch):
   )
   _drain_actor()
 
-  assert _load("t1-failed")["run_status"] is None
+  assert _load("t1-failed")["running"] is False
   assert _run_outcomes("t1-failed") == {"rt-1-failed": "failed"}
   assert "error" in published
   assert "done" in published
@@ -249,7 +269,7 @@ def test_provider_error_handoff_keeps_failed_predecessor(monkeypatch):
     "t1-failed-queued",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "next", "ts": 2}],
-    run_status="running",
+    running="running",
   )
   _seed_run("rt-1-failed-queued", "t1-failed-queued")
 
@@ -279,7 +299,7 @@ def test_provider_error_handoff_keeps_failed_predecessor(monkeypatch):
     "rt-1-failed-queued": "failed",
     successor_token: "running",
   }
-  assert _load("t1-failed-queued")["run_status"] == "running"
+  assert _load("t1-failed-queued")["running"] is True
 
 
 @pytest.mark.parametrize("queued", [False, True], ids=["settled", "handoff"])
@@ -296,7 +316,7 @@ def test_empty_provider_result_persists_retryable_failure(monkeypatch, queued):
     cid,
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=pending,
-    run_status="running",
+    running="running",
   )
   _seed_run(run_token, cid)
   _patch_claude_runner(monkeypatch, text=None)
@@ -332,11 +352,11 @@ def test_empty_provider_result_persists_retryable_failure(monkeypatch, queued):
   if queued:
     assert len(scheduled) == 1
     assert outcomes[scheduled[0]["run_token"]] == "running"
-    assert state["run_status"] == "running"
+    assert state["running"] is True
   else:
     assert scheduled == []
     assert outcomes == {run_token: "failed"}
-    assert state["run_status"] is None
+    assert state["running"] is False
 
 
 # -- 2. terminal write failure LEAVES the marker (+ reconcile repairs) ---
@@ -351,7 +371,7 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
   _seed_chat(
     "t2", messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 3}],
-    run_status="running",
+    running="running",
   )
   _patch_claude_runner(monkeypatch)
 
@@ -370,7 +390,7 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
   state = _load("t2")
   assert "error" in published
   assert "queued_turn_starting" not in published
-  assert state["run_status"] == "running", "failed terminal must LEAVE marker"
+  assert state["running"] is True, "failed terminal must LEAVE marker"
   assert len(state["pending_messages"]) == 1, "queue not consumed"
 
   # Reconcile-after-restart: the registry is empty (the run finished), so
@@ -383,7 +403,7 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
     db.close()
   assert "t2" in reconciled
   state = _load("t2")
-  assert state["run_status"] is None, "reconcile must clear the marker"
+  assert state["running"] is False, "reconcile must clear the marker"
   assert [m["content"] for m in state["pending_messages"]] == ["queued"], (
     "reconcile PRESERVES the queue (bug #2); it drains on the next send"
   )
@@ -406,7 +426,7 @@ def test_promote_ack_timeout_leaves_marker_then_reconcile_resolves(
     "t3",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 3}],
-    run_status="running",
+    running="running",
   )
   # No streamed text → finalize() is a no-op, so the turn reaches the drain
   # (the promote) which is what we're latching.
@@ -451,7 +471,7 @@ def test_promote_ack_timeout_leaves_marker_then_reconcile_resolves(
   assert "queued_turn_starting" not in published
   assert "error" in published
   state = _load("t3")
-  assert state["run_status"] == "running", "timed-out promote must LEAVE marker"
+  assert state["running"] is True, "timed-out promote must LEAVE marker"
 
   # Reconcile-after-restart resolves whichever outcome the latched commit
   # produced (here it landed after the timeout: the head moved into messages
@@ -465,7 +485,7 @@ def test_promote_ack_timeout_leaves_marker_then_reconcile_resolves(
     db.close()
   assert "t3" in reconciled
   state = _load("t3")
-  assert state["run_status"] is None
+  assert state["running"] is False
   assert state["pending_messages"] == []
   assert state["messages"][-1]["role"] == "assistant"
   assert any(b["type"] == "error" for b in state["messages"][-1]["blocks"])
@@ -484,7 +504,7 @@ def test_drain_lock_bound_exceeded_leaves_marker_then_reconcile_clears(
     "t4",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 3}],
-    run_status="running",
+    running="running",
   )
   _patch_claude_runner(monkeypatch, text=None)
   # Small terminal-lock bound so the held lock trips it deterministically.
@@ -525,7 +545,7 @@ def test_drain_lock_bound_exceeded_leaves_marker_then_reconcile_clears(
   assert "queued_turn_starting" not in published
   assert "error" in published
   state = _load("t4")
-  assert state["run_status"] == "running", "lock-bound timeout must LEAVE marker"
+  assert state["running"] is True, "lock-bound timeout must LEAVE marker"
   assert len(state["pending_messages"]) == 1, "queue not consumed on timeout"
 
   # Reconcile-after-restart clears it.
@@ -536,7 +556,7 @@ def test_drain_lock_bound_exceeded_leaves_marker_then_reconcile_clears(
   finally:
     db.close()
   assert "t4" in reconciled
-  assert _load("t4")["run_status"] is None
+  assert _load("t4")["running"] is False
 
 
 # -- 5a. appended scrub: orphan removed by identity, neighbours survive --
@@ -680,7 +700,7 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
   _seed_owner_and_creds()
   _seed_chat(
     "t6", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[], run_status="running",
+    pending=[], running="running",
   )
   _seed_run("rt-6", "t6")
   _patch_claude_runner(monkeypatch)
@@ -705,13 +725,13 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
   # The dying run did NOT promote a queue / schedule a continuation, and the
   # Stop-handoff clear ran for the immediate successor generation.
   assert "queued_turn_starting" not in published
-  assert _load("t6")["run_status"] is None, (
+  assert _load("t6")["running"] is False, (
     "Stop handoff must clear the marker after terminal persistence"
   )
   assert _run_outcomes("t6") == {"rt-6": "stopped"}
 
   # A newer run's marker must NEVER be cleared by a stale Stop-bumped run.
-  _seed_chat("t6b", run_status="running")
+  _seed_chat("t6b", running="running")
   chat_mod._clear_after_terminal_generation["t6b"] = 0  # stopped gen 0
   chat_mod.bump_run_generation("t6b")  # successor gen 1 (the immediate one)
   chat_mod.bump_run_generation("t6b")  # a NEWER run claimed gen 2
@@ -729,7 +749,7 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
     )
   )
   _drain_actor()
-  assert _load("t6b")["run_status"] == "running", (
+  assert _load("t6b")["running"] is True, (
     "a stale Stop-bumped run must NOT clear a newer run's marker"
   )
 
@@ -743,7 +763,7 @@ def test_watchdog_handoff_records_interrupted_outcome(monkeypatch):
   _seed_owner_and_creds()
   _seed_chat(
     cid, messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[], run_status="running",
+    pending=[], running="running",
   )
   _seed_run(f"rt-{cid}", cid)
 
@@ -774,7 +794,7 @@ def test_watchdog_handoff_records_interrupted_outcome(monkeypatch):
   _run_real_chat(cid, run_token=f"rt-{cid}", run_gen=gen)
   _drain_actor()
 
-  assert _load(cid)["run_status"] is None
+  assert _load(cid)["running"] is False
   assert _run_outcomes(cid) == {f"rt-{cid}": "interrupted"}
 
 
@@ -787,7 +807,7 @@ def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch):
   _seed_chat(
     "t7", messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 3}],
-    run_status="running",
+    running="running",
   )
 
   # Force an unsupported provider: stub get_provider to return a provider
@@ -820,7 +840,7 @@ def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch):
   assert "queued_turn_starting" not in published
   assert scheduled == []
   state = _load("t7")
-  assert state["run_status"] is None, "unsupported cleanup must clear marker"
+  assert state["running"] is False, "unsupported cleanup must clear marker"
   assert state["pending_messages"] == [], "pending must be cleared durably"
   assert not chat_mod.registry.is_alive("t7"), "registry released"
 
@@ -835,7 +855,7 @@ def test_actor_fatal_leaves_marker_then_reconcile_repairs(monkeypatch):
   _seed_chat(
     "t8", messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 3}],
-    run_status="running",
+    running="running",
   )
   _patch_claude_runner(monkeypatch)
 
@@ -859,7 +879,7 @@ def test_actor_fatal_leaves_marker_then_reconcile_repairs(monkeypatch):
   assert "queued_turn_starting" not in published
   assert scheduled == []
   state = _load("t8")
-  assert state["run_status"] == "running", "actor-fatal terminal must LEAVE marker"
+  assert state["running"] is True, "actor-fatal terminal must LEAVE marker"
   assert len(state["pending_messages"]) == 1, "queue not consumed"
 
   # Reconcile-after-restart (the fatal actor is restarted by the fixture's
@@ -872,7 +892,7 @@ def test_actor_fatal_leaves_marker_then_reconcile_repairs(monkeypatch):
     db.close()
   assert "t8" in reconciled
   state = _load("t8")
-  assert state["run_status"] is None
+  assert state["running"] is False
   assert [m["content"] for m in state["pending_messages"]] == ["queued"], (
     "reconcile PRESERVES the queue (bug #2); it drains on the next send"
   )
@@ -892,7 +912,7 @@ def test_continuation_schedule_failure_after_promote_leaves_marker(monkeypatch):
     "t9",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 3}],
-    run_status="running",
+    running="running",
   )
   _patch_claude_runner(monkeypatch)
 
@@ -920,7 +940,7 @@ def test_continuation_schedule_failure_after_promote_leaves_marker(monkeypatch):
   # continuation spawn), so the promote DID land before the failure.
   assert "queued_turn_starting" in published
   state = _load("t9")
-  assert state["run_status"] == "running", (
+  assert state["running"] is True, (
     "a promoted-but-unscheduled turn MUST leave the marker set"
   )
   # The promote moved the head into messages — the user message is now last.
@@ -937,7 +957,7 @@ def test_continuation_schedule_failure_after_promote_leaves_marker(monkeypatch):
     db.close()
   assert "t9" in reconciled
   state = _load("t9")
-  assert state["run_status"] is None, "reconcile must clear the marker"
+  assert state["running"] is False, "reconcile must clear the marker"
   assert state["messages"][-1]["role"] == "assistant"
   assert any(b["type"] == "error" for b in state["messages"][-1]["blocks"])
 
@@ -958,7 +978,7 @@ def test_stop_handoff_clear_does_not_erase_racing_fresh_start_turn_marker(
   marker. The new run's marker SURVIVES."""
   _seed_owner_and_creds()
   _seed_chat("t10", messages=[{"role": "user", "content": "hi", "ts": 1}],
-             pending=[], run_status="running")
+             pending=[], running="running")
   _patch_claude_runner(monkeypatch)
 
   # Set up the dying run as a Stop handoff: it owns `gen`; Stop bumped to the
@@ -990,7 +1010,7 @@ def test_stop_handoff_clear_does_not_erase_racing_fresh_start_turn_marker(
     await await_ack(ack)
 
   asyncio.run(_set_fresh_marker())
-  assert _load("t10")["run_status"] == "running", "fresh StartTurn set marker"
+  assert _load("t10")["running"] is True, "fresh StartTurn set marker"
 
   # Now the dying Stop-bumped run reaches its finally. Its gen-only check
   # (current == run_gen + 1) still passes, but the lock-gated is_chat_running
@@ -1000,7 +1020,7 @@ def test_stop_handoff_clear_does_not_erase_racing_fresh_start_turn_marker(
   _drain_actor()
 
   state = _load("t10")
-  assert state["run_status"] == "running", (
+  assert state["running"] is True, (
     "the dying Stop-bumped run must NOT clear the racing fresh run's marker"
   )
   # The fresh owner is still alive (its run never ran here — we only set its
@@ -1027,7 +1047,7 @@ def test_stale_dying_run_does_not_finalize_after_fresh_turn_claimed(monkeypatch)
   `registry.is_alive` re-check (the fresh `mark_starting`) is what does."""
   _seed_owner_and_creds()
   _seed_chat("t10c", messages=[{"role": "user", "content": "hi", "ts": 1}],
-             pending=[], run_status="running")
+             pending=[], running="running")
 
   chat_mod.mark_starting("t10c")
   gen = chat_mod.current_run_generation("t10c")
@@ -1117,7 +1137,7 @@ def test_stale_dying_run_does_not_finalize_after_fresh_turn_claimed(monkeypatch)
     m.get("role") == "assistant" for m in state["messages"][fresh_idx + 1:]
   ), "no assistant row may follow the fresh turn's user message"
   # The fresh turn's marker survives untouched.
-  assert state["run_status"] == "running", (
+  assert state["running"] is True, (
     "the fresh turn's run marker must survive the dying run's bow-out"
   )
   assert "done" in published
@@ -1139,7 +1159,7 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   _seed_chat(
     "t11", messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 3}],
-    run_status="running",
+    running="running",
   )
 
   scheduled = []
@@ -1159,7 +1179,7 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   assert "queued_turn_starting" not in published
   assert scheduled == []
   state = _load("t11")
-  assert state["run_status"] is None, "no-owner cleanup must clear the marker"
+  assert state["running"] is False, "no-owner cleanup must clear the marker"
   assert state["pending_messages"] == [], "pending must be cleared durably"
   assert not chat_mod.registry.is_alive("t11"), "registry released"
 
@@ -1197,7 +1217,7 @@ def test_no_connected_agent_streams_and_persists_guidance(
     dbx.close()
   _seed_chat(
     "t12", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    run_status="running",
+    running="running",
   )
   _seed_run("rt-12", "t12")
 
@@ -1218,7 +1238,7 @@ def test_no_connected_agent_streams_and_persists_guidance(
   assert "error" not in published
   assert published[-1] == "done"
   state = _load("t12")
-  assert state["run_status"] is None
+  assert state["running"] is False
   assert state["messages"][-1]["role"] == "assistant"
   assert state["messages"][-1]["content"] == chat_mod.NO_AGENT_CONNECTED_MESSAGE
   assert state["messages"][-1]["blocks"] == [{
@@ -1262,7 +1282,7 @@ def test_no_connected_agent_promotes_queued_message(monkeypatch):
     "t12-queued",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 3}],
-    run_status="running",
+    running="running",
   )
   _seed_run("rt-12-queued", "t12-queued")
   scheduled = []
@@ -1286,7 +1306,7 @@ def test_no_connected_agent_promotes_queued_message(monkeypatch):
   successor_token = scheduled[0]["run_token"]
   state = _load("t12-queued")
   assert state["pending_messages"] == []
-  assert state["run_status"] == "running"
+  assert state["running"] is True
   assert state["messages"][-2]["content"] == chat_mod.NO_AGENT_CONNECTED_MESSAGE
   assert state["messages"][-1]["content"] == "queued"
   assert _run_outcomes("t12-queued") == {
@@ -1326,7 +1346,7 @@ def test_no_connected_agent_stopped_during_metrics_preserves_successor_sink(
   _seed_chat(
     "t12-metrics-stop",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
-    run_status="running",
+    running="running",
   )
   _seed_run("rt-12-metrics-stop", "t12-metrics-stop")
 
@@ -1383,7 +1403,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
     "t12-auth-error",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 3}],
-    run_status="running",
+    running="running",
   )
   _seed_run("rt-12-auth", "t12-auth-error")
   monkeypatch.setattr(
@@ -1402,7 +1422,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   assert "error" in published
   assert "text" not in published
   state = _load("t12-auth-error")
-  assert state["run_status"] is None
+  assert state["running"] is False
   assert state["pending_messages"] == []
   assert _run_outcomes("t12-auth-error") == {"rt-12-auth": "failed"}
   assert not chat_mod.registry.is_alive("t12-auth-error")
@@ -1425,7 +1445,7 @@ def test_setup_error_cleanup_stale_gen_does_not_clobber_successor():
     "se-stale",
     messages=[{"role": "user", "content": "fresh", "ts": 1}],
     pending=[{"role": "user", "content": "queued-behind-fresh", "ts": 2}],
-    run_status="running",
+    running="running",
   )
   chat_mod.registry.bump_generation("se-stale")  # → 1, the setup-erroring run
   chat_mod.registry.bump_generation("se-stale")  # → 2, a Stop bumped it
@@ -1438,7 +1458,7 @@ def test_setup_error_cleanup_stale_gen_does_not_clobber_successor():
 
   assert disposition is chat_queue.TerminalDisposition.STALE_NO_ACTION
   state = _load("se-stale")
-  assert state["run_status"] == "running", "successor's marker must survive"
+  assert state["running"] is True, "successor's marker must survive"
   assert state["pending_messages"] == [
     {"role": "user", "content": "queued-behind-fresh", "ts": 2}
   ], "successor's queued send must survive"
@@ -1456,7 +1476,8 @@ def test_setup_error_cleanup_owned_gen_clears_and_forgets():
     "se-own",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 2}],
-    run_status="running",
+    running="running",
+    run_token="rt-own",
   )
   gen = chat_mod.registry.bump_generation("se-own")  # → 1, this run owns it
   chat_mod.registry.mark_starting("se-own")
@@ -1468,7 +1489,7 @@ def test_setup_error_cleanup_owned_gen_clears_and_forgets():
 
   assert disposition is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
   state = _load("se-own")
-  assert state["run_status"] is None, "owned cleanup clears the marker"
+  assert state["running"] is False, "owned cleanup clears the marker"
   assert state["pending_messages"] == [], "owned cleanup clears pending"
   assert chat_mod.registry.current_generation("se-own") == 0, "forgotten"
   assert not chat_mod.registry.is_alive("se-own"), "starting slot released"
@@ -1476,8 +1497,8 @@ def test_setup_error_cleanup_owned_gen_clears_and_forgets():
 
 # -- 13. strict marker-clear ACK timeout → FAILED_LEAVE_MARKER --------------
 def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
-  """The empty-queue terminal path issues a STRICT ClearRunStatus. Latch the
-  actor inside `_clear_run_status` AFTER dispatch so its commit blocks past a
+  """The empty-queue terminal path issues a STRICT FinishRun. Latch the
+  actor inside `_finish_run` AFTER dispatch so its commit blocks past a
   deterministically-small ACK_TIMEOUT_SECS. The strict clear's await_ack
   times out → drain_and_release raises → _complete_turn maps it to
   FAILED_LEAVE_MARKER: marker LEFT set (NOT cleared), no continuation,
@@ -1485,22 +1506,22 @@ def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
   _seed_owner_and_creds()
   _seed_chat(
     "t13", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[], run_status="running",
+    pending=[], running="running",
   )
   # No streamed text → finalize() is a no-op, so the turn reaches the
-  # empty-queue drain (which issues the strict ClearRunStatus we latch).
+  # empty-queue drain (which issues the strict FinishRun we latch).
   _patch_claude_runner(monkeypatch, text=None)
   monkeypatch.setattr(chat_writer, "ACK_TIMEOUT_SECS", 0.2)
 
   writer = get_writer()
   release = threading.Event()
-  orig_clear = writer._clear_run_status
+  orig_clear = writer._finish_run
 
   def latched_clear(db, cmd):
     release.wait(timeout=10)  # block the actor inside the clear commit
     return orig_clear(db, cmd)
 
-  writer._clear_run_status = latched_clear
+  writer._finish_run = latched_clear
 
   scheduled = []
   orig_sched = chat_mod._schedule_continuation
@@ -1521,7 +1542,7 @@ def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
     )
     assert "queued_turn_starting" not in published
     assert "error" in published
-    assert _load("t13")["run_status"] == "running", (
+    assert _load("t13")["running"] is True, (
       "a timed-out strict marker clear must LEAVE the marker set"
     )
   finally:
@@ -1530,14 +1551,14 @@ def test_empty_queue_marker_clear_ack_timeout_leaves_marker(monkeypatch):
     # cleared, the same state a restart reconcile would reach).
     release.set()
     _drain_actor()
-    writer._clear_run_status = orig_clear
+    writer._finish_run = orig_clear
     chat_mod._schedule_continuation = orig_sched
 
   # Late-landing clear converged the marker (the documented accept-and-document
   # outcome). Had it NOT landed (commit dropped rather than delayed), the
   # marker would stay set and a restart reconcile would clear it — both
   # outcomes are covered by reconcile's mid-commit-timeout contract.
-  assert _load("t13")["run_status"] is None
+  assert _load("t13")["running"] is False
 
 
 # -- 14. malformed queue head LEAVES the marker -----------------------------------------------
@@ -1560,7 +1581,7 @@ def test_malformed_pending_head_leaves_marker_then_reconcile_repairs(monkeypatch
     # A truthy non-string content survives the `... or ""` guard and makes
     # schemas.ChatMessage(content=[...]) raise inside _promote_pending.
     pending=[{"role": "user", "content": ["malformed"], "ts": 3}],
-    run_status="running",
+    running="running",
   )
   # No streamed text → finalize() is a no-op, so the turn reaches the drain
   # (the promote) which is what raises on the malformed head.
@@ -1583,7 +1604,7 @@ def test_malformed_pending_head_leaves_marker_then_reconcile_repairs(monkeypatch
   assert "queued_turn_starting" not in published
   assert "error" in published
   state = _load("tb")
-  assert state["run_status"] == "running", (
+  assert state["running"] is True, (
     "a malformed queue head must LEAVE the marker set, not clear it"
   )
   assert len(state["pending_messages"]) == 1, "the malformed message stays queued"
@@ -1600,7 +1621,7 @@ def test_malformed_pending_head_leaves_marker_then_reconcile_repairs(monkeypatch
     db.close()
   assert "tb" in reconciled
   state = _load("tb")
-  assert state["run_status"] is None
+  assert state["running"] is False
   assert len(state["pending_messages"]) == 1, (
     "reconcile PRESERVES the queue (bug #2), even a malformed head"
   )
@@ -1627,7 +1648,7 @@ def test_reconcile_preserves_tail_unanswered_question_card():
          "questions": [{"id": "q-open", "question": "Color?"}]},
       ]},
     ],
-    run_status="running",
+    running="running",
   )
   db = SessionLocal()
   try:
@@ -1636,7 +1657,7 @@ def test_reconcile_preserves_tail_unanswered_question_card():
     db.close()
   assert "tq" in reconciled
   state = _load("tq")
-  assert state["run_status"] is None
+  assert state["running"] is False
   blocks = state["messages"][-1]["blocks"]
   qids = [b.get("question_id") for b in blocks if b.get("type") == "question"]
   assert "q-open" in qids, "the open question must remain answerable"
@@ -1750,7 +1771,7 @@ def test_stop_during_provider_setup_does_not_dispatch_runner(monkeypatch):
     cid,
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[],
-    run_status="running",
+    running="running",
   )
   gen = chat_mod.registry.bump_generation(cid)
 
@@ -1779,7 +1800,7 @@ def test_stop_during_provider_setup_does_not_dispatch_runner(monkeypatch):
     "exists"
   )
   state = _load(cid)
-  assert state["run_status"] is None
+  assert state["running"] is False
 
 
 def test_normal_send_spawns_turn(monkeypatch):
@@ -1841,7 +1862,7 @@ def test_stop_during_finalize_makes_drain_bow_out_under_lock(monkeypatch):
     # A pending head so a drain that WRONGLY acted as owner would promote it
     # (queued_turn_starting + a continuation) — making the bug observable.
     pending=[{"role": "user", "content": "queued", "ts": 3}],
-    run_status="running",
+    running="running",
   )
   # Stream text so finalize() has blocks to commit and the Finalize command is
   # actually submitted + awaited (the bump must land inside that await).
@@ -1886,7 +1907,7 @@ def test_stop_during_finalize_makes_drain_bow_out_under_lock(monkeypatch):
   ], "the superseded turn must leave the queued message untouched"
   # The superseded run must NOT clear the marker — the newer owner still needs
   # it. The drain's STALE_NO_ACTION bow-out touches nothing durable.
-  assert _load("t17")["run_status"] == "running", (
+  assert _load("t17")["running"] is True, (
     "the superseded turn must NOT clear the marker the newer owner still holds"
   )
 
@@ -1930,7 +1951,7 @@ def test_stale_reclaim_bow_out_preserves_fresh_owners_broadcast_and_browser(
   _seed_owner_and_creds()
   _seed_chat(
     "t18a", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[], run_status="running",
+    pending=[], running="running",
   )
   gen = _arrange_stale_reclaim("t18a")
 
@@ -1994,7 +2015,7 @@ def test_stale_reclaim_bow_out_clears_pointer_but_leaves_browser_when_no_success
   _seed_owner_and_creds()
   _seed_chat(
     "t18b", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[], run_status="running",
+    pending=[], running="running",
   )
   gen = _arrange_stale_reclaim("t18b")
 
@@ -2037,17 +2058,17 @@ def test_stale_reclaim_bow_out_clears_pointer_but_leaves_browser_when_no_success
     bc_mod.set_active_broadcast(None)
 
 
-# -- 19. ClearRunStatus is identity-keyed: a stale token can't wipe a marker --
-def test_clear_run_status_is_identity_keyed_to_the_owning_run_token():
+# -- 19. FinishRun is identity-keyed: a stale token can't wipe a marker --
+def test_finish_run_is_identity_keyed_to_the_owning_run_token():
   """The markerless-run race. A fresh turn's StartTurn sets the marker and
   records itself (run_token) as the marker's owner. A dying run that races in
   during the window where the fresh turn has marked-starting but its handle
   isn't registered yet (so is_alive is briefly false) would otherwise clear
-  the marker by chat_id, leaving the fresh turn markerless. ClearRunStatus is
+  the marker by chat_id, leaving the fresh turn markerless. FinishRun is
   identity-keyed: a clear naming a DIFFERENT run_token is a no-op, so the fresh
   marker survives; the owning token still clears it.
   """
-  from app.chat_writer import ClearRunStatus, StartTurn, await_ack, get_writer
+  from app.chat_writer import FinishRun, StartTurn, await_ack, get_writer
 
   _seed_chat("t19", messages=[], pending=[])
 
@@ -2059,34 +2080,34 @@ def test_clear_run_status_is_identity_keyed_to_the_owning_run_token():
     await await_ack(a)
     # The dying run's clear names its OWN (older) token, not the fresh owner.
     a = get_writer().submit(
-      ClearRunStatus(chat_id="t19", run_token="rt-dying")
+      FinishRun(chat_id="t19", run_token="rt-dying")
     )
     await await_ack(a)
 
   asyncio.run(_fresh_then_stale_clear())
-  assert _load("t19")["run_status"] == "running", (
+  assert _load("t19")["running"] is True, (
     "a clear naming a non-owning run_token must NOT wipe the fresh marker"
   )
 
   async def _clear_matching():
     a = get_writer().submit(
-      ClearRunStatus(chat_id="t19", run_token="rt-fresh")
+      FinishRun(chat_id="t19", run_token="rt-fresh")
     )
     await await_ack(a)
 
   asyncio.run(_clear_matching())
-  assert _load("t19")["run_status"] is None, (
+  assert _load("t19")["running"] is False, (
     "the run_token that owns the marker still clears it"
   )
 
 
-# -- 20. a tokenless ClearRunStatus stays unconditional (reconcile/no-handoff)-
-def test_tokenless_clear_run_status_is_unconditional():
+# -- 20. a tokenless FinishRun stays unconditional (reconcile/no-handoff)-
+def test_tokenless_finish_run_is_unconditional():
   """A clear with run_token="" clears regardless of the recorded owner — the
   reconciliation and no-handoff paths that already know they own the marker
   must not be gated by the identity check.
   """
-  from app.chat_writer import ClearRunStatus, StartTurn, await_ack, get_writer
+  from app.chat_writer import FinishRun, StartTurn, await_ack, get_writer
 
   _seed_chat("t20", messages=[], pending=[])
 
@@ -2096,11 +2117,11 @@ def test_tokenless_clear_run_status_is_unconditional():
       user_msg={"role": "user", "content": "hi", "ts": 1},
     ))
     await await_ack(a)
-    a = get_writer().submit(ClearRunStatus(chat_id="t20", run_token=""))
+    a = get_writer().submit(FinishRun(chat_id="t20", run_token=""))
     await await_ack(a)
 
   asyncio.run(_start_then_tokenless_clear())
-  assert _load("t20")["run_status"] is None, (
+  assert _load("t20")["running"] is False, (
     "a tokenless clear clears unconditionally even with a recorded owner"
   )
 
@@ -2211,7 +2232,7 @@ def test_mutating_commands_do_not_resurrect_soft_deleted_chat():
     "t24",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending=[{"role": "user", "content": "queued", "ts": 2}],
-    run_status=None,
+    running=None,
   )
   # Soft-delete while it still holds a transcript + a queued message.
   db = SessionLocal()
@@ -2245,4 +2266,4 @@ def test_mutating_commands_do_not_resurrect_soft_deleted_chat():
     "no command may mutate the transcript of a soft-deleted chat"
   )
   assert len(state["pending_messages"]) == 1, "the queue must not be promoted"
-  assert state["run_status"] is None, "no run marker on a soft-deleted chat"
+  assert state["running"] is False, "no run marker on a soft-deleted chat"

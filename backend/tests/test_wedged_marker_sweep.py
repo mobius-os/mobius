@@ -1,6 +1,6 @@
-"""Runtime liveness watchdog (`sweep_wedged_run_markers`) + limit classifier.
+"""Runtime liveness watchdog (`sweep_wedged_runs`) + limit classifier.
 
-The sweep clears run markers orphaned by a completed-but-uncleared turn WITHOUT
+The sweep closes runs orphaned by a completed-but-unclosed turn WITHOUT
 a process restart (a FAILED_LEAVE_MARKER terminal, or the late-promote gap),
 which boot reconciliation would otherwise only fix on the next restart. It must
 reap ONLY a definitively-finished turn — never a live turn, and never the
@@ -24,23 +24,20 @@ def _drain_writer():
   get_writer().submit(Barrier()).result(timeout=5)
 
 
-def _seed(chat_id, *, age_secs=200, run_status="running", pending=None,
+def _seed(chat_id, *, age_secs=200, pending=None,
           messages=None, live_assistant=None, with_run=True):
   db = SessionLocal()
   try:
-    started = None
-    if run_status is not None:
-      started = datetime.now(UTC).replace(tzinfo=None) - timedelta(
-        seconds=age_secs
-      )
+    started = datetime.now(UTC).replace(tzinfo=None) - timedelta(
+      seconds=age_secs
+    )
     c = models.Chat(
       id=chat_id, title="t", messages=messages or [],
       live_assistant=live_assistant, pending_messages=pending or [],
       session_id="sess", provider="claude",
-      run_status=run_status, run_started_at=started,
     )
     db.add(c)
-    if with_run and run_status is not None:
+    if with_run:
       db.add(models.ChatRun(
         id=f"rt-{chat_id}", chat_id=chat_id, status="running",
         provider="claude",
@@ -57,8 +54,18 @@ def _state(chat_id):
   db = SessionLocal()
   try:
     c = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    run = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == chat_id,
+    ).order_by(
+      models.ChatRun.started_at.desc(),
+      models.ChatRun.id.desc(),
+    ).first()
     return (
-      c.run_status,
+      (
+        run.status
+        if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES
+        else None
+      ),
       list(c.pending_messages or []),
       list(c.messages or []),
       c.live_assistant,
@@ -81,7 +88,7 @@ def _run_outcome(chat_id):
 def _sweep():
   db = SessionLocal()
   try:
-    return asyncio.run(chat_mod.sweep_wedged_run_markers(db))
+    return asyncio.run(chat_mod.sweep_wedged_runs(db))
   finally:
     db.close()
 
@@ -97,7 +104,7 @@ def test_sweep_recovers_orphaned_turn_and_preserves_queue():
   _drain_writer()
   assert "wedged-1" in swept
   status, pending, messages, live = _state("wedged-1")
-  assert status is None, "orphaned marker should be cleared"
+  assert status is None
   assert _run_outcome("wedged-1") == "interrupted"
   assert live is None
   assert [message["role"] for message in messages] == ["user", "assistant"]
@@ -181,8 +188,8 @@ def test_wedged_candidate_query_does_not_load_transcripts():
 
   def capture(_conn, _cursor, statement, _parameters, _context, _many):
     if (
-      "FROM chats" in statement
-      and "chats.run_started_at <" in statement
+      "FROM chat_runs JOIN chats" in statement
+      and "chat_runs.started_at <" in statement
     ):
       statements.append(statement)
 
@@ -194,8 +201,8 @@ def test_wedged_candidate_query_does_not_load_transcripts():
   _drain_writer()
 
   assert len(statements) == 1
-  projection = statements[0].split("FROM chats", 1)[0]
-  assert "chats.id" in projection
+  projection = statements[0].split("FROM chat_runs", 1)[0]
+  assert "chat_runs.id" in projection
   assert "chats.messages" not in projection
 
 
@@ -238,13 +245,12 @@ def test_sweep_reaps_after_broadcast_completed():
 
 
 def test_sweep_skips_when_no_run_record():
-  # No ChatRun to identity-key the clear on — leave it for boot reconcile
-  # rather than risk a tokenless clear wiping a racing fresh run.
+  # No durable run means there is no recovery candidate.
   _seed("norun-1", age_secs=200, with_run=False)
   swept = _sweep()
   _drain_writer()
   assert "norun-1" not in swept
-  assert _state("norun-1")[0] == "running"
+  assert _state("norun-1")[0] is None
 
 
 def test_limit_error_text_classifier():

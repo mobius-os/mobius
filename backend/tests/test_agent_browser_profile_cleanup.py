@@ -2,9 +2,8 @@
 
 The reaper runs `--delete` nightly on live prod. The one way it can destroy
 value is by misreading which profiles belong to live chats, so these tests pin
-the fail-closed contract: an unreadable chat database must delete nothing, and
-the planned retirement of the `run_status` column must degrade rather than
-flip selection to age-only.
+the fail-closed contract: an unreadable chat database must delete nothing and
+the canonical `chat_runs` table must protect active chats.
 """
 
 import importlib.util
@@ -34,15 +33,23 @@ def _load_module():
 cleanup = _load_module()
 
 
-def _chats_db(path, *, with_run_status=True, rows=()):
+def _chats_db(path, *, rows=(), running_chat_ids=()):
   cols = "id, deleted_at, updated_at, activity_at"
-  if with_run_status:
-    cols += ", run_status"
   conn = sqlite3.connect(str(path))
   conn.execute(f"create table chats({cols})")
+  conn.execute(
+    "create table chat_runs("
+    "id text primary key, chat_id text, status text, started_at text)"
+  )
   for row in rows:
     conn.execute(
       f"insert into chats({cols}) values ({','.join('?' * len(row))})", row
+    )
+  for index, chat_id in enumerate(running_chat_ids):
+    conn.execute(
+      "insert into chat_runs(id, chat_id, status, started_at) "
+      "values (?, ?, 'running', '2026-06-01 00:00:00')",
+      (f"run-{index}", chat_id),
     )
   conn.commit()
   conn.close()
@@ -67,28 +74,26 @@ def test_load_chats_raises_when_chats_table_absent(tmp_path):
     cleanup._load_chats(db)
 
 
-def test_load_chats_degrades_when_run_status_column_retired(tmp_path):
-  # Step-3b drops the run_status column. The reaper must keep working with the
-  # remaining columns, not read the drop as an unreadable database.
-  db = tmp_path / "no_runstatus.db"
+def test_load_chats_reads_idle_chat_from_canonical_run_table(tmp_path):
+  db = tmp_path / "idle.db"
   _chats_db(
     db,
-    with_run_status=False,
     rows=[("c1", None, "2026-06-01 00:00:00", "2026-06-01 00:00:00")],
   )
   chats = cleanup._load_chats(db)
   assert set(chats) == {"c1"}
-  assert chats["c1"]["run_status"] is None
+  assert chats["c1"]["running"] is False
 
 
-def test_load_chats_reads_a_healthy_db(tmp_path):
+def test_load_chats_reads_running_chat_from_canonical_run_table(tmp_path):
   db = tmp_path / "ok.db"
   _chats_db(
     db,
-    rows=[("c1", None, "2026-06-01 00:00:00", "2026-06-01 00:00:00", "idle")],
+    rows=[("c1", None, "2026-06-01 00:00:00", "2026-06-01 00:00:00")],
+    running_chat_ids=["c1"],
   )
   chats = cleanup._load_chats(db)
-  assert chats["c1"]["run_status"] == "idle"
+  assert chats["c1"]["running"] is True
 
 
 def test_delete_against_unreadable_db_deletes_nothing(tmp_path, capsys):

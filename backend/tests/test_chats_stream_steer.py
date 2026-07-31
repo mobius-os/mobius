@@ -1594,9 +1594,6 @@ def test_claude_reserved_row_survives_process_loss_and_sweep(
   _make_claude_chat(chat_id, steer_enabled=True)
   db = SessionLocal()
   try:
-    chat = db.get(models.Chat, chat_id)
-    chat.run_status = "running"
-    chat.run_started_at = datetime.now(UTC)
     db.add(models.ChatRun(
       id=f"run-{chat_id}",
       chat_id=chat_id,

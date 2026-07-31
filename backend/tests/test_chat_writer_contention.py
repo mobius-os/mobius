@@ -30,7 +30,7 @@ from app.chat_writer import (
   CancelPending,
   ChatWriterActor,
   ClearPending,
-  ClearRunStatus,
+  FinishRun,
   Finalize,
   PersistError,
   PersistSessionId,
@@ -93,6 +93,8 @@ def _load_chat(chat_id="c1"):
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     if chat is None:
       return None
+    from app.run_state import running_run
+    run = running_run(db, chat_id)
     # Detach plain copies so the caller can inspect after the session closes.
     return {
       "messages": list(chat.messages or []),
@@ -101,8 +103,8 @@ def _load_chat(chat_id="c1"):
       "session_id": chat.session_id,
       "provider": chat.provider,
       "title": chat.title,
-      "run_status": chat.run_status,
-      "run_started_at": chat.run_started_at,
+      "running_status": run.status if run is not None else None,
+      "running_started_at": run.started_at if run is not None else None,
     }
   finally:
     db.close()
@@ -588,8 +590,8 @@ def test_start_turn_is_atomic(actor):
   assert chat["messages"][-1]["cid"].startswith("server-")
   assert chat["title"] == "build me a todo app"
   assert chat["provider"] == "codex"
-  assert chat["run_status"] == "running"
-  assert chat["run_started_at"] is not None
+  assert chat["running_status"] == "running"
+  assert chat["running_started_at"] is not None
 
 
 def test_start_turn_keeps_a_useful_first_message_title_preview(actor):
@@ -637,8 +639,8 @@ def test_start_turn_retry_after_completion_is_idempotent(actor):
   assert result["message"] == original
   chat = _load_chat()
   assert chat["messages"] == [original]
-  assert chat["run_status"] is None
-  assert chat["run_started_at"] is None
+  assert chat["running_status"] is None
+  assert chat["running_started_at"] is None
   assert _load_run("retry-run") is None
 
 
@@ -655,7 +657,7 @@ def test_persist_session_id_updates_chat_without_touching_transcript(actor):
   chat = _load_chat()
   assert chat["session_id"] == "thread-early"
   assert chat["messages"] == [{"role": "user", "content": "hi", "ts": 1}]
-  assert chat["run_status"] is None
+  assert chat["running_status"] is None
 
 
 # -- 8. PromotePending collapses queued follow-ups ------------------------
@@ -675,7 +677,7 @@ def test_promote_pending_collapses_all_followups(actor):
   chat = _load_chat()
   assert [m["content"] for m in chat["messages"][-2:]] == ["first", "second"]
   assert chat["pending_messages"] == []
-  assert chat["run_status"] == "running"
+  assert chat["running_status"] == "running"
 
 
 def test_promote_pending_stops_collapse_at_hidden_boundary(actor):
@@ -1124,7 +1126,7 @@ def test_reconciliation_works_independent_of_actor():
 
   from app.chat import reconcile_interrupted_chats
 
-  # A chat stranded mid-turn: run_status='running', a partial assistant block.
+  # A chat stranded mid-turn with a partial assistant block.
   db = SessionLocal()
   try:
     chat = models.Chat(
@@ -1137,17 +1139,23 @@ def test_reconciliation_works_independent_of_actor():
         ),
       ],
       pending_messages=[{"role": "user", "content": "queued", "ts": 2}],
-      run_status="running",
-      run_started_at=datetime.now(UTC),
     )
     db.add(chat)
+    db.flush()
+    db.add(models.ChatRun(
+      id="rt-stranded",
+      chat_id="stranded",
+      status="running",
+      provider="claude",
+      started_at=datetime.now(UTC),
+    ))
     db.commit()
     reconciled = reconcile_interrupted_chats(db)
   finally:
     db.close()
   assert "stranded" in reconciled
   chat = _load_chat("stranded")
-  assert chat["run_status"] is None
+  assert chat["running_status"] is None
   # The queue is PRESERVED across the restart (bug #2): clearing the marker
   # leaves the markerless-queue state that self-heals on the next send.
   assert [m["content"] for m in chat["pending_messages"]] == ["queued"]
@@ -1196,25 +1204,28 @@ def test_clear_pending_empty_queue_is_noop(actor):
   assert chat["pending_messages"] == []
 
 
-def test_clear_run_status_clears_durable_marker(actor):
-  """ClearRunStatus clears run_status + run_started_at once a turn has ended."""
+def test_finish_run_closes_durable_run(actor):
   from datetime import UTC, datetime
 
   cid = _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
-  # Mark the run via a throwaway session (the marker the command clears).
+  # Seed the run via a throwaway session.
   db = SessionLocal()
   try:
-    chat = db.query(models.Chat).filter(models.Chat.id == cid).first()
-    chat.run_status = "running"
-    chat.run_started_at = datetime.now(UTC)
+    db.add(models.ChatRun(
+      id="rt1",
+      chat_id=cid,
+      status="running",
+      provider="claude",
+      started_at=datetime.now(UTC),
+    ))
     db.commit()
   finally:
     db.close()
-  result = _await(actor.submit(ClearRunStatus(chat_id="c1", run_token="rt1")))
+  result = _await(actor.submit(FinishRun(chat_id="c1", run_token="rt1")))
   assert result is None
   chat = _load_chat()
-  assert chat["run_status"] is None
-  assert chat["run_started_at"] is None
+  assert chat["running_status"] is None
+  assert chat["running_started_at"] is None
 
 
 def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
@@ -1243,7 +1254,7 @@ def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
 
   assert result is False
   chat = _load_chat()
-  assert chat["run_status"] == "running"
+  assert chat["running_status"] == "running"
   assert [message["content"] for message in chat["messages"]] == ["old", "new"]
   assert _load_run("old-run")["status"] == "interrupted"
   assert _load_run("new-run")["status"] == "running"

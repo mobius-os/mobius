@@ -265,7 +265,9 @@ def test_answer_recovers_durable_question_without_live_pending(
       assert [m["content"] for m in row.pending_messages] == [
         "queued-visible"
       ]
-      assert row.run_status == "running"
+      assert db.query(models.ChatRun).filter_by(
+        chat_id=chat.id, status="running",
+      ).count() == 1
     finally:
       db.close()
 

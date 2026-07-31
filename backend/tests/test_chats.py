@@ -61,7 +61,7 @@ def test_delete_response_stays_authoritative_after_cleanup_failure(
   """Post-commit cleanup cannot turn a durable deletion into a false failure."""
   with (
     patch(
-      "app.routes.chats._clear_run_status",
+      "app.routes.chats._finish_run",
       new=AsyncMock(side_effect=RuntimeError("cleanup failed")),
     ),
     patch("app.routes.chats.get_system_broadcast") as mock_get_sb,
@@ -414,7 +414,6 @@ def test_retry_of_durable_message_is_acknowledged_without_new_turn(
   }
   db.refresh(chat)
   assert chat.messages == [stored]
-  assert chat.run_status is None
   assert calls == []
 
 

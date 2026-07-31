@@ -392,7 +392,6 @@ def test_first_live_turn_cannot_switch_provider_via_patch(
   from app import models
 
   chat.messages = [{"role": "user", "content": "first request"}]
-  chat.run_status = "running"
   db.add(models.ChatRun(
     id="first-live-turn",
     chat_id=chat.id,

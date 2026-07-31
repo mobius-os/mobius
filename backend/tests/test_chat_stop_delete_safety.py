@@ -110,7 +110,7 @@ def test_stop_chat_for_never_escalates_replaced_handle(monkeypatch):
 
 
 def test_stop_on_orphaned_run_after_restart_succeeds(client, auth, db):
-  """Stop on an orphaned run — run_status stuck 'running' with an EMPTY
+  """Stop on an orphaned running row with an EMPTY
   registry (the exact shape a prior restart leaves: the in-memory registry
   is gone but the durable marker survives) — must succeed gracefully: clear
   the stuck marker + the queue, return success, NOT error or strand the chat.
@@ -126,8 +126,6 @@ def test_stop_on_orphaned_run_after_restart_succeeds(client, auth, db):
     id=chat_id, title="t",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
     pending_messages=[{"role": "user", "content": "queued", "ts": 2}],
-    run_status="running",
-    run_started_at=datetime.now(UTC),
   )
   db.add(c)
   db.add(models.ChatRun(
@@ -146,9 +144,6 @@ def test_stop_on_orphaned_run_after_restart_succeeds(client, auth, db):
   assert r.json()["stopped"] is True, "Stop on an orphan must report success"
 
   db.expire_all()
-  row = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-  assert row.run_status is None, "the orphaned 'running' marker must be cleared"
-  assert row.run_started_at is None
   run = db.query(models.ChatRun).filter(
     models.ChatRun.id == "rt-orphan-after-restart",
   ).one()

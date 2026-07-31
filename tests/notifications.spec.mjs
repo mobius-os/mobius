@@ -17,7 +17,6 @@ const CHATS = [{
   created_by_app_id: null,
   has_messages: true,
   running: false,
-  run_status: null,
 }]
 
 function notifRows(now = Date.now()) {
