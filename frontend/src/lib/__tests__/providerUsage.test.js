@@ -39,13 +39,12 @@ test('usage percentages are bounded and retain useful precision', () => {
 })
 
 test('reset formatting distinguishes today from another day', () => {
-  const now = new Date('2026-07-30T12:00:00Z')
-  const today = formatUsageReset('2026-07-30T17:00:00Z', now)
-  const later = formatUsageReset('2026-08-03T17:00:00Z', now)
+  const now = new Date(2026, 6, 30, 12, 0)
+  const today = formatUsageReset(new Date(2026, 6, 30, 17, 5), now)
+  const later = formatUsageReset(new Date(2026, 7, 3, 7, 0), now)
 
-  assert.match(today, /^resets /)
-  assert.doesNotMatch(today, /Mon/)
-  assert.match(later, /^resets Mon /)
+  assert.equal(today, 'resets 17:05')
+  assert.equal(later, 'resets Mon 07:00')
 })
 
 test('only four valid allowance windows are rendered', () => {
@@ -77,7 +76,7 @@ test('Claude and Codex usage disclosures stay independently expandable', () => {
   assert.doesNotMatch(settingsView, /expandedUsage === '(?:codex|claude)'/)
 })
 
-test('expanded usage restores thin accessible lines without tall cards', () => {
+test('expanded usage shares aligned columns without tall cards', () => {
   assert.match(usageView, /className="provider-usage__track"/)
   assert.match(usageView, /role="progressbar"/)
   assert.match(usageView, /className="provider-usage__fill"/)
@@ -87,6 +86,10 @@ test('expanded usage restores thin accessible lines without tall cards', () => {
   )
   assert.match(
     providerCss,
-    /\.provider-usage__window\s*\{[^}]*grid-template-columns:/s,
+    /\.provider-usage__windows\s*\{[^}]*grid-template-columns:/s,
+  )
+  assert.match(
+    providerCss,
+    /\.provider-usage__window\s*\{[^}]*display:\s*contents;/s,
   )
 })
