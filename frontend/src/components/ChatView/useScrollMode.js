@@ -26,12 +26,12 @@
  * A live pin leaves FOLLOW_BOTTOM while its dynamic spacer is being consumed,
  * then hands off to FOLLOW_BOTTOM exactly when that reservation reaches zero.
  * A short reply never reaches the handoff and remains pinned after settle.
- * Ordinary dynamic spacer room belongs exclusively to the latest visible
- * user row. It is independent of turn completion: short replies keep the
- * remaining room, while reply/tool expansion consumes it and collapse
- * restores it. PIN_USER_MSG may reserve before its row lands so a fresh send
- * can pin in one frame; every other ordinary mode reserves only while that
- * latest row is visible. The one explicit exception is the transient
+ * Ordinary dynamic spacer room belongs to the latest user row and is derived
+ * from tail geometry, not from whether a gesture has already scrolled that row
+ * into view. That keeps scrollHeight stable while the reader approaches the
+ * final turn: short replies keep the remaining room, while reply/tool
+ * expansion consumes it and collapse restores it. The one explicit exception
+ * is the transient
  * question-submit anchor: it reserves exactly enough tail room for a stable
  * same-viewport handoff. A keyboard resize restores the pre-submit mode before
  * sizing, so the answered card moves exactly as the unanswered card would.
@@ -479,64 +479,16 @@ export function _modeForPersistence(mode, messages, scrollEl) {
 }
 
 
-function _rowIntersectsViewport(rowEl, scrollTop, viewH) {
-  if (!rowEl || !Number.isFinite(scrollTop) || !(viewH > 0)) return false
-  const rowTop = rowEl.offsetTop
-  const rowHeight = rowEl.offsetHeight
-  if (!Number.isFinite(rowTop) || !Number.isFinite(rowHeight)) return false
-  return rowTop + rowHeight > scrollTop && rowTop < scrollTop + viewH
-}
-
-
-/** Whether the latest user row owns reservation in the viewport represented by
- *  current geometry/mode. A matching PIN_USER_MSG is allowed to reserve before
- *  the browser can place the fresh row. Other modes must actually show the
- *  latest user row — either now or at the real-content target they are about to
- *  apply. Older user rows never participate because the caller passes only the
- *  DOM tail user row.
- */
-function _latestUserOwnsSpacer(scrollEl, listEl, lastUserMsgEl, mode, viewH) {
-  const rowCid = lastUserMsgEl?.dataset?.cid
-  if (mode?.kind === 'PIN_USER_MSG'
-      && rowCid != null
-      && String(rowCid) === String(mode.cid)) {
-    return true
-  }
-
-  let targetScrollTop = null
-  if (mode?.kind === 'ANCHOR_AT') {
-    const anchorEl = _anchorEl(scrollEl, mode.key)
-    if (anchorEl) targetScrollTop = anchorEl.offsetTop - mode.offset
-  } else if (mode?.kind === 'FOLLOW_BOTTOM') {
-    targetScrollTop = listEl.offsetHeight - scrollEl.clientHeight
-  }
-  if (targetScrollTop == null) {
-    return _rowIntersectsViewport(lastUserMsgEl, scrollEl.scrollTop, viewH)
-  }
-
-  // Project against real content only. Spacer cannot make its own owner
-  // visible; it may only realize room for a row that the held viewport shows.
-  const maxRealScrollTop = Math.max(
-    0,
-    listEl.offsetHeight - scrollEl.clientHeight,
-  )
-  const clampedTarget = Math.min(
-    maxRealScrollTop,
-    Math.max(0, targetScrollTop),
-  )
-  return _rowIntersectsViewport(lastUserMsgEl, clampedTarget, viewH)
-}
-
-
-/** Spacer height needed so the latest visible user message can sit near the
+/** Spacer height needed so the latest user message can sit near the
  *  top of the viewport, with the PIN_OFFSET breathing room above it, or so a
  *  transient question-submit anchor remains reachable while the submit-time
  *  viewport size is unchanged.
  *
- *  Visibility is the defining invariant. The matching latest user pin may
- *  reserve before placement; every other mode gets room only while its real
- *  viewport contains that latest row. Turn completion does not retire room.
- *  Content growth consumes the exact deficit and content collapse restores it.
+ *  Tail geometry is the defining invariant. Reservation exists before a
+ *  downward gesture reaches the latest row, so scrollHeight cannot grow at the
+ *  old physical bottom after momentum settles. Turn completion does not retire
+ *  room. Content growth consumes the exact deficit and content collapse
+ *  restores it.
  *
  *  Formula:
  *    max(0, viewH + (lastUserMsgTop − PIN_OFFSET) − listH
@@ -552,11 +504,9 @@ function _latestUserOwnsSpacer(scrollEl, listEl, lastUserMsgEl, mode, viewH) {
  *  the pre-cushion behavior; a >0 value re-adds breathing room if the exact
  *  end-of-scroll rest ever feels cramped.)
  *
- *  Once the latest user row leaves the viewport, ordinary reservation
- *  collapses. An older visible user row never receives it. A question-submit
- *  anchor instead reserves only its exact reachability deficit for a
- *  same-viewport handoff. A keyboard resize restores the mode that owned the
- *  unanswered card before this function runs again.
+ *  A question-submit anchor instead reserves only its exact reachability
+ *  deficit for a same-viewport handoff. A keyboard resize restores the mode
+ *  that owned the unanswered card before this function runs again.
  */
 const PIN_OFFSET = 4
 const PIN_BOTTOM_ROOM = 0
@@ -577,13 +527,6 @@ export function _computeSpacerH(
     return Math.max(0, viewH + anchorTarget - listEl.offsetHeight)
   }
   if (!lastUserMsgEl) return 0
-  if (!_latestUserOwnsSpacer(
-    scrollEl,
-    listEl,
-    lastUserMsgEl,
-    mode,
-    scrollEl.clientHeight || viewH,
-  )) return 0
   const pinTarget = Math.max(0, lastUserMsgEl.offsetTop - PIN_OFFSET)
   return Math.max(
     0,
@@ -1139,10 +1082,17 @@ export default function useScrollMode({
     return () => clearTimeout(deadline)
   }, [chatId])
 
+  // Geometry capture reads scrollHeight/offsetHeight, which forces a synchronous
+  // reflow of the unvirtualized transcript. That is acceptable for low-frequency
+  // transition/write traces (they run right after a layout write anyway), but on
+  // the reader-input path it would reflow on every touchstart and first scroll
+  // frame — the exact gesture-start window that must stay cheap. Those call sites
+  // opt out; geometry stays on by default everywhere else.
   const recordTrace = useCallback((bucket, event, {
     from = null,
     to = null,
     scrollEl = scrollRef.current,
+    captureGeometry = true,
   } = {}) => {
     _appendScrollTrace(bucket, {
       at: Math.round(typeof performance !== 'undefined' ? performance.now() : 0),
@@ -1150,7 +1100,7 @@ export default function useScrollMode({
       event,
       ...(from ? { from: _scrollModeForDiagnostics(from) } : {}),
       ...(to ? { to: _scrollModeForDiagnostics(to) } : {}),
-      geometry: _scrollGeometryForDiagnostics(scrollEl),
+      geometry: captureGeometry ? _scrollGeometryForDiagnostics(scrollEl) : null,
     })
   }, [chatId, scrollRef])
 
@@ -1945,8 +1895,8 @@ export default function useScrollMode({
           if (anchor) transitionMode(anchor, 'reader:hold-anchor')
         }
         persistMode()
-        // Recompute once against the final viewport after momentum, never
-        // underneath the gesture itself.
+        // Tail geometry, not mode or viewport visibility, owns reservation.
+        // Recompute once after momentum, never underneath the gesture itself.
         // When a footer resize was deferred, replay geometry + the newly
         // settled semantic mode atomically; a bare sizeSpacer here would let
         // native scroll anchoring paint an intermediate displaced frame.
@@ -2030,7 +1980,7 @@ export default function useScrollMode({
       )
       if (!readerAlreadyOwns || activatesDisclosure) {
         recordTrace('events', `reader:input-${event?.type || 'unknown'}`, {
-          scrollEl,
+          captureGeometry: false,
         })
       }
       if (activatesDisclosure) {
@@ -2213,7 +2163,7 @@ export default function useScrollMode({
       }
       const firstOwnedScroll = !readerScrollDirty
       if (firstOwnedScroll) {
-        recordTrace('events', 'reader:scroll-start', { scrollEl })
+        recordTrace('events', 'reader:scroll-start', { captureGeometry: false })
         clearTimeout(pendingGestureTimerRef.current)
         pendingGestureTimerRef.current = 0
         cancelAnimationFrame(pendingGestureReleaseRafRef.current)

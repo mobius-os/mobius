@@ -517,7 +517,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.11 (2026-07-27).** This section is the
+**Owner-authoritative contract — v1.12 (2026-07-31).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -541,21 +541,24 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   waits for the spacer-exhaustion handoff. A viewport /
   keyboard change, foreground return, mount, or chat restoration must never create
   auto-scroll.
-- **R1 — Visible latest-user reservation.** Dynamic bottom spacer belongs only to
-  the latest visible user row. It reserves exactly enough room for that row to reach
-  the viewport top and shrinks as reply, tool, image, or other content fills the
-  deficit. The remaining room survives turn completion when the reply is short.
-  Expanding content consumes it; collapsing the same content restores the exact
-  deficit. Mode does not own its ordinary lifetime: `PIN_USER_MSG` may reserve
-  before a fresh row is placed, while `ANCHOR_AT`, `FOLLOW_BOTTOM`, mount/return,
-  and disclosure settlement reserve only when their real viewport contains the
-  latest user row. If that row leaves the viewport, ordinary spacer is zero;
-  seeing an older user row never qualifies. An otherwise unreachable anchor clamps
-  to real conversation content before visibility is decided. R6's transient
-  question-submit hold is the sole exception: it may reserve only the exact tail
-  deficit required for a stable card handoff while the viewport size is unchanged.
-  It is never persisted and must release to the unanswered card's prior mode before
-  a keyboard or other viewport resize is laid out.
+- **R1 — Stable latest-turn reservation.** Dynamic bottom spacer derives from the
+  latest user row and the real tail geometry, independent of whether that row has
+  already entered the viewport. It reserves exactly enough room for that row to
+  reach the viewport top and shrinks as reply, tool, image, or other content fills
+  the deficit. The full range must exist before a downward gesture approaches the
+  final turn: crossing the latest-user viewport boundary must never extend
+  `scrollHeight` after momentum settles. The remaining room survives turn
+  completion when the reply is short. Expanding content consumes it; collapsing
+  the same content restores the exact deficit. Scroll mode does not own the
+  reservation; `PIN_USER_MSG`, `ANCHOR_AT`, `FOLLOW_BOTTOM`, mount/return, and
+  disclosure settlement all see the same tail range. Only the DOM's latest user row
+  participates—an older user row never gets a separate reservation. Durable anchor
+  validation still rejects locations wholly inside reserved blank space, so
+  restoring a chat lands on real conversation content. R6's transient
+  question-submit hold is the sole calculation exception: it may reserve only the
+  exact tail deficit required for a stable card handoff while the viewport size is
+  unchanged. It is never persisted and must release to the unanswered card's prior
+  mode before a keyboard or other viewport resize is laid out.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
   pins when its submit-time DOM snapshot is at the real-content tail. Geometry is
@@ -718,7 +721,7 @@ Controller structure is part of the contract, not an implementation detail:
   `scrollTop` write goes through `writeMode`. The exported `applyMode` executor
   is for the controller and pure unit tests, not a second live writer.
 - `useScrollMode` is the sole writer of `.spacer-dynamic` height. The write is
-  derived from the latest user row's visibility and exact content deficit;
+  derived from the latest user row and exact tail deficit;
   disclosure helpers and renderers may preserve an on-screen anchor but may never
   prime, enlarge, or unwind spacer themselves.
 - The gesture-gated `scroll` event reads physical-bottom geometry directly.
@@ -744,9 +747,9 @@ but never backward. Do not derive a remounted timer solely from `Date.now()` or 
 client arrival time of replayed deltas: catch-up arrives as a burst and that makes a
 minutes-old turn visibly restart at one second.
 
-Only the latest visible user row makes R1's reservation current. Reservation
-lifetime follows that row's visibility and exact remaining deficit, not turn
-completion or a particular scroll mode.
+Only the latest user row makes R1's reservation current. Reservation lifetime
+follows the exact remaining tail deficit, not viewport visibility, turn completion,
+or a particular scroll mode.
 - **A restored send is one logical message.** The frontend scopes the draft
   identity to the chat and reuses its client-minted `cid` when an ambiguous
   failed POST restores an unchanged composer. The route checks that durable

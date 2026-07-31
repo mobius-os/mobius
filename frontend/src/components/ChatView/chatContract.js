@@ -104,7 +104,7 @@ export const CHAT_CONTRACT = [
     summary:
       'Collapsing or expanding thinking, tool, and activity disclosures keeps '
       + 'the reader anchor fixed. The helper never writes spacer; the sole '
-      + 'owner recomputes room only for the visible latest user row.',
+      + 'owner recomputes the stable latest-turn deficit.',
   },
 ]
 
@@ -232,22 +232,19 @@ export function cushionPresent(snap, { min = PIN_BOTTOM_ROOM, pinOffset = PIN_OF
 /** C7 anchor-held-through-toggle: collapsing/expanding a disclosure (a thinking
  *  block, tool card, or activity stretch) must not move the reader. The anchor's
  *  viewport-top stays put across the toggle (±tolerance). The disclosure helper
- *  never writes spacer; the scroll owner may independently consume/restore an
- *  exact deficit only when the latest user row remains visible. */
+ *  never writes spacer; the scroll owner may independently consume/restore the
+ *  stable latest-turn deficit. */
 export function anchorHeldThroughToggle(
   before, after, { tolerance = 2 } = {}) {
   const id = 'anchor-held-through-toggle'
-  const expected = `anchor top drift <= ${tolerance}; positive spacer requires visible latest user`
+  const expected = `anchor top drift <= ${tolerance}`
   if (!before || !after || before.anchorTop == null || after.anchorTop == null) {
     return indeterminate(id, expected,
       'no anchorTop in before/after (missing disclosure anchor)')
   }
   const drift = after.anchorTop - before.anchorTop
-  const spacerOk = after.spacerH == null
-    || after.spacerH <= tolerance
-    || after.latestUserVisible === true
   return {
-    ok: Math.abs(drift) <= tolerance && spacerOk,
+    ok: Math.abs(drift) <= tolerance,
     id, expected,
     measured: {
       drift,

@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   _anchorModeIntersectsContent,
@@ -41,6 +42,11 @@ import {
   pinLanded,
   snapshotChatUX,
 } from '../chatContract.js'
+
+const scrollModeSource = readFileSync(
+  new URL('../useScrollMode.js', import.meta.url),
+  'utf8',
+)
 
 function makeScrollEl({ scrollHeight, scrollTop, clientHeight, spacerHeight = 0 }) {
   return {
@@ -310,6 +316,24 @@ test('touch input never reads scroll geometry, so it cannot force a layout', () 
   // Wheel genuinely needs the values, so it must still read them - exactly once.
   readerInputNeedsFrameRelease('wheel', readGeometry)
   assert.equal(geometryReads, 2, 'wheel reads the scroller once')
+})
+
+test('reader-input tracing never measures the transcript at gesture start', () => {
+  assert.match(
+    scrollModeSource,
+    /captureGeometry = true,[\s\S]*?geometry: captureGeometry \? _scrollGeometryForDiagnostics\(scrollEl\) : null/,
+    'low-frequency diagnostics retain geometry while hot paths can opt out',
+  )
+  assert.match(
+    scrollModeSource,
+    /reader:input-\$\{event\?\.type \|\| 'unknown'\}`,[\s\S]{0,120}?captureGeometry: false/,
+    'the first reader input must not force transcript layout',
+  )
+  assert.match(
+    scrollModeSource,
+    /reader:scroll-start', \{ captureGeometry: false \}/,
+    'the first compositor scroll frame must not force transcript layout',
+  )
 })
 
 test('scroll diagnostics expose behavior without message identity', () => {
@@ -1239,7 +1263,7 @@ function makeSpacerScrollEl({ clientHeight, queuedTray = null }) {
   }
 }
 
-test('spacer reservation belongs to the visible latest user row in any mode', () => {
+test('spacer reservation belongs to the latest user row in any mode', () => {
   const scrollEl = makeSpacerScrollEl({ clientHeight: 600 })
   scrollEl.scrollTop = 500
   const listEl = { offsetHeight: 900 }
@@ -1268,7 +1292,7 @@ test('spacer reservation belongs to the visible latest user row in any mode', ()
       { kind: 'ANCHOR_AT', key: 'a-1', offset: 0 },
     ),
     396,
-    'mode does not retire room while the latest user row is visible',
+    'mode does not retire the stable latest-turn room',
   )
   assert.equal(
     _computeSpacerH(
@@ -1279,11 +1303,11 @@ test('spacer reservation belongs to the visible latest user row in any mode', ()
       { kind: 'PIN_USER_MSG', cid: 'different-row' },
     ),
     396,
-    'visibility, not stale mode identity, owns the latest row reservation',
+    'stale mode identity cannot change the latest row reservation',
   )
 })
 
-test('spacer disappears when only an older user row is visible', () => {
+test('off-screen latest user pre-reserves one stable downward scroll range', () => {
   const scrollEl = makeSpacerScrollEl({ clientHeight: 600 })
   scrollEl.scrollTop = 0
   const listEl = { offsetHeight: 1400 }
@@ -1301,12 +1325,36 @@ test('spacer disappears when only an older user row is visible', () => {
       600,
       { kind: 'ANCHOR_AT', key: 'older-user', offset: 0 },
     ),
-    0,
-    'a visible older row cannot borrow reservation from the off-screen latest row',
+    96,
+    'tail room exists before the gesture reaches the latest row',
   )
 })
 
-test('applied anchor viewport outranks stale current visibility', () => {
+test('crossing the latest-user viewport boundary cannot create a second-stage bottom', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 600 })
+  const listEl = { offsetHeight: 1400 }
+  const latestUserMsgEl = {
+    offsetTop: 900,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+  const mode = { kind: 'ANCHOR_AT', key: 'older-user', offset: 0 }
+
+  scrollEl.scrollTop = 0
+  const beforeApproach = _computeSpacerH(
+    scrollEl, listEl, latestUserMsgEl, 600, mode,
+  )
+  scrollEl.scrollTop = 700
+  const afterLatestUserAppears = _computeSpacerH(
+    scrollEl, listEl, latestUserMsgEl, 600, mode,
+  )
+
+  assert.equal(beforeApproach, 96)
+  assert.equal(afterLatestUserAppears, beforeApproach,
+    'scrolling the latest row into view must not extend scrollHeight')
+})
+
+test('an older applied anchor does not make tail scrollHeight grow later', () => {
   const anchor = { offsetTop: 100, offsetHeight: 80 }
   const scrollEl = {
     clientHeight: 600,
@@ -1329,8 +1377,8 @@ test('applied anchor viewport outranks stale current visibility', () => {
       600,
       { kind: 'ANCHOR_AT', key: 'older-anchor', offset: 0 },
     ),
-    0,
-    'a pending anchor that hides the latest row must not carry stale room into its applied viewport',
+    296,
+    'the final range is present even while an older anchor is visible',
   )
 })
 
@@ -1362,7 +1410,7 @@ test('applied anchor may reserve before current geometry reaches its visible lat
   )
 })
 
-test('keyboard-closed height cannot make an actually hidden row visible', () => {
+test('keyboard-closed height keeps permanent tail reservation stable', () => {
   const scrollEl = makeSpacerScrollEl({ clientHeight: 400 })
   const latestUserMsgEl = {
     offsetTop: 500,
@@ -1378,8 +1426,8 @@ test('keyboard-closed height cannot make an actually hidden row visible', () => 
       800,
       { kind: 'INITIAL' },
     ),
-    0,
-    'fullViewH sizes eligible room but actual clientHeight decides visibility',
+    596,
+    'the full-height reservation exists before the hidden row is approached',
   )
 })
 
@@ -1414,7 +1462,7 @@ test('spacer reservation returns zero before there is a user message', () => {
   assert.equal(_computeSpacerH(scrollEl, listEl, null, 600), 0)
 })
 
-test('question-answer anchor gets no room when the latest user row is off-screen', () => {
+test('ordinary question-answer anchor keeps the stable latest-turn tail range', () => {
   const anchor = { offsetTop: 60, offsetHeight: 220 }
   const scrollEl = {
     clientHeight: 960,
@@ -1432,8 +1480,8 @@ test('question-answer anchor gets no room when the latest user row is off-screen
       960,
       mode,
     ),
-    0,
-    'an unreachable anchor clamps to conversation content instead',
+    556,
+    'ordinary anchor visibility cannot create a second-stage bottom',
   )
 })
 

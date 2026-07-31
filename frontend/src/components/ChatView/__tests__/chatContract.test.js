@@ -72,7 +72,7 @@ test('owner contract freezes question answers without locking keyboard movement'
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.11 \(2026-07-27\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.12 \(2026-07-31\)/)
   assert.match(
     architecture,
     /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,
@@ -80,7 +80,7 @@ test('owner contract freezes question answers without locking keyboard movement'
   )
   assert.match(
     architecture,
-    /question-submit hold is the sole exception: it may reserve only the exact tail\s+deficit required for a stable card handoff while the viewport size is unchanged/,
+    /question-submit hold is the sole calculation exception: it may reserve only the\s+exact tail deficit required for a stable card handoff while the viewport size is\s+unchanged/,
     'question submission may reserve only its same-viewport reachability deficit',
   )
   assert.match(

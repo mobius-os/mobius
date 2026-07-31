@@ -4,9 +4,9 @@ import assert from 'node:assert/strict'
 import { anchorHeldThroughToggle } from '../chatContract.js'
 
 // The disclosure seam (thinking/tool/activity collapse) is where the chat UI
-// regressed repeatedly: a bounce (anchor top moved across the toggle) or blank
-// room without the latest user row. This predicate is the machine-checkable
-// law for an ANCHOR_AT toggle.
+// regressed repeatedly: a bounce (anchor top moved across the toggle). Tail
+// reservation is stable and independent of viewport visibility; this predicate
+// is the machine-checkable law for an ANCHOR_AT toggle.
 
 test('a held anchor with no spacer growth passes', () => {
   const r = anchorHeldThroughToggle(
@@ -23,17 +23,10 @@ test('an anchor that bounced past tolerance fails', () => {
   assert.equal(r.measured.drift, 20)
 })
 
-test('an anchored disclosure cannot leave room without the latest user visible', () => {
+test('stable tail reservation may remain while an older anchor is held', () => {
   const reserved = anchorHeldThroughToggle(
     { anchorTop: 500, spacerH: 0 },
     { anchorTop: 500, spacerH: 48 })
-  assert.equal(reserved.ok, false)
-})
-
-test('collapse may restore reservation when the latest user remains visible', () => {
-  const reserved = anchorHeldThroughToggle(
-    { anchorTop: 500, spacerH: 0 },
-    { anchorTop: 500, spacerH: 48, latestUserVisible: true })
   assert.equal(reserved.ok, true)
 })
 
@@ -43,7 +36,7 @@ test('missing anchor data is indeterminate, never a false pass', () => {
   assert.match(r.reason, /anchorTop/)
 })
 
-test('a stale pre-toggle spacer passes only when the toggle leaves none behind', () => {
+test('a stable pre-toggle spacer does not affect the anchor contract', () => {
   const r = anchorHeldThroughToggle(
     { anchorTop: 300, spacerH: 250 },
     { anchorTop: 300, spacerH: 0 })
