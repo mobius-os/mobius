@@ -360,7 +360,10 @@ export default function SettingsView({
   const [expandedAuth, setExpandedAuth] = useState(null)
   // Usage is deliberately on demand. Only the disclosed provider fetches,
   // and keeping this separate from auth preserves the row's two clear actions.
-  const [expandedUsage, setExpandedUsage] = useState(null)
+  const [expandedUsage, setExpandedUsage] = useState({
+    codex: false,
+    claude: false,
+  })
   // Surface failures from the dark-mode toggle: a failed theme
   // persist would otherwise bounce the knob without telling the user
   // why.
@@ -442,13 +445,13 @@ export default function SettingsView({
   const codexUsageQuery = settingsQueries.providerUsage.useQuery('codex', {
     enabled: (
       active && providerReady && codexAuthenticated
-      && expandedUsage === 'codex'
+      && expandedUsage.codex
     ),
   })
   const claudeUsageQuery = settingsQueries.providerUsage.useQuery('claude', {
     enabled: (
       active && providerReady && claudeAuthenticated
-      && expandedUsage === 'claude'
+      && expandedUsage.claude
     ),
   })
   // Registry and provider/settings probes are independent. Starting them
@@ -779,7 +782,9 @@ export default function SettingsView({
   // panel feel jittery. With the updater form, deps are empty.
   const toggleClaudeAuth = useCallback(
     () => {
-      setExpandedUsage(null)
+      setExpandedUsage(prev => (
+        prev.claude ? { ...prev, claude: false } : prev
+      ))
       setExpandedAuth(prev => {
         if (prev !== 'claude') {
           authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
@@ -791,7 +796,9 @@ export default function SettingsView({
   )
   const toggleCodexAuth = useCallback(
     () => {
-      setExpandedUsage(null)
+      setExpandedUsage(prev => (
+        prev.codex ? { ...prev, codex: false } : prev
+      ))
       setExpandedAuth(prev => {
         if (prev !== 'codex') {
           authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
@@ -802,12 +809,12 @@ export default function SettingsView({
     [],
   )
   const toggleClaudeUsage = useCallback(() => {
-    setExpandedAuth(null)
-    setExpandedUsage(prev => prev === 'claude' ? null : 'claude')
+    setExpandedAuth(prev => prev === 'claude' ? null : prev)
+    setExpandedUsage(prev => ({ ...prev, claude: !prev.claude }))
   }, [])
   const toggleCodexUsage = useCallback(() => {
-    setExpandedAuth(null)
-    setExpandedUsage(prev => prev === 'codex' ? null : 'codex')
+    setExpandedAuth(prev => prev === 'codex' ? null : prev)
+    setExpandedUsage(prev => ({ ...prev, codex: !prev.codex }))
   }, [])
   const onProviderConnected = useCallback(async (provider) => {
     const providersBefore = authProvidersAtStartRef.current || configuredProviders
@@ -1435,11 +1442,11 @@ export default function SettingsView({
                     <PlanUsageToggle
                       provider="codex"
                       label={formatPlanStatus(codexPlanLabel)}
-                      expanded={expandedUsage === 'codex'}
+                      expanded={expandedUsage.codex}
                       onToggle={toggleCodexUsage}
                     />
                   ) : undefined}
-                  detailNode={codexAuthenticated && expandedUsage === 'codex' ? (
+                  detailNode={codexAuthenticated && expandedUsage.codex ? (
                     <ProviderUsage
                       id="provider-usage-codex"
                       snapshot={codexUsageQuery.data}
@@ -1461,11 +1468,11 @@ export default function SettingsView({
                     <PlanUsageToggle
                       provider="claude"
                       label={formatPlanStatus(claudePlanLabel)}
-                      expanded={expandedUsage === 'claude'}
+                      expanded={expandedUsage.claude}
                       onToggle={toggleClaudeUsage}
                     />
                   ) : undefined}
-                  detailNode={claudeAuthenticated && expandedUsage === 'claude' ? (
+                  detailNode={claudeAuthenticated && expandedUsage.claude ? (
                     <ProviderUsage
                       id="provider-usage-claude"
                       snapshot={claudeUsageQuery.data}

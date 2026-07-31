@@ -44,8 +44,14 @@ export default function ProviderRow({
       <span className="provider-row__name-line">
         <span className="provider-row__name">{name}</span>
         {connected && version && (
-          <span className="provider-row__version" title="Installed CLI version">
-            {version}
+          <span
+            className="provider-row__version"
+            title={`Installed CLI version ${version}`}
+          >
+            <span className="provider-row__version-full">{version}</span>
+            <span className="provider-row__version-short">
+              {version.split(/\s+/)[0]}
+            </span>
           </span>
         )}
       </span>
@@ -62,7 +68,6 @@ export default function ProviderRow({
           {connected ? 'Connected' : 'Not connected'}
         </StatusDot>
       )}
-      {detailNode}
     </span>
   )
 
@@ -86,6 +91,11 @@ export default function ProviderRow({
           ? 'Close'
           : (actionLabel || (connected ? 'Reconnect' : 'Connect'))}
       </button>
+      {detailNode && (
+        <div className="provider-row__detail">
+          {detailNode}
+        </div>
+      )}
       {expanded && (
         <div className="provider-row__auth">
           {children}

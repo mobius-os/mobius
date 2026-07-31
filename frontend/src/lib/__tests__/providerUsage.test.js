@@ -2,6 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   clampUsagePercent,
   formatPlanStatus,
@@ -9,6 +10,19 @@ import {
   formatUsageReset,
   visibleUsageWindows,
 } from '../../components/SettingsView/providerUsage.js'
+
+const usageView = readFileSync(
+  new URL('../../components/SettingsView/ProviderUsage.jsx', import.meta.url),
+  'utf8',
+)
+const settingsView = readFileSync(
+  new URL('../../components/SettingsView/SettingsView.jsx', import.meta.url),
+  'utf8',
+)
+const providerCss = readFileSync(
+  new URL('../../components/ProviderAuth/ProviderAuth.css', import.meta.url),
+  'utf8',
+)
 
 test('connected plan status uses the compact green-disclosure copy', () => {
   assert.equal(formatPlanStatus('Max plan'), 'Plan: Max')
@@ -47,4 +61,32 @@ test('only four valid allowance windows are rendered', () => {
   })
 
   assert.deepEqual(windows.map(window => window.id), ['a', 'b', 'c', 'd'])
+})
+
+test('Claude and Codex usage disclosures stay independently expandable', () => {
+  assert.match(settingsView, /expandedUsage\.codex/)
+  assert.match(settingsView, /expandedUsage\.claude/)
+  assert.match(
+    settingsView,
+    /setExpandedUsage\(prev => \(\{ \.\.\.prev, codex: !prev\.codex \}\)\)/,
+  )
+  assert.match(
+    settingsView,
+    /setExpandedUsage\(prev => \(\{ \.\.\.prev, claude: !prev\.claude \}\)\)/,
+  )
+  assert.doesNotMatch(settingsView, /expandedUsage === '(?:codex|claude)'/)
+})
+
+test('expanded usage restores thin accessible lines without tall cards', () => {
+  assert.match(usageView, /className="provider-usage__track"/)
+  assert.match(usageView, /role="progressbar"/)
+  assert.match(usageView, /className="provider-usage__fill"/)
+  assert.match(
+    providerCss,
+    /\.provider-usage__track\s*\{[^}]*height:\s*3px;/s,
+  )
+  assert.match(
+    providerCss,
+    /\.provider-usage__window\s*\{[^}]*grid-template-columns:/s,
+  )
 })

@@ -35,6 +35,19 @@ export default function ProviderUsage({
             return (
               <span className="provider-usage__window" key={window.id || window.label}>
                 <span className="provider-usage__label">{window.label}</span>
+                <span
+                  className="provider-usage__track"
+                  role="progressbar"
+                  aria-label={`${window.label} usage`}
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow={percent}
+                >
+                  <span
+                    className="provider-usage__fill"
+                    style={{ width: `${percent}%` }}
+                  />
+                </span>
                 <span className="provider-usage__value">
                   {formatUsagePercent(percent)}%
                 </span>
