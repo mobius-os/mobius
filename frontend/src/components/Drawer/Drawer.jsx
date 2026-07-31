@@ -18,6 +18,7 @@ import {
   isGeneratedTouchClick,
   isHorizontalDrawerSwipe,
   shouldSuppressDrawerSwipeClick,
+  shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
 } from '../../lib/drawerLifecycle.js'
 import { requestSearchReveal } from '../ChatView/searchReveal.js'
@@ -160,13 +161,14 @@ export default function Drawer({
     ))
   }, [allRecents.length])
 
-  // Selecting a chat from a workspace tab should reveal that same chat in the
-  // drawer. Older chats may sit outside the progressively mounted window, so
-  // first grow the window through the target row, then reveal it before paint.
-  // Remember the completed reveal so recency refreshes cannot fight a later
-  // manual scroll; leaving the chat or closing the drawer arms the next reveal.
+  // The always-visible desktop sidebar follows chat selections made elsewhere.
+  // The phone drawer instead preserves its last manual scroll position: opening
+  // navigation must not double as an automatic list scroll. Older desktop rows
+  // may sit outside the progressively mounted window, so first grow the window
+  // through the target row, then reveal it before paint. Remember the completed
+  // reveal so recency refreshes cannot fight a later manual scroll.
   useLayoutEffect(() => {
-    if (!open || activeView !== 'chat' || activeChatId == null) {
+    if (!shouldAutoRevealActiveChat({ open, persistent, activeView, activeChatId })) {
       revealedActiveChatRef.current = null
       return
     }
@@ -203,6 +205,7 @@ export default function Drawer({
     activeView,
     allRecents,
     open,
+    persistent,
     pinnedItems,
     visibleRecentCount,
   ])

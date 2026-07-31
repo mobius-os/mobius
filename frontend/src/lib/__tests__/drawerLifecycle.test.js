@@ -8,9 +8,26 @@ import {
   isGeneratedTouchClick,
   isHorizontalDrawerSwipe,
   shouldSuppressDrawerSwipeClick,
+  shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
   drawerOpenBlockedByDrag,
 } from '../drawerLifecycle.js'
+
+test('only the persistent sidebar follows active chat selections', () => {
+  const activeChat = {
+    open: true,
+    persistent: true,
+    activeView: 'chat',
+    activeChatId: 'chat-42',
+  }
+
+  assert.equal(shouldAutoRevealActiveChat(activeChat), true)
+  assert.equal(shouldAutoRevealActiveChat({ ...activeChat, persistent: false }), false,
+    'opening a modal drawer must preserve its manual scroll position')
+  assert.equal(shouldAutoRevealActiveChat({ ...activeChat, open: false }), false)
+  assert.equal(shouldAutoRevealActiveChat({ ...activeChat, activeView: 'canvas' }), false)
+  assert.equal(shouldAutoRevealActiveChat({ ...activeChat, activeChatId: null }), false)
+})
 
 test('the drawer open path stands down only while a drag is live', () => {
   // A live drag blocks the open (a left-edge tab drag must split, not open the

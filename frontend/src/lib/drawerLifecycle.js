@@ -9,6 +9,27 @@ export const DRAWER_CLOSE_WATCHDOG_BUFFER_MS = 80
 export const DRAWER_SWIPE_THRESHOLD_PX = 10
 export const DRAWER_SWIPE_DOMINANCE = 1.15
 
+/**
+ * Only the always-visible sidebar follows chat selections made elsewhere.
+ *
+ * A modal drawer is itself a destination the owner deliberately opens. Moving
+ * its list at that moment overrides the last manual scroll position and makes
+ * the opening gesture feel like it also scrolled the drawer. The persistent
+ * desktop sidebar has no such open gesture, so keeping its active row visible
+ * remains useful there.
+ */
+export function shouldAutoRevealActiveChat({
+  open,
+  persistent,
+  activeView,
+  activeChatId,
+}) {
+  return !!open
+    && !!persistent
+    && activeView === 'chat'
+    && activeChatId != null
+}
+
 function cssTimeMs(value) {
   const text = String(value || '').trim()
   const numeric = Number.parseFloat(text)
