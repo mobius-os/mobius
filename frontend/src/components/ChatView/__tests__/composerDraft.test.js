@@ -271,9 +271,12 @@ test('quota recovery sacrifices only transient cache and keeps every owner draft
 })
 
 test('the composer state boundary saves before scheduling React state', () => {
-  const source = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
-  const start = source.indexOf('function setComposerInput(nextInput)')
-  const end = source.indexOf('\n  }', start)
+  const source = readFileSync(
+    new URL('../hooks/useComposerDraftState.js', import.meta.url),
+    'utf8',
+  )
+  const start = source.indexOf('const setComposerInput = useCallback((nextInput) =>')
+  const end = source.indexOf('\n  }, [chatId])', start)
   const body = source.slice(start, end)
 
   const save = body.indexOf('persistComposerDraft(chatId, nextInput, draftAttachmentsRef.current)')

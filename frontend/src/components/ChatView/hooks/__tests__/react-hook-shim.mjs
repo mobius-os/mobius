@@ -56,6 +56,23 @@ export function useState(initial) {
   return [slot.value, setter]
 }
 
+export function useReducer(reducer, initialArg, init) {
+  const i = _slotIndex++
+  if (_slots[i] === undefined) {
+    const slot = {
+      value: typeof init === 'function' ? init(initialArg) : initialArg,
+      dispatch: null,
+    }
+    slot.dispatch = (action) => {
+      slot.value = reducer(slot.value, action)
+      _rerender()
+    }
+    _slots[i] = slot
+  }
+  const slot = _slots[i]
+  return [slot.value, slot.dispatch]
+}
+
 export function useRef(initial) {
   const i = _slotIndex++
   if (_slots[i] === undefined) {
@@ -78,6 +95,22 @@ export function useCallback(fn, deps) {
     _slots[i].deps = deps
   }
   return _slots[i].fn
+}
+
+export function useMemo(factory, deps) {
+  const i = _slotIndex++
+  if (_slots[i] === undefined) {
+    _slots[i] = { value: factory(), deps }
+  } else if (
+    deps === undefined
+    || !Array.isArray(_slots[i].deps)
+    || deps.length !== _slots[i].deps.length
+    || deps.some((dep, idx) => !Object.is(dep, _slots[i].deps[idx]))
+  ) {
+    _slots[i].value = factory()
+    _slots[i].deps = deps
+  }
+  return _slots[i].value
 }
 
 function _scheduleEffect(fn, deps) {

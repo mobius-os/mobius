@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs'
 
 
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const composerOwner = readFileSync(
+  new URL('../hooks/useComposerDraftState.js', import.meta.url),
+  'utf8',
+)
 const activeSurface = readFileSync(
   new URL('../ActiveAssistantSurface.jsx', import.meta.url),
   'utf8',
@@ -22,13 +26,13 @@ test('composer edits cannot recreate the active assistant payload', () => {
 })
 
 test('draft persistence has one state-boundary owner', () => {
-  const setter = chatView.match(
-    /function setComposerInput\(nextInput\) \{[\s\S]*?\n  \}/,
+  const setter = composerOwner.match(
+    /const setComposerInput = useCallback\(\(nextInput\) => \{[\s\S]*?\n  \}, \[chatId\]\)/,
   )?.[0] || ''
   assert.match(setter, /persistComposerDraft\(/)
   assert.match(setter, /setInputState\(/)
   assert.doesNotMatch(
-    chatView,
+    composerOwner,
     /useEffect\(\(\) => \{\s*persistComposerDraft\(chatId, input,/,
   )
 })

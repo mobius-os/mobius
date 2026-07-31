@@ -14,12 +14,13 @@ import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
-import useFileUpload from './useFileUpload.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
+import useTranscriptState from './hooks/useTranscriptState.js'
+import useComposerDraftState from './hooks/useComposerDraftState.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import { hasSendablePayload } from './composerSubmission.js'
@@ -58,7 +59,6 @@ import { clearChatQuestionDrafts } from './questionDraft.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
-import { sameMessageList } from './chatMessageList.js'
 import { updateChatRuntimeCache } from './chatRuntimeCache.js'
 import {
   chatDetailCacheValue,
@@ -94,23 +94,15 @@ import {
 } from './sendAttemptIdentity.js'
 import {
   clearFailedSendAttempt,
-  loadFailedSendAttempt,
-  saveFailedSendAttempt,
   sendAttemptIsDurable,
 } from './sendAttemptRecovery.js'
 import {
   clearComposerDraft,
-  composerDraftRevision,
   consumeComposerHandoff,
-  persistComposerDraft,
-  readComposerHandoff,
-  readComposerDraft,
-  readComposerDraftAsync,
 } from './composerDraft.js'
 import {
   reconcileComposerTextarea,
   resetComposerTextarea,
-  resizeComposerTextarea,
 } from './composerTextareaSizing.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
@@ -214,40 +206,6 @@ function tailResumableBlock(messages) {
   return null
 }
 
-function readInitialComposer(chatId, { acceptPending = true } = {}) {
-  try {
-    const failedAttempt = loadFailedSendAttempt(chatId)
-    // A retained hidden surface for the same chat must not claim a global
-    // navigation draft or its one-shot autosend. Only the currently painted
-    // world accepts that handoff; otherwise Standard + Builder duplicates could
-    // both start the same message when their shared chat id becomes visible.
-    const handoff = acceptPending
-      ? readComposerHandoff(chatId)
-      : { draft: null, autoSendDraft: null }
-    const pending = handoff.draft
-    if (pending && failedAttempt) clearFailedSendAttempt(chatId)
-    const saved = readComposerDraft(chatId)
-    const input = pending || failedAttempt?.text || saved.input
-    return {
-      input,
-      autoSend: !!input && handoff.autoSendDraft === input,
-      source: pending ? 'pending' : (failedAttempt ? 'failed' : 'saved'),
-      failedAttempt: pending ? null : failedAttempt,
-      attachments: pending
-        ? []
-        : (failedAttempt?.attachments || saved.attachments),
-    }
-  } catch {
-    return {
-      input: '',
-      autoSend: false,
-      source: 'empty',
-      failedAttempt: null,
-      attachments: [],
-    }
-  }
-}
-
 // Stable empty default so callers that pass no built apps (the embedded
 // composer) don't hand ChatView a fresh array each render and re-fire its
 // list-keyed effects.
@@ -294,6 +252,7 @@ export default function ChatView({
   const queryClient = useQueryClient()
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
+  const inputRef = useRef(null)
   const handleInternalNav = useCallback((url) => {
     onInternalNav?.(url)
   }, [onInternalNav])
@@ -316,14 +275,19 @@ export default function ChatView({
   // back through the versioned activation handoff, so any miss self-heals on
   // the first authoritative detail read.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
-  const [messages, setMessages] = useState(() => cached?.messages ?? [])
+  const transcriptCacheKey = useMemo(() => chatMessagesQueryKey(chatId), [chatId])
+  const {
+    messages,
+    messagesRef,
+    offset,
+    offsetRef,
+    applyMessagesToView,
+    commitMessages,
+  } = useTranscriptState({ cacheKey: transcriptCacheKey, cached, queryClient })
   const messageHistory = useMemo(
     () => composerHistoryFromMessages(messages),
     [messages],
   )
-  const [offset, setOffset] = useState(() => cached?.offset ?? 0)
-  const offsetRef = useRef(offset)
-  offsetRef.current = offset
   const [loading, setLoading] = useState(!cached)
   // Cached content is a real first paint even for a running chat. The initial
   // refresh remains authoritative and the stream catches up any active tail,
@@ -365,53 +329,28 @@ export default function ChatView({
       { running },
     )
   }
-  const initialComposerRef = useRef(null)
-  if (!initialComposerRef.current) {
-    initialComposerRef.current = readInitialComposer(chatId, { acceptPending: !hidden })
-  }
-  const draftAttachmentsRef = useRef(initialComposerRef.current.attachments)
-  const [input, setInputState] = useState(() => initialComposerRef.current.input)
-  const inputValueRef = useRef(input)
-  inputValueRef.current = input
-  function setComposerInput(nextInput) {
-    // Navigation can unmount this component before React flushes passive
-    // effects. Keep every composer transition durable at the state boundary,
-    // whether it came from typing, voice, restoration, or send cleanup.
-    inputValueRef.current = nextInput
-    persistComposerDraft(chatId, nextInput, draftAttachmentsRef.current)
-    setInputState(nextInput)
-  }
-  const [sendFailure, setSendFailure] = useState(() => (
-    initialComposerRef.current.failedAttempt
-      ? 'Möbius is checking whether your previous message reached the chat…'
-      : null
-  ))
-  const [pendingComposerSubmit, setPendingComposerSubmit] = useState(() => (
-    initialComposerRef.current.autoSend
-      ? {
-          token: `stored-handoff:${chatId}`,
-          text: initialComposerRef.current.input,
-          storedHandoff: true,
-        }
-      : null
-  ))
-  const submittedComposerRequestTokenRef = useRef(null)
-
-  useEffect(() => {
-    if (hidden) return
-    const initialComposer = initialComposerRef.current
-    const initial = initialComposer.input
-    if ((initialComposer.source === 'pending' || initialComposer.source === 'failed')
-        && (initial || initialComposer.attachments.length > 0)) {
-      // A global navigation handoff or failed-send recovery outranks any older
-      // per-chat draft. Adopt it into the live + durable draft owner before the
-      // one-shot handoff keys are removed.
-      persistComposerDraft(chatId, initial, initialComposer.attachments)
-    }
-    // The per-chat autosend marker remains until the actual send attempt. If
-    // this surface unmounts while loading, a remount can still finish safely.
-    consumeComposerHandoff(chatId, initial)
-  }, [hidden])
+  const {
+    input,
+    inputValueRef,
+    setComposerInput,
+    sendFailure,
+    setSendFailure,
+    pendingComposerSubmit,
+    setPendingComposerSubmit,
+    submittedComposerRequestTokenRef,
+    failedSendAttemptRef,
+    clearFailedAttempt,
+    rememberFailedAttempt,
+    pendingFiles,
+    clearFiles,
+    restoreFiles,
+    releaseFiles,
+    handleComposerInputChange,
+    handleComposerAddFiles,
+    handleComposerRemoveFile,
+    restoreComposerText,
+    restoreDurableDraft,
+  } = useComposerDraftState({ chatId, hidden, inputRef })
 
   // Per-chat agent runtime config (provider, agent_settings_json,
   // effective_agent_settings, has_assistant_turns). Resolved by the
@@ -600,14 +539,6 @@ export default function ChatView({
     }
   }, [chatId])
 
-  // Mirror `messages` in a ref so commitMessages can compute the next
-  // value without putting a side-effect (setQueryData) inside a
-  // setState updater. setState updaters must be pure; React may call
-  // them multiple times during concurrent rendering. Reading from a
-  // ref + calling setQueryData once outside the updater is correct.
-  const messagesRef = useRef(messages)
-  messagesRef.current = messages
-
   // Pending queue (the items shown in the queued-tray above the
   // composer) lives entirely inside usePendingQueue. Every mutation
   // goes through the hook's named ops; reads use pendingQueue.pendingMessages
@@ -624,66 +555,8 @@ export default function ChatView({
   const runtimeReconnectInFlightRef = useRef(false)
   const swReloadHoldTimerRef = useRef(null)
 
-  // Apply a resolved message snapshot to the mounted view without publishing
-  // it. Detail activation uses this after one complete cache publication;
-  // ordinary local/stream mutations go through commitMessages below.
-  const applyMessagesToView = useCallback((next, nextOffset, force = false) => {
-    const prev = messagesRef.current
-    // Advance messagesRef synchronously so back-to-back commits within the
-    // same React batch compose correctly.
-    messagesRef.current = next
-    if (nextOffset !== undefined) offsetRef.current = nextOffset
-    if (!force && sameMessageList(prev, next)) {
-      if (nextOffset !== undefined) {
-        setOffset(o => o === nextOffset ? o : nextOffset)
-      }
-      return
-    }
-    setMessages(next)
-    if (nextOffset !== undefined) {
-      setOffset(o => o === nextOffset ? o : nextOffset)
-    }
-  }, [])
-
-  // Single setter that updates local state AND the query cache.
-  //
-  // ALWAYS writes the query cache (so even empty chats have an entry,
-  // ensuring a cache hit on the next visit). By default, skips the
-  // React state update when messages are structurally identical
-  // (sameMessageList) — that's the path that was causing back-
-  // navigation jitter, because the background fetch would re-set the
-  // same array reference and trigger a redundant re-render of the
-  // spacer effect.
-  //
-  // The `force` option overrides that skip. Callers that originate
-  // state-machine transitions (e.g., promoteStreamToMessages doing a
-  // BRIDGE merge where catch-up content may match the DB partial
-  // byte-for-byte) MUST pass force=true. Without it, sameMessageList
-  // returns true on the structural match and setMessages is skipped
-  // — local state lags behind the cache, the UI keeps rendering the
-  // old version, and the only way to see the new one is to remount
-  // (which re-reads from the cache via useState initializer).
-  // Background-fetch callers leave force=false to keep the perf win.
-  const commitMessages = useCallback((updater, nextOffset, opts) => {
-    const force = opts?.force === true
-    const prev = messagesRef.current
-    const next = typeof updater === 'function' ? updater(prev) : updater
-    queryClient.setQueryData(chatMessagesQueryKey(chatId), (existing) => ({
-      ...(existing || {}),
-      // This composite is newer than the last complete detail read. Clearing
-      // its proof makes the next activation fail closed to one authoritative
-      // detail snapshot instead of treating local or streamed rows as a
-      // server-versioned response.
-      updated_at: null,
-      messages: next,
-      offset: nextOffset !== undefined ? nextOffset : (existing?.offset ?? 0),
-    }))
-    applyMessagesToView(next, nextOffset, force)
-  }, [applyMessagesToView, chatId, queryClient])
-
   // DOM refs
   const scrollRef = useRef(null)
-  const inputRef = useRef(null)
   const spacerRef = useRef(null)
   const lastUserMsgRef = useRef(null)
   // Stable callback ref attached to the last user message <div>. An
@@ -799,8 +672,6 @@ export default function ChatView({
   // If a POST's acknowledgement is lost, the composer is restored with the
   // same logical message identity. An unchanged retry reuses its cid so the
   // backend can acknowledge the durable row instead of starting a twin turn.
-  const failedSendAttemptRef = useRef(initialComposerRef.current.failedAttempt)
-
   // Ref mirrors of prop callbacks. doSend / doSendSilent are
   // memoized via useCallback; if these props were listed in the
   // deps array, every parent re-render that passed a fresh function
@@ -1472,47 +1343,6 @@ export default function ChatView({
       })
   }, [connectToStream, connectionError, isStreamingRef])
 
-  const {
-    files: pendingFiles,
-    addFiles,
-    removeFile,
-    clearFiles,
-    restoreFiles,
-    releaseFiles,
-  } = useFileUpload({
-    chatId,
-    initialFiles: initialComposerRef.current.attachments,
-    onFilesChange: nextFiles => {
-      draftAttachmentsRef.current = nextFiles
-      persistComposerDraft(chatId, inputValueRef.current, nextFiles)
-    },
-  })
-
-  useEffect(() => {
-    let cancelled = false
-    const revision = composerDraftRevision(chatId)
-    readComposerDraftAsync(chatId).then(saved => {
-      if (cancelled || composerDraftRevision(chatId) !== revision) return
-
-      const currentFiles = draftAttachmentsRef.current
-      const sameFiles = currentFiles.length === saved.attachments.length
-        && currentFiles.every((file, index) => {
-          const other = saved.attachments[index]
-          return file?.name === other?.name
-            && file?.size === other?.size
-            && file?.mime_type === other?.mime_type
-            && file?.status === other?.status
-        })
-      if (saved.input === inputValueRef.current && sameFiles) return
-
-      inputValueRef.current = saved.input
-      setInputState(saved.input)
-      draftAttachmentsRef.current = saved.attachments
-      restoreFiles(saved.attachments)
-    }).catch(() => {})
-    return () => { cancelled = true }
-  }, [chatId, restoreFiles])
-
   const wasHiddenRef = useRef(hidden)
   useLayoutEffect(() => {
     const becameVisible = wasHiddenRef.current && !hidden
@@ -1545,73 +1375,15 @@ export default function ChatView({
     // Composer drafts are chat-scoped across workspace worlds. A hidden retained
     // owner does not receive input events, so reconcile from the durable draft at
     // the visibility boundary before its first painted frame.
-    const saved = readComposerDraft(chatId)
-    if (saved.input !== inputValueRef.current) {
-      inputValueRef.current = saved.input
-      setInputState(saved.input)
-    }
-    restoreFiles(saved.attachments)
+    restoreDurableDraft()
   }, [
     chatId,
     commitMessages,
     hidden,
     pendingQueue.hydrate,
     queryClient,
-    restoreFiles,
+    restoreDurableDraft,
   ])
-
-  function clearFailedAttempt() {
-    if (!failedSendAttemptRef.current) return
-    failedSendAttemptRef.current = null
-    clearFailedSendAttempt(chatId)
-  }
-
-  function rememberFailedAttempt(attempt) {
-    failedSendAttemptRef.current = attempt
-    saveFailedSendAttempt(chatId, attempt)
-  }
-
-  // Reuse a failed attempt id only while the restored composer is genuinely
-  // untouched. Once the owner edits text or attachments—even if they later
-  // recreate the same visible draft—that is a new compose action and gets a
-  // new cid on send.
-  function handleComposerInputChange(nextInput) {
-    clearFailedAttempt()
-    setSendFailure(null)
-    setComposerInput(nextInput)
-  }
-
-  function handleComposerAddFiles(fileList) {
-    clearFailedAttempt()
-    setSendFailure(null)
-    return addFiles(fileList)
-  }
-
-  function handleComposerRemoveFile(fileId) {
-    clearFailedAttempt()
-    setSendFailure(null)
-    return removeFile(fileId)
-  }
-
-  function restoreComposerText(
-    text,
-    { focus = false, preserveFailedAttempt = false } = {},
-  ) {
-    if (preserveFailedAttempt) setComposerInput(text)
-    else handleComposerInputChange(text)
-    requestAnimationFrame(() => {
-      const el = inputRef.current
-      if (!el) return
-      resizeComposerTextarea(el, text)
-      if (focus) {
-        try { el.focus({ preventScroll: true }) }
-        catch { el.focus() }
-      }
-      const end = String(text).length
-      try { el.setSelectionRange(end, end) } catch {}
-      el.scrollTop = el.scrollHeight
-    })
-  }
 
   const {
     listening,

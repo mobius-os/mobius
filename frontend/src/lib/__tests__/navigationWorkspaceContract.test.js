@@ -9,6 +9,10 @@ const src = resolve(here, '../..')
 const navigation = readFileSync(resolve(src, 'hooks/useNavigation.js'), 'utf8')
 const canvas = readFileSync(resolve(src, 'components/AppCanvas/AppCanvas.jsx'), 'utf8')
 const shell = readFileSync(resolve(src, 'components/Shell/Shell.jsx'), 'utf8')
+const workspaceSession = readFileSync(
+  resolve(src, 'components/Shell/useWorkspaceSession.js'),
+  'utf8',
+)
 const frame = readFileSync(resolve(src, '../public/app-frame.html'), 'utf8')
 
 test('one open drawer owns at most one physical sentinel', () => {
@@ -138,7 +142,7 @@ test('pointer input inside an opaque app frame focuses its owning pane', () => {
 
 test('an explicit deep link replaces only a fallback implicit home tab', () => {
   assert.match(
-    shell,
+    workspaceSession,
     /const replaceImplicitBootTab = !blobValid[\s\S]*legacyOpenTabs\.length === 0[\s\S]*paneModel\.flatten\(workspace\)\.length <= 1/,
   )
   assert.match(

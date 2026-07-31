@@ -20,7 +20,6 @@ import useNavigation, {
   coldRestoredCanvasAppId,
   deepLink,
 } from '../../hooks/useNavigation.js'
-import { replaceNavEntry } from '../../lib/navHistory.js'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -56,7 +55,6 @@ import {
   appUpdateStaleMessage,
   findAppStoreApp,
 } from '../../lib/appRecovery.js'
-import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import {
   acknowledgeAppActivity,
   appAttentionIds,
@@ -66,12 +64,10 @@ import {
   withAppsFlagged,
   withoutAppFlagged,
 } from './newAppAttention.js'
-import { shouldDeferShellReload } from './shellReloadPolicy.js'
 import {
   addCreatedChatToList,
   createdChatDetailCache,
   currentReusableEmptyChat,
-  enteredEmptySingleScreen,
   mergeChatListWithCreatedGuards,
   mostRecentConcreteChatId,
   reconcileCreatedChatGuard,
@@ -90,14 +86,9 @@ import {
   stageComposerHandoff,
 } from '../ChatView/composerDraft.js'
 import {
-  reloadWhenWorkerTakesOver,
   shouldRearmShellApply,
   watchForShellUpdateOnForeground,
 } from './swHandoff.js'
-import {
-  awaitCacheFlushBeforeReload,
-  flushPersistedQueryCache,
-} from '../../queryClient.js'
 import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
@@ -124,7 +115,7 @@ import {
 } from './builtAppState.js'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
-  deriveContentVisibility, deriveModeSnapshotPlan, projectFocusedPane,
+  deriveContentVisibility, deriveModeSnapshotPlan,
   MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
@@ -136,10 +127,11 @@ import useAppIntentNavigation from './useAppIntentNavigation.js'
 import useDesktopSidebar, {
   desktopContentWidthAfterSidebarToggle,
 } from './useDesktopSidebar.js'
+import useWorkspaceSession from './useWorkspaceSession.js'
+import useShellReloadController from './useShellReloadController.js'
 import ShellBrand from './ShellBrand.jsx'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
-const SHELL_RELOAD_RECHECK_MS = 6000
 const APP_SETTINGS_SECTIONS = new Set([
   'ai-providers',
   'background-agents',
@@ -158,163 +150,31 @@ export default function Shell() {
     setWidth: setDesktopSidebarWidth,
   } = useDesktopSidebar()
 
-  // ── Workspace reducer — the single live authority for pane contents, per-pane
-  // active tabs, and focus (design §1). Declared ABOVE useNavigation so the
-  // adapter derives its legacy triple from it. Init: forgiving read of the
-  // versioned blob (readWorkspaceRaw guards the throwing sessionStorage.getItem
-  // before parseWorkspace's own try/catch), else the legacy flat seed.
-  // Capture the legacy projection once. Besides seeding a missing workspace, an
-  // empty value distinguishes the implicit home tab from a strip the user had
-  // actually engaged. The workspace still owns rendering either way.
-  const [legacyOpenTabs] = useState(() => tabModel.readOpenTabs())
-  const [workspaceState, dispatchWorkspaceRaw] = useReducer(
-    paneModel.workspaceReducer,
-    undefined,
-    () => paneModel.initialWorkspaceState(paneModel.parseWorkspace(
-      paneModel.readWorkspaceRaw(sessionStorage),
-      { fallbackTabs: legacyOpenTabs },
-    )),
-  )
-  const workspace = workspaceState.ws
-  // Whether a VALID persisted workspace blob booted this session (not a flat-tab
-  // fallback). The nav adapter uses it to make the blob authoritative over the
-  // legacy shell-reload triple, seeding from that triple only when absent/invalid
-  // (contract §5.3.10). Read once — sessionStorage is fixed for the mount.
-  const [blobValid] = useState(
-    () => paneModel.isValidWorkspaceBlob(paneModel.readWorkspaceRaw(sessionStorage)),
-  )
-  // A lone workspace tab with no legacy pinned projection is the shell's
-  // implicit home surface ONLY when there was no valid workspace blob. A valid
-  // single-screen workspace also deliberately dual-writes an empty legacy list;
-  // treating that durable state as implicit would RESET_FLAT on a cold deep link
-  // and silently flip its preserved viewMode back to the builder default.
-  const replaceImplicitBootTab = !blobValid
-    && legacyOpenTabs.length === 0
-    && Object.keys(workspace.panes).length === 1
-    && paneModel.flatten(workspace).length <= 1
-  // Ref-side reducer preview: this wrapper advances a ref copy of the reducer
-  // state SYNCHRONOUSLY before the raw React dispatch, so two navigation/
-  // placement events in one React 18 batch observe each other (design §1). Every
-  // caller uses this wrapper — no raw dispatch survives it.
-  const workspaceStateRef = useRef(workspaceState)
-  workspaceStateRef.current = workspaceState
-  // Shared "a workspace drag is live" flag. Declared ABOVE useNavigation so the
-  // drawer's OPEN path can stand down on it (useWorkspaceDrag sets it on arm and
-  // the Drawer's swipe-CLOSE handlers already read it).
-  const dragActiveRef = useRef(false)
-  // Set after useNavigation (needs navStackRef): reconciles in-memory restorable
-  // route hints against every workspace transition (design §5.1.3).
-  const onWorkspaceTransitionRef = useRef(null)
-  // Set once the New Chat policy has its chat/query dependencies. The synchronous
-  // workspace boundary can then own every edge into an empty single screen without
-  // making early navigation hooks depend on a callback declared later in the render.
-  const requestEmptySingleNewChatRef = useRef(null)
-  // Presentation state: which pane (if any) is maximized full-screen. It lives
-  // OUTSIDE the workspace blob so focusing a pane never rewrites the split tree or
-  // ratios — but it IS persisted to its own key and re-seeded here, so a maximize
-  // survives the apply-on-idle reload that fires while the tab is backgrounded
-  // (which otherwise dropped it, un-maximizing the pane on return). Seed the STATE
-  // and the REF together: dispatchWorkspace's reconcile reads the ref and short-
-  // circuits when it is null, so a state-only seed would fail to retarget/collapse
-  // the maximize on the first workspace mutation after boot.
-  const [focusedPaneViewId, setFocusedPaneViewIdState] = useState(
-    () => paneModel.resolveInitialFocusedPaneView(
-      workspace, paneModel.readFocusedPaneView(sessionStorage),
-    ),
-  )
-  const focusedPaneViewIdRef = useRef(focusedPaneViewId)
-  const setFocusedPaneViewId = useCallback((paneId) => {
-    focusedPaneViewIdRef.current = paneId
-    setFocusedPaneViewIdState(paneId)
-  }, [])
-  const dispatchWorkspace = useCallback((action) => {
-    const prev = workspaceStateRef.current
-    const next = paneModel.workspaceReducer(prev, action)
-    workspaceStateRef.current = next
-    // ANY tab-placement/pane transition can strand a route's paneId hint — a
-    // cross-pane move (even when the source pane survives) leaves the moved tab's
-    // routes pointing at the old pane, and a pane collapse leaves dead-pane hints.
-    // Reconcile them synchronously (using prev/next), before any restore reads
-    // them, so a hint always names the pane that now holds its item.
-    const enteredEmptySingle = next.ws !== prev.ws
-      && enteredEmptySingleScreen(
-        prev.ws, next.ws, paneModel.WORKSPACE_SPLITS_ENABLED,
-      )
-    if (next.ws !== prev.ws) {
-      onWorkspaceTransitionRef.current?.(prev.ws, next.ws)
-      const expanded = focusedPaneViewIdRef.current
-      if (expanded != null) {
-        const paneIds = Object.keys(next.ws.panes)
-        if (paneIds.length <= 1) {
-          setFocusedPaneViewId(null)
-        } else if (next.ws.focusedPaneId !== prev.ws.focusedPaneId
-            || !next.ws.panes[expanded]) {
-          setFocusedPaneViewId(next.ws.focusedPaneId)
-        }
-      }
-    }
-    dispatchWorkspaceRaw(action)
-    // Queue the reducer commit before policy state. React batches both, while the
-    // already-advanced ref still lets the request capture the pre-render chat target.
-    if (enteredEmptySingle) requestEmptySingleNewChatRef.current?.()
-  }, [setFocusedPaneViewId])
-
-  // ── Multi-pane projection (design §2/§4) — computed BEFORE useNavigation so
-  // the adapter learns the committed visible pane set. `contentRect` is the ONE
-  // geometry authority for projection. ResizeObserver keeps it aligned with
-  // external size changes; shell-owned desktop-sidebar toggles prime their target
-  // geometry before dispatch so CSS reservation + pane projection render once.
-  const contentElRef = useRef(null)
-  const [contentRect, setContentRect] = useState({ w: 0, h: 0 })
-  // A desktop-sidebar toggle can project the next rect before its CSS class
-  // commit. Hold that target across any already-queued ResizeObserver callback;
-  // the layout effect for the committed render settles it against real DOM.
-  const pendingContentRectRef = useRef(null)
-  // Read at placement-dispatch time (below) so the resolver derives the current
-  // device mode + pane rects without re-creating placeInWorkspace every resize.
-  const contentRectRef = useRef(contentRect)
-  contentRectRef.current = contentRect
-  const syncContentRect = useCallback(({ settlePending = false } = {}) => {
-    const el = contentElRef.current
-    if (!el) return
-    const w = Math.round(el.clientWidth)
-    const h = Math.round(el.clientHeight)
-    if (pendingContentRectRef.current && !settlePending) return
-    if (settlePending) pendingContentRectRef.current = null
-    setContentRect(prev => {
-      if (prev.w === w && prev.h === h) return prev
-      // Flag-off single-pane never tiles, so a content-size change would
-      // re-render Shell for a projection nothing reads. Skip it while the
-      // splits flag is off and the tree is a lone leaf (finding F).
-      if (!paneModel.WORKSPACE_SPLITS_ENABLED
-          && Object.keys(workspaceStateRef.current.ws.panes).length <= 1) return prev
-      return { w, h }
-    })
-  }, [])
-  useEffect(() => {
-    const el = contentElRef.current
-    if (!el || typeof ResizeObserver === 'undefined') return
-    // External layout changes (viewport, theme, browser chrome) still arrive
-    // through the observer. Shell-owned changes use the same commit helper in a
-    // layout effect, rather than waiting one painted frame for this callback.
-    const ro = new ResizeObserver(() => syncContentRect())
-    ro.observe(el)
-    return () => { ro.disconnect() }
-  }, [syncContentRect])
-  const workspaceMode = useMemo(() => paneModel.modeForRect(contentRect), [contentRect])
-  const baseProjection = useMemo(
-    () => paneModel.projectLayout(workspace, workspaceMode, contentRect),
-    [workspace, workspaceMode, contentRect],
-  )
-  const projection = useMemo(
-    () => projectFocusedPane(
-      baseProjection, workspace, focusedPaneViewId, contentRect,
-    ),
-    [baseProjection, workspace, focusedPaneViewId, contentRect],
-  )
-  // The committed visible pane set the nav adapter reads. Settings-open is
-  // applied separately inside isVisibleApp, so it is NOT excluded here.
-  const visiblePaneIds = useMemo(() => new Set(projection.visibleLeaves), [projection])
+  const {
+    legacyOpenTabs,
+    workspace,
+    workspaceStateRef,
+    dispatchWorkspace,
+    blobValid,
+    replaceImplicitBootTab,
+    dragActiveRef,
+    onWorkspaceTransitionRef,
+    requestEmptySingleNewChatRef,
+    focusedPaneViewId,
+    focusedPaneViewIdRef,
+    setFocusedPaneViewId,
+    toggleFocusedPaneView,
+    contentElRef,
+    contentRect,
+    contentRectRef,
+    primeContentRect,
+    syncContentRect,
+    workspaceMode,
+    baseProjection,
+    projection,
+    visiblePaneIds,
+    persistWorkspaceSnapshot,
+  } = useWorkspaceSession({ storage: sessionStorage })
 
   const {
     activeView,
@@ -360,9 +220,8 @@ export default function Shell() {
       sidebarWidth: desktopSidebarWidth,
     })
     const h = Math.round(el.clientHeight)
-    pendingContentRectRef.current = { w, h }
-    setContentRect(prev => (prev.w === w && prev.h === h ? prev : { w, h }))
-  }, [desktopSidebarReserved, desktopSidebarWidth])
+    primeContentRect({ w, h })
+  }, [desktopSidebarReserved, desktopSidebarWidth, primeContentRect])
   const closeDrawerRef = useRef(closeDrawer)
   closeDrawerRef.current = closeDrawer
   useEffect(() => {
@@ -418,28 +277,6 @@ export default function Shell() {
     }
   }, [workspace.viewMode, modeView.active, modeState.transition, setFocusedPaneViewId])
 
-  // Persist the maximized-pane presentation to its own key on every change so it
-  // survives the apply-on-idle reload (and a browser tab discard). Removing the
-  // key when nothing is maximized keeps a dismissed maximize from resurrecting on
-  // a later reload. Kept separate from the workspace-blob dual-write so focusing a
-  // pane never rewrites the tree/ratios.
-  useEffect(() => {
-    paneModel.writeFocusedPaneView(focusedPaneViewId, sessionStorage)
-  }, [focusedPaneViewId])
-
-  const toggleFocusedPaneView = useCallback((paneId) => {
-    const ws = workspaceStateRef.current.ws
-    if (!ws.panes[paneId] || Object.keys(ws.panes).length <= 1) {
-      setFocusedPaneViewId(null)
-      return
-    }
-    if (focusedPaneViewIdRef.current === paneId) {
-      setFocusedPaneViewId(null)
-      return
-    }
-    dispatchWorkspace({ type: 'FOCUS', paneId })
-    setFocusedPaneViewId(paneId)
-  }, [dispatchWorkspace, setFocusedPaneViewId])
   // Builder mode = the committed 'panes' world (logo twist + static brand cue + power
   // chrome), clamped off by the splits kill switch (INV 16). Flips synchronously
   // with the toggle, matching the gesture's own spring/snap.
@@ -769,12 +606,6 @@ export default function Shell() {
       return next
     })
   }, [])
-  const pendingShellReloadRef = useRef(false)
-  // False wins when several requests coalesce: an explicit shell_apply_now
-  // promotes an already-pending passive watcher rebuild to deliberate apply.
-  const pendingShellReloadPassiveRef = useRef(false)
-  const shellReloadTimerRef = useRef(null)
-  const lastShellInteractionAtRef = useRef(0)
   // Guards the once-per-mount deferred shell-update pickup effect below.
   const shellUpdatePickupRef = useRef(false)
   const shellUpdatePickupCheckStartedRef = useRef(false)
@@ -823,216 +654,6 @@ export default function Shell() {
     })
   }, [])
 
-  function shellReloadState() {
-    // Derive the compatibility triple from the freshest workspace at WRITE time,
-    // not the render-lagging active*Refs (§5.3.10): a workspace action previewed
-    // in the same React batch must not persist a fresh blob beside a stale triple.
-    // Settings is a global overlay tracked separately from pane content.
-    // CURRENT-WORLD projection (activeContentRoute): in single mode the reload
-    // triple must name the slot, not the hidden builder focus — the triple only
-    // seeds a boot with no valid workspace blob, and that boot lands in single
-    // mode showing the slot.
-    const content = paneModel.activeContentRoute(workspaceStateRef.current.ws)
-    return {
-      activeView: activeViewRef.current === 'settings' ? 'settings' : content.view,
-      activeAppId: content.appId,
-      activeChatId: content.chatId,
-      drawerOpen: drawerOpenRef.current,
-    }
-  }
-
-  async function performShellReload({ passive = false } = {}) {
-    let stalePrecache = false
-    try { stalePrecache = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
-    if (stalePrecache && navigator.onLine === false) {
-      // An offline reload is safe only while the existing precache remains
-      // intact; purging Workbox offline can strand an installed PWA on the
-      // fallback page, so stale recovery waits for an online idle boundary.
-      deferShellReload({ passive })
-      return
-    }
-    pendingShellReloadRef.current = false
-    pendingShellReloadPassiveRef.current = false
-    if (shellReloadTimerRef.current) {
-      clearTimeout(shellReloadTimerRef.current)
-      shellReloadTimerRef.current = null
-    }
-    // Capture view-owned transient state synchronously, before the async query
-    // flush or service-worker handoff can let layout/data change underneath it.
-    // ChatView uses this to persist the exact visible message anchor.
-    window.dispatchEvent(new Event(BEFORE_SHELL_RELOAD_EVENT))
-    // ChatView promotes terminal stream items into the in-memory query cache
-    // synchronously before it marks the shell idle. Normal IndexedDB writes
-    // are throttled, so a deferred rebuild can otherwise reload between those
-    // two phases and hydrate the previous partial. Flush the exact terminal
-    // cache as the reload handoff; the backend remains authoritative on the
-    // immediate background revalidation. This follows the synchronous event
-    // above so view-owned anchors are captured before the first await.
-    await awaitCacheFlushBeforeReload(flushPersistedQueryCache(queryClient))
-    // Workspace-first restore (§5.3.10): synchronously persist the latest
-    // workspace blob (tree/focus/active tabs are authoritative on boot) and the
-    // compatibility triple derived from its focused pane, so a valid blob wins
-    // over shellReload.active* and this handoff never destroys the just-persisted
-    // pane state.
-    try {
-      sessionStorage.setItem(
-        paneModel.STORAGE_KEY,
-        paneModel.serializeWorkspace(workspaceStateRef.current.ws),
-      )
-      // Capture the maximize from the REF (like the ws above): this runs after an
-      // await, so the render-closure focusedPaneViewId is stale. Keeping the (ws,
-      // maximize) pair from refs makes the persisted snapshot atomic.
-      paneModel.writeFocusedPaneView(focusedPaneViewIdRef.current, sessionStorage)
-    } catch { /* private mode / quota — the in-memory workspace still boots */ }
-    sessionStorage.setItem('shell-reload', JSON.stringify(shellReloadState()))
-    // Match the manifest scope so the post-reload page lands inside
-    // the installed PWA's declared scope — writing `/` here would
-    // briefly put the page out of scope and Chromium can refuse the
-    // next manifest update in-place.
-    replaceNavEntry('base', '/shell/')
-    // SW UPDATE LEASH (sw.js): the new service worker installed and is WAITING
-    // — it never skipWaiting()s on its own. THIS is the one moment we hand it
-    // control, so the SW generation flips exactly when the page generation does.
-    // Mark the reload page-initiated first so index.html's controllerchange
-    // handler treats any resulting controllerchange as OURS (an expected apply),
-    // not a spontaneous background SW flip to suppress.
-    try { sessionStorage.setItem('sw-skip-initiated', '1') } catch { /* ignore */ }
-
-    // Deferred stale-precache recovery (flagged by index.html at boot): a
-    // Chromium bug can keep serving the old precached index even after sw.js
-    // advertises a new bundle. Clearing Workbox's precache forces the reload to
-    // fall through to the network for index.html + the new hashed assets. Done
-    // HERE, at the same idle boundary as the reload, instead of index.html's old
-    // boot-time force-reload — so it can never blank a live turn.
-    if (stalePrecache) {
-      if (typeof caches !== 'undefined') {
-        try {
-          const keys = await caches.keys()
-          await Promise.all(
-            keys.filter(k => k.startsWith('workbox-precache-')).map(k => caches.delete(k)),
-          )
-        } catch { /* best-effort — the reload still self-heals via updateViaCache */ }
-      }
-      try { sessionStorage.removeItem('sw-stale-precache-pending') } catch { /* ignore */ }
-      // Loop-prevention: index.html's boot check reads this and skips
-      // re-flagging on the recovered load (then clears it).
-      try { sessionStorage.setItem('sw-stale-precache-recovering', '1') } catch { /* ignore */ }
-    }
-
-    // Hand control to the waiting worker (if any) and reload only once it has
-    // actually TAKEN OVER — the waiting worker reaching 'activated' (or a
-    // controllerchange), with a bounded fallback if the SW wedges. A blind
-    // ~220ms timer here used to reload before skipWaiting()->activate finished
-    // on a client's first update cycle, so the navigation was answered by the
-    // OUTGOING worker's precache and the page came back on the old generation
-    // and stuck (feature 207). No waiting worker (unchanged sw.js, e.g. a
-    // backend-only rebuild) → reload immediately: the reload alone re-fetches
-    // the current generation. The boot-time re-arm net (shouldRearmShellApply,
-    // mount effect below) still catches a stale landing if the fallback fires.
-    const doReload = () => window.location.reload()
-    if (navigator.serviceWorker?.getRegistration) {
-      navigator.serviceWorker.getRegistration()
-        .then(reg => reloadWhenWorkerTakesOver({
-          registration: reg,
-          serviceWorker: navigator.serviceWorker,
-          reload: doReload,
-        }))
-        .catch(doReload)
-    } else {
-      doReload()
-    }
-  }
-
-  function shellReloadWouldDisruptUser({ passive = false } = {}) {
-    return shouldDeferShellReload({
-      activeElement: document.activeElement,
-      activeView: activeViewRef.current,
-      activeChatId: activeChatIdRef.current,
-      multiPaneBuilderVisible: multiPaneBuilderVisibleRef.current,
-      streamingChatIds: streamingChatIdsRef.current,
-      passiveRebuild: passive,
-      voiceDictationActive: voiceDictationActiveRef.current,
-      lastUserInteractionAt: lastShellInteractionAtRef.current,
-      visibilityState: document.visibilityState,
-    })
-  }
-
-  function shellReloadHasStableVisibleHold(passive) {
-    if (document.visibilityState === 'hidden') return false
-    if (multiPaneBuilderVisibleRef.current) return true
-    return passive
-      && activeViewRef.current === 'chat'
-      && activeChatIdRef.current != null
-  }
-
-  function checkPendingShellReload() {
-    if (!pendingShellReloadRef.current) return
-    const passive = pendingShellReloadPassiveRef.current
-    if (shellReloadWouldDisruptUser({ passive })) {
-      // Stable visible holds (the whole Builder workspace, or a passive watcher
-      // while reading a chat) have no deadline. Wait for the view/mode/visibility
-      // effects below instead of waking the page every six seconds.
-      if (!shellReloadHasStableVisibleHold(passive)) scheduleShellReloadCheck()
-    } else {
-      performShellReload({ passive })
-    }
-  }
-
-  function scheduleShellReloadCheck() {
-    if (shellReloadTimerRef.current) clearTimeout(shellReloadTimerRef.current)
-    shellReloadTimerRef.current = setTimeout(() => {
-      shellReloadTimerRef.current = null
-      checkPendingShellReload()
-    }, SHELL_RELOAD_RECHECK_MS)
-  }
-
-  function deferShellReload({ passive = false } = {}) {
-    pendingShellReloadPassiveRef.current = pendingShellReloadRef.current
-      ? (pendingShellReloadPassiveRef.current && passive)
-      : passive
-    pendingShellReloadRef.current = true
-    if (!shellReloadHasStableVisibleHold(pendingShellReloadPassiveRef.current)) {
-      scheduleShellReloadCheck()
-    }
-  }
-
-  function requestShellReload({ passive = false } = {}) {
-    if (shellReloadWouldDisruptUser({ passive })) {
-      deferShellReload({ passive })
-    } else {
-      performShellReload({ passive })
-    }
-  }
-
-  useEffect(() => {
-    const record = () => { lastShellInteractionAtRef.current = Date.now() }
-    const releaseWhenHidden = () => {
-      if (document.visibilityState === 'hidden') checkPendingShellReload()
-    }
-    const opts = { capture: true, passive: true }
-    window.addEventListener('pointerdown', record, opts)
-    window.addEventListener('touchstart', record, opts)
-    window.addEventListener('keydown', record, opts)
-    window.addEventListener('input', record, opts)
-    window.addEventListener('focusin', record, opts)
-    document.addEventListener('visibilitychange', releaseWhenHidden)
-    return () => {
-      window.removeEventListener('pointerdown', record, opts)
-      window.removeEventListener('touchstart', record, opts)
-      window.removeEventListener('keydown', record, opts)
-      window.removeEventListener('input', record, opts)
-      window.removeEventListener('focusin', record, opts)
-      document.removeEventListener('visibilitychange', releaseWhenHidden)
-      if (shellReloadTimerRef.current) clearTimeout(shellReloadTimerRef.current)
-    }
-  }, [])
-
-  // Release a stable visible hold as soon as the owner leaves the chat surface
-  // or returns from Builder to Standard. Switching between chats remains
-  // protected for a passive generation.
-  useEffect(() => {
-    checkPendingShellReload()
-  }, [activeView, activeChatId, multiPaneBuilderVisible])
   // One shell-wide indicator owns the persistent offline explanation. Chat
   // still disables sends while unavailable, but does not repeat this status
   // beside the composer.
@@ -1830,6 +1451,26 @@ export default function Shell() {
   useEffect(() => {
     voiceDictationActiveRef.current = voiceDictationActive
   }, [voiceDictationActive])
+
+  const { requestShellReload } = useShellReloadController({
+    win: window,
+    doc: document,
+    nav: navigator,
+    storage: sessionStorage,
+    cacheStorage: typeof caches !== 'undefined' ? caches : null,
+    queryClient,
+    persistWorkspaceSnapshot,
+    workspaceStateRef,
+    activeViewRef,
+    activeChatIdRef,
+    drawerOpenRef,
+    multiPaneBuilderVisibleRef,
+    streamingChatIdsRef,
+    voiceDictationActiveRef,
+    activeView,
+    activeChatId,
+    multiPaneBuilderVisible,
+  })
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The

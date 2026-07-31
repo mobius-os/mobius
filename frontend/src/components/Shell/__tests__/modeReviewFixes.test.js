@@ -13,6 +13,10 @@ import { modeReducer } from '../modeMachine.js'
 // tests/mode-transition.spec.mjs.
 
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const workspaceSession = readFileSync(
+  new URL('../useWorkspaceSession.js', import.meta.url),
+  'utf8',
+)
 const nav = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.url), 'utf8')
 const controller = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
 const scene = readFileSync(new URL('../useModeViewTransition.js', import.meta.url), 'utf8')
@@ -95,8 +99,8 @@ test('bypass hunt: concrete restores funnel; explicit-null restores use the empt
   // Tombstoned/semantic-home routes deliberately clear the slot directly. They are
   // safe because every workspace dispatch crosses the shared empty-single edge gate.
   assert.match(nav, /SET_SINGLE_SCREEN', item: null/)
-  assert.match(shell, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
-  assert.match(shell, /requestEmptySingleNewChatRef\.current\?\.\(\)/)
+  assert.match(workspaceSession, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
+  assert.match(workspaceSession, /requestEmptySingleNewChatRef\.current\?\.\(\)/)
 })
 
 // -- Finding F9 (expanding review): the chat repair/seed paths funnel too --------

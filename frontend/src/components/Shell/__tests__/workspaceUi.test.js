@@ -7,6 +7,10 @@ const css = readFileSync(
   'utf8',
 )
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const workspaceSession = readFileSync(
+  new URL('../useWorkspaceSession.js', import.meta.url),
+  'utf8',
+)
 const shellBrand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
 const newChatLanding = readFileSync(new URL('../NewChatLanding.jsx', import.meta.url), 'utf8')
 const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
@@ -67,7 +71,7 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   // Only a fallback workspace may be treated as implicit. A valid one-leaf
   // single-screen blob intentionally has an empty legacy mirror; resetting it
   // on a deep link would silently change its view mode back to builder.
-  assert.match(shell, /const replaceImplicitBootTab = !blobValid\s*\n?\s*&& legacyOpenTabs\.length === 0/)
+  assert.match(workspaceSession, /const replaceImplicitBootTab = !blobValid\s*\n?\s*&& legacyOpenTabs\.length === 0/)
   assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(legacyOpenTabs\.length > 0\)/)
   assert.match(shell, /if \(openTabs\.length >= 2\) setTabStripEngaged\(true\)/)
   assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)
@@ -1135,7 +1139,9 @@ test('round4-3: requestEmptySingleNewChat records a tokenized request and does N
 })
 
 test('round4-3: every reducer edge into an empty single screen uses one policy boundary', () => {
-  const dispatch = shell.match(/const dispatchWorkspace = useCallback\(\(action\) => \{[\s\S]*?\}, \[\]\)/)?.[0] || ''
+  const dispatch = workspaceSession.match(
+    /const dispatchWorkspace = useCallback\(\(action\) => \{[\s\S]*?\}, \[setFocusedPaneViewId\]\)/,
+  )?.[0] || ''
   assert.ok(dispatch.length > 0, 'found the workspace dispatch boundary')
   assert.match(dispatch, /workspaceReducer\(prev, action\)/)
   assert.match(dispatch, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
