@@ -1,11 +1,11 @@
-/* MessageCopyButton — one-tap "copy this message" under a settled chat row.
+/* MessageCopyButton — one-tap "copy this message" in a settled message's
+   revealable metadata row.
    Exists because native long-press selection is unreliable on phones. It is a
    plain tap target only: it never intercepts press/hold or the context menu,
    so native text selection and its action menu stay fully available (the
    chatUiPolish test locks that invariant). */
 import { useEffect, useRef, useState } from 'react'
-import Check from 'lucide-react/dist/esm/icons/check.mjs'
-import Copy from 'lucide-react/dist/esm/icons/copy.mjs'
+import { Check, Copy } from '@openai/apps-sdk-ui/components/Icon'
 import { copyPlainText } from './messageCopy.js'
 
 export default function MessageCopyButton({ text }) {
@@ -15,8 +15,8 @@ export default function MessageCopyButton({ text }) {
   useEffect(() => () => clearTimeout(timerRef.current), [])
 
   async function handleCopy(e) {
-    // A tap on a user row also toggles its timestamp via the row's onClick;
-    // copying must not double as that.
+    // The containing message row owns reveal timing; copying must not restart
+    // that timer or double as another message-row click.
     e.stopPropagation()
     if (!(await copyPlainText(text))) return
     setCopied(true)
@@ -33,9 +33,8 @@ export default function MessageCopyButton({ text }) {
       title="Copy message"
     >
       {copied
-        ? <Check size={14} strokeWidth={2.3} aria-hidden="true" />
-        : <Copy size={14} strokeWidth={2} aria-hidden="true" />}
-      {copied && <span className="chat__msg-copy-label">Copied</span>}
+        ? <Check width={14} height={14} aria-hidden="true" />
+        : <Copy width={14} height={14} aria-hidden="true" />}
     </button>
   )
 }

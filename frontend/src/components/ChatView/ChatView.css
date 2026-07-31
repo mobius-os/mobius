@@ -365,40 +365,51 @@
   align-items: flex-start;
 }
 
-/* Tap-to-show timestamp below user messages. ChatView clears the visible state
+/* Tap-to-show message metadata. User timestamps and copy share one row, while
+   assistant rows show the copy action alone. ChatView clears the visible state
    automatically after a short glance, so the row never remains expanded. */
+.chat__msg-meta {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-end;
+  gap: 4px;
+  margin-top: 4px;
+  /* The row uses the existing inter-message gap without centering a real
+     button inside a zero-height box (which pulled the copy glyph upward into
+     the message bubble). Its negative bottom margin cancels only its own
+     layout height, so later rows keep the established transcript rhythm. */
+  height: 24px;
+  margin-bottom: -24px;
+  overflow: visible;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.15s ease, visibility 0s linear 0.15s;
+}
+.chat__msg-meta--visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
 .chat__ts {
   font-size: 11px;
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  margin-top: 4px;
-  opacity: 0;
-  pointer-events: none;
-  height: 0;
-  overflow: visible;
-  transition: opacity 0.15s ease;
+  white-space: nowrap;
 }
-.chat__ts--visible { opacity: 1; }
 
 /* ── One-tap message copy ──────────────────────────────
    The explicit mobile affordance: native long-press selection stays fully
    available (this is a plain tap target — never a press/hold interception,
-   see chatUiPolish.test), but a single tap now copies the whole message
-   with a visible "Copied" acknowledgement. Quiet ghost button, always
-   visible on touch devices, hover/focus-revealed on fine pointers. */
-.chat__msg-actions {
-  display: flex;
-  margin-top: 2px;
-}
-/* Every copy affordance lands in the same LOWER-RIGHT corner: code blocks
-   pin right:7px, user bubbles inherit their column's flex-end, and the
-   response row opts out of the assistant column's flex-start here. */
-.chat__msg--assistant .chat__msg-actions { align-self: flex-end; }
+   see chatUiPolish.test), but a single tap reveals a quiet ghost button
+   beside the timestamp when one is present. */
 .chat__msg-copy {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  min-height: 26px;
-  padding: 2px 7px;
+  min-height: 24px;
+  padding: 2px 5px;
   border: 0;
   border-radius: 7px;
   background: none;
@@ -417,10 +428,6 @@
   opacity: 1;
 }
 @media (hover: hover) and (pointer: fine) {
-  .chat__msg-copy { opacity: 0; }
-  .chat__msg:hover .chat__msg-copy,
-  .chat__msg-copy:focus-visible,
-  .chat__msg-copy--copied { opacity: 1; }
   .chat__msg-copy:hover {
     background: var(--surface2); /* CONTRACT: secondary opaque fill */
     color: var(--text);

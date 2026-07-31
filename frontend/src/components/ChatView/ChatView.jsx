@@ -32,7 +32,9 @@ import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import ContributionReviewCard from './ContributionReviewCard.jsx'
 import MsgContent from './MsgContent.jsx'
+import MessageMetaRow from './MessageMetaRow.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
+import { messageCopyText } from './messageCopy.js'
 import { formatResetTime } from './resetTime.js'
 import {
   resetDeadlineDelay,
@@ -134,6 +136,7 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
+const MESSAGE_META_VISIBLE_MS = 5000
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -469,8 +472,8 @@ export default function ChatView({
   // cards themselves use to publish the node being observed.
   const [showInspector, setShowInspector] = useState(false)
   const [showSummary, setShowSummary] = useState(false)
-  const [visibleTimestampKey, setVisibleTimestampKey] = useState(null)
-  const timestampTimerRef = useRef(null)
+  const [visibleMessageMetaKey, setVisibleMessageMetaKey] = useState(null)
+  const messageMetaTimerRef = useRef(null)
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
   // The app id whose CTA is mid recompile-pulse (label swapped to "Preview
   // updated ✓" for ~2s), or null.
@@ -505,17 +508,19 @@ export default function ChatView({
   }, [chatId, queryClient])
 
   useEffect(() => () => {
-    if (timestampTimerRef.current) clearTimeout(timestampTimerRef.current)
+    if (messageMetaTimerRef.current) clearTimeout(messageMetaTimerRef.current)
   }, [])
 
-  const showTimestamp = useCallback((event, key) => {
+  const showMessageMeta = useCallback((event, key) => {
+    if (event.defaultPrevented) return
+    if (event.target.closest?.('button, a, input, textarea, select, [role="button"]')) return
     if (window.getSelection?.()?.toString()) return
-    if (timestampTimerRef.current) clearTimeout(timestampTimerRef.current)
-    setVisibleTimestampKey(key)
-    timestampTimerRef.current = setTimeout(() => {
-      timestampTimerRef.current = null
-      setVisibleTimestampKey(current => current === key ? null : current)
-    }, 2200)
+    if (messageMetaTimerRef.current) clearTimeout(messageMetaTimerRef.current)
+    setVisibleMessageMetaKey(key)
+    messageMetaTimerRef.current = setTimeout(() => {
+      messageMetaTimerRef.current = null
+      setVisibleMessageMetaKey(current => current === key ? null : current)
+    }, MESSAGE_META_VISIBLE_MS)
   }, [])
   useEffect(() => {
     autoResumeRequestRef.current += 1
@@ -4007,9 +4012,11 @@ export default function ChatView({
             const dataKey = msg.id || `${msg.role}-${msg.ts ?? i}`
             // User rows key + pin on the stable cid so the optimistic→confirm
             // display-ts update never remounts the row (which would drop the
-            // pin target mid-swap). data-ts stays for the timestamp tooltip only.
+            // pin target mid-swap). data-ts stays for the revealed metadata row.
             const ownerUserMessage = isOwnerUserMessage(msg)
             const userCid = ownerUserMessage ? cidOf(msg) : null
+            const copyText = messageCopyText(msg)
+            const hasMessageMeta = Boolean(copyText || (ownerUserMessage && msg.ts))
             return (
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
@@ -4018,8 +4025,8 @@ export default function ChatView({
               data-key={dataKey}
               data-cid={userCid || undefined}
               data-ts={ownerUserMessage && msg.ts ? String(msg.ts) : undefined}
-              onClick={msg.ts && ownerUserMessage
-                ? (event) => showTimestamp(event, dataKey)
+              onClick={hasMessageMeta
+                ? (event) => showMessageMeta(event, dataKey)
                 : undefined}
             >
               <MsgContent
@@ -4051,14 +4058,11 @@ export default function ChatView({
                 pendingQuestionRef={pendingQuestionRef}
                 resumeCardRef={resumeCardRef}
               />
-              {msg.ts && ownerUserMessage && (
-                <time className={`chat__ts${visibleTimestampKey === dataKey ? ' chat__ts--visible' : ''}`}>
-                  {new Date(msg.ts).toLocaleString([], {
-                    month: 'short', day: 'numeric',
-                    hour: '2-digit', minute: '2-digit',
-                  })}
-                </time>
-              )}
+              <MessageMetaRow
+                timestamp={ownerUserMessage ? msg.ts : null}
+                copyText={copyText}
+                visible={visibleMessageMetaKey === dataKey}
+              />
             </li>
           )})}
 
@@ -4096,6 +4100,8 @@ export default function ChatView({
               // ", in progress" — instead of settling early. Source selection
               // still gates resume/question routing above (review 2026-07-17).
               isStreaming={activeAssistantIsStreaming || turnActive}
+              messageMetaVisible={visibleMessageMetaKey === streamingDataKey}
+              onMessageMetaClick={showMessageMeta}
             />
           )}
 

@@ -35,6 +35,8 @@ function ActiveAssistantSurface({
   pendingQuestionRef,
   resumeCardRef,
   isStreaming,
+  messageMetaVisible,
+  onMessageMetaClick,
 }) {
   const msg = useMemo(() => {
     if (useDbActivePayload) return activeMirrorMsg
@@ -68,6 +70,8 @@ function ActiveAssistantSurface({
       pendingQuestionRef={pendingQuestionRef}
       resumeCardRef={resumeCardRef}
       isStreaming={isStreaming}
+      messageMetaVisible={messageMetaVisible}
+      onMessageMetaClick={onMessageMetaClick}
     />
   )
 }
