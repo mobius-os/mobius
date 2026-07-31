@@ -169,4 +169,7 @@ def test_boot_preserves_the_optional_memory_apps_git_repository():
 def test_install_rollback_never_executes_app_owned_cron_declarations():
   text = INSTALL.read_text(encoding="utf-8")
   assert '["bash", str(Path(o) / "init-cron.sh")]' not in text
-  assert "rollback_actions.append(_reconcile_cron_after_install_rollback)" in text
+  assert (
+    "journal.rollback_actions.append(\n"
+    "              _reconcile_cron_after_install_rollback"
+  ) in text

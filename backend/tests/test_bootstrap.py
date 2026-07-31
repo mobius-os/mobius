@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from app import models
+from app import app_git, models
 from app.bootstrap import (
   BOOTSTRAP_SKILLS_MANIFEST_URL,
   BOOTSTRAP_STORE_MANIFEST_URL,
@@ -22,8 +22,18 @@ from app.bootstrap import (
 
 
 def _install_result(name="App", slug="app", app_id=1, mode="install"):
+  from app.install import InstallResult
+
   app = models.App(id=app_id, name=name, slug=slug)
-  return app, mode, [], {}, [], "none"
+  return InstallResult(
+    app=app,
+    mode=mode,
+    warnings=[],
+    manifest={},
+    conflict_paths=[],
+    divergence="none",
+    reconciliation=app_git.ReconciliationReceipt(),
+  )
 
 
 def _bootstrap_urls():

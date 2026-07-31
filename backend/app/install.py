@@ -31,7 +31,7 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
@@ -1834,76 +1834,113 @@ async def preview_manifest_capabilities(
   return loaded, normalized_base, contract, digest
 
 
-async def install_from_manifest(
-  db: Session,
+@dataclass(frozen=True)
+class InstallCandidate:
+  """Fully fetched, review-bound inputs for one install attempt.
+
+  Nothing below this boundary performs network I/O. The digests bind the exact
+  bytes that materialization will use, so identity selection and filesystem
+  work cannot silently reinterpret a reviewed manifest.
+  """
+
+  manifest: dict
+  raw_base: str
+  entry_bytes: bytes
+  icon_processed: bytes | None
+  icon_warning: str | None
+  bundled_job: bytes | None
+  static_assets: dict[str, bytes]
+  source_files: dict[str, bytes]
+  seeds: dict[str, bytes]
+  capability_contract: dict
+  capability_digest: str
+  candidate_digest: str
+  source_review_digest: str
+
+
+@dataclass(frozen=True)
+class InstallTarget:
+  """Identity decision made before any database or filesystem mutation."""
+
+  existing: models.App | None
+  mode: str
+  adopt_kind: str
+  canonical_manifest_url: str
+  force_core_store_update: bool
+  settings_data_dir: str
+  legacy_platform_migration: bool
+
+
+@dataclass
+class InstallJournal:
+  """Filesystem compensation owned by the pre-commit materialization phase."""
+
+  created_paths: list[Path] = field(default_factory=list)
+  rollback_actions: list[Callable[[], None]] = field(default_factory=list)
+  commit_actions: list[Callable[[], None]] = field(default_factory=list)
+  durable: bool = False
+
+  def mark_durable(self) -> None:
+    """Cross the irreversible boundary without retaining failure actions."""
+    self.durable = True
+    self.rollback_actions.clear()
+    self.created_paths.clear()
+
+  def rollback_materialization(self) -> None:
+    """Undo pre-commit filesystem work; never undo a durable install."""
+    if self.durable:
+      return
+    _run_rollback_actions(self.rollback_actions)
+    _cleanup(self.created_paths)
+
+  def cleanup_superseded(self) -> None:
+    """Remove backups/artifacts made obsolete by a successful commit."""
+    for action in self.commit_actions:
+      try:
+        action()
+      except OSError as exc:
+        log.warning("install: post-commit cleanup failed — %s", exc)
+
+
+@dataclass
+class InstallResult:
+  """Stable outcome shared by store, bootstrap, and conflict replay callers."""
+
+  app: models.App
+  mode: str
+  warnings: list[str]
+  manifest: dict
+  conflict_paths: list[str]
+  divergence: str
+  reconciliation: app_git.ReconciliationReceipt
+
+
+async def _fetch_install_candidate(
+  *,
   manifest_url: str | None,
   manifest: dict | None,
   raw_base: str | None,
-  source: str = "url",
-  reviewed_capability_digest: str | None = None,
-  reviewed_source_digest: str | None = None,
-  expected_app_id: int | None = None,
-  expected_upstream_commit: str | None = None,
-  expected_candidate_digest: str | None = None,
-) -> tuple[
-  models.App, str, list[str], dict, list[str], str,
-  app_git.ReconciliationReceipt,
-]:
-  """Returns app state plus a shared structured reconciliation receipt.
-
-  The parsed manifest dict comes back so callers can read fields the
-  App row doesn't store (notably `version`) without re-fetching.
-  `conflict_paths` is empty except on the 'conflict' mode below.
-
-  Modes:
-    - 'install' — created a new App row.
-    - 'update' — manifest's id matched an existing app's manifest_url;
-      that row's jsx_source + (missing) storage seeds + source_dir got
-      refreshed in place. Icon + cron are re-applied to keep the
-      end state coherent with the new manifest.
-    - 'conflict' — ONLY when a three-way merge of the new upstream into
-      the app's local edits conflicted. Nothing is
-      clobbered: the on-disk source, the compiled bundle, and the DB
-      row's jsx_source all keep the local edits; the new upstream bytes
-      are recorded on the `upstream` branch for a later agent-resolution
-      pass. `conflict_paths` names the files that need resolving. The
-      App row is committed (so the recorded upstream sha persists) but
-      the served app is unchanged.
-
-  The per-app git model is unconditional for any app with a real
-  source_dir. An app with no source_dir takes the legacy path — a blind
-  jsx_source overwrite with no `.git` repo created — and 'conflict' never
-  occurs there.
-
-  Failure modes:
-    - Pre-commit failures (manifest fetch, validation, JSX compile,
-      seed write, icon process) all raise HTTPException. The DB
-      transaction rolls back, filesystem `_cleanup` removes anything
-      we created, and on the update path the old compiled bundle is
-      restored from its `.bak` snapshot — caller sees a clean failure.
-    - Post-commit failures: cron registration runs AFTER `db.commit()`.
-      The app is fully installed at that point; cron failure becomes a
-      non-fatal warning appended to the returned `warnings` list. The
-      owner can re-register cron manually by editing the schedule.
-    - FastAPI surfaces each HTTPException with its proper status code;
-      we never catch + swallow anything that would land the DB or
-      filesystem in a half state.
-  """
-  # --- Phase 1: fetch + validate manifest -----------------------------
-  # follow_redirects=False — _http_get walks the chain manually so
-  # every hop runs through _validate_url_safe (a 302 to a private IP
-  # would otherwise bypass our pre-flight check).
-  async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=False) as cli:
+  reviewed_capability_digest: str | None,
+  reviewed_source_digest: str | None,
+  expected_app_id: int | None,
+  expected_upstream_commit: str | None,
+  expected_candidate_digest: str | None,
+) -> InstallCandidate:
+  """Fetch every install input once and enforce all review/replay guards."""
+  async with httpx.AsyncClient(
+    timeout=_HTTP_TIMEOUT,
+    follow_redirects=False,
+  ) as cli:
     manifest, raw_base = await _fetch_and_validate_manifest(
       cli,
       manifest_url=manifest_url,
       manifest=manifest,
       raw_base=raw_base,
     )
-    capability_contract, fetched_capability_digest = contract_and_digest(manifest)
+    capability_contract, capability_digest = contract_and_digest(manifest)
     if (
       reviewed_capability_digest is not None
-      and reviewed_capability_digest != fetched_capability_digest
+      and reviewed_capability_digest != capability_digest
     ):
       raise HTTPException(
         409,
@@ -1915,15 +1952,13 @@ async def install_from_manifest(
           ),
           "manifest": manifest,
           "capability_contract": capability_contract,
-          "capability_digest": fetched_capability_digest,
+          "capability_digest": capability_digest,
         },
       )
 
-    # --- Phase 2: fetch entry JSX + bundled assets --------------------
     entry_bytes = await _http_get(
       cli, raw_base + manifest["entry"], _ENTRY_MAX_BYTES,
     )
-    jsx_source = entry_bytes.decode("utf-8")
 
     icon_processed: bytes | None = None
     icon_warning: str | None = None
@@ -1937,24 +1972,23 @@ async def install_from_manifest(
         icon_warning = f"icon: {exc}"
         log.info("install: icon skipped — %s", exc)
       except HTTPException as exc:
-        # Icon is non-blocking — apps install fine with the auto
-        # letter-icon. Surface as a warning, not a hard fail.
+        # A broken optional icon must not block an otherwise valid app.
         icon_warning = f"icon: {exc.detail}"
         log.info("install: icon skipped — %s", exc.detail)
 
-    bundled_job: bytes | None = None
-    sched = manifest.get("schedule")
-    if sched and sched.get("job"):
+    schedule = manifest.get("schedule")
+    bundled_job = None
+    if schedule and schedule.get("job"):
       bundled_job = await _http_get(
-        cli, raw_base + sched["job"], _ENTRY_MAX_BYTES,
+        cli, raw_base + schedule["job"], _ENTRY_MAX_BYTES,
       )
 
-    static_assets_fetched: dict[str, bytes] = {}
+    static_assets: dict[str, bytes] = {}
     static_assets_total = 0
     for dest, src in static_asset_entries(
       manifest.get("static_assets") or {},
     ).items():
-      if len(static_assets_fetched) >= _STATIC_ASSETS_COUNT_MAX:
+      if len(static_assets) >= _STATIC_ASSETS_COUNT_MAX:
         raise HTTPException(
           400,
           "Manifest has too many static_assets "
@@ -1970,9 +2004,9 @@ async def install_from_manifest(
           "Manifest static_assets exceed "
           f"{_STATIC_ASSETS_TOTAL_MAX} bytes total.",
         )
-      static_assets_fetched[dest] = data
+      static_assets[dest] = data
 
-    source_files_fetched: dict[str, bytes] = {}
+    source_files: dict[str, bytes] = {}
     source_files_total = 0
     for rel in manifest.get("source_files") or []:
       data = await _http_get(cli, raw_base + rel, _ENTRY_MAX_BYTES)
@@ -1982,20 +2016,17 @@ async def install_from_manifest(
           400,
           f"Manifest source_files exceed {_SOURCE_FILES_TOTAL_MAX} bytes total.",
         )
-      source_files_fetched[rel] = data
+      source_files[rel] = data
 
-    seeds_fetched: dict[str, bytes] = {}
+    seeds: dict[str, bytes] = {}
     seeds_total = 0
     for sub, value in (manifest.get("storage_seeds") or {}).items():
-      if len(seeds_fetched) >= _SEEDS_COUNT_MAX:
+      if len(seeds) >= _SEEDS_COUNT_MAX:
         raise HTTPException(
           400,
           f"Manifest has too many storage_seeds (max {_SEEDS_COUNT_MAX}).",
         )
       if _seed_value_is_inline(value):
-        # Canonical bytes keep a deferred conflict receipt stable after its
-        # manifest is serialized/reloaded (JSON object key order is semantic-
-        # free and must not make an unchanged candidate look different).
         data = json.dumps(
           value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
@@ -2007,7 +2038,7 @@ async def install_from_manifest(
           400,
           f"Manifest storage_seeds exceed {_SEEDS_TOTAL_MAX} bytes total.",
         )
-      seeds_fetched[sub] = data
+      seeds[sub] = data
 
   candidate_digest = _install_candidate_digest(
     manifest=manifest,
@@ -2015,15 +2046,15 @@ async def install_from_manifest(
     entry_bytes=entry_bytes,
     icon_processed=icon_processed,
     bundled_job=bundled_job,
-    static_assets=static_assets_fetched,
-    source_files=source_files_fetched,
-    seeds=seeds_fetched,
+    static_assets=static_assets,
+    source_files=source_files,
+    seeds=seeds,
   )
   source_review_digest = _source_review_digest(
     manifest=manifest,
     entry_bytes=entry_bytes,
     bundled_job=bundled_job,
-    source_files=source_files_fetched,
+    source_files=source_files,
   )
   if (
     reviewed_source_digest is not None
@@ -2063,19 +2094,37 @@ async def install_from_manifest(
       },
     )
 
-  # --- Phase 3: decide install vs update -------------------------------
-  # Match by manifest_url, NOT by slug. Slug is now a routing concern
-  # only — two apps (one user-built, one installed from a manifest)
-  # may want the same slug stem, and allocate_unique_slug already
-  # handles the collision by appending -2/-3/... Identity for "is
-  # this the same app re-installed" is keyed on a canonical form of
-  # the URL it came from. The same app installed via
-  # `manifest_url=.../mobius.json` and via inline manifest +
-  # `raw_base=...` would otherwise produce two distinct strings; the
-  # canonicaliser folds both into `<base>#manifest-id=<id>` so
-  # re-install reliably hits the update branch.
+  return InstallCandidate(
+    manifest=manifest,
+    raw_base=raw_base,
+    entry_bytes=entry_bytes,
+    icon_processed=icon_processed,
+    icon_warning=icon_warning,
+    bundled_job=bundled_job,
+    static_assets=static_assets,
+    source_files=source_files,
+    seeds=seeds,
+    capability_contract=capability_contract,
+    capability_digest=capability_digest,
+    candidate_digest=candidate_digest,
+    source_review_digest=source_review_digest,
+  )
+
+
+def _select_install_target(
+  db: Session,
+  *,
+  candidate: InstallCandidate,
+  manifest_url: str | None,
+  source: str,
+  expected_app_id: int | None,
+) -> InstallTarget:
+  """Resolve install/update/adoption identity without mutating the target row."""
+  manifest = candidate.manifest
   manifest_id = manifest["id"]
-  source_for_key = manifest_url if manifest_url is not None else raw_base
+  source_for_key = (
+    manifest_url if manifest_url is not None else candidate.raw_base
+  )
   canonical_manifest_url = _canonical_identity_key(
     source_for_key, manifest_id,
   )
@@ -2088,95 +2137,41 @@ async def install_from_manifest(
     .first()
   )
   if existing is None and _is_trusted_catalog_source(canonical_manifest_url):
-    # SHAPE-DRIFT TOLERANCE (trusted catalog only). The SAME app can carry an
-    # OLDER manifest_url string than today's canonical `<base>#manifest-id=<id>`:
-    # install-core-apps / register_app wrote the raw `<base>/mobius.json`, and
-    # very old rows wrote a bare `<base>`. Match those legacy shapes of the same
-    # canonical BASE so a store update lands IN PLACE — the write path below
-    # self-heals `app.manifest_url` to the canonical form — instead of forking a
-    # duplicate row (the "app installed, not updated" dup that surfaced once core
-    # apps became store-updatable).
-    #
-    # GATED on the trusted mobius-os catalog because this matches on BASE, not
-    # manifest id: an UNTRUSTED install (esp. the inline-manifest path, where the
-    # caller supplies both id and raw_base) pointing a DIFFERENT id at an
-    # existing row's base would otherwise flip a fresh install into an in-place
-    # OVERWRITE of that row before any adoption check runs. Within mobius-os one
-    # repo is one base is one app, so a base match there is unambiguously the
-    # same app, and the fetched code comes from that trusted base regardless.
-    # Every affected legacy row (the core apps) is mobius-os, so the gate keeps
-    # the fix while closing the overwrite path. Tombstone-agnostic like the
-    # primary lookup, but prefer a LIVE row when a live + a soft-deleted legacy
-    # row share the base.
+    # Trusted catalog rows predate the canonical identity shape. Match only
+    # older forms of the same base; untrusted bases must never gain this wider
+    # update authority.
     base = _canonical_base(canonical_manifest_url)
     existing = (
       db.query(models.App)
       .filter(
-        models.App.manifest_url.in_([f"{base}/mobius.json", base, f"{base}/"])
+        models.App.manifest_url.in_(
+          [f"{base}/mobius.json", base, f"{base}/"]
+        )
       )
       .order_by(
-        # live rows (deleted_at IS NULL) first, then lowest id
         case((models.App.deleted_at.is_(None), 0), else_=1),
         models.App.id.asc(),
       )
       .first()
     )
   if existing is None:
-    # REF-INDEPENDENT IDENTITY (trusted catalog ROOT only). The base-drift block
-    # above still keys on the exact `<ref>` segment, so it can't recognize a row
-    # installed at a DIFFERENT revision of the same mobius-os/app-* repo. That is
-    # exactly what a pin bump produces (bootstrap moving app-skills from `main`
-    # to a reviewed commit), and missing it forks a duplicate app — or, if the
-    # owner had uninstalled, resurrects their tombstone. Match any ref of the
-    # same repo + manifest id and update IN PLACE; the write path self-heals
-    # `manifest_url` to the new canonical form. Tombstone-agnostic on purpose
-    # (see helper); a NULL return leaves untrusted/subdir installs unaffected.
+    # A catalog pin may move refs while retaining repo + manifest identity.
     existing = _find_ref_independent_catalog_row(
       db, canonical_manifest_url, manifest_id,
     )
-  # adopt_kind records HOW a predecessor was matched when the manifest_url
-  # lookup missed — "" for a normal install/update (the canonical match above),
-  # "rename" when this manifest renamed a prior catalog app (via `previous_id`),
-  # "legacy" when it adopts a baked/register_app predecessor that carried no
-  # catalog identity. The rename-migration block below keys off this so it only
-  # moves a source tree on a genuine rename, never on a plain re-install.
+
   adopt_kind = ""
   if existing is None:
-    # PREDECESSOR ADOPTION. The canonical manifest_url didn't match, but this
-    # install may be the SUCCESSOR of an already-installed app — a rename, or a
-    # catalog version of a predecessor that was baked in without a manifest_url.
-    # Adopting that row (instead of minting a new one) keeps the numeric id —
-    # and therefore all storage under /data/apps/<id> — and avoids a duplicate
-    # drawer entry. Unlike the primary lookup (deliberately tombstone-agnostic
-    # so a re-install REVIVES a soft-deleted app), adoption stays clear of
-    # tombstones: silently resurrecting a deleted predecessor under a new
-    # identity would be surprising, and the deleted row holds its slug until the
-    # TTL purge anyway.
-    # Both predecessor lookups are gated on the manifest DECLARING `previous_id`.
-    # That declaration is the author's explicit "this install supersedes app
-    # <previous_id>" intent — the only signal that distinguishes a deliberate
-    # takeover from the accidental case the platform already tolerates: a
-    # user-built app and a store app innocently sharing a slug stem coexist as
-    # two rows (allocate_unique_slug suffixes the newcomer). Without the
-    # declaration there is NO DB field separating a baked predecessor from a
-    # user-built app at the same slug, so adopting on slug-match alone would
-    # silently hijack the user's app — which `test_install_with_same_slug_
-    # different_manifest_keeps_both` exists to forbid.
+    # Predecessor adoption is opt-in through previous_id. Platform/core rows
+    # additionally require the trusted catalog, preventing data-bearing app
+    # identities from being claimed by a pasted third-party manifest.
     prev_id = manifest.get("previous_id")
-    # A manifest must not use `previous_id` to ADOPT (and thereby replace) a
-    # platform/core app unless it comes from the trusted mobius-os catalog.
-    # Otherwise an owner who pastes an untrusted manifest declaring
-    # previous_id="memory" would take over Memory in place — inheriting its id
-    # and stored data. Trusted-catalog renames still work; anything else falls
-    # through to a normal install as a separate app rather than a hijack.
     if (
       prev_id in _RESERVED_PLATFORM_SLUGS
       and not _is_trusted_catalog_source(canonical_manifest_url)
     ):
       prev_id = None
     if prev_id:
-      # RENAME: the predecessor came through the catalog under `previous_id`.
-      # Match its canonical identity from the SAME base.
       prev_canonical = _canonical_identity_key(source_for_key, prev_id)
       existing = (
         db.query(models.App)
@@ -2189,12 +2184,6 @@ async def install_from_manifest(
       if existing:
         adopt_kind = "rename"
       else:
-        # LEGACY-SLUG: the predecessor was a baked/register_app app at slug
-        # `previous_id` that never carried a catalog identity (manifest_url
-        # NULL or ""). Adopt ONLY such no-identity rows — a real catalog
-        # install at a coincidental slug keeps its own manifest_url and is
-        # never hijacked. Matching on `previous_id` (not the new `manifest_id`)
-        # keeps this an opt-in, author-declared takeover.
         existing = (
           db.query(models.App)
           .filter(
@@ -2207,6 +2196,7 @@ async def install_from_manifest(
         )
         if existing:
           adopt_kind = "legacy"
+
   settings_data_dir = get_settings().data_dir
   if _is_trusted_legacy_platform_catalog_install(
     existing, manifest_id, canonical_manifest_url, settings_data_dir,
@@ -2234,12 +2224,14 @@ async def install_from_manifest(
         existing = platform_row
         adopt_kind = "legacy-platform"
       elif _is_historical_platform_app_source_dir(
-        platform_row.source_dir, platform_row.manifest_url,
-        settings_data_dir, manifest_id,
+        platform_row.source_dir,
+        platform_row.manifest_url,
+        settings_data_dir,
+        manifest_id,
       ):
         existing = platform_row
         adopt_kind = "legacy-catalog"
-  mode = "update" if existing else "install"
+
   if expected_app_id is not None and (
     existing is None or existing.id != expected_app_id
   ):
@@ -2259,6 +2251,357 @@ async def install_from_manifest(
         "trusted mobius-os catalog entry."
       ),
     )
+
+  return InstallTarget(
+    existing=existing,
+    mode="update" if existing else "install",
+    adopt_kind=adopt_kind,
+    canonical_manifest_url=canonical_manifest_url,
+    force_core_store_update=force_core_store_update,
+    settings_data_dir=settings_data_dir,
+    legacy_platform_migration=legacy_platform_migration,
+  )
+
+
+async def _run_post_commit_effects(
+  db: Session,
+  *,
+  app: models.App,
+  mode: str,
+  source: str,
+  candidate: InstallCandidate,
+  warnings: list[str],
+) -> None:
+  """Converge cron, skills, and initialization after durability.
+
+  Every failure here becomes a warning. The app row and selected bundle are
+  already durable, so this phase must never enter the pre-commit rollback path.
+  """
+  manifest = candidate.manifest
+  schedule = manifest.get("schedule")
+  job_name = schedule.get("job") if schedule else None
+  cron_job_name = job_name or "job.sh"
+  has_cron = bool(schedule and schedule.get("default"))
+  drop_prior_cron = mode == "update" and bool(app.source_dir)
+  if candidate.bundled_job or has_cron or drop_prior_cron:
+    slug = app.slug
+    data_dir = Path(get_settings().data_dir)
+    app_data_dir = (
+      Path(app.source_dir)
+      if app.source_dir
+      else data_dir / "apps" / slug
+    )
+    try:
+      async with fs_locks.source_dir_lock(str(app_data_dir)):
+        if not db.query(models.App.id).filter(models.App.id == app.id).first():
+          raise HTTPException(404, "App removed before cron registration.")
+        app_data_dir.mkdir(parents=True, exist_ok=True)
+        if drop_prior_cron:
+          await asyncio.to_thread(_drop_app_cron, app_data_dir)
+        job_path = app_data_dir / cron_job_name
+        if (
+          job_name
+          and job_path.exists()
+          and not os.access(job_path, os.X_OK)
+        ):
+          warnings.append(
+            f"schedule.job {cron_job_name} is not executable — cron/run-job "
+            "will fail until the app repo commits the executable bit"
+          )
+        if has_cron and CRON_SCAFFOLD.exists():
+          await asyncio.to_thread(
+            _register_cron,
+            slug,
+            schedule["default"],
+            job_path,
+            app.id,
+          )
+        elif has_cron:
+          sentinel = app_data_dir / ".cron-pending.json"
+          sentinel.write_text(
+            json.dumps({
+              "expr": schedule["default"],
+              "job": cron_job_name,
+              "status": "pending — init-cron-scaffold.sh not on PATH",
+            }),
+            encoding="utf-8",
+          )
+          warnings.append(
+            "cron: scaffold script not available — registration pending"
+          )
+    except HTTPException as exc:
+      log.warning(
+        "install: job-script/cron step failed post-commit — %s",
+        exc.detail,
+      )
+      warnings.append(f"cron: registration failed — {exc.detail}")
+    except Exception as exc:
+      log.exception("install: job-script/cron step failed post-commit")
+      warnings.append(f"cron: registration failed — {exc!r}")
+
+  try:
+    await _sync_app_skills(db, app, manifest, warnings)
+  except Exception as exc:
+    log.exception("install: skill sync failed post-commit")
+    warnings.append(f"skills: sync failed — {exc!r}")
+
+  if (
+    mode == "install"
+    and schedule
+    and schedule.get("initialize_on_install") is True
+    and job_name
+    and app.source_dir
+  ):
+    try:
+      from app.app_jobs import launch_app_job
+
+      source_dir = Path(app.source_dir)
+      wait_for_ready = source == "bootstrap"
+      launch_app_job(
+        app.id,
+        source_dir / job_name,
+        source_dir,
+        wait_for_ready=wait_for_ready,
+      )
+      warnings.append(
+        "initialization waiting for startup readiness"
+        if wait_for_ready else "initialization started"
+      )
+    except Exception as exc:
+      log.exception("install: initialization job failed to start")
+      warnings.append(f"initialization failed to start — {exc!r}")
+
+
+async def _prepare_app_row(
+  db: Session,
+  *,
+  candidate: InstallCandidate,
+  target: InstallTarget,
+  source: str,
+  journal: InstallJournal,
+  warnings: list[str],
+) -> models.App:
+  """Create/revive/adopt the target row and converge its filesystem identity.
+
+  Source, capability, and offline metadata for an existing app deliberately
+  remain untouched here; they are accepted only after source reconciliation
+  succeeds. Identity migrations are journaled so a later compile/commit failure
+  restores the previous source tree.
+  """
+  manifest = candidate.manifest
+  manifest_id = manifest["id"]
+  data_dir = Path(get_settings().data_dir)
+  existing = target.existing
+  adopt_kind = target.adopt_kind
+  canonical_manifest_url = target.canonical_manifest_url
+
+  if existing:
+    app = existing
+    transition = icon_ownership.split_legacy_icon_ownership(app)
+    if transition.warning:
+      warnings.append(f"icon ownership: {transition.warning}")
+    app.deleted_at = None
+    app.name = manifest["name"]
+    app.description = manifest.get("description", "")
+    db.flush()
+
+    if adopt_kind == "legacy-platform":
+      old_source_dir = app.source_dir
+      target_slug = manifest_id
+      target_source_dir = str(data_dir / "apps" / target_slug)
+      try:
+        _reject_if_source_dir_taken(
+          db, target_source_dir, exclude_id=app.id,
+        )
+      except HTTPException:
+        target_slug = allocate_unique_slug(db, manifest["name"])
+        target_source_dir = str(data_dir / "apps" / target_slug)
+      if not Path(target_source_dir).exists():
+        journal.created_paths.append(Path(target_source_dir))
+      if old_source_dir:
+        async with fs_locks.source_dir_lock(old_source_dir):
+          await asyncio.to_thread(_unregister_cron, Path(old_source_dir))
+      app.slug = target_slug
+      app.source_dir = target_source_dir
+      app.manifest_url = canonical_manifest_url
+      db.flush()
+    elif adopt_kind == "legacy-catalog":
+      # Stamp identity before a possible merge conflict returns. The old source
+      # remains served until the owner resolves that conflict.
+      app.manifest_url = canonical_manifest_url
+      db.flush()
+
+    if (
+      adopt_kind
+      and adopt_kind != "legacy-platform"
+      and manifest_id != app.slug
+    ):
+      old_source_dir = app.source_dir
+      target_slug = manifest_id
+      target_source_dir = str(data_dir / "apps" / target_slug)
+      moved = False
+      if old_source_dir and Path(old_source_dir).is_dir():
+        async with fs_locks.source_dir_lock(old_source_dir):
+          try:
+            _reject_if_source_dir_taken(
+              db, target_source_dir, exclude_id=app.id,
+            )
+            target_taken = False
+          except HTTPException:
+            target_taken = True
+          if not target_taken and not Path(target_source_dir).exists():
+            _unregister_cron(Path(old_source_dir))
+            os.rename(old_source_dir, target_source_dir)
+            moved = True
+            journal.rollback_actions.append(
+              _reconcile_cron_after_install_rollback
+            )
+            journal.rollback_actions.append(
+              lambda o=old_source_dir, n=target_source_dir:
+                os.rename(n, o)
+                if Path(n).is_dir() and not Path(o).exists()
+                else None
+            )
+      if moved:
+        app.slug = target_slug
+        app.source_dir = target_source_dir
+        app.manifest_url = canonical_manifest_url
+        db.flush()
+      elif old_source_dir and Path(old_source_dir).is_dir():
+        warnings.append(
+          f"could not rename slug {app.slug}->{manifest_id}: target in use"
+        )
+    return app
+
+  slug = manifest_id
+  if db.query(models.App).filter(models.App.slug == slug).first():
+    slug = allocate_unique_slug(db, manifest["name"])
+    activity.log_event(
+      "slug_collision",
+      requested_slug=manifest_id,
+      assigned_slug=slug,
+      source=source,
+    )
+  source_dir = str(data_dir / "apps" / slug)
+  journal.created_paths.append(Path(source_dir))
+  permissions = manifest.get("permissions") or {}
+  app = models.App(
+    name=manifest["name"],
+    description=manifest.get("description", ""),
+    jsx_source=candidate.entry_bytes.decode("utf-8"),
+    source_dir=source_dir,
+    slug=slug,
+    manifest_url=canonical_manifest_url,
+    cross_app_access=permissions.get("cross_app_access", "none"),
+    share_with_apps=permissions.get("share_with_apps", "none"),
+    chat_log_access=permissions.get("chat_log_access", "none"),
+    manage_apps=bool(permissions.get("manage_apps", False)),
+    manage_skills=bool(permissions.get("manage_skills", False)),
+    github_access=bool(permissions.get("github_access", False)),
+    github_connect=bool(permissions.get("github_connect", False)),
+    filesystem_access=bool(permissions.get("filesystem_access", False)),
+    offline_capable=bool(manifest.get("offline_capable", False)),
+    embeds_agent=bool(manifest.get("embeds_agent", False)),
+    offline_contract=manifest.get("offline") or None,
+    system_prompt_file=manifest.get("system_prompt") or None,
+    system_app=bool(manifest.get("system_app", False)),
+    capability_contract=candidate.capability_contract,
+  )
+  db.add(app)
+  db.flush()
+  return app
+
+
+async def install_from_manifest(
+  db: Session,
+  manifest_url: str | None,
+  manifest: dict | None,
+  raw_base: str | None,
+  source: str = "url",
+  reviewed_capability_digest: str | None = None,
+  reviewed_source_digest: str | None = None,
+  expected_app_id: int | None = None,
+  expected_upstream_commit: str | None = None,
+  expected_candidate_digest: str | None = None,
+) -> InstallResult:
+  """Return a structured durable install/update/conflict outcome.
+
+  The parsed manifest dict comes back so callers can read fields the
+  App row doesn't store (notably `version`) without re-fetching.
+  `conflict_paths` is empty except on the 'conflict' mode below.
+
+  Modes:
+    - 'install' — created a new App row.
+    - 'update' — manifest's id matched an existing app's manifest_url;
+      that row's jsx_source + (missing) storage seeds + source_dir got
+      refreshed in place. Icon + cron are re-applied to keep the
+      end state coherent with the new manifest.
+    - 'conflict' — ONLY when a three-way merge of the new upstream into
+      the app's local edits conflicted. Nothing is
+      clobbered: the on-disk source, the compiled bundle, and the DB
+      row's jsx_source all keep the local edits; the new upstream bytes
+      are recorded on the `upstream` branch for a later agent-resolution
+      pass. `conflict_paths` names the files that need resolving. The
+      App row is committed (so the recorded upstream sha persists) but
+      the served app is unchanged.
+
+  The per-app git model is unconditional for any app with a real
+  source_dir. An app with no source_dir takes the legacy path — a blind
+  jsx_source overwrite with no `.git` repo created — and 'conflict' never
+  occurs there.
+
+  Failure modes:
+    - Pre-commit failures (manifest fetch, validation, JSX compile,
+      seed write, icon process) all raise HTTPException. The DB
+      transaction rolls back, filesystem `_cleanup` removes anything
+      we created, and on the update path the old compiled bundle is
+      restored from its `.bak` snapshot — caller sees a clean failure.
+    - Post-commit failures: cron registration runs AFTER `db.commit()`.
+      The app is fully installed at that point; cron failure becomes a
+      non-fatal warning appended to the returned `warnings` list. The
+      owner can re-register cron manually by editing the schedule.
+    - FastAPI surfaces each HTTPException with its proper status code;
+      we never catch + swallow anything that would land the DB or
+      filesystem in a half state.
+  """
+  # Phase 1: immutable, review-bound candidate. All network I/O ends here.
+  candidate = await _fetch_install_candidate(
+    manifest_url=manifest_url,
+    manifest=manifest,
+    raw_base=raw_base,
+    reviewed_capability_digest=reviewed_capability_digest,
+    reviewed_source_digest=reviewed_source_digest,
+    expected_app_id=expected_app_id,
+    expected_upstream_commit=expected_upstream_commit,
+    expected_candidate_digest=expected_candidate_digest,
+  )
+  manifest = candidate.manifest
+  raw_base = candidate.raw_base
+  entry_bytes = candidate.entry_bytes
+  icon_processed = candidate.icon_processed
+  icon_warning = candidate.icon_warning
+  bundled_job = candidate.bundled_job
+  static_assets_fetched = candidate.static_assets
+  source_files_fetched = candidate.source_files
+  seeds_fetched = candidate.seeds
+  capability_contract = candidate.capability_contract
+  fetched_capability_digest = candidate.capability_digest
+  candidate_digest = candidate.candidate_digest
+  sched = manifest.get("schedule")
+
+  # Phase 2: immutable identity/update decision. No writes occur here.
+  target = _select_install_target(
+    db,
+    candidate=candidate,
+    manifest_url=manifest_url,
+    source=source,
+    expected_app_id=expected_app_id,
+  )
+  existing = target.existing
+  mode = target.mode
+  canonical_manifest_url = target.canonical_manifest_url
+  force_core_store_update = target.force_core_store_update
+  legacy_platform_migration = target.legacy_platform_migration
 
   warnings: list[str] = []
   conflict_paths: list[str] = []
@@ -2329,205 +2672,29 @@ async def install_from_manifest(
   # spuriously. False means a plain local commit (fresh install, or a conflict
   # that left local untouched).
 
-  # --- Phase 4: materialize. Wrapped so cleanup runs on any failure. --
+  # Phase 3: materialize under one compensation journal.
   # `created_paths`: files/dirs to delete on failure (and leave on
   # success). `cleanup_actions`: callables run on the success path
   # (commit) OR rollback path (revert) — used for backup-rename
   # rollback on the update path's compiled bundle, so a failed
   # recompile restores the previous good bundle on disk to match the
   # DB row that rolled back.
-  created_paths: list[Path] = []
-  rollback_actions: list[Callable[[], None]] = []
-  commit_actions: list[Callable[[], None]] = []
+  journal = InstallJournal()
+  created_paths = journal.created_paths
+  rollback_actions = journal.rollback_actions
+  commit_actions = journal.commit_actions
   data_dir = Path(get_settings().data_dir)
   perms = manifest.get("permissions") or {}
 
   try:
-    if existing:
-      app = existing
-      transition = icon_ownership.split_legacy_icon_ownership(app)
-      if transition.warning:
-        warnings.append(f"icon ownership: {transition.warning}")
-      # Reinstalling a tombstoned app REVIVES it: the manifest_url match finds
-      # the soft-deleted row (the query is deleted_at-agnostic on purpose), and
-      # clearing deleted_at reattaches the SAME id + its preserved storage tree
-      # instead of minting a fresh empty app. No-op for a normal update. The
-      # recompile + cron re-register + updated_at bump happen on this path too,
-      # so a revived store app comes back fully wired (feature 110).
-      app.deleted_at = None
-      app.name = manifest["name"]
-      app.description = manifest.get("description", "")
-      # jsx_source AND the capability/offline fields are assigned AFTER the
-      # git merge decision below and AFTER the conflict short-circuit returns.
-      # On a conflict we keep the local edits and keep serving the OLD code,
-      # so we must not stamp the new manifest's source — nor its capabilities
-      # or offline semantics — onto a row whose running code is still the old
-      # version. Doing so would, e.g., grant manage_apps install authority to
-      # unreviewed old code, or flip offline_capable away from what the
-      # running code's service-worker logic expects.
-      db.flush()
-      if adopt_kind == "legacy-platform":
-        old_source_dir = app.source_dir
-        target_slug = manifest_id
-        target_source_dir = str(data_dir / "apps" / target_slug)
-        try:
-          _reject_if_source_dir_taken(
-            db, target_source_dir, exclude_id=app.id,
-          )
-        except HTTPException:
-          target_slug = allocate_unique_slug(db, manifest["name"])
-          target_source_dir = str(data_dir / "apps" / target_slug)
-        if not Path(target_source_dir).exists():
-          created_paths.append(Path(target_source_dir))
-        if old_source_dir:
-          async with fs_locks.source_dir_lock(old_source_dir):
-            await asyncio.to_thread(_unregister_cron, Path(old_source_dir))
-        app.slug = target_slug
-        app.source_dir = target_source_dir
-        app.manifest_url = canonical_manifest_url
-        db.flush()
-      elif adopt_kind == "legacy-catalog":
-        # A pre-git-model catalog app: editable source already sits at
-        # /data/apps/<slug> (manifest_id == app.slug on this path, so no
-        # slug/source_dir move), only the canonical identity is missing. Stamp it
-        # NOW, before the git merge below can short-circuit on a conflict. The
-        # post-merge re-stamp is skipped on conflict, so deferring to it would
-        # leave a conflicting migration with a NULL manifest_url — the boot
-        # migration would then keep re-firing (and re-fetching) every restart
-        # instead of running once. The identity move is orthogonal to the source:
-        # the owner still resolves the surfaced conflict through the click-gated
-        # resolver, and the served source/bundle stay theirs until they do.
-        app.manifest_url = canonical_manifest_url
-        db.flush()
-
-      # Identity migration after an ADOPTION (rename or legacy). The adopted row
-      # still carries the predecessor's slug + on-disk source tree, but its new
-      # identity is `manifest_id` — move the tree to the new id's path and
-      # re-stamp the row so the app is fully consistent. Explicit apply resolves
-      # source_dir from this row, and the per-app .git rides along inside the
-      # directory, so an atomic same-filesystem os.rename keeps git history +
-      # working tree intact. The numeric id (and thus /data/apps/<id> storage)
-      # is never touched. Done BEFORE the git block + source-write + cron phases
-      # so the rest of the install writes to and registers cron at the NEW path.
-      # A plain re-install (adopt_kind == "") never enters here.
-      if adopt_kind and adopt_kind != "legacy-platform" and manifest_id != app.slug:
-        old_source_dir = app.source_dir
-        target_slug = manifest_id
-        target_source_dir = str(data_dir / "apps" / target_slug)
-        moved = False
-        if old_source_dir and Path(old_source_dir).is_dir():
-          async with fs_locks.source_dir_lock(old_source_dir):
-            try:
-              # Reject the move if the target path is already another app's
-              # source tree — adopting a rename must never stomp a coexisting
-              # app. The lock above + this check are atomic against a concurrent
-              # create/patch claiming target_source_dir.
-              _reject_if_source_dir_taken(
-                db, target_source_dir, exclude_id=app.id,
-              )
-              target_taken = False
-            except HTTPException:
-              target_taken = True
-            if not target_taken and not Path(target_source_dir).exists():
-              # Drop the predecessor's crontab entry at the OLD path first; the
-              # source-write + cron phases below re-register at the new path.
-              _unregister_cron(Path(old_source_dir))
-              os.rename(old_source_dir, target_source_dir)
-              moved = True
-              # Re-establish the predecessor's supervised crontab if the move
-              # rolls back. Actions run in reverse append order, so append the
-              # reconciler before the move reversal below: it runs only after
-              # the tree and rolled-back DB row point at the old source again.
-              # Never execute the app-owned durable declaration directly.
-              rollback_actions.append(_reconcile_cron_after_install_rollback)
-              # Reverse the move on rollback so a later-phase failure doesn't
-              # leave a half-renamed app. Registered before slug/source_dir are
-              # re-stamped on the row, which roll back with the DB transaction.
-              rollback_actions.append(
-                lambda o=old_source_dir, n=target_source_dir:
-                  os.rename(n, o) if Path(n).is_dir()
-                  and not Path(o).exists() else None
-              )
-        if moved:
-          app.slug = target_slug
-          app.source_dir = target_source_dir
-          # Re-stamp the canonical identity here, INSIDE the adoption block, so
-          # the row's three identity fields (slug, source_dir, manifest_url) move
-          # together regardless of which update branch runs below. The later
-          # restamp at the end of the existing-update path is past the conflict
-          # short-circuit return — a rename that hits a git conflict would
-          # otherwise keep the predecessor's OLD url while carrying the new
-          # slug/source_dir, so the next install of the new id would miss the
-          # manifest_url match and mint a duplicate. The later assignment stays
-          # (idempotent) for the non-conflict paths.
-          app.manifest_url = canonical_manifest_url
-          db.flush()
-        else:
-          # Target slug/dir taken (or the old tree is missing): keep the old
-          # slug + dir and surface the skipped rename. The update still lands
-          # on the SAME row, so there's still no duplicate — only the on-disk
-          # identity stays at the old name.
-          if old_source_dir and Path(old_source_dir).is_dir():
-            warnings.append(
-              f"could not rename slug {app.slug}->{manifest_id}: "
-              "target in use"
-            )
-    else:
-      # Identity by manifest_url means we're now genuinely in the
-      # install branch — but slug is a separate concern. The user
-      # may already own an app whose slug stem happens to match
-      # manifest.id (most commonly: they built one, then the store
-      # ships an "official" one with the same id). allocate_unique_slug
-      # appends -2/-3/... so both rows coexist; the partner sees both
-      # in the drawer and picks the one they want.
-      slug = manifest_id
-      taken = db.query(models.App).filter(models.App.slug == slug).first()
-      if taken:
-        slug = allocate_unique_slug(db, manifest["name"])
-        # Non-behavioral telemetry: the install still succeeds under the
-        # suffixed slug, but a collision means two apps now share a stem
-        # (user-built vs store, or two store apps). Logging requested-vs-
-        # assigned makes that observable to the reflection agent / store UI
-        # without a DB rename. Best-effort like every activity emit.
-        activity.log_event(
-          "slug_collision",
-          requested_slug=manifest_id,
-          assigned_slug=slug,
-          source=source,
-        )
-      source_dir = str(data_dir / "apps" / slug)
-      created_paths.append(Path(source_dir))
-      app = models.App(
-        name=manifest["name"],
-        description=manifest.get("description", ""),
-        jsx_source=jsx_source,
-        source_dir=source_dir,
-        slug=slug,
-        manifest_url=canonical_manifest_url,
-        cross_app_access=perms.get("cross_app_access", "none"),
-        share_with_apps=perms.get("share_with_apps", "none"),
-        chat_log_access=perms.get("chat_log_access", "none"),
-        manage_apps=bool(perms.get("manage_apps", False)),
-        manage_skills=bool(perms.get("manage_skills", False)),
-        github_access=bool(perms.get("github_access", False)),
-        github_connect=bool(perms.get("github_connect", False)),
-        filesystem_access=bool(perms.get("filesystem_access", False)),
-        # The manifest's `offline_capable: true` opts the app into the
-        # SW frame cache + the window.mobius.storage outbox. Without
-        # this line every installed app defaulted to offline_capable=
-        # false on the App row regardless of what the manifest declared
-        # — apps that paid the cost of being offline-ready in code
-        # didn't actually behave offline-ready end-to-end.
-        offline_capable=bool(manifest.get("offline_capable", False)),
-        embeds_agent=bool(manifest.get("embeds_agent", False)),
-        # P1-D: persist the offline contract block (None when not declared).
-        offline_contract=manifest.get("offline") or None,
-        system_prompt_file=manifest.get("system_prompt") or None,
-        system_app=bool(manifest.get("system_app", False)),
-        capability_contract=capability_contract,
-      )
-      db.add(app)
-      db.flush()  # assign app.id without committing yet
+    app = await _prepare_app_row(
+      db,
+      candidate=candidate,
+      target=target,
+      source=source,
+      journal=journal,
+      warnings=warnings,
+    )
 
     # --- Per-app git: record upstream + (on update) merge into local ---
     # Engaged whenever the app has a real source_dir. The merge decision AND the
@@ -2846,7 +3013,6 @@ async def install_from_manifest(
                 app_git.clone_upstream, git_source_dir, repo_url, ref,
               )
               entry_bytes = (git_source_dir / "index.jsx").read_bytes()
-              jsx_source = entry_bytes.decode("utf-8")
               upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
               source_tree = {"index.jsx": entry_bytes}
               cloned_install = True
@@ -3115,13 +3281,19 @@ async def install_from_manifest(
       # surface a click-gated resolver. The served source/bundle stay the prior
       # good ones until the owner chooses Resolve in chat.
       db.commit()
+      journal.mark_durable()
       db.refresh(app)
       activity.log_event(
         "app_install", app_id=app.id, slug=app.slug, source=source,
       )
-      return (
-        app, mode, warnings, manifest, conflict_paths, divergence,
-        reconciliation,
+      return InstallResult(
+        app=app,
+        mode=mode,
+        warnings=warnings,
+        manifest=manifest,
+        conflict_paths=conflict_paths,
+        divergence=divergence,
+        reconciliation=reconciliation,
       )
 
     # Storage seeds — fresh installs always seed; updates only fill in keys
@@ -3156,8 +3328,7 @@ async def install_from_manifest(
     # write, or cleanup error run the failure actions and remove files selected
     # by the durable row. Superseded artifacts can safely remain for the startup
     # orphan reaper if post-commit cleanup is interrupted.
-    rollback_actions.clear()
-    created_paths.clear()
+    journal.mark_durable()
     db.refresh(app)
 
     # Only the durable update may retire provenance.  Doing this before the DB
@@ -3192,11 +3363,7 @@ async def install_from_manifest(
 
     # Success: drop any .bak snapshots we made — the new bundle is
     # now the canonical one.
-    for action in commit_actions:
-      try:
-        action()
-      except OSError as exc:
-        log.warning("install: post-commit cleanup failed — %s", exc)
+    journal.cleanup_superseded()
     if app.source_dir:
       clear_pending_conflict_update(app.source_dir)
 
@@ -3205,168 +3372,40 @@ async def install_from_manifest(
       manifest.get("name") or getattr(locals().get("app"), "slug", "app")
     )
     db.rollback()
-    _run_rollback_actions(rollback_actions)
-    _cleanup(created_paths)
+    journal.rollback_materialization()
     raise HTTPException(422, _compile_error_detail(app_name, exc))
   except HTTPException:
     db.rollback()
-    _run_rollback_actions(rollback_actions)
-    _cleanup(created_paths)
+    journal.rollback_materialization()
     raise
   except Exception:
     # Catch-all so a stray bug doesn't leak partial state or raw exception
     # reprs. The traceback is logged server-side for operators.
     log.exception("install: unexpected failure during materialize")
     db.rollback()
-    _run_rollback_actions(rollback_actions)
-    _cleanup(created_paths)
+    journal.rollback_materialization()
     raise HTTPException(
       500, "Install failed due to an unexpected server error.",
     )
 
-  # --- Phase 5: post-commit cron registration -------------------------
-  # The app is fully installed at this point. Cron failures become
-  # warnings, not 500s — the user just needs to re-set the schedule.
-  #
-  # The job script (manifest `schedule.job`) is ALREADY on disk: it was
-  # written in the transactional source write above, INDEPENDENT of whether
-  # the manifest also declares a recurring `schedule.default`. An app may
-  # ship an on-demand job invoked only through the run-job endpoint (e.g. the
-  # LaTeX app's build.sh, compiled on a Build click) with no recurring
-  # schedule, and run-job needs the script on disk to find it. A recurring
-  # crontab entry is installed here only when `schedule.default` is present.
-  # `job_name` was derived once before the git block; reuse it so the cron
-  # entry points at the same file the source write produced. A manifest may
-  # declare `schedule.default` without a `schedule.job`; fall back to the
-  # scaffold's own default basename so the crontab entry is still well-formed
-  # (it points at a stub the scaffold writes when no job was shipped).
-  cron_job_name = job_name or "job.sh"
-  has_cron = bool(sched and sched.get("default"))
-  # An UPDATE must CONVERGE cron state, not just add to it: the prior install
-  # may have registered a crontab line this new manifest no longer wants
-  # (recurring → on-demand migration). So on update we unconditionally drop
-  # the existing entry first, then re-register below only if the new manifest
-  # still declares one. A fresh install has nothing to drop. (Card 099.)
-  # Guard on source_dir like the git block above: a legacy no-source_dir app
-  # never had a per-app dir or a crontab line to converge, so forcing the cron
-  # block on its update would only materialize a stray empty /data/apps/<slug>/
-  # via the app_data_dir.mkdir below (card 099, stray-dir follow-up).
-  drop_prior_cron = mode == "update" and bool(app.source_dir)
-  if bundled_job or has_cron or drop_prior_cron:
-    slug = app.slug
-    # Use the app's ACTUAL source_dir (where the JSX + job script live), not a
-    # freshly re-derived /data/apps/<slug>. After a valid source-dir PATCH the
-    # two diverge, which would split the job file from the source tree (Codex
-    # review round-10 #7). `slug` stays the cron job identifier.
-    app_data_dir = Path(app.source_dir) if app.source_dir else data_dir / "apps" / slug
-    try:
-      # Under the per-source-dir lock so the job-file writes serialize vs a
-      # concurrent create/patch claiming this directory, and recheck the app
-      # row still exists first (the endpoint's lifecycle lock already excludes a
-      # concurrent uninstall, but the recheck makes the write never happen for a
-      # vanished row) — Codex review round-9 #3.
-      async with fs_locks.source_dir_lock(str(app_data_dir)):
-        if not db.query(models.App.id).filter(models.App.id == app.id).first():
-          raise HTTPException(404, "App removed before cron registration.")
-        app_data_dir.mkdir(parents=True, exist_ok=True)
-        # Drop any prior crontab entry + init-cron.sh BEFORE re-registering, so
-        # the net effect matches the new manifest. The scaffold's own rewrite is
-        # idempotent, but it never removes a line the new manifest dropped — that
-        # is exactly the orphan this clears. Off the event loop (shells out).
-        if drop_prior_cron:
-          await asyncio.to_thread(_drop_app_cron, app_data_dir)
-        job_path = app_data_dir / cron_job_name
-        # A cloned install/update materializes the job script with the repo's
-        # own mode — the installer never chmods tracked clone files (a mode
-        # change would read as permanent local divergence vs origin). A repo
-        # carrying the job as 100644 therefore lands non-executable, and the
-        # crontab/run-job exec fails silently at fire time; surface it now.
-        # The durable fix is repo-side (commit the +x bit). The synthetic
-        # write loop chmods declared jobs 0o755, so this never fires there.
-        if (
-          job_name
-          and job_path.exists()
-          and not os.access(job_path, os.X_OK)
-        ):
-          warnings.append(
-            f"schedule.job {cron_job_name} is not executable — cron/run-job "
-            "will fail until the app repo commits the executable bit"
-          )
-        if has_cron and CRON_SCAFFOLD.exists():
-          # The job script is already on disk; the scaffold preserves it and
-          # installs the crontab entry pointing at it.
-          await asyncio.to_thread(
-            _register_cron,
-            slug, sched["default"], job_path, app.id,
-          )
-        else:
-          # Either an on-demand-only job (no recurring schedule) or, when a
-          # schedule IS declared, a test env that mocks the scaffold away. The
-          # job script already landed in the transactional source write, so
-          # run-job can find it either way.
-          if has_cron:
-            # Schedule declared but the scaffold isn't on PATH (tests):
-            # persist a sentinel so the contract is observable + warn.
-            sentinel = app_data_dir / ".cron-pending.json"
-            sentinel.write_text(json.dumps({
-              "expr": sched["default"], "job": cron_job_name,
-              "status": "pending — init-cron-scaffold.sh not on PATH",
-            }), encoding="utf-8")
-            warnings.append(
-              "cron: scaffold script not available — registration pending"
-            )
-    except HTTPException as exc:
-      # The write/cron failed but the app is installed. Surface as a warning.
-      log.warning("install: job-script/cron step failed post-commit — %s",
-                  exc.detail)
-      warnings.append(f"cron: registration failed — {exc.detail}")
-    except Exception as exc:
-      log.exception("install: job-script/cron step failed post-commit")
-      warnings.append(f"cron: registration failed — {exc!r}")
+  # Phase 4: best-effort effects after the durable boundary.
+  await _run_post_commit_effects(
+    db,
+    app=app,
+    mode=mode,
+    source=source,
+    candidate=candidate,
+    warnings=warnings,
+  )
 
-  # --- Phase 6: post-commit shared-skill materialization ---------------
-  # Same best-effort contract as cron: the app is durably installed, so a
-  # skill failure is a warning, never a 500. A conflicting update returned
-  # earlier, so new-version skills are never installed while old code is
-  # still being served.
-  try:
-    await _sync_app_skills(db, app, manifest, warnings)
-  except Exception as exc:
-    log.exception("install: skill sync failed post-commit")
-    warnings.append(f"skills: sync failed — {exc!r}")
-
-  # A first install may request a deterministic initialization run so the app
-  # does not remain empty until its first cron tick.  It enters through the
-  # same supervised wrapper as cron and Run now, so uninstall can revoke it.
-  if (
-    mode == "install"
-    and sched
-    and sched.get("initialize_on_install") is True
-    and job_name
-    and app.source_dir
-  ):
-    try:
-      from app.app_jobs import launch_app_job
-      source_dir = Path(app.source_dir)
-      # Bootstrap runs inside FastAPI lifespan, before this backend can answer
-      # the supervisor's scoped capability calls.  Keep that ordering detail in
-      # the generic runner: it waits for the existing readiness signal before
-      # starting.  Interactive installs already happen against a live server.
-      wait_for_ready = source == "bootstrap"
-      launch_app_job(
-        app.id, source_dir / job_name, source_dir, wait_for_ready=wait_for_ready,
-      )
-      warnings.append(
-        "initialization waiting for startup readiness"
-        if wait_for_ready else "initialization started"
-      )
-    except Exception as exc:
-      log.exception("install: initialization job failed to start")
-      warnings.append(f"initialization failed to start — {exc!r}")
-
-  return (
-    app, mode, warnings, manifest, conflict_paths, divergence,
-    reconciliation,
+  return InstallResult(
+    app=app,
+    mode=mode,
+    warnings=warnings,
+    manifest=manifest,
+    conflict_paths=conflict_paths,
+    divergence=divergence,
+    reconciliation=reconciliation,
   )
 
 

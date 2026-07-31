@@ -785,6 +785,9 @@ async def test_bootstrap_install_emits_with_source_bootstrap(db, monkeypatch):
   captured = []
 
   async def _fake_install(db, manifest_url, manifest, raw_base, source="url"):
+    from app import app_git
+    from app.install import InstallResult
+
     captured.append(source)
     fake = models.App(
       id=42, name="Store", slug="store",
@@ -795,7 +798,15 @@ async def test_bootstrap_install_emits_with_source_bootstrap(db, monkeypatch):
     activity.log_event(
       "app_install", app_id=fake.id, slug=fake.slug, source=source,
     )
-    return fake, "install", [], {}, [], "none"
+    return InstallResult(
+      app=fake,
+      mode="install",
+      warnings=[],
+      manifest={},
+      conflict_paths=[],
+      divergence="none",
+      reconciliation=app_git.ReconciliationReceipt(),
+    )
 
   with patch("app.bootstrap.install_from_manifest", _fake_install):
     await ensure_bootstrap_apps_installed(db)

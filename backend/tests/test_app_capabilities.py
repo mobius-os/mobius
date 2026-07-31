@@ -234,7 +234,7 @@ async def test_bootstrap_initialization_waits_for_backend_readiness(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
   ), patch("app.app_jobs.launch_app_job") as launch:
-    app, mode, warnings, *_rest = await install_from_manifest(
+    result = await install_from_manifest(
       db,
       base + "mobius.json",
       None,
@@ -242,6 +242,9 @@ async def test_bootstrap_initialization_waits_for_backend_readiness(
       source="bootstrap",
       reviewed_capability_digest=digest,
     )
+  app = result.app
+  mode = result.mode
+  warnings = result.warnings
 
   assert mode == "install"
   source_dir = Path(app.source_dir)

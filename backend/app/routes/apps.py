@@ -877,20 +877,22 @@ async def install_app(
   # overlap lets one delete what the other just wrote
   # (fs_locks.install_uninstall_lock has the full rationale).
   async with fs_locks.install_uninstall_lock():
-    (
-      app, mode, warnings, manifest, conflict_paths, divergence,
-      reconciliation,
-    ) = (
-      await install_from_manifest(
-        db,
-        manifest_url=body.manifest_url,
-        manifest=body.manifest,
-        raw_base=body.raw_base,
-        source="store",
-        reviewed_capability_digest=body.reviewed_capability_digest,
-        reviewed_source_digest=body.reviewed_source_digest,
-      )
+    result = await install_from_manifest(
+      db,
+      manifest_url=body.manifest_url,
+      manifest=body.manifest,
+      raw_base=body.raw_base,
+      source="store",
+      reviewed_capability_digest=body.reviewed_capability_digest,
+      reviewed_source_digest=body.reviewed_source_digest,
     )
+  app = result.app
+  mode = result.mode
+  warnings = result.warnings
+  manifest = result.manifest
+  conflict_paths = result.conflict_paths
+  divergence = result.divergence
+  reconciliation = result.reconciliation
   # Notify the Shell to refetch its app list so a new install (or an
   # in-place update) shows up in the drawer without a page reload.
   # Published only on the success path: install_from_manifest raises
@@ -2066,19 +2068,22 @@ async def resolve_app_update(
     # icon, skills, seeds, and schedule. Re-enter it without holding the inner
     # app/source locks; it acquires those in the global order itself.
     try:
-      reapplied, mode, warnings, _, conflict_paths, _, reconciliation = (
-        await install.install_from_manifest(
-          db,
-          manifest_url=None,
-          manifest=receipt["manifest"],
-          raw_base=receipt["raw_base"],
-          source="store",
-          reviewed_capability_digest=receipt["capability_digest"],
-          expected_app_id=app_id,
-          expected_upstream_commit=replay_upstream_commit,
-          expected_candidate_digest=receipt["candidate_digest"],
-        )
+      result = await install.install_from_manifest(
+        db,
+        manifest_url=None,
+        manifest=receipt["manifest"],
+        raw_base=receipt["raw_base"],
+        source="store",
+        reviewed_capability_digest=receipt["capability_digest"],
+        expected_app_id=app_id,
+        expected_upstream_commit=replay_upstream_commit,
+        expected_candidate_digest=receipt["candidate_digest"],
       )
+      reapplied = result.app
+      mode = result.mode
+      warnings = result.warnings
+      conflict_paths = result.conflict_paths
+      reconciliation = result.reconciliation
     except HTTPException as exc:
       detail = exc.detail
       if (

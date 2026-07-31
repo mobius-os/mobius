@@ -193,18 +193,16 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
       bootstrap_app.name, bootstrap_app.manifest_url,
     )
     try:
-      (
-        app, mode, warnings, _manifest, _conflicts, _divergence,
-        _reconciliation,
-      ) = (
-        await install_from_manifest(
-          db,
-          manifest_url=bootstrap_app.manifest_url,
-          manifest=None,
-          raw_base=None,
-          source="bootstrap",
-        )
+      result = await install_from_manifest(
+        db,
+        manifest_url=bootstrap_app.manifest_url,
+        manifest=None,
+        raw_base=None,
+        source="bootstrap",
       )
+      app = result.app
+      mode = result.mode
+      warnings = result.warnings
     except Exception as exc:
       # Catch-all on purpose: no manifest failure should crash lifespan or
       # prevent the remaining bootstrap apps from installing.
