@@ -560,6 +560,11 @@ function _latestUserOwnsSpacer(scrollEl, listEl, lastUserMsgEl, mode, viewH) {
  */
 const PIN_OFFSET = 4
 const PIN_BOTTOM_ROOM = 0
+// Where a search-reveal jump lands the matched row: a comfortable margin below
+// the viewport top so a little prior context shows above it, rather than the
+// row flush to the very top. Kept well under any real viewport height so the
+// seeded ANCHOR_AT satisfies the content-intersection invariant.
+const REVEAL_OFFSET = 96
 export function _computeSpacerH(
   scrollEl,
   listEl,
@@ -1016,6 +1021,7 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   freezeQuestionSubmission: () => void,
  *   freezeQueuedSubmission: () => void,
  *   revealConversationTail: () => void,
+ *   revealAnchor: (key: string) => boolean,
  *   settleSendIntent: (event?: object) => void,
  *   settleStreamingPin: () => void,
  *   composerResized: () => void,
@@ -1377,6 +1383,37 @@ export default function useScrollMode({
     lastAppliedModeRef.current = nextMode
     nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
     persistMode()
+  }, [persistMode, scrollRef, transitionMode, writeMode])
+
+  // Jump to a specific transcript row (drawer search result). Like the
+  // attention nudge, this is an explicit reader location routed through the
+  // controller so modeRef, persistence, and later layout passes all agree on
+  // the anchor instead of a raw scrollIntoView the machine would overwrite.
+  // `offset` is the pixels from the viewport top to the row top after landing;
+  // the caller passes a value computed from the matched WORD's position so a
+  // deep match in a long message still lands the word (not just the row top) in
+  // view. Returns true when the row is in the loaded window and we anchored to
+  // it; false when it isn't present (an out-of-window match — caller no-ops).
+  const revealAnchor = useCallback((key, offset = REVEAL_OFFSET) => {
+    const scrollEl = scrollRef.current
+    if (!scrollEl || !key) return false
+    const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(key) : key
+    const row = scrollEl.querySelector(`[data-key="${esc}"]`)
+    if (!row) return false
+    discardPendingReaderSettleRef.current?.()
+    gestureWindowUntilRef.current = 0
+    readerLocationExplicitRef.current = true
+    const nextMode = {
+      kind: 'ANCHOR_AT',
+      key,
+      offset: Number.isFinite(offset) ? offset : REVEAL_OFFSET,
+    }
+    transitionMode(nextMode, 'reader:search-reveal')
+    writeMode(scrollEl, nextMode, 'reader:search-reveal')
+    lastAppliedModeRef.current = nextMode
+    nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
+    persistMode()
+    return true
   }, [persistMode, scrollRef, transitionMode, writeMode])
 
   useLayoutEffect(() => () => {
@@ -2449,6 +2486,7 @@ export default function useScrollMode({
     freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
+    revealAnchor,
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,

@@ -186,6 +186,122 @@
   background: var(--surface);
 }
 
+/* ── Search ────────────────────────────────────────── */
+
+/* Same row treatment as New chat: search is navigation, not a widget. The
+   closed state is a plain row; the open state swaps the label for an input
+   inside the identical footprint so activation never shifts the layout. */
+.drawer__item--search {
+  color: var(--muted);
+  margin: 0;
+  padding: 11px 12px;
+  min-height: 44px;
+}
+
+.drawer__item--search:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.drawer__item--search-open {
+  color: var(--text);
+  cursor: default;
+  background: var(--surface);
+}
+
+/* The row is the focus surface: one quiet ring around the whole control
+   instead of the global 2px input ring boxing the text field alone. Applies
+   on :focus-within so keyboard users keep an explicit indicator. */
+.drawer__item--search-open:focus-within {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.drawer__search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--text);
+  /* 16px baseline everywhere a finger can focus it: below that, iOS zooms
+     the whole page on focus (see the global input rule in index.css). Real
+     pointers get the drawer's 14px row scale back. */
+  font-size: 16px;
+  font-family: var(--font);
+  outline: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .drawer__search-input {
+    font-size: 14px;
+  }
+}
+
+.drawer__search-input:focus-visible {
+  outline: none;
+}
+
+.drawer__search-input::placeholder {
+  color: var(--muted);
+}
+
+.drawer__search-clear {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: -4px -6px -4px 0;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.drawer__search-clear:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+/* Result rows are two-line: title in the row voice, matched excerpt under it
+   in the muted voice with the match itself lifted back to full contrast. */
+.drawer__item--result {
+  align-items: flex-start;
+}
+
+.drawer__item--result .drawer__item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.drawer__result-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer__result-snippet {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.drawer__result-snippet mark {
+  background: none;
+  color: var(--text);
+  font-weight: 600;
+}
+
 /* ── Navigation sections ──────────────────────────── */
 
 .drawer__group {

@@ -7,6 +7,7 @@ import { appQueries, chatQueries } from '../../hooks/queries.js'
 import {
   AppsNavIcon,
   NewChatNavIcon,
+  SearchNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import { appIconUrl } from '../appIcon.js'
@@ -19,6 +20,8 @@ import {
   shouldSuppressDrawerSwipeClick,
   clearDrawerGestureStyles,
 } from '../../lib/drawerLifecycle.js'
+import { requestSearchReveal } from '../ChatView/searchReveal.js'
+import { termsFromSnippet } from '../ChatView/searchTermHighlight.js'
 import { WORKSPACE_SPLITS_ENABLED } from '../Shell/paneModel.js'
 import { DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX } from '../Shell/dragController.js'
 import InstallSheet from './InstallSheet.jsx'
@@ -49,6 +52,30 @@ import './Drawer.css'
 // A fresh `new Set()` per call would break identity-based memoization
 // downstream.
 const EMPTY_SET = new Set()
+
+// Search snippets arrive with private-use sentinels (U+E000 / U+E001) around
+// each matched word — characters that cannot occur in real transcript text —
+// so highlighting needs no HTML from the server. This is the one place that
+// converts them, into <mark> elements.
+function SearchSnippet({ text }) {
+  if (!text) return null
+  const nodes = []
+  text.split('\ue000').forEach((chunk, i) => {
+    if (i === 0) {
+      if (chunk) nodes.push(chunk)
+      return
+    }
+    const end = chunk.indexOf('\ue001')
+    if (end === -1) {
+      nodes.push(chunk)
+      return
+    }
+    nodes.push(<mark key={i}>{chunk.slice(0, end)}</mark>)
+    const rest = chunk.slice(end + 1)
+    if (rest) nodes.push(rest)
+  })
+  return <span className="drawer__result-snippet">{nodes}</span>
+}
 
 export default function Drawer({
   open,
@@ -208,6 +235,61 @@ export default function Drawer({
     observer.observe(sentinel)
     return () => observer.disconnect()
   }, [allRecents.length, open, visibleRecentCount])
+
+  // Drawer-wide chat search. While a query is active the navigation scroll
+  // (Apps / Pinned / Recents) is swapped for ranked results; clearing the
+  // field restores it untouched. Keystrokes are debounced and the previous
+  // request aborted, so at most one search is ever in flight.
+  const [searchActive, setSearchActive] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState([])
+  const [searchStatus, setSearchStatus] = useState('idle') // idle|loading|success|error
+  const searchInputRef = useRef(null)
+  const searchTerm = searchQuery.trim()
+
+  useEffect(() => {
+    if (!searchActive || !searchTerm) {
+      setSearchResults([])
+      setSearchStatus('idle')
+      return undefined
+    }
+    const ctrl = new AbortController()
+    setSearchStatus('loading')
+    const timer = setTimeout(async () => {
+      try {
+        const res = await api.chats.search(searchTerm, { signal: ctrl.signal })
+        if (!res.ok) throw new Error(`search failed: ${res.status}`)
+        const data = await res.json()
+        if (ctrl.signal.aborted) return
+        setSearchResults(Array.isArray(data) ? data : [])
+        setSearchStatus('success')
+      } catch {
+        if (ctrl.signal.aborted) return
+        setSearchStatus('error')
+      }
+    }, 200)
+    return () => {
+      clearTimeout(timer)
+      ctrl.abort()
+    }
+  }, [searchActive, searchTerm])
+
+  const closeSearch = useCallback(() => {
+    setSearchActive(false)
+    setSearchQuery('')
+  }, [])
+
+  // The input mounts on activation; focus it there so the phone keyboard
+  // rises with the same tap that opened search.
+  useEffect(() => {
+    if (searchActive) searchInputRef.current?.focus()
+  }, [searchActive])
+
+  // A dismissed modal drawer (phone) should reopen in its normal state, not
+  // mid-search. The persistent desktop sidebar keeps search across blurs.
+  useEffect(() => {
+    if (!open && !persistent) closeSearch()
+  }, [open, persistent, closeSearch])
 
   // One row at a time can be in rename or open-menu mode. Tracking the
   // active id (rather than per-row state) lets a click on another row's
@@ -922,6 +1004,121 @@ export default function Drawer({
               <span className="drawer__item-text">New chat</span>
             </button>
 
+            {searchActive ? (
+              <div className="drawer__item drawer__item--search drawer__item--search-open">
+                <span className="drawer__item-icon" aria-hidden="true">
+                  <SearchNavIcon />
+                </span>
+                <input
+                  ref={searchInputRef}
+                  className="drawer__search-input"
+                  type="text"
+                  inputMode="search"
+                  enterKeyHint="search"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck="false"
+                  value={searchQuery}
+                  placeholder="Search chats"
+                  aria-label="Search chats"
+                  onChange={event => setSearchQuery(event.target.value)}
+                  onKeyDown={event => {
+                    if (event.key === 'Escape') {
+                      // Owns Escape while search is up: first press clears the
+                      // drawer back to normal instead of dismissing the drawer.
+                      event.stopPropagation()
+                      closeSearch()
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="drawer__search-clear"
+                  aria-label="Close search"
+                  onClick={closeSearch}
+                >
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                    <path
+                      d="M4 4l8 8M12 4l-8 8"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      fill="none"
+                    />
+                  </svg>
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="drawer__item drawer__item--search"
+                onClick={() => {
+                  resetAppsSurfaceUi({ restoreFocus: false })
+                  setSearchActive(true)
+                }}
+              >
+                <span className="drawer__item-icon" aria-hidden="true">
+                  <SearchNavIcon />
+                </span>
+                <span className="drawer__item-text">Search chats</span>
+              </button>
+            )}
+
+            {searchActive && searchTerm ? (
+              <div className="drawer__scroll drawer__scroll--navigation">
+                <section
+                  className="drawer__section"
+                  aria-labelledby="drawer-search-label"
+                  aria-live="polite"
+                >
+                  <h2 id="drawer-search-label" className="drawer__label">
+                    <span>Results</span>
+                  </h2>
+                  {searchResults.length > 0 ? searchResults.map(result => (
+                    <div className="drawer__row" key={result.id}>
+                      <button
+                        type="button"
+                        className={`drawer__item drawer__item--result${
+                          !appsActive && activeView === 'chat' && activeChatId === result.id
+                            ? ' drawer__item--active'
+                            : ''
+                        }`}
+                        onClick={() => {
+                          // Record the exact transcript row to reveal (when the
+                          // hit is a message, not just a title) BEFORE opening
+                          // the chat, so ChatView jumps there on first paint.
+                          if (result.ts != null && result.role) {
+                            requestSearchReveal(
+                              result.id,
+                              `${result.role}-${result.ts}`,
+                              termsFromSnippet(result.snippet),
+                            )
+                          }
+                          rowActions.select('chat', result.id)
+                        }}
+                      >
+                        <span className="drawer__item-text">
+                          <span className="drawer__result-title">{result.title}</span>
+                          <SearchSnippet text={result.snippet} />
+                        </span>
+                      </button>
+                    </div>
+                  )) : searchStatus === 'loading' ? (
+                    <p className="drawer__list-status" role="status">Searching…</p>
+                  ) : searchStatus === 'error' ? (
+                    <p className="drawer__list-status" role="alert">
+                      Search is unavailable right now.
+                    </p>
+                  ) : searchStatus === 'success' ? (
+                    <EmptyMessage className="drawer__empty" fill="static">
+                      <EmptyMessage.Description>
+                        No chats mention “{searchTerm}”
+                      </EmptyMessage.Description>
+                    </EmptyMessage>
+                  ) : null}
+                </section>
+              </div>
+            ) : (
             <div className="drawer__scroll drawer__scroll--navigation" ref={navigationScrollRef}>
               <button
                 ref={appsButtonRef}
@@ -1044,6 +1241,7 @@ export default function Drawer({
                 )}
               </section>
             </div>
+            )}
           </div>{/* /.drawer__scroll-wrap */}
 
           <div className="drawer__group drawer__group--bottom">

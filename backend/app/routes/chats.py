@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Text, case, cast, func
 from sqlalchemy.orm import Session
 
-from app import activity, auth, models, providers, questions
+from app import activity, auth, chat_search, models, providers, questions
 from app.config import get_settings
 from app.chat import (
   _finish_run,
@@ -519,6 +519,26 @@ def list_chats(
     )
     for chat in chats
   ]
+
+
+@router.get("/search")
+def search_chats(
+  q: str = Query("", max_length=256),
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Full-text search over chat titles and conversation prose.
+
+  Registered before ``/{chat_id}`` so the literal path wins. The index is
+  derived data reconciled inside the request (see ``chat_search``); the first
+  query on an existing instance pays a one-time backfill, after which only
+  changed chats are touched. Snippets mark matches with private-use
+  sentinels U+E000/U+E001; the drawer converts them to highlight marks.
+  """
+  query = q.strip()
+  if not query:
+    return []
+  return chat_search.search(db, query)
 
 
 @router.get("/session-links")
