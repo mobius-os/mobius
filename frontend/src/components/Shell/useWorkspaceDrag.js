@@ -80,7 +80,6 @@ export default function useWorkspaceDrag({
   drawerOpenRef,
   closeDrawer,
   openDrawer,
-  openTabMenuAtRef, // ref → (clientX, clientY, tab, paneId) => void
   onPreviewBuilder, // (active, { committed }) => void — enter/leave the LIVE
   // builder preview a single-mode drag unfolds (point 15: dragging IS
   // building). Render-only: the reducer viewMode stays 'single' until the drop
@@ -340,7 +339,9 @@ export default function useWorkspaceDrag({
 
       // Tabs use one unambiguous touch contract across their whole surface:
       // movement before the hold belongs to strip scrolling; surviving the short
-      // hold lifts the tab so a following move drags it. Drawer rows keep their
+      // hold lifts the tab so a following move drags it. Releasing that lifted tab
+      // in place simply puts it back — phone tabs do not overload the drag gesture
+      // with the desktop actions menu. Drawer rows keep their
       // directional drag-out shortcut because it does not compete with the
       // drawer's vertical scroll axis. A stationary drawer hold remains the
       // alternate path to its row menu.
@@ -532,30 +533,26 @@ export default function useWorkspaceDrag({
 
       const onUp = (ev) => {
         if (ev.pointerId !== pointerId) return // ignore a second finger
-        const openTouchMenu = () => {
-          if (sourceKind === 'tab' && openTabMenuAtRef.current) {
-            openTabMenuAtRef.current(ev.clientX, ev.clientY, tabFromKey(key), paneId)
-          } else if (sourceKind === 'drawer') {
-            // Re-enter the row's real context-menu boundary instead of
-            // programmatically clicking its menu trigger. `contextmenu` is the
-            // one semantic path shared with desktop right-click and keyboard
-            // access, so touch hold cannot drift when the trigger composition
-            // changes.
-            srcEl.dispatchEvent(new window.MouseEvent('contextmenu', {
-              bubbles: true,
-              cancelable: true,
-              view: window,
-              button: 2,
-              clientX: ev.clientX,
-              clientY: ev.clientY,
-            }))
-          }
+        const openDrawerTouchMenu = () => {
+          // Re-enter the row's real context-menu boundary instead of
+          // programmatically clicking its menu trigger. `contextmenu` is the
+          // one semantic path shared with desktop right-click and keyboard
+          // access, so touch hold cannot drift when the trigger composition
+          // changes.
+          srcEl.dispatchEvent(new window.MouseEvent('contextmenu', {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            button: 2,
+            clientX: ev.clientX,
+            clientY: ev.clientY,
+          }))
         }
         if (!armed) {
           if (scrolling) {
             cleanup({ suppressClick: true })
-          } else if (isTouch && held) {
-            openTouchMenu()
+          } else if (isTouch && held && sourceKind === 'drawer') {
+            openDrawerTouchMenu()
             cleanup({ suppressClick: true })
           } else cleanup()
           return
@@ -573,9 +570,9 @@ export default function useWorkspaceDrag({
         const backOverDrawer = sourceKind === 'drawer' && drawerEdgeX != null
           && ev.clientX <= drawerEdgeX && !(isTouch && glided)
         if (isTouch && releasedInPlace(dx, dy)) {
-          // Lift → release-in-place = context menu. A strip tab reuses the
-          // stage-A pane menu; a drawer row opens its own ⋮ menu (adjudicated).
-          openTouchMenu()
+          // A lifted tab released in place cancels cleanly; its hold is reserved
+          // for drag. Drawer rows retain their stationary-hold action menu.
+          if (sourceKind === 'drawer') openDrawerTouchMenu()
           cleanup({ suppressClick: true })
         } else if (backOverDrawer) {
           // Released back over the drawer = cancel; cleanup reopens it if glided.

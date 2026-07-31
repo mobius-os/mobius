@@ -38,9 +38,9 @@ test('the workspace menu avoids an oversized border-and-shadow card', () => {
   assert.doesNotMatch(rule, /box-shadow:[^;]*(?:1[6-9]|[2-9]\d)px/)
 })
 
-test('the workspace menu stays close-only, edge-clamped, and keyboard navigable', () => {
+test('the desktop workspace menu stays close-only, edge-clamped, and keyboard navigable', () => {
   const menuMarkup = shell.slice(
-    shell.indexOf('{tabMenu &&'),
+    shell.indexOf('{tabActionsAvailable && tabMenu &&'),
     shell.indexOf('</HistoryDismissProvider>'),
   )
   assert.match(shell, /aria-label="Tab actions"/)
@@ -56,7 +56,11 @@ test('the workspace menu stays close-only, edge-clamped, and keyboard navigable'
   assert.match(shell, /querySelector\('\[role="menuitem"\]'\)\?\.focus\(\)/)
   assert.match(shell, /tabMenuReturnFocusRef\.current = event\.currentTarget/)
   assert.match(shell, /returnTarget\?\.focus\?\.\(\{ preventScroll: true \}\)/)
-  assert.match(css, /@media \(max-width: 720px\)[\s\S]*?\.workspace__menu-header/)
+  assert.match(shell, /const tabActionsAvailable = workspaceMode !== 'phone'/)
+  assert.match(shell, /event\.preventDefault\(\)\s*\n\s*if \(!tabActionsAvailable\) return/)
+  assert.match(shell, /\{tabActionsAvailable && tabMenu &&/)
+  assert.doesNotMatch(shell, /workspace__menu-handle|workspace__menu-header|workspace__menu-close/)
+  assert.doesNotMatch(css, /workspace__menu-handle|workspace__menu-header|workspace__menu-close|workspace-tab-sheet-in/)
 })
 
 test('an implicit home tab does not engage the single-pane tab strip', () => {
@@ -637,6 +641,8 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.match(dragBinding, /if \(sourceKind === 'tab'\) arm\(\)/)
   assert.match(dragBinding, /touchMoveIntent\(dx, dy, sourceKind\)/)
   assert.match(dragBinding, /scrollStripEl\.scrollLeft \+= previousPoint\.x - ev\.clientX/)
+  assert.match(dragBinding, /if \(sourceKind === 'drawer'\) openDrawerTouchMenu\(\)/)
+  assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
 })
 

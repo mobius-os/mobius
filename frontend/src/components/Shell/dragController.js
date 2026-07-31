@@ -45,8 +45,9 @@ export const PRE_HOLD_MOVE_PX = 8
 // jitter settle before a rightward drag-out takes ownership.
 export const DRAWER_DRAG_INTENT_PX = 18
 export const DRAWER_DRAG_DOMINANCE = 1.2
-// After a touch lift, a release that never moved past this opens the context
-// menu instead of dropping (lift → release-in-place = menu; lift → move = drag).
+// After a touch lift, a release that never moved past this is not a drop.
+// Drawer rows use that stationary release for their action menu; tabs cancel
+// cleanly because their hold gesture is reserved for dragging.
 export const RELEASE_IN_PLACE_PX = 5
 
 // ── Zone geometry (design §3.2 / §3.3) ───────────────────────────────────────
@@ -119,8 +120,7 @@ export function touchMoveIntent(dx, dy, sourceKind, limit = PRE_HOLD_MOVE_PX) {
   return 'scroll'
 }
 
-// After a lift, a release still within this radius opened no drag — it is the
-// escalation branch that opens the context menu.
+// After a lift, a release still within this radius did not become a drag.
 export function releasedInPlace(dx, dy, limit = RELEASE_IN_PLACE_PX) {
   return hypot(dx, dy) <= limit
 }

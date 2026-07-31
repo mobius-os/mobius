@@ -1,6 +1,6 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { CollapseSm, X } from '@openai/apps-sdk-ui/components/Icon'
+import { CollapseSm } from '@openai/apps-sdk-ui/components/Icon'
 import {
   AppsNavIcon,
   NewChatNavIcon,
@@ -1539,13 +1539,16 @@ export default function Shell() {
   }, [])
 
   // Tabs expose a compact browser-style close menu without adding permanent
-  // chrome: right-click or the keyboard menu key on desktop, stationary hold on
-  // touch. The same state drives both the single strip and tiled pane strips.
+  // chrome on desktop: right-click or the keyboard menu key. Phone tabs reserve
+  // press-and-hold for dragging and never open these bulk actions. The same state
+  // drives both the single strip and tiled pane strips.
   const [tabMenu, setTabMenu] = useState(null)
   const tabMenuRef = useRef(null)
   const tabMenuReturnFocusRef = useRef(null)
+  const tabActionsAvailable = workspaceMode !== 'phone'
   const openTabMenu = useCallback((event, tab, paneId) => {
     event.preventDefault()
+    if (!tabActionsAvailable) return
     const owner = paneId || paneModel.paneOf(workspace, tabModel.tabKey(tab))?.id
     if (!owner) return
     const triggerRect = event.currentTarget.getBoundingClientRect()
@@ -1560,15 +1563,7 @@ export default function Shell() {
       tabKey: tabModel.tabKey(tab),
       paneId: owner,
     })
-  }, [workspace])
-  const openTabMenuAt = useCallback((x, y, tab, paneId) => {
-    if (!tab) return
-    const owner = paneId
-      || paneModel.paneOf(workspaceStateRef.current.ws, tabModel.tabKey(tab))?.id
-    if (!owner) return
-    tabMenuReturnFocusRef.current = null
-    setTabMenu({ x, y, tab, tabKey: tabModel.tabKey(tab), paneId: owner })
-  }, [])
+  }, [tabActionsAvailable, workspace])
   const closeTabMenu = useCallback((restoreFocus = true) => {
     setTabMenu(null)
     if (!restoreFocus) return
@@ -1609,6 +1604,10 @@ export default function Shell() {
   }, [])
   useEffect(() => {
     if (!tabMenu) return undefined
+    if (!tabActionsAvailable) {
+      closeTabMenu(false)
+      return undefined
+    }
     const onDown = (event) => {
       if (!event.target.closest?.('.workspace__menu')) closeTabMenu(false)
     }
@@ -1621,7 +1620,7 @@ export default function Shell() {
       document.removeEventListener('pointerdown', onDown, true)
       document.removeEventListener('keydown', onKey, true)
     }
-  }, [closeTabMenu, tabMenu])
+  }, [closeTabMenu, tabActionsAvailable, tabMenu])
 
   // ── Workspace drag controller wiring (design §3, PR3) ─────────────────────
   // All of this is gated behind WORKSPACE_SPLITS_ENABLED — the hook installs no
@@ -1633,8 +1632,6 @@ export default function Shell() {
   sceneInputsRef.current = { projection, mode: workspaceMode, contentRect }
   const labelForTabRef = useRef(labelForTab)
   labelForTabRef.current = labelForTab
-  const openTabMenuAtRef = useRef(openTabMenuAt)
-  openTabMenuAtRef.current = openTabMenuAt
   // A single-mode drag previews the builder world through the ONE descriptor
   // (INV 5): arm is phase 'drag-preview', and the id it mints is carried to the
   // matching commit/cancel so a stale end-event from a superseded drag is
@@ -1711,7 +1708,6 @@ export default function Shell() {
     drawerOpenRef,
     closeDrawer,
     openDrawer,
-    openTabMenuAtRef,
     onPreviewBuilder: onModeDragPreview,
   })
 
@@ -4082,7 +4078,7 @@ export default function Shell() {
         action={toast?.action}
         onDismiss={dismissToast}
       />
-      {tabMenu && (() => {
+      {tabActionsAvailable && tabMenu && (() => {
         const menuPane = workspace.panes[tabMenu.paneId]
         const menuTabIndex = menuPane?.tabs.findIndex(
           tab => tabModel.tabKey(tab) === tabMenu.tabKey,
@@ -4104,21 +4100,6 @@ export default function Shell() {
               }}
               onKeyDown={handleTabMenuKeyDown}
             >
-              <div className="workspace__menu-handle" aria-hidden="true" />
-              <header className="workspace__menu-header">
-                <div>
-                  <span>Tab actions</span>
-                  <strong>{labelForTab(tabMenu.tab)}</strong>
-                </div>
-                <button
-                  type="button"
-                  className="workspace__menu-close"
-                  aria-label="Close tab actions"
-                  onClick={() => closeTabMenu()}
-                >
-                  <X width={18} height={18} aria-hidden="true" />
-                </button>
-              </header>
               <div className="workspace__menu-items">
                 <button
                   type="button"
