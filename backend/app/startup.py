@@ -326,6 +326,10 @@ STARTUP_TASKS = (
     critical=True,
     checkpoint="startup_database_initialized",
   ),
+  # Transcript migrations below are writer domain commands. Start ownership as
+  # soon as the schema exists; later startup failures still fail open exactly
+  # as they did when the writer started near the end of the plan.
+  StartupTask("start chat writer", _start_chat_writer),
   StartupTask("purge expired chat tombstones", _purge_expired_chats),
   StartupTask("backfill session links", _backfill_session_links),
   StartupTask("backfill prompt snapshots", _backfill_prompt_snapshots),
@@ -352,7 +356,6 @@ STARTUP_TASKS = (
     _retire_integrated_provenance,
     checkpoint="startup_app_provenance_retired",
   ),
-  StartupTask("start chat writer", _start_chat_writer),
   StartupTask("initialize push", _initialize_push),
   StartupTask("notify reconciled chats", _notify_reconciled_chats),
   StartupTask(

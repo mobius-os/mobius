@@ -105,11 +105,9 @@ def test_fix_forward_chat_media_restores_moved_file_when_commit_fails(
   old_file.parent.mkdir(parents=True)
   old_file.write_bytes(b"old-image")
 
-  def fail_commit():
-    raise RuntimeError("commit failed")
-
-  monkeypatch.setattr(db, "commit", fail_commit)
-  with pytest.raises(RuntimeError, match="commit failed"):
+  from app import chat_writer
+  monkeypatch.setattr(chat_writer, "_commit_or_rollback", lambda _db: False)
+  with pytest.raises(chat_writer._PersistFailed, match="RewriteChatMediaPaths"):
     fix_forward_chat_media(db, get_settings().data_dir)
 
   assert old_file.read_bytes() == b"old-image"

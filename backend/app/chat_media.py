@@ -8,6 +8,7 @@ from sqlalchemy import String, cast, literal, or_
 from sqlalchemy.orm import Session
 
 from app import models
+from app.chat_writer import RewriteChatMediaPaths, get_writer, wait_ack
 
 
 def _replace_media_path(value, old_prefix: str, new_prefix: str):
@@ -130,18 +131,13 @@ def fix_forward_chat_media(db: Session, data_dir: str) -> int:
 
       old_prefix = f"/api/chats/{chat.id}/generated/"
       new_prefix = f"/api/chats/{chat.id}/media/"
-      messages = _replace_media_path(chat.messages, old_prefix, new_prefix)
-      pending = _replace_media_path(
-        chat.pending_messages, old_prefix, new_prefix,
-      )
-      if messages != chat.messages:
-        chat.messages = messages
-        changed += 1
-      if pending != chat.pending_messages:
-        chat.pending_messages = pending
-        changed += 1
-
-      db.commit()
+      rewritten = wait_ack(get_writer().submit(RewriteChatMediaPaths(
+        chat_id=chat.id,
+        old_prefix=old_prefix,
+        new_prefix=new_prefix,
+      )))
+      changed += int(rewritten or 0)
+      db.expire_all()
     except BaseException:
       db.rollback()
       # Restore files moved for this chat so a handled startup failure never
