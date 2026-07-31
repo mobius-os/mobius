@@ -23,6 +23,7 @@ test('frame attribution derives identity only from the mounted source window', (
 
 test('module requests reject unbound identity before acknowledging or fetching', () => {
   const posts = []
+  let fetches = 0
   const accepted = serveModuleRequest({
     message: { type: 'moebius:module-request', requestId: 'r1', appId: 8 },
     source: { postMessage: (...args) => posts.push(args) },
@@ -30,9 +31,43 @@ test('module requests reject unbound identity before acknowledging or fetching',
     frameVersion: 'v1',
     token: 'secret',
     moduleUrl: '/api/apps/7/module',
+    fetchModule: async () => { fetches += 1 },
   })
   assert.equal(accepted, false)
   assert.deepEqual(posts, [])
+  assert.equal(fetches, 0)
+})
+
+
+test('an attributed module request acknowledges before its transfer settles', async () => {
+  const posts = []
+  let resolveTransfer
+  const transfer = new Promise(resolve => { resolveTransfer = resolve })
+  const source = { postMessage: (...args) => posts.push(args) }
+
+  const accepted = serveModuleRequest({
+    message: { type: 'moebius:module-request', requestId: 'r1', appId: 7 },
+    source,
+    appId: 7,
+    frameVersion: 'v1',
+    token: 'secret',
+    moduleUrl: '/api/apps/7/module',
+    fetchModule: () => transfer,
+  })
+
+  assert.equal(accepted, true)
+  assert.deepEqual(posts, [[{
+    type: 'moebius:module-ack', requestId: 'r1', appId: 7,
+  }, '*']])
+
+  const bytes = new Uint8Array([1, 2, 3])
+  resolveTransfer(bytes)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(posts.length, 2)
+  assert.deepEqual(posts[1][0], {
+    type: 'moebius:module-result', requestId: 'r1', appId: 7, ok: true, bytes,
+  })
+  assert.deepEqual(posts[1].slice(1), ['*', [bytes]])
 })
 
 

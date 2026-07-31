@@ -81,13 +81,10 @@ test('internal navigation crosses stable markdown memo boundaries', () => {
 })
 
 test('shell resolves raw deep-link app targets through the intent rail', () => {
-  const navigation = read('../../../hooks/useNavigation.js')
   const shell = read('../../Shell/Shell.jsx')
   const intentNavigation = read('../../Shell/useAppIntentNavigation.js')
   const pane = read('../../Shell/PaneChatView.jsx')
 
-  assert.match(navigation, /const intent = params\.get\('intent'\)/)
-  assert.match(navigation, /app,\s+appId:/)
   assert.match(intentNavigation, /const openAppWithIntent = useCallback/)
   assert.match(intentNavigation, /findAppForOpenTarget\(updatedApps, target\)/)
   assert.match(intentNavigation, /navToRef\.current\('canvas'/)

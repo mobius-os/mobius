@@ -3842,9 +3842,9 @@ def apply_answers_to_last_question(
 
 # -- module singleton + lifespan accessors -------------------------------
 # One actor per process.  `start_writer` is called from the FastAPI
-# lifespan AFTER db init + crash reconciliation (which must run before the
-# actor exists — recovery cannot depend on a healthy writer); `stop_writer`
-# drains on shutdown.
+# lifespan immediately after DB initialization, before startup transcript
+# migrations and crash reconciliation submit their must-persist repairs;
+# `stop_writer` drains on shutdown.
 _writer: ChatWriterActor | None = None
 # Serializes the singleton check+create in `start_writer` (and the
 # clear in `stop_writer`) so two concurrent callers can't both pass the

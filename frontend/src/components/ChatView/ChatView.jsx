@@ -64,8 +64,11 @@ import {
 } from '../../lib/chatDetailCache.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
-import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
-import { deriveActiveAssistantSelection } from './activeAssistantSelection.js'
+import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, streamItemsHaveRenderableContent } from './streamPromotion.js'
+import {
+  commitAssistantPromotion,
+  deriveActiveAssistantSelection,
+} from './activeAssistantSelection.js'
 import {
   answerKeepsCurrentTurn,
   builtAppPulseDecision,
@@ -1522,12 +1525,13 @@ export default function ChatView({
     // publish→clear gap cannot show both the durable row and its retired live
     // surface. This deliberately records streamItems (painted state), not
     // latestItemsRef (which may already contain a newer buffered frame).
-    retiredAssistantItemsRef.current = streamItems
-    commitMessages(
-      prev => promoteAssistantStream(prev, { items, bridgeTs }),
-      undefined,
-      { force: true },
-    )
+    commitAssistantPromotion({
+      retiredItemsRef: retiredAssistantItemsRef,
+      paintedItems: streamItems,
+      promotedItems: items,
+      bridgeTs,
+      commitMessages,
+    })
     // force=true bypasses sameMessageList. In the BRIDGE merge path
     // the new (catch-up) blocks may be structurally identical to the
     // kept DB-partial blocks (backend's throttled save was recent +

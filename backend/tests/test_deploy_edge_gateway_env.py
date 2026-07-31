@@ -60,6 +60,7 @@ def _run_resolution(
     TARGET=prod
     DOMAIN=mobius.example.com
     REPO_ROOT={str(repo_root)!r}
+    DEPLOY_SUPPORT={str(SCRIPT.with_name('deploy_support.py'))!r}
     {gateway_setup}
     {_resolution_source()}
     resolve_prod_service_gateway_origin

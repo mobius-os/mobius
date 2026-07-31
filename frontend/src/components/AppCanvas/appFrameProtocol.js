@@ -19,7 +19,15 @@ function requestIdOf(message) {
     : ''
 }
 
-export function serveModuleRequest({ message, source, appId, frameVersion, token, moduleUrl }) {
+export function serveModuleRequest({
+  message,
+  source,
+  appId,
+  frameVersion,
+  token,
+  moduleUrl,
+  fetchModule = fetchAppModuleBytes,
+}) {
   const requestId = requestIdOf(message)
   if (!requestId || String(message.appId) !== String(appId)) return false
   const retry = message.retry === 1 ? 1 : 0
@@ -32,7 +40,7 @@ export function serveModuleRequest({ message, source, appId, frameVersion, token
 
   ;(async () => {
     try {
-      const bytes = await fetchAppModuleBytes({
+      const bytes = await fetchModule({
         baseUrl: moduleUrl, token, frameVersion, retry,
       })
       source?.postMessage({

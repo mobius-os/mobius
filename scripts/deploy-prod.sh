@@ -147,6 +147,7 @@ else
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEPLOY_SUPPORT="$REPO_ROOT/scripts/deploy_support.py"
 cd "$REPO_ROOT"
 
 # ── ANSI colors (kept simple, matches sync-test-shell.sh's restraint) ──
@@ -334,7 +335,7 @@ resolve_prod_service_gateway_origin() {
   fi
 
   if [ -n "$value" ]; then
-    if ! value=$(python3 "$REPO_ROOT/scripts/deploy_support.py" \
+    if ! value=$(python3 "$DEPLOY_SUPPORT" \
       normalize-gateway-origin "$value" --shell-host "$DOMAIN"); then
       fail "MOBIUS_SERVICE_GATEWAY_ORIGIN must be a separate HTTPS origin without credentials, a path, query, or fragment."
       exit 1
@@ -405,7 +406,7 @@ ensure_edge_network() {
 }
 
 valid_gateway_origin() {
-  python3 "$REPO_ROOT/scripts/deploy_support.py" \
+  python3 "$DEPLOY_SUPPORT" \
     validate-gateway-origin "$1"
 }
 
@@ -554,7 +555,7 @@ check_build_disk() {
 }
 
 rollback_tag_for_image() {
-  python3 "$REPO_ROOT/scripts/deploy_support.py" rollback-tag "$1"
+  python3 "$DEPLOY_SUPPORT" rollback-tag "$1"
 }
 
 remove_superseded_rollback_image() {

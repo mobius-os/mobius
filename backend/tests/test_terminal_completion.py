@@ -882,9 +882,10 @@ def test_actor_fatal_leaves_marker_then_reconcile_repairs(monkeypatch):
   assert state["running"] is True, "actor-fatal terminal must LEAVE marker"
   assert len(state["pending_messages"]) == 1, "queue not consumed"
 
-  # Reconcile-after-restart (the fatal actor is restarted by the fixture's
-  # teardown; here we just run the pure recovery against the DB).
+  # Reconcile-after-restart: boot replaces the fatal actor before submitting
+  # the must-persist startup repair through that new single writer.
   chat_mod.registry.reset_for_tests()
+  chat_writer.start_writer(SessionLocal)
   db = SessionLocal()
   try:
     reconciled = chat_mod.reconcile_interrupted_chats(db)

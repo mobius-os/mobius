@@ -1,21 +1,17 @@
 """Fail-closed contracts for the shared-edge production deploy path."""
 
 from pathlib import Path
-import re
-import subprocess
+import importlib.util
 
 import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "deploy-prod.sh"
-
-
-def _gateway_validator() -> str:
-  text = SCRIPT.read_text(encoding="utf-8")
-  match = re.search(r"valid_gateway_origin\(\) \{.*?^\}", text, re.MULTILINE | re.DOTALL)
-  assert match, "deploy script must keep gateway validation in one testable helper"
-  return match.group(0)
-
+SUPPORT = SCRIPT.with_name("deploy_support.py")
+_SPEC = importlib.util.spec_from_file_location("deploy_support_edge", SUPPORT)
+assert _SPEC is not None and _SPEC.loader is not None
+deploy_support = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(deploy_support)
 
 @pytest.mark.parametrize("origin", [
   "https://services.example.test",
@@ -23,11 +19,9 @@ def _gateway_validator() -> str:
   "https://127.0.0.1:443",
 ])
 def test_gateway_renderer_accepts_bare_https_origins(origin):
-  result = subprocess.run(
-    ["bash", "-c", f'{_gateway_validator()}\nvalid_gateway_origin "$1"', "_", origin],
-    check=False,
+  assert deploy_support.normalize_gateway_origin(origin) == (
+    origin.removesuffix(":443")
   )
-  assert result.returncode == 0
 
 
 @pytest.mark.parametrize("origin", [
@@ -39,11 +33,8 @@ def test_gateway_renderer_accepts_bare_https_origins(origin):
   "https://services.example.test:65536",
 ])
 def test_gateway_renderer_rejects_non_origins_and_render_metacharacters(origin):
-  result = subprocess.run(
-    ["bash", "-c", f'{_gateway_validator()}\nvalid_gateway_origin "$1"', "_", origin],
-    check=False,
-  )
-  assert result.returncode != 0
+  with pytest.raises(deploy_support.DeployInputError):
+    deploy_support.normalize_gateway_origin(origin)
 
 
 def test_stopped_shared_edge_never_falls_back_to_bundled_caddy():

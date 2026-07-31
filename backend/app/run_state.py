@@ -24,7 +24,7 @@ def goal_objective_for_run_start(
   inherit only from the immediately preceding unfinished/interrupted run; an
   ordinary turn after a completed goal therefore cannot revive stale UI state.
   """
-  from app.chat import _goal_objective
+  from app.chat_context import _goal_objective
 
   objective = _goal_objective(content or "")
   if objective is not None:

@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { deriveActiveAssistantSelection } from '../activeAssistantSelection.js'
-
-const chatViewSource = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+import {
+  commitAssistantPromotion,
+  deriveActiveAssistantSelection,
+} from '../activeAssistantSelection.js'
 
 
 test('an idle chat exposes no active assistant surface', () => {
@@ -91,18 +91,25 @@ test('a current post-steer answer still renders even when it repeats the sealed 
 })
 
 test('promotion retires the exact painted array before publishing the durable row', () => {
-  const promotionStart = chatViewSource.indexOf('function promoteStreamToMessages')
-  const promotionEnd = chatViewSource.indexOf('\n  function ', promotionStart + 1)
-  const promotionSource = chatViewSource.slice(
-    promotionStart,
-    promotionEnd >= 0 ? promotionEnd : undefined,
-  )
-  const retireAt = promotionSource.indexOf('retiredAssistantItemsRef.current = streamItems')
-  const publishAt = promotionSource.indexOf('commitMessages(')
+  const paintedItems = [{ type: 'text', content: 'painted answer' }]
+  const promotedItems = [{ type: 'text', content: 'durable answer' }]
+  const retiredItemsRef = { current: null }
+  let publishedMessages = null
 
-  assert.ok(retireAt >= 0, 'promotion must identify the currently painted live array')
-  assert.ok(publishAt > retireAt,
-    'the live surface must retire before the durable-row cache publish can render')
-  assert.match(chatViewSource,
-    /liveItemsRetired:\s*retiredAssistantItemsRef\.current === streamItems/)
+  commitAssistantPromotion({
+    retiredItemsRef,
+    paintedItems,
+    promotedItems,
+    bridgeTs: null,
+    commitMessages(updater, unused, options) {
+      assert.equal(retiredItemsRef.current, paintedItems,
+        'the painted live array must retire before the cache publish')
+      assert.equal(unused, undefined)
+      assert.deepEqual(options, { force: true })
+      publishedMessages = updater([{ role: 'user', content: 'hello' }])
+    },
+  })
+
+  assert.equal(retiredItemsRef.current, paintedItems)
+  assert.equal(publishedMessages.at(-1).content, 'durable answer')
 })
