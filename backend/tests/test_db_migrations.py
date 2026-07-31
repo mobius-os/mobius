@@ -524,8 +524,56 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
 
   assert [row["version"] for row in first] == [
     "0001_legacy_schema_convergence",
+    "0002_chat_run_goal_objective",
   ]
   assert second == first
+
+
+def test_goal_migration_backfills_only_the_running_turns_initiating_goal(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'goal-run.db'}")
+  models.Base.metadata.create_all(eng)
+  started_at = datetime(2026, 7, 31, 12, 0, 0)
+  started_ms = int(started_at.replace(tzinfo=database.UTC).timestamp() * 1000)
+  with Session(eng) as session:
+    session.add(models.Chat(
+      id="goal-chat",
+      title="Goal",
+      messages=[
+        {
+          "role": "user",
+          "content": "/goal finish the migration",
+          "ts": started_ms - 5,
+        },
+        {"role": "assistant", "content": "Working", "ts": started_ms + 5},
+        {
+          "role": "user",
+          "content": "A steered question",
+          "ts": started_ms + 10,
+        },
+      ],
+      pending_messages=[],
+    ))
+    session.add(models.ChatRun(
+      id="goal-run",
+      chat_id="goal-chat",
+      status="running",
+      provider="codex",
+      started_at=started_at,
+    ))
+    session.commit()
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_objective"))
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    objective = conn.execute(text(
+      "SELECT goal_objective FROM chat_runs WHERE id = 'goal-run'"
+    )).scalar_one()
+  assert objective == "finish the migration"
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):

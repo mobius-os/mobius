@@ -217,6 +217,11 @@ class ChatRun(Base):
   # park_reason="restart"; an unplanned crash remains "interrupted".
   status = Column(String(16), nullable=False, default="running", index=True)
   provider = Column(String(32), nullable=True, default=None)
+  # Objective shown by the shell while this exact run owns a native goal.
+  # This belongs to the run rather than the transcript tail: mid-turn owner
+  # questions are steered into the same run and must not make the goal vanish
+  # after a reload. NULL is an ordinary non-goal run.
+  goal_objective = Column(Text, nullable=True, default=None)
   # App that initiated this turn under the app-attributed-chat contract
   # (077 §1). NULL = an ordinary owner-driven turn. Reserved now so the
   # attribution lands on the run row, not retrofitted later.

@@ -41,6 +41,7 @@ from app.run_state import (
   has_nonterminal_run,
   has_running_run,
   running_chat_ids,
+  running_goal_objective,
 )
 from app.schemas import ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
@@ -416,6 +417,9 @@ def _chat_detail_response(
   provider = chat.provider or "claude"
   pending_question = questions.get(chat.id)
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
+  active_goal_objective = (
+    running_goal_objective(db, chat.id) if running else None
+  )
   return {
     "id": chat.id,
     "title": chat.title,
@@ -428,6 +432,7 @@ def _chat_detail_response(
     "total": total,
     "offset": start,
     "running": running,
+    "active_goal_objective": active_goal_objective,
     "pending_question_id": (
       pending_question.question_id if pending_question is not None else None
     ),
@@ -1107,6 +1112,7 @@ def get_chat_runtime(
   pending_question = questions.get(chat.id)
   return {
     "running": is_chat_running(chat.id),
+    "active_goal_objective": running_goal_objective(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": (
       pending_question.question_id if pending_question is not None else None

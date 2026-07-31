@@ -936,8 +936,74 @@ def _converge_legacy_schema(eng) -> None:
         conn.commit()
 
 
+def _add_chat_run_goal_objective(eng) -> None:
+  """Persist active goal identity on its owning durable run.
+
+  The bounded backfill covers a goal already running during this upgrade. User
+  timestamps are server-authored, and the run starts after its initiating row
+  is committed; later steered questions therefore fall strictly after the run
+  boundary and cannot replace the initiating ``/goal`` candidate.
+  """
+  import re
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if "chat_runs" not in tables:
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  if "goal_objective" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chat_runs ADD COLUMN goal_objective TEXT NULL"
+    ))
+    rows = (
+      conn.execute(text(
+        "SELECT r.id, r.started_at, c.messages "
+        "FROM chat_runs r JOIN chats c ON c.id = r.chat_id "
+        "WHERE r.status IN ('running', 'parked', 'resume_pending')"
+      )).all()
+      if "chats" in tables
+      else []
+    )
+    for run_id, raw_started_at, raw_messages in rows:
+      try:
+        started_at = raw_started_at
+        if isinstance(started_at, str):
+          started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        if started_at.tzinfo is None:
+          started_at = started_at.replace(tzinfo=UTC)
+        started_ms = started_at.timestamp() * 1000
+        messages = (
+          json.loads(raw_messages)
+          if isinstance(raw_messages, str)
+          else list(raw_messages or [])
+        )
+      except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        continue
+      initiating = None
+      for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+          continue
+        timestamp = message.get("ts")
+        if isinstance(timestamp, (int, float)) and timestamp <= started_ms:
+          initiating = message
+      content = initiating.get("content", "") if initiating else ""
+      if not isinstance(content, str):
+        continue
+      match = re.match(r"^\s*/goal(?:\s+([\s\S]+))?\s*$", content)
+      objective = (match.group(1) or "").strip() if match else ""
+      if not objective or objective.lower() == "clear":
+        continue
+      conn.execute(text(
+        "UPDATE chat_runs SET goal_objective = :objective WHERE id = :run_id"
+      ), {"objective": objective, "run_id": run_id})
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
+  ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
 )
 
 

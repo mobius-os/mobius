@@ -1963,11 +1963,16 @@ class ChatWriterActor:
     # so any still-running row is a prior run whose clear was dropped — mark it
     # interrupted before opening this one (at most one run is ever live).
     from app.models import ChatRun
+    from app.run_state import goal_objective_for_run_start
+    goal_objective = goal_objective_for_run_start(
+      db, cmd.chat_id, cmd.user_msg.get("content"),
+    )
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
     db.add(ChatRun(
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=cmd.initiated_by_app_id,
+      goal_objective=goal_objective,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
@@ -2359,6 +2364,10 @@ class ChatWriterActor:
     # continuation. Close its run record and open the continuation's in the
     # SAME commit as the queue handoff.
     from app.models import ChatRun
+    from app.run_state import goal_objective_for_run_start
+    goal_objective = goal_objective_for_run_start(
+      db, cmd.chat_id, agent_pending.get("content"),
+    )
     self._close_nonterminal_runs(
       db, cmd.chat_id, cmd.ending_status, except_token=cmd.run_token
     )
@@ -2366,6 +2375,7 @@ class ChatWriterActor:
       id=cmd.run_token, chat_id=cmd.chat_id, status="running",
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=initiated_by_app_id,
+      goal_objective=goal_objective,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("PromotePending did not persist")

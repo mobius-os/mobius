@@ -142,6 +142,11 @@ test('ChatView binds goal state to the existing run-start and turn-end lifecycle
   )
   assert.match(
     chatView,
+    /runtime\.active_goal_objective \|\| latestGoalObjective\(visibleMessages\)/,
+    'a cold chat read should restore the objective from the durable active run',
+  )
+  assert.match(
+    chatView,
     /<ProgressRail\s+items=\{progressRail\}/,
     'the goal should render through the shared progress rail',
   )
@@ -153,6 +158,11 @@ test('ChatView binds goal state to the existing run-start and turn-end lifecycle
   assert.match(progressRail, /chat__progress-rail/)
   assert.match(progressRail, /aria-expanded=\{expanded\}/)
   assert.match(progressRail, /label\.scrollWidth > step\.clientWidth/)
+  assert.match(
+    chatCss,
+    /\.chat__progress-rail\s*\{[\s\S]*?margin:\s*0 auto 3px;/,
+    'the goal rail should sit close to the composer like other footer status UI',
+  )
   assert.match(
     chatCss,
     /\.chat__foot \.chat__progress-step--toggle[\s\S]*?\{ pointer-events: auto; \}/,

@@ -131,6 +131,45 @@ def test_agent_context_includes_evolving_chat_summary(
   assert payload["system_prompt_origin"] == "platform"
 
 
+def test_chat_reads_keep_goal_identity_after_a_mid_turn_question(
+  client, auth, chat, db,
+):
+  started_at = datetime.now(UTC)
+  started_ms = int(started_at.timestamp() * 1000)
+  chat.messages = [
+    {
+      "role": "user",
+      "content": "/goal finish the review",
+      "ts": started_ms - 5,
+      "cid": "goal-start",
+    },
+    {"role": "assistant", "content": "Working", "ts": started_ms + 5},
+    {
+      "role": "user",
+      "content": "A steered question",
+      "ts": started_ms + 10,
+      "cid": "goal-steer",
+    },
+  ]
+  db.add(models.ChatRun(
+    id="active-goal-run",
+    chat_id=chat.id,
+    status="running",
+    provider="codex",
+    goal_objective="finish the review",
+    started_at=started_at,
+  ))
+  db.commit()
+
+  detail = client.get(f"/api/chats/{chat.id}", headers=auth)
+  runtime = client.get(f"/api/chats/{chat.id}/runtime", headers=auth)
+
+  assert detail.status_code == 200
+  assert runtime.status_code == 200
+  assert detail.json()["active_goal_objective"] == "finish the review"
+  assert runtime.json()["active_goal_objective"] == "finish the review"
+
+
 def test_chat_usage_reports_totals_and_historic_coverage(
   client, auth, chat, db,
 ):

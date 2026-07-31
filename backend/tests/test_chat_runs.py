@@ -79,6 +79,16 @@ def _active_status(chat_id):
     db.close()
 
 
+def _goal_objective(chat_id):
+  db = SessionLocal()
+  try:
+    from app.run_state import latest_run
+    run = latest_run(db, chat_id)
+    return run.goal_objective if run is not None else None
+  finally:
+    db.close()
+
+
 def _drain():
   get_writer().submit(Barrier()).result(timeout=5)
 
@@ -99,6 +109,48 @@ def test_start_turn_opens_a_running_run_record():
   runs = _runs("r1")
   assert runs == {"rt-1": ("running", False)}
   assert _active_status("r1") == "running"
+
+
+def test_goal_identity_lives_on_the_run_and_real_resume_inherits_it():
+  _seed_chat("r-goal")
+  get_writer().submit(StartTurn(
+    chat_id="r-goal", run_token="rt-goal",
+    user_msg={
+      "role": "user", "content": "/goal finish the migration", "ts": 1,
+    },
+    title_source="goal", default_provider="codex",
+  )).result(timeout=5)
+  assert _goal_objective("r-goal") == "finish the migration"
+
+  get_writer().submit(FinishRun(
+    chat_id="r-goal",
+    run_token="rt-goal",
+    terminal_status="interrupted",
+  )).result(timeout=5)
+  get_writer().submit(StartTurn(
+    chat_id="r-goal", run_token="rt-resume",
+    user_msg={"role": "user", "content": "continue", "ts": 2},
+    title_source="continue", default_provider="codex",
+  )).result(timeout=5)
+  assert _goal_objective("r-goal") == "finish the migration"
+
+
+def test_completed_goal_does_not_leak_into_an_ordinary_later_run():
+  _seed_chat("r-complete-goal")
+  get_writer().submit(StartTurn(
+    chat_id="r-complete-goal", run_token="rt-old-goal",
+    user_msg={"role": "user", "content": "/goal old work", "ts": 1},
+    title_source="goal", default_provider="codex",
+  )).result(timeout=5)
+  get_writer().submit(FinishRun(
+    chat_id="r-complete-goal", run_token="rt-old-goal",
+  )).result(timeout=5)
+  get_writer().submit(StartTurn(
+    chat_id="r-complete-goal", run_token="rt-ordinary",
+    user_msg={"role": "user", "content": "what happened?", "ts": 2},
+    title_source="ordinary", default_provider="codex",
+  )).result(timeout=5)
+  assert _goal_objective("r-complete-goal") is None
 
 
 # -- clean close ----------------------------------------------------------

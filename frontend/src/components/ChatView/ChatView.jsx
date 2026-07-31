@@ -919,9 +919,13 @@ export default function ChatView({
       if (data.running || (!preserveLocalTurn && !staleSnapshot)) {
         setServerRunningState(!!data.running)
       }
+      setActiveGoalState(data.running
+        ? (data.active_goal_objective || latestGoalObjective(msgs))
+        : '')
       setLiveQuestionId(data.pending_question_id || null)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
+        activeGoalObjective: data.active_goal_objective || '',
         pending_messages: data.pending_messages || [],
         pending_question_id: data.pending_question_id || null,
       })
@@ -944,7 +948,13 @@ export default function ChatView({
       // an authoritative idle verdict.
       return null
     }
-  }, [chatId, commitMessages, pendingQueue.hydrate, queryClient])
+  }, [
+    chatId,
+    commitMessages,
+    pendingQueue.hydrate,
+    queryClient,
+    setActiveGoalState,
+  ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
   // assistant output, but queued-message affordances depend on the durable
@@ -984,9 +994,11 @@ export default function ChatView({
         sendingRef.current = false
       }
       setServerRunningState(!!data.running)
+      setActiveGoalState(data.running ? (data.active_goal_objective || '') : '')
       setLiveQuestionId(data.pending_question_id || null)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
+        activeGoalObjective: data.active_goal_objective || '',
         pending_messages: serverPending,
         pending_question_id: data.pending_question_id || null,
       })
@@ -997,7 +1009,13 @@ export default function ChatView({
         pendingQueue.hydrate(serverPending)
       }
     } catch { /* background reconciliation is best-effort */ }
-  }, [chatId, pendingQueue.hydrate, pendingQueue.pendingMessagesRef, queryClient])
+  }, [
+    chatId,
+    pendingQueue.hydrate,
+    pendingQueue.pendingMessagesRef,
+    queryClient,
+    setActiveGoalState,
+  ])
 
   const handleCompactionStored = useCallback(
     () => fetchMessages({ force: true }),
@@ -1652,6 +1670,9 @@ export default function ChatView({
     const settleRuntime = (runtime, visibleMessages) => {
       const running = !!runtime.running
       setServerRunningLocalState(running)
+      setActiveGoalState(running
+        ? (runtime.active_goal_objective || latestGoalObjective(visibleMessages))
+        : '')
       hadMessagesRef.current = visibleMessages.length > 0
       setLiveQuestionId(runtime.pending_question_id || null)
       setBridgeMountInputs({
@@ -1720,6 +1741,7 @@ export default function ChatView({
         // changed. The retained messages and their DOM remain untouched.
         updateChatRuntimeCache(queryClient, queryKey, {
           running: !!runtime.running,
+          activeGoalObjective: runtime.active_goal_objective || '',
           pending_messages: runtime.pending_messages || [],
           pending_question_id: runtime.pending_question_id || null,
         })

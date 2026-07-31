@@ -2844,7 +2844,7 @@
    its height, so a height animation would fight the composer clearance. */
 .chat__progress-rail {
   max-width: 720px;
-  margin: 0 auto 8px;
+  margin: 0 auto 3px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;

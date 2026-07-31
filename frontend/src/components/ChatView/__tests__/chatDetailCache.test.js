@@ -22,6 +22,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     }],
     offset: 12,
     running: false,
+    active_goal_objective: 'Finish the migration',
     pending_messages: [{ id: 'queued' }],
     pending_question_id: 'question-1',
     provider: 'codex',
@@ -39,6 +40,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
   assert.equal(cached.updated_at, source.updated_at)
   assert.equal(source.messages[0].blocks[0].status, 'running', 'projection does not mutate the response')
   assert.equal(cached.offset, 12)
+  assert.equal(cached.activeGoalObjective, 'Finish the migration')
   assert.equal(cached.pending_question_id, 'question-1')
   assert.deepEqual(cached.chatInfo, {
     provider: 'codex',

@@ -13,6 +13,33 @@ from sqlalchemy.orm import Session
 from app import models
 
 
+def goal_objective_for_run_start(
+  db: Session,
+  chat_id: str,
+  content: str | None,
+) -> str | None:
+  """Resolve the goal metadata for a newly opened durable run.
+
+  Explicit ``/goal`` commands start a new objective. A real continuation may
+  inherit only from the immediately preceding unfinished/interrupted run; an
+  ordinary turn after a completed goal therefore cannot revive stale UI state.
+  """
+  from app.chat import _goal_objective
+
+  objective = _goal_objective(content or "")
+  if objective is not None:
+    return objective
+  if (content or "").strip().lower() != "continue":
+    return None
+  previous = latest_run(db, chat_id)
+  if previous is None or previous.status not in (
+    *models.NONTERMINAL_RUN_STATUSES,
+    "interrupted",
+  ):
+    return None
+  return previous.goal_objective
+
+
 def latest_run(db: Session, chat_id: str) -> models.ChatRun | None:
   """Return the deterministic latest durable run for one chat."""
   return (
@@ -69,6 +96,23 @@ def running_run(db: Session, chat_id: str) -> models.ChatRun | None:
     )
     .first()
   )
+
+
+def running_goal_objective(db: Session, chat_id: str) -> str | None:
+  """Return only the active run's goal label for lightweight UI reads."""
+  row = (
+    db.query(models.ChatRun.goal_objective)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.status == "running",
+    )
+    .order_by(
+      models.ChatRun.started_at.desc(),
+      models.ChatRun.id.desc(),
+    )
+    .first()
+  )
+  return row[0] if row is not None else None
 
 
 def running_chat_ids(
