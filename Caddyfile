@@ -1,4 +1,4 @@
-{$DOMAIN} {
+{$FRONTEND_ORIGIN} {
     encode gzip
 
     # The embedded-chat bootstrap document is intentionally nested below an
@@ -67,7 +67,8 @@
     # A user-opened external tab must not inherit the app frame's opaque
     # origin. The app remains sandboxed; only its new popup/tab escapes.
     #
-    # connect-src NAMES THIS ORIGIN WITH ITS SCHEME, and needs all three parts:
+    # Every fetch directive NAMES THIS ORIGIN WITH ITS SCHEME, and needs all
+    # three parts:
     # the sandbox deliberately omits allow-same-origin, so the frame's origin is
     # opaque. `'self'` matches NOTHING for an opaque origin, and a bare host
     # (`example.com`) matches nothing either — a scheme-less host source is
@@ -88,13 +89,15 @@
     #
     # This restores the reach the frame was always meant to have without
     # weakening the sandbox: one origin, and the app still holds nothing but its
-    # own scoped token.
-    header @appFrame >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation; default-src 'self'; script-src 'self' 'unsafe-inline' blob: https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self' {$FRONTEND_ORIGIN}; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
+    # own scoped token. FRONTEND_ORIGIN also owns this site's address above, so
+    # leaving it unset makes Caddy reject the configuration at startup instead
+    # of silently reducing these directives to the original broken policy.
+    header @appFrame >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation; default-src {$FRONTEND_ORIGIN}; script-src {$FRONTEND_ORIGIN} 'unsafe-inline' blob: https://esm.sh; style-src {$FRONTEND_ORIGIN} 'unsafe-inline' https://fonts.googleapis.com; font-src {$FRONTEND_ORIGIN} https://fonts.gstatic.com https://cdn.openai.com; connect-src {$FRONTEND_ORIGIN}; img-src {$FRONTEND_ORIGIN} data: blob:; frame-src {$FRONTEND_ORIGIN} {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
     # The embedded chat mounts the full ChatView (upload previews, image
     # lightbox), so its img-src needs blob: for the same object URLs as the
     # shell policy above.
     header @chatEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self'"
-    header @staticEmbed >Content-Security-Policy "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:"
+    header @staticEmbed >Content-Security-Policy "sandbox allow-scripts allow-forms allow-pointer-lock; default-src {$FRONTEND_ORIGIN}; script-src {$FRONTEND_ORIGIN} 'unsafe-inline'; style-src {$FRONTEND_ORIGIN} 'unsafe-inline'; font-src {$FRONTEND_ORIGIN} data:; connect-src {$FRONTEND_ORIGIN}; img-src {$FRONTEND_ORIGIN} data: blob:; media-src {$FRONTEND_ORIGIN} blob:; worker-src {$FRONTEND_ORIGIN} blob:"
     # /sites/ headers (disjoint matcher — see the @publishedSite note above).
     # X-Frame-Options SAMEORIGIN keeps the page top-level-only; the CSP is
     # sandbox-only: the opaque origin is the credential boundary, and resource

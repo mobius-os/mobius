@@ -337,12 +337,23 @@ _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
 _PUBLISHED_SITE_PREFIX = "/sites/"
 
 # This isolation boundary must always be enforced, never Report-Only: browsers
-# ignore the CSP sandbox directive in a Report-Only policy.
+# ignore the CSP sandbox directive in a Report-Only policy. The sandbox omits
+# allow-same-origin, so the document's active origin is opaque and CSP 'self'
+# matches none of its own relative subresources on WebKit. Name the configured
+# absolute origin explicitly in every fetch directive. This does not weaken the
+# credential boundary: packaged code already executes in the opaque document,
+# and it still cannot reach the shell's localStorage, cookies, or owner token.
+_STATIC_EMBED_ORIGIN = settings.frontend_origin.rstrip("/")
 _STATIC_EMBED_CSP = (
-  "sandbox allow-scripts allow-forms allow-pointer-lock; default-src 'self'; "
-  "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
-  "font-src 'self' data:; connect-src 'self'; img-src 'self' data: blob:; "
-  "media-src 'self' blob:; worker-src 'self' blob:"
+  "sandbox allow-scripts allow-forms allow-pointer-lock; "
+  f"default-src {_STATIC_EMBED_ORIGIN}; "
+  f"script-src {_STATIC_EMBED_ORIGIN} 'unsafe-inline'; "
+  f"style-src {_STATIC_EMBED_ORIGIN} 'unsafe-inline'; "
+  f"font-src {_STATIC_EMBED_ORIGIN} data:; "
+  f"connect-src {_STATIC_EMBED_ORIGIN}; "
+  f"img-src {_STATIC_EMBED_ORIGIN} data: blob:; "
+  f"media-src {_STATIC_EMBED_ORIGIN} blob:; "
+  f"worker-src {_STATIC_EMBED_ORIGIN} blob:"
 )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own

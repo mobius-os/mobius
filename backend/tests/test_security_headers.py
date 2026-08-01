@@ -206,13 +206,22 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   assert "sandbox allow-scripts" in app_frame_csp
   assert "allow-popups-to-escape-sandbox" in app_frame_csp
   assert "allow-same-origin" not in app_frame_csp
-  assert "script-src 'self' 'unsafe-inline' blob: https://esm.sh" in app_frame_csp
+  assert (
+    "script-src {$FRONTEND_ORIGIN} 'unsafe-inline' blob: https://esm.sh"
+    in app_frame_csp
+  )
   assert "blob:" not in ordinary_csp.split("style-src", 1)[0]
   assert 'header @appFrame >X-Frame-Options "SAMEORIGIN"' in lines
-  # The frame's origin is opaque, so 'self' matches nothing and a scheme-less
-  # host matches nothing; the directive needs a real scheme://host. Take it from
-  # FRONTEND_ORIGIN, the one variable that already carries the scheme.
-  assert "connect-src 'self' {$FRONTEND_ORIGIN}" in app_frame_csp
+  # The frame's origin is opaque, so 'self' matches nothing in EVERY fetch
+  # directive. The response's absolute origin must be named wherever the frame
+  # intentionally loads its own resources, not only for API connections.
+  for directive in (
+    "default-src", "script-src", "style-src", "font-src", "connect-src",
+    "img-src", "frame-src",
+  ):
+    sources = app_frame_csp.split(f"{directive} ", 1)[1].split(";", 1)[0]
+    assert "{$FRONTEND_ORIGIN}" in sources
+    assert "'self'" not in sources
   static_csp = next(
     line for line in lines
     if line.startswith("header @staticEmbed >Content-Security-Policy ")
@@ -221,6 +230,14 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   assert "allow-same-origin" not in static_csp
   assert "frame-ancestors" not in static_csp
   assert "MOBIUS_SERVICE_GATEWAY_ORIGIN" not in static_csp
+  # Caddy and the backend must enforce the same packaged-document boundary.
+  # Resolve the sole Caddy env placeholder to the configured backend origin,
+  # then compare the complete policy rather than sampling one directive.
+  assert (
+    static_csp.split('Content-Security-Policy "', 1)[1].rsplit('"', 1)[0]
+    .replace("{$FRONTEND_ORIGIN}", main.settings.frontend_origin.rstrip("/"))
+    == _STATIC_EMBED_CSP
+  )
   service_csp = next(
     line for line in lines
     if line.startswith("?Content-Security-Policy ")
@@ -239,8 +256,8 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
     )
 
 
-def test_app_frame_connect_src_stays_one_absolute_origin_in_every_environment():
-  """A CSP origin must never be rebuilt by gluing a scheme onto a variable.
+def test_app_frame_sources_stay_absolute_in_every_environment():
+  """Every variable-backed CSP source resolves to one absolute origin.
 
   The app frame is sandboxed without allow-same-origin, so its origin is opaque:
   'self' matches nothing and a scheme-less host matches nothing, which leaves a
@@ -257,14 +274,25 @@ def test_app_frame_connect_src_stays_one_absolute_origin_in_every_environment():
   would leave the directive empty at runtime while still looking assigned.
   """
   root = Path(__file__).resolve().parents[2]
+  caddy_lines = (root / "Caddyfile").read_text(encoding="utf-8").splitlines()
+  # FRONTEND_ORIGIN is deliberately also the site address. Caddy cannot parse
+  # an empty site label, so an omitted variable now fails startup instead of
+  # quietly deleting the only source that opaque frames can match.
+  assert caddy_lines[0].strip() == "{$FRONTEND_ORIGIN} {"
   app_frame_csp = next(
     line.strip()
-    for line in (root / "Caddyfile").read_text(encoding="utf-8").splitlines()
+    for line in caddy_lines
     if line.strip().startswith("header @appFrame >Content-Security-Policy ")
   )
-  connect_src = app_frame_csp.split("connect-src ", 1)[1].split(";", 1)[0]
-  referenced = re.findall(r"\{\$(\w+)\}", connect_src)
-  assert referenced, "connect-src must name this origin through a variable"
+  policy = app_frame_csp.split(
+    'Content-Security-Policy "', 1
+  )[1].rsplit('"', 1)[0]
+  variable_directives = {
+    fields[0]: " ".join(fields[1:])
+    for raw in policy.split(";")
+    if (fields := raw.strip().split()) and "{$" in raw
+  }
+  assert variable_directives, "the app frame must name its absolute origins"
 
   # Compose's own merge tags (`!override`, `!reset`) are not YAML-standard, so
   # a plain safe_load raises on docker-compose.test.yml. Keep the node's value
@@ -292,25 +320,28 @@ def test_app_frame_connect_src_stays_one_absolute_origin_in_every_environment():
         for entry in (spec.get("environment") or [])
         if "=" in entry
       )
-      for var in referenced:
-        assert var in env, (
-          f"{name}: service {svc!r} mounts the Caddyfile but never sets {var}, "
-          "so the app-frame connect-src would resolve to nothing"
-        )
-        value = env[var]
-        # Caddy expands {$VAR} from the container env; compose expands ${VAR}
-        # and ${VAR:-default} before that. deploy-prod.sh refuses a DOMAIN that
-        # is not a bare hostname, so a bare host is the faithful stand-in here.
-        resolved = connect_src.replace(f"{{${var}}}", value)
+      for directive, sources in variable_directives.items():
+        referenced = set(re.findall(r"\{\$(\w+)\}", sources))
+        for var in referenced:
+          assert var in env, (
+            f"{name}: service {svc!r} mounts the Caddyfile but never sets "
+            f"{var}, so app-frame {directive} would resolve to nothing"
+          )
+        # Substitute ALL variables before parsing. Replacing and validating
+        # one at a time leaves the other {$VAR} token behind in frame-src,
+        # making the guard reject a valid two-origin policy spuriously.
+        resolved = sources
+        for var in referenced:
+          resolved = resolved.replace(f"{{${var}}}", env[var])
         resolved = re.sub(r"\$\{\w+:-([^}]*)\}", r"\1", resolved)
         resolved = re.sub(r"\$\{\w+\}", "mobius.example.test", resolved)
         for source in resolved.split():
-          if source.startswith("'"):
+          if source.startswith("'") or source in ("data:", "blob:"):
             continue
           parsed = urlparse(source)
           assert source.count("://") == 1 and parsed.scheme and parsed.netloc, (
-            f"{name}: {var}={value} resolves connect-src to {source!r}, which "
-            "is not a single absolute origin and would be ignored by the browser"
+            f"{name}: {directive} resolves to {source!r}, which is not a "
+            "single absolute origin and would be ignored by the browser"
           )
 
 
