@@ -661,7 +661,10 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
   assert.match(drawer, /function beginTouchMenuHold\(event\)/)
-  assert.match(drawer, /window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/)
+  assert.match(drawer, /function beginTouchMenuHold\(event\)[\s\S]*?holdTimerRef\.current = setTimeout\(\(\) => \{[\s\S]*?window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/)
+  assert.match(drawer, /function beginPinnedReorder\(event\)[\s\S]*?holdTimerRef\.current = setTimeout\(\(\) => \{[\s\S]*?window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/)
+  assert.equal((drawer.match(/window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/g) || []).length, 2,
+    'only a resolved row hold may install cancelable touch ownership')
   assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
   assert.match(drawer, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
   assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 2,
@@ -674,19 +677,15 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.match(drawerCss, /\.drawer__item\[data-hold-ready="true"\]/)
 })
 
-// iOS/WebKit does not implement the touch-action pan-* keywords (WebKit 133112),
-// so `touch-action: pan-y pinch-zoom` is dropped there entirely and cannot
-// reserve the horizontal axis for swipe-to-close. The gesture must therefore be
-// CLAIMED: a non-passive touchmove listener that cancels the event once the pan
-// is recognized. React's own onTouch* props are passive at the root, so binding
-// through them silently made the drawer undismissable by swipe on iPhone.
-test('drawer swipe-to-close claims the gesture with a non-passive touchmove listener', () => {
-  assert.match(drawer, /addEventListener\('touchmove', move, \{ passive: false \}\)/)
-  assert.doesNotMatch(drawer, /onTouchMove=\{/,
-    "React's touch props are passive — preventDefault from them is a no-op")
-  // The claim itself, plus the sticky per-gesture ownership flag it reads.
+test('drawer swipe-to-close leaves vertical scrolling on the native pointer path', () => {
+  assert.match(drawerCss, /\.drawer\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
+  assert.match(drawer, /onPointerDown=\{onDrawerPointerDown\}/)
+  assert.match(drawer, /onPointerMove=\{onDrawerPointerMove\}/)
+  assert.match(drawer, /onPointerCancel=\{onDrawerPointerCancel\}/)
+  assert.doesNotMatch(drawer, /addEventListener\('touchmove', move/,
+    'the panel must never install a scroll-blocking touch listener')
   assert.match(drawer, /if \(dx < 0 && isHorizontalSwipe\) panningRef\.current = true/)
-  assert.match(drawer, /if \(!panningRef\.current\) return\s*\n[\s\S]{0,400}?e\.preventDefault\(\)/)
+  assert.match(drawer, /setPointerCapture\?\.\(e\.pointerId\)/)
 })
 
 test('workspace tabs spend their chrome on names rather than redundant kind icons', () => {

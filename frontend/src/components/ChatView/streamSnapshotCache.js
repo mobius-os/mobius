@@ -1,42 +1,33 @@
+import { perfTime } from '../../lib/perfProbe.js'
+
 /*
  * Versioned sessionStorage cache for the currently visible streaming
  * assistant items. It is intentionally tiny and side-effect scoped: the
  * stream transport decides when to read/write/clear, this file only owns
- * key format, legacy invalidation, and the multi-pane write throttle.
+ * key format, legacy invalidation, and the lifecycle write-behind buffer.
  *
- * Multi-pane perf budget (design §2 — "Perf budget", flagged by every
- * critique so it is a gate, not a hope). Each mounted ChatView serializes the
- * full non-empty stream snapshot on every setStreamItems, and the typewriter
- * fires that once per animation frame. With a single chat mounted that cost is
- * negligible and the write stays SYNCHRONOUS (byte-identical to the pre-throttle
- * behavior). But once TWO ChatViews stream at once, per-frame JSON.stringify×N
- * onto one origin-scoped sessionStorage becomes the profiled hot path on the
- * main thread. So whenever >1 chat is mounted, writes coalesce to a trailing
- * edge of >=250ms PER CHAT.
+ * Each ChatView used to serialize the full growing reply into synchronous
+ * sessionStorage on every reveal commit. Phone telemetry measured individual
+ * writes as high as 60ms, so even one active chat could block an entire scroll
+ * frame. Writes now stay in a latest-wins memory buffer until a lifecycle or
+ * terminal boundary needs them. The visible React state remains frame-paced;
+ * synchronous storage no longer runs during an active reply or scroll.
  *
- * A throttle alone would reintroduce partial-text ROLLBACK: the snapshot is the
+ * Write-behind alone would reintroduce partial-text ROLLBACK: the snapshot is the
  * remount/reconnect fallback (useStreamConnection.js readStoredStreamSnapshot),
- * so if the shell reloads or a pane unmounts with a coalesced write still
+ * so if the shell reloads or a pane unmounts with a buffered write still
  * pending, the fallback would restore a stale frame. Hence the mandatory
- * synchronous FLUSH contract: the caller flushes the pending trailing write on
+ * synchronous FLUSH contract: the caller flushes the pending latest value on
  * BEFORE_SHELL_RELOAD_EVENT, pagehide, unmount, terminal promotion (stream end),
- * and any visibility swap (a pane hidden). Latest-wins coalescing keeps it
+ * and any visibility swap (a pane hidden). Latest-wins buffering keeps it
  * lossless — the flush always writes the most recent items handed in.
  */
 
 export const STREAM_SNAPSHOT_VERSION = 2
 const STREAM_SNAPSHOT_PREFIX = `chat-stream-items:v${STREAM_SNAPSHOT_VERSION}:`
 
-// Trailing-edge coalescing window applied only while >1 chat is mounted.
-export const STREAM_SNAPSHOT_THROTTLE_MS = 250
-
-// Count of mounted ChatView stream controllers. Registered/unregistered by
-// useStreamConnection's mount effect. The throttle is a multi-pane-only
-// cost control; with <=1 mount there is nothing to contend for.
-let mountedChatCount = 0
-
-// chatId -> { items, storage, timer }. The single pending trailing write per
-// chat, latest-wins. Absent when nothing is coalesced for that chat.
+// chatId -> { items, storage }. The single pending write per chat, latest-wins.
+// Absent when nothing needs to be flushed at the next lifecycle boundary.
 const pendingWrites = new Map()
 
 export function streamSnapshotKey(chatId) {
@@ -59,22 +50,13 @@ export function readStoredStreamSnapshot(chatId, storage = defaultStorage()) {
   }
 }
 
-// Register/unregister a mounted chat. Arms the throttle only once a SECOND chat
-// is mounted, so single-pane behavior is unthrottled and byte-identical.
-export function registerMountedChat() {
-  mountedChatCount += 1
-}
-export function unregisterMountedChat() {
-  mountedChatCount = Math.max(0, mountedChatCount - 1)
-}
-export function getMountedChatCount() {
-  return mountedChatCount
-}
-
 function performWrite(chatId, items, storage) {
   if (!storage || !chatId) return
   try {
-    storage.setItem(streamSnapshotKey(chatId), JSON.stringify(items))
+    perfTime(
+      'stream.snapshotWrite',
+      () => storage.setItem(streamSnapshotKey(chatId), JSON.stringify(items)),
+    )
   } catch {
     // Best-effort only. If sessionStorage is unavailable, the durable DB
     // partial plus SSE catch-up still reconstruct the stream.
@@ -84,7 +66,6 @@ function performWrite(chatId, items, storage) {
 function dropPending(chatId) {
   const entry = pendingWrites.get(chatId)
   if (!entry) return null
-  if (entry.timer != null) clearTimeout(entry.timer)
   pendingWrites.delete(chatId)
   return entry
 }
@@ -93,50 +74,26 @@ export function writeStoredStreamSnapshot(chatId, items, storage = defaultStorag
   if (!storage || !chatId) return
   if (!Array.isArray(items) || items.length === 0) return
 
-  // Single/zero mount: synchronous, byte-identical to the pre-throttle path.
-  if (mountedChatCount <= 1) {
-    // A prior multi-pane pending write for this chat would be staler than the
-    // synchronous one we're about to make; drop it so it can't clobber later.
-    dropPending(chatId)
-    performWrite(chatId, items, storage)
-    return
-  }
-
-  // Multi-pane: coalesce to a trailing-edge write. Record latest-wins; the
-  // timer performs the actual serialization at the end of the window, and any
-  // lifecycle/visibility flush writes it synchronously before then.
+  // Record latest-wins without serializing. A lifecycle/terminal boundary calls
+  // flushStoredStreamSnapshot synchronously before the state can disappear.
   const existing = pendingWrites.get(chatId)
   if (existing) {
     existing.items = items
     existing.storage = storage
     return
   }
-  const entry = { items, storage, timer: null }
-  entry.timer = setTimeout(() => {
-    const cur = pendingWrites.get(chatId)
-    pendingWrites.delete(chatId)
-    if (cur) performWrite(chatId, cur.items, cur.storage)
-  }, STREAM_SNAPSHOT_THROTTLE_MS)
-  pendingWrites.set(chatId, entry)
+  pendingWrites.set(chatId, { items, storage })
 }
 
-// Synchronously write this chat's pending trailing snapshot, if any. The flush
-// half of the throttle contract: called at every boundary where a coalesced
-// write must be durable NOW (design §2). No-op when nothing is pending (the
-// single-mount path already wrote synchronously).
+// Synchronously write this chat's pending snapshot, if any. This is called at
+// every boundary where the reconnect cache must be durable NOW.
 export function flushStoredStreamSnapshot(chatId) {
   const entry = dropPending(chatId)
   if (entry) performWrite(chatId, entry.items, entry.storage)
 }
 
-// Flush every pending chat. Used by page-global boundaries (pagehide,
-// shell reload) that leave no chat behind.
-export function flushAllStreamSnapshots() {
-  for (const chatId of [...pendingWrites.keys()]) flushStoredStreamSnapshot(chatId)
-}
-
 export function clearStoredStreamSnapshot(chatId, storage = defaultStorage()) {
-  // Drop any coalesced write first — a pending trailing write must never
+  // Drop any buffered write first — a pending value must never
   // resurrect a snapshot the transport just decided to clear (e.g. a fresh
   // send or terminal 204 wiping stale partial items).
   dropPending(chatId)
@@ -154,7 +111,7 @@ export function clearStoredStreamSnapshot(chatId, storage = defaultStorage()) {
  * Composer drafts are owner-authored data; stream snapshots are a remount cache
  * backed by the durable partial plus SSE catch-up. If Web Storage fills up,
  * callers may clear this cache before retrying an owner-data write. Pending
- * throttled writes for the same storage are dropped as part of the transaction
+ * buffered writes for the same storage are dropped as part of the transaction
  * so they cannot immediately resurrect the bytes that were just reclaimed.
  */
 export function reclaimStoredStreamSnapshots(storage = defaultStorage()) {
@@ -182,9 +139,8 @@ export function reclaimStoredStreamSnapshots(storage = defaultStorage()) {
   return reclaimed
 }
 
-// Test-only: reset the module's throttle state so specs run in isolation
+// Test-only: reset the module's write-behind state so specs run in isolation
 // regardless of order.
-export function _resetStreamSnapshotThrottleForTests() {
+export function _resetStreamSnapshotBufferForTests() {
   for (const chatId of [...pendingWrites.keys()]) dropPending(chatId)
-  mountedChatCount = 0
 }
