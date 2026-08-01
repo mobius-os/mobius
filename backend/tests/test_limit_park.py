@@ -16,9 +16,9 @@ Locks in the six contracts of the limit-park feature:
       while draining, and resolves deleted chats silently.
   (e) Auto-resume is policy-controlled (off = notify only). Provider-limit
       retries ignore unrelated live work and launch with a short stagger,
-      while an accepted planned restart resumes the exact previously-live set
-      together. Each resumed turn combines its preserved queue + a "continue"
-      into one continuation.
+      while an accepted planned restart restores the exact previously-live set
+      through a bounded recovery ceiling. Each resumed turn combines its
+      preserved queue + a "continue" into one continuation.
   (f) The parks are observable: /api/debug/status lists parked runs.
   (g) A planned restart reuses the same exact-run state with a due-now time;
       crashes, unanswered questions, and app-owned work stay manual.
@@ -1424,10 +1424,10 @@ def test_sweep_starts_only_one_of_two_opted_chats(owner_token, monkeypatch):
       chat_mod.discard_starting(cid)
 
 
-def test_sweep_restarts_every_opted_chat_in_the_accepted_batch(
+def test_sweep_bounds_restart_recovery_and_retries_the_exact_remainder(
   owner_token, monkeypatch,
 ):
-  """A restart restores the exact set that was already concurrent."""
+  """Restart recovery preserves every exact park without a launch stampede."""
   del owner_token
   nonce = "restart-nonce-batch"
   monkeypatch.setattr(
@@ -1448,7 +1448,16 @@ def test_sweep_restarts_every_opted_chat_in_the_accepted_batch(
     )
 
   try:
-    assert set(_run_sweep()) == set(chat_ids)
+    first = _run_sweep()
+    assert len(first) == chat_mod.RESTART_AUTO_RESUME_MAX_ACTIVE
+    assert {item["chat_id"] for item in scheduled} == set(first)
+    deferred = (set(chat_ids) - set(first)).pop()
+    assert _run_row(f"rt-{deferred}")["status"] == "parked"
+
+    # A settled recovery frees one slot. The next sweep starts the exact
+    # remaining park rather than consuming or replacing it.
+    chat_mod.discard_starting(first[0])
+    assert _run_sweep() == [deferred]
     assert {item["chat_id"] for item in scheduled} == set(chat_ids)
     for cid in chat_ids:
       assert _run_row(f"rt-{cid}")["status"] == "completed"
@@ -1602,6 +1611,42 @@ def test_auto_resume_locked_claim_ignores_an_unrelated_live_chat(monkeypatch):
     assert scheduled[0]["chat_id"] == cid
   finally:
     chat_mod.discard_starting(cid)
+
+
+def test_restart_auto_resume_locked_claim_preserves_park_at_capacity():
+  """Owner work already using the recovery budget keeps the exact park due."""
+  cid = "restart-capacity-locked-claim"
+  park_token = f"park-{cid}"
+  nonce = "restart-capacity-nonce"
+  _seed_chat(cid, auto_restart=True)
+  _seed_run(
+    cid,
+    park_token,
+    status="resume_pending",
+    park_reason="restart",
+    restart_nonce=nonce,
+    started_offset=-30,
+  )
+  blockers = [
+    _Handle(f"restart-capacity-live-{index}-{uuid.uuid4()}")
+    for index in range(chat_mod.RESTART_AUTO_RESUME_MAX_ACTIVE)
+  ]
+  for blocker in blockers:
+    registry.register(blocker)
+
+  try:
+    assert asyncio.run(chat_mod._auto_resume_chat(
+      cid,
+      park_token=park_token,
+      restart_authorization=nonce,
+    )) is False
+  finally:
+    for blocker in blockers:
+      registry.unregister(blocker.chat_id, blocker.kind)
+
+  assert _run_row(park_token)["status"] == "resume_pending"
+  assert _chat_row(cid)["pending"] == []
+  assert not chat_mod.is_chat_running(cid)
 
 
 def test_auto_resume_locked_claim_rejects_superseded_park():
