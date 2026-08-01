@@ -5,7 +5,9 @@ The backend deliberately has no global resource CSP; exact opaque/static/service
 documents supply their own policies while the bundled proxy owns shell CSP.
 """
 
+import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import Response
 from fastapi.testclient import TestClient
@@ -206,6 +208,10 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
   assert "script-src 'self' 'unsafe-inline' blob: https://esm.sh" in app_frame_csp
   assert "blob:" not in ordinary_csp.split("style-src", 1)[0]
   assert 'header @appFrame >X-Frame-Options "SAMEORIGIN"' in lines
+  # The frame's origin is opaque, so 'self' matches nothing and a scheme-less
+  # host matches nothing; the directive needs a real scheme://host. Take it from
+  # FRONTEND_ORIGIN, the one variable that already carries the scheme.
+  assert "connect-src 'self' {$FRONTEND_ORIGIN}" in app_frame_csp
   static_csp = next(
     line for line in lines
     if line.startswith("header @staticEmbed >Content-Security-Policy ")
@@ -230,6 +236,57 @@ def test_bundled_caddy_mirrors_exact_embed_frame_exception():
     assert any(line.startswith(f">{name} ") for line in lines), (
       f"{name} must replace, not duplicate, the backend value after proxying"
     )
+
+
+def test_app_frame_connect_src_stays_one_absolute_origin_in_every_environment():
+  """A CSP origin must never be rebuilt by gluing a scheme onto a variable.
+
+  The app frame is sandboxed without allow-same-origin, so its origin is opaque:
+  'self' matches nothing and a scheme-less host matches nothing, which leaves a
+  real `scheme://host` as the only source that can match. Writing that as
+  `https://{$DOMAIN}` looks right because DOMAIN is a bare host in production —
+  but it is a full URL under docker-compose.test.yml, so the prefix yielded
+  `https://http://localhost:8001`. Browsers drop an invalid source silently,
+  so the directive was left with no usable origin and the frame could not reach
+  the API at all. Resolve the placeholder against every value the compose files
+  actually assign, so the next such rewrite fails here rather than in e2e.
+  """
+  root = Path(__file__).resolve().parents[2]
+  app_frame_csp = next(
+    line.strip()
+    for line in (root / "Caddyfile").read_text(encoding="utf-8").splitlines()
+    if line.strip().startswith("header @appFrame >Content-Security-Policy ")
+  )
+  connect_src = app_frame_csp.split("connect-src ", 1)[1].split(";", 1)[0]
+  referenced = re.findall(r"\{\$(\w+)\}", connect_src)
+  assert referenced, "connect-src must name this origin through a variable"
+
+  composes = {
+    name: (root / name).read_text(encoding="utf-8")
+    for name in ("docker-compose.yml", "docker-compose.test.yml")
+  }
+  for var in referenced:
+    values = {
+      value
+      for compose in composes.values()
+      for value in re.findall(rf"^\s*-\s*{var}=(\S+)$", compose, re.MULTILINE)
+    }
+    assert values, f"{var} must be assigned by the compose files"
+    for value in values:
+      # Caddy expands {$VAR} from the container env; compose expands ${VAR} and
+      # ${VAR:-default} before that. deploy-prod.sh refuses a DOMAIN that is not
+      # a bare hostname, so a bare host is the faithful stand-in here.
+      resolved = connect_src.replace(f"{{${var}}}", value)
+      resolved = re.sub(r"\$\{\w+:-([^}]*)\}", r"\1", resolved)
+      resolved = re.sub(r"\$\{\w+\}", "mobius.example.test", resolved)
+      for source in resolved.split():
+        if source.startswith("'"):
+          continue
+        parsed = urlparse(source)
+        assert source.count("://") == 1 and parsed.scheme and parsed.netloc, (
+          f"{var}={value} resolves connect-src to {source!r}, which is not a "
+          "single absolute origin and would be ignored by the browser"
+        )
 
 
 def test_compose_keeps_optional_service_gateway_inert_by_default():

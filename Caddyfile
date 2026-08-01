@@ -72,17 +72,24 @@
     # opaque. `'self'` matches NOTHING for an opaque origin, and a bare host
     # (`example.com`) matches nothing either — a scheme-less host source is
     # compared against the DOCUMENT's scheme, and an opaque origin has none to
-    # compare. Only a fully-qualified `https://host` matches on the request URL
+    # compare. Only a fully-qualified `scheme://host` matches on the request URL
     # alone. Chromium resolves all three leniently; WebKit obeys the spec, so on
     # iOS every network call an app made was blocked before it left the device —
     # no status, no server-side trace, indistinguishable from the network being
     # down. Verified from the device: with the bare host present, WebKit still
     # reported `refused by: connect-src` for a URL on exactly that host.
     #
+    # Use {$FRONTEND_ORIGIN} — the one variable that already carries the scheme,
+    # and the same origin @notFrameableEmbed/frame-ancestors is written against.
+    # Do NOT rebuild it as `https://{$DOMAIN}`: DOMAIN is a bare host in
+    # production but a full URL under docker-compose.test.yml, so the prefix
+    # yields `https://http://localhost:8001` — an invalid source the browser
+    # drops, leaving the directive with no usable origin at all.
+    #
     # This restores the reach the frame was always meant to have without
     # weakening the sandbox: one origin, and the app still holds nothing but its
     # own scoped token.
-    header @appFrame >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation; default-src 'self'; script-src 'self' 'unsafe-inline' blob: https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self' https://{$DOMAIN}; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
+    header @appFrame >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation; default-src 'self'; script-src 'self' 'unsafe-inline' blob: https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self' {$FRONTEND_ORIGIN}; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
     # The embedded chat mounts the full ChatView (upload previews, image
     # lightbox), so its img-src needs blob: for the same object URLs as the
     # shell policy above.
