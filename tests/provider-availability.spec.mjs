@@ -148,6 +148,11 @@ test('model and effort choices stay interactive while saves remain ordered', asy
 
     const effortGroup = page.getByRole('radiogroup', { name: 'Reasoning effort' })
     alternateEffort = effortGroup.locator('[role="radio"][aria-checked="false"]').first()
+    const alternateEffortName = await alternateEffort.getAttribute('aria-label')
+    alternateEffort = effortGroup.getByRole('radio', {
+      name: alternateEffortName,
+      exact: true,
+    })
     await expect(alternateEffort).toBeEnabled()
     await alternateEffort.click()
     await expect(alternateEffort).toHaveAttribute('aria-checked', 'true')
