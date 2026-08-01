@@ -20,5 +20,5 @@ test('recovery stays a plain last-resort link with adaptable context', () => {
   }))
   assert.match(standaloneHtml, /class="standalone-app__recovery"/)
   assert.match(standaloneHtml, /If the app still won’t open/)
-  assert.match(standaloneHtml, />open recovery<\/a>/)
+  assert.match(standaloneHtml, />open the isolated recovery workspace<\/a>/)
 })

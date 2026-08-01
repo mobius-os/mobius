@@ -43,6 +43,7 @@ function shellUrl(params = {}) {
 export default function StandaloneApp({ initialApp }) {
   const queryClient = useQueryClient()
   const canvasRef = useRef(null)
+  const crashHeadingRef = useRef(null)
   const visualContentOnly = isVisualContentOnly()
   const [app, setApp] = useState(initialApp)
   const [updateAvailable, setUpdateAvailable] = useState(false)
@@ -98,12 +99,16 @@ export default function StandaloneApp({ initialApp }) {
       repairRequestId: attempt?.repairRequestId || null,
       messageCid: attempt?.messageCid || null,
       agentError: attempt?.phase === 'agent-failed'
-        ? 'Möbius couldn’t start the repair chat.'
+        ? 'Repair chat request failed.'
         : '',
     })
   }, [recoverySurfaceKey])
 
   useEffect(() => () => repairControllerRef.current?.abort(), [])
+
+  useEffect(() => {
+    if (crashFingerprint) crashHeadingRef.current?.focus()
+  }, [crashFingerprint])
 
   useEffect(() => {
     if (!crashFingerprint) return undefined
@@ -123,7 +128,7 @@ export default function StandaloneApp({ initialApp }) {
         repairRequestId: attempt?.repairRequestId || null,
         messageCid: attempt?.messageCid || null,
         agentError: attempt?.phase === 'agent-failed'
-          ? 'Möbius couldn’t start the repair chat.'
+          ? 'Repair chat request failed.'
           : '',
       } : current)
     }
@@ -313,7 +318,7 @@ export default function StandaloneApp({ initialApp }) {
         phase: 'recovery',
         attemptPhase: 'agent-failed',
         repairChatId: createdChatId,
-        agentError: 'Möbius couldn’t start the repair chat.',
+        agentError: 'Repair chat request failed.',
       } : current)
     })
   }, [app.id, app.name, crash, recoverySurfaceKey])
@@ -323,12 +328,6 @@ export default function StandaloneApp({ initialApp }) {
     attemptPhase: crash.attemptPhase,
     repairChatId: crash.repairChatId,
   }) : null
-
-  const openRepairChat = useCallback(() => {
-    if (crash?.repairChatId) {
-      window.location.href = repairChatPath(crash.repairChatId, BASE)
-    }
-  }, [crash?.repairChatId])
 
   if (removed) {
     return (
@@ -343,7 +342,7 @@ export default function StandaloneApp({ initialApp }) {
   }
 
   return (
-    <main className={`standalone-app${immersive ? ' standalone-app--immersive' : ''}`}>
+    <main className={`standalone-app${immersive ? ' standalone-app--immersive' : ''}${crash ? ' standalone-app--crashed' : ''}`}>
       <AppCanvas
         ref={canvasRef}
         appId={app.id}
@@ -354,7 +353,7 @@ export default function StandaloneApp({ initialApp }) {
         capabilityContract={app.capability_contract || null}
         active
         visible
-        interactive
+        interactive={!crash}
         immersive={immersive}
         onImmersive={(_id, value) => setImmersive(value)}
         onNavPush={onNavPush}
@@ -363,16 +362,18 @@ export default function StandaloneApp({ initialApp }) {
         onAppError={captureCrash}
       />
 
-      <a
-        className="standalone-app__mobius-link"
-        href={shellUrl({ app: app.id })}
-        aria-label={`Open ${app.name} in Möbius`}
-      >
-        <span aria-hidden="true">∞</span>
-        <span>Open in Möbius</span>
-      </a>
+      {!crash && (
+        <a
+          className="standalone-app__mobius-link"
+          href={shellUrl({ app: app.id })}
+          aria-label={`Open ${app.name} in Möbius`}
+        >
+          <span aria-hidden="true">∞</span>
+          <span>Open in Möbius</span>
+        </a>
+      )}
 
-      {updateAvailable && (
+      {updateAvailable && !crash && (
         <button
           className="standalone-app__update"
           type="button"
@@ -384,48 +385,69 @@ export default function StandaloneApp({ initialApp }) {
       )}
 
       {crash && (
-        <section className="standalone-app__crash" role="alert">
-          <h1>{app.name} stopped unexpectedly</h1>
-          <p>
-            {crash.phase === 'refresh' && 'Refresh the app first. Your chats and data are safe.'}
-            {(crash.phase === 'agent' || crash.phase === 'agent-starting') && 'Refreshing didn’t fix it. Möbius can send this error to a new repair chat for your agent to investigate.'}
-            {crash.phase === 'recovery' && crash.attemptPhase === 'agent-directed' && 'The repair chat started, but the app still can’t open. System recovery is the remaining fallback.'}
-            {crash.phase === 'recovery' && crash.attemptPhase === 'agent-failed' && 'The repair chat couldn’t start. Try the agent again or use system recovery as a last resort.'}
-          </p>
-          <pre>{readableAppDiagnostic(crash.error)}</pre>
-          {crash.agentError && (
-            <p className="standalone-app__crash-status" role="status">{crash.agentError}</p>
-          )}
-          <div>
-            {crashActions.showRefreshAgain && (
-              <button type="button" onClick={refreshCrash}>Refresh again</button>
-            )}
-            {crashActions.showOpenRepairChat && (
-              <button type="button" onClick={openRepairChat}>Open repair chat</button>
-            )}
-            {(crash.phase === 'refresh' || crashActions.showAskAgent || crashActions.showRetryAgent || crash.phase === 'agent-starting') && (
-              <button
-                type="button"
-                onClick={crash.phase === 'refresh' ? refreshCrash : reportCrash}
-                disabled={crash.phase === 'agent-starting'}
+        <div className="standalone-app__crash-layer">
+          <section
+            className="standalone-app__crash"
+            aria-labelledby="standalone-crash-title"
+          >
+            <h1 id="standalone-crash-title" ref={crashHeadingRef} tabIndex={-1}>
+              {app.name} stopped unexpectedly
+            </h1>
+            <p>
+              {crash.phase === 'refresh' && 'This app hit an unexpected error. Refreshing won’t delete your chats.'}
+              {(crash.phase === 'agent' || crash.phase === 'agent-starting') && 'Refreshing didn’t fix the app. Möbius can start a new repair chat and share these technical details with your agent to investigate and fix it.'}
+              {crash.phase === 'recovery' && crash.attemptPhase === 'agent-directed' && 'The repair chat started, but the app still can’t open. System recovery is the remaining fallback.'}
+              {crash.phase === 'recovery' && crash.attemptPhase === 'agent-failed' && 'The repair chat couldn’t start. You can retry it or use system recovery as a last resort.'}
+            </p>
+            <details className="standalone-app__details">
+              <summary>Technical details</summary>
+              <pre>{readableAppDiagnostic(crash.error)}</pre>
+            </details>
+            {(crash.phase === 'agent-starting' || crash.agentError) && (
+              <p
+                className={`standalone-app__crash-status${crash.agentError ? ' standalone-app__crash-status--sr-only' : ''}`}
+                role="status"
+                aria-live="polite"
               >
-                {crash.phase === 'refresh' && 'Refresh app'}
-                {crash.phase === 'agent' && (crash.attemptPhase === 'agent-starting' ? 'Resume agent repair' : 'Ask agent to fix')}
-                {crash.phase === 'agent-starting' && 'Starting repair chat…'}
-                {crash.phase === 'recovery' && 'Try agent again'}
-              </button>
+                {crash.phase === 'agent-starting' ? 'Starting the repair chat. This may take a moment.' : crash.agentError}
+              </p>
             )}
-          </div>
-          {crashActions.showRecovery && (
-            <RecoveryLink
-              className="standalone-app__recovery"
-              lead="If the repair chat can’t get you back in,"
-            />
-          )}
-        </section>
+            <div
+              className="standalone-app__crash-actions"
+              aria-busy={crash.phase === 'agent-starting' ? true : undefined}
+            >
+              <a href={shellUrl({ app: app.id })}>Open in Möbius</a>
+              {crashActions.showRefreshAgain && (
+                <button type="button" onClick={refreshCrash}>Refresh again</button>
+              )}
+              {crashActions.showOpenRepairChat && (
+                <a href={repairChatPath(crash.repairChatId, BASE)}>Open repair chat</a>
+              )}
+              {(crash.phase === 'refresh' || crashActions.showAskAgent || crashActions.showRetryAgent || crash.phase === 'agent-starting') && (
+                <button
+                  type="button"
+                  className="standalone-app__crash-primary"
+                  onClick={crash.phase === 'refresh' ? refreshCrash : reportCrash}
+                  disabled={crash.phase === 'agent-starting'}
+                >
+                  {crash.phase === 'refresh' && 'Refresh app'}
+                  {crash.phase === 'agent' && (crash.attemptPhase === 'agent-starting' ? 'Resume repair chat' : 'Start repair chat')}
+                  {crash.phase === 'agent-starting' && 'Starting repair chat…'}
+                  {crash.phase === 'recovery' && 'Retry repair chat'}
+                </button>
+              )}
+            </div>
+            {crashActions.showRecovery && (
+              <RecoveryLink
+                className="standalone-app__recovery"
+                lead="If the repair chat can’t get you back in,"
+              />
+            )}
+          </section>
+        </div>
       )}
 
-      {!visualContentOnly && (
+      {!crash && !visualContentOnly && (
         <StandaloneInstallCard
           app={app}
           forceOpen={installOpen}

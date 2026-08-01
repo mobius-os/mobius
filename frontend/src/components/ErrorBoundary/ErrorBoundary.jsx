@@ -6,6 +6,7 @@ import {
   createRepairIdentity,
   errorRecoveryFingerprint,
   readErrorRecoveryAttempt,
+  redactDiagnosticText,
   recoveryActionPolicy,
   recoveryPhaseForAttempt,
   repairChatPath,
@@ -40,7 +41,7 @@ import './ErrorBoundary.css'
 export default class ErrorBoundary extends Component {
   state = {
     error: null,
-    phase: 'refresh',
+    phase: 'resolving',
     agentError: '',
     repairChatId: null,
     attemptPhase: null,
@@ -50,6 +51,7 @@ export default class ErrorBoundary extends Component {
   agentStarting = false
   repairController = null
   pageShowListening = false
+  headingRef = null
 
   static getDerivedStateFromError(error) {
     return { error }
@@ -82,11 +84,17 @@ export default class ErrorBoundary extends Component {
         canAskAgent: this.props.canAskAgent !== false,
       }),
       agentError: attempt?.phase === 'agent-failed'
-        ? 'Möbius couldn’t start the repair chat.'
+        ? 'Repair chat request failed.'
         : '',
       repairChatId: attempt?.chatId || null,
       attemptPhase: attempt?.phase || null,
     })
+  }
+
+  componentDidUpdate(_prevProps, prevState) {
+    if (prevState.phase === 'resolving' && this.state.phase !== 'resolving') {
+      this.headingRef?.focus()
+    }
   }
 
   componentWillUnmount() {
@@ -119,7 +127,7 @@ export default class ErrorBoundary extends Component {
       attemptPhase: attempt?.phase || null,
       repairChatId: attempt?.chatId || null,
       agentError: attempt?.phase === 'agent-failed'
-        ? 'Möbius couldn’t start the repair chat.'
+        ? 'Repair chat request failed.'
         : '',
     })
   }
@@ -219,20 +227,14 @@ export default class ErrorBoundary extends Component {
         phase: 'recovery',
         attemptPhase: 'agent-failed',
         repairChatId: chatId,
-        agentError: 'Möbius couldn’t start the repair chat.',
+        agentError: 'Repair chat request failed.',
       })
-    }
-  }
-
-  openRepairChat = () => {
-    if (this.state.repairChatId) {
-      window.location.assign(repairChatPath(this.state.repairChatId, BASE))
     }
   }
 
   render() {
     if (!this.state.error) return this.props.children
-    const message = String(this.state.error?.message || this.state.error)
+    const message = redactDiagnosticText(this.state.error?.message || this.state.error)
     const cls = this.props.variant === 'inline' ? 'errbound errbound--inline' : 'errbound'
     const { phase, attemptPhase, repairChatId } = this.state
     const canAskAgent = this.props.canAskAgent !== false
@@ -243,40 +245,58 @@ export default class ErrorBoundary extends Component {
       repairChatId,
     })
     return (
-      <div className={cls} role="alert" aria-live="assertive">
+      <div className={cls}>
         <div className="errbound__card">
-          <h1 className="errbound__title">Something broke</h1>
+          <h1
+            className="errbound__title"
+            ref={node => { this.headingRef = node }}
+            tabIndex={-1}
+          >
+            Something broke
+          </h1>
           <p className="errbound__body">
             {phase === 'refresh' && (
-              <>This screen hit an unexpected error. Your chats and data are safe. Refresh the screen to try it again.</>
+              <>This screen hit an unexpected error. Refreshing won’t delete your chats.</>
             )}
             {(phase === 'agent' || phase === 'agent-starting') && (
-              <>Refreshing didn’t fix this screen. Möbius can send the error to a new repair chat for your agent to investigate.</>
+              <>Refreshing didn’t fix this screen. Möbius can start a new repair chat and share these technical details with your agent to investigate and fix it.</>
             )}
             {actions.showRecovery && attemptPhase === 'agent-directed' && repairChatId && (
               <>The repair chat started, but this screen still can’t open. System recovery is the remaining fallback.</>
             )}
             {actions.showRecovery && attemptPhase === 'agent-failed' && (
-              <>The repair chat couldn’t start. You can try the agent again or use system recovery as a last resort.</>
+              <>The repair chat couldn’t start. You can retry it or use system recovery as a last resort.</>
             )}
             {actions.showRecovery && !canAskAgent && (
               <>Refreshing didn’t fix this screen. Use system recovery to diagnose the problem without relying on this embedded chat.</>
             )}
           </p>
-          <pre className="errbound__detail">{message}</pre>
-          {this.state.agentError && (
-            <p className="errbound__status" role="status">{this.state.agentError}</p>
+          <details className="errbound__details">
+            <summary>Technical details</summary>
+            <pre className="errbound__detail">{message}</pre>
+          </details>
+          {(phase === 'agent-starting' || this.state.agentError) && (
+            <p
+              className={`errbound__status${this.state.agentError ? ' errbound__status--sr-only' : ''}`}
+              role="status"
+              aria-live="polite"
+            >
+              {phase === 'agent-starting' ? 'Starting the repair chat. This may take a moment.' : this.state.agentError}
+            </p>
           )}
-          <div className="errbound__actions">
+          <div
+            className="errbound__actions"
+            aria-busy={phase === 'agent-starting' ? true : undefined}
+          >
             {actions.showRefreshAgain && (
               <button type="button" className="errbound__btn" onClick={this.handleRefresh}>
                 Refresh again
               </button>
             )}
             {actions.showOpenRepairChat && (
-              <button type="button" className="errbound__btn" onClick={this.openRepairChat}>
+              <a className="errbound__btn" href={repairChatPath(repairChatId, BASE)}>
                 Open repair chat
-              </button>
+              </a>
             )}
             {(phase === 'refresh' || actions.showAskAgent || actions.showRetryAgent || phase === 'agent-starting') && (
               <button
@@ -286,9 +306,9 @@ export default class ErrorBoundary extends Component {
                 disabled={phase === 'agent-starting'}
               >
                 {phase === 'refresh' && 'Refresh screen'}
-                {phase === 'agent' && (attemptPhase === 'agent-starting' ? 'Resume agent repair' : 'Ask agent to fix')}
+                {phase === 'agent' && (attemptPhase === 'agent-starting' ? 'Resume repair chat' : 'Start repair chat')}
                 {phase === 'agent-starting' && 'Starting repair chat…'}
-                {actions.showRetryAgent && 'Try agent again'}
+                {actions.showRetryAgent && 'Retry repair chat'}
               </button>
             )}
           </div>

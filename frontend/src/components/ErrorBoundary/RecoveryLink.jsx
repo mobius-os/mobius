@@ -7,7 +7,7 @@ export default function RecoveryLink({
 }) {
   return (
     <p className={className}>
-      {lead} <a href={RECOVERY_PATH} target="_top">open recovery</a>.
+      {lead} <a href={RECOVERY_PATH} target="_top">open the isolated recovery workspace</a>.
     </p>
   )
 }

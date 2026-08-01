@@ -58,11 +58,36 @@
   font: 600 12px/1 var(--font, system-ui, sans-serif);
 }
 
-.standalone-app__crash,
+.standalone-app__crash-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+  padding:
+    max(24px, env(safe-area-inset-top))
+    max(16px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom))
+    max(16px, env(safe-area-inset-left));
+  background: var(--bg, #0d0d0d);
+}
+
+.standalone-app__crash {
+  width: min(520px, 100%);
+  margin: auto;
+  padding: 22px;
+  border: 1px solid var(--border, #333);
+  border-radius: 18px;
+  background: var(--surface, #171717);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+  font-family: var(--font, system-ui, sans-serif);
+}
+
 .standalone-app--message > section {
   position: fixed;
   inset: 50% auto auto 50%;
-  z-index: 40;
   transform: translate(-50%, -50%);
   width: min(520px, calc(100vw - 32px));
   padding: 22px;
@@ -73,7 +98,13 @@
   font-family: var(--font, system-ui, sans-serif);
 }
 
-.standalone-app__crash h1,
+.standalone-app__crash h1 {
+  margin: 0;
+  color: var(--text, #fff);
+  font-size: 20px;
+  line-height: 1.3;
+}
+
 .standalone-app--message h1,
 .standalone-install h1 {
   margin: 0;
@@ -82,14 +113,36 @@
   line-height: 1.3;
 }
 
-.standalone-app__crash pre {
-  max-height: 180px;
+.standalone-app__crash h1:focus {
+  outline: none;
+}
+
+.standalone-app__details {
   margin: 14px 0;
+  color: var(--muted, #aaa);
+  font-size: 13px;
+}
+
+.standalone-app__details summary {
+  width: max-content;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.standalone-app__details summary:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: 3px;
+}
+
+.standalone-app__details pre {
+  max-height: 180px;
+  margin: 10px 0 0;
   padding: 12px;
   overflow: auto;
   border-radius: 10px;
   background: color-mix(in srgb, var(--bg, #000) 82%, transparent);
-  color: var(--danger, #f87171);
+  color: color-mix(in srgb, var(--danger, #f87171) 78%, var(--text, #ececec));
   font: 12px/1.5 ui-monospace, monospace;
   white-space: pre-wrap;
   user-select: text;
@@ -103,21 +156,38 @@
 }
 
 .standalone-app__crash .standalone-app__crash-status {
-  margin: -6px 0 14px;
-  color: var(--danger, #f87171);
+  margin: 0 0 14px;
+  color: color-mix(in srgb, var(--danger, #f87171) 78%, var(--text, #ececec));
 }
 
-.standalone-app__crash > div,
+.standalone-app__crash-status--sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.standalone-app__crash-actions,
 .standalone-install__actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
 }
 
 .standalone-app__crash button,
+.standalone-app__crash-actions a,
 .standalone-install button,
 .standalone-app--message a {
-  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
   padding: 0 15px;
   border: 1px solid var(--border, #333);
   border-radius: 11px;
@@ -134,9 +204,29 @@
 }
 
 .standalone-app__crash button:focus-visible,
+.standalone-app__crash-actions a:focus-visible,
 .standalone-app__recovery a:focus-visible {
   outline: 2px solid var(--accent, #a78bfa);
   outline-offset: 3px;
+}
+
+.standalone-app__crash .standalone-app__crash-primary {
+  border-color: color-mix(in srgb, var(--accent, #8b6cf7) 82%, #000);
+  background: color-mix(in srgb, var(--accent, #8b6cf7) 82%, #000);
+  color: var(--accent-fg, #fff);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .standalone-app__crash button:hover,
+  .standalone-app__crash-actions a:hover {
+    border-color: color-mix(in srgb, var(--text, #ececec) 42%, transparent);
+    background: color-mix(in srgb, var(--text, #ececec) 8%, transparent);
+  }
+
+  .standalone-app__crash .standalone-app__crash-primary:hover {
+    border-color: color-mix(in srgb, var(--accent, #8b6cf7) 74%, #000);
+    background: color-mix(in srgb, var(--accent, #8b6cf7) 74%, #000);
+  }
 }
 
 .standalone-app__recovery {
@@ -265,4 +355,15 @@
 
 @media (prefers-reduced-motion: reduce) {
   .standalone-app__mobius-link { transition: none; }
+}
+
+@media (max-width: 30rem) {
+  .standalone-app__crash-actions {
+    flex-direction: column;
+  }
+
+  .standalone-app__crash button,
+  .standalone-app__crash-actions a {
+    width: 100%;
+  }
 }
