@@ -304,6 +304,9 @@ def _fake_sdk(async_codex_cls):
       self.message = message
       self.data = data
 
+  class _FakePersonality:
+    none = "none"
+
   return {
     "AgentMessageDeltaNotification": _Dummy,
     "AgentMessageThreadItem": _Dummy,
@@ -322,6 +325,7 @@ def _fake_sdk(async_codex_cls):
     "ImageViewThreadItem": type("_FakeImageViewThreadItem", (), {}),
     "InvalidParamsError": _FakeInvalidParamsError,
     "InvalidRequestError": _FakeInvalidRequestError,
+    "Personality": _FakePersonality,
     "ReasoningEffort": _FakeReasoningEffort(),
     "ReasoningSummary": _FakeReasoningSummary(),
     "Sandbox": _FakeSandbox,
@@ -3162,6 +3166,9 @@ def test_codex_config_overrides_kill_switch(monkeypatch):
   monkeypatch.setenv("MOEBIUS_CODEX_MULTI_AGENT", "off")
   ov = runner._codex_config_overrides()
   assert ov == [
+    'instructions=""',
+    'developer_instructions=""',
+    "project_doc_max_bytes=0",
     "features.default_mode_request_user_input=true",
     "features.goals=true",
   ]
@@ -3727,12 +3734,12 @@ def test_run_codex_sdk_turn_fallback_does_not_start_capture_poller(
   assert result["error"] is None
 
 
-def test_run_codex_sdk_turn_resume_supplies_base_instructions(monkeypatch):
-  # On resume, the immutable per-chat constitution snapshot must be re-supplied
-  # as base_instructions — parity with the Claude runner re-sending its system
-  # prompt every turn — so a resumed Codex thread stays anchored to its prompt
-  # even after a server-side compaction, rather than trusting the thread's
-  # original instructions to survive.
+@pytest.mark.parametrize("session_id", [None, "resumed-thread"])
+def test_run_codex_sdk_turn_controls_prompt_layers(monkeypatch, session_id):
+  # Fresh and resumed threads receive the same immutable constitution as their
+  # base prompt, with provider-authored developer/personality layers disabled.
+  # Re-supplying the snapshot on resume also keeps a compacted thread anchored
+  # without trusting its original instructions to survive indefinitely.
   completed_turn = SimpleNamespace(id="turn-r", usage=None, error=None)
   notifications = [
     SimpleNamespace(
@@ -3755,11 +3762,13 @@ def test_run_codex_sdk_turn_resume_supplies_base_instructions(monkeypatch):
 
     async def thread_resume(self, session_id, **kwargs):
       captured["session_id"] = session_id
-      captured["base_instructions"] = kwargs.get("base_instructions")
+      captured["thread_options"] = kwargs
       return thread
 
-    async def thread_start(self, *_a, **_k):
-      raise AssertionError("a resume turn must not fall back to thread_start")
+    async def thread_start(self, **kwargs):
+      captured["session_id"] = None
+      captured["thread_options"] = kwargs
+      return thread
 
   monkeypatch.setattr(
     codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
@@ -3767,7 +3776,7 @@ def test_run_codex_sdk_turn_resume_supplies_base_instructions(monkeypatch):
 
   result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
     user_message="continue",
-    session_id="resumed-thread",
+    session_id=session_id,
     base_env={},
     cwd="/tmp",
     chat_id="chat-resume",
@@ -3777,8 +3786,12 @@ def test_run_codex_sdk_turn_resume_supplies_base_instructions(monkeypatch):
     system_prompt="FROZEN CONSTITUTION SNAPSHOT",
   ))
 
-  assert captured["session_id"] == "resumed-thread"
-  assert captured["base_instructions"] == "FROZEN CONSTITUTION SNAPSHOT"
+  assert captured["session_id"] == session_id
+  assert captured["thread_options"]["base_instructions"] == (
+    "FROZEN CONSTITUTION SNAPSHOT"
+  )
+  assert captured["thread_options"]["developer_instructions"] == ""
+  assert captured["thread_options"]["personality"] == "none"
   assert result["session_id"] == "resumed-thread"
   assert result["error"] is None
 # --- Structured rate-limit reset extraction --------------------------------

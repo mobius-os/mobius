@@ -1,4 +1,9 @@
-"""Capture immutable per-chat prompts from installed-app fragments.
+"""Capture immutable, provider-neutral per-chat prompts.
+
+The resulting snapshot is the complete behavioral constitution supplied to
+both Claude and Codex. Provider runners may add only the permission, tool, and
+runtime metadata their transports require; they must not substitute a
+provider-authored personality or behavioral prompt.
 
 An app opts into this privileged surface by declaring a root-level
 ``system_prompt`` markdown file in its manifest.  The installer stores only the

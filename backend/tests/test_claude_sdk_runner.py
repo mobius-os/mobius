@@ -960,6 +960,7 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
 
   assert captured["options"].model == "claude-opus-4-8"
   assert captured["options"].effort == "high"
+  assert captured["options"].system_prompt == "system"
   assert captured["options"].max_buffer_size == 10 * 1024 * 1024
   assert captured["options"].thinking == {
     "type": "adaptive",

@@ -121,6 +121,18 @@ def test_core_prompt_has_no_static_skill_catalog():
   assert "<available_skills>" in core
 
 
+def test_core_prompt_owns_freshness_and_source_policy():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+
+  assert "## Freshness and sources" in core
+  assert "the partner asks you to search" in core
+  assert "could plausibly have changed" in core
+  assert "When in doubt, search" in core
+  assert "Prefer primary and official sources" in core
+  assert "Cite the supporting link close to the claim" in core
+
+
 def test_owned_app_skill_summaries_expose_complete_initial_read_sets():
   repo = Path(__file__).resolve().parents[2]
   seed_dir = repo / "backend" / "scripts" / "seed-skills"
