@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 from scripts.verify_test_runtime import PLATFORM_ROOT, platform_head, validate_runtime
 
@@ -177,6 +178,53 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
   assert "bundled_codex_path().samefile" in codex_layer
   assert "pip check" in codex_layer
   assert "declared cli-bin package is retained for SDK compatibility" in requirements
+
+
+def test_production_image_keeps_persistent_sso_checkouts_bootable():
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+  fingerprint = (
+    ROOT / "scripts" / "test-image-fingerprint.sh"
+  ).read_text(encoding="utf-8")
+  requirements = (ROOT / "backend" / "requirements.txt").read_text(
+    encoding="utf-8"
+  )
+  requirements_lock = (ROOT / "backend" / "requirements.lock").read_text(
+    encoding="utf-8"
+  )
+  shim_root = ROOT / "backend" / "legacy_runtime"
+  probe_path = shim_root / "verify_jose.py"
+  probe = probe_path.read_text(encoding="utf-8")
+  subprocess.run(
+    [sys.executable, "-B", str(probe_path)],
+    check=True,
+    capture_output=True,
+    text=True,
+    env={**os.environ, "PYTHONPATH": str(shim_root)},
+  )
+
+  for unsafe_dependency in ("python-jose", "ecdsa"):
+    assert unsafe_dependency not in requirements.lower()
+    assert unsafe_dependency not in requirements_lock.lower()
+  assert (
+    "COPY backend/legacy_runtime/jose/ "
+    "/usr/local/lib/python3.12/site-packages/jose/"
+  ) in dockerfile
+  assert dockerfile.index("> /app/test-image-fingerprint") < dockerfile.index(
+    "COPY backend/legacy_runtime/jose/ "
+    "/usr/local/lib/python3.12/site-packages/jose/"
+  )
+  assert "from jose import JWTError, jwt" in probe
+  assert "jwt.encode" in probe
+  assert "jwt.decode" in probe
+  assert "except JWTError:" in probe
+  assert "backend/legacy_runtime/jose/__init__.py" in fingerprint
+  assert "backend/legacy_runtime/verify_jose.py" in fingerprint
+  assert "COPY backend/legacy_runtime/verify_jose.py" in dockerfile
+  assert (
+    "COPY backend/legacy_runtime/ "
+    "/tmp/test-image-inputs/backend/legacy_runtime/"
+  ) in dockerfile
+  assert "python /tmp/verify-legacy-jose.py" in dockerfile
 
 
 def test_pre_push_syntax_check_keeps_bytecode_out_of_checkout():

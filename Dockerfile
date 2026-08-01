@@ -217,11 +217,19 @@ COPY frontend/ ./shell-src/
 COPY scripts/test-image-fingerprint.sh /tmp/test-image-inputs/scripts/test-image-fingerprint.sh
 COPY Dockerfile /tmp/test-image-inputs/Dockerfile
 COPY backend/requirements.txt backend/requirements.lock /tmp/test-image-inputs/backend/
+COPY backend/legacy_runtime/ /tmp/test-image-inputs/backend/legacy_runtime/
 COPY frontend/package.json frontend/package-lock.json /tmp/test-image-inputs/frontend/
 RUN MOBIUS_TEST_IMAGE_INPUT_ROOT=/tmp/test-image-inputs \
       /tmp/test-image-inputs/scripts/test-image-fingerprint.sh \
       > /app/test-image-fingerprint \
     && rm -rf /tmp/test-image-inputs
+
+# /data/platform survives image replacement and can predate the PyJWT migration.
+# Install the narrow historical import surface on the standard interpreter path;
+# entrypoint intentionally clears PYTHONPATH before starting the platform.
+COPY backend/legacy_runtime/jose/ /usr/local/lib/python3.12/site-packages/jose/
+COPY backend/legacy_runtime/verify_jose.py /tmp/verify-legacy-jose.py
+RUN python /tmp/verify-legacy-jose.py && rm /tmp/verify-legacy-jose.py
 
 # Whole-repo platform seed. /data is a runtime volume, so bake the real clone
 # under /app and let entrypoint copy it into /data/platform on first boot. The
