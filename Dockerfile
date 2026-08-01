@@ -8,7 +8,7 @@
 # expensive apt/agent-CLI/browser layers during local E2E builds. The pinned
 # agent-browser requires Node >=24; preship-gate.sh uses this same major so local
 # frontend verification cannot silently pass on an older runtime.
-FROM node:24-trixie-slim AS node-runtime
+FROM node:25-trixie-slim AS node-runtime
 
 # -- Stage 1: build the frontend --------------------------------------
 FROM node-runtime AS frontend
