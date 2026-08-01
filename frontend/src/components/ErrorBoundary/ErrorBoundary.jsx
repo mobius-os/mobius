@@ -3,18 +3,14 @@ import { api, BASE } from '../../api/client.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import {
   buildAgentRepairPrompt,
-  createRepairIdentity,
   errorRecoveryFingerprint,
   readErrorRecoveryAttempt,
   redactDiagnosticText,
-  recoveryActionPolicy,
-  recoveryPhaseForAttempt,
-  repairChatPath,
-  startAgentRepair,
-  writeErrorRecoveryAttempt,
+  recoveryViewForAttempt,
+  runAgentRepair,
   writeRefreshedRecoveryAttempt,
 } from '../../lib/errorRecovery.js'
-import RecoveryLink from './RecoveryLink.jsx'
+import RecoveryPanel from './RecoveryPanel.jsx'
 import './ErrorBoundary.css'
 
 /**
@@ -42,13 +38,11 @@ export default class ErrorBoundary extends Component {
   state = {
     error: null,
     phase: 'resolving',
-    agentError: '',
     repairChatId: null,
     attemptPhase: null,
   }
 
   crashContext = null
-  agentStarting = false
   repairController = null
   pageShowListening = false
   headingRef = null
@@ -79,16 +73,9 @@ export default class ErrorBoundary extends Component {
       attempt,
     }
     this.listenForPageShow()
-    this.setState({
-      phase: recoveryPhaseForAttempt(attempt, {
-        canAskAgent: this.props.canAskAgent !== false,
-      }),
-      agentError: attempt?.phase === 'agent-failed'
-        ? 'Repair chat request failed.'
-        : '',
-      repairChatId: attempt?.chatId || null,
-      attemptPhase: attempt?.phase || null,
-    })
+    this.setState(recoveryViewForAttempt(attempt, {
+      canAskAgent: this.props.canAskAgent !== false,
+    }))
   }
 
   componentDidUpdate(_prevProps, prevState) {
@@ -113,27 +100,19 @@ export default class ErrorBoundary extends Component {
   handlePageShow = (event) => {
     const context = this.crashContext
     if (!event.persisted || !context) return
-    this.agentStarting = false
     this.repairController = null
     const attempt = readErrorRecoveryAttempt({
       surfaceKey: context.surfaceKey,
       fingerprint: context.fingerprint,
     })
     context.attempt = attempt
-    this.setState({
-      phase: recoveryPhaseForAttempt(attempt, {
-        canAskAgent: this.props.canAskAgent !== false,
-      }),
-      attemptPhase: attempt?.phase || null,
-      repairChatId: attempt?.chatId || null,
-      agentError: attempt?.phase === 'agent-failed'
-        ? 'Repair chat request failed.'
-        : '',
-    })
+    this.setState(recoveryViewForAttempt(attempt, {
+      canAskAgent: this.props.canAskAgent !== false,
+    }))
   }
 
   handleRefresh = () => {
-    if (this.agentStarting) return
+    if (this.repairController) return
     const context = this.crashContext
     if (context) {
       writeRefreshedRecoveryAttempt({
@@ -153,43 +132,23 @@ export default class ErrorBoundary extends Component {
 
   handleAgentRepair = async () => {
     const context = this.crashContext
-    if (!context || this.agentStarting || this.props.canAskAgent === false) return
-    const identity = createRepairIdentity(context.attempt)
-    const startingAttempt = {
-      ...(context.attempt || {}),
-      phase: 'agent-starting',
-      repairRequestId: identity.repairRequestId,
-      messageCid: identity.messageCid,
-    }
-    context.attempt = startingAttempt
-    this.agentStarting = true
-    this.repairController = new AbortController()
-    writeErrorRecoveryAttempt({
-      surfaceKey: context.surfaceKey,
-      fingerprint: context.fingerprint,
-      ...startingAttempt,
-    })
-    this.setState({
-      phase: 'agent-starting',
-      attemptPhase: 'agent-starting',
-      agentError: '',
-    })
+    if (!context || this.repairController || this.props.canAskAgent === false) return
+    const controller = new AbortController()
+    this.repairController = controller
     try {
-      const result = await startAgentRepair({
+      const result = await runAgentRepair({
         client: api,
         base: BASE,
-        repairRequestId: identity.repairRequestId,
-        messageCid: identity.messageCid,
-        signal: this.repairController.signal,
-        onChatCreated: chatId => {
-          const attempt = { ...startingAttempt, chatId }
+        surfaceKey: context.surfaceKey,
+        fingerprint: context.fingerprint,
+        previousAttempt: context.attempt,
+        signal: controller.signal,
+        onAttempt: (attempt, { active }) => {
           context.attempt = attempt
-          writeErrorRecoveryAttempt({
-            surfaceKey: context.surfaceKey,
-            fingerprint: context.fingerprint,
-            ...attempt,
-          })
-          this.setState({ repairChatId: chatId })
+          this.setState(recoveryViewForAttempt(attempt, {
+            active,
+            canAskAgent: this.props.canAskAgent !== false,
+          }))
         },
         prompt: buildAgentRepairPrompt({
           surface: context.surfaceKey,
@@ -198,37 +157,11 @@ export default class ErrorBoundary extends Component {
           pathname: window.location.pathname,
         }),
       })
-      writeErrorRecoveryAttempt({
-        surfaceKey: context.surfaceKey,
-        fingerprint: context.fingerprint,
-        phase: 'agent-directed',
-        chatId: result.chatId,
-        repairRequestId: identity.repairRequestId,
-        messageCid: identity.messageCid,
-      })
       window.location.assign(result.path)
     } catch (error) {
-      this.agentStarting = false
-      this.repairController = null
       if (error?.name === 'AbortError') return
-      const chatId = context.attempt?.chatId || null
-      context.attempt = {
-        phase: 'agent-failed',
-        chatId,
-        repairRequestId: identity.repairRequestId,
-        messageCid: identity.messageCid,
-      }
-      writeErrorRecoveryAttempt({
-        surfaceKey: context.surfaceKey,
-        fingerprint: context.fingerprint,
-        ...context.attempt,
-      })
-      this.setState({
-        phase: 'recovery',
-        attemptPhase: 'agent-failed',
-        repairChatId: chatId,
-        agentError: 'Repair chat request failed.',
-      })
+    } finally {
+      if (this.repairController === controller) this.repairController = null
     }
   }
 
@@ -238,84 +171,23 @@ export default class ErrorBoundary extends Component {
     const cls = this.props.variant === 'inline' ? 'errbound errbound--inline' : 'errbound'
     const { phase, attemptPhase, repairChatId } = this.state
     const canAskAgent = this.props.canAskAgent !== false
-    const actions = recoveryActionPolicy({
-      phase,
-      attemptPhase,
-      canAskAgent,
-      repairChatId,
-    })
     return (
       <div className={cls}>
-        <div className="errbound__card">
-          <h1
-            className="errbound__title"
-            ref={node => { this.headingRef = node }}
-            tabIndex={-1}
-          >
-            Something broke
-          </h1>
-          <p className="errbound__body">
-            {phase === 'refresh' && (
-              <>This screen hit an unexpected error. Refreshing won’t delete your chats.</>
-            )}
-            {(phase === 'agent' || phase === 'agent-starting') && (
-              <>Refreshing didn’t fix this screen. Möbius can start a new repair chat and share these technical details with your agent to investigate and fix it.</>
-            )}
-            {actions.showRecovery && attemptPhase === 'agent-directed' && repairChatId && (
-              <>The repair chat started, but this screen still can’t open. System recovery is the remaining fallback.</>
-            )}
-            {actions.showRecovery && attemptPhase === 'agent-failed' && (
-              <>The repair chat couldn’t start. You can retry it or use system recovery as a last resort.</>
-            )}
-            {actions.showRecovery && !canAskAgent && (
-              <>Refreshing didn’t fix this screen. Use system recovery to diagnose the problem without relying on this embedded chat.</>
-            )}
-          </p>
-          <details className="errbound__details">
-            <summary>Technical details</summary>
-            <pre className="errbound__detail">{message}</pre>
-          </details>
-          {(phase === 'agent-starting' || this.state.agentError) && (
-            <p
-              className={`errbound__status${this.state.agentError ? ' errbound__status--sr-only' : ''}`}
-              role="status"
-              aria-live="polite"
-            >
-              {phase === 'agent-starting' ? 'Starting the repair chat. This may take a moment.' : this.state.agentError}
-            </p>
-          )}
-          <div
-            className="errbound__actions"
-            aria-busy={phase === 'agent-starting' ? true : undefined}
-          >
-            {actions.showRefreshAgain && (
-              <button type="button" className="errbound__btn" onClick={this.handleRefresh}>
-                Refresh again
-              </button>
-            )}
-            {actions.showOpenRepairChat && (
-              <a className="errbound__btn" href={repairChatPath(repairChatId, BASE)}>
-                Open repair chat
-              </a>
-            )}
-            {(phase === 'refresh' || actions.showAskAgent || actions.showRetryAgent || phase === 'agent-starting') && (
-              <button
-                type="button"
-                className="errbound__btn errbound__btn--primary"
-                onClick={phase === 'refresh' ? this.handleRefresh : this.handleAgentRepair}
-                disabled={phase === 'agent-starting'}
-              >
-                {phase === 'refresh' && 'Refresh screen'}
-                {phase === 'agent' && (attemptPhase === 'agent-starting' ? 'Resume repair chat' : 'Start repair chat')}
-                {phase === 'agent-starting' && 'Starting repair chat…'}
-                {actions.showRetryAgent && 'Retry repair chat'}
-              </button>
-            )}
-          </div>
-          {actions.showRecovery && (
-            <RecoveryLink lead="If the repair chat can’t get you back in," />
-          )}
-        </div>
+        <RecoveryPanel
+          variant="boundary"
+          className="errbound__card"
+          headingRef={node => { this.headingRef = node }}
+          title="Something broke"
+          subject="screen"
+          diagnostic={message}
+          phase={phase}
+          attemptPhase={attemptPhase}
+          repairChatId={repairChatId}
+          canAskAgent={canAskAgent}
+          refreshLabel="Refresh screen"
+          onRefresh={this.handleRefresh}
+          onAgentRepair={this.handleAgentRepair}
+        />
       </div>
     )
   }

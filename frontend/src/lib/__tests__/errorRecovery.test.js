@@ -10,8 +10,10 @@ import {
   readErrorRecoveryAttempt,
   recoveryActionPolicy,
   recoveryPhaseForAttempt,
+  recoveryViewForAttempt,
   redactDiagnosticText,
   repairChatPath,
+  runAgentRepair,
   startAgentRepair,
   writeErrorRecoveryAttempt,
   writeRefreshedRecoveryAttempt,
@@ -131,6 +133,140 @@ test('an interrupted repair resumes with the same request and message identities
   })
   assert.deepEqual(resumed, first)
   assert.equal(recoveryPhaseForAttempt({ phase: 'agent-starting' }), 'agent')
+})
+
+test('recovery view state derives persisted identity and active progress', () => {
+  assert.deepEqual(recoveryViewForAttempt(null), {
+    phase: 'refresh',
+    attemptPhase: null,
+    repairChatId: null,
+  })
+
+  const attempt = {
+    phase: 'agent-starting',
+    chatId: 'repair-chat',
+    repairRequestId: 'repair-request',
+    messageCid: 'repair-message',
+  }
+  assert.deepEqual(recoveryViewForAttempt(attempt), {
+    phase: 'agent',
+    attemptPhase: 'agent-starting',
+    repairChatId: 'repair-chat',
+  })
+  assert.equal(recoveryViewForAttempt(attempt, { active: true }).phase, 'agent-starting')
+  assert.equal(recoveryViewForAttempt(attempt, { canAskAgent: false }).phase, 'recovery')
+})
+
+test('repair flow owns persisted transitions and reports active attempts', async () => {
+  const storage = memoryStorage()
+  const surfaceKey = 'chat:flow'
+  const fingerprint = errorRecoveryFingerprint(surfaceKey, 'render failed')
+  const snapshots = []
+  const client = {
+    chats: {
+      create: async () => ({ ok: true, json: async () => ({ id: 'repair-chat' }) }),
+      send: async () => ({ ok: true }),
+    },
+  }
+
+  const result = await runAgentRepair({
+    prompt: 'diagnostic prompt',
+    client,
+    surfaceKey,
+    fingerprint,
+    storage,
+    previousAttempt: {
+      phase: 'refreshed',
+      repairRequestId: 'repair-request',
+      messageCid: 'repair-message',
+    },
+    onAttempt: (attempt, meta) => snapshots.push([attempt, meta]),
+  })
+
+  assert.equal(result.chatId, 'repair-chat')
+  assert.deepEqual(snapshots.map(([attempt, meta]) => [attempt.phase, attempt.chatId, meta.active]), [
+    ['agent-starting', null, true],
+    ['agent-starting', 'repair-chat', true],
+    ['agent-directed', 'repair-chat', false],
+  ])
+  const persisted = readErrorRecoveryAttempt({ storage, surfaceKey, fingerprint })
+  assert.equal(Number.isFinite(persisted.at), true)
+  assert.deepEqual({ ...persisted, at: 0 }, {
+    fingerprint,
+    phase: 'agent-directed',
+    at: 0,
+    chatId: 'repair-chat',
+    repairRequestId: 'repair-request',
+    messageCid: 'repair-message',
+  })
+})
+
+test('repair flow persists a failed send with the created chat identity', async () => {
+  const storage = memoryStorage()
+  const surfaceKey = 'chat:failed-flow'
+  const fingerprint = errorRecoveryFingerprint(surfaceKey, 'render failed')
+  const snapshots = []
+  const client = {
+    chats: {
+      create: async () => ({ ok: true, json: async () => ({ id: 'repair-chat' }) }),
+      send: async () => ({ ok: false, status: 503 }),
+    },
+  }
+
+  await assert.rejects(runAgentRepair({
+    prompt: 'diagnostic prompt',
+    client,
+    surfaceKey,
+    fingerprint,
+    storage,
+    previousAttempt: {
+      repairRequestId: 'repair-request',
+      messageCid: 'repair-message',
+    },
+    onAttempt: (attempt, meta) => snapshots.push([attempt, meta]),
+  }), /repair chat send 503/)
+
+  assert.deepEqual(snapshots.at(-1), [{
+    phase: 'agent-failed',
+    chatId: 'repair-chat',
+    repairRequestId: 'repair-request',
+    messageCid: 'repair-message',
+  }, { active: false }])
+  assert.equal(
+    readErrorRecoveryAttempt({ storage, surfaceKey, fingerprint }).phase,
+    'agent-failed',
+  )
+})
+
+test('an aborted repair remains resumable instead of becoming a failure', async () => {
+  const storage = memoryStorage()
+  const surfaceKey = 'chat:aborted-flow'
+  const fingerprint = errorRecoveryFingerprint(surfaceKey, 'render failed')
+  const abortError = new Error('navigation interrupted the request')
+  abortError.name = 'AbortError'
+
+  await assert.rejects(runAgentRepair({
+    prompt: 'diagnostic prompt',
+    client: {
+      chats: {
+        create: async () => { throw abortError },
+        send: async () => { throw new Error('must not send') },
+      },
+    },
+    surfaceKey,
+    fingerprint,
+    storage,
+    previousAttempt: {
+      chatId: 'existing-chat',
+      repairRequestId: 'repair-request',
+      messageCid: 'repair-message',
+    },
+  }), error => error === abortError)
+
+  const persisted = readErrorRecoveryAttempt({ storage, surfaceKey, fingerprint })
+  assert.equal(persisted.phase, 'agent-starting')
+  assert.equal(persisted.chatId, 'existing-chat')
+  assert.equal(recoveryViewForAttempt(persisted).phase, 'agent')
 })
 
 test('stale and different errors do not inherit an escalation', () => {

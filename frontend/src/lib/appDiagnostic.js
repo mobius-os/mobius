@@ -1,4 +1,4 @@
-import { redactDiagnosticText } from './errorRecovery.js'
+import { redactDiagnosticText } from './diagnosticRedaction.js'
 
 export function readableAppDiagnostic(error, limit = 6000) {
   const raw = redactDiagnosticText(error?.message || error || 'Unknown app error')

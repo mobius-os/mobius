@@ -10,7 +10,7 @@
 // or route through apiFetch's 401-reload path, and a failed report can never
 // itself throw.
 
-import { redactDiagnosticText } from './errorRecovery.js'
+import { redactDiagnosticText } from './diagnosticRedaction.js'
 
 const RING_KEY = 'mobius:error-log' // ring buffer of the last MAX errors
 const MAX = 10
