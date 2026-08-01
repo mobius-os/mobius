@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import pytest
@@ -149,3 +150,37 @@ def test_fix_forward_chat_media_timeout_stays_valid_after_late_commit(
   db.expire_all()
   persisted = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
   assert persisted.messages[0]["content"] == new_url
+
+
+def test_interrupted_copy_leaves_no_truncated_destination(db, chat, monkeypatch):
+  """A crash mid-copy must not publish a short file at the destination.
+
+  Copying straight to `destination` is not atomic: an interrupted copy left a
+  truncated file there, the next boot skipped it because it existed, and the
+  intact legacy copy was deleted on the following successful pass -- making the
+  truncation permanent.
+  """
+  old_url = f"/api/chats/{chat.id}/generated/old.png"
+  chat.messages = [{"role": "assistant", "content": f"![image]({old_url})"}]
+  db.commit()
+
+  chat_root = Path(get_settings().data_dir) / "chats" / chat.id
+  old_dir = chat_root / "generated"
+  old_dir.mkdir(parents=True)
+  (old_dir / "old.png").write_bytes(b"complete-image-bytes")
+
+  real_copy = shutil.copy2
+
+  def truncated_copy(source, target, *args, **kwargs):
+    Path(target).write_bytes(b"short")
+    raise OSError("interrupted mid-copy")
+
+  monkeypatch.setattr(shutil, "copy2", truncated_copy)
+
+  with pytest.raises(OSError, match="interrupted mid-copy"):
+    fix_forward_chat_media(db, get_settings().data_dir)
+
+  monkeypatch.setattr(shutil, "copy2", real_copy)
+  assert not (chat_root / "media" / "old.png").exists()
+  assert (old_dir / "old.png").read_bytes() == b"complete-image-bytes"
+  assert not list((chat_root / "media").glob(".*.partial"))

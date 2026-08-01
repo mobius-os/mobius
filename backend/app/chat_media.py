@@ -1,6 +1,7 @@
 """Fix-forward migration for the canonical per-chat media directory."""
 
 import filecmp
+import os
 import shutil
 from pathlib import Path
 
@@ -103,7 +104,18 @@ def fix_forward_chat_media(db: Session, data_dir: str) -> int:
             continue
           destination = media_dir / source.name
           if not destination.exists():
-            shutil.copy2(source, destination)
+            # Stage then rename. A bare copy2 to `destination` is not atomic:
+            # an interrupted copy leaves a short file there, the next pass
+            # skips it because it exists, and the intact legacy copy is deleted
+            # on the following successful pass -- so the truncation becomes
+            # permanent. os.replace() within one directory is atomic, so the
+            # destination is either absent or complete.
+            staged = destination.with_name(f".{source.name}.partial")
+            try:
+              shutil.copy2(source, staged)
+              os.replace(staged, destination)
+            finally:
+              staged.unlink(missing_ok=True)
           changed += 1
 
       old_prefix = f"/api/chats/{chat_id}/generated/"
@@ -117,8 +129,11 @@ def fix_forward_chat_media(db: Session, data_dir: str) -> int:
       db.expire_all()
     except BaseException:
       db.rollback()
-      # Keep both copies. The actor may still commit after a caller-side
-      # timeout, and either old or new URLs must remain readable in that case.
+      # Keep both copies so a later boot can finish the migration. Note what
+      # this does NOT buy: no route serves `/generated/` (routes/media.py only
+      # exposes `/{chat_id}/media/{filename}`), so if the rewrite never commits
+      # the affected messages stay broken until a later pass succeeds.
+      # Retaining the bytes is what makes that later pass possible.
       raise
 
     if old_dir.is_dir():
