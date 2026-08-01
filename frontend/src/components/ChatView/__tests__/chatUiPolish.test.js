@@ -85,8 +85,8 @@ test('stop action has no visible circular shell', () => {
 test('stop action keeps a legible glyph inside its full touch target', () => {
   assert.match(
     chatInputBar,
-    /<Stop width=\{24\} height=\{24\} aria-hidden="true" \/>/,
-    'the SDK Stop icon needs a 24px box because its square occupies only part of the viewBox',
+    /<Stop width=\{28\} height=\{28\} aria-hidden="true" \/>/,
+    'the SDK Stop icon needs a 28px box because its square occupies only part of the viewBox',
   )
 })
 
