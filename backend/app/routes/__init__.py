@@ -60,7 +60,6 @@ chats_stream_router = _load("chats_stream")
 chat_logs_router = _load("chat_logs")
 proxy_router = _load("proxy")
 local_services_router = _load("local_services")
-speech_router = _load("speech")
 notify_router = _load("notify")
 settings_router = _load("settings")
 storage_router = _load("storage")
@@ -94,7 +93,6 @@ __all__ = [
   "chat_logs_router",
   "proxy_router",
   "local_services_router",
-  "speech_router",
   "notify_router",
   "settings_router",
   "uploads_router",
