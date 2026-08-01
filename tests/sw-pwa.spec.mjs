@@ -17,6 +17,15 @@
  */
 import { test, expect } from '@playwright/test'
 import { applyApp } from './app-source.mjs'
+// Import the cache names rather than repeating them. They are deliberately
+// bumped whenever a cached response's policy changes, so a literal here turns
+// every future bump into an unrelated e2e failure 5 minutes into the run —
+// which is exactly what the v4 → v5 CSP bump did.
+import {
+  APP_ASSETS_CACHE,
+  OFFLINE_APPS_CACHE,
+  STANDALONE_APPS_CACHE,
+} from '../frontend/src/sw-cache-policy.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const HOSTILE_ORIGIN = process.env.MOBIUS_TEST_HOSTILE_ORIGIN || null
@@ -169,10 +178,10 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
 
       await page.goto(standaloneUrl, { waitUntil: 'domcontentloaded' })
       await expect(standaloneMarker()).toHaveText(firstMarker)
-      await expect.poll(() => page.evaluate(async url => {
-        const cache = await caches.open('mobius-standalone-v3')
+      await expect.poll(() => page.evaluate(async ({ url, cacheName }) => {
+        const cache = await caches.open(cacheName)
         return !!await cache.match(url)
-      }, standaloneUrl)).toBe(true)
+      }, { url: standaloneUrl, cacheName: STANDALONE_APPS_CACHE })).toBe(true)
 
       // Close the standalone page before applying the edit, so its SSE cannot
       // observe app_updated and mask a stale-navigation-cache regression.
@@ -261,8 +270,8 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       const appVersion = String(app.updated_at ?? '0').trim() || '0'
       const frameRev = await page.locator('meta[name="mobius-frame-rev"]').getAttribute('content')
       const frameVersion = frameRev ? `${appVersion}-${frameRev}` : appVersion
-      await expect.poll(() => page.evaluate(async ({ appId, appVersion, frameVersion }) => {
-        const cache = await caches.open('mobius-offline-apps-v4')
+      await expect.poll(() => page.evaluate(async ({ appId, appVersion, frameVersion, cacheName }) => {
+        const cache = await caches.open(cacheName)
         const keys = await cache.keys()
         const has = (route, version) => keys.some(request => {
           const url = new URL(request.url)
@@ -273,7 +282,9 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
           frame: has('frame', frameVersion),
           module: has('module', appVersion),
         }
-      }, { appId: app.id, appVersion, frameVersion })).toEqual({
+      }, {
+        appId: app.id, appVersion, frameVersion, cacheName: OFFLINE_APPS_CACHE,
+      })).toEqual({
         frame: true,
         module: true,
       })
@@ -403,10 +414,10 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
         }
       })).toBe('SecurityError')
 
-      const keys = await page.evaluate(async () => {
-        const cache = await caches.open('mobius-app-assets-v2')
+      const keys = await page.evaluate(async cacheName => {
+        const cache = await caches.open(cacheName)
         return (await cache.keys()).map(request => new URL(request.url).pathname)
-      })
+      }, APP_ASSETS_CACHE)
       expect(keys).toContain(`/app-embeds/by-id/${app.id}/index.html`)
       expect(keys).not.toContain(`/app-assets/by-id/${app.id}/index.html`)
       // A response-sandboxed child has an opaque effective origin and is not
