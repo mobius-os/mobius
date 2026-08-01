@@ -74,8 +74,8 @@ DEFAULT_THEME = """\
   --green: #10b981;
 
   /* Typography. */
-  --font: 'Inter', system-ui, -apple-system, sans-serif;
-  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
+  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
 }
 """
 

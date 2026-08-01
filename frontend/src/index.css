@@ -16,6 +16,60 @@
    Weights: Inter 400/500/600/700, JetBrains Mono 400/500.
    (Weight 450 appeared in the old Google Fonts URL but was never
    referenced in component CSS — omitted here.) */
+
+/* Metric-matched local fallbacks (R7 prerequisite).
+   `font-display: swap` means the FIRST paint of every chat uses a fallback
+   family and the real face rewraps the whole transcript when it arrives. That
+   rewrap is the single largest height producer on a cold visit and no scroll
+   machinery can predict it, so it is removed at the source: the fallback is
+   re-metricked to match Inter / JetBrains Mono, and the swap becomes a glyph
+   substitution with no reflow.
+
+   Derivation (all values MEASURED from public/vendor/fonts/*.woff2 with
+   fontTools, not copied):
+     size-adjust      = target.avgCharWidth / fallback.avgCharWidth
+     ascent-override  = target.hheaAscent  / (unitsPerEm * size-adjust)
+     descent-override = |target.hheaDescent| / (unitsPerEm * size-adjust)
+     line-gap-override= target.hheaLineGap / (unitsPerEm * size-adjust)
+   avgCharWidth uses the legacy OS/2 xAvgCharWidth algorithm (weighted mean of
+   the advances of space + a-z) for BOTH sides, because that is the algorithm
+   the fallback families' own published xAvgCharWidth was produced with;
+   Inter's stored OS/2 value uses the newer all-glyph mean and is not
+   comparable.
+
+   Inter 400:            unitsPerEm 2048, hhea asc 1984, desc -494, gap 0,
+                         legacy xAvgCharWidth 972.3 (0.474745em)
+   Arial (fallback):     unitsPerEm 2048, OS/2 xAvgCharWidth 904 (0.441406em)
+     size-adjust        = 0.474745 / 0.441406 = 1.07553  -> 107.6%
+     ascent-override    = (1984/2048) / 1.07553 = 0.90072 -> 90.1%
+     descent-override   = (494/2048)  / 1.07553 = 0.22427 -> 22.4%
+
+   JetBrains Mono 400:   unitsPerEm 1000, hhea asc 1020, desc -300, gap 0,
+                         legacy xAvgCharWidth 600 (0.6em)
+   Menlo / DejaVu Sans Mono (fallback): advance 1233/2048 = 0.602051em
+     size-adjust        = 0.6 / 0.602051 = 0.996593 -> 99.7%
+     ascent-override    = 1.02 / 0.996593 = 1.023487 -> 102.3%
+     descent-override   = 0.30 / 0.996593 = 0.301026 -> 30.1%
+
+   A wrong number here shifts text once, statically, and is visible in review.
+   It cannot become a race. */
+@font-face {
+  font-family: 'Inter Fallback';
+  src: local('Arial');
+  size-adjust: 107.6%;
+  ascent-override: 90.1%;
+  descent-override: 22.4%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: 'JetBrains Mono Fallback';
+  src: local('Menlo'), local('Consolas'), local('DejaVu Sans Mono');
+  size-adjust: 99.7%;
+  ascent-override: 102.3%;
+  descent-override: 30.1%;
+  line-gap-override: 0%;
+}
+
 @font-face {
   font-family: 'Inter';
   font-style: normal;
@@ -135,8 +189,8 @@ body,
    Only non-color defaults for dev mode (where server injection
    doesn't happen). */
 :root {
-  --font: 'Inter', system-ui, -apple-system, sans-serif;
-  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
+  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
   /* Default to dark. Light-mode override below keeps native UA
      widgets (scrollbars, date picker, autofill background) in
      sync with the active theme. */
