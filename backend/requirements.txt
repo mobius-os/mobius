@@ -12,7 +12,7 @@ httpx>=0.28.0
 Pillow>=11.0.0
 pywebpush>=2.0.0
 pytest>=8.0
-pytest-asyncio>=0.23
+pytest-asyncio>=1.4.0
 watchdog>=4.0.0
 claude-agent-sdk==0.2.126
 # openai-codex is installed --no-deps from a pinned Git SHA in Dockerfile.
