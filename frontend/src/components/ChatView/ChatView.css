@@ -2004,7 +2004,9 @@
      attached (see .chat__pill--with-attach). `.chat__input` subtracts this
      from the composer's share of the visible height, so the pill's TOTAL
      height stays the same whether or not a file is attached. */
-  --composer-reserve: 8px;
+  --pill-pad: 4px;
+  --composer-input-floor: 48px;
+  --composer-reserve: calc(var(--pill-pad) * 2);
   flex: 1;
   min-width: 0;
   display: flex;
@@ -2013,7 +2015,7 @@
   background: color-mix(in srgb, var(--surface) 60%, transparent);
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 24px;
-  padding: 4px;
+  padding: var(--pill-pad);
   min-height: 48px;
   backdrop-filter: blur(16px) saturate(140%);
   -webkit-backdrop-filter: blur(16px) saturate(140%);
@@ -2059,8 +2061,11 @@
      roomy screens; the floor keeps two lines legible on a cramped one. Growth
      past the cap scrolls inside the textarea (overflow-y below). */
   max-height: clamp(
-    48px,
-    calc(var(--composer-room, 100dvh) * 0.5 - var(--composer-reserve, 8px)),
+    var(--composer-input-floor, 48px),
+    calc(
+      var(--composer-room, 100dvh) * 0.5
+      - var(--composer-reserve, calc(var(--pill-pad, 4px) * 2))
+    ),
     280px
   );
   padding: 4px 8px 4px 12px;
@@ -2469,16 +2474,35 @@
   --pill-gap: 6px;
   --tray-pad-top: 2px;
   --tray-pad-bottom: 4px;
+  /* In a short keyboard viewport a fixed 96px card can exceed the pill's
+     entire half-room budget before the textarea is counted. Spend that budget
+     in one place: preserve a usable one-line input, then let the pending card
+     shrink until the total pill fits. Forty pixels is the last practical card
+     size (the remove control remains fully inside it); below a 184px room that
+     physical usability floor deliberately wins by only the unavoidable amount. */
+  --composer-input-floor: 24px;
+  --composer-stack-chrome: calc(
+    var(--tray-pad-top) + var(--tray-pad-bottom)
+    + var(--pill-gap)
+    + var(--pill-pad) * 2
+  );
+  --composer-attach-card: clamp(
+    40px,
+    calc(
+      var(--composer-room, 100dvh) * 0.5
+      - var(--composer-stack-chrome)
+      - var(--composer-input-floor)
+    ),
+    var(--attach-card)
+  );
   flex-direction: column;
   align-items: stretch;
   gap: var(--pill-gap);
   padding: var(--pill-pad);
   border-radius: 22px;
   --composer-reserve: calc(
-    var(--attach-card)
-    + var(--tray-pad-top) + var(--tray-pad-bottom)
-    + var(--pill-gap)
-    + var(--pill-pad) * 2
+    var(--composer-attach-card)
+    + var(--composer-stack-chrome)
   );
 }
 /* When chips are attached the pill is in column layout and the
@@ -2524,17 +2548,19 @@
   flex-direction: column;
   justify-content: flex-start;
   gap: 6px;
-  padding: 10px;
+  padding: clamp(4px, calc(var(--composer-attach-card, var(--attach-card)) * 0.1), 10px);
   background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 14px;
-  width: var(--attach-card, 96px);
-  height: var(--attach-card, 96px);
+  width: var(--composer-attach-card, var(--attach-card, 96px));
+  height: var(--composer-attach-card, var(--attach-card, 96px));
+  overflow: hidden;
+  container-type: size;
 }
 
 .chat__attach-card--image {
-  width: var(--attach-card, 96px);
-  height: var(--attach-card, 96px);
+  width: var(--composer-attach-card, var(--attach-card, 96px));
+  height: var(--composer-attach-card, var(--attach-card, 96px));
   padding: 0;
   border-radius: 14px;
   overflow: hidden;
@@ -2624,6 +2650,22 @@
   -webkit-box-orient: vertical;
   line-height: 1.25;
   word-break: break-all;
+}
+
+/* A card that gives room back to the conversation becomes a compact file
+   badge rather than clipping two lines of filename into an unreadable sliver.
+   Image cards need no variant: their thumbnail already scales with the box. */
+@container (max-height: 63px) {
+  .chat__attach-card-icon {
+    width: 20px;
+    height: 24px;
+    font-size: 7px;
+  }
+  .chat__attach-card-icon::after {
+    width: 6px;
+    height: 6px;
+  }
+  .chat__attach-card-name { display: none; }
 }
 
 /* The remove × sits INSIDE the card corner — the pill's rounded

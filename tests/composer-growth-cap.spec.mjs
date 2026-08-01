@@ -18,6 +18,8 @@ function composerGeometry(page) {
     return {
       chat: chat.getBoundingClientRect().height,
       pill: pill.getBoundingClientRect().height,
+      input: surface.querySelector('.chat__input')?.getBoundingClientRect().height ?? 0,
+      card: surface.querySelector('.chat__attach-card')?.getBoundingClientRect().height ?? 0,
       room: chat.style.getPropertyValue('--composer-room').trim(),
     }
   })
@@ -95,4 +97,35 @@ test('an attached file comes out of the text share, not on top of it', async ({ 
   // And it still leaves the conversation the larger half. Before the cap, this
   // composer was a 280px text area plus a ~124px tray inside a ~430px pane.
   expect(after.pill / after.chat).toBeLessThan(0.6)
+})
+
+// The tray used to stay 96px tall regardless of the room. Once half the room
+// fell below the fixed tray + the textarea's floor, clamp() could only honor
+// the textarea floor and the composer again consumed nearly everything. Pin
+// the review's landscape-keyboard geometry directly: the pending card gives
+// room back before the conversation does.
+test('a short keyboard room compacts the attachment before eclipsing the transcript', async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 480 })
+  const { painted, composer } = await openNewChat(page, 'growth-cap-short-room')
+
+  // Headless Chromium cannot summon an iOS keyboard, so publish the 190px
+  // visible band from the field geometry while leaving the shell itself roomy
+  // enough for reliable controls. This exercises the live CSS layout rather
+  // than restating its arithmetic in a source-reading unit test.
+  await painted.locator('.chat').evaluate((chat) => {
+    chat.style.setProperty('--composer-room', '190px')
+  })
+  await composer.fill(LONG_DRAFT)
+  await painted.locator('input[type="file"]').setInputFiles({
+    name: 'short-room.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('attachment'),
+  })
+  await expect(painted.getByRole('button', { name: 'Remove short-room.txt' }))
+    .toBeVisible({ timeout: 8000 })
+
+  const geometry = await settledGeometry(page)
+  expect(geometry.card).toBeLessThan(96)
+  expect(geometry.input).toBeGreaterThanOrEqual(24)
+  expect(geometry.pill).toBeLessThanOrEqual(96)
 })

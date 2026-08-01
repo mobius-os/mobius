@@ -12,17 +12,17 @@ function ruleBody(selector) {
   return match[1]
 }
 
-test('sent image attachments match the composer card height and corners', () => {
+test('roomy composer images match sent attachment size and corners', () => {
   const composer = ruleBody('.chat__attach-card--image')
   const sentButton = ruleBody('.chat__attach-thumb-button')
   const sent = ruleBody('.chat__attach-thumb')
 
-  // Pending and sent squares must stay the same size. They read it from one
-  // token on `.chat` instead of repeating a literal, and the composer's own
-  // growth cap reserves the tray from that same token — so a size change here
-  // can't leave the two out of step or the cap reserving the wrong row.
+  // Pending and sent squares share one roomy-size token instead of repeating a
+  // literal. A pending card may compact below that ceiling when the keyboard
+  // leaves very little room; its fallback must still be the sent-card token so
+  // the normal layout and a token change remain in step.
   assert.match(ruleBody('.chat'), /--attach-card:\s*96px/)
-  assert.match(composer, /height:\s*var\(--attach-card/)
+  assert.match(composer, /height:\s*var\(--composer-attach-card,\s*var\(--attach-card/)
   assert.match(sent, /width:\s*var\(--attach-card/)
   assert.match(sent, /height:\s*var\(--attach-card/)
   assert.match(composer, /border-radius:\s*14px/)
