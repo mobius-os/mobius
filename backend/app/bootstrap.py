@@ -114,7 +114,7 @@ async def _migrate_legacy_platform_apps(db: Session) -> None:
   migration has had its chance.
   """
   eng = db.get_bind()
-  if database.data_migration_done(eng, _LEGACY_PLATFORM_APPS_MIGRATION):
+  if database.migration_applied(eng, _LEGACY_PLATFORM_APPS_MIGRATION):
     return
   rows = (
     db.query(models.App)
@@ -148,7 +148,7 @@ async def _migrate_legacy_platform_apps(db: Session) -> None:
       # Leave the marker unset so a transient catalog/network failure retries on
       # the next boot rather than stranding a genuinely un-migrated row.
       return
-  database.record_data_migration(eng, _LEGACY_PLATFORM_APPS_MIGRATION)
+  database.record_migration(eng, _LEGACY_PLATFORM_APPS_MIGRATION)
 
 
 async def ensure_bootstrap_apps_installed(db: Session) -> None:

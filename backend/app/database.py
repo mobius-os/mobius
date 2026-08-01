@@ -1016,33 +1016,9 @@ def schema_migration_history(eng) -> list[dict]:
   ]
 
 
-def data_migration_done(eng, name: str) -> bool:
-  """True when a one-shot DATA migration has already completed.
-
-  Shares the ``schema_migrations`` ledger with ``_SCHEMA_MIGRATIONS`` because
-  both answer the same question — "has this one-shot already run?" — but data
-  migrations record through these helpers instead of that tuple: they can be
-  async and perform network I/O (fetching a catalog manifest), which the
-  synchronous engine-only ``run_migrations`` loop cannot express.
-
-  Without a durable marker a "one-shot" data migration can only infer
-  completion from the shape of the rows it finds, which silently re-arms it for
-  any row created LATER that happens to match that shape.
-  """
-  from sqlalchemy import inspect as sa_inspect, text
-
-  if "schema_migrations" not in sa_inspect(eng).get_table_names():
-    return False
-  with eng.connect() as conn:
-    return conn.execute(text(
-      "SELECT 1 FROM schema_migrations WHERE version = :version"
-    ), {"version": name}).first() is not None
-
-
-def record_data_migration(eng, name: str) -> None:
-  """Mark a one-shot data migration complete so it never re-evaluates rows."""
+def ensure_migration_ledger(eng) -> None:
+  """Create the durable one-shot ledger if it does not exist yet."""
   from sqlalchemy import text
-  from sqlalchemy.exc import IntegrityError
 
   with eng.begin() as conn:
     conn.execute(text(
@@ -1051,6 +1027,38 @@ def record_data_migration(eng, name: str) -> None:
       "applied_at TIMESTAMP NOT NULL"
       ")"
     ))
+
+
+def migration_applied(eng, version: str) -> bool:
+  """True when ``version`` has already completed on this database.
+
+  One ledger answers "has this one-shot already run?" for every kind of
+  migration. ``run_migrations`` drives the synchronous schema entries in
+  ``_SCHEMA_MIGRATIONS`` through these same primitives; migrations that cannot
+  live in that tuple — async ones, or ones doing network I/O such as fetching a
+  catalog manifest — call them directly. Same table, same question, one
+  implementation, so the ledger can never disagree with itself.
+
+  Without a durable marker a "one-shot" migration can only infer completion
+  from the shape of the rows it finds, which silently re-arms it for any row
+  created LATER that happens to match that shape.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if "schema_migrations" not in sa_inspect(eng).get_table_names():
+    return False
+  with eng.connect() as conn:
+    return conn.execute(text(
+      "SELECT 1 FROM schema_migrations WHERE version = :version"
+    ), {"version": version}).first() is not None
+
+
+def record_migration(eng, version: str) -> None:
+  """Mark ``version`` complete so it never re-evaluates rows. Idempotent."""
+  from sqlalchemy import text
+  from sqlalchemy.exc import IntegrityError
+
+  ensure_migration_ledger(eng)
   # Plain INSERT + IntegrityError rather than a dialect-specific upsert: this
   # ledger runs on both SQLite and PostgreSQL (Railway), and re-recording an
   # already-complete migration is a no-op either way.
@@ -1060,7 +1068,7 @@ def record_data_migration(eng, name: str) -> None:
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, :applied_at)"
       ), {
-        "version": name,
+        "version": version,
         "applied_at": datetime.now(UTC).replace(tzinfo=None),
       })
   except IntegrityError:
@@ -1078,34 +1086,21 @@ def run_migrations(eng) -> None:
   Each migration remains internally idempotent so a crash before its ledger
   insert safely retries it. The ledger row is committed only after the migration
   returns successfully.
+
+  Drives the shared ledger primitives (``migration_applied`` /
+  ``record_migration``) rather than its own SQL, so a one-shot recorded here and
+  one recorded by an async caller are the same fact in the same table.
   """
-  from sqlalchemy import inspect as sa_inspect, text
+  from sqlalchemy import inspect as sa_inspect
 
   if "apps" not in sa_inspect(eng).get_table_names():
     return
-  with eng.begin() as conn:
-    conn.execute(text(
-      "CREATE TABLE IF NOT EXISTS schema_migrations ("
-      "version VARCHAR(128) PRIMARY KEY, "
-      "applied_at TIMESTAMP NOT NULL"
-      ")"
-    ))
-  applied = {
-    row["version"] for row in schema_migration_history(eng)
-  }
+  ensure_migration_ledger(eng)
   for version, migration in _SCHEMA_MIGRATIONS:
-    if version in applied:
+    if migration_applied(eng, version):
       continue
     migration(eng)
-    with eng.begin() as conn:
-      conn.execute(text(
-        "INSERT INTO schema_migrations (version, applied_at) "
-        "VALUES (:version, :applied_at)"
-      ), {
-        "version": version,
-        "applied_at": datetime.now(UTC).replace(tzinfo=None),
-      })
-    applied.add(version)
+    record_migration(eng, version)
 
 
 def get_db():
