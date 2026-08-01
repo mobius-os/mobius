@@ -85,7 +85,14 @@ async def start_programmatic_chat_turn(
       "chatId": chat_id,
     })
     return True
-  except Exception:
+  except BaseException:
+    # BaseException, not Exception: ``asyncio.CancelledError`` derives from
+    # BaseException, and the only suspension point above is the ``await_ack``
+    # that a cancellation lands on -- after ``mark_starting`` has succeeded.
+    # Leaking the claim there wedges the chat as 'starting' until the process
+    # restarts (see ``discard_starting`` in app/chat.py), which is exactly the
+    # drift this boundary exists to own.  The re-raise below keeps cancellation
+    # propagating normally.
     if run_coro is not None:
       run_coro.close()
     if broadcast_created:

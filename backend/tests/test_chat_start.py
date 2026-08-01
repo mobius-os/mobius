@@ -1,5 +1,6 @@
 """Programmatic chat starts share one durable lifecycle protocol."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -166,3 +167,33 @@ async def test_programmatic_start_cleans_transient_owners_when_spawn_fails(
   assert state.removed_broadcasts == ["chat-1"]
   assert state.system_events == []
   assert state.discarded == ["chat-1"]
+
+
+@pytest.mark.asyncio
+async def test_programmatic_start_releases_the_claim_when_cancelled(monkeypatch):
+  """A cancellation at the ack must not wedge the chat as 'starting'.
+
+  ``asyncio.CancelledError`` derives from BaseException, so an ``except
+  Exception`` cleanup silently skips ``discard_starting`` -- and the registry
+  has no TTL, so every later start for that chat returns False until the
+  process restarts.  The only suspension point in the boundary is this await,
+  which is precisely where a cancelled caller lands.
+  """
+  state = _install_start_fakes(monkeypatch)
+
+  async def cancelled_await_ack(_ack):
+    raise asyncio.CancelledError()
+
+  monkeypatch.setattr(chat_start, "await_ack", cancelled_await_ack)
+
+  with pytest.raises(asyncio.CancelledError):
+    await chat_start.start_programmatic_chat_turn(
+      chat_id="chat-1", title="t", content="c", provider="claude",
+    )
+
+  # The claim is released, and nothing transient was left behind.
+  assert state.discarded == ["chat-1"]
+  assert state.created_broadcasts == []
+  assert state.removed_broadcasts == []
+  assert state.scheduled == []
+  assert state.system_events == []
