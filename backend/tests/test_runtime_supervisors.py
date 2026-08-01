@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.broadcast import SystemBroadcast
 from app.runtime_supervisors import RuntimeSupervisors
 
 
@@ -63,3 +64,41 @@ async def test_start_fails_open_when_chat_supervisor_wiring_breaks(monkeypatch):
 
   assert frontend_started is True
   assert supervisors._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_reset_park_subscription_exists_only_while_its_task_runs(
+  monkeypatch,
+):
+  import app.broadcast as broadcast_module
+  import app.chat as chat_module
+  import app.runtime_supervisors as supervisors_module
+
+  broadcast = SystemBroadcast()
+
+  class EmptySession:
+    def __enter__(self):
+      return object()
+
+    def __exit__(self, *_args):
+      return False
+
+  async def no_chats(*_args, **_kwargs):
+    return []
+
+  monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
+  monkeypatch.setattr(supervisors_module, "SessionLocal", EmptySession)
+  monkeypatch.setattr(chat_module, "sweep_reset_parks", no_chats)
+
+  supervisors = _supervisors()
+  await supervisors._start_chat_supervisors()
+
+  # Task creation alone must not allocate a process-lifetime subscriber. An
+  # immediate shutdown can cancel a coroutine before its first instruction.
+  assert broadcast.subscribers == []
+
+  await asyncio.sleep(0)
+  assert len(broadcast.subscribers) == 1
+
+  await supervisors.stop()
+  assert broadcast.subscribers == []

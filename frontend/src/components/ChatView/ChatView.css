@@ -2139,7 +2139,11 @@
 }
 .chat__stop:focus-visible svg {
   outline: 2px solid var(--accent);
-  outline-offset: 3px;
+  /* Offset is measured from the SVG box, so it has to shrink as the glyph
+     grows: at 28px a 3px offset draws 28 + 2*(3 + 2) = 38px, exactly the
+     button's own 38px padding box, and the ring stops reading as a ring
+     around the glyph. 1px keeps the previous 34px visual. */
+  outline-offset: 1px;
   border-radius: 4px;
 }
 

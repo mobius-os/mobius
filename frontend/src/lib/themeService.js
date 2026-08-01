@@ -1,4 +1,10 @@
-import { DARK_COLORS, LIGHT_COLORS, parseThemeMeta, buildThemeCss } from '../theme.js'
+import {
+  DARK_COLORS,
+  LIGHT_COLORS,
+  parseThemeMeta,
+  buildThemeCss,
+  contrastingAccentFg,
+} from '../theme.js'
 import { themeQueries } from '../hooks/queries.js'
 import { applyTheme, inferMode, HEX_RE } from './applyTheme.js'
 
@@ -410,6 +416,19 @@ export async function toggleTheme(queryClient, currentMode, api) {
   // whatever was already missing — degrading theme.css on every swap
   // until light mode rendered with no accents at all.
   const colors = { ...base, ...meta.colors, ...swapped }
+
+  // `--accent-fg` is derived, never spread from the palette. The server injects
+  // it into a TRAILING `:root` that `parseThemeMeta` does not read, so it is
+  // absent from `meta.colors` here even when the running page has it. Deriving
+  // from the accent we just preserved reproduces the backend rule instead of
+  // reintroducing a fixed white and persisting it -- which would stop
+  // `_ensure_core_vars` ever injecting again, since it only fills MISSING vars.
+  // A theme that declares its own `--accent-fg` up front keeps it.
+  if (!meta.colors['--accent-fg']) {
+    const derived = contrastingAccentFg(colors['--accent'])
+    if (derived) colors['--accent-fg'] = derived
+    else delete colors['--accent-fg']
+  }
   const newCss = buildThemeCss(colors, meta, newMode)
 
   // Extract NEW bg from the built CSS, not from old meta.

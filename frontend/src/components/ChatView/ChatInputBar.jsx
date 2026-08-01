@@ -44,7 +44,7 @@
  * ║                                                                  ║
  * ║   4. ICONS COME FROM THE APPS-SDK-UI PACKAGE                     ║
  * ║      Primary action: `ArrowUp` (22) for send, `Mic` (24), and    ║
- * ║      `Stop` (24). The package ships these — don't substitute     ║
+ * ║      `Stop` (28). The package ships these — don't substitute     ║
  * ║      hand-rolled paths.                                          ║
  * ║                                                                  ║
  * ║   5. ATTACH CARD CLASSIFIER (`classifyFile`) drives the badge    ║
@@ -171,7 +171,7 @@ function PrimaryAction({
         onClick={onStop}
         aria-label="Stop"
       >
-        <Stop width={24} height={24} aria-hidden="true" />
+        <Stop width={28} height={28} aria-hidden="true" />
       </button>
     )
   }

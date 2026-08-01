@@ -1,4 +1,5 @@
 import os
+import re
 os.environ.setdefault("SECRET_KEY", "test-secret-key-exactly-32-chars!!")
 os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/mobius_test/test.db")
 os.environ.setdefault("DATA_DIR", "/tmp/mobius_test")
@@ -63,6 +64,7 @@ def test_ensure_core_vars_skips_when_all_present():
   --accent: #f0f;
   --accent-hover: #faf;
   --accent-dim: rgba(255, 0, 255, 0.1);
+  --accent-fg: #ffffff;
   --border: #333;
   --border-light: #444;
   --danger: #f00;
@@ -90,6 +92,7 @@ def test_ensure_core_vars_leaves_creative_css_alone():
   --accent: #d4a437;
   --accent-hover: #f0c451;
   --accent-dim: rgba(212, 164, 55, 0.14);
+  --accent-fg: #1a1206;
   --border: #2d6e47;
   --border-light: #1a4d2e;
   --danger: #c4554e;
@@ -211,7 +214,10 @@ def test_ensure_core_vars_dark_theme_unchanged_by_mode_awareness():
   assert "--surface2: #212121" in out
   assert "--border-light: #1f1f1f" in out
   # No light-mode value leaked into a dark theme.
-  assert "#ffffff" not in out  # light --surface
+  # Assert the LIGHT --surface value specifically, not a bare "#ffffff"
+  # substring: --accent-fg is legitimately #ffffff in both modes (white on
+  # the purple accent fill), so the loose form fails for the wrong reason.
+  assert "--surface: #ffffff" not in out
   assert "#e8e6e2" not in out  # light --surface2
 
 
@@ -251,7 +257,10 @@ def test_ensure_core_vars_dark_4digit_rgba_bg():
   assert "--surface: #171717" in out
   assert "--surface2: #212121" in out
   # No light-mode value leaked into a dark theme.
-  assert "#ffffff" not in out  # light --surface
+  # Assert the LIGHT --surface value specifically, not a bare "#ffffff"
+  # substring: --accent-fg is legitimately #ffffff in both modes (white on
+  # the purple accent fill), so the loose form fails for the wrong reason.
+  assert "--surface: #ffffff" not in out
   assert "#e8e6e2" not in out  # light --surface2
 
 
@@ -560,3 +569,33 @@ def test_snapshot_theme_prunes_old_backups(tmp_path):
   # The oldest seeded snapshots are gone; the newest survive.
   assert "theme.css.bak-1000" not in numeric
   assert keeper.exists()
+
+
+def test_injected_accent_fg_follows_the_theme_accent():
+  """The one core var whose default depends on another var the theme supplied.
+
+  A fixed #ffffff is right for Möbius's dark accent, but a theme that sets a
+  light --accent and omits --accent-fg would paint white on white on every
+  control pairing the two.
+  """
+  from app.theme import _ensure_core_vars
+
+  def injected_accent_fg(accent):
+    css = f":root {{ --bg: #ffffff; --fg: #111111; --accent: {accent}; }}"
+    match = re.search(r"--accent-fg:\s*([^;]+);", _ensure_core_vars(css))
+    return match.group(1).strip() if match else None
+
+  # The shipped accent is dark enough for white, and must keep it.
+  assert injected_accent_fg("#8b6cf7") == "#ffffff"
+  assert injected_accent_fg("#1a237e") == "#ffffff"
+  # A light accent must not inherit the white default.
+  assert injected_accent_fg("#ffffff") == "#000000"
+  assert injected_accent_fg("rgb(255, 250, 205)") == "#000000"
+
+
+def test_theme_that_declares_accent_fg_is_left_alone():
+  from app.theme import _ensure_core_vars
+
+  css = ":root { --bg: #fff; --fg: #111; --accent: #ffffff; --accent-fg: #123456; }"
+  assert _ensure_core_vars(css).count("--accent-fg") == 1
+  assert "#123456" in _ensure_core_vars(css)
