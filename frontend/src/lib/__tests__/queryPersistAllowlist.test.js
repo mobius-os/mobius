@@ -20,9 +20,27 @@ import { indexedDB } from 'fake-indexeddb'
 import { get } from 'idb-keyval'
 import {
   awaitCacheFlushBeforeReload,
+  compactPersistedChatDetails,
   flushPersistedQueryCache,
   shouldPersistQueryKey,
 } from '../../queryClient.js'
+
+test('background persistence bounds inactive chat history to the cold page', () => {
+  const messages = Array.from({ length: 30 }, (_, index) => ({ content: `line-${index}` }))
+  const persisted = compactPersistedChatDetails({
+    clientState: {
+      queries: [{
+        queryKey: ['chat-messages', 'chat-1'],
+        state: { data: { offset: 4, total: 34, restorationWindowComplete: true, messages } },
+      }],
+    },
+  })
+  const data = persisted.clientState.queries[0].state.data
+  assert.equal(data.offset, 14)
+  assert.equal(data.messages.length, 20)
+  assert.equal(data.messages[0].content, 'line-10')
+  assert.equal(data.restorationWindowComplete, true)
+})
 
 test('top-level domains persist by head segment', () => {
   for (const head of ['chats', 'chat-messages', 'theme', 'apps']) {

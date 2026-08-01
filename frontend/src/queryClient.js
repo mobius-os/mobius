@@ -20,6 +20,7 @@
 import { QueryClient, dehydrate } from '@tanstack/react-query'
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister'
 import { get, set, del } from 'idb-keyval'
+import { compactPersistedChatDetailCacheValue } from './lib/chatDetailCache.js'
 
 const QUERY_CACHE_KEY = 'mobius-query-cache'
 const QUERY_CACHE_BUSTER = 'v1'
@@ -43,10 +44,37 @@ const idbStorage = {
   removeItem: (key) => del(key),
 }
 
+/** Bound steady-state IndexedDB growth without changing the live query cache.
+ * An explicit shell reload writes the full current window separately below. */
+export function compactPersistedChatDetails(persistedClient) {
+  const queries = persistedClient?.clientState?.queries
+  if (!Array.isArray(queries)) return persistedClient
+  return {
+    ...persistedClient,
+    clientState: {
+      ...persistedClient.clientState,
+      queries: queries.map(query => (
+        query?.queryKey?.[0] !== 'chat-messages'
+          ? query
+          : {
+              ...query,
+              state: {
+                ...query.state,
+                data: compactPersistedChatDetailCacheValue(query.state?.data),
+              },
+            }
+      )),
+    },
+  }
+}
+
 export const queryPersister = createAsyncStoragePersister({
   storage: idbStorage,
   key: QUERY_CACHE_KEY,
   throttleTime: 1000,
+  serialize: persistedClient => JSON.stringify(
+    compactPersistedChatDetails(persistedClient),
+  ),
 })
 
 export const persistOptions = {

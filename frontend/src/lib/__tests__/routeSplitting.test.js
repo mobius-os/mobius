@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs'
 
 const SOURCE = readFileSync(new URL('../../App.jsx', import.meta.url), 'utf8')
 const INDEX_HTML = readFileSync(new URL('../../../index.html', import.meta.url), 'utf8')
+const RECOVERY_CSS = [
+  readFileSync(new URL('../../components/ErrorBoundary/ErrorBoundary.css', import.meta.url), 'utf8'),
+  readFileSync(new URL('../../components/ErrorBoundary/RecoveryPanel.css', import.meta.url), 'utf8'),
+].join('\n')
 
 test('mutually exclusive top-level flows remain lazy route boundaries', () => {
   for (const component of ['SetupWizard', 'LoginForm', 'Shell', 'ChatEmbed']) {
@@ -13,12 +17,36 @@ test('mutually exclusive top-level flows remain lazy route boundaries', () => {
       `${component} must not return to the shared startup bundle`,
     )
   }
+  const startupError = SOURCE.slice(
+    SOURCE.indexOf('function StartupError'),
+    SOURCE.indexOf('function removeSplash'),
+  )
+  const sharedClasses = [
+    'errbound__card',
+    'recovery-panel--boundary',
+    'recovery-panel__title',
+    'recovery-panel__body',
+    'recovery-panel__actions',
+    'recovery-panel__button',
+    'recovery-panel__button--primary',
+  ]
+
+  assert.ok((SOURCE.match(/<StartupError/g) || []).length >= 2)
+  assert.doesNotMatch(startupError, /errbound__(?:title|body|actions|btn)/)
+  for (const className of sharedClasses) {
+    assert.match(startupError, new RegExp(`className="[^"]*${className}`))
+    assert.match(
+      RECOVERY_CSS,
+      new RegExp(`\\.${className.replaceAll('-', '\\-')}(?:[\\s.:,{]|$)`),
+      `${className} must keep a stylesheet rule`,
+    )
+  }
 })
 
 test('route loading is blank without removing the launch mark', () => {
   const routeLoading = SOURCE.slice(
     SOURCE.indexOf('function RouteLoading'),
-    SOURCE.indexOf('function SetupStatusError'),
+    SOURCE.indexOf('function StartupError'),
   )
   const launchSplash = INDEX_HTML.slice(
     INDEX_HTML.indexOf('<div id="splash"'),

@@ -3,6 +3,7 @@ import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client
 import { QueryClientProvider, useIsRestoring } from '@tanstack/react-query'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
 import RecoveryLink from './components/ErrorBoundary/RecoveryLink.jsx'
+import './components/ErrorBoundary/RecoveryPanel.css'
 import { api, beginEphemeralAuth, getToken, setToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries } from './hooks/queries.js'
@@ -260,12 +261,16 @@ function AppRoot() {
   if (status === 'sso') return <RouteLoading />
   if (status === 'install-pass') return <RouteLoading />
   if (status === 'sso-error') return (
-    <ManagedSignInError
+    <StartupError
+      title="Couldn’t sign in"
+      message="Your Möbius account could not be confirmed. Try again from this browser."
       onRetry={() => window.location.replace(api.auth.sso.startUrl('/shell/'))}
     />
   )
   if (status === 'setup-error') return (
-    <SetupStatusError
+    <StartupError
+      title="Couldn’t reach Möbius"
+      message="The server didn’t answer the startup check. Your account status is unknown, so sign-in is paused until the connection recovers."
       retrying={setupStatusQuery.isFetching}
       onRetry={() => setupStatusQuery.refetch()}
     />
@@ -306,18 +311,19 @@ function RouteLoading() {
   return <div className="app-route-loading" aria-hidden="true" />
 }
 
-function SetupStatusError({ retrying, onRetry }) {
+function StartupError({ title, message, retrying = false, onRetry }) {
   return (
     <div className="errbound" role="alert">
-      <div className="errbound__card">
-        <h1 className="errbound__title">Couldn’t reach Möbius</h1>
-        <p className="errbound__body">
-          The server didn’t answer the startup check. Your account status is unknown, so sign-in is paused until the connection recovers.
-        </p>
-        <div className="errbound__actions">
+      <section className="recovery-panel recovery-panel--boundary errbound__card">
+        <h1 className="recovery-panel__title">{title}</h1>
+        <p className="recovery-panel__body">{message}</p>
+        <div
+          className="recovery-panel__actions"
+          aria-busy={retrying ? true : undefined}
+        >
           <button
             type="button"
-            className="errbound__btn errbound__btn--primary"
+            className="recovery-panel__button recovery-panel__button--primary"
             onClick={onRetry}
             disabled={retrying}
           >
@@ -325,30 +331,7 @@ function SetupStatusError({ retrying, onRetry }) {
           </button>
         </div>
         <RecoveryLink />
-      </div>
-    </div>
-  )
-}
-
-function ManagedSignInError({ onRetry }) {
-  return (
-    <div className="errbound" role="alert">
-      <div className="errbound__card">
-        <h1 className="errbound__title">Couldn’t sign in</h1>
-        <p className="errbound__body">
-          Your Möbius account could not be confirmed. Try again from this browser.
-        </p>
-        <div className="errbound__actions">
-          <button
-            type="button"
-            className="errbound__btn errbound__btn--primary"
-            onClick={onRetry}
-          >
-            Try again
-          </button>
-        </div>
-        <RecoveryLink />
-      </div>
+      </section>
     </div>
   )
 }

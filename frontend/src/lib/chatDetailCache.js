@@ -2,6 +2,11 @@
 // bounded idle prefetch must agree on this shape so a prefetched chat mounts as
 // a real warm chat rather than through a second, parallel cache convention.
 
+// Ordinary background persistence keeps the same recent page a cold activation
+// asks the server for. The explicit reload handoff deliberately bypasses this
+// projection so the currently loaded reader can restore its exact coordinate.
+export const CHAT_DETAIL_PERSISTED_MESSAGE_LIMIT = 20
+
 export function messageKey(message, index = 0) {
   if (!message) return null
   if (message.id != null) return String(message.id)
@@ -121,6 +126,21 @@ export function chatDetailCacheValue(data = {}) {
       auto_resume_on_limit: !!data.auto_resume_on_limit,
       auto_resume_on_restart: !!data.auto_resume_on_restart,
     },
+  }
+}
+
+export function compactPersistedChatDetailCacheValue(
+  data,
+  messageLimit = CHAT_DETAIL_PERSISTED_MESSAGE_LIMIT,
+) {
+  if (!data || !Array.isArray(data.messages) || data.messages.length <= messageLimit) {
+    return data
+  }
+  const removedCount = data.messages.length - messageLimit
+  return {
+    ...data,
+    messages: data.messages.slice(-messageLimit),
+    offset: Math.max(0, Number(data.offset) || 0) + removedCount,
   }
 }
 
