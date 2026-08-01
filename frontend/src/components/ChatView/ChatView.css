@@ -98,6 +98,11 @@
    opaque. List bottom padding tracks the foot's measured height
    via the `--composer-h` CSS var. */
 .chat {
+  /* One attachment-card size for the whole chat: the composer's pending
+     chips, the same image after it is sent, and the row the composer has to
+     reserve for the chip tray when it caps its own growth. Changing it here
+     keeps a pending attachment and a sent one the same square. */
+  --attach-card: 96px;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -1994,6 +1999,12 @@
    match a WhatsApp-style composer; send/mic buttons live INSIDE
    at 32×32. */
 .chat__pill {
+  /* Everything inside the pill that is NOT the text area: the pill's own
+     vertical padding here, and the attach tray + its gap once files are
+     attached (see .chat__pill--with-attach). `.chat__input` subtracts this
+     from the composer's share of the visible height, so the pill's TOTAL
+     height stays the same whether or not a file is attached. */
+  --composer-reserve: 8px;
   flex: 1;
   min-width: 0;
   display: flex;
@@ -2037,7 +2048,21 @@
   resize: none;
   outline: none;
   min-height: 24px;
-  max-height: 280px;
+  /* The composer may never swallow the conversation. `--composer-room`
+     (published by ChatView) is how much of this chat the reader can actually
+     SEE — it follows visualViewport, so the phone's soft keyboard counts. The
+     composer takes at most half of that, and whatever the attach tray occupies
+     comes out of the text area's share rather than being added on top of it:
+     before this, a 280px text area plus a 102px attach tray made a 406px
+     composer that covered the entire visible area on a phone with the keyboard
+     open, which reads as "it just grows forever". 280px stays the ceiling on
+     roomy screens; the floor keeps two lines legible on a cramped one. Growth
+     past the cap scrolls inside the textarea (overflow-y below). */
+  max-height: clamp(
+    48px,
+    calc(var(--composer-room, 100dvh) * 0.5 - var(--composer-reserve, 8px)),
+    280px
+  );
   padding: 4px 8px 4px 12px;
   overflow-y: auto;
   display: block;
@@ -2440,6 +2465,8 @@
   gap: 6px;
   padding: 8px;
   border-radius: 22px;
+  /* card + 6px tray padding + 6px column gap + 16px pill padding */
+  --composer-reserve: calc(var(--attach-card) + 28px);
 }
 /* When chips are attached the pill is in column layout and the
    input-line sits BELOW the chip tray. Anchor send/mic to the
@@ -2486,13 +2513,13 @@
   background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 14px;
-  width: 96px;
-  height: 96px;
+  width: var(--attach-card, 96px);
+  height: var(--attach-card, 96px);
 }
 
 .chat__attach-card--image {
-  width: 96px;
-  height: 96px;
+  width: var(--attach-card, 96px);
+  height: var(--attach-card, 96px);
   padding: 0;
   border-radius: 14px;
   overflow: hidden;
@@ -2657,10 +2684,11 @@
 }
 
 .chat__attach-thumb {
-  /* Match the composer's attachment card after send. The thumbnail is a
-     consistent square crop; tapping it still opens the full source image. */
-  width: 96px;
-  height: 96px;
+  /* Match the composer's attachment card after send — same `--attach-card`
+     token, so the two can't drift. The thumbnail is a consistent square
+     crop; tapping it still opens the full source image. */
+  width: var(--attach-card, 96px);
+  height: var(--attach-card, 96px);
   object-fit: cover;
   border-radius: 14px;
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */

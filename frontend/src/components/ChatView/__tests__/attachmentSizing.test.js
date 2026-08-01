@@ -17,9 +17,14 @@ test('sent image attachments match the composer card height and corners', () => 
   const sentButton = ruleBody('.chat__attach-thumb-button')
   const sent = ruleBody('.chat__attach-thumb')
 
-  assert.match(composer, /height:\s*96px/)
-  assert.match(sent, /width:\s*96px/)
-  assert.match(sent, /height:\s*96px/)
+  // Pending and sent squares must stay the same size. They read it from one
+  // token on `.chat` instead of repeating a literal, and the composer's own
+  // growth cap reserves the tray from that same token — so a size change here
+  // can't leave the two out of step or the cap reserving the wrong row.
+  assert.match(ruleBody('.chat'), /--attach-card:\s*96px/)
+  assert.match(composer, /height:\s*var\(--attach-card/)
+  assert.match(sent, /width:\s*var\(--attach-card/)
+  assert.match(sent, /height:\s*var\(--attach-card/)
   assert.match(composer, /border-radius:\s*14px/)
   assert.match(sentButton, /border-radius:\s*14px/)
   assert.match(sent, /border-radius:\s*14px/)

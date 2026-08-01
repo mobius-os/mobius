@@ -478,7 +478,6 @@ export default function ChatView({
   // every other indirect scroll-geometry write.
   const chatRef = useRef(null)
   const footRef = useRef(null)
-
   // One explicit Shell-to-composer handoff owns both New-chat focus and drafts
   // supplied by app navigation. Storage restores unmounted chats; applying the
   // same request here is what updates a retained ChatView without sacrificing
