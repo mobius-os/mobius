@@ -595,7 +595,7 @@ async def _seal_steer_split(bc, active_client, chat_id: str) -> None:
   # block can slip in front of it.
   if raw_bc is None:
     return
-  from app.chat import steered_into_turn_event
+  from app.chat_event_sink import steered_into_turn_event
 
   stored_messages = (
     stored_result.get("stored_messages") if isinstance(stored_result, dict)

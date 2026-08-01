@@ -3,17 +3,11 @@
 // A tab is a pinned reference to a chat or app the owner can swap to:
 // `{ kind: 'chat' | 'app', id: string }`, plus the canonical shell-owned
 // Apps and Settings tabs (see below). This module
-// owns the whole tab contract — construction, identity, open-set deduplication,
-// persistence, how a tab maps to navigation, and whether it is
-// the one on screen — so no call site has to re-derive them.
+// owns the whole tab contract — construction, identity, navigation mapping,
+// and active-state comparison — so no call site has to re-derive them.
 //
-// It is deliberately dependency-free and pane-agnostic. Today the shell keeps
-// ONE open set (a flat strip) and one on-screen view. The planned multi-pane
-// workspace (build several apps / chat with several agents in tiled panes)
-// holds a set of these tabs PER pane and computes active-ness against that
-// pane's own view — the same primitives, fed pane state instead of global
-// nav. See ARCHITECTURE.md's "Multi-pane workspace" section for the target
-// model and the scroll/nav constraints that migration must honor.
+// It is deliberately dependency-free and pane-agnostic. The workspace holds
+// these tabs per pane and computes active-ness against pane state.
 
 // The Settings tab — a single-instance builder surface, not a chat/app.
 //
@@ -25,9 +19,6 @@
 // string — unlike chat/app ids there is no per-instance identity — which is why
 // `settingsTab()` takes no argument and `SETTINGS_TAB_KEY` is a constant.
 //
-// Deliberately kept OUT of the legacy `mobius-open-tabs` projection (readOpenTabs
-// below drops any non-chat/app kind): that flat key is a one-release rollback
-// mirror for shells that predate the Settings tab, so it must stay chat/app-only.
 export const SETTINGS_ID = 'settings'
 export const SETTINGS_TAB_KEY = 'settings:settings'
 export function settingsTab() { return { kind: 'settings', id: SETTINGS_ID } }
@@ -71,42 +62,4 @@ export function tabNavTarget(tab) {
   return tab.kind === 'app'
     ? { view: 'canvas', opts: { appId: Number(tab.id) } }
     : { view: 'chat', opts: { chatId: tab.id } }
-}
-
-const STORAGE_KEY = 'mobius-open-tabs'
-
-// Restore the open set from owner-written storage. Forgiving by design (a
-// hand-edited or corrupt store must never crash the shell): drop malformed
-// entries, drop app tabs whose id isn't a finite number (they would become
-// NaN in tabNavTarget and never resolve), and dedup after normalizing so two
-// id forms of the same tab can't render duplicate React keys. The kind filter
-// keeps this legacy projection chat/app-only — a Settings tab is never mirrored
-// here (it lives only in the versioned workspace blob).
-export function readOpenTabs(storage = sessionStorage) {
-  try {
-    const parsed = JSON.parse(storage.getItem(STORAGE_KEY) || '[]')
-    if (!Array.isArray(parsed)) return []
-    const seen = new Set()
-    const tabs = []
-    for (const raw of parsed) {
-      if (!raw || (raw.kind !== 'chat' && raw.kind !== 'app') || raw.id == null) continue
-      if (raw.kind === 'app' && !Number.isFinite(Number(raw.id))) continue
-      const tab = makeTab(raw.kind, raw.id)
-      const key = tabKey(tab)
-      if (seen.has(key)) continue
-      seen.add(key)
-      tabs.push(tab)
-    }
-    return tabs
-  } catch {
-    return []
-  }
-}
-
-export function writeOpenTabs(tabs, storage = sessionStorage) {
-  try {
-    storage.setItem(STORAGE_KEY, JSON.stringify(tabs))
-  } catch {
-    /* private mode / quota — tabs stay in memory only */
-  }
 }

@@ -1,14 +1,11 @@
-// Pane model — the tiled-workspace successor of the flat tab strip.
+// Pane model — the tiled workspace behind the shell.
 //
 // tabModel.js owns a single flat open set and computes active-ness against one
 // global nav focus. This module generalizes that to a binary split tree of
 // panes: each pane holds its own set of tabModel tabs plus its own active tab,
 // and the workspace tracks which pane has focus. A single pane is the trivial
-// leaf, so today's shell is the degenerate one-pane form of this model — see
-// ARCHITECTURE.md's "Multi-pane workspace" section for the seams and the
-// scroll/nav constraints migration must honor, and
-// docs/design/split-pane-workspace.md for the full v1 design (§1 is this file's
-// spec: the state shape, the normalize() invariants, and the reducer contract).
+// leaf. The state shape, normalize() invariants, reducer contract, and rendering
+// constraints are documented in ARCHITECTURE.md.
 //
 // Everything here is pure and dependency-free except tabModel.js. Tab identity,
 // construction, the numeric-app-id posture, and nav mapping all stay in
@@ -93,9 +90,7 @@ export const BUILDER_POWER_CHROME = (() => {
 export const MIN_PANE_W = 280
 export const MIN_PANE_H = 200
 
-// sessionStorage key for the serialized workspace; the legacy flat key
-// (tabModel's 'mobius-open-tabs') is dual-written for one release so a rollback
-// still finds its tabs.
+// sessionStorage key for the sole serialized workspace state.
 export const STORAGE_KEY = 'mobius-workspace'
 
 // sessionStorage key for the maximized ("focus one pane full-screen") presentation.
@@ -164,8 +159,8 @@ function clampRatio(ratio) {
 }
 
 // Coerce one raw tab to a canonical tabModel tab, or null if it can't be a live
-// tab: this is tabModel.readOpenTabs's posture — drop unknown kinds, missing
-// ids, and app ids that aren't finite numbers (they would become NaN in
+// tab: drop unknown kinds, missing ids, and app ids that aren't finite numbers
+// (they would become NaN in
 // tabNavTarget and never resolve). The Settings tab is the one non-chat/app kind
 // accepted, and only under two conditions that make single-instance and rollback
 // safety structural rather than guarded-around:
@@ -1168,8 +1163,8 @@ export function prune(ws, { liveChatIds, liveAppIds } = {}) {
   return commit(ws, candidate)
 }
 
-// In-order walk of every tab across every pane — the flat projection today's
-// strip renders and the legacy dual-write's ordering baseline.
+// In-order walk of every tab across every pane — the flat projection the
+// drawer, app-frame cache, and workspace strip consume.
 export function flatten(ws) {
   const out = []
   for (const id of leafIds(ws.layout)) {
@@ -1177,33 +1172,6 @@ export function flatten(ws) {
     if (pane) out.push(...pane.tabs)
   }
   return out
-}
-
-// Rollback ordering for the legacy 'mobius-open-tabs' dual-write. Background
-// panes come first, then the focused pane's other tabs, then its active tab,
-// preserving the old key's focus-oriented ordering for older clients.
-// The Settings tab is filtered out: this projection feeds a chat/app-only
-// rollback mirror (readOpenTabs drops it on read anyway), so it never belongs
-// in the legacy key — dropping it here also keeps a chat/app active-last even
-// when Settings is the focused active tab.
-export function flattenRollbackPriority(ws) {
-  const out = []
-  const focusedId = ws.focusedPaneId
-  for (const id of leafIds(ws.layout)) {
-    if (id === focusedId) continue
-    const pane = ws.panes[id]
-    if (pane) out.push(...pane.tabs)
-  }
-  const focused = ws.panes[focusedId]
-  if (focused) {
-    const active = focused.activeTabKey
-    for (const tab of focused.tabs) {
-      if (tabModel.tabKey(tab) !== active) out.push(tab)
-    }
-    const activeTab = focused.tabs.find(tab => tabModel.tabKey(tab) === active)
-    if (activeTab) out.push(activeTab)
-  }
-  return out.filter(tab => !tabModel.isSettingsTab(tab))
 }
 
 // ── Projection: the tree → renderable geometry (design §4) ──────────────────
@@ -1574,8 +1542,8 @@ export function serializeWorkspace(ws) {
 // The raw stored blob, or null if storage is unavailable. sessionStorage.getItem
 // can THROW (SecurityError in a sandboxed frame, disabled storage, a privacy
 // policy), and the caller reads it while evaluating parseWorkspace's argument —
-// outside parseWorkspace's own try/catch. Guarding the read here (the
-// tabModel.readOpenTabs posture) keeps a broken storage from taking down boot.
+// outside parseWorkspace's own try/catch. Guarding the read here keeps broken
+// browser storage from taking down boot.
 export function readWorkspaceRaw(storage) {
   try {
     return storage.getItem(STORAGE_KEY)
@@ -1623,17 +1591,17 @@ export function resolveInitialFocusedPaneView(ws, rawId) {
 
 // Forgiving read: any structural failure — bad JSON, wrong version, or an
 // invariant that survives normalize (a too-deep/too-wide corrupt blob) — falls
-// back to a fresh flat seed. Never throws.
-export function parseWorkspace(raw, { fallbackTabs = [] } = {}) {
+// back to a fresh workspace. Never throws.
+export function parseWorkspace(raw) {
   try {
-    if (typeof raw !== 'string' || raw.length === 0) return seedFromFlatTabs(fallbackTabs)
+    if (typeof raw !== 'string' || raw.length === 0) return seedFromFlatTabs([])
     const parsed = JSON.parse(raw)
-    if (!parsed || parsed.v !== 1) return seedFromFlatTabs(fallbackTabs)
+    if (!parsed || parsed.v !== 1) return seedFromFlatTabs([])
     const normalized = normalize(parsed)
-    if (!isValidWorkspace(normalized)) return seedFromFlatTabs(fallbackTabs)
+    if (!isValidWorkspace(normalized)) return seedFromFlatTabs([])
     return normalized
   } catch {
-    return seedFromFlatTabs(fallbackTabs)
+    return seedFromFlatTabs([])
   }
 }
 

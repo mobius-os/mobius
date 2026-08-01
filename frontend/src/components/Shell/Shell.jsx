@@ -12,14 +12,11 @@ import AppCanvas from '../AppCanvas/AppCanvas.jsx'
 import WalkthroughOverlay from '../Walkthrough/WalkthroughOverlay.jsx'
 import NotificationCenter from '../NotificationBell/NotificationCenter.jsx'
 import {
-  api, apiFetch, jsonOrThrow, probeDeletion, BASE, clearAppRuntimeData,
+  api, apiFetch, jsonOrThrow, probeDeletion, clearAppRuntimeData,
   invalidateShellListCache,
 } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
-import useNavigation, {
-  coldRestoredCanvasAppId,
-  deepLink,
-} from '../../hooks/useNavigation.js'
+import useNavigation, { deepLink } from '../../hooks/useNavigation.js'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -33,14 +30,9 @@ import {
   modelQueries,
   ownerQueries,
 } from '../../hooks/queries.js'
-import { appVersionKey } from '../../lib/appVersion.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
-import {
-  APP_LRU_STORAGE_KEY, mergeAppLru, parseStoredAppLru, requestAppCodeWarm,
-  selectAppsToWarm,
-} from '../../lib/appPrecache.js'
 import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
 import {
@@ -129,6 +121,7 @@ import useDesktopSidebar, {
 } from './useDesktopSidebar.js'
 import useWorkspaceSession from './useWorkspaceSession.js'
 import useShellReloadController from './useShellReloadController.js'
+import useAppFrameCache from './useAppFrameCache.js'
 import ShellBrand from './ShellBrand.jsx'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
@@ -151,7 +144,6 @@ export default function Shell() {
   } = useDesktopSidebar()
 
   const {
-    legacyOpenTabs,
     workspace,
     workspaceStateRef,
     dispatchWorkspace,
@@ -527,53 +519,7 @@ export default function Shell() {
   modelQueries.registry.useQuery({ enabled: !!activeChatId })
   modelQueries.prefs.useQuery({ enabled: !!activeChatId })
 
-  // Cache key from app.updated_at (server-side). Stable across reloads.
-  const versionForApp = useCallback((id) => {
-    const app = apps.find(a => String(a.id) === String(id))
-    return appVersionKey(app?.updated_at)
-  }, [apps])
-  // Warm LRU of recently-VISIBLE app ids (most-recent first) — the unpinned
-  // remainder of the iframe budget. Each rendered app stays mounted as a hidden
-  // iframe so re-opening it is instant (no module re-fetch, no WebGL re-init).
-  // A ref + version counter (not state) because the rendered set is DERIVED
-  // synchronously from visibleAppIds ∪ this: visible ids are always pinned, and
-  // a post-commit effect would blank a pane whose newly-activated app was never
-  // in the LRU (design §2/§4, finding B). Bounded to keep phone memory
-  // predictable (each Three.js / WebGL app can hold tens of MB).
-  const APP_CACHE_MAX = 6
-  const warmLruRef = useRef(
-    coldRestoredCanvasAppId != null ? [String(coldRestoredCanvasAppId)] : []
-  )
-  const [warmVersion, setWarmVersion] = useState(0)
-  // Drop every warm-LRU id matching `matches` and bump the version so the
-  // synchronous rendered-set derivation re-runs. The version bump is load-bearing
-  // (renderedAppIds deps on it); funnelling all four eviction sites through one
-  // helper makes it impossible to drop an id without the bump (finding: warm-LRU
-  // pattern hand-repeated four times).
-  const dropFromWarmLru = useCallback((matches) => {
-    if (!warmLruRef.current.some(matches)) return
-    warmLruRef.current = warmLruRef.current.filter(id => !matches(id))
-    setWarmVersion(v => v + 1)
-  }, [])
   const [appIntents, setAppIntents] = useState({})
-  // Ids ever observed PRESENT in a fetched /api/apps list. The eviction
-  // effect below treats an app as uninstalled only on a genuine
-  // present→absent transition (it was here, now it's gone), never on a
-  // never-yet-seen id. That distinction is load-bearing: opening an app
-  // whose install raced ahead of the apps query (the moebius:open-app
-  // stale-list path — refreshApps resolves the new id, navTo adds it to
-  // the LRU, but the `apps` derived value lags one render behind) would
-  // otherwise look "absent from the live list" for that one render and
-  // get wrongly evicted the instant it was opened. Tracking observed-
-  // present ids closes the window without a timer: a freshly-opened id
-  // hasn't been seen present yet, so it's exempt until the list catches
-  // up; a real uninstall flips a previously-seen id to absent and evicts.
-  const seenAppIdsRef = useRef(new Set())
-  // One-shot guard for the M5 pre-upgrade-blob slot-app validation: the present->
-  // absent eviction below only fires for ids SEEN present this session, so a slot
-  // app uninstalled while the browser was CLOSED (never seen present) needs a
-  // first-authoritative-fetch check, exactly like the cold-restore probe.
-  const initialSlotReconciledRef = useRef(false)
   // toast state: null | { message, variant, duration, action }
   // variant: 'info' | 'error'  (see components/ui/Toast.jsx)
   const toastSequenceRef = useRef(0)
@@ -726,29 +672,41 @@ export default function Shell() {
   // declared above useNavigation). openTabs is the in-order flat walk that
   // today's single top strip renders.
   const openTabs = useMemo(() => paneModel.flatten(workspace), [workspace])
+  const {
+    appsLiveFetched,
+    dropFromWarmLru,
+    renderedAppIds,
+    versionForApp,
+    warmAppCode,
+  } = useAppFrameCache({
+    apps,
+    appsQuery,
+    visibleAppIds,
+    workspace,
+    openTabs,
+    queryClient,
+    navStackRef,
+    workspaceStateRef,
+    retireAppHistory,
+    tombstoneRoute,
+    dispatchWorkspace,
+  })
   // Becoming a two-tab workspace engages the strip; returning to zero resets it.
   // A single implicit home tab on a fresh session stays visually identical to
   // the pre-workspace shell. State (rather than a render-time ref mutation) keeps
   // this safe under replayed or abandoned concurrent renders.
-  const [tabStripEngaged, setTabStripEngaged] = useState(legacyOpenTabs.length > 0)
+  const [tabStripEngaged, setTabStripEngaged] = useState(openTabs.length >= 2)
   useEffect(() => {
     if (openTabs.length >= 2) setTabStripEngaged(true)
     else if (openTabs.length === 0) setTabStripEngaged(false)
   }, [openTabs.length])
-  // Dual-write on every workspace commit: the versioned blob is authoritative on
-  // boot, and the legacy flat key is mirrored for one release so a rolled-back
-  // client still finds its tabs. The rollback ordering keeps the focused pane
-  // together and its active tab last for older clients.
+  // Persist only the versioned workspace. The former flat-tab rollback mirror
+  // completed its release window and was removed so every boot has one owner.
   useEffect(() => {
     try {
       sessionStorage.setItem(paneModel.STORAGE_KEY, paneModel.serializeWorkspace(workspace))
     } catch { /* private mode / quota — workspace stays in memory only */ }
-    tabModel.writeOpenTabs(
-      tabStripEngaged
-        ? paneModel.flattenRollbackPriority(workspace)
-        : [],
-    )
-  }, [tabStripEngaged, workspace])
+  }, [workspace])
   // Pointer events inside an iframe do not bubble to its positioned shell
   // wrapper. The verified live frame sends a tiny focus signal so app panes have
   // the same click-to-focus semantics as native chat panes.
@@ -1061,50 +1019,6 @@ export default function Shell() {
       ? STANDARD_CHAT_WORLD
       : BUILDER_CHAT_WORLD,
   })
-
-  // ── Synchronous pinned iframe-cache derivation (design §2/§4) ─────────────
-  // renderedAppIds = sortById(visibleAppIds ∪ boundedWarmLRU). Visible ids come
-  // from the projection REGARDLESS of LRU membership and are never evicted, so a
-  // MOVE_TAB that makes a never-visited app visible materializes its wrapper in
-  // the SAME commit — no post-commit effect, no blank pane (finding B). The set is
-  // bounded by APP_CACHE_MAX so hidden history never grows without limit
-  // (§4.1.4). AppCanvas retires physical history in a layout-effect cleanup as a
-  // live frame is swapped or unmounted. Keeping retirement out of this derivation
-  // is load-bearing: React may replay or abandon a render, and render-time registry
-  // mutation would retire a frame that remains committed.
-  const renderedAppIds = useMemo(() => {
-    const result = new Set()
-    for (const id of visibleAppIds) result.add(String(id))
-    // TWO-WORLDS mount identity (design risk 1): PIN the single-screen slot app
-    // even while builder shows, so a world switch never LRU-evicts its iframe or
-    // retires its history. Added BEFORE the warm cap, so visible builder apps may
-    // earn one extra pinned frame for the slot app; the warm
-    // LRU then fills only the remaining capacity.
-    const slot = workspace.singleScreen
-    if (slot && slot.kind === 'app') result.add(String(slot.id))
-    for (const id of warmLruRef.current) {
-      if (result.size >= APP_CACHE_MAX) break
-      result.add(String(id))
-    }
-    return [...result].sort((a, b) => Number(a) - Number(b))
-  }, [visibleAppIds, warmVersion, workspace.singleScreen])
-
-  // Maintain the warm LRU as the visible set changes: currently-visible apps are
-  // the most-recent entries, and a just-hidden app slides into the warm remainder
-  // (capped). Retirement is NOT done here — it happens synchronously in the
-  // derivation above, before the unmount (§4.1.2). This effect only rotates the
-  // bounded warm list and bumps the version so the memo re-derives. AppCanvas's
-  // layout cleanup owns retirement when a resulting eviction actually commits.
-  useEffect(() => {
-    const visible = [...visibleAppIds].map(String)
-    const prevWarm = warmLruRef.current
-    const merged = [...visible, ...prevWarm.filter(id => !visible.includes(id))].slice(0, APP_CACHE_MAX)
-    const changed = merged.length !== prevWarm.length || merged.some((id, i) => id !== prevWarm[i])
-    if (changed) {
-      warmLruRef.current = merged
-      setWarmVersion(v => v + 1)
-    }
-  }, [visibleAppIds])
 
   // Id → row Maps, rebuilt only when the chat/app lists change. labelForTab and
   // the single-pane strip previously ran a linear chats.find/apps.find PER tab
@@ -1605,172 +1519,6 @@ export default function Shell() {
   // evicted frame's history before unmount. No separate activeAppId-rotation
   // effect is needed.
 
-  // Cross-session recency for SW cache warming. The persisted LRU read
-  // once at mount (useState initializer, so the persist effect below
-  // can't clobber it first) feeds the warm-on-load effect; every rendered-set
-  // change then MERGES into storage rather than overwriting, keeping depth
-  // WARM_APP_LIMIT across sessions. Failures degrade to pinned-only warming.
-  const [initialAppLru] = useState(() => {
-    try {
-      return parseStoredAppLru(localStorage.getItem(APP_LRU_STORAGE_KEY))
-    } catch { return [] }
-  })
-  useEffect(() => {
-    // The empty mount state carries no recency information — persisting
-    // it would erase the previous session's signal before it's used.
-    if (renderedAppIds.length === 0) return
-    try {
-      const stored = parseStoredAppLru(localStorage.getItem(APP_LRU_STORAGE_KEY))
-      localStorage.setItem(
-        APP_LRU_STORAGE_KEY, JSON.stringify(mergeAppLru(renderedAppIds, stored)),
-      )
-    } catch { /* storage unavailable (private mode) — warming degrades */ }
-  }, [renderedAppIds])
-
-  // Posts a precache-warming message to the service worker for one app.
-  // The SW handler (moebius:precache-app in sw.js) fetches frame + module
-  // with cache:'reload' and stores them under token-stripped keys, so the
-  // next open of the app is a pure cache read. The module endpoint 401s
-  // without a token, so one is resolved through the SAME query key the
-  // open path uses (priming that cache is a free side benefit); passing
-  // it as a query param mirrors the controlled AppCanvas module broker.
-  // Safe to call speculatively — the SW skips already-cached entries.
-  const warmAppCode = useCallback(async (app) => {
-    try {
-      const token = await queryClient.fetchQuery({
-        queryKey: appQueries.token.key(app.id),
-        queryFn: () => appQueries.token.fetch(app.id),
-        staleTime: 5 * 60_000,
-      })
-      const version = appVersionKey(app.updated_at)
-      // Mirror AppCanvas exactly: fold the frame-file content rev
-      // (meta[mobius-frame-rev]) into `?v=` so the SW pre-warms the SAME
-      // cache key the open path opens. Without it a frame-file redeploy
-      // leaves the pre-warm a miss on first open (AppCanvas still loads
-      // correctly via its own revved URL).
-      const frameRev =
-        (typeof document !== 'undefined' &&
-          document.querySelector('meta[name="mobius-frame-rev"]')?.content) || ''
-      const frameUrl =
-        `${BASE}/api/apps/${app.id}/frame?v=${encodeURIComponent(version)}${frameRev ? '-' + frameRev : ''}`
-      const moduleUrl =
-        `${BASE}/api/apps/${app.id}/module?v=${encodeURIComponent(version)}`
-        + `&token=${encodeURIComponent(token)}`
-      await requestAppCodeWarm({ frameUrl, moduleUrl })
-    } catch { /* best-effort — warming must never break the shell */ }
-  }, [queryClient])
-
-  // Pane-aware tombstone eviction (design §1). When an app is uninstalled out of
-  // band (feature 110 soft-delete) it drops out of /api/apps and the server 404s
-  // its /module + /frame, but its iframe stays mounted (a workspace tab and/or a
-  // warm cached frame). Reconcile against the live list: a confirmed-gone app has
-  // its history retired, its nav-stack routes scrubbed, and its tab CLOSED in ITS
-  // OWN pane — the reducer activates that pane's neighbour or collapses it, never
-  // globally demoting the focused pane unless that IS the pane it closes.
-  //
-  // Gate on a live-confirmed list (isSuccess + isFetchedAfterMount): a
-  // transiently-empty `apps` (cold cache, a refetch that resolved to []) must not
-  // evict valid apps.
-  const appsLiveFetched = appsQuery.isSuccess && appsQuery.isFetchedAfterMount
-  useEffect(() => {
-    if (!appsLiveFetched) return
-    const liveIds = new Set(apps.map(a => a.id))
-    // Record everything the live list currently shows, so a later
-    // disappearance reads as a real uninstall rather than a never-seen id.
-    for (const id of liveIds) seenAppIdsRef.current.add(id)
-    // NOTE (H1): the single-world SLOT app is pinned even while builder paints and is
-    // never "seen present" when it was uninstalled while the browser was CLOSED, so
-    // this present->absent eviction can't cover it. Its one-shot validation lives in
-    // the dedicated 404-probe effect below — an AUTHORITATIVE per-app check, never a
-    // trust of this NetworkFirst list's absence (a stale SW cache fallback would else
-    // delete a still-installed slot app's tab/slot/history on a slow/offline launch).
-    // Candidates: every mounted app frame (rendered set) plus every app tab.
-    const candidates = new Set(renderedAppIds.map(String))
-    for (const tab of openTabs) if (tab.kind === 'app') candidates.add(String(tab.id))
-    if (candidates.size === 0) return
-    // Never evict an app a back-stack entry still points at (a NetworkFirst
-    // /api/apps refetch can transiently omit a still-installed app; a real LOCAL
-    // uninstall scrubs the stack via deleteApp). A currently-VISIBLE tombstone is
-    // NOT exempt — it must be closed even if an earlier visit also left it on the
-    // stack (contract §5.1.2). String-normalized comparison throughout.
-    const navHeld = new Set(
-      navStackRef.current
-        .filter(e => e.view === 'canvas' && e.appId != null)
-        .map(e => String(e.appId))
-    )
-    for (const vid of visibleAppIds) navHeld.delete(vid)
-    // Confirmed stale: seen present before, gone now, and not a protected back
-    // target. A just-opened app not yet seen present survives (stale-list race).
-    const stale = [...candidates].filter(sid => {
-      const nid = Number(sid)
-      return !navHeld.has(sid) && !liveIds.has(nid) && seenAppIdsRef.current.has(nid)
-    })
-    if (stale.length === 0) return
-    const staleSet = new Set(stale)
-    navStackRef.current = navStackRef.current.filter(
-      e => !(e.view === 'canvas' && staleSet.has(String(e.appId)))
-    )
-    for (const sid of stale) {
-      retireAppHistory(sid, 'uninstalled')
-      tombstoneRoute('app', sid)
-      dispatchWorkspace({
-        type: 'CLOSE_TAB',
-        tabKey: tabModel.tabKey(tabModel.makeTab('app', sid)),
-        reason: 'deleted',
-      })
-    }
-    // Drop any warm-only stale frame (not a tab, so CLOSE_TAB was a no-op for it)
-    // so its 404'ing iframe unmounts.
-    dropFromWarmLru(id => staleSet.has(String(id)))
-  }, [apps, appsLiveFetched, openTabs, renderedAppIds, visibleAppIds,
-      navStackRef, retireAppHistory, dispatchWorkspace])
-
-  // One-shot slot-app reconcile (H1). A slot app uninstalled while the browser was
-  // CLOSED is never "seen present" this session, so the eviction above can't reach
-  // it. But its absence from the FIRST live list is only a HINT, never deletion
-  // evidence: /api/apps/ is NetworkFirst (sw.js), so a slow or offline cold launch
-  // can resolve the list from a stale SW cache fallback that TanStack cannot
-  // distinguish from a live response. Per the platform DELETION-EVIDENCE CONTRACT
-  // (probeDeletion), only a real per-app GET /api/apps/{id} 404 (live_app_or_404
-  // tombstone) proves the slot app is gone. This deliberately RHYMES with the chat
-  // cold-restore probe below: list absence hints, the authoritative per-resource 404
-  // decides. A 'deleted' verdict triggers CLOSE_TAB reason:'deleted' (the reducer
-  // clears the slot + scrubs history), retires its physical nav history, drops its
-  // warm frame, and lands the empty single world on the New Chat surface; anything else
-  // (present, offline, timeout) leaves the still-installed slot app pinned.
-  useEffect(() => {
-    if (!appsLiveFetched || initialSlotReconciledRef.current) return
-    initialSlotReconciledRef.current = true
-    const slot = workspaceStateRef.current.ws.singleScreen
-    if (!slot || slot.kind !== 'app') return
-    // The live list already vouches for the slot app → installed, no probe needed.
-    if (apps.some(a => Number(a.id) === Number(slot.id))) return
-    const slotId = slot.id
-    let cancelled = false
-    ;(async () => {
-      const verdict = await probeDeletion(`/apps/${encodeURIComponent(slotId)}`)
-      // Stale-guard: the single-world slot can change while the probe is in flight,
-      // so a verdict for an old slot must never delete the new one.
-      const current = workspaceStateRef.current.ws.singleScreen
-      if (cancelled || !current || current.kind !== 'app'
-          || Number(current.id) !== Number(slotId)) return
-      // Only authoritative deletion evidence tears the slot down; 'exists'/'unknown'
-      // (present, offline, timeout, non-404) leave the slot/tab/history untouched.
-      if (verdict !== 'deleted') return
-      const sid = String(slotId)
-      retireAppHistory(sid, 'uninstalled')
-      tombstoneRoute('app', sid)
-      dispatchWorkspace({
-        type: 'CLOSE_TAB',
-        tabKey: tabModel.tabKey(tabModel.makeTab('app', sid)),
-        reason: 'deleted',
-      })
-      dropFromWarmLru(id => String(id) === sid)
-    })()
-    return () => { cancelled = true }
-  }, [appsLiveFetched, apps, retireAppHistory, tombstoneRoute, dispatchWorkspace,
-      dropFromWarmLru, workspaceStateRef])
-
   // New-app dot detection (state + open-clear live up beside the chat
   // attention machinery). First live list = the session baseline; anything
   // appearing after it is a genuine arrival and gets flagged.
@@ -1795,57 +1543,6 @@ export default function Shell() {
       placeInWorkspace(workspaceRequestsForBuiltApps(builtArrivals))
     }
   }, [apps, appsLiveFetched, placeInWorkspace])
-
-  // One-shot: a cold-restored canvas (moebius_active_app) is OPTIMISTIC —
-  // useNavigation can't see the apps list. Once the live list lands, if the
-  // restored app is gone (uninstalled since), demote the canvas to chat.
-  // The present->absent eviction effect above can't cover this: a restored
-  // id was never 'seen present' this session. See ARCHITECTURE.md (Navigation back-stack + drawer model).
-  const coldRestoreCheckedRef = useRef(false)
-  useEffect(() => {
-    if (!appsLiveFetched || coldRestoreCheckedRef.current) return
-    coldRestoreCheckedRef.current = true
-    if (coldRestoredCanvasAppId == null) return
-    const live = new Set(apps.map(a => a.id))
-    if (live.has(coldRestoredCanvasAppId)) return
-    // Restored app is gone (uninstalled since): retire its history and evict the
-    // seeded warm frame so it can't sit stuck-mounted (the present->absent
-    // eviction above never fires for an id never seen present this session). If a
-    // tab was seeded for it (fallback boot), close it in its pane; if the
-    // authoritative workspace never contained it, this is a no-op (contract
-    // §1.4.6).
-    retireAppHistory(coldRestoredCanvasAppId, 'cold-restore-gone')
-    tombstoneRoute('app', coldRestoredCanvasAppId)
-    dispatchWorkspace({
-      type: 'CLOSE_TAB',
-      tabKey: tabModel.tabKey(tabModel.makeTab('app', coldRestoredCanvasAppId)),
-      reason: 'deleted',
-    })
-    const sid = String(coldRestoredCanvasAppId)
-    dropFromWarmLru(id => String(id) === sid)
-  }, [appsLiveFetched, apps, retireAppHistory, dispatchWorkspace])
-
-  // Warm the SW app-code cache once per shell load for the apps the user
-  // is most likely to open next — pinned + most-recent (the persisted
-  // LRU) — so the first app-open of the session is served from cache.
-  // Deliberately off the critical path: waits for a live-confirmed apps
-  // list, then runs at browser idle (with a timeout so a busy page still
-  // warms eventually). Skipped entirely under data-saver. The ref flips
-  // BEFORE scheduling so apps-list refetches can't re-trigger the pass;
-  // once scheduled it is never cancelled — priming the cache after a
-  // view change (or even unmount) is exactly the point.
-  const warmedOnLoadRef = useRef(false)
-  useEffect(() => {
-    if (warmedOnLoadRef.current || !appsLiveFetched || apps.length === 0) return
-    warmedOnLoadRef.current = true
-    if (navigator.connection?.saveData) return
-    const toWarm = selectAppsToWarm(apps, initialAppLru)
-    if (toWarm.length === 0) return
-    const idle = typeof requestIdleCallback === 'function'
-      ? (fn) => requestIdleCallback(fn, { timeout: 5000 })
-      : (fn) => setTimeout(fn, 1500)
-    idle(() => { for (const app of toWarm) warmAppCode(app) })
-  }, [appsLiveFetched, apps, initialAppLru, warmAppCode])
 
   usePushSubscription()
 

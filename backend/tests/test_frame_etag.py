@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app import compiler
-from app.routes.apps import _frame_etag
+from app.routes.app_runtime import _frame_etag
 from test_app_fixtures import create_local_app
 
 

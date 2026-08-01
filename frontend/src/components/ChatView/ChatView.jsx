@@ -5,7 +5,6 @@ import {
   useLayoutEffect,
   useCallback,
   useMemo,
-  useSyncExternalStore,
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
@@ -23,6 +22,7 @@ import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import useTranscriptState from './hooks/useTranscriptState.js'
 import useComposerDraftState from './hooks/useComposerDraftState.js'
+import useChatRuntimePolicy from './hooks/useChatRuntimePolicy.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import { hasSendablePayload } from './composerSubmission.js'
@@ -42,8 +42,6 @@ import { formatResetTime } from './resetTime.js'
 import {
   resetDeadlineDelay,
   resetDeadlineState,
-  saveAutoResumePolicy,
-  saveRestartResumePolicy,
 } from './autoResumePolicy.js'
 import {
   EMPTY_CHAT_RUN_SIGNAL,
@@ -51,10 +49,7 @@ import {
   chatRunSignalDelta,
 } from '../../lib/chatRunSignal.js'
 import {
-  clearProviderSwitch,
-  getProviderSwitchState,
   isProviderSwitchBlocking,
-  subscribeProviderSwitch,
 } from './providerSwitch.js'
 import { questionKey } from './questionKey.js'
 import { clearChatQuestionDrafts } from './questionDraft.js'
@@ -359,18 +354,6 @@ export default function ChatView({
     restoreDurableDraft,
   } = useComposerDraftState({ chatId, hidden, inputRef })
 
-  // Per-chat agent runtime config (provider, agent_settings_json,
-  // effective_agent_settings, has_assistant_turns). Resolved by the
-  // initial /chats/{id} fetch and used to drive ChatSettingsPanel
-  // (the model + effort picker inside the `+` popover). A canonical create or
-  // earlier detail cache can provide it immediately; otherwise the picker
-  // stays hidden until the fetch lands.
-  const [chatInfo, setChatInfo] = useState(() => cached?.chatInfo ?? null)
-  const [autoResumeSaving, setAutoResumeSaving] = useState(false)
-  const [autoResumeError, setAutoResumeError] = useState('')
-  const [autoResumeErrorSource, setAutoResumeErrorSource] = useState('')
-  const [restartResumeSaving, setRestartResumeSaving] = useState(false)
-  const [restartResumeError, setRestartResumeError] = useState('')
   const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
     EMPTY_CHAT_RUN_SIGNAL,
   )
@@ -379,28 +362,7 @@ export default function ChatView({
   // from the current card's reset timestamp below, so a newly loaded card can
   // never render using the previous card's boolean state.
   const [, setLimitResetClockTick] = useState(0)
-  const autoResumeSavingRef = useRef(false)
-  const autoResumeRequestRef = useRef(0)
-  const restartResumeSavingRef = useRef(false)
-  const restartResumeRequestRef = useRef(0)
   const armedEmbeddedResetRef = useRef(null)
-  // This external per-chat state survives ChatView's keyed unmount/remount.
-  // Send handlers also read the store directly, closing the same-frame gap
-  // before React paints disabled controls.
-  const subscribeToProviderSwitch = useCallback(
-    listener => subscribeProviderSwitch(chatId, listener),
-    [chatId],
-  )
-  const readProviderSwitch = useCallback(
-    () => getProviderSwitchState(chatId),
-    [chatId],
-  )
-  const providerSwitchState = useSyncExternalStore(
-    subscribeToProviderSwitch,
-    readProviderSwitch,
-    readProviderSwitch,
-  )
-  const providerSwitching = providerSwitchState.status === 'switching'
   // The question_id of the AskUserQuestion the runner is currently parked
   // on, set from the live SSE `question` event (onLiveQuestion). It is a
   // FAST-PATH HINT only, never the sole gate: the backend does not persist
@@ -469,82 +431,11 @@ export default function ChatView({
     }, MESSAGE_META_VISIBLE_MS)
   }, [])
   useEffect(() => {
-    autoResumeRequestRef.current += 1
-    autoResumeSavingRef.current = false
-    setAutoResumeSaving(false)
-    setAutoResumeError('')
-    setAutoResumeErrorSource('')
-    restartResumeRequestRef.current += 1
-    restartResumeSavingRef.current = false
-    setRestartResumeSaving(false)
-    setRestartResumeError('')
     setActiveGoalObjective(
       queryClient.getQueryData(chatMessagesQueryKey(chatId))
         ?.activeGoalObjective ?? '',
     )
   }, [chatId, queryClient])
-
-  const handleAutoResumeChange = useCallback(async (next, source = 'card') => {
-    if (autoResumeSavingRef.current) return
-    autoResumeSavingRef.current = true
-    const requestId = ++autoResumeRequestRef.current
-    setAutoResumeSaving(true)
-    setAutoResumeError('')
-    setAutoResumeErrorSource(source)
-    try {
-      const result = await saveAutoResumePolicy({
-        chatId,
-        next,
-        request: apiFetch,
-      })
-      if (requestId !== autoResumeRequestRef.current) return
-      if (result.value !== null) {
-        setChatInfo(prev => prev ? ({
-          ...prev,
-          auto_resume_on_limit: result.value,
-        }) : prev)
-      }
-      setAutoResumeError(result.error)
-    } finally {
-      if (requestId === autoResumeRequestRef.current) {
-        autoResumeSavingRef.current = false
-        setAutoResumeSaving(false)
-      }
-    }
-  }, [chatId])
-
-  const handleAutoResumeSettingsChange = useCallback(
-    next => handleAutoResumeChange(next, 'settings'),
-    [handleAutoResumeChange],
-  )
-
-  const handleRestartResumeChange = useCallback(async next => {
-    if (restartResumeSavingRef.current) return
-    restartResumeSavingRef.current = true
-    const requestId = ++restartResumeRequestRef.current
-    setRestartResumeSaving(true)
-    setRestartResumeError('')
-    try {
-      const result = await saveRestartResumePolicy({
-        chatId,
-        next,
-        request: apiFetch,
-      })
-      if (requestId !== restartResumeRequestRef.current) return
-      if (result.value !== null) {
-        setChatInfo(prev => prev ? ({
-          ...prev,
-          auto_resume_on_restart: result.value,
-        }) : prev)
-      }
-      setRestartResumeError(result.error)
-    } finally {
-      if (requestId === restartResumeRequestRef.current) {
-        restartResumeSavingRef.current = false
-        setRestartResumeSaving(false)
-      }
-    }
-  }, [chatId])
 
   // Pending queue (the items shown in the queued-tray above the
   // composer) lives entirely inside usePendingQueue. Every mutation
@@ -1148,28 +1039,32 @@ export default function ChatView({
     [fetchMessages],
   )
 
-  useEffect(() => {
-    if (hidden) return
-    if (
-      providerSwitchState.status !== 'success'
-      || !providerSwitchState.result
-    ) return
-    const data = providerSwitchState.result
-    setChatInfo(prev => prev ? ({
-      ...prev,
-      agent_settings_json: data.agent_settings_json,
-      provider: data.provider || prev.provider,
-      effective: data.effective || prev.effective,
-    }) : prev)
-    handleCompactionStored()
-    clearProviderSwitch(chatId)
-  }, [
+  // Provider selection and automatic-resume persistence form one per-chat
+  // policy owner. Transcript refresh remains an injected settled outcome.
+  const {
+    autoResumeEnabled,
+    autoResumeError,
+    autoResumeErrorSource,
+    autoResumeSaving,
+    chatInfo,
+    clearAutoResumeError,
+    handleAutoResumeChange,
+    handleAutoResumeSettingsChange,
+    handleRestartResumeChange,
+    mergeChatInfo,
+    providerSwitchState,
+    providerSwitching,
+    restartResumeEnabled,
+    restartResumeError,
+    restartResumeSaving,
+    setChatInfo,
+  } = useChatRuntimePolicy({
     chatId,
-    handleCompactionStored,
+    cached,
     hidden,
-    providerSwitchState.result,
-    providerSwitchState.status,
-  ])
+    onProviderSwitchSettled: handleCompactionStored,
+    request: apiFetch,
+  })
 
   const {
     streamItems,
@@ -3613,8 +3508,6 @@ export default function ChatView({
   const pendingResumeBlock = tailResumableBlock(messages)
   const hasPendingResume = !!pendingResumeBlock
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
-  const autoResumeEnabled = !!chatInfo?.auto_resume_on_limit
-  const restartResumeEnabled = !!chatInfo?.auto_resume_on_restart
   useEffect(() => {
     if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
       if (!pendingLimitResetAt) armedEmbeddedResetRef.current = null
@@ -3666,8 +3559,7 @@ export default function ChatView({
   )
 
   useEffect(() => {
-    setAutoResumeError('')
-    setAutoResumeErrorSource('')
+    clearAutoResumeError()
     let timer = null
     let cancelled = false
     const schedule = () => {
@@ -3686,7 +3578,7 @@ export default function ChatView({
       cancelled = true
       if (timer !== null) clearTimeout(timer)
     }
-  }, [pendingLimitResetAt])
+  }, [clearAutoResumeError, pendingLimitResetAt])
 
   // Visibility of either card is a pure viewport question — an
   // IntersectionObserver rooted at the scroll container is the signal, no
@@ -4229,20 +4121,7 @@ export default function ChatView({
                 onRestartResumeChange={
                   embedded ? undefined : handleRestartResumeChange
                 }
-                onChangeChatInfo={({ agent_settings_json, provider, effective }) => {
-                  // Merge into chatInfo so the next render reflects the
-                  // PATCH without a roundtrip. effective is authoritative
-                  // (backend re-merged on top of the current global file).
-                  // `provider` only changes when the user picked a new one —
-                  // preserve the existing value otherwise so an unrelated
-                  // PATCH doesn't wipe it.
-                  setChatInfo(prev => prev ? ({
-                    ...prev,
-                    agent_settings_json: agent_settings_json,
-                    provider: provider || prev.provider,
-                    effective: effective || prev.effective,
-                  }) : prev)
-                }}
+                onChangeChatInfo={mergeChatInfo}
                 providerSwitchState={providerSwitchState}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}

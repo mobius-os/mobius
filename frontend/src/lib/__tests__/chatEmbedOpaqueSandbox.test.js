@@ -8,7 +8,7 @@ const embedSource = readFileSync(
   'utf8',
 )
 const runtimeSource = readFileSync(
-  new URL('../../../public/mobius-runtime.js', import.meta.url),
+  new URL('../../runtime/chat.js', import.meta.url),
   'utf8',
 )
 const bootstrapSource = readFileSync(

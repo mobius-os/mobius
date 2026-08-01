@@ -173,13 +173,6 @@ export function shouldFreezeStreamingReturn({
 export function answerTurnDisposition(response) {
   if (response?.answer_turn === 'same') return 'same'
   if (response?.answer_turn === 'new') return 'new'
-  if (response?.answer_turn != null) return 'unknown'
-
-  // Rolling-update compatibility: older backends shipped the same semantic
-  // distinction only through `status`. Once both sides carry answer_turn,
-  // future status names cannot silently change row ownership.
-  if (response?.status === 'answer_delivered') return 'same'
-  if (response?.status === 'started') return 'new'
   return 'unknown'
 }
 

@@ -1455,7 +1455,7 @@ export default function useStreamConnection(chatId, {
       // A recovered AskUserQuestion answer (the process restarted after
       // persisting the question block) starts a fresh hidden continuation.
       // Its response declares `answer_turn: "new"` for ChatView's bridge
-      // decision; status remains the rolling-update compatibility signal.
+      // decision; status still owns the transport reconnect below.
       // That is a NEW stream, unlike the in-process answer_delivered path
       // above, so initialize the same reconnect state a visible fresh send
       // would use.

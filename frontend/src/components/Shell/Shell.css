@@ -624,13 +624,27 @@
 /* Desktop productivity shell: the workspace starts at the very top, while a
    narrow left rail remains as the only persistent chrome. Expanding navigation
    turns that same rail into the drawer header (brand + notification bell);
-   collapsing it leaves a stable Möbius mark plus compact quick actions. Density
-   comes from removing redundant chrome, never by scaling the fixed viewport
-   (which clips composers and makes fixed edges drift). */
+   collapsing it leaves a stable Möbius mark plus compact quick actions. */
 @media (min-width: 1024px) {
+  /* The owner-selected productivity density is a document-level relayout, not a
+     transform on .shell. Root zoom expands the layout viewport before painting,
+     so fixed, dvh-sized, and iframe-backed surfaces still meet every edge. Shell
+     pointer interactions bridge client pixels back into layout pixels at their
+     geometry boundaries; keep that contract covered when adding a new drag. */
+  :root {
+    zoom: 0.9;
+  }
+
   .shell {
     --desktop-rail-width: 58px;
     --shell-bar-height: 0px;
+  }
+
+  /* At 90% paint density, 12.5px would land at 11.25px on screen. Keep tabs
+     compact but legible beside 13.5px-painted drawer rows; phone stays at the
+     base 12.5px because it does not inherit desktop density. */
+  .shell__tab-open {
+    font-size: 13.5px;
   }
 
   .shell::before {

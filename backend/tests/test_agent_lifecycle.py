@@ -9,9 +9,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app import models
-from app import chat as chat_module
+from app import chat_event_sink
 from app.agent_lifecycle import normalize_chat_event, record_event
-from app.chat import _ChatEventSink
+from app.chat_event_sink import ChatEventSink
 from test_app_fixtures import create_local_app
 
 
@@ -253,7 +253,7 @@ def test_sink_submits_lifecycle_through_writer_actor(db):
     def publish(self, _event):
       pass
 
-  sink = _ChatEventSink(Bus(), "chat-life", "run-life")
+  sink = ChatEventSink(Bus(), "chat-life", "run-life")
   sink.record_lifecycle({
     "type": "task_start",
     "task_id": "task-1",
@@ -288,8 +288,8 @@ def test_sink_fences_and_retries_unreconstructable_lifecycle_fact(monkeypatch):
       return command.ack
 
   writer = Writer()
-  monkeypatch.setattr(chat_module, "get_writer", lambda: writer)
-  sink = _ChatEventSink(object(), "chat-life", "run-life")
+  monkeypatch.setattr(chat_event_sink, "get_writer", lambda: writer)
+  sink = ChatEventSink(object(), "chat-life", "run-life")
   sink.record_lifecycle({
     "type": "task_start", "task_id": "task-1",
     "provider_session_id": "session-1", "source_event_id": "uuid-1",

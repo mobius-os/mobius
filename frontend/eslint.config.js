@@ -1,0 +1,58 @@
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+
+const commonRules = {
+  ...js.configs.recommended.rules,
+  // The codebase intentionally uses catch-and-degrade boundaries extensively.
+  'no-empty': ['error', { allowEmptyCatch: true }],
+  // Existing modules still carry some owner-facing extension seams. Enabling
+  // this before those APIs are narrowed would turn static analysis into churn;
+  // correctness checks remain hard failures.
+  'no-unused-vars': 'off',
+  'no-useless-escape': 'off',
+  'no-useless-assignment': 'off',
+  'no-regex-spaces': 'off',
+  'no-control-regex': 'off',
+  'preserve-caught-error': 'off',
+}
+
+export default [
+  {
+    ignores: [
+      'dist/**',
+      '.dist-*/**',
+      '.assets-attic/**',
+      'node_modules/**',
+      'public/vendor/**',
+      'public/mobius-runtime.js',
+    ],
+  },
+  {
+    files: ['src/**/*.{js,jsx}', 'scripts/**/*.mjs', 'vite.config.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      parserOptions: { ecmaFeatures: { jsx: true } },
+      globals: {
+        ...globals.browser,
+        ...globals.node,
+        ...globals.serviceworker,
+      },
+    },
+    linterOptions: {
+      reportUnusedDisableDirectives: 'error',
+    },
+    plugins: {
+      'react-hooks': reactHooks,
+    },
+    rules: {
+      ...commonRules,
+      'react-hooks/rules-of-hooks': 'error',
+      // Existing state-owner extractions use deliberate ref-backed dependency
+      // boundaries. Surface new review candidates without making that migration
+      // a prerequisite for correctness linting.
+      'react-hooks/exhaustive-deps': 'warn',
+    },
+  },
+]

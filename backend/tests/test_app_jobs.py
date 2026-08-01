@@ -15,9 +15,8 @@ from pathlib import Path
 import pytest
 from jose import jwt
 
-from app import app_jobs, models
+from app import app_cron, app_jobs, models
 from app.config import get_settings
-from app.install import _crontab_command_path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -28,7 +27,7 @@ def test_cron_parser_resolves_supervised_command_to_real_job():
     "30 5 * * * python3 /app/scripts/app-job-runner.py "
     "57 /data/apps/memory/memory-job.sh"
   )
-  assert _crontab_command_path(line) == (
+  assert app_cron.crontab_command_path(line) == (
     "/data/apps/memory/memory-job.sh"
   )
 
@@ -39,7 +38,7 @@ def test_cron_parser_resolves_wall_clock_gate_to_real_job():
     "--wall-clock Europe/Belgrade 30\\ 2\\ \\*\\ \\*\\ \\* "
     "57 /data/apps/memory/memory-job.sh"
   )
-  assert _crontab_command_path(line) == (
+  assert app_cron.crontab_command_path(line) == (
     "/data/apps/memory/memory-job.sh"
   )
 

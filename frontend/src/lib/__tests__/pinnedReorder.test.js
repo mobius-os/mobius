@@ -1,7 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { computePinnedDrag } from '../../components/Drawer/pinnedReorder.js'
+import {
+  computePinnedDrag,
+  observePinnedOrderHandoff,
+  pinnedEntriesMatchRanks,
+  pinnedOrderHandoffStatus,
+  projectPinnedEntries,
+} from '../../components/Drawer/pinnedReorder.js'
 
 // Four uniform 40px rows stacked from top 0.
 function uniformRows() {
@@ -71,4 +77,109 @@ test('previewed positions equal final natural positions with non-uniform heights
     y += rows.find((r) => r.key === key).height
   }
   assert.deepEqual(previewTop, finalTop)
+})
+
+test('pinned order handoff distinguishes pending, committed, and superseded lists', () => {
+  const expected = ['a', 'c', 'b']
+  assert.equal(pinnedOrderHandoffStatus(['a', 'b', 'c'], expected), 'pending')
+  assert.equal(pinnedOrderHandoffStatus(['a', 'c', 'b'], expected), 'committed')
+  assert.equal(pinnedOrderHandoffStatus(['a', 'b'], expected), 'superseded')
+  assert.equal(pinnedOrderHandoffStatus(['a', 'b', 'd'], expected), 'superseded')
+  assert.equal(pinnedOrderHandoffStatus(['a', 'a', 'b'], expected), 'superseded')
+})
+
+test('mixed chat/app refreshes cannot override the visible pinned order', () => {
+  const entry = (kind, id, pinnedAt) => ({
+    kind,
+    item: { id, pinned_at: pinnedAt },
+  })
+  const mixedSnapshot = [
+    entry('chat', 'c1', '2026-07-30T02:22:25.951'),
+    entry('app', 39, '2026-07-30T02:22:25.996'),
+    entry('app', 80, '2026-07-30T02:22:26.044'),
+  ]
+  const visibleKeys = ['app:39', 'app:80', 'chat:c1']
+  assert.deepEqual(
+    projectPinnedEntries(mixedSnapshot, visibleKeys)
+      .map(({ kind, item }) => `${kind}:${item.id}`),
+    visibleKeys,
+  )
+})
+
+test('pinned handoff waits for exact atomic server ranks from both queries', () => {
+  const entries = [
+    { kind: 'app', item: { id: 39, pinned_at: 'server-a' } },
+    { kind: 'chat', item: { id: 'c1', pinned_at: 'client-c' } },
+  ]
+  const expected = [
+    { key: 'app:39', pinnedAt: 'server-a' },
+    { key: 'chat:c1', pinnedAt: 'server-c' },
+  ]
+  assert.equal(pinnedEntriesMatchRanks(entries, expected), false)
+  entries[1].item.pinned_at = 'server-c'
+  assert.equal(pinnedEntriesMatchRanks(entries, expected), true)
+})
+
+test('pinned preview stays held until the keyed DOM order commits', () => {
+  let keys = ['a', 'b', 'c']
+  let observerCallback = null
+  let disconnects = 0
+  const root = {
+    querySelectorAll() {
+      return keys.map(pinnedKey => ({ dataset: { pinnedKey } }))
+    },
+  }
+  class FakeMutationObserver {
+    constructor(callback) { observerCallback = callback }
+    observe(observedRoot, options) {
+      assert.equal(observedRoot, root)
+      assert.deepEqual(options, { childList: true, subtree: false })
+    }
+    disconnect() { disconnects += 1 }
+  }
+  const settled = []
+  const cancel = observePinnedOrderHandoff(
+    root,
+    ['a', 'c', 'b'],
+    status => settled.push(status),
+    FakeMutationObserver,
+  )
+
+  assert.deepEqual(settled, [], 'old DOM order must keep preview transforms in place')
+  observerCallback()
+  assert.deepEqual(settled, [], 'unrelated mutation before the reorder is still pending')
+
+  keys = ['a', 'c', 'b']
+  observerCallback()
+  assert.deepEqual(settled, ['committed'])
+  assert.equal(disconnects, 1)
+
+  cancel()
+  assert.equal(disconnects, 1, 'cancellation stays idempotent after settlement')
+})
+
+test('a concurrent pin-set change releases a pending preview as superseded', () => {
+  let keys = ['a', 'b', 'c']
+  let observerCallback = null
+  const root = {
+    querySelectorAll() {
+      return keys.map(pinnedKey => ({ dataset: { pinnedKey } }))
+    },
+  }
+  class FakeMutationObserver {
+    constructor(callback) { observerCallback = callback }
+    observe() {}
+    disconnect() {}
+  }
+  const settled = []
+  observePinnedOrderHandoff(
+    root,
+    ['a', 'c', 'b'],
+    status => settled.push(status),
+    FakeMutationObserver,
+  )
+
+  keys = ['a', 'c']
+  observerCallback()
+  assert.deepEqual(settled, ['superseded'])
 })

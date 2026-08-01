@@ -39,7 +39,6 @@ const STYLE_ID = 'mobius-theme'
 const FONT_LINK_ATTR = 'data-theme-font'
 const SLOT_ID = '__mobius-theme__'
 const STORE_KEY = 'mobius-theme'
-const STORE_BG_KEY = 'mobius-theme-bg'
 const DEFAULT_BG = '#0d0d0d'
 const DEFAULT_MODE = 'dark'
 
@@ -89,9 +88,7 @@ export function inferMode(bg) {
  *   2. `localStorage['mobius-theme']` — `{ bg, mode }` persisted by
  *      `applyTheme` on every paint. Carries a warm reload + cold-offline
  *      reopen (served from the SW's cached, slot-EMPTY index.html).
- *   3. `localStorage['mobius-theme-bg']` — a bare hex, the legacy key
- *      kept for one more cycle so a pre-upgrade install still themes.
- *   4. The dark default.
+ *   3. The dark default.
  *
  * `css` is only ever present from the slot (offline reloads paint from
  * the SW-cached <style id="mobius-theme"> that a prior online paint left
@@ -118,12 +115,7 @@ export function resolveTheme({ doc = globalThis.document, store = defaultStore()
       return { bg, mode: d.mode || inferMode(bg) || DEFAULT_MODE }
     }
   } catch {}
-  // 3. Legacy bare-hex key.
-  try {
-    const bg = store && store.getItem(STORE_BG_KEY)
-    if (bg && HEX_RE.test(bg)) return { bg, mode: inferMode(bg) || DEFAULT_MODE }
-  } catch {}
-  // 4. Default.
+  // 3. Default.
   return { bg: DEFAULT_BG, mode: DEFAULT_MODE }
 }
 
@@ -138,9 +130,8 @@ export function resolveTheme({ doc = globalThis.document, store = defaultStore()
  *     inline `--bg` on <html> (beats `:root{}`, keeps the pre-paint var
  *     in lockstep), and `color-scheme`/`data-theme`/iOS status bar from
  *     the mode.
- *   - Persist BOTH `mobius-theme` ({bg,mode}, the new key resolveTheme +
- *     the pre-paint IIFE read) AND `mobius-theme-bg` (bare hex, the
- *     legacy key one-cycle-compatible with the old splash script).
+ *   - Persist `mobius-theme` ({bg,mode}), the sole key shared by
+ *     resolveTheme and the pre-paint IIFE.
  *
  * `doc`/`store` are injectable for tests; default to globals.
  */
@@ -230,14 +221,13 @@ export function applyTheme(theme, { doc = globalThis.document, store = defaultSt
     doc.head.appendChild(themeStyleEl)
   }
 
-  // Persist for the next boot: the new {bg,mode} key the pre-paint IIFE +
-  // resolveTheme read, and the legacy bare-hex key for one-cycle compat.
+  // Persist for the next boot: the {bg,mode} key shared by the pre-paint IIFE
+  // and resolveTheme.
   // Persist only from the top-level shell — opaque app frames intentionally do not share
   // this store and must not clobber the shell-owned theme key.
   if (bg && HEX_RE.test(bg) && (typeof window === 'undefined' || window.parent === window)) {
     try {
       store.setItem(STORE_KEY, JSON.stringify({ bg, mode: mode || DEFAULT_MODE }))
-      store.setItem(STORE_BG_KEY, bg)
     } catch {}
   }
 }
@@ -250,7 +240,7 @@ export function applyTheme(theme, { doc = globalThis.document, store = defaultSt
  *
  * It does the minimum needed to avoid a wrong-mode/wrong-bg flash:
  * resolve {css?, bg, mode} by the SAME precedence as resolveTheme
- * (slot -> mobius-theme -> mobius-theme-bg -> dark default), inject the
+ * (slot -> mobius-theme -> dark default), inject the
  * slot css into <style id="mobius-theme"> when present, and set --bg /
  * data-theme / color-scheme on <html>. The full applyTheme (fonts, meta
  * tags, status bar, persistence) runs once the module loads.
@@ -292,12 +282,6 @@ export const PREPAINT_SRC = `(function () {
           var p = JSON.parse(raw);
           if (p.bg && HEX.test(p.bg)) { bg = p.bg; mode = mode || p.mode || infer(p.bg); }
         }
-      } catch (e) {}
-    }
-    if (!bg) {
-      try {
-        var legacy = localStorage.getItem('mobius-theme-bg');
-        if (legacy && HEX.test(legacy)) { bg = legacy; mode = mode || infer(legacy); }
       } catch (e) {}
     }
     if (!bg) bg = '#0d0d0d';
@@ -350,7 +334,6 @@ export const PREPAINT_SRC = `(function () {
     try {
       if (window.parent === window) {
         localStorage.setItem('mobius-theme', JSON.stringify({ bg: bg, mode: mode }));
-        localStorage.setItem('mobius-theme-bg', bg);
       }
     } catch (e) {}
   } catch (e) {}

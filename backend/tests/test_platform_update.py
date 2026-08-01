@@ -1231,6 +1231,7 @@ def test_paths_need_restart_classifier():
   # a backend RUNTIME file outside backend/app/ (root module, deps) also restarts
   assert pu._paths_need_restart(["backend/config_helper.py"]) is True
   assert pu._paths_need_restart(["backend/requirements.txt"]) is True
+  assert pu._paths_need_restart(["backend/requirements.lock"]) is True
   # the platform constitution is process-cached even though it is not Python
   assert pu._paths_need_restart(["skill/core.md"]) is True
   # a rename OUT of backend/app (with --no-renames the delete side shows) restarts

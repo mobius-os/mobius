@@ -110,7 +110,7 @@ else
   echo "wt-pytest: neither shared venv nor image pytest is available" >&2
   echo "  create the shared venv once with:" >&2
   echo "    python3 -m venv \"$MAIN/backend/.venv\" \\" >&2
-  echo "      && \"$MAIN/backend/.venv/bin/pip\" install -r \"$MAIN/backend/requirements.txt\"" >&2
+  echo "      && \"$MAIN/backend/.venv/bin/pip\" install --require-hashes -r \"$MAIN/backend/requirements.lock\"" >&2
   exit 1
 fi
 cd "$ROOT/backend" || exit 1
@@ -124,12 +124,32 @@ cd "$ROOT/backend" || exit 1
 # and mutate this checkout's .git (flip core.bare / append "Initialize app
 # repo" commits). Verified safe: no backend test relies on implicit discovery
 # of the enclosing repo, and the app-git tests use explicit -C <tmp_path>.
-exec env \
+TEST_ENV=(env \
   GIT_CEILING_DIRECTORIES="$ROOT" \
   MOBIUS_TEST_RUNTIME=1 \
   MOEBIUS_SKIP_BOOTSTRAP=1 \
   API_BASE_URL=http://127.0.0.1:9 \
   PATH="$ESB_DIR:${PATH:-}" \
   NODE_PATH="$NODE_MODULES${NODE_PATH:+:$NODE_PATH}" \
-  SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}" \
-  "$PYTHON" -m pytest -p no:cacheprovider "${PYTEST_ARGS[@]}"
+  SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}")
+
+if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
+  # Recovery deliberately refuses to start if the platform package is
+  # importable. Exercise the two systems in separate processes instead of
+  # weakening that production invariant to make one pytest process convenient.
+  "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider \
+    --ignore=tests/test_recoveryd.py \
+    --ignore=tests/test_recovery_launcher.py \
+    --ignore=tests/test_recovery_throttle.py \
+    --ignore=tests/test_recovery_update.py \
+    || exit $?
+  cd "$ROOT/backend/recovery" || exit 1
+  exec "${TEST_ENV[@]}" "$PYTHON" -m pytest --noconftest -p no:cacheprovider \
+    "$ROOT/backend/tests/test_recoveryd.py" \
+    "$ROOT/backend/tests/test_recovery_launcher.py" \
+    "$ROOT/backend/tests/test_recovery_throttle.py" \
+    "$ROOT/backend/tests/test_recovery_update.py"
+fi
+
+exec "${TEST_ENV[@]}" "$PYTHON" -m pytest -p no:cacheprovider \
+  "${PYTEST_ARGS[@]}"

@@ -7,6 +7,10 @@ const css = readFileSync(
   'utf8',
 )
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const appFrameCache = readFileSync(
+  new URL('../useAppFrameCache.js', import.meta.url),
+  'utf8',
+)
 const workspaceSession = readFileSync(
   new URL('../useWorkspaceSession.js', import.meta.url),
   'utf8',
@@ -71,15 +75,15 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   // Only a fallback workspace may be treated as implicit. A valid one-leaf
   // single-screen blob intentionally has an empty legacy mirror; resetting it
   // on a deep link would silently change its view mode back to builder.
-  assert.match(workspaceSession, /const replaceImplicitBootTab = !blobValid\s*\n?\s*&& legacyOpenTabs\.length === 0/)
-  assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(legacyOpenTabs\.length > 0\)/)
+  assert.match(workspaceSession, /const replaceImplicitBootTab = !blobValid\s*\n?\s*&& Object\.keys\(workspace\.panes\)\.length === 1/)
+  assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(openTabs\.length >= 2\)/)
   assert.match(shell, /if \(openTabs\.length >= 2\) setTabStripEngaged\(true\)/)
   assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)
   // With splits ON the strip follows the EFFECTIVE builder world only (never
   // single mode or an immersive takeover); the engaged latch is the kill-switch
   // world's legacy rule.
   assert.match(shell, /const tabStripVisible = !immersiveActive\s*\n?\s*&& \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
-  assert.match(shell, /tabStripEngaged[\s\S]*?paneModel\.flattenRollbackPriority\(workspace\)[\s\S]*?: \[\]/)
+  assert.doesNotMatch(shell, /mobius-open-tabs|flattenRollbackPriority|writeOpenTabs/)
   // v2 DELETED the legacy sole-tab "unpin" shortcut (deletion list): the sole-tab
   // close is always a real CLOSE_TAB now, so an emptied builder auto-returns to
   // single. The ONE unified close takes a tab object + opts (INV 13).
@@ -895,7 +899,11 @@ test('a secondary-button release cannot immediately select a flipped drawer menu
 })
 
 test('launcher cards and drawer rows share the same long-press threshold and movement slop', () => {
-  assert.match(drawer, /import \{ DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX \} from '\.\.\/Shell\/dragController\.js'/)
+  const dragImports = drawer.match(
+    /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
+  )?.[1] || ''
+  assert.match(dragImports, /DRAWER_HOLD_MS/)
+  assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
   assert.match(drawer, /\}, DRAWER_HOLD_MS\)/)
   assert.match(drawer, /> PRE_HOLD_MOVE_PX/)
   assert.doesNotMatch(drawer, /520/)
@@ -1061,6 +1069,9 @@ test('workspace focus, drag label, and cancel visuals remain coherent', () => {
   assert.match(dragBinding, /const viewportWidth = document\.documentElement\.offsetWidth\s*\n\s*\|\| document\.documentElement\.clientWidth\s*\n\s*\|\| window\.innerWidth/)
   assert.match(dragBinding, /const maxLeft = Math\.max\(margin, viewportWidth - chipWidth - margin\)/)
   assert.match(dragBinding, /Math\.max\(margin, Math\.min\(left, maxLeft\)\)/)
+  assert.match(chrome, /clientPointToLocal/)
+  assert.match(chrome, /const axis = dir === 'row' \? point\.x : point\.y/,
+    'divider resizing must project painted pointer coordinates into workspace layout pixels')
   // V6: a CANCELLED drag blurs the drag-origin row so its focus ring clears; a
   // committed drop keeps focus (the tab moved).
   assert.match(dragBinding, /if \(suppressClick && !committed\) srcEl\.blur\?\.\(\)/)
@@ -1088,25 +1099,27 @@ test('H1: the initial slot-app reconcile confirms absence with an authoritative 
   // stale SW cache fallback is indistinguishable from a live response); it probes the
   // AUTHORITATIVE per-app endpoint and deletes ONLY on a real 404, mirroring the chat
   // 404-probe (cancelled + stale guards).
-  const effect = shell.match(/One-shot slot-app reconcile \(H1\)[\s\S]*?workspaceStateRef\]\)/)?.[0] || ''
+  const effect = appFrameCache.match(
+    /A Standard-world slot restored from disk[\s\S]*?\[apps, appsLiveFetched, closeRemovedApp, workspaceStateRef\]\)/,
+  )?.[0] || ''
   assert.ok(effect.length > 0, 'found the slot-app probe effect')
   assert.match(effect, /if \(!appsLiveFetched \|\| initialSlotReconciledRef\.current\) return/)
   assert.match(effect, /const slot = workspaceStateRef\.current\.ws\.singleScreen/)
   // Fast path: a slot app the live list already vouches for is skipped, no probe.
-  assert.match(effect, /if \(apps\.some\(a => Number\(a\.id\) === Number\(slot\.id\)\)\) return/)
+  assert.match(effect, /if \(apps\.some\(app => Number\(app\.id\) === Number\(slot\.id\)\)\) return/)
   // The authoritative per-app probe via the shared deletion-evidence contract, and
   // teardown ONLY on a 'deleted' verdict (a real 404).
   assert.match(effect, /probeDeletion\(`\/apps\/\$\{encodeURIComponent\(slotId\)\}`\)/)
-  assert.match(effect, /if \(verdict !== 'deleted'\) return/)
+  assert.match(effect, /if \(verdict === 'deleted'\) closeRemovedApp\(slotId, 'uninstalled'\)/)
   // Stale-guard: a slot change mid-probe must never delete the new slot.
   assert.match(effect, /const current = workspaceStateRef\.current\.ws\.singleScreen/)
-  assert.match(effect, /Number\(current\.id\) !== Number\(slotId\)\) return/)
+  assert.match(effect, /Number\(current\.id\) !== Number\(slotId\)[\s\S]*?\) return/)
   // Cancelled-guard cleanup, like the chat cold-restore probe.
   assert.match(effect, /let cancelled = false/)
   assert.match(effect, /return \(\) => \{ cancelled = true \}/)
   // Close as deleted (the reducer clears the slot); the shared dispatch boundary,
   // tested below, owns the New Chat landing rather than this effect patching it.
-  assert.match(effect, /reason: 'deleted'/)
+  assert.match(appFrameCache, /reason: 'deleted'/)
   assert.doesNotMatch(effect, /requestEmptySingleNewChat/)
 })
 
@@ -1119,7 +1132,7 @@ test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unkn
   assert.match(client, /if \(res\.ok\) return 'exists'/)
   assert.match(client, /return 'unknown'/)
   // Both cold-restore probes read the SAME contract (rhyme, not two copies).
-  assert.match(shell, /probeDeletion\(`\/apps\//)
+  assert.match(appFrameCache, /probeDeletion\(`\/apps\//)
   assert.match(shell, /probeDeletion\(`\/chats\//)
 })
 

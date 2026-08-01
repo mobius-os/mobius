@@ -152,9 +152,6 @@ class Chat(Base):
   auto_resume_on_restart = Column(
     Boolean, nullable=False, default=True, server_default=true()
   )
-  # Vestigial: the named-agent feature was removed; column retained
-  # nullable to avoid a prod migration. Nothing reads or writes it.
-  agent_id = Column(String(64), nullable=True, default=None)
   # Drawer pinning: NOT NULL = pinned, NULL = unpinned. Sort key for
   # the chats list — pinned rows render first, ordered by this
   # column DESC (newest pin at top of pinned group). PATCH

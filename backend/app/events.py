@@ -43,7 +43,8 @@ def _normalize_subagent_status(status: str | None) -> str:
 # strip the boot-set `resumable` flag and the pause descriptor. Whitelisted
 # (not a blanket passthrough) so an unexpected event key can't silently pollute
 # the durable transcript: `resumable` drives the one-tap Resume affordance
-# (MsgContent), and `pause` is the single descriptor `chat._pause_note` builds
+# (MsgContent), and `pause` is the single descriptor
+# `chat_event_sink._pause_note` builds
 # — {kind: 'restart'|'stall'|'rate_limit'|'usage_limit', resets_at?} — that
 # ErrorCard reads to render the calm "Paused" family or the live "resets at …"
 # limit card. Folding the whole classification into `pause` keeps this
@@ -265,7 +266,8 @@ _THINKING_INTERRUPTING_TYPES: frozenset[str] = frozenset({
 
 # -- tool-output reduction (contract rule 6) ------------------------------
 # A tool_output larger than this is reduced to a bounded head+tail excerpt on
-# the ONE event funnel (chat.py _ChatEventSink.publish), so the live SSE wire,
+# the ONE event funnel (`chat_event_sink.ChatEventSink.publish`), so the live
+# SSE wire,
 # the catch-up replay, and the persisted Chat.messages blob all carry only the
 # excerpt; the full text is stashed server-side keyed by tool_use_id and
 # fetched lazily on expand. A round-trip costs more than a few KB, so small

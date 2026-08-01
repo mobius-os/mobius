@@ -33,6 +33,26 @@ MAX_STORAGE_BYTES = 50 * 1024 * 1024
 MAX_APP_STORAGE_BYTES = 1024 * 1024 * 1024
 
 
+def rmtree_strict(path: Path) -> None:
+  """Remove a directory tree and fail if any root entry survives.
+
+  ``shutil.rmtree`` deliberately refuses a symlinked root while
+  ``Path.exists`` follows it, so handle links separately and confirm with
+  ``lexists``. Destructive app lifecycle and publication rollback both use
+  this contract before reporting that owner data is gone.
+  """
+  if path.is_symlink():
+    path.unlink()
+    if os.path.lexists(path):
+      raise OSError(f"failed to remove symlink {path}")
+    return
+  if not path.exists():
+    return
+  shutil.rmtree(path)
+  if os.path.lexists(path):
+    raise OSError(f"failed to remove {path}")
+
+
 def file_version_token(file_path: Path) -> str:
   """Returns an opaque version token for a storage file.
 

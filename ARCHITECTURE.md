@@ -66,7 +66,7 @@ The `/data` volume persists across `docker compose build && up -d`, so a new ima
 
 Möbius is meant to be self-hosted on a user-provisioned host — a managed platform (Railway/Render/Fly/PikaPods) or a raw VPS — so "apply a security update" splits into three tiers by who can even act:
 
-- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: bump the pin (`Dockerfile` / `backend/requirements.txt` / `frontend/package.json`), rebuild, recreate. Never `apt upgrade` / `pip install -U` a *running* container — that mutation is ephemeral and drifts the live container away from the reproducible image. `deploy-prod.sh` is the apply path. One deliberate runtime exception: the `mobius` user (the in-product agent) has scoped NOPASSWD sudo for `apt-get`/`apt`/`dpkg` only (`/etc/sudoers.d/mobius-apt`, baked and visudo-validated in the `Dockerfile`), so it can install a genuinely needed OS package at runtime without full root — such installs stay ephemeral until pinned into the image, and the recovery floor deliberately depends on zero apt-installed packages, so a bad package can never take recovery down.
+- **Image userspace** — the Python wheels, npm globals, apt packages, and vendored mini-app libs baked into the image. The agent owns these end-to-end: change the declared constraint (`Dockerfile` / `backend/requirements.txt` / `frontend/package.json`), regenerate the hashed Python lock, rebuild, recreate. Never `apt upgrade` / `pip install -U` a *running* container — that mutation is ephemeral and drifts the live container away from the reproducible image. `deploy-prod.sh` is the apply path. One deliberate runtime exception: the `mobius` user (the in-product agent) has scoped NOPASSWD sudo for `apt-get`/`apt`/`dpkg` only (`/etc/sudoers.d/mobius-apt`, baked and visudo-validated in the `Dockerfile`), so it can install a genuinely needed OS package at runtime without full root — such installs stay ephemeral until pinned into the image, and the recovery floor deliberately depends on zero apt-installed packages, so a bad package can never take recovery down.
 - **Host OS userspace + the Docker engine** — outside every container; patched on the host (`unattended-upgrades` covers the OS packages; the engine is a separate host upgrade).
 - **Host kernel** — *not in the container*; it shares the host's and cannot be patched from inside. On a managed platform the operator patches+reboots the kernel underneath you (the safe default for non-devops owners); on a raw VPS it's the owner's job, via `unattended-upgrades` + livepatch + a scheduled reboot window.
 
@@ -401,7 +401,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Change chat streaming UI | `ChatView/ChatView.jsx` + `ChatView/useStreamConnection.js` (+ `streamReducers.js`) |
 | Change chat scroll/spacer/keyboard | `ChatView/ChatView.jsx` + `ChatView.css`; run the spacer/send-pin tests in repo-root `tests/` |
 | Change drawer / back-stack nav | `frontend/src/hooks/useNavigation.js` + `Shell/Shell.jsx` (read *Navigation back-stack + drawer model* below first) |
-| Change the mini-app iframe / cache | `AppCanvas/AppCanvas.jsx` + `Shell/Shell.jsx` (`appCache`); ETag logic in `routes/apps.py` |
+| Change the mini-app iframe / cache | `AppCanvas/AppCanvas.jsx` + `Shell/Shell.jsx` (`appCache`); ETag and frame/module serving in `routes/app_runtime.py` |
 | Add an app-runtime capability | `frontend/public/mobius-runtime.js` + `app_runtime_inject.js`; bump the compiler artifact revision for additive compiled-bridge changes, or the ABI only for host-incompatible changes |
 | Add a supported app package | Pin it in `frontend/package.json`, add it to `BUNDLED_RUNTIME_LIBS`, and run the compiler/offline-frame contracts |
 | Change offline / SW behavior | `frontend/src/sw.js` + `frontend/src/sw-cache-policy.js` (read *Service worker + offline* below first) |
@@ -970,101 +970,78 @@ export, and writer commands continue to use the full transcript.
 
 **GUARDRAIL — never write `Chat.messages` / `Chat.live_assistant` / `Chat.pending_messages` directly** from a request handler or SDK runner. SQLite WAL serializes commits but NOT the app-level JSON snapshot READ: two readers both see the pre-write snapshot and one silently overwrites the other (the lost-update race the actor closes). The only justified direct writer is `reconcile_interrupted_chats` (`chat.py`, runs at boot before the actor starts); `recovery_chat_runner.py` is actor-independent by design and appends to its own `/data/recovery/chats/<chat_id>.jsonl`, not the `Chat.messages` column.
 
-## Multi-pane workspace (design only)
+## Multi-pane workspace
 
-The shipped feature is a single tab strip that swaps one on-screen view. The
-target is a workspace where tabs can move between tiled panes: a build chat on
-the left and its app preview on the right, or several agent chats side by side.
-Phones degrade to swap-only tabs; tiling is a web/desktop capability.
+The shell ships a responsive tiled workspace. Wide layouts can show several
+chat and app surfaces at once; compact layouts project the focused pair; phones
+keep the same durable workspace but present one practical surface at a time.
+The shell decides geometry from the available content rectangle—callers express
+placement intent and never encode pane ids, split directions, or breakpoints.
 
-### Existing pane seams
+### State and ownership
 
-`frontend/src/components/Shell/tabModel.js` is the openable-item primitive. A
-tab is `{ kind: 'chat' | 'app', id: string }`; the module owns construction,
-identity (`tabKey`, `sameTab`), deduplication, capacity, persistence, navigation
-mapping, and current single-view active state. Construction, identity,
-deduplication, capacity, and `tabNavTarget` carry into panes unchanged. Today
-`isTabActive(tab, view)` maps the global `{ view, chatId, appId }` focus to a
-tab. A pane will instead store `activeTabKey` and compare it with `tabKey(tab)`.
+`frontend/src/components/Shell/paneModel.js` is the pure workspace model. A
+workspace contains a binary `layout` tree, a map of pane records, a focused pane,
+a presentation mode (`single` or `panes`), and the single-screen slot. Each pane
+owns its ordered tabs and `activeTabKey`; tab identity and navigation mapping
+remain in `tabModel.js`. The model normalizes persisted input, enforces unique
+tabs across panes, bounds pane count/depth, collapses empty splits, and returns
+the same reference for no-op transitions.
 
-`Shell.jsx` currently keeps one `openTabs` set, one active-view triple, and the
-hidden app-iframe LRU. This is the degenerate one-pane form of the target model.
+`useWorkspaceSession.js` is the live state owner. It composes reducer transitions
+through a synchronous ref boundary, persists the sole versioned
+`mobius-workspace` session value, owns focused-pane presentation, and projects
+content geometry. A missing or invalid workspace value fails closed to a fresh
+empty workspace; retained active-destination keys can then restore the current
+chat or app through the normal navigation path. There is no parallel flat-tab
+persistence format.
 
-`frontend/src/components/Shell/workspacePlacement.js` is the placement seam.
-Producers issue an `open-item` request with `placement: 'beside-source'`; they
-never name a tab strip, pane id, split direction, or breakpoint. Generic opens
-use `background` / `foreground`. A committed build uses the internal
-`live-preview` activation: it enters Builder, reveals the app in a companion
-pane while keeping the chat focused on wider screens, and activates the app tab
-on phones.
+The render path walks the projected leaves. Each visible chat pane owns its own
+retained `ChatView` surface and scroll controller. App frames remain in the
+global stable-id cache, so moving focus or resizing a pane does not reparent or
+reload an iframe. The global cache cap still applies across visible and retained
+apps.
 
-| Input | Confirmation | Current action |
-| --- | --- | --- |
-| `app_created {appId, chatId}` | Live row exists | Refresh lifecycle/list state |
-| `app_preview_ready {appId, chatId}` | Refetched row matches the app and requesting chat | Apply one `live-preview` `beside-source` request |
-| `app_preview_ready` missing/mismatched ids | No matching live row | Ignore the placement request |
-| Fresh app-list row with `chat_id` | App absent from the established session baseline | Apply the same live-preview request as reconnect fallback |
-| `app_updated` | Live row exists | Refresh CTA/code and live-swap the open frame |
-| Store install or app without `chat_id` | No source-chat relationship | Drawer arrival only |
-| Replayed/duplicate placement | Target app already open | Strict same-reference no-op |
+### Placement and interaction
 
-Every automatic built-preview path passes through
-`resolveWorkspaceRequests`. Direct drawer/user tab opens remain explicit
-foreground navigation and bypass automatic placement by design. Generic
-background work preserves every already-visible surface; a live preview is
-intentionally visible and may activate an existing companion tab without
-moving keyboard focus away from the building chat.
+`workspacePlacement.js` is the policy seam. Producers issue semantic requests
+such as `placement: 'beside-source'`, `activation: 'background'`, or the internal
+`live-preview` activation. `resolveWorkspaceRequests` combines those requests
+with the current model and device projection. App-build previews therefore use
+the same path whether they arrive live or are reconstructed after reconnect.
 
-### Target pane model
+Tab drag/drop, edge splitting, divider resizing, maximized-pane presentation,
+Builder/Standard mode changes, and undo all dispatch through the workspace
+owner. Feasibility is shared: at most four panes, depth at most two, and minimum
+projected dimensions of 280×200. Phone mode admits only top/bottom split intent
+and may project fewer leaves without discarding the underlying tree.
 
-- **Workspace** = a `layout` tree plus a set of `panes`.
-- **Pane** = `{ id, tabs: Tab[], activeTabKey }`, with its own open set and
-  focused tab. The current shell is `panes: [pane0]` with
-  `pane0.tabs = openTabs`.
-- **Layout** = a binary split tree: `{ dir: 'row' | 'col', a, b, ratio }`, with
-  pane leaves. A single pane is the trivial leaf.
-- **Focus** = the pane receiving keyboard input and serving as the current back
-  target.
+### Navigation and lifecycle constraints
 
-`paneModel.js`, beside `tabModel.js`, should own pure layout operations: split
-a pane, move a tab, close a pane, and resize a split. Rendering walks the tree
-and renders each leaf pane's active tab.
+1. **Do not remount ChatView to re-measure.** Each pane owns its scroll geometry;
+   resizing updates that owner while preserving follow-bottom and the current
+   reading anchor.
+2. **Do not reparent keyed app iframes.** Visible app panes count against the
+   global app cache. Stable render ownership avoids reloads and initialization
+   timeouts.
+3. **App ids remain numeric at the navigation boundary.** Every open flows
+   through `tabModel.tabNavTarget`; string/number divergence can double-mount an
+   app frame.
+4. **History entries carry pane ownership.** `useNavigation.js` tags shell
+   entries with the restorable route and pane hint, and repairs that hint when
+   focus or tab ownership changes. Back/Forward must not infer a pane from
+   visual order.
+5. **Single and Builder are two projections of one durable workspace.** Mode
+   transitions capture presentation state but never maintain a second layout
+   model. The single-screen slot is explicit, including an intentional null New
+   Chat destination.
+6. **Test behavior at the owner boundary.** Pure model tests cover invariants and
+   reference stability; hook tests cover same-batch transition composition;
+   browser tests cover resize, drag, navigation, and scroll continuity.
 
-### Localized migration path
-
-1. Introduce `paneModel.js` and a workspace reducer. Seed one pane from today's
-   `openTabs`; do not change the UI yet.
-2. Render the layout tree instead of one `<main>`. The single-pane output must
-   remain identical; this step unlocks two panes.
-3. Add drag-to-tile: dropping a tab on a pane edge splits it and moves the tab.
-   The strip's drag source already has `tabKey`.
-4. Add per-pane chat/app rendering. Today only the active ChatView mounts; a
-   workspace mounts one ChatView per visible chat pane and must obey the
-   constraints below.
-
-### Hard pane constraints
-
-1. **Never remount ChatView to re-measure.** Pane resizing must imperatively
-   reset its grow-only `fullViewHRef` in `useScrollMode` while preserving
-   `FOLLOW_BOTTOM`. Folding pane size into a React key freezes live follow
-   behavior. Each pane owns
-   its own height ref; keyboard resizing is pane-local.
-2. **Never reparent keyed app iframes, and keep the global cap.** Visible app
-   panes count against `APP_CACHE_MAX` (currently four). Preserve id-sorted
-   render order across the workspace; reparenting a sandboxed iframe reloads it
-   and can hit the ten-second loading timeout.
-3. **App ids remain numeric for navigation.** Route every pane open through
-   `tabModel.tabNavTarget`; string/number divergence double-mounts the iframe.
-4. **Design Back and pane focus together.** Multiple panes need per-pane
-   history or explicitly tagged tab/pane history entries dispatched by type.
-   A priority-list guess desynchronizes the Navigation API and sentinel model.
-5. **Test positive behavior.** Assert that a message stays pinned and a pane
-   continues following its stream across resize/toggle. A bound such as
-   `spacer <= client` is insufficient because a broken zero spacer passes it.
-
-`paneModel`, the layout reducer, multi-pane rendering, resizing, and drag/drop
-remain deferred until panes are the explicit task. The tab and placement seams
-above are useful in the shipped one-pane experience today.
+The central extension seam is semantic placement plus pure model operations.
+New workspace features should add an owned transition or projection rather than
+mutating pane-shaped state in `Shell.jsx`.
 
 ## Navigation back-stack + drawer model
 
@@ -1084,7 +1061,7 @@ they race the shell's indexed cursor and break Safari's source-state fallback.
 
 ## Service worker + offline
 
-Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/app-assets/`, `/app-embeds/`, `/recover`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/apps.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
+Möbius uses one root-scoped service worker, `frontend/src/sw.js`, to keep shell and mini-app navigations same-origin when offline. The shell route is the Workbox app-shell path: `NavigationRoute(createHandlerBoundToURL('/index.html'))` serves the precached shell, with `/apps/`, `/app-assets/`, `/app-embeds/`, `/recover`, `/shell/embed`, `/sites`, and selected published-style paths denied so backend-owned documents don't become the SPA by accident. Mini-app code is split from that shell path: `/api/apps/{id}/frame` and `/api/apps/{id}/module` match `isAppCodeRoute()` and go through `appCodeHandler(OFFLINE_APPS_CACHE, { gated: false })` — frame/module caching is deliberately NOT gated by `offline_capable`. Standalone `/apps/<slug>/` navigations use the same handler with `gated: true`: only a `200` carrying `X-Mobius-Offline: 1` is stored; a headerless `200` purges the standalone entry. The server sets that header for `offline_capable` apps in `routes/app_runtime.py:get_frame`/`get_module` and `routes/standalone.py:standalone_shell`.
 
 `appCodeHandler()` normalizes the cache key by stripping `token`/`_`/`install` but KEEPING `v`; freshness rides `?v=<app.updated_at>` becoming a new key, not a connectivity probe. Once a versioned entry exists, `shouldServeCacheFirst()` serves it immediately while `event.waitUntil()` refreshes in the background. Cold paths and refreshes use `cache: 'reload'` through `boundedFetch()` so browser HTTP-cache revalidation can't hand the SW a bodyless `304` (`NET_TIMEOUT_MS` is a 3000ms hang guard, not a latency knob). `appCodeStoreAction()` is the storage policy: ungated frame/module stores every `200`, gated standalone stores only `X-Mobius-Offline: 1`, all non-`200` ignored; `applyAppCodeStore()` tolerates quota failures and deletes superseded same-route entries with a different `v`.
 

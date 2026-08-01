@@ -43,7 +43,8 @@ test('phone and web share one searchable launcher tab', () => {
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*?grid-template-columns: repeat\(4/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
     'launcher cards and drawer rows must enter the same context-menu path')
-  assert.match(drawer, /DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX/)
+  assert.match(drawer, /DRAWER_HOLD_MS/)
+  assert.match(drawer, /PRE_HOLD_MOVE_PX/)
   assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?toggleMenu[\s\S]*?DRAWER_HOLD_MS\)/)
   assert.doesNotMatch(drawer, /520/)
   assert.match(drawer, /menuPlacement=\{openMenu/)
@@ -65,10 +66,14 @@ test('chat and app rows share one placed action menu contract', () => {
     'Delete data must stay app-only')
 })
 
-test('desktop density keeps shell chrome and pointer geometry in one coordinate system', () => {
+test('desktop productivity density is 90% with explicit pointer-geometry bridges', () => {
   const desktop = shellCss.match(/@media \(min-width: 1024px\) \{[\s\S]*$/)?.[0] || ''
-  assert.doesNotMatch(desktop, /(?:^|[;{])\s*zoom\s*:/,
-    'desktop density must not scale the viewport away from pointer coordinates')
+  assert.match(desktop, /:root\s*\{\s*zoom:\s*0\.9;/)
+  assert.match(desktop, /\.shell__tab-open\s*\{\s*font-size:\s*13\.5px;/)
+  assert.match(shellCss, /\.shell__tab-open\s*\{[\s\S]*?font-size:\s*12\.5px;/,
+    'phone keeps the compact tab size without desktop zoom')
+  assert.match(shellCss, /pointer interactions bridge client pixels back into layout pixels/)
+  assert.match(drawer, /clientDeltaToLocal/)
 })
 
 test('the app directory distinguishes loading, errors, and confirmed emptiness', () => {

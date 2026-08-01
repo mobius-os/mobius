@@ -497,12 +497,11 @@ def _converge_legacy_schema(eng) -> None:
   # already-populated rows are filtered out by the WHERE clause and
   # their slugs are read into `taken` so we don't collide with them.
   #
-  # _slugify_for_source_dir is intentionally inlined here rather than
-  # imported from app.routes.apps.  routes/apps.py is on the agent's
-  # write surface (chmod 664) — importing it into the migration path
-  # would mean a broken or agent-edited apps.py prevents the DB from
-  # booting.  The implementation is frozen to this copy; if the slug
-  # algorithm ever changes in apps.py, update both together.
+  # The app_identity slug algorithm is intentionally inlined here. Importing
+  # application lifecycle code into the frozen baseline migration would let a
+  # later app edit prevent the database from booting. The implementation is
+  # frozen to this copy; if the live algorithm changes, decide explicitly
+  # whether old rows should retain their historical identity.
   def _slugify_for_source_dir(name: str) -> str:
     slug = "".join(
       ch if ch.isalnum() else "-" for ch in (name or "").lower()
@@ -757,12 +756,6 @@ def _converge_legacy_schema(eng) -> None:
       # deleted app leaving a stale id behind just reads as "no live
       # owner app," which the route tolerates). See models.Chat.
       _add.append("ALTER TABLE chats ADD COLUMN created_by_app_id INTEGER NULL")
-    if "agent_id" not in chats_cols:
-      # Vestigial column from the removed named-agent feature. Kept
-      # nullable so the model and any pre-removal DBs agree on the
-      # schema without a table rebuild. Nothing reads or writes it.
-      # See models.Chat.agent_id.
-      _add.append("ALTER TABLE chats ADD COLUMN agent_id VARCHAR(64) NULL")
     if "activity_at" not in chats_cols:
       # Drawer ordering key that advances only on owner-send. Backfill
       # existing rows to updated_at so their current order is preserved

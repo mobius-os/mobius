@@ -94,9 +94,9 @@ test('only a recovered question answer starts a new hidden turn', () => {
   assert.equal(answerKeepsCurrentTurn(null), false)
 })
 
-test('answer turn ownership stays compatible with older backends', () => {
-  assert.equal(answerTurnDisposition({ status: 'answer_delivered' }), 'same')
-  assert.equal(answerTurnDisposition({ status: 'started' }), 'new')
+test('answer turn ownership requires the explicit semantic field', () => {
+  assert.equal(answerTurnDisposition({ status: 'answer_delivered' }), 'unknown')
+  assert.equal(answerTurnDisposition({ status: 'started' }), 'unknown')
 })
 
 test('an unknown explicit answer-turn value fails closed to a separate boundary', () => {

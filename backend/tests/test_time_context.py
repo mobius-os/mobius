@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app import models, schemas
-from app.chat import (
+from app.chat_context import (
   CLI_SLASH_COMMANDS,
   _build_time_context,
   _chat_has_goal_intent,

@@ -1,0 +1,402 @@
+"""Runtime-code serving and validation routes for installed apps."""
+
+import asyncio
+import hashlib
+import json
+import re
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import FileResponse, HTMLResponse
+from sqlalchemy.orm import Session
+
+from app import activity, models, theme
+from app.app_identity import ensure_slug
+from app.config import get_settings
+from app.database import get_db
+from app.deps import get_current_owner, resolve_owner_or_app
+from app.http_caching import strip_range
+from app.resource_access import live_app, live_app_or_404
+
+
+router = APIRouter()
+
+
+def _etag_for_app(app: models.App) -> str | None:
+  """Weak ETag derived from `app.updated_at`. Microsecond precision
+  so two updates within the same wall-clock second produce different
+  validators — second-precision risks the agent shipping a fix and
+  the user's cached browser refusing to revalidate."""
+  if not app.updated_at:
+    return None
+  ts_us = int(app.updated_at.timestamp() * 1_000_000)
+  return f'W/"{ts_us}"'
+
+
+def _not_modified_if_match(
+  request: Request,
+  etag: str,
+  offline: bool = False,
+  response_headers: dict[str, str] | None = None,
+) -> Response | None:
+  """Returns a 304 Response if the request's If-None-Match matches
+  `etag`, else None. The 304 keeps the ETag header so a browser
+  re-validating an existing cache entry can keep its validator, and
+  mirrors the X-Mobius-Offline marker so the 304 carries the same
+  cache metadata as the 200 it stands in for. The SW's
+  appCodeStoreAction policy keys on that header for the gated
+  standalone-navigation cache. Callers whose representation metadata changes
+  independently of the body (notably the frame CSP) pass it through so a 304
+  freshens the cached policy instead of preserving obsolete headers."""
+  match = request.headers.get("if-none-match")
+  if match and etag in [v.strip() for v in match.split(",")]:
+    headers = dict(response_headers or {})
+    headers["ETag"] = etag
+    if offline:
+      headers["X-Mobius-Offline"] = "1"
+    return Response(status_code=304, headers=headers)
+  return None
+
+
+_APP_FRAME_CSP = (
+  "sandbox allow-scripts allow-forms allow-popups "
+  "allow-popups-to-escape-sandbox "
+  "allow-top-navigation-by-user-activation"
+)
+
+
+def _frame_etag(
+  app: models.App,
+  frame_path: Path,
+  frame_rev: str | None = None,
+) -> str | None:
+  """Validator for the `/frame` response, combining the app's
+  `updated_at` with the shared runtime-frame file's content and the
+  active theme.
+
+  Unlike the per-app module, the frame serves `app-frame.html` — the
+  isolation boundary + runtime bootstrap — which changes INDEPENDENTLY of any app
+  row. Keying only on `app.updated_at` (as `_etag_for_app` does) means
+  an edit to the frame (e.g. changing the broker protocol) never
+  invalidates an already-installed PWA: it keeps revalidating against
+  an unchanged validator, gets a 304, and runs the stale frame forever.
+  That is exactly how a dropped `/vendor/three/` path pinned clients to
+  a spinner. Folding a hash of the frame's CONTENT in busts every app's
+  frame cache on the next load whenever app-frame.html changes.
+
+  Content hash, not mtime: `cp`, bind-mounts, and backup/restore rewrite
+  mtimes independently of content, which risks UNDER-invalidation (a
+  real content change that keeps its mtime) — the precise failure mode
+  here. The frame file is small, so hashing per request is cheap.
+
+  `frame_rev`: the app-frame.html content hash, already computed once by
+  `load_effective_theme` for the same request. Pass it so the frame file
+  isn't hashed a SECOND time here — the theme bundle and this ETag share
+  one read (both resolve the same candidate list, so the hash is identical;
+  see get_frame). When omitted (None), the hash is computed from
+  `frame_path` as before, so standalone callers and the unit tests are
+  unaffected. An empty rev means the frame was unresolvable — no content
+  part, matching the old read-failure fall-through."""
+  parts: list[str] = []
+  if app.updated_at:
+    parts.append(str(int(app.updated_at.timestamp() * 1_000_000)))
+  if frame_rev is None:
+    try:
+      parts.append(hashlib.sha256(frame_path.read_bytes()).hexdigest()[:16])
+    except OSError:
+      pass
+  elif frame_rev:
+    parts.append(frame_rev)
+  if not parts:
+    return None
+  return 'W/"' + "-".join(parts) + '"'
+
+
+@router.api_route("/{app_id}/frame", methods=["GET", "HEAD"])
+def get_frame(
+  app_id: int,
+  request: Request,
+  db: Session = Depends(get_db),
+):
+  """Serves the mini-app runtime frame HTML.
+
+  Token-free as of 2026-04-27: the parent shell injects the auth
+  token and the current theme via `postMessage` after the iframe
+  loads, instead of having them server-templated into the body.
+
+  Cache freshness model: two independent mechanisms COEXIST. The
+  compound `_frame_etag` (folding `app.updated_at` with the shared
+  frame file's content) plus `Cache-Control: no-cache` drives the
+  browser's HTTP-cache revalidation on cold / non-SW paths — the
+  browser sends `If-None-Match` and gets a 304 when nothing changed
+  or a fresh 200 when `updated_at` advanced or the frame file
+  changed. The service worker revalidates frame/module routes against
+  the same ETag via `appCodeHandler` in `sw.js`; that cache is ungated
+  and applies to every installed app.
+  SEPARATELY, `AppCanvas` appends `?v=<app.updated_at>` to the frame
+  URL, which the SW keeps as its offline cache key (it strips only
+  token/_/install, not `v`), so an app edit changes the SW key and
+  forces a fresh load. `v` is purely a client/SW cache-buster — this
+  endpoint never reads it.
+
+  Frame is intentionally public — it's just the runtime shell
+  (error UI, postMessage broker/bootstrap). Actual app
+  modules at `/api/apps/{id}/module` still require a token. An
+  attacker embedding this frame in their own page would receive
+  the iframe's `moebius:frame-mounted` postMessage on their parent window,
+  but the iframe's origin check (against `window.location.origin`)
+  rejects any reply from a non-Möbius origin, so no token can be
+  coerced into the frame.
+  """
+  app = live_app(db, app_id)
+  if not app or not app.compiled_path:
+    raise HTTPException(status_code=404, detail="App not found.")
+  compiled = Path(app.compiled_path)
+  if not compiled.exists():
+    raise HTTPException(status_code=404, detail="Compiled module missing.")
+
+  # Frame priority: served platform frontend first, then the baked-in fallback.
+  # Resolve this BEFORE the ETag so the validator reflects the frame file's
+  # content (see _frame_etag) — otherwise a changed frame never reaches
+  # installed PWAs.
+  frame_candidates = [
+    Path(get_settings().data_dir)
+    / "platform" / "frontend" / "public" / "app-frame.html",
+    # Repo-relative dev/test fallback (== served clone in-container).
+    Path(__file__).resolve().parents[3] / "frontend" / "public" / "app-frame.html",
+    Path("/app/app-frame.html"),
+  ]
+  frame_path = next((p for p in frame_candidates if p.exists()), None)
+  if frame_path is None:
+    raise HTTPException(status_code=404, detail="Frame not found.")
+
+  # The frame is no longer theme-varying: theme-as-data moved theming to the
+  # client (the frame's pre-paint IIFE reads the __mobius-theme__ slot +
+  # localStorage and paints flash-free; the server no longer injects a
+  # <style>). So the validator keys only on app.updated_at + the
+  # app-frame.html content hash — NOT the theme. A light/dark toggle no
+  # longer needs to bust the frame cache, because the served frame bytes
+  # don't change with the theme. Compute the frame content hash and key the
+  # validator on it plus app.updated_at.
+  frame_rev = theme.frame_content_rev(get_settings().data_dir)
+  etag = _frame_etag(app, frame_path, frame_rev=frame_rev)
+  frame_cache_headers = {
+    "Cache-Control": "no-cache",
+    "Content-Security-Policy": _APP_FRAME_CSP,
+  }
+  if etag:
+    not_modified = _not_modified_if_match(
+      request,
+      etag,
+      app.offline_capable,
+      response_headers=frame_cache_headers,
+    )
+    if not_modified is not None:
+      return not_modified
+
+  html = frame_path.read_text(encoding="utf-8")
+
+  # Per-app server-side substitution of the app/chat ids the runtime needs.
+  html = html.replace(
+    "var _FRAME_APP_ID = 'unknown'",
+    f"var _FRAME_APP_ID = {json.dumps(str(app_id))}",
+  )
+  html = html.replace(
+    "var _FRAME_CHAT_ID = ''",
+    f"var _FRAME_CHAT_ID = {json.dumps(app.chat_id or '')}",
+  )
+
+  # Theme-as-data: the frame no longer has the theme server-injected. Its
+  # pre-paint IIFE reads the __mobius-theme__ slot (when the server fills
+  # one) and the shell's same-origin localStorage to paint --bg / data-theme
+  # / color-scheme flash-free from the fallback :root + the persisted owner
+  # mode. The parent shell still posts moebius:frame-init/-theme for LIVE
+  # swaps without a reload. Removing the injection means the served frame
+  # bytes are theme-independent (so the ETag no longer folds the theme).
+
+  # The element remains unsandboxed until navigation so the shell service
+  # worker can intercept and serve a cached frame offline. Apply the equivalent
+  # sandbox on the RESPONSE: the loaded app still receives an opaque origin,
+  # including when this backend is reached without the edge proxy. Caddy adds
+  # the full resource policy while preserving this sandbox contract. Popups
+  # opened by an explicit app link must escape the opaque-origin sandbox:
+  # otherwise the destination inherits Origin: null and sites such as GitHub
+  # load their document but fail same-origin API/storage requests. This does
+  # not relax the app frame itself or let it navigate the owner shell.
+  headers = dict(frame_cache_headers)
+  if etag:
+    headers["ETag"] = etag
+  # The X-Mobius-Offline header does not gate frame/module caching: the SW
+  # caches code for every installed app via appCodeHandler(OFFLINE_APPS_CACHE,
+  # {gated:false}), regardless of this header. It only gates the separate
+  # standalone-navigation cache and offline write/open semantics.
+  # Offline capability is a function of server state, not a client-pushed list.
+  if app.offline_capable:
+    headers["X-Mobius-Offline"] = "1"
+
+  # app_open: emit on the GET 200 path only — the 304 short-circuit above
+  # already returned for cache-revalidating loads (which would otherwise
+  # double-count every freshness check on a navigation back), and a HEAD is
+  # an existence probe, not a real open, so it must not count either. Best-
+  # effort: a log failure must not block the frame response
+  # (activity.log_event swallows its own OSError).
+  if request.method != "HEAD":
+    activity.log_event(
+      "app_open", app_id=app.id, slug=ensure_slug(db, app),
+    )
+  return HTMLResponse(html, headers=headers)
+
+
+@router.api_route("/{app_id}/module", methods=["GET", "HEAD"])
+def get_module(
+  app_id: int,
+  request: Request,
+  token: str | None = None,
+  db: Session = Depends(get_db),
+):
+  """Serves the compiled JS module for a mini-app.
+
+  Accepts a `token` query parameter so the iframe can load the
+  module without custom request headers (dynamic `import()` doesn't
+  set an Authorization header).
+
+  Cache freshness: ETag derived from `app.updated_at` (microsecond
+  precision) + `Cache-Control: no-cache`. Browser sends
+  `If-None-Match` on every fetch; we return 304 when the app hasn't
+  changed. Matches the `/frame` route's strategy — see comment
+  there for the broader rationale.
+  """
+  # Apps share modules same as they share storage — every mini-app
+  # is authored by the owner's own agent, and a multi-app workflow
+  # may legitimately want to import or interop across them. Any
+  # valid token (owner or app-scoped) is allowed to fetch any
+  # module by id. See CLAUDE.md "Mini-app sandbox — accepted
+  # same-origin decision" for the broader trust model. resolve_owner_
+  # or_app runs the same decode + revocation check the header deps use,
+  # so a signed-out token can't keep pulling module source; the empty-
+  # token guard stays explicit to keep the "Valid token required" 401
+  # (and to avoid feeding a None token into the JWT decoder).
+  if not token:
+    raise HTTPException(
+      status_code=401, detail="Valid token required."
+    )
+  resolve_owner_or_app(token, db)
+  app = live_app(db, app_id)
+  if not app or not app.compiled_path:
+    raise HTTPException(status_code=404, detail="Module not found.")
+  path = Path(app.compiled_path)
+  etag = _etag_for_app(app)
+  offline_capable = bool(app.offline_capable)
+  # FileResponse streams after this function returns. Do not make the stream's
+  # lifetime the database checkout's lifetime.
+  db.close()
+  if not path.exists():
+    raise HTTPException(
+      status_code=404, detail="Compiled module not found on disk."
+    )
+
+  if etag:
+    not_modified = _not_modified_if_match(request, etag, offline_capable)
+    if not_modified is not None:
+      return not_modified
+
+  headers = {"Cache-Control": "no-cache"}
+  if etag:
+    headers["ETag"] = etag
+  # See get_frame: X-Mobius-Offline does not gate in-shell module caching.
+  # The SW caches modules for every installed app regardless of this header;
+  # the header only gates the separate standalone-navigation cache and
+  # offline write/open semantics.
+  if offline_capable:
+    headers["X-Mobius-Offline"] = "1"
+  # The module is a REVALIDATING response (no-cache + stable ETag), so it
+  # must never answer a 206. A `Range: bytes=0-0` probe of a FileResponse
+  # would otherwise let Chromium store the 1-byte slice and later serve it
+  # as a status-200 full body — a black mini-app until the next app update.
+  # Stripping Range here keeps the streamed full-body 200 (see http_caching).
+  strip_range(request)
+  return FileResponse(
+    path,
+    media_type="application/javascript",
+    headers=headers,
+  )
+
+
+@router.get("/{app_id}/validate")
+async def validate_app(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Validates a compiled mini-app for common issues.
+
+  Checks that the compiled file exists, is parseable JS, exports a
+  default, and that the source JSX is present. Returns a report the
+  agent can use to decide whether to offer debugging.
+  """
+  app = live_app_or_404(db, app_id)
+  app_name = app.name
+  jsx_source = app.jsx_source
+  compiled_path = app.compiled_path
+  db.close()
+
+  issues = []
+
+  if not jsx_source:
+    issues.append("No JSX source stored in database.")
+  if not compiled_path:
+    issues.append("No compiled path set — compilation may have failed.")
+  else:
+    path = Path(compiled_path)
+    if not path.exists():
+      issues.append(
+        f"Compiled file missing at {compiled_path}."
+      )
+    else:
+      js = path.read_text(encoding="utf-8")
+      if not js.strip():
+        issues.append("Compiled file is empty.")
+      elif not re.search(r"export\s+default\b|export\s*\{[^}]*\bas\s+default\b", js):
+        issues.append(
+          "Compiled JS has no default export — "
+          "the component won't mount."
+        )
+      # Quick syntax check via node --check if available. Uses
+      # asyncio.create_subprocess_exec so the FastAPI event loop
+      # stays free while node runs (a blocking subprocess.run here
+      # would stall every other request for up to the 5s timeout).
+      proc = None
+      try:
+        proc = await asyncio.create_subprocess_exec(
+          "node", "--check", str(path),
+          stdout=asyncio.subprocess.PIPE,
+          stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+          stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(), timeout=5,
+          )
+        except asyncio.TimeoutError:
+          # Kill the orphan node process; otherwise it lingers
+          # holding the pipe open until the OS reaps it.
+          try:
+            proc.kill()
+            await proc.wait()
+          except ProcessLookupError:
+            pass
+          issues.append("Syntax check timed out.")
+        else:
+          if proc.returncode != 0:
+            stderr = stderr_b.decode("utf-8", errors="replace")
+            issues.append(
+              f"JS syntax error: {stderr.strip()}"
+            )
+      except FileNotFoundError:
+        pass  # node not available — skip this check
+
+  return {
+    "app_id": app_id,
+    "name": app_name,
+    "valid": len(issues) == 0,
+    "issues": issues,
+  }

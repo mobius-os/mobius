@@ -176,7 +176,6 @@ function delDatabase(name, label) {
       const req = indexedDB.deleteDatabase(name)
       req.onsuccess = req.onerror = () => resolve()
       req.onblocked = () => {
-        // eslint-disable-next-line no-console
         console.warn(`mobius: ${label} DB delete blocked by an open connection on logout`)
         resolve()
       }
@@ -421,14 +420,11 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
-    // Re-stamp a chat's pin time WITHOUT invalidating the shell list. Used by
-    // drag-reorder, which re-stamps every pinned row in sequence: the shared
-    // per-mutation invalidation would refetch the list N times mid-sequence and
-    // visibly re-shuffle it. The caller has already applied the final order
-    // optimistically, so no refetch is wanted.
-    repin: (chatId) => apiFetch(`/chats/${chatId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ pinned: true }),
+    // Chats and apps share one pinned section, so its order is one transaction
+    // even though the rows live in two resource tables.
+    reorderPinned: (items) => apiFetch('/chats/pinned-order', {
+      method: 'PUT',
+      body: JSON.stringify({ items }),
     }),
     remove: (chatId) => listAffectingMutation(
       'chats', `/chats/${chatId}`, { method: 'DELETE' },
@@ -453,13 +449,6 @@ export const api = {
     update: (appId, payload) => listAffectingMutation('apps', `/apps/${appId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
-    }),
-    // Re-stamp an app's pin time WITHOUT invalidating the shell list — see
-    // chats.repin. Drag-reorder persists the whole pinned order this way so the
-    // list does not refetch-and-reshuffle on every step.
-    repin: (appId) => apiFetch(`/apps/${appId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ pinned: true }),
     }),
     remove: (appId) => listAffectingMutation(
       'apps', `/apps/${appId}`, { method: 'DELETE' },

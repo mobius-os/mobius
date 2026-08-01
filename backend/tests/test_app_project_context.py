@@ -11,7 +11,7 @@ its strict slug validation — a project_id is used as a path component.
 import os
 
 from app import models
-from app.chat import _build_app_context
+from app.chat_context import _build_app_context
 
 _DATA_DIR = os.environ.get("DATA_DIR", "/tmp")
 

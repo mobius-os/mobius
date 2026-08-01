@@ -60,8 +60,20 @@ docker compose -p mobius-test -f docker-compose.test.yml run --rm pytest
 ```
 
 CI runs the equivalent natively: install `frontend/package-lock.json`, put its
-locked `node_modules/.bin` on `PATH`, install `backend/requirements.txt`, then
-run `pytest -q` from `backend/`.
+locked `node_modules/.bin` on `PATH`, install the hashed
+`backend/requirements.lock` plus `backend/requirements-static.txt`, run Ruff,
+then run the platform suite with an 83% coverage floor. The four recovery
+service test modules run separately from `backend/recovery/` with platform
+fixtures disabled; importing the main platform and recovery floor into one
+Python process would invalidate the isolation those tests protect. Edit
+`requirements.txt` as the human-readable input and regenerate the lock with:
+
+```bash
+cd backend
+python -m pip install -r requirements-static.txt
+python -m piptools compile --generate-hashes --strip-extras \
+  --output-file requirements.lock requirements.txt
+```
 
 For one-off `docker run` probes, use `scripts/docker-probe.sh --timeout
 SECONDS -- ...`. It gives the container an exact identity and removes it at
@@ -73,10 +85,17 @@ the age, CPU, and memory of any active probes.
 
 ```bash
 npm test           # = test:lib + test:hooks (two separate ESM loaders)
+npm run lint       # correctness lint; legacy dependency-array findings warn
+npm run test:coverage
 ```
 
 The two scripts can't be merged: `test:lib` rewrites `import.meta.env`; `test:hooks`
 aliases `react` to a hook-only shim (see `frontend/package.json` scripts).
+
+Prefer behavioral assertions against the module that owns a transition.
+Source-text assertions are reserved for generated artifacts, packaging,
+security boundaries, and other build-time contracts that cannot execute as
+ordinary unit behavior.
 
 **Chat scroll contract.** Before changing `ChatView`, read `ARCHITECTURE.md`
 "Chat scroll + steer contract" and run the send/spacer browser specs. The first

@@ -143,7 +143,7 @@ test('pointer input inside an opaque app frame focuses its owning pane', () => {
 test('an explicit deep link replaces only a fallback implicit home tab', () => {
   assert.match(
     workspaceSession,
-    /const replaceImplicitBootTab = !blobValid[\s\S]*legacyOpenTabs\.length === 0[\s\S]*paneModel\.flatten\(workspace\)\.length <= 1/,
+    /const replaceImplicitBootTab = !blobValid[\s\S]*Object\.keys\(workspace\.panes\)\.length === 1[\s\S]*paneModel\.flatten\(workspace\)\.length <= 1/,
   )
   assert.match(
     navigation,

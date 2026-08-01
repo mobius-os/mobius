@@ -236,7 +236,6 @@ test('applyTheme ignores a non-hex bg (no DOM / no persist mutation)', () => {
   assert.equal(dom.document.body.style.background, '#init')
   assert.equal(dom.meta.content, '#init')
   assert.equal(store.getItem('mobius-theme'), null)
-  assert.equal(store.getItem('mobius-theme-bg'), null)
 })
 
 test('applyTheme sets data-theme + color-scheme + status bar from mode', () => {
@@ -270,10 +269,9 @@ test('applyTheme infers mode from --bg in CSS when no bg arg', () => {
   assert.equal(dom.documentElement.getAttribute('data-theme'), 'light')
 })
 
-test('applyTheme persists both mobius-theme and mobius-theme-bg', () => {
+test('applyTheme persists the structured mobius-theme value', () => {
   applyTheme({ css: ':root{--bg:#f0eeeb;}', bg: '#f0eeeb' }, ctx())
   assert.deepEqual(JSON.parse(store.getItem('mobius-theme')), { bg: '#f0eeeb', mode: 'light' })
-  assert.equal(store.getItem('mobius-theme-bg'), '#f0eeeb')
 })
 
 test('applyTheme does NOT persist inside an iframe (window.parent !== window) â€” the drawer-bleed fix', () => {
@@ -286,11 +284,14 @@ test('applyTheme does NOT persist inside an iframe (window.parent !== window) â€
     globalThis.window = { parent: {} }              // iframe: parent is the shell, not self
     applyTheme({ css: ':root{--bg:#0d0d0d;}', bg: '#0d0d0d', mode: 'dark' }, ctx())
     assert.equal(store.getItem('mobius-theme'), null, 'iframe must NOT write the shared theme key')
-    assert.equal(store.getItem('mobius-theme-bg'), null)
     const top = {}; top.parent = top               // top-level shell: parent === self
     globalThis.window = top
     applyTheme({ css: ':root{--bg:#f0eeeb;}', bg: '#f0eeeb', mode: 'light' }, ctx())
-    assert.equal(store.getItem('mobius-theme-bg'), '#f0eeeb', 'top-level shell persists')
+    assert.deepEqual(
+      JSON.parse(store.getItem('mobius-theme')),
+      { bg: '#f0eeeb', mode: 'light' },
+      'top-level shell persists',
+    )
   } finally {
     if (saved) Object.defineProperty(globalThis, 'window', saved); else delete globalThis.window
   }
@@ -309,21 +310,13 @@ test('resolveTheme: 1) JSON slot wins', () => {
 
 test('resolveTheme: 2) mobius-theme when no slot', () => {
   store.setItem('mobius-theme', JSON.stringify({ bg: '#f0eeeb', mode: 'light' }))
-  store.setItem('mobius-theme-bg', '#0d0d0d')
   const t = resolveTheme(ctx())
   assert.equal(t.bg, '#f0eeeb')
   assert.equal(t.mode, 'light')
   assert.equal(t.css, undefined)
 })
 
-test('resolveTheme: 3) legacy mobius-theme-bg when no slot/new key', () => {
-  store.setItem('mobius-theme-bg', '#f0eeeb')
-  const t = resolveTheme(ctx())
-  assert.equal(t.bg, '#f0eeeb')
-  assert.equal(t.mode, 'light')  // inferred from the bg
-})
-
-test('resolveTheme: 4) dark default when nothing present', () => {
+test('resolveTheme: 3) dark default when nothing present', () => {
   const t = resolveTheme(ctx())
   assert.deepEqual(t, { bg: '#0d0d0d', mode: 'dark' })
 })

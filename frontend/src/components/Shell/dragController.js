@@ -179,6 +179,20 @@ export function clientPointToLocal(point, clientRect, localSize) {
   }
 }
 
+// Convert a painted/client displacement into the CSS-layout displacement an
+// inline transform or resize consumes. Gesture thresholds should stay in client
+// pixels; only cross this boundary when writing or projecting layout geometry.
+export function clientDeltaToLocal(delta, clientRect, localSize) {
+  const clientW = Number(clientRect?.width)
+  const clientH = Number(clientRect?.height)
+  const localW = Number(localSize?.w)
+  const localH = Number(localSize?.h)
+  return {
+    x: Number(delta?.x) * (clientW > 0 && localW > 0 ? localW / clientW : 1),
+    y: Number(delta?.y) * (clientH > 0 && localH > 0 ? localH / clientH : 1),
+  }
+}
+
 function contains(rect, point) {
   return point.x >= rect.x && point.x <= rect.x + rect.w
     && point.y >= rect.y && point.y <= rect.y + rect.h

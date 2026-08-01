@@ -109,12 +109,6 @@
         }
       } catch (e) {}
     }
-    if (!bg) {
-      try {
-        var legacy = localStorage.getItem('mobius-theme-bg');
-        if (legacy && HEX.test(legacy)) { bg = legacy; mode = mode || infer(legacy); }
-      } catch (e) {}
-    }
     if (!bg) bg = '#0d0d0d';
     if (!mode) mode = 'dark';
     if (css) {
@@ -165,7 +159,6 @@
     try {
       if (window.parent === window) {
         localStorage.setItem('mobius-theme', JSON.stringify({ bg: bg, mode: mode }));
-        localStorage.setItem('mobius-theme-bg', bg);
       }
     } catch (e) {}
   } catch (e) {}

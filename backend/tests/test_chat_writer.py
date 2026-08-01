@@ -188,7 +188,8 @@ def test_actor_dispatch_failure_is_operator_visible_in_chat_log():
   """An actor commit failure must land in the chat.log /api/debug/logs reads.
 
   The actor logs via `moebius.chat.writer`, a CHILD of `moebius.chat`, so its
-  records propagate to the RotatingFileHandler `chat._get_logger` attaches to
+  records propagate to the RotatingFileHandler `chat_logging.get_logger`
+  attaches to
   `moebius.chat` — the same `DATA_DIR/logs/chat.log` file `routes/debug.py`
   serves. Before this wiring the actor logged under a sibling name that hit no
   handler, so a commit failure during a must-persist command (the exact

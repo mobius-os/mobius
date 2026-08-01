@@ -396,7 +396,7 @@ def resolve_owner_or_app(token: str, db: Session) -> models.Owner:
   """Resolves an owner (from a full OR app-scoped token string).
 
   The owner-or-app counterpart to `resolve_owner_only`, exposed for the
-  module route in routes/apps.py, which takes the token on a `?token=`
+  module route in routes/app_runtime.py, which takes the token on a `?token=`
   query param (iframe `import()` can't set headers) and deliberately
   accepts any valid token. Going through here applies the same
   revocation check the header dependencies use, so a signed-out token

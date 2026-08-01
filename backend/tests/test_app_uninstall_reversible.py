@@ -704,8 +704,8 @@ def test_recover_migrates_preserved_direct_cron_without_executing_it(
 
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
 
-  with patch("app.install._register_cron") as register, \
-       patch("app.routes.apps._read_live_crontab", return_value=""), \
+  with patch("app.app_cron.register_cron") as register, \
+       patch("app.routes.app_schedules._read_live_crontab", return_value=""), \
        patch("app.routes.apps.subprocess.run") as direct_run:
     response = client.post(f"/api/apps/{app_id}/recover", headers=auth)
 

@@ -113,6 +113,18 @@ export function useMemo(factory, deps) {
   return _slots[i].value
 }
 
+export function useSyncExternalStore(subscribe, getSnapshot) {
+  const snapshotRef = useRef(getSnapshot())
+  snapshotRef.current = getSnapshot()
+  useEffect(() => subscribe(() => {
+    const next = getSnapshot()
+    if (Object.is(next, snapshotRef.current)) return
+    snapshotRef.current = next
+    _rerender()
+  }), [getSnapshot, subscribe])
+  return snapshotRef.current
+}
+
 function _scheduleEffect(fn, deps) {
   const i = _slotIndex++
   if (_slots[i] === undefined) {

@@ -103,8 +103,8 @@ RUN git clone --depth 1 --branch v1.0.6 \
 
 WORKDIR /app
 
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
+COPY backend/requirements.txt backend/requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
     && python -c \
       'from pathlib import Path; import claude_agent_sdk; p = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"; p.unlink(missing_ok=True); assert not p.exists()'
 
@@ -216,7 +216,7 @@ COPY frontend/ ./shell-src/
 # failing the build if any declared input was not copied into the image.
 COPY scripts/test-image-fingerprint.sh /tmp/test-image-inputs/scripts/test-image-fingerprint.sh
 COPY Dockerfile /tmp/test-image-inputs/Dockerfile
-COPY backend/requirements.txt /tmp/test-image-inputs/backend/requirements.txt
+COPY backend/requirements.txt backend/requirements.lock /tmp/test-image-inputs/backend/
 COPY frontend/package.json frontend/package-lock.json /tmp/test-image-inputs/frontend/
 RUN MOBIUS_TEST_IMAGE_INPUT_ROOT=/tmp/test-image-inputs \
       /tmp/test-image-inputs/scripts/test-image-fingerprint.sh \

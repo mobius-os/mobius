@@ -445,7 +445,8 @@ def frame_content_rev(data_dir: str) -> str:
   only advances on an app EDIT, not when the shared app-frame.html is
   REDEPLOYED — so without this rev the service worker keeps serving the stale
   frame until a 2nd-open background revalidate. Mirrors the content hash in
-  routes/apps.py `_frame_etag`, which the SW cache KEY (unlike the HTTP ETag)
+  routes/app_runtime.py `_frame_etag`, which the SW cache KEY (unlike the
+  HTTP ETag)
   ignores. Keep the path candidates in sync with the `/frame` route.
   """
   frame_path = _resolve_frame_path(data_dir)

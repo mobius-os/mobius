@@ -49,3 +49,117 @@ export function computePinnedDrag(rows, fromIndex, deltaY) {
 
   return { above, shifts, slotDelta, finalKeys, changed }
 }
+
+// The drag preview is imperative while the durable list order arrives through
+// React Query on its next notification task. Clearing transforms before React
+// has moved the keyed rows exposes the old order for one paint. Classify that
+// handoff from the rendered keys themselves: an exact match is committed, the
+// same keys in another order are still pending, and a changed key set means a
+// concurrent pin/unpin/delete superseded this drag.
+export function pinnedOrderHandoffStatus(currentKeys, expectedKeys) {
+  if (!Array.isArray(currentKeys) || !Array.isArray(expectedKeys)) {
+    return 'superseded'
+  }
+  if (
+    currentKeys.length === expectedKeys.length
+    && currentKeys.every((key, index) => key === expectedKeys[index])
+  ) return 'committed'
+  if (currentKeys.length !== expectedKeys.length) return 'superseded'
+
+  const current = new Set(currentKeys)
+  const expected = new Set(expectedKeys)
+  if (
+    current.size !== currentKeys.length
+    || expected.size !== expectedKeys.length
+  ) return 'superseded'
+  return currentKeys.every(key => expected.has(key)) ? 'pending' : 'superseded'
+}
+
+function pinnedEntryKey(entry) {
+  return `${entry.kind}:${entry.item.id}`
+}
+
+// While persistence is in flight, this projection is the visible authority for
+// the combined pinned section. Underlying chat/app queries may refresh on
+// different tasks; as long as they still contain the same identities, keep the
+// order the owner just chose instead of letting mixed timestamp snapshots
+// reshuffle it. A changed identity set is a real concurrent pin/unpin/delete and
+// falls back to current server truth.
+export function projectPinnedEntries(entries, orderedKeys) {
+  const currentKeys = entries.map(pinnedEntryKey)
+  if (pinnedOrderHandoffStatus(currentKeys, orderedKeys) === 'superseded') {
+    return entries
+  }
+  const byKey = new Map(entries.map(entry => [pinnedEntryKey(entry), entry]))
+  return orderedKeys.map(key => byKey.get(key))
+}
+
+// The handoff can retire only after BOTH query observers expose the exact ranks
+// returned by the atomic save. Matching order alone is insufficient: one query
+// may still hold client timestamps that happen to sort correctly until the
+// other query refreshes and briefly interleaves against them.
+export function pinnedEntriesMatchRanks(entries, expectedRanks) {
+  if (!Array.isArray(expectedRanks) || entries.length !== expectedRanks.length) {
+    return false
+  }
+  const current = new Map(entries.map(entry => [
+    pinnedEntryKey(entry),
+    String(entry.item.pinned_at || ''),
+  ]))
+  return expectedRanks.every(({ key, pinnedAt }) => (
+    current.get(key) === String(pinnedAt || '')
+  ))
+}
+
+/**
+ * Hold the preview transforms until the keyed DOM order has committed.
+ * MutationObserver fires in the microtask checkpoint after React's DOM move and
+ * before the browser paints, so the caller can clear transforms without ever
+ * revealing the old natural order. Returns an idempotent cancellation function.
+ */
+export function observePinnedOrderHandoff(
+  root,
+  expectedKeys,
+  onSettled,
+  MutationObserverImpl = globalThis.MutationObserver,
+) {
+  let observer = null
+  let settled = false
+
+  const renderedKeys = () => (
+    root && typeof root.querySelectorAll === 'function'
+      ? [...root.querySelectorAll('[data-pinned-key]')]
+        .map(node => node.dataset?.pinnedKey)
+      : []
+  )
+  const settleIfReady = () => {
+    if (settled) return false
+    const status = pinnedOrderHandoffStatus(renderedKeys(), expectedKeys)
+    if (status === 'pending') return false
+    settled = true
+    observer?.disconnect()
+    onSettled(status)
+    return true
+  }
+
+  // The common path is still the old order here. Checking first also keeps the
+  // helper honest for a synchronous renderer or an already-superseded list.
+  if (!settleIfReady()) {
+    if (typeof MutationObserverImpl !== 'function') {
+      settled = true
+      onSettled('superseded')
+    } else {
+      observer = new MutationObserverImpl(settleIfReady)
+      observer.observe(root, { childList: true, subtree: false })
+      // Close the tiny check→observe race if the renderer committed between the
+      // first read and observer registration.
+      settleIfReady()
+    }
+  }
+
+  return () => {
+    if (settled) return
+    settled = true
+    observer?.disconnect()
+  }
+}

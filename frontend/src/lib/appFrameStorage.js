@@ -6,7 +6,7 @@ const SHARED_KEYS = new Set([
   'mobius:setup-complete:v1',
   'mobius:system-setup-ready:v1',
 ])
-const THEME_KEYS = new Set(['mobius-theme', 'mobius-theme-bg'])
+const THEME_KEYS = new Set(['mobius-theme'])
 const LEGACY_KEYS_BY_SLUG = {
   cuberun: new Set([
     'highscores', 'musicEnabled',

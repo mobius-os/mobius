@@ -156,7 +156,7 @@
            src/lib/applyTheme.js). The frame reads its injected theme slot and
            may read the safe compatibility storage snapshot when available;
            when the server fills one. Resolves {css,bg,mode} (slot ->
-           mobius-theme -> mobius-theme-bg -> dark default) and paints --bg /
+           mobius-theme -> dark default) and paints --bg /
            data-theme / color-scheme before <style> parses, so a stale/
            uninjected frame follows the OWNER's persisted mode with no flash.
            applyTheme.prepaint.test.js pins this byte-identical to index.html. -->
@@ -194,12 +194,6 @@
           var p = JSON.parse(raw);
           if (p.bg && HEX.test(p.bg)) { bg = p.bg; mode = mode || p.mode || infer(p.bg); }
         }
-      } catch (e) {}
-    }
-    if (!bg) {
-      try {
-        var legacy = localStorage.getItem('mobius-theme-bg');
-        if (legacy && HEX.test(legacy)) { bg = legacy; mode = mode || infer(legacy); }
       } catch (e) {}
     }
     if (!bg) bg = '#0d0d0d';
@@ -252,7 +246,6 @@
     try {
       if (window.parent === window) {
         localStorage.setItem('mobius-theme', JSON.stringify({ bg: bg, mode: mode }));
-        localStorage.setItem('mobius-theme-bg', bg);
       }
     } catch (e) {}
   } catch (e) {}
@@ -308,7 +301,7 @@
     }
     /* Mode-aware fallback (defense in depth). Gated on data-theme="light" via :where() (zero added specificity, so a server-injected :root or a live theme-swap still wins by source order),
        set by the pre-paint <head> script (shared IIFE) from the owner's persisted
-       localStorage['mobius-theme-bg'] — NOT on OS prefers-color-scheme. A
+       localStorage['mobius-theme'] — NOT on OS prefers-color-scheme. A
        dark-shell owner on a light-OS device therefore keeps the dark :root
        default; light only appears from a positive owner signal (this attribute)
        or from the server-filled __mobius-theme__ slot. No signal => dark

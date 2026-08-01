@@ -52,20 +52,20 @@ class _FakeBroadcast:
 
 
 def _make_sink(chat_id="chat1", run_token="tok1"):
-  """Build a _ChatEventSink with a fake writer and broadcast."""
-  from app import chat as chat_mod
+  """Build a ChatEventSink with a fake writer and broadcast."""
+  from app.chat_event_sink import ChatEventSink
 
   bc = _FakeBroadcast()
-  sink = chat_mod._ChatEventSink(bc, chat_id=chat_id, run_token=run_token)
+  sink = ChatEventSink(bc, chat_id=chat_id, run_token=run_token)
   return sink, bc
 
 
 @pytest.fixture(autouse=True)
 def _patch_writer(monkeypatch):
   """Replace get_writer() with a per-test _FakeWriter instance."""
-  from app import chat as chat_mod
+  from app import chat_event_sink
   writer = _FakeWriter()
-  monkeypatch.setattr(chat_mod, "get_writer", lambda: writer)
+  monkeypatch.setattr(chat_event_sink, "get_writer", lambda: writer)
   return writer
 
 

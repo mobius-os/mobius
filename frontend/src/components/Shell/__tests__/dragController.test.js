@@ -7,7 +7,7 @@ import {
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
   passedSlop, touchMoveIntent, releasedInPlace, holdMsFor, chipOffset,
-  clientPointToLocal,
+  clientPointToLocal, clientDeltaToLocal,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene,
 } from '../dragController.js'
@@ -61,6 +61,25 @@ test('clientPointToLocal keeps ordinary unscaled coordinates unchanged', () => {
       { w: 500, h: 300 },
     ),
     { x: 35, y: 40 },
+  )
+})
+
+test('clientDeltaToLocal keeps zoomed resize and transform writes under the pointer', () => {
+  assert.deepEqual(
+    clientDeltaToLocal(
+      { x: 90, y: -45 },
+      { width: 1224, height: 864 },
+      { w: 1360, h: 960 },
+    ),
+    { x: 100, y: -50 },
+  )
+  assert.deepEqual(
+    clientDeltaToLocal(
+      { x: 48, y: 24 },
+      { width: 500, height: 300 },
+      { w: 500, h: 300 },
+    ),
+    { x: 48, y: 24 },
   )
 })
 

@@ -53,6 +53,7 @@ from app import (
   models,
   source_dirs,
 )
+from app import app_cron
 from app.app_capabilities import contract_and_digest
 from app.app_source_check import check_app_source
 from app.compiler import (
@@ -87,9 +88,9 @@ from app.manifest_contract import (
 # net_utils.py for why the two SSRF validators were unified.
 from app.net_utils import validate_url_safe as _validate_url_safe
 from app.storage_io import atomic_write
-from app.routes.apps import (
-  _derive_source_dir, _reject_if_source_dir_taken, _slugify_for_source_dir,
+from app.app_identity import (
   allocate_unique_slug,
+  reject_if_source_dir_taken as _reject_if_source_dir_taken,
 )
 
 log = logging.getLogger("mobius.install")
@@ -236,43 +237,8 @@ _HTTP_TIMEOUT = 15.0
 # different host.
 _MAX_REDIRECTS = 5
 
-_BAKED_CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
 # Tests override this module attribute to prevent production cron mutation.
-CRON_SCAFFOLD = _BAKED_CRON_SCAFFOLD
-_ALLOW_TEST_CRON_ENV = "MOBIUS_ALLOW_TEST_CRON"
-
-
-def _cron_scaffold() -> Path:
-  """Return an explicit test override or the active production scaffold.
-
-  Startup reconciliation must migrate persisted crontab entries immediately
-  after a platform update, before the next image rebuild refreshes /app. Prefer
-  the served checkout for that production default; retain the baked copy as
-  the degraded-boot floor.
-  """
-  if CRON_SCAFFOLD != _BAKED_CRON_SCAFFOLD:
-    return CRON_SCAFFOLD
-  live = (
-    Path(__file__).resolve().parent.parent
-    / "scripts"
-    / "init-cron-scaffold.sh"
-  )
-  return live if live.is_file() else _BAKED_CRON_SCAFFOLD
-
-
-def _cron_mutation_blocked_in_test_runtime() -> bool:
-  """Whether host crontab writes must fail closed in this process.
-
-  Pytest is occasionally run from inside the production container, where the
-  real scaffold and crontab binary are both available. Its database and
-  DATA_DIR are isolated, but a low-id test app must never escape that boundary
-  and replace a production schedule. Narrow unit tests can opt in only while
-  their crontab/scaffold subprocess is explicitly faked.
-  """
-  return (
-    os.environ.get("MOBIUS_TEST_RUNTIME") == "1"
-    and os.environ.get(_ALLOW_TEST_CRON_ENV) != "1"
-  )
+CRON_SCAFFOLD = app_cron.BAKED_CRON_SCAFFOLD
 
 
 def _validate_manifest(m: dict) -> None:
@@ -1065,90 +1031,6 @@ def clear_pending_conflict_update(source_dir: str | Path) -> None:
   )
 
 
-def _register_cron(slug: str, schedule_expr: str, job_path: Path,
-                   app_id: int | None = None,
-                   timezone: str | None = None,
-                   zone_cron: str | None = None) -> None:
-  """Runs init-cron-scaffold.sh to install the crontab entry.
-
-  ``timezone``/``zone_cron`` (given together) declare the schedule's durable
-  zone-aware identity. The scaffold writes that identity into the complete
-  durable declaration atomically *before* installing the live entry. This
-  ordering means a persistence failure cannot change live behavior while
-  returning failure; a later live-write failure leaves a durable declaration
-  that boot reconciliation can safely retry.
-
-  The scaffold writes both the durable ``init-cron.sh`` declaration and the
-  live crontab entry. On restart, lifespan parses that declaration and rewrites
-  it through the supervised runner; app-owned shell is never executed merely
-  because the container booted. Calling the scaffold for an unchanged
-  ``(slug, schedule, job)`` is idempotent.
-
-  The job script itself is written earlier, in the transactional source
-  write (so a locally edited job survives an update via the per-app git
-  merge); the scaffold preserves an existing job file rather than stubbing
-  it, so it never clobbers what we wrote.
-
-  The job filename (e.g. fetch.sh, from the manifest's schedule.job) is
-  passed to the scaffold so the crontab entry points at the real job —
-  the scaffold defaults to job.sh otherwise, which would leave a
-  manifest that ships fetch.sh firing an empty stub.
-
-  `app_id`, when given, is passed as the scaffold's 4th arg so the
-  crontab command becomes `<job-path> <app_id>`. A reusable job that
-  reads its target app from "$1" (the same contract as the run-job
-  "Generate now" endpoint) then fires correctly from cron. Without it,
-  such a job runs with no id and exits early — which is exactly how a
-  freshly-installed news app's cron lands dead on arrival.
-  """
-  if _cron_mutation_blocked_in_test_runtime():
-    raise HTTPException(
-      500,
-      "Cron mutation is disabled in the test runtime.",
-    )
-  if (timezone is None) != (zone_cron is None):
-    raise HTTPException(
-      500, "Cron registration bug: timezone and zone_cron must be paired.",
-    )
-  if timezone is not None:
-    from app import cron_tz
-
-    if app_id is None:
-      raise HTTPException(
-        500, "A timezone-owned schedule requires an app id.",
-      )
-    if not cron_tz.valid_timezone(timezone):
-      raise HTTPException(500, f"Unknown IANA timezone: {timezone!r}")
-    if cron_tz.parse_daily_cron(zone_cron) is None:
-      raise HTTPException(
-        500, f"Zone-owned schedule must be a plain daily cron: {zone_cron!r}",
-      )
-  scaffold = _cron_scaffold()
-  if not scaffold.exists():
-    # In tests we mock this away; in containers it's always present.
-    raise HTTPException(500, "init-cron-scaffold.sh missing from image.")
-  cmd = [str(scaffold), slug, schedule_expr, job_path.name]
-  if app_id is not None:
-    cmd.append(str(app_id))
-  if timezone is not None:
-    cmd.extend([timezone, zone_cron])
-  # Cron has a deliberately minimal environment. Materialize the configured
-  # backend URL and the active supervisor path into its generated entry so
-  # scheduled jobs use the same live runner and server as Run now.
-  from app.app_jobs import runner_script
-  env = dict(os.environ)
-  env["API_BASE_URL"] = get_settings().api_base_url
-  env["MOBIUS_APP_JOB_RUNNER"] = str(runner_script())
-  result = subprocess.run(
-    cmd, capture_output=True, text=True, timeout=30, env=env,
-  )
-  if result.returncode != 0:
-    raise HTTPException(
-      500,
-      f"Cron registration failed: {result.stderr.strip()[:400]}",
-    )
-
-
 def _reconcile_cron_after_install_rollback() -> None:
   """Best-effort safe restoration after an adopted source-dir move fails.
 
@@ -1160,7 +1042,7 @@ def _reconcile_cron_after_install_rollback() -> None:
   """
   try:
     from app.database import SessionLocal
-    from app.routes.apps import reconcile_app_cron_supervision
+    from app.routes.app_schedules import reconcile_app_cron_supervision
     cron_db = SessionLocal()
     try:
       _count, warnings = reconcile_app_cron_supervision(cron_db)
@@ -1174,47 +1056,12 @@ def _reconcile_cron_after_install_rollback() -> None:
     log.warning("install rollback cron reconciliation failed: %s", exc)
 
 
-def _crontab_command_path(line: str) -> str:
-  """The executable path a crontab job line runs, or "" for a line that
-  runs no job (blank, comment, or a `NAME=value` env/setting line).
-
-  The schedule is either a single `@shorthand` token (@daily/@reboot/…) or
-  five whitespace-separated fields; the rest is the command. cron also lets
-  the command be prefixed with inline `NAME=value` assignments, which we
-  skip to reach the real executable (the first non-assignment token).
-  """
-  s = line.strip()
-  if not s or s.startswith("#"):
-    return ""
-  first = s.split(None, 1)[0]
-  if first.startswith("@"):
-    cmd = (s.split(None, 1) + [""])[1]
-  elif "=" in first:
-    return ""  # NAME=value env/setting line — runs no command
-  else:
-    parts = s.split(None, 5)
-    cmd = parts[5] if len(parts) == 6 else ""
-  toks = cmd.split()
-  while toks and "=" in toks[0] and not toks[0].startswith("/"):
-    toks.pop(0)
-  if not toks:
-    return ""
-  for i, token in enumerate(toks):
-    if token.endswith("/app-job-runner.py") and len(toks) > i + 2:
-      # The supervised runner's job path is always its final argument. A
-      # wall-clock schedule inserts its timezone and source expression before
-      # the app id; using the final argument keeps uninstall parsing aligned
-      # with both ordinary and gated invocations.
-      return toks[-1]
-  return toks[0]
-
-
 def _crontab_without_app(current: str, source_dir: Path) -> str | None:
   """Return `current` crontab text with every line whose COMMAND runs a
   script under `source_dir` removed — or None if nothing matched, so the
   caller can skip rewriting entirely.
 
-  Matches on the command's executable path (see `_crontab_command_path`),
+  Matches on the command's executable path (see `app_cron.crontab_command_path`),
   NOT a whole-line substring: that keeps the news/news-2 prefix safe AND
   avoids dropping an unrelated app whose ARGUMENTS merely reference this
   app's dir (e.g. `... /data/apps/agg/run.sh --feed /data/apps/news/x`).
@@ -1224,7 +1071,7 @@ def _crontab_without_app(current: str, source_dir: Path) -> str | None:
   needle = f"{str(source_dir).rstrip('/')}/"
   kept, dropped = [], False
   for ln in current.splitlines():
-    if _crontab_command_path(ln).startswith(needle):
+    if app_cron.crontab_command_path(ln).startswith(needle):
       dropped = True
     else:
       kept.append(ln)
@@ -1245,7 +1092,7 @@ def _unregister_cron(source_dir: Path) -> None:
   source-tree rmtree this accompanies. Runs `crontab -u mobius` (the
   server runs as mobius, which may edit its own crontab).
   """
-  if _cron_mutation_blocked_in_test_runtime():
+  if app_cron.cron_mutation_blocked_in_test_runtime():
     return
   try:
     listing = subprocess.run(
@@ -2308,13 +2155,15 @@ async def _run_post_commit_effects(
             f"schedule.job {cron_job_name} is not executable — cron/run-job "
             "will fail until the app repo commits the executable bit"
           )
-        if has_cron and CRON_SCAFFOLD.exists():
+        active_cron_scaffold = app_cron.cron_scaffold(CRON_SCAFFOLD)
+        if has_cron and active_cron_scaffold.exists():
           await asyncio.to_thread(
-            _register_cron,
+            app_cron.register_cron,
             slug,
             schedule["default"],
             job_path,
             app.id,
+            scaffold=active_cron_scaffold,
           )
         elif has_cron:
           sentinel = app_data_dir / ".cron-pending.json"
@@ -2511,6 +2360,162 @@ async def _prepare_app_row(
   db.flush()
   return app
 
+@dataclass(frozen=True)
+class ActivationPlan:
+  """Source and manifest state selected by reconciliation for activation."""
+
+  source_tree: dict[str, bytes]
+  static_assets: dict[str, bytes]
+  dropped_source_paths: set[str]
+  exec_paths: frozenset[str]
+  git_exec_paths: frozenset[str]
+  entry_key: str
+  job_name: str | None
+  cloned_install: bool
+  cloned_update: bool
+  merge_applied: bool
+  updating: bool
+  canonical_manifest_url: str
+  capability_contract: dict
+
+
+async def _activate_install_source(
+  db: Session,
+  *,
+  app: models.App,
+  manifest: dict,
+  plan: ActivationPlan,
+  journal: InstallJournal,
+  data_dir: Path,
+) -> str | None:
+  """Publish the reconciled source tree while its source-dir lock is held.
+
+  Returns the upstream equivalence ref that becomes safe to retire only after
+  the caller commits the row. Every filesystem mutation is registered with the
+  journal before this function returns, so the outer transaction retains one
+  rollback boundary.
+  """
+  app.version = str(manifest.get("version", "")).strip() or None
+  app.theme_color = _manifest_color(manifest.get("theme_color"))
+  app.background_color = (
+    _manifest_color(manifest.get("background_color")) or app.theme_color
+  )
+  app.display = _manifest_display(manifest.get("display"))
+
+  entry_source = plan.source_tree[plan.entry_key].decode("utf-8")
+  if plan.updating:
+    permissions = manifest.get("permissions") or {}
+    app.jsx_source = entry_source
+    app.manifest_url = plan.canonical_manifest_url
+    app.cross_app_access = permissions.get(
+      "cross_app_access", app.cross_app_access,
+    )
+    app.share_with_apps = permissions.get(
+      "share_with_apps", app.share_with_apps,
+    )
+    app.chat_log_access = permissions.get(
+      "chat_log_access", app.chat_log_access,
+    )
+    # Privileged grants are opt-in on every version; omission revokes them.
+    app.manage_apps = bool(permissions.get("manage_apps", False))
+    app.manage_skills = bool(permissions.get("manage_skills", False))
+    app.github_access = bool(permissions.get("github_access", False))
+    app.github_connect = bool(permissions.get("github_connect", False))
+    app.filesystem_access = bool(permissions.get("filesystem_access", False))
+    if "offline_capable" in manifest:
+      app.offline_capable = bool(manifest["offline_capable"])
+    if "embeds_agent" in manifest:
+      app.embeds_agent = bool(manifest["embeds_agent"])
+    app.offline_contract = manifest.get("offline") or None
+    app.system_prompt_file = manifest.get("system_prompt") or None
+    app.system_app = bool(manifest.get("system_app", False))
+    app.capability_contract = plan.capability_contract
+
+  staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
+  source_dir = Path(app.source_dir) if app.source_dir else None
+  if source_dir is None:
+    await compile_jsx(app.id, entry_source, out_path=staged_bundle)
+    _publish_install_bundle(
+      app, staged_bundle, journal.rollback_actions, journal.commit_actions,
+    )
+    return None
+
+  _reject_if_source_dir_taken(db, str(source_dir), exclude_id=app.id)
+  source_dir.mkdir(parents=True, exist_ok=True)
+  jsx_file = source_dir / "index.jsx"
+  if not plan.cloned_install:
+    for rel, content in plan.source_tree.items():
+      target = source_dir / rel
+      backup = (
+        jsx_file.with_suffix(".jsx.bak")
+        if rel == "index.jsx"
+        else target.with_name(target.name + ".bak")
+      )
+      target.parent.mkdir(parents=True, exist_ok=True)
+      _assert_within(source_dir, target, f"source_files {rel}")
+      _write_source_file(
+        target,
+        content,
+        backup,
+        journal.created_paths,
+        journal.rollback_actions,
+        journal.commit_actions,
+      )
+      if rel in plan.exec_paths or rel in plan.git_exec_paths:
+        target.chmod(0o755)
+    _prune_dropped_source_files(
+      source_dir,
+      plan.dropped_source_paths,
+      journal.rollback_actions,
+      journal.commit_actions,
+    )
+    if not plan.cloned_update:
+      _check_source_completeness(
+        app_name=str(manifest.get("name") or app.slug),
+        manifest=manifest,
+        source_tree=plan.source_tree,
+        entry_key=plan.entry_key,
+        static_dests=list(plan.static_assets),
+        job_name=plan.job_name,
+      )
+
+  _write_static_assets(
+    source_dir,
+    plan.static_assets,
+    journal.created_paths,
+    journal.rollback_actions,
+    journal.commit_actions,
+  )
+  await compile_jsx(
+    app.id,
+    entry_source,
+    out_path=staged_bundle,
+    source_path=source_dir / plan.entry_key,
+  )
+  _publish_install_bundle(
+    app, staged_bundle, journal.rollback_actions, journal.commit_actions,
+  )
+
+  commit_message = (
+    f"install: {manifest.get('name', app.slug)} "
+    f"v{manifest.get('version', 'unknown')}"
+  )
+  equivalence_target = None
+  if plan.merge_applied and app.upstream_commit:
+    await asyncio.to_thread(
+      app_git.commit_replay,
+      source_dir,
+      app.upstream_commit,
+      commit_message,
+    )
+    equivalence_target = app.upstream_commit
+  else:
+    await asyncio.to_thread(app_git.commit_local, source_dir, commit_message)
+  app.source_commit = await asyncio.to_thread(
+    app_git.head_sha, source_dir, app_git.LOCAL_BRANCH,
+  )
+  return equivalence_target
+
 
 async def install_from_manifest(
   db: Session,
@@ -2673,18 +2678,10 @@ async def install_from_manifest(
   # that left local untouched).
 
   # Phase 3: materialize under one compensation journal.
-  # `created_paths`: files/dirs to delete on failure (and leave on
-  # success). `cleanup_actions`: callables run on the success path
-  # (commit) OR rollback path (revert) — used for backup-rename
-  # rollback on the update path's compiled bundle, so a failed
-  # recompile restores the previous good bundle on disk to match the
-  # DB row that rolled back.
+  # Every filesystem mutation registers its rollback/commit action on this
+  # journal before the durable row commit.
   journal = InstallJournal()
-  created_paths = journal.created_paths
-  rollback_actions = journal.rollback_actions
-  commit_actions = journal.commit_actions
   data_dir = Path(get_settings().data_dir)
-  perms = manifest.get("permissions") or {}
 
   try:
     app = await _prepare_app_row(
@@ -3067,208 +3064,28 @@ async def install_from_manifest(
       # conflict skips it (the source stays the local edits, served by the prior
       # bundle). The no-source_dir legacy path falls through with no lock.
       if mode != "conflict":
-        # Stamp the installed version on the row now that we know the source is
-        # actually being applied (the conflict path skips this with the old
-        # version intact). This is what GET /api/apps/ exposes, so the store and
-        # any out-of-band caller read the installed version without a side-map.
-        app.version = str(manifest.get("version", "")).strip() or None
-        app.theme_color = _manifest_color(manifest.get("theme_color"))
-        app.background_color = _manifest_color(manifest.get("background_color")) or app.theme_color
-        app.display = _manifest_display(manifest.get("display"))
-
-        # `app.jsx_source` mirrors the entry the tree carries (the merged
-        # entry on a clean update, the upstream bytes otherwise).
-        entry_source = source_tree[entry_key].decode("utf-8")
-        if existing:
-          # Apply the (possibly merged) source AND the new manifest's capability /
-          # offline fields now that the merge decision is made and the conflict
-          # short-circuit above has been skipped. Deferring these past the
-          # conflict skip keeps a served-old-code conflict from jumping
-          # capabilities or offline semantics ahead of the code actually running.
-          # Without local divergence (or for an app with no source_dir),
-          # the entry is just the upstream bytes.
-          app.jsx_source = entry_source
-          # Re-stamp the canonical identity. A no-op for a plain re-install (the
-          # row already matched on this exact value), but LOAD-BEARING for an
-          # adopted predecessor: a rename carried the predecessor's OLD canonical
-          # url and a legacy adoption carried NULL/"" — without this, the next
-          # install of the new id would miss the manifest_url match and mint a
-          # duplicate, defeating the adoption. Deferred past the conflict skip so
-          # a served-old-code conflict keeps its old provenance.
-          app.manifest_url = canonical_manifest_url
-          app.cross_app_access = perms.get("cross_app_access", app.cross_app_access)
-          app.share_with_apps = perms.get("share_with_apps", app.share_with_apps)
-          app.chat_log_access = perms.get("chat_log_access", app.chat_log_access)
-          # Privileged grants are opt-in on EVERY published version: an update
-          # that omits the key REVOKES it, never preserves a stale privileged
-          # bit from an older manifest. This must match the capability contract
-          # (app_capabilities builds each as `perms.get(key, False)`) and the
-          # fresh-install path above — retaining an omitted grant here diverged
-          # the durable row from its own contract (e.g. `manage_skills=true`
-          # while the contract recorded false), leaving authorization to trust a
-          # capability the new manifest never asked for.
-          app.manage_apps = bool(perms.get("manage_apps", False))
-          app.manage_skills = bool(perms.get("manage_skills", False))
-          app.github_access = bool(perms.get("github_access", False))
-          app.github_connect = bool(perms.get("github_connect", False))
-          app.filesystem_access = bool(perms.get("filesystem_access", False))
-          if "offline_capable" in manifest:
-            app.offline_capable = bool(manifest["offline_capable"])
-          if "embeds_agent" in manifest:
-            app.embeds_agent = bool(manifest["embeds_agent"])
-          # P1-D: persist the offline contract block (replaces on update to match
-          # the new manifest; None if the key is absent in the new manifest).
-          app.offline_contract = manifest.get("offline") or None
-          app.system_prompt_file = manifest.get("system_prompt") or None
-          app.system_app = bool(manifest.get("system_app", False))
-          app.capability_contract = capability_contract
-
-        # The compiled bundle is written OUT OF PLACE to a staging file, then
-        # atomically published under its SHA-256 name BEFORE the DB commit. The
-        # row keeps referencing its prior immutable bundle until commit, so a
-        # concurrent module read can observe neither a half-write nor
-        # uncommitted code; after commit, the new path necessarily exists. A
-        # rollback removes the new orphan and a successful commit removes the
-        # superseded path. Startup reaps either artifact after a process crash.
-        # The actual compile happens below, AFTER the source files are on disk,
-        # so esbuild can bundle a multi-file app's sibling imports from the real
-        # source tree — a syntax error there raises and the outer except rolls
-        # everything back. Explicit apply uses the same artifact transaction.
-        staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
-
-        # Guard on the raw string, not the Path: Path("") is PosixPath('.'),
-        # which is truthy — a legacy sourceless app (source_dir NULL/"") would
-        # slip into this branch and write index.jsx into the process cwd.
-        source_dir_path = Path(app.source_dir) if app.source_dir else None
-        if source_dir_path is not None:
-          # The per-source-dir lock is ALREADY held (acquired above for the merge
-          # decision and kept across this write), so another source commit can't
-          # interleave and the merge result we computed is exactly what lands.
-          # Every file is written atomically, and on an UPDATE the prior copy is
-          # snapshotted to a .bak so a later rollback restores it. A multi-file
-          # app's siblings must be on disk before esbuild bundles them.
-          _reject_if_source_dir_taken(
-            db, str(source_dir_path), exclude_id=app.id
-          )
-          source_dir_path.mkdir(parents=True, exist_ok=True)
-          jsx_file = source_dir_path / "index.jsx"
-          # Write the WHOLE source tree: index.jsx + every sibling + the job
-          # script, all just keys. index.jsx keeps its historical
-          # `index.jsx.bak` snapshot name (so the existing rollback expectations
-          # hold); every other file uses `<name>.bak`. Nested paths get their
-          # parent dirs created first; the job script is staged executable.
-          if not cloned_install:
-            for rel, content in source_tree.items():
-              target = source_dir_path / rel
-              if rel == "index.jsx":
-                backup = jsx_file.with_suffix(".jsx.bak")
-              else:
-                backup = target.with_name(target.name + ".bak")
-              # Create parent dirs first so the realpath check sees the actual
-              # on-disk shape (a symlinked existing parent resolves to its
-              # target), then reject any write whose resolved path escapes the
-              # source dir.
-              target.parent.mkdir(parents=True, exist_ok=True)
-              _assert_within(source_dir_path, target, f"source_files {rel}")
-              _write_source_file(
-                target, content, backup,
-                created_paths, rollback_actions, commit_actions,
-              )
-              if rel in exec_paths or rel in git_exec_paths:
-                target.chmod(0o755)
-            # Reconcile the worktree to the source tree: a file the new version
-            # dropped (a sibling, an old job) must be deleted, not left on disk
-            # to be re-recorded onto `main` as permanent local divergence. The
-            # explicit upstream-diff delete set keeps local-only tracked source
-            # files out of prune's reach.
-            _prune_dropped_source_files(
-              source_dir_path, dropped_source_paths,
-              rollback_actions, commit_actions,
-            )
-            # On the synthetic-fetch path the on-disk tree is EXACTLY what the
-            # manifest declared (entry + source_files + job), so an entry that
-            # imports an undeclared sibling ships an incomplete tree that can't
-            # load — the Editor launch bug. Reject it here with a precise 422
-            # (esbuild would too, but with a cryptic "Could not resolve"). A
-            # git-origin-backed tree (`cloned_install` fresh clone, or
-            # `cloned_update` origin fetch) is skipped: it carries the whole
-            # repo, complete by construction, so source_files completeness is
-            # moot for it — the standalone CLI (scripts/validate-app.py) is the
-            # pre-push gate that holds a cloned app's manifest to the same bar
-            # for OTHER install paths. Errors raise HTTPException(422) → the
-            # outer handler rolls the source writes back.
-            if not cloned_update:
-              _check_source_completeness(
-                app_name=str(manifest.get("name") or app.slug),
-                manifest=manifest,
-                source_tree=source_tree,
-                entry_key=entry_key,
-                static_dests=list(static_assets_fetched.keys()),
-                job_name=job_name,
-              )
-          # Materialize declared static destinations before compilation: an app
-          # may import a generated same-origin module from `./static/...`, and
-          # the source completeness contract already treats those destinations
-          # as valid graph nodes. Rollback actions keep a failed compile atomic.
-          _write_static_assets(
-            source_dir_path,
-            static_assets_fetched,
-            created_paths,
-            rollback_actions,
-            commit_actions,
-          )
-          # Compile now that the whole source tree is on disk. Passing the real
-          # entry path makes esbuild resolve `./cards.js`-style sibling imports
-          # from the files just written; publication of the staged bundle is
-          # content-addressed and precedes the row commit. A compile failure
-          # raises into the outer except, which runs the source rollback actions
-          # appended above (restoring every .bak). `entry_key` is the entry's
-          # on-disk name on every path that reaches here: synthetic trees
-          # write it as the root index.jsx, cloned trees keep the repo's own
-          # filename (a cloned install skipped the write loop entirely).
-          await compile_jsx(
-            app.id, entry_source,
-            out_path=staged_bundle, source_path=source_dir_path / entry_key,
-          )
-          _publish_install_bundle(
-            app, staged_bundle, rollback_actions, commit_actions,
-          )
-          # On the Git path, commit the working-tree source onto the local
-          # `main` branch so future explicit applies build on a known base.
-          # When this update folded upstream into the served source, record it
-          # as a single-parent replay on the upstream tip (commit_replay) so the
-          # merge base advances and history stays linear — otherwise the NEXT
-          # update re-merges from the install point and conflicts spuriously
-          # even on disjoint changes. A plain local commit otherwise (fresh
-          # install, or a conflict that left local untouched). No-op when the
-          # source is unchanged.
-          if git_source_dir:
-            commit_msg = (
-              f"install: {manifest.get('name', app.slug)} "
-              f"v{manifest.get('version', 'unknown')}"
-            )
-            if merge_applied and app.upstream_commit:
-              await asyncio.to_thread(
-                app_git.commit_replay, source_dir_path,
-                app.upstream_commit, commit_msg,
-              )
-              equivalence_target_to_retire = app.upstream_commit
-            else:
-              await asyncio.to_thread(
-                app_git.commit_local, source_dir_path, commit_msg,
-              )
-            app.source_commit = await asyncio.to_thread(
-              app_git.head_sha, source_dir_path, app_git.LOCAL_BRANCH,
-            )
-        else:
-          # No source_dir (legacy app): there is no sibling tree on disk, so
-          # compile the bare entry string with no source_path — esbuild writes it
-          # to a temp file and bundles that. The staged bundle still promotes
-          # into its immutable content path before commit.
-          await compile_jsx(app.id, entry_source, out_path=staged_bundle)
-          _publish_install_bundle(
-            app, staged_bundle, rollback_actions, commit_actions,
-          )
+        equivalence_target_to_retire = await _activate_install_source(
+          db,
+          app=app,
+          manifest=manifest,
+          plan=ActivationPlan(
+            source_tree=source_tree,
+            static_assets=static_assets_fetched,
+            dropped_source_paths=dropped_source_paths,
+            exec_paths=exec_paths,
+            git_exec_paths=git_exec_paths,
+            entry_key=entry_key,
+            job_name=job_name,
+            cloned_install=cloned_install,
+            cloned_update=cloned_update,
+            merge_applied=merge_applied,
+            updating=existing is not None,
+            canonical_manifest_url=canonical_manifest_url,
+            capability_contract=capability_contract,
+          ),
+          journal=journal,
+          data_dir=data_dir,
+        )
     finally:
       # Release the per-source-dir lock (held across the merge + write for the
       # git path) BEFORE the seeds block takes app_storage_lock, preserving the
@@ -3310,7 +3127,7 @@ async def install_from_manifest(
         if mode == "update" and target.exists():
           continue
         atomic_write(target, content)
-        created_paths.append(target)
+        journal.created_paths.append(target)
 
     # A successfully resolved manifest declaration owns the package icon.
     # Omission clears it; a warned fetch/decode failure preserves the last

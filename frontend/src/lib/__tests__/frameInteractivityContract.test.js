@@ -9,6 +9,10 @@ const src = resolve(here, '../..')
 const frame = readFileSync(resolve(src, '../public/app-frame.html'), 'utf8')
 const canvas = readFileSync(resolve(src, 'components/AppCanvas/AppCanvas.jsx'), 'utf8')
 const shell = readFileSync(resolve(src, 'components/Shell/Shell.jsx'), 'utf8')
+const frameCacheModel = readFileSync(
+  resolve(src, 'components/Shell/appFrameCache.js'),
+  'utf8',
+)
 
 test('drawer suspension reaches the live app frame before paint', () => {
   // Pane assembly/scatter also suspends iframe interaction throughout either beat:
@@ -20,7 +24,7 @@ test('drawer suspension reaches the live app frame before paint', () => {
 })
 
 test('hidden app-frame history is bounded to six without limiting open tabs', () => {
-  assert.match(shell, /const APP_CACHE_MAX = 6/)
+  assert.match(frameCacheModel, /const APP_CACHE_MAX = 6/)
   assert.doesNotMatch(shell, /openTabs\.slice\(/)
 })
 
@@ -29,9 +33,8 @@ test('iframe history retirement runs at the committed layout boundary, never dur
     canvas,
     /useLayoutEffect\(\(\) => \{\s*if \(!appId\) return\s*return \(\) => \{ onNavReset\?\.\(appId\) \}/,
   )
-  const cacheDerivation = shell.slice(
-    shell.indexOf('const renderedAppIds = useMemo'),
-    shell.indexOf('// Maintain the warm LRU'),
+  const cacheDerivation = frameCacheModel.slice(
+    frameCacheModel.indexOf('export function deriveRenderedAppIds'),
   )
   assert.ok(cacheDerivation.length > 0)
   assert.doesNotMatch(cacheDerivation, /retireAppHistory/)

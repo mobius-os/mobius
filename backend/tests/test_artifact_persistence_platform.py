@@ -19,6 +19,7 @@ from app.artifact_data import (
 from app.config import get_settings
 from app.publication import read_publication_record, registry_path
 from app.routes import apps as apps_route
+from app.routes import app_publication as publication_route
 from app.timeutil import now_naive_utc
 from test_app_fixtures import create_local_app
 
@@ -177,7 +178,7 @@ def test_publish_rejects_unsafe_or_unavailable_link_preview_images(
   )
 
   assert response.status_code == expected_status
-  assert apps_route._registry_records_for_app(
+  assert publication_route._registry_records_for_app(
     get_settings(), app_id,
   )[0].state != "active"
 
@@ -360,14 +361,18 @@ def test_failed_first_publish_never_activates_orphan(
   def fail_promote(_stage, _destination):
     raise OSError("simulated atomic promote failure")
 
-  monkeypatch.setattr(apps_route, "atomic_promote_directory", fail_promote)
+  monkeypatch.setattr(
+    publication_route, "atomic_promote_directory", fail_promote,
+  )
   with pytest.raises(OSError, match="simulated atomic promote failure"):
     client.post(
       f"/api/apps/{app_id}/publish",
       headers=auth,
       json={"project_id": "tip-fail"},
     )
-  records = apps_route._registry_records_for_app(get_settings(), app_id)
+  records = publication_route._registry_records_for_app(
+    get_settings(), app_id,
+  )
   assert len(records) == 1 and records[0].state == "revoked"
   assert client.get(f"/sites/{records[0].token}/").status_code == 404
 
@@ -392,10 +397,10 @@ def test_failed_republish_restores_the_previous_generation(
     raise OSError("simulated registry write failure")
 
   if failure_point == "hint":
-    monkeypatch.setattr(apps_route, "atomic_write", fail_write)
+    monkeypatch.setattr(publication_route, "atomic_write", fail_write)
   else:
     monkeypatch.setattr(
-      apps_route, "replace_publication_record", fail_registry,
+      publication_route, "replace_publication_record", fail_registry,
     )
 
   with pytest.raises(OSError, match="simulated .* write failure"):
@@ -421,7 +426,7 @@ def test_failed_republish_preserves_old_copy_if_rollback_fails(
 
   site = _build_dir(app_id, project_id) / "site"
   (site / "index.html").write_text("failed generation", encoding="utf-8")
-  real_promote = apps_route.atomic_promote_directory
+  real_promote = publication_route.atomic_promote_directory
   promotions = 0
 
   def fail_rollback(stage, destination):
@@ -435,9 +440,9 @@ def test_failed_republish_preserves_old_copy_if_rollback_fails(
     raise OSError("simulated hint write failure")
 
   monkeypatch.setattr(
-    apps_route, "atomic_promote_directory", fail_rollback,
+    publication_route, "atomic_promote_directory", fail_rollback,
   )
-  monkeypatch.setattr(apps_route, "atomic_write", fail_write)
+  monkeypatch.setattr(publication_route, "atomic_write", fail_write)
 
   with pytest.raises(OSError, match="simulated rollback failure"):
     client.post(
@@ -501,7 +506,7 @@ def test_revoke_is_fail_closed_when_snapshot_rmtree_fails(
       raise OSError("simulated cleanup failure")
     return real_rmtree(path, *args, **kwargs)
 
-  monkeypatch.setattr(apps_route.shutil, "rmtree", fail_snapshot)
+  monkeypatch.setattr(publication_route.shutil, "rmtree", fail_snapshot)
   response = client.delete(f"/api/apps/{app_id}", headers=auth)
   assert response.status_code == 204, response.text
   assert snapshot.is_dir()
@@ -932,7 +937,7 @@ def test_unpublish_reports_failure_when_the_url_stays_live(
   def _fail(*_args, **_kwargs):
     raise OSError("simulated registry write failure")
 
-  monkeypatch.setattr(apps_route, "replace_publication_record", _fail)
+  monkeypatch.setattr(publication_route, "replace_publication_record", _fail)
   response = client.delete(
     f"/api/apps/{app_id}/publish?project_id=still-live", headers=auth,
   )
@@ -1026,7 +1031,7 @@ def test_unpublish_revokes_the_registry_even_if_the_hint_read_errors(
   def _raise(*_a, **_k):
     raise OSError("simulated hint read failure")
 
-  monkeypatch.setattr(apps_route, "_read_publish_token_hint", _raise)
+  monkeypatch.setattr(publication_route, "_read_publish_token_hint", _raise)
   response = client.delete(
     f"/api/apps/{app_id}/publish?project_id=resilient", headers=auth,
   )

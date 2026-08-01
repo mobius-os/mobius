@@ -11,7 +11,13 @@ import {
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import { appIconUrl } from '../appIcon.js'
-import { computePinnedDrag } from './pinnedReorder.js'
+import {
+  computePinnedDrag,
+  observePinnedOrderHandoff,
+  pinnedEntriesMatchRanks,
+  pinnedOrderHandoffStatus,
+  projectPinnedEntries,
+} from './pinnedReorder.js'
 import {
   drawerCloseWatchdogMs,
   drawerWidthFromPointerDelta,
@@ -24,7 +30,11 @@ import {
 import { requestSearchReveal } from '../ChatView/searchReveal.js'
 import { termsFromSnippet } from '../ChatView/searchTermHighlight.js'
 import { WORKSPACE_SPLITS_ENABLED } from '../Shell/paneModel.js'
-import { DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX } from '../Shell/dragController.js'
+import {
+  DRAWER_HOLD_MS,
+  PRE_HOLD_MOVE_PX,
+  clientDeltaToLocal,
+} from '../Shell/dragController.js'
 import InstallSheet from './InstallSheet.jsx'
 import AppsDirectory from './AppsDirectory.jsx'
 import DrawerItemActionMenu from './DrawerItemActionMenu.jsx'
@@ -134,11 +144,38 @@ export default function Drawer({
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
   const resizeRef = useRef(null)
+  const pinnedReorderGenerationRef = useRef(0)
+  const [pinnedOrderHandoff, setPinnedOrderHandoff] = useState(null)
   const {
-    pinned: pinnedItems,
+    pinned: basePinnedItems,
     recents: allRecents,
     apps: sortedApps,
   } = useMemo(() => buildDrawerSections(chats, apps), [chats, apps])
+  const pinnedItems = useMemo(() => (
+    pinnedOrderHandoff
+      ? projectPinnedEntries(basePinnedItems, pinnedOrderHandoff.visibleKeys)
+      : basePinnedItems
+  ), [basePinnedItems, pinnedOrderHandoff])
+
+  // Keep the chosen order through every partial chat/app refresh. Release only
+  // when both query observers carry the exact server ranks returned by the
+  // atomic save; useLayoutEffect makes the no-op authority handoff before paint.
+  useLayoutEffect(() => {
+    if (!pinnedOrderHandoff) return
+    const currentKeys = basePinnedItems.map(({ kind, item }) => `${kind}:${item.id}`)
+    const status = pinnedOrderHandoffStatus(
+      currentKeys,
+      pinnedOrderHandoff.visibleKeys,
+    )
+    if (status === 'superseded') {
+      setPinnedOrderHandoff(null)
+      return
+    }
+    if (
+      pinnedOrderHandoff.releaseRanks
+      && pinnedEntriesMatchRanks(basePinnedItems, pinnedOrderHandoff.releaseRanks)
+    ) setPinnedOrderHandoff(null)
+  }, [basePinnedItems, pinnedOrderHandoff])
   const [visibleRecentCount, setVisibleRecentCount] = useState(
     () => initialDrawerRowCount(allRecents.length),
   )
@@ -505,48 +542,60 @@ export default function Drawer({
   }
 
   // Persist a new order for the one combined pinned list (chats AND apps share
-  // it). `orderedKeys` is the desired top → bottom order as "kind:id" strings —
-  // exactly what the drag previewed, so the optimistic state matches pixel for
-  // pixel and nothing re-shuffles when the PATCHes land.
+  // it). The visible handoff remains authoritative until the ONE atomic server
+  // transaction returns exact ranks for both query caches. This prevents an
+  // unrelated chat/app refresh from exposing a mixed snapshot mid-save.
   async function reorderPinned(orderedKeys) {
     if (!Array.isArray(orderedKeys) || orderedKeys.length === 0) return
+    const generation = ++pinnedReorderGenerationRef.current
+    const visibleKeys = [...orderedKeys]
+    const items = visibleKeys.map(key => {
+      const sep = key.indexOf(':')
+      return { kind: key.slice(0, sep), id: key.slice(sep + 1) }
+    })
+    if (items.some(item => !['chat', 'app'].includes(item.kind) || !item.id)) return
+
+    setPinnedOrderHandoff({ generation, visibleKeys, releaseRanks: null })
     const chatKey = chatQueries.keys.all
     const appKey = appQueries.keys.all
-    const prevChats = queryClient.getQueryData(chatKey)
-    const prevApps = queryClient.getQueryData(appKey)
-    // Ascending synthetic pinned_at (top oldest → bottom newest) matching the
-    // rendered order; pinned_at is the ordering primitive the drawer sorts on.
-    const rank = new Map()
-    const now = Date.now()
-    orderedKeys.forEach((key, index) => {
-      rank.set(key, new Date(now + index).toISOString())
-    })
-    const applyRank = (kind) => (list) =>
-      (list || []).map(item => rank.has(`${kind}:${item.id}`)
-        ? { ...item, pinned_at: rank.get(`${kind}:${item.id}`) }
-        : item)
-    queryClient.setQueryData(chatKey, applyRank('chat'))
-    queryClient.setQueryData(appKey, applyRank('app'))
     try {
-      // Persist the order by re-stamping pin times top → bottom (each later call
-      // is newer, so the bottom row ends newest — the ascending order rendered).
-      // These are the QUIET `repin` calls: they do NOT invalidate the shell list,
-      // and we deliberately do NOT refetch afterwards. The optimistic cache above
-      // already holds the exact order the drag previewed; refetching would swap
-      // client-clock stamps for server-clock ones item-by-item and visibly
-      // re-shuffle the list. A later natural refetch returns the same order.
-      for (const key of orderedKeys) {
-        const sep = key.indexOf(':')
-        const kind = key.slice(0, sep)
-        const rawId = key.slice(sep + 1)
-        const res = kind === 'chat'
-          ? await api.chats.repin(rawId)
-          : await api.apps.repin(Number(rawId))
-        if (!res.ok) throw new Error('Could not reorder pinned items')
+      const res = await api.chats.reorderPinned(items)
+      if (!res.ok) throw new Error('Could not reorder pinned items')
+      const payload = await res.json()
+      const persisted = Array.isArray(payload?.items) ? payload.items : []
+      const rank = new Map(persisted.map(item => [
+        `${item.kind}:${item.id}`,
+        item.pinned_at,
+      ]))
+      if (rank.size !== visibleKeys.length || visibleKeys.some(key => !rank.has(key))) {
+        throw new Error('Pinned reorder returned an incomplete order')
       }
+      if (generation !== pinnedReorderGenerationRef.current) return
+      // Cancel any list reads that began before the transaction committed;
+      // their stale response must not overwrite the coherent ranks below.
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: chatKey }),
+        queryClient.cancelQueries({ queryKey: appKey }),
+      ])
+      if (generation !== pinnedReorderGenerationRef.current) return
+      const applyRank = kind => list => (list || []).map(item => {
+        const pinnedAt = rank.get(`${kind}:${item.id}`)
+        return pinnedAt ? { ...item, pinned_at: pinnedAt } : item
+      })
+      queryClient.setQueryData(chatKey, applyRank('chat'))
+      queryClient.setQueryData(appKey, applyRank('app'))
+      setPinnedOrderHandoff(current => (
+        current?.generation === generation
+          ? {
+            ...current,
+            releaseRanks: visibleKeys.map(key => ({ key, pinnedAt: rank.get(key) })),
+          }
+          : current
+      ))
     } catch {
-      queryClient.setQueryData(chatKey, prevChats)
-      queryClient.setQueryData(appKey, prevApps)
+      if (generation === pinnedReorderGenerationRef.current) {
+        setPinnedOrderHandoff(null)
+      }
     }
   }
 
@@ -872,7 +921,8 @@ export default function Drawer({
     if (e.button !== 0) return
     e.preventDefault()
     e.stopPropagation()
-    const panelRect = drawerRef.current?.getBoundingClientRect()
+    const panel = drawerRef.current
+    const panelRect = panel?.getBoundingClientRect()
     const handleRect = e.currentTarget.getBoundingClientRect()
     const handleCenter = handleRect.left + (handleRect.width / 2)
     const panelCenter = panelRect
@@ -884,6 +934,11 @@ export default function Drawer({
       startWidth: clampDesktopSidebarWidth(width),
       edgeDirection: handleCenter < panelCenter ? -1 : 1,
       width: clampDesktopSidebarWidth(width),
+      clientRect: panelRect,
+      localSize: {
+        w: panel?.offsetWidth || panelRect?.width,
+        h: panel?.offsetHeight || panelRect?.height,
+      },
     }
     e.currentTarget.setPointerCapture(e.pointerId)
     drawerRef.current?.classList.add('drawer--resizing')
@@ -891,10 +946,15 @@ export default function Drawer({
 
   function onResizePointerMove(e) {
     if (resizeRef.current?.pointerId !== e.pointerId) return
+    const delta = clientDeltaToLocal(
+      { x: e.clientX - resizeRef.current.startX, y: 0 },
+      resizeRef.current.clientRect,
+      resizeRef.current.localSize,
+    )
     applyResizeWidth(drawerWidthFromPointerDelta({
       startWidth: resizeRef.current.startWidth,
-      startX: resizeRef.current.startX,
-      currentX: e.clientX,
+      startX: 0,
+      currentX: delta.x,
       edgeDirection: resizeRef.current.edgeDirection,
     }))
   }
@@ -1616,6 +1676,17 @@ const DrawerRow = memo(function DrawerRow({
     const start = { x: event.clientX, y: event.clientY }
     const sourceBtn = event.currentTarget
     const drawerEl = sourceBtn.closest('#navigation-drawer')
+    const pinnedSection = sourceBtn.closest('.drawer__section')
+    const drawerClientRect = drawerEl?.getBoundingClientRect()
+    const drawerLocalSize = {
+      w: drawerEl?.offsetWidth || drawerClientRect?.width,
+      h: drawerEl?.offsetHeight || drawerClientRect?.height,
+    }
+    const layoutDeltaY = deltaY => clientDeltaToLocal(
+      { x: 0, y: deltaY },
+      drawerClientRect,
+      drawerLocalSize,
+    ).y
     const wrapOf = (btn) => btn.closest('.drawer__row') || btn
     // Measure every pinned row once, at drag start.
     const rows = [...(drawerEl || document).querySelectorAll('[data-pinned-key]')]
@@ -1633,9 +1704,14 @@ const DrawerRow = memo(function DrawerRow({
     const src = rows[fromIndex]
     let dragging = false
     let listenersOff = false
+    let cancelOrderHandoff = null
+    let stylesCleared = false
     let last = { slotDelta: 0, finalKeys: null, changed: false, shifts: new Map() }
 
     function clearStyles() {
+      if (stylesCleared) return
+      stylesCleared = true
+      cancelOrderHandoff?.()
       for (const r of rows) {
         const s = r.wrap.style
         s.transition = ''; s.transform = ''; s.zIndex = ''
@@ -1643,6 +1719,7 @@ const DrawerRow = memo(function DrawerRow({
       }
       src.btn.removeAttribute('data-reordering')
       document.body.style.userSelect = ''
+      if (reorderCleanupRef.current === forceFinish) reorderCleanupRef.current = null
     }
     function removeListeners() {
       if (listenersOff) return
@@ -1659,12 +1736,31 @@ const DrawerRow = memo(function DrawerRow({
       if (ended) return
       ended = true
       removeListeners()
-      if (commit && last.changed && last.finalKeys) actions.reorderPinned(last.finalKeys)
+      if (commit && last.changed && last.finalKeys && pinnedSection) {
+        // Keep the preview at its final pixels while the optimistic query-cache
+        // write crosses React Query's async notification boundary. The observer
+        // releases the transforms only after React has moved the keyed rows in
+        // the DOM (its callback runs before paint), eliminating the one-frame
+        // old-order flash. A concurrent pin-set change supersedes the handoff
+        // and releases it safely instead of leaving transforms stranded.
+        cancelOrderHandoff = observePinnedOrderHandoff(
+          pinnedSection,
+          last.finalKeys,
+          clearStyles,
+        )
+        actions.reorderPinned(last.finalKeys)
+        return
+      }
       clearStyles()
-      if (reorderCleanupRef.current === forceFinish) reorderCleanupRef.current = null
     }
     // A later drag (or unmount) calls this to snap this one shut with no commit.
-    const forceFinish = () => finalize(false)
+    const forceFinish = () => {
+      if (!ended) {
+        ended = true
+        removeListeners()
+      }
+      clearStyles()
+    }
     reorderCleanupRef.current = forceFinish
 
     function armDrag() {
@@ -1690,10 +1786,10 @@ const DrawerRow = memo(function DrawerRow({
       }
       moveEvent.preventDefault()
       last = computePinnedDrag(rows, fromIndex, dy)
-      src.wrap.style.transform = `translateY(${dy}px)` // lifted row tracks the pointer 1:1
+      src.wrap.style.transform = `translateY(${layoutDeltaY(dy)}px)`
       for (const r of rows) {
         if (r === src) continue
-        r.wrap.style.transform = `translateY(${last.shifts.get(r.key) || 0}px)`
+        r.wrap.style.transform = `translateY(${layoutDeltaY(last.shifts.get(r.key) || 0)}px)`
       }
     }
 
@@ -1713,7 +1809,7 @@ const DrawerRow = memo(function DrawerRow({
       }
       src.wrap.addEventListener('transitionend', onEnd)
       src.wrap.style.transition = 'transform 190ms cubic-bezier(0.2, 0, 0, 1)'
-      src.wrap.style.transform = `translateY(${commit ? last.slotDelta : 0}px)`
+      src.wrap.style.transform = `translateY(${layoutDeltaY(commit ? last.slotDelta : 0)}px)`
       // Fallback if transitionend never fires (e.g. the offset was already 0).
       setTimeout(done, 240)
     }

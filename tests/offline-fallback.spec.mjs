@@ -15,15 +15,25 @@ async function swReady(page) {
   )
 }
 
-test('shell persists theme bg for the offline page', async ({ page }) => {
+test('offline page consumes the structured theme persisted by the shell', async ({ page }) => {
   await page.goto(`${BASE}/shell/`)
-  // useTheme writes this on a successful theme load.
+  // The shell and offline fallback share one structured cold-boot contract.
   await page.waitForFunction(
-    () => !!localStorage.getItem('mobius-theme-bg'),
+    () => {
+      try {
+        return !!JSON.parse(localStorage.getItem('mobius-theme'))?.bg
+      } catch {
+        return false
+      }
+    },
     { timeout: 15000 },
   )
-  const bg = await page.evaluate(() => localStorage.getItem('mobius-theme-bg'))
-  expect(bg).toBeTruthy()
+  const bg = await page.evaluate(() => JSON.parse(localStorage.getItem('mobius-theme')).bg)
+
+  await page.goto(`${BASE}/offline.html`)
+  await expect.poll(() => page.evaluate(() => (
+    getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()
+  ))).toBe(bg)
 })
 
 test('shell loads offline from the SW cache (no native error page)', async ({ page, context }) => {

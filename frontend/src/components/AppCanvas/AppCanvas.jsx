@@ -978,7 +978,6 @@ const AppCanvas = forwardRef(function AppCanvas({
     }
     window.addEventListener('mobius:shared-storage', onSharedStorage)
     return () => window.removeEventListener('mobius:shared-storage', onSharedStorage)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Clear this app's pending nav-sentinels when the VISIBLE frame stops

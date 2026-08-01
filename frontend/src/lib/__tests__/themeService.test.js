@@ -113,9 +113,8 @@ function makeDomStub() {
 let dom
 let themeService
 
-// Minimal localStorage stub — applyThemeToDom now persists the active
-// bg to localStorage['mobius-theme-bg'] so the next cold-boot splash
-// reads the current theme's bg (BUG 2). Captures the writes for assertion.
+// Minimal localStorage stub — captures the structured theme writes for
+// cold-boot assertions.
 function makeLocalStorageStub() {
   const map = new Map()
   return {
@@ -354,12 +353,10 @@ test('getEffectiveTheme returns null when no theme has been applied', () => {
 })
 
 
-// --- BUG 2: applyThemeToDom syncs the inline --bg + localStorage ---
-// The splash script in index.html sets an INLINE --bg on <html> from
-// localStorage['mobius-theme-bg'] before first paint. An inline style on
-// documentElement beats `:root{}`, so applyThemeToDom must overwrite it
-// (and the localStorage key) with the theme it actually paints — otherwise
-// a stale splash value pins the wrong background after a toggle/reload.
+// --- applyThemeToDom syncs the inline --bg + structured persistence ---
+// The splash script sets an INLINE --bg on <html> before first paint. An inline
+// style beats `:root{}`, so applyThemeToDom must overwrite it with the theme it
+// actually paints.
 
 test('applyThemeToDom syncs the inline --bg on <html> to the active bg', () => {
   // Seed a STALE inline value the splash would have written (dark).
@@ -369,21 +366,22 @@ test('applyThemeToDom syncs the inline --bg on <html> to the active bg', () => {
     'inline --bg on <html> must track the painted theme, not the stale splash value')
 })
 
-test('applyThemeToDom writes localStorage[mobius-theme-bg] to the active bg', () => {
-  localStorage.setItem('mobius-theme-bg', '#0d0d0d')  // stale dark from a prior splash
+test('applyThemeToDom writes the structured theme for the next boot', () => {
   themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')
-  assert.equal(localStorage.getItem('mobius-theme-bg'), '#f0eeeb',
-    'next cold-boot splash must read the CURRENT bg, not the previous one')
+  assert.deepEqual(
+    JSON.parse(localStorage.getItem('mobius-theme')),
+    { bg: '#f0eeeb', mode: 'light' },
+  )
 })
 
 test('applyThemeToDom does NOT touch inline --bg or localStorage for a non-hex bg', () => {
   // Defensive: a malformed bg must not corrupt the inline var or the
-  // persisted splash key (same gate as body/meta).
+  // persisted structured theme (same gate as body/meta).
   dom.documentElement.style.setProperty('--bg', '#initial')
-  localStorage.setItem('mobius-theme-bg', '#initial')
+  localStorage.setItem('mobius-theme', JSON.stringify({ bg: '#initial', mode: 'dark' }))
   themeService.applyThemeToDom(':root {}', 'expression(alert(1))')
   assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#initial')
-  assert.equal(localStorage.getItem('mobius-theme-bg'), '#initial')
+  assert.equal(localStorage.getItem('mobius-theme'), JSON.stringify({ bg: '#initial', mode: 'dark' }))
 })
 
 test('applyThemeToDom dark→light then light→dark leaves a consistent inline --bg', () => {
@@ -395,23 +393,21 @@ test('applyThemeToDom dark→light then light→dark leaves a consistent inline 
   assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#0d0d0d')
   themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')  // back to light
   assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb')
-  assert.equal(localStorage.getItem('mobius-theme-bg'), '#f0eeeb')
+  assert.equal(JSON.parse(localStorage.getItem('mobius-theme')).bg, '#f0eeeb')
 })
 
 
 // --- DELEGATION: applyThemeToDom now delegates to the shared library ---
 // (src/lib/applyTheme.js). These assert the contract that moved with the
-// delegation: BOTH localStorage keys are written, and color-scheme is set.
+// delegation: the structured localStorage key is written and color-scheme is set.
 
-test('applyThemeToDom (delegated) writes BOTH mobius-theme and mobius-theme-bg', () => {
+test('applyThemeToDom (delegated) writes mobius-theme', () => {
   themeService.applyThemeToDom(':root { --bg: #f0eeeb; }', '#f0eeeb')
   assert.deepEqual(
     JSON.parse(localStorage.getItem('mobius-theme')),
     { bg: '#f0eeeb', mode: 'light' },
     'the new {bg,mode} key the pre-paint IIFE + resolveTheme read',
   )
-  assert.equal(localStorage.getItem('mobius-theme-bg'), '#f0eeeb',
-    'the legacy bare-hex key (one-cycle compat with the old splash script)')
 })
 
 test('applyThemeToDom (delegated) sets documentElement.style.colorScheme', () => {

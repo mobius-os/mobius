@@ -5,20 +5,23 @@ import { mediaTokenParam } from '../../api/mediaToken.js'
 import ImagePreviewButton from './ImagePreviewButton.jsx'
 
 export default function Attachments({ attachments, chatId }) {
-  if (!attachments || attachments.length === 0) return null
-  const images = attachments.filter(a => a.mime_type?.startsWith('image/'))
-  const files = attachments.filter(a => !a.mime_type?.startsWith('image/'))
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0
 
   // Fetch a short-lived media token for this chat. Owner JWTs must not appear
   // in ?token= query params (they leak into access logs/history/Referer).
   const [tokenParam, setTokenParam] = useState('')
   useEffect(() => {
+    if (!hasAttachments) return undefined
     let cancelled = false
     mediaTokenParam(chatId).then(p => {
       if (!cancelled) setTokenParam(p)
     })
     return () => { cancelled = true }
-  }, [chatId])
+  }, [chatId, hasAttachments])
+
+  if (!hasAttachments) return null
+  const images = attachments.filter(a => a.mime_type?.startsWith('image/'))
+  const files = attachments.filter(a => !a.mime_type?.startsWith('image/'))
 
   return (
     <div className="chat__attachments">

@@ -512,8 +512,8 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   the crontab points at the real bundled job, not the empty stub.
   Regression for the bug where every scheduled app fired an empty job.sh.
   The job script itself is written in the transactional source write, not
-  here, so _register_cron only installs the crontab entry."""
-  from app import install
+  here, so register_cron only installs the crontab entry."""
+  from app import app_cron
 
   app_dir = tmp_path / "reflection"
   app_dir.mkdir()
@@ -521,13 +521,12 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   fake_scaffold = tmp_path / "init-cron-scaffold.sh"
   fake_scaffold.write_text("#!/bin/bash\n")
 
-  # The inner CRON_SCAFFOLD patch overrides the autouse bypass so we reach
-  # the subprocess call; subprocess.run is mocked so nothing shells out.
-  with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
-       patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
-       patch("app.install.subprocess.run") as mock_run:
+  with patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
+       patch("app.app_cron.subprocess.run") as mock_run:
     mock_run.return_value = MagicMock(returncode=0, stderr="")
-    install._register_cron("reflection", "0 6 * * *", job_path, 42)
+    app_cron.register_cron(
+      "reflection", "0 6 * * *", job_path, 42, scaffold=fake_scaffold,
+    )
 
   # 5th arg is the app id — so a reusable fetch.sh that reads "$1" fires
   # from cron, not just from the run-job endpoint. Regression for news-2:
@@ -544,19 +543,18 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
 
 
 def test_cron_scaffold_prefers_the_served_checkout():
-  from app import install
+  from app import app_cron
 
-  with patch("app.install.CRON_SCAFFOLD", install._BAKED_CRON_SCAFFOLD):
-    assert install._cron_scaffold() == (
-      Path(install.__file__).resolve().parent.parent
-      / "scripts"
-      / "init-cron-scaffold.sh"
-    )
+  assert app_cron.cron_scaffold(app_cron.BAKED_CRON_SCAFFOLD) == (
+    Path(app_cron.__file__).resolve().parent.parent
+    / "scripts"
+    / "init-cron-scaffold.sh"
+  )
 
 
 def test_register_cron_gives_scaffold_the_complete_zone_identity(tmp_path):
   """The scaffold owns durable declaration + live update as one ordered unit."""
-  from app import install
+  from app import app_cron
 
   app_dir = tmp_path / "reflection"
   app_dir.mkdir()
@@ -564,13 +562,13 @@ def test_register_cron_gives_scaffold_the_complete_zone_identity(tmp_path):
   fake_scaffold = tmp_path / "init-cron-scaffold.sh"
   fake_scaffold.write_text("#!/bin/bash\n")
 
-  with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
-       patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
-       patch("app.install.subprocess.run") as mock_run:
+  with patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
+       patch("app.app_cron.subprocess.run") as mock_run:
     mock_run.return_value = MagicMock(returncode=0, stderr="")
-    install._register_cron(
+    app_cron.register_cron(
       "reflection", "* * * * *", job_path, 42,
       timezone="Europe/Belgrade", zone_cron="30 2 * * *",
+      scaffold=fake_scaffold,
     )
 
   assert mock_run.call_args.args[0] == [
@@ -589,17 +587,16 @@ def test_register_cron_gives_scaffold_the_complete_zone_identity(tmp_path):
 def test_register_cron_rejects_invalid_zone_contract_before_subprocess(
   tmp_path, timezone, zone_cron, app_id,
 ):
-  from app import install
+  from app import app_cron
 
   fake_scaffold = tmp_path / "init-cron-scaffold.sh"
   fake_scaffold.write_text("#!/bin/sh\n")
-  with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
-       patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
-       patch("app.install.subprocess.run") as mock_run, \
-       pytest.raises(install.HTTPException):
-    install._register_cron(
+  with patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
+       patch("app.app_cron.subprocess.run") as mock_run, \
+       pytest.raises(app_cron.HTTPException):
+    app_cron.register_cron(
       "memory", "* * * * *", tmp_path / "fetch.sh", app_id,
-      timezone=timezone, zone_cron=zone_cron,
+      timezone=timezone, zone_cron=zone_cron, scaffold=fake_scaffold,
     )
   mock_run.assert_not_called()
 
@@ -607,7 +604,7 @@ def test_register_cron_rejects_invalid_zone_contract_before_subprocess(
 def test_register_cron_omits_app_id_when_none(tmp_path):
   """A self-contained job (hardcoded id) needs no app-id arg — the
   scaffold call stays 4 elements so the crontab command stays bare."""
-  from app import install
+  from app import app_cron
 
   app_dir = tmp_path / "selfcontained"
   app_dir.mkdir()
@@ -615,11 +612,12 @@ def test_register_cron_omits_app_id_when_none(tmp_path):
   fake_scaffold = tmp_path / "init-cron-scaffold.sh"
   fake_scaffold.write_text("#!/bin/bash\n")
 
-  with patch("app.install.CRON_SCAFFOLD", fake_scaffold), \
-       patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
-       patch("app.install.subprocess.run") as mock_run:
+  with patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
+       patch("app.app_cron.subprocess.run") as mock_run:
     mock_run.return_value = MagicMock(returncode=0, stderr="")
-    install._register_cron("selfcontained", "0 6 * * *", job_path)
+    app_cron.register_cron(
+      "selfcontained", "0 6 * * *", job_path, scaffold=fake_scaffold,
+    )
 
   assert mock_run.call_args.args[0] == [
     str(fake_scaffold), "selfcontained", "0 6 * * *", "job.sh",
@@ -630,17 +628,17 @@ def test_register_cron_refuses_real_subprocess_in_test_runtime(
   tmp_path, monkeypatch,
 ):
   """The Python boundary blocks the exact production-container pytest leak."""
-  from app import install
+  from app import app_cron
 
   fake_scaffold = tmp_path / "init-cron-scaffold.sh"
   fake_scaffold.write_text("#!/bin/sh\n")
-  monkeypatch.setattr(install, "CRON_SCAFFOLD", fake_scaffold)
   monkeypatch.delenv("MOBIUS_ALLOW_TEST_CRON", raising=False)
 
-  with patch("app.install.subprocess.run") as mock_run, \
-       pytest.raises(install.HTTPException) as exc:
-    install._register_cron(
+  with patch("app.app_cron.subprocess.run") as mock_run, \
+       pytest.raises(app_cron.HTTPException) as exc:
+    app_cron.register_cron(
       "memory", "30 5 * * *", tmp_path / "fetch.sh", 3,
+      scaffold=fake_scaffold,
     )
 
   assert exc.value.status_code == 500

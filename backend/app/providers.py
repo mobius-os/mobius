@@ -31,12 +31,9 @@ import stat
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal, Protocol
 
 from app.storage_io import atomic_write
-
-if TYPE_CHECKING:
-  from app.schemas import AgentSettingsOverride
 
 
 log = logging.getLogger(__name__)
@@ -170,6 +167,13 @@ _LEGACY_GLOBAL_AUTO_RESUME_KEY = "auto_resume_on_limit"
 _AGENT_SETTINGS_LOCK = threading.RLock()
 
 
+class _SettingsOverride(Protocol):
+  """Structural boundary for the Pydantic override accepted by this module."""
+
+  def model_dump(self) -> dict[str, Any]:
+    ...
+
+
 def remove_legacy_global_auto_resume_setting(data_dir: str) -> bool:
   """Delete the removed owner-global policy so rollback cannot revive it.
 
@@ -288,7 +292,7 @@ def update_agent_settings(data_dir: str, updater) -> bool:
 
 def effective_agent_settings(
   data_dir: str,
-  chat_overrides: "AgentSettingsOverride | dict[str, Any] | None" = None,
+  chat_overrides: _SettingsOverride | dict[str, Any] | None = None,
   provider: str | None = None,
 ) -> dict:
   """Merges per-chat overrides on top of the global defaults.

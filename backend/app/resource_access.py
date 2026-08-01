@@ -134,7 +134,7 @@ def live_app(
 
   The App analogue of `get_active_chat_or_404`'s filter, factored out because
   feature 110 made uninstall a reversible tombstone (`App.deleted_at`) and the
-  "hide a tombstoned app" filter then scattered to ~10 sites in `routes/apps.py`
+  "hide a tombstoned app" filter then scattered across the app route owners
   plus `deps`/`standalone`/`main` — and a review still missed `validate_app`. A
   single definition makes the next app-read endpoint correct by construction.
 

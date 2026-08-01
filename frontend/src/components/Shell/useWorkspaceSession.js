@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
 } from 'react'
-import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
 import { enteredEmptySingleScreen } from './newChatPolicy.js'
 import { projectFocusedPane } from './workspaceView.js'
@@ -20,21 +19,18 @@ import { projectFocusedPane } from './workspaceView.js'
  * use dispatchWorkspace so same-batch transitions compose against workspaceStateRef.
  */
 export default function useWorkspaceSession({ storage }) {
-  const [legacyOpenTabs] = useState(() => tabModel.readOpenTabs(storage))
   const [workspaceState, dispatchWorkspaceRaw] = useReducer(
     paneModel.workspaceReducer,
     undefined,
-    () => paneModel.initialWorkspaceState(paneModel.parseWorkspace(
-      paneModel.readWorkspaceRaw(storage),
-      { fallbackTabs: legacyOpenTabs },
-    )),
+    () => paneModel.initialWorkspaceState(
+      paneModel.parseWorkspace(paneModel.readWorkspaceRaw(storage)),
+    ),
   )
   const workspace = workspaceState.ws
   const [blobValid] = useState(
     () => paneModel.isValidWorkspaceBlob(paneModel.readWorkspaceRaw(storage)),
   )
   const replaceImplicitBootTab = !blobValid
-    && legacyOpenTabs.length === 0
     && Object.keys(workspace.panes).length === 1
     && paneModel.flatten(workspace).length <= 1
 
@@ -167,7 +163,6 @@ export default function useWorkspaceSession({ storage }) {
   }, [storage])
 
   return {
-    legacyOpenTabs,
     workspace,
     workspaceStateRef,
     dispatchWorkspace,

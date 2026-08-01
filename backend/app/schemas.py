@@ -149,7 +149,7 @@ class AppOut(BaseModel):
   # URL slug for the standalone PWA install at /apps/<slug>/. Null
   # only for legacy rows from before the slug column existed; lazy-
   # backfilled on first access via standalone routes (see
-  # routes/apps.py:ensure_slug).
+  # app_identity.ensure_slug).
   slug: str | None = None
   # URL the app was installed from (manifest URL passed to
   # POST /api/apps/install). Null for user-built apps. The install

@@ -7,6 +7,7 @@ ROOT="${MOBIUS_TEST_IMAGE_INPUT_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")
 files=(
   Dockerfile
   backend/requirements.txt
+  backend/requirements.lock
   frontend/package.json
   frontend/package-lock.json
 )

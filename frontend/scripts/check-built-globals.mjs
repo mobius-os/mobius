@@ -110,7 +110,10 @@ function findUnbound(buildDir) {
         ranges: true,
       })
     } catch (error) {
-      throw new Error(`could not parse ${path.relative(buildDir, file)}: ${error.message}`)
+      throw new Error(
+        `could not parse ${path.relative(buildDir, file)}: ${error.message}`,
+        { cause: error },
+      )
     }
 
     const scopeManager = analyze(ast, {

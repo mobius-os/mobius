@@ -3,7 +3,7 @@
 The editable app directory is a draft. This module captures one immutable Git
 tree, compiles that exact tree, commits it, and only then advances the live App
 row to the content-addressed bundle. Callers own the lifecycle/app/source lock
-span documented in routes/apps.py.
+span documented by the app lifecycle routes.
 """
 
 from __future__ import annotations

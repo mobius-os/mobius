@@ -284,7 +284,7 @@ def _backfill_app_source_dirs(context: StartupContext) -> None:
 
 
 def _reconcile_app_cron(context: StartupContext) -> None:
-  from app.routes.apps import reconcile_app_cron_supervision
+  from app.routes.app_schedules import reconcile_app_cron_supervision
 
   with SessionLocal() as db:
     count, warnings = reconcile_app_cron_supervision(db)
@@ -300,7 +300,7 @@ def _reconcile_app_cron(context: StartupContext) -> None:
 
 
 def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
-  from app.chat import get_chat_log_handler
+  from app.chat_logging import get_chat_log_handler
 
   handler = get_chat_log_handler()
   for name, level in (

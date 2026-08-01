@@ -91,7 +91,7 @@ test('seedFromFlatTabs makes a single focused pane with the last tab active', ()
   assertInvariants(ws)
 })
 
-test('seedFromFlatTabs sanitizes and dedups readOpenTabs-shaped input', () => {
+test('seedFromFlatTabs sanitizes and dedups untrusted input', () => {
   const seeded = paneModel.seedFromFlatTabs([
     { kind: 'chat', id: 'a' },
     { kind: 'app', id: 42 },        // numeric id normalizes to a string
@@ -100,10 +100,6 @@ test('seedFromFlatTabs sanitizes and dedups readOpenTabs-shaped input', () => {
     { kind: 'chat', id: 'a' },       // duplicate dropped
   ])
   assert.deepEqual(paneModel.flatten(seeded), [makeTab('chat', 'a'), makeTab('app', 42)])
-  // Round-trips through today's flat projection unchanged.
-  assert.deepEqual(paneModel.flatten(seeded), tabModel.readOpenTabs(
-    fakeStorage(JSON.stringify(paneModel.flatten(seeded))),
-  ))
   assertInvariants(seeded)
 })
 
@@ -782,39 +778,6 @@ test('canSplit: minimum pane size within the current projected rect', () => {
     'an unknown pane can not split')
 })
 
-test('flattenRollbackPriority round-trips every tab with the focused active tab last', () => {
-  // Two panes, eight tabs, focus on pB whose active tab is chat:f6.
-  const ws = paneModel.normalize({
-    v: 1,
-    layout: { id: 's0', dir: 'row', a: 'pA', b: 'pB', ratio: 0.5 },
-    panes: {
-      pA: {
-        id: 'pA',
-        tabs: [makeTab('chat', 'f0'), makeTab('chat', 'f1'), makeTab('chat', 'f2'), makeTab('chat', 'f3')],
-        activeTabKey: 'chat:f1',
-      },
-      pB: {
-        id: 'pB',
-        tabs: [makeTab('chat', 'f4'), makeTab('chat', 'f5'), makeTab('chat', 'f6'), makeTab('chat', 'f7')],
-        activeTabKey: 'chat:f6',
-      },
-    },
-    focusedPaneId: 'pB',
-    nextId: 2,
-  })
-
-  const rollback = paneModel.flattenRollbackPriority(ws)
-  // Background pane first, then focused pane's other tabs, then its active last.
-  assert.equal(tabKey(rollback.at(-1)), 'chat:f6', 'the focused active tab is dead last')
-
-  const store = fakeStorage()
-  tabModel.writeOpenTabs(rollback, store)
-  const survivors = tabModel.readOpenTabs(store).map(tabKey)
-  assert.equal(survivors.length, 8)
-  for (let i = 0; i < 8; i += 1) assert.ok(survivors.includes(`chat:f${i}`))
-  assert.equal(survivors.at(-1), 'chat:f6', 'and its active tab is the last kept')
-})
-
 test('readWorkspaceRaw survives a throwing storage instead of crashing boot', () => {
   const throwing = {
     getItem() { throw new DOMException('The operation is insecure.', 'SecurityError') },
@@ -822,11 +785,9 @@ test('readWorkspaceRaw survives a throwing storage instead of crashing boot', ()
   // Must not throw — sessionStorage.getItem can raise in a sandboxed frame, and
   // the Shell reads it while building the reducer's initial state.
   assert.equal(paneModel.readWorkspaceRaw(throwing), null)
-  // The null feeds parseWorkspace, which then seeds from the flat fallback.
-  const ws = paneModel.parseWorkspace(paneModel.readWorkspaceRaw(throwing), {
-    fallbackTabs: [makeTab('chat', 'a')],
-  })
-  assert.deepEqual(ws, paneModel.seedFromFlatTabs([makeTab('chat', 'a')]))
+  // The null feeds parseWorkspace, which then seeds a safe empty workspace.
+  const ws = paneModel.parseWorkspace(paneModel.readWorkspaceRaw(throwing))
+  assert.deepEqual(ws, paneModel.seedFromFlatTabs([]))
 
   const working = fakeStorage(JSON.stringify(paneModel.seedFromFlatTabs([makeTab('chat', 'z')])))
   assert.ok(typeof paneModel.readWorkspaceRaw(working) === 'string', 'a healthy storage reads through')
@@ -837,19 +798,18 @@ test('serialize/parse round-trips a valid workspace', () => {
     paneModel.seedFromFlatTabs([makeTab('chat', 'a'), makeTab('app', 7)]),
     'app:7', { paneId: 'p0', edge: 'bottom' },
   )
-  const back = paneModel.parseWorkspace(paneModel.serializeWorkspace(ws), { fallbackTabs: [] })
+  const back = paneModel.parseWorkspace(paneModel.serializeWorkspace(ws))
   assert.deepEqual(back, ws)
 })
 
 test('parseWorkspace falls back on garbage, wrong version, and too-deep trees', () => {
-  const fallbackTabs = [makeTab('chat', 'seed')]
-  const seed = paneModel.seedFromFlatTabs(fallbackTabs)
+  const seed = paneModel.seedFromFlatTabs([])
 
-  assert.deepEqual(paneModel.parseWorkspace('not json {{{', { fallbackTabs }), seed)
-  assert.deepEqual(paneModel.parseWorkspace(null, { fallbackTabs }), seed)
-  assert.deepEqual(paneModel.parseWorkspace('', { fallbackTabs }), seed)
+  assert.deepEqual(paneModel.parseWorkspace('not json {{{'), seed)
+  assert.deepEqual(paneModel.parseWorkspace(null), seed)
+  assert.deepEqual(paneModel.parseWorkspace(''), seed)
   assert.deepEqual(
-    paneModel.parseWorkspace(JSON.stringify({ v: 2, layout: 'p0', panes: {} }), { fallbackTabs }),
+    paneModel.parseWorkspace(JSON.stringify({ v: 2, layout: 'p0', panes: {} })),
     seed,
   )
 
@@ -870,7 +830,7 @@ test('parseWorkspace falls back on garbage, wrong version, and too-deep trees', 
     focusedPaneId: 'p1',
     nextId: 5,
   })
-  assert.deepEqual(paneModel.parseWorkspace(tooDeep, { fallbackTabs }), seed)
+  assert.deepEqual(paneModel.parseWorkspace(tooDeep), seed)
 })
 
 test('parseWorkspace repairs a recoverable blob instead of falling back', () => {
@@ -896,7 +856,7 @@ test('parseWorkspace repairs a recoverable blob instead of falling back', () => 
     focusedPaneId: 'ghost',
     nextId: 3,
   })
-  const ws = paneModel.parseWorkspace(raw, { fallbackTabs: [makeTab('chat', 'seed')] })
+  const ws = paneModel.parseWorkspace(raw)
   assert.equal(ws.v, 1)
   assert.deepEqual(paneModel.flatten(ws), [makeTab('chat', 'a'), makeTab('app', 7)])
   assert.equal(ws.focusedPaneId, paneIdsOf(ws.layout)[0])
@@ -904,8 +864,7 @@ test('parseWorkspace repairs a recoverable blob instead of falling back', () => 
 })
 
 test('parseWorkspace falls back on a malformed split node', () => {
-  const fallbackTabs = [makeTab('chat', 'seed')]
-  const seed = paneModel.seedFromFlatTabs(fallbackTabs)
+  const seed = paneModel.seedFromFlatTabs([])
   const bad = JSON.stringify({
     v: 1,
     layout: { id: null, dir: 'diagonal', ratio: 0.5, a: 'pA', b: 'pB' },
@@ -918,7 +877,7 @@ test('parseWorkspace falls back on a malformed split node', () => {
   })
   // normalize keeps the split's shape verbatim, so isValidWorkspace is what
   // catches id:null / dir:'diagonal' and forces the fallback.
-  assert.deepEqual(paneModel.parseWorkspace(bad, { fallbackTabs }), seed)
+  assert.deepEqual(paneModel.parseWorkspace(bad), seed)
 })
 
 test('parseWorkspace accepts a persisted pane with more than six tabs', () => {
@@ -930,7 +889,7 @@ test('parseWorkspace accepts a persisted pane with more than six tabs', () => {
     focusedPaneId: 'p0',
     nextId: 1,
   })
-  const parsed = paneModel.parseWorkspace(raw, { fallbackTabs: [makeTab('chat', 'seed')] })
+  const parsed = paneModel.parseWorkspace(raw)
   assert.deepEqual(parsed.panes.p0.tabs, many)
   assert.equal(parsed.panes.p0.activeTabKey, 'chat:c0')
   assertInvariants(parsed)
@@ -949,7 +908,7 @@ test('normalize recomputes nextId so a stale generator cannot lose a tab', () =>
     },
     focusedPaneId: 'p0',
     nextId: 1,
-  }), { fallbackTabs: [] })
+  }))
   assert.ok(persisted.nextId > 5, 'nextId is recomputed past every live suffix')
 
   const before = new Set(paneModel.flatten(persisted).map(tabKey))

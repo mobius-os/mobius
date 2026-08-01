@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 from app import models
-from app.chat import _build_app_report_block, _strip_report_html
+from app.chat_context import _build_app_report_block, _strip_report_html
 
 _DATA_DIR = os.environ.get("DATA_DIR", "/tmp")
 

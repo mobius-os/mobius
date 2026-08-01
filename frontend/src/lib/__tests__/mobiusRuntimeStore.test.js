@@ -281,6 +281,8 @@ async function renderUseDocument(storage, path, opts) {
   }
   const { createUseDocument } = await runtimeExports()
   const useDocument = createUseDocument(storage, React)
+  // This is a deterministic hook harness rather than a React component.
+  // eslint-disable-next-line react-hooks/rules-of-hooks
   const handle = useDocument(path, opts)
   const cleanups = effects.map((fn) => fn()).filter(Boolean)
   return { handle, state: () => stateSlots[0], cleanup: () => cleanups.forEach((fn) => fn()) }
@@ -926,7 +928,6 @@ test('deleting the mobius-outbox DB (logout) purges the cache mirror too', async
 
   // A fresh runtime (post-logout) reads offline → the mirror is gone (null),
   // proving the cache store rode the same DB and was purged, not just the outbox.
-  globalThis.indexedDB = globalThis.indexedDB   // same factory; DB was deleted
   const s2 = await newStorage()
   server.setOnline(false)
   assert.equal(await s2.get('cached.json'), null)

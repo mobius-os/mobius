@@ -23,14 +23,12 @@ function twoPanes() {
 
 // ── viewMode field + persistence (design: view-mode toggle, forgiving parse) ──
 
-test('first boot and fallback workspaces default to standard single-screen mode', () => {
+test('first boot workspaces default to an empty standard single-screen mode', () => {
   assert.equal(freshWorkspace().viewMode, 'single')
   assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, '5')
-  const firstBoot = paneModel.parseWorkspace(null, {
-    fallbackTabs: [makeTab('chat', '5')],
-  })
+  const firstBoot = paneModel.parseWorkspace(null)
   assert.equal(firstBoot.viewMode, 'single')
-  assert.equal(paneModel.activeContentRoute(firstBoot).chatId, '5')
+  assert.equal(paneModel.activeContentRoute(firstBoot).chatId, null)
 })
 
 test('setViewMode sets the mode and is same-reference on a no-op', () => {
@@ -78,12 +76,12 @@ test('normalize stays reference-stable when viewMode already matches', () => {
 
 test('viewMode round-trips the blob', () => {
   const single = paneModel.setViewMode(twoPanes(), 'single')
-  const back = paneModel.parseWorkspace(paneModel.serializeWorkspace(single), { fallbackTabs: [] })
+  const back = paneModel.parseWorkspace(paneModel.serializeWorkspace(single))
   assert.equal(back.viewMode, 'single')
   // And a panes blob round-trips as panes.
   const panes = twoPanes()
   assert.equal(
-    paneModel.parseWorkspace(paneModel.serializeWorkspace(panes), { fallbackTabs: [] }).viewMode,
+    paneModel.parseWorkspace(paneModel.serializeWorkspace(panes)).viewMode,
     'panes',
   )
 })
@@ -92,14 +90,14 @@ test('parseWorkspace defaults an absent viewMode to panes', () => {
   const noField = { ...twoPanes() }
   delete noField.viewMode
   const blob = JSON.stringify(noField)
-  assert.equal(paneModel.parseWorkspace(blob, { fallbackTabs: [] }).viewMode, 'panes')
+  assert.equal(paneModel.parseWorkspace(blob).viewMode, 'panes')
   // The blob is still valid (viewMode never gates validity).
   assert.equal(paneModel.isValidWorkspaceBlob(blob), true)
 })
 
 test('parseWorkspace degrades a corrupted viewMode to panes without falling back', () => {
   const corrupt = JSON.stringify({ ...twoPanes(), viewMode: 42 })
-  const ws = paneModel.parseWorkspace(corrupt, { fallbackTabs: [] })
+  const ws = paneModel.parseWorkspace(corrupt)
   assert.equal(ws.viewMode, 'panes')
   // The rest of the tree survived (this was NOT a fresh-seed fallback).
   assert.equal(Object.keys(ws.panes).length, 2, 'the two panes are preserved')

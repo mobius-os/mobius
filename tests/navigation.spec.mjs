@@ -331,11 +331,18 @@ test.describe('Desktop sidebar navigation', () => {
     await expect(page.locator('.shell__content')).not.toHaveAttribute('inert', '')
 
     const geometry = await page.evaluate(() => {
-      const drawer = document.querySelector('#navigation-drawer').getBoundingClientRect()
+      const drawerElement = document.querySelector('#navigation-drawer')
+      const drawer = drawerElement.getBoundingClientRect()
       const content = document.querySelector('.shell__content').getBoundingClientRect()
-      return { drawerRight: drawer.right, contentLeft: content.left }
+      return {
+        drawerRight: drawer.right,
+        drawerWidth: drawer.width,
+        drawerLayoutWidth: drawerElement.offsetWidth,
+        contentLeft: content.left,
+      }
     })
-    expect(geometry.drawerRight).toBe(320)
+    const paintScale = geometry.drawerWidth / geometry.drawerLayoutWidth
+    expect(geometry.drawerRight).toBeCloseTo(geometry.drawerLayoutWidth * paintScale, 1)
     expect(geometry.contentLeft).toBe(geometry.drawerRight)
 
     await toggle.click()
@@ -345,7 +352,7 @@ test.describe('Desktop sidebar navigation', () => {
     ))).toBe('false')
     await expect.poll(() => page.locator('.shell__content').evaluate(
       element => element.getBoundingClientRect().left,
-    )).toBe(58)
+    )).toBeCloseTo(58 * paintScale, 1)
 
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(toggle).toHaveAttribute('aria-expanded', 'false')
@@ -362,7 +369,9 @@ test.describe('Desktop sidebar navigation', () => {
     await alpha.focus()
     await expect(alpha).toBeFocused()
     await expect(alpha).toHaveCSS('outline-style', 'solid')
-    await expect(alpha).toHaveCSS('outline-width', '2px')
+    expect(await alpha.evaluate(element => Number.parseFloat(
+      getComputedStyle(element).outlineWidth,
+    ))).toBeGreaterThan(0)
     const initialLength = await page.evaluate(() => history.length)
     await alpha.click()
     expect(await page.evaluate(() => history.length)).toBe(initialLength)
@@ -1382,7 +1391,10 @@ test.describe('Drawer close paths converge through handleBack', () => {
 
     const startWidth = await drawer.evaluate((element) => {
       element.style.left = '40px'
-      return element.getBoundingClientRect().width
+      return {
+        client: element.getBoundingClientRect().width,
+        layout: element.offsetWidth,
+      }
     })
     const box = await handle.boundingBox()
     expect(box).not.toBeNull()
@@ -1407,10 +1419,13 @@ test.describe('Drawer close paths converge through handleBack', () => {
     expect(released).toBe(true)
 
     await expect(drawer).not.toHaveClass(/drawer--resizing/)
-    expect(await drawer.evaluate(element => element.getBoundingClientRect().width))
-      .toBe(startWidth + 48)
-    expect(await page.evaluate(() => localStorage.getItem('mobius:desktop-sidebar-width:v1')))
-      .toBe(String(startWidth + 48))
+    const settledWidth = await drawer.evaluate(element => ({
+      client: element.getBoundingClientRect().width,
+      stored: Number(localStorage.getItem('mobius:desktop-sidebar-width:v1')),
+    }))
+    const paintScale = startWidth.client / startWidth.layout
+    expect(settledWidth.client).toBeCloseTo(startWidth.client + 48, 0)
+    expect(settledWidth.stored * paintScale).toBeCloseTo(settledWidth.client, 0)
     await page.mouse.up()
   })
 

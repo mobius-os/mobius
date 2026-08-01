@@ -70,6 +70,9 @@ try {
     )
   }
   run(process.execPath, [
+    path.join(frontendDir, 'scripts', 'build-runtime.mjs'),
+  ])
+  run(process.execPath, [
     path.join(frontendDir, 'node_modules', 'vite', 'bin', 'vite.js'),
     'build',
     '--configLoader',

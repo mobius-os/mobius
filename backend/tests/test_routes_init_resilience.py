@@ -149,7 +149,7 @@ def test_lifespan_cannot_mutate_cron_for_a_low_id_test_app(
 
   from app import install, models
   from app.config import get_settings
-  from app.routes import apps as apps_module
+  from app.routes import app_schedules as apps_module
   from app.main import app as main_app
 
   source_dir = Path(get_settings().data_dir) / "apps" / "memory"

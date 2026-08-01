@@ -311,7 +311,7 @@ elif backend_needs_pytest; then
   else
     warn "backend changed, no shared venv ($MAIN/backend/.venv) — skipping pytest (CI runs it)."
     warn "  enable: python3 -m venv \"$MAIN/backend/.venv\" \\"
-    warn "    && \"$MAIN/backend/.venv/bin/pip\" install -r \"$MAIN/backend/requirements.txt\""
+    warn "    && \"$MAIN/backend/.venv/bin/pip\" install --require-hashes -r \"$MAIN/backend/requirements.lock\""
   fi
 elif changed_match '^backend/scripts/seed-skills/.*\.md$'; then
   ok "backend seed-skill docs changed — full pytest not required"

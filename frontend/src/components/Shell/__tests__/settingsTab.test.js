@@ -64,18 +64,6 @@ test('focusedContentRoute ignores a BACKGROUND settings tab', () => {
   assert.equal(route.chatId, '5')
 })
 
-// ── Legacy rollback projection stays chat/app-only ───────────────────────────
-
-test('flattenRollbackPriority excludes the Settings tab', () => {
-  let ws = onePane()
-  ws = paneModel.openTab(ws, makeTab('app', 42), { paneId: ws.focusedPaneId, activate: true })
-  ws = paneModel.openTab(ws, settingsTab(), { paneId: ws.focusedPaneId, activate: true })
-  const rollback = paneModel.flattenRollbackPriority(ws)
-  assert.ok(!rollback.some(tabModel.isSettingsTab), 'settings never mirrored to the legacy key')
-  // flatten() (the strip projection) DOES keep it — it is a real, tappable tab.
-  assert.ok(paneModel.flatten(ws).some(tabModel.isSettingsTab), 'flatten keeps the settings tab')
-})
-
 // ── Compatibility suite (design §7) ─────────────────────────────────────────
 
 // Two panes: p0 = chat 'c' (focused), p1 = app 42.

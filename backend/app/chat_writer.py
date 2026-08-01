@@ -63,7 +63,8 @@ from app.events import (
 )
 
 # Child of `moebius.chat` (NOT a sibling `moebius.chat_writer`) so the actor's
-# records PROPAGATE to the RotatingFileHandler that `chat._get_logger` attaches
+# records PROPAGATE to the RotatingFileHandler that `chat_logging.get_logger`
+# attaches
 # to `moebius.chat` — the same `chat.log` file `/api/debug/logs` serves. A
 # persistence failure during Finalize/PersistTranscript/AnswerQuestion is
 # exactly the failure the redesign's failure-semantics route here, so it has to
@@ -71,7 +72,7 @@ from app.events import (
 # records landed on no handler and the post-mortem was blind. No double-logging:
 # `moebius.chat` holds the only handler, this child adds none, and the root
 # logger has none — so a propagated record hits exactly one handler. The parent
-# handler is built lazily by `chat._get_logger`, which the lifespan's
+# handler is built lazily by `chat_logging.get_logger`, which the lifespan's
 # `reconcile_interrupted_chats` always calls BEFORE `start_writer()`, so the
 # handler exists by the time the writer thread can log.
 log = logging.getLogger("moebius.chat.writer")
@@ -394,7 +395,7 @@ class AppendSteeredUserMessage(_Command):
   user row BETWEEN the pre-steer assistant text and the post-steer
   continuation). That ordering is exact for Claude; for Codex the A1/A2 cut
   is best-effort because turn.steer() has no turn boundary (see
-  `_ChatEventSink.split_for_steer`). The split path seals the
+  `ChatEventSink.split_for_steer`). The split path seals the
   streamed-so-far assistant text as its own message FIRST, so when this
   command runs the trailing message is that sealed assistant — appending the
   user row after it leaves

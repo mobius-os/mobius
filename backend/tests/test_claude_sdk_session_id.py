@@ -196,7 +196,7 @@ def test_resumed_context_block_round_trips_transcript():
   session has no resumable transcript — the agent continues a fresh
   session with its own prior conversation as context.
   """
-  from app.chat import _build_resumed_context
+  from app.chat_context import _build_resumed_context
 
   row = _FakeChatRow([
     {"role": "user", "content": "build me a notes app"},
@@ -217,7 +217,7 @@ def test_resumed_context_block_round_trips_transcript():
 
 def test_resumed_context_skips_non_conversation_rows():
   """Compaction/system rows and blank content are not reseeded."""
-  from app.chat import _build_resumed_context
+  from app.chat_context import _build_resumed_context
 
   row = _FakeChatRow([
     {"role": "system", "content": "ignored"},
@@ -232,7 +232,7 @@ def test_resumed_context_skips_non_conversation_rows():
 
 
 def test_resumed_context_labels_automatic_continuation_as_product_event():
-  from app.chat import _build_resumed_context
+  from app.chat_context import _build_resumed_context
 
   row = _FakeChatRow([{
     "role": "user",
@@ -248,7 +248,7 @@ def test_resumed_context_labels_automatic_continuation_as_product_event():
 
 def test_resumed_context_none_when_empty():
   """A chat with no usable transcript yields no reseed block."""
-  from app.chat import _build_resumed_context
+  from app.chat_context import _build_resumed_context
 
   assert _build_resumed_context(_FakeChatRow([])) is None
   assert _build_resumed_context(None) is None
@@ -260,7 +260,7 @@ def test_resumed_context_truncates_to_budget():
   Oldest turns drop first so the block can't blow the context window;
   the most recent turn always survives.
   """
-  from app.chat import _RESUME_CONTEXT_CHAR_BUDGET, _build_resumed_context
+  from app.chat_context import _RESUME_CONTEXT_CHAR_BUDGET, _build_resumed_context
 
   big = "x" * 4000
   msgs = [{"role": "user", "content": f"{i} {big}"} for i in range(20)]

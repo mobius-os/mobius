@@ -607,7 +607,7 @@ class ActiveCodexTurn:
     raw_bc = self._steer_broadcast()
     if raw_bc is None:
       return
-    from app.chat import steer_delivery_failed_event
+    from app.chat_event_sink import steer_delivery_failed_event
     raw_bc.publish(
       steer_delivery_failed_event(attempt.consume_pending_cids)
     )
@@ -616,7 +616,7 @@ class ActiveCodexTurn:
     self, attempt: _CodexSteerAttempt,
   ) -> None:
     """Persist + publish the accepted cut through the turn's owning sink."""
-    from app.chat import commit_steer_cut
+    from app.chat_event_sink import commit_steer_cut
     await commit_steer_cut(
       self.chat_id,
       attempt.user_msgs,
@@ -2213,7 +2213,8 @@ async def run_codex_sdk_turn(
       # process group, so the transport dies mid-stream instead of
       # delivering turn/completed. Surfacing that as a provider failure is
       # both wrong and destructive: the raw string overwrites the stall note
-      # (chat._pause_note) published moments earlier, because error blocks
+      # (`chat_event_sink._pause_note`) published moments earlier, because
+      # error blocks
       # coalesce latest-wins and drop every events.ERROR_PASSTHROUGH_FIELDS
       # the new event omits — taking the note's one-tap Resume with it and
       # leaving the owner an unexplained error and no way back.

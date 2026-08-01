@@ -1147,12 +1147,9 @@ export default function useNavigation({
           tabModel.makeTab('chat', deepLink.chatId),
         )
       } else if (!blobValid && initialNav.view === 'canvas' && initialNav.appId != null) {
-        // No valid blob: the flat-tab seed is only the tab STRIP; the legacy
-        // triple (moebius_active_view/_app/_chat) names the ACTIVE tab and must
-        // win as active — NOT gated on `bootPaneEmpty`, because a prior session's
-        // persisted mobius-open-tabs makes the seeded pane non-empty and would
-        // otherwise strand the restore on the wrong (stale) tab. openBootTab dedups
-        // an already-open tab and replaces a lone implicit-home tab.
+        // No valid blob: the retained active-destination keys name the item to
+        // restore. openBootTab replaces the lone implicit-home fallback and
+        // normalizes the destination into the current workspace shape.
         openBootTab(tabModel.makeTab('app', initialNav.appId))
       } else if (!blobValid && initialNav.chatId != null) {
         openBootTab(tabModel.makeTab('chat', initialNav.chatId))

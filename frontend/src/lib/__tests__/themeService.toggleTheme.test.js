@@ -161,8 +161,8 @@ function makeApi(initialCss = DARK_CSS) {
 let dom
 let themeService
 
-// applyThemeToDom (called inside toggleTheme) now writes
-// localStorage['mobius-theme-bg'] (BUG 2). Stub it so the calls don't throw.
+// applyThemeToDom (called inside toggleTheme) writes the structured theme.
+// Stub localStorage so those calls are testable.
 function makeLocalStorageStub() {
   const map = new Map()
   return {
@@ -535,9 +535,7 @@ test('BUG 2 — toggleTheme keeps the inline --bg in lockstep with the painted t
   await themeService.toggleTheme(qc, 'dark', api)
   assert.equal(dom.documentElement.style.getPropertyValue('--bg'), '#f0eeeb',
     'inline --bg must track the toggled-to light bg, not the stale splash value')
-  // Delegation: applyThemeToDom (now via the shared library) persists BOTH
-  // the legacy bare-hex key AND the new {bg,mode} key the pre-paint IIFE reads.
-  assert.equal(localStorage.getItem('mobius-theme-bg'), '#f0eeeb')
+  // Delegation: applyThemeToDom persists the {bg,mode} key the pre-paint IIFE reads.
   assert.deepEqual(
     JSON.parse(localStorage.getItem('mobius-theme')),
     { bg: '#f0eeeb', mode: 'light' },

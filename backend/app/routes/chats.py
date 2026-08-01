@@ -4,7 +4,8 @@ import hashlib
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse, Response
@@ -168,6 +169,19 @@ def _drain_writer_before_sidecar_read(
 class ChatUpdate(BaseModel):
   title: str | None = None
   messages: list[dict] | None = None
+
+
+class PinnedOrderItem(BaseModel):
+  """One identity in the drawer's combined chat/app pinned list."""
+
+  kind: Literal["chat", "app"]
+  id: str = Field(min_length=1, max_length=128)
+
+
+class PinnedOrderUpdate(BaseModel):
+  """The complete top-to-bottom order of every currently pinned item."""
+
+  items: list[PinnedOrderItem] = Field(min_length=1, max_length=5000)
 
 
 def _coerce_agent_settings(raw) -> dict:
@@ -736,6 +750,74 @@ def create_chat(
     "messages": detail["messages"],
     "detail": detail,
   }
+
+
+@router.put("/pinned-order", dependencies=[Depends(reject_cross_site)])
+def update_pinned_order(
+  body: PinnedOrderUpdate,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Atomically persist the drawer's one combined pinned order.
+
+  Chats and apps live in separate tables, but the drawer presents them as one
+  list. Re-pinning each row through its ordinary resource endpoint exposed
+  partially-restamped server state to unrelated list refreshes: one query could
+  land while the other still carried optimistic client timestamps, making rows
+  shuffle and then settle again. Validate the complete identity set, assign one
+  coherent timestamp sequence, and commit both tables once so every reader sees
+  either the old order or the new order—never an intermediate mix.
+  """
+  normalized: list[tuple[str, str]] = []
+  for item in body.items:
+    raw_id = item.id.strip()
+    if item.kind == "app":
+      try:
+        app_id = int(raw_id)
+      except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid pinned app id.")
+      if app_id <= 0:
+        raise HTTPException(status_code=422, detail="Invalid pinned app id.")
+      raw_id = str(app_id)
+    elif not raw_id:
+      raise HTTPException(status_code=422, detail="Invalid pinned chat id.")
+    normalized.append((item.kind, raw_id))
+
+  if len(set(normalized)) != len(normalized):
+    raise HTTPException(status_code=422, detail="Pinned order contains duplicates.")
+
+  pinned_chats = db.query(models.Chat).filter(
+    models.Chat.deleted_at.is_(None),
+    models.Chat.pinned_at.isnot(None),
+  ).all()
+  pinned_apps = db.query(models.App).filter(
+    models.App.deleted_at.is_(None),
+    models.App.pinned_at.isnot(None),
+  ).all()
+  rows = {
+    **{("chat", str(chat.id)): chat for chat in pinned_chats},
+    **{("app", str(app.id)): app for app in pinned_apps},
+  }
+  if set(normalized) != set(rows):
+    raise HTTPException(
+      status_code=409,
+      detail="Pinned items changed while reordering; try again.",
+    )
+
+  # Keep the last assigned rank at or before `now` so a pin toggled immediately
+  # after this transaction still appends below the reordered list.
+  anchor = now_naive_utc() - timedelta(microseconds=len(normalized))
+  persisted = []
+  for index, key in enumerate(normalized, start=1):
+    pinned_at = anchor + timedelta(microseconds=index)
+    rows[key].pinned_at = pinned_at
+    persisted.append({
+      "kind": key[0],
+      "id": key[1],
+      "pinned_at": pinned_at.isoformat(),
+    })
+  db.commit()
+  return {"items": persisted}
 
 
 @router.put("/{chat_id}", dependencies=[Depends(reject_cross_site)])

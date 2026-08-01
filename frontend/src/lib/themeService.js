@@ -200,8 +200,8 @@ function runThemeTransition(mutateDom, options = {}) {
  * which is the single source of truth for the DOM mutations (strip+link
  * @import fonts, inject <style id="mobius-theme"> last in <head>, mirror bg
  * onto body / meta theme-color / inline --bg, set data-theme + color-scheme +
- * iOS status bar from the mode) AND for persisting {bg,mode} + the legacy
- * mobius-theme-bg key. The same library code paints the app-frame's pre-paint
+ * iOS status bar from the mode) AND for persisting the sole {bg,mode} key.
+ * The same library code paints the app-frame's pre-paint
  * IIFE, so the shell and the iframe can never drift.
  *
  * Kept as a named export so existing callers (useTheme's apply effect,
