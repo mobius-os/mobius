@@ -86,6 +86,11 @@ _UNMODIFIED_MIGRATIONS = {
   "resolving-app-git.md": {
     # v17 baked copy: resolution is an explicit installer replay.
     "6d462f1711891a182c26e212a1ec8fc922eeb02faee45e70ab9b2becfba24f5a",
+    # Pre-v17 baked copy still describing the retired source watcher
+    # ("finish by saving — the watcher does the rest"). It contradicts the
+    # resolver prompt in routes/apps.py, which sends the agent here and then
+    # tells it to run resolve_app_update.py. Unmodified copies migrate.
+    "4911c6db2d3d47eb7c3c206b53ca9be9459619f149a78c06c02711422b941127",
   },
   "app-component-shapes.md": {
     "0320609ff924a0954c20d5e5db91ed3681d421d76f6804b24552eb6e8fa5eb31",

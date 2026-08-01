@@ -129,6 +129,7 @@ def test_controlled_skills_have_fix_forward_migrations():
   }
   assert module._UNMODIFIED_MIGRATIONS["resolving-app-git.md"] == {
     "6d462f1711891a182c26e212a1ec8fc922eeb02faee45e70ab9b2becfba24f5a",
+    "4911c6db2d3d47eb7c3c206b53ca9be9459619f149a78c06c02711422b941127",
   }
   assert module._UNMODIFIED_MIGRATIONS["app-component-shapes.md"] == {
     "0320609ff924a0954c20d5e5db91ed3681d421d76f6804b24552eb6e8fa5eb31",
