@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app import legacy_platform_apps, models
+from app import database, legacy_platform_apps, models
 from app.config import get_settings
 from app.install import _is_historical_platform_app_source_dir, install_from_manifest
 
@@ -95,12 +95,27 @@ def _is_legacy_platform_row(app: models.App) -> bool:
   )
 
 
+_LEGACY_PLATFORM_APPS_MIGRATION = "data_0001_legacy_platform_apps"
+
+
 async def _migrate_legacy_platform_apps(db: Session) -> None:
   """Move old built-in rows forward by installing their trusted catalog entry.
 
   This only runs when an active row from an older image is already present and
   still points at the retired platform-core source tree.
+
+  ONE-SHOT, recorded durably. The row-shape predicate alone cannot tell an
+  un-migrated historical row from an app the OWNER creates later at the same
+  path with the same slug — `app_apply` writes exactly that shape (slug from the
+  manifest id, source_dir /data/apps/<slug>, no manifest_url). Without this
+  marker, an owner building a local app called `memory`, `reflection`, or
+  `beat-machine` would match on the next boot and have the catalog manifest
+  installed over their work. The ledger closes the window permanently once the
+  migration has had its chance.
   """
+  eng = db.get_bind()
+  if database.data_migration_done(eng, _LEGACY_PLATFORM_APPS_MIGRATION):
+    return
   rows = (
     db.query(models.App)
     .filter(
@@ -130,6 +145,10 @@ async def _migrate_legacy_platform_apps(db: Session) -> None:
         "bootstrap: legacy platform app migration failed for %s — %s",
         row.slug, exc,
       )
+      # Leave the marker unset so a transient catalog/network failure retries on
+      # the next boot rather than stranding a genuinely un-migrated row.
+      return
+  database.record_data_migration(eng, _LEGACY_PLATFORM_APPS_MIGRATION)
 
 
 async def ensure_bootstrap_apps_installed(db: Session) -> None:

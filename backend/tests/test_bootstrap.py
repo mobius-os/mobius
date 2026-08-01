@@ -14,12 +14,28 @@ from fastapi import HTTPException
 
 from app import app_git, models
 from app.bootstrap import (
+  _LEGACY_PLATFORM_APPS_MIGRATION,
   BOOTSTRAP_SKILLS_MANIFEST_URL,
   BOOTSTRAP_STORE_MANIFEST_URL,
   LEGACY_PLATFORM_APP_MANIFEST_URLS,
   _migrate_legacy_platform_apps,
   ensure_bootstrap_apps_installed,
 )
+
+
+def _reset_legacy_platform_marker(db):
+  """Drop the durable one-shot marker so a case can act as a FIRST boot.
+
+  The marker is per-database and the suite reuses one, so without this every
+  case after the first would correctly short-circuit and assert nothing.
+  """
+  from sqlalchemy import text
+
+  db.execute(
+    text("DELETE FROM schema_migrations WHERE version = :v"),
+    {"v": _LEGACY_PLATFORM_APPS_MIGRATION},
+  )
+  db.commit()
 
 
 def _install_result(name="App", slug="app", app_id=1, mode="install"):
@@ -217,6 +233,7 @@ async def test_bootstrap_migrates_active_legacy_platform_rows(
   ))
   db.commit()
 
+  _reset_legacy_platform_marker(db)
   should_migrate = source_shape == "platform_core" or manifest_url_shape == "empty"
   install_mock = AsyncMock(
     return_value=_install_result("Memory", "memory", app_id=3, mode="update"),
@@ -233,6 +250,46 @@ async def test_bootstrap_migrates_active_legacy_platform_rows(
     assert install_mock.await_args.kwargs["source"] == "bootstrap"
   else:
     install_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owner_app_reusing_a_historical_slug_is_never_overwritten(
+  db, monkeypatch,
+):
+  """An owner's own app named `memory` must survive the next boot.
+
+  `app_apply` writes exactly the shape the historical predicate matches — slug
+  from the manifest id, source_dir /data/apps/<slug>, no manifest_url — so
+  without a durable one-shot marker the migration would install the catalog
+  manifest OVER an app the owner built themselves.
+  """
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  from app.config import get_settings
+
+  data_dir = get_settings().data_dir
+  _reset_legacy_platform_marker(db)
+
+  # First boot: nothing legacy present, so the migration closes its window.
+  empty_mock = AsyncMock(return_value=_install_result())
+  with patch("app.bootstrap.install_from_manifest", empty_mock):
+    await _migrate_legacy_platform_apps(db)
+  empty_mock.assert_not_awaited()
+
+  # Later: the owner builds their own app and happens to call it "memory".
+  db.add(models.App(
+    name="Memory",
+    description="the owner's OWN app, not the catalog one",
+    jsx_source="export default function App() {}",
+    slug="memory",
+    source_dir=f"{data_dir}/apps/memory",
+    manifest_url=None,
+  ))
+  db.commit()
+
+  install_mock = AsyncMock(return_value=_install_result("Memory", "memory"))
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await _migrate_legacy_platform_apps(db)
+  install_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
