@@ -15,8 +15,12 @@ export default function useTranscriptState({ cacheKey, cached, queryClient }) {
   const [offset, setOffset] = useState(() => cached?.offset ?? 0)
   const messagesRef = useRef(messages)
   const offsetRef = useRef(offset)
-  messagesRef.current = messages
-  offsetRef.current = offset
+
+  // The mutation methods below advance these owners before scheduling React
+  // state. Do not copy rendered state back into them here: an interruptible
+  // cold-history render may be preceded by an urgent stream/runtime render of
+  // the older UI. That render must not roll the already-accepted transcript
+  // snapshot backward while the transition is still pending.
 
   const applyMessagesToView = useCallback((next, nextOffset, force = false) => {
     const prev = messagesRef.current

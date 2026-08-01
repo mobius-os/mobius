@@ -1451,7 +1451,17 @@ export default function useStreamConnection(chatId, {
       // streaming whatever the runner emits next. Returning here
       // prevents a redundant reconnect that would close the live
       // stream and replay the full catch-up burst.
-      if (data.status === 'answer_delivered') return data
+      if (data.status === 'answer_delivered') {
+        // A cold entry on a parked question intentionally skips replaying the
+        // settled pre-question event log. The answer releases that barrier, so
+        // attach now before the runner can publish its continuation. Existing
+        // live viewers retain their socket and avoid a redundant full replay.
+        if (!isStreamingRef.current) {
+          wantsReconnectRef.current = true
+          connectRef.current?.(true)
+        }
+        return data
+      }
       // A recovered AskUserQuestion answer (the process restarted after
       // persisting the question block) starts a fresh hidden continuation.
       // Its response declares `answer_turn: "new"` for ChatView's bridge

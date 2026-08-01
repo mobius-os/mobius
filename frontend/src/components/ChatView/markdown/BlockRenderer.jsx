@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { Marked } from 'marked'
-import { MemoBlock, BlockToken, MathBlock } from './blocks.jsx'
+import { MemoBlock, MathBlock } from './blocks.jsx'
 import { mathTokens } from './mathTokens.js'
 import { groupMarkdownImages } from './imageGallery.js'
 import ImageGallery from './ImageGallery.jsx'
@@ -88,9 +88,17 @@ export function ProgressiveMarkdown({
 
 /**
  * StandardMarkdown — history mode.
- * One-shot render, no memoization overhead.
+ *
+ * Settled blocks normally render once. A pathological cold transcript can
+ * prepare one long block over several hidden frames; `renderFraction` reveals
+ * token prefixes while one memoized token tree keeps already-prepared DOM.
  */
-export function StandardMarkdown({ text, onInternalNav, mediaDimensions }) {
+export function StandardMarkdown({
+  text,
+  renderFraction,
+  onInternalNav,
+  mediaDimensions,
+}) {
   // The settled-transcript renderer, so this is the one that matters for "a
   // stopped chat still feels slow". `useMemo` only holds while the component
   // stays mounted; if anything remounts messages this re-tokenises every
@@ -100,10 +108,14 @@ export function StandardMarkdown({ text, onInternalNav, mediaDimensions }) {
     () => perfTime('markdown.tokenize.settled', () => groupMarkdownImages(tokenize(text))),
     [text],
   )
+  const fraction = Number(renderFraction)
+  const visibleTokens = Number.isFinite(fraction) && fraction > 0 && fraction < 1
+    ? tokens.slice(0, Math.max(1, Math.ceil(tokens.length * fraction)))
+    : tokens
 
   return (
     <div className="standard-markdown md-blocks">
-      {tokens.map((token, i) => {
+      {visibleTokens.map((token, i) => {
         const appCard = appLinkCardFromParagraph(token, window.location.href)
         if (appCard) {
           return <AppLinkCard key={i} card={appCard} onInternalNav={onInternalNav} />
@@ -121,7 +133,7 @@ export function StandardMarkdown({ text, onInternalNav, mediaDimensions }) {
           )
         }
         return (
-          <BlockToken
+          <MemoBlock
             key={i}
             token={token}
             onInternalNav={onInternalNav}

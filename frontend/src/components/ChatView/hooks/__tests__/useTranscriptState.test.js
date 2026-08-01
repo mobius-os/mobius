@@ -63,3 +63,26 @@ test('structurally identical commits still publish but avoid replacing view stat
   assert.equal(queryClient.writes, 1)
   assert.notEqual(queryClient.value.messages, first)
 })
+
+test('an accepted equivalent snapshot remains the synchronous owner across rerenders', () => {
+  const first = [{ role: 'user', content: 'same', ts: 1 }]
+  const equivalent = [{ ...first[0] }]
+  const queryClient = queryClientWith({ messages: first, offset: 0 })
+  const hookArgs = {
+    cacheKey: ['chat-messages', 7],
+    cached: queryClient.value,
+    queryClient,
+  }
+  const { result, rerender } = renderHook(useTranscriptState, hookArgs)
+
+  result.current.applyMessagesToView(equivalent, 0)
+  assert.equal(result.current.messages, first)
+  assert.equal(result.current.messagesRef.current, equivalent)
+
+  // Model an unrelated urgent render landing before an interruptible
+  // transcript transition. Rendered state is still the old equivalent array;
+  // the synchronous owner must not be rolled back to it.
+  rerender(hookArgs)
+  assert.equal(result.current.messages, first)
+  assert.equal(result.current.messagesRef.current, equivalent)
+})

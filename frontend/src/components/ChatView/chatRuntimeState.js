@@ -180,6 +180,107 @@ export function answerKeepsCurrentTurn(response) {
   return answerTurnDisposition(response) === 'same'
 }
 
+/**
+ * A running turn normally owns a live replay stream. An unanswered owner
+ * question is a protocol barrier: no assistant output can arrive before the
+ * answer, while replaying the entire pre-question event log would only rebuild
+ * settled history beside the durable card. Keep that pause on the compact DB
+ * surface; the answer transport attaches before the runner continues.
+ */
+export function shouldAttachRunningStream({
+  running,
+  pendingQuestionId,
+} = {}) {
+  return !!running && !pendingQuestionId
+}
+
+function coldBlockRenderCost(block) {
+  if (block?.type !== 'text') return 1
+  // Markdown reports create work roughly in proportion to their source size,
+  // not merely their block count. Weight long prose so one helper report does
+  // not consume an entire supposedly-small frame by itself.
+  return Math.max(1, Math.ceil(String(block.content || '').length / 4000))
+}
+
+/**
+ * Build prefix-complete frames for a pathological cold transcript commit.
+ *
+ * The view stays hidden until the caller commits the final frame, so these are
+ * not partial product states. Each frame only appends blocks/messages; stable
+ * keys let React retain markdown and disclosure DOM already prepared by the
+ * prior frame. Ordinary chats return the original array as their sole frame.
+ */
+export function coldTranscriptRenderFrames(
+  messages,
+  { minCost = 80, frameBudget = 4 } = {},
+) {
+  if (!Array.isArray(messages) || messages.length === 0) return [messages || []]
+
+  const totalCost = messages.reduce((sum, message) => {
+    const blocks = Array.isArray(message?.blocks) ? message.blocks : []
+    return sum + (blocks.length > 0
+      ? blocks.reduce((blockSum, block) => blockSum + coldBlockRenderCost(block), 0)
+      : 1)
+  }, 0)
+  if (totalCost < minCost) return [messages]
+
+  const frames = []
+  const completeMessages = []
+  let frameCost = 0
+  for (const message of messages) {
+    const blocks = Array.isArray(message?.blocks) ? message.blocks : []
+    if (blocks.length === 0) {
+      completeMessages.push(message)
+      continue
+    }
+
+    const visibleBlocks = []
+    const publish = partialBlock => {
+      frames.push([
+        ...completeMessages,
+        {
+          ...message,
+          blocks: partialBlock
+            ? [...visibleBlocks, partialBlock]
+            : [...visibleBlocks],
+        },
+      ])
+    }
+
+    for (const block of blocks) {
+      const blockCost = coldBlockRenderCost(block)
+      let consumed = 0
+      while (consumed < blockCost) {
+        const take = Math.min(
+          frameBudget - frameCost,
+          blockCost - consumed,
+        )
+        consumed += take
+        frameCost += take
+        const complete = consumed === blockCost
+        const partialBlock = complete
+          ? null
+          : { ...block, _coldRenderFraction: consumed / blockCost }
+        if (complete) visibleBlocks.push(block)
+        if (frameCost === frameBudget) {
+          publish(partialBlock)
+          frameCost = 0
+        }
+      }
+    }
+    completeMessages.push(message)
+  }
+
+  if (frameCost > 0) frames.push([...completeMessages])
+
+  // The terminal commit must use the authoritative objects, not a last-message
+  // clone manufactured by the render plan. This keeps cache/view identity and
+  // the transcript state owner's equivalence checks aligned after reveal.
+  if (frames.length === 0) return [messages]
+  frames[frames.length - 1] = messages
+  return frames
+}
+
 export function shouldShowOpenAppCta(builtApp, turnActive = false) {
   if (!builtApp?.id) return false
   const seenCurrentBuild = Boolean(

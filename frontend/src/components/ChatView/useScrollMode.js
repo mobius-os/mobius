@@ -64,6 +64,7 @@ import { isPerfProbeEnabled, perfMark, perfTime } from '../../lib/perfProbe.js'
 // readiness: inline media owns a reserved frame and ResizeObserver keeps the
 // saved anchor stable as lazy previews arrive after reveal.
 const REVEAL_CAP_MS = 1500
+const PREPARING_REVEAL_CAP_MS = 5000
 
 // Reader quiet-settle window. Input and momentum retain Infinity ownership;
 // every real scroll restarts this timer. Only its trailing edge derives the
@@ -1037,7 +1038,7 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   shows/hides because the tray's margin shrinks the spacer math).
  * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
  *   When true, scroll events from pagination shouldn't mutate mode.
- * @param {'history'|'cached'|'ready'} args.initialEntryPhase
+ * @param {'history'|'cached'|'preparing'|'ready'} args.initialEntryPhase
  *   One entry-readiness state: history blocks reveal, cached permits an
  *   immediate first paint while layout stabilizes, and ready means the
  *   authoritative history read has settled.
@@ -1158,8 +1159,26 @@ export default function useScrollMode({
     revealedRef.current = false
     mountStabilizingRef.current = true
     setRevealed(false)
+    let preparationDeadline = 0
     const deadline = setTimeout(() => {
       if (revealedRef.current) return
+      // A pathological transcript can be deliberately preparing in bounded,
+      // committed slices. Revealing at the ordinary stalled-request cap would
+      // expose that incomplete prefix and let its later growth take over the
+      // reader's scroll mode. Give this explicit phase its own absolute escape
+      // hatch; a normal ready transition still reveals immediately through the
+      // quiet-layout path below.
+      if (initialEntryPhaseRef.current === 'preparing') {
+        preparationDeadline = setTimeout(() => {
+          if (revealedRef.current) return
+          if (forceRevealRef.current) forceRevealRef.current()
+          else {
+            revealedRef.current = true
+            setRevealed(true)
+          }
+        }, PREPARING_REVEAL_CAP_MS - REVEAL_CAP_MS)
+        return
+      }
       if (forceRevealRef.current) forceRevealRef.current()
       else {
         // Defensive fallback for a mount whose scroll DOM never materialized.
@@ -1167,7 +1186,10 @@ export default function useScrollMode({
         setRevealed(true)
       }
     }, REVEAL_CAP_MS)
-    return () => clearTimeout(deadline)
+    return () => {
+      clearTimeout(deadline)
+      clearTimeout(preparationDeadline)
+    }
   }, [chatId])
 
   // Geometry capture reads scrollHeight/offsetHeight, which forces a synchronous
@@ -1504,8 +1526,16 @@ export default function useScrollMode({
     const listEl = scrollEl.querySelector('.chat__list')
     if (!listEl) return
 
-    // Restore mode for this chat if persisted (mount-restore path).
-    if (modeRef.current.kind === 'INITIAL') {
+    // Restore mode for this chat if persisted (mount-restore path). A
+    // progressive cold render exposes only a prefix of one giant assistant
+    // row; validating a saved deep-in-row offset against that temporary short
+    // row would reject the real location as off-content and permanently fall
+    // back to the top. Wait for the authoritative frame, whose ready-phase
+    // render re-runs this effect with the complete row geometry.
+    if (
+      modeRef.current.kind === 'INITIAL'
+      && initialEntryPhaseRef.current !== 'preparing'
+    ) {
       const saved = _scrollModes[chatId]
       const restored = _validateSavedMode(saved, messagesRef.current, scrollEl)
       readerLocationExplicitRef.current = !!saved

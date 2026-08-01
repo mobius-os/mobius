@@ -183,6 +183,7 @@ function MsgContentInner({
                     />
                   : <StandardMarkdown
                       text={text}
+                      renderFraction={block._coldRenderFraction}
                       onInternalNav={onInternalNav}
                       mediaDimensions={msg.media_dimensions}
                     />)

@@ -391,12 +391,25 @@ def _chat_detail_response(
 
   all_msgs = materialized_messages(chat)
   running = is_chat_running(chat.id) or has_running_run(db, chat.id)
+  pending_question = questions.get(chat.id)
   live_snapshot = chat.live_assistant
   live_message = (
     all_msgs[-1]
     if running
     and all_msgs
     and all_msgs[-1] is live_snapshot
+    else None
+  )
+  # A genuinely streaming assistant row must remain self-contained: the live
+  # surface may need every block before the next event arrives. A runner parked
+  # on an owner question is different. Nothing can extend that row until the
+  # question is answered, so its already-settled activity can use the same lazy
+  # compact projection as immutable history. The frontend deliberately does
+  # not attach to the replay stream during this pause; answering reconnects it
+  # before the provider can add more output.
+  compact_exempt_live_message = (
+    live_message
+    if not (compact and questions.is_waiting(chat.id))
     else None
   )
   total = len(all_msgs)
@@ -436,7 +449,7 @@ def _chat_detail_response(
     page = compact_messages_for_detail(
       page,
       message_offset=start,
-      live_message=live_message,
+      live_message=compact_exempt_live_message,
     )
   from app.chat_media_dimensions import project_message_image_dimensions
   page = project_message_image_dimensions(
@@ -446,7 +459,6 @@ def _chat_detail_response(
   )
 
   provider = chat.provider or "claude"
-  pending_question = questions.get(chat.id)
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
   active_goal_objective = (
     running_goal_objective(db, chat.id) if running else None

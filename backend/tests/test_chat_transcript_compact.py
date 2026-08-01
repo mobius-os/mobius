@@ -1,6 +1,10 @@
 """Compact chat reads keep the transcript light without changing stored truth."""
 
+import asyncio
+
+from app import models, questions
 from app.chat_transcript import compact_messages_for_detail
+from app.pending_questions import PendingQuestion
 from sqlalchemy import event
 
 
@@ -178,6 +182,74 @@ def test_single_activity_and_live_message_remain_self_contained():
   assert compact is messages
   assert compact[0] is single
   assert compact[1] is live
+
+
+def test_compact_route_folds_settled_activity_while_live_turn_waits_for_answer(
+  client,
+  auth,
+  db,
+  monkeypatch,
+):
+  created = client.post(
+    "/api/chats",
+    headers=auth,
+    json={"title": "Parked question"},
+  )
+  assert created.status_code == 200
+  chat_id = created.json()["id"]
+  chat = db.get(models.Chat, chat_id)
+  chat.live_assistant = {
+    "role": "assistant",
+    "ts": 42,
+    "blocks": [
+      {"type": "thinking", "content": "settled reasoning"},
+      {"type": "tool", "tool": "Bash", "output": "settled output"},
+      {"type": "question", "question_id": "question-1", "questions": []},
+    ],
+  }
+  db.commit()
+  question_loop = asyncio.new_event_loop()
+  pending = PendingQuestion(
+    question_id="question-1",
+    questions=[],
+    future=question_loop.create_future(),
+  )
+  questions.register(chat_id, pending)
+  monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: True)
+
+  try:
+    response = client.get(
+      f"/api/chats/{chat_id}?limit=20&compact=1",
+      headers=auth,
+    )
+  finally:
+    questions.cancel(chat_id)
+    question_loop.close()
+
+  assert response.status_code == 200
+  payload = response.json()
+  assert payload["running"] is True
+  assert payload["pending_question_id"] == "question-1"
+  assert payload["messages"][0]["blocks"] == [
+    {
+      "type": "activity",
+      "activity_id": "0:0:2",
+      "message_index": 0,
+      "start": 0,
+      "end": 2,
+      "entries": [
+        {"item": {"type": "thinking"}, "idx": 0},
+        {
+          "item": {"type": "tool", "tool": "Bash", "status": "done"},
+          "idx": 1,
+        },
+      ],
+      "tool_count": 1,
+    },
+    {"type": "question", "question_id": "question-1", "questions": []},
+  ]
+  assert "settled reasoning" not in response.text
+  assert "settled output" not in response.text
 
 
 def test_image_reads_stay_distinctive_and_question_twins_are_not_rendered():
