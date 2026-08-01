@@ -73,6 +73,11 @@ import {
   withoutConfirmedDeletions,
 } from './confirmedDeletion.js'
 import {
+  withChatOwnerActivity,
+  withChatRename,
+  withChatRunState,
+} from './chatListProjection.js'
+import {
   clearComposerDraft,
   consumeComposerHandoff,
   stageComposerHandoff,
@@ -1577,6 +1582,31 @@ export default function Shell() {
       .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
       .catch(() => [])
   }, [queryClient])
+  const projectChatList = useCallback((project) => {
+    queryClient.setQueryData(chatQueries.keys.all, current => {
+      const next = project(Array.isArray(current) ? current : [])
+      chatsRef.current = next
+      return next
+    })
+  }, [queryClient])
+  const markChatOwnerActivity = useCallback((chatId) => {
+    const at = new Date().toISOString()
+    projectChatList(rows => withChatOwnerActivity(rows, chatId, at))
+  }, [projectChatList])
+  const markChatRunState = useCallback((chatId, running) => {
+    const at = running ? new Date().toISOString() : null
+    projectChatList(rows => withChatRunState(
+      running ? withChatOwnerActivity(rows, chatId, at) : rows,
+      chatId,
+      running,
+    ))
+  }, [projectChatList])
+  const applyChatRenameEvent = useCallback((event) => {
+    projectChatList(rows => withChatRename(rows, event.chatId, {
+      title: event.title,
+      updatedAt: event.updatedAt,
+    }))
+  }, [projectChatList])
 
   const confirmChatDeleted = useCallback((id) => {
     const sid = String(id)
@@ -2043,10 +2073,12 @@ export default function Shell() {
       if (ev.chatId) confirmChatRecovered(ev.chatId)
       void invalidateShellListCache('chats').then(refreshChats)
     } else if (ev.type === 'chat_renamed') {
-      // The summary publisher committed a new generated name. Refresh durable
-      // list truth immediately so open tabs and the drawer update after the
-      // first settled turn, and after a later substantial topic shift.
-      void invalidateShellListCache('chats').then(refreshChats)
+      // The committed event carries the exact changed row fields. Apply those
+      // in place so renaming one chat cannot parse and reconcile all hundreds
+      // of drawer rows underneath typing/scrolling. Drop the offline fallback
+      // copy asynchronously; the next ordinary reconnect can repopulate it.
+      applyChatRenameEvent(ev)
+      void invalidateShellListCache('chats')
     } else if (ev.type === 'app_deleted') {
       if (ev.appId) confirmAppDeleted(ev.appId)
       void invalidateShellListCache('apps')
@@ -2159,8 +2191,8 @@ export default function Shell() {
       if (ev.chatId) {
         markChatRunActivity(ev.chatId)
         markStreamingStart(ev.chatId)
+        markChatRunState(ev.chatId, true)
       }
-      refreshChats()
     } else if (ev.type === 'chat_run_finished') {
       const chatId = ev.chatId
       if (chatId) {
@@ -2169,6 +2201,7 @@ export default function Shell() {
         // final durable transcript.
         markChatRunFinished(chatId)
         markStreamingEnd(chatId)
+        markChatRunState(chatId, false)
         // Attention iff the finished chat is NOT visible in ANY pane — membership
         // in the visible set, not equality with one global id, so a chat visible
         // in a background split gets no false dot (finding D-iii).
@@ -2181,7 +2214,6 @@ export default function Shell() {
           })
         }
       }
-      refreshChats()
     } else if (ev.type === 'shell_rebuilt' || ev.type === 'shell_apply_now') {
       // A new shell generation is available. `shell_rebuilt` fires automatically
       // when the frontend rebuilds; `shell_apply_now` is the agent's EXPLICIT
@@ -2224,10 +2256,11 @@ export default function Shell() {
     // activeAppIdRef, activeChatIdRef, drawerOpenRef) so stale closure values
     // can't be serialized. Refs themselves don't need to be in deps (they're
     // stable objects whose .current is read at call time, not at capture time).
+    applyChatRenameEvent,
     confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished,
-    markStreamingEnd, markStreamingStart,
+    markChatRunState, markStreamingEnd, markStreamingStart,
     onNotificationCreated, placeInWorkspace, refreshApps, refreshChats, warmAppCode,
   ])
 
@@ -3235,7 +3268,7 @@ export default function Shell() {
                 markVoiceListening={markVoiceListening}
                 refreshApps={refreshApps}
                 acknowledgeAppPreview={handleAppPreviewSeen}
-                refreshChats={refreshChats}
+                markChatOwnerActivity={markChatOwnerActivity}
                 loadTheme={loadTheme}
                 navTo={stablePaneNavTo}
                 onInternalNav={handleChatInternalNav}

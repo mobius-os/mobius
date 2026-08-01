@@ -615,10 +615,13 @@ def test_committed_chat_rename_publishes_live_projection_event(
   assert renamed.status_code == 200
   assert unchanged.status_code == 200
   db.expire_all()
-  assert db.query(models.Chat).filter_by(id=chat.id).one().title == "Current topic"
+  refreshed = db.query(models.Chat).filter_by(id=chat.id).one()
+  assert refreshed.title == "Current topic"
   fake_sb.publish.assert_called_once_with({
     "type": "chat_renamed",
     "chatId": str(chat.id),
+    "title": "Current topic",
+    "updatedAt": refreshed.updated_at.isoformat(),
   })
 
 

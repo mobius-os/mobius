@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Text, case, cast, func
 from sqlalchemy.orm import Session
 
-from app import activity, auth, chat_search, models, providers, questions
+from app import activity, auth, models, providers, questions
 from app.config import get_settings
 from app.chat import (
   _finish_run,
@@ -535,26 +535,6 @@ def list_chats(
   ]
 
 
-@router.get("/search")
-def search_chats(
-  q: str = Query("", max_length=256),
-  _: models.Owner = Depends(get_current_owner),
-  db: Session = Depends(get_db),
-):
-  """Full-text search over chat titles and conversation prose.
-
-  Registered before ``/{chat_id}`` so the literal path wins. The index is
-  derived data reconciled inside the request (see ``chat_search``); the first
-  query on an existing instance pays a one-time backfill, after which only
-  changed chats are touched. Snippets mark matches with private-use
-  sentinels U+E000/U+E001; the drawer converts them to highlight marks.
-  """
-  query = q.strip()
-  if not query:
-    return []
-  return chat_search.search(db, query)
-
-
 @router.get("/session-links")
 def list_session_links(
   _: models.Owner = Depends(get_current_owner),
@@ -762,11 +742,9 @@ def update_pinned_order(
 
   Chats and apps live in separate tables, but the drawer presents them as one
   list. Re-pinning each row through its ordinary resource endpoint exposed
-  partially-restamped server state to unrelated list refreshes: one query could
-  land while the other still carried optimistic client timestamps, making rows
-  shuffle and then settle again. Validate the complete identity set, assign one
-  coherent timestamp sequence, and commit both tables once so every reader sees
-  either the old order or the new order—never an intermediate mix.
+  partially-restamped server state to unrelated list refreshes. Validate the
+  complete identity set, assign one coherent timestamp sequence, and commit
+  both tables once so readers see either the old or the new order.
   """
   normalized: list[tuple[str, str]] = []
   for item in body.items:
@@ -1076,6 +1054,8 @@ async def patch_chat(
       get_system_broadcast().publish({
         "type": "chat_renamed",
         "chatId": str(chat_id),
+        "title": chat.title,
+        "updatedAt": chat.updated_at.isoformat() if chat.updated_at else None,
       })
     # Record a real provider switch (Claude <-> Codex) once, after this first
     # commit — NOT after the owner-provider mirror commit below, which would

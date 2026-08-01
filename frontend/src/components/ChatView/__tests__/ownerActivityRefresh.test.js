@@ -16,10 +16,15 @@ function slice(source, fromNeedle, toNeedle) {
   return source.slice(from, to)
 }
 
-test('the pane gives all committed owner activity one stable drawer refresh', () => {
-  assert.match(paneChatView, /onOwnerActivity=\{refreshChats\}/)
+test('the pane gives all committed owner activity one stable row projection', () => {
+  assert.match(paneChatView, /onOwnerActivity=\{handleOwnerActivity\}/)
+  assert.match(paneChatView, /markChatOwnerActivity\(chatId\)/)
+  assert.doesNotMatch(paneChatView, /refreshChats/,
+    'ordinary chat activity must not fetch and reconcile the complete drawer list')
+  assert.match(paneChatView, /if \(continues !== undefined\) \{[\s\S]*?refreshApps\(\)[\s\S]*?loadTheme\(\)/,
+    'an idle activation 204 must not reconcile unrelated app and theme state')
   assert.doesNotMatch(paneChatView, /onQuestionAnswered/,
-    'question answers must not keep a one-off parallel refresh callback')
+    'question answers must not keep a one-off parallel projection callback')
   assert.match(chatView, /const onOwnerActivityRef = useRef\(onOwnerActivity\)/)
 })
 

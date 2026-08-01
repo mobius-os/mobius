@@ -89,7 +89,9 @@ def test_production_startup_plan_has_explicit_unique_order_and_criticality():
   assert [task.name for task in startup.STARTUP_TASKS if task.critical] == [
     "initialize database",
   ]
-  assert names.index("reconcile startup chats") < names.index("start chat writer")
+  assert names.index("initialize database") < names.index("start chat writer")
+  assert names.index("start chat writer") < names.index("fix forward chat media")
+  assert names.index("start chat writer") < names.index("reconcile startup chats")
   assert names.index("initialize push") < names.index("notify reconciled chats")
   assert names.index("install bootstrap apps") < names.index(
     "reconcile app cron supervision"

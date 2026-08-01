@@ -235,28 +235,17 @@ function collectAnimations() {
   }
 }
 
-function collectDom() {
+export function collectDom() {
   return {
-    nodeCount: document.querySelectorAll('*').length,
-    // Element counts for the two properties most likely to be mispriced on a
-    // phone. Computed from live style, so a rule that never matches an element
-    // is correctly counted as zero rather than as a suspect.
-    backdropFilterElements: countComputed('backdropFilter'),
-    willChangeElements: countComputed('willChange'),
-  }
-}
-
-function countComputed(prop) {
-  try {
-    let n = 0
-    const all = document.querySelectorAll('*')
-    for (const el of all) {
-      const v = getComputedStyle(el)[prop]
-      if (v && v !== 'none' && v !== 'auto') n += 1
-    }
-    return n
-  } catch {
-    return null
+    // Keep the interval sample O(1) with respect to style/layout. The former
+    // census called getComputedStyle twice for every node in the document. On
+    // the owner's phone that made the supposedly passive probe create its own
+    // 250-350ms long animation frame every 15 seconds, then report that frame
+    // at the next interval. A node count is enough to correlate a large live
+    // surface with other passive entries; property-level style inspection
+    // belongs in an explicit one-shot DevTools investigation, never the field
+    // recorder that is measuring ordinary interaction.
+    nodeCount: document.getElementsByTagName('*').length,
   }
 }
 

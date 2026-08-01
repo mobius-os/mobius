@@ -6,3 +6,15 @@ target-version = "py312"
 # style and unused-code cleanup should be earned module by module rather than
 # creating a repository-wide formatting migration.
 select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+follow_imports = "skip"
+files = [
+  "app/runtime_types.py",
+  "app/codex_sdk_contract.py",
+  "app/claude_sdk_contract.py",
+  "app/startup.py",
+  "app/runtime_supervisors.py",
+]

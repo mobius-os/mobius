@@ -9,8 +9,10 @@ these isolation tests still drive it directly to assert
 ordering/coalescing/fencing without the route + DB layers around it.
 """
 
+import ast
 import threading
 from concurrent.futures import Future
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +26,29 @@ from app.chat_writer import (
   SwitchProviderWithCompaction,
   alloc_run_token,
 )
+
+
+def test_transcript_columns_have_one_source_owner():
+  """No boot task or route may grow a second transcript write path."""
+  app_dir = Path(__file__).resolve().parents[1] / "app"
+  violations = []
+  for source_path in app_dir.glob("*.py"):
+    if source_path.name == "chat_writer.py":
+      continue
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+      if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        continue
+      targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+      for target in targets:
+        if isinstance(target, ast.Attribute) and target.attr in {
+          "messages", "pending_messages",
+        }:
+          violations.append(f"{source_path.name}:{node.lineno}:{target.attr}")
+  assert violations == [], (
+    "Chat.messages and Chat.pending_messages are chat_writer-owned: "
+    + ", ".join(violations)
+  )
 
 
 class _RecordingSession:

@@ -10,10 +10,9 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
+import { retainChatDetailQuery } from '../../queryClient.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode from './useScrollMode.js'
-import { peekSearchReveal, takeSearchReveal, subscribeSearchReveal } from './searchReveal.js'
-import { paintSearchTermHighlight, clearSearchTermHighlight } from './searchTermHighlight.js'
 import useVoiceInput from './useVoiceInput.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
@@ -64,8 +63,11 @@ import {
 } from '../../lib/chatDetailCache.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
-import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, promoteAssistantStream, streamItemsHaveRenderableContent } from './streamPromotion.js'
-import { deriveActiveAssistantSelection } from './activeAssistantSelection.js'
+import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, streamItemsHaveRenderableContent } from './streamPromotion.js'
+import {
+  commitAssistantPromotion,
+  deriveActiveAssistantSelection,
+} from './activeAssistantSelection.js'
 import {
   answerKeepsCurrentTurn,
   builtAppPulseDecision,
@@ -208,11 +210,6 @@ function tailResumableBlock(messages) {
 // list-keyed effects.
 const NO_BUILT_APPS = []
 
-// Where a search-reveal lands the matched word: pixels from the viewport top.
-// Mirrors useScrollMode's REVEAL_OFFSET (the row-top fallback when no word
-// range is measurable) so both paths feel the same.
-const SEARCH_REVEAL_MARGIN = 96
-
 export default function ChatView({
   chatId,
   onStreamEnd,
@@ -277,6 +274,7 @@ export default function ChatView({
   // back through the versioned activation handoff, so any miss self-heals on
   // the first authoritative detail read.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
+  useEffect(() => retainChatDetailQuery(queryClient, chatId), [chatId, queryClient])
   const transcriptCacheKey = useMemo(() => chatMessagesQueryKey(chatId), [chatId])
   const {
     messages,
@@ -649,7 +647,6 @@ export default function ChatView({
     freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
-    revealAnchor,
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,
@@ -692,124 +689,6 @@ export default function ChatView({
   useLayoutEffect(() => {
     if (hidden) freezeChatExit()
   }, [hidden, freezeChatExit])
-
-  // Drawer search "jump to the match". Two lifetimes:
-  //   • the word-level highlight PERSISTS until the reader leaves the chat, and
-  //   • a brief row "landing" pulse fires once on arrival.
-  // `reveal` holds the active target for THIS chat; keeping it in state (not a
-  // one-shot consume) lets the apply effect retry as the transcript renders, so
-  // a fresh open no longer misses the highlight when the message paints a beat
-  // after the reveal fires (the "only a second click highlights it" bug).
-  const [reveal, setReveal] = useState(null) // { chatId, key, terms, scrolled }
-  const [searchHitKey, setSearchHitKey] = useState(null)
-  const [revealTick, setRevealTick] = useState(0)
-  const revealRetryRef = useRef(0)
-  const revealVisRetryRef = useRef(0)
-  const revealPulseTimerRef = useRef(0)
-  // Ownership token of the highlight THIS instance last painted, so its teardown
-  // only clears the global highlight when it still owns it — several ChatViews
-  // are mounted at once (the outgoing chat lingers as an inert cover during a
-  // tab switch), and an unscoped clear wiped the incoming chat's highlight.
-  const paintedTokenRef = useRef(0)
-  // Bumps when a reveal is requested for THIS chat while it is already mounted
-  // (re-tapping a result for the open chat), so the pickup effect re-runs.
-  const [searchRevealNonce, setSearchRevealNonce] = useState(0)
-  useEffect(() => subscribeSearchReveal((targetId) => {
-    if (String(targetId) === String(chatId)) setSearchRevealNonce(n => n + 1)
-  }), [chatId])
-
-  // Pick up a pending intent (fresh open: `revealed` flips true; re-tap while
-  // open: the nonce bumps) and promote it to the active reveal for this chat.
-  // PEEK (don't consume) the pending intent and promote it to this instance's
-  // active reveal. Consumption happens later, only from the VISIBLE instance's
-  // apply — several ChatViews can be mounted for the same chat (background tabs,
-  // Standard + Builder worlds), and a consume here would let a hidden copy
-  // swallow the intent and paint off-screen, leaving the visible copy blank.
-  useLayoutEffect(() => {
-    if (!revealed) return
-    const pending = peekSearchReveal(chatId)
-    if (!pending) return
-    setReveal(prev => {
-      if (prev && prev.chatId === chatId && prev.key === pending.key) return prev
-      revealRetryRef.current = 0
-      revealVisRetryRef.current = 0
-      return { chatId, key: pending.key, terms: pending.terms, scrolled: false }
-    })
-  }, [revealed, searchRevealNonce, chatId])
-
-  // Apply + keep the reveal: paint the matched words (idempotent, re-asserted as
-  // the transcript settles) and scroll to the match once. Retries across frames
-  // until the row and its rendered text exist, so async markdown can't leave a
-  // fresh open unhighlighted. The highlight then persists — cleared only when
-  // the reader leaves the chat (the cleanup below).
-  useLayoutEffect(() => {
-    if (!reveal || reveal.chatId !== chatId) return undefined
-    const scrollEl = scrollRef.current
-    // Apply ONLY from the visible instance. A hidden copy (background tab, other
-    // world) has `offsetParent === null`; it must not consume the intent or
-    // paint into its off-screen DOM. Re-runs when this copy becomes visible
-    // (focus/messages change) — with a bounded frame retry as a safety net.
-    if (!scrollEl || scrollEl.offsetParent === null) {
-      if (revealVisRetryRef.current < 45) {
-        revealVisRetryRef.current += 1
-        const raf = requestAnimationFrame(() => setRevealTick(t => t + 1))
-        return () => cancelAnimationFrame(raf)
-      }
-      return undefined
-    }
-    const esc = (typeof CSS !== 'undefined' && CSS.escape)
-      ? CSS.escape(reveal.key) : reveal.key
-    const row = scrollEl.querySelector(`[data-key="${esc}"]`)
-    if (!row) {
-      // The match can be OLDER than the initially-loaded window (open fetches
-      // only the latest 20 messages). Pull the rest of the history in once;
-      // this effect re-runs when `messages` grows and then anchors + paints.
-      if (offsetRef.current > 0) loadOlderThroughReveal()
-      return undefined
-    }
-    // The visible instance owns this reveal now — consume the shared intent so
-    // no other mounted copy (or a remount) grabs it. `reveal` state below keeps
-    // driving the paint/scroll; a later re-click re-arms a fresh intent.
-    takeSearchReveal(chatId)
-    const { firstRange, token } = paintSearchTermHighlight(row, reveal.terms)
-    if (token) paintedTokenRef.current = token
-    const retriesLeft = revealRetryRef.current < 12
-    // Scroll once. Prefer anchoring to the matched WORD (a deep match in a long
-    // message would otherwise sit below the fold); wait for it while retries
-    // remain, then fall back to the row top so the jump never stalls.
-    if (!reveal.scrolled && (firstRange || !retriesLeft)) {
-      const anchorOffset = firstRange
-        ? SEARCH_REVEAL_MARGIN
-          - (firstRange.getBoundingClientRect().top - row.getBoundingClientRect().top)
-        : undefined
-      if (revealAnchor(reveal.key, anchorOffset)) {
-        setReveal(r => (r && r.chatId === chatId ? { ...r, scrolled: true } : r))
-        setSearchHitKey(reveal.key)
-        clearTimeout(revealPulseTimerRef.current)
-        revealPulseTimerRef.current = setTimeout(() => setSearchHitKey(null), 900)
-      }
-    }
-    // Words not in the DOM yet (lazy markdown) — retry next frame, bounded, so a
-    // fresh open still highlights instead of needing a second click.
-    if (!firstRange && retriesLeft) {
-      revealRetryRef.current += 1
-      const raf = requestAnimationFrame(() => setRevealTick(t => t + 1))
-      return () => cancelAnimationFrame(raf)
-    }
-    return undefined
-  }, [reveal, messages, revealed, revealTick, chatId, revealAnchor, scrollRef])
-
-  // Leaving this chat (or unmounting) drops the persistent highlight and any
-  // active reveal, so a later return without a fresh search doesn't re-light it.
-  // Scope the clear to the token THIS instance painted: a co-mounted outgoing
-  // cover tearing down must not wipe the incoming chat's highlight.
-  useEffect(() => () => {
-    clearTimeout(revealPulseTimerRef.current)
-    clearSearchTermHighlight(paintedTokenRef.current)
-    paintedTokenRef.current = 0
-    setSearchHitKey(null)
-    setReveal(null)
-  }, [chatId])
 
   function rememberSendIntent(cid, intent) {
     if (!cid || !intent) return
@@ -1522,12 +1401,13 @@ export default function ChatView({
     // publish→clear gap cannot show both the durable row and its retired live
     // surface. This deliberately records streamItems (painted state), not
     // latestItemsRef (which may already contain a newer buffered frame).
-    retiredAssistantItemsRef.current = streamItems
-    commitMessages(
-      prev => promoteAssistantStream(prev, { items, bridgeTs }),
-      undefined,
-      { force: true },
-    )
+    commitAssistantPromotion({
+      retiredItemsRef: retiredAssistantItemsRef,
+      paintedItems: streamItems,
+      promotedItems: items,
+      bridgeTs,
+      commitMessages,
+    })
     // force=true bypasses sameMessageList. In the BRIDGE merge path
     // the new (catch-up) blocks may be structurally identical to the
     // kept DB-partial blocks (backend's throttled save was recent +
@@ -1901,36 +1781,6 @@ export default function ChatView({
         })
       })
       .catch(() => { loadingOlder.current = false })
-  }
-
-  // Search reveal targeting a message older than the loaded window: pull ALL
-  // remaining older messages in ONE request (limit=before=offset → start 0), so
-  // the matched row exists and the reveal effect can anchor + highlight it. A
-  // deliberate jump, so loading the rest of the history is acceptable; unlike
-  // reader pagination it doesn't preserve position — the reveal scrolls next.
-  function loadOlderThroughReveal() {
-    const remaining = offsetRef.current
-    if (!scrollRef.current || loadingOlder.current || loading || remaining <= 0) return
-    loadingOlder.current = true
-    apiFetch(
-      `/chats/${chatId}?limit=${remaining}&before=${remaining}&compact=1`,
-      { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
-    )
-      .then(r => jsonOrThrow(r, 'Earlier messages failed to load'))
-      .then(data => {
-        if (chatIdStaleRef.current) return
-        const older = data.messages || []
-        for (const msg of older) {
-          if (msg.blocks) {
-            for (const blk of msg.blocks) {
-              if (blk.type === 'tool' && blk.status === 'running') blk.status = 'done'
-            }
-          }
-        }
-        commitMessages(prev => [...older, ...prev], data.offset || 0)
-      })
-      .catch(() => {})
-      .finally(() => { loadingOlder.current = false })
   }
 
   function handleScroll() {
@@ -3862,9 +3712,7 @@ export default function ChatView({
             return (
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
-              className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}${
-                searchHitKey && dataKey === searchHitKey ? ' chat__msg--search-hit' : ''
-              }`}
+              className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}`}
               ref={i === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
               data-cid={userCid || undefined}

@@ -520,11 +520,11 @@ test('pin reapply waits until the target is reachable to avoid stepwise pin jitt
   )
 })
 
-test('pin reapply holds a pinned send when streaming drags the viewport toward bottom', () => {
+test('pin repair never pulls backward over an unchanged target', () => {
   const scrollEl = {
     scrollHeight: 2000,
-    // Target is 996. This simulates browser/follow-bottom drift after content
-    // streams below the pinned user row.
+    // Target is 996. ScrollTop beyond it is indistinguishable from a reader
+    // moving down while the scroll event waits behind a busy render.
     scrollTop: 1200,
     clientHeight: 700,
     querySelector(selector) {
@@ -537,7 +537,7 @@ test('pin reapply holds a pinned send when streaming drags the viewport toward b
 
   assert.equal(
     _pinReapplyNeeded(scrollEl, { kind: 'PIN_USER_MSG', cid: 'c-123' }, 1000),
-    true,
+    false,
   )
 })
 
@@ -1748,7 +1748,6 @@ test('F1: a collapse-clamped pin is recovered by the settle once the spacer rest
   assert.ok(pinLanded(snapOf(el, userTop)).ok, 'the settle re-pins flush at the top')
   assert.equal(el.scrollTop, userTop - PIN_OFFSET)
 })
-
 
 // ---------------------------------------------------------------------------
 // F2 — remount reservation follows whether the latest user row is visible.

@@ -398,6 +398,328 @@ def excerpt_tool_output(content: str):
   return excerpt, full_len, exit_code
 
 
+def _process_error_event(event: dict, assistant_blocks: list) -> bool:
+  """Coalesce one terminal error while preserving question-tail semantics."""
+  event_type = event.get("type")
+  if event_type == "error":
+    # Persist the error into the assistant transcript so users see
+    # what went wrong when scrolling back. The same event is also
+    # broadcast live for active SSE subscribers (the sink handles
+    # both). Coalesce: a single error is enough — additional error
+    # events on the same turn replace rather than stack.
+    message = event.get("message", "") or ""
+    # Carry the whitelisted extras through onto the persisted block,
+    # LATEST-EVENT-WINS: a coalescing error event's extras replace the
+    # block's wholesale — keys the new event omits are REMOVED, not kept.
+    # A park error followed by a different terminal error must degrade to a
+    # plain error, not keep rendering a stale "resets at …" card for a park
+    # the backend never scheduled (or already superseded).
+    extras = {
+      key: event[key] for key in ERROR_PASSTHROUGH_FIELDS if key in event
+    }
+    # A planned restart can interrupt a runner that is blocked on a durable
+    # AskUserQuestion. Keep that question as the transcript tail so it remains
+    # answerable after reload, and do not offer a competing Resume button: the
+    # answer is the continuation. Repeated restart events update the one marker
+    # immediately before the trailing question run.
+    restart_pause = (extras.get("pause") or {}).get("kind") == "restart"
+    trailing_open_start = len(assistant_blocks)
+    if restart_pause:
+      while trailing_open_start > 0:
+        block = assistant_blocks[trailing_open_start - 1]
+        if block.get("type") != "question" or block.get("answers"):
+          break
+        trailing_open_start -= 1
+    if restart_pause and trailing_open_start < len(assistant_blocks):
+      extras.pop("resumable", None)
+      marker = {
+        "type": "error",
+        "message": message,
+        **extras,
+      }
+      previous_idx = trailing_open_start - 1
+      if (
+        previous_idx >= 0
+        and assistant_blocks[previous_idx].get("type") == "error"
+        and (
+          assistant_blocks[previous_idx].get("pause") or {}
+        ).get("kind") == "restart"
+      ):
+        assistant_blocks[previous_idx] = marker
+      else:
+        assistant_blocks.insert(trailing_open_start, marker)
+      return True
+    if (assistant_blocks
+        and assistant_blocks[-1].get("type") == "error"):
+      block = assistant_blocks[-1]
+      block["message"] = message
+      for key in ERROR_PASSTHROUGH_FIELDS:
+        if key in extras:
+          block[key] = extras[key]
+        else:
+          block.pop(key, None)
+    else:
+      assistant_blocks.append({
+        "type": "error",
+        "message": message,
+        **extras,
+      })
+    return True
+
+  return False
+
+
+def _process_question_event(event: dict, assistant_blocks: list) -> bool:
+  """Coalesce one durable question by provider-stable identity."""
+  event_type = event.get("type")
+  if event_type == "question":
+    # Two partial deliveries for the same AskUserQuestion call may
+    # straddle other events (a text token or tool boundary often
+    # lands between them). Coalesce by stable identity — the SDK-
+    # provided question id, falling back to the first question's
+    # text — instead of "is the last block a question?". Adjacency-
+    # based dedup left duplicate cards when anything interleaved.
+    #
+    # The runner now publishes a `question_id` (the PendingQuestion's
+    # id) on the event. When present, stamp it on the block so the
+    # answer routes can match the exact open question by identity
+    # (fixing the wrong-block bug when two questions are open at once),
+    # and prefer it as the coalescing key — it is the most stable
+    # identity for the call, independent of the sub-questions' shape.
+    # When absent (legacy/defensive), behaviour is unchanged: no
+    # question_id key on the block and dedup by `question_block_key`.
+    questions = event.get("questions", [])
+    question_id = event.get("question_id")
+    new_block = {"type": "question", "questions": questions}
+    if question_id:
+      new_block["question_id"] = question_id
+    key = question_block_key(new_block)
+    for i, existing in enumerate(assistant_blocks):
+      if (existing.get("type") == "question"
+          and question_block_key(existing) == key):
+        existing["questions"] = questions
+        if question_id:
+          existing["question_id"] = question_id
+        return True
+    assistant_blocks.append(new_block)
+    return True
+
+  return False
+
+
+_SUBAGENT_EVENT_TYPES = frozenset({"task_start", "task_done"})
+
+
+def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
+  """Persist monotonic helper lifecycle on its parent tool block."""
+  event_type = event.get("type")
+  if event_type in ("task_start", "task_done"):
+    # Subagent observability (card 247): a background Task/Agent sub-task reports
+    # its lifecycle as task_start / task_done, each carrying the tool_use_id of
+    # the parent turn's Task tool call that spawned it. Enrich that block in
+    # place so the persisted transcript carries the chip data for historical
+    # chats (ToolBlock.jsx / SubagentChips read block["subagent"]); the same
+    # events also drive the LIVE chip on the wire. Codex opens one synthetic
+    # Task host per delegating turn and points each activation at it, so the
+    # same persistence path serves both providers. Route-through-the-actor is
+    # implicit: process_event mutates assistant_blocks and returns True, so the
+    # sink's normal PersistTranscript/Finalize path persists it — this never
+    # writes Chat.messages directly (the single-writer guardrail).
+    #
+    # Frozen shape: block["subagent"] = {"<task_id>": {description, status,
+    # summary}} — status is "running" until task_done, then the terminal status
+    # verbatim (done/failed/killed/stopped). task_progress stays LIVE-ONLY: its
+    # per-tick usage/last_tool_name is not worth persisting (it falls through to
+    # `return False` below). A missing id, or a tool_use_id with no matching
+    # block (unknown), no-ops so a stray event can never append a phantom block.
+    task_id = event.get("task_id")
+    if task_id is None:
+      return False
+    tool_use_id = event.get("tool_use_id")
+    task_key = str(task_id)
+    # Locate the helper by task_id FIRST, then fall back to the parent tool by
+    # tool_use_id — mirroring the frontend reducer. This ordering is load-bearing
+    # for the terminal task_updated path: a task stopped via TaskStop reports
+    # "killed" as a task_done carrying tool_use_id null (claude_sdk_runner drops
+    # it), so requiring a tool_use_id would leave the helper persisted as
+    # "running" forever. A tool_use_id is required only to MATERIALIZE a
+    # previously-unseen helper (a first sighting must know its parent block).
+    target = None
+    for blk in reversed(assistant_blocks):
+      if (blk.get("type") == "tool"
+          and isinstance(blk.get("subagent"), dict)
+          and task_key in blk["subagent"]):
+        target = blk
+        break
+    if target is None and tool_use_id:
+      for blk in reversed(assistant_blocks):
+        if (blk.get("type") == "tool"
+            and blk.get("tool_use_id") == tool_use_id):
+          target = blk
+          break
+    if target is None:
+      return False
+    subagent = target.setdefault("subagent", {})
+    entry = subagent.setdefault(task_key, {
+      "description": "",
+      "status": "running",
+      "summary": None,
+    })
+    was_terminal = entry["status"] in _TERMINAL_SUBAGENT_STATUSES
+    if event_type == "task_start":
+      if event.get("description"):
+        entry["description"] = event["description"]
+      # A re-delivered start (catch-up replay, or an out-of-order start after
+      # the done) must NOT downgrade an already-terminal helper back to running
+      # — mirrors the frontend reducer's monotonic guard.
+      if not was_terminal:
+        entry["status"] = "running"
+    elif not was_terminal:
+      # Persist the CANONICAL terminal status so the stored block matches what
+      # the live reducer produces (completed -> done); otherwise a reloaded chat
+      # renders a succeeded helper with the failed dot.
+      entry["status"] = _normalize_subagent_status(event.get("status"))
+      if event.get("summary") is not None:
+        entry["summary"] = event.get("summary")
+    return True
+
+  return False
+
+
+_TOOL_EVENT_TYPES = frozenset({
+  "tool_start", "tool_input", "tool_output", "tool_sources", "tool_end",
+  "skill_loaded",
+})
+
+
+def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
+  """Apply tool lifecycle/source events behind one family boundary."""
+  event_type = event.get("type")
+  if event_type == "tool_start":
+    block = {
+      "type": "tool",
+      "tool": event.get("tool", ""),
+      "input": event.get("input", ""),
+      "output": "",
+      "status": "running",
+    }
+    # Carry the tool's stable identity onto the block (contract rule 6) so a
+    # reduced output can be fetched lazily by tool_use_id. Only stamp it when
+    # the runner supplied one — a tokenless legacy/test event keeps the block
+    # shape unchanged.
+    tool_use_id = event.get("tool_use_id")
+    if tool_use_id:
+      block["tool_use_id"] = tool_use_id
+    if isinstance(event.get("recall"), dict):
+      block["recall"] = event["recall"]
+    assistant_blocks.append(block)
+    return True
+
+  if event_type == "tool_input":
+    # Backfill the input summary. Prefer an exact tool_use_id match (Codex
+    # backfills a WebSearch query at completion, when several searches may be
+    # in flight); older id-less events retain the earliest input-less fallback.
+    def _apply_tool_input(blk: dict) -> None:
+      blk["input"] = event.get("input", "")
+      # A Memory lookup is identified from the command it runs (stamped on the
+      # event by the sink). Carrying that marker onto the block is what lets the
+      # turn name the recall while it is still running, and is the ONLY thing
+      # that authorizes the later output phase to cite notes.
+      if isinstance(event.get("recall"), dict):
+        blk["recall"] = event["recall"]
+
+    tool_use_id = event.get("tool_use_id")
+    if tool_use_id:
+      for blk in assistant_blocks:
+        if (blk.get("type") == "tool"
+            and blk.get("tool_use_id") == tool_use_id):
+          _apply_tool_input(blk)
+          return True
+      candidates = [
+        blk for blk in assistant_blocks
+        if (blk.get("type") == "tool"
+            and blk.get("status") != "done"
+            and not blk.get("tool_use_id") and not blk.get("input"))
+      ]
+      if len(candidates) == 1:
+        candidates[0]["tool_use_id"] = tool_use_id
+        _apply_tool_input(candidates[0])
+        return True
+      return False
+    for blk in assistant_blocks:
+      if blk.get("type") == "tool" and not blk.get("input"):
+        _apply_tool_input(blk)
+        break
+    return True
+
+  if event_type == "tool_output":
+    blk = _tool_block_for_event(assistant_blocks, event.get("tool_use_id"))
+    if blk is not None:
+      blk["output"] = event.get("content", "")
+      # A tool_output the sink reduced (contract rule 6) carries a bounded
+      # excerpt as `content` plus the metadata below; carry it onto the block
+      # so the persisted transcript + wire agree and the frontend can fetch
+      # the full text and read a failure exit code from a field, not a parse
+      # of the possibly-carved excerpt. Absent fields leave the block shape
+      # unchanged (a small, un-reduced output).
+      exit_code = event.get("output_exit_code")
+      if exit_code is not None:
+        blk["output_exit_code"] = exit_code
+      if event.get("output_truncated"):
+        blk["output_truncated"] = True
+        blk["output_full_len"] = event.get("output_full_len")
+      # Settle a Memory lookup from "searching" to what it actually recalled.
+      # The app prints its bounded result last, so it survives any head+tail
+      # carving the sink performed before parsing.
+      if isinstance(event.get("recall"), dict):
+        blk["recall"] = event["recall"]
+      return True
+    return False
+
+  if event_type == "tool_sources":
+    # This is the single event funnel feeding persistence, catch-up replay, and
+    # live SSE. Normalize here even though both runners already do so, keeping a
+    # future producer from bypassing the resource and URL-safety contract.
+    sources = normalize_tool_sources(event.get("sources"))
+    event["sources"] = sources
+    if not sources:
+      return False
+    # Bind the result to the search that produced it, by id. A turn can run
+    # several WebSearch calls in ONE batch, and their results then arrive back
+    # to back while the LAST search block is the trailing one — so matching by
+    # position alone drops every batch member's sources but the final one.
+    target = _tool_block_for_sources(assistant_blocks, event.get("tool_use_id"))
+    if target is None:
+      return False
+    target["sources"] = _merge_sources(target.get("sources"), sources)
+    return True
+
+  if event_type == "tool_end":
+    blk = _tool_block_for_event(assistant_blocks, event.get("tool_use_id"))
+    if blk is None:
+      return False
+    blk["status"] = "done"
+    return True
+
+  if event_type == "skill_loaded":
+    # Skill observability: the runner emits this alongside the Skill
+    # tool's tool_start. Stamp the skill name onto the most recent
+    # Skill tool block so the persisted transcript carries the chip
+    # data (the frontend reads `block.skill`); the same event drives
+    # the activity-log append on the runner side. No skill name is a
+    # no-op — an empty chip carries no signal.
+    skill = event.get("skill") or ""
+    if not skill:
+      return False
+    for blk in reversed(assistant_blocks):
+      if blk.get("type") == "tool" and blk.get("tool") == "Skill":
+        blk["skill"] = skill
+        return True
+    return False
+
+  return False
+
+
 def process_event(event: dict, assistant_blocks: list) -> bool:
   """Accumulates a parsed event into the assistant blocks list.
 
@@ -593,294 +915,17 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
       return True
     return False
 
-  if event_type == "tool_start":
-    block = {
-      "type": "tool",
-      "tool": event.get("tool", ""),
-      "input": event.get("input", ""),
-      "output": "",
-      "status": "running",
-    }
-    # Carry the tool's stable identity onto the block (contract rule 6) so a
-    # reduced output can be fetched lazily by tool_use_id. Only stamp it when
-    # the runner supplied one — a tokenless legacy/test event keeps the block
-    # shape unchanged.
-    tool_use_id = event.get("tool_use_id")
-    if tool_use_id:
-      block["tool_use_id"] = tool_use_id
-    if isinstance(event.get("recall"), dict):
-      block["recall"] = event["recall"]
-    assistant_blocks.append(block)
-    return True
+  if event_type in _TOOL_EVENT_TYPES:
+    return _process_tool_event(event, assistant_blocks)
 
-  if event_type == "tool_input":
-    # Backfill the input summary. Prefer an exact tool_use_id match (Codex
-    # backfills a WebSearch query at completion, when several searches may be
-    # in flight); older id-less events retain the earliest input-less fallback.
-    def _apply_tool_input(blk: dict) -> None:
-      blk["input"] = event.get("input", "")
-      # A Memory lookup is identified from the command it runs (stamped on the
-      # event by the sink). Carrying that marker onto the block is what lets the
-      # turn name the recall while it is still running, and is the ONLY thing
-      # that authorizes the later output phase to cite notes.
-      if isinstance(event.get("recall"), dict):
-        blk["recall"] = event["recall"]
-
-    tool_use_id = event.get("tool_use_id")
-    if tool_use_id:
-      for blk in assistant_blocks:
-        if (blk.get("type") == "tool"
-            and blk.get("tool_use_id") == tool_use_id):
-          _apply_tool_input(blk)
-          return True
-      candidates = [
-        blk for blk in assistant_blocks
-        if (blk.get("type") == "tool"
-            and blk.get("status") != "done"
-            and not blk.get("tool_use_id") and not blk.get("input"))
-      ]
-      if len(candidates) == 1:
-        candidates[0]["tool_use_id"] = tool_use_id
-        _apply_tool_input(candidates[0])
-        return True
-      return False
-    for blk in assistant_blocks:
-      if blk.get("type") == "tool" and not blk.get("input"):
-        _apply_tool_input(blk)
-        break
-    return True
-
-  if event_type == "tool_output":
-    blk = _tool_block_for_event(assistant_blocks, event.get("tool_use_id"))
-    if blk is not None:
-      blk["output"] = event.get("content", "")
-      # A tool_output the sink reduced (contract rule 6) carries a bounded
-      # excerpt as `content` plus the metadata below; carry it onto the block
-      # so the persisted transcript + wire agree and the frontend can fetch
-      # the full text and read a failure exit code from a field, not a parse
-      # of the possibly-carved excerpt. Absent fields leave the block shape
-      # unchanged (a small, un-reduced output).
-      exit_code = event.get("output_exit_code")
-      if exit_code is not None:
-        blk["output_exit_code"] = exit_code
-      if event.get("output_truncated"):
-        blk["output_truncated"] = True
-        blk["output_full_len"] = event.get("output_full_len")
-      # Settle a Memory lookup from "searching" to what it actually recalled.
-      # The app prints its bounded result last, so it survives any head+tail
-      # carving the sink performed before parsing.
-      if isinstance(event.get("recall"), dict):
-        blk["recall"] = event["recall"]
-      return True
-    return False
-
-  if event_type == "tool_sources":
-    # This is the single event funnel feeding persistence, catch-up replay, and
-    # live SSE. Normalize here even though both runners already do so, keeping a
-    # future producer from bypassing the resource and URL-safety contract.
-    sources = normalize_tool_sources(event.get("sources"))
-    event["sources"] = sources
-    if not sources:
-      return False
-    # Bind the result to the search that produced it, by id. A turn can run
-    # several WebSearch calls in ONE batch, and their results then arrive back
-    # to back while the LAST search block is the trailing one — so matching by
-    # position alone drops every batch member's sources but the final one.
-    target = _tool_block_for_sources(assistant_blocks, event.get("tool_use_id"))
-    if target is None:
-      return False
-    target["sources"] = _merge_sources(target.get("sources"), sources)
-    return True
-
-  if event_type == "tool_end":
-    blk = _tool_block_for_event(assistant_blocks, event.get("tool_use_id"))
-    if blk is None:
-      return False
-    blk["status"] = "done"
-    return True
-
-  if event_type == "skill_loaded":
-    # Skill observability: the runner emits this alongside the Skill
-    # tool's tool_start. Stamp the skill name onto the most recent
-    # Skill tool block so the persisted transcript carries the chip
-    # data (the frontend reads `block.skill`); the same event drives
-    # the activity-log append on the runner side. No skill name is a
-    # no-op — an empty chip carries no signal.
-    skill = event.get("skill") or ""
-    if not skill:
-      return False
-    for blk in reversed(assistant_blocks):
-      if blk.get("type") == "tool" and blk.get("tool") == "Skill":
-        blk["skill"] = skill
-        return True
-    return False
-
-  if event_type in ("task_start", "task_done"):
-    # Subagent observability (card 247): a background Task/Agent sub-task reports
-    # its lifecycle as task_start / task_done, each carrying the tool_use_id of
-    # the parent turn's Task tool call that spawned it. Enrich that block in
-    # place so the persisted transcript carries the chip data for historical
-    # chats (ToolBlock.jsx / SubagentChips read block["subagent"]); the same
-    # events also drive the LIVE chip on the wire. Codex opens one synthetic
-    # Task host per delegating turn and points each activation at it, so the
-    # same persistence path serves both providers. Route-through-the-actor is
-    # implicit: process_event mutates assistant_blocks and returns True, so the
-    # sink's normal PersistTranscript/Finalize path persists it — this never
-    # writes Chat.messages directly (the single-writer guardrail).
-    #
-    # Frozen shape: block["subagent"] = {"<task_id>": {description, status,
-    # summary}} — status is "running" until task_done, then the terminal status
-    # verbatim (done/failed/killed/stopped). task_progress stays LIVE-ONLY: its
-    # per-tick usage/last_tool_name is not worth persisting (it falls through to
-    # `return False` below). A missing id, or a tool_use_id with no matching
-    # block (unknown), no-ops so a stray event can never append a phantom block.
-    task_id = event.get("task_id")
-    if task_id is None:
-      return False
-    tool_use_id = event.get("tool_use_id")
-    task_key = str(task_id)
-    # Locate the helper by task_id FIRST, then fall back to the parent tool by
-    # tool_use_id — mirroring the frontend reducer. This ordering is load-bearing
-    # for the terminal task_updated path: a task stopped via TaskStop reports
-    # "killed" as a task_done carrying tool_use_id null (claude_sdk_runner drops
-    # it), so requiring a tool_use_id would leave the helper persisted as
-    # "running" forever. A tool_use_id is required only to MATERIALIZE a
-    # previously-unseen helper (a first sighting must know its parent block).
-    target = None
-    for blk in reversed(assistant_blocks):
-      if (blk.get("type") == "tool"
-          and isinstance(blk.get("subagent"), dict)
-          and task_key in blk["subagent"]):
-        target = blk
-        break
-    if target is None and tool_use_id:
-      for blk in reversed(assistant_blocks):
-        if (blk.get("type") == "tool"
-            and blk.get("tool_use_id") == tool_use_id):
-          target = blk
-          break
-    if target is None:
-      return False
-    subagent = target.setdefault("subagent", {})
-    entry = subagent.setdefault(task_key, {
-      "description": "",
-      "status": "running",
-      "summary": None,
-    })
-    was_terminal = entry["status"] in _TERMINAL_SUBAGENT_STATUSES
-    if event_type == "task_start":
-      if event.get("description"):
-        entry["description"] = event["description"]
-      # A re-delivered start (catch-up replay, or an out-of-order start after
-      # the done) must NOT downgrade an already-terminal helper back to running
-      # — mirrors the frontend reducer's monotonic guard.
-      if not was_terminal:
-        entry["status"] = "running"
-    elif not was_terminal:
-      # Persist the CANONICAL terminal status so the stored block matches what
-      # the live reducer produces (completed -> done); otherwise a reloaded chat
-      # renders a succeeded helper with the failed dot.
-      entry["status"] = _normalize_subagent_status(event.get("status"))
-      if event.get("summary") is not None:
-        entry["summary"] = event.get("summary")
-    return True
+  if event_type in _SUBAGENT_EVENT_TYPES:
+    return _process_subagent_event(event, assistant_blocks)
 
   if event_type == "error":
-    # Persist the error into the assistant transcript so users see
-    # what went wrong when scrolling back. The same event is also
-    # broadcast live for active SSE subscribers (the sink handles
-    # both). Coalesce: a single error is enough — additional error
-    # events on the same turn replace rather than stack.
-    message = event.get("message", "") or ""
-    # Carry the whitelisted extras through onto the persisted block,
-    # LATEST-EVENT-WINS: a coalescing error event's extras replace the
-    # block's wholesale — keys the new event omits are REMOVED, not kept.
-    # A park error followed by a different terminal error must degrade to a
-    # plain error, not keep rendering a stale "resets at …" card for a park
-    # the backend never scheduled (or already superseded).
-    extras = {
-      key: event[key] for key in ERROR_PASSTHROUGH_FIELDS if key in event
-    }
-    # A planned restart can interrupt a runner that is blocked on a durable
-    # AskUserQuestion. Keep that question as the transcript tail so it remains
-    # answerable after reload, and do not offer a competing Resume button: the
-    # answer is the continuation. Repeated restart events update the one marker
-    # immediately before the trailing question run.
-    restart_pause = (extras.get("pause") or {}).get("kind") == "restart"
-    trailing_open_start = len(assistant_blocks)
-    if restart_pause:
-      while trailing_open_start > 0:
-        block = assistant_blocks[trailing_open_start - 1]
-        if block.get("type") != "question" or block.get("answers"):
-          break
-        trailing_open_start -= 1
-    if restart_pause and trailing_open_start < len(assistant_blocks):
-      extras.pop("resumable", None)
-      marker = {
-        "type": "error",
-        "message": message,
-        **extras,
-      }
-      previous_idx = trailing_open_start - 1
-      if (
-        previous_idx >= 0
-        and assistant_blocks[previous_idx].get("type") == "error"
-        and (
-          assistant_blocks[previous_idx].get("pause") or {}
-        ).get("kind") == "restart"
-      ):
-        assistant_blocks[previous_idx] = marker
-      else:
-        assistant_blocks.insert(trailing_open_start, marker)
-      return True
-    if (assistant_blocks
-        and assistant_blocks[-1].get("type") == "error"):
-      block = assistant_blocks[-1]
-      block["message"] = message
-      for key in ERROR_PASSTHROUGH_FIELDS:
-        if key in extras:
-          block[key] = extras[key]
-        else:
-          block.pop(key, None)
-    else:
-      assistant_blocks.append({
-        "type": "error",
-        "message": message,
-        **extras,
-      })
-    return True
+    return _process_error_event(event, assistant_blocks)
 
   if event_type == "question":
-    # Two partial deliveries for the same AskUserQuestion call may
-    # straddle other events (a text token or tool boundary often
-    # lands between them). Coalesce by stable identity — the SDK-
-    # provided question id, falling back to the first question's
-    # text — instead of "is the last block a question?". Adjacency-
-    # based dedup left duplicate cards when anything interleaved.
-    #
-    # The runner now publishes a `question_id` (the PendingQuestion's
-    # id) on the event. When present, stamp it on the block so the
-    # answer routes can match the exact open question by identity
-    # (fixing the wrong-block bug when two questions are open at once),
-    # and prefer it as the coalescing key — it is the most stable
-    # identity for the call, independent of the sub-questions' shape.
-    # When absent (legacy/defensive), behaviour is unchanged: no
-    # question_id key on the block and dedup by `question_block_key`.
-    questions = event.get("questions", [])
-    question_id = event.get("question_id")
-    new_block = {"type": "question", "questions": questions}
-    if question_id:
-      new_block["question_id"] = question_id
-    key = question_block_key(new_block)
-    for i, existing in enumerate(assistant_blocks):
-      if (existing.get("type") == "question"
-          and question_block_key(existing) == key):
-        existing["questions"] = questions
-        if question_id:
-          existing["question_id"] = question_id
-        return True
-    assistant_blocks.append(new_block)
-    return True
+    return _process_question_event(event, assistant_blocks)
 
   return False
 

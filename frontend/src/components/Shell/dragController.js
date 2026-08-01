@@ -31,23 +31,15 @@ import { tabKey } from './tabModel.js'
 // A mouse drag arms once the pointer travels past this from the press point;
 // below it, the press is still a plain click (tab activate / row open).
 export const POINTER_SLOP = 5
-// Touch lift is a long-press: a tab strip lifts at 350ms, a drawer row at 450ms
-// (drawer rows live in a vertical scroller beside swipe-to-close, so they need a
-// longer, more deliberate hold to not fight the scroll).
+// Touch lift is a long-press. Tabs use the shorter threshold because they live
+// in a horizontal strip; drawer rows use the longer threshold in their own
+// gesture owner so an ordinary vertical scroll wins before any row action.
 export const TAB_HOLD_MS = 350
 export const DRAWER_HOLD_MS = 450
-// Movement past this before the hold resolves is enough to classify the gesture
-// against the source scroller's axis (touchMoveIntent below).
+// Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
-// A drawer row only lifts when it is deliberately pulled TOWARD the workspace.
-// The opposite (leftward) direction is the drawer's swipe-to-close gesture, so
-// it must never arm row dragging. The larger threshold also lets ordinary thumb
-// jitter settle before a rightward drag-out takes ownership.
-export const DRAWER_DRAG_INTENT_PX = 18
-export const DRAWER_DRAG_DOMINANCE = 1.2
-// After a touch lift, a release that never moved past this is not a drop.
-// Drawer rows use that stationary release for their action menu; tabs cancel
-// cleanly because their hold gesture is reserved for dragging.
+// After a touch lift, a release that never moved past this is not a drop. Tabs
+// cancel cleanly because their hold gesture is reserved for dragging.
 export const RELEASE_IN_PLACE_PX = 5
 
 // ── Zone geometry (design §3.2 / §3.3) ───────────────────────────────────────
@@ -102,32 +94,18 @@ export function passedSlop(dx, dy, slop = POINTER_SLOP) {
   return hypot(dx, dy) > slop
 }
 
-// Drawer rows live in a vertical list: vertical movement stays native scrolling,
-// a LEFTWARD pull belongs to the drawer's swipe-close handler, and only a
-// deliberate RIGHTWARD pull toward the workspace becomes a row drag. Tabs do not
-// infer drag intent from direction: every move before their hold resolves belongs
-// to scrolling, and the binding arms tab dragging only after that deliberate hold.
-export function touchMoveIntent(dx, dy, sourceKind, limit = PRE_HOLD_MOVE_PX) {
+// Tabs do not infer drag intent from direction: every move before their hold
+// resolves belongs to scrolling, and the binding arms tab dragging only after
+// that deliberate hold. Drawer touch gestures are owned by Drawer itself so a
+// held row can open its menu or reorder a pin without also moving the workspace.
+export function touchTabMoveIntent(dx, dy, limit = PRE_HOLD_MOVE_PX) {
   if (hypot(dx, dy) <= limit) return 'pending'
-  const x = Math.abs(dx)
-  const y = Math.abs(dy)
-  if (sourceKind === 'drawer') {
-    if (dx < 0 && x > y) return 'swipe-close'
-    if (dx > DRAWER_DRAG_INTENT_PX && x > y * DRAWER_DRAG_DOMINANCE) return 'drag'
-    if (y >= x) return 'scroll'
-    return 'pending'
-  }
   return 'scroll'
 }
 
 // After a lift, a release still within this radius did not become a drag.
 export function releasedInPlace(dx, dy, limit = RELEASE_IN_PLACE_PX) {
   return hypot(dx, dy) <= limit
-}
-
-// The long-press duration for a source kind: drawer rows hold longer than tabs.
-export function holdMsFor(sourceKind) {
-  return sourceKind === 'drawer' ? DRAWER_HOLD_MS : TAB_HOLD_MS
 }
 
 // Whether the workspace-root-edge drop zone may arm for this pointer + mode: it
@@ -180,8 +158,8 @@ export function clientPointToLocal(point, clientRect, localSize) {
 }
 
 // Convert a painted/client displacement into the CSS-layout displacement an
-// inline transform or resize consumes. Gesture thresholds should stay in client
-// pixels; only cross this boundary when writing or projecting layout geometry.
+// inline transform or resize consumes. Gesture thresholds stay in client
+// pixels; callers cross this boundary only when writing layout geometry.
 export function clientDeltaToLocal(delta, clientRect, localSize) {
   const clientW = Number(clientRect?.width)
   const clientH = Number(clientRect?.height)

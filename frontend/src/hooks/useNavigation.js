@@ -12,15 +12,17 @@ import {
   updateCurrentNavEntry,
 } from '../lib/navHistory.js'
 import { resolveInitialNav } from '../lib/resolveInitialNav.js'
+import {
+  consumeReturnView,
+  parseShellDeepLink,
+  persistActiveNavigation,
+  readRestoredCanvas,
+  readStoredChatId,
+} from '../lib/navigationPersistence.js'
 import { drawerOpenBlockedByDrag } from '../lib/drawerLifecycle.js'
 import { shellReload } from '../lib/shellReloadState.js'
 import * as tabModel from '../components/Shell/tabModel.js'
 import * as paneModel from '../components/Shell/paneModel.js'
-
-const ACTIVE_CHAT_KEY = 'moebius_active_chat'
-const ACTIVE_VIEW_KEY = 'moebius_active_view'
-const ACTIVE_APP_KEY = 'moebius_active_app'
-const RETURN_VIEW_KEY = 'mobius:return-view'
 
 const MAX_APP_SENTINELS = 20
 
@@ -71,9 +73,7 @@ function sameRoute(a, b) {
 }
 
 // Last active chat id, read defensively (private-mode / disabled storage throws).
-function safeStoredChatId() {
-  try { return localStorage.getItem(ACTIVE_CHAT_KEY) } catch { return null }
-}
+const safeStoredChatId = readStoredChatId
 
 // Parse deep-link URL. A COLD notification tap lands on the in-scope
 // shell form `/shell/?app=<id-or-slug>` (or `?chat=<id>`) — this reopens
@@ -81,61 +81,16 @@ function safeStoredChatId() {
 // inside the manifest scope (`/shell/`). The legacy out-of-scope forms
 // `/app/:id` and `/chat/:id` are still parsed for back-compat (warm taps
 // on notifications already in the OS tray, or older senders).
-export const deepLink = (() => {
-  const path = window.location.pathname
-  // In-scope cold-start form: /shell/?app=<id-or-slug> | /shell/?chat=<id>.
-  if (/^\/shell\/?$/.test(path)) {
-    try {
-      const params = new URLSearchParams(window.location.search)
-      const app = params.get('app')
-      const chat = params.get('chat')
-      const intent = params.get('intent')
-      if (app) {
-        const parsedAppId = /^\d+$/.test(app) ? parseInt(app, 10) : null
-        return {
-          view: 'canvas',
-          app,
-          appId: Number.isFinite(parsedAppId) ? parsedAppId : null,
-          intent,
-        }
-      }
-      if (chat) return { view: 'chat', chatId: chat, intent }
-    } catch { /* no query — fall through */ }
-    return null
-  }
-  const appMatch = path.match(/^\/app\/([^/]+)$/)
-  const chatMatch = path.match(/^\/chat\/([^/]+)$/)
-  if (appMatch) return { view: 'canvas', appId: parseInt(appMatch[1], 10) }
-  if (chatMatch) return { view: 'chat', chatId: chatMatch[1] }
-  return null
-})()
+export const deepLink = parseShellDeepLink(window.location)
 
 // Cold-restore of the active view/app (mirror of moebius_active_chat) so a
 // COLD relaunch of the shell PWA lands on the app the user was viewing
 // instead of defaulting to a chat. Only the canvas needs an explicit
 // signal (chat is the default). shellReload / deepLink (an explicit
 // destination for THIS load) take precedence — see below.
-const restored = (() => {
-  try {
-    const view = localStorage.getItem(ACTIVE_VIEW_KEY)
-    const app = localStorage.getItem(ACTIVE_APP_KEY)
-    if (view === 'canvas' && app) {
-      const id = parseInt(app, 10)
-      if (Number.isFinite(id)) return { view: 'canvas', appId: id }
-    }
-  } catch { /* storage unavailable */ }
-  return null
-})()
+const restored = readRestoredCanvas(localStorage)
 
-const returnView = (() => {
-  try {
-    const view = sessionStorage.getItem(RETURN_VIEW_KEY)
-    sessionStorage.removeItem(RETURN_VIEW_KEY)
-    return view === 'settings' ? { view: 'settings' } : null
-  } catch {
-    return null
-  }
-})()
+const returnView = consumeReturnView(sessionStorage)
 
 // The app id cold-restored to the canvas (null unless the storage-restore
 // — not shellReload/deepLink — drove it). The restore is OPTIMISTIC: this
@@ -1724,28 +1679,11 @@ export default function useNavigation({
     document.body.style.opacity = '1'
   }, [])
 
-  // Persist active chat id locally (compatibility mirror; the workspace blob is
-  // authoritative on boot).
   useEffect(() => {
-    if (activeChatId) {
-      try { localStorage.setItem(ACTIVE_CHAT_KEY, activeChatId) } catch { /* ignore */ }
-    }
-  }, [activeChatId])
-
-  // Persist active view + app (mirror) so a cold relaunch of the shell PWA
-  // restores the app the user was on.
-  useEffect(() => {
-    try { localStorage.setItem(ACTIVE_VIEW_KEY, activeView) } catch { /* ignore */ }
-  }, [activeView])
-  useEffect(() => {
-    try {
-      if (activeView === 'canvas' && activeAppId != null) {
-        localStorage.setItem(ACTIVE_APP_KEY, String(activeAppId))
-      } else if (activeView !== 'canvas') {
-        localStorage.removeItem(ACTIVE_APP_KEY)
-      }
-    } catch { /* ignore */ }
-  }, [activeView, activeAppId])
+    persistActiveNavigation(localStorage, {
+      activeView, activeChatId, activeAppId,
+    })
+  }, [activeView, activeChatId, activeAppId])
 
   return {
     activeView,

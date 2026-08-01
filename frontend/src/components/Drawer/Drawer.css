@@ -186,122 +186,6 @@
   background: var(--surface);
 }
 
-/* ── Search ────────────────────────────────────────── */
-
-/* Same row treatment as New chat: search is navigation, not a widget. The
-   closed state is a plain row; the open state swaps the label for an input
-   inside the identical footprint so activation never shifts the layout. */
-.drawer__item--search {
-  color: var(--muted);
-  margin: 0;
-  padding: 11px 12px;
-  min-height: 44px;
-}
-
-.drawer__item--search:hover {
-  color: var(--text);
-  background: var(--surface);
-}
-
-.drawer__item--search-open {
-  color: var(--text);
-  cursor: default;
-  background: var(--surface);
-}
-
-/* The row is the focus surface: one quiet ring around the whole control
-   instead of the global 2px input ring boxing the text field alone. Applies
-   on :focus-within so keyboard users keep an explicit indicator. */
-.drawer__item--search-open:focus-within {
-  box-shadow: inset 0 0 0 1px var(--accent);
-}
-
-.drawer__search-input {
-  flex: 1;
-  min-width: 0;
-  border: none;
-  background: none;
-  padding: 0;
-  color: var(--text);
-  /* 16px baseline everywhere a finger can focus it: below that, iOS zooms
-     the whole page on focus (see the global input rule in index.css). Real
-     pointers get the drawer's 14px row scale back. */
-  font-size: 16px;
-  font-family: var(--font);
-  outline: none;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .drawer__search-input {
-    font-size: 14px;
-  }
-}
-
-.drawer__search-input:focus-visible {
-  outline: none;
-}
-
-.drawer__search-input::placeholder {
-  color: var(--muted);
-}
-
-.drawer__search-clear {
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  margin: -4px -6px -4px 0;
-  border: none;
-  border-radius: 8px;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.drawer__search-clear:hover {
-  color: var(--text);
-  background: var(--surface);
-}
-
-/* Result rows are two-line: title in the row voice, matched excerpt under it
-   in the muted voice with the match itself lifted back to full contrast. */
-.drawer__item--result {
-  align-items: flex-start;
-}
-
-.drawer__item--result .drawer__item-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.drawer__result-title {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.drawer__result-snippet {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  font-size: 12px;
-  line-height: 16px;
-  color: var(--muted);
-  overflow-wrap: anywhere;
-}
-
-.drawer__result-snippet mark {
-  background: none;
-  color: var(--text);
-  font-weight: 600;
-}
-
 /* ── Navigation sections ──────────────────────────── */
 
 .drawer__group {
@@ -386,10 +270,9 @@
   color: inherit;
 }
 
-.drawer__progressive-sentinel {
-  flex: 0 0 1px;
+.drawer__virtual-spacer {
+  flex: 0 0 auto;
   width: 100%;
-  height: 1px;
   pointer-events: none;
 }
 
@@ -397,6 +280,7 @@
 
 .drawer__item {
   width: 100%;
+  min-height: 44px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -444,6 +328,14 @@
    handoffs. The selected row already has its own steady accent wash. */
 .drawer__item:not(.drawer__item--active):active {
   background-color: var(--surface);
+}
+
+/* The hold threshold has resolved, but the owner has not moved or released yet.
+   A quiet lift is the button-free affordance: release opens actions; vertical
+   movement of a pin becomes reorder. */
+.drawer__item[data-hold-ready="true"] {
+  background: var(--surface);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.20);
 }
 
 /* The lifted row while it is being dragged to a new spot. It reads as "picked
@@ -523,6 +415,8 @@
 .drawer__row {
   position: relative;
   display: flex;
+  flex: 0 0 44px;
+  height: 44px;
   align-items: center;
   gap: 0;
 }
@@ -530,10 +424,13 @@
 .drawer__row .drawer__item {
   flex: 1;
   min-width: 0;
+  /* iOS can cancel the pointer and show its callout before our release path.
+     This property affects touch callouts only; desktop context menus remain. */
+  -webkit-touch-callout: none;
 }
 
-/* Drawer rows scroll vertically. Gesture arbitration gives leftward movement to
-   swipe-close and only a deliberate rightward pull to workspace drag-out. */
+/* Drawer rows scroll vertically before a hold. Once a hold resolves, the local
+   row gesture owns menu/reorder and the shared drawer swipe recognizer yields. */
 .drawer__row .drawer__item[data-drag-key] {
   touch-action: pan-y pinch-zoom;
 }
@@ -568,11 +465,6 @@
 
 .drawer__item-action-menu[data-positioned="true"] {
   visibility: visible;
-}
-
-.drawer__item-action-handle,
-.drawer__item-action-header {
-  display: none;
 }
 
 .drawer__item-action-items {
@@ -610,8 +502,7 @@
   color: var(--danger);
 }
 
-.drawer__item-action-item:focus-visible,
-.drawer__item-action-close:focus-visible {
+.drawer__item-action-item:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -668,157 +559,29 @@
 }
 
 @media (max-width: 720px) {
-  .drawer__item-action-layer {
-    background: rgba(0, 0, 0, 0.46);
-    backdrop-filter: blur(2px);
-  }
-
-  .drawer__item-action-menu,
-  .drawer__item-action-menu[data-positioned="true"] {
-    top: auto;
-    right: 12px;
-    bottom: max(12px, env(safe-area-inset-bottom));
-    left: 12px;
-    width: auto;
-    max-width: none;
+  /* Keep the Web interaction model on touch: a compact menu stays attached to
+     the row instead of turning into a drawer-covering bottom sheet. Placement
+     still flips/clamps through contextMenuGeometry when space is tight. */
+  .drawer__item-action-menu {
+    width: 224px;
     max-height: calc(100dvh - 24px - env(safe-area-inset-bottom));
-    visibility: visible;
-    padding: 7px;
-    border-radius: 20px;
-    background: var(--surface);
-    box-shadow: 0 22px 54px rgba(0, 0, 0, 0.46);
-    animation: drawer-item-sheet-in 170ms cubic-bezier(0.2, 0.75, 0.2, 1);
-  }
-
-  .drawer__item-action-handle {
-    width: 34px;
-    height: 4px;
-    display: block;
-    margin: 2px auto 7px;
-    border-radius: 999px;
-    background: var(--border);
-  }
-
-  .drawer__item-action-header {
-    display: flex;
-    align-items: center;
-    gap: 11px;
-    padding: 4px 5px 10px;
-  }
-
-  .drawer__item-action-icon {
-    position: relative;
-    width: 42px;
-    height: 42px;
-    flex: 0 0 42px;
-    display: grid;
-    place-items: center;
-    overflow: hidden;
-    border-radius: 11px;
-    background: var(--app-color, var(--accent));
-    color: var(--accent-fg, #fff);
-    font-size: 12px;
-    font-weight: 750;
-  }
-
-  .drawer__item-action-icon img {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-  }
-
-  .drawer__item-action-icon.is-image {
-    overflow: visible;
-    border-radius: 0;
-    background: transparent;
-  }
-
-  .drawer__item-action-icon.is-image > span {
-    visibility: hidden;
-  }
-
-  .drawer__item-action-icon--chat {
-    background: var(--accent-dim);
-    color: var(--accent);
-  }
-
-  .drawer__item-action-heading {
-    min-width: 0;
-    flex: 1;
-    display: grid;
-    gap: 2px;
-  }
-
-  .drawer__item-action-heading > span {
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 650;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-
-  .drawer__item-action-heading > strong {
-    overflow: hidden;
-    font-size: 16px;
-    font-weight: 650;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .drawer__item-action-close {
-    width: 40px;
-    height: 40px;
-    flex: 0 0 40px;
-    display: grid;
-    place-items: center;
-    padding: 0;
-    border: 0;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--bg) 72%, transparent);
-    color: var(--muted);
-  }
-
-  .drawer__item-action-items {
-    gap: 2px;
+    animation: drawer-item-menu-in 120ms ease-out;
   }
 
   .drawer__item-action-item {
-    min-height: 48px;
-    padding: 11px 13px;
-    border-radius: 12px;
-    font-size: 15px;
+    min-height: 44px;
+    padding: 9px 11px;
+    font-size: 14px;
   }
 
   .drawer__item-action-note {
-    margin: 5px 7px 2px;
-    padding: 9px 6px 5px;
-    font-size: 11px;
-  }
-
-  .drawer__item-action-confirm {
-    gap: 9px;
-    padding: 10px 8px 6px;
-  }
-
-  .drawer__item-action-confirm > strong {
-    font-size: 16px;
-  }
-
-  .drawer__item-action-confirm > span {
-    font-size: 13px;
-  }
-
-  .drawer__item-action-confirm > div {
-    gap: 8px;
-    margin-top: 6px;
+    padding-bottom: 3px;
   }
 }
 
-@keyframes drawer-item-sheet-in {
-  from { opacity: 0; transform: translateY(18px); }
-  to { opacity: 1; transform: translateY(0); }
+@keyframes drawer-item-menu-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* ── Inline rename ─────────────────────────────────── */

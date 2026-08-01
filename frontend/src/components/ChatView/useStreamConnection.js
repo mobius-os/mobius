@@ -47,7 +47,7 @@ import {
 // the already-arrived request and the same text appeared in the transcript.
 // SQLite no longer has that fixed checkout ceiling, but 45s keeps rolling
 // deployments / slower external DBs on the safe side of the same contract.
-const SEND_POST_TIMEOUT_MS = 45000
+export const SEND_POST_TIMEOUT_MS = 45000
 
 // Delay before the wake/online reattach surfaces as a visible
 // "Reconnecting…" note. Real mobile reattach can spend time waking the

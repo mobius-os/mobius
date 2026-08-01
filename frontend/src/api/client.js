@@ -395,13 +395,6 @@ export const api = {
   },
   chats: {
     list: (options = {}) => apiFetch('/chats', options),
-    // Drawer full-text search. Time-boxed: a stuck request must not leave the
-    // drawer's results view spinning forever, and the caller aborts on every
-    // keystroke anyway.
-    search: (q, { signal } = {}) => apiFetch(
-      `/chats/search?q=${encodeURIComponent(q)}`,
-      { signal, timeoutMs: 10_000 },
-    ),
     create: (payload) => listAffectingMutation('chats', '/chats', {
       method: 'POST',
       body: JSON.stringify(payload),

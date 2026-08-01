@@ -6,6 +6,7 @@ and the offline-test escape hatch.
 """
 
 from datetime import datetime, timezone
+import re
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -43,6 +44,14 @@ def _bootstrap_urls():
     LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"],
     LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"],
   ]
+
+
+def test_recovery_store_bootstrap_is_pinned_to_an_immutable_commit():
+  """A fresh boot cannot silently install a newly moved Store branch tip."""
+  assert re.search(
+    r"/mobius-os/app-store/[0-9a-f]{40}/mobius\.json$",
+    BOOTSTRAP_STORE_MANIFEST_URL,
+  )
 
 
 @pytest.mark.asyncio

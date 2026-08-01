@@ -47,12 +47,7 @@ const ALLOWED_GLOBALS = new Set([
   'createImageBitmap', 'crypto', 'CSS', 'CustomEvent', 'document',
   'DOMMatrixReadOnly', 'DOMParser',
   'Element', 'Event', 'EventSource', 'fetch', 'File', 'FileReader', 'FormData',
-  'getComputedStyle', 'Headers',
-  // CSS Custom Highlight API: chat search paints matched words as non-destructive
-  // Ranges (searchTermHighlight.js). Guarded by `typeof Highlight` for browsers
-  // without it.
-  'Highlight',
-  'history', 'HTMLElement', 'HTMLInputElement',
+  'getComputedStyle', 'Headers', 'history', 'HTMLElement', 'HTMLInputElement',
   'indexedDB', 'IntersectionObserver', 'localStorage', 'location', 'matchMedia',
   'MessageChannel', 'MessageEvent', 'MutationObserver', 'navigation',
   'navigator', 'Node', 'NodeFilter', 'Notification', 'performance',

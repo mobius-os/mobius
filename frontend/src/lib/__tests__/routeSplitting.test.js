@@ -15,7 +15,7 @@ test('mutually exclusive top-level flows remain lazy route boundaries', () => {
   }
 })
 
-test('shell route reload is logo-free without changing the launch splash', () => {
+test('route loading is blank without removing the launch mark', () => {
   const routeLoading = SOURCE.slice(
     SOURCE.indexOf('function RouteLoading'),
     SOURCE.indexOf('function SetupStatusError'),
@@ -25,6 +25,7 @@ test('shell route reload is logo-free without changing the launch splash', () =>
     INDEX_HTML.indexOf('<div id="root"'),
   )
 
-  assert.doesNotMatch(routeLoading, /moebius\.(?:png|svg)|<img/)
-  assert.match(launchSplash, /moebius\.png/)
+  assert.doesNotMatch(routeLoading, /Möbius|moebius\.(?:png|svg)|<img|<span|role="status"/)
+  assert.match(routeLoading, /return <div className="app-route-loading" aria-hidden="true" \/>/)
+  assert.match(launchSplash, /<img src="\/moebius\.png"/)
 })

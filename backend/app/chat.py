@@ -83,6 +83,7 @@ from app.chat_writer import (
   PrepareAutoResume,
   PrepareRestartIntents,
   RecordRunMetrics,
+  ReconcileStartupChat,
   RecoverWedgedRun,
   ResolvePark,
   RollbackAutoResume,
@@ -92,6 +93,7 @@ from app.chat_writer import (
   get_writer,
   next_message_ts as _next_message_ts,
   update_last_assistant_message as _update_last_assistant_message,
+  wait_ack as _wait_ack,
 )
 from app.config import get_settings
 from app.events import (
@@ -656,10 +658,9 @@ def reconcile_startup_chats(
       the crash-loop ambiguity;
     - close the exact durable run row.
 
-  No queue lock is taken: this runs single-threaded at startup before
-  any POST /messages can land, so the serialization invariant that the
-  per-chat queue lock documents has no concurrent writer to guard
-  against here.
+  No queue lock is taken: this runs during lifespan before any POST /messages
+  can land. The database transition still goes through the chat writer, so the
+  transcript ownership rule has no boot-only exception.
 
   Mid-commit timeout contract (accept-and-document; see design §D). A terminal
   `Finalize`/`PromotePending`/`FinishRun` whose `await_ack`
@@ -680,16 +681,6 @@ def reconcile_startup_chats(
   The runtime wedged-run sweep now closes the late-promote gap between boots:
   an old running row with no registry or running broadcast is recovered by
   exact run id after the terminal window settles.
-
-  Intentional direct-write exception to the C2 single-writer rule: this
-  mutates `chat.messages` / `chat.pending_messages` and ChatRun rows
-  DIRECTLY on its own session rather than through the writer actor. That
-  is deliberate — reconciliation runs in the FastAPI lifespan BEFORE
-  `start_writer()` (recovery must work even when persistence is degraded,
-  so it can't depend on a healthy actor), and there is no concurrent
-  runtime writer at that point (the registry is empty at a cold boot, and
-  a still-alive chat is skipped above). So the lost-update race the actor
-  exists to close cannot occur here.
 
   An exact running ChatRun stamped with the root-authorized restart nonce is
   different from a generic crash. After the same transcript finalization, an
@@ -888,8 +879,6 @@ def reconcile_startup_chats(
         new_msg = build_assistant_message([err_block])
         new_msg["ts"] = _next_message_ts(msgs)
         msgs.append(new_msg)
-      chat.messages = msgs
-      chat.live_assistant = None
       # Preserve chat.pending_messages: closing the run leaves an idle queue
       # that self-heals on the next user POST's stale-pending drain. We do NOT auto-drain at
       # boot — that is the crash-loop hazard. (Owner-reported bug: a
@@ -897,20 +886,20 @@ def reconcile_startup_chats(
       # Close every still-running row for the chat in the SAME commit as the
       # transcript repair. A healthy writer maintains one current row; closing
       # all also repairs any historical duplicate left by an interrupted deploy.
-      recovered_at = datetime.now(UTC)
-      for run in running_runs:
-        if restart_eligible and restart_run is not None and run.id == restart_run.id:
-          run.status = "parked"
-          run.parked_until = recovered_at.replace(tzinfo=None)
-          run.park_reason = "restart"
-          run.ended_at = recovered_at
-          # Keep restart_nonce: the reset sweep rechecks it against the same
-          # root-owned boot authorization immediately before continuation.
-        else:
-          run.status = "interrupted"
-          run.ended_at = recovered_at
-          run.restart_nonce = None
-      db.commit()
+      recovered_at = datetime.now(UTC).replace(tzinfo=None)
+      ack = get_writer().submit(ReconcileStartupChat(
+        chat_id=chat.id,
+        messages=msgs,
+        running_run_ids=tuple(run.id for run in running_runs),
+        restart_run_id=(
+          restart_run.id if restart_eligible and restart_run is not None
+          else None
+        ),
+        recovered_at=recovered_at,
+      ))
+      if not _wait_ack(ack):
+        raise RuntimeError("startup chat reconciliation was not applied")
+      db.expire_all()
       if restart_eligible:
         restart_parks.append(chat.id)
       else:

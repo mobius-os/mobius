@@ -12,16 +12,29 @@ import inspect
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Protocol
 
 from app.database import SessionLocal
 from app.memory_observability import record_memory_checkpoint
 
 
+class StartupState(Protocol):
+  media_migration_failed: bool
+  reconciliation_failed: bool
+
+
+class StartupApp(Protocol):
+  state: StartupState
+
+
+class StartupSettings(Protocol):
+  data_dir: str
+
+
 @dataclass
 class StartupContext:
-  app: object
-  settings: object
+  app: StartupApp
+  settings: StartupSettings
   boot_id: str
   init_db: Callable[[], None]
   install_pm_commit_launcher: Callable[[Path, Path], bool]
@@ -326,6 +339,10 @@ STARTUP_TASKS = (
     critical=True,
     checkpoint="startup_database_initialized",
   ),
+  # Transcript migrations below are writer domain commands. Start ownership as
+  # soon as the schema exists; later startup failures still fail open exactly
+  # as they did when the writer started near the end of the plan.
+  StartupTask("start chat writer", _start_chat_writer),
   StartupTask("purge expired chat tombstones", _purge_expired_chats),
   StartupTask("backfill session links", _backfill_session_links),
   StartupTask("backfill prompt snapshots", _backfill_prompt_snapshots),
@@ -352,7 +369,6 @@ STARTUP_TASKS = (
     _retire_integrated_provenance,
     checkpoint="startup_app_provenance_retired",
   ),
-  StartupTask("start chat writer", _start_chat_writer),
   StartupTask("initialize push", _initialize_push),
   StartupTask("notify reconciled chats", _notify_reconciled_chats),
   StartupTask(

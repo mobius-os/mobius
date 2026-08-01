@@ -78,7 +78,12 @@ jobs:
           && pip install -r requirements-static.txt
       - name: Run backend static analysis
         working-directory: backend
-        run: ruff check app tests
+        run: |
+          ruff check app tests
+          mypy
+      - name: Audit locked Python runtime dependencies
+        working-directory: backend
+        run: pip-audit --strict --disable-pip -r requirements.lock
       - name: Validate bundled Caddy policy
         # Caddy expands these placeholders inside its container. Keep the
         # validation values non-empty and production-shaped so both site

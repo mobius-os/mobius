@@ -3,7 +3,7 @@ import * as tabModel from './tabModel.js'
 import { STRIP_H } from './paneModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
-  passedSlop, touchMoveIntent, releasedInPlace, holdMsFor, crossedDrawerExit,
+  passedSlop, touchTabMoveIntent, releasedInPlace, TAB_HOLD_MS, crossedDrawerExit,
   rootEdgeAllowed, clientPointToLocal,
 } from './dragController.js'
 
@@ -339,19 +339,16 @@ export default function useWorkspaceDrag({
 
       // Tabs use one unambiguous touch contract across their whole surface:
       // movement before the hold belongs to strip scrolling; surviving the short
-      // hold lifts the tab so a following move drags it. Releasing that lifted tab
-      // in place simply puts it back — phone tabs do not overload the drag gesture
-      // with the desktop actions menu. Drawer rows keep their
-      // directional drag-out shortcut because it does not compete with the
-      // drawer's vertical scroll axis. A stationary drawer hold remains the
-      // alternate path to its row menu.
+      // hold lifts the tab so a following move drags it. Drawer touch rows never
+      // enter this controller: Drawer owns their menu/reorder gesture as one
+      // interaction, so a held finger cannot also glide navigation closed.
       if (isTouch) {
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
           held = true
           if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
-          if (sourceKind === 'tab') arm()
-        }, holdMsFor(sourceKind))
+          arm()
+        }, TAB_HOLD_MS)
       }
 
       function stopAutoScroll() {
@@ -433,27 +430,18 @@ export default function useWorkspaceDrag({
         }
         if (!armed) {
           if (isTouch) {
-            const intent = touchMoveIntent(dx, dy, sourceKind)
-            if (intent === 'scroll' || intent === 'swipe-close') {
+            const intent = touchTabMoveIntent(dx, dy)
+            if (intent === 'scroll') {
               clearTimeout(holdTimer)
-              if (sourceKind === 'tab' && intent === 'scroll') {
-                // The tab reserves one-finger panning so the browser cannot
-                // reclaim a post-hold horizontal move and cancel a live drag.
-                // Until the hold wins, mirror the strip's one-to-one pan here.
-                // Whitespace and close buttons remain native pan-x.
-                scrolling = true
-                scrollStripEl = srcEl.closest('.shell__tabstrip')
-                ev.preventDefault?.()
-                if (scrollStripEl) scrollStripEl.scrollLeft += start.x - ev.clientX
-              } else {
-                cancelled = true
-                cleanup()
-              }
+              // The tab reserves one-finger panning so the browser cannot
+              // reclaim a post-hold horizontal move and cancel a live drag.
+              // Until the hold wins, mirror the strip's one-to-one pan here.
+              // Whitespace and close buttons remain native pan-x.
+              scrolling = true
+              scrollStripEl = srcEl.closest('.shell__tabstrip')
+              ev.preventDefault?.()
+              if (scrollStripEl) scrollStripEl.scrollLeft += start.x - ev.clientX
               return
-            }
-            if (intent === 'drag') {
-              clearTimeout(holdTimer)
-              arm()
             }
             if (!armed) return
           } else {
@@ -533,26 +521,8 @@ export default function useWorkspaceDrag({
 
       const onUp = (ev) => {
         if (ev.pointerId !== pointerId) return // ignore a second finger
-        const openDrawerTouchMenu = () => {
-          // Re-enter the row's real context-menu boundary instead of
-          // programmatically clicking its menu trigger. `contextmenu` is the
-          // one semantic path shared with desktop right-click and keyboard
-          // access, so touch hold cannot drift when the trigger composition
-          // changes.
-          srcEl.dispatchEvent(new window.MouseEvent('contextmenu', {
-            bubbles: true,
-            cancelable: true,
-            view: window,
-            button: 2,
-            clientX: ev.clientX,
-            clientY: ev.clientY,
-          }))
-        }
         if (!armed) {
           if (scrolling) {
-            cleanup({ suppressClick: true })
-          } else if (isTouch && held && sourceKind === 'drawer') {
-            openDrawerTouchMenu()
             cleanup({ suppressClick: true })
           } else cleanup()
           return
@@ -571,8 +541,7 @@ export default function useWorkspaceDrag({
           && ev.clientX <= drawerEdgeX && !(isTouch && glided)
         if (isTouch && releasedInPlace(dx, dy)) {
           // A lifted tab released in place cancels cleanly; its hold is reserved
-          // for drag. Drawer rows retain their stationary-hold action menu.
-          if (sourceKind === 'drawer') openDrawerTouchMenu()
+          // for drag.
           cleanup({ suppressClick: true })
         } else if (backOverDrawer) {
           // Released back over the drawer = cancel; cleanup reopens it if glided.
@@ -744,6 +713,10 @@ export default function useWorkspaceDrag({
       const strip = srcEl.closest('[data-pane-strip]')
       const sourceKind = inDrawer ? 'drawer' : (strip ? 'tab' : null)
       if (!sourceKind) return
+      // Touch drawer rows have a different, local contract: stationary hold
+      // opens their contextual menu and held vertical movement reorders a pin.
+      // Never create a second workspace-drag session for that same pointer.
+      if (sourceKind === 'drawer' && e.pointerType !== 'mouse') return
       const paneId = strip ? strip.dataset.paneStrip : null
       startSession(e, srcEl, sourceKind, key, paneId)
     }

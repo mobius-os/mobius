@@ -29,6 +29,16 @@ test('chat display readiness preserves the authoritative transcript reveal gate'
     'an already-ready chat must re-announce when a cross-pane move changes its handoff owner')
   assert.doesNotMatch(chatView, /onDisplayReadyRef/,
     'the callback dependency is the owner-change signal; a parallel mutable ref would obscure it')
+  assert.doesNotMatch(
+    chatView,
+    /scrollEl\.addEventListener\(['"](?:load|error)['"], requestRevealOnQuiet/,
+    'reserved image frames must not extend chat entry while their bytes resolve',
+  )
+  assert.doesNotMatch(
+    chatView,
+    /new MutationObserver\(requestRevealOnQuiet\)/,
+    'DOM churn without a geometry change must not extend the reveal quiet window',
+  )
 })
 
 test('activation reuses an unchanged retained transcript before stream catch-up', () => {
@@ -175,7 +185,7 @@ test('the held chat is an opaque layer above staging until the atomic swap', () 
     'the last painted frame must stay above the staging mount')
 })
 
-test('chat selection settles without flashing or crossfading text layers', () => {
+test('chat selection swaps atomically without flashing or animating text layers', () => {
   const drawerItem = ruleBody('.drawer__item', drawerCss)
   const drawerPress = ruleBody('.drawer__item:not(.drawer__item--active):active', drawerCss)
   assert.equal(
@@ -189,15 +199,10 @@ test('chat selection settles without flashing or crossfading text layers', () =>
   assert.doesNotMatch(drawerPress, /transform:/,
     'drawer press feedback must keep the row geometry fixed')
 
-  assert.match(ruleBody('.shell__chat-view > .chat'), /transition:\s*opacity 90ms ease-out/,
-    'the ready transcript should settle on its existing mounted surface')
-  assert.match(ruleBody('.shell__chat-view--staging > .chat'), /opacity:\s*0\.94/,
-    'only the incoming transcript should be softened while the opaque cover is held')
+  assert.doesNotMatch(shellCss, /\.shell__chat-view(?:--staging)? > \.chat/,
+    'the ready transcript must replace the opaque cover in one fully painted frame')
   assert.doesNotMatch(ruleBody('.shell__chat-view--held'), /opacity:/,
-    'the outgoing transcript must stay opaque instead of ghosting over incoming text')
-  assert.match(shellCss,
-    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.shell__chat-view > \.chat \{\s*transition:\s*none;/,
-    'the transcript settle should disappear under reduced motion')
+    'the outgoing transcript must remain opaque until the atomic swap')
   assert.match(drawerCss,
     /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.drawer__item \{\s*transition:\s*none;/,
     'the drawer background wash should disappear under reduced motion')

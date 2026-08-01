@@ -38,7 +38,7 @@ function PaneChatView({
   markVoiceListening,
   refreshApps,
   acknowledgeAppPreview,
-  refreshChats,
+  markChatOwnerActivity,
   loadTheme,
   navTo,
   onInternalNav,
@@ -56,15 +56,26 @@ function PaneChatView({
 
   const handleStreamEnd = useCallback(({ continues } = {}) => {
     if (!continues) markStreamingEnd(chatId)
-    refreshApps()
-    loadTheme()
-    refreshChats()
-  }, [chatId, markStreamingEnd, refreshApps, loadTheme, refreshChats])
+    // Every idle chat probes its broadcast once on activation and receives a
+    // terminal 204. That is not a completed turn and must not turn ordinary
+    // chat switching into an unrelated full apps/theme reconciliation. A real
+    // `done` event always carries the boolean continuation fact; keep the
+    // refresh only as a fallback for that committed-turn boundary (live app /
+    // theme events normally update their own projections first).
+    if (continues !== undefined) {
+      refreshApps()
+      loadTheme()
+    }
+  }, [chatId, markStreamingEnd, refreshApps, loadTheme])
 
   const handleFirstMessage = useCallback(() => {
     onFirstMessage?.(chatId)
-    refreshChats()
-  }, [chatId, onFirstMessage, refreshChats])
+    markChatOwnerActivity(chatId)
+  }, [chatId, markChatOwnerActivity, onFirstMessage])
+
+  const handleOwnerActivity = useCallback(() => {
+    markChatOwnerActivity(chatId)
+  }, [chatId, markChatOwnerActivity])
 
   const handleMessageStart = useCallback(() => {
     markStreamingStart(chatId)
@@ -102,7 +113,7 @@ function PaneChatView({
         onOpenApp={handleOpenApp}
         onInternalNav={onInternalNav}
         onMessageStart={handleMessageStart}
-        onOwnerActivity={refreshChats}
+        onOwnerActivity={handleOwnerActivity}
         onVoiceListeningChange={markVoiceListening}
         composerRequest={composerRequest}
         onComposerRequestHandled={onComposerRequestHandled}

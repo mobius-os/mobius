@@ -1,4 +1,5 @@
 import os
+import importlib.util
 from pathlib import Path
 import subprocess
 import textwrap
@@ -7,6 +8,11 @@ import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "deploy-prod.sh"
+SUPPORT = SCRIPT.with_name("deploy_support.py")
+_SPEC = importlib.util.spec_from_file_location("deploy_support_disk", SUPPORT)
+assert _SPEC is not None and _SPEC.loader is not None
+deploy_support = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(deploy_support)
 HELPERS_START = "# ── deploy disk policy helpers"
 HELPERS_END = "# ── end deploy disk policy helpers"
 
@@ -101,14 +107,7 @@ def test_unavailable_disk_probe_fails_closed_or_uses_same_override():
   ),
 ])
 def test_rollback_tag_replaces_only_the_last_image_tag(image, expected):
-  result = subprocess.run(
-    ["bash", "-c", _helpers() + '\nrollback_tag_for_image "$1"', "_", image],
-    capture_output=True,
-    text=True,
-  )
-
-  assert result.returncode == 0, result.stderr
-  assert result.stdout.strip() == expected
+  assert deploy_support.rollback_tag_for_image(image) == expected
 
 
 def test_cleanup_removes_only_the_superseded_rollback_image(tmp_path):

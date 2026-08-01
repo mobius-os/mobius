@@ -12,6 +12,18 @@
 // that identity is what lets the drop settle with no jump, regardless of whether
 // rows have different heights (app rows are taller than chat rows).
 
+import { PRE_HOLD_MOVE_PX } from '../Shell/dragController.js'
+
+// Once a touch hold has claimed a drawer row, only a clearly vertical movement
+// on a pinned item can become reordering. Every other movement cancels the row
+// action while remaining claimed until release, so the same finger cannot fall
+// through into drawer swipe-close or workspace drag-out.
+export function heldDrawerRowIntent(dx, dy, pinned, limit = PRE_HOLD_MOVE_PX) {
+  if (Math.hypot(dx, dy) <= limit) return 'pending'
+  if (pinned && Math.abs(dy) > Math.abs(dx)) return 'reorder'
+  return 'cancel'
+}
+
 export function computePinnedDrag(rows, fromIndex, deltaY) {
   const src = rows[fromIndex]
   const anchorTop = rows[0].top // top edge of the pinned region — a fixed anchor
@@ -82,9 +94,7 @@ function pinnedEntryKey(entry) {
 // While persistence is in flight, this projection is the visible authority for
 // the combined pinned section. Underlying chat/app queries may refresh on
 // different tasks; as long as they still contain the same identities, keep the
-// order the owner just chose instead of letting mixed timestamp snapshots
-// reshuffle it. A changed identity set is a real concurrent pin/unpin/delete and
-// falls back to current server truth.
+// order the owner chose instead of painting mixed timestamp snapshots.
 export function projectPinnedEntries(entries, orderedKeys) {
   const currentKeys = entries.map(pinnedEntryKey)
   if (pinnedOrderHandoffStatus(currentKeys, orderedKeys) === 'superseded') {
@@ -113,9 +123,8 @@ export function pinnedEntriesMatchRanks(entries, expectedRanks) {
 
 /**
  * Hold the preview transforms until the keyed DOM order has committed.
- * MutationObserver fires in the microtask checkpoint after React's DOM move and
- * before the browser paints, so the caller can clear transforms without ever
- * revealing the old natural order. Returns an idempotent cancellation function.
+ * MutationObserver fires after React's DOM move and before the browser paints,
+ * so the caller can clear transforms without revealing the old natural order.
  */
 export function observePinnedOrderHandoff(
   root,
@@ -142,8 +151,6 @@ export function observePinnedOrderHandoff(
     return true
   }
 
-  // The common path is still the old order here. Checking first also keeps the
-  // helper honest for a synchronous renderer or an already-superseded list.
   if (!settleIfReady()) {
     if (typeof MutationObserverImpl !== 'function') {
       settled = true
@@ -151,8 +158,7 @@ export function observePinnedOrderHandoff(
     } else {
       observer = new MutationObserverImpl(settleIfReady)
       observer.observe(root, { childList: true, subtree: false })
-      // Close the tiny check→observe race if the renderer committed between the
-      // first read and observer registration.
+      // Close the tiny check→observe race if React committed between reads.
       settleIfReady()
     }
   }

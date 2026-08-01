@@ -2,11 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   POINTER_SLOP, TAB_HOLD_MS, DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX, RELEASE_IN_PLACE_PX,
-  DRAWER_DRAG_INTENT_PX, DRAWER_DRAG_DOMINANCE,
   HYSTERESIS_PX, ROOT_EDGE_PX, CARET_W, CARET_H, CENTER_INSET, DRAWER_EXIT_PX,
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
-  passedSlop, touchMoveIntent, releasedInPlace, holdMsFor, chipOffset,
+  passedSlop, touchTabMoveIntent, releasedInPlace, chipOffset,
   clientPointToLocal, clientDeltaToLocal,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene,
@@ -92,23 +91,11 @@ test('passedSlop arms only past the slop radius', () => {
   assert.equal(passedSlop(3, 3), false) // hypot 4.24 < 5
 })
 
-test('touchMoveIntent reserves every pre-hold tab move for scrolling', () => {
-  assert.equal(touchMoveIntent(8, 0, 'tab'), 'pending')
-  assert.equal(touchMoveIntent(0, 8.1, 'tab'), 'scroll', 'vertical jitter does not bypass the hold')
-  assert.equal(touchMoveIntent(8.1, 0, 'tab'), 'scroll', 'horizontal pull scrolls over a tab body')
-  assert.equal(touchMoveIntent(-8.1, 0, 'drawer'), 'swipe-close',
-    'leftward pull belongs exclusively to drawer close')
-  assert.equal(touchMoveIntent(18, 0, 'drawer'), 'pending',
-    'a small rightward thumb movement does not lift a row')
-  assert.equal(touchMoveIntent(18.1, 0, 'drawer'), 'drag',
-    'a deliberate rightward pull toward the workspace lifts the row')
-  assert.equal(touchMoveIntent(24, 21, 'drawer'), 'pending',
-    'a shallow rightward diagonal remains undecided rather than latching')
-  assert.equal(touchMoveIntent(0, 8.1, 'drawer'), 'scroll', 'vertical pull scrolls the drawer')
-  assert.equal(touchMoveIntent(10, 10, 'drawer'), 'scroll', 'ambiguous diagonals favor native scroll')
+test('touchTabMoveIntent reserves every pre-hold tab move for scrolling', () => {
+  assert.equal(touchTabMoveIntent(8, 0), 'pending')
+  assert.equal(touchTabMoveIntent(0, 8.1), 'scroll', 'vertical jitter does not bypass the hold')
+  assert.equal(touchTabMoveIntent(8.1, 0), 'scroll', 'horizontal pull scrolls over a tab body')
   assert.equal(PRE_HOLD_MOVE_PX, 8)
-  assert.equal(DRAWER_DRAG_INTENT_PX, 18)
-  assert.equal(DRAWER_DRAG_DOMINANCE, 1.2)
 })
 
 test('releasedInPlace is true only within the release radius', () => {
@@ -116,9 +103,7 @@ test('releasedInPlace is true only within the release radius', () => {
   assert.equal(releasedInPlace(RELEASE_IN_PLACE_PX + 0.1, 0), false)
 })
 
-test('holdMsFor gives drawer rows the longer hold', () => {
-  assert.equal(holdMsFor('tab'), TAB_HOLD_MS)
-  assert.equal(holdMsFor('drawer'), DRAWER_HOLD_MS)
+test('drawer rows retain a more deliberate hold than tabs', () => {
   assert.equal(TAB_HOLD_MS, 350)
   assert.equal(DRAWER_HOLD_MS, 450)
 })

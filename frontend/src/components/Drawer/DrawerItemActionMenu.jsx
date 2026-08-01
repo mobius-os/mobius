@@ -1,10 +1,9 @@
-/* DrawerItemActionMenu gives app launcher cards and drawer rows one
-   pointer-accurate desktop menu and one named, thumb-friendly compact-screen
-   action sheet. */
+/* DrawerItemActionMenu gives app launcher cards and drawer rows one compact,
+   pointer-accurate contextual menu across mouse, keyboard, and touch. */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Chat, Pin, PinFilled, X } from '@openai/apps-sdk-ui/components/Icon'
+import { Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 
 function focusableMenuItems(menu) {
@@ -15,7 +14,6 @@ export default function DrawerItemActionMenu({
   open,
   itemKind,
   itemName,
-  icon,
   pinned,
   canInstall,
   canShare,
@@ -135,18 +133,7 @@ export default function DrawerItemActionMenu({
     items[next].focus()
   }
 
-  const kindLabel = itemKind === 'chat' ? 'Chat' : 'App'
   const recoveryLabel = itemKind === 'chat' ? 'chats' : 'apps'
-  const identityIcon = itemKind === 'chat'
-    ? (
-      <span
-        className="drawer__item-action-icon drawer__item-action-icon--chat"
-        aria-hidden="true"
-      >
-        <Chat width={20} height={20} />
-      </span>
-    )
-    : icon
 
   const layer = (
     <div
@@ -172,23 +159,6 @@ export default function DrawerItemActionMenu({
         onPointerDown={event => event.stopPropagation()}
         onKeyDown={onMenuKeyDown}
       >
-        <div className="drawer__item-action-handle" aria-hidden="true" />
-        <header className="drawer__item-action-header">
-          {identityIcon}
-          <div className="drawer__item-action-heading">
-            <span>{kindLabel} actions</span>
-            <strong>{itemName}</strong>
-          </div>
-          <button
-            type="button"
-            className="drawer__item-action-close"
-            aria-label={`Close ${kindLabel.toLowerCase()} actions`}
-            onClick={() => close()}
-          >
-            <X width={18} height={18} aria-hidden="true" />
-          </button>
-        </header>
-
         {confirmation === 'delete-data' ? (
           <div className="drawer__item-action-confirm">
             <strong>Delete this app’s data?</strong>

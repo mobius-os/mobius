@@ -2,9 +2,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  CHAT_DETAIL_WARM_MESSAGE_LIMIT,
   chatDetailCacheValue,
   chatEntryPhase,
   chatSnapshotMatchesRuntime,
+  compactChatDetailCacheValue,
 } from '../../../lib/chatDetailCache.js'
 
 test('a cached running chat paints immediately while catch-up runs', () => {
@@ -65,4 +67,12 @@ test('a retained snapshot is reusable only at the same explicit row version', ()
   assert.equal(chatSnapshotMatchesRuntime({}, {
     updated_at: '2026-07-30T12:00:00Z',
   }), false)
+})
+
+test('inactive detail compaction keeps one exact server page and advances pagination', () => {
+  const messages = Array.from({ length: 27 }, (_, i) => ({ role: 'user', content: String(i) }))
+  const compacted = compactChatDetailCacheValue({ messages, offset: 6 })
+  assert.equal(compacted.messages.length, CHAT_DETAIL_WARM_MESSAGE_LIMIT)
+  assert.equal(compacted.messages[0].content, '7')
+  assert.equal(compacted.offset, 13)
 })

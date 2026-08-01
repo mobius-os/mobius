@@ -120,6 +120,11 @@ async def await_ack(ack: Future, *, timeout: float | None = None):
   return await asyncio.wait_for(asyncio.wrap_future(ack), timeout=timeout)
 
 
+def wait_ack(ack: Future, *, timeout: float | None = None):
+  """Synchronously await a writer ack during single-threaded boot work only."""
+  return ack.result(timeout=ACK_TIMEOUT_SECS if timeout is None else timeout)
+
+
 # -- Commands (domain-level; a later milestone swaps their dispatch) -----
 @dataclass
 class _Command:
@@ -325,6 +330,31 @@ class MigrateChat(_Command):
 
   chat_id: str = ""
   dry_run: bool = False
+
+
+@dataclass
+class RewriteChatMediaPaths(_Command):
+  """Atomically rewrite one chat's legacy media URLs during boot."""
+
+  chat_id: str = ""
+  old_prefix: str = ""
+  new_prefix: str = ""
+
+
+@dataclass
+class ReconcileStartupChat(_Command):
+  """Persist one interrupted-turn recovery plan during boot.
+
+  Transcript shaping stays in ``chat.reconcile_startup_chats``; this command
+  owns the database transition so boot repair follows the same single-writer
+  rule as live turns. Run rows close in the same transaction as the transcript.
+  """
+
+  chat_id: str = ""
+  messages: list[dict] = field(default_factory=list)
+  running_run_ids: tuple[str, ...] = ()
+  restart_run_id: str | None = None
+  recovered_at: object | None = None
 
 
 # -- queue + turn commands (the JSON-blob RMW the actor owns) ------------
@@ -1409,6 +1439,10 @@ class ChatWriterActor:
       return self._stash_thinking_trace(db, cmd)
     if isinstance(cmd, MigrateChat):
       return self._migrate_chat(db, cmd)
+    if isinstance(cmd, RewriteChatMediaPaths):
+      return self._rewrite_chat_media_paths(db, cmd)
+    if isinstance(cmd, ReconcileStartupChat):
+      return self._reconcile_startup_chat(db, cmd)
     if isinstance(cmd, StartTurn):
       return self._start_turn(db, cmd)
     if isinstance(cmd, AppendPending):
@@ -1699,6 +1733,90 @@ class ChatWriterActor:
         row.complete = bool(row.complete or stash.complete)
       elif stash.complete and not row.complete:
         row.complete = True
+
+  def _rewrite_chat_media_paths(
+    self, db, cmd: "RewriteChatMediaPaths",
+  ) -> int:
+    """Rewrite both transcript blobs in one actor-owned transaction."""
+    from app.chat_media import _replace_media_path
+    from app.models import Chat
+
+    row = db.execute(select(
+      Chat.messages, Chat.pending_messages,
+    ).where(Chat.id == cmd.chat_id)).first()
+    if row is None:
+      return 0
+    messages, pending = row
+    rewritten_messages = _replace_media_path(
+      messages, cmd.old_prefix, cmd.new_prefix,
+    )
+    rewritten_pending = _replace_media_path(
+      pending, cmd.old_prefix, cmd.new_prefix,
+    )
+    values = {}
+    if rewritten_messages != messages:
+      values["messages"] = rewritten_messages
+    if rewritten_pending != pending:
+      values["pending_messages"] = rewritten_pending
+    if not values:
+      return 0
+    db.execute(update(Chat).where(Chat.id == cmd.chat_id).values(**values))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("RewriteChatMediaPaths did not persist")
+    return len(values)
+
+  def _reconcile_startup_chat(
+    self, db, cmd: "ReconcileStartupChat",
+  ) -> bool:
+    """Commit one boot recovery plan without bypassing transcript ownership."""
+    from app.models import Chat, ChatRun
+
+    if not cmd.chat_id or cmd.recovered_at is None:
+      return False
+    chat_update = db.execute(
+      update(Chat)
+      .where(Chat.id == cmd.chat_id, Chat.deleted_at.is_(None))
+      .values(messages=cmd.messages, live_assistant=None)
+    )
+    if chat_update.rowcount != 1:
+      db.rollback()
+      return False
+    interrupted_ids = tuple(
+      run_id for run_id in cmd.running_run_ids
+      if run_id != cmd.restart_run_id
+    )
+    if interrupted_ids:
+      db.execute(
+        update(ChatRun)
+        .where(
+          ChatRun.chat_id == cmd.chat_id,
+          ChatRun.id.in_(interrupted_ids),
+          ChatRun.status == "running",
+        )
+        .values(
+          status="interrupted",
+          ended_at=cmd.recovered_at,
+          restart_nonce=None,
+        )
+      )
+    if cmd.restart_run_id:
+      db.execute(
+        update(ChatRun)
+        .where(
+          ChatRun.chat_id == cmd.chat_id,
+          ChatRun.id == cmd.restart_run_id,
+          ChatRun.status == "running",
+        )
+        .values(
+          status="parked",
+          parked_until=cmd.recovered_at,
+          park_reason="restart",
+          # Preserve restart_nonce: the reset sweep authenticates it again.
+        )
+      )
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("ReconcileStartupChat did not persist")
+    return True
 
   def _migrate_chat(self, db, cmd: "MigrateChat") -> dict:
     """Forward-migrate one chat (card-221 B1+B2). See `MigrateChat`.
@@ -3724,9 +3842,9 @@ def apply_answers_to_last_question(
 
 # -- module singleton + lifespan accessors -------------------------------
 # One actor per process.  `start_writer` is called from the FastAPI
-# lifespan AFTER db init + crash reconciliation (which must run before the
-# actor exists — recovery cannot depend on a healthy writer); `stop_writer`
-# drains on shutdown.
+# lifespan immediately after DB initialization, before startup transcript
+# migrations and crash reconciliation submit their must-persist repairs;
+# `stop_writer` drains on shutdown.
 _writer: ChatWriterActor | None = None
 # Serializes the singleton check+create in `start_writer` (and the
 # clear in `stop_writer`) so two concurrent callers can't both pass the

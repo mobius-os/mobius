@@ -68,6 +68,14 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from app.codex_sdk_contract import (
+  app_server_pid,
+  control_client,
+  goal_notification_stream_type,
+  install_approval_handler,
+  wait_for_goal_snapshot,
+)
+
 from app.codex_events import (
   _thinking_event,
   _codex_thinking_segment_id,
@@ -198,10 +206,8 @@ def _codex_process_group_id(
   access in one defensive helper.  Refuse a group that is not led by the SDK
   process: on an old/non-``setsid`` launch that group can be uvicorn's own.
   """
-  sync_client = getattr(getattr(codex, "_client", None), "_sync", None)
-  proc = getattr(sync_client, "_proc", None)
-  pid = getattr(proc, "pid", None)
-  if not isinstance(pid, int) or pid <= 1:
+  pid = app_server_pid(codex)
+  if pid is None:
     return None
   try:
     pgid = os.getpgid(pid)
@@ -836,24 +842,6 @@ def _release_goal_route(client: Any, state: Any | None) -> None:
     log.warning("Codex goal route cleanup failed", exc_info=True)
 
 
-def _wait_for_goal_snapshot(state: Any, timeout: float) -> Any | None:
-  """Wait until thread/resume's ordered goal snapshot reaches the SDK route."""
-  condition = getattr(state, "_condition", None)
-  if condition is None:
-    return getattr(state, "status", None)
-  deadline = time.monotonic() + timeout
-  with condition:
-    while getattr(state, "status", None) is None:
-      failure = getattr(state, "_failure", None)
-      if failure is not None:
-        raise failure
-      remaining = deadline - time.monotonic()
-      if remaining <= 0:
-        return None
-      condition.wait(remaining)
-    return state.status
-
-
 def _sdk_imports() -> dict[str, Any]:
   """Imports the SDK lazily so this module stays importable without it.
 
@@ -876,7 +864,6 @@ def _sdk_imports() -> dict[str, Any]:
     TransportClosedError,
   )
   from openai_codex.types import ReasoningEffort, ReasoningSummary
-  from openai_codex._goal import _AsyncGoalNotificationStream
   from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
     AgentMessageThreadItem,
@@ -971,7 +958,7 @@ def _sdk_imports() -> dict[str, Any]:
     "AgentMessageThreadItem": AgentMessageThreadItem,
     "ApprovalMode": ApprovalMode,
     "AsyncCodex": AsyncCodex,
-    "AsyncGoalNotificationStream": _AsyncGoalNotificationStream,
+    "AsyncGoalNotificationStream": goal_notification_stream_type(),
     "CodexConfig": CodexConfig,
     "CodexRpcError": CodexRpcError,
     "InvalidRequestError": InvalidRequestError,
@@ -1323,32 +1310,13 @@ def _install_request_user_input_handler(
       }
     return {"answers": answers_by_qid}
 
-  # Reach the sync client. AsyncCodex._client is AsyncCodexClient;
-  # AsyncCodexClient._sync is CodexClient — the level that
-  # owns the public `approval_handler` constructor argument. Test
-  # fakes legitimately lack the chain entirely; only real
-  # openai-codex installs reach the strict check.
-  sync_client = None
-  try:
-    sync_client = codex._client._sync
-  except AttributeError:
+  if not install_approval_handler(codex, handler):
     log.warning(
       "Codex SDK has no _client._sync chain — request_user_input "
       "bridge NOT installed for chat_id=%s (likely a unit-test fake).",
       chat_id,
     )
     return
-  if not hasattr(sync_client, "_approval_handler"):
-    # Real openai-codex client without the expected attribute means
-    # the SDK was refactored — silently no-opping would make the
-    # model's AskUserQuestion calls vanish. Fail loudly so the
-    # operator pins a known-good version instead of debugging silent
-    # question loss.
-    raise RuntimeError(
-      "openai-codex API broken: CodexClient._approval_handler "
-      "missing — pin a known-good version"
-    )
-  sync_client._approval_handler = handler
   log.debug(
     "Codex request_user_input bridge installed chat_id=%s", chat_id,
   )
@@ -1471,20 +1439,6 @@ async def run_codex_sdk_turn(
   # and the MOEBIUS_CODEX_MULTI_AGENT kill switch, in _codex_config_overrides().
   codex_bin = shutil.which("codex")
   config_overrides = _codex_config_overrides()
-  # Owner-registered connectors (Settings → Connectors). In app-server
-  # mode MCP servers are governed by the THREAD's config (passed to
-  # thread_start/thread_resume below) — process-level --config overrides
-  # are ignored for them. Decrypted keys ride the app-server process env
-  # (never argv, never the thread-config JSON). Read fresh each turn; a
-  # registry failure must never break the turn.
-  try:
-    from app.connectors import codex_config as _connectors_codex_config
-    _connector_thread_config, _connector_env = _connectors_codex_config(db)
-  except Exception:
-    log.warning("connector injection skipped (registry read failed)",
-                exc_info=True)
-    _connector_thread_config, _connector_env = None, {}
-  env.update(_connector_env)
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
@@ -1577,6 +1531,11 @@ async def run_codex_sdk_turn(
   try:
     codex, entry_cancel = await _enter_codex_context_owned(codex_context)
     async with _EnteredCodexContext(codex_context, codex) as codex:
+      needs_goal_control = bool(
+        goal_mode or goal_objective is not None or goal_clear
+        or goal_continue or fallback_goal_objective is not None
+      )
+      goal_client = control_client(codex) if needs_goal_control else None
       record_memory_checkpoint_once(
         "codex_first_client_connected",
         chat_id=chat_id,
@@ -1599,7 +1558,7 @@ async def run_codex_sdk_turn(
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
       # neither AsyncCodex nor AsyncCodexClient accept it, so we
-      # set it on `codex._client._sync` after construction. Staying
+      # set it on `goal_client._sync` after construction. Staying
       # on AsyncCodex (instead of dropping to CodexClient to pass
       # the kwarg natively) keeps ~100 lines of SDK glue out of this
       # module. See the module docstring for the full reasoning.
@@ -1656,7 +1615,7 @@ async def run_codex_sdk_turn(
       if session_id is not None and goal_mode:
         try:
           persisted_goal = await _codex_thread_goal(
-            codex._client, sdk, session_id,
+            goal_client, sdk, session_id,
           )
         except sdk["InvalidRequestError"] as exc:
           error_message = str(getattr(exc, "message", exc))
@@ -1668,14 +1627,14 @@ async def run_codex_sdk_turn(
           goal_store_available = False
         if goal_clear:
           if persisted_goal is not None:
-            cleared = await codex._client.thread_goal_clear(session_id)
+            cleared = await goal_client.thread_goal_clear(session_id)
             goal_cleared = bool(getattr(cleared, "cleared", True))
           persisted_goal = None
         elif goal_objective is not None and persisted_goal is not None:
           # An explicit new /goal replaces the stored operation.  Clear it
           # before resume so app-server cannot auto-start the old objective in
           # the small window between thread/resume and start_goal_operation.
-          await codex._client.thread_goal_clear(session_id)
+          await goal_client.thread_goal_clear(session_id)
           persisted_goal = None
         elif (
           persisted_goal is not None
@@ -1684,14 +1643,13 @@ async def run_codex_sdk_turn(
           # Register before thread/resume: app-server emits the goal snapshot
           # and may start the next physical turn immediately after its resume
           # response.  Routing afterward loses those early notifications.
-          goal_state = codex._client.register_goal_operation(session_id)
+          goal_state = goal_client.register_goal_operation(session_id)
 
       if session_id is None:
         thread = await codex.thread_start(
           approval_mode=sdk["ApprovalMode"].auto_review,
           sandbox=_sandbox,
           base_instructions=base_instructions,
-          config=_connector_thread_config,
           cwd=cwd,
           model=model,
         )
@@ -1708,7 +1666,6 @@ async def run_codex_sdk_turn(
           approval_mode=sdk["ApprovalMode"].auto_review,
           sandbox=_sandbox,
           base_instructions=base_instructions,
-          config=_connector_thread_config,
           cwd=cwd,
           model=model,
         )
@@ -1721,14 +1678,14 @@ async def run_codex_sdk_turn(
       current_session_id = thread.id
       if abort_requested():
         if goal_state is not None:
-          await codex._client.cancel_goal_operation(goal_state)
-          _release_goal_route(codex._client, goal_state)
+          await goal_client.cancel_goal_operation(goal_state)
+          _release_goal_route(goal_client, goal_state)
           goal_state = None
         log.info("Codex turn aborted before turn setup chat_id=%s", chat_id)
         return aborted_result()
       if session_id is not None and current_session_id != session_id:
         if goal_state is not None:
-          _release_goal_route(codex._client, goal_state)
+          _release_goal_route(goal_client, goal_state)
         goal_state = None
         persisted_goal = None
         # The requested Codex session is gone (rollout cleaned up, or a phantom
@@ -1799,19 +1756,19 @@ async def run_codex_sdk_turn(
 
       if native_goal_objective is not None and persisted_goal is None:
         goal_state, _goal_turn_id = (
-          await codex._client.start_goal_operation(
+          await goal_client.start_goal_operation(
             thread.id, native_goal_objective,
           )
         )
         turn = _CodexGoalTurn(
-          codex._client,
+          goal_client,
           goal_state,
           sdk["AsyncGoalNotificationStream"],
           sdk["InvalidRequestError"],
         )
       elif goal_state is not None and persisted_goal is not None:
         resumed_goal_status = await asyncio.to_thread(
-          _wait_for_goal_snapshot, goal_state, 30.0,
+          wait_for_goal_snapshot, goal_state, 30.0,
         )
         if resumed_goal_status is None:
           raise RuntimeError(
@@ -1821,7 +1778,7 @@ async def run_codex_sdk_turn(
           # Paused/blocked/limited goals stay idle across thread/resume.  A new
           # Möbius turn is the owner's request to continue, so reactivate the
           # SAME stored goal and wait for the runtime-created physical turn.
-          await codex._client.thread_goal_set(
+          await goal_client.thread_goal_set(
             thread.id,
             status=sdk["ThreadGoalStatus"].active,
           )
@@ -1833,7 +1790,7 @@ async def run_codex_sdk_turn(
             "Timed out waiting for the persisted Codex goal to resume"
           )
         turn = _CodexGoalTurn(
-          codex._client,
+          goal_client,
           goal_state,
           sdk["AsyncGoalNotificationStream"],
           sdk["InvalidRequestError"],

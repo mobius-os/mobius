@@ -894,39 +894,3 @@ class ContributionAutopilot(Base):
   rounds_json = Column(JSON, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: now_naive_utc())
   updated_at = Column(DateTime, default=lambda: now_naive_utc())
-
-
-class Connector(Base):
-  """A registered external MCP service injected into agent turns.
-
-  Phase-1 scope: remote streamable-HTTP MCP servers with no auth or a
-  static API key. The key is Fernet-encrypted at rest (same derivation
-  pattern as app secrets, distinct salt); the plaintext never appears in
-  API responses or logs — it is decrypted only when building per-turn
-  provider config. The cached tool list and token estimate come from the
-  add-time MCP handshake so Settings can show what a connector costs
-  before it is enabled.
-  """
-
-  __tablename__ = "connectors"
-
-  id = Column(Integer, primary_key=True)
-  # MCP server key for both providers (claude `mcp_servers` dict key,
-  # codex `mcp_servers.<slug>.*` config path) — lowercase [a-z0-9_].
-  slug = Column(String(64), nullable=False, unique=True)
-  name = Column(String(128), nullable=False)
-  url = Column(Text, nullable=False)
-  # HTTP header carrying the API key. NULL = no auth. "Authorization"
-  # gets a "Bearer " prefix at send time unless the stored value already
-  # carries one; any other header sends the stored value verbatim.
-  auth_header = Column(String(64), nullable=True)
-  auth_value_encrypted = Column(Text, nullable=True)
-  enabled = Column(Boolean, nullable=False, default=True)
-  # Cached tools/list result (list of {name, description}) + a chars/4
-  # token estimate of the full schema payload, refreshed on handshake.
-  tools_json = Column(JSON, nullable=False, default=list)
-  est_tokens = Column(Integer, nullable=False, default=0)
-  status = Column(String(16), nullable=False, default="ok")  # ok | error
-  status_detail = Column(Text, nullable=True)
-  created_at = Column(DateTime, default=lambda: now_naive_utc())
-  last_checked_at = Column(DateTime, nullable=True)

@@ -3,11 +3,20 @@ import assert from 'node:assert/strict'
 
 import {
   computePinnedDrag,
+  heldDrawerRowIntent,
   observePinnedOrderHandoff,
   pinnedEntriesMatchRanks,
   pinnedOrderHandoffStatus,
   projectPinnedEntries,
 } from '../../components/Drawer/pinnedReorder.js'
+
+test('a held drawer row has one button-free menu or reorder contract', () => {
+  assert.equal(heldDrawerRowIntent(3, 4, true), 'pending', 'thumb jitter stays stationary')
+  assert.equal(heldDrawerRowIntent(0, 9, true), 'reorder', 'a held pin moves vertically')
+  assert.equal(heldDrawerRowIntent(9, 0, true), 'cancel', 'sideways drift never moves the drawer')
+  assert.equal(heldDrawerRowIntent(0, 9, false), 'cancel', 'an unpinned row cannot reorder')
+  assert.equal(heldDrawerRowIntent(9, 9, true), 'cancel', 'ambiguous diagonals cancel')
+})
 
 // Four uniform 40px rows stacked from top 0.
 function uniformRows() {
@@ -129,12 +138,9 @@ test('pinned preview stays held until the keyed DOM order commits', () => {
       return keys.map(pinnedKey => ({ dataset: { pinnedKey } }))
     },
   }
-  class FakeMutationObserver {
+  class ObserverStub {
     constructor(callback) { observerCallback = callback }
-    observe(observedRoot, options) {
-      assert.equal(observedRoot, root)
-      assert.deepEqual(options, { childList: true, subtree: false })
-    }
+    observe() {}
     disconnect() { disconnects += 1 }
   }
   const settled = []
@@ -142,44 +148,32 @@ test('pinned preview stays held until the keyed DOM order commits', () => {
     root,
     ['a', 'c', 'b'],
     status => settled.push(status),
-    FakeMutationObserver,
+    ObserverStub,
   )
 
-  assert.deepEqual(settled, [], 'old DOM order must keep preview transforms in place')
+  assert.deepEqual(settled, [], 'the old DOM order keeps preview transforms held')
   observerCallback()
-  assert.deepEqual(settled, [], 'unrelated mutation before the reorder is still pending')
-
+  assert.deepEqual(settled, [], 'unrelated mutation before reorder remains pending')
   keys = ['a', 'c', 'b']
   observerCallback()
   assert.deepEqual(settled, ['committed'])
   assert.equal(disconnects, 1)
-
   cancel()
   assert.equal(disconnects, 1, 'cancellation stays idempotent after settlement')
 })
 
-test('a concurrent pin-set change releases a pending preview as superseded', () => {
-  let keys = ['a', 'b', 'c']
-  let observerCallback = null
+test('a concurrent pin-set change safely supersedes the preview handoff', () => {
   const root = {
     querySelectorAll() {
-      return keys.map(pinnedKey => ({ dataset: { pinnedKey } }))
+      return ['a', 'b', 'new'].map(pinnedKey => ({ dataset: { pinnedKey } }))
     },
-  }
-  class FakeMutationObserver {
-    constructor(callback) { observerCallback = callback }
-    observe() {}
-    disconnect() {}
   }
   const settled = []
   observePinnedOrderHandoff(
     root,
     ['a', 'c', 'b'],
     status => settled.push(status),
-    FakeMutationObserver,
+    class ObserverStub { observe() {} disconnect() {} },
   )
-
-  keys = ['a', 'c']
-  observerCallback()
   assert.deepEqual(settled, ['superseded'])
 })

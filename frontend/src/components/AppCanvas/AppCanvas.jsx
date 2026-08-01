@@ -11,8 +11,7 @@ import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
 import { appTokenIdentity, liveAppToken, resolveLatchedToken } from '../../lib/appToken.js'
 import { createAppStorageHost } from '../../lib/appStorageHost.js'
 import {
-  cacheAppToken, clearAppFrameStorage, readAppFrameStorage,
-  readCachedAppToken, removeAppFrameStorage, setAppFrameStorage,
+  cacheAppToken, readAppFrameStorage, readCachedAppToken,
   isSharedVirtualStorageKey,
 } from '../../lib/appFrameStorage.js'
 import { immersiveLifecycleValue } from '../../lib/immersive.js'
@@ -20,9 +19,14 @@ import { getEffectiveTheme } from '../../lib/themeService.js'
 import { readSafeAreaInsets, zeroInsets } from '../../lib/safeAreaInsets.js'
 import { createCapabilityHost } from '../../lib/capabilityHost.js'
 import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
-import { fetchAppModuleBytes } from '../../lib/appModuleBroker.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import { appHostRequest } from '../../lib/appHostRequest.js'
+import {
+  applyVirtualStorageMutation,
+  attributedFrameVersion,
+  serveModuleRequest,
+  serveStorageRpc,
+} from './appFrameProtocol.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
@@ -619,120 +623,29 @@ const AppCanvas = forwardRef(function AppCanvas({
       // ATTRIBUTE the message to the exact frame that sent it. Two frames are
       // alive during a swap, so we must NOT assume a single contentWindow —
       // compare e.source to each mounted frame's window and recover its version.
-      let srcVersion = null
-      for (const [v, el] of framesRef.current) {
-        if (el?.contentWindow && el.contentWindow === e.source) { srcVersion = v; break }
-      }
+      const srcVersion = attributedFrameVersion(framesRef.current, e.source)
       if (srcVersion == null) return   // not one of our frames (stale/unknown)
 
       if (msg.type === 'moebius:module-request') {
-        const requestId = typeof msg.requestId === 'string' && msg.requestId.length <= 160
-          ? msg.requestId
-          : ''
-        if (!requestId || String(msg.appId) !== String(appId)) return
-        const source = e.source
-        const retry = msg.retry === 1 ? 1 : 0
-        // Ack BEFORE the fetch. The frame's short deadline exists to catch a
-        // request this listener never took — an unattributable source, a
-        // detached frame — not to cap a multi-megabyte download it cannot
-        // predict. Taking ownership here lets the frame switch to a transfer
-        // budget, so a cold-cache open on a slow network stops reporting an
-        // unresponsive parent. Must stay synchronous: an await before this
-        // reintroduces the race on a congested main thread.
-        try {
-          source?.postMessage(
-            { type: 'moebius:module-ack', requestId, appId }, '*',
-          )
-        } catch { /* frame detached before the fetch began */ }
-        ;(async () => {
-          try {
-            const bytes = await fetchAppModuleBytes({
-              baseUrl: api.apps.moduleUrl(appId),
-              token: hostTokenRef.current,
-              frameVersion: srcVersion,
-              retry,
-            })
-            source?.postMessage({
-              type: 'moebius:module-result', requestId, appId,
-              ok: true, bytes,
-            }, '*', [bytes])
-          } catch (error) {
-            try {
-              source?.postMessage({
-                type: 'moebius:module-result', requestId, appId, ok: false,
-                error: {
-                  code: error?.code || 'module-load-failed',
-                  message: error?.message || 'The app module could not be loaded.',
-                  status: error?.status ?? null,
-                },
-              }, '*')
-            } catch { /* frame detached while the module request settled */ }
-          }
-        })()
+        serveModuleRequest({
+          message: msg, source: e.source, appId, frameVersion: srcVersion,
+          token: hostTokenRef.current, moduleUrl: api.apps.moduleUrl(appId),
+        })
         return
       }
 
       if (msg.type === 'moebius:storage-rpc') {
-        const requestId = typeof msg.requestId === 'string' && msg.requestId.length <= 160
-          ? msg.requestId
-          : ''
-        const method = typeof msg.method === 'string' ? msg.method : ''
-        const args = Array.isArray(msg.args) ? msg.args : []
-        if (!requestId) return
-        const source = e.source
-        const host = storageHostRef.current
-        ;(async () => {
-          try {
-            const result = await host.handleRpc(source, method, args)
-            source?.postMessage({
-              type: 'moebius:storage-rpc-result', requestId, ok: true, result,
-            }, '*')
-          } catch (error) {
-            try {
-              source?.postMessage({
-                type: 'moebius:storage-rpc-result', requestId, ok: false,
-                error: {
-                  name: error?.name || 'Error',
-                  message: error?.message || String(error),
-                  code: error?.code,
-                  status: error?.status,
-                  path: error?.path,
-                  writeId: error?.writeId,
-                  retryable: error?.retryable === true,
-                  refusedValue: error?.refusedValue,
-                },
-              }, '*')
-            } catch { /* frame detached while the host request settled */ }
-          }
-        })()
+        serveStorageRpc({
+          message: msg, source: e.source, host: storageHostRef.current,
+        })
         return
       }
 
-      // Opaque frames get a synchronous in-memory localStorage facade. Persist
-      // mutations into an app-private namespace only; never write arbitrary
-      // keys into the shell's own storage.
-      if (msg.type === 'moebius:storage-set') {
-        const saved = setAppFrameStorage(appId, msg.key, msg.value)
-        if (saved && isSharedVirtualStorageKey(msg.key)) {
-          window.dispatchEvent(new CustomEvent('mobius:shared-storage', {
-            detail: { key: msg.key, value: msg.value },
-          }))
-        }
-        return
-      }
-      if (msg.type === 'moebius:storage-remove') {
-        const removed = removeAppFrameStorage(appId, msg.key)
-        if (removed && isSharedVirtualStorageKey(msg.key)) {
-          window.dispatchEvent(new CustomEvent('mobius:shared-storage', {
-            detail: { key: msg.key, value: null },
-          }))
-        }
-        return
-      }
-      if (msg.type === 'moebius:storage-clear') {
-        clearAppFrameStorage(appId)
-        return
-      }
+      if (applyVirtualStorageMutation(appId, msg, (key, value) => {
+        window.dispatchEvent(new CustomEvent('mobius:shared-storage', {
+          detail: { key, value },
+        }))
+      })) return
 
       // frame-mounted: the reducer routes it — promotion if it's the incoming
       // frame, first-load settle if it's the live frame, ignored if stale.

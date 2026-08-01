@@ -2,6 +2,13 @@
 // bounded idle prefetch must agree on this shape so a prefetched chat mounts as
 // a real warm chat rather than through a second, parallel cache convention.
 
+// The detail endpoint and inactive-cache projection share one page boundary.
+// This is not a device-dependent entry ceiling: twenty is the server's own
+// recent-history page, so an inactive chat keeps exactly the useful instant
+// first paint that a cold activation would fetch while loaded pagination stays
+// owned by mounted readers only.
+export const CHAT_DETAIL_WARM_MESSAGE_LIMIT = 20
+
 function settledToolBlocks(message) {
   const blocks = Array.isArray(message?.blocks) ? message.blocks : null
   if (!blocks?.some(block => block?.type === 'tool' && block.status === 'running')) {
@@ -60,5 +67,26 @@ export function chatDetailCacheValue(data = {}) {
       auto_resume_on_limit: !!data.auto_resume_on_limit,
       auto_resume_on_restart: !!data.auto_resume_on_restart,
     },
+  }
+}
+
+// Once a chat has no mounted reader, keep the same useful first-paint shape as
+// the initial detail request rather than retaining every page the reader ever
+// loaded. Advancing the offset by the removed prefix preserves exact server
+// pagination when that chat is opened again.
+export function compactChatDetailCacheValue(
+  data,
+  messageLimit = CHAT_DETAIL_WARM_MESSAGE_LIMIT,
+) {
+  if (
+    !data
+    || !Array.isArray(data.messages)
+    || data.messages.length <= messageLimit
+  ) return data
+  const removedCount = data.messages.length - messageLimit
+  return {
+    ...data,
+    messages: data.messages.slice(-messageLimit),
+    offset: Math.max(0, Number(data.offset) || 0) + removedCount,
   }
 }

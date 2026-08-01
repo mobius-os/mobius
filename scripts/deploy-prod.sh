@@ -147,6 +147,7 @@ else
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEPLOY_SUPPORT="$REPO_ROOT/scripts/deploy_support.py"
 cd "$REPO_ROOT"
 
 # ── ANSI colors (kept simple, matches sync-test-shell.sh's restraint) ──
@@ -334,34 +335,8 @@ resolve_prod_service_gateway_origin() {
   fi
 
   if [ -n "$value" ]; then
-    if ! value=$(python3 - "$value" "$DOMAIN" <<'PY'
-import re
-import sys
-from urllib.parse import urlsplit
-
-raw, shell_host = sys.argv[1:]
-try:
-  parsed = urlsplit(raw.strip())
-  port = parsed.port
-except ValueError:
-  raise SystemExit(1)
-host = (parsed.hostname or "").rstrip(".").lower()
-if (
-  parsed.scheme != "https"
-  or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host)
-  or parsed.username is not None
-  or parsed.password is not None
-  or parsed.query
-  or parsed.fragment
-  or parsed.path not in ("", "/")
-  or host == shell_host.rstrip(".").lower()
-  or port is not None and not 1 <= port <= 65535
-):
-  raise SystemExit(1)
-authority = host if port in (None, 443) else f"{host}:{port}"
-print(f"https://{authority}")
-PY
-    ); then
+    if ! value=$(python3 "$DEPLOY_SUPPORT" \
+      normalize-gateway-origin "$value" --shell-host "$DOMAIN"); then
       fail "MOBIUS_SERVICE_GATEWAY_ORIGIN must be a separate HTTPS origin without credentials, a path, query, or fragment."
       exit 1
     fi
@@ -431,17 +406,8 @@ ensure_edge_network() {
 }
 
 valid_gateway_origin() {
-  local origin="$1" authority port
-  # Keep the render substitution inert: one HTTPS DNS/IPv4 authority, with an
-  # optional numeric port, and no credentials, path, query, fragment, control
-  # characters, or sed delimiter. Caddy validates the hostname itself later.
-  [[ "$origin" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]] \
-    || return 1
-  authority=${origin#https://}
-  if [[ "$authority" == *:* ]]; then
-    port=${authority##*:}
-    (( 10#$port >= 1 && 10#$port <= 65535 )) || return 1
-  fi
+  python3 "$DEPLOY_SUPPORT" \
+    validate-gateway-origin "$1"
 }
 
 # The bundled Caddyfile is the single routing source of truth for BOTH
@@ -589,12 +555,7 @@ check_build_disk() {
 }
 
 rollback_tag_for_image() {
-  local repository="${1%@*}" leaf
-  leaf="${repository##*/}"
-  if [[ "$leaf" == *:* ]]; then
-    repository="${repository%:*}"
-  fi
-  printf '%s:rollback-prev\n' "$repository"
+  python3 "$DEPLOY_SUPPORT" rollback-tag "$1"
 }
 
 remove_superseded_rollback_image() {

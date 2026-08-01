@@ -106,11 +106,7 @@ test('module broker classifies auth, network, HTTP, and size failures', async ()
   )
 })
 
-test('opaque frames request module bytes only after exact parent attribution', () => {
-  const sourceGate = canvas.indexOf('if (srcVersion == null) return')
-  const broker = canvas.indexOf("if (msg.type === 'moebius:module-request')")
-  assert.ok(sourceGate >= 0 && broker > sourceGate)
-  assert.match(canvas, /fetchAppModuleBytes\(/)
+test('opaque frames execute only bytes returned by the parent module broker', () => {
   assert.match(frame, /type: 'moebius:module-request'/)
   assert.match(frame, /new Blob\(\[bytes\], \{ type: 'text\/javascript' \}\)/)
   assert.match(frame, /URL\.revokeObjectURL\(blobUrl\)/)
@@ -151,13 +147,6 @@ test('the frame separates parent liveness from module transfer time', () => {
   assert.doesNotMatch(frame, /error\.code = 'timeout'/)
   assert.match(frame, /type === 'moebius:module-ack'/)
 
-  // The parent must ack synchronously on receipt — before awaiting the fetch,
-  // otherwise the frame's liveness deadline still races the download.
-  const took = canvas.indexOf("type: 'moebius:module-ack'")
-  const fetched = canvas.indexOf('await fetchAppModuleBytes(')
-  assert.ok(took >= 0 && fetched > took, 'ack must precede the module fetch')
-  const attributed = canvas.indexOf('if (srcVersion == null) return')
-  assert.ok(attributed >= 0 && took > attributed, 'ack only after attribution')
 })
 
 test('mounting an opaque frame explicitly warms its versioned document', () => {

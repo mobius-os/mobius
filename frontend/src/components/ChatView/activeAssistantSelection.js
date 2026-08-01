@@ -5,6 +5,7 @@ import {
   chooseActiveAssistantMirrorIndex,
   chooseActiveAssistantSurface,
   findTrailingAssistantPartialIndex,
+  promoteAssistantStream,
 } from './streamPromotion.js'
 
 
@@ -85,4 +86,25 @@ export function deriveActiveAssistantSelection({
       showActiveAssistantSurface && !useDbActivePayload
     ),
   }
+}
+
+
+/**
+ * Publish one live assistant array into the durable transcript atomically.
+ * The retirement marker must become observable before the synchronous query
+ * cache publish, otherwise one render can paint both copies of the answer.
+ */
+export function commitAssistantPromotion({
+  retiredItemsRef,
+  paintedItems,
+  promotedItems,
+  bridgeTs,
+  commitMessages,
+}) {
+  retiredItemsRef.current = paintedItems
+  commitMessages(
+    prev => promoteAssistantStream(prev, { items: promotedItems, bridgeTs }),
+    undefined,
+    { force: true },
+  )
 }

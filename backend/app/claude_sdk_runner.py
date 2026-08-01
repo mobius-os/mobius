@@ -84,6 +84,7 @@ from claude_agent_sdk.types import (
 
 from app import activity
 from app.claude_events import _clip_task_text, dispatch_sdk_message
+from app.claude_sdk_contract import transport_exit_error, transport_process_pid
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
@@ -116,9 +117,7 @@ def _claude_cli_path() -> str:
 
 def _claude_process_group_id(client: ClaudeSDKClient) -> int | None:
   """Return the isolated Claude CLI PGID through the SDK transport."""
-  transport = getattr(client, "_transport", None)
-  process = getattr(transport, "_process", None)
-  pid = getattr(process, "pid", None)
+  pid = transport_process_pid(client)
   pgid = isolated_process_group_id(pid)
   if pgid is None and isinstance(pid, int):
     log.error(
@@ -141,8 +140,7 @@ def _claude_process_was_force_stopped(client: ClaudeSDKClient) -> bool:
   (``_claude_process_group_id`` reads its child pid); if the SDK changes shape,
   this fails closed and the error remains visible.
   """
-  transport = getattr(client, "_transport", None)
-  exit_error = getattr(transport, "_exit_error", None)
+  exit_error = transport_exit_error(client)
   return (
     isinstance(exit_error, ProcessError)
     and exit_error.exit_code in (-signal.SIGTERM, -signal.SIGKILL)
@@ -988,19 +986,6 @@ async def run_claude_sdk_turn(
     # Passed via --settings as inline JSON.
     _cli_settings = {"ultracode": True} if _ultracode else {"disableWorkflows": True}
     options_kwargs["extra_args"] = {"settings": json.dumps(_cli_settings)}
-    # Owner-registered connectors (Settings → Connectors) ride the SDK's
-    # native mcp_servers option. Read fresh each turn so registry edits
-    # apply without a restart; a registry failure must never break the
-    # turn — the agent just runs without connectors.
-    try:
-      from app.connectors import claude_mcp_servers
-      _connector_servers = claude_mcp_servers(db)
-    except Exception:
-      log.warning("connector injection skipped (registry read failed)",
-                  exc_info=True)
-      _connector_servers = {}
-    if _connector_servers:
-      options_kwargs["mcp_servers"] = _connector_servers
     options = ClaudeAgentOptions(**options_kwargs)
 
     client = ClaudeSDKClient(options)

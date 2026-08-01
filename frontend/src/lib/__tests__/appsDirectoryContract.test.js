@@ -16,6 +16,10 @@ const itemActionMenu = readFileSync(
 )
 const shell = readFileSync(resolve(src, 'components/Shell/Shell.jsx'), 'utf8')
 const shellCss = readFileSync(resolve(src, 'components/Shell/Shell.css'), 'utf8')
+const workspaceChrome = readFileSync(
+  resolve(src, 'components/Shell/WorkspaceChrome.jsx'),
+  'utf8',
+)
 const tabModel = readFileSync(resolve(src, 'components/Shell/tabModel.js'), 'utf8')
 const navigationIcons = readFileSync(resolve(src, 'components/navigationIcons.js'), 'utf8')
 
@@ -43,15 +47,21 @@ test('phone and web share one searchable launcher tab', () => {
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*?grid-template-columns: repeat\(4/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
     'launcher cards and drawer rows must enter the same context-menu path')
-  assert.match(drawer, /DRAWER_HOLD_MS/)
-  assert.match(drawer, /PRE_HOLD_MOVE_PX/)
+  const dragImports = drawer.match(
+    /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
+  )?.[1] || ''
+  assert.match(dragImports, /DRAWER_HOLD_MS/)
+  assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
   assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?toggleMenu[\s\S]*?DRAWER_HOLD_MS\)/)
   assert.doesNotMatch(drawer, /520/)
   assert.match(drawer, /menuPlacement=\{openMenu/)
   assert.match(itemActionMenu, /placeContextMenu/)
   assert.match(itemActionMenu, /stopImmediatePropagation/)
-  assert.match(drawerCss, /@media \(max-width: 720px\)[\s\S]*?drawer__item-action-menu/)
-  assert.match(drawerCss, /bottom: max\(12px, env\(safe-area-inset-bottom\)\)/)
+  const phoneMenu = drawerCss.match(
+    /@media \(max-width: 720px\) \{[\s\S]*?\n\}/,
+  )?.[0] || ''
+  assert.match(phoneMenu, /drawer__item-action-menu[\s\S]*?width:\s*224px/)
+  assert.doesNotMatch(phoneMenu, /\n\s*bottom:|backdrop-filter|drawer-item-sheet-in/)
   assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
 })
 
@@ -59,21 +69,21 @@ test('chat and app rows share one placed action menu contract', () => {
   assert.match(drawer, /<DrawerItemActionMenu[\s\S]*?itemKind=\{kind\}[\s\S]*?itemName=\{label\}/)
   assert.doesNotMatch(drawer, /@openai\/apps-sdk-ui\/components\/Menu/)
   assert.doesNotMatch(drawer, /triggerHidden|drawer__menu-anchor/)
-  assert.match(itemActionMenu, /itemKind === 'chat' \? 'Chat' : 'App'/)
   assert.match(itemActionMenu, /itemKind === 'chat' \? 'chats' : 'apps'/)
-  assert.match(itemActionMenu, /<Chat width=\{20\} height=\{20\}/)
+  assert.doesNotMatch(itemActionMenu, /drawer__item-action-header|drawer__item-action-handle/)
   assert.match(itemActionMenu, /itemKind === 'app' && \(/,
     'Delete data must stay app-only')
 })
 
-test('desktop productivity density is 90% with explicit pointer-geometry bridges', () => {
+test('desktop density keeps root zoom behind explicit pointer geometry bridges', () => {
   const desktop = shellCss.match(/@media \(min-width: 1024px\) \{[\s\S]*$/)?.[0] || ''
   assert.match(desktop, /:root\s*\{\s*zoom:\s*0\.9;/)
   assert.match(desktop, /\.shell__tab-open\s*\{\s*font-size:\s*13\.5px;/)
-  assert.match(shellCss, /\.shell__tab-open\s*\{[\s\S]*?font-size:\s*12\.5px;/,
-    'phone keeps the compact tab size without desktop zoom')
-  assert.match(shellCss, /pointer interactions bridge client pixels back into layout pixels/)
-  assert.match(drawer, /clientDeltaToLocal/)
+  assert.match(shellCss, /Pointer-owned shell interactions convert client pixels/)
+  assert.match(drawer, /clientDeltaToLocal/,
+    'drawer resize and pinned drag must convert painted deltas to layout pixels')
+  assert.match(workspaceChrome, /clientPointToLocal/,
+    'pane divider projection must convert painted points to layout pixels')
 })
 
 test('the app directory distinguishes loading, errors, and confirmed emptiness', () => {

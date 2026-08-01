@@ -20,7 +20,9 @@ import { indexedDB } from 'fake-indexeddb'
 import { get } from 'idb-keyval'
 import {
   awaitCacheFlushBeforeReload,
+  compactPersistedChatDetails,
   flushPersistedQueryCache,
+  retainChatDetailQuery,
   shouldPersistQueryKey,
 } from '../../queryClient.js'
 
@@ -57,6 +59,56 @@ test('unrelated keys do not persist', () => {
   assert.equal(shouldPersistQueryKey(['models', 'registry']), false)
   assert.equal(shouldPersistQueryKey(['app-token', 'some-app']), false)
   assert.equal(shouldPersistQueryKey(['owner', 'walkthrough']), false)
+})
+
+test('persistence projects every chat to one activation page without an entry ceiling', () => {
+  const queries = ['a', 'b'].map(id => ({
+    queryKey: ['chat-messages', id],
+    state: {
+      data: {
+        messages: Array.from({ length: 28 }, (_, i) => ({ content: `${id}-${i}` })),
+        offset: 4,
+      },
+    },
+  }))
+  const compacted = compactPersistedChatDetails({ clientState: { queries } })
+  assert.equal(compacted.clientState.queries.length, 2)
+  for (const query of compacted.clientState.queries) {
+    assert.equal(query.state.data.messages.length, 20)
+    assert.equal(query.state.data.offset, 12)
+  }
+  assert.equal(queries[0].state.data.messages.length, 28,
+    'persistence projection never mutates the live cache')
+})
+
+test('the last mounted reader release compacts only that inactive working set', async () => {
+  const client = new QueryClient()
+  const messages = Array.from({ length: 30 }, (_, i) => ({ content: String(i) }))
+  client.setQueryData(['chat-messages', 'chat-1'], { messages, offset: 3 })
+  const releaseOne = retainChatDetailQuery(client, 'chat-1')
+  const releaseTwo = retainChatDetailQuery(client, 'chat-1')
+  releaseOne()
+  assert.equal(client.getQueryData(['chat-messages', 'chat-1']).messages.length, 30)
+  releaseTwo()
+  await Promise.resolve()
+  const compacted = client.getQueryData(['chat-messages', 'chat-1'])
+  assert.equal(compacted.messages.length, 20)
+  assert.equal(compacted.offset, 13)
+})
+
+test('a same-tick owner handoff cancels inactive compaction', async () => {
+  const client = new QueryClient()
+  const messages = Array.from({ length: 30 }, (_, i) => ({ content: String(i) }))
+  client.setQueryData(['chat-messages', 'chat-1'], { messages, offset: 0 })
+  const releaseFirstMount = retainChatDetailQuery(client, 'chat-1')
+  releaseFirstMount()
+  const releaseSecondMount = retainChatDetailQuery(client, 'chat-1')
+  await Promise.resolve()
+  assert.equal(client.getQueryData(['chat-messages', 'chat-1']).messages.length, 30,
+    'StrictMode cleanup/setup and owner handoffs keep the live working set')
+  releaseSecondMount()
+  await Promise.resolve()
+  assert.equal(client.getQueryData(['chat-messages', 'chat-1']).messages.length, 20)
 })
 
 test('explicit reload handoff flushes the latest allowlisted chat cache', async () => {

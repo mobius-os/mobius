@@ -206,9 +206,9 @@ function AppRoot() {
   }, [hasToken, setupStatusQuery.isError, setupStatusQuery.isSuccess, setupStatusQuery.data])
 
   if (status === 'loading' || isRestoring) {
-    return <RouteLoading label={isRestoring ? 'Restoring Möbius' : 'Loading Möbius'} />
+    return <RouteLoading />
   }
-  if (status === 'sso') return <RouteLoading label="Signing in to Möbius" />
+  if (status === 'sso') return <RouteLoading />
   if (status === 'sso-error') return (
     <ManagedSignInError
       onRetry={() => window.location.replace(api.auth.sso.startUrl('/shell/'))}
@@ -221,7 +221,7 @@ function AppRoot() {
     />
   )
   if (status === 'setup') return (
-    <Suspense fallback={<RouteLoading label="Loading setup" />}>
+    <Suspense fallback={<RouteLoading />}>
       <SetupWizard
         onDone={() => {
           setupSession.clearResumeStep()
@@ -232,7 +232,7 @@ function AppRoot() {
     </Suspense>
   )
   if (status === 'login') return (
-    <Suspense fallback={<RouteLoading label="Loading sign in" />}>
+    <Suspense fallback={<RouteLoading />}>
       <LoginForm onLogin={() => {
         const ret = safeReturnPath(
           new URLSearchParams(window.location.search).get('return'),
@@ -244,7 +244,7 @@ function AppRoot() {
     </Suspense>
   )
   return (
-    <Suspense fallback={<RouteLoading label="Loading Möbius" />}>
+    <Suspense fallback={<RouteLoading />}>
       {STANDALONE_APP
         ? <StandaloneApp initialApp={STANDALONE_APP} />
         : <Shell />}
@@ -252,12 +252,8 @@ function AppRoot() {
   )
 }
 
-function RouteLoading({ label }) {
-  return (
-    <div className="app-route-loading" role="status">
-      <span>{label}…</span>
-    </div>
-  )
+function RouteLoading() {
+  return <div className="app-route-loading" aria-hidden="true" />
 }
 
 function SetupStatusError({ retrying, onRetry }) {

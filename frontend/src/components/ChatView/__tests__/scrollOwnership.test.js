@@ -90,6 +90,11 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
   assert.match(settlePath, /if \(settledAtBottom\)/)
   assert.match(settlePath, /persistMode\(\)/)
   assert.match(settlePath, /sizeSpacer\(\)/)
+  assert.doesNotMatch(
+    settlePath,
+    /scrollEl\.scrollHeight\s*>\s*scrollEl\.clientHeight/,
+    'a live spacer collapse must not leave the pre-gesture pin armed',
+  )
 })
 
 test('newer semantic actions cannot be overwritten by an older quiet settlement', () => {

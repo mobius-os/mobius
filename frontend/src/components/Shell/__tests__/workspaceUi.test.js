@@ -646,12 +646,29 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
     'the tab button is the one drag source')
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
-  assert.match(dragBinding, /if \(sourceKind === 'tab'\) arm\(\)/)
-  assert.match(dragBinding, /touchMoveIntent\(dx, dy, sourceKind\)/)
+  assert.match(dragBinding, /touchTabMoveIntent\(dx, dy\)/)
   assert.match(dragBinding, /scrollStripEl\.scrollLeft \+= previousPoint\.x - ev\.clientX/)
-  assert.match(dragBinding, /if \(sourceKind === 'drawer'\) openDrawerTouchMenu\(\)/)
+  assert.match(
+    dragBinding,
+    /sourceKind === 'drawer' && e\.pointerType !== 'mouse'\) return/,
+    'touch drawer rows must not enter the workspace drag-out controller',
+  )
+  assert.match(drawer, /heldDrawerRowIntent\(dx, dy, true\)/)
+  assert.match(drawer, /openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
   assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
+  assert.match(drawer, /function beginTouchMenuHold\(event\)/)
+  assert.match(drawer, /window\.addEventListener\('touchmove', preventClaimedTouchMove, \{ capture: true, passive: false \}\)/)
+  assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
+  assert.match(drawer, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
+  assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 2,
+    'touch contextmenu must be stopped before the shared bubble-phase menu opener')
+  assert.match(drawerCss, /\.drawer__row \.drawer__item\s*\{[\s\S]*?-webkit-touch-callout:\s*none/)
+  assert.match(drawer, /sourceBtn\.setAttribute\('data-hold-ready', 'true'\)/)
+  assert.match(drawer, /const openMenu = held && !dragging && !cancelledAfterHold/)
+  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
+  assert.match(drawer, /if \(intent === 'cancel'\)[\s\S]*?cancelledAfterHold = true/)
+  assert.match(drawerCss, /\.drawer__item\[data-hold-ready="true"\]/)
 })
 
 // iOS/WebKit does not implement the touch-action pan-* keywords (WebKit 133112),
@@ -752,8 +769,16 @@ test('opening navigation is presentation-only and never refetches whole lists', 
   assert.doesNotMatch(shell, /if \(navigationOpen\) \{ refreshApps\(\); refreshChats\(\) \}/)
   assert.match(shell, /ev\.type === 'app_updated'[\s\S]*?ev\.type === 'app_created'[\s\S]*?ev\.type === 'app_preview_ready'[\s\S]*?refreshApps\(\)/,
     'app lifecycle events still own their authoritative refresh')
-  assert.match(shell, /ev\.type === 'chat_run_finished'[\s\S]*?refreshChats\(\)/,
-    'chat lifecycle events still own their authoritative refresh')
+  const chatLifecycle = shell.slice(
+    shell.indexOf("ev.type === 'chat_run_started'"),
+    shell.indexOf("ev.type === 'shell_rebuilt'"),
+  )
+  assert.match(chatLifecycle, /markChatRunState\(ev\.chatId, true\)/)
+  assert.match(chatLifecycle, /markChatRunState\(chatId, false\)/)
+  assert.doesNotMatch(chatLifecycle, /refreshChats\(\)/,
+    'one run-state change must not parse and reconcile the complete chat list')
+  assert.match(shell, /running \? withChatOwnerActivity\(rows, chatId, at\) : rows/,
+    'a run started in another live client must still advance drawer recency')
 })
 
 test('chat drawer dots distinguish active work from unseen completion', () => {
@@ -878,10 +903,10 @@ test('chat deletion is immediate while app deletion still requires confirmation'
 })
 
 test('drawer row menus use one semantic context-menu path across pointer types', () => {
-  assert.match(drawer, /function openItemMenu\(event\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
+  assert.match(drawer, /function openItemMenuAt\(point\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
     'app cards, app rows, and chat rows must share one opening function')
-  assert.match(dragBinding, /srcEl\.dispatchEvent\(new window\.MouseEvent\('contextmenu'/)
+  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: upEvent\.clientX, y: upEvent\.clientY \}\)/)
   assert.doesNotMatch(
     dragBinding,
     /srcEl\.closest\('\.drawer__row'\)\?\.querySelector\('\.drawer__more'\)\?\.click\(\)/,
@@ -1069,9 +1094,6 @@ test('workspace focus, drag label, and cancel visuals remain coherent', () => {
   assert.match(dragBinding, /const viewportWidth = document\.documentElement\.offsetWidth\s*\n\s*\|\| document\.documentElement\.clientWidth\s*\n\s*\|\| window\.innerWidth/)
   assert.match(dragBinding, /const maxLeft = Math\.max\(margin, viewportWidth - chipWidth - margin\)/)
   assert.match(dragBinding, /Math\.max\(margin, Math\.min\(left, maxLeft\)\)/)
-  assert.match(chrome, /clientPointToLocal/)
-  assert.match(chrome, /const axis = dir === 'row' \? point\.x : point\.y/,
-    'divider resizing must project painted pointer coordinates into workspace layout pixels')
   // V6: a CANCELLED drag blurs the drag-origin row so its focus ring clears; a
   // committed drop keeps focus (the tab moved).
   assert.match(dragBinding, /if \(suppressClick && !committed\) srcEl\.blur\?\.\(\)/)

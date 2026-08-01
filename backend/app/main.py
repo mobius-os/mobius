@@ -56,9 +56,9 @@ from app import activity, models
 from app.routes import (
   admin_router, apps_router, auth_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
-  connectors_router,
   debug_router, fs_router, github_router, media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
+  speech_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
@@ -170,7 +170,6 @@ async def _sleep_with_lag_warning(
 
 @asynccontextmanager
 async def lifespan(app):
-  import asyncio as _asyncio
   _log = logging.getLogger(__name__)
   record_memory_checkpoint("lifespan_start")
   from app.startup import (
@@ -188,242 +187,16 @@ async def lifespan(app):
     logger=_log,
   )
   await run_startup_tasks(startup_context, STARTUP_TASKS)
-  _restart_authorization = startup_context.restart_authorization
-  _restart_fallback_chats = startup_context.restart_fallback_chats
-  _frontend_observer = None
-  _frontend_handler = None
-  # Start the whole-repo frontend watcher when /data/platform is active.
-  # A broken frontend build path must not crash lifespan.
-  try:
-    from pathlib import Path as _Path
-    _frontend_src = _Path("/data/platform/frontend/src")
-    if _frontend_src.is_dir():
-      from app.frontend_watcher import start_supervised_watcher
-      _frontend_observer, _frontend_handler = await start_supervised_watcher(
-        _asyncio.get_running_loop(),
-      )
-  except Exception as exc:
-    _log.error("start_frontend_watcher failed: %s", exc, exc_info=True)
+  from app.runtime_supervisors import RuntimeSupervisors
+  supervisors = RuntimeSupervisors(
+    settings=settings,
+    logger=_log,
+    restart_authorization=startup_context.restart_authorization,
+    restart_fallback_chats=startup_context.restart_fallback_chats,
+    lag_sleep=_sleep_with_lag_warning,
+  )
+  await supervisors.start()
   record_memory_checkpoint("startup_frontend_watcher_started")
-  # Runtime liveness watchdog. reconcile_startup_chats only runs at boot,
-  # so a turn that leaves its run marker set without a process restart (a
-  # FAILED_LEAVE_MARKER terminal, or the late-promote gap) would hold the chat
-  # "running" forever and make the app look permanently busy. This periodic
-  # sweep clears such orphaned markers between boots. Wrapped so a sweep failure
-  # can't kill the loop; the loop is cancelled on shutdown.
-  _wedged_sweep_task = None
-  _stalled_live_task = None
-  _reset_park_task = None
-  _browser_profile_task = None
-  _writer_supervisor_task = None
-  _tool_output_compression_task = None
-  try:
-    from app.chat import (
-      sweep_idle_pending_chats,
-      sweep_reset_parks,
-      sweep_stalled_live_runs,
-      sweep_wedged_runs,
-    )
-    from app.database import SessionLocal as _SweepSession
-
-    async def _wedged_marker_loop():
-      while True:
-        await _asyncio.sleep(60)
-        try:
-          _sw_db = _SweepSession()
-          try:
-            await sweep_wedged_runs(_sw_db)
-            await sweep_idle_pending_chats(_sw_db)
-          finally:
-            _sw_db.close()
-        except _asyncio.CancelledError:
-          raise
-        except Exception as _exc:
-          _log.error("wedged-marker sweep failed: %s", _exc, exc_info=True)
-
-    _wedged_sweep_task = _asyncio.create_task(_wedged_marker_loop())
-
-    async def _stalled_live_loop():
-      import time as _time
-      while True:
-        await _sleep_with_lag_warning(
-          _asyncio.sleep,
-          _time.monotonic,
-          _log,
-        )
-        try:
-          _sl_db = _SweepSession()
-          try:
-            await sweep_stalled_live_runs(_sl_db)
-          finally:
-            _sl_db.close()
-        except _asyncio.CancelledError:
-          raise
-        except Exception as _exc:
-          _log.error("stalled-live sweep failed: %s", _exc, exc_info=True)
-
-    _stalled_live_task = _asyncio.create_task(_stalled_live_loop())
-
-    # Durable-continuation sweep (design §2.4): handles provider-limit resets
-    # and exact runs parked by a planned restart. The first pass is awaited
-    # BEFORE lifespan yields, so a reconnecting client cannot win the startup
-    # race and turn an opted-in restart into manual recovery. Later passes run
-    # after a turn finishes or at the 60s fallback cadence. This is event-
-    # driven in the common path (one indexed query per completed turn), with
-    # no per-chat worker or short polling loop.
-    from app.broadcast import get_system_broadcast as _system_broadcast
-    _reset_park_events = _system_broadcast().subscribe()
-
-    async def _sweep_reset_parks_once(*, startup: bool = False):
-      try:
-        _rp_db = _SweepSession()
-        try:
-          if startup:
-            return await sweep_reset_parks(
-              _rp_db,
-              restart_authorization=_restart_authorization,
-            )
-          return await sweep_reset_parks(_rp_db)
-        finally:
-          _rp_db.close()
-      except _asyncio.CancelledError:
-        raise
-      except Exception as _exc:
-        _log.error("reset-park sweep failed: %s", _exc, exc_info=True)
-        return []
-
-    _startup_continuations = await _sweep_reset_parks_once(startup=True)
-    if _restart_authorization:
-      _log.info(
-        "startup restart continuation pass authorized=%d fallback_recovered=%d "
-        "started_or_resolved=%d",
-        1,
-        len(_restart_fallback_chats),
-        len(_startup_continuations),
-      )
-
-    async def _compress_legacy_tool_outputs():
-      """Fix old side-table rows forward without delaying readiness."""
-      from app.tool_output_storage import compress_legacy_tool_output_batch
-
-      total_rows = 0
-      raw_chars = 0
-      stored_chars = 0
-      after_chat_id = None
-      after_tool_use_id = None
-      try:
-        while True:
-          report = await _asyncio.to_thread(
-            compress_legacy_tool_output_batch,
-            _SweepSession,
-            batch_size=16,
-            after_chat_id=after_chat_id,
-            after_tool_use_id=after_tool_use_id,
-          )
-          if not int(report["scanned"]):
-            break
-          count = int(report["compressed"])
-          total_rows += count
-          raw_chars += int(report["raw_chars"])
-          stored_chars += int(report["stored_chars"])
-          after_chat_id = report["last_chat_id"]
-          after_tool_use_id = report["last_tool_use_id"]
-          await _asyncio.sleep(0.01)
-      except _asyncio.CancelledError:
-        raise
-      except Exception as _exc:
-        _log.error(
-          "legacy tool-output compression failed: %s", _exc, exc_info=True,
-        )
-        return
-      if total_rows:
-        _log.info(
-          "compressed %d legacy tool output(s): %d -> %d stored characters",
-          total_rows,
-          raw_chars,
-          stored_chars,
-        )
-
-    # Starts only after lifespan yields, so compression never delays the
-    # readiness transition. Exact-value compare-and-swap protects a tool row
-    # refreshed concurrently while short transactions yield between batches.
-    _tool_output_compression_task = _asyncio.create_task(
-      _compress_legacy_tool_outputs()
-    )
-
-    async def _reset_park_loop():
-      try:
-        while True:
-          try:
-            # One absolute fallback window. Unrelated system events must not
-            # keep resetting a per-get timer and starve a future limit reset.
-            async with _asyncio.timeout(60):
-              while True:
-                _event = await _reset_park_events.get()
-                if _event and _event.get("type") == "chat_run_finished":
-                  break
-          except _asyncio.TimeoutError:
-            pass
-          await _sweep_reset_parks_once()
-      finally:
-        _system_broadcast().unsubscribe(_reset_park_events)
-
-    _reset_park_task = _asyncio.create_task(_reset_park_loop())
-
-    # The 60-second loop cadence is the writer respawn backoff.
-    async def _writer_supervisor_loop():
-      from app.chat_writer import supervise_writer
-      while True:
-        await _asyncio.sleep(60)
-        try:
-          supervise_writer()
-        except _asyncio.CancelledError:
-          raise
-        except Exception as _exc:
-          _log.error("writer supervisor tick failed: %s", _exc, exc_info=True)
-
-    _writer_supervisor_task = _asyncio.create_task(_writer_supervisor_loop())
-
-    async def _browser_profile_loop():
-      # Keep boot latency predictable; the first quota scan is low-priority.
-      await _asyncio.sleep(300)
-      while True:
-        _profile_sweep_seconds = 60 * 60
-        try:
-          from app.browser_profiles import (
-            browser_profile_sweep_seconds,
-            chat_activity_snapshot,
-            enforce_browser_profile_quota,
-          )
-          _profile_sweep_seconds = browser_profile_sweep_seconds()
-          from app.runner_registry import registry as _runner_registry
-          _bp_db = _SweepSession()
-          try:
-            _chat_snapshot = chat_activity_snapshot(_bp_db)
-          finally:
-            _bp_db.close()
-          _profile_result = await _asyncio.to_thread(
-            enforce_browser_profile_quota,
-            settings.data_dir,
-            _chat_snapshot,
-            _runner_registry.all_alive_chat_ids(),
-          )
-          if _profile_result["reclaimed_bytes"]:
-            _log.info(
-              "agent-browser profile quota reclaimed %d bytes",
-              _profile_result["reclaimed_bytes"],
-            )
-        except _asyncio.CancelledError:
-          raise
-        except Exception as _exc:
-          _log.error(
-            "agent-browser profile quota failed: %s", _exc, exc_info=True,
-          )
-        await _asyncio.sleep(_profile_sweep_seconds)
-
-    _browser_profile_task = _asyncio.create_task(_browser_profile_loop())
-  except Exception as exc:
-    _log.error("chat liveness sweep wiring failed: %s", exc, exc_info=True)
   record_memory_checkpoint("startup_ready")
   try:
     yield
@@ -432,19 +205,8 @@ async def lifespan(app):
     # Preserve the final partial request-error windows across graceful restarts.
     # This is one bounded batch append, not one write per response.
     activity.flush_request_errors()
-    # Stop the liveness watchdog before the writer drains.
-    if _wedged_sweep_task is not None:
-      _wedged_sweep_task.cancel()
-    if _stalled_live_task is not None:
-      _stalled_live_task.cancel()
-    if _reset_park_task is not None:
-      _reset_park_task.cancel()
-    if _browser_profile_task is not None:
-      _browser_profile_task.cancel()
-    if _writer_supervisor_task is not None:
-      _writer_supervisor_task.cancel()
-    if _tool_output_compression_task is not None:
-      _tool_output_compression_task.cancel()
+    # Supervisors stop before the persistence actor they monitor.
+    await supervisors.stop()
     # Drain + join the chat-writer actor so any in-flight persistence
     # completes before the process exits. Wrapped: a stop failure must
     # not mask the rest of shutdown.
@@ -453,26 +215,6 @@ async def lifespan(app):
       stop_writer()
     except Exception as exc:
       _log.error("chat writer stop failed: %s", exc, exc_info=True)
-    if _frontend_handler is not None:
-      try:
-        _frontend_handler.close()
-      except Exception as exc:
-        _log.error(
-          "frontend watcher handler.close failed: %s", exc, exc_info=True,
-        )
-    if _frontend_observer is not None:
-      try:
-        _frontend_observer.stop()
-      except Exception as exc:
-        _log.error(
-          "frontend watcher observer.stop failed: %s", exc, exc_info=True,
-        )
-      try:
-        _frontend_observer.join(timeout=2)
-      except Exception as exc:
-        _log.error(
-          "frontend watcher observer.join failed: %s", exc, exc_info=True,
-        )
 
 settings = get_settings()
 
@@ -842,7 +584,6 @@ app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(chat_logs_router)
-app.include_router(connectors_router)
 # App-attributed chat contract (design §1) — a SECOND router defined in
 # routes/chats.py under /api/app-chats, so it's imported directly rather
 # than via routes/__init__'s `_load` (which only returns `.router`).
@@ -858,6 +599,7 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
 app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(local_services_router)
+app.include_router(speech_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
 app.include_router(settings_router)

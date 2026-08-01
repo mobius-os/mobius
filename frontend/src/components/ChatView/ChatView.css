@@ -359,43 +359,6 @@
 
 .chat__msg--user { align-items: flex-end; }
 .chat__msg--marker { align-items: stretch; }
-
-/* Drawer-search reveal: a soft, brief wash on the matched message so the eye
-   lands on it after the jump, then fade out. The precise cue is the word-level
-   highlight below; this is just gentle "here" context. A negative-margin padded
-   box keeps the wash around the bubble without shifting layout. Transient —
-   ChatView clears the class after the animation. */
-.chat__msg--search-hit {
-  border-radius: 14px;
-  margin-left: -8px;
-  margin-right: -8px;
-  padding-left: 8px;
-  padding-right: 8px;
-  animation: chat-search-hit 0.9s ease-out forwards;
-}
-
-@keyframes chat-search-hit {
-  0% { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-  100% { background: transparent; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .chat__msg--search-hit {
-    /* No pulse; the persistent word highlight below is the lasting cue. */
-    animation: none;
-    background: transparent;
-  }
-}
-
-/* The matched word(s) inside the revealed message. Painted by ChatView through
-   the CSS Custom Highlight API (non-destructive Ranges) and kept until the
-   reader leaves the chat. Only a few properties are stylable on ::highlight, so
-   a strong accent background + a contrasting text color carry the emphasis; the
-   accent-tinted text color keeps light words legible on the solid wash. */
-::highlight(chat-search-term) {
-  background-color: color-mix(in srgb, var(--accent) 62%, transparent);
-  color: var(--accent-fg, #fff);
-}
 .chat__msg--assistant {
   --activity-block-gap: 8px;
   --activity-row-gap: 4px;

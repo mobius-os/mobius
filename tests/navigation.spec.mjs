@@ -462,9 +462,10 @@ test.describe('Desktop sidebar navigation', () => {
 test.describe('Drawer touch lifecycle', () => {
   test.use({ hasTouch: true })
 
-  test('an interrupted drawer drag cannot consume the next real row tap', async ({ page }) => {
-    // Enable drawer-row workspace gestures before the shell module evaluates.
-    // This is the production path that creates the full-viewport drag layer.
+  test('an interrupted workspace drag cannot consume the next real drawer-row tap', async ({ page }) => {
+    // Enable workspace gestures before the shell module evaluates. Touch drawer
+    // rows intentionally own menu/reorder locally; a hybrid device's mouse or
+    // trackpad still uses the row-to-workspace drag contract tested below.
     await page.addInitScript(() => {
       localStorage.setItem('mobius:workspace-splits', '1')
     })
@@ -482,17 +483,18 @@ test.describe('Drawer touch lifecycle', () => {
     const beta = navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true })
     await expect(beta).toBeVisible()
 
-    // Reproduce the mobile interruption precisely: the row's drag controller
-    // arms and installs its transparent viewport layer, then the browser steals
-    // the terminal pointer event (notification shade/app switch), so no up or
-    // cancel reaches the shell. This used to leave the layer above the drawer.
+    // Reproduce the hybrid-device interruption precisely: a trackpad/mouse
+    // drawer-row drag enters the workspace controller and installs its
+    // transparent viewport layer, then the browser steals the terminal event.
+    // Standard phone mode has no tab strip, while touch on drawer rows belongs
+    // to their local menu/reorder owner, so this is the real drawer source.
     await beta.evaluate((row) => {
       const box = row.getBoundingClientRect()
       const start = {
         bubbles: true,
         cancelable: true,
         pointerId: 1,
-        pointerType: 'touch',
+        pointerType: 'mouse',
         isPrimary: true,
         button: 0,
         clientX: box.left + 40,

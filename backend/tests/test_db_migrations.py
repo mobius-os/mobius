@@ -1,4 +1,7 @@
+import ast
+import hashlib
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import String, create_engine, inspect, text
@@ -574,6 +577,21 @@ def test_goal_migration_backfills_only_the_running_turns_initiating_goal(
       "SELECT goal_objective FROM chat_runs WHERE id = 'goal-run'"
     )).scalar_one()
   assert objective == "finish the migration"
+
+
+def test_applied_legacy_schema_migration_is_immutable():
+  """Editing migration 0001 must require an intentional new migration."""
+  source = Path(database.__file__).read_text(encoding="utf-8")
+  module = ast.parse(source)
+  migration = next(
+    node for node in module.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name == "_converge_legacy_schema"
+  )
+  semantic_shape = ast.dump(migration, include_attributes=False).encode()
+  assert hashlib.sha256(semantic_shape).hexdigest() == (
+    "4f7b1f167534e0f692eaa004e40c124b36b655c387671f93b66f4932a6e242ec"
+  ), "0001 is applied history; append a new numbered migration instead"
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):

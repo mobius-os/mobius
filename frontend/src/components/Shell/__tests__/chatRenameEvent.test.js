@@ -7,10 +7,16 @@ const shell = readFileSync(
   'utf8',
 )
 
-test('a committed summary rename refreshes live tab and drawer names', () => {
+test('a committed summary rename projects exact fields without a list refetch', () => {
   assert.match(shell, /ev\.type === 'chat_renamed'/)
   assert.match(
     shell,
-    /ev\.type === 'chat_renamed'[\s\S]*?invalidateShellListCache\('chats'\)\.then\(refreshChats\)/,
+    /ev\.type === 'chat_renamed'[\s\S]*?applyChatRenameEvent\(ev\)[\s\S]*?invalidateShellListCache\('chats'\)/,
   )
+  const renamePath = shell.slice(
+    shell.indexOf("ev.type === 'chat_renamed'"),
+    shell.indexOf("ev.type === 'app_deleted'"),
+  )
+  assert.doesNotMatch(renamePath, /refreshChats/)
+  assert.match(shell, /title: event\.title[\s\S]*?updatedAt: event\.updatedAt/)
 })
