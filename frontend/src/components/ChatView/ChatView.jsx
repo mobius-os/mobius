@@ -1717,7 +1717,18 @@ export default function ChatView({
       setInitialEntryPhase('preparing')
       for (const frame of renderFrames) {
         await yieldToMainThread()
-        if (cancelled || fetchGenRef.current !== gen) return
+        if (cancelled) return
+        if (fetchGenRef.current !== gen) {
+          // A newer generation owns the runtime now (a fresh send, or Stop
+          // clearing the queue), so this fetch must NOT apply its own runtime
+          // state — settleRuntime would re-hydrate the queue Stop just
+          // cleared. But 'preparing' is a hidden gate that only this path
+          // sets, and neither superseding path releases it: returning here
+          // without releasing it strands the chat blank until remount.
+          setInitialEntryPhase('ready')
+          setLoading(false)
+          return
+        }
         // React may batch state updates across async task yields and discard
         // every intermediate prefix. Commit each hidden slice explicitly; the
         // flush is scoped to this cold, off-screen preparation path only.
