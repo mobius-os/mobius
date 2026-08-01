@@ -595,14 +595,18 @@ export function isEmptyTree(ws) {
 // Auto-return an EMPTIED builder to single (owner semantic: closing the last tab
 // with no panes left in builder returns to single). Applied by the close reducer
 // cases when a close in 'panes' mode empties the tree. Flips viewMode to single
-// and seeds the slot if it was never initialized (an empty builder seeds an empty
-// single screen — focusedSlotSeed is null on an empty pane). The caller marks the
-// undo `restoreViewMode` so undo restores the closed tab AND builder mode as ONE
-// gesture. Returns { ws, autoReturned } so the caller knows whether to flag the undo.
+// and, for a legacy workspace whose slot was never initialized, carries the
+// departing visible item into Standard before the emptied tree loses it. The
+// caller marks the undo `restoreViewMode` so undo restores the closed tab AND
+// builder mode as ONE gesture. Returns { ws, autoReturned } so the caller knows
+// whether to flag the undo.
 function autoReturnIfEmptied(prevWs, nextWs) {
   if (prevWs.viewMode !== 'panes') return { ws: nextWs, autoReturned: false }
   if (isEmptyTree(prevWs) || !isEmptyTree(nextWs)) return { ws: nextWs, autoReturned: false }
-  return { ws: seedSingleScreenIfAbsent(setViewMode(nextWs, 'single')), autoReturned: true }
+  const withSlot = ('singleScreen' in nextWs)
+    ? nextWs
+    : setSingleScreen(nextWs, focusedSlotSeed(prevWs))
+  return { ws: setViewMode(withSlot, 'single'), autoReturned: true }
 }
 
 // Every live leaf pane id in in-order (left-to-right) sequence. The resolver

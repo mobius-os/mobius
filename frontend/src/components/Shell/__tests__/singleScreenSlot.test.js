@@ -258,6 +258,11 @@ test('closing the LAST builder tab auto-returns to single', () => {
   const ws = builderSeed([makeTab('chat', '5')])
   const s = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
   assert.equal(s.ws.viewMode, 'single', 'empty builder auto-returns to single')
+  assert.deepEqual(
+    s.ws.singleScreen,
+    { kind: 'chat', id: '5' },
+    'a legacy workspace carries the departing visible tab into Standard',
+  )
   assert.equal(s.undo.restoreViewMode, true, 'the undo is flagged one-gesture')
 })
 
@@ -366,14 +371,15 @@ test('CLOSE_PANE that empties the builder auto-returns to single', () => {
   const ws = builderSeed([makeTab('chat', '5')])
   const s = reduce(init(ws), { type: 'CLOSE_PANE', paneId: ws.focusedPaneId })
   assert.equal(s.ws.viewMode, 'single')
+  assert.deepEqual(s.ws.singleScreen, { kind: 'chat', id: '5' })
   assert.equal(s.undo.restoreViewMode, true)
 })
 
-test('a refused empty-builder entry preserves the coupled close undo', () => {
+test('a genuinely empty New Chat entry preserves the coupled close undo', () => {
   // Auto-return arms a mode-coupled undo (restoreViewMode). Trying to enter an
   // empty Builder is not a new mode intent because that destination does not
   // exist, so it must not weaken the one-gesture restoration.
-  const ws = builderSeed([makeTab('chat', '5')])
+  const ws = { ...builderSeed([makeTab('chat', '5')]), singleScreen: null }
   let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' }) // → single, coupled undo
   assert.equal(state.undo.restoreViewMode, true)
   state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'panes' }) // refused: tree is empty
