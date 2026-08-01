@@ -1097,7 +1097,13 @@ can deliver it untagged or not at all, which left the chat image viewer open
 with a permanently dead close button. A browser Back/swipe instead reaches the
 registered dismissal through `handleBack`; both navigation-event paths
 recognize a `dismissible` source BEFORE their phantom guard and before the
-Navigation API's `canIntercept` gate, and neither pops `navStackRef`. Forward traversal deliberately leaves a
+Navigation API's `canIntercept` gate, and neither pops `navStackRef`. Each
+registration captures the tagged shell cursor it was pushed from, so an
+untagged iframe landing restores that cursor rather than leaving it pointed at
+the consumed sentinel. Explicit-close traversals are also correlated with the
+entry that issued them: if delayed bookkeeping crosses a newer surface's
+sentinel, it never dismisses that surface and the navigation owner re-arms the
+same logical sentinel at the committed cursor. Forward traversal deliberately leaves a
 dismissed transient closed and treats its physical entry as a no-op sentinel;
 reopening it pushes a fresh entry and naturally truncates that stale Forward
 branch. Do not add component-local `popstate` listeners for these surfaces —

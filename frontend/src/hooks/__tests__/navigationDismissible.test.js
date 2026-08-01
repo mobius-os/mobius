@@ -158,6 +158,7 @@ function sessionHistory({ wedged = false, navigationApi = true } = {}) {
     },
     get pendingTraversals() { return queued },
     get currentKind() { return history.state?.kind ?? null },
+    get currentState() { return history.state },
     get depth() { return index },
   }
 }
@@ -233,6 +234,30 @@ test('closing stays available after a traversal the engine never delivers', asyn
     'a lost traversal must not leave the close affordance permanently dead')
 })
 
+test('late close bookkeeping cannot dismiss the next surface', async () => {
+  const engine = sessionHistory({ wedged: true })
+  const { result } = await mountNavigation(engine)
+  const dismissals = []
+
+  const first = result.current.openHistoryDismiss(() => dismissals.push('first'))
+  result.current.closeHistoryDismiss(first)
+
+  // Open another viewer before the first close's asynchronous traversal lands.
+  // The engine will now physically traverse off this newer sentinel, but the
+  // request is still correlated with `first` and must not close `second`.
+  const second = result.current.openHistoryDismiss(() => dismissals.push('second'))
+  engine.settle()
+
+  assert.deepEqual(dismissals, ['first'])
+  assert.equal(engine.currentKind, 'dismissible',
+    'the still-open surface gets one live sentinel re-armed at the cursor')
+
+  result.current.closeHistoryDismiss(second)
+  engine.settle()
+  assert.deepEqual(dismissals, ['first', 'second'])
+  assert.equal(engine.currentKind, 'base', 'its own close consumes that sentinel once')
+})
+
 test('a back gesture dismisses the surface even when it lands on an untagged entry', async () => {
   // iOS Safari without the Navigation API, with a sandboxed iframe entry
   // sitting beneath the sentinel: the landing reads untagged, and the phantom
@@ -249,6 +274,11 @@ test('a back gesture dismisses the surface even when it lands on an untagged ent
 
   assert.deepEqual(dismissals, ['gesture'], 'Back closes the surface')
   assert.equal(engine.currentKind, null, 'and lands on the untagged entry beneath it')
+
+  const next = result.current.openHistoryDismiss(() => dismissals.push('next'))
+  assert.equal(engine.currentState.index, 1,
+    'the next sentinel derives from the tagged cursor beneath the phantom')
+  result.current.closeHistoryDismiss(next)
 })
 
 test('a back gesture on a healthy engine dismisses exactly once', async () => {

@@ -310,6 +310,12 @@ export default function useNavigation({
   // sentinels but no route. The callback registry lets handleBack dismiss the
   // exact mounted surface without teaching it about that surface's React state.
   const historyDismissalsRef = useRef(new Map())
+  // Explicit closes dismiss synchronously, then ask History to consume their
+  // sentinel. The traversal can be delayed past the opening of another surface
+  // (or dropped entirely), so correlate each request with the exact entry it
+  // was issued for instead of treating the next dismissible traversal as the
+  // currently mounted surface's Back gesture.
+  const pendingHistoryDismissTraversalsRef = useRef([])
   // Legacy app-local levels are destructive: Back tells the iframe to close
   // them, and Forward cannot recreate them. Remember those physical entries so
   // revisiting one can safely degrade to the app base. Reversible entries use
@@ -488,6 +494,11 @@ export default function useNavigation({
 
   const openHistoryDismiss = useCallback((onDismiss) => {
     if (typeof onDismiss !== 'function') return null
+    // The classic store can land on an untagged iframe phantom beneath this
+    // sentinel. Capture the shell cursor BEFORE pushing so either history path
+    // can restore that authoritative model even when no browser store can name
+    // the committed shell entry.
+    const returnState = currentNavStateRef.current
     let state
     try {
       state = pushShellEntry('dismissible', snapshotRoute())
@@ -496,7 +507,7 @@ export default function useNavigation({
     }
     const entryId = navEntryId(state)
     if (!entryId) return null
-    historyDismissalsRef.current.set(entryId, { onDismiss })
+    historyDismissalsRef.current.set(entryId, { onDismiss, returnState })
     return entryId
   }, [pushShellEntry, snapshotRoute])
 
@@ -514,10 +525,23 @@ export default function useNavigation({
     if (!dismissal) return false
     historyDismissalsRef.current.delete(entryId)
     const current = currentNavStateRef.current
-    if (current?.kind === 'dismissible' && navEntryId(current) === entryId) {
-      try { history.back() } catch { /* history unavailable — the surface still closes */ }
-    }
+    // Close the surface before touching session history. A throwing or lost
+    // traversal must never strand the UI open again.
     dismissal.onDismiss()
+    if (current?.kind === 'dismissible' && navEntryId(current) === entryId) {
+      const pending = { entryId, returnState: dismissal.returnState }
+      pendingHistoryDismissTraversalsRef.current.push(pending)
+      try {
+        history.back()
+      } catch (error) {
+        // Do not swallow an unobserved History failure. Remove only the request
+        // that was never issued, then preserve the browser's error; dismissal
+        // itself has already completed synchronously above.
+        const index = pendingHistoryDismissTraversalsRef.current.indexOf(pending)
+        if (index >= 0) pendingHistoryDismissTraversalsRef.current.splice(index, 1)
+        throw error
+      }
+    }
     return true
   }, [])
 
@@ -1295,6 +1319,59 @@ export default function useNavigation({
       if (id) consumedAppEntryIdsRef.current.add(id)
     }
 
+    function settleDismissibleTraversal(destination, source) {
+      const sourceEntryId = navEntryId(source)
+      const registration = sourceEntryId
+        ? historyDismissalsRef.current.get(sourceEntryId)
+        : null
+      // History serializes traversal requests. If an explicit close is waiting,
+      // this event answers the oldest request even when the engine reports the
+      // newly-current sentinel as its source.
+      const pending = pendingHistoryDismissTraversalsRef.current.shift() || null
+      const returnState = registration?.returnState
+        || (pending?.entryId === sourceEntryId ? pending.returnState : null)
+      const committed = isMobiusNavState(destination)
+        ? destination
+        : (isMobiusNavState(history.state)
+            ? history.state
+            : (isMobiusNavState(returnState) ? returnState : null))
+
+      // A close for an older entry arrived after another surface opened. It is
+      // bookkeeping for `pending.entryId`, NOT a Back gesture for the live
+      // `sourceEntryId`: do not invoke that newer registration. The traversal
+      // has nevertheless crossed its physical sentinel, so re-arm the same
+      // logical surface at the committed cursor. When we landed on the older
+      // sentinel itself, repurpose that slot; when the engine jumped all the
+      // way to its return state, push a replacement above it. In both cases the
+      // mounted hook keeps the same entry id and its next close consumes one
+      // sentinel in one Back.
+      if (pending && pending.entryId !== sourceEntryId) {
+        if (registration && sourceEntryId) {
+          let rearmed
+          if (navEntryId(committed) === pending.entryId) {
+            rearmed = updateCurrentNavEntry(source.route, {
+              kind: 'dismissible',
+              entryId: sourceEntryId,
+            })
+          } else {
+            rearmed = pushNavEntry('dismissible', source.route, {
+              currentState: committed || registration.returnState,
+              entryId: sourceEntryId,
+            })
+          }
+          if (rearmed) {
+            currentNavStateRef.current = rearmed
+            return
+          }
+        }
+        if (committed) currentNavStateRef.current = committed
+        return
+      }
+
+      if (committed) currentNavStateRef.current = committed
+      handleBack(committed, source)
+    }
+
     function handleBack(destination, source) {
       backFiredRef.current = true
       setTimeout(() => { backFiredRef.current = false }, 400)
@@ -1519,11 +1596,7 @@ export default function useNavigation({
         // and the shell never keeps pointing at an entry it has already left.
         if (source?.kind === 'dismissible') {
           const consumeDismissible = () => {
-            const committed = isMobiusNavState(destination)
-              ? destination
-              : (isMobiusNavState(history.state) ? history.state : null)
-            if (committed) currentNavStateRef.current = committed
-            handleBack(committed, source)
+            settleDismissibleTraversal(destination, source)
           }
           if (e.canIntercept) e.intercept({ handler: consumeDismissible })
           else setTimeout(consumeDismissible, 0)
@@ -1607,8 +1680,7 @@ export default function useNavigation({
       // sits BENEATH the sentinel) must still consume it rather than fall into
       // the phantom guard below and strand the surface (mirrors onNavigate).
       if (source?.kind === 'dismissible') {
-        if (isMobiusNavState(destination)) currentNavStateRef.current = destination
-        handleBack(destination, source)
+        settleDismissibleTraversal(destination, source)
         return
       }
       // Phantom-entry guard: a pop landing on an UNTAGGED entry is a phantom
