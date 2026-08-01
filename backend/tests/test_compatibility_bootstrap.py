@@ -34,7 +34,7 @@ def classify(main, external=None, daily=None):
 
 def test_inventory_accepts_only_fresh_partial_and_complete_states():
   assert classify(PREVIOUS) == ("build", "")
-  assert classify(CURRENT) == ("reuse", CURRENT.digest)
+  assert classify(CURRENT) == ("build", "")
   assert classify(CURRENT, CURRENT) == ("reuse", CURRENT.digest)
 
 
@@ -53,6 +53,18 @@ def test_prewrite_rechecks_detect_tags_appearing_after_inventory():
   bootstrap.assert_prewrite_state(
     tag="main",
     main=PREVIOUS,
+    external=None,
+    daily=None,
+    current=CURRENT,
+    previous=PREVIOUS,
+  )
+  # A lone current-revision main is untrusted metadata from an incomplete
+  # attempt. The guarded build may replace it, but it may not carry forward to
+  # external-recovery until main owns the new selected digest.
+  untrusted = bootstrap.Identity("sha256:" + "d" * 64, CURRENT_SHA)
+  bootstrap.assert_prewrite_state(
+    tag="main",
+    main=untrusted,
     external=None,
     daily=None,
     current=CURRENT,
