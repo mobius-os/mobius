@@ -68,6 +68,16 @@ export function drawerRowWindowContaining(total, rowIndex, windowRows = DRAWER_I
   return { start, end: Math.min(count, start + width) }
 }
 
+/** Return the existing window when the row is already mounted or is not part
+ * of Recents. Pinned rows deliberately have a Recent index of -1: preserving
+ * object identity there prevents a layout effect from scheduling forever. */
+export function drawerRowWindowForIndex(current, total, rowIndex) {
+  const count = boundedTotal(total)
+  if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= count) return current
+  if (rowIndex >= current?.start && rowIndex < current?.end) return current
+  return drawerRowWindowContaining(count, rowIndex)
+}
+
 export function drawerRowSpacerHeights(window, total, rowHeight = DRAWER_ROW_HEIGHT) {
   const bounded = clampDrawerRowWindow(window, total)
   return {
