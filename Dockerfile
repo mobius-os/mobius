@@ -20,7 +20,7 @@ COPY frontend/ .
 RUN npm run build
 
 # -- Stage 2: backend + everything ------------------------------------
-FROM python:3.12-slim-trixie
+FROM python:3.14-slim-trixie
 
 # Copy Node.js binary from the frontend stage instead of installing via
 # apt.  The debian nodejs/npm packages pull in ~200MB of system node
