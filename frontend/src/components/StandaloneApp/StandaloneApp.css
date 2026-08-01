@@ -95,6 +95,18 @@
   user-select: text;
 }
 
+.standalone-app__crash > p {
+  margin: 8px 0 0;
+  color: var(--muted, #aaa);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.standalone-app__crash .standalone-app__crash-status {
+  margin: -6px 0 14px;
+  color: var(--danger, #f87171);
+}
+
 .standalone-app__crash > div,
 .standalone-install__actions {
   display: flex;
@@ -114,6 +126,17 @@
   font: 600 13px/1 var(--font, system-ui, sans-serif);
   text-decoration: none;
   cursor: pointer;
+}
+
+.standalone-app__crash button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.standalone-app__crash button:focus-visible,
+.standalone-app__recovery a:focus-visible {
+  outline: 2px solid var(--accent, #a78bfa);
+  outline-offset: 3px;
 }
 
 .standalone-app__recovery {

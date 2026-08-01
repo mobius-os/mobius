@@ -61,6 +61,7 @@
 
 .errbound__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
 }
@@ -78,6 +79,17 @@
   transition: opacity 0.15s var(--ease-out-soft, ease);
 }
 
+.errbound__btn:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.errbound__btn:focus-visible,
+.errbound__recovery a:focus-visible {
+  outline: 2px solid var(--accent, #8b6cf7);
+  outline-offset: 3px;
+}
+
 @media (hover: hover) and (pointer: fine) {
   .errbound__btn:hover {
     opacity: 0.85;
@@ -88,6 +100,13 @@
   background: var(--accent, #8b6cf7);
   border-color: var(--accent, #8b6cf7);
   color: var(--accent-fg, #ffffff);
+}
+
+.errbound__status {
+  margin: -8px 0 16px;
+  color: var(--danger, #f87171);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .errbound__recovery {

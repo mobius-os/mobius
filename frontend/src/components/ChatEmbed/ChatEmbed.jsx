@@ -262,7 +262,9 @@ export default function ChatEmbed() {
   return (
     <ErrorBoundary
       label="chat-embed"
+      recoveryKey={`chat-embed:${chatId}`}
       variant="fullscreen"
+      canAskAgent={false}
       onReset={() => postToParent(ERROR, { error: 'render-crash' })}
     >
       <div className="chat-embed">

@@ -3122,7 +3122,12 @@ export default function Shell() {
             onPointerDownCapture={paned && !modeBeatActive
               ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId }) : undefined}
           >
-            <ErrorBoundary key={`ab-${id}`} variant="inline" label="app">
+            <ErrorBoundary
+              key={`ab-${id}`}
+              variant="inline"
+              label="app"
+              recoveryKey={`app:${id}`}
+            >
             <AppCanvas
               appId={id}
               // Focused-pane-only: gates safe-area insets + the immersive holder

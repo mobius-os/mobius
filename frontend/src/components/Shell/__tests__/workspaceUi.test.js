@@ -202,7 +202,10 @@ test('drawer lists distinguish loading, error, and confirmed empty data', () => 
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
   // The AppCanvas wrapper is wrapped in its own inline ErrorBoundary so one
   // canvas throw degrades locally instead of replacing the whole shell.
-  assert.match(shell, /<ErrorBoundary key=\{`ab-\$\{id\}`\} variant="inline" label="app">/)
+  assert.match(
+    shell,
+    /<ErrorBoundary[^>]*key=\{`ab-\$\{id\}`\}[^>]*variant="inline"[^>]*label="app"[^>]*recoveryKey=\{`app:\$\{id\}`\}/,
+  )
 })
 
 test('the divider drag tears down from the window, surviving a mid-drag unmount', () => {

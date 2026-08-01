@@ -54,7 +54,11 @@ export default function App() {
   if (EMBED_ROUTE) {
     return (
       <QueryClientProvider client={queryClient}>
-        <ErrorBoundary label="chat-embed">
+        <ErrorBoundary
+          label="chat-embed"
+          recoveryKey="chat-embed:root"
+          canAskAgent={false}
+        >
           {/* Keep the opaque embed blank until its capability is verified. */}
           <Suspense fallback={null}>
             <ChatEmbed />
