@@ -125,6 +125,23 @@ def wait_ack(ack: Future, *, timeout: float | None = None):
   return ack.result(timeout=ACK_TIMEOUT_SECS if timeout is None else timeout)
 
 
+def _replace_chat_media_path(value, old_prefix: str, new_prefix: str):
+  """Recursively rewrite media URLs inside JSON-compatible chat data."""
+  if isinstance(value, str):
+    return value.replace(old_prefix, new_prefix)
+  if isinstance(value, list):
+    return [
+      _replace_chat_media_path(item, old_prefix, new_prefix)
+      for item in value
+    ]
+  if isinstance(value, dict):
+    return {
+      key: _replace_chat_media_path(item, old_prefix, new_prefix)
+      for key, item in value.items()
+    }
+  return value
+
+
 # -- Commands (domain-level; a later milestone swaps their dispatch) -----
 @dataclass
 class _Command:
@@ -1738,7 +1755,6 @@ class ChatWriterActor:
     self, db, cmd: "RewriteChatMediaPaths",
   ) -> int:
     """Rewrite both transcript blobs in one actor-owned transaction."""
-    from app.chat_media import _replace_media_path
     from app.models import Chat
 
     row = db.execute(select(
@@ -1747,10 +1763,10 @@ class ChatWriterActor:
     if row is None:
       return 0
     messages, pending = row
-    rewritten_messages = _replace_media_path(
+    rewritten_messages = _replace_chat_media_path(
       messages, cmd.old_prefix, cmd.new_prefix,
     )
-    rewritten_pending = _replace_media_path(
+    rewritten_pending = _replace_chat_media_path(
       pending, cmd.old_prefix, cmd.new_prefix,
     )
     values = {}

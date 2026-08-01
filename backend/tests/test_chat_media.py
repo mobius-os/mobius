@@ -50,10 +50,10 @@ def test_fix_forward_chat_media_skips_unrelated_transcripts(
   }]
   db.commit()
 
-  def unexpected_copy(*_args):
-    raise AssertionError("unrelated transcript was materialized for rewrite")
+  def unexpected_writer():
+    raise AssertionError("unrelated transcript was selected for rewrite")
 
-  monkeypatch.setattr(chat_media, "_replace_media_path", unexpected_copy)
+  monkeypatch.setattr(chat_media, "get_writer", unexpected_writer)
 
   assert fix_forward_chat_media(db, get_settings().data_dir) == 0
 

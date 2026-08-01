@@ -11,20 +11,6 @@ from app import models
 from app.chat_writer import RewriteChatMediaPaths, get_writer, wait_ack
 
 
-def _replace_media_path(value, old_prefix: str, new_prefix: str):
-  """Recursively rewrites media URLs inside JSON-compatible chat data."""
-  if isinstance(value, str):
-    return value.replace(old_prefix, new_prefix)
-  if isinstance(value, list):
-    return [_replace_media_path(item, old_prefix, new_prefix) for item in value]
-  if isinstance(value, dict):
-    return {
-      key: _replace_media_path(item, old_prefix, new_prefix)
-      for key, item in value.items()
-    }
-  return value
-
-
 def fix_forward_chat_media(db: Session, data_dir: str) -> int:
   """Moves old chat images into `media/` and rewrites stored message URLs.
 
