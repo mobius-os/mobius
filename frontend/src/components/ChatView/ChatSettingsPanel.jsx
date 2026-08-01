@@ -41,13 +41,11 @@
  * ║      persisted flag isn't refreshed mid-turn, so the messages    ║
  * ║      check engages the lock the moment a reply lands.            ║
  * ║                                                                  ║
- * ║   3. SERIAL, LATEST-INTENT PICKER WRITES                         ║
- * ║      `latestReqId` and `settingsSaveTailRef` are owned by the    ║
- * ║      parent (ComposerPopover) — NOT panel-local. Routine model   ║
- * ║      and effort picks remain interactive while saving, allocate  ║
- * ║      their intent id immediately, and persist in tap order. An   ║
- * ║      older response cannot repaint over a newer optimistic pick, ║
- * ║      and closing/reopening + cannot reset either guard.          ║
+ * ║   3. ORDERED PICKER WRITES                                      ║
+ * ║      `settingsSaveTailRef` is owned by ChatView, so model and    ║
+ * ║      effort picks persist in tap order even if this popover is   ║
+ * ║      closed. The same tail gates provider handoffs and message   ║
+ * ║      sends. Rows stay interactive while routine saves settle.    ║
  * ║                                                                  ║
  * ║   4. KEYBOARD-STATE PRESERVATION                                 ║
  * ║      `refocusChatInput` gates on `wasInputFocusedRef?.current`   ║
@@ -249,12 +247,7 @@ export default function ChatSettingsPanel({
   restartResumeError = '',
   onRestartResumeChange,
   onChange,
-  // Stale-PATCH guard: parent passes a ref that survives panel
-  // mount/unmount. See ComposerPopover for the rationale.
-  reqIdRef,
-  // Promise tail for routine picker writes. It shares the parent's lifetime
-  // with reqIdRef so closing/reopening the + popover cannot let a newer write
-  // overtake an older request that is still settling.
+  // Shared promise tail for picker writes, handoffs, and message sends.
   settingsSaveTailRef,
   // Tracks whether the chat textarea was focused when the popover
   // opened. Used to decide whether to refocus after a picker
@@ -268,10 +261,6 @@ export default function ChatSettingsPanel({
 }) {
   const [saving, setSaving] = useState(false)
   const [localError, setLocalError] = useState('')
-  const fallbackReqId = useRef(0)
-  const latestReqId = reqIdRef || fallbackReqId
-  const fallbackSettingsSaveTail = useRef(Promise.resolve())
-  const settingsSaveTail = settingsSaveTailRef || fallbackSettingsSaveTail
   const pendingSwitchPreviousRef = useRef(null)
   // Synchronous guard for the paid atomic handoff. Routine picker writes use
   // the serialized tail and deliberately remain available while saving.
@@ -366,47 +355,35 @@ export default function ChatSettingsPanel({
   ])
 
   const patchChat = useCallback((body) => {
-    if (!chatId) return Promise.resolve('fail')
-    // Allocate freshness at PICK time, not when this operation reaches the
-    // front of the save tail. Otherwise an older response can repaint its
-    // model during the interval where a newer choice is queued but not yet
-    // dispatched.
-    const reqId = ++latestReqId.current
+    if (!chatId) return Promise.resolve()
     setSaving(true)
     setLocalError('')
-    const persist = async () => {
+    const operation = settingsSaveTailRef.current.then(async () => {
       try {
         const res = await apiFetch(`/chats/${chatId}`, {
           method: 'PATCH',
           body: JSON.stringify(body),
         })
-        if (!res.ok) {
-          if (reqId !== latestReqId.current) return 'stale'
-          setLocalError('Could not save. Try again.')
-          return 'fail'
-        }
+        if (!res.ok) return 'Could not save. Try again.'
         const data = await res.json()
-        // Writes are serialized, so every successful response is a real
-        // durable checkpoint. Publish it in order; the draft-sync effects
-        // above defer repaint while a newer optimistic intent remains queued.
         onChange?.({
           agent_settings_json: data.agent_settings_json,
           provider: data.provider,
           effective: data.effective,
         })
-        return reqId === latestReqId.current ? 'ok' : 'stale'
+        return ''
       } catch {
-        if (reqId !== latestReqId.current) return 'stale'
-        setLocalError('Network error.')
-        return 'fail'
-      } finally {
-        if (reqId === latestReqId.current) setSaving(false)
+        return 'Network error.'
       }
-    }
-    const operation = settingsSaveTail.current.then(persist)
-    settingsSaveTail.current = operation
+    })
+    settingsSaveTailRef.current = operation
+    operation.then(error => {
+      if (settingsSaveTailRef.current !== operation) return
+      setLocalError(error)
+      setSaving(false)
+    })
     return operation
-  }, [chatId, onChange, latestReqId, settingsSaveTail])
+  }, [chatId, onChange, settingsSaveTailRef])
 
   const switchProviderWithHandoff = useCallback(async ({
     provider: nextProvider,
@@ -430,7 +407,7 @@ export default function ChatSettingsPanel({
       // A same-provider choice made just before this confirmation is part of
       // the source chat state the handoff follows. Wait for that routine write
       // even if + was closed/reopened while it settled.
-      await settingsSaveTail.current
+      await settingsSaveTailRef.current
       const res = await apiFetch(`/chats/${chatId}/provider-switch`, {
         method: 'POST',
         body: JSON.stringify(providerSwitchPayload({
@@ -473,7 +450,7 @@ export default function ChatSettingsPanel({
       )
       return false
     }
-  }, [chatId, pendingSwitch, provider, settingsSaveTail])
+  }, [chatId, pendingSwitch, provider, settingsSaveTailRef])
 
   // Conditional refocus — only restores textarea focus if it was
   // ALREADY focused when the popover opened. Without this guard,
@@ -506,46 +483,43 @@ export default function ChatSettingsPanel({
     value, providerValue, allowedEfforts, switchId = createProviderSwitchId(),
   ) => {
     if (isProviderSwitchBlocking(chatId)) return false
-    // The atomic handoff cannot overlap itself. Empty-chat provider/model
-    // PATCHes use the serialized routine-write tail above, so they remain
-    // safely pickable while an earlier choice saves.
-    if (hasAssistantTurns && providerSwitchInFlightRef.current) return false
-    if (hasAssistantTurns) providerSwitchInFlightRef.current = true
-    try {
-      // Cross-provider switch: restore this provider's last-known
-      // effort (or fall back to the value already on screen — which
-      // becomes that provider's first memory once they accept it).
-      // The provider/model effort enums do not overlap perfectly. Normalize
-      // the remembered value against the selected model's declared scale so
-      // the UI and persisted runner value cannot drift apart.
-      const nextEffort = validEffort(
-        allowedEfforts,
-        draftEffortByProvider[providerValue] ?? draftEffort,
-      )
-      const nextEffortByProvider = {
-        ...draftEffortByProvider,
-        [providerValue]: nextEffort,
-      }
-      let ok
-      if (hasAssistantTurns) {
-        ok = await switchProviderWithHandoff({
-          provider: providerValue,
+    // Cross-provider switch: restore this provider's last-known effort and
+    // normalize it against the selected model's declared scale.
+    const nextEffort = validEffort(
+      allowedEfforts,
+      draftEffortByProvider[providerValue] ?? draftEffort,
+    )
+    const nextEffortByProvider = {
+      ...draftEffortByProvider,
+      [providerValue]: nextEffort,
+    }
+
+    if (!hasAssistantTurns) {
+      setDraftModel(value)
+      setDraftProvider(providerValue)
+      setDraftEffort(nextEffort)
+      setDraftEffortByProvider(nextEffortByProvider)
+      patchChat({
+        provider: providerValue,
+        agent_settings_json: {
           model: value,
           effort: nextEffort,
-          effortByProvider: nextEffortByProvider,
-          switchId,
-        })
-      } else {
-        const outcome = await patchChat({
-          provider: providerValue,
-          agent_settings_json: {
-            model: value,
-            effort: nextEffort,
-            effort_by_provider: nextEffortByProvider,
-          },
-        })
-        ok = outcome === 'ok'
-      }
+          effort_by_provider: nextEffortByProvider,
+        },
+      })
+      return true
+    }
+
+    if (providerSwitchInFlightRef.current) return false
+    providerSwitchInFlightRef.current = true
+    try {
+      const ok = await switchProviderWithHandoff({
+        provider: providerValue,
+        model: value,
+        effort: nextEffort,
+        effortByProvider: nextEffortByProvider,
+        switchId,
+      })
       if (!ok) return false
       setDraftModel(value)
       setDraftProvider(providerValue)
@@ -553,7 +527,7 @@ export default function ChatSettingsPanel({
       setDraftEffortByProvider(nextEffortByProvider)
       return true
     } finally {
-      if (hasAssistantTurns) providerSwitchInFlightRef.current = false
+      providerSwitchInFlightRef.current = false
     }
   }, [
     draftEffort,
@@ -839,7 +813,7 @@ export default function ChatSettingsPanel({
                       className="csp__confirm-btn csp__confirm-btn--primary"
                       onPointerDown={preserveFocusUnlessTouch}
                       onClick={handleConfirmProviderSwitch}
-                      disabled={saving || switchBusy}
+                      disabled={switchBusy}
                     >
                       Switch provider
                     </button>

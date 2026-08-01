@@ -1142,6 +1142,13 @@ export default function ChatView({
       fetchMessages({ force: true })
     },
   })
+  // The composer clears before this boundary, so a slow picker save delays
+  // transport without swallowing text entered after Send.
+  const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
+    await settingsSaveTailRef.current
+    return streamSend(text, attachments, options)
+  }, [streamSend])
+
   useEffect(() => {
     if (retiredAssistantItemsRef.current !== streamItems) {
       retiredAssistantItemsRef.current = null
@@ -1951,12 +1958,7 @@ export default function ChatView({
       }
       let queueRequest = null
       try {
-        // Keep the normal synchronous submit transition (snapshot + clear the
-        // composer), but do not put the message on the wire until the last
-        // model choice is durable. The tail never rejects; a failed final pick
-        // reconciles to the last successful checkpoint before this continues.
-        await settingsSaveTailRef.current
-        queueRequest = streamSend(
+        queueRequest = sendAfterSettingsSaved(
           text,
           attachments.length > 0 ? attachments : undefined,
           directSteer
@@ -2248,11 +2250,7 @@ export default function ChatView({
     }
 
     try {
-      // The optimistic row and composer clear above happen at tap time. Only
-      // transport waits, so typing begun after Send cannot be swallowed by a
-      // delayed settings round-trip.
-      await settingsSaveTailRef.current
-      const result = await streamSend(
+      const result = await sendAfterSettingsSaved(
         sendText,
         attachments.length > 0 ? attachments : undefined,
         // The minted cid rides the POST so the durable row carries the same
@@ -2376,7 +2374,7 @@ export default function ChatView({
     // stale-closure trap for callers like handleStop).
   }, [
     chatId,
-    streamSend,
+    sendAfterSettingsSaved,
     pendingFiles,
     commitMessages,
     fetchMessages,

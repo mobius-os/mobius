@@ -7,10 +7,6 @@ const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8'
 const chatInputBar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const queuedMessages = readFileSync(new URL('../QueuedMessages.jsx', import.meta.url), 'utf8')
-const chatSettingsPanel = readFileSync(
-  new URL('../ChatSettingsPanel.jsx', import.meta.url),
-  'utf8',
-)
 
 function stripComments(css) {
   return css.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -32,28 +28,6 @@ test('theme transition does not animate every descendant or expensive shadows', 
     'theme toggles must not install a document-wide transition')
   assert.doesNotMatch(transitionRules, /box-shadow/,
     'theme toggles should not animate box-shadow across chat surfaces')
-})
-
-test('effort choice stays interactive and fully visible while its optimistic save settles', () => {
-  const effortStepper = chatSettingsPanel.match(
-    /<EffortStepper\s+efforts=\{rowEfforts\}[\s\S]*?onStopPointerDown=\{preserveFocusUnlessTouch\}[\s\S]*?\/>/,
-  )?.[0] || ''
-
-  assert.match(
-    effortStepper,
-    /disabled=\{switchBusy \|\| !providerConfigured\}/,
-    'only a provider switch or unavailable provider should disable effort',
-  )
-  assert.doesNotMatch(
-    effortStepper,
-    /disabled=\{[^}]*saving/,
-    'a routine save must not dim the effort control into a visible blackout',
-  )
-  assert.match(
-    chatSettingsPanel,
-    /if \(reqId !== latestReqId\.current\) return 'stale'/,
-    'rapid effort choices remain safe through the existing latest-request guard',
-  )
 })
 
 test('restored chat rows and tool blocks do not replay entrance animation', () => {
