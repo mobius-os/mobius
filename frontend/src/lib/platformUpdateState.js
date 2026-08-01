@@ -44,6 +44,7 @@ export function platformUpdateStatusLabel(platform) {
 
   if (state === 'conflict') return 'Update blocked'
   if (state === 'rolled_back') return 'Update needs repair'
+  if (platform?.updates_disabled) return 'Managed by deployment'
   if (needsRestart && available) return 'More updates available'
   if (needsRestart) return 'Ready to restart'
   if (available) return 'New update available'

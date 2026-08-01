@@ -217,11 +217,19 @@ COPY frontend/ ./shell-src/
 COPY scripts/test-image-fingerprint.sh /tmp/test-image-inputs/scripts/test-image-fingerprint.sh
 COPY Dockerfile /tmp/test-image-inputs/Dockerfile
 COPY backend/requirements.txt backend/requirements.lock /tmp/test-image-inputs/backend/
+COPY backend/legacy_runtime/ /tmp/test-image-inputs/backend/legacy_runtime/
 COPY frontend/package.json frontend/package-lock.json /tmp/test-image-inputs/frontend/
 RUN MOBIUS_TEST_IMAGE_INPUT_ROOT=/tmp/test-image-inputs \
       /tmp/test-image-inputs/scripts/test-image-fingerprint.sh \
       > /app/test-image-fingerprint \
     && rm -rf /tmp/test-image-inputs
+
+# /data/platform survives image replacement and can predate the PyJWT migration.
+# Install the narrow historical import surface on the standard interpreter path;
+# entrypoint intentionally clears PYTHONPATH before starting the platform.
+COPY backend/legacy_runtime/jose/ /usr/local/lib/python3.12/site-packages/jose/
+COPY backend/legacy_runtime/verify_jose.py /tmp/verify-legacy-jose.py
+RUN python /tmp/verify-legacy-jose.py && rm /tmp/verify-legacy-jose.py
 
 # Whole-repo platform seed. /data is a runtime volume, so bake the real clone
 # under /app and let entrypoint copy it into /data/platform on first boot. The
@@ -282,28 +290,21 @@ RUN useradd -m -s /bin/bash mobius \
     && ln -s /opt/agent-browser /home/mobius/.agent-browser \
     && chown -R mobius:mobius /opt/agent-browser
 
-# apt scoped-sudo (owner spec): mobius (the in-product agent) may install/remove
-# OS packages but NOT have full root, so it can't break the recovery floor or
-# core system files. Scoped to apt/dpkg only; validated by visudo. NOT a hard
-# sandbox (apt maintainer scripts run as root) — the real safety is that the
-# recovery runtime depends on ZERO apt-installed packages, so a bad package can
-# never compromise it.
-RUN printf 'mobius ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg\n' \
-      > /etc/sudoers.d/mobius-apt \
-    && chmod 440 /etc/sudoers.d/mobius-apt \
-    && visudo -cf /etc/sudoers.d/mobius-apt
-
 # Runtime source belongs at the tail of the image so normal code changes reuse
 # the browser, CLI, Python, vendor, and platform-seed layers above.
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
+COPY backend/recovery_target ./recovery-target/
 COPY skill/ ./skill/
 COPY protected-files.txt ./protected-files.txt
 
 # Frozen recovery floor (recoveryd) — the Tier-1 recovery system that runs in
 # its own container. It imports no app.* code and remains root-owned/read-only.
 COPY backend/recovery ./recovery/
-RUN chmod -R a-w /app/recovery
+# Stamp target identity from the actual baked checkout, never a runtime-
+# overridable environment value.
+RUN cp /app/platform-baked/.baked-sha /app/recovery-target/BUILD_REVISION \
+    && chmod -R a-w /app/recovery /app/recovery-target
 RUN chmod +x ./scripts/entrypoint.sh
 
 # Build identity — passed at `docker compose build` time (deploy-prod.sh

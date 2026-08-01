@@ -7,6 +7,7 @@ import {
   drawerRowSpacerHeights,
   drawerRowWindow,
   drawerRowWindowContaining,
+  drawerRowWindowForIndex,
   initialDrawerRowWindow,
 } from '../../components/Drawer/drawerRowWindow.js'
 
@@ -54,4 +55,24 @@ test('desktop active-chat reveal mounts a far row in one bounded window', () => 
   const window = drawerRowWindowContaining(795, 620)
   assert.ok(window.start <= 620 && window.end > 620)
   assert.equal(window.end - window.start, DRAWER_INITIAL_WINDOW_ROWS)
+})
+
+test('desktop active-chat reveal moves the window only for an unmounted Recent row', () => {
+  const current = { start: 120, end: 168 }
+
+  assert.equal(
+    drawerRowWindowForIndex(current, 795, -1),
+    current,
+    'a pinned chat is absent from Recents and must not schedule a state update',
+  )
+  assert.equal(
+    drawerRowWindowForIndex(current, 795, 140),
+    current,
+    'an already-mounted row must preserve object identity',
+  )
+
+  const moved = drawerRowWindowForIndex(current, 795, 620)
+  assert.notEqual(moved, current)
+  assert.ok(moved.start <= 620 && moved.end > 620)
+  assert.equal(moved.end - moved.start, DRAWER_INITIAL_WINDOW_ROWS)
 })

@@ -98,7 +98,12 @@ function PaneChatView({
   }, [onDisplayReady, paneId])
 
   return (
-    <ErrorBoundary key={chatId} variant="inline" label="chat">
+    <ErrorBoundary
+      key={chatId}
+      variant="inline"
+      label="chat"
+      recoveryKey={`chat:${chatId}`}
+    >
       <ChatView
         key={chatId}
         chatId={chatId}

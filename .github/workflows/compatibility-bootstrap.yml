@@ -1,0 +1,194 @@
+name: Bootstrap compatible recovery channel
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Keep the useful build summary without retaining an unused Buildx record.
+  DOCKER_BUILD_RECORD_UPLOAD: 'false'
+  MOBIUS_IMAGE_REPOSITORY: ghcr.io/mobius-os/mobius
+  # Last public compatibility image before this one-time bridge release. The
+  # inventory gate accepts only this tuple or the exact current bootstrap SHA.
+  COMPATIBILITY_PREVIOUS_SHA: c0c07478a0c63cc227bc34a1b47c79424558b80c
+  COMPATIBILITY_PREVIOUS_DIGEST: sha256:bc1f08ce675a66977b1d4c0cf6dbbe77f9e44e4839f1a7995407d408690b1778
+
+# This compatible bridge release establishes both channels at one exact digest.
+# The sequential tag writes are crash-recoverable because every rerun reuses
+# the first exact digest and rejects every unrecognized registry state.
+concurrency:
+  group: mobius-core-image-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # This repository switch is enabled only for the one compatible A′ merge
+    # and disabled immediately after both tags pass anonymous verification.
+    # Later main pushes therefore cannot move either frozen legacy channel.
+    if: >-
+      vars.MOBIUS_COMPATIBILITY_BOOTSTRAP_ENABLED == 'true' &&
+      github.sha == vars.MOBIUS_COMPATIBILITY_BOOTSTRAP_SHA
+    environment: compatibility-bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Resolve exact compatibility build identity
+        id: identity
+        env:
+          EXPECTED_BOOTSTRAP_SHA: ${{ vars.MOBIUS_COMPATIBILITY_BOOTSTRAP_SHA }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          case "$GITHUB_SHA" in
+            *[!0-9a-f]*|'') exit 2 ;;
+          esac
+          test "${#GITHUB_SHA}" -eq 40
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$EXPECTED_BOOTSTRAP_SHA" = "$GITHUB_SHA"
+          echo "date=$(git show -s --format=%cs HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Inventory compatible channels and resume an exact partial publish
+        id: existing
+        run: |
+          anonymous_config="$RUNNER_TEMP/anonymous-docker-inventory"
+          install -d -m 0700 "$anonymous_config"
+          DOCKER_CONFIG="$anonymous_config" python3 scripts/compatibility_bootstrap.py \
+            inventory \
+            --repository "$MOBIUS_IMAGE_REPOSITORY" \
+            --current-sha "$GITHUB_SHA" \
+            --previous-sha "$COMPATIBILITY_PREVIOUS_SHA" \
+            --previous-digest "$COMPATIBILITY_PREVIOUS_DIGEST" \
+            --output "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Bootstrap the controlled external-recovery channel from the same
+      # compatible build as :main. A later recovery-removal release can move
+      # only that channel while legacy installs remain pinned to :main.
+      - name: Build and publish immutable compatibility image
+        id: build
+        if: steps.existing.outputs.mode == 'build'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          push: true
+          tags: ${{ env.MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+            BUILD_DATE=${{ steps.identity.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Select one exact bootstrap digest
+        id: selected
+        env:
+          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+          MODE: ${{ steps.existing.outputs.mode }}
+        run: |
+          if [ "$MODE" = reuse ]; then
+            digest=$EXISTING_DIGEST
+          else
+            digest=$BUILT_DIGEST
+          fi
+          case "$digest" in
+            sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "The selected bootstrap digest is invalid" >&2; exit 1 ;;
+          esac
+          case "${digest#sha256:}" in
+            *[!0-9a-f]*|'') exit 2 ;;
+          esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Verify immutable image anonymously and by baked revision
+        env:
+          IMAGE_DIGEST: ${{ steps.selected.outputs.digest }}
+        run: |
+          case "$IMAGE_DIGEST" in
+            sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "The published image digest is invalid" >&2; exit 1 ;;
+          esac
+          anonymous_config="$RUNNER_TEMP/anonymous-docker-bootstrap"
+          install -d -m 0700 "$anonymous_config"
+          observed=""
+          for attempt in 1 2 3 4 5 6 7 8; do
+            observed=$(DOCKER_CONFIG="$anonymous_config" \
+              docker buildx imagetools inspect \
+              "$MOBIUS_IMAGE_REPOSITORY@$IMAGE_DIGEST" \
+              --format '{{.Manifest.Digest}}' 2>/dev/null) || true
+            [ "$observed" = "$IMAGE_DIGEST" ] && break
+            sleep "$attempt"
+          done
+          test "$observed" = "$IMAGE_DIGEST"
+          revision=$(DOCKER_CONFIG="$anonymous_config" \
+            docker buildx imagetools inspect \
+            "$MOBIUS_IMAGE_REPOSITORY@$IMAGE_DIGEST" \
+            --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}')
+          test "$revision" = "$GITHUB_SHA"
+
+      - name: Verify this run still owns current main
+        env:
+          EXPECTED_BOOTSTRAP_SHA: ${{ vars.MOBIUS_COMPATIBILITY_BOOTSTRAP_SHA }}
+        run: |
+          test "$EXPECTED_BOOTSTRAP_SHA" = "$GITHUB_SHA"
+          current_sha=$(git ls-remote --exit-code origin refs/heads/main | awk 'NR == 1 { print $1 }')
+          test "$current_sha" = "$GITHUB_SHA"
+
+      - name: Establish exact compatible image channels
+        env:
+          IMAGE_DIGEST: ${{ steps.selected.outputs.digest }}
+          EXPECTED_BOOTSTRAP_SHA: ${{ vars.MOBIUS_COMPATIBILITY_BOOTSTRAP_SHA }}
+        run: |
+          for tag in main external-recovery; do
+            test "$EXPECTED_BOOTSTRAP_SHA" = "$GITHUB_SHA"
+            current_sha=$(git ls-remote --exit-code origin refs/heads/main | awk 'NR == 1 { print $1 }')
+            test "$current_sha" = "$GITHUB_SHA"
+            anonymous_config="$RUNNER_TEMP/anonymous-docker-prewrite-$tag"
+            install -d -m 0700 "$anonymous_config"
+            DOCKER_CONFIG="$anonymous_config" python3 scripts/compatibility_bootstrap.py \
+              prewrite \
+              --repository "$MOBIUS_IMAGE_REPOSITORY" \
+              --current-sha "$GITHUB_SHA" \
+              --previous-sha "$COMPATIBILITY_PREVIOUS_SHA" \
+              --previous-digest "$COMPATIBILITY_PREVIOUS_DIGEST" \
+              --selected-digest "$IMAGE_DIGEST" \
+              --tag "$tag"
+            docker buildx imagetools create \
+              --prefer-index=false \
+              --tag "$MOBIUS_IMAGE_REPOSITORY:$tag" \
+              "$MOBIUS_IMAGE_REPOSITORY@$IMAGE_DIGEST"
+          done
+
+      - name: Verify both compatible channels anonymously
+        env:
+          IMAGE_DIGEST: ${{ steps.selected.outputs.digest }}
+          EXPECTED_BOOTSTRAP_SHA: ${{ vars.MOBIUS_COMPATIBILITY_BOOTSTRAP_SHA }}
+        run: |
+          anonymous_config="$RUNNER_TEMP/anonymous-docker-channels"
+          install -d -m 0700 "$anonymous_config"
+          DOCKER_CONFIG="$anonymous_config" python3 scripts/compatibility_bootstrap.py \
+            final \
+            --repository "$MOBIUS_IMAGE_REPOSITORY" \
+            --current-sha "$GITHUB_SHA" \
+            --previous-sha "$COMPATIBILITY_PREVIOUS_SHA" \
+            --previous-digest "$COMPATIBILITY_PREVIOUS_DIGEST" \
+            --selected-digest "$IMAGE_DIGEST"
+          test "$EXPECTED_BOOTSTRAP_SHA" = "$GITHUB_SHA"
+          current_sha=$(git ls-remote --exit-code origin refs/heads/main | awk 'NR == 1 { print $1 }')
+          test "$current_sha" = "$GITHUB_SHA"

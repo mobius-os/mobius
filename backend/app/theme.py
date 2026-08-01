@@ -314,7 +314,7 @@ def _is_safe_import_url(url: str) -> bool:
 # Variables augmented when missing (full list lives in
 # `_CORE_VARS`):
 #   --bg, --surface, --surface2, --text, --muted,
-#   --accent, --accent-hover, --accent-dim,
+#   --accent, --accent-hover, --accent-dim, --accent-fg,
 #   --border, --border-light, --danger, --green,
 #   --font, --mono
 #
@@ -329,7 +329,7 @@ _CORE_VARS = {
   # invisible-on-dark-mode hardcoded literal (e.g. `var(--fg, #111)`
   # where --fg doesn't exist).
   "--bg", "--surface", "--surface2", "--text", "--muted",
-  "--accent", "--accent-hover", "--accent-dim",
+  "--accent", "--accent-hover", "--accent-dim", "--accent-fg",
   "--border", "--border-light", "--danger", "--green",
   "--font", "--mono",
 }
@@ -357,6 +357,58 @@ _LIGHT_DEFAULTS = {
   "--danger": "#ef4444",
   "--green": "#059669",
 }
+
+
+def _parse_css_rgb(value: str) -> tuple[int, int, int] | None:
+  """Best-effort (r, g, b) from a CSS color literal, else None."""
+  text = value.strip().lower()
+  m = re.fullmatch(r"#([0-9a-f]{3}|[0-9a-f]{6})", text)
+  if m:
+    digits = m.group(1)
+    if len(digits) == 3:
+      digits = "".join(c * 2 for c in digits)
+    return tuple(int(digits[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+  m = re.fullmatch(r"rgba?\(([^)]*)\)", text)
+  if m:
+    # Accept both legacy comma-separated and modern space-separated syntax
+    # (`rgb(255 255 255 / 50%)`); an unparseable form returns None and keeps
+    # the previous fixed default rather than guessing.
+    parts = [p for p in re.split(r"[,\s]+", m.group(1).replace("/", " ")) if p]
+    try:
+      channels = [round(float(p[:-1]) * 255 / 100) if p.endswith("%") else round(float(p))
+                  for p in parts[:3]]
+    except ValueError:
+      return None
+    if len(channels) == 3:
+      return tuple(max(0, min(255, c)) for c in channels)  # type: ignore[return-value]
+  return None
+
+
+def _relative_luminance(rgb: tuple[int, int, int]) -> float:
+  def channel(c: int) -> float:
+    s = c / 255
+    return s / 12.92 if s <= 0.04045 else ((s + 0.055) / 1.055) ** 2.4
+
+  r, g, b = (channel(c) for c in rgb)
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrasting_accent_fg(accent: str | None) -> str | None:
+  """DEFAULT_THEME's white, unless it would be illegible on `accent`.
+
+  A fixed #ffffff is wrong for a light accent -- a theme setting
+  --accent: #ffffff and omitting --accent-fg paints white on white on every
+  control that pairs the two.  But most accents are dark enough that white is
+  both legible and the intended Möbius look, so only swap to black when white
+  drops below the 3:1 WCAG AA floor for UI components and large text.  Returns
+  None when the accent cannot be parsed, leaving the existing default in place.
+  """
+  rgb = _parse_css_rgb(accent) if accent else None
+  if rgb is None:
+    return None
+  luminance = _relative_luminance(rgb)
+  white_contrast = 1.05 / (luminance + 0.05)
+  return "#ffffff" if white_contrast >= 3.0 else "#000000"
 
 
 def _infer_theme_mode(css: str) -> str:
@@ -425,6 +477,16 @@ def _ensure_core_vars(css: str) -> str:
       defaults[m.group(1)] = m.group(2).strip()
   if _infer_theme_mode(css) == "light":
     defaults.update(_LIGHT_DEFAULTS)
+  # --accent-fg is the one core var whose correct value depends on another var
+  # the theme DID supply.  Derive it from the theme's own --accent so a light
+  # accent does not inherit DEFAULT_THEME's white and paint white-on-white.
+  if "--accent-fg" in missing:
+    declared_accent = re.search(r"--accent\s*:\s*([^;]+);", css)
+    derived = _contrasting_accent_fg(
+      declared_accent.group(1).strip() if declared_accent else defaults.get("--accent")
+    )
+    if derived:
+      defaults["--accent-fg"] = derived
   injected = "\n".join(
     f"  {name}: {defaults[name]};"
     for name in sorted(missing)

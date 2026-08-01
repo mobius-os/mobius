@@ -7,7 +7,8 @@ so this module returns metadata only: refs, ancestry counts, source-diff
 magnitudes, and working-tree counts/path names.  It never fetches, writes, or
 returns source contents.
 
-Platform compares ``HEAD`` with ``origin/main``.  Apps keep their
+Platform compares ``HEAD`` with its configured update target (normally
+``origin/main``). Apps keep their
 installer-owned ``upstream`` branch as the installed baseline, while also
 reporting last-fetched ``origin`` and configured GitHub-fork topology.  Nothing
 here fetches, so every remote relationship is a view of refs already on disk,
@@ -23,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app import app_git
+from app import app_git, release_channel
 from app.config import get_settings
 
 _GIT_TIMEOUT = 8
@@ -455,6 +456,13 @@ def _project_status(
   *, repo: Path, kind: str, key: str, name: str, slug: str | None,
   version: str | None, manifest_url: str | None,
 ) -> dict[str, Any]:
+  platform_channel = None
+  channel_invalid = False
+  if kind == "platform":
+    try:
+      platform_channel = release_channel.platform_release_channel()
+    except release_channel.ReleaseChannelError:
+      channel_invalid = release_channel.release_ref_requested()
   response: dict[str, Any] = {
     "key": key,
     "kind": kind,
@@ -467,7 +475,11 @@ def _project_status(
     "forks": [],
     "branch": None,
     "head_sha": None,
-    "base_ref": "origin/main" if kind == "platform" else "upstream",
+    "base_ref": (
+      platform_channel.target_ref
+      if platform_channel is not None
+      else ("release-channel-invalid" if channel_invalid else "origin/main")
+    ) if kind == "platform" else "upstream",
     "base_sha": None,
     "ahead": None,
     "behind": None,
@@ -475,6 +487,28 @@ def _project_status(
     "reconciliation": None,
     "working": None,
     "state": "unavailable",
+    "contribution_disabled": bool(
+      channel_invalid
+      or (
+        platform_channel is not None
+        and platform_channel.contributions_disabled
+      )
+    ) if kind == "platform" else False,
+    "contribution_disabled_reason": (
+      release_channel.CONTRIBUTION_DISABLED_REASON
+      if kind == "platform" and (
+        channel_invalid
+        or (
+          platform_channel is not None
+          and platform_channel.contributions_disabled
+        )
+      )
+      else None
+    ),
+    "release_ref": (
+      platform_channel.release_ref
+      if platform_channel is not None else None
+    ) if kind == "platform" else None,
   }
   if not repo.is_dir() or not (repo / ".git").exists():
     return response
@@ -577,7 +611,7 @@ def _project_status(
 
 
 def build_platform_status() -> dict[str, Any]:
-  """Inspect the live platform clone against its last-fetched origin/main."""
+  """Inspect the live platform clone against its configured exact target."""
   settings = get_settings()
   data_dir = Path(settings.data_dir).resolve()
   return _project_status(

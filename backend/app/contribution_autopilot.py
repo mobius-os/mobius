@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,7 +35,8 @@ from pathlib import Path
 from sqlalchemy import and_, update
 from sqlalchemy.orm import Session
 
-from app import fs_locks, models
+from app import fs_locks, models, release_channel
+from app.chat_start import start_programmatic_chat_turn
 from app.config import get_settings
 from app.contribution_records import (
   now_iso,
@@ -269,6 +269,25 @@ def claim_for_round(
     row = get_row(db, app_id, record_id)
     if row is None or not row.enabled:
       return {"status": "not_granted"}
+    if release_channel.platform_contributions_disabled():
+      target_repo = str(row.target_repo or "").casefold()
+      platform = Path(get_settings().data_dir).resolve() / "platform"
+      try:
+        target_path = (
+          Path(row.target_repo_path).resolve()
+          if row.target_repo_path else None
+        )
+      except (OSError, RuntimeError, ValueError):
+        target_path = None
+      if (
+        target_repo == "mobius-os/mobius"
+        or target_path == platform
+        or (
+          target_path is not None
+          and target_path.is_relative_to(platform)
+        )
+      ):
+        return {"status": "not_granted"}
     if row.last_handled_attention_key == attention_key:
       return {"status": "duplicate"}
     if (
@@ -791,17 +810,12 @@ async def spawn_round_turn(
 ) -> bool:
   """Start a follow-up round turn in the dedicated chat.
 
-  Mirrors ``apps._start_conflict_resolver_turn`` but allows a non-empty IDLE
-  chat (rounds accumulate in one chat). Refuses only when the chat is missing or
-  a turn is already running — the caller then releases the claim and retries next
-  cron pass, so rounds never stack into the pending queue.
+  Unlike app conflict chats, Autopilot deliberately reuses a non-empty idle chat
+  so rounds accumulate in one place.  Eligibility stays here while the shared
+  programmatic-start boundary owns the turn lifecycle.  A busy chat is retried
+  on the next cron pass, so rounds never stack into the pending queue.
   """
-  from app.broadcast import create_broadcast, get_system_broadcast
-  from app.chat import (
-    current_run_generation, discard_starting, is_chat_running, mark_starting,
-    run_chat,
-  )
-  from app.chat_writer import StartTurn, alloc_run_token, await_ack, get_writer
+  from app.chat import is_chat_running
   from app.run_state import has_running_run
 
   chat = (
@@ -815,35 +829,9 @@ async def spawn_round_turn(
     or is_chat_running(chat_id)
   ):
     return False
-  if not mark_starting(chat_id):
-    return False
-
-  try:
-    start_gen = current_run_generation(chat_id)
-    run_token = alloc_run_token()
-    user_msg = {
-      "role": "user", "content": content, "ts": int(time.time() * 1000),
-    }
-    ack = get_writer().submit(StartTurn(
-      chat_id=chat_id,
-      run_token=run_token,
-      user_msg=user_msg,
-      title_source=title,
-      default_provider=provider,
-    ))
-    result = await await_ack(ack)
-    if current_run_generation(chat_id) != start_gen:
-      discard_starting(chat_id)
-      return False
-    create_broadcast(chat_id)
-    get_system_broadcast().publish(
-      {"type": "chat_run_started", "chatId": chat_id}
-    )
-    asyncio.create_task(run_chat(
-      result["history"], chat_id=chat_id, session_id=result["session_id"],
-      provider_id=result["provider"], run_gen=start_gen, run_token=run_token,
-    ))
-    return True
-  except Exception:
-    discard_starting(chat_id)
-    raise
+  return await start_programmatic_chat_turn(
+    chat_id=chat_id,
+    title=title,
+    content=content,
+    provider=provider,
+  )

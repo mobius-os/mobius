@@ -116,3 +116,54 @@ def test_update_check_reports_fetch_failure(client, auth, monkeypatch):
   res = client.post("/api/platform/check", headers=auth)
   assert res.status_code == 503
   assert res.json()["detail"] == "Could not reach the platform update source."
+
+
+def test_managed_release_disables_check_and_preview(client, auth, monkeypatch):
+  from app.platform_update import PlatformUpdateError
+
+  def managed():
+    raise PlatformUpdateError("platform_updates_managed_by_release_channel")
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.check_for_updates", managed,
+  )
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.platform_update_preview", managed,
+  )
+
+  checked = client.post("/api/platform/check", headers=auth)
+  preview = client.get("/api/platform/update-preview", headers=auth)
+
+  assert checked.status_code == 409
+  assert checked.json()["detail"] == (
+    "platform_updates_managed_by_release_channel"
+  )
+  assert preview.status_code == 409
+
+
+def test_managed_release_disables_apply(client, auth, monkeypatch, tmp_path):
+  from app import release_channel
+
+  sha = "e" * 40
+  info = tmp_path / "build-info.json"
+  info.write_text(f'{{"sha":"{sha}"}}\n')
+  monkeypatch.setattr(release_channel, "BUILD_INFO_PATH", info)
+  monkeypatch.setenv(
+    release_channel.PLATFORM_RELEASE_REF_ENV,
+    "refs/heads/release/external-recovery",
+  )
+
+  response = client.post(
+    "/api/platform/apply",
+    headers=auth,
+    json={
+      "plan_id": "a" * 64,
+      "current_sha": "b" * 40,
+      "target_sha": "c" * 40,
+    },
+  )
+
+  assert response.status_code == 409
+  assert response.json()["detail"] == (
+    "platform_updates_managed_by_release_channel"
+  )

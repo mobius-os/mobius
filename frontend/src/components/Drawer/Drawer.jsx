@@ -47,7 +47,7 @@ import {
   clampDrawerRowWindow,
   drawerRowSpacerHeights,
   drawerRowWindow,
-  drawerRowWindowContaining,
+  drawerRowWindowForIndex,
   initialDrawerRowWindow,
   sameDrawerRowWindow,
 } from './drawerRowWindow.js'
@@ -272,11 +272,13 @@ export default function Drawer({
     ))
     if (!isPinned && recentIndex < 0) return
 
-    if (recentIndex < recentWindow.start || recentIndex >= recentWindow.end) {
-      setRecentWindow(drawerRowWindowContaining(
-        allRecents.length,
-        recentIndex,
-      ))
+    const revealWindow = drawerRowWindowForIndex(
+      recentWindow,
+      allRecents.length,
+      recentIndex,
+    )
+    if (revealWindow !== recentWindow) {
+      setRecentWindow(revealWindow)
       return
     }
 

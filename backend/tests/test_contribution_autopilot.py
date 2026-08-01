@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from app import contribution_autopilot as autopilot
-from app import models
+from app import models, release_channel
 from app.config import get_settings
 from app.database import SessionLocal
 from app.storage_io import atomic_write
@@ -84,6 +84,37 @@ def test_claim_dedupe_busy_and_cursor(db):
   assert autopilot.claim_for_round(
     db, 1, "rec", attention_key="k3", event_at="2026-07-01T00:00:00Z",
   )["status"] == "duplicate"
+
+
+def test_non_main_release_disables_existing_platform_autopilot_grant(
+  db, monkeypatch, tmp_path,
+):
+  sha = "f" * 40
+  info = tmp_path / "build-info.json"
+  info.write_text(f'{{"sha":"{sha}"}}\n')
+  monkeypatch.setattr(release_channel, "BUILD_INFO_PATH", info)
+  monkeypatch.setenv(
+    release_channel.PLATFORM_RELEASE_REF_ENV,
+    "refs/heads/release/external-recovery",
+  )
+  autopilot.stamp_grant(
+    db,
+    1,
+    "platform-record",
+    head_sha=sha,
+    target_repo="mobius-os/mobius",
+  )
+
+  verdict = autopilot.claim_for_round(
+    db,
+    1,
+    "platform-record",
+    attention_key="review:1",
+    event_at="2026-07-01T00:00:00Z",
+  )
+
+  assert verdict["status"] == "not_granted"
+  assert autopilot.get_row(db, 1, "platform-record").state == "idle"
 
 
 def test_run_id_binds_the_round(db):

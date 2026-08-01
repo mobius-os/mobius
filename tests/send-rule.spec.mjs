@@ -244,7 +244,7 @@ test('Send while at the bottom hands off after a long response fills the reserva
   expect(m.scrollH - m.scrollTop - m.clientH).toBeLessThanOrEqual(8)
 })
 
-test('Immediate tail-to-send holds through reserved streaming room, then follows', async ({ page }) => {
+test('Immediate tail-to-send preserves a manual reserved-tail position as output fills it', async ({ page }) => {
   await installChunkedStreams(page, [
     [
       [0, { type: 'catch_up_done' }],
@@ -308,13 +308,13 @@ test('Immediate tail-to-send holds through reserved streaming room, then follows
   await page.waitForFunction(() => {
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
-    if (!scroll || !spacer || spacer.offsetHeight > 1) return false
-    return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 8
+    return !!scroll && !!spacer && spacer.offsetHeight <= 1
   })
 
-  const following = await measure(page)
-  expect(following.spacerH).toBeLessThanOrEqual(1)
-  expect(following.scrollH - following.scrollTop - following.clientH).toBeLessThanOrEqual(8)
+  const filled = await measure(page)
+  expect(filled.spacerH).toBeLessThanOrEqual(1)
+  expect(Math.abs(filled.scrollTop - manuallyHeld.scrollTop)).toBeLessThanOrEqual(8)
+  expect(filled.scrollH - filled.scrollTop - filled.clientH).toBeGreaterThan(50)
 })
 
 // ───────────────────────────────────────────────────────────────────

@@ -62,12 +62,31 @@ async def get_platform_status(
     return await asyncio.to_thread(platform_update.platform_status)
   except Exception as exc:
     log.warning("platform status failed: %r", exc)
+    release_ref = None
+    updates_disabled = False
+    try:
+      channel = platform_update.release_channel.platform_release_channel()
+      release_ref = channel.release_ref
+      updates_disabled = channel.updates_disabled
+    except platform_update.release_channel.ReleaseChannelError:
+      # A malformed requested channel must fail closed instead of restoring the
+      # main-channel buttons that could fetch/apply the wrong source.
+      updates_disabled = (
+        platform_update.release_channel.release_ref_requested()
+      )
     return PlatformStatus(
       state=platform_update.PlatformUpdateState.UP_TO_DATE.value,
       available=False, needs_restart=False, current_build_sha=None,
       recorded_upstream_sha=None, contained_upstream_sha=None,
       seed_required=False, conflict_paths=[],
       conflict_chat_id=None,
+      updates_disabled=updates_disabled,
+      update_disabled_reason=(
+        platform_update.release_channel.UPDATE_DISABLED_REASON
+        if updates_disabled
+        else None
+      ),
+      release_ref=release_ref,
     )
 
 
@@ -81,6 +100,14 @@ async def check_platform_updates(
   data for an authoritative "No updates found" result."""
   try:
     return await asyncio.to_thread(platform_update.check_for_updates)
+  except PlatformUpdateError as exc:
+    if str(exc) == "platform_updates_managed_by_release_channel":
+      raise HTTPException(status_code=409, detail=str(exc)) from exc
+    log.warning("platform check failed: %r", exc)
+    raise HTTPException(
+      status_code=503,
+      detail="Could not reach the platform update source.",
+    ) from exc
   except Exception as exc:
     log.warning("platform check failed: %r", exc)
     raise HTTPException(
@@ -99,6 +126,8 @@ async def get_platform_update_preview(
   shows "nothing to review" rather than breaking the page."""
   try:
     return await asyncio.to_thread(platform_update.platform_update_preview)
+  except PlatformUpdateError as exc:
+    raise HTTPException(status_code=409, detail=str(exc)) from exc
   except Exception as exc:
     log.warning("platform update-preview failed: %r", exc)
     return platform_update.empty_platform_update_preview()

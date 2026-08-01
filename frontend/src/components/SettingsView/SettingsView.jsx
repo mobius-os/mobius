@@ -1345,6 +1345,7 @@ export default function SettingsView({
   const platformRolledBack = platform?.state === 'rolled_back'
   const platformRestart = !!platform?.needs_restart
   const updateAvailable = !!platform?.available
+  const platformUpdatesDisabled = !!platform?.updates_disabled
   const mobiusUpdating =
     platformPhase === 'applying' || updatePhase === 'checking'
   const checkUpdatesLabel = updateCheckLabel(updatePhase)
@@ -1688,7 +1689,7 @@ export default function SettingsView({
                       : 'Resolve in chat'}
                 </button>
               ) : null
-            ) : platformRestart ? (
+            ) : platformUpdatesDisabled ? null : platformRestart ? (
               <div
                 className="settings__update-actions"
                 role="group"
@@ -1754,6 +1755,12 @@ export default function SettingsView({
               </button>
             )}
           </div>
+          {platformUpdatesDisabled && !platformConflict && (
+            <div className="settings__notice" role="status">
+              {platform?.update_disabled_reason
+                || 'Updates are managed by this deployment. Redeploy the next image to upgrade.'}
+            </div>
+          )}
           {platformPhase === 'restarting' && (
             <div className="settings__notice" role="status">
               {platformRestartSlow

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app import app_git, source_status
+from app import app_git, release_channel, source_status
 from app.config import get_settings
 
 
@@ -53,6 +53,34 @@ def _app(repo: Path, *, app_id: int = 7) -> dict:
     ),
     "source_dir": str(repo),
   }
+
+
+def test_platform_source_status_uses_exact_managed_target_and_disables_contribute(
+  monkeypatch, tmp_path,
+):
+  sha = "c" * 40
+  info = tmp_path / "build-info.json"
+  info.write_text(f'{{"sha":"{sha}"}}\n')
+  monkeypatch.setattr(release_channel, "BUILD_INFO_PATH", info)
+  monkeypatch.setenv(
+    release_channel.PLATFORM_RELEASE_REF_ENV,
+    "refs/heads/release/external-recovery",
+  )
+
+  result = source_status._project_status(
+    repo=tmp_path / "missing-platform",
+    kind="platform",
+    key="platform",
+    name="Möbius",
+    slug=None,
+    version=None,
+    manifest_url=None,
+  )
+
+  assert result["base_ref"] == sha
+  assert result["contribution_disabled"] is True
+  assert "non-main release channel" in result["contribution_disabled_reason"]
+  assert result["release_ref"] == "refs/heads/release/external-recovery"
 
 
 def test_aligned_and_history_only_ahead_keep_tree_magnitude_zero():

@@ -395,7 +395,13 @@ export const api = {
   },
   chats: {
     list: (options = {}) => apiFetch('/chats', options),
-    create: (payload) => listAffectingMutation('chats', '/chats', {
+    create: (payload, options = {}) => listAffectingMutation('chats', '/chats', {
+      ...options,
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    send: (chatId, payload, options = {}) => apiFetch(`/chats/${encodeURIComponent(chatId)}/messages`, {
+      ...options,
       method: 'POST',
       body: JSON.stringify(payload),
     }),

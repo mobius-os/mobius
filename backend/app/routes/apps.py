@@ -10,7 +10,6 @@ import secrets
 import shutil
 import subprocess
 import tempfile
-import time
 import uuid
 from datetime import datetime, UTC
 from pathlib import Path
@@ -56,6 +55,7 @@ from app.compiler import (
   CompileError,
   recompile_app_bundle,
 )
+from app.chat_start import start_programmatic_chat_turn
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -696,12 +696,7 @@ async def _start_conflict_resolver_turn(
   db: Session, chat_id: str, title: str, content: str, provider: str,
 ) -> bool:
   """Start the resolver turn only while the chat is empty and idle."""
-  from app.broadcast import create_broadcast
-  from app.chat import (
-    current_run_generation, discard_starting, is_chat_running, mark_starting,
-    run_chat,
-  )
-  from app.chat_writer import StartTurn, alloc_run_token, await_ack, get_writer
+  from app.chat import is_chat_running
   from app.run_state import has_running_run
 
   chat = (
@@ -714,38 +709,12 @@ async def _start_conflict_resolver_turn(
     is_chat_running(chat_id)
   ):
     return False
-  if not mark_starting(chat_id):
-    return False
-
-  try:
-    start_gen = current_run_generation(chat_id)
-    run_token = alloc_run_token()
-    user_msg = {
-      "role": "user", "content": content, "ts": int(time.time() * 1000),
-    }
-    ack = get_writer().submit(StartTurn(
-      chat_id=chat_id,
-      run_token=run_token,
-      user_msg=user_msg,
-      title_source=title,
-      default_provider=provider,
-    ))
-    result = await await_ack(ack)
-    if current_run_generation(chat_id) != start_gen:
-      discard_starting(chat_id)
-      return False
-    create_broadcast(chat_id)
-    get_system_broadcast().publish(
-      {"type": "chat_run_started", "chatId": chat_id}
-    )
-    asyncio.create_task(run_chat(
-      result["history"], chat_id=chat_id, session_id=result["session_id"],
-      provider_id=result["provider"], run_gen=start_gen, run_token=run_token,
-    ))
-    return True
-  except Exception:
-    discard_starting(chat_id)
-    raise
+  return await start_programmatic_chat_turn(
+    chat_id=chat_id,
+    title=title,
+    content=content,
+    provider=provider,
+  )
 
 
 def _materialize_conflict_files(

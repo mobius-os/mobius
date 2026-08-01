@@ -27,7 +27,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import Response
 
-from app import github_auth, source_status
+from app import github_auth, release_channel, source_status
 from app.config import get_settings
 from app.database import checked_out_connections
 from app.storage_io import atomic_write
@@ -1263,6 +1263,61 @@ def _prepared_real_review(app_id, record_id):
   return repo, record, diff_text
 
 
+def test_non_main_release_blocks_platform_contribution_before_claim_or_push(
+  client, owner_token, monkeypatch, tmp_path,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "managed-platform"
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/mobius",
+    "status": "prepared",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/mobius",
+    },
+  }
+  _write_contribution(app_id, record_id, record, "reviewed")
+  baked_sha = "d" * 40
+  info = tmp_path / "build-info.json"
+  info.write_text(f'{{"sha":"{baked_sha}"}}\n')
+  monkeypatch.setattr(release_channel, "BUILD_INFO_PATH", info)
+  monkeypatch.setenv(
+    release_channel.PLATFORM_RELEASE_REF_ENV,
+    "refs/heads/release/external-recovery",
+  )
+  pushed = False
+
+  def unexpected_push(*_args, **_kwargs):
+    nonlocal pushed
+    pushed = True
+
+  monkeypatch.setattr(
+    "app.routes.github._submit_prepared_pr", unexpected_push,
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 409
+  assert "non-main release channel" in response.json()["detail"]
+  assert pushed is False
+  projection = github_routes._chat_review_projection(record, app_id)
+  assert "non-main release channel" in (
+    projection["contribution_disabled_reason"]
+  )
+  stored = json.loads((
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "contributions" / f"{record_id}.json"
+  ).read_text())
+  assert stored["status"] == "prepared"
+
+
 def test_review_status_catches_local_drift_before_send(
   client, owner_token,
 ):
@@ -2089,9 +2144,17 @@ def test_cleanup_terminal_staging_checkout_only_removes_disposable_clone():
   }
   assert _cleanup_terminal_staging_checkout(record) is False
   assert disposable.exists()
-  record["status"] = "merged"
-  assert _cleanup_terminal_staging_checkout(record) is True
-  assert not disposable.exists()
+
+  for status in ("merged", "closed", "superseded", "commented", "abandoned"):
+    candidate = data_dir / "contrib" / f"terminal-cleanup-{status}" / "repo"
+    (candidate / ".git").mkdir(parents=True)
+    (candidate / "index.jsx").write_text("hello")
+    record = {
+      "status": status,
+      "plan": {"repo_path": str(candidate)},
+    }
+    assert _cleanup_terminal_staging_checkout(record) is True
+    assert not candidate.exists()
 
   live_repo = data_dir / "apps" / "terminal-cleanup-live"
   (live_repo / ".git").mkdir(parents=True)

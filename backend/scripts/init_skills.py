@@ -50,6 +50,9 @@ _UNMODIFIED_MIGRATIONS = {
   "cron.md": {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
+    # Locally curated pre-app-token copy. It tells scheduled app jobs to read
+    # the owner service token, contradicting supervised $APP_TOKEN authority.
+    "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
   },
   "recovery.md": {
     "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",

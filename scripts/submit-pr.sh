@@ -9,6 +9,13 @@ cd "$ROOT"
 err() { printf 'submit-pr: %s\n' "$*" >&2; }
 info() { printf 'submit-pr: %s\n' "$*"; }
 
+if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ] &&
+   [ "${MOBIUS_PLATFORM_RELEASE_REF}" != "refs/heads/main" ]; then
+  err "platform contributions are disabled on a non-main release channel"
+  err "redeploy on main before preparing or publishing platform changes"
+  exit 2
+fi
+
 check_private_history() {
   local commits
   commits="$(git rev-list HEAD -- \

@@ -57,7 +57,14 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
-from app import app_git, fs_locks, github_auth, models, source_status
+from app import (
+  app_git,
+  fs_locks,
+  github_auth,
+  models,
+  release_channel,
+  source_status,
+)
 from app.config import get_settings
 from app.contribution_records import (
   MAX_RECORD_BYTES,
@@ -133,6 +140,7 @@ from app.github_contributions import (
   _validate_submit_app,
   _recheck_submit_app,
   _safe_repo_path,
+  _record_targets_platform,
   _safe_equivalence_source_path,
   _equivalence_source_repo,
   _record_pending_equivalence,
@@ -886,6 +894,14 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
           and total > 0 else None
         ),
       }
+  contribution_disabled_reason = (
+    release_channel.CONTRIBUTION_DISABLED_REASON
+    if (
+      release_channel.platform_contributions_disabled()
+      and _record_targets_platform(record)
+    )
+    else ""
+  )
   return {
     "id": record_id,
     "type": text(record.get("type")),
@@ -900,6 +916,7 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "labels": labels,
     "last_submit_error": text(record.get("last_submit_error")),
     "updated_at": text(record.get("updated_at")),
+    "contribution_disabled_reason": contribution_disabled_reason,
     # `is_stack` keeps an invalid/legacy stack safely non-sendable. `stack`
     # carries only the display identity/order the chat needs to collapse every
     # valid layer into one review-together card; branch ancestry stays private.

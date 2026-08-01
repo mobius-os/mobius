@@ -3,6 +3,50 @@
 # the 'mobius' user for the actual server.  The non-root user allows
 # --dangerously-skip-permissions in the Claude CLI.
 
+# Recovery target mode is an immutable, early boot path. It must run before
+# touching /data or importing any agent-editable platform code. The separate
+# recovery worker reaches this private listener with a one-time bearer token
+# whose canonical base-10 epoch deadline is enforced by targetd itself.
+case "${MOBIUS_BOOT_MODE:-normal}" in
+  normal) ;;
+  recovery)
+    # Never exec the target with its bearer in the process environment. Linux
+    # exposes the original exec environment through /proc even after unsetenv,
+    # so move the secret through an unlinked, inherited descriptor and build a
+    # fresh Python environment without it. The target closes fd 3 before it
+    # starts listening and refuses to run unless it is container pid 1.
+    _recovery_target_token=${MOBIUS_RECOVERY_TARGET_TOKEN:-}
+    unset MOBIUS_RECOVERY_TARGET_TOKEN
+    umask 077
+    _recovery_token_file=$(mktemp /tmp/mobius-recovery-target-token.XXXXXX) || {
+      echo "FATAL: could not allocate recovery target secret descriptor." >&2
+      exit 70
+    }
+    if ! printf '%s' "$_recovery_target_token" > "$_recovery_token_file"; then
+      rm -f "$_recovery_token_file"
+      echo "FATAL: could not stage recovery target secret." >&2
+      exit 70
+    fi
+    exec 3< "$_recovery_token_file"
+    rm -f "$_recovery_token_file"
+    unset _recovery_target_token _recovery_token_file
+    MOBIUS_RECOVERY_TARGET_TOKEN_FD=3
+    export MOBIUS_RECOVERY_TARGET_TOKEN_FD
+    exec python3 -I /app/recovery-target/targetd.py
+    ;;
+  *)
+    echo "FATAL: MOBIUS_BOOT_MODE must be normal or recovery." >&2
+    exit 64
+    ;;
+esac
+
+# Root is an externally-controlled instance capability. There is deliberately
+# no partial apt/dpkg rule: package maintainer scripts already make that rule
+# equivalent to arbitrary root. Enabling this setting is therefore explicit
+# and honest; disabling it leaves the agent with no sudo path at all.
+. /app/scripts/agent_sudo.sh
+configure_agent_sudo "${MOBIUS_AGENT_SUDO:-0}" || exit $?
+
 # Stop cron on container shutdown so it doesn't orphan processes.
 cleanup() { kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null; }
 trap cleanup TERM INT
@@ -745,9 +789,22 @@ printf '%s\n' "$_served_sha" > /tmp/serving-sha
 chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 
 if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
-  # Slice B deploy=merge reconcile. A deploy ships a new image AND advances
-  # canonical origin/main; fetch origin and merge the new version once with the
-  # local edits NOW, before uvicorn imports the code, so the update goes live this
+  # A managed release image must not import the updater from the persistent
+  # checkout it is about to repair. That checkout may predate release-channel
+  # support and still follow origin/main. Import the root-owned updater baked
+  # into this exact image instead; it fetches the configured release ref but
+  # reconciles /data/platform only to /app/build-info.json's immutable SHA.
+  # Normal installations keep the historical persistent-updater path.
+  _platform_reconciler_backend=/data/platform/backend
+  _platform_reconciler_prefix=
+  if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
+    _platform_reconciler_backend=/app/platform-baked/backend
+    _platform_reconciler_prefix="env PYTHONDONTWRITEBYTECODE=1"
+  fi
+  # Deploy=merge reconcile. A normal deploy advances origin/main; a managed
+  # deploy fetches its configured channel and selects the image's baked SHA.
+  # Merge that selected version once with local edits before uvicorn imports it,
+  # so the update goes live this
   # boot with no restart. Runs as mobius (writes /data; root would poison /data
   # ownership + hit git "dubious ownership"), cwd the served backend so `app`
   # imports resolve from the clone, under the IDENTICAL GIT_*/PYTHONPATH scrub
@@ -760,9 +817,9 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # comfortably higher so internal timeouts fire FIRST; the post-timeout guard
   # below still cleans the tree if the outer kill ever wins. recoveryd remains
   # the outer floor.
-  echo "Platform layer: reconciling /data/platform with origin (slice B deploy=merge)..." >&2
+  echo "Platform layer: reconciling /data/platform with its configured release target..." >&2
   su -s /bin/sh mobius -c \
-    "cd /data/platform/backend && $_env_scrub timeout 900 python3 -c \
+    "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix timeout 900 python3 -c \
      'from app import platform_update; print(platform_update.reconcile_clone_sync())'" \
     2>&1 || true
   # Reconcile itself is best-effort, but the post-reconcile guard is the final
@@ -770,19 +827,43 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # state, do not import that tree. Exiting lets recoveryd/container policy use
   # the baked recovery floor instead of serving possibly half-applied code.
   if ! su -s /bin/sh mobius -c \
-    "cd /data/platform/backend && $_env_scrub python3 -c \
+    "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix python3 -c \
      'from app import platform_update; print(platform_update.boot_guard_sync())'" \
     2>&1; then
     echo "Platform layer: boot guard failed; refusing to serve the platform tree." >&2
     exit 1
   fi
+  # The best-effort reconcile intentionally exits zero on offline/conflict/
+  # invalid-channel outcomes. That is acceptable on the normal main channel,
+  # but a managed migration must never serve a pre-bridge persistent updater:
+  # it would ignore MOBIUS_PLATFORM_RELEASE_REF after uvicorn starts. Import the
+  # STRICT readiness proof from the baked backend. If /data/platform does not
+  # contain this image's exact baked SHA, preserve it for recovery and serve the
+  # immutable baked floor for this boot instead.
+  if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
+    if ! _managed_release_proof=$(su -s /bin/sh mobius -c \
+      "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix python3 -c \
+       'from app import platform_update; print(platform_update.managed_release_ready_sync())'" \
+      2>&1); then
+      echo "PLATFORM RELEASE WARNING: persistent checkout is not at this image's release." >&2
+      echo "  ${_managed_release_proof}" >&2
+      echo "  Serving the baked floor; /data/platform is preserved for recovery." >&2
+      _platform_use_baked
+    else
+      echo "Platform layer: ${_managed_release_proof}" >&2
+    fi
+  fi
   # A fast-forward / merge advanced main, so the served sha the /api/version and
   # /api/debug/serving routes report (written to /tmp/serving-sha above) must
   # reflect the reconciled HEAD, not the pre-reconcile clone tip.
-  _served_sha=$(su -s /bin/sh mobius -c \
-    'git -C /data/platform rev-parse HEAD' 2>/dev/null || echo "$_served_sha")
+  if [ "$_use_platform" -eq 1 ]; then
+    _served_sha=$(su -s /bin/sh mobius -c \
+      'git -C /data/platform rev-parse HEAD' 2>/dev/null || echo "$_served_sha")
+  fi
+  # Selection may have changed to baked after the first markers were written.
+  printf '%s\n' "$_serve_source" > /tmp/serving-source
   printf '%s\n' "$_served_sha" > /tmp/serving-sha
-  chmod 644 /tmp/serving-sha 2>/dev/null || true
+  chmod 644 /tmp/serving-source /tmp/serving-sha 2>/dev/null || true
 fi
 
 # SECRET_KEY drift detection.

@@ -28,6 +28,7 @@ from app import (
   github_auth,
   github_contribution_git as _git_ops,
   models,
+  release_channel,
 )
 from app.config import get_settings
 from app.contribution_errors import ContributionSubmitError
@@ -51,6 +52,7 @@ from app.deps import Principal
 _CONTRIBUTION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _PUSH_RETRIES = 3
 _PUSH_RETRY_BASE_SECONDS = 0.5
+_PLATFORM_REPO = "mobius-os/mobius"
 
 def _require_github_access_principal(
   principal: Principal, db: Session
@@ -137,6 +139,38 @@ def _safe_repo_path(raw: object) -> Path:
     "Ask the agent to prepare it again from /data/contrib, /data/apps, or "
     "/data/platform; nothing was sent to GitHub."
   )
+
+
+def _record_targets_platform(record: dict) -> bool:
+  """Recognize platform records even when review uses a staging worktree."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  target = str(plan.get("repo") or record.get("repo") or "").casefold()
+  if target == _PLATFORM_REPO:
+    return True
+  platform = Path(get_settings().data_dir).resolve() / "platform"
+  for key in ("source_repo_path", "repo_path"):
+    raw = plan.get(key)
+    if not isinstance(raw, str) or not raw:
+      continue
+    try:
+      candidate = Path(raw).resolve()
+      if candidate == platform or candidate.is_relative_to(platform):
+        return True
+    except (OSError, RuntimeError, ValueError):
+      continue
+  return False
+
+
+def _require_platform_contribution_allowed(record: dict) -> None:
+  """Block before a private record is claimed or any GitHub write can start."""
+  if (
+    release_channel.platform_contributions_disabled()
+    and _record_targets_platform(record)
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail=release_channel.CONTRIBUTION_DISABLED_REASON,
+    )
 
 
 def _safe_equivalence_source_path(raw: object) -> Path:
@@ -326,7 +360,9 @@ def _settle_equivalence(record: dict, upstream_sha: str | None = None) -> str | 
 
 def _cleanup_terminal_staging_checkout(record: dict) -> bool:
   """Remove a terminal contribution checkout through its owning Git shape."""
-  if record.get("status") not in {"merged", "closed"}:
+  if record.get("status") not in {
+    "merged", "closed", "superseded", "commented", "abandoned",
+  }:
     return False
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   repo = _safe_repo_path(plan.get("repo_path"))
@@ -436,6 +472,7 @@ def _claim_record(
         "chain together."
       ),
     )
+  _require_platform_contribution_allowed(record)
   now = _now_iso()
   claimed = {
     **record,
@@ -591,6 +628,8 @@ def _claim_stack_records(
     validated = _validate_stack_records([row["record"] for row in rows])
   except ContributionSubmitError as exc:
     raise HTTPException(status_code=409, detail=exc.message) from exc
+  for item in validated:
+    _require_platform_contribution_allowed(item["record"])
   by_id = {row["record"]["id"]: row for row in rows}
   ordered = []
   now = _now_iso()
@@ -644,6 +683,8 @@ def _claim_stack_landing(
     validated = _validate_stack_records([row["record"] for row in rows])
   except ContributionSubmitError as exc:
     raise HTTPException(status_code=409, detail=exc.message) from exc
+  for item in validated:
+    _require_platform_contribution_allowed(item["record"])
   statuses = {item["record"].get("status") for item in validated}
   by_id = {row["record"]["id"]: row for row in rows}
   ordered = [

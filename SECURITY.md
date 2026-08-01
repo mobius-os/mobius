@@ -79,6 +79,25 @@ editable platform is broken. This is appropriate because:
 3. Recovery is isolated from the editable production process and provides the
    rollback boundary.
 
+Full agent root is an explicit instance capability, disabled by default.
+`MOBIUS_AGENT_SUDO=1` is accepted only by the root-owned baked entrypoint and
+creates an unrestricted sudo rule after owner confirmation; reverting it
+requires recreating the container. The recovery worker never shares that
+container: it is non-root/read-only and reaches a separate root target through
+a one-time authenticated, bounded protocol. The target removes the bearer from
+its exec environment, wipes it after deriving a one-way verifier, blocks child
+access to its memory and descriptors, drops packet-capture/ptrace/mount
+capabilities, and confines its own file helpers to explicit roots with Linux
+`openat2`. Repair commands retain root over the stopped `/data` instance but
+cannot inspect target PID1 or modify the recovery worker itself.
+
+Self-hosted recovery containers never restart automatically. A worker restart
+would reconstruct its tmpfs-backed one-time-code state from unchanged
+environment credentials, while a target restart would retain the same bearer.
+If either exits, use `scripts/mobiusctl recovery reopen`; it removes both
+containers, rotates both credentials, pulls the latest worker, and recreates a
+clean pair while keeping the ordinary app stopped.
+
 ## Opaque embedded-chat contract
 
 `window.mobius.chat` creates three documents. The outer sandbox restriction

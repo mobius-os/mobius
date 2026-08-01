@@ -43,6 +43,46 @@ export const LIGHT_COLORS = {
   '--green': '#059669',
 }
 
+// Mirrors `_contrasting_accent_fg` in backend/app/theme.py. `--accent-fg` is the
+// one core var whose correct value is a function of another var the theme owns,
+// so it must never be a fixed palette entry: a constant here would be spread
+// back over the server-derived value on every toggle, and `persistTheme` would
+// write it into the first `:root` where `_ensure_core_vars` stops treating it as
+// missing -- permanently disabling the derivation for that theme.
+// Deliberately narrow: keep white unless it drops below the 3:1 WCAG AA floor
+// for UI components, so the shipped accent keeps its white.
+export function contrastingAccentFg(accent) {
+  const rgb = parseCssRgb(accent)
+  if (!rgb) return null
+  const channel = (c) => {
+    const s = c / 255
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
+  }
+  const [r, g, b] = rgb.map(channel)
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  return 1.05 / (luminance + 0.05) >= 3 ? '#ffffff' : '#000000'
+}
+
+function parseCssRgb(value) {
+  const text = String(value || '').trim().toLowerCase()
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(text)
+  if (hex) {
+    const d = hex[1].length === 3 ? [...hex[1]].map((c) => c + c).join('') : hex[1]
+    return [0, 2, 4].map((i) => parseInt(d.slice(i, i + 2), 16))
+  }
+  const fn = /^rgba?\(([^)]*)\)$/.exec(text)
+  if (fn) {
+    const parts = fn[1].replace(/\//g, ' ').split(/[,\s]+/).filter(Boolean).slice(0, 3)
+    if (parts.length !== 3) return null
+    const channels = parts.map((p) => p.endsWith('%')
+      ? Math.round((parseFloat(p) * 255) / 100)
+      : Math.round(parseFloat(p)))
+    if (channels.some((c) => !Number.isFinite(c))) return null
+    return channels.map((c) => Math.max(0, Math.min(255, c)))
+  }
+  return null
+}
+
 export function parseThemeMeta(css) {
   const imports = []
   let rest = css

@@ -6,6 +6,8 @@ set -euo pipefail
 ROOT="${MOBIUS_TEST_IMAGE_INPUT_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 files=(
   Dockerfile
+  backend/legacy_runtime/jose/__init__.py
+  backend/legacy_runtime/verify_jose.py
   backend/requirements.txt
   backend/requirements.lock
   frontend/package.json

@@ -168,7 +168,7 @@
   <body style="margin:0;background:var(--bg,#0d0d0d)">
     <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
     <div id="splash" style="position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:var(--bg,#0d0d0d);z-index:9999;transition:opacity .3s ease;contain:strict">
-      <img src="/moebius.png" width="56" height="56" alt="" style="opacity:.4;will-change:opacity" />
+      <img src="/moebius.png" width="44" height="44" alt="" style="opacity:.4;will-change:opacity" />
     </div>
     <div id="root"></div>
     <script>
@@ -188,13 +188,30 @@
       if ('scrollRestoration' in history) {
         history.scrollRestoration = 'manual'
       }
-      // If the shell JS fails to load within 8s, surface a recovery link so the
-      // user can restore the UI without knowing the server address.
+      // If the shell JS fails to load within 8s, offer an ordinary reload first
+      // and keep the independent recovery service as the last resort.
       setTimeout(function() {
         if (!document.getElementById('root').hasChildNodes()) {
           var d = document.createElement('div')
-          d.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:99999;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px 20px;font-family:system-ui,sans-serif;font-size:13px;color:#94a3b8;text-align:center;white-space:nowrap'
-          d.innerHTML = 'Shell failed to load. <a href="/recover" style="color:#a78bfa;text-decoration:none;font-weight:500">Open recovery page \u2192</a>'
+          var retry = document.createElement('a')
+          var recovery = document.createElement('a')
+          d.setAttribute('role', 'alert')
+          d.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:99999;width:max-content;max-width:calc(100vw - 48px);background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px 20px;font-family:system-ui,sans-serif;font-size:13px;line-height:1.5;color:#cbd5e1;text-align:center'
+          retry.href = window.location.href
+          retry.textContent = 'Try again'
+          retry.style.cssText = 'color:#c4b5fd;text-decoration:none;font-weight:600'
+          retry.addEventListener('click', function(event) {
+            event.preventDefault()
+            window.location.reload()
+          })
+          recovery.href = '/recover'
+          recovery.target = '_top'
+          recovery.textContent = 'open recovery'
+          recovery.style.cssText = 'color:inherit;text-decoration:underline;text-underline-offset:2px'
+          d.append(
+            'Möbius failed to load. ', retry,
+            '. If it still won’t load, ', recovery, '.',
+          )
           document.body.appendChild(d)
         }
       }, 8000)

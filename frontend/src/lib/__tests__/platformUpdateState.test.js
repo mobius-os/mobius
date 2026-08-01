@@ -117,3 +117,14 @@ test('blocking and repair states keep priority over batching copy', () => {
     'Update needs repair',
   )
 })
+
+test('deployment-managed releases do not advertise an in-app update', () => {
+  assert.equal(
+    platformUpdateStatusLabel({
+      state: 'available',
+      available: true,
+      updates_disabled: true,
+    }),
+    'Managed by deployment',
+  )
+})

@@ -3,10 +3,11 @@
 ``/data/platform`` is a real ``git clone`` of the canonical repo; uvicorn serves
 its backend directly (``cd /data/platform/backend && uvicorn app.main:app``).
 Local ``main`` carries the agent's edits; the ``upstream`` branch records the
-commit the clone was last reconciled to (set to HEAD at clone time). A deploy
-ships a new image AND advances canonical ``origin/main``; this module makes that
-deploy actually REACH a running instance by fetching origin and merging it with
-the local edits — on boot (before uvicorn imports the code, so
+commit the clone was last reconciled to (set to HEAD at clone time). A normal
+deploy advances ``origin/main``. A managed-channel deploy fetches its configured
+branch but selects only the exact commit baked into that image. This module makes
+either deploy actually REACH a running instance by merging the selected target
+with local edits — on boot (before uvicorn imports the code, so
 the update goes live automatically) and on owner-triggered Apply. Owner Apply
 pins the exact target returned by the review plan even if its fetch observes a
 newer remote head; backend changes then need a restart to load.
@@ -30,7 +31,7 @@ The reconcile is built to be non-destructive above all else:
    serving a broken tree.
 
 Availability is an EXACT ancestry check, not a sha-string compare: an update is
-available iff ``origin/main`` is NOT already an ancestor of local ``main`` — the
+available iff the configured target is NOT already an ancestor of local ``main`` — the
 same ``git merge-base --is-ancestor`` model ``app_git`` uses for an app. This
 module reuses ``app_git``'s isolated git env and ``commit_local`` engine; it does
 NOT carry forward the old baked-floor machinery (recording a baked tree onto
@@ -63,7 +64,7 @@ from typing import Callable, Literal, TypedDict
 
 from sqlalchemy.orm import Session
 
-from app import app_git
+from app import app_git, release_channel
 
 
 log = logging.getLogger(__name__)
@@ -110,9 +111,10 @@ UPDATE_PROGRESS_PATH = Path("/data/.platform-update-progress.json")
 
 UPSTREAM_BRANCH = "upstream"
 LOCAL_BRANCH = "main"
-# The canonical release ref a reconcile targets. A configured release channel
-# could override this later; for now it is the remote-tracking ``origin/main``.
-DEFAULT_TARGET_REF = "origin/main"
+# Preserve the historical public constant for callers/tests. Runtime entry
+# points resolve through release_channel so managed images can fetch a release
+# branch while targeting only their exact baked commit.
+DEFAULT_TARGET_REF = release_channel.DEFAULT_TARGET_REF
 # Keeps an off-tree semantic merge-base tree reachable while an owner may leave
 # a platform conflict unresolved across Git maintenance or server restarts.
 _CONFLICT_MERGE_BASE_REF = "refs/mobius/platform-conflict-base"
@@ -198,6 +200,34 @@ class PlatformUpdateError(RuntimeError):
   """A platform update could not proceed (carries a short machine code)."""
 
 
+def _runtime_release_channel() -> release_channel.PlatformReleaseChannel:
+  """Resolve the deployment contract as a platform-update error."""
+  try:
+    return release_channel.platform_release_channel()
+  except release_channel.ReleaseChannelError as exc:
+    raise PlatformUpdateError(str(exc)) from exc
+
+
+def _managed_status_fields(
+  channel: release_channel.PlatformReleaseChannel,
+) -> dict[str, object]:
+  return {
+    "updates_disabled": channel.updates_disabled,
+    "update_disabled_reason": (
+      release_channel.UPDATE_DISABLED_REASON
+      if channel.updates_disabled else None
+    ),
+    "release_ref": channel.release_ref,
+  }
+
+
+def _require_interactive_updates(
+  channel: release_channel.PlatformReleaseChannel,
+) -> None:
+  if channel.updates_disabled:
+    raise PlatformUpdateError("platform_updates_managed_by_release_channel")
+
+
 class PlatformUpdateState(str, Enum):
   """User-visible state for the platform updater."""
 
@@ -228,6 +258,12 @@ class PlatformStatus(TypedDict):
   # the owner straight to it. None unless ``state == "conflict"`` AND the id was
   # recorded.
   conflict_chat_id: str | None
+  # Non-main release channels are upgraded by pulling/redeploying the next
+  # image. The in-app fetch/apply UI is disabled so it cannot follow main or
+  # imply that a moving branch tip is safe to apply from this image.
+  updates_disabled: bool
+  update_disabled_reason: str | None
+  release_ref: str | None
 
 
 class PlatformApplyResult(TypedDict):
@@ -575,27 +611,35 @@ def boot_guard_clean_served_tree(repo: Path = PLATFORM_REPO) -> str:
   return "boot_guard[clean]"
 
 
-def _fetch(repo: Path = PLATFORM_REPO) -> bool:
-  """``git fetch --no-tags origin`` with a bounded timeout. Returns True on
+def _fetch(
+  repo: Path = PLATFORM_REPO, *, refspec: str | None = None,
+) -> bool:
+  """Bounded ``git fetch`` of main or one explicit release refspec. Returns True on
   success, False when the fetch fails (offline / unreachable origin) — a
   non-fatal condition: the caller keeps serving the current clone and retries on
   the next boot. A hung fetch (timeout) is treated as failure, not a wedge."""
   try:
-    proc = _git("fetch", "--no-tags", "origin", repo=repo, check=False,
-                timeout=_FETCH_TIMEOUT)
+    args = ["fetch", "--no-tags", "origin"]
+    if refspec is not None:
+      args.append(refspec)
+    proc = _git(*args, repo=repo, check=False, timeout=_FETCH_TIMEOUT)
     return proc.returncode == 0
   except (subprocess.TimeoutExpired, OSError):
     return False
 
 
-def _fetch_unshallow(repo: Path = PLATFORM_REPO) -> None:
+def _fetch_unshallow(
+  repo: Path = PLATFORM_REPO, *, refspec: str | None = None,
+) -> None:
   """Deepen a shallow clone so a merge can find a real merge base. Best-effort:
   an offline/timeout failure leaves the clone shallow and the caller's merge
   either still succeeds (the base was inside the shallow window) or reports a
   conflict, which fails closed to serve-old — never a hard reset."""
   try:
-    _git("fetch", "--unshallow", "--no-tags", "origin", repo=repo, check=False,
-         timeout=_FETCH_TIMEOUT)
+    args = ["fetch", "--unshallow", "--no-tags", "origin"]
+    if refspec is not None:
+      args.append(refspec)
+    _git(*args, repo=repo, check=False, timeout=_FETCH_TIMEOUT)
   except (subprocess.TimeoutExpired, OSError):
     pass
 
@@ -1209,6 +1253,8 @@ def reconcile_clone(
   repo: Path = PLATFORM_REPO,
   *,
   target_ref: str = DEFAULT_TARGET_REF,
+  fetch_refspec: str | None = None,
+  release_tip_ref: str | None = None,
   at_boot: bool = False,
   fetch_remote: bool = True,
   progress: Callable[[PlatformUpdatePhase], None] | None = None,
@@ -1217,8 +1263,11 @@ def reconcile_clone(
 
   The one entry point for both boot and owner Apply. At boot (``at_boot=True``)
   ``fetch_remote`` refreshes the moving release ref before the fresh uvicorn
-  imports it. Owner Apply passes a full reviewed oid with ``fetch_remote=False``
-  so it neither repeats network work nor changes the selected release. A success
+  imports it. A managed image passes an explicit ``fetch_refspec`` but targets
+  its baked oid; ``release_tip_ref`` proves that oid still belongs to the fetched
+  channel before any working-tree mutation. Owner Apply passes a full reviewed
+  oid with ``fetch_remote=False`` so it neither repeats network work nor changes
+  the selected release. A success
   that changes backend code still needs a restart. Never raises for an
   operational failure (offline, conflict, import-broken) — it returns a
   :class:`ReconcileResult` describing the outcome and always leaves
@@ -1247,13 +1296,49 @@ def reconcile_clone(
   if fetch_remote:
     if progress:
       progress(PlatformUpdatePhase.FETCHING)
-    if not _fetch(repo):
+    fetched = (
+      _fetch(repo)
+      if fetch_refspec is None
+      else _fetch(repo, refspec=fetch_refspec)
+    )
+    if not fetched:
       # Offline is non-fatal: keep serving the current clone, retry next boot.
       _write_offline_flag("fetch_failed")
       return ReconcileResult("offline", pre, pre, None, error="fetch_failed")
     OFFLINE_FLAG.unlink(missing_ok=True)
 
   target = _rev(repo, target_ref)
+  if release_tip_ref is not None:
+    # An explicit channel fetch may leave an old image's baked commit outside a
+    # shallow boundary. Deepen only that same channel, then require both the
+    # exact object and ancestry from it to the freshly fetched channel tip. A
+    # force-moved/misconfigured branch therefore serves the old clean tree; it
+    # never falls back to main or silently applies the moving tip.
+    release_tip = _rev(repo, release_tip_ref)
+    membership_proven = bool(
+      target
+      and release_tip
+      and _is_ancestor(repo, target, release_tip)
+    )
+    if not membership_proven and _is_shallow(repo):
+      _fetch_unshallow(repo, refspec=fetch_refspec)
+      target = _rev(repo, target_ref)
+      release_tip = _rev(repo, release_tip_ref)
+      membership_proven = bool(
+        target
+        and release_tip
+        and _is_ancestor(repo, target, release_tip)
+      )
+    if not target:
+      _write_offline_flag("release_target_missing")
+      return ReconcileResult(
+        "error", pre, pre, None, error="release_target_missing",
+      )
+    if not membership_proven:
+      _write_offline_flag("release_target_outside_ref")
+      return ReconcileResult(
+        "error", pre, pre, target, error="release_target_outside_ref",
+      )
   if not target:
     _write_offline_flag("no_target_ref")
     return ReconcileResult("offline", pre, pre, None, error="no_target_ref")
@@ -1304,7 +1389,10 @@ def reconcile_clone(
     if _is_shallow(repo) and not fast_forward:
       if progress:
         progress(PlatformUpdatePhase.FETCHING)
-      _fetch_unshallow(repo)
+      if fetch_refspec is None:
+        _fetch_unshallow(repo)
+      else:
+        _fetch_unshallow(repo, refspec=fetch_refspec)
       if progress:
         progress(PlatformUpdatePhase.RECONCILING)
       fast_forward = bool(pre) and _is_ancestor(repo, pre, target)
@@ -1461,6 +1549,8 @@ def _reconcile_under_lock(
   at_boot: bool,
   *,
   target_ref: str = DEFAULT_TARGET_REF,
+  fetch_refspec: str | None = None,
+  release_tip_ref: str | None = None,
   plan_id: str | None = None,
   current_sha: str | None = None,
   progress: Callable[[PlatformUpdatePhase], None] | None = None,
@@ -1485,16 +1575,22 @@ def _reconcile_under_lock(
         target_sha=target_ref,
       )
     previous_upstream_sha = _rev(repo, UPSTREAM_BRANCH) or None
-    result = reconcile_clone(
-      repo,
-      target_ref=target_ref,
-      at_boot=at_boot,
+    reconcile_kwargs = {
+      "target_ref": target_ref,
+      "at_boot": at_boot,
       # A reviewed Apply already proved the immutable object exists. Fetching a
       # moving remote again adds latency and was the original TOCTOU bug; boot
       # keeps the normal refresh path. A shallow merge may still deepen below.
-      fetch_remote=plan_id is None,
-      progress=progress,
-    )
+      "fetch_remote": plan_id is None,
+      "progress": progress,
+    }
+    # Keep the default/main call shape unchanged for old monkeypatch consumers
+    # and, more importantly, keep its git fetch behavior byte-for-byte normal.
+    if fetch_refspec is not None:
+      reconcile_kwargs["fetch_refspec"] = fetch_refspec
+    if release_tip_ref is not None:
+      reconcile_kwargs["release_tip_ref"] = release_tip_ref
+    result = reconcile_clone(repo, **reconcile_kwargs)
     if (
       result.status == "updated"
       and prepare_frontend
@@ -1529,11 +1625,22 @@ def _short(sha: str | None) -> str:
 
 def reconcile_clone_sync() -> str:
   """Boot entry point (called from a throwaway ``python3 -c`` as mobius, cwd the
-  served backend). Runs one locked reconcile and returns a one-line summary for
+  served backend normally or the image-baked backend on a managed channel).
+  Runs one locked reconcile and returns a one-line summary for
   the entrypoint log. Never raises — a reconcile failure must not brick boot; the
   worst case leaves the pre-reconcile code serving and a flag set."""
   try:
-    res = _reconcile_under_lock(PLATFORM_REPO, at_boot=True)
+    channel = _runtime_release_channel()
+    if channel.configured:
+      res = _reconcile_under_lock(
+        PLATFORM_REPO,
+        at_boot=True,
+        target_ref=channel.target_ref,
+        fetch_refspec=channel.fetch_refspec,
+        release_tip_ref=channel.tracking_ref,
+      )
+    else:
+      res = _reconcile_under_lock(PLATFORM_REPO, at_boot=True)
     # Even an offline/conflict pass leaves a complete served tree on disk. Hook
     # refresh is local-only, so do it on every boot rather than waiting for a
     # successful fetch that may be unrelated to the stale installed copy.
@@ -1555,6 +1662,36 @@ def reconcile_clone_sync() -> str:
     return f"reconcile[error] {exc!r}"
 
 
+def managed_release_ready_sync() -> str:
+  """Strict post-reconcile proof used only by managed-channel entrypoint boot.
+
+  The ordinary reconcile remains best-effort so a transient fetch cannot brick
+  normal main-channel boot. A managed migration has a stronger requirement:
+  serving an old persistent checkout could also serve an old updater that does
+  not understand the release channel. The entrypoint imports this function from
+  the baked backend and falls back to the baked floor unless the image's exact
+  baked commit is already contained in the clean persistent ``HEAD``.
+
+  Unlike :func:`reconcile_clone_sync`, this deliberately raises on every failed
+  proof. It never mutates the repository.
+  """
+  channel = _runtime_release_channel()
+  if not channel.configured:
+    raise PlatformUpdateError("platform_release_channel_not_configured")
+  if not (PLATFORM_REPO / ".git").exists():
+    raise PlatformUpdateError("platform_repo_missing")
+  target = _rev(PLATFORM_REPO, channel.target_ref)
+  if not target:
+    raise PlatformUpdateError("managed_release_target_missing")
+  head = _rev(PLATFORM_REPO, "HEAD")
+  if not head or not _is_ancestor(PLATFORM_REPO, target, head):
+    raise PlatformUpdateError("managed_release_target_not_integrated")
+  return (
+    f"managed_release[ready] head={_short(head)} "
+    f"target={_short(target)}"
+  )
+
+
 def boot_guard_sync() -> str:
   """Shell entry point run after reconcile and before uvicorn.
 
@@ -1569,19 +1706,19 @@ def boot_guard_sync() -> str:
 def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   """Compute update availability on demand (no daemon, no polling, no fetch).
 
-  Availability is an EXACT ancestry check: an update is available iff
-  ``origin/main`` (the remote-tracking ref from the last boot/apply fetch, read
-  cheaply with ``git rev-parse``) is NOT an ancestor of local ``main``. Conflict
-  and rolled-back states come from their persisted flags and take precedence over
-  a bare "available".
+  Availability is an EXACT ancestry check against the configured target. Normal
+  installations read ``origin/main``; managed images read their baked SHA after
+  boot proved it belongs to the configured release branch. Conflict and
+  rolled-back states take precedence over a bare "available".
   """
+  channel = _runtime_release_channel()
   image_sha = current_build_sha()
   upstream_sha = recorded_upstream_sha(repo)
   conflict = CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)
   rolled_back = ROLLED_BACK_FLAG.exists()
   restart_needed = RESTART_NEEDED_FLAG.exists() or _platform_tree_needs_restart(repo)
   local = _local_branch(repo)
-  target = _rev(repo, DEFAULT_TARGET_REF)
+  target = _rev(repo, channel.target_ref)
   target_contained = bool(target) and _is_ancestor(repo, target, local)
   contained_upstream_sha = target if target_contained else upstream_sha
 
@@ -1595,6 +1732,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
       contained_upstream_sha=contained_upstream_sha,
       seed_required=False,
       conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
+      **_managed_status_fields(channel),
     )
 
   available = bool(target) and not target_contained
@@ -1615,6 +1753,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
     contained_upstream_sha=contained_upstream_sha,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
+    **_managed_status_fields(channel),
   )
 
 
@@ -1622,7 +1761,7 @@ def check_for_updates(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   """Owner-triggered "Check for updates": fetch origin, THEN report availability.
 
   :func:`platform_status` is deliberately fetch-free — it reads the
-  remote-tracking ``origin/main`` left by the last boot/apply fetch — so this is
+  configured target left by the last boot/apply fetch — so this is
   the one on-demand path that refreshes that ref without waiting for a reboot.
   A missing clone/origin or failed fetch is an explicit error: returning status
   from a stale remote-tracking ref would tell the owner "No updates found" when
@@ -1631,14 +1770,41 @@ def check_for_updates(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   and ``main`` are untouched — a fetch only advances remote-tracking refs, so
   this is safe to run anytime and never mutates the served code.
   """
+  channel = _runtime_release_channel()
+  _require_interactive_updates(channel)
   if not (repo / ".git").exists():
     raise PlatformUpdateError("platform_repo_missing")
   if not _has_origin(repo):
     raise PlatformUpdateError("platform_origin_missing")
   with _reconcile_flock():
-    if not _fetch(repo):
+    fetched = (
+      _fetch(repo)
+      if channel.fetch_refspec is None
+      else _fetch(repo, refspec=channel.fetch_refspec)
+    )
+    if not fetched:
       raise PlatformUpdateError("platform_fetch_failed")
-    target = _rev(repo, DEFAULT_TARGET_REF)
+    target = _rev(repo, channel.target_ref)
+    if channel.configured:
+      release_tip = _rev(repo, channel.tracking_ref)
+      membership_proven = bool(
+        target
+        and release_tip
+        and _is_ancestor(repo, target, release_tip)
+      )
+      if not membership_proven and _is_shallow(repo):
+        _fetch_unshallow(repo, refspec=channel.fetch_refspec)
+        target = _rev(repo, channel.target_ref)
+        release_tip = _rev(repo, channel.tracking_ref)
+        membership_proven = bool(
+          target
+          and release_tip
+          and _is_ancestor(repo, target, release_tip)
+        )
+      if not target:
+        raise PlatformUpdateError("release_target_missing")
+      if not membership_proven:
+        raise PlatformUpdateError("release_target_outside_ref")
     local = _local_branch(repo)
     if target and _is_ancestor(repo, target, local):
       _set_upstream(repo, target)
@@ -1751,12 +1917,14 @@ def platform_update_preview(repo: Path = PLATFORM_REPO) -> PlatformUpdatePreview
   """Read-only preview of the incoming platform update, for the Settings review
   step before Apply (fetch-free, never mutates the tree).
 
-  Shows the upstream-side changes ``origin/main`` brings since the shared merge
+  Shows the upstream-side changes the configured target brings since the shared merge
   base — local edits are excluded, so the owner reviews exactly what a clean Apply
   would pull. Availability is the same ancestry check :func:`platform_status`
   uses; an up-to-date instance returns an empty preview. Degrades to an empty
   preview (never raises) when the clone or ancestry can't be read, so it can never
   break Settings."""
+  channel = _runtime_release_channel()
+  _require_interactive_updates(channel)
   # A missing/non-clone tree has no source snapshot to protect. Return before
   # touching the durable /data lock so read-only diagnostics and recovery
   # surfaces still degrade cleanly when DATA_DIR itself is unavailable.
@@ -1765,18 +1933,23 @@ def platform_update_preview(repo: Path = PLATFORM_REPO) -> PlatformUpdatePreview
   if not (repo / ".git").exists():
     return empty_platform_update_preview()
   with _reconcile_flock():
-    return _platform_update_preview_unlocked(repo)
+    return _platform_update_preview_unlocked(repo, channel=channel)
 
 
 def _platform_update_preview_unlocked(
   repo: Path,
+  *,
+  channel: release_channel.PlatformReleaseChannel | None = None,
 ) -> PlatformUpdatePreview:
   """Build one preview while the reconcile lock holds its source snapshot."""
+  if channel is None:
+    channel = _runtime_release_channel()
+  _require_interactive_updates(channel)
   if not (repo / ".git").exists() or not _has_origin(repo):
     return empty_platform_update_preview()
   local = _local_branch(repo)
   local_sha = _rev(repo, local) or None
-  target = _rev(repo, DEFAULT_TARGET_REF) or None
+  target = _rev(repo, channel.target_ref) or None
   available = bool(target) and not _is_ancestor(repo, target, local)
   if not target or not available:
     return empty_platform_update_preview(
@@ -1825,6 +1998,7 @@ async def apply_platform_update(
   recorded and Settings offers an owner-clicked resolver chat. Rolled back ->
   the tree stayed on the old code and the state says so. Offline/skipped -> a
   ``409`` via :class:`PlatformUpdateError`. Never restarts on its own."""
+  _require_interactive_updates(_runtime_release_channel())
   async with _APPLY_LOCK:
     _set_update_progress(
       PlatformUpdatePhase.PREPARING,
@@ -1957,7 +2131,8 @@ async def create_platform_conflict_resolver_chat(
       )
 
   conflict_paths = flag.get("paths") or _unmerged_paths(repo)
-  target_sha = flag.get("upstream") or _rev(repo, DEFAULT_TARGET_REF)
+  channel = _runtime_release_channel()
+  target_sha = flag.get("upstream") or _rev(repo, channel.target_ref)
   merge_base = flag.get("merge_base")
   if not target_sha:
     raise PlatformUpdateError("Platform conflict target is unavailable.")
@@ -2049,15 +2224,10 @@ async def spawn_platform_conflict_chat(
   """Open a visible agent chat to reconcile the new platform version into
   the checked-out working branch — the platform analogue of a per-app
   update-conflict resolver chat. Dedupes on a running resolver."""
-  import time
   import uuid
 
   from app import models, providers
-  from app.broadcast import create_broadcast, get_system_broadcast
-  from app.chat import (
-    current_run_generation, discard_starting, mark_starting, run_chat,
-  )
-  from app.chat_writer import StartTurn, alloc_run_token, await_ack, get_writer
+  from app.chat_start import start_programmatic_chat_turn
   from app.config import get_settings
   from app.push import notify_owner
   from app.run_state import running_chat_ids
@@ -2100,36 +2270,13 @@ async def spawn_platform_conflict_chat(
   db.add(chat)
   db.commit()
 
-  if not mark_starting(chat_id):
-    return PlatformConflictResolverChatOut(
-      chat_id=chat_id, created=True, started=False,
-    )
-
-  started = False
   try:
-    start_gen = current_run_generation(chat_id)
-    run_token = alloc_run_token()
-    user_msg = {"role": "user", "content": content, "ts": int(time.time() * 1000)}
-    ack = get_writer().submit(StartTurn(
-      chat_id=chat_id, run_token=run_token, user_msg=user_msg,
-      title_source=title, default_provider=provider,
-    ))
-    result = await await_ack(ack)
-    if current_run_generation(chat_id) == start_gen:
-      create_broadcast(chat_id)
-      get_system_broadcast().publish(
-        {"type": "chat_run_started", "chatId": chat_id}
-      )
-      asyncio.create_task(run_chat(
-        result["history"], chat_id=chat_id, session_id=result["session_id"],
-        provider_id=result["provider"], run_gen=start_gen, run_token=run_token,
-      ))
-      started = True
-    else:
-      discard_starting(chat_id)
-  except Exception:
-    discard_starting(chat_id)
-    raise
+    started = await start_programmatic_chat_turn(
+      chat_id=chat_id,
+      title=title,
+      content=content,
+      provider=provider,
+    )
   finally:
     try:
       notify_owner(

@@ -183,9 +183,13 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `theme.py` | Theme CSS management and HTML injection |
 | `push.py` | VAPID key management and Web Push delivery |
 
-### Recovery (the frozen island)
+### Recovery boundaries during external cutover
 
-Recovery is a SEPARATE always-up container, `recoveryd`, not a module inside `backend/app/`. Its code is a distinct package, `backend/recovery/` (baked root-owned to `/app/recovery/`, outside `backend/app/`), deliberately isolated from the SDK/chat stack — stdlib `http.server`, zero `app.*` imports — so a broken platform install cannot take recovery down. The only recovery-adjacent module left in `backend/app/` is `recovery_seed.py` (it mirrors the owner row into a DB-independent seed for a wiped-DB login; see the self-heal section).
+The legacy `recoveryd` container remains available only during the staged
+external-recovery cutover. Its code is a distinct package,
+`backend/recovery/` (baked root-owned to `/app/recovery/`, outside
+`backend/app/`) and deliberately isolated from the SDK/chat stack. The only
+recovery-adjacent module in `backend/app/` is `recovery_seed.py`.
 
 | File | Role |
 |------|------|
@@ -194,6 +198,25 @@ Recovery is a SEPARATE always-up container, `recoveryd`, not a module inside `ba
 | `recovery_chat_pages.py` | HTML + page surface for the recovery chat |
 | `recovery_chat_runner.py` | Minimal CLI runner for the recovery chat; shares no code with `chat`/`providers`/SDK (runs the standalone `claude` binary as its own subprocess) and appends to its own per-chat jsonl under `/data`, never the `Chat.messages` column |
 | `recovery_restore.sh` | Baked git-reset restore tool (`backend/scripts/recovery_restore.sh` → `/app/scripts/`) — what the "Restore platform" button drives |
+
+The replacement boundary is `backend/recovery_target/targetd.py`. In
+`MOBIUS_BOOT_MODE=recovery`, the baked entrypoint starts this stdlib daemon as
+root before initializing or importing anything from `/data`. It listens only
+on the private target port, authenticates every request with a high-entropy
+one-time bearer, and exposes bounded execution and filesystem operations to a
+separate non-root recovery worker. Normal mode never starts the listener.
+
+The entrypoint removes the target bearer from the exec environment and passes
+it once through an unlinked descriptor; targetd must be container PID 1,
+consumes and closes that descriptor, marks itself non-dumpable, and removes
+packet-capture, ptrace, and mount capabilities from every capability set
+(including bounding) before listening. The raw bearer is immediately wiped;
+only a domain-separated SHA-256 verifier remains at rest. Convenience file
+operations are kernel-confined with `openat2` to `/data`, `/app`, and `/tmp`
+(writes omit `/app`) without symlink, magic-link, `..`, or nested-mount
+escapes. Thus a root repair child can neither inspect target memory or file
+descriptors nor enlist target PID1 to read its own `/proc` memory. Target health
+reports the immutable image-baked Git revision, never a runtime identity env.
 
 `recovery_auth.py` (HMAC-cookie auth) and `recovery_db.py` (raw-`sqlite3` owner-row read, no ORM, with a DB-independent `/data/.recovery-owner.json` fallback for a wiped DB) round out the package. See the self-heal section below for the container itself.
 
@@ -517,7 +540,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.12 (2026-07-31).** This section is the
+**Owner-authoritative contract — v1.13 (2026-08-01).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -536,9 +559,11 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   position). Auto-scroll engages only through (a) the gesture-gated scroll handler
   after the user manually reaches an ordinary bottom with no reservation remaining,
   or (b) the live-send pin handoff when the streaming reply has consumed its exact
-  reserved room. The physical bottom while reservation remains is the prompt's pin
-  target, not the real-content tail: reaching it preserves (or repairs) pin hold and
-  waits for the spacer-exhaustion handoff. A viewport /
+  reserved room. Only a send may create `PIN_USER_MSG`. The physical bottom while
+  reservation remains is an exact reader-owned `ANCHOR_AT` position—including a
+  negative row offset when the viewport is inside reserved reply room—not a pin or
+  the real-content tail. Reaching it must preserve that exact physical position and
+  must never manufacture the pin's spacer-exhaustion handoff. A viewport /
   keyboard change, foreground return, mount, or chat restoration must never create
   auto-scroll.
 - **R1 — Stable latest-turn reservation.** Dynamic bottom spacer derives from the
@@ -582,7 +607,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   mobile-keyboard open/close cycle even though the full-height reservation makes its
   scroll position temporarily look away from the physical bottom; viewport geometry
   is not reader intent, so apart from the explicit filled-reservation handoff, only a
-  gesture-gated reader scroll may retire the pin.
+  gesture-gated reader scroll may retire the pin. A retired or saved pin restores
+  only as an ordinary `ANCHOR_AT`; pin ownership is never reconstructed by layout,
+  lifecycle restoration, or a reader gesture.
   Terminal promotion makes this decision against the committed settled DOM,
   before paint, so a final browser clamp cannot race the pin or its exact
   filled-reservation handoff.
@@ -629,6 +656,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   geometry, while a disclosure first settles any preceding gesture and then owns
   layout caused by its own expansion/collapse. A bounded dead-man remains the final
   escape hatch for any interrupted no-scroll gesture.
+  The first actual scroll event owned by each gesture also advances one monotonic
+  reader-intent generation. Every direct scroll write and every indirect geometry
+  write that can clamp scrolling (dynamic spacer height and composer clearance)
+  must commit through the scroll controller only when both its captured generation
+  is still current and the gesture gate is open. Deferred layout captured before a
+  newer gesture is rejected; once that gesture settles, the controller adopts the
+  current semantic location and performs one fresh geometry reconciliation. Waiting
+  for the timing gate to expire never gives stale work its authority back.
   A marked Q&A custom-answer field is the deliberate exception to "ordinary
   typing cannot scroll": changing its value can grow the field and cause the
   browser to move the transcript to keep the native caret visible. Only an
@@ -694,8 +729,7 @@ path means routing it through the same entries rather than inventing another rul
 | First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted at real-content tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
-| Reader reaches physical bottom while latest-user reservation remains and turn is live | any | armed `PIN_USER_MSG` | User-owned; then keep prompt fixed |
-| Reader reaches physical bottom while latest-user reservation remains and turn is idle | any | settled `PIN_USER_MSG` | User-owned; keep prompt fixed |
+| Reader reaches physical bottom while latest-user reservation remains | any | exact `ANCHOR_AT` | User-owned; preserve the numeric physical position, including negative anchor offset |
 | Reader reaches bottom with no reservation remaining | any | `FOLLOW_BOTTOM` | User-owned |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
@@ -717,10 +751,14 @@ Controller structure is part of the contract, not an implementation detail:
 - `ChatView` may read `modeRef` for a submit snapshot but must not assign it.
   It emits send, queue, pagination, and lifecycle events through the semantic
   methods returned by `useScrollMode`.
-- Every live mode mutation goes through `transitionMode`; every mode-owned
-  `scrollTop` write goes through `writeMode`. The exported `applyMode` executor
-  is for the controller and pure unit tests, not a second live writer.
-- `useScrollMode` is the sole writer of `.spacer-dynamic` height. The write is
+- Every live mode mutation goes through `transitionMode`, whose entry guard permits
+  new pins only from send and new follow only from an unreserved-bottom gesture or
+  an already-armed pin's filled-reservation handoff. Every mode-owned `scrollTop`
+  write goes through `writeMode`. The exported `applyMode` executor is for the
+  controller and pure unit tests, not a second live writer.
+- `useScrollMode` is the sole writer of `.spacer-dynamic` height and the
+  composer-clearance CSS geometry. Those indirect writes and every `writeMode`
+  call share R5's reader-generation commit gate. Spacer height is
   derived from the latest user row and exact tail deficit;
   disclosure helpers and renderers may preserve an on-screen anchor but may never
   prime, enlarge, or unwind spacer themselves.

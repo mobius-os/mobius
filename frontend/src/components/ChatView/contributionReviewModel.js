@@ -41,6 +41,9 @@ export function actionableRecords(payload) {
  */
 export function sendBlocker(record, { connected } = {}) {
   if (!record || record.status !== 'prepared') return null
+  if (record.contribution_disabled_reason) {
+    return record.contribution_disabled_reason
+  }
   if (record.stack || record.is_stack) {
     return 'This is one layer of a stacked set — review and send the whole chain in Contribute.'
   }
@@ -285,6 +288,9 @@ export function visibleReviewItems(payload, storage) {
         return !sendBlocker(item.record, {
           connected: payload?.connected !== false,
         })
+      }
+      if (item.kind === 'stack') {
+        return !item.records.some(record => record?.contribution_disabled_reason)
       }
       return true
     },
