@@ -751,24 +751,15 @@
     display: none;
   }
 
-  /* Keep the panel within the drawer gutter while it is narrow, then move its
-     left edge so the capped panel continues to follow the resizable right edge. */
+  /* The docked panel covers the drawer the way the phone panel covers the
+     screen: it fills the drawer's content column, inset by the same 8px gutter
+     Drawer.css gives its rows, so a resized drawer resizes the panel with it
+     and no row is left peeking out beside it. */
   .shell--drawer-docked .notifications {
-    --notifications-panel-max-width: 390px;
     top: 66px;
     right: auto;
-    left: max(
-      12px,
-      calc(
-        var(--desktop-sidebar-width)
-        - var(--notifications-panel-max-width)
-        - 12px
-      )
-    );
-    width: min(
-      var(--notifications-panel-max-width),
-      calc(var(--desktop-sidebar-width) - 24px)
-    );
+    left: 8px;
+    width: calc(var(--desktop-sidebar-width) - 16px);
     max-height: calc(100dvh - 78px);
   }
 

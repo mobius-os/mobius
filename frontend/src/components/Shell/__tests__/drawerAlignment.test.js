@@ -35,9 +35,20 @@ test('collapsed and expanded drawer actions share one vertical rhythm', () => {
   )
 })
 
-test('the notifications panel follows the resizable drawer edge', () => {
+test('the docked notifications panel covers the drawer content column', () => {
+  const panel = ruleBody(shellCss, '.shell--drawer-docked .notifications')
+  const desktopDrawerBody = ruleBody(drawerCss, '.drawer__body', 1)
+  // Second shorthand value: the horizontal gutter drawer rows already sit in.
+  const gutterMatch = desktopDrawerBody.match(/padding:\s*\d+px\s+(\d+)px/)
+  assert.ok(gutterMatch, 'Missing desktop drawer body padding')
+  const gutter = Number(gutterMatch[1])
+
+  // Uncapped width tracks the resizable drawer, so widening it can never leave
+  // drawer rows visible beside the panel.
+  assert.equal(px(panel, 'left'), gutter)
   assert.match(
-    shellCss,
-    /\.shell--drawer-docked \.notifications\s*\{[\s\S]*?--notifications-panel-max-width:\s*390px;[\s\S]*?left:\s*max\([\s\S]*?var\(--desktop-sidebar-width\)[\s\S]*?- var\(--notifications-panel-max-width\)[\s\S]*?width:\s*min\([\s\S]*?var\(--notifications-panel-max-width\)[\s\S]*?var\(--desktop-sidebar-width\)/,
+    panel,
+    new RegExp(`width:\\s*calc\\(var\\(--desktop-sidebar-width\\) - ${gutter * 2}px\\)`),
   )
+  assert.doesNotMatch(panel, /max-width/)
 })
