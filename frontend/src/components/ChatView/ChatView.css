@@ -2005,15 +2005,19 @@
      from the composer's share of the visible height, so the pill's TOTAL
      height stays the same whether or not a file is attached. */
   --pill-pad: 4px;
+  --pill-border: 1px;
   --composer-input-floor: 48px;
-  --composer-reserve: calc(var(--pill-pad) * 2);
+  --composer-reserve: calc(
+    var(--pill-pad) * 2
+    + var(--pill-border) * 2
+  );
   flex: 1;
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 4px;
   background: color-mix(in srgb, var(--surface) 60%, transparent);
-  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
+  border: var(--pill-border) solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 24px;
   padding: var(--pill-pad);
   min-height: 48px;
@@ -2485,7 +2489,7 @@
     var(--tray-pad-top) + var(--tray-pad-bottom)
     + var(--pill-gap)
     + var(--pill-pad) * 2
-    + 2px /* pill border */
+    + var(--pill-border) * 2
   );
   --composer-attach-card: clamp(
     24px,
