@@ -435,9 +435,7 @@
   touch-action: pan-y pinch-zoom;
 }
 
-/* App cards and drawer rows share one action-menu placement path. Pointer
-   coordinates are converted to root layout space so shell density never shifts
-   a menu away from the click. */
+/* App cards and drawer rows share one action-menu placement path. */
 .drawer__item-action-layer {
   position: fixed;
   inset: 0;

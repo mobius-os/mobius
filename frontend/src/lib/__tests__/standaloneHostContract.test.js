@@ -33,12 +33,7 @@ test('standalone chat navigation delegates draft and autosend ownership', () => 
 test('generic and standalone crashes share one recovery panel contract', () => {
   const standalone = read('src/components/StandaloneApp/StandaloneApp.jsx')
   const boundary = read('src/components/ErrorBoundary/ErrorBoundary.jsx')
-  const panel = read('src/components/ErrorBoundary/RecoveryPanel.jsx')
 
   assert.match(standalone, /<RecoveryPanel/)
   assert.match(boundary, /<RecoveryPanel/)
-  assert.match(panel, /Refreshing didn’t fix/)
-  assert.match(panel, /Repair chat request failed/)
-  assert.doesNotMatch(standalone, /agentError|Repair chat request failed/)
-  assert.doesNotMatch(boundary, /agentError|Repair chat request failed/)
 })

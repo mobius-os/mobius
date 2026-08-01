@@ -123,9 +123,17 @@ export default function ComposerPopover({
     const measure = () => {
       const trigger = triggerRef.current
       if (!trigger) return
+      const rect = trigger.getBoundingClientRect()
       setMaxHeight(popoverMaxHeight({
-        triggerTop: trigger.getBoundingClientRect().top,
+        triggerTop: rect.top,
+        // `triggerBottom` + `viewportHeight` are not extra precision — they are
+        // how the helper tells which coordinate space `rect` is in. iOS reports
+        // fixed-layer rects against the VISUAL viewport once the keyboard
+        // offsets it, and subtracting `offsetTop` as well collapsed the panel
+        // to a 14px sliver. See composerPopoverHeight.js.
+        triggerBottom: rect.bottom,
         viewportTop: window.visualViewport?.offsetTop || 0,
+        viewportHeight: window.visualViewport?.height || 0,
         clipTop: nearestClipTop(trigger),
       }))
     }

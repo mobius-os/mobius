@@ -162,7 +162,7 @@ test('lightbox fills its actual overlay and dismisses from every backdrop edge',
   assert.doesNotMatch(
     lightboxCss,
     /\.lightbox-(?:content|image)\s*\{[^}]*(?:100vw|100vh|100dvh)/s,
-    'root-level desktop density makes viewport units smaller than the already-correct fixed overlay',
+    'the fixed overlay already owns the correct bounds without a second viewport calculation',
   )
 })
 

@@ -139,35 +139,14 @@ export function crossedDrawerExit(pointX, edgeX, gap = DRAWER_EXIT_PX) {
 
 // ── Small geometry helpers ───────────────────────────────────────────────────
 
-// Pointer events and getBoundingClientRect() report painted/client pixels, while
-// projectLayout and inline left/top values use the element's unscaled CSS layout
-// pixels. Those spaces are normally identical, but a CSS zoom/scale on an
-// ancestor makes them diverge. Bridge that boundary once so hit-testing,
-// measured tab edges, and rendered preview rects all use layout-local pixels.
-export function clientPointToLocal(point, clientRect, localSize) {
-  const clientW = Number(clientRect?.width)
-  const clientH = Number(clientRect?.height)
-  const localW = Number(localSize?.w)
-  const localH = Number(localSize?.h)
-  const scaleX = clientW > 0 && localW > 0 ? localW / clientW : 1
-  const scaleY = clientH > 0 && localH > 0 ? localH / clientH : 1
+// Translate viewport pointer coordinates into an element's local geometry.
+// The shell stays at native document scale, so this boundary owns translation
+// only; introducing a second scaled coordinate space here would make every
+// drag and fixed overlay carry special conversion rules again.
+export function clientPointToLocal(point, clientRect) {
   return {
-    x: (Number(point?.x) - (Number(clientRect?.left) || 0)) * scaleX,
-    y: (Number(point?.y) - (Number(clientRect?.top) || 0)) * scaleY,
-  }
-}
-
-// Convert a painted/client displacement into the CSS-layout displacement an
-// inline transform or resize consumes. Gesture thresholds stay in client
-// pixels; callers cross this boundary only when writing layout geometry.
-export function clientDeltaToLocal(delta, clientRect, localSize) {
-  const clientW = Number(clientRect?.width)
-  const clientH = Number(clientRect?.height)
-  const localW = Number(localSize?.w)
-  const localH = Number(localSize?.h)
-  return {
-    x: Number(delta?.x) * (clientW > 0 && localW > 0 ? localW / clientW : 1),
-    y: Number(delta?.y) * (clientH > 0 && localH > 0 ? localH / clientH : 1),
+    x: Number(point?.x) - (Number(clientRect?.left) || 0),
+    y: Number(point?.y) - (Number(clientRect?.top) || 0),
   }
 }
 

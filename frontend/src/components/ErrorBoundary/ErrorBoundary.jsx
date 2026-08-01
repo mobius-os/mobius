@@ -1,12 +1,11 @@
 import { Component } from 'react'
 import { api, BASE } from '../../api/client.js'
+import { redactDiagnosticText } from '../../lib/diagnosticRedaction.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import {
   buildAgentRepairPrompt,
   errorRecoveryFingerprint,
   readErrorRecoveryAttempt,
-  redactDiagnosticText,
-  recoveryViewForAttempt,
   runAgentRepair,
   writeRefreshedRecoveryAttempt,
 } from '../../lib/errorRecovery.js'
@@ -37,9 +36,8 @@ import './ErrorBoundary.css'
 export default class ErrorBoundary extends Component {
   state = {
     error: null,
-    phase: 'resolving',
-    repairChatId: null,
-    attemptPhase: null,
+    attempt: null,
+    repairActive: false,
   }
 
   crashContext = null
@@ -73,19 +71,13 @@ export default class ErrorBoundary extends Component {
       attempt,
     }
     this.listenForPageShow()
-    this.setState(recoveryViewForAttempt(attempt, {
-      canAskAgent: this.props.canAskAgent !== false,
-    }))
-  }
-
-  componentDidUpdate(_prevProps, prevState) {
-    if (prevState.phase === 'resolving' && this.state.phase !== 'resolving') {
-      this.headingRef?.focus()
-    }
+    this.setState({ attempt, repairActive: false }, () => this.headingRef?.focus())
   }
 
   componentWillUnmount() {
-    this.repairController?.abort()
+    const controller = this.repairController
+    this.repairController = null
+    controller?.abort()
     if (this.pageShowListening) window.removeEventListener('pageshow', this.handlePageShow)
   }
 
@@ -100,15 +92,15 @@ export default class ErrorBoundary extends Component {
   handlePageShow = (event) => {
     const context = this.crashContext
     if (!event.persisted || !context) return
+    const controller = this.repairController
     this.repairController = null
+    controller?.abort()
     const attempt = readErrorRecoveryAttempt({
       surfaceKey: context.surfaceKey,
       fingerprint: context.fingerprint,
     })
     context.attempt = attempt
-    this.setState(recoveryViewForAttempt(attempt, {
-      canAskAgent: this.props.canAskAgent !== false,
-    }))
+    this.setState({ attempt, repairActive: false })
   }
 
   handleRefresh = () => {
@@ -135,6 +127,7 @@ export default class ErrorBoundary extends Component {
     if (!context || this.repairController || this.props.canAskAgent === false) return
     const controller = new AbortController()
     this.repairController = controller
+    this.setState({ repairActive: true })
     try {
       const result = await runAgentRepair({
         client: api,
@@ -143,12 +136,9 @@ export default class ErrorBoundary extends Component {
         fingerprint: context.fingerprint,
         previousAttempt: context.attempt,
         signal: controller.signal,
-        onAttempt: (attempt, { active }) => {
+        onAttempt: (attempt) => {
           context.attempt = attempt
-          this.setState(recoveryViewForAttempt(attempt, {
-            active,
-            canAskAgent: this.props.canAskAgent !== false,
-          }))
+          this.setState({ attempt })
         },
         prompt: buildAgentRepairPrompt({
           surface: context.surfaceKey,
@@ -161,7 +151,10 @@ export default class ErrorBoundary extends Component {
     } catch (error) {
       if (error?.name === 'AbortError') return
     } finally {
-      if (this.repairController === controller) this.repairController = null
+      if (this.repairController === controller) {
+        this.repairController = null
+        this.setState({ repairActive: false })
+      }
     }
   }
 
@@ -169,8 +162,6 @@ export default class ErrorBoundary extends Component {
     if (!this.state.error) return this.props.children
     const message = redactDiagnosticText(this.state.error?.message || this.state.error)
     const cls = this.props.variant === 'inline' ? 'errbound errbound--inline' : 'errbound'
-    const { phase, attemptPhase, repairChatId } = this.state
-    const canAskAgent = this.props.canAskAgent !== false
     return (
       <div className={cls}>
         <RecoveryPanel
@@ -180,10 +171,9 @@ export default class ErrorBoundary extends Component {
           title="Something broke"
           subject="screen"
           diagnostic={message}
-          phase={phase}
-          attemptPhase={attemptPhase}
-          repairChatId={repairChatId}
-          canAskAgent={canAskAgent}
+          attempt={this.state.attempt}
+          repairActive={this.state.repairActive}
+          canAskAgent={this.props.canAskAgent !== false}
           refreshLabel="Refresh screen"
           onRefresh={this.handleRefresh}
           onAgentRepair={this.handleAgentRepair}

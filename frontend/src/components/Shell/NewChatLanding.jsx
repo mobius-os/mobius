@@ -21,7 +21,7 @@ export default function NewChatLanding({ failure = null, onRetry }) {
     <div className="chat chat--empty">
       <div className="chat__empty-wrap">
         <div className="chat__empty">
-          <img className="chat__empty-glyph" src="/moebius.png" alt="" width="120" height="120" />
+          <img className="chat__empty-glyph" src="/moebius.png" alt="" width="76" height="76" />
           <p className="chat__empty-title">What&apos;s on your mind?</p>
           {failure && (
             <>

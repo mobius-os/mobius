@@ -1554,9 +1554,16 @@ def test_update_preview_caps_large_diff(clone_env):
   assert len(preview["diff"]) == pu.MAX_PREVIEW_DIFF_CHARS
 
 
-def test_update_preview_reports_exact_total_beyond_rendered_commit_cap(clone_env):
+def test_update_preview_reports_exact_total_beyond_rendered_commit_cap(
+  clone_env, monkeypatch,
+):
   origin, platform = clone_env
   work = origin.parent / "origin-work"
+  # The contract is that counting remains exact beyond the rendered cap, not
+  # that every full-suite worker must manufacture the production-sized history.
+  # Keeping this fixture small also avoids several parallel CI workers churning
+  # hundreds of temporary loose Git objects at once.
+  monkeypatch.setattr(pu, "_PREVIEW_COMMIT_LIMIT", 5)
   total = pu._PREVIEW_COMMIT_LIMIT + 7
   for index in range(total):
     (work / "release-counter.txt").write_text(f"{index}\n")

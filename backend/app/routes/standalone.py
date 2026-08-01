@@ -486,9 +486,7 @@ def _standalone_index_html(app: models.App) -> str:
     '<link rel="apple-touch-icon" href="/apple-touch-icon.png" />',
     f'<link rel="apple-touch-icon" href="/apps/{slug}/icon-192.png?v={version}" />',
   )
-  # The baked recovery floor historically used /moebius.svg while the live
-  # template uses /moebius.png. The semantic rel=icon seam is stable; match it
-  # rather than coupling standalone availability to the fallback artwork type.
+  # Match the semantic icon element so artwork changes remain frontend-owned.
   html, icon_replacements = re.subn(
     r'<link\s+rel="icon"[^>]*>',
     f'<link rel="icon" type="image/png" href="/apps/{slug}/icon-192.png?v={version}" />',
@@ -520,11 +518,11 @@ def _standalone_index_html(app: models.App) -> str:
   )
   html = _replace_html_text(html, "</head>", f"  {boot_slot}\n  </head>")
 
-  # Make the pre-JS loading moment app-specific without changing the signed
-  # module graph. If the template changes, leaving the Möbius mark is harmless.
+  # Make the pre-JS loading moment app-specific without coupling the backend to
+  # the shell artwork's filename, dimensions, or other presentation details.
   html = re.sub(
-    r'<img src="/moebius\.(?:png|svg)" width="56" height="56" alt=""',
-    f'<img src="/apps/{slug}/icon-192.png?v={version}" width="56" height="56" alt=""',
+    r'(<div id="splash"[^>]*>\s*<img\b[^>]*\bsrc=")[^"]*(")',
+    rf'\g<1>/apps/{slug}/icon-192.png?v={version}\g<2>',
     html,
     count=1,
   )

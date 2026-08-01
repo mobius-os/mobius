@@ -135,6 +135,7 @@ const APP_SETTINGS_SECTIONS = new Set([
   'background-agents',
   'models',
 ])
+const EMPTY_LIST = Object.freeze([])
 // Mode timing lives with the pure snapshot geometry in workspaceView.js; browser
 // transition completion owns its lifetime, so Shell has no animation timers.
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
@@ -456,8 +457,8 @@ export default function Shell() {
   const chatsQuery = chatQueries.list.useQuery({
     reconcile: reconcileCreatedChats,
   })
-  const apps = appsQuery.data ?? []
-  const chats = chatsQuery.data ?? []
+  const apps = appsQuery.data ?? EMPTY_LIST
+  const chats = chatsQuery.data ?? EMPTY_LIST
   const appsStatus = apps.length > 0 || appsQuery.isSuccess
     ? 'success'
     : (appsQuery.isError ? 'error' : 'loading')
@@ -1118,10 +1119,6 @@ export default function Shell() {
     const position = placeContextMenu({
       clientPoint: { x: tabMenu.x, y: tabMenu.y },
       clientViewport: rootRect,
-      layoutViewport: {
-        width: root.offsetWidth || root.clientWidth || rootRect.width,
-        height: root.offsetHeight || root.clientHeight || rootRect.height,
-      },
       menuSize: { width: menu.offsetWidth, height: menu.offsetHeight },
     })
     menu.style.setProperty('--workspace-menu-x', `${position.x}px`)

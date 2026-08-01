@@ -94,7 +94,12 @@ def classify_inventory(
   current_sha: str,
   previous: Identity,
 ) -> tuple[str, str]:
-  """Accept exactly S0 (fresh), S1 (main moved), or S2 (complete)."""
+  """Build from incomplete state; reuse only two matching established tags.
+
+  A revision label is descriptive metadata, not provenance. In particular, a
+  current-revision :main without :external-recovery must be replaced by an
+  image built in this guarded workflow rather than trusted as a resume point.
+  """
 
   validate_identity(main)
   validate_identity(previous)
@@ -111,7 +116,7 @@ def classify_inventory(
   if main.revision != current_sha:
     raise StateError("the public :main compatibility floor changed unexpectedly")
   if external is None:
-    return "reuse", main.digest
+    return "build", ""
   if external != main:
     raise StateError("partial bootstrap channels disagree on their exact identity")
   return "reuse", main.digest
@@ -129,7 +134,11 @@ def assert_prewrite_state(
   if daily is not None:
     raise StateError(":daily appeared during compatibility publication")
   if tag == "main":
-    if main not in {previous, current}:
+    # An incomplete prior attempt may have moved :main to an image that merely
+    # claims the current revision. It is not trusted; this run replaces it with
+    # its freshly built digest. Complete state is reused during inventory and
+    # never reaches this prewrite branch.
+    if main not in {previous, current} and main.revision != current.revision:
       raise StateError(":main changed after the initial inventory")
     if external not in {None, current}:
       raise StateError(":external-recovery changed after the initial inventory")

@@ -1,7 +1,7 @@
 import { useId } from 'react'
 import { BASE } from '../../api/client.js'
 import {
-  recoveryActionPolicy,
+  recoveryPhaseForAttempt,
   repairChatPath,
 } from '../../lib/errorRecovery.js'
 import RecoveryLink from './RecoveryLink.jsx'
@@ -12,7 +12,7 @@ function recoveryMessage({ phase, attemptPhase, canAskAgent, subject }) {
   if (phase === 'refresh') {
     return `This ${subject} hit an unexpected error. Refreshing won’t delete your chats.`
   }
-  if (phase === 'agent' || phase === 'agent-starting') {
+  if (phase === 'agent') {
     return `Refreshing didn’t fix ${currentSubject}. Möbius can start a new repair chat and share these technical details with your agent to investigate and fix it.`
   }
   if (!canAskAgent) {
@@ -25,54 +25,48 @@ function recoveryMessage({ phase, attemptPhase, canAskAgent, subject }) {
 }
 
 export default function RecoveryPanel({
+  attempt = null,
   canAskAgent = true,
   className = '',
   diagnostic,
-  headingId,
   headingRef,
   onAgentRepair,
   onRefresh,
-  phase,
+  repairActive = false,
   refreshLabel,
-  repairChatId,
   secondaryAction = null,
   subject,
   title,
-  attemptPhase,
   variant,
 }) {
-  const generatedHeadingId = useId()
-  const resolvedHeadingId = headingId || generatedHeadingId
-  const actions = recoveryActionPolicy({
-    phase,
-    attemptPhase,
-    canAskAgent,
-    repairChatId,
-  })
-  const starting = phase === 'agent-starting'
+  const headingId = useId()
+  const phase = recoveryPhaseForAttempt(attempt, { canAskAgent })
+  const attemptPhase = attempt?.phase || null
+  const repairChatId = attempt?.chatId || null
+  const starting = repairActive && attemptPhase === 'agent-starting'
   const agentFailed = attemptPhase === 'agent-failed'
-  const showPrimary = phase === 'refresh'
-    || actions.showAskAgent
-    || actions.showRetryAgent
-    || starting
-  const primaryLabel = phase === 'refresh'
-    ? refreshLabel
-    : starting
-      ? 'Starting repair chat…'
-      : phase === 'agent' && attemptPhase === 'agent-starting'
-        ? 'Resume repair chat'
-        : actions.showRetryAgent
-          ? 'Retry repair chat'
-          : 'Start repair chat'
+  let primaryAction = null
+  if (phase === 'refresh') {
+    primaryAction = { label: refreshLabel, onClick: onRefresh }
+  } else if (starting) {
+    primaryAction = { label: 'Starting repair chat…', onClick: onAgentRepair, disabled: true }
+  } else if (phase === 'agent') {
+    primaryAction = {
+      label: attemptPhase === 'agent-starting' ? 'Resume repair chat' : 'Start repair chat',
+      onClick: onAgentRepair,
+    }
+  } else if (canAskAgent && agentFailed) {
+    primaryAction = { label: 'Retry repair chat', onClick: onAgentRepair }
+  }
 
   return (
     <section
       className={`recovery-panel recovery-panel--${variant}${className ? ` ${className}` : ''}`}
-      aria-labelledby={resolvedHeadingId}
+      aria-labelledby={headingId}
     >
       <h1
         className="recovery-panel__title"
-        id={resolvedHeadingId}
+        id={headingId}
         ref={headingRef}
         tabIndex={-1}
       >
@@ -105,28 +99,28 @@ export default function RecoveryPanel({
             {secondaryAction.label}
           </a>
         )}
-        {actions.showRefreshAgain && (
+        {phase !== 'refresh' && !starting && (
           <button type="button" className="recovery-panel__button" onClick={onRefresh}>
             Refresh again
           </button>
         )}
-        {actions.showOpenRepairChat && (
+        {phase === 'recovery' && repairChatId && (
           <a className="recovery-panel__button" href={repairChatPath(repairChatId, BASE)}>
             Open repair chat
           </a>
         )}
-        {showPrimary && (
+        {primaryAction && (
           <button
             type="button"
             className="recovery-panel__button recovery-panel__button--primary"
-            onClick={phase === 'refresh' ? onRefresh : onAgentRepair}
-            disabled={starting}
+            onClick={primaryAction.onClick}
+            disabled={primaryAction.disabled}
           >
-            {primaryLabel}
+            {primaryAction.label}
           </button>
         )}
       </div>
-      {actions.showRecovery && (
+      {phase === 'recovery' && (
         <RecoveryLink
           className="recovery-panel__recovery"
           lead="If the repair chat can’t get you back in,"

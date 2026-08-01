@@ -324,6 +324,9 @@ def test_standalone_shell_boots_the_shared_opaque_app_host(client, owner_token):
   assert boot["slug"] == app["slug"]
   assert boot["name"] == "Live App"
 
+  splash = html[html.index('<div id="splash"'):html.index('<div id="root"')]
+  assert f'/apps/{app["slug"]}/icon-192.png?v=' in splash
+
   # The common signed frontend bundle owns the top-level document. The old
   # standalone implementation imported and rendered the app module directly.
   assert re.search(r'/assets/index-[^" ]+\.js', html)

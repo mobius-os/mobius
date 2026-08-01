@@ -3647,7 +3647,7 @@ export default function ChatView({
             )
           ) : (
             <div className="chat__empty">
-              <img className="chat__empty-glyph" src="/moebius.png" alt="" width="120" height="120" />
+              <img className="chat__empty-glyph" src="/moebius.png" alt="" width="76" height="76" />
               <p className="chat__empty-title">What's on your mind?</p>
             </div>
           )}

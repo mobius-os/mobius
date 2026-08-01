@@ -1,5 +1,4 @@
-/* Context-menu geometry bridges painted pointer coordinates to the root
-   layout space, then keeps the menu beside the pointer and inside the viewport. */
+/* Keep a context menu beside the pointer and inside the client viewport. */
 
 function positiveNumber(value, fallback) {
   const number = Number(value)
@@ -13,38 +12,31 @@ function clamp(value, minimum, maximum) {
 export function placeContextMenu({
   clientPoint,
   clientViewport,
-  layoutViewport,
   menuSize,
   gap = 8,
   padding = 12,
 }) {
-  const clientWidth = positiveNumber(clientViewport?.width, 1)
-  const clientHeight = positiveNumber(clientViewport?.height, 1)
-  const layoutWidth = positiveNumber(layoutViewport?.width, clientWidth)
-  const layoutHeight = positiveNumber(layoutViewport?.height, clientHeight)
-  const scaleX = layoutWidth / clientWidth
-  const scaleY = layoutHeight / clientHeight
-  const pointX = (Number(clientPoint?.x) - (Number(clientViewport?.left) || 0)) * scaleX
-  const pointY = (Number(clientPoint?.y) - (Number(clientViewport?.top) || 0)) * scaleY
+  const viewportWidth = positiveNumber(clientViewport?.width, 1)
+  const viewportHeight = positiveNumber(clientViewport?.height, 1)
+  const pointX = Number(clientPoint?.x) - (Number(clientViewport?.left) || 0)
+  const pointY = Number(clientPoint?.y) - (Number(clientViewport?.top) || 0)
   const menuWidth = positiveNumber(menuSize?.width, 0)
   const menuHeight = positiveNumber(menuSize?.height, 0)
-  const gapX = Math.max(0, Number(gap) || 0) * scaleX
-  const gapY = Math.max(0, Number(gap) || 0) * scaleY
-  const paddingX = Math.max(0, Number(padding) || 0) * scaleX
-  const paddingY = Math.max(0, Number(padding) || 0) * scaleY
+  const safeGap = Math.max(0, Number(gap) || 0)
+  const safePadding = Math.max(0, Number(padding) || 0)
 
-  let x = pointX + gapX
-  if (x + menuWidth > layoutWidth - paddingX) {
-    x = pointX - menuWidth - gapX
+  let x = pointX + safeGap
+  if (x + menuWidth > viewportWidth - safePadding) {
+    x = pointX - menuWidth - safeGap
   }
 
-  let y = pointY + gapY
-  if (y + menuHeight > layoutHeight - paddingY) {
-    y = pointY - menuHeight - gapY
+  let y = pointY + safeGap
+  if (y + menuHeight > viewportHeight - safePadding) {
+    y = pointY - menuHeight - safeGap
   }
 
   return {
-    x: clamp(x, paddingX, layoutWidth - menuWidth - paddingX),
-    y: clamp(y, paddingY, layoutHeight - menuHeight - paddingY),
+    x: clamp(x, safePadding, viewportWidth - menuWidth - safePadding),
+    y: clamp(y, safePadding, viewportHeight - menuHeight - safePadding),
   }
 }

@@ -114,8 +114,8 @@ const ShellBrand = memo(function ShellBrand({
             className="shell__logo"
             src="/moebius.png"
             alt=""
-            width="30"
-            height="30"
+            width="28"
+            height="28"
             draggable={false}
           />
         </span>

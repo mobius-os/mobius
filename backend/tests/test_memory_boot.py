@@ -2,6 +2,7 @@
 
 import importlib.util
 import hashlib
+import re
 from pathlib import Path
 
 
@@ -107,6 +108,8 @@ def test_controlled_skills_have_fix_forward_migrations():
   assert module._UNMODIFIED_MIGRATIONS["cron.md"] == {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
+    "76ab03fd128157715b388b16146239217f57bba62c5248b8192a39639d0200b1",
+    "e4539739815b80b4c52ca2c56f2a4055e7a4a12cd1843c0cb5077a149547acd1",
     "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
   }
   assert module._UNMODIFIED_MIGRATIONS["images.md"] == {
@@ -144,6 +147,30 @@ def test_controlled_skills_have_fix_forward_migrations():
     "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87"
     in module._UNMODIFIED_MIGRATIONS["recovery.md"]
   )
+
+
+def test_migration_digests_are_wellformed_and_never_the_current_seed():
+  """A registered digest must name a PREDECESSOR, never the shipping seed.
+
+  Registering the current seed's own digest is a silent no-op that reads like a
+  fix: the file is replaced with itself and the stale copy it was meant to
+  catch is never touched.  A mistyped digest is likewise invisible.  Neither
+  can be caught by asserting the literals back, so check the properties that
+  are checkable.
+  """
+  module = _load("init_skills")
+  seed_dir = SCRIPTS / "seed-skills"
+
+  for name, digests in module._UNMODIFIED_MIGRATIONS.items():
+    current = hashlib.sha256((seed_dir / name).read_bytes()).hexdigest()
+    for digest in digests:
+      assert re.fullmatch(r"[0-9a-f]{64}", digest), (
+        f"{name}: {digest!r} is not a sha256 hex digest"
+      )
+      assert digest != current, (
+        f"{name}: registers the digest of the seed it currently ships, which "
+        "would replace the file with itself instead of migrating a predecessor"
+      )
 
 
 def test_seeded_cron_jobs_use_only_app_scoped_credentials():

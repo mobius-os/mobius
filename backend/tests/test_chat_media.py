@@ -93,7 +93,7 @@ def test_fix_forward_chat_media_preflights_conflicts(db, chat):
   assert (media_dir / "same.png").read_bytes() == b"different"
 
 
-def test_fix_forward_chat_media_restores_moved_file_when_commit_fails(
+def test_fix_forward_chat_media_keeps_both_copies_when_commit_fails(
   db, chat, monkeypatch,
 ):
   old_url = f"/api/chats/{chat.id}/generated/old.png"
@@ -111,6 +111,41 @@ def test_fix_forward_chat_media_restores_moved_file_when_commit_fails(
     fix_forward_chat_media(db, get_settings().data_dir)
 
   assert old_file.read_bytes() == b"old-image"
-  assert not (chat_root / "media" / "old.png").exists()
+  assert (chat_root / "media" / "old.png").read_bytes() == b"old-image"
   persisted = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
   assert persisted.messages[0]["content"] == old_url
+
+
+def test_fix_forward_chat_media_timeout_stays_valid_after_late_commit(
+  db, chat, monkeypatch,
+):
+  old_url = f"/api/chats/{chat.id}/generated/old.png"
+  new_url = f"/api/chats/{chat.id}/media/old.png"
+  chat.messages = [{"role": "assistant", "content": old_url}]
+  db.commit()
+
+  chat_root = Path(get_settings().data_dir) / "chats" / chat.id
+  old_file = chat_root / "generated" / "old.png"
+  new_file = chat_root / "media" / "old.png"
+  old_file.parent.mkdir(parents=True)
+  old_file.write_bytes(b"old-image")
+
+  pending_ack = None
+
+  def timeout_without_cancelling(ack):
+    nonlocal pending_ack
+    pending_ack = ack
+    raise TimeoutError("writer acknowledgement timed out")
+
+  monkeypatch.setattr(chat_media, "wait_ack", timeout_without_cancelling)
+  with pytest.raises(TimeoutError, match="acknowledgement timed out"):
+    fix_forward_chat_media(db, get_settings().data_dir)
+
+  assert old_file.read_bytes() == b"old-image"
+  assert new_file.read_bytes() == b"old-image"
+  assert pending_ack is not None
+  assert pending_ack.result(timeout=5) == 1
+
+  db.expire_all()
+  persisted = db.query(models.Chat).filter(models.Chat.id == chat.id).one()
+  assert persisted.messages[0]["content"] == new_url

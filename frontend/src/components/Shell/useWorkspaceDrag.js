@@ -113,37 +113,10 @@ export default function useWorkspaceDrag({
 
     function contentBox() {
       const host = contentElRef.current
-      if (!host) {
-        return {
-          rect: { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight },
-          localSize: { w: window.innerWidth, h: window.innerHeight },
-        }
-      }
-      const rect = host.getBoundingClientRect()
-      return {
-        rect,
-        localSize: {
-          w: host.clientWidth || rect.width,
-          h: host.clientHeight || rect.height,
-        },
-      }
+      return host?.getBoundingClientRect() || { left: 0, top: 0 }
     }
     function toLocal(clientX, clientY, box = contentBox()) {
-      return clientPointToLocal({ x: clientX, y: clientY }, box.rect, box.localSize)
-    }
-    function toViewportLayout(clientX, clientY) {
-      const root = document.documentElement
-      const rect = root.getBoundingClientRect()
-      return clientPointToLocal(
-        { x: clientX, y: clientY },
-        rect,
-        {
-          // CSS zoom leaves the root's client box in painted pixels, but its
-          // offset box remains in the layout pixels fixed descendants consume.
-          w: root.offsetWidth || root.clientWidth || rect.width,
-          h: root.offsetHeight || root.clientHeight || rect.height,
-        },
-      )
+      return clientPointToLocal({ x: clientX, y: clientY }, box)
     }
 
     function ensureOverlays() {
@@ -194,12 +167,11 @@ export default function useWorkspaceDrag({
         chipEl.hidden = false
         chipWidth = chipEl.offsetWidth || 0
       }
-      const { left, top } = chipOffset(toViewportLayout(clientX, clientY), isTouch)
+      const { left, top } = chipOffset({ x: clientX, y: clientY }, isTouch)
       // V5 (vizreview): clamp the chip within the viewport so its label never clips
       // at the right edge (the +12 offset pushed a right-edge drag off-screen).
       const margin = 8
-      const viewportWidth = document.documentElement.offsetWidth
-        || document.documentElement.clientWidth
+      const viewportWidth = document.documentElement.clientWidth
         || window.innerWidth
       const maxLeft = Math.max(margin, viewportWidth - chipWidth - margin)
       chipEl.style.left = `${Math.max(margin, Math.min(left, maxLeft))}px`

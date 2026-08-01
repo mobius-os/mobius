@@ -75,15 +75,12 @@ test('chat and app rows share one placed action menu contract', () => {
     'Delete data must stay app-only')
 })
 
-test('desktop density keeps root zoom behind explicit pointer geometry bridges', () => {
+test('desktop density keeps the shell at native document scale', () => {
   const desktop = shellCss.match(/@media \(min-width: 1024px\) \{[\s\S]*$/)?.[0] || ''
-  assert.match(desktop, /:root\s*\{\s*zoom:\s*0\.9;/)
-  assert.match(desktop, /\.shell__tab-open\s*\{\s*font-size:\s*13\.5px;/)
-  assert.match(shellCss, /Pointer-owned shell interactions convert client pixels/)
-  assert.match(drawer, /clientDeltaToLocal/,
-    'drawer resize and pinned drag must convert painted deltas to layout pixels')
-  assert.match(workspaceChrome, /clientPointToLocal/,
-    'pane divider projection must convert painted points to layout pixels')
+  assert.doesNotMatch(desktop, /(?:^|[;{])\s*zoom\s*:/)
+  assert.match(shellCss, /document remains at native[\s\S]*geometry share one space/)
+  assert.doesNotMatch(drawer, /clientDeltaToLocal/)
+  assert.doesNotMatch(workspaceChrome, /clientPointToLocal/)
 })
 
 test('the app directory distinguishes loading, errors, and confirmed emptiness', () => {

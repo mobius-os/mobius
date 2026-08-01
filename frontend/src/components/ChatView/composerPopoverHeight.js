@@ -20,6 +20,37 @@
  * the screen. The panel's top rows — Attach files first — landed outside the
  * pane and were unreachable: scrolling the panel moves content further up, and
  * the page behind it can't scroll to them either.
+ *
+ * ╔════════════════════════════════════════════════════════════════╗
+ * ║                                                                ║
+ * ║   THE TWO COORDINATE SPACES — iOS keyboard, read this first    ║
+ * ║                                                                ║
+ * ║   `getBoundingClientRect()` is defined against the LAYOUT       ║
+ * ║   viewport and `visualViewport.offsetTop` measures the visible  ║
+ * ║   viewport's offset FROM that same layout viewport, so on       ║
+ * ║   paper subtracting one from the other is sound.                ║
+ * ║                                                                ║
+ * ║   It is not sound on iOS. The whole shell is                    ║
+ * ║   `position: fixed; inset: 0` on an unscrollable document       ║
+ * ║   (`html, body, #root { position: fixed; overflow: hidden }`),  ║
+ * ║   and once the soft keyboard offsets the visual viewport iOS    ║
+ * ║   reports client rects for that fixed layer relative to the     ║
+ * ║   VISUAL viewport — the keyboard inset is already baked into    ║
+ * ║   `triggerTop`. Subtracting `offsetTop` on top of that counts   ║
+ * ║   the keyboard TWICE, drives `space` negative, and the panel    ║
+ * ║   renders as a ~14px empty sliver (padding + border around a    ║
+ * ║   zero-height scrollport). That is the "tapping + does nothing  ║
+ * ║   while the keyboard is up" bug; it was intermittent because    ║
+ * ║   whether the measurement caught the pre- or post-offset frame  ║
+ * ║   depended on when iOS fired its viewport events.               ║
+ * ║                                                                ║
+ * ║   `visibleTopInRectSpace` below decides which space the rects   ║
+ * ║   are in, using the one fact that is always true at measure     ║
+ * ║   time: the user just TAPPED the trigger, so the trigger is     ║
+ * ║   on screen. Don't replace it with a UA sniff, and don't        ║
+ * ║   "simplify" it back to a bare `offsetTop` subtraction.         ║
+ * ║                                                                ║
+ * ╚════════════════════════════════════════════════════════════════╝
  */
 
 /** Gap between the popover's bottom edge and the trigger (matches the CSS). */
@@ -28,6 +59,18 @@ export const POPOVER_GAP = 8
 export const POPOVER_TOP_MARGIN = 8
 /** Upper bound on tall screens — a full-height panel reads as a takeover. */
 export const POPOVER_CAP = 420
+// There is deliberately NO MINIMUM HEIGHT. A 160px floor was tried here and
+// removed: a floor cannot be made safe. The quantity it must respect is
+// `space` — the room between the trigger and the clipping boundary — and a
+// floor bounded by `space` is by definition never larger than the measurement
+// it exists to rescue, so it does nothing. Bounding it by the visible viewport
+// instead is vacuous: on a phone the two differ by hundreds of pixels, so the
+// floor rendered ~60px of the panel, the Attach row included, above the
+// clipping ancestor — invisible and untappable, which is the exact failure
+// this helper exists to prevent. `MIN_PANE_H` (200) also makes a genuinely
+// cramped pane a SUPPORTED surface, not the impossible measurement a floor
+// assumes. The sliver a floor was meant to rescue came from the
+// coordinate-space double-count below: fix the measurement, don't pad it.
 
 /**
  * Top edge (in client coordinates) of the nearest ancestor that would clip the
@@ -52,23 +95,52 @@ export function nearestClipTop(el) {
 }
 
 /**
+ * Where the top of the VISIBLE viewport sits in the same coordinate space the
+ * caller's client rects are in. See the coordinate-spaces box above.
+ *
+ * The trigger was just tapped, so it is on screen. If its rect already fits
+ * inside a band that starts at 0 and is `viewportHeight` tall, the rects are
+ * visual-viewport-relative and the keyboard inset is already in them — the
+ * visible top is 0 and `offsetTop` must NOT be applied again. If the rect sits
+ * below that band, the rects are layout-viewport-relative (the spec-correct
+ * case, and what Android reports), so `offsetTop` is the visible top.
+ *
+ * @param {number} triggerBottom  trigger's `getBoundingClientRect().bottom`
+ * @param {number} viewportTop    `visualViewport.offsetTop`
+ * @param {number} viewportHeight `visualViewport.height`
+ * @returns {number}
+ */
+export function visibleTopInRectSpace({ triggerBottom, viewportTop, viewportHeight }) {
+  if (!(viewportTop > 0)) return 0
+  if (!(viewportHeight > 0)) return viewportTop
+  return triggerBottom <= viewportHeight ? 0 : viewportTop
+}
+
+/**
  * @param {object} m
- * @param {number} m.triggerTop     trigger's `getBoundingClientRect().top`
- * @param {number} [m.viewportTop]  `visualViewport.offsetTop` (0 when absent)
- * @param {number} [m.clipTop]      `nearestClipTop(trigger)` (0 when none)
+ * @param {number} m.triggerTop        trigger's `getBoundingClientRect().top`
+ * @param {number} [m.triggerBottom]   trigger's `getBoundingClientRect().bottom`
+ * @param {number} [m.viewportTop]     `visualViewport.offsetTop` (0 when absent)
+ * @param {number} [m.viewportHeight]  `visualViewport.height` (0 when absent)
+ * @param {number} [m.clipTop]         `nearestClipTop(trigger)` (0 when none)
  * @param {number} [m.cap]
  * @returns {number} max-height in CSS pixels
  */
 export function popoverMaxHeight({
   triggerTop,
+  triggerBottom = triggerTop,
   viewportTop = 0,
+  viewportHeight = 0,
   clipTop = 0,
   cap = POPOVER_CAP,
 }) {
-  const boundary = Math.max(viewportTop, clipTop)
+  const visibleTop = visibleTopInRectSpace({ triggerBottom, viewportTop, viewportHeight })
+  // Floor the boundary at 0: when the rects are visual-viewport-relative the
+  // clipping pane's top is NEGATIVE (it starts above the visible area), and the
+  // real boundary is the top of the screen, not that negative number.
+  const boundary = Math.max(0, visibleTop, clipTop)
   const space = triggerTop - boundary - POPOVER_GAP - POPOVER_TOP_MARGIN
-  // A minimum would knowingly cross the clipping boundary in the exact cramped
-  // geometry this helper exists to make safe. A short scrollport is imperfect
-  // but reachable; overflowing above the pane makes its first actions impossible.
-  return Math.max(0, Math.min(cap, Math.floor(space)))
+  // Never more than the measured space: the panel must stay inside the clipping
+  // ancestor even when that leaves it very short. See the no-minimum note above.
+  return Math.min(cap, Math.floor(Math.max(0, space)))
 }
