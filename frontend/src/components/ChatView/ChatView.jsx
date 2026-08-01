@@ -100,6 +100,7 @@ import {
   consumeComposerHandoff,
 } from './composerDraft.js'
 import {
+  composerRoom,
   reconcileComposerTextarea,
   resetComposerTextarea,
 } from './composerTextareaSizing.js'

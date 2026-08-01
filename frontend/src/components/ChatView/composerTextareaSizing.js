@@ -2,6 +2,37 @@ export const COMPOSER_TEXTAREA_MAX_HEIGHT = 280
 export const COMPOSER_TEXTAREA_TALL_THRESHOLD = 45
 let nativeSizingSupport
 
+/**
+ * How much of the chat the reader can actually SEE, in CSS pixels.
+ *
+ * ChatView publishes this as `--composer-room` and `.chat__input` caps its
+ * growth against half of it, so the composer can never swallow the
+ * conversation it belongs to.
+ *
+ * The pane's own height is not that number on a phone. The shell is a fixed
+ * layer on an unscrollable document, so `.chat` keeps reporting its full
+ * height while the soft keyboard covers the bottom half of it — only
+ * `visualViewport` sees the shrink. In a tiled workspace the reverse holds:
+ * the viewport is the whole window and the pane is the tighter bound. The
+ * room is whichever is smaller.
+ *
+ * Either bound can be unknown: a retained pane is `display: none` and reports
+ * clientHeight 0 until it is shown, and a non-browser runtime has no
+ * visualViewport. An unknown bound must not win the `min` and collapse the
+ * composer to its floor, so the other one stands alone.
+ *
+ * @param {object} [m]
+ * @param {number} [m.paneHeight]      `.chat` clientHeight
+ * @param {number} [m.viewportHeight]  `visualViewport.height`, else innerHeight
+ * @returns {number} whole CSS pixels, or 0 when neither bound is known
+ */
+export function composerRoom({ paneHeight = 0, viewportHeight = 0 } = {}) {
+  const pane = Number(paneHeight) > 0 ? Number(paneHeight) : 0
+  const viewport = Number(viewportHeight) > 0 ? Number(viewportHeight) : 0
+  if (!pane || !viewport) return Math.round(pane || viewport)
+  return Math.round(Math.min(pane, viewport))
+}
+
 function composerPill(textarea) {
   return textarea?.closest?.('.chat__pill') || null
 }
