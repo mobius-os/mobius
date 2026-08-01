@@ -12,12 +12,14 @@ from app.chat_writer import RewriteChatMediaPaths, get_writer, wait_ack
 
 
 def fix_forward_chat_media(db: Session, data_dir: str) -> int:
-  """Moves old chat images into `media/` and rewrites stored message URLs.
+  """Copies old chat images into `media/` and rewrites stored message URLs.
 
-  The operation is idempotent. Files move before database references change,
-  so a crash can only leave a second run with fewer files to move. A conflicting
-  destination is accepted only when its bytes match; otherwise the migration
-  stops rather than silently overwriting either image.
+  The old copy remains until the writer confirms the URL rewrite. This matters
+  because a timed-out writer acknowledgement does not cancel a command already
+  running on the actor thread: either eventual database outcome therefore still
+  names a directory containing the bytes. A conflicting destination is accepted
+  only when its bytes match; otherwise the migration stops rather than silently
+  overwriting either image.
   """
   changed = 0
   chats_root = Path(data_dir) / "chats"
@@ -86,18 +88,12 @@ def fix_forward_chat_media(db: Session, data_dir: str) -> int:
           f"Conflicting chat media file for chat {chat_id}: {source.name}"
         )
 
-  # Load one transcript at a time. A real legacy fleet may contain many
-  # candidates, but the migration's peak memory stays bounded by its largest
-  # individual chat rather than the sum of every chat in the instance.
+  # The writer actor owns transcript loading and mutation. Keep the boot session
+  # on ids only so migration does not materialize the same JSON blob twice.
   for chat_id in sorted(candidate_ids):
-    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    if chat is None:
-      continue
-    chat_root = chats_root / chat.id
+    chat_root = chats_root / chat_id
     old_dir = chat_root / "generated"
     media_dir = chat_root / "media"
-    moved: list[tuple[Path, Path]] = []
-    duplicates: list[Path] = []
 
     try:
       if old_dir.is_dir():
@@ -106,19 +102,14 @@ def fix_forward_chat_media(db: Session, data_dir: str) -> int:
           if not source.is_file():
             continue
           destination = media_dir / source.name
-          if destination.exists():
-            # The global preflight proved this is an identical regular file.
-            # Keep the old copy until the URL rewrite commits successfully.
-            duplicates.append(source)
-          else:
-            source.replace(destination)
-            moved.append((source, destination))
+          if not destination.exists():
+            shutil.copy2(source, destination)
           changed += 1
 
-      old_prefix = f"/api/chats/{chat.id}/generated/"
-      new_prefix = f"/api/chats/{chat.id}/media/"
+      old_prefix = f"/api/chats/{chat_id}/generated/"
+      new_prefix = f"/api/chats/{chat_id}/media/"
       rewritten = wait_ack(get_writer().submit(RewriteChatMediaPaths(
-        chat_id=chat.id,
+        chat_id=chat_id,
         old_prefix=old_prefix,
         new_prefix=new_prefix,
       )))
@@ -126,15 +117,14 @@ def fix_forward_chat_media(db: Session, data_dir: str) -> int:
       db.expire_all()
     except BaseException:
       db.rollback()
-      # Restore files moved for this chat so a handled startup failure never
-      # leaves old URLs pointing at a directory the live API no longer serves.
-      for source, destination in reversed(moved):
-        if destination.exists() and not source.exists():
-          destination.replace(source)
+      # Keep both copies. The actor may still commit after a caller-side
+      # timeout, and either old or new URLs must remain readable in that case.
       raise
 
-    for source in duplicates:
-      source.unlink(missing_ok=True)
+    if old_dir.is_dir():
+      for source in old_dir.iterdir():
+        if source.is_file():
+          source.unlink()
     if old_dir.exists() and not any(old_dir.iterdir()):
       shutil.rmtree(old_dir)
 
