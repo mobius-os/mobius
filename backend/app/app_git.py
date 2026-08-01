@@ -342,6 +342,24 @@ def _run_with_index(
   )
 
 
+def _require_local_branch(repo: Path) -> None:
+  """Fail before an accepted-source operation can touch the wrong index.
+
+  App history has one canonical writable branch. Updating ``main`` while a
+  deployment or review branch is checked out would move one ref and refresh a
+  different branch's index, making ignored runtime files appear staged. Keep
+  that invalid repository shape explicit instead of trying to reconcile two
+  source owners inside the publisher.
+  """
+  current = _run(
+    repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False,
+  )
+  if current.returncode != 0 or current.stdout.strip() != LOCAL_BRANCH:
+    raise SourceTreeChanged(
+      f"App source must be checked out on {LOCAL_BRANCH!r} before applying it."
+    )
+
+
 def _tracked_source(source_dir: Path) -> list[str]:
   """The source files to stage: everything in the dir minus what
   `.gitignore` excludes. We add by directory (`git add -A`) and let the
@@ -1439,6 +1457,7 @@ def snapshot_worktree(source_dir: str | Path) -> WorktreeTree:
   """
   repo = Path(source_dir)
   ensure_repo(repo)
+  _require_local_branch(repo)
   parent = head_sha(repo, LOCAL_BRANCH)
   with tempfile.TemporaryDirectory(prefix="mobius-app-index-") as tmp:
     index_file = Path(tmp) / "index"
@@ -1463,6 +1482,7 @@ def commit_worktree_tree(
   it as scratch state.
   """
   repo = Path(source_dir)
+  _require_local_branch(repo)
   current = head_sha(repo, LOCAL_BRANCH)
   if current != snapshot.parent_sha:
     raise SourceTreeChanged(
@@ -1728,6 +1748,7 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   """
   repo = Path(source_dir)
   ensure_repo(repo)
+  _require_local_branch(repo)
   git_dir = repo / ".git"
   merge_head_path = git_dir / "MERGE_HEAD"
   # Refuse to touch the index while a rebase/cherry-pick/am is in progress

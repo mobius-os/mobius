@@ -74,6 +74,21 @@ def test_worktree_snapshot_uses_git_inventory_without_mutating_real_index(
   assert (materialized / "link").read_text() == "/data/service-token.txt"
 
 
+def test_worktree_snapshot_rejects_a_noncanonical_checked_out_branch(tmp_path):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  app_git._run(repo, "checkout", "-q", "-b", "deploy/review")
+  _write(repo, "export default () => 'draft'\n")
+  index_before = app_git._run(repo, "write-tree").stdout.strip()
+
+  with pytest.raises(app_git.SourceTreeChanged, match="checked out on 'main'"):
+    app_git.snapshot_worktree(repo)
+
+  assert app_git._run(repo, "write-tree").stdout.strip() == index_before
+  assert "index.jsx" in app_git._run(repo, "status", "--porcelain").stdout
+
+
 def test_commit_worktree_tree_commits_candidate_and_leaves_later_edit_draft(
   tmp_path,
 ):
@@ -96,6 +111,24 @@ def test_commit_worktree_tree_commits_candidate_and_leaves_later_edit_draft(
   assert "index.jsx" in app_git._run(
     repo, "status", "--porcelain",
   ).stdout
+
+
+def test_commit_worktree_tree_rejects_a_branch_switch_without_touching_index(
+  tmp_path,
+):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  _write(repo, "export default () => 'accepted'\n")
+  snapshot = app_git.snapshot_worktree(repo)
+  app_git._run(repo, "checkout", "-q", "-b", "deploy/review")
+  index_before = app_git._run(repo, "write-tree").stdout.strip()
+
+  with pytest.raises(app_git.SourceTreeChanged, match="checked out on 'main'"):
+    app_git.commit_worktree_tree(repo, snapshot, "apply app")
+
+  assert app_git._run(repo, "write-tree").stdout.strip() == index_before
+  assert app_git.head_sha(repo, app_git.LOCAL_BRANCH) == snapshot.parent_sha
 
 
 def test_commit_worktree_tree_rejects_changed_parent(tmp_path):
