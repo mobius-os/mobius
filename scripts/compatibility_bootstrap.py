@@ -130,15 +130,17 @@ def assert_prewrite_state(
   daily: Identity | None,
   current: Identity,
   previous: Identity,
+  initial_main: Identity,
 ) -> None:
   if daily is not None:
     raise StateError(":daily appeared during compatibility publication")
   if tag == "main":
     # An incomplete prior attempt may have moved :main to an image that merely
-    # claims the current revision. It is not trusted; this run replaces it with
-    # its freshly built digest. Complete state is reused during inventory and
-    # never reaches this prewrite branch.
-    if main not in {previous, current} and main.revision != current.revision:
+    # claims the current revision. This run may replace only the exact digest
+    # it inventoried; accepting any same-revision image here would reopen a
+    # race with a concurrent registry writer. Complete state is reused during
+    # inventory and never reaches this prewrite branch.
+    if main not in {previous, current, initial_main}:
       raise StateError(":main changed after the initial inventory")
     if external not in {None, current}:
       raise StateError(":external-recovery changed after the initial inventory")
@@ -187,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--previous-sha", required=True)
   parser.add_argument("--previous-digest", required=True)
   parser.add_argument("--selected-digest", default="")
+  parser.add_argument("--initial-main-digest", default="")
   parser.add_argument("--tag", choices=("main", "external-recovery"))
   parser.add_argument("--output")
   return parser
@@ -209,7 +212,11 @@ def main(argv: list[str] | None = None) -> int:
       current_sha=args.current_sha,
       previous=previous,
     )
-    _write_outputs(args.output, {"mode": mode, "digest": digest})
+    _write_outputs(args.output, {
+      "mode": mode,
+      "digest": digest,
+      "initial_main_digest": live_main.digest,
+    })
     return 0
 
   if not DIGEST_RE.fullmatch(args.selected_digest):
@@ -218,6 +225,9 @@ def main(argv: list[str] | None = None) -> int:
   if args.command == "prewrite":
     if not args.tag:
       raise StateError("prewrite tag is required")
+    if not DIGEST_RE.fullmatch(args.initial_main_digest):
+      raise StateError("invalid initial main digest")
+    initial_main = Identity(args.initial_main_digest, live_main.revision)
     assert_prewrite_state(
       tag=args.tag,
       main=live_main,
@@ -225,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
       daily=live_daily,
       current=current,
       previous=previous,
+      initial_main=initial_main,
     )
     return 0
 

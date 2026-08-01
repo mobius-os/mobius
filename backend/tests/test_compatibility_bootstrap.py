@@ -57,6 +57,7 @@ def test_prewrite_rechecks_detect_tags_appearing_after_inventory():
     daily=None,
     current=CURRENT,
     previous=PREVIOUS,
+    initial_main=PREVIOUS,
   )
   # A lone current-revision main is untrusted metadata from an incomplete
   # attempt. The guarded build may replace it, but it may not carry forward to
@@ -69,7 +70,19 @@ def test_prewrite_rechecks_detect_tags_appearing_after_inventory():
     daily=None,
     current=CURRENT,
     previous=PREVIOUS,
+    initial_main=untrusted,
   )
+  swapped = bootstrap.Identity("sha256:" + "e" * 64, CURRENT_SHA)
+  with pytest.raises(bootstrap.StateError):
+    bootstrap.assert_prewrite_state(
+      tag="main",
+      main=swapped,
+      external=None,
+      daily=None,
+      current=CURRENT,
+      previous=PREVIOUS,
+      initial_main=untrusted,
+    )
   with pytest.raises(bootstrap.StateError):
     bootstrap.assert_prewrite_state(
       tag="main",
@@ -78,6 +91,7 @@ def test_prewrite_rechecks_detect_tags_appearing_after_inventory():
       daily=None,
       current=CURRENT,
       previous=PREVIOUS,
+      initial_main=PREVIOUS,
     )
   with pytest.raises(bootstrap.StateError):
     bootstrap.assert_prewrite_state(
@@ -87,6 +101,7 @@ def test_prewrite_rechecks_detect_tags_appearing_after_inventory():
       daily=None,
       current=CURRENT,
       previous=PREVIOUS,
+      initial_main=PREVIOUS,
     )
 
 

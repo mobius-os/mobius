@@ -168,6 +168,7 @@ jobs:
               --previous-sha "$COMPATIBILITY_PREVIOUS_SHA" \
               --previous-digest "$COMPATIBILITY_PREVIOUS_DIGEST" \
               --selected-digest "$IMAGE_DIGEST" \
+              --initial-main-digest "${{ steps.existing.outputs.initial_main_digest }}" \
               --tag "$tag"
             docker buildx imagetools create \
               --prefer-index=false \
