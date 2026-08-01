@@ -104,8 +104,6 @@ class RuntimeSupervisors:
         except Exception as exc:
           self.log.error("stalled-live sweep failed: %s", exc, exc_info=True)
 
-    events = get_system_broadcast().subscribe()
-
     async def sweep_reset_parks_once(*, startup: bool = False):
       try:
         with SessionLocal() as db:
@@ -131,6 +129,8 @@ class RuntimeSupervisors:
       )
 
     async def reset_park_loop():
+      system_broadcast = get_system_broadcast()
+      events = system_broadcast.subscribe()
       try:
         while True:
           try:
@@ -143,7 +143,7 @@ class RuntimeSupervisors:
             pass
           await sweep_reset_parks_once()
       finally:
-        get_system_broadcast().unsubscribe(events)
+        system_broadcast.unsubscribe(events)
 
     async def compress_legacy_tool_outputs():
       from app.tool_output_storage import compress_legacy_tool_output_batch
