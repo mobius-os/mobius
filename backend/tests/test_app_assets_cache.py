@@ -223,7 +223,10 @@ def test_opaque_embed_alias_preserves_relative_tree_and_sandboxes_document(
   _assert_opaque_embed_policy(entry, 200)
   _assert_opaque_embed_policy(child, 200)
   _assert_opaque_embed_policy(svg, 200)
-  assert entry.headers["access-control-allow-origin"] == "null"
+  # `*`, not the echoed `null`: WebKit refuses to match the literal value
+  # and blocks the response before the app frame sees it (see
+  # test_opaque_origin_cors.py).
+  assert entry.headers["access-control-allow-origin"] == "*"
   assert ordinary.headers["x-frame-options"] == "SAMEORIGIN"
 
 

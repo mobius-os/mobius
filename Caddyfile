@@ -66,7 +66,23 @@
     header @appFrame >X-Frame-Options "SAMEORIGIN"
     # A user-opened external tab must not inherit the app frame's opaque
     # origin. The app remains sandboxed; only its new popup/tab escapes.
-    header @appFrame >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation; default-src 'self'; script-src 'self' 'unsafe-inline' blob: https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
+    #
+    # connect-src NAMES THIS ORIGIN WITH ITS SCHEME, and needs all three parts:
+    # the sandbox deliberately omits allow-same-origin, so the frame's origin is
+    # opaque. `'self'` matches NOTHING for an opaque origin, and a bare host
+    # (`example.com`) matches nothing either — a scheme-less host source is
+    # compared against the DOCUMENT's scheme, and an opaque origin has none to
+    # compare. Only a fully-qualified `https://host` matches on the request URL
+    # alone. Chromium resolves all three leniently; WebKit obeys the spec, so on
+    # iOS every network call an app made was blocked before it left the device —
+    # no status, no server-side trace, indistinguishable from the network being
+    # down. Verified from the device: with the bare host present, WebKit still
+    # reported `refused by: connect-src` for a URL on exactly that host.
+    #
+    # This restores the reach the frame was always meant to have without
+    # weakening the sandbox: one origin, and the app still holds nothing but its
+    # own scoped token.
+    header @appFrame >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation; default-src 'self'; script-src 'self' 'unsafe-inline' blob: https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self' https://{$DOMAIN}; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
     # The embedded chat mounts the full ChatView (upload previews, image
     # lightbox), so its img-src needs blob: for the same object URLs as the
     # shell policy above.

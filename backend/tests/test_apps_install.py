@@ -2241,7 +2241,10 @@ def test_install_accepts_opaque_app_frame_with_manage_apps(
       json={"manifest_url": base + "mobius.json"},
     )
   assert r.status_code == 201, r.text
-  assert r.headers["access-control-allow-origin"] == "null"
+  # `*`, not the echoed `null`: WebKit refuses to match the literal value
+  # and blocks the response before the app frame sees it (see
+  # test_opaque_origin_cors.py).
+  assert r.headers["access-control-allow-origin"] == "*"
 
 
 def test_install_rejects_app_token_with_cross_write_but_no_manage_apps(

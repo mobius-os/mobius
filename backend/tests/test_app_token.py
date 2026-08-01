@@ -73,7 +73,10 @@ def test_app_token_can_access_storage(client, owner_token):
     },
   )
   assert r.status_code == 204
-  assert r.headers["access-control-allow-origin"] == "null"
+  # `*`, not the echoed `null`: WebKit refuses to match the literal value and
+  # blocks the response before the frame sees it. See
+  # test_opaque_origin_cors.py for why widening this answer grants nothing.
+  assert r.headers["access-control-allow-origin"] == "*"
 
 
 def test_app_token_can_list_models(client, owner_token):

@@ -562,6 +562,56 @@ app.add_middleware(
   expose_headers=["ETag"],
 )
 
+
+class _OpaqueOriginCorsMiddleware:
+  """Answers a sandboxed app frame with `*` rather than the literal `null`.
+
+  A frame without `allow-same-origin` sends `Origin: null`, and CORSMiddleware
+  echoes the matched value back, so the response says
+  `Access-Control-Allow-Origin: null`. Chromium treats that as a match; WebKit
+  does not, and blocks the response before the page sees it. The request never
+  reaches this server, so the failure looks like the network is down — on iOS
+  every direct API call from an app frame failed this way, while the same app's
+  storage worked because that path goes through the shell instead.
+
+  `*` is the same header the opaque-frame asset routes already emit, and it is
+  legal here only because `allow_credentials=False`: no cookie or other ambient
+  credential rides along, so this widens nothing an attacker could use without
+  first holding a bearer token that lives in localStorage, out of reach of any
+  other origin. State-changing routes keep their own `reject_cross_site` guard.
+
+  Placed outside CORSMiddleware (added later == outer) so it can rewrite that
+  middleware's header on both the preflight and the real response.
+  """
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    if scope["type"] != "http":
+      return await self.app(scope, receive, send)
+    origin = None
+    for key, value in scope.get("headers") or ():
+      if key == b"origin":
+        origin = value
+        break
+    if origin != b"null":
+      return await self.app(scope, receive, send)
+
+    async def send_wrapper(message):
+      if message["type"] == "http.response.start":
+        headers = [
+          (k, b"*" if k.lower() == b"access-control-allow-origin" else v)
+          for k, v in message.get("headers") or ()
+        ]
+        message = {**message, "headers": headers}
+      await send(message)
+
+    return await self.app(scope, receive, send_wrapper)
+
+
+app.add_middleware(_OpaqueOriginCorsMiddleware)
+
 # Security remains outside CORS and request-size enforcement so its headers
 # land on those generated responses. Request context is outermost so every
 # request receives one diagnostic label before middleware can touch the DB.

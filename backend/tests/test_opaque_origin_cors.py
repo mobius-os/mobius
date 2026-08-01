@@ -1,0 +1,57 @@
+"""A sandboxed app frame must be answered with `*`, not the literal `null`.
+
+Mini-app frames drop `allow-same-origin`, so the browser sends `Origin: null`.
+CORSMiddleware echoes the matched value, producing
+`Access-Control-Allow-Origin: null`. Chromium accepts that as a match; WebKit
+does not and blocks the response before the page sees it, so on iOS every
+direct API call from an app frame failed as if the network were down while the
+same app's storage kept working (that path goes through the shell, not the
+frame). Answering `*` is what the opaque-frame asset routes already do.
+
+`*` is legal here only because `allow_credentials=False` — nothing ambient
+rides along, so a response still requires a bearer token the frame already
+holds and no other origin can obtain.
+"""
+
+
+def _origin(response):
+  return response.headers.get("access-control-allow-origin")
+
+
+def test_sandboxed_frame_preflight_is_answered_with_a_wildcard(client):
+  r = client.options(
+    "/api/github/status",
+    headers={
+      "Origin": "null",
+      "Access-Control-Request-Method": "GET",
+      "Access-Control-Request-Headers": "authorization",
+    },
+  )
+  assert r.status_code == 200
+  # The literal "null" is exactly what WebKit refuses to match.
+  assert _origin(r) == "*"
+
+
+def test_sandboxed_frame_gets_a_wildcard_on_the_real_response_too(client, auth):
+  # A preflight alone is not enough: WebKit checks the actual response as well.
+  r = client.get("/api/apps/", headers={"Origin": "null", **auth})
+  assert r.status_code == 200
+  assert _origin(r) == "*"
+
+
+def test_an_unauthenticated_sandboxed_request_is_still_refused(client):
+  # Widening the CORS answer must not widen who may read anything: the bearer
+  # token remains the gate, and it lives where no other origin can reach it.
+  r = client.get("/api/apps/", headers={"Origin": "null"})
+  assert r.status_code == 401
+
+
+def test_the_ordinary_shell_origin_is_untouched(client, auth):
+  r = client.get("/api/apps/", headers={"Origin": "http://localhost:5173", **auth})
+  assert _origin(r) != "*"
+
+
+def test_requests_without_an_origin_are_untouched(client, auth):
+  r = client.get("/api/apps/", headers=auth)
+  assert r.status_code == 200
+  assert _origin(r) is None

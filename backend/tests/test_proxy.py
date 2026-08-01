@@ -169,7 +169,10 @@ def test_proxy_get_allows_opaque_app_frame_request(
   )
   assert r.status_code == 200
   assert r.json() == {"id": "test"}
-  assert r.headers["access-control-allow-origin"] == "null"
+  # `*`, not the echoed `null`: WebKit refuses to match the literal value
+  # and blocks the response before the app frame sees it (see
+  # test_opaque_origin_cors.py).
+  assert r.headers["access-control-allow-origin"] == "*"
 
 
 def test_proxy_post_rejects_foreign_cross_site_request(client, owner_token):
@@ -219,7 +222,10 @@ def test_proxy_post_allows_opaque_app_frame_request(
   )
   assert r.status_code == 200
   assert r.text == "ok"
-  assert r.headers["access-control-allow-origin"] == "null"
+  # `*`, not the echoed `null`: WebKit refuses to match the literal value
+  # and blocks the response before the app frame sees it (see
+  # test_opaque_origin_cors.py).
+  assert r.headers["access-control-allow-origin"] == "*"
 
 
 def test_proxy_get_allows_same_origin_request(client, owner_token):
