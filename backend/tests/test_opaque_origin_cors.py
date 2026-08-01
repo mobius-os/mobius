@@ -14,6 +14,9 @@ holds and no other origin can obtain.
 """
 
 
+from app.main import settings
+
+
 def _origin(response):
   return response.headers.get("access-control-allow-origin")
 
@@ -47,8 +50,13 @@ def test_an_unauthenticated_sandboxed_request_is_still_refused(client):
 
 
 def test_the_ordinary_shell_origin_is_untouched(client, auth):
-  r = client.get("/api/apps/", headers={"Origin": "http://localhost:5173", **auth})
-  assert _origin(r) != "*"
+  # Assert the echoed origin exactly. `!= "*"` would also pass if the header
+  # vanished altogether — and it did: sending a hardcoded shell origin that is
+  # not the CONFIGURED one is simply an unmatched origin, so CORSMiddleware
+  # omits the header and the loose assertion held for the wrong reason. Drive
+  # this from the configured origin so it proves the shell still gets its echo.
+  r = client.get("/api/apps/", headers={"Origin": settings.frontend_origin, **auth})
+  assert _origin(r) == settings.frontend_origin
 
 
 def test_requests_without_an_origin_are_untouched(client, auth):

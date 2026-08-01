@@ -30,7 +30,14 @@ export const SHELL_DATA_CACHE = 'mobius-shell-data'
 // destination tabs escape the frame's opaque sandbox. Cache-first would serve
 // the old response policy once (or indefinitely offline), so activation must
 // evict v3 and make the first post-upgrade frame load use the new CSP.
-export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v4'
+// Bumped -v4 → -v5 (2026-08-01): the frame's connect-src now names this origin
+// with its scheme, because 'self' matches nothing from the frame's opaque
+// origin. Same reason as the v3→v4 bump — security headers travel with the
+// cached response, so a device holding a v4 frame would keep the policy that
+// blocks every API call and see no fix at all on its first post-upgrade open.
+// That is precisely the population this change is for, so the eviction is the
+// half that actually delivers it.
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v5'
 // Bumped -v2 → -v3 (2026-07-30): v2 standalone documents executed app-authored
 // modules directly at owner origin. The secure host now mounts the shared
 // opaque AppCanvas frame; activation must evict every cached v2 document so an

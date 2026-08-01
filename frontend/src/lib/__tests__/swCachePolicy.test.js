@@ -45,6 +45,10 @@ test('runtime cache cleanup evicts old offline app caches', () => {
   // v3 stored app-frame responses before popup escape was added to their CSP.
   // It must not survive offline/cache-first into the revised policy.
   assert.equal(isStaleRuntimeCache('mobius-offline-apps-v3'), true)
+  // v4 stored frames whose connect-src was 'self'-only, which matches nothing
+  // from the frame's opaque origin. Serving one cache-first would reinstate the
+  // blocked-network failure on exactly the devices the fix targets.
+  assert.equal(isStaleRuntimeCache('mobius-offline-apps-v4'), true)
   assert.equal(isStaleRuntimeCache(OFFLINE_APPS_CACHE), false)
   assert.equal(isStaleRuntimeCache('mobius-standalone'), true)
   assert.equal(isStaleRuntimeCache('mobius-standalone-v1'), true)

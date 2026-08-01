@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
+import yaml
 from fastapi import Response
 from fastapi.testclient import TestClient
 
@@ -250,6 +251,10 @@ def test_app_frame_connect_src_stays_one_absolute_origin_in_every_environment():
   so the directive was left with no usable origin and the frame could not reach
   the API at all. Resolve the placeholder against every value the compose files
   actually assign, so the next such rewrite fails here rather than in e2e.
+
+  Resolution is scoped to the service that mounts the Caddyfile: that container
+  is what expands `{$VAR}`, so a variable defined only on some other service
+  would leave the directive empty at runtime while still looking assigned.
   """
   root = Path(__file__).resolve().parents[2]
   app_frame_csp = next(
@@ -261,32 +266,52 @@ def test_app_frame_connect_src_stays_one_absolute_origin_in_every_environment():
   referenced = re.findall(r"\{\$(\w+)\}", connect_src)
   assert referenced, "connect-src must name this origin through a variable"
 
-  composes = {
-    name: (root / name).read_text(encoding="utf-8")
-    for name in ("docker-compose.yml", "docker-compose.test.yml")
-  }
-  for var in referenced:
-    values = {
-      value
-      for compose in composes.values()
-      for value in re.findall(rf"^\s*-\s*{var}=(\S+)$", compose, re.MULTILINE)
+  # Compose's own merge tags (`!override`, `!reset`) are not YAML-standard, so
+  # a plain safe_load raises on docker-compose.test.yml. Keep the node's value
+  # and drop the tag; nothing here inspects a tagged field.
+  class _ComposeLoader(yaml.SafeLoader):
+    pass
+
+  _ComposeLoader.add_multi_constructor(
+    "", lambda loader, suffix, node: loader.construct_sequence(node)
+    if isinstance(node, yaml.SequenceNode) else loader.construct_scalar(node)
+  )
+
+  for name in ("docker-compose.yml", "docker-compose.test.yml"):
+    services = yaml.load(
+      (root / name).read_text(encoding="utf-8"), Loader=_ComposeLoader
+    )["services"]
+    proxies = {
+      svc: spec for svc, spec in services.items()
+      if any("Caddyfile" in str(v) for v in (spec or {}).get("volumes") or [])
     }
-    assert values, f"{var} must be assigned by the compose files"
-    for value in values:
-      # Caddy expands {$VAR} from the container env; compose expands ${VAR} and
-      # ${VAR:-default} before that. deploy-prod.sh refuses a DOMAIN that is not
-      # a bare hostname, so a bare host is the faithful stand-in here.
-      resolved = connect_src.replace(f"{{${var}}}", value)
-      resolved = re.sub(r"\$\{\w+:-([^}]*)\}", r"\1", resolved)
-      resolved = re.sub(r"\$\{\w+\}", "mobius.example.test", resolved)
-      for source in resolved.split():
-        if source.startswith("'"):
-          continue
-        parsed = urlparse(source)
-        assert source.count("://") == 1 and parsed.scheme and parsed.netloc, (
-          f"{var}={value} resolves connect-src to {source!r}, which is not a "
-          "single absolute origin and would be ignored by the browser"
+    assert proxies, f"{name} must mount the Caddyfile on some service"
+    for svc, spec in proxies.items():
+      env = dict(
+        entry.split("=", 1)
+        for entry in (spec.get("environment") or [])
+        if "=" in entry
+      )
+      for var in referenced:
+        assert var in env, (
+          f"{name}: service {svc!r} mounts the Caddyfile but never sets {var}, "
+          "so the app-frame connect-src would resolve to nothing"
         )
+        value = env[var]
+        # Caddy expands {$VAR} from the container env; compose expands ${VAR}
+        # and ${VAR:-default} before that. deploy-prod.sh refuses a DOMAIN that
+        # is not a bare hostname, so a bare host is the faithful stand-in here.
+        resolved = connect_src.replace(f"{{${var}}}", value)
+        resolved = re.sub(r"\$\{\w+:-([^}]*)\}", r"\1", resolved)
+        resolved = re.sub(r"\$\{\w+\}", "mobius.example.test", resolved)
+        for source in resolved.split():
+          if source.startswith("'"):
+            continue
+          parsed = urlparse(source)
+          assert source.count("://") == 1 and parsed.scheme and parsed.netloc, (
+            f"{name}: {var}={value} resolves connect-src to {source!r}, which "
+            "is not a single absolute origin and would be ignored by the browser"
+          )
 
 
 def test_compose_keeps_optional_service_gateway_inert_by_default():
