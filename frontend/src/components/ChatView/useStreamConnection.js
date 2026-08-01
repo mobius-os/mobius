@@ -195,6 +195,7 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   sendMessage: (text: string, attachments?: Array<object>,
  *                 opts?: {hidden?: boolean, queueOnly?: boolean, cid?: string,
  *                         forceSteer?: boolean, directSteer?: boolean,
+ *                         continuation?: 'manual',
  *                         consumePendingCids?: string[], answers?: object})
  *                 => Promise<object>,
  *   connectToStream: () => void,
@@ -1303,6 +1304,7 @@ export default function useStreamConnection(chatId, {
       steeredMessages = undefined,
       answers = undefined,
       question_id = undefined,
+      continuation = undefined,
     } = {},
   ) => {
     activeStreamChatIdRef.current = chatIdRef.current
@@ -1355,6 +1357,7 @@ export default function useStreamConnection(chatId, {
       // recovered hidden continuation.
       if (answers) body.answers = answers
       if (question_id) body.question_id = question_id
+      if (continuation) body.continuation = continuation
       if (attachments && attachments.length > 0) {
         body.attachments = attachments
       }

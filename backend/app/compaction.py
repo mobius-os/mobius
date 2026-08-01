@@ -23,6 +23,11 @@ import signal
 import tempfile
 from pathlib import Path
 
+from app.continuations import (
+  continuation_actor_label,
+  is_continuation_message,
+)
+
 log = logging.getLogger("moebius.chat")
 
 # The default cap remains useful to callers that render a transcript preview.
@@ -123,9 +128,8 @@ def build_transcript_text(
     # it back into a later synthesis recursively inflates the next handoff.
     if m.get("kind") == "compaction":
       continue
-    if m.get("kind") == "auto_continuation":
-      reason = str(m.get("continuation_reason") or "automatic recovery")
-      role = f"AUTOMATIC CONTINUATION ({reason.upper()})"
+    if is_continuation_message(m):
+      role = continuation_actor_label(m).upper()
     else:
       role = (m.get("role") or "user").upper()
     content = m.get("content") or ""

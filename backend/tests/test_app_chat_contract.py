@@ -434,6 +434,24 @@ def test_owner_can_still_send_to_app_owned_chat(client, owner_token, db):
   assert r.status_code == 202, r.text
 
 
+def test_app_token_cannot_forge_a_manual_resume_marker(client, owner_token):
+  app_id, app_token = _make_app(client, owner_token, "resume-marker-app")
+  del app_id
+  created = client.post(
+    "/api/app-chats", json={"title": "App conversation"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert created.status_code == 201, created.text
+
+  response = client.post(
+    f"/api/chats/{created.json()['id']}/messages",
+    json={"content": "continue", "continuation": "manual"},
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 403
+
+
 def test_app_chat_excluded_from_history_list(client, owner_token, db):
   """App-created chats stay out of default history but remain readable."""
   app_id, app_token = _make_app(client, owner_token, "drawer-hidden")

@@ -564,6 +564,17 @@ class SendMessage(BaseModel):
   # so older clients that omit it keep working via the latest-question
   # fallback (no behaviour change when absent).
   question_id: str | None = None
+  # The shell's one-tap Resume is a product action, not owner-authored prose.
+  # The provider still needs a short prompt to open a new turn after the old
+  # process has gone away, but persistence/rendering attribute that prompt as
+  # a continuation marker rather than a user bubble.
+  continuation: Literal["manual"] | None = None
+
+  @model_validator(mode="after")
+  def validate_continuation(self):
+    if self.continuation == "manual" and self.content.strip().lower() != "continue":
+      raise ValueError("manual continuation content must be 'continue'")
+    return self
 
 
 class PushKeys(BaseModel):

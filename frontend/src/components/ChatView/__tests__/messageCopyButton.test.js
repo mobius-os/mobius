@@ -39,6 +39,7 @@ test('messageCopyText falls back to plain content; system rows copy nothing', ()
   assert.equal(messageCopyText({ role: 'assistant', content: 'plain' }), 'plain')
   assert.equal(messageCopyText({ role: 'assistant', kind: 'compaction', content: 'x' }), '')
   assert.equal(messageCopyText({ role: 'assistant', kind: 'auto_continuation', content: 'x' }), '')
+  assert.equal(messageCopyText({ role: 'assistant', kind: 'continuation', content: 'x' }), '')
   assert.equal(messageCopyText({ role: 'assistant', blocks: [{ type: 'tool' }] }), '')
 })
 

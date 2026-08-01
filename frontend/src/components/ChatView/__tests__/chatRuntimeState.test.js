@@ -9,7 +9,7 @@ import {
   shouldFreezeStreamingReturn,
   cidOf,
   continuationRowsFromPromotedMessage,
-  isAutoContinuationMessage,
+  isContinuationMessage,
   isOwnerUserMessage,
   mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
@@ -25,14 +25,15 @@ import {
   systemEventForChat,
 } from '../chatRuntimeState.js'
 
-test('automatic continuations are product markers, not owner messages', () => {
+test('automatic and manual continuations are product markers, not owner messages', () => {
   const marker = {
     role: 'user',
     content: 'continue',
-    kind: 'auto_continuation',
-    continuation_reason: 'restart',
+    kind: 'continuation',
+    continuation_reason: 'manual',
   }
-  assert.equal(isAutoContinuationMessage(marker), true)
+  assert.equal(isContinuationMessage(marker), true)
+  assert.equal(isContinuationMessage({ ...marker, kind: 'auto_continuation' }), true)
   assert.equal(isOwnerUserMessage(marker), false)
   assert.equal(isOwnerUserMessage({ role: 'user', content: 'hello' }), true)
   assert.equal(isOwnerUserMessage({ role: 'user', hidden: true }), false)

@@ -49,6 +49,13 @@ from app.runner_registry import RunnerKind, registry
 NOW = datetime(2026, 7, 10, 22, 0, 0)
 
 
+def _async_notify(callback):
+  async def wrapped(*args, **kwargs):
+    return callback(*args, **kwargs)
+
+  return wrapped
+
+
 class _Sink:
   def __init__(self):
     self.events = []
@@ -586,8 +593,8 @@ def test_sweep_notifies_once_and_resolves(owner_token, monkeypatch):
   del owner_token  # fixture creates the Owner row the notify needs
   calls = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: calls.append(kw) or "notif-id"),
   )
   _due_park("sweep-once", "rt-sweep-once")
 
@@ -608,8 +615,8 @@ def test_sweep_skips_future_parks(owner_token, monkeypatch):
   del owner_token
   calls = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: calls.append(kw) or "notif-id"),
   )
   _seed_chat("sweep-future")
   _seed_run("sweep-future", "rt-sweep-future", status="parked",
@@ -625,8 +632,8 @@ def test_sweep_stands_down_while_draining(owner_token, monkeypatch):
   del owner_token
   calls = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: calls.append(kw) or "notif-id"),
   )
   _due_park("sweep-drain", "rt-sweep-drain")
 
@@ -643,8 +650,8 @@ def test_sweep_resolves_deleted_chat_without_notify(owner_token, monkeypatch):
   del owner_token
   calls = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: calls.append(kw) or "notif-id"),
   )
   _due_park("sweep-deleted", "rt-sweep-deleted", deleted=True)
 
@@ -659,8 +666,8 @@ def test_sweep_processes_a_bounded_batch(owner_token, monkeypatch):
   del owner_token
   monkeypatch.setattr(chat_mod, "CONTINUATION_SWEEP_BATCH_SIZE", 2)
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: "notif-id"),
   )
   for suffix in ("a", "b", "c"):
     _due_park(f"sweep-batch-{suffix}", f"rt-sweep-batch-{suffix}")
@@ -682,8 +689,8 @@ def test_sweep_processes_a_bounded_batch(owner_token, monkeypatch):
 def test_sweep_auto_resume_off_by_default(owner_token, monkeypatch):
   del owner_token
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: "notif-id"),
   )
   resumes = []
 
@@ -705,8 +712,8 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
 ):
   del owner_token
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: "notif-id"),
   )
   scheduled = []
   monkeypatch.setattr(
@@ -730,7 +737,7 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
     promoted = scheduled[0]["next_user"]
     assert "queued ask" in promoted["content"]
     assert "continue" in promoted["content"]
-    assert promoted["_messages"][-1]["kind"] == "auto_continuation"
+    assert promoted["_messages"][-1]["kind"] == "continuation"
     assert promoted["_messages"][-1]["continuation_reason"] == "usage_limit"
     state = _chat_row("sweep-auto")
     assert state["pending"] == []
@@ -746,8 +753,8 @@ def test_limit_auto_resumes_are_staggered_not_blocked_by_live_work(
 ):
   del owner_token
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: "notif-id"),
   )
   clock = [100.0]
   monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: clock[0])
@@ -790,8 +797,8 @@ def test_restart_park_auto_continues_with_product_marker(
   del owner_token
   notifications = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda *args, **kwargs: notifications.append(kwargs) or "notif-id"),
   )
   scheduled = []
   monkeypatch.setattr(
@@ -816,7 +823,7 @@ def test_restart_park_auto_continues_with_product_marker(
     marker = scheduled[0]["next_user"]["_messages"][-1]
     assert marker["role"] == "user"
     assert marker["content"] == "continue"
-    assert marker["kind"] == "auto_continuation"
+    assert marker["kind"] == "continuation"
     assert marker["continuation_reason"] == "restart"
     assert marker["cid"] == f"restart-resume-{token}"
     assert notifications[0]["title"] == "Möbius restarted"
@@ -831,7 +838,7 @@ def test_app_initiated_restart_preserves_attribution_and_continues(
   """The restart policy applies to app chats without losing ownership."""
   del owner_token
   monkeypatch.setattr(
-    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
   )
   scheduled = []
   monkeypatch.setattr(
@@ -860,7 +867,7 @@ def test_app_initiated_restart_preserves_attribution_and_continues(
     resumed_run = _run_row(scheduled[0]["run_token"])
     assert resumed_run["initiated_by_app_id"] == app_id
     marker = scheduled[0]["next_user"]["_messages"][-1]
-    assert marker["kind"] == "auto_continuation"
+    assert marker["kind"] == "continuation"
     assert marker["continuation_reason"] == "restart"
   finally:
     chat_mod.discard_starting(cid)
@@ -873,8 +880,8 @@ def test_restart_does_not_absorb_newly_queued_app_work(
   del owner_token
   notifications = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda *args, **kwargs: notifications.append(kwargs) or "notif-id"),
   )
   resumes = []
 
@@ -915,7 +922,7 @@ def test_owner_message_queued_after_app_restart_takes_over_attribution(
   """New owner input outranks the parked app when forming the next run."""
   del owner_token
   monkeypatch.setattr(
-    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
   )
   scheduled = []
   monkeypatch.setattr(
@@ -958,7 +965,7 @@ def test_startup_sweep_uses_one_captured_restart_authorization(
   """The pre-yield pass must not depend on a second ledger read."""
   del owner_token
   monkeypatch.setattr(
-    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
   )
   monkeypatch.setattr(
     "app.restart_ledger.authorized_restart_nonce",
@@ -998,8 +1005,8 @@ def test_restart_park_waiting_on_question_stays_manual(
   del owner_token
   notifications = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda *args, **kwargs: notifications.append(kwargs) or "notif-id"),
   )
   resumes = []
 
@@ -1053,8 +1060,8 @@ def test_restart_park_policy_off_resolves_to_manual_interruption(
   del owner_token
   notifications = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda *args, **kwargs: notifications.append(kwargs) or "notif-id"),
   )
   cid = "restart-policy-off"
   token = f"rt-{cid}"
@@ -1083,8 +1090,8 @@ def test_restart_park_without_current_boot_ack_stays_manual(
   del owner_token
   notifications = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda *args, **kwargs: notifications.append(kwargs) or "notif-id"),
   )
   monkeypatch.setattr(
     "app.restart_ledger.authorized_restart_nonce", lambda: None,
@@ -1107,7 +1114,7 @@ def test_restart_park_with_no_nonce_never_matches_missing_ack(
 ):
   del owner_token
   monkeypatch.setattr(
-    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
   )
   monkeypatch.setattr(
     "app.restart_ledger.authorized_restart_nonce", lambda: None,
@@ -1130,7 +1137,7 @@ def test_restart_park_rejects_ack_for_the_wrong_nonce(
   cid = "restart-wrong-ack"
   token = f"rt-{cid}"
   monkeypatch.setattr(
-    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
   )
   monkeypatch.setattr(
     "app.restart_ledger.authorized_restart_nonce",
@@ -1157,7 +1164,7 @@ def test_restart_spawn_failure_retires_one_shot_authorization(
   token = f"rt-{cid}"
   nonce = "restart-nonce-spawn"
   monkeypatch.setattr(
-    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
   )
   monkeypatch.setattr(
     "app.restart_ledger.authorized_restart_nonce",
@@ -1310,8 +1317,8 @@ def test_sweep_auto_resume_starts_while_unrelated_turn_is_live(
   del owner_token
   calls = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: calls.append(kw) or "notif-id"),
   )
   cid = "sweep-independent"
   _due_park(cid, f"rt-{cid}", auto_resume=True)
@@ -1340,8 +1347,8 @@ def test_live_turn_allows_enabled_and_notify_only_chats_to_resolve(
   del owner_token
   calls = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: calls.append(kw) or "notif-id"),
   )
   _due_park("sweep-opted", "rt-sweep-opted", auto_resume=True)
   _due_park("sweep-notify", "rt-sweep-notify")
@@ -1367,34 +1374,35 @@ def test_live_turn_allows_enabled_and_notify_only_chats_to_resolve(
   assert [item["chat_id"] for item in scheduled] == ["sweep-opted"]
 
 
-def test_unrelated_turn_starting_during_notify_does_not_cancel_resume(
+def test_notification_side_effects_run_after_resume_is_scheduled(
   owner_token, monkeypatch,
 ):
-  """A notify callback admitting other work must not restore the global gate."""
+  """Slow/active push delivery is never on the continuation critical path."""
   del owner_token
   cid = "sweep-notify-race"
   blocker_id = f"live-{uuid.uuid4()}"
   blocker = _Handle(blocker_id)
-  notifications = []
+  events = []
 
   def _notify(*args, **kwargs):
     del args
-    notifications.append(kwargs)
+    events.append(("notify", kwargs["source_id"]))
     registry.register(blocker)
     return "notif-id"
 
-  monkeypatch.setattr("app.push.notify_owner", _notify)
+  monkeypatch.setattr("app.push.notify_owner_async", _async_notify(_notify))
   scheduled = []
-  monkeypatch.setattr(
-    chat_mod, "_schedule_continuation",
-    lambda **kw: scheduled.append(kw),
-  )
+  def _schedule(**kw):
+    events.append(("schedule", kw["chat_id"]))
+    scheduled.append(kw)
+
+  monkeypatch.setattr(chat_mod, "_schedule_continuation", _schedule)
   _due_park(cid, f"rt-{cid}", auto_resume=True)
 
   try:
     assert _run_sweep() == [cid]
     assert _run_row(f"rt-{cid}")["status"] == "completed"
-    assert len(notifications) == 1
+    assert events == [("schedule", cid), ("notify", cid)]
   finally:
     registry.unregister(blocker_id, blocker.kind)
     chat_mod.discard_starting(cid)
@@ -1404,7 +1412,7 @@ def test_unrelated_turn_starting_during_notify_does_not_cancel_resume(
 def test_sweep_starts_only_one_of_two_opted_chats(owner_token, monkeypatch):
   del owner_token
   monkeypatch.setattr(
-    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
   )
   scheduled = []
   monkeypatch.setattr(
@@ -1433,13 +1441,19 @@ def test_sweep_restarts_every_opted_chat_in_the_accepted_batch(
   monkeypatch.setattr(
     "app.restart_ledger.authorized_restart_nonce", lambda: nonce,
   )
+  events = []
   monkeypatch.setattr(
-    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda *args, **kwargs: events.append(
+      ("notify", kwargs["source_id"])
+    ) or "notif-id"),
   )
   scheduled = []
-  monkeypatch.setattr(
-    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
-  )
+  def _schedule(**kw):
+    events.append(("schedule", kw["chat_id"]))
+    scheduled.append(kw)
+
+  monkeypatch.setattr(chat_mod, "_schedule_continuation", _schedule)
   chat_ids = ("restart-batch-a", "restart-batch-b", "restart-batch-c")
   for cid in chat_ids:
     _due_park(
@@ -1450,6 +1464,12 @@ def test_sweep_restarts_every_opted_chat_in_the_accepted_batch(
   try:
     assert set(_run_sweep()) == set(chat_ids)
     assert {item["chat_id"] for item in scheduled} == set(chat_ids)
+    assert [kind for kind, _ in events[:len(chat_ids)]] == [
+      "schedule", "schedule", "schedule",
+    ]
+    assert {chat_id for kind, chat_id in events if kind == "notify"} == set(
+      chat_ids
+    )
     for cid in chat_ids:
       assert _run_row(f"rt-{cid}")["status"] == "completed"
   finally:
@@ -1466,8 +1486,8 @@ def test_auto_resume_spawn_failure_rolls_back_and_retries_once(
   park_token = f"rt-{cid}"
   notifications = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda *args, **kwargs: notifications.append(kwargs) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda *args, **kwargs: notifications.append(kwargs) or "notif-id"),
   )
   clock = [100.0]
   monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: clock[0])
@@ -1649,7 +1669,7 @@ def test_app_initiated_park_never_auto_resumes(owner_token, monkeypatch):
   """App-token turns are background work even though they own a ChatRun."""
   del owner_token
   monkeypatch.setattr(
-    "app.push.notify_owner", lambda db, owner_id, **kw: "notif-id",
+    "app.push.notify_owner_async", _async_notify(lambda db, owner_id, **kw: "notif-id"),
   )
   resumes = []
 
@@ -1678,7 +1698,7 @@ def test_app_attributed_pending_work_disables_auto_resume(
 ):
   del owner_token
   monkeypatch.setattr(
-    "app.push.notify_owner", lambda *args, **kwargs: "notif-id",
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
   )
   resumes = []
 
@@ -1794,8 +1814,8 @@ def test_sweep_skips_notify_when_park_superseded_mid_sweep(
   del owner_token
   calls = []
   monkeypatch.setattr(
-    "app.push.notify_owner",
-    lambda db, owner_id, **kw: calls.append(kw) or "notif-id",
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: calls.append(kw) or "notif-id"),
   )
 
   async def _ack_not_parked(ack, timeout=None):

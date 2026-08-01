@@ -107,8 +107,8 @@ test('MsgContent gates the Resume button on a resumable tail note', () => {
   )
   assert.match(
     msgContent,
-    /className="chat__resume"[\s\S]*?onClick=\{\(\)\s*=>\s*onResume\('continue'\)\}/,
-    'the Resume button must re-send "continue" via onResume',
+    /className="chat__resume"[\s\S]*?onClick=\{\(\)\s*=>\s*onResume\('continue',\s*\{[\s\S]*?continuation:\s*'manual'[\s\S]*?pin:\s*false/,
+    'the Resume button must open a manual product-owned continuation',
   )
 })
 
@@ -120,7 +120,7 @@ test('MsgContent memo compares onResume so a stable ref skips re-render', () => 
 test('ChatView wires MsgContent.onResume to the normal send', () => {
   assert.match(chatView, /<MsgContent[\s\S]*?onResume=\{doSend\}/,
     'ChatView must pass its stable doSend as onResume so tapping Resume ' +
-      'performs a normal visible "continue" send')
+      'uses the ordinary durable send boundary without a visible user row')
 })
 
 test('Resume button has styling', () => {

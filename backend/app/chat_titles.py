@@ -1,5 +1,7 @@
 """Chat naming policy for the immediate first-message fallback."""
 
+from app.continuations import is_continuation_message
+
 FIRST_MESSAGE_TITLE_MAX_CHARS = 80
 
 
@@ -22,7 +24,7 @@ def first_user_message_title(messages: list[object] | None) -> str:
     if (
       not isinstance(message, dict)
       or message.get("role") != "user"
-      or message.get("kind") == "auto_continuation"
+      or is_continuation_message(message)
     ):
       continue
     title = first_message_title(message.get("content"))

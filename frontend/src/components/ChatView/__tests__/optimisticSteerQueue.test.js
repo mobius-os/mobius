@@ -85,7 +85,7 @@ test('the modified-Enter submit uses one direct request and reveals only queue f
   )
   assert.match(
     source,
-    /directSteer\s*\? \{ directSteer: true, cid \}\s*: \{ queueOnly: true, cid \}/,
+    /directSteer\s*\? \{ directSteer: true, cid, continuation \}\s*: \{ queueOnly: true, cid, continuation \}/,
     'Cmd/Ctrl+Enter must make one direct-steer POST instead of queue then force-steer',
   )
   assert.match(

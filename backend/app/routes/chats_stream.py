@@ -293,6 +293,9 @@ def _user_message_from_body(
   if body.cid:
     user_msg["cid"] = body.cid
   ensure_user_cid(user_msg)
+  if body.continuation == "manual":
+    user_msg["kind"] = "continuation"
+    user_msg["continuation_reason"] = "manual"
   if body.hidden:
     user_msg["hidden"] = True
   if body.attachments:
@@ -729,6 +732,11 @@ async def _send_message_locked(
   duplicate = _duplicate_send_response(chat_id, chat, body.cid)
   if duplicate is not None:
     return duplicate
+  if body.continuation == "manual" and principal.app_id is not None:
+    raise HTTPException(
+      status_code=403,
+      detail="Only the owner can resume a paused chat.",
+    )
   record_memory_checkpoint_once(
     "chat_send_first_request",
     chat_id=chat_id,

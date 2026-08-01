@@ -12,6 +12,10 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app import models, schemas
+from app.continuations import (
+  continuation_actor_label,
+  is_continuation_message,
+)
 
 def _human_elapsed(seconds: float | None) -> str | None:
   """Human 'N ago' for the gap since the user's previous message.
@@ -64,7 +68,7 @@ def _last_user_message_elapsed(db, chat_id: str) -> str | None:
       if (
         not isinstance(m, dict)
         or m.get("role") != "user"
-        or m.get("kind") == "auto_continuation"
+        or is_continuation_message(m)
       ):
         continue
       ts = m.get("ts")
@@ -460,9 +464,8 @@ def _build_resumed_context(chat_row) -> str | None:
     content = msg.get("content")
     if not isinstance(content, str) or not content.strip():
       continue
-    if msg.get("kind") == "auto_continuation":
-      reason = msg.get("continuation_reason") or "automatic recovery"
-      speaker = f"Automatic continuation ({reason})"
+    if is_continuation_message(msg):
+      speaker = continuation_actor_label(msg)
     else:
       speaker = "User" if role == "user" else "Assistant"
     line = f"{speaker}: {content.strip()}"
@@ -553,7 +556,7 @@ def _goal_resume_requested(chat_row, text: str) -> bool:
   if not durable:
     return False
   current = durable[-1] if isinstance(durable[-1], dict) else {}
-  if current.get("kind") == "auto_continuation":
+  if is_continuation_message(current):
     return True
   # The visible Resume button is rendered only for a resumable tail block and
   # sends the same short text as an automatic continuation. The persisted tail

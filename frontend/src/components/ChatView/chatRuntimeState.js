@@ -16,8 +16,9 @@ export function cidOf(msg) {
   return msg.cid || null
 }
 
-export function isAutoContinuationMessage(message) {
-  return message?.kind === 'auto_continuation'
+export function isContinuationMessage(message) {
+  return message?.kind === 'continuation'
+    || message?.kind === 'auto_continuation'
 }
 
 /** A visible transcript row authored by the owner, excluding product events
@@ -26,7 +27,7 @@ export function isOwnerUserMessage(message) {
   return !!message
     && message.role === 'user'
     && !message.hidden
-    && !isAutoContinuationMessage(message)
+    && !isContinuationMessage(message)
 }
 
 export function stripInternalUserMessageFields(raw) {

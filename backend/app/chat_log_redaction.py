@@ -40,6 +40,11 @@ from __future__ import annotations
 
 import re
 
+from app.continuations import (
+  continuation_actor_label,
+  is_continuation_message,
+)
+
 # Per-excerpt char cap for the list view, and per-message char cap for
 # the single-chat view. Excerpts are a teaser; full-message bodies in
 # the detail view are longer but still bounded so one giant pasted blob
@@ -163,11 +168,10 @@ def redact_message(msg: dict) -> dict | None:
     return None
   if msg.get("hidden"):
     return None
-  if msg.get("kind") == "auto_continuation":
-    reason = str(msg.get("continuation_reason") or "automatic recovery")
+  if is_continuation_message(msg):
     return {
       "role": "system",
-      "text": f"Automatic continuation ({reason}).",
+      "text": f"{continuation_actor_label(msg)}.",
     }
   role = msg.get("role")
   if role == "assistant":

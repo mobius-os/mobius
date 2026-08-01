@@ -1847,7 +1847,7 @@ async def _auto_resume_chat(
                 "role": "user",
                 "content": "continue",
                 "ts": int(time.time() * 1000),
-                "kind": "auto_continuation",
+                "kind": "continuation",
                 "continuation_reason": resume_reason,
                 # A retry after AppendPending succeeded but a later step failed
                 # must not enqueue a second synthetic continuation.
@@ -1997,36 +1997,17 @@ async def sweep_reset_parks(
           "fall back to manual recovery",
           exc_info=True,
         )
-  owner_loaded = False
-  owner = None
+  # Notification persistence/delivery is deliberately outside the state loop.
+  # A Web Push endpoint can take tens of seconds to fail; doing that before the
+  # next restart continuation made a six-chat recovery batch take minutes and
+  # let manual Resume taps race the still-authorized automatic work. First
+  # settle every durable continuation, then deliver the best-effort notices
+  # concurrently through push.notify_owner_async (which keeps remote I/O off
+  # the event loop).
+  notification_requests: list[tuple[str, bool]] = []
 
-  def notify_due(chat_id: str, run: models.ChatRun) -> None:
-    nonlocal owner, owner_loaded
-    try:
-      if not owner_loaded:
-        owner = db.query(models.Owner).first()
-        owner_loaded = True
-      if owner is not None:
-        from app import push
-        restarted = run.park_reason == "restart"
-        push.notify_owner(
-          db,
-          owner.id,
-          title=("Möbius restarted" if restarted else LIMIT_RESET_NOTIFY_TITLE),
-          body=(
-            "Your paused turn is ready."
-            if restarted
-            else LIMIT_RESET_NOTIFY_BODY
-          ),
-          source_type="system",
-          source_id=chat_id,
-          target=f"/shell/?chat={chat_id}",
-        )
-    except Exception:
-      owner_loaded = True
-      log.warning(
-        "continuation notify failed chat_id=%s", chat_id, exc_info=True,
-      )
+  def queue_due_notification(chat_id: str, run: models.ChatRun) -> None:
+    notification_requests.append((chat_id, run.park_reason == "restart"))
 
   def auto_resume_rejection(chat, run) -> str | None:
     pending = list(chat.pending_messages or []) if chat is not None else []
@@ -2123,11 +2104,11 @@ async def sweep_reset_parks(
           continue
         resolved.append(chat_id)
         if prepared.get("notify") and not chat_gone:
-          notify_due(chat_id, run)
+          queue_due_notification(chat_id, run)
         continue
 
       if prepared.get("notify"):
-        notify_due(chat_id, run)
+        queue_due_notification(chat_id, run)
       if (
         not restart_auto_resume
         and not _claim_limit_auto_resume_slot()
@@ -2170,7 +2151,47 @@ async def sweep_reset_parks(
       continue
     resolved.append(chat_id)
     if should_notify and not chat_gone:
-      notify_due(chat_id, run)
+      queue_due_notification(chat_id, run)
+  if notification_requests:
+    try:
+      owner_row = db.query(models.Owner.id).first()
+      owner_id = owner_row[0] if owner_row is not None else None
+    except Exception:
+      owner_id = None
+      log.warning("continuation notification owner lookup failed", exc_info=True)
+    if owner_id is not None:
+      from app import push
+      from app.database import SessionLocal
+
+      async def deliver_due_notification(
+        chat_id: str, restarted: bool,
+      ) -> None:
+        try:
+          with SessionLocal() as notification_db:
+            await push.notify_owner_async(
+              notification_db,
+              owner_id,
+              title=(
+                "Möbius restarted" if restarted else LIMIT_RESET_NOTIFY_TITLE
+              ),
+              body=(
+                "Your paused turn is ready."
+                if restarted
+                else LIMIT_RESET_NOTIFY_BODY
+              ),
+              source_type="system",
+              source_id=chat_id,
+              target=f"/shell/?chat={chat_id}",
+            )
+        except Exception:
+          log.warning(
+            "continuation notify failed chat_id=%s", chat_id, exc_info=True,
+          )
+
+      await asyncio.gather(*(
+        deliver_due_notification(chat_id, restarted)
+        for chat_id, restarted in notification_requests
+      ))
   if resolved:
     log.info(
       "continuation sweep resolved %d park(s): %s",

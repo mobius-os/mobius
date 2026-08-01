@@ -7,7 +7,8 @@ import QuestionCard from './QuestionCard.jsx'
 import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
-import AutoContinuationCard from './AutoContinuationCard.jsx'
+import ContinuationCard from './ContinuationCard.jsx'
+import { isContinuationMessage } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 import {
   repairInterleavedQuestionText,
@@ -94,8 +95,8 @@ function MsgContentInner({
     )
   }
 
-  if (msg.kind === 'auto_continuation') {
-    return <AutoContinuationCard msg={msg} />
+  if (isContinuationMessage(msg)) {
+    return <ContinuationCard msg={msg} />
   }
 
   if (msg.blocks && msg.blocks.length > 0) {
@@ -242,8 +243,9 @@ function MsgContentInner({
         // it), and only the TAIL note on the last message is resumable —
         // mirrors how a question card is only answerable at the tail — so
         // scrolled-back history and live provider errors never show a Resume
-        // button. One tap re-sends a short "continue" as a normal visible
-        // send; on a park the button reads "Resume now" (design §2.4).
+        // button. One tap opens a provider continuation turn and persists a
+        // product marker rather than attributing the internal prompt to the
+        // owner; on a park the button reads "Resume now" (design §2.4).
         const resumable = !!(block.resumable && isLastMsg && onResume)
         const parked = !!block.pause?.resets_at
         return (
@@ -292,7 +294,10 @@ function MsgContentInner({
                 // block. The old querySelectorAll lookup took `.pop()`, which
                 // is what this reproduces.
                 ref={i === lastEntryIdx ? resumeCardRef : undefined}
-                onClick={() => onResume('continue')}
+                onClick={() => onResume('continue', {
+                  continuation: 'manual',
+                  pin: false,
+                })}
                 disabled={submissionBlocked}
                 title={submissionBlocked
                   ? 'Wait for the provider switch to finish.'

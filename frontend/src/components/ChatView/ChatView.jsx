@@ -74,7 +74,7 @@ import {
   canFastForwardQueue,
   cidOf,
   continuationRowsFromPromotedMessage,
-  isAutoContinuationMessage,
+  isContinuationMessage,
   isOwnerUserMessage,
   mergeRecentMessagesIntoLoadedWindow,
   openAppCtaViewModel,
@@ -1831,6 +1831,7 @@ export default function ChatView({
     if (!hasSendablePayload(text, attachments)) return
 
     const pin = opts.pin !== false  // default true
+    const continuation = opts.continuation === 'manual' ? 'manual' : undefined
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -1888,7 +1889,13 @@ export default function ChatView({
       if (usesComposerFiles) releaseFiles(composerFileSnapshot)
     }
     function restoreComposerAfterFailedSend() {
-      restoreComposerText(text, { preserveFailedAttempt: true })
+      // Resume is a product action whose provider-facing prompt never belonged
+      // in the composer. A failed request keeps the resumable card in place;
+      // restoring the internal word "continue" as a draft would misattribute
+      // it to the owner and make a retry look like ordinary prose.
+      if (!continuation) {
+        restoreComposerText(text, { preserveFailedAttempt: true })
+      }
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
     }
 
@@ -1919,6 +1926,10 @@ export default function ChatView({
     // latest commit and dodge that.
     if (queuesBehindActiveTurn) {
       const queuedMsg = { role: 'user', content: text, ts: Date.now(), cid, queued: true }
+      if (continuation) {
+        queuedMsg.kind = 'continuation'
+        queuedMsg.continuation_reason = continuation
+      }
       if (attachments.length > 0) queuedMsg.attachments = attachments
       if (!directSteer) pendingQueue.add(queuedMsg, { inFlight: true })
       // The shared send decision was captured AT SEND TIME, before blur or the
@@ -1951,8 +1962,8 @@ export default function ChatView({
           text,
           attachments.length > 0 ? attachments : undefined,
           directSteer
-            ? { directSteer: true, cid }
-            : { queueOnly: true, cid },
+            ? { directSteer: true, cid, continuation }
+            : { queueOnly: true, cid, continuation },
         )
         if (!directSteer) queuedSendRequestsRef.current.set(cid, queueRequest)
         const result = await queueRequest
@@ -2159,12 +2170,14 @@ export default function ChatView({
         // Roll back optimistic + restore input.
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetSendIntent({ cid: queuedMsg.cid })
-        rememberFailedAttempt({
-          cid,
-          draftIdentity,
-          text,
-          attachments: composerFileSnapshot,
-        })
+        if (!continuation) {
+          rememberFailedAttempt({
+            cid,
+            draftIdentity,
+            text,
+            attachments: composerFileSnapshot,
+          })
+        }
         restoreComposerAfterFailedSend()
         setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
       } finally {
@@ -2197,6 +2210,10 @@ export default function ChatView({
     const freshPinIntent = sendPinIntent
 
     const userMsg = { role: 'user', content: text, ts: Date.now(), cid, optimistic: true }
+    if (continuation) {
+      userMsg.kind = 'continuation'
+      userMsg.continuation_reason = continuation
+    }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
     setComposerInput('')
@@ -2246,7 +2263,7 @@ export default function ChatView({
         // identity the optimistic row (and its pin) already use — without it
         // the server row derives legacy-<ts> and the strict data-cid pin
         // selector goes blind after the ack re-render.
-        { cid },
+        { cid, continuation },
       )
       clearFailedAttempt()
       releaseComposerFilesAfterAccepted()
@@ -2332,12 +2349,14 @@ export default function ChatView({
       setSending(false)
       sendingRef.current = false
       setServerRunningState(false)
-      rememberFailedAttempt({
-        cid,
-        draftIdentity,
-        text,
-        attachments: composerFileSnapshot,
-      })
+      if (!continuation) {
+        rememberFailedAttempt({
+          cid,
+          draftIdentity,
+          text,
+          attachments: composerFileSnapshot,
+        })
+      }
       restoreComposerAfterFailedSend()
       // Ambiguity recovery already verified reachability and safely replayed
       // this exact cid once. If even that acknowledgement was lost, keep the
@@ -3649,7 +3668,7 @@ export default function ChatView({
 
           {messages.map((msg, i) => {
             if (msg.hidden) return null
-            const continuationMarker = isAutoContinuationMessage(msg)
+            const continuationMarker = isContinuationMessage(msg)
             const isLastMsg = i === lastVisibleMessageIndex
             // The mirrored DB row is rendered below by the SAME active
             // MsgContent instance that consumes live payloads. Suppress only

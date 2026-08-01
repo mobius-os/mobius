@@ -1,6 +1,9 @@
 from app import models
 from app.database import checked_out_connections
-from app.push import notify_owner
+import asyncio
+import threading
+
+from app.push import notify_owner, notify_owner_async
 
 
 def _owner_with_subscription(db):
@@ -41,6 +44,33 @@ def test_notify_owner_sends_normal_agent_push(db, auth, monkeypatch):
   assert db.get(models.Notification, notif_id) is not None
   assert len(sent) == 1
   assert sent[0][1]["title"] == "Task complete"
+
+
+def test_notify_owner_async_keeps_remote_delivery_off_the_event_loop(
+  db, auth, monkeypatch,
+):
+  owner = _owner_with_subscription(db)
+  loop_thread = threading.get_ident()
+  delivery_threads = []
+
+  def fake_send_push(subscription_info, payload):
+    del subscription_info, payload
+    delivery_threads.append(threading.get_ident())
+    return True
+
+  monkeypatch.setattr("app.push.send_push", fake_send_push)
+  notification_id = asyncio.run(notify_owner_async(
+    db,
+    owner.id,
+    title="Turn ready",
+    body="Continuing now.",
+    source_type="system",
+    source_id="chat-1",
+  ))
+
+  assert db.get(models.Notification, notification_id) is not None
+  assert delivery_threads
+  assert all(thread_id != loop_thread for thread_id in delivery_threads)
 
 
 def test_notify_owner_saves_platform_maintenance_without_push(

@@ -20,8 +20,8 @@ const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'u
 const paneChatView = readFileSync(new URL('../../Shell/PaneChatView.jsx', import.meta.url), 'utf8')
 const chatEmbed = readFileSync(new URL('../../ChatEmbed/ChatEmbed.jsx', import.meta.url), 'utf8')
 const chatSettingsPanel = readFileSync(new URL('../ChatSettingsPanel.jsx', import.meta.url), 'utf8')
-const autoContinuationCard = readFileSync(
-  new URL('../AutoContinuationCard.jsx', import.meta.url), 'utf8',
+const continuationCard = readFileSync(
+  new URL('../ContinuationCard.jsx', import.meta.url), 'utf8',
 )
 const settingsView = readFileSync(
   new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8',
@@ -130,13 +130,16 @@ test('auto-resume is a chat-local switch shown only on the active rate-limit car
     'the chat switch restores the SDK checked track after the button reset')
 })
 
-test('automatic continuation renders as a product marker, not a user bubble', () => {
-  assert.match(msgContent, /msg\.kind === 'auto_continuation'/,
-    'the stored provider-facing user row must take the product-marker branch')
-  assert.match(msgContent, /<AutoContinuationCard msg=\{msg\}/,
-    'both restart and limit continuations share the marker renderer')
-  assert.match(autoContinuationCard, /Server restarted — continuing automatically/)
-  assert.match(autoContinuationCard, /Usage available again — continuing automatically/)
+test('continuations render as product markers, not user bubbles', () => {
+  assert.match(msgContent, /isContinuationMessage\(msg\)/,
+    'legacy automatic and current continuation rows share the marker branch')
+  assert.match(msgContent, /<ContinuationCard msg=\{msg\}/,
+    'manual, restart, and limit continuations share the marker renderer')
+  assert.match(continuationCard, /Resumed manually/)
+  assert.match(continuationCard, /Server restarted — continuing automatically/)
+  assert.match(continuationCard, /Usage available again — continuing automatically/)
+  assert.match(msgContent, /onResume\('continue', \{[\s\S]*continuation: 'manual',[\s\S]*pin: false/,
+    'Resume must mark its provider-facing prompt as a product action')
   assert.match(chatView, /chat__msg--\$\{continuationMarker \? 'marker' : msg\.role\}/,
     'the row shell must not inherit owner-user alignment')
 })

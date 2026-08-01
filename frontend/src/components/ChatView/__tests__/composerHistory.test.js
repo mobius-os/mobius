@@ -26,6 +26,7 @@ test('history contains only visible owner-authored text', () => {
     { role: 'assistant', content: 'reply' },
     { role: 'user', content: 'hidden', hidden: true },
     { role: 'user', content: 'continue', kind: 'auto_continuation' },
+    { role: 'user', content: 'continue', kind: 'continuation' },
     { role: 'user', content: '   ' },
     {
       role: 'user',

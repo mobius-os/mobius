@@ -1,10 +1,12 @@
 """VAPID key management and Web Push delivery."""
 
+import asyncio
 import base64
 import json
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -128,7 +130,14 @@ def send_push(subscription_info: dict, payload: dict) -> bool:
     raise
 
 
-def notify_owner(
+@dataclass(frozen=True)
+class _PreparedPush:
+  notification_id: str
+  payload: dict
+  subscriptions: tuple[dict, ...]
+
+
+def _prepare_owner_notification(
   db: Session,
   owner_id: int,
   *,
@@ -139,16 +148,13 @@ def notify_owner(
   icon: str | None = None,
   target: str | None = None,
   actions: list[dict] | None = None,
-) -> str:
-  """Saves a Notification row and fires Web Push to the owner.
+) -> tuple[str, _PreparedPush | None]:
+  """Persist and announce one notification, returning optional push work.
 
-  The shared implementation behind `POST /api/notifications/send`,
-  factored out so a non-request caller (e.g. a scheduled task) can
-  reuse it without a `Request`. Push delivery is suppressed when the
-  owner is currently subscribed to the SSE stream for `source_id` —
-  the in-tab UX already shows the event. The notification row is
-  saved either way so history is consistent. Returns the
-  notification id.
+  This loop-owned half performs database work and publishes live system-bus
+  events. Remote Web Push is returned as inert scalar data so async callers can
+  move only that blocking I/O to a worker thread without touching asyncio
+  queues or a SQLAlchemy Session from the wrong thread.
 
   THE producer seam for owner notifications — any subsystem that wants a
   row in the notification preview calls this and nothing else. One call =
@@ -208,7 +214,7 @@ def notify_owner(
       db.rollback()
     except Exception:
       pass
-    return notification_id
+    return notification_id, None
 
   if activity_app_id is not None:
     # The row above is durable; this replay-free event only makes a live shell
@@ -235,10 +241,10 @@ def notify_owner(
   # owns this contract so we don't have to reach across modules
   # into broadcast internals.
   if source_id and presence.has_watchers(source_id):
-    return notification_id
+    return notification_id, None
 
   if _is_quiet_maintenance_push(source_type=source_type):
-    return notification_id
+    return notification_id, None
 
   payload = {
     "id": notification_id,
@@ -264,26 +270,93 @@ def notify_owner(
   ]
   # Web Push is remote I/O and may wait on several endpoints. Copy the four
   # scalar fields we need, then release the checkout before delivery. If stale
-  # subscriptions are found, the reusable Session checks out again only for
-  # the short delete transaction below.
+  # subscriptions are found, delivery opens a fresh short cleanup transaction.
   db.close()
+  return notification_id, _PreparedPush(
+    notification_id=notification_id,
+    payload=payload,
+    subscriptions=tuple(subscriptions),
+  )
+
+
+def _deliver_prepared_push(prepared: _PreparedPush) -> None:
+  """Perform remote delivery from scalar data; safe to call in a worker."""
   stale_ids = []
-  for sub in subscriptions:
+  for sub in prepared.subscriptions:
     sub_info = {
       "endpoint": sub["endpoint"],
       "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
     }
     try:
-      alive = send_push(sub_info, payload)
+      alive = send_push(sub_info, prepared.payload)
       if not alive:
         stale_ids.append(sub["id"])
     except Exception:
       logger.exception("push delivery failed for sub %s", sub["id"][:8])
 
   if stale_ids:
-    db.query(models.PushSubscription).filter(
-      models.PushSubscription.id.in_(stale_ids)
-    ).delete(synchronize_session=False)
-    db.commit()
+    from app.database import SessionLocal
+    with SessionLocal() as cleanup_db:
+      cleanup_db.query(models.PushSubscription).filter(
+        models.PushSubscription.id.in_(stale_ids)
+      ).delete(synchronize_session=False)
+      cleanup_db.commit()
+
+
+def notify_owner(
+  db: Session,
+  owner_id: int,
+  *,
+  title: str,
+  body: str | None,
+  source_type: str = "system",
+  source_id: str | None = None,
+  icon: str | None = None,
+  target: str | None = None,
+  actions: list[dict] | None = None,
+) -> str:
+  """Save a notification and synchronously deliver its optional Web Push."""
+  notification_id, prepared = _prepare_owner_notification(
+    db,
+    owner_id,
+    title=title,
+    body=body,
+    source_type=source_type,
+    source_id=source_id,
+    icon=icon,
+    target=target,
+    actions=actions,
+  )
+  if prepared is not None:
+    _deliver_prepared_push(prepared)
+  return notification_id
+
+
+async def notify_owner_async(
+  db: Session,
+  owner_id: int,
+  *,
+  title: str,
+  body: str | None,
+  source_type: str = "system",
+  source_id: str | None = None,
+  icon: str | None = None,
+  target: str | None = None,
+  actions: list[dict] | None = None,
+) -> str:
+  """Save a notification, then deliver Web Push without blocking the loop."""
+  notification_id, prepared = _prepare_owner_notification(
+    db,
+    owner_id,
+    title=title,
+    body=body,
+    source_type=source_type,
+    source_id=source_id,
+    icon=icon,
+    target=target,
+    actions=actions,
+  )
+  if prepared is not None:
+    await asyncio.to_thread(_deliver_prepared_push, prepared)
 
   return notification_id
