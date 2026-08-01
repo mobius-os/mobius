@@ -2668,3 +2668,34 @@ def test_adjacent_disjoint_source_edit_bails_safely(tmp_path):
   merge = app_git.merge_upstream(repo)
   assert merge.status == "conflict"
   assert app_git.resolve_version_only_conflict(repo, merge.conflict_paths) is None
+
+
+def test_commit_local_works_on_a_non_canonical_branch(tmp_path):
+  """The shared engine must not carry the app-only canonical-branch rule.
+
+  `commit_local`'s one production caller is platform reconcile, and a platform
+  clone legitimately sits on a deploy/release branch. Enforcing the app
+  invariant here broke that path while protecting nothing: app publication
+  goes through `snapshot_worktree`/`commit_worktree_tree`, which keep the guard.
+  """
+  repo = tmp_path / "platform"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  (repo / "file.txt").write_text("one\n", encoding="utf-8")
+  app_git.commit_local(repo, "seed")
+  app_git._run(repo, "checkout", "-b", "deploy/aligned-20260801")
+
+  (repo / "file.txt").write_text("two\n", encoding="utf-8")
+  assert app_git.commit_local(repo, "platform: local edits before reconcile")
+
+
+def test_worktree_publication_still_refuses_a_non_canonical_branch(tmp_path):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  (repo / "file.txt").write_text("one\n", encoding="utf-8")
+  app_git.commit_local(repo, "seed")
+  app_git._run(repo, "checkout", "-b", "review/pr1")
+
+  with pytest.raises(app_git.SourceTreeChanged):
+    app_git.snapshot_worktree(repo)

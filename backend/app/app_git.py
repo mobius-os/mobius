@@ -1748,7 +1748,12 @@ def commit_local(source_dir: str | Path, msg: str) -> str | None:
   """
   repo = Path(source_dir)
   ensure_repo(repo)
-  _require_local_branch(repo)
+  # NOT `_require_local_branch` here. This engine is shared: its only
+  # production caller is platform reconcile (platform_update.py), and a
+  # platform clone legitimately sits on a deploy/release branch. The canonical
+  # -branch invariant belongs to app accepted-source publication, so it is
+  # enforced at the two entry points that own it -- `snapshot_worktree` and
+  # `commit_worktree_tree` -- rather than inside the engine both share.
   git_dir = repo / ".git"
   merge_head_path = git_dir / "MERGE_HEAD"
   # Refuse to touch the index while a rebase/cherry-pick/am is in progress
