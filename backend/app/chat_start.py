@@ -1,0 +1,94 @@
+"""Programmatic chat-turn startup behind one lifecycle boundary.
+
+Interactive sends own request-specific validation and response shaping in the
+chat route.  App conflict resolution, platform conflict resolution, and
+Contribute Autopilot all start a prepared turn without that HTTP lifecycle.
+Those callers still own their distinct eligibility rules; this module owns the
+shared start protocol after eligibility is established.
+"""
+
+import asyncio
+import time
+
+from app.broadcast import (
+  create_broadcast,
+  get_system_broadcast,
+  remove_broadcast,
+)
+from app.chat import (
+  current_run_generation,
+  discard_starting,
+  mark_starting,
+  run_chat,
+)
+from app.chat_writer import (
+  StartTurn,
+  alloc_run_token,
+  await_ack,
+  get_writer,
+)
+
+
+async def start_programmatic_chat_turn(
+  *, chat_id: str, title: str, content: str, provider: str,
+) -> bool:
+  """Durably start one system-initiated turn if the chat can be claimed.
+
+  The caller decides whether the chat is eligible (empty-only conflict chats,
+  reusable Autopilot chats, or a newly created platform resolver).  This
+  boundary owns the claim, writer command, Stop-generation fence, broadcast,
+  task creation, and failure cleanup so those steps cannot drift by caller.
+
+  Returns ``False`` when the claim fails or a Stop wins while ``StartTurn`` is
+  committing.  Unexpected failures propagate after releasing the transient
+  claim; the durable run remains available to normal reconciliation.
+  """
+  if not mark_starting(chat_id):
+    return False
+
+  run_coro = None
+  broadcast_created = False
+  try:
+    start_gen = current_run_generation(chat_id)
+    run_token = alloc_run_token()
+    user_msg = {
+      "role": "user",
+      "content": content,
+      "ts": int(time.time() * 1000),
+    }
+    result = await await_ack(get_writer().submit(StartTurn(
+      chat_id=chat_id,
+      run_token=run_token,
+      user_msg=user_msg,
+      title_source=title,
+      default_provider=provider,
+    )))
+
+    if current_run_generation(chat_id) != start_gen:
+      discard_starting(chat_id)
+      return False
+
+    create_broadcast(chat_id)
+    broadcast_created = True
+    run_coro = run_chat(
+      result["history"],
+      chat_id=chat_id,
+      session_id=result["session_id"],
+      provider_id=result["provider"],
+      run_gen=start_gen,
+      run_token=run_token,
+    )
+    asyncio.create_task(run_coro)
+    run_coro = None
+    get_system_broadcast().publish({
+      "type": "chat_run_started",
+      "chatId": chat_id,
+    })
+    return True
+  except Exception:
+    if run_coro is not None:
+      run_coro.close()
+    if broadcast_created:
+      remove_broadcast(chat_id)
+    discard_starting(chat_id)
+    raise

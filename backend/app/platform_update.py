@@ -2049,15 +2049,10 @@ async def spawn_platform_conflict_chat(
   """Open a visible agent chat to reconcile the new platform version into
   the checked-out working branch — the platform analogue of a per-app
   update-conflict resolver chat. Dedupes on a running resolver."""
-  import time
   import uuid
 
   from app import models, providers
-  from app.broadcast import create_broadcast, get_system_broadcast
-  from app.chat import (
-    current_run_generation, discard_starting, mark_starting, run_chat,
-  )
-  from app.chat_writer import StartTurn, alloc_run_token, await_ack, get_writer
+  from app.chat_start import start_programmatic_chat_turn
   from app.config import get_settings
   from app.push import notify_owner
   from app.run_state import running_chat_ids
@@ -2100,36 +2095,14 @@ async def spawn_platform_conflict_chat(
   db.add(chat)
   db.commit()
 
-  if not mark_starting(chat_id):
-    return PlatformConflictResolverChatOut(
-      chat_id=chat_id, created=True, started=False,
-    )
-
   started = False
   try:
-    start_gen = current_run_generation(chat_id)
-    run_token = alloc_run_token()
-    user_msg = {"role": "user", "content": content, "ts": int(time.time() * 1000)}
-    ack = get_writer().submit(StartTurn(
-      chat_id=chat_id, run_token=run_token, user_msg=user_msg,
-      title_source=title, default_provider=provider,
-    ))
-    result = await await_ack(ack)
-    if current_run_generation(chat_id) == start_gen:
-      create_broadcast(chat_id)
-      get_system_broadcast().publish(
-        {"type": "chat_run_started", "chatId": chat_id}
-      )
-      asyncio.create_task(run_chat(
-        result["history"], chat_id=chat_id, session_id=result["session_id"],
-        provider_id=result["provider"], run_gen=start_gen, run_token=run_token,
-      ))
-      started = True
-    else:
-      discard_starting(chat_id)
-  except Exception:
-    discard_starting(chat_id)
-    raise
+    started = await start_programmatic_chat_turn(
+      chat_id=chat_id,
+      title=title,
+      content=content,
+      provider=provider,
+    )
   finally:
     try:
       notify_owner(
