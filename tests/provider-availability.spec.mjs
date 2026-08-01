@@ -114,19 +114,21 @@ test('model and effort choices stay interactive while saves remain ordered', asy
   let releaseFirst
   const firstHeld = new Promise(resolve => { releaseFirst = resolve })
   const startedSettings = []
+  let persistedSettings = {}
   await page.route(new RegExp(`/api/chats/${chat.id}$`), async route => {
     if (route.request().method() !== 'PATCH') return route.continue()
     const body = route.request().postDataJSON()
     startedSettings.push(body.agent_settings_json)
     if (startedSettings.length === 1) await firstHeld
+    persistedSettings = { ...persistedSettings, ...body.agent_settings_json }
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
         ok: true,
         provider,
-        agent_settings_json: body.agent_settings_json,
-        effective: body.agent_settings_json,
+        agent_settings_json: persistedSettings,
+        effective: persistedSettings,
       }),
     })
   })
