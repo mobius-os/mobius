@@ -3,24 +3,14 @@ import { perfTime } from '../../lib/perfProbe.js'
 /*
  * Versioned sessionStorage cache for the currently visible streaming
  * assistant items. It is intentionally tiny and side-effect scoped: the
- * stream transport decides when to read/write/clear, this file only owns
+ * stream transport decides when to buffer/flush/clear; this file only owns
  * key format, legacy invalidation, and the lifecycle write-behind buffer.
  *
- * Each ChatView used to serialize the full growing reply into synchronous
- * sessionStorage on every reveal commit. Phone telemetry measured individual
- * writes as high as 60ms, so even one active chat could block an entire scroll
- * frame. Writes now stay in a latest-wins memory buffer until a lifecycle or
- * terminal boundary needs them. The visible React state remains frame-paced;
- * synchronous storage no longer runs during an active reply or scroll.
- *
- * Write-behind alone would reintroduce partial-text ROLLBACK: the snapshot is the
- * remount/reconnect fallback (useStreamConnection.js readStoredStreamSnapshot),
- * so if the shell reloads or a pane unmounts with a buffered write still
- * pending, the fallback would restore a stale frame. Hence the mandatory
- * synchronous FLUSH contract: the caller flushes the pending latest value on
- * BEFORE_SHELL_RELOAD_EVENT, pagehide, unmount, terminal promotion (stream end),
- * and any visibility swap (a pane hidden). Latest-wins buffering keeps it
- * lossless — the flush always writes the most recent items handed in.
+ * Synchronous sessionStorage serialization previously ran on every reveal
+ * commit and could block a phone for a full frame. The latest snapshot now
+ * stays in memory until a lifecycle or terminal boundary flushes it. Those
+ * explicit flushes preserve remount/reconnect recovery without putting storage
+ * work back on the frame-paced reveal path.
  */
 
 export const STREAM_SNAPSHOT_VERSION = 2
@@ -70,7 +60,7 @@ function dropPending(chatId) {
   return entry
 }
 
-export function writeStoredStreamSnapshot(chatId, items, storage = defaultStorage()) {
+export function bufferStreamSnapshot(chatId, items, storage = defaultStorage()) {
   if (!storage || !chatId) return
   if (!Array.isArray(items) || items.length === 0) return
 
@@ -142,5 +132,5 @@ export function reclaimStoredStreamSnapshots(storage = defaultStorage()) {
 // Test-only: reset the module's write-behind state so specs run in isolation
 // regardless of order.
 export function _resetStreamSnapshotBufferForTests() {
-  for (const chatId of [...pendingWrites.keys()]) dropPending(chatId)
+  pendingWrites.clear()
 }

@@ -21,7 +21,7 @@ import {
 } from './streamReducers.js'
 import {
   readStoredStreamSnapshot,
-  writeStoredStreamSnapshot,
+  bufferStreamSnapshot,
   clearStoredStreamSnapshot,
   flushStoredStreamSnapshot,
 } from './streamSnapshotCache.js'
@@ -254,7 +254,7 @@ export default function useStreamConnection(chatId, {
     // sessionStorage serialization happens only at lifecycle/terminal flush
     // boundaries, never on this frame-paced reveal path.
     if (next.length > 0) {
-      writeStoredStreamSnapshot(activeStreamChatIdRef.current, next)
+      bufferStreamSnapshot(activeStreamChatIdRef.current, next)
     }
     _setStreamItems(next)
   }
@@ -563,16 +563,9 @@ export default function useStreamConnection(chatId, {
     _setStreamItems(stored)
   }, [chatId])
 
-  // Stream snapshot write-behind lifecycle. Visible text stays frame-paced
-  // while the regenerable session cache remains an in-memory latest-wins value.
-  // The flush half of the contract runs here:
-  // pagehide and the shell-reload handoff must land the pending buffered value
-  // synchronously, as do chat switches above and this hook's own unmount —
-  // otherwise the
-  // remount/reconnect fallback could roll back to a stale frame across the
-  // handoff. ChatView drives the visibility-swap flush (a pane hidden) via
-  // flushStreamSnapshot below; the terminal-promotion flush lives in the `done`
-  // / EOF paths.
+  // Lifecycle exits synchronously flush the latest buffered recovery snapshot.
+  // Chat switches, terminal promotion, and pane visibility own their equivalent
+  // boundaries at the call sites where those transitions happen.
   useEffect(() => {
     const flushSelf = () => flushStoredStreamSnapshot(activeStreamChatIdRef.current)
     window.addEventListener('pagehide', flushSelf)

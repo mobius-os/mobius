@@ -231,32 +231,6 @@ test('reconnect reset keeps visible stream while catch-up rebuilds off-screen', 
   assert.equal(visibleItems[0].tool, 'Bash')
 })
 
-test('stream snapshot writes non-empty items and terminal clear removes it', () => {
-  const session = new Map()
-  const chatId = 'chat-a'
-  const key = `chat-stream-items:v2:${chatId}`
-  const legacyKey = `chat-stream-items:${chatId}`
-  const items = [{ type: 'tool', tool: 'Bash', status: 'running' }]
-
-  function writeStoredStreamSnapshot(id, value) {
-    if (!Array.isArray(value) || value.length === 0) return
-    session.set(`chat-stream-items:v2:${id}`, JSON.stringify(value))
-  }
-  function clearStoredStreamSnapshot(id) {
-    session.delete(`chat-stream-items:v2:${id}`)
-    session.delete(`chat-stream-items:${id}`)
-  }
-
-  session.set(legacyKey, JSON.stringify([{ type: 'text', content: 'old' }]))
-  writeStoredStreamSnapshot(chatId, items)
-  assert.deepEqual(JSON.parse(session.get(key)), items)
-  writeStoredStreamSnapshot(chatId, [])
-  assert.ok(session.has(key), 'empty reconnect reset must not wipe the last visible snapshot')
-  clearStoredStreamSnapshot(chatId)
-  assert.equal(session.has(key), false, 'terminal clear removes the snapshot')
-  assert.equal(session.has(legacyKey), false, 'terminal clear removes stale v1 snapshots')
-})
-
 test('semantic stream clear retires last-good fallback too', () => {
   let latestItems = [{ type: 'text', content: 'already promoted' }]
   let visibleItems = latestItems

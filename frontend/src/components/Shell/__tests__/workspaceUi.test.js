@@ -684,7 +684,7 @@ test('drawer swipe-to-close leaves vertical scrolling on the native pointer path
   assert.match(drawer, /onPointerCancel=\{onDrawerPointerCancel\}/)
   assert.doesNotMatch(drawer, /addEventListener\('touchmove', move/,
     'the panel must never install a scroll-blocking touch listener')
-  assert.match(drawer, /if \(dx < 0 && isHorizontalSwipe\) panningRef\.current = true/)
+  assert.match(drawer, /if \(dx < 0 && isHorizontalSwipe\) gesture\.panning = true/)
   assert.match(drawer, /setPointerCapture\?\.\(e\.pointerId\)/)
 })
 

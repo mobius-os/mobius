@@ -1929,14 +1929,13 @@ export default function useScrollMode({
     //
     const ro = new ResizeObserver(() => {
       const authorityVersion = currentAuthority()
-      const mayWriteScroll = layoutOwnsScroll(authorityVersion)
       // Streaming content can resize on every reveal frame while the reader is
       // actively scrolling. Defer the whole geometry transaction here: even a
       // read of scrollHeight/offsetHeight can synchronously lay out the full
       // transcript and steal a frame from native momentum. The trailing replay
       // performs one authoritative spacer + mode pass after reader ownership
       // ends.
-      if (!mayWriteScroll) {
+      if (!layoutOwnsScroll(authorityVersion)) {
         deferLayoutUntilReaderYields(authorityVersion)
         requestRevealOnQuiet()
         return
@@ -1948,12 +1947,9 @@ export default function useScrollMode({
       const k = modeRef.current.kind
       if (
         k === 'FOLLOW_BOTTOM'
-        // ANCHOR_AT is re-applied unconditionally ONLY while the transcript
-        // is still hidden, where corrections cost nothing. Once the reader can
-        // see it, the conditional shift/clamp repair below is the only writer:
-        // an unconditional re-apply on every layout observation is exactly the
-        // visible "it jumps two or three times on entry" the reader reports,
-        // because every late highlight, math block and font swap fires one.
+        // Hidden transcripts may re-anchor freely. Once revealed, only the
+        // conditional shift/clamp repair below may move an anchor; otherwise
+        // every late renderer or font swap becomes a visible jump.
         || (k === 'ANCHOR_AT' && !revealedRef.current)
       ) {
         writeMode(
@@ -1964,7 +1960,6 @@ export default function useScrollMode({
             : 'layout:restore-anchor',
           authorityVersion,
         )
-        nearScrollBottomRef.current = isNearScrollBottom(scrollEl)
       } else if (k === 'PIN_USER_MSG') {
         // Re-pin in two cases, both of which leave the message off its
         // intended top position with no user action:
@@ -2100,15 +2095,6 @@ export default function useScrollMode({
       requestRevealOnQuiet()
     }
 
-    const scheduleReaderSettle = () => {
-      if (hasNativeScrollEnd) return
-      clearTimeout(readerSettleTimer)
-      readerSettleTimer = setTimeout(
-        settleReaderScroll,
-        GESTURE_SETTLE_MS,
-      )
-    }
-
     const releasePendingGesture = (sequence) => {
       if (gestureSequenceRef.current !== sequence
           || gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
@@ -2223,7 +2209,6 @@ export default function useScrollMode({
         scheduleNoScrollRelease()
       }
     }
-    const onGestureEndWithoutScroll = scheduleNoScrollRelease
     const questionEditField = (target) => target?.matches?.(
       'textarea[data-chat-scroll-edit-field]',
     ) ? target : null
@@ -2267,18 +2252,11 @@ export default function useScrollMode({
       }
       scheduleQuestionEditNoScrollRelease()
     }
-    // Field-probe instrumentation, bound at the listener boundary so
-    // `onUserInput`'s own control flow - which has several early returns -
-    // stays exactly as written. Each wrapper is created once and reused for
-    // both add and remove; a fresh wrapper per call would not match on removal
-    // and would leak a listener per remount. When the device has not opted in,
-    // `probed` returns `onUserInput` itself, so an ordinary session registers
-    // the identical function reference it always did.
-    //
-    const probed = (label) => (isPerfProbeEnabled()
-      ? (event) => perfTime(label, () => onUserInput(event))
-      : onUserInput)
-    const onWheelInput = probed('scroll.wheel')
+    // Reuse the exact input handler when the opt-in field probe is disabled;
+    // the hot path then carries no timing closure or extra wrapper.
+    const onWheelInput = isPerfProbeEnabled()
+      ? (event) => perfTime('scroll.wheel', () => onUserInput(event))
+      : onUserInput
 
     // Scroll-START latency, measured rather than inferred. Lag at the moment a
     // finger lands is a different failure from steady-state jank and has a
@@ -2305,7 +2283,7 @@ export default function useScrollMode({
     }
     const onPointerUpInput = () => {
       if (!readerScrollDirty) pendingGestureStart = 0
-      onGestureEndWithoutScroll()
+      scheduleNoScrollRelease()
     }
     const noteScrollStart = () => {
       if (!pendingGestureStart) return
@@ -2380,7 +2358,10 @@ export default function useScrollMode({
       readerScrollSequence = intent.claimedSequence
       readerIntentVersionRef.current = intent.version
       readerLocationExplicitRef.current = true
-      scheduleReaderSettle()
+      if (!hasNativeScrollEnd) {
+        clearTimeout(readerSettleTimer)
+        readerSettleTimer = setTimeout(settleReaderScroll, GESTURE_SETTLE_MS)
+      }
     }
     scrollEl.addEventListener('scroll', onScroll, { passive: true })
     if (hasNativeScrollEnd) {

@@ -80,8 +80,16 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
     /persistMode|sizeSpacer|contentHoldModeFromScroll|_lastUserRowEl|querySelector/,
     'per-frame scroll handling must not traverse messages, resize layout, or persist',
   )
-  assert.match(hotPath, /scheduleReaderSettle\(\)/,
-    'scroll frames should hand final semantic work to one trailing-edge settle')
+  assert.match(
+    hotPath,
+    /if \(!hasNativeScrollEnd\)[\s\S]*?setTimeout\(settleReaderScroll, GESTURE_SETTLE_MS\)/,
+    'older engines should schedule exactly one trailing-edge settlement path',
+  )
+  assert.match(
+    ownerSource,
+    /addEventListener\('scrollend', settleReaderScroll/,
+    'supporting engines should settle from the browser scroll lifecycle',
+  )
   assert.match(
     hotPath,
     /readerScrollAtBottom\s*=\s*distanceToBottom\s*<\s*PHYSICAL_BOTTOM_EPSILON_PX/,
@@ -90,7 +98,7 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
 
   const settleStart = ownerSource.indexOf('const settleReaderScroll = () => {')
   const settleEnd = ownerSource.indexOf(
-    'const scheduleReaderSettle = () => {',
+    'const releasePendingGesture = (sequence) => {',
     settleStart,
   )
   const settlePath = ownerSource.slice(settleStart, settleEnd)
