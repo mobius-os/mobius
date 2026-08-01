@@ -4,10 +4,11 @@
 // (POST /api/notifications/send), and the backend does not validate `target`,
 // so every consumer must treat it as hostile input. This parser is consumed by
 // BOTH the NotificationsView row click and Shell's warm-tap notification-click
-// handler, so the two can never drift; sw.js keeps its own `_safeTarget` copy
-// (separate bundle) with the same posture. Never navigate a raw target.
+// handler, so the two can never drift; the push worker keeps its own
+// `_safeTarget` copy (public/sw-push.js is served unbundled and cannot import
+// this) with the same posture. Never navigate a raw target.
 //
-// Posture mirrors sw.js::_safeTarget: same-origin only for absolute URLs,
+// Posture mirrors sw-push.js::_safeTarget: same-origin only for absolute URLs,
 // known in-scope forms only, conservative id charsets, and FAIL CLOSED — any
 // unrecognized or malformed target parses to null (a no-op for the caller),
 // never to a best-effort navigation.

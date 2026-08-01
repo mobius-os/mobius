@@ -888,6 +888,19 @@ def _resolve_asset_file(asset_path: str) -> Path | None:
   return None
 
 
+# Root-served worker scripts: `sw.js` caches the shell, `sw-push.js` owns Web
+# Push (see frontend/public/sw-push.js). Same delivery contract at every use
+# site below.
+_SERVICE_WORKER_SCRIPTS = frozenset({"sw.js", "sw-push.js"})
+
+# The push worker's scope. It exists only to name a URL prefix inside the
+# shell's PWA scope, and must never resolve to a document — a page here would
+# be controlled by a worker with no fetch handler, so it would boot the shell
+# with no precache and no offline fallback. Mirrored in the frontend's
+# swNavigationPolicy denylist for the offline path.
+_PUSH_WORKER_SCOPE = "shell/push"
+
+
 def _is_static_asset_path(path: str) -> bool:
   """True for paths that must 404 on a miss rather than fall through to
   the SPA HTML.
@@ -913,7 +926,7 @@ def _is_static_asset_path(path: str) -> bool:
     # First path segment — catches both `vendor` and `vendor/<file>`
     # without over-matching a route like `vendorfoo`.
     path.split("/", 1)[0] in {"vendor", "assets"}
-    or path == "sw.js"
+    or path in _SERVICE_WORKER_SCRIPTS
     or path.rsplit(".", 1)[-1] in {
       "js", "mjs", "css", "html", "map", "wasm", "json",
     }
@@ -929,8 +942,8 @@ _RESERVED_TOP_LEVEL_APP_ALIASES = {
   "chat",
   "recover",
   "shell",
-  "sw.js",
   "vendor",
+  *_SERVICE_WORKER_SCRIPTS,
 }
 
 
@@ -1215,6 +1228,8 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
   @app.get("/{path:path}")
   async def spa_fallback(request: Request, path: str):
     """Serves the SPA index.html for any non-API, non-asset path."""
+    if path == _PUSH_WORKER_SCOPE or path.startswith(f"{_PUSH_WORKER_SCOPE}/"):
+      raise HTTPException(status_code=404, detail="Not found.")
     # Resolve which build serves THIS request (live dist if complete, else the
     # baked floor) once, up front — per request, never a module-load snapshot.
     static_dir = _resolve_static_dir()
@@ -1277,10 +1292,9 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       # If-None-Match on every request, so a 304 keeps the
       # download cheap when nothing changed.
       headers = _public_static_headers(path)
-      if path == "sw.js":
+      if path in _SERVICE_WORKER_SCRIPTS:
         headers["Cache-Control"] = "no-cache, must-revalidate"
-      if path == "sw.js":
-        # sw.js is a REVALIDATING response (no-cache + the mtime ETag
+        # A worker script is a REVALIDATING response (no-cache + the mtime ETag
         # FileResponse sets), so it must never answer a 206. A
         # `Range: bytes=0-0` probe would otherwise let Chromium store the
         # 1-byte slice and later serve it as a status-200 full body — a

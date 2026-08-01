@@ -61,9 +61,9 @@ function stampFrameRev() {
 }
 
 // Service-worker integration uses `injectManifest` rather than the
-// `generateSW` shortcut: the SW source at `src/sw.js` still has
-// hand-written push + notification-click handlers that don't fit
-// Workbox's stock recipes, so we keep ownership of the SW and let
+// `generateSW` shortcut: the SW source at `src/sw.js` has hand-written
+// routing and offline behaviour that doesn't fit Workbox's stock
+// recipes, so we keep ownership of the SW and let
 // the plugin only INJECT the precache manifest (`self.__WB_MANIFEST`)
 // into it. That replaces the previous hand-edited `VERSION = 'vN'`
 // constant with build-content-hashed cache names — every Vite
@@ -103,7 +103,13 @@ export default defineConfig({
         // rewritten to the active --bg, so precaching it would freeze gesture/
         // system-UI color hints to whatever theme existed at build time.
         globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],
-        globIgnores: ['vendor/**', 'app-frame.html', 'manifest.webmanifest'],
+        // `sw-push.js` is itself a service worker (see public/sw-push.js).
+        // Precaching a worker script would let the shell SW serve a cached
+        // copy back to the browser's update check, freezing push behaviour at
+        // whatever shipped first.
+        globIgnores: [
+          'vendor/**', 'app-frame.html', 'manifest.webmanifest', 'sw-push.js',
+        ],
         // ROOT FIX for stale installed PWAs: give EVERY precache
         // entry a real content-hash revision.
         //

@@ -9,6 +9,11 @@ const SHELL_NAVIGATION_DENYLIST = [
   /^\/apps\//,
   /^\/recover(\/|$)/,
   /^\/shell\/embed(\/|$)/,
+  // The push worker's scope (public/sw-push.js). It names a URL prefix inside
+  // the shell's PWA scope and must never resolve to a document: a page there
+  // would be controlled by that worker, which has no fetch handler, so it
+  // would boot the shell with no precache and no offline fallback.
+  /^\/shell\/push(\/|$)/,
   /^\/sites(\/|$)/,
   /^\/services(\/|$)/,
   ...PROXIED_APP_SUBTREES,

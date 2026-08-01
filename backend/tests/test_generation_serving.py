@@ -129,6 +129,29 @@ def test_unknown_asset_returns_404_not_html(client, serving):
   assert "text/html" not in head.headers.get("content-type", "")
 
 
+def test_push_worker_scope_never_resolves_to_a_document(client, serving):
+  """The push worker's scope must hold no documents.
+
+  `/shell/push/` exists only to name a URL prefix inside the shell's PWA scope
+  so Android routes notifications to the installed app (see
+  frontend/public/sw-push.js). A page served there would be controlled by that
+  worker, which has no fetch handler, so it would boot the shell with no
+  precache and no offline fallback. The SPA fallback happily answers any
+  extensionless path with index.html, so this has to be refused explicitly.
+  """
+  _write_build(serving["live"], "gen2")
+  _reset_memo()
+  if not _spa_active(client):
+    pytest.skip("SPA fallback not registered (no static dir in this env)")
+  for path in ("/shell/push", "/shell/push/", "/shell/push/anything"):
+    r = client.get(path)
+    assert r.status_code == 404, path
+    assert "text/html" not in r.headers.get("content-type", ""), path
+  # The sibling shell routes must keep working — this is a narrow carve-out.
+  assert client.get("/shell/").status_code == 200
+  assert client.get("/shell/pushy").status_code == 200
+
+
 def test_traversal_attempts_rejected(serving):
   live = serving["live"]
   _write_build(live, "gen2")

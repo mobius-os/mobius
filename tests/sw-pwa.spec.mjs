@@ -7,7 +7,8 @@
  *     content-hashed shell assets (no manual VERSION bump).
  *   - Workbox routing rules cover `/vendor/*`, `esm.sh/*`, and
  *     `/api/proxy?url=*.{img/font}` (SWR).
- *   - Push + notificationclick handlers are present in the built SW.
+ *   - Push + notificationclick handlers are present in the built push
+ *     worker, and its scope stays inside the PWA manifest scope.
  *
  * What this test guards against: any future refactor that
  * accidentally drops precache injection or runtime caching, or
@@ -40,11 +41,45 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
     // SW. Without precacheAndRoute, the migration is incomplete.
     expect(body).toContain('precache')
     expect(body).toMatch(/mobius-vendor|mobius-esm|mobius-proxy/)
-    expect(body).toContain('notificationclick')
-    expect(body).toContain('notification-click')
-    expect(body).toContain('postMessage')
-    expect(body).toMatch(/\.navigate\(/)
+    // Push deliberately does NOT live here — see the push-worker test below.
+    expect(body).not.toContain('notificationclick')
   })
+
+  test('the push worker owns notification handling, inside the PWA scope',
+    async ({ page }) => {
+      // Android hands a push to the installed shell only when the SERVICE
+      // WORKER'S SCOPE resolves to that WebAPK, and a WebAPK's intent filter
+      // carries the manifest `scope` as its pathPrefix. The caching worker is
+      // registered at `/` so it can also serve the standalone mini-app pages,
+      // which puts it outside `/shell/` — so push lives on its own worker.
+      // Get this wrong and every notification becomes a Chrome notification
+      // whose tap leaves the app, which nothing else in CI can see.
+      const res = await page.request.get(`${BASE}/sw-push.js`)
+      expect(res.status()).toBe(200)
+      const body = await res.text()
+      expect(body).toContain('notificationclick')
+      expect(body).toContain('notification-click')
+      expect(body).toContain('postMessage')
+      expect(body).toMatch(/\.navigate\(/)
+
+      const manifest = JSON.parse(
+        await (await page.request.get(`${BASE}/manifest.webmanifest`)).text(),
+      )
+      await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+      const scope = await page.evaluate(async () => {
+        const reg = await navigator.serviceWorker.register(
+          '/sw-push.js', { scope: '/shell/push/' },
+        )
+        return reg.scope
+      })
+      expect(new URL(scope).pathname.startsWith(manifest.scope)).toBe(true)
+
+      // The scope must hold no documents: a page there would be controlled by
+      // this worker, which has no fetch handler, so it would boot the shell
+      // with no precache and no offline fallback.
+      const doc = await page.request.get(`${BASE}/shell/push/`)
+      expect(doc.status()).toBe(404)
+    })
 
   test('manifest is reachable', async ({ page }) => {
     const res = await page.request.get(`${BASE}/manifest.webmanifest`)

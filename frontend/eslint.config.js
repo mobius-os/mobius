@@ -29,7 +29,17 @@ export default [
     ],
   },
   {
-    files: ['src/**/*.{js,jsx}', 'scripts/**/*.mjs', 'vite.config.js'],
+    files: [
+      'src/**/*.{js,jsx}',
+      'scripts/**/*.mjs',
+      'vite.config.js',
+      // Served verbatim from public/ rather than bundled, but still hand-
+      // written source that deserves the same rules and worker globals. A
+      // pattern, not a filename: the generated files here are already in
+      // `ignores` above, so the next hand-written one is linted by default
+      // instead of shipping unchecked.
+      'public/**/*.js',
+    ],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',

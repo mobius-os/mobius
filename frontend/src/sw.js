@@ -11,8 +11,6 @@
  *     (immutable bundled libs), `esm.sh/*` (versioned remote
  *     deps), and `/api/proxy?url=*.{img|font|...}` (cacheable
  *     static assets via the CORS-bypass proxy).
- *   - Web Push handlers (push, notificationclick). These are
- *     domain-specific behavior that doesn't fit a Workbox recipe.
  *
  * Caching model for `/api/apps/{id}/{frame,module}` (ALL installed apps):
  *   - These ARE cached, by `appCodeHandler`, for EVERY installed app — loading
@@ -778,134 +776,7 @@ self.addEventListener('message', (event) => {
   if (event && typeof event.waitUntil === 'function') event.waitUntil(work)
 })
 
-// ── Web Push ────────────────────────────────────────────────────
-//
-// Pure-domain behavior — Workbox has no stock recipe for these,
-// so we own them verbatim. Keep complete; an earlier truncation
-// of this file failed `node --check` and silently disabled the
-// SW for installed PWAs (no push, no offline cache).
-
-self.addEventListener('push', (e) => {
-  if (!e.data) return
-  const data = e.data.json()
-  const options = {
-    body: data.body || '',
-    icon: data.icon || '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
-    data: { target: data.target || '/', actions: data.actions },
-    actions: (data.actions || []).slice(0, 2).map(a => ({
-      action: a.action,
-      title: a.title,
-    })),
-  }
-  e.waitUntil(self.registration.showNotification(data.title, options))
-})
-
-// Whitelist notification targets to same-origin chat/app paths so a
-// malicious payload (server compromise, MITM of an unencrypted push)
-// can't steer openWindow() or postMessage to an arbitrary URL.
-//
-// COLD-START SCOPE: the canonical target is `/shell/?app=<id>` (and
-// `/shell/?chat=<id>`), which is INSIDE the PWA manifest scope (`/shell/`).
-// A cold tap (app closed/backgrounded) does `clients.openWindow(target)`;
-// only a target inside scope reopens the installed standalone PWA — an
-// out-of-scope form opens a plain browser tab instead. The retired
-// `/app/<id>` and `/chat/<id>` legacy forms are no longer accepted (the last
-// one on prod predates this by weeks); they now fall through to root. We
-// preserve the query string so the page-side parser (Shell onSwMessage,
-// useNavigation deepLink) can read `?app=`/`?chat=`.
-function _safeTarget(raw) {
-  if (typeof raw !== 'string' || !raw) return '/'
-  let path = raw
-  let search = ''
-  try {
-    if (/^https?:\/\//i.test(raw)) {
-      const u = new URL(raw)
-      if (u.origin !== self.location.origin) return '/'
-      path = u.pathname
-      search = u.search
-    } else {
-      const q = raw.indexOf('?')
-      if (q !== -1) {
-        path = raw.slice(0, q)
-        search = raw.slice(q)
-      }
-    }
-  } catch { return '/' }
-  // In-scope shell deep-link: /shell/ or /shell with an ?app=/?chat= query.
-  if (/^\/shell\/?$/.test(path)) {
-    try {
-      const params = new URLSearchParams(search)
-      const app = params.get('app')
-      const chat = params.get('chat')
-      // An app deep-link may carry a one-shot intent naming WHICH item to
-      // open (e.g. `artifact:tip-calculator-7f3a`). Dropping it here landed
-      // the tap on the app's index instead of the item the notification was
-      // about. Same conservative charset as the ids, plus the ':' and '.'
-      // that namespace an intent's target.
-      const intent = params.get('intent')
-      if (app && /^[A-Za-z0-9_-]+$/.test(app)) {
-        return (intent && /^[A-Za-z0-9_.:-]{1,128}$/.test(intent))
-          ? `/shell/?app=${app}&intent=${encodeURIComponent(intent)}`
-          : `/shell/?app=${app}`
-      }
-      if (chat && /^[A-Za-z0-9_-]+$/.test(chat)) return `/shell/?chat=${chat}`
-    } catch { /* fall through */ }
-    return '/shell/'
-  }
-  // Root is the only remaining out-of-scope target we accept; every other
-  // form (including the retired /app/<id> and /chat/<id> notification
-  // targets) falls through to root.
-  if (path === '/') return path
-  return '/'
-}
-
-self.addEventListener('notificationclick', (e) => {
-  e.notification.close()
-  const data = e.notification.data || {}
-  let target = data.target || '/'
-
-  if (e.action && data.actions) {
-    const match = data.actions.find(a => a.action === e.action)
-    if (match && match.target) target = match.target
-  }
-  target = _safeTarget(target)
-
-  e.waitUntil((async () => {
-    const windowClients = await clients.matchAll({
-      type: 'window',
-      includeUncontrolled: true,
-    })
-    const focusable = windowClients.filter(c => 'focus' in c)
-    // Prefer a client the user is currently looking at — focusing a
-    // hidden/background tab would steer the message away from the
-    // window they're actually using. Fall back to the first match
-    // if nothing is visible.
-    const visible = focusable.find(c => c.visibilityState === 'visible')
-    const target_client = visible || focusable[0]
-    if (target_client) {
-      // For shell deep-links, navigate the existing client instead of only
-      // postMessaging it. The message path is fast when the current Shell
-      // listener is alive, but installed PWAs can have a stale/booting page
-      // after a service-worker update; navigation gives the browser a durable
-      // URL to load so actions like "Open Klix" don't focus Mobius and then
-      // appear to do nothing.
-      if (/^\/shell\/?\?/.test(target) && 'navigate' in target_client) {
-        try {
-          const navigated = await target_client.navigate(target)
-          await (navigated || target_client).focus()
-          return
-        } catch {
-          // Fall back to focus + postMessage below.
-        }
-      }
-      // Focus BEFORE postMessage so the message lands on the window
-      // the user will end up on. If focus moves the active document
-      // mid-handler, postMessage on the un-focused one can race.
-      await target_client.focus()
-      target_client.postMessage({ type: 'notification-click', target })
-      return
-    }
-    if (clients.openWindow) return clients.openWindow(target)
-  })())
-})
+// Web Push is handled by `public/sw-push.js`, registered at `/shell/push/` so
+// Android routes notifications to the installed shell. Do not add a `push` or
+// `notificationclick` listener here — this worker's `/` scope is outside the
+// shell's PWA scope, which is the bug that moved them out.

@@ -1,47 +1,23 @@
 import { useEffect } from 'react'
-import { api } from '../api/client.js'
+import { subscribeToPush } from '../lib/pushSubscription.js'
 
 /**
  * Subscribes the browser to Web Push notifications after login.
  * Runs once per session — re-subscribes each time (subscriptions can
  * rotate), but only prompts for permission once.
+ *
+ * Push lives on its own service worker — see `lib/pushSubscription.js`.
  */
 export default function usePushSubscription() {
   useEffect(() => {
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) return
-
-    async function subscribe() {
-      try {
-        const reg = await navigator.serviceWorker.ready
-
-        // Fetch the VAPID public key from the server.
-        const res = await api.push.vapidKey()
-        if (!res.ok) return
-        const { publicKey } = await res.json()
-
-        // Convert base64url to Uint8Array for subscribe().
-        const padding = '='.repeat((4 - publicKey.length % 4) % 4)
-        const raw = atob(publicKey.replace(/-/g, '+').replace(/_/g, '/') + padding)
-        const key = new Uint8Array(raw.length)
-        for (let i = 0; i < raw.length; i++) key[i] = raw.charCodeAt(i)
-
-        // Subscribe (prompts for permission if needed).
-        const sub = await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: key,
-        })
-
-        // Send subscription to backend.
-        const subJson = sub.toJSON()
-        await api.push.subscribe({
-          endpoint: subJson.endpoint,
-          keys: subJson.keys,
-        })
-      } catch {
-        // Permission denied or push not supported — silently ignore.
-      }
-    }
-
-    subscribe()
+    // A denied permission can never be re-raised from here, so the whole
+    // pipeline (worker install, key fetch, subscribe) would be wasted. Only
+    // 'denied' short-circuits: 'default' is what raises the prompt.
+    // `globalThis.` matters: a bare `Notification` is a ReferenceError, not
+    // undefined, anywhere the API is absent.
+    if (globalThis.Notification?.permission === 'denied') return
+    // Push unsupported or the prompt refused — nothing to surface.
+    subscribeToPush().catch(() => {})
   }, [])
 }

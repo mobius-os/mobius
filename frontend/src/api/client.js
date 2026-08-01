@@ -594,5 +594,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+    unsubscribe: (payload) => apiFetch('/push/subscribe', {
+      method: 'DELETE',
+      body: JSON.stringify(payload),
+    }),
   },
 }

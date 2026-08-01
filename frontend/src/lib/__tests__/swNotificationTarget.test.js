@@ -3,17 +3,19 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
 const SOURCE = readFileSync(
-  new URL('../../sw.js', import.meta.url),
+  new URL('../../../public/sw-push.js', import.meta.url),
   'utf8',
 )
 
 // _safeTarget is the notification-click allowlist: it normalizes whatever a
 // notification carried in `data.target` down to a shell route we are willing
-// to open. Extract it from source (same approach as the denylist test) rather
-// than importing sw.js, which needs a ServiceWorkerGlobalScope.
+// to open. It lives in the push worker (public/sw-push.js), which owns push
+// and notificationclick. Extract it from source (same approach as the denylist
+// test) rather than importing the worker, which needs a
+// ServiceWorkerGlobalScope.
 function loadSafeTarget() {
   const start = SOURCE.indexOf('function _safeTarget(raw) {')
-  assert.ok(start !== -1, '_safeTarget exists in sw.js')
+  assert.ok(start !== -1, '_safeTarget exists in sw-push.js')
   let depth = 0
   let end = -1
   for (let i = SOURCE.indexOf('{', start); i < SOURCE.length; i += 1) {
