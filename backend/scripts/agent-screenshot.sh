@@ -624,6 +624,13 @@ PY
       >/dev/null; then
       die "shell did not commit its settled frame before capture"
     fi
+    # The shell can be visually settled while webfonts are still in flight.
+    # Waiting on the browser's font set prevents cold captures from recording
+    # a system fallback that a warm owner browser never shows.
+    BROWSER_PHASE="font readiness"
+    if ! browser_wait --fn "document.fonts.status === 'loaded'" >/dev/null; then
+      die "document fonts did not finish loading before capture"
+    fi
     ;;
 esac
 
