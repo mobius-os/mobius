@@ -2460,13 +2460,26 @@
 /* When file chips are attached the pill flips to a column with the
    chip tray on top and the input-line below. */
 .chat__pill--with-attach {
+  /* The three boxes stacked between the attachment card and the text area,
+     declared once here and consumed by both the layout below and the reserve.
+     A hand-summed constant would re-introduce exactly the drift `--attach-card`
+     was added to remove: change the tray padding and the growth cap would
+     silently reserve the wrong row, with nothing to catch it. */
+  --pill-pad: 8px;
+  --pill-gap: 6px;
+  --tray-pad-top: 2px;
+  --tray-pad-bottom: 4px;
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
-  padding: 8px;
+  gap: var(--pill-gap);
+  padding: var(--pill-pad);
   border-radius: 22px;
-  /* card + 6px tray padding + 6px column gap + 16px pill padding */
-  --composer-reserve: calc(var(--attach-card) + 28px);
+  --composer-reserve: calc(
+    var(--attach-card)
+    + var(--tray-pad-top) + var(--tray-pad-bottom)
+    + var(--pill-gap)
+    + var(--pill-pad) * 2
+  );
 }
 /* When chips are attached the pill is in column layout and the
    input-line sits BELOW the chip tray. Anchor send/mic to the
@@ -2486,7 +2499,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 2px 2px 4px;
+  /* Block padding comes from the pill's tokens above, which the growth cap
+     reserves against. The fallbacks keep this rule correct on its own. */
+  padding: var(--tray-pad-top, 2px) 2px var(--tray-pad-bottom, 4px);
   overflow-x: auto;
   scrollbar-width: none;
   min-width: 0;

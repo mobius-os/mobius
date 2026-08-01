@@ -7,9 +7,13 @@ import { composerRoom } from '../composerTextareaSizing.js'
 // added on top of it (another 102px), with no relationship to the space left
 // on screen. On a phone with the soft keyboard open that composer was taller
 // than the entire visible chat: the conversation disappeared behind it and the
-// pill read as "growing forever, never scrolling". `.chat__input` now caps
-// itself against half of `--composer-room`, and this is the number that var
-// carries — so getting it wrong reproduces the original bug exactly.
+// pill read as "growing forever, never scrolling".
+//
+// SCOPE: `composerRoom` is a pure function and these cases exercise its
+// arithmetic only — the number ChatView publishes as `--composer-room`. They
+// say nothing about the CSS clamp that consumes it, nor about whether the var
+// reaches `.chat` at all. Both of those are browser behaviour and are covered
+// in tests/composer-growth-cap.spec.mjs.
 
 test('the soft keyboard shrinks the room even though the pane does not', () => {
   // The reported phone, keyboard up. `.chat` is a fixed layer on an
@@ -33,9 +37,10 @@ test('either bound stands alone while the other is still unknown', () => {
   assert.equal(composerRoom({ paneHeight: 754, viewportHeight: 0 }), 754)
 })
 
-test('an unmeasurable composer reports zero and keeps the CSS default', () => {
-  // ChatView publishes nothing at 0, so `.chat__input` falls back to the
-  // 100dvh default baked into its clamp() rather than to a bogus cap.
+test('an unmeasurable pane and viewport report zero rather than a guess', () => {
+  // Zero is the caller's signal to publish nothing at all, which leaves
+  // `.chat__input` on the default baked into its clamp(). Returning a bogus
+  // small number instead would cap the composer at its 48px floor.
   assert.equal(composerRoom(), 0)
   assert.equal(composerRoom({}), 0)
   assert.equal(composerRoom({ paneHeight: NaN, viewportHeight: -1 }), 0)

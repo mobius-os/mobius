@@ -479,6 +479,33 @@ export default function ChatView({
   // every other indirect scroll-geometry write.
   const chatRef = useRef(null)
   const footRef = useRef(null)
+  // `--composer-room` — how much of this chat the reader can actually SEE,
+  // read by the composer's growth cap (`.chat__input` max-height).
+  //
+  // This is deliberately NOT part of the pass above. `--composer-h` is scroll
+  // geometry: it feeds the list's bottom padding and has to be sequenced with
+  // spacer math, so the scroll controller owns when it runs. The room owns
+  // nothing of the sort — it describes the pane and the visible viewport, and
+  // an empty chat has both. Publishing it from the scroll controller's pass
+  // made it inherit that pass's early return for chats that render no scroll
+  // node, so on a NEW chat the var was never set at all, the cap fell back to
+  // its `100dvh` default, and — because iOS does not shrink `dvh` for the soft
+  // keyboard — the composer could still cover the conversation in the exact
+  // flow most likely to hit it. It publishes on its own terms now.
+  const composerRoomRef = useRef(0)
+  const publishComposerRoom = useCallback(() => {
+    const chatEl = chatRef.current
+    if (!chatEl) return
+    const room = composerRoom({
+      paneHeight: chatEl.clientHeight,
+      viewportHeight: window.visualViewport?.height || window.innerHeight,
+    })
+    // Write only on a real change: this also runs from a ResizeObserver on
+    // `.chat`, and an unconditional style write there is an easy feedback loop.
+    if (room <= 0 || room === composerRoomRef.current) return
+    composerRoomRef.current = room
+    chatEl.style.setProperty('--composer-room', `${room}px`)
+  }, [])
   // One explicit Shell-to-composer handoff owns both New-chat focus and drafts
   // supplied by app navigation. Storage restores unmounted chats; applying the
   // same request here is what updates a retained ChatView without sacrificing
@@ -1444,13 +1471,21 @@ export default function ChatView({
 
     let raf1 = 0
     let raf2 = 0
-    const applySoon = () => {
+    // The room is published unconditionally; the foot measurement goes through
+    // the scroll controller, which may decline while the reader owns the
+    // scroll. Keeping them in one settle sequence means the cap and the list
+    // padding still land from the same events.
+    const applyNow = () => {
+      publishComposerRoom()
       composerResized()
+    }
+    const applySoon = () => {
+      applyNow()
       if (raf1) cancelAnimationFrame(raf1)
       if (raf2) cancelAnimationFrame(raf2)
       raf1 = requestAnimationFrame(() => {
-        composerResized()
-        raf2 = requestAnimationFrame(composerResized)
+        applyNow()
+        raf2 = requestAnimationFrame(applyNow)
       })
     }
     const reconcileForegroundGeometry = () => {
@@ -1470,6 +1505,14 @@ export default function ChatView({
       ? new ResizeObserver(applySoon)
       : null
     ro?.observe(footEl)
+    // The pane is the room's other input, and it can change without any window
+    // or viewport event at all — dragging a workspace split resizes this chat
+    // while the window stands still. Observe it directly rather than hoping a
+    // neighbouring event fires.
+    const paneRo = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(publishComposerRoom)
+      : null
+    if (chatRef.current) paneRo?.observe(chatRef.current)
     window.addEventListener('resize', applySoon)
     window.addEventListener('pageshow', reconcileForegroundGeometry)
     window.visualViewport?.addEventListener('resize', applySoon)
@@ -1480,13 +1523,14 @@ export default function ChatView({
       if (raf1) cancelAnimationFrame(raf1)
       if (raf2) cancelAnimationFrame(raf2)
       ro?.disconnect()
+      paneRo?.disconnect()
       window.removeEventListener('resize', applySoon)
       window.removeEventListener('pageshow', reconcileForegroundGeometry)
       window.visualViewport?.removeEventListener('resize', applySoon)
       window.visualViewport?.removeEventListener('scroll', applySoon)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [composerResized])
+  }, [composerResized, publishComposerRoom])
 
   useEffect(() => {
     composerResized()
