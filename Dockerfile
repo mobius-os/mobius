@@ -196,13 +196,13 @@ RUN mkdir -p /tmp/pdfjs-install && cd /tmp/pdfjs-install \
 # The stable /vendor/katex/ alias is used by installed app stylesheets.
 RUN mkdir -p /tmp/katex-install && cd /tmp/katex-install \
     && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund --silent katex@0.17.0 \
-    && mkdir -p /app/static/vendor/katex@0.17.0/fonts \
-    && cp node_modules/katex/dist/katex.min.js /app/static/vendor/katex@0.17.0/ \
-    && cp node_modules/katex/dist/katex.mjs    /app/static/vendor/katex@0.17.0/ \
-    && cp node_modules/katex/dist/katex.min.css /app/static/vendor/katex@0.17.0/ \
-    && cp node_modules/katex/dist/fonts/*.woff2 /app/static/vendor/katex@0.17.0/fonts/ \
-    && ln -s katex@0.17.0 /app/static/vendor/katex \
+    && npm install --no-audit --no-fund --silent katex@0.18.1 \
+    && mkdir -p /app/static/vendor/katex@0.18.1/fonts \
+    && cp node_modules/katex/dist/katex.min.js /app/static/vendor/katex@0.18.1/ \
+    && cp node_modules/katex/dist/katex.mjs    /app/static/vendor/katex@0.18.1/ \
+    && cp node_modules/katex/dist/katex.min.css /app/static/vendor/katex@0.18.1/ \
+    && cp node_modules/katex/dist/fonts/*.woff2 /app/static/vendor/katex@0.18.1/fonts/ \
+    && ln -s katex@0.18.1 /app/static/vendor/katex \
     && cd / && rm -rf /tmp/katex-install
 
 # Frontend static files + app-frame served by FastAPI, plus the full source
