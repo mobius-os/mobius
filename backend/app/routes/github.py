@@ -115,6 +115,7 @@ from app.github_contribution_git import (
   _run_cmd,
   _assert_clean_worktree,
   _assert_coauthor_trailer,
+  _conflicts_with_recorded_upstream,
   _connected_git_identity,
   _head_commit_metadata,
   _head_sha_patch,
@@ -628,6 +629,10 @@ _REVIEW_STATUS_MESSAGES = {
   "missing_coauthor": (
     "The staged commit is missing its Möbius Agent co-author marker."
   ),
+  "upstream_conflict": (
+    "This no longer merges cleanly with the branch it targets, so it has to "
+    "be refreshed before it can be sent."
+  ),
   "invalid_stack": "The linked PR chain no longer matches its reviewed order.",
   "parent_merged": (
     "A parent PR has merged, so the remaining private layer must be refreshed "
@@ -696,6 +701,12 @@ def _inspect_prepared_review(
         author_name=author_name,
         author_email=author_email,
       )
+    # Last, because it is the only verdict here that is not about the staged
+    # checkout: the source can match its review exactly and still be
+    # unmergeable. A dirty or moved checkout is the more urgent thing to say,
+    # so those are reported first.
+    if _conflicts_with_recorded_upstream(record, repo, branch):
+      return _review_status_problem(record_id, code="upstream_conflict")
   except ContributionSubmitError as exc:
     return _review_status_problem(
       record_id,

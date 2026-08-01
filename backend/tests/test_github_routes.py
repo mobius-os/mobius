@@ -5108,3 +5108,150 @@ def test_send_refuses_branch_with_existing_pr_before_any_push(
   # of any kind and no PR creation.
   assert not any("push" in call for call in git_calls)
   assert not any(call[:2] == ("pr", "create") for call in gh_calls)
+
+
+def _conflicting_upstream_commit(repo, content):
+  """Commit a rival change to main, and return its sha.
+
+  The review branch already edited this file, so a different edit to the same
+  line is a genuine merge conflict rather than a simulated one.
+  """
+  subprocess.run(["git", "checkout", "main"], cwd=repo, check=True,
+                 capture_output=True)
+  (repo / "index.jsx").write_text(content)
+  subprocess.run(["git", "add", "index.jsx"], cwd=repo, check=True)
+  subprocess.run(["git", "commit", "-m", "upstream moved"], cwd=repo,
+                 check=True, capture_output=True)
+  sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo,
+                                text=True).strip()
+  subprocess.run(["git", "checkout", "fix/demo-review"], cwd=repo, check=True,
+                 capture_output=True)
+  return sha
+
+
+def _record_upstream(app_id, record_id, sha):
+  path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "contributions" / f"{record_id}.json"
+  )
+  stored = json.loads(path.read_text())
+  stored["last_submit_upstream_sha"] = sha
+  path.write_text(json.dumps(stored))
+
+
+def test_review_status_reports_a_branch_that_no_longer_merges(
+  client, owner_token,
+):
+  """The one verdict local freshness checks cannot reach.
+
+  A conflict is a fact about upstream, so every check about the staged
+  checkout still passes and the review would otherwise read "ready".
+  """
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  repo, _record, _diff = _prepared_real_review(app_id, "conflicted")
+  headers = {"Authorization": f"Bearer {app_token}"}
+
+  assert client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  ).json()["records"][0]["state"] == "ready"
+
+  _record_upstream(
+    app_id, "conflicted", _conflicting_upstream_commit(repo, "export default 9\n"),
+  )
+
+  blocked = client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  )
+  assert blocked.status_code == 200, blocked.text
+  assert blocked.json()["needs_refresh"] == 1
+  verdict = blocked.json()["records"][0]
+  assert verdict["code"] == "upstream_conflict"
+  assert verdict["message"] == (
+    github_routes._REVIEW_STATUS_MESSAGES["upstream_conflict"]
+  )
+
+
+def test_refreshing_the_branch_clears_the_conflict_with_nothing_to_reset(
+  client, owner_token,
+):
+  """The property a stored verdict could not have.
+
+  Nothing records that this review was conflicted, so nothing has to remember
+  to clear it: merging upstream in is enough, and the next read is honest.
+  """
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  repo, _record, _diff = _prepared_real_review(app_id, "healing")
+  headers = {"Authorization": f"Bearer {app_token}"}
+  upstream = _conflicting_upstream_commit(repo, "export default 9\n")
+  _record_upstream(app_id, "healing", upstream)
+
+  assert client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  ).json()["records"][0]["code"] == "upstream_conflict"
+
+  # Resolve it exactly as a refresh would, then re-stage the reviewed source.
+  subprocess.run(["git", "merge", upstream, "-m", "merge upstream"], cwd=repo,
+                 check=False, capture_output=True)
+  (repo / "index.jsx").write_text("export default 2\n")
+  subprocess.run(["git", "add", "index.jsx"], cwd=repo, check=True)
+  subprocess.run([
+    "git", "commit", "--no-edit", "-m", "refreshed", "-m",
+    "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>",
+  ], cwd=repo, check=False, capture_output=True)
+  head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo,
+                                 text=True).strip()
+  path = (
+    Path(get_settings().data_dir) / "apps" / str(app_id)
+    / "contributions" / "healing.json"
+  )
+  stored = json.loads(path.read_text())
+  base = stored["plan"]["base_sha"]
+  diff_text = subprocess.check_output([
+    "git", "-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color",
+    "--binary", "--full-index", "--src-prefix=a/", "--dst-prefix=b/",
+    f"{base}..{head}",
+  ], cwd=repo, text=True)
+  stored["plan"]["head_sha"] = head
+  stored["plan"]["diff_sha256"] = hashlib.sha256(diff_text.encode()).hexdigest()
+  _write_contribution(app_id, "healing", stored, diff_text)
+
+  healed = client.get(
+    f"/api/github/contributions/{app_id}/review-status", headers=headers,
+  )
+  assert healed.json()["records"][0]["state"] == "ready", healed.text
+
+
+def test_a_review_that_never_reached_upstream_is_not_inspected_for_conflicts(
+  client, owner_token,
+):
+  """No recorded upstream means nothing local to compare against."""
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _prepared_real_review(app_id, "never-sent")
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.json()["records"][0]["state"] == "ready"
+
+
+def test_a_dirty_checkout_is_named_before_an_upstream_conflict(
+  client, owner_token,
+):
+  """Two things wrong at once: say the one the owner can act on locally."""
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  repo, _record, _diff = _prepared_real_review(app_id, "both-wrong")
+  _record_upstream(
+    app_id, "both-wrong", _conflicting_upstream_commit(repo, "export default 9\n"),
+  )
+  (repo / "index.jsx").write_text("export default 77\n")
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.json()["records"][0]["code"] == "working_changes"

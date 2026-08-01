@@ -534,6 +534,39 @@ def _assert_merges_with_upstream(
   finally:
     _git(repo, "update-ref", "-d", upstream_ref, check=False)
 
+def _conflicts_with_recorded_upstream(record: dict, repo, branch: str) -> bool:
+  """Whether this branch still fails to merge the upstream it last saw.
+
+  A conflict is a fact about two commits, so DERIVE it from the branch as it
+  stands rather than trusting a verdict a past attempt left behind. A refreshed
+  branch stops reporting one the moment it genuinely merges, and nothing has to
+  remember to clear a flag — the failure mode of every stored classification.
+
+  The upstream commit is already in this checkout's object store, fetched by the
+  submit that recorded its sha, so this stays local and never reaches the
+  network. It can only go stale in the safe direction: upstream moving on is
+  invisible here, and the authoritative check against live upstream still runs
+  at submit before anything is pushed.
+
+  ``merge-tree --write-tree`` writes the merged tree it computes, so this leaves
+  unreferenced objects behind for gc — the same objects the submit-time check
+  already writes. It touches no working tree, index, branch or ref, which is
+  what the read-only review endpoint calling it promises.
+  """
+  upstream_sha = str(record.get("last_submit_upstream_sha") or "")
+  if not _GIT_SHA.match(upstream_sha):
+    return False
+  present = _git(
+    repo, "cat-file", "-e", f"{upstream_sha}^{{commit}}", check=False,
+  )
+  if present.returncode != 0:
+    return False
+  merged = _git(
+    repo, "merge-tree", "--write-tree", upstream_sha, branch, check=False,
+  )
+  return merged.returncode != 0
+
+
 
 def _resolve_reviewed_commit(repo: Path, value: object, label: str) -> str:
   raw = str(value or "").strip()
