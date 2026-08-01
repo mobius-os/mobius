@@ -3,7 +3,6 @@ import * as tabModel from './tabModel.js'
 import {
   projectLayout, STRIP_H,
 } from './paneModel.js'
-import { clientPointToLocal } from './dragController.js'
 import { ARROW_STEP_RATIO } from '../../lib/splitHelper.js'
 import { PaneStrip } from './PaneStrip.jsx'
 import { modeViewTransitionStyle } from './useModeViewTransition.js'
@@ -141,11 +140,7 @@ export default function WorkspaceChrome({
     // the rects are written imperatively per frame and there is no interpolation to
     // suppress. A divider drag also cannot overlap a mode beat — the chrome is inert
     // during one.
-    const clientRect = contentEl.getBoundingClientRect()
-    const localSize = {
-      w: contentEl.clientWidth || clientRect.width,
-      h: contentEl.clientHeight || clientRect.height,
-    }
+    const contentBounds = contentEl.getBoundingClientRect()
     const { dir, splitId } = divider
 
     // Cache the elements to move; no React render fires during the drag, so the
@@ -169,12 +164,9 @@ export default function WorkspaceChrome({
     let committed = divider.ratio
 
     const paint = (clientX, clientY) => {
-      const point = clientPointToLocal(
-        { x: clientX, y: clientY },
-        clientRect,
-        localSize,
-      )
-      const axis = dir === 'row' ? point.x : point.y
+      const axis = dir === 'row'
+        ? clientX - contentBounds.left
+        : clientY - contentBounds.top
       const raw = divider.span > 0 ? (axis - divider.origin) / divider.span : 0.5
       const proj = projectLayout(workspace, mode, contentRect, { splitId, ratio: raw })
       committed = proj.dividers.find(d => d.splitId === splitId)?.ratio ?? committed

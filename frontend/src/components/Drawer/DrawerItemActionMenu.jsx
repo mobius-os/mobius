@@ -83,10 +83,6 @@ export default function DrawerItemActionMenu({
           : rootRect.top + rootRect.height / 2,
       },
       clientViewport: rootRect,
-      layoutViewport: {
-        width: root.offsetWidth || root.clientWidth || rootRect.width,
-        height: root.offsetHeight || root.clientHeight || rootRect.height,
-      },
       menuSize: {
         width: menuRect.offsetWidth,
         height: menuRect.offsetHeight,

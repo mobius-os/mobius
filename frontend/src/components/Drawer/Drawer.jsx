@@ -31,7 +31,6 @@ import { WORKSPACE_SPLITS_ENABLED } from '../Shell/paneModel.js'
 import {
   DRAWER_HOLD_MS,
   PRE_HOLD_MOVE_PX,
-  clientDeltaToLocal,
 } from '../Shell/dragController.js'
 import InstallSheet from './InstallSheet.jsx'
 import AppsDirectory from './AppsDirectory.jsx'
@@ -902,11 +901,6 @@ export default function Drawer({
       startWidth: clampDesktopSidebarWidth(width),
       edgeDirection: handleCenter < panelCenter ? -1 : 1,
       width: clampDesktopSidebarWidth(width),
-      clientRect: panelRect,
-      localSize: {
-        w: panel?.offsetWidth || panelRect?.width,
-        h: panel?.offsetHeight || panelRect?.height,
-      },
     }
     e.currentTarget.setPointerCapture(e.pointerId)
     drawerRef.current?.classList.add('drawer--resizing')
@@ -914,15 +908,10 @@ export default function Drawer({
 
   function onResizePointerMove(e) {
     if (resizeRef.current?.pointerId !== e.pointerId) return
-    const delta = clientDeltaToLocal(
-      { x: e.clientX - resizeRef.current.startX, y: 0 },
-      resizeRef.current.clientRect,
-      resizeRef.current.localSize,
-    )
     applyResizeWidth(drawerWidthFromPointerDelta({
       startWidth: resizeRef.current.startWidth,
-      startX: 0,
-      currentX: delta.x,
+      startX: resizeRef.current.startX,
+      currentX: e.clientX,
       edgeDirection: resizeRef.current.edgeDirection,
     }))
   }
@@ -1670,7 +1659,6 @@ const DrawerRow = memo(function DrawerRow({
     let fromIndex = -1
     let src = null
     let pinnedSection = null
-    let layoutDeltaY = deltaY => deltaY
     let last = { slotDelta: 0, finalKeys: null, changed: false, shifts: new Map() }
 
     function releaseTouchClaim() {
@@ -1746,16 +1734,6 @@ const DrawerRow = memo(function DrawerRow({
     function measureRows() {
       const drawerEl = sourceBtn.closest('#navigation-drawer')
       pinnedSection = sourceBtn.closest('.drawer__section')
-      const drawerClientRect = drawerEl?.getBoundingClientRect()
-      const drawerLocalSize = {
-        w: drawerEl?.offsetWidth || drawerClientRect?.width,
-        h: drawerEl?.offsetHeight || drawerClientRect?.height,
-      }
-      layoutDeltaY = deltaY => clientDeltaToLocal(
-        { x: 0, y: deltaY },
-        drawerClientRect,
-        drawerLocalSize,
-      ).y
       const wrapOf = (btn) => btn.closest('.drawer__row') || btn
       // Measure once only after reorder intent wins. Ordinary touch scrolls do
       // no layout work at pointerdown, keeping the first scroll frame crisp.
@@ -1821,10 +1799,10 @@ const DrawerRow = memo(function DrawerRow({
       }
       moveEvent.preventDefault()
       last = computePinnedDrag(rows, fromIndex, dy)
-      src.wrap.style.transform = `translateY(${layoutDeltaY(dy)}px)`
+      src.wrap.style.transform = `translateY(${dy}px)`
       for (const r of rows) {
         if (r === src) continue
-        r.wrap.style.transform = `translateY(${layoutDeltaY(last.shifts.get(r.key) || 0)}px)`
+        r.wrap.style.transform = `translateY(${last.shifts.get(r.key) || 0}px)`
       }
     }
 
@@ -1844,7 +1822,7 @@ const DrawerRow = memo(function DrawerRow({
       }
       src.wrap.addEventListener('transitionend', onEnd)
       src.wrap.style.transition = 'transform 190ms cubic-bezier(0.2, 0, 0, 1)'
-      src.wrap.style.transform = `translateY(${layoutDeltaY(commit ? last.slotDelta : 0)}px)`
+      src.wrap.style.transform = `translateY(${commit ? last.slotDelta : 0}px)`
       // Fallback if transitionend never fires (e.g. the offset was already 0).
       setTimeout(done, 240)
     }

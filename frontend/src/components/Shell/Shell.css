@@ -609,22 +609,10 @@
 /* Desktop productivity shell: the workspace starts at the very top, while a
    narrow left rail remains as the only persistent chrome. Expanding navigation
    turns that same rail into the drawer header (brand + notification bell);
-   collapsing it leaves a stable Möbius mark plus compact quick actions. */
+   collapsing it leaves a stable Möbius mark plus compact quick actions. Density
+   comes from removing redundant chrome while the document remains at native
+   scale, so viewport, pointer, iframe, and layout geometry share one space. */
 @media (min-width: 1024px) {
-  /* Owner-selected desktop density. Root author zoom relayouts before paint,
-     unlike transforming .shell, so fixed, dvh, and iframe surfaces still meet
-     the viewport edges. Pointer-owned shell interactions convert client pixels
-     through their measured layout boxes (dragController/contextMenuGeometry). */
-  :root {
-    zoom: 0.9;
-  }
-
-  /* Preserve the intended painted tab size under the desktop density scale.
-     Phone keeps the base 12.5px because it does not inherit desktop zoom. */
-  .shell__tab-open {
-    font-size: 13.5px;
-  }
-
   .shell {
     --desktop-rail-width: 58px;
     --shell-bar-height: 0px;
