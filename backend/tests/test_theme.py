@@ -1,4 +1,5 @@
 import os
+import re
 os.environ.setdefault("SECRET_KEY", "test-secret-key-exactly-32-chars!!")
 os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/mobius_test/test.db")
 os.environ.setdefault("DATA_DIR", "/tmp/mobius_test")
@@ -568,3 +569,33 @@ def test_snapshot_theme_prunes_old_backups(tmp_path):
   # The oldest seeded snapshots are gone; the newest survive.
   assert "theme.css.bak-1000" not in numeric
   assert keeper.exists()
+
+
+def test_injected_accent_fg_follows_the_theme_accent():
+  """The one core var whose default depends on another var the theme supplied.
+
+  A fixed #ffffff is right for Möbius's dark accent, but a theme that sets a
+  light --accent and omits --accent-fg would paint white on white on every
+  control pairing the two.
+  """
+  from app.theme import _ensure_core_vars
+
+  def injected_accent_fg(accent):
+    css = f":root {{ --bg: #ffffff; --fg: #111111; --accent: {accent}; }}"
+    match = re.search(r"--accent-fg:\s*([^;]+);", _ensure_core_vars(css))
+    return match.group(1).strip() if match else None
+
+  # The shipped accent is dark enough for white, and must keep it.
+  assert injected_accent_fg("#8b6cf7") == "#ffffff"
+  assert injected_accent_fg("#1a237e") == "#ffffff"
+  # A light accent must not inherit the white default.
+  assert injected_accent_fg("#ffffff") == "#000000"
+  assert injected_accent_fg("rgb(255, 250, 205)") == "#000000"
+
+
+def test_theme_that_declares_accent_fg_is_left_alone():
+  from app.theme import _ensure_core_vars
+
+  css = ":root { --bg: #fff; --fg: #111; --accent: #ffffff; --accent-fg: #123456; }"
+  assert _ensure_core_vars(css).count("--accent-fg") == 1
+  assert "#123456" in _ensure_core_vars(css)

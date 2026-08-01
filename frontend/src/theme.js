@@ -18,6 +18,7 @@ export const DARK_COLORS = {
   '--accent': '#8b6cf7',
   '--accent-hover': '#7c5ce6',
   '--accent-dim': 'rgba(139, 108, 247, 0.14)',
+  '--accent-fg': '#ffffff',
   '--danger': '#f87171',
   '--green': '#10b981',
 }
@@ -39,6 +40,7 @@ export const LIGHT_COLORS = {
   '--accent': '#8b6cf7',
   '--accent-hover': '#7c5ce6',
   '--accent-dim': 'rgba(139, 108, 247, 0.08)',
+  '--accent-fg': '#ffffff',
   '--danger': '#ef4444',
   '--green': '#059669',
 }
