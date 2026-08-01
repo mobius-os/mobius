@@ -496,21 +496,27 @@ export default function useNavigation({
     }
     const entryId = navEntryId(state)
     if (!entryId) return null
-    historyDismissalsRef.current.set(entryId, { onDismiss, closing: false })
+    historyDismissalsRef.current.set(entryId, { onDismiss })
     return entryId
   }, [pushShellEntry, snapshotRoute])
 
+  // An explicit close DISMISSES SYNCHRONOUSLY and only then consumes its
+  // sentinel; the traversal is bookkeeping, never the thing that closes the
+  // surface. Waiting on that traversal made the close button unreliable on a
+  // wedged WebKit Navigation store (iOS 18.4+, see navHistory.mirrorCurrentEntry):
+  // the mirror write fails, the traversal comes back untagged, the phantom guard
+  // discards it, and the image viewer stayed open with a permanently dead X —
+  // a pending-close flag then swallowed every later tap (field report
+  // 2026-08-01, standalone iOS PWA). Back/swipe dismissal still routes through
+  // handleBack, which finds this registration only while the surface is live.
   const closeHistoryDismiss = useCallback((entryId) => {
     const dismissal = historyDismissalsRef.current.get(entryId)
     if (!dismissal) return false
-    if (dismissal.closing) return true
+    historyDismissalsRef.current.delete(entryId)
     const current = currentNavStateRef.current
     if (current?.kind === 'dismissible' && navEntryId(current) === entryId) {
-      dismissal.closing = true
-      history.back()
-      return true
+      try { history.back() } catch { /* history unavailable — the surface still closes */ }
     }
-    historyDismissalsRef.current.delete(entryId)
     dismissal.onDismiss()
     return true
   }, [])
@@ -1506,6 +1512,23 @@ export default function useNavigation({
           else setTimeout(consume, 0)
           return
         }
+        // A traversal off a dismissible sentinel is ALWAYS ours: the tag comes
+        // from our own ref when the mirror read fails. Recognize it here — before
+        // the phantom guard would misread an untagged destination as an iframe
+        // entry, and before the canIntercept gate — so the sentinel is consumed
+        // and the shell never keeps pointing at an entry it has already left.
+        if (source?.kind === 'dismissible') {
+          const consumeDismissible = () => {
+            const committed = isMobiusNavState(destination)
+              ? destination
+              : (isMobiusNavState(history.state) ? history.state : null)
+            if (committed) currentNavStateRef.current = committed
+            handleBack(committed, source)
+          }
+          if (e.canIntercept) e.intercept({ handler: consumeDismissible })
+          else setTimeout(consumeDismissible, 0)
+          return
+        }
         if (!e.canIntercept) return
         const direction = navTraversalDirection(source, destination, {
           currentEntryIndex,
@@ -1538,13 +1561,6 @@ export default function useNavigation({
             appLocalPopInFlightRef.current = false
             appLocalPopInFlightEntryRef.current = null
             setTimeout(resumeLocalAppPops, 0)
-          } })
-          return
-        }
-        if (source?.kind === 'dismissible') {
-          e.intercept({ handler() {
-            currentNavStateRef.current = destination
-            handleBack(destination, source)
           } })
           return
         }
@@ -1586,6 +1602,15 @@ export default function useNavigation({
       const source = currentNavStateRef.current
       const direction = navTraversalDirection(source, destination)
       const sourceRoute = snapshotRoute()
+      // A pop off a dismissible sentinel is ours whatever it lands on: the tag
+      // comes from our own ref, so an untagged landing (an iframe phantom that
+      // sits BENEATH the sentinel) must still consume it rather than fall into
+      // the phantom guard below and strand the surface (mirrors onNavigate).
+      if (source?.kind === 'dismissible') {
+        if (isMobiusNavState(destination)) currentNavStateRef.current = destination
+        handleBack(destination, source)
+        return
+      }
       // Phantom-entry guard: a pop landing on an UNTAGGED entry is a phantom
       // pushed onto the shared session history by a sandboxed app/preview
       // iframe, not one of our sentinels — ignore it.
@@ -1619,10 +1644,6 @@ export default function useNavigation({
       // direction classifier returns same/unknown, a pending close whose source
       // is the drawer sentinel must consume that sentinel through handleBack.
       if (drawerClosePendingRef.current && source?.kind === 'drawer') {
-        handleBack(destination, source)
-        return
-      }
-      if (source?.kind === 'dismissible') {
         handleBack(destination, source)
         return
       }

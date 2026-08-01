@@ -1089,9 +1089,15 @@ The mobile design satisfies a few hard desiderata — no "two drawers" artifact 
 
 Transient shell surfaces that should dismiss on browser Back use the same owner
 through `useHistoryDismiss`. Opening one pushes a tagged `kind:'dismissible'`
-entry before the surface paints; its close affordances consume that entry via
-`history.back()`, and both navigation-event paths call the registered dismissal
-instead of popping `navStackRef`. Forward traversal deliberately leaves a
+entry before the surface paints. An explicit close (X, backdrop, Escape)
+dismisses the surface SYNCHRONOUSLY and consumes that entry with
+`history.back()` as bookkeeping — it must never wait for the traversal, because
+a wedged WebKit Navigation store (iOS 18.4+, `navHistory.mirrorCurrentEntry`)
+can deliver it untagged or not at all, which left the chat image viewer open
+with a permanently dead close button. A browser Back/swipe instead reaches the
+registered dismissal through `handleBack`; both navigation-event paths
+recognize a `dismissible` source BEFORE their phantom guard and before the
+Navigation API's `canIntercept` gate, and neither pops `navStackRef`. Forward traversal deliberately leaves a
 dismissed transient closed and treats its physical entry as a no-op sentinel;
 reopening it pushes a fresh entry and naturally truncates that stale Forward
 branch. Do not add component-local `popstate` listeners for these surfaces —
