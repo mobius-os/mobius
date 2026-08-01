@@ -130,6 +130,24 @@ test('still writes the sessionStorage ring (existing behavior preserved)', () =>
   assert.ok(ring.some((r) => r.message === 'ring me'), 'ring buffer still populated')
 })
 
+test('credentials are redacted before local storage and remote reporting', () => {
+  const secret = 'github_pat_0123456789abcdefghijklmnopqrstuvwxyz'
+  globalThis.location.href = `https://mobius.example/app?token=${secret}`
+  errorLog.recordClientError({
+    where: 'window.onerror',
+    message: `Authorization: Bearer ${secret}`,
+    stack: `OPENAI_API_KEY=${secret}`,
+    componentStack: `postgres://owner:${secret}@db.internal/mobius`,
+  })
+
+  const serializedRing = JSON.stringify(errorLog.getRecentErrors())
+  const serializedReport = fetchCalls[0].opts.body
+  assert.doesNotMatch(serializedRing, new RegExp(secret))
+  assert.doesNotMatch(serializedReport, new RegExp(secret))
+  assert.match(serializedRing, /\[redacted/)
+  assert.match(serializedReport, /\[redacted/)
+})
+
 function stubWindowEvents() {
   const handlers = {}
   globalThis.window = {
