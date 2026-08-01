@@ -4,14 +4,38 @@ updates:
     directory: /backend
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    versioning-strategy: lockfile-only
+    groups:
+      python-lockfile:
+        patterns: ["*"]
+
   - package-ecosystem: npm
     directory: /frontend
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
-  - package-ecosystem: docker
-    directory: /
-    schedule: { interval: weekly }
-    open-pull-requests-limit: 5
+    versioning-strategy: increase-if-necessary
+    groups:
+      tanstack:
+        patterns: ["@tanstack/*"]
+        update-types: [minor, patch]
+      codemirror:
+        patterns:
+          - "@codemirror/*"
+          - "@lezer/*"
+          - codemirror
+        update-types: [minor, patch]
+      frontend-minor-patch:
+        patterns: ["*"]
+        exclude-patterns:
+          - "@tanstack/*"
+          - "@codemirror/*"
+          - "@lezer/*"
+          - codemirror
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
