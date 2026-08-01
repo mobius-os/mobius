@@ -10,7 +10,6 @@ import {
   buildAgentRepairPrompt,
   errorRecoveryFingerprint,
   readErrorRecoveryAttempt,
-  recoveryViewForAttempt,
   runAgentRepair,
   writeRefreshedRecoveryAttempt,
 } from '../../lib/errorRecovery.js'
@@ -88,11 +87,15 @@ export default function StandaloneApp({ initialApp }) {
       error,
       fingerprint,
       attempt,
-      ...recoveryViewForAttempt(attempt),
+      repairActive: false,
     })
   }, [recoverySurfaceKey])
 
-  useEffect(() => () => repairControllerRef.current?.abort(), [])
+  useEffect(() => () => {
+    const controller = repairControllerRef.current
+    repairControllerRef.current = null
+    controller?.abort()
+  }, [])
 
   useEffect(() => {
     if (crashFingerprint) crashHeadingRef.current?.focus()
@@ -102,7 +105,9 @@ export default function StandaloneApp({ initialApp }) {
     if (!crashFingerprint) return undefined
     function onPageShow(event) {
       if (!event.persisted) return
+      const controller = repairControllerRef.current
       repairControllerRef.current = null
+      controller?.abort()
       const attempt = readErrorRecoveryAttempt({
         surfaceKey: recoverySurfaceKey,
         fingerprint: crashFingerprint,
@@ -110,7 +115,7 @@ export default function StandaloneApp({ initialApp }) {
       setCrash(current => current ? {
         ...current,
         attempt,
-        ...recoveryViewForAttempt(attempt),
+        repairActive: false,
       } : current)
     }
     window.addEventListener('pageshow', onPageShow)
@@ -229,6 +234,7 @@ export default function StandaloneApp({ initialApp }) {
     if (!crash || repairControllerRef.current) return
     const controller = new AbortController()
     repairControllerRef.current = controller
+    setCrash(current => current ? { ...current, repairActive: true } : current)
     void runAgentRepair({
       client: api,
       base: BASE,
@@ -236,11 +242,10 @@ export default function StandaloneApp({ initialApp }) {
       fingerprint: crash.fingerprint,
       previousAttempt: crash.attempt,
       signal: controller.signal,
-      onAttempt: (attempt, { active }) => {
+      onAttempt: (attempt) => {
         setCrash(current => current ? {
           ...current,
           attempt,
-          ...recoveryViewForAttempt(attempt, { active }),
         } : current)
       },
       prompt: buildAgentRepairPrompt({
@@ -254,7 +259,10 @@ export default function StandaloneApp({ initialApp }) {
     }).catch(error => {
       if (error?.name === 'AbortError') return
     }).finally(() => {
-      if (repairControllerRef.current === controller) repairControllerRef.current = null
+      if (repairControllerRef.current === controller) {
+        repairControllerRef.current = null
+        setCrash(current => current ? { ...current, repairActive: false } : current)
+      }
     })
   }, [app.id, app.name, crash, recoverySurfaceKey])
 
@@ -318,14 +326,12 @@ export default function StandaloneApp({ initialApp }) {
           <RecoveryPanel
             variant="standalone"
             className="standalone-app__crash"
-            headingId="standalone-crash-title"
             headingRef={crashHeadingRef}
             title={`${app.name} stopped unexpectedly`}
             subject="app"
             diagnostic={readableAppDiagnostic(crash.error)}
-            phase={crash.phase}
-            attemptPhase={crash.attemptPhase}
-            repairChatId={crash.repairChatId}
+            attempt={crash.attempt}
+            repairActive={crash.repairActive}
             refreshLabel="Refresh app"
             onRefresh={refreshCrash}
             onAgentRepair={reportCrash}

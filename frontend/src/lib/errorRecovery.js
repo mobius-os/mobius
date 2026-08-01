@@ -1,18 +1,16 @@
 import { redactDiagnosticText } from './diagnosticRedaction.js'
 
-export { redactDiagnosticText } from './diagnosticRedaction.js'
-
 export const ERROR_RECOVERY_MAX_AGE_MS = 10 * 60 * 1000
 export const AGENT_REPAIR_REQUEST_TIMEOUT_MS = 12 * 1000
 
 const STORAGE_PREFIX = 'mobius:error-recovery:v2:'
-const ATTEMPT_PHASES = new Set([
-  'refreshed',
+const AGENT_ATTEMPT_PHASES = new Set([
   'agent-starting',
   'agent-directed',
   'agent-failed',
 ])
-const REPAIR_ACTIVE_PHASES = new Set(['agent-starting', 'agent-directed', 'agent-failed'])
+const ATTEMPT_PHASES = new Set(['refreshed', ...AGENT_ATTEMPT_PHASES])
+
 function boundedText(value, limit) {
   return redactDiagnosticText(value)
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
@@ -102,7 +100,7 @@ export function writeRefreshedRecoveryAttempt({
   now = Date.now(),
 }) {
   const current = readErrorRecoveryAttempt({ storage, surfaceKey, fingerprint, now })
-  if (current && REPAIR_ACTIVE_PHASES.has(current.phase)) return true
+  if (current && AGENT_ATTEMPT_PHASES.has(current.phase)) return true
   return writeErrorRecoveryAttempt({
     storage,
     surfaceKey,
@@ -121,41 +119,9 @@ export function recoveryPhaseForAttempt(attempt, { canAskAgent = true } = {}) {
   return 'recovery'
 }
 
-export function recoveryViewForAttempt(
-  attempt,
-  { canAskAgent = true, active = false } = {},
-) {
-  const attemptPhase = attempt?.phase || null
-  return {
-    phase: active && attemptPhase === 'agent-starting'
-      ? 'agent-starting'
-      : recoveryPhaseForAttempt(attempt, { canAskAgent }),
-    attemptPhase,
-    repairChatId: attempt?.chatId || null,
-  }
-}
-
-export function recoveryActionPolicy({
-  phase,
-  attemptPhase = null,
-  canAskAgent = true,
-  repairChatId = null,
-}) {
-  const starting = phase === 'agent-starting'
-  return {
-    showRefreshAgain: phase !== 'refresh' && !starting,
-    showAskAgent: canAskAgent && phase === 'agent',
-    showRetryAgent: canAskAgent && phase === 'recovery' && attemptPhase === 'agent-failed',
-    showOpenRepairChat: phase === 'recovery' && Boolean(repairChatId),
-    showRecovery: phase === 'recovery',
-  }
-}
-
-export function createRepairIdentity(
-  attempt,
-  createId = () => globalThis.crypto?.randomUUID?.()
-    || `repair-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-) {
+function createRepairIdentity(attempt) {
+  const createId = () => globalThis.crypto?.randomUUID?.()
+    || `repair-${Date.now()}-${Math.random().toString(36).slice(2)}`
   return {
     repairRequestId: attempt?.repairRequestId || createId(),
     messageCid: attempt?.messageCid || createId(),
@@ -198,7 +164,7 @@ export function repairChatPath(chatId, base = '') {
   return `${base}/shell/?chat=${encodeURIComponent(chatId)}`
 }
 
-export async function startAgentRepair({
+async function startAgentRepair({
   prompt,
   client,
   base = '',
@@ -231,8 +197,6 @@ export async function startAgentRepair({
   return {
     chatId: String(chat.id),
     path: repairChatPath(chat.id, base),
-    repairRequestId,
-    messageCid,
   }
 }
 
@@ -254,7 +218,7 @@ export async function runAgentRepair({
     repairRequestId: identity.repairRequestId,
     messageCid: identity.messageCid,
   }
-  const persist = (nextAttempt, { active = false } = {}) => {
+  const persist = (nextAttempt) => {
     attempt = nextAttempt
     writeErrorRecoveryAttempt({
       storage,
@@ -262,10 +226,10 @@ export async function runAgentRepair({
       fingerprint,
       ...attempt,
     })
-    onAttempt?.(attempt, { active })
+    onAttempt?.(attempt)
   }
 
-  persist(attempt, { active: true })
+  persist(attempt)
   try {
     const result = await startAgentRepair({
       prompt,
@@ -275,7 +239,7 @@ export async function runAgentRepair({
       messageCid: identity.messageCid,
       signal,
       onChatCreated: chatId => {
-        persist({ ...attempt, chatId }, { active: true })
+        persist({ ...attempt, chatId })
       },
     })
     persist({
