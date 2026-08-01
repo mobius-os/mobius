@@ -327,6 +327,10 @@ test('repair diagnostics redact common credentials before storage or agent use',
     'https://user:password@example.com/path?token=secret-token&code=secret-code',
     'postgres://db-user:db-password@database.internal/mobius',
     'Authorization: Bearer abc.def.ghi',
+    'Authorization: Token tok-scheme-secret',
+    'Authorization: ApiKey key-scheme-secret',
+    'authorization: Digest response="digest-scheme-secret"',
+    '{"authorization":"Token json-scheme-secret","keep":"visible-field"}',
     'Cookie: session=secret-cookie',
     'OPENAI_API_KEY=sk-secret',
     'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE',
@@ -346,6 +350,10 @@ test('repair diagnostics redact common credentials before storage or agent use',
     'secret-token',
     'secret-code',
     'abc.def.ghi',
+    'tok-scheme-secret',
+    'key-scheme-secret',
+    'digest-scheme-secret',
+    'json-scheme-secret',
     'secret-cookie',
     'sk-secret',
     'AKIAIOSFODNN7EXAMPLE',
@@ -358,6 +366,9 @@ test('repair diagnostics redact common credentials before storage or agent use',
     'private-key-body',
   ]) assert.equal(redacted.includes(secret), false, `must redact ${secret}`)
   assert.match(redacted, /\[redacted\]/)
+  // A quoted authorization value ends at its closing quote, so redacting one
+  // JSON field must not swallow the rest of the object.
+  assert.match(redacted, /visible-field/)
   assert.match(redacted, /\[redacted-private-key\]/)
   assert.match(redacted, /\[redacted-provider-token\]/)
   assert.match(redacted, /\[redacted-high-entropy-value\]/)
