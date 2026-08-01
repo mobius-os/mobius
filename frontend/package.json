@@ -44,7 +44,7 @@
     "pdfjs-dist": "4.10.38",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "recharts": "2.15.4",
+    "recharts": "3.10.1",
     "three": "0.185.1"
   },
   "overrides": {
