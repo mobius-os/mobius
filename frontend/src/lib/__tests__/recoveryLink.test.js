@@ -12,6 +12,7 @@ test('recovery stays a plain last-resort link with adaptable context', () => {
   assert.match(defaultHtml, /class="errbound__recovery"/)
   assert.match(defaultHtml, /If the problem continues after trying again/)
   assert.match(defaultHtml, new RegExp(`href="${RECOVERY_PATH}"`))
+  assert.match(defaultHtml, /target="_top"/)
 
   const standaloneHtml = renderToStaticMarkup(createElement(RecoveryLink, {
     className: 'standalone-app__recovery',

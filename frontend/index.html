@@ -200,7 +200,12 @@
           retry.href = window.location.href
           retry.textContent = 'Try again'
           retry.style.cssText = 'color:#c4b5fd;text-decoration:none;font-weight:600'
+          retry.addEventListener('click', function(event) {
+            event.preventDefault()
+            window.location.reload()
+          })
           recovery.href = '/recover'
+          recovery.target = '_top'
           recovery.textContent = 'open recovery'
           recovery.style.cssText = 'color:inherit;text-decoration:underline;text-underline-offset:2px'
           d.append(
