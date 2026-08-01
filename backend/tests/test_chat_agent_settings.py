@@ -438,6 +438,21 @@ def test_agent_settings_override_rejects_unknown_keys():
   raise AssertionError("Expected ValidationError for unknown key")
 
 
+def test_agent_settings_override_accepts_codex_catalog_ultra_effort():
+  """Sol/Terra advertise `ultra`; the picker payload must round-trip."""
+  settings = AgentSettingsOverride(
+    model="gpt-5.6-sol",
+    effort="ultra",
+    effort_by_provider={"codex": "ultra"},
+  )
+
+  assert settings.model_dump(exclude_unset=True) == {
+    "model": "gpt-5.6-sol",
+    "effort": "ultra",
+    "effort_by_provider": {"codex": "ultra"},
+  }
+
+
 def test_patch_chat_provider_and_model_in_same_request(
   client, auth, chat, monkeypatch,
 ):

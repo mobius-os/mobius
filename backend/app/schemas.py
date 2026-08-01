@@ -444,7 +444,8 @@ class AgentSettingsOverride(BaseModel):
   # Acceptable per the platform's "reversibility over prevention"
   # philosophy.
   effort: Literal[
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultracode"
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    "ultracode",
   ] | None = None
   # Per-provider memory of the last-picked effort. The enums are
   # NOT comparable across providers — Codex `medium` is roughly
