@@ -225,11 +225,38 @@ class RuntimeSupervisors:
           )
         await asyncio.sleep(sweep_seconds)
 
+    async def agent_scratch_loop():
+      # Scratch cleanup is retention work, not part of starting a chat. Keeping
+      # it here avoids making every concurrent turn rescan the same directory.
+      await asyncio.sleep(300)
+      while True:
+        try:
+          from app.agent_scratch import sweep_idle_scratch
+
+          def sweep_once():
+            with SessionLocal() as db:
+              return sweep_idle_scratch(db)
+
+          result = await asyncio.to_thread(sweep_once)
+          if result["bytes"]:
+            self.log.info(
+              "agent scratch retention reclaimed %d bytes",
+              result["bytes"],
+            )
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error(
+            "agent scratch retention failed: %s", exc, exc_info=True,
+          )
+        await asyncio.sleep(60 * 60)
+
     self._spawn("wedged-marker-sweep", wedged_marker_loop())
     self._spawn("stalled-live-sweep", stalled_live_loop())
     self._spawn("reset-park-sweep", reset_park_loop())
     self._spawn("writer-supervisor", writer_supervisor_loop())
     self._spawn("browser-profile-quota", browser_profile_loop())
+    self._spawn("agent-scratch-retention", agent_scratch_loop())
     self._spawn("legacy-tool-output-compression", compress_legacy_tool_outputs())
 
   async def stop(self) -> None:

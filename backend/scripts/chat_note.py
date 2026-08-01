@@ -165,10 +165,34 @@ def _render_transcript(raw: str) -> str:
   return "\n\n".join(lines)
 
 
+def _apply_sqlite_policy(con: sqlite3.Connection) -> None:
+  """Apply the runtime's shared SQLite policy to a raw connection.
+
+  This script opens the same database the server does, so it must not drift
+  from the engine's settings — most visibly `journal_size_limit`, which is a
+  per-connection setting: a writer that skips it leaves the WAL's high-water
+  allocation in place no matter what the server's connections declare.
+
+  Imported lazily, and tolerant of failure, because publishing a chat note is
+  worth more than a pragma: the script also runs in contexts where the app
+  package is not importable.
+  """
+  backend_text = str(Path(__file__).resolve().parents[1])
+  if backend_text not in sys.path:
+    sys.path.insert(0, backend_text)
+  try:
+    from app.sqlite_policy import connection_pragmas
+  except ImportError:
+    return
+  for pragma in connection_pragmas():
+    con.execute(pragma)
+
+
 def _read_chat_snapshot(chat_id: str) -> tuple[str, str] | None:
   """Return complete transcript + durable revision for one idle live chat."""
   try:
     con = sqlite3.connect(str(DB))
+    _apply_sqlite_policy(con)
     row = con.execute(
       "select messages, updated_at from chats "
       "where id=? and deleted_at is null "
@@ -295,6 +319,7 @@ def _configured_provider() -> str:
     return override
   try:
     con = sqlite3.connect(str(DB))
+    _apply_sqlite_policy(con)
     row = con.execute("select provider from owner limit 1").fetchone()
     con.close()
   except sqlite3.Error:
@@ -432,6 +457,7 @@ def _publish_if_current(
   """Atomically publish only while both durable snapshots are still current."""
   con = sqlite3.connect(str(DB), timeout=10, isolation_level=None)
   try:
+    _apply_sqlite_policy(con)
     con.execute("begin immediate")
     row = con.execute(
       "select updated_at from chats "

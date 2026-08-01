@@ -1,14 +1,9 @@
 """Database engine and session configuration.
 
-FROZEN at runtime (chmod 444 root-owned per protected-files.txt).
-main.py imports this at module load to set up the engine + run
-migrations; if I'm broken the server can't boot and /recover/chat
-is unreachable. (The recovery surface itself uses raw sqlite3
-and doesn't depend on me, but main.py still does.)
-
-To edit me, change the source on the host repo and rebuild the
-container image. For ad-hoc DB queries the agent should use raw
-`sqlite3` from stdlib — that path doesn't touch this file at all.
+Boot-critical: main.py imports this at module load to build the engine and
+run migrations, so a broken edit leaves only /recover reachable. `python3 -m
+py_compile` before a restart. (Recovery uses raw sqlite3 and does not depend
+on this module; main.py does.)
 """
 
 import json
@@ -25,6 +20,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.pool import NullPool
 
+from app import sqlite_policy
 from app.config import get_settings
 
 
@@ -111,31 +107,14 @@ def _make_engine():
         label,
       )
   if is_sqlite:
-    # SQLite under concurrent writes:
-    # - WAL lets readers run while a single writer writes (no
-    #   blanket lock the way the default DELETE journal does).
-    # - busy_timeout waits up to N ms for a lock instead of
-    #   immediately raising "database is locked" when two
-    #   coroutines try to commit in the same window.
-    # - synchronous=FULL fsyncs the WAL on every commit so an
-    #   OOM kill (which this host suffers periodically) or a
-    #   power loss can't leave the last N commits in the kernel
-    #   page cache but not on disk. NORMAL skips that fsync and
-    #   risks losing the last committed transaction on an abrupt
-    #   kill; FULL adds ~1 fsync per write transaction, acceptable
-    #   given write frequency on this platform.
+    # NullPool opens a fresh connection per session, so this runs constantly
+    # under load. The policy itself lives in sqlite_policy so the standalone
+    # scripts writing this same database apply it identically.
     @event.listens_for(eng, "connect")
     def _set_sqlite_pragmas(dbapi_conn, _record):
       cur = dbapi_conn.cursor()
-      # busy_timeout must come first: journal_mode=WAL takes locks and,
-      # with no busy handler yet installed, fails immediately instead of
-      # waiting when another connection holds them. NullPool opens a
-      # fresh connection per session, so this pragma sequence runs under
-      # load constantly. (True disk exhaustion still fails here — that
-      # cause is owned by the disk-headroom work, not this ordering.)
-      cur.execute("PRAGMA busy_timeout=5000")
-      cur.execute("PRAGMA journal_mode=WAL")
-      cur.execute("PRAGMA synchronous=FULL")
+      for pragma in sqlite_policy.connection_pragmas():
+        cur.execute(pragma)
       cur.close()
   return eng
 

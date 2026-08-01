@@ -215,14 +215,13 @@ def _child_count(subdir: Path) -> int | None:
 
 @router.get("/disk")
 def fs_disk(_owner: models.Owner = Depends(get_owner_or_app_with_filesystem_access)):
-  """Disk usage of the HOST filesystem that backs the data dir, in bytes.
+  """Capacity of the filesystem containing the configured data dir, in bytes.
 
-  A single `statvfs` on the data-dir mount — no path parameter, no walk. This
-  reports the underlying HOST volume holding `/data` (total/used/free), NOT a
-  Möbius-imposed quota or the size of the viewable tree: everything else on
-  that mount (the OS, other containers, images) counts toward `used`. The
-  Editor surfaces it so the owner can see how much room the volume has
-  left."""
+  A single mount-level `statvfs` — not a recursive subtree size, and not a
+  Möbius-enforced quota. What else counts toward `used` depends on how the
+  deployment mounts `data_dir`: when it has its own volume this is Möbius's
+  own footprint, and when it shares a mount the mount's other tenants count
+  too."""
   data_dir = get_settings().data_dir
   usage = shutil.disk_usage(data_dir)
   return {"total": usage.total, "used": usage.used, "free": usage.free,

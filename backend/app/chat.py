@@ -4157,6 +4157,12 @@ async def _run_chat_impl_with_db(
     "CHAT_ID": chat_id,
   })
   base_env.update(app_context_env)
+  # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
+  # the bounded data volume, never the container's unbounded overlay. TMP and
+  # TEMP travel with it so a tool reading either does not escape back to /tmp.
+  from app.agent_scratch import scratch_for_chat
+  scratch = scratch_for_chat(chat_id)
+  base_env["TMPDIR"] = base_env["TMP"] = base_env["TEMP"] = str(scratch)
   # Partner viewport (sent by the React shell on each turn). The agent
   # uses these when taking screenshots so the framing matches what the
   # partner actually sees — preview_shell.sh reads them, mini-app
