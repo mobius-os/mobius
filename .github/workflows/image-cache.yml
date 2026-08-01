@@ -1,11 +1,8 @@
-name: Daily image
+name: Main image
 
 on:
   push:
     branches: [main]
-  schedule:
-    # Rebuild pinned source and refresh base-system packages once per day.
-    - cron: '17 3 * * *'
   workflow_dispatch:
 
 permissions:
@@ -19,7 +16,7 @@ env:
 # A newer main contains every older merge, so an obsolete image publish has no
 # value once the next one starts.
 concurrency:
-  group: daily-image-main
+  group: main-image
   cancel-in-progress: true
 
 jobs:
@@ -43,11 +40,12 @@ jobs:
         id: identity
         run: echo "date=$(git show -s --format=%cs HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and publish daily image
+      - name: Build and publish image
         uses: docker/build-push-action@v7
         with:
           context: .
           push: true
+          # Existing Railway services follow this legacy tag.
           tags: ghcr.io/mobius-os/mobius:daily
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -57,9 +55,9 @@ jobs:
             BUILD_DATE=${{ steps.identity.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
-          # Scheduled/manual runs deliberately refresh moving system packages;
-          # pushes still take the fast cached path for the new source revision.
-          no-cache: ${{ github.event_name != 'push' }}
+          # Manual runs deliberately refresh moving system packages; pushes
+          # take the fast cached path for the new source revision.
+          no-cache: ${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Verify the open-source image is public
         run: |

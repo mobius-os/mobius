@@ -471,7 +471,7 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
-def test_pull_requests_run_required_suites_and_main_publishes_daily_image():
+def test_pull_requests_run_required_suites_and_main_publishes_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
@@ -499,7 +499,7 @@ def test_pull_requests_run_required_suites_and_main_publishes_daily_image():
 
   assert "push:\n" in cache_triggers
   assert "    branches: [main]\n" in cache_triggers
-  assert "schedule:\n" in cache_triggers
+  assert "schedule:\n" not in cache_triggers
   assert "workflow_dispatch:\n" in cache_triggers
   assert "pull_request:\n" not in cache_triggers
   assert "packages: write" in cache_workflow
