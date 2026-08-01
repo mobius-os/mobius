@@ -1252,6 +1252,38 @@ test.describe('Workspace view-mode toggle', () => {
     expect(whichPaneHas(await readWs(page), `chat:${c.id}`), 'the drop is undone').toBe(null)
   })
 
+  test('single-mode drawer drop seeds an empty Builder without replacing Standard', async ({ page }) => {
+    await boot(page, WIDE)
+    const current = await createTaggedChat(page, 'vmEmptyCurrent')
+    const dropped = await createTaggedChat(page, 'vmEmptyDropped')
+    await mockApps(page, [])
+    await exposeChatsInDrawer(page, [current.id, dropped.id])
+    const ws = paneModel.setSingleScreen(
+      paneModel.seedFromFlatTabs([]),
+      { kind: 'chat', id: current.id },
+    )
+    await seedWorkspace(page, ws)
+    await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+
+    await ensureNavigationOpen(page)
+    const content = await page.locator('.shell__content').boundingBox()
+    const row = page.locator(`.drawer__item[data-drag-key="chat:${dropped.id}"]`)
+    await expect(row).toBeVisible()
+    await mouseDrag(page, row, content.x + content.width / 2, content.y + content.height / 2)
+
+    await expect.poll(async () => (await readWs(page)).viewMode, {
+      timeout: 3000,
+      message: 'the drop enters Builder',
+    }).toBe('panes')
+    const after = await readWs(page)
+    expect(after.panes[after.focusedPaneId].tabs.map(t => `${t.kind}:${t.id}`)).toEqual([
+      `chat:${current.id}`,
+      `chat:${dropped.id}`,
+    ])
+    expect(after.singleScreen).toEqual({ kind: 'chat', id: String(current.id) })
+  })
+
   test('single-mode drag → Escape cancels: back to single, no mutation, no residue', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'vmCancA')

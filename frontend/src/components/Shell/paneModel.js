@@ -478,18 +478,32 @@ function coerceViewMode(mode) {
   return mode === 'single' ? 'single' : 'panes'
 }
 
-// Set the view-mode. Pure; returns the SAME reference when it already holds the
-// resolved target mode (the workspace convention, so React can bail). Builder
-// cannot be entered with an empty tree: there is no pane content for that world
-// to present, so the honest resolved destination remains Standard.
-export function setViewMode(ws, mode) {
-  const requested = coerceViewMode(mode)
-  const next = requested === 'panes' && isEmptyTree(ws) ? 'single' : requested
-  if (ws.viewMode === next) return ws
-  return { ...ws, viewMode: next }
+function singleScreenTab(ws) {
+  const item = ('singleScreen' in ws)
+    ? sanitizeSingleScreen(ws.singleScreen)
+    : focusedSlotSeed(ws)
+  if (!item) return null
+  if (item.kind === 'apps') return tabModel.appsTab()
+  return tabModel.makeTab(item.kind, item.id)
 }
 
-// Flip single <-> panes. An empty Standard workspace remains Standard.
+// Set the view-mode. Pure; returns the SAME reference on a true no-op. Builder
+// has no empty state: entering it from an empty tree seeds the current Standard
+// screen as its first tab. If Standard is itself the empty New Chat landing,
+// there is no content to seed and the workspace honestly remains Standard.
+export function setViewMode(ws, mode) {
+  const requested = coerceViewMode(mode)
+  let nextWs = ws
+  if (requested === 'panes' && isEmptyTree(ws)) {
+    const tab = singleScreenTab(ws)
+    if (!tab) return ws
+    nextWs = doOpenTab(ws, tab)
+  }
+  if (nextWs.viewMode === requested) return nextWs
+  return { ...nextWs, viewMode: requested }
+}
+
+// Flip single <-> panes. An empty Standard workspace seeds its current screen.
 export function toggleViewMode(ws) {
   return setViewMode(ws, ws.viewMode === 'single' ? 'panes' : 'single')
 }
@@ -1731,8 +1745,13 @@ export function workspaceReducer(state, action) {
       // A drag drop from a drawer row (open the item AT the zone) or a strip tab
       // (degrades to a move). One commit, one undo slot — the drop is one tap
       // from repaired (design §3.5).
-      const next = openTabAt(ws, action.tab, action.target)
-      if (next === ws) return state
+      const cleanTab = sanitizeTab(action.tab)
+      if (!cleanTab) return state
+      // When a drawer drag enters Builder from an empty hidden tree, resolve the
+      // mode first: setViewMode seeds Standard's current screen as tab one. The
+      // dragged item then joins/splits that seeded pane instead of replacing it.
+      const working = action.flipViewMode ? setViewMode(ws, action.flipViewMode) : ws
+      const next = openTabAt(working, cleanTab, action.target)
       // A single-leaf splitting drop made in single view-mode flips to 'panes' as
       // part of the SAME gesture (the drop's intent is a second visible surface).
       // Folding the flip into THIS action — rather than a following SET_VIEW_MODE —
@@ -1741,6 +1760,7 @@ export function workspaceReducer(state, action) {
       // flipped mode over a reverted tree. action.flipViewMode is null for every
       // ordinary drop, so this is a no-op there.
       const flipped = action.flipViewMode ? setViewMode(next, action.flipViewMode) : next
+      if (flipped === ws) return state
       const dropLabel = action.label || 'Moved tab'
       return {
         ws: flipped,

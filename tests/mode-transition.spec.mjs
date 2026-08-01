@@ -72,6 +72,17 @@ function twoPaneBuilder(slot) {
   return ws // viewMode stays 'panes' (builder)
 }
 
+// The user-visible empty-Builder seam: Standard has one concrete current item,
+// while the hidden Builder tree has no tabs yet. Entering Builder must seed this
+// chat as its only tab; the truly empty New Chat landing intentionally cannot
+// enter a content-less Builder world.
+function standardChatWithEmptyBuilder() {
+  return paneModel.setSingleScreen(
+    paneModel.seedFromFlatTabs([]),
+    { kind: 'chat', id: 'aaa' },
+  )
+}
+
 // An intentionally asymmetric three-pane tree. Its natural edge vectors differ
 // enough to expose same-duration entry as visibly different pane velocities.
 function unevenThreePaneBuilder(slot) {
@@ -186,20 +197,22 @@ for (const [name, viewport] of [
   ['wide', { width: 1280, height: 900 }],
 ]) {
   test(`[${name}] a single builder toggle flips the mode and settles clean`, async ({ page }) => {
-    await bootShell(page, viewport)
-    // A fresh workspace seeds viewMode:'panes' (builder), so do NOT hardcode the
-    // initial direction (finding 15) — read it and assert the toggle FLIPS it.
+    await bootSeededWorkspace(page, viewport, standardChatWithEmptyBuilder())
+    // The hidden Builder tree is empty, so this toggle also proves that entry
+    // seeds the current Standard chat rather than refusing or painting a blank.
     const before = await builderActive(page)
     await toggleMode(page)
     await expect.poll(() => builderActive(page)).toBe(!before)
+    const entered = await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), paneModel.STORAGE_KEY)
+    expect(entered.panes[entered.focusedPaneId].tabs.map(tabModel.tabKey)).toEqual(['chat:aaa'])
     // The beat settles: no transient class lingers.
     await expect.poll(() => transientClassCount(page), { timeout: 2000 }).toBe(0)
     await expect.poll(() => modePhase(page)).toBe('idle')
   })
 
   test(`[${name}] a cancelled single-mode drag UNTILES (BLOCKER 1: no permanent tile)`, async ({ page }) => {
-    await bootShell(page, viewport)
-    // Ensure SINGLE mode (a fresh workspace is builder).
+    await bootSeededWorkspace(page, viewport, standardChatWithEmptyBuilder())
+    // Ensure SINGLE mode.
     if (await builderActive(page)) {
       await toggleMode(page)
       await expect.poll(() => builderActive(page)).toBe(false)
@@ -230,7 +243,7 @@ for (const [name, viewport] of [
   })
 
   test(`[${name}] 20x rapid toggle never wedges and never doubles the beat class`, async ({ page }) => {
-    await bootShell(page, viewport)
+    await bootSeededWorkspace(page, viewport, standardChatWithEmptyBuilder())
     await armOneBeatObserver(page)
     const startBuilder = await builderActive(page)
     // Storm the toggle far faster than the beat can complete, so enter-during-exit

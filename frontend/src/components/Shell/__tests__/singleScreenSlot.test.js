@@ -261,10 +261,25 @@ test('closing the LAST builder tab auto-returns to single', () => {
   assert.equal(s.undo.restoreViewMode, true, 'the undo is flagged one-gesture')
 })
 
-test('an empty workspace cannot enter or persist in builder mode', () => {
+test('an empty builder tree enters by seeding the current Standard chat or app', () => {
+  for (const singleScreen of [{ kind: 'chat', id: '5' }, { kind: 'app', id: '42' }]) {
+    const empty = {
+      ...paneModel.seedFromFlatTabs([]),
+      singleScreen,
+    }
+    const entered = reduce(init(empty), { type: 'SET_VIEW_MODE', mode: 'panes' })
+    assert.equal(entered.ws.viewMode, 'panes')
+    assert.ok(
+      paneModel.paneOf(entered.ws, `${singleScreen.kind}:${singleScreen.id}`),
+      'the Standard screen becomes the first Builder tab',
+    )
+    assert.deepEqual(entered.ws.singleScreen, singleScreen, 'Standard keeps its independent slot')
+  }
+
   const empty = paneModel.seedFromFlatTabs([])
-  const toggled = reduce(init(empty), { type: 'SET_VIEW_MODE', mode: 'panes' })
-  assert.equal(toggled.ws.viewMode, 'single', 'explicit entry remains Standard')
+  const home = empty
+  const refused = reduce(init(home), { type: 'SET_VIEW_MODE', mode: 'panes' })
+  assert.equal(refused.ws.viewMode, 'single', 'the New Chat landing has no concrete tab to seed')
 
   const stale = JSON.stringify({ ...empty, viewMode: 'panes' })
   assert.equal(
@@ -272,6 +287,48 @@ test('an empty workspace cannot enter or persist in builder mode', () => {
     'single',
     'a persisted empty Builder repairs to Standard at boot',
   )
+})
+
+test('closing the final Builder tab can re-enter from the preserved Standard screen', () => {
+  const ws = {
+    ...builderSeed([makeTab('chat', '5')]),
+    singleScreen: { kind: 'chat', id: '5' },
+  }
+  let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
+  assert.equal(state.ws.viewMode, 'single')
+  state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'panes' })
+  assert.equal(state.ws.viewMode, 'panes')
+  assert.ok(paneModel.paneOf(state.ws, 'chat:5'))
+})
+
+test('a drawer drop into an empty Builder preserves a Standard chat or app as the first tab', () => {
+  for (const [singleScreen, dropped] of [
+    [{ kind: 'chat', id: '5' }, makeTab('app', '42')],
+    [{ kind: 'app', id: '42' }, makeTab('chat', '5')],
+  ]) {
+    const ws = {
+      ...paneModel.seedFromFlatTabs([]),
+      singleScreen,
+    }
+    const state = reduce(init(ws), {
+      type: 'OPEN_TAB_AT',
+      tab: dropped,
+      target: { paneId: ws.focusedPaneId },
+      flipViewMode: 'panes',
+    })
+    const pane = state.ws.panes[state.ws.focusedPaneId]
+    assert.equal(state.ws.viewMode, 'panes')
+    assert.deepEqual(pane.tabs.map(tabModel.tabKey), [
+      `${singleScreen.kind}:${singleScreen.id}`,
+      tabModel.tabKey(dropped),
+    ])
+    assert.equal(
+      pane.activeTabKey,
+      tabModel.tabKey(dropped),
+      'the dropped item activates without replacing Standard',
+    )
+    assert.deepEqual(state.ws.singleScreen, ws.singleScreen)
+  }
 })
 
 test('deleting the last builder resource also leaves no empty builder behind', () => {

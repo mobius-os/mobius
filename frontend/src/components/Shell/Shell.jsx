@@ -1201,9 +1201,9 @@ export default function Shell() {
     const leavingBuilder = ws.viewMode !== 'single'
     const requestedTo = leavingBuilder ? 'single' : 'panes'
     const to = paneModel.setViewMode(ws, requestedTo).viewMode
-    // Builder has no empty state. The model resolves an attempted entry with no
-    // tabs back to Standard; do not arm a browser scene or twist the mode logo for
-    // a destination the durable workspace correctly refused.
+    // Builder has no empty state. The model seeds an empty tree from Standard's
+    // current screen; only the New Chat landing has no concrete tab to seed. Do
+    // not arm a browser scene or twist the logo for that honest no-op.
     if (to === ws.viewMode) {
       return { animated: false, totalMs: 0, transitionId: null, to, changed: false }
     }

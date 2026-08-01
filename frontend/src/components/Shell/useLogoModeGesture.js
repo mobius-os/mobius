@@ -141,9 +141,9 @@ export function useLogoModeGesture({
     // logo's scale in the SAME batched paint (endPress resets --hold-progress to 0,
     // but the is-beat-held animation's backwards fill holds .84 through the delay).
     const receipt = onToggleMode?.('hold')
-    // A completed hold can be a deliberate no-op (currently: Standard has no pane
-    // content, so there is no honest Builder destination). Release the gesture
-    // without playing entry feedback for a mode change that did not happen.
+    // A completed hold can be a deliberate no-op when Standard is the empty New
+    // Chat landing, with no concrete screen to seed into Builder. Release the
+    // gesture without playing feedback for a mode change that did not happen.
     if (receipt?.changed === false) {
       endPress({ suppressClick: true })
       return
