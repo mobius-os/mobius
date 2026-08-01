@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/moebius.svg" width="104" alt="Möbius">
+  <img src="assets/moebius.png" width="104" alt="Möbius">
 </p>
 
 <h1 align="center">Möbius</h1>

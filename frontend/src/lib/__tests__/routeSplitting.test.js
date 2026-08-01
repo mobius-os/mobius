@@ -27,5 +27,9 @@ test('route loading is blank without removing the launch mark', () => {
 
   assert.doesNotMatch(routeLoading, /Möbius|moebius\.(?:png|svg)|<img|<span|role="status"/)
   assert.match(routeLoading, /return <div className="app-route-loading" aria-hidden="true" \/>/)
-  assert.match(launchSplash, /<img src="\/moebius\.png"/)
+  assert.match(
+    launchSplash,
+    /<img src="\/moebius\.png" width="44" height="44"/,
+    'the tight logo canvas must keep the splash artwork at its established apparent size',
+  )
 })

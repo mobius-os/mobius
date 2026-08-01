@@ -18,6 +18,7 @@ const dockerfile = readFileSync(
   'utf8',
 )
 const publicLogo = readFileSync(new URL('../../../public/moebius.png', import.meta.url))
+const sourceLogo = readFileSync(new URL('../../../../assets/moebius.png', import.meta.url))
 const publicSvgLogo = new URL('../../../public/moebius.svg', import.meta.url)
 const bundledSvgLogo = new URL('../../assets/moebius.svg', import.meta.url)
 const bundledPngLogo = new URL('../../assets/moebius.png', import.meta.url)
@@ -62,6 +63,9 @@ test('precache versions match the package graph and the shell has one bitmap log
   assert.match(dockerfile, new RegExp(`pdfjs@${PDFJS_ASSET_VERSION}`))
   assert.match(dockerfile, new RegExp(`katex@${KATEX_ASSET_VERSION}`))
   assert.equal(publicLogo.toString('ascii', 1, 4), 'PNG')
+  assert.equal(publicLogo.readUInt32BE(16), 768)
+  assert.equal(publicLogo.readUInt32BE(20), 768)
+  assert.deepEqual(publicLogo, sourceLogo)
   assert.equal(existsSync(publicSvgLogo), false)
   assert.equal(existsSync(bundledSvgLogo), false)
   assert.equal(existsSync(bundledPngLogo), false)

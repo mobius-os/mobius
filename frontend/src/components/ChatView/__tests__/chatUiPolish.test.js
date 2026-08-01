@@ -19,7 +19,7 @@ function stripComments(css) {
 test('an empty chat keeps the Möbius brand anchor above its prompt', () => {
   assert.match(chatView, /src="\/moebius\.png"/)
   assert.match(chatView, /className="chat__empty-glyph"[\s\S]*?What's on your mind\?/)
-  assert.match(chatCss, /\.chat__empty-glyph\s*\{[\s\S]*?width:\s*96px/)
+  assert.match(chatCss, /\.chat__empty-glyph\s*\{[\s\S]*?width:\s*76px/)
 })
 
 test('theme transition does not animate every descendant or expensive shadows', () => {
