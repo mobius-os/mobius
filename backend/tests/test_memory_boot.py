@@ -104,6 +104,11 @@ def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
   assert module.SEED_VERSION == "22"
+  assert module._UNMODIFIED_MIGRATIONS["cron.md"] == {
+    "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
+    "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
+    "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
+  }
   assert module._UNMODIFIED_MIGRATIONS["images.md"] == {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
     "29039a6fc5c9281794247eda5d0bbf66e969a1a260e9ed56c69ee6e1cd175f7c",
@@ -139,6 +144,15 @@ def test_controlled_skills_have_fix_forward_migrations():
     "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87"
     in module._UNMODIFIED_MIGRATIONS["recovery.md"]
   )
+
+
+def test_seeded_cron_jobs_use_only_app_scoped_credentials():
+  text = (SCRIPTS / "seed-skills" / "cron.md").read_text(encoding="utf-8")
+
+  assert 'Authorization: Bearer $APP_TOKEN' in text
+  assert "Never read `/data/service-token.txt` from an app job" in text
+  assert "SERVICE_TOKEN=$(cat /data/service-token.txt)" not in text
+  assert "using bearer token $SERVICE_TOKEN" not in text
 
 
 def test_cron_starts_only_after_per_boot_supervision_proof():
