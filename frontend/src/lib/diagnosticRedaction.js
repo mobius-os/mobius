@@ -5,7 +5,7 @@ const SECRET_QUERY_VALUE = /([?&](?:access_token|auth|authorization|code|key|pas
 // and embedded in the agent repair prompt. A quoted value (a JSON body) ends at
 // its closing quote so neighbouring fields survive; anything else runs to end of
 // line, exactly like COOKIE_VALUE below. The key itself may be quoted.
-const AUTHORIZATION_VALUE = /\b(authorization["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\r\n]+)/gi
+const AUTHORIZATION_VALUE = /\b(authorization["']?\s*[:=]\s*)("(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\r\n]+)/gi
 const COOKIE_VALUE = /\b((?:set-)?cookie\s*[:=]\s*)[^\r\n]+/gi
 const SECRET_ASSIGNMENT = /(["']?)\b((?:[a-z0-9]+[_-])*(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|token|password|passwd|pwd|secret))\1(\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&#]+)/gi
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g

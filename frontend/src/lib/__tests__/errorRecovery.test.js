@@ -331,6 +331,7 @@ test('repair diagnostics redact common credentials before storage or agent use',
     'Authorization: ApiKey key-scheme-secret',
     'authorization: Digest response="digest-scheme-secret"',
     '{"authorization":"Token json-scheme-secret","keep":"visible-field"}',
+    '{"authorization":"Digest username=\\"Mufasa\\", response=\\"escaped-quote-secret\\"","keep":"second-visible-field"}',
     'Cookie: session=secret-cookie',
     'OPENAI_API_KEY=sk-secret',
     'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE',
@@ -354,6 +355,7 @@ test('repair diagnostics redact common credentials before storage or agent use',
     'key-scheme-secret',
     'digest-scheme-secret',
     'json-scheme-secret',
+    'escaped-quote-secret',
     'secret-cookie',
     'sk-secret',
     'AKIAIOSFODNN7EXAMPLE',
@@ -369,6 +371,7 @@ test('repair diagnostics redact common credentials before storage or agent use',
   // A quoted authorization value ends at its closing quote, so redacting one
   // JSON field must not swallow the rest of the object.
   assert.match(redacted, /visible-field/)
+  assert.match(redacted, /second-visible-field/)
   assert.match(redacted, /\[redacted-private-key\]/)
   assert.match(redacted, /\[redacted-provider-token\]/)
   assert.match(redacted, /\[redacted-high-entropy-value\]/)
