@@ -2089,9 +2089,17 @@ def test_cleanup_terminal_staging_checkout_only_removes_disposable_clone():
   }
   assert _cleanup_terminal_staging_checkout(record) is False
   assert disposable.exists()
-  record["status"] = "merged"
-  assert _cleanup_terminal_staging_checkout(record) is True
-  assert not disposable.exists()
+
+  for status in ("merged", "closed", "superseded", "commented", "abandoned"):
+    candidate = data_dir / "contrib" / f"terminal-cleanup-{status}" / "repo"
+    (candidate / ".git").mkdir(parents=True)
+    (candidate / "index.jsx").write_text("hello")
+    record = {
+      "status": status,
+      "plan": {"repo_path": str(candidate)},
+    }
+    assert _cleanup_terminal_staging_checkout(record) is True
+    assert not candidate.exists()
 
   live_repo = data_dir / "apps" / "terminal-cleanup-live"
   (live_repo / ".git").mkdir(parents=True)

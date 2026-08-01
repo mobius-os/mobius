@@ -326,7 +326,9 @@ def _settle_equivalence(record: dict, upstream_sha: str | None = None) -> str | 
 
 def _cleanup_terminal_staging_checkout(record: dict) -> bool:
   """Remove a terminal contribution checkout through its owning Git shape."""
-  if record.get("status") not in {"merged", "closed"}:
+  if record.get("status") not in {
+    "merged", "closed", "superseded", "commented", "abandoned",
+  }:
     return False
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   repo = _safe_repo_path(plan.get("repo_path"))
