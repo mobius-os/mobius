@@ -63,6 +63,7 @@ def test_ensure_core_vars_skips_when_all_present():
   --accent: #f0f;
   --accent-hover: #faf;
   --accent-dim: rgba(255, 0, 255, 0.1);
+  --accent-fg: #ffffff;
   --border: #333;
   --border-light: #444;
   --danger: #f00;
@@ -90,6 +91,7 @@ def test_ensure_core_vars_leaves_creative_css_alone():
   --accent: #d4a437;
   --accent-hover: #f0c451;
   --accent-dim: rgba(212, 164, 55, 0.14);
+  --accent-fg: #1a1206;
   --border: #2d6e47;
   --border-light: #1a4d2e;
   --danger: #c4554e;
@@ -211,7 +213,10 @@ def test_ensure_core_vars_dark_theme_unchanged_by_mode_awareness():
   assert "--surface2: #212121" in out
   assert "--border-light: #1f1f1f" in out
   # No light-mode value leaked into a dark theme.
-  assert "#ffffff" not in out  # light --surface
+  # Assert the LIGHT --surface value specifically, not a bare "#ffffff"
+  # substring: --accent-fg is legitimately #ffffff in both modes (white on
+  # the purple accent fill), so the loose form fails for the wrong reason.
+  assert "--surface: #ffffff" not in out
   assert "#e8e6e2" not in out  # light --surface2
 
 
@@ -251,7 +256,10 @@ def test_ensure_core_vars_dark_4digit_rgba_bg():
   assert "--surface: #171717" in out
   assert "--surface2: #212121" in out
   # No light-mode value leaked into a dark theme.
-  assert "#ffffff" not in out  # light --surface
+  # Assert the LIGHT --surface value specifically, not a bare "#ffffff"
+  # substring: --accent-fg is legitimately #ffffff in both modes (white on
+  # the purple accent fill), so the loose form fails for the wrong reason.
+  assert "--surface: #ffffff" not in out
   assert "#e8e6e2" not in out  # light --surface2
 
 

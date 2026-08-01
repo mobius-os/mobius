@@ -314,7 +314,7 @@ def _is_safe_import_url(url: str) -> bool:
 # Variables augmented when missing (full list lives in
 # `_CORE_VARS`):
 #   --bg, --surface, --surface2, --text, --muted,
-#   --accent, --accent-hover, --accent-dim,
+#   --accent, --accent-hover, --accent-dim, --accent-fg,
 #   --border, --border-light, --danger, --green,
 #   --font, --mono
 #
@@ -329,7 +329,7 @@ _CORE_VARS = {
   # invisible-on-dark-mode hardcoded literal (e.g. `var(--fg, #111)`
   # where --fg doesn't exist).
   "--bg", "--surface", "--surface2", "--text", "--muted",
-  "--accent", "--accent-hover", "--accent-dim",
+  "--accent", "--accent-hover", "--accent-dim", "--accent-fg",
   "--border", "--border-light", "--danger", "--green",
   "--font", "--mono",
 }
