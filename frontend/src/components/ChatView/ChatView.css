@@ -2475,23 +2475,24 @@
   --tray-pad-top: 2px;
   --tray-pad-bottom: 4px;
   /* In a short keyboard viewport a fixed 96px card can exceed the pill's
-     entire half-room budget before the textarea is counted. Spend that budget
-     in one place: preserve a usable one-line input, then let the pending card
-     shrink until the total pill fits. Forty pixels is the last practical card
-     size (the remove control remains fully inside it); below a 184px room that
-     physical usability floor deliberately wins by only the unavoidable amount. */
+     entire half-room budget before the input row is counted. Spend that budget
+     in one place: preserve the row's 40px action target, then compact the
+     pending card to its 24px remove-control badge before taking space from the
+     conversation. */
   --composer-input-floor: 24px;
+  --composer-row-floor: 40px;
   --composer-stack-chrome: calc(
     var(--tray-pad-top) + var(--tray-pad-bottom)
     + var(--pill-gap)
     + var(--pill-pad) * 2
+    + 2px /* pill border */
   );
   --composer-attach-card: clamp(
-    40px,
+    24px,
     calc(
       var(--composer-room, 100dvh) * 0.5
       - var(--composer-stack-chrome)
-      - var(--composer-input-floor)
+      - var(--composer-row-floor)
     ),
     var(--attach-card)
   );
