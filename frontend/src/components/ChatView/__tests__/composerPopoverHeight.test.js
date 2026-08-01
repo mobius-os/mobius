@@ -4,8 +4,8 @@ import {
   popoverMaxHeight,
   visibleTopInRectSpace,
   POPOVER_CAP,
-  POPOVER_MIN,
 } from '../composerPopoverHeight.js'
+import { MIN_PANE_H } from '../../Shell/paneModel.js'
 
 test('caps at POPOVER_CAP when there is plenty of room above the trigger', () => {
   // Keyboard down on a 793px-tall phone: trigger near the bottom.
@@ -64,17 +64,31 @@ test('takes the viewport boundary when it is below the pane top', () => {
   }), 284)
 })
 
-test('never renders an unusable sliver, whatever the measurement says', () => {
-  // A cap this small can only come from a bad measurement — no Möbius surface
-  // puts the composer 40px from the top of its pane. Rendering the floor keeps
-  // the panel's lower rows reachable; the old clamp-to-zero left a 14px empty
-  // box that read as a dead button.
-  assert.equal(popoverMaxHeight({ triggerTop: 40 }), POPOVER_MIN)
-  assert.equal(popoverMaxHeight({ triggerTop: 0 }), POPOVER_MIN)
+test('never returns more than the space above the trigger', () => {
+  // There is no minimum height. A floor here used to return 160 (and 84 with a
+  // 100px visible viewport) for these geometries, rendering the panel's top —
+  // the Attach files row — above the boundary, where it is clipped away and
+  // hit-tests to the shell chrome instead. Short is recoverable; unreachable
+  // is not.
+  assert.equal(popoverMaxHeight({ triggerTop: 40 }), 24)
+  assert.equal(popoverMaxHeight({ triggerTop: 40, viewportHeight: 100 }), 24)
+  assert.equal(popoverMaxHeight({ triggerTop: 0 }), 0)
 })
 
-test('the floor never exceeds what the visible viewport could show', () => {
-  assert.equal(popoverMaxHeight({ triggerTop: 40, viewportHeight: 100 }), 84)
+test('stays inside a pane at the smallest supported height', () => {
+  // MIN_PANE_H is a SUPPORTED surface, not an impossible measurement: split a
+  // workspace to the minimum and the composer really does sit ~100px below the
+  // pane's clipping top. The panel must fit that, however cramped.
+  const clipTop = 500
+  const triggerTop = clipTop + (MIN_PANE_H / 2)
+  const height = popoverMaxHeight({
+    triggerTop,
+    triggerBottom: triggerTop + 44,
+    clipTop,
+    viewportHeight: 900,
+  })
+  assert.equal(height, 84)
+  assert.ok(triggerTop - height >= clipTop, 'panel top must not cross the clipping boundary')
 })
 
 test('visibleTopInRectSpace ignores an offset the rects already contain', () => {

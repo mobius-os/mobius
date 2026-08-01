@@ -59,17 +59,18 @@ export const POPOVER_GAP = 8
 export const POPOVER_TOP_MARGIN = 8
 /** Upper bound on tall screens — a full-height panel reads as a takeover. */
 export const POPOVER_CAP = 420
-/**
- * Smallest panel worth rendering: the Attach row plus enough of the model list
- * to scroll. A measurement that lands under this is describing a pane roughly
- * 190px tall, which no real Möbius surface is — so it is far likelier to be a
- * bad measurement than a genuinely cramped screen, and a bad measurement used
- * to render an empty sliver that reads as a dead button. Overflowing the
- * boundary by a little keeps the panel's lower rows reachable; a sliver leaves
- * nothing reachable at all. Never applied above the real space when the visible
- * viewport itself is smaller (see `popoverMaxHeight`).
- */
-export const POPOVER_MIN = 160
+// There is deliberately NO MINIMUM HEIGHT. A 160px floor was tried here and
+// removed: a floor cannot be made safe. The quantity it must respect is
+// `space` — the room between the trigger and the clipping boundary — and a
+// floor bounded by `space` is by definition never larger than the measurement
+// it exists to rescue, so it does nothing. Bounding it by the visible viewport
+// instead is vacuous: on a phone the two differ by hundreds of pixels, so the
+// floor rendered ~60px of the panel, the Attach row included, above the
+// clipping ancestor — invisible and untappable, which is the exact failure
+// this helper exists to prevent. `MIN_PANE_H` (200) also makes a genuinely
+// cramped pane a SUPPORTED surface, not the impossible measurement a floor
+// assumes. The sliver a floor was meant to rescue came from the
+// coordinate-space double-count below: fix the measurement, don't pad it.
 
 /**
  * Top edge (in client coordinates) of the nearest ancestor that would clip the
@@ -139,10 +140,7 @@ export function popoverMaxHeight({
   // real boundary is the top of the screen, not that negative number.
   const boundary = Math.max(0, visibleTop, clipTop)
   const space = triggerTop - boundary - POPOVER_GAP - POPOVER_TOP_MARGIN
-  // The floor can't exceed what the visible viewport itself could show, so a
-  // genuinely short surface still can't be overflowed by the rescue path.
-  const floor = viewportHeight > 0
-    ? Math.min(POPOVER_MIN, Math.max(0, viewportHeight - POPOVER_GAP - POPOVER_TOP_MARGIN))
-    : POPOVER_MIN
-  return Math.max(floor, Math.min(cap, Math.floor(Math.max(0, space))))
+  // Never more than the measured space: the panel must stay inside the clipping
+  // ancestor even when that leaves it very short. See the no-minimum note above.
+  return Math.min(cap, Math.floor(Math.max(0, space)))
 }
