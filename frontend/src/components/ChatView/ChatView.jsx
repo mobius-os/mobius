@@ -473,19 +473,11 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
-  // Refs for the absolutely-positioned foot. A ResizeObserver
-  // measures `.chat__foot` and publishes its height as `--composer-h`
-  // on `.chat`, which `.chat__list` reads for its bottom padding so
-  // chips/queue/multi-line growth keep the last message visible
-  // above the pill.
+  // Refs for the absolutely-positioned foot. Its ResizeObserver notifies the
+  // scroll controller, which owns publishing composer clearance together with
+  // every other indirect scroll-geometry write.
   const chatRef = useRef(null)
   const footRef = useRef(null)
-  const measureComposerHeight = useCallback(() => {
-    const chatEl = chatRef.current
-    const footEl = footRef.current
-    if (!chatEl || !footEl) return
-    chatEl.style.setProperty('--composer-h', `${footEl.offsetHeight}px`)
-  }, [])
 
   // One explicit Shell-to-composer handoff owns both New-chat focus and drafts
   // supplied by app navigation. Storage restores unmounted chats; applying the
@@ -657,12 +649,12 @@ export default function ChatView({
     scrollRef,
     spacerRef,
     lastUserMsgRef,
-    syncComposerGeometry: measureComposerHeight,
+    chatRef,
+    footRef,
     messages,
     messagesRef,
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
-    turnRunning: sending || serverRunning,
     initialEntryPhase,
   })
 
@@ -1443,11 +1435,9 @@ export default function ChatView({
     if (el && !hidden) reconcileComposerTextarea(el, input)
   }, [chatId, hidden, input])
 
-  // Publish `.chat__foot`'s rendered height as `--composer-h` on
-  // `.chat`. `.chat__list` reads this var for its bottom padding so
-  // the last message always clears the absolutely-positioned pill
-  // — chips, queue tray, multi-line growth all push the clearance
-  // in lockstep.
+  // Notify the scroll owner when `.chat__foot` geometry may have changed.
+  // The controller publishes the matching list clearance and spacer in one
+  // guarded layout pass so an observer cannot move the reader indirectly.
   useEffect(() => {
     const footEl = footRef.current
     if (!footEl) return

@@ -72,7 +72,7 @@ test('owner contract freezes question answers without locking keyboard movement'
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.12 \(2026-07-31\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.13 \(2026-08-01\)/)
   assert.match(
     architecture,
     /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,

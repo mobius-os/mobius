@@ -24,7 +24,7 @@ import {
   modeForQuestionEditingViewportChange,
   modeForQueuedSubmission,
   modeForViewportChange,
-  modeAfterReaderReachesBottom,
+  modeAfterReaderGesture,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
   physicalBottomAnchorModeFromScroll,
@@ -698,45 +698,25 @@ test('an armed live pin holds until its exact spacer is filled, then follows', (
   assert.deepEqual(modeAfterSpacerResize(livePin, 0), { kind: 'FOLLOW_BOTTOM' })
 })
 
-test('reader reaching the reserved physical bottom keeps the live pin armed', () => {
-  const livePin = {
-    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
+test('reader settlement preserves reserved room and follows only real content', () => {
+  const exactHold = {
+    kind: 'ANCHOR_AT', key: 'user-c-123', offset: -320,
   }
-  assert.equal(modeAfterReaderReachesBottom({
-    mode: livePin,
-    spacerH: 320,
-    turnRunning: true,
-    lastUserCid: 'c-123',
-  }), livePin, 'the existing pin identity stays intact')
-})
-
-test('reader reaching visible latest-user reservation creates a live pin', () => {
-  assert.deepEqual(modeAfterReaderReachesBottom({
-    mode: { kind: 'FOLLOW_BOTTOM' },
-    spacerH: 320,
-    turnRunning: true,
-    lastUserCid: 'c-123',
-  }), {
-    kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
-  })
-})
-
-test('reader reaches ordinary bottom only after reservation is exhausted', () => {
-  assert.deepEqual(modeAfterReaderReachesBottom({
-    mode: { kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true },
-    spacerH: 0,
-    turnRunning: true,
-    lastUserCid: 'c-123',
+  assert.equal(modeAfterReaderGesture({
+    reachedPhysicalBottom: true,
+    hasReservedTail: true,
+    holdMode: exactHold,
+  }), exactHold, 'reserved room remains the reader\'s exact anchor')
+  assert.deepEqual(modeAfterReaderGesture({
+    reachedPhysicalBottom: true,
+    hasReservedTail: false,
+    holdMode: exactHold,
   }), { kind: 'FOLLOW_BOTTOM' })
-})
-
-test('reader reaching visible latest-user reservation creates a settled pin', () => {
-  assert.deepEqual(modeAfterReaderReachesBottom({
-    mode: { kind: 'ANCHOR_AT', key: 'user-c-123', offset: 4 },
-    spacerH: 320,
-    turnRunning: false,
-    lastUserCid: 'c-123',
-  }), { kind: 'PIN_USER_MSG', cid: 'c-123' })
+  assert.equal(modeAfterReaderGesture({
+    reachedPhysicalBottom: false,
+    hasReservedTail: false,
+    holdMode: exactHold,
+  }), exactHold)
 })
 
 test('a short settled pin retires automatic follow but keeps its identity', () => {
@@ -957,21 +937,33 @@ test('a product continuation marker cannot take ownership of a saved user pin', 
       kind: 'auto_continuation',
     },
   ]
+  const ownerRow = {
+    offsetTop: 420,
+    dataset: { key: 'owner-user-row' },
+  }
+  const scrollEl = {
+    querySelector(selector) {
+      return selector === '.chat__msg--user[data-cid="owner-cid"]'
+        ? ownerRow
+        : null
+    },
+    querySelectorAll() { return [] },
+  }
 
   assert.deepEqual(
     _validateSavedMode(
       { kind: 'PIN_USER_MSG', cid: 'owner-cid', followWhenFilled: true },
       messages,
-      null,
+      scrollEl,
     ),
-    { kind: 'PIN_USER_MSG', cid: 'owner-cid' },
-    'the preceding owner row remains the latest real user message',
+    { kind: 'ANCHOR_AT', key: 'owner-user-row', offset: PIN_OFFSET },
+    'the preceding owner row restores physically without recreating pin authority',
   )
   assert.deepEqual(
     _validateSavedMode(
       { kind: 'PIN_USER_MSG', cid: 'restart-resume-token' },
       messages,
-      null,
+      scrollEl,
     ),
     { kind: 'INITIAL' },
     'the provider-facing marker is never restored as an owner-authored pin',
@@ -1771,7 +1763,7 @@ test('F2: an idle-mounted short chat reserves for its visible latest user', () =
   assert.equal(spacerH, 851)
 })
 
-test('F2: a deliberately restored pin owns exact room and keeps its user row visible', () => {
+test('F2: a saved pin restores as the same physical ordinary anchor', () => {
   const shortList = 260
   const clientHeight = 915
   const lowUserTop = 200
@@ -1783,10 +1775,17 @@ test('F2: a deliberately restored pin owns exact room and keeps its user row vis
     { kind: 'PIN_USER_MSG', cid: 'c-1' },
   )
   const restored = makePinnableScrollEl({ listH: shortList, spacerH, clientHeight, userTop: lowUserTop, cid: 'c-1' })
-  applyMode(restored, { kind: 'PIN_USER_MSG', cid: 'c-1' })
+  restored.querySelector = (selector) => {
+    if (selector === '.spacer-dynamic') return { offsetHeight: spacerH }
+    if (selector === '[data-key="user-c-1"]') return { offsetTop: lowUserTop }
+    return null
+  }
+  applyMode(restored, {
+    kind: 'ANCHOR_AT', key: 'user-c-1', offset: PIN_OFFSET,
+  })
   assert.equal(restored.scrollTop, lowUserTop - PIN_OFFSET)
   assert.equal(restored.scrollHeight - restored.clientHeight, restored.scrollTop,
-    'the reservation ends exactly at the visible pin target')
+    'the reservation ends at the same visible location without live pin state')
 })
 
 
