@@ -22,10 +22,10 @@
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",
-    "@codemirror/lang-markdown": "6.5.0",
+    "@codemirror/lang-markdown": "6.5.1",
     "@codemirror/language": "6.12.4",
     "@codemirror/state": "6.7.1",
-    "@codemirror/view": "6.43.4",
+    "@codemirror/view": "6.43.7",
     "@lezer/highlight": "1.2.3",
     "@openai/apps-sdk-ui": "0.2.2",
     "@tanstack/query-async-storage-persister": "^5.101.2",
