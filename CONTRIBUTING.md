@@ -25,8 +25,9 @@ any non-trivial change.
 ## Tests
 
 Required PR CI is `.github/workflows/test.yml`; the commands below mirror it.
-After protected merges, `.github/workflows/image-cache.yml` refreshes the
-shared Docker cache without repeating the test suite.
+After protected merges, `.github/workflows/main-image.yml` publishes the
+prebuilt `ghcr.io/mobius-os/mobius:main` Railway image without repeating the
+test suite.
 
 ## Submitting a session branch
 

@@ -1,4 +1,4 @@
-name: Main image
+name: Publish main image
 
 on:
   push:
@@ -45,8 +45,7 @@ jobs:
         with:
           context: .
           push: true
-          # Existing Railway services follow this legacy tag.
-          tags: ghcr.io/mobius-os/mobius:daily
+          tags: ghcr.io/mobius-os/mobius:main
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -63,11 +62,11 @@ jobs:
         run: |
           docker logout ghcr.io
           for attempt in 1 2 3 4 5 6; do
-            if docker buildx imagetools inspect ghcr.io/mobius-os/mobius:daily; then
+            if docker buildx imagetools inspect ghcr.io/mobius-os/mobius:main; then
               exit 0
             fi
             if [ "$attempt" = 6 ]; then
-              echo "ghcr.io/mobius-os/mobius:daily is not public" >&2
+              echo "ghcr.io/mobius-os/mobius:main is not public" >&2
               echo "Set the package visibility once at:" >&2
               echo "https://github.com/orgs/mobius-os/packages/container/mobius/settings" >&2
               exit 1

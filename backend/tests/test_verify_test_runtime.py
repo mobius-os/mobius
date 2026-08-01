@@ -475,11 +475,11 @@ def test_pull_requests_run_required_suites_and_main_publishes_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
-  cache_workflow = (ROOT / ".github" / "workflows" / "image-cache.yml").read_text(
+  image_workflow = (ROOT / ".github" / "workflows" / "main-image.yml").read_text(
     encoding="utf-8"
   )
   test_triggers = test_workflow.split("\npermissions:\n", 1)[0]
-  cache_triggers = cache_workflow.split("\npermissions:\n", 1)[0]
+  image_triggers = image_workflow.split("\npermissions:\n", 1)[0]
   backend = test_workflow.split("\n  backend:\n", 1)[1].split(
     "\n  frontend-unit:\n", 1,
   )[0]
@@ -497,19 +497,20 @@ def test_pull_requests_run_required_suites_and_main_publishes_image():
   assert "cache-from: type=gha" in e2e
   assert "cache-to:" not in e2e
 
-  assert "push:\n" in cache_triggers
-  assert "    branches: [main]\n" in cache_triggers
-  assert "schedule:\n" not in cache_triggers
-  assert "workflow_dispatch:\n" in cache_triggers
-  assert "pull_request:\n" not in cache_triggers
-  assert "packages: write" in cache_workflow
-  assert "push: true" in cache_workflow
-  assert "tags: ghcr.io/mobius-os/mobius:daily" in cache_workflow
-  assert "docker buildx imagetools inspect ghcr.io/mobius-os/mobius:daily" in cache_workflow
-  assert "cache-to: type=gha,mode=max,ignore-error=true" in cache_workflow
-  assert "load: true" not in cache_workflow
+  assert "push:\n" in image_triggers
+  assert "    branches: [main]\n" in image_triggers
+  assert "schedule:\n" not in image_triggers
+  assert "workflow_dispatch:\n" in image_triggers
+  assert "pull_request:\n" not in image_triggers
+  assert "packages: write" in image_workflow
+  assert "push: true" in image_workflow
+  assert "tags: ghcr.io/mobius-os/mobius:main" in image_workflow
+  assert "docker buildx imagetools inspect ghcr.io/mobius-os/mobius:main" in image_workflow
+  assert "ghcr.io/mobius-os/mobius:daily" not in image_workflow
+  assert "cache-to: type=gha,mode=max,ignore-error=true" in image_workflow
+  assert "load: true" not in image_workflow
 
-  workflows = test_workflow + cache_workflow
+  workflows = test_workflow + image_workflow
   assert workflows.count("DOCKER_BUILD_RECORD_UPLOAD: 'false'") == 2
   assert "actions/checkout@v5" not in workflows
   assert "actions/setup-node@v5" not in workflows
