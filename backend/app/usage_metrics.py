@@ -224,8 +224,16 @@ def _codex_call_cost(
   model: str,
   counts: dict[str, Any],
   rates: tuple[float, float, float],
+  *,
+  long_context_eligible: bool = True,
 ) -> float:
-  """Price one upstream model call, including request-scoped surcharges."""
+  """Price one upstream model call, including request-scoped surcharges.
+
+  ``long_context_eligible=False`` prices the same arithmetic WITHOUT the
+  long-context surcharge, for callers holding turn totals rather than one
+  request. The surcharge is request-scoped, so a threshold test against a sum
+  over many calls is not the same question and would over-charge.
+  """
   in_rate, cached_rate, out_rate = rates
   input_total = _count(counts.get("input_tokens"))
   cached = min(_count(counts.get("cached_input_tokens")), input_total)
@@ -236,7 +244,8 @@ def _codex_call_cost(
   uncached = max(0, input_total - cached - cache_write)
   cache_write_rate = in_rate * (1.25 if model in _CACHE_WRITE_MODELS else 1.0)
   if (
-    model in _LONG_CONTEXT_MODELS
+    long_context_eligible
+    and model in _LONG_CONTEXT_MODELS
     and input_total > _LONG_CONTEXT_INPUT_THRESHOLD
   ):
     in_rate *= 2
@@ -266,7 +275,6 @@ def codex_cost_usd(model: str | None, usage_metrics: dict | None) -> float | Non
   rates = CODEX_MODEL_RATES.get(model)
   if rates is None:
     return None
-  in_rate, cached_rate, out_rate = rates
   model_calls = usage_metrics.get("model_calls")
   if isinstance(model_calls, list) and model_calls:
     return round(sum(
@@ -274,19 +282,26 @@ def codex_cost_usd(model: str | None, usage_metrics: dict | None) -> float | Non
       for call in model_calls if isinstance(call, dict)
     ), 6)
 
+  # No per-call breakdown — only turn TOTALS. Route through `_codex_call_cost`
+  # anyway so the rate arithmetic and the cache-write premium live in exactly
+  # one place; this branch previously inlined a second copy that had already
+  # drifted (different key names, no `min()` clamps).
+  #
+  # But opt OUT of the long-context surcharge: it is request-scoped, and these
+  # totals are a SUM over every call in the turn. Ten 100k-token requests sum
+  # past the 272k threshold while no single request ever crossed it, so testing
+  # the sum would over-charge. Under-charging a genuinely long single request is
+  # the safer error, and matches the behavior this fallback has always had.
+  # The normalized turn keys carry the three input classes DISJOINTLY, while
+  # `_codex_call_cost` expects an inclusive `input_tokens` it subdivides.
   uncached = max(0, _count(usage_metrics.get("uncached_input_tokens")))
   cached = max(0, _count(usage_metrics.get("cache_read_input_tokens")))
   cache_write = max(
     0, _count(usage_metrics.get("cache_creation_input_tokens"))
   )
-  cache_write_rate = in_rate * (
-    1.25 if model in _CACHE_WRITE_MODELS else 1.0
-  )
-  output = max(0, _count(usage_metrics.get("output_tokens")))
-  cost = (
-    uncached * in_rate
-    + cached * cached_rate
-    + cache_write * cache_write_rate
-    + output * out_rate
-  ) / 1_000_000
-  return round(cost, 6)
+  return round(_codex_call_cost(model, {
+    "input_tokens": uncached + cached + cache_write,
+    "cached_input_tokens": cached,
+    "cache_write_input_tokens": cache_write,
+    "output_tokens": max(0, _count(usage_metrics.get("output_tokens"))),
+  }, rates, long_context_eligible=False), 6)
