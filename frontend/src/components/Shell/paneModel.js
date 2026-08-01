@@ -296,6 +296,10 @@ function nearestSurviving(orderedIds, survivors, targetId) {
   return null
 }
 
+function panesAreEmpty(panes) {
+  return Object.values(panes).every(pane => pane.tabs.length === 0)
+}
+
 // Enforce every workspace invariant, idempotently, and return the SAME reference
 // when the input already satisfies them (so normalize(normalize(ws)) is
 // reference-stable and callers can bail on an unchanged tree). Repairs — never
@@ -392,11 +396,15 @@ export function normalize(ws) {
   for (const id of splitIdsOf(layout)) maxId = Math.max(maxId, idSuffix(id))
   const storedNext = (Number.isInteger(ws.nextId) && ws.nextId > 0) ? ws.nextId : 0
   const nextId = Math.max(maxId + 1, storedNext)
-  // viewMode is a preserved field, coerced to a valid value (absent/corrupt ->
-  // 'panes', design: forgiving parse). It never affects the tree, so it rides
-  // through normalize untouched except for this coercion; deepEqual below still
-  // returns the SAME reference when the input already carried the same mode.
-  const viewMode = coerceViewMode(ws.viewMode)
+  // Builder is a presentation of actual pane content, never an empty world. A
+  // stale/corrupt persisted blob can still say `panes` after every tab is gone;
+  // repair that at the model boundary so boot cannot strand the owner in a blank
+  // Builder. Non-empty trees preserve their mode.
+  const requestedViewMode = coerceViewMode(ws.viewMode)
+  const viewMode = requestedViewMode === 'panes'
+    && panesAreEmpty(panes)
+    ? 'single'
+    : requestedViewMode
   const result = { v: 1, viewMode, layout, panes, focusedPaneId: focused, nextId }
   // The single-screen slot rides through normalize the same way viewMode does:
   // a preserved field, forgivingly sanitized, that never affects the tree. ABSENCE
@@ -471,16 +479,17 @@ function coerceViewMode(mode) {
 }
 
 // Set the view-mode. Pure; returns the SAME reference when it already holds the
-// target mode (the workspace convention, so React can bail on an unchanged tree).
-// It touches only viewMode — the layout/panes/focus/nextId are already normalized
-// and a mode flip never mutates them, so no re-normalize is needed.
+// resolved target mode (the workspace convention, so React can bail). Builder
+// cannot be entered with an empty tree: there is no pane content for that world
+// to present, so the honest resolved destination remains Standard.
 export function setViewMode(ws, mode) {
-  const next = coerceViewMode(mode)
+  const requested = coerceViewMode(mode)
+  const next = requested === 'panes' && isEmptyTree(ws) ? 'single' : requested
   if (ws.viewMode === next) return ws
   return { ...ws, viewMode: next }
 }
 
-// Flip single <-> panes. Absent/'panes' -> 'single'; 'single' -> 'panes'.
+// Flip single <-> panes. An empty Standard workspace remains Standard.
 export function toggleViewMode(ws) {
   return setViewMode(ws, ws.viewMode === 'single' ? 'panes' : 'single')
 }
@@ -566,7 +575,7 @@ export function seedSingleScreenIfAbsent(ws) {
 // this is the "last tab in builder just closed" signal (owner semantic: an empty
 // builder auto-returns to single).
 export function isEmptyTree(ws) {
-  return Object.values(ws.panes).every(pane => pane.tabs.length === 0)
+  return panesAreEmpty(ws.panes)
 }
 
 // Auto-return an EMPTIED builder to single (owner semantic: closing the last tab
@@ -1835,12 +1844,10 @@ export function workspaceReducer(state, action) {
     }
     case 'RESET_FLAT': {
       const seeded = seedFromFlatTabs(action.tabs)
-      // RESET_FLAT reseeds the BUILDER tree only (two-worlds design): it must not
-      // reset the world (viewMode) or the single-screen slot. seedFromFlatTabs
-      // returns a fresh 'panes' seed with no slot, so carry the current world state
-      // across. A boot with no valid blob starts from the initial seed anyway
-      // (current viewMode 'panes', slot absent), so this is a no-op there.
-      const next = { ...seeded, viewMode: ws.viewMode }
+      // RESET_FLAT reseeds the BUILDER tree only (two-worlds design): preserve the
+      // current world and single-screen slot unless the reset removed every tab,
+      // in which case the shared no-empty-Builder invariant resolves to Standard.
+      const next = setViewMode(seeded, ws.viewMode)
       if ('singleScreen' in ws) next.singleScreen = ws.singleScreen
       if (deepEqual(next, ws) && undo == null) return state
       return { ws: next, undo: null }

@@ -261,6 +261,28 @@ test('closing the LAST builder tab auto-returns to single', () => {
   assert.equal(s.undo.restoreViewMode, true, 'the undo is flagged one-gesture')
 })
 
+test('an empty workspace cannot enter or persist in builder mode', () => {
+  const empty = paneModel.seedFromFlatTabs([])
+  const toggled = reduce(init(empty), { type: 'SET_VIEW_MODE', mode: 'panes' })
+  assert.equal(toggled.ws.viewMode, 'single', 'explicit entry remains Standard')
+
+  const stale = JSON.stringify({ ...empty, viewMode: 'panes' })
+  assert.equal(
+    paneModel.parseWorkspace(stale).viewMode,
+    'single',
+    'a persisted empty Builder repairs to Standard at boot',
+  )
+})
+
+test('deleting the last builder resource also leaves no empty builder behind', () => {
+  const ws = builderSeed([makeTab('chat', '5')])
+  const state = reduce(init(ws), {
+    type: 'CLOSE_TAB', tabKey: 'chat:5', reason: 'deleted',
+  })
+  assert.equal(state.ws.viewMode, 'single')
+  assert.equal(state.undo, null, 'resource deletion remains non-undoable workspace state')
+})
+
 test('undo of the last-tab close restores the tab AND builder mode as one gesture', () => {
   const ws = builderSeed([makeTab('chat', '5')])
   let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' })
@@ -290,17 +312,39 @@ test('CLOSE_PANE that empties the builder auto-returns to single', () => {
   assert.equal(s.undo.restoreViewMode, true)
 })
 
-test('INV 8: an explicit later toggle rebases a coupled undo to tree-only', () => {
-  // Auto-return arms a mode-coupled undo (restoreViewMode). The owner then toggles
-  // the mode explicitly; undo must restore the TREE but not yank the mode back.
+test('a refused empty-builder entry preserves the coupled close undo', () => {
+  // Auto-return arms a mode-coupled undo (restoreViewMode). Trying to enter an
+  // empty Builder is not a new mode intent because that destination does not
+  // exist, so it must not weaken the one-gesture restoration.
   const ws = builderSeed([makeTab('chat', '5')])
   let state = reduce(init(ws), { type: 'CLOSE_TAB', tabKey: 'chat:5' }) // → single, coupled undo
   assert.equal(state.undo.restoreViewMode, true)
-  state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'panes' }) // explicit later intent
-  assert.equal(state.undo.restoreViewMode, false, 'coupled undo rebased to tree-only')
+  state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'panes' }) // refused: tree is empty
+  assert.equal(state.ws.viewMode, 'single')
+  assert.equal(state.undo.restoreViewMode, true, 'the refused entry does not rewrite undo semantics')
   state = reduce(state, { type: 'UNDO_LAST' })
   assert.ok(paneModel.paneOf(state.ws, 'chat:5'), 'tab restored')
-  assert.equal(state.ws.viewMode, 'panes', 'the owner\'s later mode choice is preserved')
+  assert.equal(state.ws.viewMode, 'panes', 'the closed Builder world is restored with its tab')
+})
+
+test('a real later mode choice still rebases a coupled undo to tree-only', () => {
+  let state = init({
+    ...paneModel.seedFromFlatTabs([makeTab('chat', '5')]),
+    viewMode: 'single',
+  })
+  state = reduce(state, {
+    type: 'OPEN_TAB_AT',
+    tab: makeTab('app', '42'),
+    target: { paneId: state.ws.focusedPaneId, edge: 'right' },
+    flipViewMode: 'panes',
+  })
+  assert.equal(state.undo.restoreViewMode, true)
+
+  state = reduce(state, { type: 'SET_VIEW_MODE', mode: 'single' })
+  assert.equal(state.undo.restoreViewMode, false, 'the accepted mode choice rebases the undo')
+  state = reduce(state, { type: 'UNDO_LAST' })
+  assert.equal(state.ws.viewMode, 'single', 'tree undo preserves the later Standard choice')
+  assert.equal(Object.keys(state.ws.panes).length, 1, 'the split itself is still undone')
 })
 
 test('singleScreenRoute: chat, installed app, Apps launcher, and empty/home', () => {
