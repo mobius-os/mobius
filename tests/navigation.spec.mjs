@@ -165,6 +165,40 @@ async function openDrawer(page) {
   await expect(toggle).toHaveAttribute('aria-expanded', 'true')
 }
 
+async function dispatchDrawerPointerGesture(page, {
+  pointerId,
+  points,
+  terminal = 'pointerup',
+  compatibilityClickSelector = null,
+}) {
+  await page.locator('.drawer').evaluate((drawer, gesture) => {
+    const init = ([clientX, clientY]) => ({
+      bubbles: true,
+      cancelable: true,
+      pointerId: gesture.pointerId,
+      pointerType: 'touch',
+      isPrimary: true,
+      button: 0,
+      clientX,
+      clientY,
+    })
+    const [start, ...moves] = gesture.points
+    drawer.dispatchEvent(new PointerEvent('pointerdown', init(start)))
+    for (const point of moves) {
+      drawer.dispatchEvent(new PointerEvent('pointermove', init(point)))
+    }
+    const end = gesture.points.at(-1)
+    if (gesture.terminal) {
+      drawer.dispatchEvent(new PointerEvent(gesture.terminal, init(end)))
+    }
+    if (gesture.compatibilityClickSelector) {
+      drawer.querySelector(gesture.compatibilityClickSelector)?.dispatchEvent(
+        new MouseEvent('click', { ...init(end), detail: 1 }),
+      )
+    }
+  }, { pointerId, points, terminal, compatibilityClickSelector })
+}
+
 /** Close the modal drawer via the SCRIM — its canonical pointerdown-dismiss
  *  (Drawer.handleOverlayPointerDown → onClose). The drawer has no dedicated close
  *  control by owner decision; the exits are the scrim tap, the brand toggle, and
@@ -1159,43 +1193,19 @@ test.describe('Drawer close paths converge through handleBack', () => {
 
     // Reproduce the Android sequence without waiting out the old suppressor's
     // 400ms fallback: a noisy diagonal sample briefly looks horizontal, then
-    // native pan-y takes over and emits touchcancel. The immediately-following
+    // native pan-y takes over and emits pointercancel. The immediately-following
     // destination tap must pass; cancellation is not a custom swipe completion.
-    await page.locator('.drawer').evaluate((drawer) => {
-      const point = (x, y) => new Touch({
-        identifier: 37,
-        target: drawer,
-        clientX: x,
-        clientY: y,
-      })
-      drawer.dispatchEvent(new TouchEvent('touchstart', {
-        bubbles: true,
-        cancelable: true,
-        touches: [point(180, 520)],
-      }))
-      drawer.dispatchEvent(new TouchEvent('touchmove', {
-        bubbles: true,
-        cancelable: true,
-        touches: [point(165, 512)],
-      }))
-      drawer.dispatchEvent(new TouchEvent('touchmove', {
-        bubbles: true,
-        cancelable: true,
-        touches: [point(165, 390)],
-      }))
-      drawer.dispatchEvent(new TouchEvent('touchcancel', {
-        bubbles: true,
-        cancelable: true,
-        touches: [],
-        changedTouches: [point(165, 390)],
-      }))
-
-      const settings = [...drawer.querySelectorAll('button')]
-        .find(button => button.textContent.trim() === 'Settings')
-      settings?.click()
+    await dispatchDrawerPointerGesture(page, {
+      pointerId: 37,
+      points: [[180, 520], [165, 512], [165, 390]],
+      terminal: 'pointercancel',
     })
+    await page.getByRole('navigation', { name: 'Primary navigation' })
+      .getByRole('button', { name: 'Settings', exact: true })
+      .click()
 
-    await expect(page.locator('.settings')).toBeVisible()
+    // Drawer closure proves the destination action fired. Waiting for Settings
+    // data here would couple an input-ownership test to unrelated fetch latency.
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
   })
@@ -1208,33 +1218,14 @@ test.describe('Drawer close paths converge through handleBack', () => {
     // the guard with a short horizontal swipe that snaps back, but deliberately
     // omit that generated click. The next genuine Playwright tap starts with
     // pointerdown and must clear the stale same-gesture guard before clicking.
-    await page.locator('.drawer').evaluate((drawer) => {
-      const point = (x, y) => new Touch({
-        identifier: 38,
-        target: drawer,
-        clientX: x,
-        clientY: y,
-      })
-      drawer.dispatchEvent(new TouchEvent('touchstart', {
-        bubbles: true,
-        cancelable: true,
-        touches: [point(180, 420)],
-      }))
-      drawer.dispatchEvent(new TouchEvent('touchmove', {
-        bubbles: true,
-        cancelable: true,
-        touches: [point(150, 421)],
-      }))
-      drawer.dispatchEvent(new TouchEvent('touchend', {
-        bubbles: true,
-        cancelable: true,
-        touches: [],
-        changedTouches: [point(150, 421)],
-      }))
+    await dispatchDrawerPointerGesture(page, {
+      pointerId: 38,
+      points: [[180, 420], [150, 421]],
     })
 
-    await page.getByRole('button', { name: 'Settings' }).click()
-    await expect(page.locator('.settings')).toBeVisible()
+    await page.getByRole('navigation', { name: 'Primary navigation' })
+      .getByRole('button', { name: 'Settings', exact: true })
+      .click()
     await expect(page.getByRole('button', { name: 'Toggle navigation' }))
       .toHaveAttribute('aria-expanded', 'false')
   })
@@ -1243,39 +1234,10 @@ test.describe('Drawer close paths converge through handleBack', () => {
     await setup(page, { width: 426, height: 860 })
     await openDrawer(page)
 
-    await page.locator('.drawer').evaluate((drawer) => {
-      const point = (x, y) => new Touch({
-        identifier: 39,
-        target: drawer,
-        clientX: x,
-        clientY: y,
-      })
-      drawer.dispatchEvent(new TouchEvent('touchstart', {
-        bubbles: true,
-        cancelable: true,
-        touches: [point(180, 420)],
-      }))
-      drawer.dispatchEvent(new TouchEvent('touchmove', {
-        bubbles: true,
-        cancelable: true,
-        touches: [point(150, 421)],
-      }))
-      drawer.dispatchEvent(new TouchEvent('touchend', {
-        bubbles: true,
-        cancelable: true,
-        touches: [],
-        changedTouches: [point(150, 421)],
-      }))
-
-      const settings = [...drawer.querySelectorAll('button')]
-        .find(button => button.textContent.trim() === 'Settings')
-      settings?.dispatchEvent(new MouseEvent('click', {
-        bubbles: true,
-        cancelable: true,
-        detail: 1,
-        clientX: 150,
-        clientY: 421,
-      }))
+    await dispatchDrawerPointerGesture(page, {
+      pointerId: 39,
+      points: [[180, 420], [150, 421]],
+      compatibilityClickSelector: 'button[aria-label="Settings"]',
     })
 
     expect((await getNavState(page)).drawerOpen).toBe(true)
@@ -1288,26 +1250,13 @@ test.describe('Drawer close paths converge through handleBack', () => {
 
     // Reproduce the mobile failure: a slight horizontal drawer drag writes an
     // inline transform, then shell navigation closes the drawer before the
-    // browser delivers touchend/touchcancel. The close state must clear that
+    // browser delivers pointerup/pointercancel. The close state must clear that
     // imperative transform unconditionally rather than trusting a terminal
-    // touch event that may never arrive.
-    await page.locator('.drawer').evaluate((drawer) => {
-      const point = (x, y) => new Touch({
-        identifier: 41,
-        target: drawer,
-        clientX: x,
-        clientY: y,
-      })
-      drawer.dispatchEvent(new TouchEvent('touchstart', {
-        bubbles: true,
-        cancelable: true,
-        touches: [point(220, 420)],
-      }))
-      drawer.dispatchEvent(new TouchEvent('touchmove', {
-        bubbles: true,
-        cancelable: true,
-        touches: [point(195, 420)],
-      }))
+    // pointer event that may never arrive.
+    await dispatchDrawerPointerGesture(page, {
+      pointerId: 41,
+      points: [[220, 420], [195, 420]],
+      terminal: null,
     })
     expect(await page.locator('.drawer').evaluate((drawer) => drawer.style.transform))
       .toBe('translateX(-25px)')
