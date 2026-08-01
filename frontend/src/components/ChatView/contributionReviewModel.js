@@ -117,6 +117,26 @@ export function diffStatSummary(value) {
   return lines.at(-1) || ''
 }
 
+/**
+ * The failure this card should currently explain, or null when there is none.
+ *
+ * A send that failed is a fact about the record, not about this render: the
+ * card must still explain it after a reload, and must never keep showing the
+ * previous attempt's reason while a new one is in flight. `attempt` is this
+ * card's own latest outcome and always wins; otherwise the stored one speaks.
+ */
+export function submitFailure(record, { attempt = null, sending = false } = {}) {
+  if (sending) return null
+  const source = attempt || {
+    message: record?.last_submit_error,
+    detail: record?.last_submit_error_detail,
+  }
+  const message = typeof source.message === 'string' ? source.message.trim() : ''
+  if (!message) return null
+  const detail = typeof source.detail === 'string' ? source.detail.trim() : ''
+  return { message, detail }
+}
+
 /** Copy for the grouped panel while it still has pending work. */
 export function reviewPanelSummary(pendingCount) {
   const count = Math.max(0, Number(pendingCount) || 0)

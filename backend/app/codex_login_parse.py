@@ -18,13 +18,12 @@ linear patterns over bounded text.
 
 import re
 
+from app.terminal_output import strip_terminal_noise
+
 # A device code looks like XXXX-XXXX (groups of 4+ alphanumerics joined by a
 # hyphen). Used both as the readline-loop readiness probe and the final
 # extraction.
 _CODE_RE = re.compile(r"[A-Z0-9]{4,}-[A-Z0-9]{4,}")
-
-# Strips ANSI escape sequences (e.g. the CLI wraps the URL in \x1b[4m…\x1b[0m).
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 # A bare https URL — stops at whitespace or quoting/bracket characters.
 _URL_RE = re.compile(r"https://[^\s<>\"']+")
@@ -48,7 +47,7 @@ def parse_login_banner(output: str):
   punctuation captured from prose (e.g. "Visit https://example.com.") is
   trimmed off the URL.
   """
-  clean = _ANSI_RE.sub("", output)
+  clean = strip_terminal_noise(output)
   url_match = _URL_RE.search(clean)
   code_match = _CODE_RE.search(clean)
   if not url_match or not code_match:

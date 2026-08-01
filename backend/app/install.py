@@ -88,6 +88,7 @@ from app.manifest_contract import (
 # net_utils.py for why the two SSRF validators were unified.
 from app.net_utils import validate_url_safe as _validate_url_safe
 from app.storage_io import atomic_write
+from app.terminal_output import strip_terminal_noise
 from app.app_identity import (
   allocate_unique_slug,
   reject_if_source_dir_taken as _reject_if_source_dir_taken,
@@ -138,7 +139,6 @@ _ENTRY_MAX_BYTES = _CONTRACT_ENTRY_MAX_BYTES
 _SEED_MAX_BYTES = _CONTRACT_SEED_MAX_BYTES
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
-_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _manifest_color(value) -> str | None:
@@ -167,7 +167,7 @@ def _manifest_display(value) -> str | None:
 
 def _compile_error_detail(app_name: str, exc: CompileError) -> str:
   """Return a concise client-safe compile error for a manifest install."""
-  cleaned = _ANSI_RE.sub("", exc.stderr or "")
+  cleaned = strip_terminal_noise(exc.stderr or "")
   lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
   for line in lines:
     resolve_idx = line.find("Could not resolve")

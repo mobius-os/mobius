@@ -261,7 +261,7 @@ test('independent cards can submit in parallel without duplicating one record', 
 
 test('a grouped panel does not repeat the same audience payoff on every card', () => {
   assert.match(cardSrc, /showPayoff=\{!grouped\}/)
-  assert.match(cardSrc, /showPayoff && !error && !submitting/)
+  assert.match(cardSrc, /showPayoff && !failure && !submitting/)
 })
 
 // The action names the value of contributing, not the mechanism of sending, and
@@ -454,7 +454,7 @@ test('every card shape shares one swipe implementation', () => {
   assert.equal((cardSrc.match(/addEventListener\('touchmove'/g) || []).length, 1)
 })
 
-test('a failed send is shown only on the record that failed', () => {
-  assert.match(cardSrc, /const \[error, setError\] = useState\(null\)/)
-  assert.match(cardSrc, /setError\(outcome\.error\)/)
-})
+// "A failure is shown only on the record that failed" used to be asserted by
+// grepping this component for a useState identifier. It is now a property of
+// submitFailure(), which resolves a failure purely from one record plus that
+// row's own attempt — see contributionFailure.test.js.

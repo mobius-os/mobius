@@ -915,6 +915,7 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "files": _diff_file_paths(diff_path),
     "labels": labels,
     "last_submit_error": text(record.get("last_submit_error")),
+    "last_submit_error_detail": text(record.get("last_submit_error_detail")),
     "updated_at": text(record.get("updated_at")),
     "contribution_disabled_reason": contribution_disabled_reason,
     # `is_stack` keeps an invalid/legacy stack safely non-sendable. `stack`
@@ -1097,10 +1098,11 @@ async def submit_contribution(
         record_path=record_path,
         message=exc.message,
         record_patch=exc.record_patch,
+        detail=exc.detail,
       )
     raise HTTPException(
       status_code=exc.status_code,
-      detail={"message": exc.message, "record": record},
+      detail={"message": exc.message, "detail": exc.detail, "record": record},
     )
   except Exception as exc:
     log.exception("Contribution submit failed for %s/%s", app_id, record_id)
@@ -1258,11 +1260,13 @@ async def submit_contribution_stack(
               exc.message,
               failed_id=str(record.get("id") or ""),
               record_patch=exc.record_patch,
+              detail=exc.detail,
             )
           raise HTTPException(
             status_code=exc.status_code,
             detail={
               "message": exc.message,
+              "detail": exc.detail,
               "records": snapshots,
               "submitted": submitted_urls,
             },
@@ -1298,10 +1302,11 @@ async def submit_contribution_stack(
         rows,
         exc.message,
         record_patch=exc.record_patch,
+        detail=exc.detail,
       )
     raise HTTPException(
       status_code=exc.status_code,
-      detail={"message": exc.message, "records": snapshots},
+      detail={"message": exc.message, "detail": exc.detail, "records": snapshots},
     ) from exc
   except Exception as exc:
     log.exception("Contribution stack submit failed for app %s", app_id)

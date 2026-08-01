@@ -15,6 +15,7 @@ import {
   rememberReviewItemDismissed,
   reviewPanelSummary,
   statusLabel,
+  submitFailure,
   visibleReviewItems,
 } from './contributionReviewModel.js'
 import './ContributionReviewCard.css'
@@ -77,16 +78,25 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
       })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
-        const detail = body?.detail?.message || body?.detail
+        const detail = body?.detail
+        const message = typeof detail === 'string' ? detail : detail?.message
         return {
-          error: typeof detail === 'string'
-            ? detail
-            : 'Could not contribute this. Open Contribute for the details.',
+          failure: {
+            message: typeof message === 'string' && message
+              ? message
+              : 'Could not contribute this. Open Contribute for the details.',
+            detail: typeof detail?.detail === 'string' ? detail.detail : '',
+          },
         }
       }
       return { contributed: true }
     } catch {
-      return { error: 'Could not reach the server. Nothing was contributed.' }
+      return {
+        failure: {
+          message: 'Could not reach the server. Nothing was contributed.',
+          detail: '',
+        },
+      }
     } finally {
       queryClient.invalidateQueries({ queryKey, exact: true })
     }
@@ -314,19 +324,20 @@ function ReviewRow({
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [attempt, setAttempt] = useState(null)
   // Each row owns its own in-flight guard. That keeps sibling rows independent
   // while closing the same-frame double-click window for this record.
   const activeSendRef = useRef(false)
   const diffStat = diffStatSummary(record.diff_stat)
   const submitting = record.status === 'submitting'
   const cardRef = useSwipeToDismiss(onDismiss)
+  const failure = submitFailure(record, { attempt, sending: busy || submitting })
 
   async function send() {
     if (activeSendRef.current) return
     activeSendRef.current = true
     setBusy(true)
-    setError(null)
+    setAttempt(null)
     let outcome
     try {
       outcome = await onSubmit(record)
@@ -334,8 +345,8 @@ function ReviewRow({
       activeSendRef.current = false
       setBusy(false)
     }
-    if (outcome?.error) {
-      setError(outcome.error)
+    if (outcome?.failure) {
+      setAttempt(outcome.failure)
     } else if (outcome?.contributed) {
       onContributed(record.id)
     }
@@ -366,15 +377,24 @@ function ReviewRow({
         {diffStat ? <span> · {diffStat}</span> : null}
       </p>
 
-      {showPayoff && !error && !submitting && (
+      {showPayoff && !failure && !submitting && (
         <p className="contrib-card__payoff">{payoffLine(record)}</p>
       )}
-      {autopilot && !error && !submitting && (
+      {autopilot && !failure && !submitting && (
         <p className="contrib-card__meta">
           Möbius will also handle review feedback after you contribute.
         </p>
       )}
-      {error && <p className="contrib-card__error">{error}</p>}
+      {/* One sentence says what happened; the transcript that proves it stays
+          collapsed next to it, so the card explains without shouting plumbing
+          at someone who only needs to know nothing was published. */}
+      {failure && <p className="contrib-card__error">{failure.message}</p>}
+      {failure?.detail && (
+        <details className="contrib-card__failure-detail">
+          <summary>What blocked it</summary>
+          <pre className="contrib-card__body">{failure.detail}</pre>
+        </details>
+      )}
 
       <div className="contrib-card__actions">
         <button
@@ -395,7 +415,7 @@ function ReviewRow({
         </button>
         {/* A failed submit may reveal a server-side change after this ready
             card loaded. Contribute owns that repair path. */}
-        {error && onOpenContribute && (
+        {failure && onOpenContribute && (
           <button
             type="button"
             className="contrib-card__toggle"

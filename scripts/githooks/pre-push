@@ -49,10 +49,25 @@ trap 'rm -rf "$PP_TMP"' EXIT
 
 FAIL=0
 PRIVACY_FAIL=0
-c_ok=$'\033[1;32m'; c_warn=$'\033[1;33m'; c_err=$'\033[1;31m'; c_off=$'\033[0m'
+# Names of the checks that actually failed, for the machine-readable verdict
+# emitted at the end. Kept separate from the prose above it so a reader and a
+# program never have to agree on how a sentence is worded.
+FAILED_CHECKS=""
+# Colour is for a human watching a terminal. When git runs this hook inside
+# another program — Contribute's Send, CI, a log collector — the escape codes
+# survive into whatever stores the output and disfigure the diagnostic they
+# were meant to highlight. Emit none unless both streams are a terminal.
+if [ -t 1 ] && [ -t 2 ]; then
+  c_ok=$'\033[1;32m'; c_warn=$'\033[1;33m'; c_err=$'\033[1;31m'; c_off=$'\033[0m'
+else
+  c_ok=''; c_warn=''; c_err=''; c_off=''
+fi
 ok()   { printf '%s[pre-push]%s %s\n' "$c_ok"  "$c_off" "$*"; }
 warn() { printf '%s[pre-push]%s %s\n' "$c_warn" "$c_off" "$*"; }
 err()  { printf '%s[pre-push]%s %s\n' "$c_err" "$c_off" "$*" >&2; }
+# Record a failing check by name. Every caller that has a name uses this so the
+# final verdict line can list them without anything parsing the prose.
+fail_check() { FAILED_CHECKS="${FAILED_CHECKS:+$FAILED_CHECKS,}$1"; FAIL=1; }
 
 # Direct main updates bypass the PR's synthetic merge test and are prohibited.
 # Branch protection is the remote guarantee; this local rejection gives a fast,
@@ -72,7 +87,7 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
     refs/heads/main)
       err "direct updates to main are prohibited; publish a topic branch"
       err "and run scripts/submit-pr.sh"
-      FAIL=1
+      fail_check main-branch-push
       ;;
   esac
 done <"$PUSH_REFS"
@@ -133,7 +148,7 @@ if git grep -nIE '^(<<<<<<<|>>>>>>>) ' HEAD -- \
      'backend' 'frontend/src' 'skill' 'scripts' >"$PP_TMP/confl" 2>/dev/null; then
   err "merge-conflict markers in the tree you're pushing:"
   sed 's/^/    /' "$PP_TMP/confl" >&2
-  FAIL=1
+  fail_check merge-conflict-markers
 else
   ok "no conflict markers"
 fi
@@ -150,7 +165,7 @@ if [ "${POLLUTION:-0}" -gt 0 ]; then
   err "detected $POLLUTION Mobius-authored commit(s) on this branch — likely app-git test pollution:"
   git log --format='%h %an %s' "$BASE"..HEAD | grep 'Mobius' | sed 's/^/    /' >&2
   err "recover: git reset --hard origin/main  (drops the pollution); see scripts/git-doctor.sh"
-  FAIL=1
+  fail_check polluted-history
 fi
 
 # 1c. Private workspace paths must never reach the PUBLIC repo. Gitignore only
@@ -197,7 +212,7 @@ if [ -n "$PY" ]; then
        python3 -m py_compile "${_py[@]}" 2>"$PP_TMP/py"; then
     ok "python syntax ok (${#_py[@]} file(s))"
   else
-    err "python syntax errors:"; sed 's/^/    /' "$PP_TMP/py" >&2; FAIL=1
+    err "python syntax errors:"; sed 's/^/    /' "$PP_TMP/py" >&2; fail_check python-syntax
   fi
 fi
 
@@ -216,7 +231,7 @@ if [ -n "$JSX" ] && [ -x "$ESB" ]; then
     "$ESB" "$f" --loader:.js=jsx --outfile=/dev/null >"$PP_TMP/esb" 2>&1 || {
       err "jsx parse error in $f:"; sed 's/^/    /' "$PP_TMP/esb" >&2; jsx_fail=1; }
   done <<< "$JSX"
-  [ "$jsx_fail" -eq 0 ] && ok "jsx parse ok" || FAIL=1
+  [ "$jsx_fail" -eq 0 ] && ok "jsx parse ok" || fail_check jsx-parse
 fi
 
 # 4. Frontend-unit — only when frontend changed (~6s). Mirrors the CI
@@ -228,7 +243,7 @@ if changed_match '^frontend/'; then
     if (cd frontend && npm test >"$PP_TMP/fe" 2>&1); then
       ok "frontend-unit passed"
     else
-      err "frontend-unit FAILED:"; tail -n 30 "$PP_TMP/fe" | sed 's/^/    /' >&2; FAIL=1
+      err "frontend-unit FAILED:"; tail -n 30 "$PP_TMP/fe" | sed 's/^/    /' >&2; fail_check frontend-unit
     fi
   elif ! command -v npm >/dev/null 2>&1; then
     warn "frontend changed, npm not found — skipping frontend-unit (CI runs it)."
@@ -250,7 +265,7 @@ if changed_match '^(backend/scripts/package-static-app\.mjs|scripts/package-stat
     else
       err "static-app packager unit FAILED:"
       tail -n 30 "$PP_TMP/packager" | sed 's/^/    /' >&2
-      FAIL=1
+      fail_check static-app-packager
     fi
   else
     warn "node not found — skipping static-app packager unit (CI runs it)."
@@ -270,7 +285,7 @@ elif backend_needs_pytest; then
     if [ -z "$NODE_MODULES" ]; then
       err "backend tests need frontend dependencies matching this worktree's lockfile"
       err "  enable: (cd frontend && npm ci)"
-      FAIL=1
+      fail_check backend-deps
     else
       warn "running backend pytest (full suite currently ~10m)…"
       # Sibling sessions all share this ONE venv (+ its SQLite fixtures + esbuild),
@@ -303,7 +318,7 @@ elif backend_needs_pytest; then
              "$VENV" -m pytest -q -p no:cacheprovider >"$PP_TMP/be" 2>&1); then
         ok "backend pytest passed"
       else
-        err "backend pytest FAILED:"; tail -n 30 "$PP_TMP/be" | sed 's/^/    /' >&2; FAIL=1
+        err "backend pytest FAILED:"; tail -n 30 "$PP_TMP/be" | sed 's/^/    /' >&2; fail_check backend-pytest
       fi
       # Release the shared-venv lock (fd 9 also closes on hook exit; explicit is tidier).
       exec 9>&- || true
@@ -323,6 +338,13 @@ if [ "$FAIL" -ne 0 ]; then
   else
     err "push blocked. Fix the above, or bypass only if the non-privacy failure is understood."
   fi
+  # The verdict, for programs. Everything above this line is written for a
+  # person and may be reworded freely; THIS line is a contract. Möbius's
+  # Contribute reads it to tell an owner why a Send was refused, so keep the
+  # `key=value` shape and the check names stable, and change it deliberately.
+  printf '[pre-push] verdict=blocked cause=%s checks=%s\n' \
+    "$([ "$PRIVACY_FAIL" -ne 0 ] && echo privacy || echo checks)" \
+    "$FAILED_CHECKS" >&2
   exit 1
 fi
 ok "all gate checks passed — pushing"
