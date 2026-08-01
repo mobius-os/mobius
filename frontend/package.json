@@ -37,7 +37,7 @@
     "dompurify": "^3.4.11",
     "highlight.js": "^11.11.1",
     "idb-keyval": "^6.2.6",
-    "katex": "0.17.0",
+    "katex": "0.18.1",
     "lucide-react": "^1.23.0",
     "marked": "^17.0.6",
     "marked-highlight": "2.2.4",
