@@ -370,7 +370,10 @@ def _parse_css_rgb(value: str) -> tuple[int, int, int] | None:
     return tuple(int(digits[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
   m = re.fullmatch(r"rgba?\(([^)]*)\)", text)
   if m:
-    parts = [p.strip() for p in m.group(1).replace("/", ",").split(",")]
+    # Accept both legacy comma-separated and modern space-separated syntax
+    # (`rgb(255 255 255 / 50%)`); an unparseable form returns None and keeps
+    # the previous fixed default rather than guessing.
+    parts = [p for p in re.split(r"[,\s]+", m.group(1).replace("/", " ")) if p]
     try:
       channels = [round(float(p[:-1]) * 255 / 100) if p.endswith("%") else round(float(p))
                   for p in parts[:3]]

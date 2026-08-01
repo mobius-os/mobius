@@ -604,3 +604,32 @@ test('REVERT RACE — query cache is seeded BEFORE stale marking', async () => {
   assert.ok(setIdx < invIdx,
     `setQueryData must precede invalidate so the refetch/re-apply sees the new theme; got ${events.join(' -> ')}`)
 })
+
+test('toggleTheme derives --accent-fg from the accent it preserved', async () => {
+  // The server injects --accent-fg into a TRAILING :root that parseThemeMeta
+  // does not read, so it is absent from meta.colors here. A fixed palette
+  // value would be spread back over the derivation and then persisted into the
+  // first :root, where _ensure_core_vars stops treating it as missing --
+  // permanently disabling the derivation for that theme.
+  const whiteAccent = DARK_CSS.replace('--accent: #ff00ff', '--accent: #ffffff')
+  const qc = makeQueryClient()
+  const api = makeApi(whiteAccent)
+  await themeService.toggleTheme(qc, 'dark', api)
+  const newCss = api.calls.find(c => c[0] === 'putThemeCss')[1]
+  assert.ok(newCss.includes('--accent: #ffffff'), 'accent survives the toggle')
+  assert.ok(newCss.includes('--accent-fg: #000000'),
+    'a white accent must not keep a white foreground through a toggle')
+})
+
+test('toggleTheme keeps a foreground the theme declared for itself', async () => {
+  const declared = DARK_CSS.replace(
+    '--accent: #ff00ff',
+    '--accent: #ffffff; --accent-fg: #123456',
+  )
+  const qc = makeQueryClient()
+  const api = makeApi(declared)
+  await themeService.toggleTheme(qc, 'dark', api)
+  const newCss = api.calls.find(c => c[0] === 'putThemeCss')[1]
+  assert.ok(newCss.includes('--accent-fg: #123456'),
+    'an explicitly declared foreground is never overwritten by derivation')
+})
