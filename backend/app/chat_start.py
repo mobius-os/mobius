@@ -46,8 +46,6 @@ async def start_programmatic_chat_turn(
   if not mark_starting(chat_id):
     return False
 
-  run_coro = None
-  broadcast_created = False
   try:
     start_gen = current_run_generation(chat_id)
     run_token = alloc_run_token()
@@ -69,33 +67,30 @@ async def start_programmatic_chat_turn(
       return False
 
     create_broadcast(chat_id)
-    broadcast_created = True
-    run_coro = run_chat(
-      result["history"],
-      chat_id=chat_id,
-      session_id=result["session_id"],
-      provider_id=result["provider"],
-      run_gen=start_gen,
-      run_token=run_token,
-    )
-    asyncio.create_task(run_coro)
     run_coro = None
-    get_system_broadcast().publish({
-      "type": "chat_run_started",
-      "chatId": chat_id,
-    })
-    return True
-  except BaseException:
-    # BaseException, not Exception: ``asyncio.CancelledError`` derives from
-    # BaseException, and the only suspension point above is the ``await_ack``
-    # that a cancellation lands on -- after ``mark_starting`` has succeeded.
-    # Leaking the claim there wedges the chat as 'starting' until the process
-    # restarts (see ``discard_starting`` in app/chat.py), which is exactly the
-    # drift this boundary exists to own.  The re-raise below keeps cancellation
-    # propagating normally.
-    if run_coro is not None:
-      run_coro.close()
-    if broadcast_created:
+    try:
+      run_coro = run_chat(
+        result["history"],
+        chat_id=chat_id,
+        session_id=result["session_id"],
+        provider_id=result["provider"],
+        run_gen=start_gen,
+        run_token=run_token,
+      )
+      asyncio.create_task(run_coro)
+    except BaseException:
+      if run_coro is not None:
+        run_coro.close()
       remove_broadcast(chat_id)
+      raise
+  except BaseException:
     discard_starting(chat_id)
     raise
+
+  # Once scheduled, the task owns the claim and broadcast. A system
+  # notification failure must not roll back a live run.
+  get_system_broadcast().publish({
+    "type": "chat_run_started",
+    "chatId": chat_id,
+  })
+  return True

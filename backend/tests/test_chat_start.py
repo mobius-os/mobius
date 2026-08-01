@@ -26,6 +26,7 @@ def _install_start_fakes(monkeypatch, *, generations=(7, 7)):
   removed_broadcasts = []
   system_events = []
   scheduled = []
+  run_calls = []
 
   monkeypatch.setattr(chat_start, "mark_starting", lambda _chat_id: True)
   monkeypatch.setattr(
@@ -47,8 +48,13 @@ def _install_start_fakes(monkeypatch, *, generations=(7, 7)):
       "provider": "claude",
     }
 
-  async def fake_run_chat(*_args, **_kwargs):
-    return None
+  def fake_run_chat(*args, **kwargs):
+    run_calls.append((args, kwargs))
+
+    async def finish():
+      return None
+
+    return finish()
 
   def fake_create_task(coro):
     scheduled.append(coro)
@@ -80,6 +86,7 @@ def _install_start_fakes(monkeypatch, *, generations=(7, 7)):
     removed_broadcasts=removed_broadcasts,
     system_events=system_events,
     scheduled=scheduled,
+    run_calls=run_calls,
   )
 
 
@@ -111,6 +118,15 @@ async def test_programmatic_start_owns_writer_fence_broadcast_and_spawn(
   assert state.created_broadcasts == ["chat-1"]
   assert state.removed_broadcasts == []
   assert len(state.scheduled) == 1
+  assert state.run_calls == [
+    ((["prepared-message"],), {
+      "chat_id": "chat-1",
+      "session_id": "session-1",
+      "provider_id": "claude",
+      "run_gen": 7,
+      "run_token": "run-1",
+    })
+  ]
   assert state.system_events == [
     {"type": "chat_run_started", "chatId": "chat-1"}
   ]
@@ -167,6 +183,32 @@ async def test_programmatic_start_cleans_transient_owners_when_spawn_fails(
   assert state.removed_broadcasts == ["chat-1"]
   assert state.system_events == []
   assert state.discarded == ["chat-1"]
+
+
+@pytest.mark.asyncio
+async def test_programmatic_start_does_not_reclaim_a_scheduled_run(
+  monkeypatch,
+):
+  state = _install_start_fakes(monkeypatch)
+
+  def fail_publish(_event):
+    raise RuntimeError("system broadcast unavailable")
+
+  monkeypatch.setattr(
+    chat_start,
+    "get_system_broadcast",
+    lambda: SimpleNamespace(publish=fail_publish),
+  )
+
+  with pytest.raises(RuntimeError, match="system broadcast unavailable"):
+    await chat_start.start_programmatic_chat_turn(
+      chat_id="chat-1", title="t", content="c", provider="codex",
+    )
+
+  assert len(state.scheduled) == 1
+  assert state.created_broadcasts == ["chat-1"]
+  assert state.removed_broadcasts == []
+  assert state.discarded == []
 
 
 @pytest.mark.asyncio
