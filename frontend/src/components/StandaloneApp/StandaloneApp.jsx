@@ -8,14 +8,15 @@ import { stageComposerHandoff } from '../ChatView/composerDraft.js'
 import RecoveryLink from '../ErrorBoundary/RecoveryLink.jsx'
 import {
   buildAgentRepairPrompt,
-  clearErrorRecoveryAttempt,
-  ERROR_RECOVERY_STABLE_MS,
+  createRepairIdentity,
   errorRecoveryFingerprint,
   readErrorRecoveryAttempt,
+  recoveryActionPolicy,
   recoveryPhaseForAttempt,
   repairChatPath,
   startAgentRepair,
   writeErrorRecoveryAttempt,
+  writeRefreshedRecoveryAttempt,
 } from '../../lib/errorRecovery.js'
 import {
   isVisualContentOnly,
@@ -48,8 +49,10 @@ export default function StandaloneApp({ initialApp }) {
   const [removed, setRemoved] = useState(false)
   const [immersive, setImmersive] = useState(false)
   const [crash, setCrash] = useState(null)
+  const crashFingerprint = crash?.fingerprint || null
   const recoverySurfaceKey = `standalone-app:${initialApp.id}`
   const repairStartingRef = useRef(false)
+  const repairControllerRef = useRef(null)
   const [installOpen, setInstallOpen] = useState(() => {
     try { return new URLSearchParams(window.location.search).get('install') === '1' }
     catch { return false }
@@ -78,14 +81,6 @@ export default function StandaloneApp({ initialApp }) {
     return current
   }, [app, initialApp.id, queryClient])
 
-  useEffect(() => {
-    if (crash) return undefined
-    const timer = setTimeout(() => {
-      clearErrorRecoveryAttempt(recoverySurfaceKey)
-    }, ERROR_RECOVERY_STABLE_MS)
-    return () => clearTimeout(timer)
-  }, [crash, recoverySurfaceKey])
-
   const captureCrash = useCallback((_appId, error, chatId) => {
     const message = readableAppDiagnostic(error)
     const fingerprint = errorRecoveryFingerprint(recoverySurfaceKey, message)
@@ -98,12 +93,43 @@ export default function StandaloneApp({ initialApp }) {
       chatId,
       fingerprint,
       phase: recoveryPhaseForAttempt(attempt),
+      attemptPhase: attempt?.phase || null,
       repairChatId: attempt?.chatId || null,
+      repairRequestId: attempt?.repairRequestId || null,
+      messageCid: attempt?.messageCid || null,
       agentError: attempt?.phase === 'agent-failed'
         ? 'Möbius couldn’t start the repair chat.'
         : '',
     })
   }, [recoverySurfaceKey])
+
+  useEffect(() => () => repairControllerRef.current?.abort(), [])
+
+  useEffect(() => {
+    if (!crashFingerprint) return undefined
+    function onPageShow(event) {
+      if (!event.persisted) return
+      repairStartingRef.current = false
+      repairControllerRef.current = null
+      const attempt = readErrorRecoveryAttempt({
+        surfaceKey: recoverySurfaceKey,
+        fingerprint: crashFingerprint,
+      })
+      setCrash(current => current ? {
+        ...current,
+        phase: recoveryPhaseForAttempt(attempt),
+        attemptPhase: attempt?.phase || null,
+        repairChatId: attempt?.chatId || null,
+        repairRequestId: attempt?.repairRequestId || null,
+        messageCid: attempt?.messageCid || null,
+        agentError: attempt?.phase === 'agent-failed'
+          ? 'Möbius couldn’t start the repair chat.'
+          : '',
+      } : current)
+    }
+    window.addEventListener('pageshow', onPageShow)
+    return () => window.removeEventListener('pageshow', onPageShow)
+  }, [crashFingerprint, recoverySurfaceKey])
 
   useSystemEventStream(useCallback((event) => {
     if (String(event.appId || '') !== String(initialApp.id)) return
@@ -205,26 +231,55 @@ export default function StandaloneApp({ initialApp }) {
   }, [captureCrash, initialApp.id])
 
   const refreshCrash = useCallback(() => {
-    if (!crash) return
-    writeErrorRecoveryAttempt({
+    if (!crash || repairStartingRef.current) return
+    writeRefreshedRecoveryAttempt({
       surfaceKey: recoverySurfaceKey,
       fingerprint: crash.fingerprint,
-      phase: 'refreshed',
     })
     window.location.reload()
   }, [crash, recoverySurfaceKey])
 
   const reportCrash = useCallback(() => {
     if (!crash || repairStartingRef.current) return
+    const identity = createRepairIdentity(crash)
+    let createdChatId = crash.repairChatId || null
     repairStartingRef.current = true
+    repairControllerRef.current = new AbortController()
+    const startingAttempt = {
+      phase: 'agent-starting',
+      chatId: crash.repairChatId,
+      repairRequestId: identity.repairRequestId,
+      messageCid: identity.messageCid,
+    }
+    writeErrorRecoveryAttempt({
+      surfaceKey: recoverySurfaceKey,
+      fingerprint: crash.fingerprint,
+      ...startingAttempt,
+    })
     setCrash(current => current ? {
       ...current,
       phase: 'agent-starting',
+      attemptPhase: 'agent-starting',
+      repairRequestId: identity.repairRequestId,
+      messageCid: identity.messageCid,
       agentError: '',
     } : current)
     void startAgentRepair({
       client: api,
       base: BASE,
+      repairRequestId: identity.repairRequestId,
+      messageCid: identity.messageCid,
+      signal: repairControllerRef.current.signal,
+      onChatCreated: chatId => {
+        createdChatId = chatId
+        writeErrorRecoveryAttempt({
+          surfaceKey: recoverySurfaceKey,
+          fingerprint: crash.fingerprint,
+          ...startingAttempt,
+          chatId,
+        })
+        setCrash(current => current ? { ...current, repairChatId: chatId } : current)
+      },
       prompt: buildAgentRepairPrompt({
         surface: `standalone app ${app.name} (${app.id})`,
         message: readableAppDiagnostic(crash.error),
@@ -237,22 +292,37 @@ export default function StandaloneApp({ initialApp }) {
         fingerprint: crash.fingerprint,
         phase: 'agent-directed',
         chatId: result.chatId,
+        repairRequestId: identity.repairRequestId,
+        messageCid: identity.messageCid,
       })
       window.location.href = result.path
-    }).catch(() => {
+    }).catch(error => {
       repairStartingRef.current = false
+      repairControllerRef.current = null
+      if (error?.name === 'AbortError') return
       writeErrorRecoveryAttempt({
         surfaceKey: recoverySurfaceKey,
         fingerprint: crash.fingerprint,
         phase: 'agent-failed',
+        chatId: createdChatId,
+        repairRequestId: identity.repairRequestId,
+        messageCid: identity.messageCid,
       })
       setCrash(current => current ? {
         ...current,
         phase: 'recovery',
+        attemptPhase: 'agent-failed',
+        repairChatId: createdChatId,
         agentError: 'Möbius couldn’t start the repair chat.',
       } : current)
     })
   }, [app.id, app.name, crash, recoverySurfaceKey])
+
+  const crashActions = crash ? recoveryActionPolicy({
+    phase: crash.phase,
+    attemptPhase: crash.attemptPhase,
+    repairChatId: crash.repairChatId,
+  }) : null
 
   const openRepairChat = useCallback(() => {
     if (crash?.repairChatId) {
@@ -319,34 +389,34 @@ export default function StandaloneApp({ initialApp }) {
           <p>
             {crash.phase === 'refresh' && 'Refresh the app first. Your chats and data are safe.'}
             {(crash.phase === 'agent' || crash.phase === 'agent-starting') && 'Refreshing didn’t fix it. Möbius can send this error to a new repair chat for your agent to investigate.'}
-            {crash.phase === 'recovery' && crash.repairChatId && 'The repair chat started, but the app still can’t open. System recovery is the remaining fallback.'}
-            {crash.phase === 'recovery' && !crash.repairChatId && 'The repair chat couldn’t start. Try the agent again or use system recovery as a last resort.'}
+            {crash.phase === 'recovery' && crash.attemptPhase === 'agent-directed' && 'The repair chat started, but the app still can’t open. System recovery is the remaining fallback.'}
+            {crash.phase === 'recovery' && crash.attemptPhase === 'agent-failed' && 'The repair chat couldn’t start. Try the agent again or use system recovery as a last resort.'}
           </p>
           <pre>{readableAppDiagnostic(crash.error)}</pre>
           {crash.agentError && (
             <p className="standalone-app__crash-status" role="status">{crash.agentError}</p>
           )}
           <div>
-            {crash.phase !== 'refresh' && (
+            {crashActions.showRefreshAgain && (
               <button type="button" onClick={refreshCrash}>Refresh again</button>
             )}
-            {crash.phase === 'recovery' && crash.repairChatId && (
+            {crashActions.showOpenRepairChat && (
               <button type="button" onClick={openRepairChat}>Open repair chat</button>
             )}
-            {!crash.repairChatId && (
+            {(crash.phase === 'refresh' || crashActions.showAskAgent || crashActions.showRetryAgent || crash.phase === 'agent-starting') && (
               <button
                 type="button"
                 onClick={crash.phase === 'refresh' ? refreshCrash : reportCrash}
                 disabled={crash.phase === 'agent-starting'}
               >
                 {crash.phase === 'refresh' && 'Refresh app'}
-                {crash.phase === 'agent' && 'Ask agent to fix'}
+                {crash.phase === 'agent' && (crash.attemptPhase === 'agent-starting' ? 'Resume agent repair' : 'Ask agent to fix')}
                 {crash.phase === 'agent-starting' && 'Starting repair chat…'}
                 {crash.phase === 'recovery' && 'Try agent again'}
               </button>
             )}
           </div>
-          {crash.phase === 'recovery' && (
+          {crashActions.showRecovery && (
             <RecoveryLink
               className="standalone-app__recovery"
               lead="If the repair chat can’t get you back in,"

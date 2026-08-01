@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Text, case, cast, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import activity, auth, models, providers, questions
@@ -169,6 +170,22 @@ def _drain_writer_before_sidecar_read(
 class ChatUpdate(BaseModel):
   title: str | None = None
   messages: list[dict] | None = None
+
+
+class ChatCreate(ChatUpdate):
+  # Stable identity for a client retry whose first response may have been lost.
+  # It is owner-scoped by the route and derives an opaque UUID rather than being
+  # stored as user-visible chat metadata.
+  recovery_request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+def _chat_create_response(chat: models.Chat, db: Session) -> dict:
+  detail = _chat_detail_response(chat, db=db)
+  return {
+    **_owner_chat_summary(chat),
+    "messages": detail["messages"],
+    "detail": detail,
+  }
 
 
 class PinnedOrderItem(BaseModel):
@@ -675,7 +692,7 @@ def list_agent_lifecycle(
 
 @router.post("", dependencies=[Depends(reject_cross_site)])
 def create_chat(
-  body: ChatUpdate,
+  body: ChatCreate,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
@@ -698,6 +715,18 @@ def create_chat(
   """
   import uuid
 
+  chat_id = str(uuid.uuid4())
+  if body.recovery_request_id:
+    chat_id = str(uuid.uuid5(
+      uuid.NAMESPACE_URL,
+      f"mobius:error-repair:{body.recovery_request_id}",
+    ))
+    existing = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if existing is not None:
+      if existing.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="repair chat was deleted")
+      return _chat_create_response(existing, db)
+
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
   provider = providers.resolve_default_provider(
@@ -705,7 +734,7 @@ def create_chat(
   )
 
   chat = models.Chat(
-    id=str(uuid.uuid4()),
+    id=chat_id,
     title=body.title or "New chat",
     messages=body.messages or [],
     provider=provider,
@@ -718,18 +747,22 @@ def create_chat(
     ),
   )
   db.add(chat)
-  db.commit()
+  try:
+    db.commit()
+  except IntegrityError:
+    db.rollback()
+    if not body.recovery_request_id:
+      raise
+    existing = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if existing is None or existing.deleted_at is not None:
+      raise
+    return _chat_create_response(existing, db)
   db.refresh(chat)
   activity.log_event("chat_created", chat_id=chat.id)
   _reclaim_expired_tombstones_after_chat_write(db)
   # Preserve the flat summary + messages fields existing callers consume while
   # carrying the exact detail contract under its own forward-compatible key.
-  detail = _chat_detail_response(chat, db=db)
-  return {
-    **_owner_chat_summary(chat),
-    "messages": detail["messages"],
-    "detail": detail,
-  }
+  return _chat_create_response(chat, db)
 
 
 @router.put("/pinned-order", dependencies=[Depends(reject_cross_site)])

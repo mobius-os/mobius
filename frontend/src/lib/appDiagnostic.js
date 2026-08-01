@@ -1,8 +1,7 @@
-const TOKEN_IN_URL = /([?&]token=)[^&\s"'<>]+/gi
+import { redactDiagnosticText } from './errorRecovery.js'
 
 export function readableAppDiagnostic(error, limit = 6000) {
-  const raw = String(error?.message || error || 'Unknown app error')
-    .replace(TOKEN_IN_URL, '$1[redacted]')
+  const raw = redactDiagnosticText(error?.message || error || 'Unknown app error')
   return raw.length > limit
     ? `${raw.slice(0, limit)}\n[diagnostic truncated]`
     : raw

@@ -257,6 +257,25 @@ def test_create_chat_returns_canonical_owner_drawer_summary(client, auth):
   assert body["detail"] == detail_body
 
 
+def test_create_repair_chat_is_idempotent_across_ambiguous_retries(client, auth):
+  payload = {
+    "title": "Fix a Möbius error",
+    "recovery_request_id": "recovery-request-1",
+  }
+  first = client.post("/api/chats", json=payload, headers=auth)
+  retry = client.post("/api/chats", json=payload, headers=auth)
+
+  assert first.status_code == 200
+  assert retry.status_code == 200
+  assert retry.json()["id"] == first.json()["id"]
+  assert retry.json()["messages"] == []
+
+  listed = client.get("/api/chats", headers=auth)
+  assert listed.status_code == 200
+  matches = [row for row in listed.json() if row["id"] == first.json()["id"]]
+  assert len(matches) == 1
+
+
 def test_chat_list_projects_summaries_without_hydrating_transcripts(
   client, auth,
 ):
