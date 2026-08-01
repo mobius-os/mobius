@@ -976,8 +976,10 @@ test.describe('Stream reconnection', () => {
     const CHAT_ID = '11111111-1111-1111-1111-111111111111'
     const QUESTION_ID = 'q-frozen-1'
     const TURN_TS = 1700000000000
+    const GOAL = 'Keep this question stable'
 
     let answerPosted = null
+    let streamRequestCount = 0
 
     // Initial chat load: a running chat whose last assistant message is
     // frozen on an unanswered question. Crucially `pending_question_id`
@@ -989,7 +991,7 @@ test.describe('Stream reconnection', () => {
       title: 'frozen chat',
       updated_at: updatedAt,
       messages: [
-        { role: 'user', content: 'help me pick', ts: TURN_TS - 1000 },
+        { role: 'user', content: `/goal ${GOAL}`, ts: TURN_TS - 1000 },
         {
           role: 'assistant',
           ts: TURN_TS,
@@ -1012,6 +1014,7 @@ test.describe('Stream reconnection', () => {
       total: 2,
       offset: 0,
       running: true,
+      active_goal_objective: GOAL,
       pending_question_id: null,
       session_id: 'sess-1',
       provider: 'claude',
@@ -1031,6 +1034,7 @@ test.describe('Stream reconnection', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           running: true,
+          active_goal_objective: GOAL,
           pending_messages: [],
           pending_question_id: null,
           updated_at: updatedAt,
@@ -1038,15 +1042,17 @@ test.describe('Stream reconnection', () => {
       })
     })
 
-    // The /stream catch-up is EMPTY (just catch_up_done) and the body
-    // holds open indefinitely — the turn is parked on the question
-    // future, so no `done` and no `question` event ever arrives.
+    // The first /stream catch-up is EMPTY (just catch_up_done), matching a
+    // turn parked on the question future: no `done` and no `question` event.
     // `streamItems` stays empty (no live card, no bridge suppression),
-    // `liveQuestionId` is never set by the stream, and `isStreaming`
-    // stays true. We use a never-resolving ReadableStream so the EOF
-    // reconnect loop doesn't churn — the connection just stays open the
-    // way a real parked turn's SSE does.
+    // and `liveQuestionId` is never set by the stream. Later reattachments
+    // fail so the same test reaches retry exhaustion after the answer handoff.
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+      streamRequestCount++
+      if (streamRequestCount > 1) {
+        await route.fulfill({ status: 503, body: 'temporary stream failure' })
+        return
+      }
       const body = [
         'data: {"type":"catch_up_done"}\n\n',
       ].join('')
@@ -1055,12 +1061,8 @@ test.describe('Stream reconnection', () => {
         headers: {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
-          // A chunked SSE response that Playwright keeps open: fulfilling
-          // with a finite body still signals EOF, which would re-arm the
-          // reconnect. That's fine — every reconnect replays the same
-          // empty catch-up, isStreaming stays true throughout, and the
-          // persisted card stays answerable. We assert on that steady
-          // state.
+          // The finite body signals EOF and re-arms reconnect; subsequent
+          // requests deliberately fail above to exercise ambiguous loss.
         },
         body,
       })
@@ -1084,6 +1086,8 @@ test.describe('Stream reconnection', () => {
 
     // The persisted question card renders.
     await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 10000 })
+    const goalRail = page.getByRole('group', { name: 'Goal progress' })
+    await expect(goalRail).toContainText(`Goal · ${GOAL}`)
 
     // The option buttons must be ENABLED (the bug rendered them
     // disabled). Pick an answer + submit.
@@ -1094,6 +1098,13 @@ test.describe('Stream reconnection', () => {
     const submitBtn = page.getByRole('button', { name: 'Submit' })
     await expect(submitBtn).toBeEnabled()
     await submitBtn.click()
+
+    // The answer stays inside this same durable goal run. Even after this
+    // browser exhausts its reconnects, the connection warning must not retire
+    // the goal while the authoritative runtime still reports `running:true`.
+    await expect(goalRail).toContainText(`Goal · ${GOAL}`)
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({ timeout: 12000 })
+    await expect(goalRail).toContainText(`Goal · ${GOAL}`)
 
     // Answering MUST POST the answer payload (the turn unfreezes).
     await expect.poll(() => answerPosted, { timeout: 5000 }).not.toBeNull()

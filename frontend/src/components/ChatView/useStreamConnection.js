@@ -161,6 +161,10 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  * @param {(info?: {continues: boolean, promotedTs: number|null}) => void} [callbacks.onStreamEnd]
  *   Fired one rAF after the `done` event so React commits before the
  *   caller promotes streamItems to messages.
+ * @param {() => void} [callbacks.onConnectionLost]
+ *   Fired when this browser exhausts its reconnect attempts but the backend
+ *   turn may still be running. Callers may preserve the last-good payload,
+ *   but must not treat this as a terminal run boundary.
  * @param {(event: object) => void} [callbacks.onSystemEvent]
  *   Fired for non-chat SSE events (theme/app/shell). Not buffered.
  * @param {(opts?: {force?: boolean}) => void} [callbacks.onNeedsRefresh]
@@ -213,6 +217,7 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  */
 export default function useStreamConnection(chatId, {
   onStreamEnd,
+  onConnectionLost,
   onSystemEvent,
   onNeedsRefresh,
   onQueuedTurnStarting,
@@ -606,6 +611,8 @@ export default function useStreamConnection(chatId, {
   const connectRef = useRef(null)
   const onStreamEndRef = useRef(onStreamEnd)
   onStreamEndRef.current = onStreamEnd
+  const onConnectionLostRef = useRef(onConnectionLost)
+  onConnectionLostRef.current = onConnectionLost
   const onSystemEventRef = useRef(onSystemEvent)
   onSystemEventRef.current = onSystemEvent
   const onNeedsRefreshRef = useRef(onNeedsRefresh)
@@ -1258,14 +1265,13 @@ export default function useStreamConnection(chatId, {
           _setStreamItems(saved)
         }
         // Retries are exhausted for THIS browser connection, not necessarily
-        // for the backend turn. Signal stream-end so any last-good partial can
-        // be promoted locally, then force a DB refresh; ChatView rehydrates
-        // `running` from the server and flips the composer back to active if
-        // the agent is still working. Without that refresh, a mobile sleep /
-        // network handoff could make the UI look idle while the server was
-        // still running.
+        // for the backend turn. Preserve any last-good partial through the
+        // explicitly non-terminal callback, then force an authoritative DB
+        // refresh. A connection failure must never masquerade as a run-end:
+        // doing so briefly retired run-owned UI (including the active goal)
+        // before the refresh restored `running` from the server.
         requestAnimationFrame(() => {
-          onStreamEndRef.current?.()
+          onConnectionLostRef.current?.()
           onNeedsRefreshRef.current?.({ force: true })
         })
       } else {

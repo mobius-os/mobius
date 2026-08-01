@@ -10,6 +10,10 @@ import {
 } from '../goalProgress.js'
 
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const streamConnection = readFileSync(
+  new URL('../useStreamConnection.js', import.meta.url),
+  'utf8',
+)
 const progressRail = readFileSync(new URL('../ProgressRail.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
@@ -120,7 +124,7 @@ test('the goal reuses the progress rail and stays as context for build phases', 
   )
 })
 
-test('ChatView binds goal state to the existing run-start and turn-end lifecycle', () => {
+test('ChatView binds goal state to explicit run boundaries, not transport liveness', () => {
   const runStarts = chatView.split('setBuildPhases(railAtRunStart())').slice(1)
   assert.equal(runStarts.length, 4, 'every current run-start seam should be covered')
   for (const suffix of runStarts) {
@@ -130,10 +134,35 @@ test('ChatView binds goal state to the existing run-start and turn-end lifecycle
       'goal and build progress must reset together at each run boundary',
     )
   }
+  assert.doesNotMatch(
+    chatView,
+    /if \(!turnActive\)[\s\S]{0,100}setActiveGoalState\(''\)/,
+    'a transient loss of browser liveness must not retire a durable goal',
+  )
   assert.match(
     chatView,
-    /if \(!turnActive\) \{\s*if \(activeGoalObjective\) setActiveGoalState\(''\)/,
-    'a completed or stopped turn must retire its goal indication',
+    /setServerRunningState\(false\)\s*setActiveGoalState\(''\)\s*\/\/ Stream ended without continuation/,
+    'a terminal stream boundary must retire its goal indication',
+  )
+  assert.match(
+    chatView,
+    /disconnect\(\{ clearStreaming: true \}\)\s*promoteStreamToMessages\(\)\s*setSending\(false\)\s*setServerRunningState\(false\)\s*setActiveGoalState\(''\)/,
+    'a confirmed Stop must retire its goal indication',
+  )
+  assert.match(
+    chatView,
+    /onConnectionLost: \(\) => \{[\s\S]{0,500}promoteStreamToMessages\(\{ keepTurnOpen: true \}\)/,
+    'connection loss may preserve partial output without ending the run',
+  )
+  assert.match(
+    streamConnection,
+    /onConnectionLostRef\.current\?\.\(\)[\s\S]{0,100}onNeedsRefreshRef\.current/,
+    'retry exhaustion must use the non-terminal handoff before reconciliation',
+  )
+  assert.match(
+    chatView,
+    /const visibleGoalObjective = activeGoalObjective/,
+    'goal visibility must follow goal ownership rather than a transport flag',
   )
   assert.match(
     chatView,

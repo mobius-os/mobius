@@ -429,10 +429,8 @@ export default function ChatView({
     }, MESSAGE_META_VISIBLE_MS)
   }, [])
   useEffect(() => {
-    setActiveGoalObjective(
-      queryClient.getQueryData(chatMessagesQueryKey(chatId))
-        ?.activeGoalObjective ?? '',
-    )
+    const runtime = queryClient.getQueryData(chatMessagesQueryKey(chatId))
+    setActiveGoalObjective(runtime?.running ? (runtime.activeGoalObjective ?? '') : '')
   }, [chatId, queryClient])
 
   // Pending queue (the items shown in the queued-tray above the
@@ -953,6 +951,13 @@ export default function ChatView({
     patchQuestionAnswers,
     flushStreamSnapshot,
   } = useStreamConnection(chatId, {
+    onConnectionLost: () => {
+      // Browser transport ownership is uncertain here: the backend turn may
+      // still be parked on a question or producing output. Preserve the
+      // last-good assistant payload without retiring any run-owned state;
+      // onNeedsRefresh below is the authority for whether the run truly ended.
+      promoteStreamToMessages({ keepTurnOpen: true })
+    },
     onStreamEnd: ({ continues, promotedMessage } = {}) => {
       if (embedded && continues === false) setEmbeddedRunActive(false)
       promoteStreamToMessages()
@@ -1001,6 +1006,7 @@ export default function ChatView({
         setSending(false)
         sendingRef.current = false
         setServerRunningState(false)
+        setActiveGoalState('')
         // Stream ended without continuation. If we have local pending
         // entries, server may have cleared them (auth fail, error) —
         // refetch to reconcile. Skip when pending empty.
@@ -2814,6 +2820,7 @@ export default function ChatView({
       promoteStreamToMessages()
       setSending(false)
       setServerRunningState(false)
+      setActiveGoalState('')
       // Sync sendingRef to the just-committed state so the synchronous
       // doSend(resendText) call below reads the post-stop value.
       // setSending(false) queues a render — the next render will write
@@ -3082,10 +3089,7 @@ export default function ChatView({
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
   useEffect(() => {
-    if (!turnActive) {
-      if (activeGoalObjective) setActiveGoalState('')
-      return
-    }
+    if (!turnActive) return
     // Ordinary live turns set this synchronously at their run-start seam. This
     // branch is the cold remount/reconnect recovery path. The query cache
     // retains a known goal across keyed chat switches, including after a
@@ -3513,7 +3517,9 @@ export default function ChatView({
     .map(app => ({ app, vm: openAppCtaViewModel(app, turnActive) }))
     .filter(entry => entry.vm)
   const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
-  const visibleGoalObjective = turnActive ? activeGoalObjective : ''
+  // Goal ownership comes from explicit run boundaries and authoritative
+  // runtime reconciliation, never a momentary browser transport signal.
+  const visibleGoalObjective = activeGoalObjective
   const progressRail = progressRailViewModel(
     visibleGoalObjective,
     buildPhaseRail,
@@ -3816,9 +3822,9 @@ export default function ChatView({
             attention actions → build-progress rail → connection/retry → queued
             messages → composer. The shell owns the one persistent offline
             explanation; the composer retains contextual send-failure copy. */}
-        {/* A LOST connection empties the stack: while the terminal
-            'disconnected' state is set, nudges, rail, and the queued tray
-            hide so the one thing on screen is the problem and its Retry
+        {/* A LOST connection hides transient actions: while the terminal
+            'disconnected' state is set, nudges hide so the one thing on screen
+            is the problem and its Retry
             (owner ask, 2026-07-17). ONLY 'disconnected' gates: 'retrying'
             is a transient bare-EOF auto-reconnect that clears itself in
             ~300ms — blanking and popping the whole stack on every mobile
@@ -3867,12 +3873,12 @@ export default function ChatView({
               </button>
             )}
           </div>
-          <ProgressRail
-            items={progressRail}
-            ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
-          />
           </>
         )}
+        <ProgressRail
+          items={progressRail}
+          ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
+        />
         {/* Contribution staged from THIS chat: approve it where the work
             happened. Renders nothing unless something is actually waiting.
             Owner-shell only: an app-embedded chat runs on a capability token
