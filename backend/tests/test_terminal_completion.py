@@ -842,6 +842,10 @@ def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch):
   state = _load("t7")
   assert state["running"] is False, "unsupported cleanup must clear marker"
   assert state["pending_messages"] == [], "pending must be cleared durably"
+  assert state["messages"][-1]["blocks"] == [{
+    "type": "error",
+    "message": "Provider 'Bogus' has no supported runtime.",
+  }]
   assert not chat_mod.registry.is_alive("t7"), "registry released"
 
 
@@ -1425,6 +1429,8 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   state = _load("t12-auth-error")
   assert state["running"] is False
   assert state["pending_messages"] == []
+  assert state["messages"][-1]["blocks"]
+  assert state["messages"][-1]["blocks"][-1]["type"] == "error"
   assert _run_outcomes("t12-auth-error") == {"rt-12-auth": "failed"}
   assert not chat_mod.registry.is_alive("t12-auth-error")
 
@@ -1453,7 +1459,9 @@ def test_setup_error_cleanup_stale_gen_does_not_clobber_successor():
   chat_mod.registry.mark_starting("se-stale")    # successor holds the slot
 
   disposition = asyncio.run(
-    chat_mod._terminal_setup_error_cleanup("se-stale", "rt-stale", 1)
+    chat_mod._terminal_setup_error_cleanup(
+      "se-stale", "rt-stale", 1, error_message="stale error",
+    )
   )
   _drain_actor()
 
@@ -1463,6 +1471,9 @@ def test_setup_error_cleanup_stale_gen_does_not_clobber_successor():
   assert state["pending_messages"] == [
     {"role": "user", "content": "queued-behind-fresh", "ts": 2}
   ], "successor's queued send must survive"
+  assert state["messages"] == [
+    {"role": "user", "content": "fresh", "ts": 1}
+  ], "stale cleanup must not persist an error into the successor"
   assert chat_mod.registry.current_generation("se-stale") == 2, (
     "successor's generation must survive (not reset to reusable 0)"
   )
@@ -1484,7 +1495,9 @@ def test_setup_error_cleanup_owned_gen_clears_and_forgets():
   chat_mod.registry.mark_starting("se-own")
 
   disposition = asyncio.run(
-    chat_mod._terminal_setup_error_cleanup("se-own", "rt-own", gen)
+    chat_mod._terminal_setup_error_cleanup(
+      "se-own", "rt-own", gen, error_message="setup failed",
+    )
   )
   _drain_actor()
 
@@ -1492,6 +1505,9 @@ def test_setup_error_cleanup_owned_gen_clears_and_forgets():
   state = _load("se-own")
   assert state["running"] is False, "owned cleanup clears the marker"
   assert state["pending_messages"] == [], "owned cleanup clears pending"
+  assert state["messages"][-1]["blocks"] == [
+    {"type": "error", "message": "setup failed"}
+  ], "owned cleanup persists the setup error before clearing the marker"
   assert chat_mod.registry.current_generation("se-own") == 0, "forgotten"
   assert not chat_mod.registry.is_alive("se-own"), "starting slot released"
 

@@ -2737,6 +2737,8 @@ async def _terminal_setup_error_cleanup(
   chat_id: str,
   run_token: str = "",
   run_gen: int | None = None,
+  *,
+  error_message: str,
 ) -> chat_queue.TerminalDisposition:
   """Bounded terminal cleanup for a setup-time error before any runner ran.
 
@@ -2748,9 +2750,9 @@ async def _terminal_setup_error_cleanup(
   StartTurn's marker can't be erased and a wedged writer/lock can't hang
   teardown):
 
-    (0) ownership gate, (1) await ClearPending (strict),
-    (2) await FinishRun (strict), (3) discard_starting,
-    (4) forget (if-current), all inside
+    (0) ownership gate, (1) await Finalize with the error (strict),
+    (2) await ClearPending (strict), (3) await FinishRun (strict),
+    (4) discard_starting, (5) forget (if-current), all inside
     `asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)` around the queue lock.
 
   The ownership gate (step 0) mirrors `_complete_turn`'s `we_own_gen` check:
@@ -2783,6 +2785,14 @@ async def _terminal_setup_error_cleanup(
       async with chat_queue.get_lock(chat_id):
         if run_gen is not None and current_run_generation(chat_id) != run_gen:
           return chat_queue.TerminalDisposition.STALE_NO_ACTION
+        if run_token:
+          await _await_ack(get_writer().submit(Finalize(
+            chat_id=chat_id,
+            run_token=run_token,
+            snapshot=build_assistant_message([
+              {"type": "error", "message": error_message},
+            ]),
+          )))
         await _clear_pending_strict(chat_id)
         await _finish_run_strict(
           chat_id, run_token, terminal_status="failed",
@@ -4121,8 +4131,11 @@ async def _run_chat_impl_with_db(
 
   owner = db.query(models.Owner).first()
   if not owner:
-    bc.publish({"type": "error", "message": "No owner configured."})
-    disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
+    error_message = "No owner configured."
+    bc.publish({"type": "error", "message": error_message})
+    disposition = await _terminal_setup_error_cleanup(
+      chat_id, run_token or "", run_gen, error_message=error_message,
+    )
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
@@ -4257,12 +4270,10 @@ async def _run_chat_impl_with_db(
   except Exception:
     log.exception("failed to snapshot system prompt chat_id=%s", chat_id)
     db.rollback()
-    bc.publish({
-      "type": "error",
-      "message": "Could not preserve this chat's system prompt snapshot.",
-    })
+    error_message = "Could not preserve this chat's system prompt snapshot."
+    bc.publish({"type": "error", "message": error_message})
     disposition = await _terminal_setup_error_cleanup(
-      chat_id, run_token or "", run_gen,
+      chat_id, run_token or "", run_gen, error_message=error_message,
     )
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)
@@ -4344,7 +4355,9 @@ async def _run_chat_impl_with_db(
         provider_free=True,
       )
     bc.publish({"type": "error", "message": auth_error})
-    disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
+    disposition = await _terminal_setup_error_cleanup(
+      chat_id, run_token or "", run_gen, error_message=auth_error,
+    )
     bc.publish({"type": "done"})
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
@@ -4610,11 +4623,11 @@ async def _run_chat_impl_with_db(
     "unsupported provider chat_id=%s provider=%s — no SDK path",
     chat_id, provider.name,
   )
-  bc.publish({
-    "type": "error",
-    "message": f"Provider {provider.name!r} has no supported runtime.",
-  })
-  disposition = await _terminal_setup_error_cleanup(chat_id, run_token or "", run_gen)
+  error_message = f"Provider {provider.name!r} has no supported runtime."
+  bc.publish({"type": "error", "message": error_message})
+  disposition = await _terminal_setup_error_cleanup(
+    chat_id, run_token or "", run_gen, error_message=error_message,
+  )
   clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
   bc.publish({"type": "done"})
   bc.mark_completed()
