@@ -116,6 +116,20 @@
   cursor: pointer;
 }
 
+.standalone-app__recovery {
+  margin: 14px 0 0;
+  color: var(--muted, #a3a3a3);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: end;
+}
+
+.standalone-app__recovery a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .standalone-install__backdrop {
   position: fixed;
   inset: 0;

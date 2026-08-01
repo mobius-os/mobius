@@ -2,6 +2,7 @@ import { lazy, Suspense, useState, useEffect } from 'react'
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
 import { QueryClientProvider, useIsRestoring } from '@tanstack/react-query'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
+import RecoveryLink from './components/ErrorBoundary/RecoveryLink.jsx'
 import { api, beginEphemeralAuth, getToken, setToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
 import { setupQueries } from './hooks/queries.js'
@@ -274,6 +275,7 @@ function SetupStatusError({ retrying, onRetry }) {
             {retrying ? 'Trying again…' : 'Try again'}
           </button>
         </div>
+        <RecoveryLink />
       </div>
     </div>
   )
@@ -296,6 +298,7 @@ function ManagedSignInError({ onRetry }) {
             Try again
           </button>
         </div>
+        <RecoveryLink />
       </div>
     </div>
   )

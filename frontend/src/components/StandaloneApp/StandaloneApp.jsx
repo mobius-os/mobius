@@ -5,6 +5,7 @@ import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import { stageComposerHandoff } from '../ChatView/composerDraft.js'
+import RecoveryLink from '../ErrorBoundary/RecoveryLink.jsx'
 import {
   isVisualContentOnly,
   standaloneAppVersion,
@@ -232,6 +233,10 @@ export default function StandaloneApp({ initialApp }) {
             <button type="button" onClick={() => window.location.reload()}>Try again</button>
             {app.chat_id && <button type="button" onClick={reportCrash}>Report to agent</button>}
           </div>
+          <RecoveryLink
+            className="standalone-app__recovery"
+            lead="If the app still won’t open,"
+          />
         </section>
       )}
 

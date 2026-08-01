@@ -1,5 +1,6 @@
 import { Component } from 'react'
 import { recordClientError } from '../../lib/errorLog.js'
+import RecoveryLink from './RecoveryLink.jsx'
 import './ErrorBoundary.css'
 
 /**
@@ -78,6 +79,7 @@ export default class ErrorBoundary extends Component {
               Reload app
             </button>
           </div>
+          <RecoveryLink />
         </div>
       </div>
     )

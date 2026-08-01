@@ -61,11 +61,15 @@
 
 .errbound__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
 }
 
 .errbound__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font: inherit;
   font-size: 14px;
   font-weight: 500;
@@ -75,6 +79,7 @@
   background: transparent;
   color: var(--text, #ececec);
   cursor: pointer;
+  text-decoration: none;
   transition: opacity 0.15s var(--ease-out-soft, ease);
 }
 
@@ -88,4 +93,24 @@
   background: var(--accent, #8b6cf7);
   border-color: var(--accent, #8b6cf7);
   color: var(--accent-fg, #ffffff);
+}
+
+.errbound__recovery {
+  margin: 14px 0 0;
+  color: var(--muted, #a3a3a3);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: end;
+}
+
+.errbound__recovery a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .errbound__recovery a:hover {
+    color: var(--text, #ececec);
+  }
 }
