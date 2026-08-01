@@ -81,6 +81,8 @@ async def start_programmatic_chat_turn(
     except BaseException:
       if run_coro is not None:
         run_coro.close()
+      # No task or SSE subscriber owns this programmatic broadcast yet, so
+      # remove it instead of publishing the continuation path's terminal pair.
       remove_broadcast(chat_id)
       raise
   except BaseException:

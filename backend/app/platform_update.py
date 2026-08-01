@@ -2095,7 +2095,6 @@ async def spawn_platform_conflict_chat(
   db.add(chat)
   db.commit()
 
-  started = False
   try:
     started = await start_programmatic_chat_turn(
       chat_id=chat_id,
