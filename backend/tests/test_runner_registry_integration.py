@@ -175,6 +175,7 @@ def test_codex_runner_registers_then_unregisters_handle(monkeypatch):
     ),
     "ItemStartedNotification": type("ItemStartedNotification", (), {}),
     "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
+    "Personality": type("Personality", (), {"none": "none"}),
     "ReasoningEffort": lambda value: value,
     "Sandbox": type(
       "Sandbox",
