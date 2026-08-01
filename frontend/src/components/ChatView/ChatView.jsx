@@ -473,6 +473,10 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
+  // The model/effort picker can accept another choice before the prior save
+  // settles. Keep its serialized write tail at ChatView scope so both a closed
+  // + popover and an immediate Send still observe the same ordering boundary.
+  const settingsSaveTailRef = useRef(Promise.resolve())
   // Refs for the absolutely-positioned foot. Its ResizeObserver notifies the
   // scroll controller, which owns publishing composer clearance together with
   // every other indirect scroll-geometry write.
@@ -1947,6 +1951,11 @@ export default function ChatView({
       }
       let queueRequest = null
       try {
+        // Keep the normal synchronous submit transition (snapshot + clear the
+        // composer), but do not put the message on the wire until the last
+        // model choice is durable. The tail never rejects; a failed final pick
+        // reconciles to the last successful checkpoint before this continues.
+        await settingsSaveTailRef.current
         queueRequest = streamSend(
           text,
           attachments.length > 0 ? attachments : undefined,
@@ -2239,6 +2248,10 @@ export default function ChatView({
     }
 
     try {
+      // The optimistic row and composer clear above happen at tap time. Only
+      // transport waits, so typing begun after Send cannot be swallowed by a
+      // delayed settings round-trip.
+      await settingsSaveTailRef.current
       const result = await streamSend(
         sendText,
         attachments.length > 0 ? attachments : undefined,
@@ -3961,6 +3974,7 @@ export default function ChatView({
                 }
                 onChangeChatInfo={mergeChatInfo}
                 providerSwitchState={providerSwitchState}
+                settingsSaveTailRef={settingsSaveTailRef}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
                 embedded={embedded}

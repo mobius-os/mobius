@@ -53,9 +53,10 @@
  * ║   plugs a different platform's behaviour. Don't simplify       ║
  * ║   without re-verifying on iOS Safari AND Android Chrome.       ║
  * ║                                                                ║
- * ║   `reqIdRef` lives in THIS file (not ChatSettingsPanel) so     ║
- * ║   the stale-PATCH monotonic counter survives panel unmount.    ║
- * ║   A panel-local ref would reset between popover opens.         ║
+ * ║   `reqIdRef` lives here and `settingsSaveTailRef` comes from   ║
+ * ║   ChatView. Both outlive ChatSettingsPanel, so the newest       ║
+ * ║   picker intent and serialized write order survive panel       ║
+ * ║   unmount. Panel-local refs would reset between popover opens.  ║
  * ║                                                                ║
  * ╚════════════════════════════════════════════════════════════════╝
  */
@@ -87,6 +88,7 @@ export default function ComposerPopover({
   restartResumeError,
   onRestartResumeChange,
   providerSwitchState,
+  settingsSaveTailRef,
   onOpenInspector,
   onOpenSummary,
   embedded = false,
@@ -99,6 +101,12 @@ export default function ComposerPopover({
   // reset between opens and break the stale-response guard. See
   // ChatSettingsPanel's `reqIdRef` prop for the rationale.
   const reqIdRef = useRef(0)
+  // Standalone/component-test fallback. The normal shell supplies ChatView's
+  // tail so an immediate Send also waits for the last picker choice.
+  const fallbackSettingsSaveTailRef = useRef(Promise.resolve())
+  const durableSettingsSaveTailRef = (
+    settingsSaveTailRef || fallbackSettingsSaveTailRef
+  )
   // Tracks whether the chat textarea was focused at the moment the
   // popover opened. If yes, refocus after a picker action so the
   // soft keyboard stays open. If no (user tapped + with keyboard
@@ -280,6 +288,7 @@ export default function ComposerPopover({
                 onChange={onChangeChatInfo}
                 providerSwitchState={providerSwitchState}
                 reqIdRef={reqIdRef}
+                settingsSaveTailRef={durableSettingsSaveTailRef}
                 wasInputFocusedRef={wasInputFocusedRef}
               />
             </div>
