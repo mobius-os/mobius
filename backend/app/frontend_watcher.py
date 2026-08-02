@@ -57,6 +57,7 @@ _FRONTEND_DIR = Path(os.environ.get(
 ))
 _DIST_DIR = _FRONTEND_DIR / "dist"
 _STAGING_DIST_DIR = _FRONTEND_DIR / ".dist-staging"
+_BAKED_VENDOR_DIR = Path("/app/static/vendor")
 _REBUILD_DIST_DIR = _FRONTEND_DIR / ".dist-rebuild"
 _NEXT_DIST_DIR = _FRONTEND_DIR / ".dist-next"
 _OLD_DIST_DIR = _FRONTEND_DIR / ".dist-old"
@@ -580,13 +581,27 @@ def _vite_build_cmd(out_dir: Path) -> list[str]:
 
 
 def _copy_vendor(dest: Path) -> None:
-  vendor = Path("/app/static/vendor")
+  """Fill image-built vendor dependencies without replacing source assets.
+
+  Vite has already copied ``frontend/public/vendor`` into ``dest``. The image
+  also supplies heavy generated dependencies (currently KaTeX) that are not
+  checked into the source tree. Those two inputs are complementary: the baked
+  tree may fill absent paths, but source-owned public files must win when a
+  path exists in both. Replacing the directory here used to erase every newly
+  added public vendor asset at the final publish boundary.
+  """
+  vendor = _BAKED_VENDOR_DIR
   if not vendor.is_dir():
     return
   vendor_dest = dest / "vendor"
-  if vendor_dest.exists():
-    shutil.rmtree(vendor_dest)
-  shutil.copytree(vendor, vendor_dest)
+  vendor_dest.mkdir(parents=True, exist_ok=True)
+  for source in vendor.rglob("*"):
+    target = vendor_dest / source.relative_to(vendor)
+    if source.is_dir():
+      target.mkdir(parents=True, exist_ok=True)
+    elif not target.exists():
+      target.parent.mkdir(parents=True, exist_ok=True)
+      shutil.copy2(source, target)
 
 
 def _prepare_next_from(source_dir: Path) -> None:

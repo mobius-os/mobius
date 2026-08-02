@@ -375,6 +375,35 @@ def test_source_filter_and_scandir_exclude_generated_trees(fw_dirs):
   assert not fw._is_frontend_source_path(frontend / "node_modules" / "x.js")
 
 
+def test_baked_vendor_fills_gaps_without_erasing_source_assets(
+  tmp_path, monkeypatch,
+):
+  baked = tmp_path / "baked-vendor"
+  built = tmp_path / "built"
+  (baked / "fonts").mkdir(parents=True)
+  (baked / "katex").mkdir()
+  (baked / "fonts" / "mobius-fonts.css").write_text(
+    "old baked declarations", encoding="utf-8",
+  )
+  (baked / "katex" / "katex.min.css").write_text(
+    "generated dependency", encoding="utf-8",
+  )
+  (built / "vendor" / "fonts").mkdir(parents=True)
+  (built / "vendor" / "fonts" / "mobius-fonts.css").write_text(
+    "current source declarations", encoding="utf-8",
+  )
+  monkeypatch.setattr(fw, "_BAKED_VENDOR_DIR", baked)
+
+  fw._copy_vendor(built)
+
+  assert (built / "vendor" / "fonts" / "mobius-fonts.css").read_text() == (
+    "current source declarations"
+  )
+  assert (built / "vendor" / "katex" / "katex.min.css").read_text() == (
+    "generated dependency"
+  )
+
+
 def test_startup_build_skips_fresh_dist_but_recovers_newer_source(fw_dirs):
   src = fw_dirs["frontend"] / "src"
   src.mkdir()

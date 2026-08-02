@@ -62,3 +62,14 @@ def test_mounted_flag_is_set_inside_an_effect():
     "window.__frameMounted is never set inside a useEffect — the post-mount "
     "error guard is dead code (or fires before the first render commits)."
   )
+
+
+def test_font_check_is_requested_separately_from_app_mount():
+  html = _frame_html()
+  mount_signal = html[
+    html.index("function MountSignal"):
+    html.index("// Immersive safe-area passthrough")
+  ]
+  assert "__mobiusFontReadiness" not in mount_signal
+  assert "msg.type === 'moebius:frame-font-check'" in html
+  assert "type: 'moebius:frame-font-check-result'" in html

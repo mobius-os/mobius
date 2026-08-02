@@ -25,6 +25,7 @@ import {
   clearStoredStreamSnapshot,
 } from './streamSnapshotCache.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
+import { agentViewport } from '../../lib/agentViewport.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
 import {
   reportNetworkReachable,
@@ -1363,10 +1364,7 @@ export default function useStreamConnection(chatId, {
         : window.innerHeight
       const maxH = maxInnerHeightRef.current || 0
       const keyboardLikely = maxH > 0 && cur < maxH - 100
-      body.viewport = {
-        width: window.innerWidth,
-        height: keyboardLikely ? maxH : cur,
-      }
+      body.viewport = agentViewport(window, keyboardLikely ? maxH : cur)
       // Time-box the send POST. It normally returns 202 immediately (the turn
       // runs as a background task), so a hang means a dead socket (mobile
       // sleep, lost network) or a wedged backend — without this the await

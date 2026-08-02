@@ -251,6 +251,9 @@
   } catch (e) {}
 })();</script>
   <meta charset="UTF-8" />
+  <!-- One font-face source serves both the shell and isolated app frames. -->
+  <link rel="stylesheet" href="/vendor/fonts/mobius-fonts.css" />
+  <script src="/vendor/fonts/mobius-font-readiness.js"></script>
   <!-- viewport-fit=cover makes the iframe's layout viewport extend UNDER the
        notch/punch-hole so an immersive app's background paints full-bleed (the
        safe-rect-only default left a strip of shell colour above the app), and
@@ -290,8 +293,8 @@
       --accent-dim: rgba(139, 108, 247, 0.14);
       --accent-fg: #ffffff;
       --danger: #f87171; --green: #10b981;
-      --font: 'Inter', system-ui, -apple-system, sans-serif;
-      --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+      --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
+      --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
       /* Immersive safe-area insets, forwarded from the shell via
          moebius:frame-insets (env(safe-area-inset-*) reads 0 inside this
          sandboxed iframe). Default 0 so apps can reference them before the
@@ -1172,6 +1175,20 @@
       }
       if (msg.type === 'moebius:frame-interactivity') {
         setFrameInteractivity(msg.interactive === true, msg.suspendScrolling === true);
+        return;
+      }
+      if (msg.type === 'moebius:frame-font-check') {
+        const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
+        if (!requestId || requestId.length > 160) return;
+        const fonts = window.__mobiusFontReadiness;
+        Promise.resolve(
+          fonts ? fonts.settleDocument(document) : false
+        ).then((ready) => {
+          window.parent.postMessage(
+            { type: 'moebius:frame-font-check-result', requestId, ready: ready === true },
+            window.location.origin
+          );
+        });
         return;
       }
       if (msg.type === 'moebius:storage-sync') {

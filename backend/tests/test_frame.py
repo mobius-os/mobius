@@ -179,6 +179,9 @@ def test_frame_self_themes_no_server_style_injection(client, auth):
     # The pre-paint IIFE is present (shared with index.html / PREPAINT_SRC).
     assert "__mobius-theme__" in html
     assert "data-theme" in html  # the IIFE sets it + the fallback CSS gates on it
+    assert 'href="/vendor/fonts/mobius-fonts.css"' in html
+    assert "--font: 'Inter', 'Inter Fallback'" in html
+    assert "--mono: 'JetBrains Mono', 'JetBrains Mono Fallback'" in html
     # The frame self-themes by luminance from localStorage/slot — it does NOT
     # carry a SERVER-injected <html data-theme="light"> attribute (that was the
     # old inject_theme_into_html path). <html> is the bare tag.

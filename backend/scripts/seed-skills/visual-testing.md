@@ -27,7 +27,18 @@ that isolated browser session without writing onboarding or dismissal state. Use
 
 Raw `agent-browser open <url>` is for **non-Möbius pages only** (an external site you're scraping or sanity-checking) — it has no auth dance, so it shows the login wall for any Möbius route.
 
-Core moves once a page is open: `set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT"` (the helper sets this for you; needed when driving raw), `snapshot` (a11y tree with `@eN` refs), `click/fill/type @eN`, `screenshot <path>`, `wait` (on a signal — `wait @eN` / `--text` / `--fn` / `--url` — not a guessed duration), `batch "cmd1" "cmd2"` (ordered, fewer round-trips), `diff snapshot` / `diff screenshot --baseline <before>.png`.
+After changing state or temporarily injecting CSS into an already-open Möbius
+page, capture the result through the same verified boundary without navigating:
+
+```bash
+bash "$SCRIPTS_DIR/agent-screenshot.sh" --current-page <route> <out.png>
+```
+
+Do **not** fall back to raw `agent-browser screenshot` for a Möbius comparison;
+that bypasses the real display density, exact-font readiness, freshness, and
+atomic-output checks. Raw capture remains appropriate for non-Möbius pages.
+
+Core moves once a page is open: `set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" "$VIEWPORT_PIXEL_RATIO"` (the helper sets the complete geometry for you; needed when driving raw non-Möbius pages), `snapshot` (a11y tree with `@eN` refs), `click/fill/type @eN`, `wait` (on a signal — `wait @eN` / `--text` / `--fn` / `--url` — not a guessed duration), `batch "cmd1" "cmd2"` (ordered, fewer round-trips), `diff snapshot` / `diff screenshot --baseline <before>.png`.
 
 **Write a viewable image once, at its final home.** Any screenshot, render,
 crop, montage, or other raster image you intend to pass to `Read`/`view_image`
@@ -39,7 +50,7 @@ arbitrary `/tmp` files. Mint a unique final path before the producing command:
 MEDIA_DIR="/data/chats/$CHAT_ID/media"
 mkdir -p "$MEDIA_DIR"
 OUT="$MEDIA_DIR/inspect-$(date +%s%N).png"
-agent-browser screenshot "$OUT"       # or make PIL/save/render write to "$OUT"
+bash "$SCRIPTS_DIR/agent-screenshot.sh" --current-page <route> "$OUT"
 ```
 
 `/tmp` remains correct for logs, diffs, test workspaces, disposable browser
@@ -95,7 +106,7 @@ Two gotchas every session:
 
 Loading a PNG into your vision (`Read` on Claude, `view_image` on Codex) lets YOU inspect it. The partner sees ONLY your text plus any `![caption](/api/chats/$CHAT_ID/media/<name>.png)` embeds you explicitly write. The failure mode: you view it, describe it ("the grid rendered beautifully"), but never embed — so the partner trusts an unverified claim. Pattern:
 
-1. `Bash`: capture with `bash "$SCRIPTS_DIR/agent-screenshot.sh" <route>` — with no output path it lands in the chat's served media dir (`/data/chats/$CHAT_ID/media/shot-*.png`) and prints the path **plus a ready-to-paste `![screenshot](/api/chats/…)` embed line** — copy that line into your reply (step 3) so the shot actually shows. (Already-open or non-Möbius page: mint the unique final media path first, then run `agent-browser screenshot "$OUT"`.) Only files under that dir embed; an image created under `/tmp` cannot preview in the chat.
+1. `Bash`: capture with `bash "$SCRIPTS_DIR/agent-screenshot.sh" <route>` — with no output path it lands in the chat's served media dir (`/data/chats/$CHAT_ID/media/shot-*.png`) and prints the path **plus a ready-to-paste `![screenshot](/api/chats/…)` embed line** — copy that line into your reply (step 3) so the shot actually shows. For an already-open Möbius state, mint the unique final media path first and use the same helper with `--current-page`; reserve raw `agent-browser screenshot "$OUT"` for non-Möbius pages. Only files under that dir embed; an image created under `/tmp` cannot preview in the chat.
 2. `Read` / `view_image`: the path it printed.
 3. **Text** (same message, BEFORE interpreting): `![first render](/api/chats/$CHAT_ID/media/<name>.png)` — the embed path must match the file and carry the resolved chat id — a literal `$CHAT_ID` only expands in Bash, never in your markdown. Then a one-line description.
 4. Continue.
