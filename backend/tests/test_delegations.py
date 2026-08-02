@@ -113,7 +113,11 @@ def test_app_token_can_observe_own_work_but_cannot_submit_spend(
 
 
 def test_child_policy_is_integrity_checked_and_write_loss_needs_review(db):
-  app = models.App(name="Subagents", description="", jsx_source="")
+  app = models.App(
+    slug="test-delegations-116",
+    source_dir="/tmp/mobius-tests/test-delegations-116",
+    name="Subagents", description="", jsx_source="",
+  )
   db.add(app)
   db.flush()
   parent = models.Chat(id="parent", title="Parent", messages=[])

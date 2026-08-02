@@ -106,6 +106,8 @@ def test_notification_created_published_on_system_bus(client, auth):
 def test_app_attributed_send_publishes_activity_then_badge(client, auth, db):
   """App-sourced sends keep the drawer-dot event AND gain the badge nudge."""
   app = models.App(
+    slug="test-notifications-unread-108",
+    source_dir="/tmp/mobius-tests/test-notifications-unread-108",
     name="News", description="",
     jsx_source="export default function App(){}",
     compiled_path="/tmp/app.js",
@@ -136,6 +138,8 @@ def test_unread_endpoints_are_owner_only(client, auth, db):
   assert client.post("/api/notifications/read-all").status_code == 401
 
   app = models.App(
+    slug="test-notifications-unread-138",
+    source_dir="/tmp/mobius-tests/test-notifications-unread-138",
     name="Probe", description="",
     jsx_source="export default function App(){}",
     compiled_path="/tmp/probe.js",

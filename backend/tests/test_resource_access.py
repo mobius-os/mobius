@@ -105,6 +105,8 @@ def test_access_only_gate_preserves_app_chat_ownership(db):
   """The minimal projection keeps the same app-vs-foreign authorization."""
   db.add_all([
     models.App(
+      slug="test-resource-access-107",
+      source_dir="/tmp/mobius-tests/test-resource-access-107",
       id=7,
       name="owner app",
       description="",

@@ -790,6 +790,7 @@ async def test_bootstrap_install_emits_with_source_bootstrap(db, monkeypatch):
 
     captured.append(source)
     fake = models.App(
+      source_dir="/tmp/mobius-tests/store",
       id=42, name="Store", slug="store",
       manifest_url=manifest_url,
     )

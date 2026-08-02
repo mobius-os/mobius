@@ -68,6 +68,8 @@ def _seed_app(app_id=42):
   db = SessionLocal()
   try:
     app = models.App(
+      slug="test-chat-writer-contention-70",
+      source_dir="/tmp/mobius-tests/test-chat-writer-contention-70",
       id=app_id,
       name=f"App {app_id}",
       description="",

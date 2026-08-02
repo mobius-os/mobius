@@ -18,6 +18,8 @@ _DATA_DIR = os.environ.get("DATA_DIR", "/tmp")
 
 def _app_chat(db, *, project_id=None):
   app = models.App(
+    slug="test-app-project-context-20",
+    source_dir="/tmp/mobius-tests/test-app-project-context-20",
     name="studio", description="t",
     jsx_source="export default () => null",
   )

@@ -26,8 +26,6 @@ def slugify_for_source_dir(name: str) -> str:
   return slug
 
 
-
-
 def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) -> str:
   """Returns a slug that isn't taken by any other App row.
 
@@ -54,23 +52,6 @@ def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) 
       return candidate
     candidate = f"{base}-{suffix}"
     suffix += 1
-
-
-def ensure_slug(db: Session, app: models.App) -> str:
-  """Returns the app's slug, populating it on first call for legacy rows.
-
-  Apps created before the slug column existed have NULL slug. Lazy
-  backfill on first standalone-route access keeps the migration
-  pure-additive and avoids guessing slugs we might not be able to
-  validate at migration time (uniqueness needs a transaction).
-  """
-  if app.slug:
-    return app.slug
-  app.slug = allocate_unique_slug(db, app.name, exclude_id=app.id)
-  db.commit()
-  return app.slug
-
-
 
 
 def validate_source_dir(source_dir: str, data_dir: str) -> str:

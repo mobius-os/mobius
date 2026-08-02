@@ -133,6 +133,7 @@ def test_owner_required(client, fsroot):
 def _app_auth(db, *, filesystem_access: bool) -> tuple[dict[str, str], models.App]:
   owner = db.query(models.Owner).filter(models.Owner.username == "test").one()
   app = models.App(
+    source_dir="/tmp/mobius-tests/filesystem-test-app",
     name="Filesystem test app",
     description="",
     jsx_source="export default function App() {}",

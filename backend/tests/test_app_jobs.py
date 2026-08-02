@@ -395,6 +395,8 @@ def test_wrapper_rejects_job_context_without_exact_app_identity(
 
 def _db_app(db, name):
   app = models.App(
+    slug=name,
+    source_dir=f"/tmp/mobius-tests/{name}",
     name=name, description="", jsx_source="export default () => null",
   )
   db.add(app)

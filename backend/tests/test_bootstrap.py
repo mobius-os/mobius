@@ -26,7 +26,10 @@ from app.bootstrap import (
 def _install_result(name="App", slug="app", app_id=1, mode="install"):
   from app.install import InstallResult
 
-  app = models.App(id=app_id, name=name, slug=slug)
+  app = models.App(
+    source_dir="/tmp/mobius-tests/test-bootstrap-29",
+    id=app_id, name=name, slug=slug,
+  )
   return InstallResult(
     app=app,
     mode=mode,
@@ -83,6 +86,7 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
   deleted_at = datetime.now(timezone.utc)
   db.add_all([
     models.App(
+      source_dir="/tmp/mobius-tests/store",
       name="Store",
       description="owner uninstalled",
       jsx_source="export default function App() {}",
@@ -93,6 +97,7 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       deleted_at=deleted_at,
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/skills",
       name="Skills",
       description="owner uninstalled",
       jsx_source="export default function App() {}",
@@ -103,6 +108,7 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       deleted_at=deleted_at,
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/memory",
       name="Memory",
       description="owner uninstalled",
       jsx_source="export default function App() {}",
@@ -113,6 +119,7 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       deleted_at=deleted_at,
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/reflection",
       name="Reflection",
       description="already here",
       jsx_source="export default function App() {}",
@@ -144,6 +151,7 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
 
   db.add_all([
     models.App(
+      source_dir="/tmp/mobius-tests/app-store",
       name="Store",
       description="already here",
       jsx_source="export default function App() {}",
@@ -151,6 +159,7 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       manifest_url=_canonical_identity_key(BOOTSTRAP_STORE_MANIFEST_URL, "store"),
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/skills-custom",
       name="Skills",
       description="already here",
       jsx_source="export default function App() {}",
@@ -160,6 +169,7 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       ),
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/memory-custom",
       name="Memory",
       description="already here",
       jsx_source="export default function App() {}",
@@ -169,6 +179,7 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       ),
     ),
     models.App(
+      source_dir="/tmp/mobius-tests/reflection-custom",
       name="Reflection",
       description="already here",
       jsx_source="export default function App() {}",
@@ -195,6 +206,7 @@ async def test_bootstrap_ignores_unrelated_store_slug(db, monkeypatch):
   """A user-built app named store does not satisfy canonical app identity."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   db.add(models.App(
+    source_dir="/tmp/mobius-tests/store",
     name="Store",
     description="user's own app, unrelated to the bootstrap manifest",
     jsx_source="export default function App() {}",
@@ -260,6 +272,7 @@ async def test_bootstrap_recognizes_skills_row_installed_at_other_ref(
     "https://raw.githubusercontent.com/mobius-os/app-skills"
   )
   db.add(models.App(
+    source_dir="/tmp/mobius-tests/skills",
     id=50, name="Skills", slug="skills",
     manifest_url=_canonical_identity_key(_SKILLS_MAIN_MANIFEST, "skills"),
   ))
@@ -281,6 +294,7 @@ async def test_bootstrap_honors_skills_tombstone_at_other_ref(db, monkeypatch):
   from app.install import _canonical_identity_key
 
   db.add(models.App(
+    source_dir="/tmp/mobius-tests/skills",
     id=51, name="Skills", slug="skills",
     manifest_url=_canonical_identity_key(_SKILLS_MAIN_MANIFEST, "skills"),
     deleted_at=datetime.now(timezone.utc),

@@ -359,8 +359,12 @@ def test_app_cannot_touch_foreign_chat(client, owner_token, db):
   owner_chat = models.Chat(id="owner-chat", title="owner's", messages=[])
   db.add(owner_chat)
   # Another app's chat.
-  other = models.App(name="other", description="",
-                     jsx_source="export default () => null")
+  other = models.App(
+    slug="test-app-chat-contract-362",
+    source_dir="/tmp/mobius-tests/test-app-chat-contract-362",
+    name="other", description="",
+    jsx_source="export default () => null",
+  )
   db.add(other)
   db.commit()
   db.refresh(other)
@@ -417,8 +421,12 @@ def test_owner_can_still_send_to_app_owned_chat(client, owner_token, db):
   """The created_by_app_id tag attributes the chat to an app, but the
   owner can still drive it from the shell — it's an actor tag, not a
   fence against the owner."""
-  app = models.App(name="x", description="",
-                   jsx_source="export default () => null")
+  app = models.App(
+    slug="test-app-chat-contract-420",
+    source_dir="/tmp/mobius-tests/test-app-chat-contract-420",
+    name="x", description="",
+    jsx_source="export default () => null",
+  )
   db.add(app)
   db.commit()
   db.refresh(app)

@@ -30,6 +30,17 @@ def _bundle_path(db, app_id: int) -> Path:
   return Path(row.compiled_path)
 
 
+def _set_legacy_source(row: models.App, jsx_source: str) -> None:
+  """Keep a pre-commit row reproducible without violating app identity."""
+  from app import app_git
+
+  source = Path(row.source_dir) / "index.jsx"
+  source.write_text(jsx_source, encoding="utf-8")
+  app_git.commit_local(row.source_dir, "test legacy source")
+  row.source_commit = None
+  row.jsx_source = jsx_source
+
+
 def test_put_json_inner_object(client, auth, owner_token):
   """PUT body is the inner object; server stringifies + writes."""
   app_id = _make_app(client, owner_token)
@@ -852,9 +863,8 @@ def test_uninstall_skips_numeric_source_dir(client, auth, owner_token, db):
   assert os.path.isfile(os.path.join(victim, "keep.json"))
 
 
-def test_uninstall_skips_nested_and_shared_source_dir(client, auth, owner_token, db):
-  """Uninstall won't rmtree a NESTED descendant of /data/apps (could be inside
-  another app's tree) or a dir SHARED by another app row (Codex review #4)."""
+def test_uninstall_skips_nested_source_dir(client, auth, owner_token, db):
+  """Uninstall won't remove a nested descendant of another app's tree."""
   import os
   import app.models as models
   data_dir = os.environ["DATA_DIR"]
@@ -868,18 +878,6 @@ def test_uninstall_skips_nested_and_shared_source_dir(client, auth, owner_token,
   db.commit()
   assert client.delete(f"/api/apps/{a1}", headers=auth).status_code == 204
   assert os.path.isdir(nested)
-
-  # An immediate-child dir referenced by TWO app rows must survive deleting one.
-  shared = os.path.join(data_dir, "apps", "shared-src")
-  os.makedirs(shared, exist_ok=True)
-  open(os.path.join(shared, "y.json"), "w").close()
-  a2 = _make_app(client, owner_token)
-  a3 = _make_app(client, owner_token)
-  for aid in (a2, a3):
-    db.query(models.App).filter(models.App.id == aid).first().source_dir = shared
-  db.commit()
-  assert client.delete(f"/api/apps/{a2}", headers=auth).status_code == 204
-  assert os.path.isdir(shared)  # a3 still references it
 
 
 # Transactional bundle recompile — compile out-of-place, publish an immutable
@@ -896,10 +894,9 @@ async def test_recompile_app_bundle_promotes_after_commit(client, owner_token, d
   app_id = _make_app(client, owner_token)
   data_dir = os.environ["DATA_DIR"]
   row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.source_dir = None
-  row.source_commit = None
   previous = Path(row.compiled_path)
   new_jsx = "export default function App(){ return <div>PROMOTED</div> }"
+  _set_legacy_source(row, new_jsx)
   await recompile_app_bundle(db, row, new_jsx)
   current = Path(row.compiled_path)
   assert current != previous
@@ -921,9 +918,9 @@ async def test_recompile_publishes_before_commit_without_replacing_previous(
   import app.compiler as compiler
   app_id = _make_app(client, owner_token)
   row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.source_dir = None
-  row.source_commit = None
   previous = Path(row.compiled_path)
+  new_jsx = "export default function App(){ return <div>BOUNDARY</div> }"
+  _set_legacy_source(row, new_jsx)
   observed = {}
   real_sync = compiler._sync_published_bundle
 
@@ -948,8 +945,7 @@ async def test_recompile_publishes_before_commit_without_replacing_previous(
       db.rollback()
 
   await compiler.recompile_app_bundle(
-    _InspectCommit(), row,
-    "export default function App(){ return <div>BOUNDARY</div> }",
+    _InspectCommit(), row, new_jsx,
   )
 
   assert observed["published"] != previous
@@ -971,8 +967,6 @@ async def test_recompile_app_bundle_commit_failure_keeps_live_bundle(
   app_id = _make_app(client, owner_token)
   data_dir = os.environ["DATA_DIR"]
   row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.source_dir = None
-  row.source_commit = None
   live = Path(row.compiled_path)
   before = live.read_bytes()
 
@@ -984,6 +978,7 @@ async def test_recompile_app_bundle_commit_failure_keeps_live_bundle(
       db.rollback()
 
   new_jsx = "export default function App(){ return <div>CHANGED</div> }"
+  _set_legacy_source(row, new_jsx)
   with pytest.raises(RuntimeError):
     await recompile_app_bundle(_FailCommit(), row, new_jsx)
   assert Path(row.compiled_path) == live
@@ -1002,15 +997,15 @@ async def test_recompile_app_bundle_bad_jsx_keeps_live_bundle(
   from app.compiler import recompile_app_bundle
   app_id = _make_app(client, owner_token)
   row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.source_dir = None
-  row.source_commit = None
   live = Path(row.compiled_path)
   before = live.read_bytes()
   # Has `export default` (passes the cheap guard) but the JSX is unclosed, so
   # esbuild itself fails.
+  bad_jsx = "export default function App(){ return <div> }"
+  _set_legacy_source(row, bad_jsx)
   with pytest.raises(RuntimeError):
     await recompile_app_bundle(
-      db, row, "export default function App(){ return <div> }",
+      db, row, bad_jsx,
     )
   assert Path(row.compiled_path) == live
   assert live.read_bytes() == before
@@ -1034,9 +1029,9 @@ async def test_reconcile_missing_bundles_recompiles_missing_file(
   live = _bundle_path(db, app_id)
   # Simulate a legacy interrupted row or incomplete compiled-volume restore.
   row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.source_dir = None
-  row.source_commit = None
-  row.jsx_source = "export default function App(){ return <div>HEALED</div> }"
+  _set_legacy_source(
+    row, "export default function App(){ return <div>HEALED</div> }",
+  )
   db.commit()
   live.unlink()
   assert not live.exists()
@@ -1112,9 +1107,11 @@ async def test_reconcile_missing_bundles_isolates_one_apps_failure(
   broken = _bundle_path(db, broken_id)
   good = _bundle_path(db, good_id)
   broken_row = db.query(models.App).filter(models.App.id == broken_id).first()
-  broken_row.source_dir = None
-  broken_row.source_commit = None
-  broken_row.jsx_source = "export default function App(){ return <div> }"
+  _set_legacy_source(
+    broken_row, "export default function App(){ return <div> }",
+  )
+  good_row = db.query(models.App).filter(models.App.id == good_id).first()
+  _set_legacy_source(good_row, good_row.jsx_source)
   db.commit()
   broken.unlink()
   good.unlink()
@@ -1142,13 +1139,11 @@ async def test_reconcile_outdated_bundles_recompiles_legacy_bundle(
   from app.compiler import reconcile_outdated_bundles
   app_id = _make_app(client, owner_token)
   row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.source_dir = None
-  row.source_commit = None
   Path(row.compiled_path).unlink()
   legacy = Path(os.environ["DATA_DIR"], "compiled", f"app-{app_id}.js")
   row.compiled_path = str(legacy)
-  row.jsx_source = (
-    "export default function App(){ return <div>ABI_MIGRATED</div> }"
+  _set_legacy_source(
+    row, "export default function App(){ return <div>ABI_MIGRATED</div> }",
   )
   db.commit()
   # Current ABI but mutable legacy name: this is the old same-ABI crash gap,
@@ -1179,8 +1174,6 @@ async def test_reconcile_outdated_bundles_recompiles_old_artifact_revision(
 
   app_id = _make_app(client, owner_token)
   row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.source_dir = None
-  row.source_commit = None
   current = Path(row.compiled_path)
   current_bytes = current.read_bytes()
   current_banner = COMPILED_RUNTIME_BANNER.encode("ascii")
@@ -1192,8 +1185,9 @@ async def test_reconcile_outdated_bundles_recompiles_old_artifact_revision(
   current.unlink()
   old_bundle.write_bytes(old_bytes)
   row.compiled_path = str(old_bundle)
-  row.jsx_source = (
-    "export default function App(){ return <div>REVISION_MIGRATED</div> }"
+  _set_legacy_source(
+    row,
+    "export default function App(){ return <div>REVISION_MIGRATED</div> }",
   )
   db.commit()
 
@@ -1248,10 +1242,6 @@ async def test_reconcile_outdated_bundles_isolates_compile_failure(
   good_id = _make_app(client, owner_token)
   broken_row = db.query(models.App).filter(models.App.id == broken_id).first()
   good_row = db.query(models.App).filter(models.App.id == good_id).first()
-  broken_row.source_dir = None
-  broken_row.source_commit = None
-  good_row.source_dir = None
-  good_row.source_commit = None
   Path(broken_row.compiled_path).unlink()
   Path(good_row.compiled_path).unlink()
   compiled = Path(os.environ["DATA_DIR"], "compiled")
@@ -1259,9 +1249,11 @@ async def test_reconcile_outdated_bundles_isolates_compile_failure(
   good = compiled / f"app-{good_id}.js"
   broken_row.compiled_path = str(broken)
   good_row.compiled_path = str(good)
-  broken_row.jsx_source = "export default function App(){ return <div> }"
-  good_row.jsx_source = (
-    "export default function App(){ return <div>ABI_GOOD</div> }"
+  _set_legacy_source(
+    broken_row, "export default function App(){ return <div> }",
+  )
+  _set_legacy_source(
+    good_row, "export default function App(){ return <div>ABI_GOOD</div> }",
   )
   db.commit()
   for path in (broken, good):

@@ -38,6 +38,8 @@ def test_created_by_app_id_defaults_to_null(db):
 def test_created_by_app_id_persists_integer(db):
   """Setting created_by_app_id to an integer round-trips through the DB."""
   app = models.App(
+    slug="test-created-by-app-id-40",
+    source_dir="/tmp/mobius-tests/test-created-by-app-id-40",
     name="myapp", description="test", jsx_source="export default () => null",
   )
   db.add(app)
@@ -83,6 +85,8 @@ def _app_principal(db, app_id: int):
 def test_owner_principal_drives_any_chat(db):
   """An owner token may drive any chat regardless of created_by_app_id."""
   app = models.App(
+    slug="test-created-by-app-id-85",
+    source_dir="/tmp/mobius-tests/test-created-by-app-id-85",
     name="a1", description="", jsx_source="export default () => null",
   )
   db.add(app)
@@ -115,6 +119,8 @@ def test_owner_principal_drives_owner_created_chat(db):
 def test_app_principal_drives_own_chat(db):
   """An app token may drive a chat it created (matching created_by_app_id)."""
   app = models.App(
+    slug="test-created-by-app-id-117",
+    source_dir="/tmp/mobius-tests/test-created-by-app-id-117",
     name="a2", description="", jsx_source="export default () => null",
   )
   db.add(app)
@@ -136,6 +142,8 @@ def test_app_principal_drives_own_chat(db):
 def test_app_principal_blocked_from_owner_chat(db):
   """An app token receives 403 when targeting an owner-created chat (NULL)."""
   app = models.App(
+    slug="test-created-by-app-id-138",
+    source_dir="/tmp/mobius-tests/test-created-by-app-id-138",
     name="a3", description="", jsx_source="export default () => null",
   )
   db.add(app)
@@ -155,9 +163,13 @@ def test_app_principal_blocked_from_owner_chat(db):
 def test_app_principal_blocked_from_foreign_app_chat(db):
   """An app token receives 403 when targeting a chat owned by a different app."""
   app_a = models.App(
+    slug="test-created-by-app-id-157",
+    source_dir="/tmp/mobius-tests/test-created-by-app-id-157",
     name="a4", description="", jsx_source="export default () => null",
   )
   app_b = models.App(
+    slug="test-created-by-app-id-160",
+    source_dir="/tmp/mobius-tests/test-created-by-app-id-160",
     name="a5", description="", jsx_source="export default () => null",
   )
   db.add(app_a)

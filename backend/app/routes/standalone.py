@@ -383,7 +383,7 @@ async def standalone_icon(
   app_id = app.id
   icon_png = app.effective_icon_png
   name = app.name
-  app_slug = app.slug or slug
+  app_slug = app.slug
   bg_inputs = (app.background_color, app.theme_color)
 
   def _compute() -> bytes:
@@ -480,8 +480,8 @@ def _standalone_index_html(app: models.App, install_pass: str = "") -> str:
       headers={"Retry-After": "1"},
     )
 
-  slug = quote(app.slug or "", safe="")
-  name = escape(app.name or app.slug or "App", quote=True)
+  slug = quote(app.slug, safe="")
+  name = escape(app.name or app.slug, quote=True)
   description = escape(app.description or "", quote=True)
   version = int(app.updated_at.timestamp() * 1_000_000) if app.updated_at else 0
   app_bg = _app_background_color(app)

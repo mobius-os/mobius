@@ -282,6 +282,7 @@ def test_reserved_top_level_routes_do_not_alias_to_apps(client, owner_token):
   try:
     for slug in ("api", "apps", "assets", "recover", "shell", "vendor"):
       db.add(models.App(
+        source_dir=f"/tmp/mobius-tests/{slug}",
         name=slug,
         slug=slug,
         description="reserved route collision",

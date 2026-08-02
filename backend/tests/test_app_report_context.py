@@ -26,6 +26,8 @@ def _write_report(app_id, date_str, html):
 def _app_chat(db, *, report_date=None, app=None):
   if app is None:
     app = models.App(
+      slug="test-app-report-context-28",
+      source_dir="/tmp/mobius-tests/test-app-report-context-28",
       name="reporter", description="t",
       jsx_source="export default () => null",
     )
@@ -97,6 +99,8 @@ def test_no_block_when_report_file_missing(db):
 def test_malformed_report_date_rejected(db):
   # A traversal-shaped date must never become a path component.
   app = models.App(
+    slug="test-app-report-context-99",
+    source_dir="/tmp/mobius-tests/test-app-report-context-99",
     name="evil", description="t", jsx_source="export default () => null",
   )
   db.add(app)

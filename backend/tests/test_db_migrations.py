@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 import app.database as database
+from app.config import get_settings
 from app.database import (
   _agent_lifecycle_width_migrations,
   run_migrations,
@@ -46,6 +47,8 @@ def test_run_migrations_removes_retired_job_authority_receipts(tmp_path):
   with Session(eng) as session:
     memory = models.App(
       name="Memory",
+      slug="memory",
+      source_dir=str(tmp_path / "apps" / "memory"),
       description="",
       jsx_source="export default () => null",
       capability_contract={
@@ -116,6 +119,71 @@ def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
       "SELECT icon_ownership_split FROM apps WHERE id = 1"
     )).scalar_one()
   assert split in (False, 0)
+
+
+def test_app_identity_migration_backfills_source_and_enforces_future_writes(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'app-identity.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps ("
+      "id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512))"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps (id, name, slug, source_dir) "
+      "VALUES (1, 'Canonical app', 'canonical-app', NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps (id, name, slug, source_dir) "
+      "VALUES (2, 'Canonical app', NULL, NULL)"
+    ))
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    identities = conn.execute(text(
+      "SELECT slug, source_dir FROM apps ORDER BY id"
+    )).all()
+    indexes = {item[1] for item in conn.execute(text("PRAGMA index_list(apps)"))}
+  apps_root = Path(get_settings().data_dir) / "apps"
+  assert identities == [
+    ("canonical-app", str(apps_root / "canonical-app")),
+    ("canonical-app-2", str(apps_root / "canonical-app-2")),
+  ]
+  assert "ix_apps_source_dir" in indexes
+
+  with pytest.raises(IntegrityError, match="apps require slug and source_dir"):
+    with eng.begin() as conn:
+      conn.execute(text(
+        "UPDATE apps SET source_dir = NULL WHERE id = 1"
+      ))
+  with pytest.raises(IntegrityError, match="apps require slug and source_dir"):
+    with eng.begin() as conn:
+      conn.execute(text(
+        "UPDATE apps SET slug = '' WHERE id = 1"
+      ))
+  with pytest.raises(IntegrityError):
+    with eng.begin() as conn:
+      conn.execute(text(
+        "UPDATE apps SET source_dir = :source_dir WHERE id = 2"
+      ), {"source_dir": str(apps_root / "canonical-app")})
+
+
+def test_fresh_app_schema_requires_nonempty_slug_and_source_dir(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'fresh-app-identity.db'}")
+  models.Base.metadata.create_all(eng)
+  columns = {column["name"]: column for column in inspect(eng).get_columns("apps")}
+  assert columns["slug"]["nullable"] is False
+  assert columns["source_dir"]["nullable"] is False
+  checks = {
+    item["name"] for item in inspect(eng).get_check_constraints("apps")
+  }
+  assert {"ck_apps_slug_nonempty", "ck_apps_source_dir_nonempty"} <= checks
+  indexes = {item["name"] for item in inspect(eng).get_indexes("apps")}
+  assert "ix_apps_source_dir" in indexes
 
 
 def test_run_migrations_adds_managed_sign_in_identity_to_existing_owner(tmp_path):
@@ -529,6 +597,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0001_legacy_schema_convergence",
     "0002_chat_run_goal_objective",
     "0003_chat_run_root_identity",
+    "0004_app_identity_required",
   ]
   assert second == first
 
@@ -538,7 +607,9 @@ def test_chat_run_root_migration_backfills_existing_physical_runs(tmp_path):
   applied_at = datetime(2026, 8, 1)
   with eng.begin() as conn:
     conn.execute(text(
-      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128))"
+      "CREATE TABLE apps ("
+      "id INTEGER PRIMARY KEY, name VARCHAR(128), "
+      "slug VARCHAR(128), source_dir VARCHAR(512))"
     ))
     conn.execute(text(
       "CREATE TABLE chat_runs ("

@@ -262,6 +262,7 @@ def test_refresh_route_calls_refresh_with_override(
   from app.routes import skills as rs
 
   app_row = models.App(
+    source_dir="/tmp/mobius-tests/skills",
     name="Skills", description="", jsx_source="x", compiled_path="", slug="skills",
   )
   db.add(app_row)
@@ -296,6 +297,7 @@ def test_sources_override_absent_or_malformed_is_none(db, monkeypatch):
   assert rs._catalog_sources_override(db) is None
 
   app_row = models.App(
+    source_dir="/tmp/mobius-tests/skills",
     name="Skills", description="", jsx_source="x", compiled_path="", slug="skills",
   )
   db.add(app_row)

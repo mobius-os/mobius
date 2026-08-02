@@ -6,9 +6,11 @@ from app.config import get_settings
 
 
 def _create_app(db, name: str) -> models.App:
+  slug = name.lower().replace(" ", "-")
   app = models.App(
+    source_dir=f"/tmp/mobius-tests/{slug}",
     name=name,
-    slug=name.lower().replace(" ", "-"),
+    slug=slug,
     description="test",
     jsx_source="export default function App() { return null }",
     compiled_path=f"/tmp/{name}.js",

@@ -11,7 +11,10 @@ from app import models
 
 
 def _make_app(db, name, chat_log_access="none"):
+  slug = name.lower().replace(" ", "-")
   app = models.App(
+    slug=slug,
+    source_dir=f"/tmp/mobius-tests/{slug}",
     name=name,
     description="",
     jsx_source="export default () => null",

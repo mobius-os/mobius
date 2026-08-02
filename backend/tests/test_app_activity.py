@@ -6,6 +6,8 @@ from app.broadcast import get_system_broadcast
 
 def _app(db):
   app = models.App(
+    slug="test-app-activity-8",
+    source_dir="/tmp/mobius-tests/test-app-activity-8",
     name="News", description="", jsx_source="export default function App(){}",
     compiled_path="/tmp/app.js",
   )

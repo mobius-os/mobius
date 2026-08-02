@@ -1002,10 +1002,123 @@ def _add_chat_run_root_identity(eng) -> None:
       ))
 
 
+def _require_app_identity(eng) -> None:
+  """Make every app row retain its canonical URL and source identities.
+
+  Fresh databases receive ordinary NOT NULL + CHECK constraints from the ORM
+  model. SQLite cannot add those constraints to an existing table without a
+  high-risk table rebuild, so upgraded databases enforce the identical write
+  boundary with small BEFORE triggers after proving every stored row is ready.
+  PostgreSQL can promote the columns directly.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if "apps" not in sa_inspect(eng).get_table_names():
+    return
+  with eng.begin() as conn:
+    from app.app_identity import slugify_for_source_dir
+
+    apps_root = Path(get_settings().data_dir) / "apps"
+    used_slugs = {
+      str(slug)
+      for (slug,) in conn.execute(text(
+        "SELECT slug FROM apps "
+        "WHERE slug IS NOT NULL AND length(trim(slug)) > 0"
+      ))
+    }
+    missing_slugs = conn.execute(text(
+      "SELECT id, name FROM apps "
+      "WHERE slug IS NULL OR length(trim(slug)) = 0 ORDER BY id"
+    )).all()
+    for app_id, name in missing_slugs:
+      base = slugify_for_source_dir(str(name or ""))
+      slug = base
+      suffix = 2
+      while slug in used_slugs:
+        slug = f"{base}-{suffix}"
+        suffix += 1
+      conn.execute(text(
+        "UPDATE apps SET slug = :slug WHERE id = :app_id"
+      ), {"slug": slug, "app_id": app_id})
+      used_slugs.add(slug)
+    missing_sources = conn.execute(text(
+      "SELECT id, slug FROM apps "
+      "WHERE source_dir IS NULL OR length(trim(source_dir)) = 0"
+    )).all()
+    for app_id, slug in missing_sources:
+      if not slug or not str(slug).strip():
+        raise RuntimeError(
+          f"cannot require app identity: app {app_id} has no slug"
+        )
+      conn.execute(text(
+        "UPDATE apps SET source_dir = :source_dir WHERE id = :app_id"
+      ), {
+        "source_dir": str(apps_root / str(slug)),
+        "app_id": app_id,
+      })
+    invalid = conn.execute(text(
+      "SELECT COUNT(*) FROM apps "
+      "WHERE slug IS NULL OR length(trim(slug)) = 0 "
+      "OR source_dir IS NULL OR length(trim(source_dir)) = 0"
+    )).scalar_one()
+    if invalid:
+      raise RuntimeError(
+        f"cannot require app identity: {invalid} app row(s) are incomplete"
+      )
+    duplicate_sources = conn.execute(text(
+      "SELECT source_dir FROM apps GROUP BY source_dir HAVING COUNT(*) > 1"
+    )).all()
+    if duplicate_sources:
+      raise RuntimeError(
+        "cannot require app identity: duplicate source_dir values exist"
+      )
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_apps_source_dir "
+      "ON apps (source_dir)"
+    ))
+    if eng.dialect.name == "sqlite":
+      predicate = (
+        "NEW.slug IS NULL OR length(trim(NEW.slug)) = 0 "
+        "OR NEW.source_dir IS NULL OR length(trim(NEW.source_dir)) = 0"
+      )
+      conn.execute(text(
+        "CREATE TRIGGER IF NOT EXISTS apps_require_identity_insert "
+        f"BEFORE INSERT ON apps WHEN {predicate} BEGIN "
+        "SELECT RAISE(ABORT, 'apps require slug and source_dir'); END"
+      ))
+      conn.execute(text(
+        "CREATE TRIGGER IF NOT EXISTS apps_require_identity_update "
+        f"BEFORE UPDATE OF slug, source_dir ON apps WHEN {predicate} BEGIN "
+        "SELECT RAISE(ABORT, 'apps require slug and source_dir'); END"
+      ))
+    elif eng.dialect.name == "postgresql":
+      conn.execute(text(
+        "ALTER TABLE apps ALTER COLUMN slug SET NOT NULL"
+      ))
+      conn.execute(text(
+        "ALTER TABLE apps ALTER COLUMN source_dir SET NOT NULL"
+      ))
+      checks = {
+        item.get("name")
+        for item in sa_inspect(conn).get_check_constraints("apps")
+      }
+      if "ck_apps_slug_nonempty" not in checks:
+        conn.execute(text(
+          "ALTER TABLE apps ADD CONSTRAINT ck_apps_slug_nonempty "
+          "CHECK (length(trim(slug)) > 0)"
+        ))
+      if "ck_apps_source_dir_nonempty" not in checks:
+        conn.execute(text(
+          "ALTER TABLE apps ADD CONSTRAINT ck_apps_source_dir_nonempty "
+          "CHECK (length(trim(source_dir)) > 0)"
+        ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
   ("0003_chat_run_root_identity", _add_chat_run_root_identity),
+  ("0004_app_identity_required", _require_app_identity),
 )
 
 

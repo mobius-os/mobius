@@ -124,7 +124,7 @@ def compose_system_prompt(base: str, db: Session) -> str:
       continue
     source_label = str(Path(app.source_dir).resolve())
     fragments.append(
-      f"<!-- installed system app: {app.slug or app.id}; "
+      f"<!-- installed system app: {app.slug}; "
       f"source_dir: {source_label} -->\n{fragment}"
     )
   if not fragments:

@@ -46,7 +46,10 @@ def _app_token(db, *, manage_skills):
   from app import models
   from app.auth import create_access_token
 
+  suffix = "manage" if manage_skills else "read-only"
   app_row = models.App(
+    slug=f"skills-{suffix}",
+    source_dir=f"/tmp/mobius-tests/skills-{suffix}",
     name="Skills",
     description="skills app",
     jsx_source="export default () => null",

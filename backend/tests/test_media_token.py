@@ -189,6 +189,7 @@ def test_serve_upload_rejects_app_token_on_query_param(client, auth, chat, db):
   from app import models as _m
   app_row = _m.App(
     name="Test", description="test", slug="test-app-tok",
+    source_dir="/tmp/mobius-tests/test-app-tok",
     jsx_source="export default () => null",
     token_nonce="nonce1",
   )

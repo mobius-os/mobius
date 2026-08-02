@@ -13,7 +13,6 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import activity, models, theme
-from app.app_identity import ensure_slug
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner, resolve_owner_or_app
@@ -432,7 +431,7 @@ def get_frame(
   # (activity.log_event swallows its own OSError).
   if request.method != "HEAD":
     activity.log_event(
-      "app_open", app_id=app.id, slug=ensure_slug(db, app),
+      "app_open", app_id=app.id, slug=app.slug,
     )
   return HTMLResponse(html, headers=headers)
 

@@ -131,7 +131,7 @@ class AppOut(BaseModel):
   description: str
   compiled_path: str
   chat_id: str | None = None
-  source_dir: str | None = None
+  source_dir: str
   pinned_at: datetime | None = None
   # Owner navigation recency. Kept separate from updated_at so opening an app
   # never rotates its executable-bundle cache key.
@@ -161,11 +161,8 @@ class AppOut(BaseModel):
   github_connect: bool = False
   # Guarded owner-filesystem access — see models.App.filesystem_access.
   filesystem_access: bool = False
-  # URL slug for the standalone PWA install at /apps/<slug>/. Null
-  # only for legacy rows from before the slug column existed; lazy-
-  # backfilled on first access via standalone routes (see
-  # app_identity.ensure_slug).
-  slug: str | None = None
+  # Stable URL slug for the standalone PWA install at /apps/<slug>/.
+  slug: str
   # URL the app was installed from (manifest URL passed to
   # POST /api/apps/install). Null for user-built apps. The install
   # endpoint matches by this for update-vs-install discrimination.

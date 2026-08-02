@@ -18,6 +18,7 @@ def _seed_pinned_rows(db):
   ]
   apps = [
     models.App(
+      source_dir=f"/tmp/mobius-tests/app-{index}",
       name=f"App {index}",
       description="",
       jsx_source="export default function App() {}",

@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app import app_cron, app_jobs, models, schemas
-from app.app_identity import slugify_for_source_dir as _slugify_for_source_dir
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -127,8 +126,6 @@ def _schedule_from_crontab_text(
 
 
 def _app_schedule(app: models.App, live_crontab: str) -> tuple[str, str] | None:
-  if not app.source_dir:
-    return None
   source_dir = Path(app.source_dir)
   live = _schedule_from_crontab_text(source_dir, live_crontab)
   if live is not None:
@@ -150,8 +147,6 @@ def _app_zone_declaration(app: models.App) -> tuple[str, str] | None:
   """
   from app import cron_tz
 
-  if not app.source_dir:
-    return None
   source_dir = Path(app.source_dir)
   for replay_dir in _cron_replay_dirs_for_app(app, source_dir):
     declaration = cron_tz.parse_zone_declaration(
@@ -247,7 +242,7 @@ def reconcile_app_cron_supervision(db: Session) -> tuple[int, list[str]]:
   apps = db.query(models.App).filter(models.App.deleted_at.is_(None)).all()
   for app in apps:
     schedule = _app_schedule(app, live_crontab)
-    if schedule is None or not app.source_dir:
+    if schedule is None:
       continue
     source_dir = Path(app.source_dir)
     try:
@@ -408,10 +403,6 @@ def run_app_job(
       detail="App token can only run its own job.",
     )
   app = live_app_or_404(db, app_id)
-  if not app.source_dir:
-    raise HTTPException(
-      status_code=400, detail="App has no source_dir; cannot locate job.",
-    )
   source_dir = Path(app.source_dir)
   # The manifest's schedule.job wins. The legacy probe (fetch.sh
   # app-news convention, job.sh install-from-manifest default,
@@ -502,10 +493,6 @@ def update_app_schedule(
       detail="App token can only update its own schedule.",
     )
   app = live_app_or_404(db, app_id)
-  if not app.source_dir:
-    raise HTTPException(
-      status_code=400, detail="App has no source_dir; cannot locate job.",
-    )
   from app import cron_tz
   try:
     validate_cron_expr(body.cron)
@@ -533,7 +520,7 @@ def update_app_schedule(
   job_path = source_dir / job_name
   if not job_path.is_file():
     raise HTTPException(status_code=400, detail="Job script not found.")
-  slug = app.slug or _slugify_for_source_dir(app.name)
+  slug = app.slug
   if timezone is not None:
     materialized = cron_tz.materialize_zone_cron(body.cron, timezone)
     app_cron.register_cron(

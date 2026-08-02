@@ -173,6 +173,7 @@ def test_owner_chat_log_scope_backfills_a_legacy_store_contract(
 
 def test_list_apps_does_not_hydrate_source_or_icon_payloads(client, auth, db):
   app = models.App(
+    source_dir="/tmp/mobius-tests/heavy-metadata-test",
     name="Heavy metadata test",
     description="drawer row",
     jsx_source="x" * 1_000_000,

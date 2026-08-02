@@ -1075,8 +1075,6 @@ async def _sync_app_skills(
   silently take over another live app's skill file.
   """
   skills = list(dict.fromkeys(manifest.get("skills") or []))
-  if not app.source_dir:
-    raise RuntimeError(f"app {app.id} violates canonical source ownership")
   data_dir = Path(get_settings().data_dir)
   skills_dir = data_dir / "shared" / "skills"
   source_dir = Path(app.source_dir)
@@ -1928,15 +1926,11 @@ async def _run_post_commit_effects(
   job_name = schedule.get("job") if schedule else None
   cron_job_name = job_name or "job.sh"
   has_cron = bool(schedule and schedule.get("default"))
-  drop_prior_cron = mode == "update" and bool(app.source_dir)
+  drop_prior_cron = mode == "update"
   if candidate.bundled_job or has_cron or drop_prior_cron:
     slug = app.slug
     data_dir = Path(get_settings().data_dir)
-    app_data_dir = (
-      Path(app.source_dir)
-      if app.source_dir
-      else data_dir / "apps" / slug
-    )
+    app_data_dir = Path(app.source_dir)
     try:
       async with fs_locks.source_dir_lock(str(app_data_dir)):
         if not db.query(models.App.id).filter(models.App.id == app.id).first():
@@ -2198,8 +2192,6 @@ async def _activate_install_source(
     app.capability_contract = plan.capability_contract
 
   staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
-  if not app.source_dir:
-    raise RuntimeError(f"app {app.id} violates canonical source ownership")
   source_dir = Path(app.source_dir)
 
   _reject_if_source_dir_taken(db, str(source_dir), exclude_id=app.id)
@@ -2453,8 +2445,8 @@ async def install_from_manifest(
     )
 
     # --- Per-app git: record upstream + (on update) merge into local ---
-    # Engaged whenever the app has a real source_dir. The merge decision AND the
-    # disk write below run under ONE held span of source_dir_lock — not two
+    # The merge decision AND the disk write below run under ONE held span of
+    # source_dir_lock — not two
     # separate critical sections — so explicit apply (which takes the same lock
     # before its own commit_local) cannot commit an agent edit in the gap and
     # have the write then clobber it (the edit would be lost from the live tree,
@@ -2464,8 +2456,6 @@ async def install_from_manifest(
     # conflict can short-circuit both. The lock is released before the seeds
     # block takes app_storage_lock, preserving the documented acquisition order
     # (install_uninstall -> app_storage -> source_dir).
-    if not app.source_dir:
-      raise RuntimeError(f"app {app.id} violates canonical source ownership")
     git_source_dir = Path(app.source_dir)
     source_lock = fs_locks.source_dir_lock(str(git_source_dir))
     await source_lock.acquire()
@@ -2896,7 +2886,7 @@ async def install_from_manifest(
     # install back.  Ref deletion is best-effort post-commit housekeeping: the
     # replay already parents `main` directly on this upstream target, so keeping
     # an obsolete ref is harmless while deleting it bounds metadata growth.
-    if app.source_dir and equivalence_target_to_retire:
+    if equivalence_target_to_retire:
       try:
         async with fs_locks.source_dir_lock(str(app.source_dir)):
           await asyncio.to_thread(
@@ -2924,8 +2914,7 @@ async def install_from_manifest(
     # Success: drop any .bak snapshots we made — the new bundle is
     # now the canonical one.
     journal.cleanup_superseded()
-    if app.source_dir:
-      clear_pending_conflict_update(app.source_dir)
+    clear_pending_conflict_update(app.source_dir)
 
   except CompileError as exc:
     app_name = str(

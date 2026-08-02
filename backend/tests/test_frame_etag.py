@@ -24,7 +24,11 @@ def test_recompile_bumps_updated_at_so_etag_changes(monkeypatch, tmp_path):
   ETags (derived from it) never change and a warm browser 304s to the stale
   bundle even though the compiled file was rewritten."""
   monkeypatch.setattr(compiler, "_compiled_dir", lambda: tmp_path)
-  monkeypatch.setattr(compiler, "_entry_source_path", lambda app: None)
+  source_dir = tmp_path / "source"
+  source_dir.mkdir()
+  source_path = source_dir / "index.jsx"
+  jsx_source = "export default function A(){}"
+  source_path.write_text(jsx_source, encoding="utf-8")
 
   async def fake_compile(app_id, jsx, *, out_path=None, source_path=None):
     Path(out_path).write_text("// compiled")
@@ -41,8 +45,15 @@ def test_recompile_bumps_updated_at_so_etag_changes(monkeypatch, tmp_path):
       pass
 
   before = datetime.datetime(2020, 1, 1, 0, 0, 0)
-  app = SimpleNamespace(id=999, jsx_source="old", compiled_path=None, updated_at=before)
-  asyncio.run(compiler.recompile_app_bundle(FakeDB(), app, "export default function A(){}"))
+  app = SimpleNamespace(
+    id=999,
+    jsx_source="old",
+    compiled_path=None,
+    source_dir=str(source_dir),
+    source_commit=None,
+    updated_at=before,
+  )
+  asyncio.run(compiler.recompile_app_bundle(FakeDB(), app, jsx_source))
 
   assert app.updated_at > before, "recompile must advance updated_at for ETag freshness"
   assert commits["n"] == 1

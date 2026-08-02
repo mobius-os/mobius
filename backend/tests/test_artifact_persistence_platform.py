@@ -39,6 +39,7 @@ def _create_app(client, auth, name="artifact-platform") -> int:
 
 def _seed_app_row(db, app_id: int, name: str) -> models.App:
   app = models.App(
+    source_dir="/tmp/mobius-tests/test-artifact-persistence-platform-41",
     id=app_id,
     name=name,
     description="test",

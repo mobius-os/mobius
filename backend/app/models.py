@@ -17,8 +17,8 @@ import secrets
 from datetime import UTC, datetime
 
 from sqlalchemy import (
-  Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, LargeBinary,
-  String, Text, UniqueConstraint, event, false, or_, true,
+  Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer, JSON,
+  LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
 )
 
 from sqlalchemy.orm import column_property
@@ -523,6 +523,14 @@ class App(Base):
   """A mini-app created and managed by the agent."""
 
   __tablename__ = "apps"
+  __table_args__ = (
+    CheckConstraint(
+      "length(trim(slug)) > 0", name="ck_apps_slug_nonempty",
+    ),
+    CheckConstraint(
+      "length(trim(source_dir)) > 0", name="ck_apps_source_dir_nonempty",
+    ),
+  )
 
   id = Column(Integer, primary_key=True, index=True)
   name = Column(String(128), nullable=False)
@@ -537,7 +545,7 @@ class App(Base):
   # the slug pins the install identity (manifest `id`), and changing
   # it after a user has installed the standalone PWA would orphan
   # their home-screen icon.
-  slug = Column(String(128), nullable=True, unique=True, index=True)
+  slug = Column(String(128), nullable=False, unique=True, index=True)
   # Per-app secret stamped into every app-scoped token at mint and
   # verified on each request (deps._enforce_app_scope). It rotates with
   # the row: a freshly-created app gets a fresh random nonce, so a token
@@ -611,8 +619,7 @@ class App(Base):
   # Absolute directory holding this app's source files. Editable app source lives
   # under `/data/apps/<dirname>`. Stored explicitly so source apply can map a
   # directory back to its DB row without slugify-guessing the name.
-  # Null for apps created before this column existed.
-  source_dir = Column(String(512), nullable=True, default=None)
+  source_dir = Column(String(512), nullable=False, unique=True, index=True)
   # Chat that last created or modified this app.  Null for apps created
   # before this column was added.  Used to route app errors back to the
   # correct chat so the agent can fix them.

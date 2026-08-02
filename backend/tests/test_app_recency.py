@@ -7,6 +7,8 @@ from app import models
 
 def _app(db):
   app = models.App(
+    slug="test-app-recency-9",
+    source_dir="/tmp/mobius-tests/test-app-recency-9",
     name="Atlas",
     description="",
     jsx_source="export default function App(){}",

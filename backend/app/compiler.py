@@ -170,11 +170,8 @@ def purge_app_bundles(app_id: int) -> None:
     unlink_app_bundle(app_id, candidate)
 
 
-def _entry_source_path(app, *, source_root: Path | None = None) -> Path | None:
-  source_dir = source_root or getattr(app, "source_dir", None)
-  if not source_dir:
-    return None
-  source_root = Path(source_dir)
+def _entry_source_path(app, *, source_root: Path | None = None) -> Path:
+  source_root = source_root or Path(app.source_dir)
   entry = "index.jsx"
   manifest_path = source_root / "mobius.json"
   try:
@@ -405,8 +402,8 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
   compile_source_path = source_path
   snapshot = None
   source_commit = getattr(app, "source_commit", None)
-  source_dir = getattr(app, "source_dir", None)
-  if source_commit and source_dir:
+  if source_commit:
+    source_dir = Path(app.source_dir)
     # Bundle recovery is not a source publication authority. Compile the exact
     # Git revision selected by SQLite in a temporary tree so an unapplied draft
     # survives boot/recovery byte-for-byte. Static assets are installer-managed
@@ -418,18 +415,16 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
     try:
       await asyncio.to_thread(
         app_git.materialize_tree,
-        Path(source_dir),
+        source_dir,
         source_commit,
         snapshot_root,
       )
       await asyncio.to_thread(
-        _copy_managed_static_assets, Path(source_dir), snapshot_root,
+        _copy_managed_static_assets, source_dir, snapshot_root,
       )
       compile_source_path = _entry_source_path(
         app, source_root=snapshot_root,
       )
-      if compile_source_path is None:
-        raise RuntimeError("Accepted app source has no entry path.")
       accepted_source = compile_source_path.read_text(encoding="utf-8")
       if accepted_source != jsx_source:
         raise RuntimeError(
@@ -438,7 +433,7 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
     except Exception:
       snapshot.cleanup()
       raise
-  elif source_path is not None:
+  else:
     # Legacy rows have no durable source commit. Never repair them by writing
     # into the editable tree: that was a hidden source mutation and could
     # destroy an unapplied draft. Only a byte-identical entry is safe to use.
@@ -453,7 +448,7 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
       )
     from app import app_git
 
-    if await asyncio.to_thread(app_git.worktree_dirty, Path(source_dir)):
+    if await asyncio.to_thread(app_git.worktree_dirty, app.source_dir):
       raise RuntimeError(
         "Editable app source has an unapplied draft; apply it explicitly "
         "before rebuilding its bundle."
@@ -464,9 +459,7 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
       app.id,
       jsx_source,
       out_path=staged,
-      source_path=(
-        compile_source_path if compile_source_path is not None else None
-      ),
+      source_path=compile_source_path,
     )
   except Exception:
     if snapshot is not None:
