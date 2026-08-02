@@ -4177,6 +4177,7 @@ export default function ChatView({
                 onChangeChatInfo={mergeChatInfo}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
+                composerInputRef={inputRef}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
                 embedded={embedded}

@@ -64,6 +64,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { FileDocument, InfoCircle, Paperclip, Plus } from '@openai/apps-sdk-ui/components/Icon'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
+import { focusComposerElement } from './composerFocusPolicy.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -88,6 +89,7 @@ export default function ComposerPopover({
   onRestartResumeChange,
   providerSwitchState,
   settingsSaveTailRef,
+  composerInputRef,
   onOpenInspector,
   onOpenSummary,
   embedded = false,
@@ -184,8 +186,7 @@ export default function ComposerPopover({
     // up when the popover opened. Otherwise leave focus alone —
     // tapping + on a closed-keyboard chat shouldn't pop it open.
     if (wasInputFocusedRef.current) {
-      const el = document.querySelector('.chat__input')
-      if (el) el.focus({ preventScroll: true })
+      focusComposerElement(composerInputRef?.current)
     }
     onAttachClick()
   }
@@ -216,7 +217,7 @@ export default function ComposerPopover({
           // Capture focus state at the click moment — before React
           // commits and any iOS focus-shuffling completes. See
           // wasInputFocusedRef declaration above.
-          const el = document.querySelector('.chat__input')
+          const el = composerInputRef?.current
           const wasFocused = document.activeElement === el
           if (!open) wasInputFocusedRef.current = wasFocused
           setOpen(o => !o)
@@ -285,6 +286,7 @@ export default function ComposerPopover({
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 wasInputFocusedRef={wasInputFocusedRef}
+                composerInputRef={composerInputRef}
               />
             </div>
           )}
