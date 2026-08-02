@@ -343,6 +343,66 @@ test.describe('Navigation basics', () => {
   })
 })
 
+test.describe('Touch navigation', () => {
+  test.use({ hasTouch: true, isMobile: true })
+
+  test('New chat focuses the composer after the destination mounts', async ({ page }) => {
+    const newChatId = '10000000-0000-4000-8000-000000000099'
+    await setup(page)
+    await expect.poll(() => page.evaluate(() => (
+      matchMedia('(hover: none) and (pointer: coarse)').matches
+    ))).toBe(true)
+
+    await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      await new Promise(resolve => setTimeout(resolve, 300))
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: newChatId,
+          title: 'New chat',
+          created_at: '2026-01-01T00:01:00Z',
+          updated_at: '2026-01-01T00:01:00Z',
+          activity_at: '2026-01-01T00:01:00Z',
+          pinned_at: null,
+          created_by_app_id: null,
+          has_messages: false,
+          running: false,
+        }),
+      })
+    })
+    await page.route(new RegExp(`/api/chats/${newChatId}(?:\\?.*)?$`), route => (
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          messages: [],
+          total: 0,
+          offset: 0,
+          running: false,
+          pending_messages: [],
+          pending_question_id: null,
+          session_id: null,
+        }),
+      })
+    ))
+
+    await openDrawer(page)
+    await page.getByRole('navigation', { name: 'Primary navigation' })
+      .getByRole('button', { name: 'New chat', exact: true })
+      .click()
+
+    const focusLease = page.getByRole('textbox', { name: 'New chat message' })
+    await expect(focusLease).toBeFocused()
+    await page.keyboard.type('Typed while opening')
+
+    const composer = page.locator('[data-chat-surface="painted"] textarea')
+    await expect(composer).toBeFocused()
+    await expect(composer).toHaveValue('Typed while opening')
+  })
+})
+
 test.describe('Desktop sidebar navigation', () => {
   async function setupDesktop(page, open = true) {
     await page.addInitScript(({ key, value }) => {

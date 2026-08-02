@@ -298,8 +298,9 @@ test('shell draft handoffs use the same owner instead of writing around its live
     'chat cleanup must clear memory, session, and durable copies together')
   assert.match(shellSource, /stageComposerHandoff\(buildingChatId, report\)/)
   assert.match(shellSource, /stageComposerHandoff\(request\.chatId, draftText\)/)
-  assert.match(shellSource, /stageComposerHandoff\(chatId, draftText, \{ autoSend \}\)/,
-    'new-chat handoffs must preserve the reviewed autosend intent')
+  assert.match(shellSource,
+    /stageComposerHandoff\(chatId, draftText, \{\s*autoSend: suppliedDraft \? autoSend : false,\s*\}\)/,
+    'new-chat handoffs must preserve supplied autosend intent without sending early phone typing')
   assert.match(shellSource, /consumeComposerHandoff\(prev\.chatId, prev\.draft\)/,
     'an acknowledged direct handoff must retire its global fallback')
   assert.match(shellSource, /requestComposer\(buildingChatId, \{ draft: report \}\)/,
