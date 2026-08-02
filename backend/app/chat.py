@@ -1643,12 +1643,6 @@ CONTINUATION_SWEEP_BATCH_SIZE = 100
 # not delay an opted-in chat after its reset, but a bad/early reset timestamp
 # also must not launch a whole parked batch in one burst.
 LIMIT_AUTO_RESUME_STAGGER_SECS = 30.0
-# Planned restarts may recover many exact turns at once. Restoring all of them
-# in one lifespan sweep can consume the host before ordinary shell requests get
-# a chance to run. Automatic recovery therefore uses a small process-wide
-# admission ceiling; owner sends remain uncapped and take the available slots
-# first, while durable restart parks stay due for the next sweep.
-RESTART_AUTO_RESUME_MAX_ACTIVE = 2
 _next_limit_auto_resume_at = 0.0
 _RESTART_AUTHORIZATION_UNSET = object()
 
@@ -1675,14 +1669,6 @@ def _claim_limit_auto_resume_slot(now: float | None = None) -> bool:
     return False
   _next_limit_auto_resume_at = now + LIMIT_AUTO_RESUME_STAGGER_SECS
   return True
-
-
-def _restart_auto_resume_capacity_available() -> bool:
-  """Whether automatic restart recovery may add another live turn."""
-  return (
-    len(registry.all_alive_chat_ids())
-    < RESTART_AUTO_RESUME_MAX_ACTIVE
-  )
 
 
 def _has_unanswered_question(chat: models.Chat | None) -> bool:
@@ -1773,8 +1759,9 @@ async def _auto_resume_chat(
         # attribution, the exact latest park, and provider ownership at the
         # actual claim point. Provider-limit retries are staggered by the
         # reset sweep, rather than blocked on unrelated live chats. Planned-
-        # restart continuations are admitted against the process-wide recovery
-        # ceiling so a restart cannot crowd ordinary shell work off the host.
+        # restart continuations are different: they are the exact, owner-opted
+        # set that was already live together before the restart, so each chat
+        # may reclaim its own slot independently.
         async with chat_queue.get_lock(chat_id):
           with SessionLocal() as check_db:
             chat = check_db.query(models.Chat).filter(
@@ -1849,11 +1836,6 @@ async def _auto_resume_chat(
             resume_app_id = (
               park.initiated_by_app_id if restart_park else None
             )
-          if (
-            restart_park
-            and not _restart_auto_resume_capacity_available()
-          ):
-            return False
           if not mark_starting(chat_id):
             return False
           claimed = True
@@ -1959,11 +1941,9 @@ async def sweep_reset_parks(
       at most one starts per sweep and launches are spaced even when unrelated
       chats are live. App-attributed provider-limit runs never auto-resume.
       Planned-restart continuations reclaim the exact set that was already live
-      before the restart and preserve each run's attribution, but only up to a
-      small process-wide recovery ceiling. Additional exact parks remain due
-      for a later tick, leaving capacity for owner-triggered work. A deferred
-      enabled chat stays pending while notify-only chats in the same due batch
-      still resolve normally.
+      before the restart, preserve each run's attribution, and may resume
+      independently. A staggered enabled chat stays pending for a later tick,
+      while notify-only chats in the same due batch still resolve normally.
       App-attributed messages newly queued behind either kind of park still
       require an ordinary app-owned handoff rather than being swept into the
       synthetic continuation.
@@ -2078,13 +2058,6 @@ async def sweep_reset_parks(
       # but keep walking so a later notify-only chat is not held hostage by
       # another chat's auto-resume preference.
       continue
-    if (
-      restart_auto_resume
-      and not _restart_auto_resume_capacity_available()
-    ):
-      # Keep the exact park untouched. A later sweep admits it after another
-      # turn settles; an owner send can still start immediately in the meantime.
-      continue
     if auto_resume:
       try:
         prepared = await _await_ack(get_writer().submit(
@@ -2132,15 +2105,6 @@ async def sweep_reset_parks(
         resolved.append(chat_id)
         if prepared.get("notify") and not chat_gone:
           queue_due_notification(chat_id, run)
-        continue
-
-      if (
-        restart_auto_resume
-        and not _restart_auto_resume_capacity_available()
-      ):
-        # Capacity can disappear while the actor prepares the durable park.
-        # Leaving resume_pending intact is intentional: the next sweep retries
-        # without duplicating the continuation or its notification.
         continue
 
       if prepared.get("notify"):
