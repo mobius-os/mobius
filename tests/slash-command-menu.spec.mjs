@@ -31,4 +31,15 @@ test('the slash menu follows textarea focus without losing the draft', async ({ 
 
   await input.focus()
   await expect(page.getByRole('listbox', { name: 'Commands' })).toBeVisible()
+
+  // The footer deliberately lets empty-space taps pass through to the
+  // transcript. Its visible command surface must opt back into hit testing so
+  // an ordinary pointer click can complete the command without submitting it.
+  const reopenedInput = paintedChat.locator('textarea[aria-label="Message Möbius…"]')
+  await reopenedInput.fill('/go')
+  await page.getByRole('option', { name: /\/goal/ }).click()
+  await expect(reopenedInput).toHaveValue('/goal ')
+  await expect(reopenedInput).toBeFocused()
+  await expect(page.getByRole('listbox', { name: 'Commands' })).toBeHidden()
+  await expect(paintedChat.locator('.message--user')).toHaveCount(0)
 })
