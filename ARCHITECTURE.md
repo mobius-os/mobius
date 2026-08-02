@@ -81,6 +81,17 @@ dependency manifest therefore carries a separate host action (and may require a
 particular ordering) even when the live clone merges cleanly. Never describe
 Apply + server restart alone as activating those files.
 
+The app-frame CSP is an explicit update precondition. Immediately before
+Settings sends Apply, the browser makes a cache-bypassing `HEAD` request to the
+public `/api/apps/0/frame` path and reports the effective enforced CSP. The
+backend rejects the update before touching source when that path is unverified
+or its effective script source list omits `blob:`. This checks the policy after
+the real public edge, not the weaker backend-only header. When the host edge must change, `scripts/reload-caddy.sh` validates and
+reloads the newly pulled `Caddyfile` **before** the owner retries Apply; a custom
+edge must perform the equivalent ordered reload. App code never falls back to a direct module URL:
+the exact-parent byte broker, version key, size bound, offline behavior, and
+token containment remain one execution path.
+
 **lodash is pinned to 4.18.1 via `overrides`.** `@openai/apps-sdk-ui` pulls lodash transitively — only through its `Slider` component, which the shell does not import. The 4.17.x line sat unfixed against several advisories for a long stretch; 4.18.x restored maintenance and patched them, so `frontend/package.json` `overrides` forces the transitive lodash to 4.18.1 (`npm audit` is clean). As defense-in-depth, `frontend/src/lib/__tests__/appsSdkLodash.test.js` also fails if the shell ever imports `Slider`, which keeps lodash tree-shaken out of the shipped bundle regardless of the pin.
 
 ## Self-update model — `upstream` / `main`, preserve local changes on update

@@ -96,13 +96,64 @@ def test_apply_forwards_exact_reviewed_plan(client, auth, monkeypatch):
     "plan_id": "a" * 64,
     "current_sha": "1" * 40,
     "target_sha": "2" * 40,
+    "edge_preflight": {
+      "path": "/api/apps/0/frame",
+      "content_security_policy": (
+        "default-src 'self'; script-src 'self' blob:"
+      ),
+    },
   }
 
   res = client.post("/api/platform/apply", headers=auth, json=body)
 
   assert res.status_code == 200
-  assert captured == body
+  assert captured == {
+    "plan_id": body["plan_id"],
+    "current_sha": body["current_sha"],
+    "target_sha": body["target_sha"],
+  }
   assert res.json()["upstream_commit"] == body["target_sha"]
+
+
+def test_apply_rejects_missing_or_old_public_frame_policy(
+  client, auth, monkeypatch,
+):
+  called = False
+
+  async def fake_apply(*_args, **_kwargs):
+    nonlocal called
+    called = True
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.apply_platform_update",
+    fake_apply,
+  )
+  plan = {
+    "plan_id": "a" * 64,
+    "current_sha": "1" * 40,
+    "target_sha": "2" * 40,
+  }
+
+  missing = client.post("/api/platform/apply", headers=auth, json=plan)
+  assert missing.status_code == 409
+  assert missing.json()["detail"] == "edge_csp_preflight_required"
+
+  old = client.post(
+    "/api/platform/apply",
+    headers=auth,
+    json={
+      **plan,
+      "edge_preflight": {
+        "path": "/api/apps/0/frame",
+        "content_security_policy": (
+          "default-src 'self'; script-src 'self' 'unsafe-inline'"
+        ),
+      },
+    },
+  )
+  assert old.status_code == 409
+  assert old.json()["detail"] == "edge_csp_blob_required"
+  assert called is False
 
 
 def test_update_check_reports_fetch_failure(client, auth, monkeypatch):

@@ -49,3 +49,18 @@ export function platformUpdateStatusLabel(platform) {
   if (available) return 'New update available'
   return 'Up to date'
 }
+
+export function platformApplyErrorMessage(detail) {
+  if (detail === 'update_plan_stale') {
+    return 'Möbius changed since this preview. Close it and review the refreshed update before applying.'
+  }
+  if (detail === 'edge_csp_preflight_required') {
+    return 'Refresh this page before applying. The current update flow must verify the public app-frame security policy first.'
+  }
+  if (detail === 'edge_csp_blob_required') {
+    return 'Nothing was changed because the host proxy still serves the older app-frame security policy. Reload its /api/apps/*/frame policy, or run scripts/reload-caddy.sh for bundled Caddy, then try again.'
+  }
+  return detail
+    ? `Update stopped: ${detail}`
+    : 'Update stopped before completion. Check the current status before trying again.'
+}

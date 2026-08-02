@@ -148,6 +148,7 @@ If the instance cannot boot, start the latest isolated recovery worker without
 custom proxy configuration:
 
 ```bash
+
 scripts/mobiusctl recovery start
 # if the worker/browser restarts, rotate both credentials and print a new code:
 scripts/mobiusctl recovery reopen
@@ -175,13 +176,17 @@ Update a self-hosted instance inside Möbius: open Settings, find the Möbius
 section, and select **Check for updates**. Review the exact incoming commit,
 apply it, then select **Restart to finish**. The updater follows `origin/main`,
 preserves local platform changes, and keeps data under `/data`; normal updates
-do not require a host-side Git pull or image rebuild.
+do not require a host-side Git pull or image rebuild. If an update reports that
+the public app-frame policy is incompatible, update the host checkout first and
+run `scripts/reload-caddy.sh` before retrying Apply. A custom edge proxy needs
+the equivalent policy update and validated reload.
 
 The in-product agent has passwordless full root inside its Mobius container by
 default. To use the operator kill switch, set `MOBIUS_AGENT_SUDO=0` in `.env`
 and recreate the app with `docker compose up -d --force-recreate app`. The
 external recovery worker remains non-root and read-only, and recovery boot
 never installs the agent sudo rule.
+
 
 To connect a full web service such as Tandoor, point a sibling DNS name at the same server. For example, use `services.mobius.example.com`, then set it as `MOBIUS_SERVICE_GATEWAY_ORIGIN` in `.env`. Caddy serves integrations below `/services/<slug>`, so you do not need wildcard DNS or a new record for each service. See [.env.example](.env.example) for setup and [ARCHITECTURE.md](ARCHITECTURE.md#app-execution-tiers) for the trust boundaries.
 

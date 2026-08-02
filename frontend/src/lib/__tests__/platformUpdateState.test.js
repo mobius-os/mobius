@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  platformApplyErrorMessage,
   platformStatusFromApply,
   platformUpdateStatusLabel,
 } from '../platformUpdateState.js'
@@ -126,5 +127,20 @@ test('a legacy deployment flag does not hide an available in-app update', () => 
       updates_disabled: true,
     }),
     'New update available',
+  )
+})
+
+test('edge preflight failures explain the host-side recovery path', () => {
+  assert.match(
+    platformApplyErrorMessage('edge_csp_preflight_required'),
+    /Refresh this page/,
+  )
+  assert.match(
+    platformApplyErrorMessage('edge_csp_blob_required'),
+    /scripts\/reload-caddy\.sh/,
+  )
+  assert.equal(
+    platformApplyErrorMessage('update_plan_stale'),
+    'Möbius changed since this preview. Close it and review the refreshed update before applying.',
   )
 })

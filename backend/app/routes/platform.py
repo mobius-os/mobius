@@ -4,9 +4,9 @@ Small endpoints behind ``get_current_owner`` + ``reject_cross_site``:
 ``GET /status`` (cheap, read-only, fetch-free — drives the Settings "Updates"
 line), ``POST /check`` (owner-triggered ``git fetch`` + fresh status, the
 on-demand refresh for the "Check for updates" button), ``GET /update-preview``
-(an immutable exact-target plan), ``POST /apply`` (apply that reviewed target
-and merge it with local edits, or record a conflict),
-``GET /update-progress`` (the active Apply phase),
+(an immutable exact-target plan), ``POST /apply`` (verify the effective public
+app-frame policy, then apply that reviewed target and merge it with local edits,
+or record a conflict), ``GET /update-progress`` (the active Apply phase),
 ``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
 ``POST /restart`` (owner-confirmed self-restart, same SIGTERM pattern as the
 normal Settings restart). The status/check routes are wrapped so a transient git
@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
-from app import models, platform_update
+from app import models, platform_edge, platform_update
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
 from app.platform_update import (
@@ -39,12 +39,20 @@ log = logging.getLogger("mobius.platform")
 router = APIRouter(prefix="/api/platform", tags=["platform"])
 
 
+class PlatformEdgePreflightIn(BaseModel):
+  """The effective app-frame policy observed through the public origin."""
+
+  path: str = Field(max_length=128)
+  content_security_policy: str | None = Field(default=None, max_length=16_384)
+
+
 class PlatformApplyIn(BaseModel):
   """The immutable update plan returned by ``GET /update-preview``."""
 
   plan_id: str = Field(min_length=64, max_length=64)
   current_sha: str = Field(min_length=40, max_length=64)
   target_sha: str = Field(min_length=40, max_length=64)
+  edge_preflight: PlatformEdgePreflightIn | None = None
 
 
 @router.get("/status")
@@ -120,6 +128,14 @@ async def apply_platform_update(
 ) -> PlatformApplyResult:
   """Apply exactly the release represented by the reviewed immutable plan."""
   try:
+    preflight = request.edge_preflight
+    if preflight is None:
+      raise HTTPException(status_code=409, detail="edge_csp_preflight_required")
+    if not platform_edge.app_frame_edge_preflight_passes(
+      path=preflight.path,
+      content_security_policy=preflight.content_security_policy,
+    ):
+      raise HTTPException(status_code=409, detail="edge_csp_blob_required")
     return await platform_update.apply_platform_update(
       db,
       plan_id=request.plan_id,

@@ -7,9 +7,14 @@ import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
 import {
+  platformApplyErrorMessage,
   platformStatusFromApply,
   platformUpdateStatusLabel,
 } from '../../lib/platformUpdateState.js'
+import {
+  applyWithFreshEdgePolicy,
+  probeAppFrameEdgePolicy,
+} from '../../lib/platformEdgePreflight.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
 import {
   PROVIDER_AVAILABILITY_PHASE,
@@ -1125,19 +1130,23 @@ export default function SettingsView({
     setPlatformProgress(null)
     setPlatformPhase('applying')
     try {
-      const res = await api.platform.apply(plan)
+      const { error: preflightError, response: res } = await applyWithFreshEdgePolicy(
+        plan,
+        {
+          probe: probeAppFrameEdgePolicy,
+          apply: payload => api.platform.apply(payload),
+        },
+      )
+      if (preflightError) {
+        setPlatformError(preflightError)
+        return { ok: false }
+      }
       let body = null
       try { body = await res.json() } catch {}
       if (!res.ok) {
         const detail = body?.detail || ''
         await refreshPlatform()
-        setPlatformError(
-          detail === 'update_plan_stale'
-            ? 'Möbius changed since this preview. Close it and review the refreshed update before applying.'
-            : detail
-              ? `Update stopped: ${detail}`
-              : 'Update stopped before completion. Check the current status before trying again.',
-        )
+        setPlatformError(platformApplyErrorMessage(detail))
         return { ok: false }
       }
       const state = typeof body?.state === 'string' ? body.state : ''
