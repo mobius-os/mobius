@@ -289,7 +289,7 @@
   border: none;
   border-radius: 10px;
   color: var(--text);
-  font-size: 14px;
+  font-size: 15px;
   font-family: var(--font);
   font-weight: 400;
   text-align: left;
@@ -654,9 +654,9 @@
 }
 
 /* Desktop's collapsed rail and expanded drawer are two presentations of the
-   same three actions. Match their 20px glyphs and exact centers; the slightly
-   larger 15px labels preserve the rail's stronger visual weight when expanded.
-   Mobile has no collapsed rail, so it keeps its existing compact drawer scale. */
+   same three actions. Match their 20px glyphs and exact centers. Row labels use
+   the same readable 15px scale at every width; section labels retain their own
+   desktop treatment below. */
 @media (min-width: 1024px) {
   /* 58px drawer header + 8px body inset matches the collapsed rail's 66px
      action start; the shared 40px row height keeps Apps aligned too. */
@@ -668,7 +668,6 @@
   .drawer__item--new {
     min-height: 40px;
     padding: 0 11px;
-    font-size: 15px;
   }
 
   .drawer__label {

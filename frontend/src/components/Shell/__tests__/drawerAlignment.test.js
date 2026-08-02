@@ -35,6 +35,14 @@ test('collapsed and expanded drawer actions share one vertical rhythm', () => {
   )
 })
 
+test('phone drawer increases row type without changing the section-title scale', () => {
+  const drawerItem = ruleBody(drawerCss, '.drawer__item')
+  const drawerLabel = ruleBody(drawerCss, '.drawer__label')
+
+  assert.equal(px(drawerItem, 'font-size'), 15)
+  assert.equal(px(drawerLabel, 'font-size'), 14)
+})
+
 test('the docked notifications panel covers the drawer content column', () => {
   const panel = ruleBody(shellCss, '.shell--drawer-docked .notifications')
   const desktopDrawerBody = ruleBody(drawerCss, '.drawer__body', 1)
