@@ -690,7 +690,6 @@ export default function ChatView({
     anchorPagination,
     captureSendIntent,
     commitSendIntent,
-    freezeChatExit,
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
@@ -712,6 +711,10 @@ export default function ChatView({
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
     initialEntryPhase,
+    // Standard and Builder can retain separate physical ChatViews for the same
+    // logical chat. Only the surface participating in the active handoff may
+    // publish that chat's one durable reading coordinate.
+    ownsReadingPosition: !hidden,
   })
 
   // Forward committed pane-geometry changes to the scroll controller. A new
@@ -730,19 +733,17 @@ export default function ChatView({
     if (paneContentHeight != null) paneResized(paneContentHeight)
   }, [paneContentHeight, paneResized])
 
-  // Settings used to unmount the active chat. Retained pane identity is useful
-  // for split/unsplit transitions, but hiding a pane must still perform the old
-  // leave/return lifecycle: freeze its reader position while geometry is live,
-  // then let the load effect below disconnect while hidden and refresh on show.
+  // A hidden retained owner is not an active runtime. The scroll controller
+  // owns the visible -> hidden reading-position handoff; this layer only arms
+  // freshness so the surface cannot paint stale history when it returns.
   useLayoutEffect(() => {
     if (!hidden) return
-    freezeChatExit()
     // Arm the freshness + restoration gate while this surface is still
     // physically hidden. A retained ChatView must not reappear with the
     // transcript from its previous visible lifetime for even one frame.
     setInitialEntryPhase('history')
     setLoading(true)
-  }, [hidden, freezeChatExit])
+  }, [hidden])
 
   function rememberSendIntent(cid, intent) {
     if (!cid || !intent) return

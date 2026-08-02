@@ -72,7 +72,7 @@ test('owner contract freezes question answers without locking keyboard movement'
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.13 \(2026-08-01\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.14 \(2026-08-02\)/)
   assert.match(
     architecture,
     /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,
@@ -95,7 +95,7 @@ test('owner contract freezes question answers without locking keyboard movement'
   )
 })
 
-test('a retained chat crosses the old unmount lifecycle while hidden', () => {
+test('a retained chat has exactly one durable reading-position owner', () => {
   const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
   const scrollController = readFileSync(
     new URL('../useScrollMode.js', import.meta.url),
@@ -103,18 +103,23 @@ test('a retained chat crosses the old unmount lifecycle while hidden', () => {
   )
   assert.match(
     chatView,
-    /useLayoutEffect\(\(\) => \{\s*if \(!hidden\) return\s*freezeChatExit\(\)[\s\S]*setInitialEntryPhase\('history'\)[\s\S]*setLoading\(true\)/,
-    'hiding a retained chat must freeze its position and arm freshness before it can paint again',
+    /ownsReadingPosition: !hidden/,
+    'ChatView must declare whether this physical surface owns the logical chat coordinate',
+  )
+  assert.doesNotMatch(
+    chatView,
+    /freezeChatExit/,
+    'ChatView must not duplicate the scroll controller\'s ownership transition',
+  )
+  assert.match(
+    scrollController,
+    /if \(!readingPositionOwnerRef\.current\) return[\s\S]*const wasOwner = readingPositionOwnerRef\.current[\s\S]*persistMode\(\{ freezeToCurrentPosition: true \}\)[\s\S]*readingPositionOwnerRef\.current = false[\s\S]*readingPositionOwnerRef\.current = true[\s\S]*transitionMode\(\{ kind: 'INITIAL' \}, 'lifecycle:position-owner-enter'\)/,
+    'the outgoing owner must freeze once, relinquish writes, and make the incoming owner restore shared state',
   )
   assert.match(
     chatView,
     /if \(hidden\) return[\s\S]*?\}, \[chatId, loadNonce, hidden\]\)/,
     'hidden chats must disconnect and refresh history when they become visible again',
-  )
-  assert.match(
-    scrollController,
-    /const freezeChatExit = useCallback\(\(\) => \{[\s\S]*?readerLocationExplicitRef\.current = true[\s\S]*?persistMode\(\{ freezeToCurrentPosition: true \}\)/,
-    'chat navigation must preserve an automatic tail hold through the later unmount cleanup',
   )
 })
 

@@ -553,7 +553,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.13 (2026-08-01).** This section is the
+**Owner-authoritative contract — v1.14 (2026-08-02).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -638,6 +638,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   Exactness is bounded by real content: if a viewport growth or content collapse
   makes the saved target unreachable, clamp it to the nearest real conversation
   position, then apply R1 only if that viewport shows the latest user row.
+  The durable reading coordinate belongs to the logical chat, not to every
+  retained DOM copy. When Standard and Builder retain separate physical
+  `ChatView`s for the same chat, only the surface participating in the active
+  handoff owns that coordinate. Its visible-to-hidden edge freezes once and
+  relinquishes persistence authority; an initially hidden owner writes nothing.
+  The incoming owner re-enters through `INITIAL` and consumes the shared saved
+  coordinate before it can paint. Hidden owners register no page-lifecycle
+  persistence and cannot overwrite the active owner during reload.
 - **R5 — Reader owns gestures and layout-only sends.** From the first wheel/touch/key
   input until its scroll event lands, no layout path may write `scrollTop`: stream
   resize, spacer handoff, terminal promotion, catch-up, and viewport/keyboard resize
@@ -764,6 +772,11 @@ Controller structure is part of the contract, not an implementation detail:
 - `ChatView` may read `modeRef` for a submit snapshot but must not assign it.
   It emits send, queue, pagination, and lifecycle events through the semantic
   methods returned by `useScrollMode`.
+- `ChatView` declares whether its physical surface owns the chat's durable
+  reading coordinate. `useScrollMode` alone transfers that authority, persists
+  the outgoing coordinate, and resets the incoming owner for restoration.
+  Hidden retained owners may keep DOM geometry but are never persistence
+  writers; do not reintroduce a second freeze call in `ChatView`.
 - Every live mode mutation goes through `transitionMode`, whose entry guard permits
   new pins only from send and new follow only from an unreserved-bottom gesture or
   an already-armed pin's filled-reservation handoff. Every mode-owned `scrollTop`
