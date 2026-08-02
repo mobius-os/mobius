@@ -153,14 +153,22 @@ export function clearQueryCache() {
 // offline work. The runtime owns the IndexedDB schemas, so keep the record
 // traversal there rather than duplicating it in bundled code.
 export async function clearAppRuntimeData(appId) {
+  const cleanups = []
   try {
     const runtimeUrl = `${BASE}/mobius-runtime.js`
     const runtime = await import(/* @vite-ignore */ runtimeUrl)
-    await runtime.purgeAppRuntimeData?.(appId)
+    cleanups.push(runtime.purgeAppRuntimeData?.(appId))
   } catch {
     // The server-side wipe already succeeded. Local cleanup is best-effort and
     // the rotated installation nonce still prevents stale record reuse.
   }
+  try {
+    const deviceAssets = await import('../lib/deviceAssetCache.js')
+    cleanups.push(deviceAssets.purgeDeviceAssetCache?.(appId))
+  } catch {
+    // Browser support and module loading are best-effort during data removal.
+  }
+  await Promise.allSettled(cleanups)
 }
 
 // The offline outbox and signal queue (mobius-runtime.js) are their OWN

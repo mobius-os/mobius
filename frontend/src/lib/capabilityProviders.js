@@ -1,4 +1,8 @@
 import { startMicrophoneCapture } from './microphoneCapture.js'
+import {
+  createDeviceAssetCacheProvider,
+  DEVICE_ASSET_CACHE,
+} from './deviceAssetCache.js'
 
 export const MICROPHONE_CAPTURE = 'media.microphone.capture'
 
@@ -41,6 +45,7 @@ export function createMicrophoneProvider({ startCapture = startMicrophoneCapture
 
 export function builtInCapabilityProviders(options = {}) {
   return {
+    [DEVICE_ASSET_CACHE]: createDeviceAssetCacheProvider(options.deviceAssets),
     [MICROPHONE_CAPTURE]: createMicrophoneProvider(options.microphone),
   }
 }

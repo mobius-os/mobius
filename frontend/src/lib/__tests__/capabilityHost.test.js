@@ -74,6 +74,18 @@ test('host binds a declared capability session to its exact source', async () =>
   assert.equal(harness.host.activeCount(), 0)
 })
 
+test('provider events can transfer large buffers without cloning them', async () => {
+  const harness = setup()
+  harness.host.handle(harness.source, openMessage())
+  await new Promise((resolve) => setImmediate(resolve))
+  const bytes = new ArrayBuffer(8)
+
+  harness.channel.event('chunk', { bytes }, [bytes])
+
+  assert.deepEqual(harness.sent.at(-1).transfer, [bytes])
+  assert.equal(harness.sent.at(-1).message.value.bytes, bytes)
+})
+
 test('host refuses undeclared, inactive, and mismatched-version requests', () => {
   const undeclared = setup({ declared: false })
   undeclared.host.handle(undeclared.source, openMessage())

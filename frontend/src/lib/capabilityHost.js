@@ -144,9 +144,9 @@ export function createCapabilityHost({
           post(shellSession, 'moebius:capability-ready', { value })
         }
       },
-      event(event, value) {
+      event(event, value, transfer = []) {
         if (current(shellSession) && typeof event === 'string') {
-          post(shellSession, 'moebius:capability-event', { event, value })
+          post(shellSession, 'moebius:capability-event', { event, value }, transfer)
         }
       },
       result(value, transfer = []) {
