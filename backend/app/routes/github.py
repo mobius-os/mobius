@@ -61,7 +61,7 @@ from app import (
   app_git,
   fs_locks,
   github_auth,
-  github_preflight_checks,
+  github_pre_pr_checks,
   models,
   source_status,
 )
@@ -823,7 +823,7 @@ async def contribution_review_status(
   }
 
 
-def _claim_prepared_checks(
+def _claim_pre_pr_checks(
   *, app_id: int, record_id: str, db: Session, expected_nonce: str | None,
 ) -> tuple[dict, Path, Path, str]:
   record_path, diff_path = _record_paths(app_id, record_id)
@@ -834,44 +834,43 @@ def _claim_prepared_checks(
       status_code=409,
       detail="This contribution is no longer waiting for approval.",
     )
-  if not github_preflight_checks.supports_prepared_checks(record):
+  if not github_pre_pr_checks.supports_pre_pr_checks(record):
     raise HTTPException(
       status_code=409,
       detail=(
-        "Early GitHub checks are currently available for standalone Möbius "
+        "Pre-PR GitHub checks are currently available for standalone Möbius "
         "platform contributions only."
       ),
     )
-  if github_preflight_checks.check_is_active(record.get("early_checks")):
+  if github_pre_pr_checks.pre_pr_checks_active(record.get("pre_pr_checks")):
     raise HTTPException(
       status_code=409,
       detail="GitHub checks are already starting or running for this review.",
     )
   request_id = secrets.token_hex(16)
-  requested_at = _now_iso()
+  claimed_at = _now_iso()
   claimed = {
     **record,
-    "early_checks": {
+    "pre_pr_checks": {
       "state": "dispatching",
       "request_id": request_id,
-      "requested_at": requested_at,
-      "observed_at": requested_at,
+      "observed_at": claimed_at,
     },
-    "updated_at": requested_at,
+    "updated_at": claimed_at,
   }
   _write_record(record_path, claimed)
   return claimed, record_path, diff_path, request_id
 
 
-def _settle_prepared_checks(
+def _settle_pre_pr_checks(
   *,
   record_path: Path,
   request_id: str,
   record_patch: dict,
-  early_checks: dict,
+  pre_pr_checks: dict,
 ) -> dict:
   current = _read_record(record_path)
-  live = current.get("early_checks")
+  live = current.get("pre_pr_checks")
   if (
     current.get("status") != "prepared"
     or not isinstance(live, dict)
@@ -885,8 +884,8 @@ def _settle_prepared_checks(
   updated = {
     **current,
     **record_patch,
-    "early_checks": {
-      **early_checks,
+    "pre_pr_checks": {
+      **pre_pr_checks,
       "request_id": request_id,
     },
     "updated_at": now,
@@ -896,11 +895,11 @@ def _settle_prepared_checks(
 
 
 @router.post(
-  "/contributions/{app_id}/{record_id}/run-checks",
+  "/contributions/{app_id}/{record_id}/pre-pr-checks",
   dependencies=[Depends(reject_cross_site)],
 )
 @_limiter.limit("10/minute")
-async def run_prepared_contribution_checks(
+async def run_pre_pr_checks(
   request: Request,
   app_id: int,
   record_id: str,
@@ -916,7 +915,7 @@ async def run_prepared_contribution_checks(
   expected_nonce = _validate_submit_app(app_id, principal, db)
   db.close()
   async with fs_locks.app_storage_lock(app_id):
-    claimed, record_path, diff_path, request_id = _claim_prepared_checks(
+    claimed, record_path, diff_path, request_id = _claim_pre_pr_checks(
       app_id=app_id,
       record_id=record_id,
       db=db,
@@ -930,20 +929,17 @@ async def run_prepared_contribution_checks(
     plan = claimed.get("plan") or {}
     repo_path = _safe_repo_path(plan.get("repo_path"))
     async with fs_locks.source_dir_lock(str(repo_path)):
-      early_checks, record_patch = await asyncio.to_thread(
-        github_preflight_checks.dispatch_prepared_checks,
+      pre_pr_checks, record_patch = await asyncio.to_thread(
+        github_pre_pr_checks.dispatch_pre_pr_checks,
         claimed,
         diff_path,
-        requested_at=str(
-          (claimed.get("early_checks") or {}).get("requested_at") or _now_iso()
-        ),
       )
   except ContributionSubmitError as exc:
     record_patch = dict(exc.record_patch)
-    early_checks = record_patch.pop("early_checks", None)
-    if not isinstance(early_checks, dict):
-      early_checks = {
-        **(claimed.get("early_checks") or {}),
+    pre_pr_checks = record_patch.pop("pre_pr_checks", None)
+    if not isinstance(pre_pr_checks, dict):
+      pre_pr_checks = {
+        **(claimed.get("pre_pr_checks") or {}),
         "state": "error",
         "message": exc.message,
         "observed_at": _now_iso(),
@@ -954,10 +950,10 @@ async def run_prepared_contribution_checks(
       "code": exc.code,
     })
   except Exception as exc:
-    log.exception("Prepared GitHub checks failed for %s/%s", app_id, record_id)
+    log.exception("Pre-PR GitHub checks failed for %s/%s", app_id, record_id)
     message = "Could not start GitHub checks for this contribution."
-    early_checks = {
-      **(claimed.get("early_checks") or {}),
+    pre_pr_checks = {
+      **(claimed.get("pre_pr_checks") or {}),
       "state": "error",
       "message": message,
       "observed_at": _now_iso(),
@@ -967,11 +963,11 @@ async def run_prepared_contribution_checks(
   async with fs_locks.app_storage_lock(app_id):
     _recheck_submit_app(db, app_id, expected_nonce)
     db.close()
-    record = _settle_prepared_checks(
+    record = _settle_pre_pr_checks(
       record_path=record_path,
       request_id=request_id,
       record_patch=record_patch,
-      early_checks=early_checks,
+      pre_pr_checks=pre_pr_checks,
     )
   if failure is not None:
     status_code, detail = failure
@@ -979,15 +975,15 @@ async def run_prepared_contribution_checks(
       status_code=status_code,
       detail={**detail, "record": record},
     )
-  return {"record": record, "checks": record["early_checks"]}
+  return {"record": record}
 
 
 @router.post(
-  "/contributions/{app_id}/prepared-checks/refresh",
+  "/contributions/{app_id}/pre-pr-checks/refresh",
   dependencies=[Depends(reject_cross_site)],
 )
 @_limiter.limit("30/minute")
-async def refresh_prepared_contribution_checks(
+async def refresh_pre_pr_checks(
   request: Request,
   app_id: int,
   db: Session = Depends(get_db),
@@ -1004,8 +1000,8 @@ async def refresh_prepared_contribution_checks(
         record = _read_record_tolerant(path)
         if (
           record is not None
-          and github_preflight_checks.check_is_active(
-            record.get("early_checks")
+          and github_pre_pr_checks.pre_pr_checks_active(
+            record.get("pre_pr_checks")
           )
         ):
           candidates.append((path, record))
@@ -1016,11 +1012,11 @@ async def refresh_prepared_contribution_checks(
   for path, record in candidates:
     try:
       checks = await asyncio.to_thread(
-        github_preflight_checks.refresh_prepared_check, record,
+        github_pre_pr_checks.refresh_pre_pr_check, record,
       )
     except ContributionSubmitError as exc:
       checks = {
-        **(record.get("early_checks") or {}),
+        **(record.get("pre_pr_checks") or {}),
         "state": "error",
         "message": exc.message,
         "observed_at": _now_iso(),
@@ -1034,8 +1030,8 @@ async def refresh_prepared_contribution_checks(
       current = _read_record_tolerant(path)
       if current is None or current.get("status") != "prepared":
         continue
-      current_checks = current.get("early_checks")
-      prior_checks = prior.get("early_checks")
+      current_checks = current.get("pre_pr_checks")
+      prior_checks = prior.get("pre_pr_checks")
       if (
         not isinstance(current_checks, dict)
         or not isinstance(prior_checks, dict)
@@ -1044,7 +1040,7 @@ async def refresh_prepared_contribution_checks(
         continue
       if checks == prior_checks:
         continue
-      updated = {**current, "early_checks": checks, "updated_at": _now_iso()}
+      updated = {**current, "pre_pr_checks": checks, "updated_at": _now_iso()}
       _write_record(path, updated)
       results.append(updated)
   return {"refreshed": results}

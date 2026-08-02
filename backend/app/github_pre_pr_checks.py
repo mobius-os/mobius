@@ -17,7 +17,10 @@ from urllib.parse import quote
 
 from app import github_auth
 from app.contribution_errors import ContributionSubmitError
-from app.github_contribution_contract import GIT_SHA as _GIT_SHA
+from app.github_contribution_contract import (
+  GIT_SHA as _GIT_SHA,
+  PRE_PR_CHECK_ACTIVE_STATES as _ACTIVE_STATES,
+)
 from app import github_contribution_git as _git_ops
 from app import github_contributions as _contrib
 
@@ -26,13 +29,8 @@ _SUPPORTED_WORKFLOWS = {
   "mobius-os/mobius": "test.yml",
 }
 _API_VERSION = "2026-03-10"
-_ACTIVE_STATES = frozenset({
-  "dispatching", "uncertain", "queued", "in_progress",
-})
-
-
-def supports_prepared_checks(record: dict) -> bool:
-  """True when one prepared record may use the early-check action."""
+def supports_pre_pr_checks(record: dict) -> bool:
+  """True when one prepared record may use the pre-pr-check action."""
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   repo = str(plan.get("repo") or record.get("repo") or "")
   return bool(
@@ -44,7 +42,7 @@ def supports_prepared_checks(record: dict) -> bool:
   )
 
 
-def check_is_active(check: object) -> bool:
+def pre_pr_checks_active(check: object) -> bool:
   return isinstance(check, dict) and check.get("state") in _ACTIVE_STATES
 
 
@@ -104,7 +102,7 @@ def _enable_workflow(repo: Path, fork_slug: str, workflow: str) -> None:
       "GitHub could not enable the Tests workflow on the personal fork. "
       "Enable Actions there or reconnect GitHub, then try Run checks again.",
       detail=detail[:600] or None,
-      code="early_checks_disabled",
+      code="pre_pr_checks_disabled",
     )
 
 
@@ -119,11 +117,11 @@ def _assert_upstream_workflow_dispatchable(
   )
   if source.returncode != 0 or "workflow_dispatch:" not in source.stdout:
     raise ContributionSubmitError(
-      "This is the one-time bootstrap for early checks: the manual Tests "
+      "This is the one-time bootstrap for pre-PR checks: the manual Tests "
       "trigger must reach upstream main before GitHub can run it from forks. "
       "Send this contribution normally; later platform contributions can run "
       "checks first.",
-      code="early_checks_unavailable",
+      code="pre_pr_checks_unavailable",
     )
 
 
@@ -148,7 +146,7 @@ def _dispatch_workflow(
       "The reviewed branch was pushed, but Contribute could not confirm "
       "whether GitHub started the checks. Reopen Contribute to reconcile the "
       "run before trying again.",
-      code="early_checks_uncertain",
+      code="pre_pr_checks_uncertain",
     ) from exc
   if result.returncode != 0:
     detail = (result.stderr or result.stdout or "").strip()
@@ -156,7 +154,7 @@ def _dispatch_workflow(
       "The reviewed branch was pushed, but GitHub could not start its Tests "
       "workflow.",
       detail=detail[:600] or None,
-      code="early_checks_dispatch_failed",
+      code="pre_pr_checks_dispatch_failed",
     )
   try:
     payload = _json_output(
@@ -167,7 +165,7 @@ def _dispatch_workflow(
     raise ContributionSubmitError(
       exc.message,
       detail=exc.detail,
-      code="early_checks_uncertain",
+      code="pre_pr_checks_uncertain",
     ) from exc
   try:
     run_id = int(payload.get("workflow_run_id"))
@@ -177,20 +175,18 @@ def _dispatch_workflow(
   if run_id <= 0 or not url.startswith("https://github.com/"):
     raise ContributionSubmitError(
       "GitHub started the checks but did not return their run details.",
-      code="early_checks_uncertain",
+      code="pre_pr_checks_uncertain",
     )
   return {"run_id": run_id, "url": url}
 
 
-def dispatch_prepared_checks(
+def dispatch_pre_pr_checks(
   record: dict,
   diff_path: Path,
-  *,
-  requested_at: str,
 ) -> tuple[dict, dict]:
   """Push the exact reviewed branch to the owner fork and start Tests.
 
-  Returns ``(early_checks, record_patch)``.  ``record_patch`` may contain a
+  Returns ``(pre_pr_checks, record_patch)``.  ``record_patch`` may contain a
   normalized reviewed head SHA and fork/push evidence; callers must persist it
   with the run atomically.
   """
@@ -208,14 +204,14 @@ def dispatch_prepared_checks(
     raise ContributionSubmitError(
       "Reconnect GitHub with full PR access before running checks on a fork.",
       status_code=409,
-      code="early_checks_scope",
+      code="pre_pr_checks_scope",
     )
-  if not supports_prepared_checks(record):
+  if not supports_pre_pr_checks(record):
     raise ContributionSubmitError(
-      "Early GitHub checks are currently available for standalone Möbius "
+      "Pre-PR GitHub checks are currently available for standalone Möbius "
       "platform contributions only.",
       status_code=409,
-      code="early_checks_unsupported",
+      code="pre_pr_checks_unsupported",
     )
 
   plan = record.get("plan") or {}
@@ -274,7 +270,7 @@ def dispatch_prepared_checks(
       raise ContributionSubmitError(
         f"This branch already has a {state_label} pull request: {url}. "
         "Use that pull request's checks instead of starting a private run.",
-        code="early_checks_existing_pr",
+        code="pre_pr_checks_existing_pr",
       )
 
     fork_slug = _contrib._ensure_owner_fork_remote(repo, upstream_repo, login)
@@ -318,7 +314,6 @@ def dispatch_prepared_checks(
       "branch": branch,
       "head_sha": pushed_sha,
       "workflow": workflow,
-      "requested_at": requested_at,
     }
     branch_url = f"https://github.com/{fork_slug}/tree/{quote(branch, safe='/')}"
     record_patch = _git_ops._record_patch_with(record_patch, {
@@ -329,6 +324,7 @@ def dispatch_prepared_checks(
     })
 
     _enable_workflow(repo, fork_slug, workflow)
+    pushed["requested_at"] = _now_iso()
     dispatched = _dispatch_workflow(
       repo,
       fork_slug=fork_slug,
@@ -346,8 +342,8 @@ def dispatch_prepared_checks(
     combined_patch = _git_ops._record_patch_with(
       record_patch, exc.record_patch,
     )
-    if pushed and not isinstance(combined_patch.get("early_checks"), dict):
-      check_state = "uncertain" if exc.code == "early_checks_uncertain" else "error"
+    if pushed and not isinstance(combined_patch.get("pre_pr_checks"), dict):
+      check_state = "uncertain" if exc.code == "pre_pr_checks_uncertain" else "error"
       patch = {
         **pushed,
         "state": check_state,
@@ -359,7 +355,7 @@ def dispatch_prepared_checks(
         exc.message,
         exc.status_code,
         detail=exc.detail,
-        record_patch={**combined_patch, "early_checks": patch},
+        record_patch={**combined_patch, "pre_pr_checks": patch},
         code=exc.code,
       ) from exc
     if combined_patch:
@@ -444,10 +440,10 @@ def _find_uncertain_run(repo: Path, check: dict) -> dict | None:
   return matches[0] if len(matches) == 1 else None
 
 
-def refresh_prepared_check(record: dict) -> dict | None:
-  """Return a fresh early-check snapshot, or None when no refresh is due."""
-  check = record.get("early_checks")
-  if not supports_prepared_checks(record) or not check_is_active(check):
+def refresh_pre_pr_check(record: dict) -> dict | None:
+  """Return a fresh pre-pr-check snapshot, or None when no refresh is due."""
+  check = record.get("pre_pr_checks")
+  if not supports_pre_pr_checks(record) or not pre_pr_checks_active(check):
     return None
   plan = record.get("plan") or {}
   repo = _contrib._safe_repo_path(plan.get("repo_path"))

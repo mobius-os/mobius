@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 from app.contribution_errors import ContributionSubmitError
-from app import github_preflight_checks as checks
+from app import github_pre_pr_checks as checks
 
 
 def _record(*, repo="mobius-os/mobius", status="prepared"):
@@ -28,18 +28,18 @@ def _cp(payload, returncode=0):
 
 
 def test_support_is_narrow_and_active_states_are_explicit():
-  assert checks.supports_prepared_checks(_record())
-  assert not checks.supports_prepared_checks(_record(repo="mobius-os/app-demo"))
-  assert not checks.supports_prepared_checks(_record(status="open"))
+  assert checks.supports_pre_pr_checks(_record())
+  assert not checks.supports_pre_pr_checks(_record(repo="mobius-os/app-demo"))
+  assert not checks.supports_pre_pr_checks(_record(status="open"))
   stacked = _record()
   stacked["plan"]["stack"] = {"id": "stack-1"}
-  assert not checks.supports_prepared_checks(stacked)
+  assert not checks.supports_pre_pr_checks(stacked)
 
-  assert checks.check_is_active({"state": "dispatching"})
-  assert checks.check_is_active({"state": "uncertain"})
-  assert checks.check_is_active({"state": "queued"})
-  assert checks.check_is_active({"state": "in_progress"})
-  assert not checks.check_is_active({"state": "completed"})
+  assert checks.pre_pr_checks_active({"state": "dispatching"})
+  assert checks.pre_pr_checks_active({"state": "uncertain"})
+  assert checks.pre_pr_checks_active({"state": "queued"})
+  assert checks.pre_pr_checks_active({"state": "in_progress"})
+  assert not checks.pre_pr_checks_active({"state": "completed"})
 
 
 def test_bootstrap_requires_manual_trigger_on_upstream(monkeypatch, tmp_path):
@@ -54,7 +54,7 @@ def test_bootstrap_requires_manual_trigger_on_upstream(monkeypatch, tmp_path):
     checks._assert_upstream_workflow_dispatchable(
       tmp_path, upstream_sha="a" * 40, workflow="test.yml",
     )
-  assert failure.value.code == "early_checks_unavailable"
+  assert failure.value.code == "pre_pr_checks_unavailable"
   assert "one-time bootstrap" in failure.value.message
   assert calls[0][1] == (
     "show", f"{'a' * 40}:.github/workflows/test.yml",
@@ -74,7 +74,7 @@ def test_dispatch_response_without_run_identity_is_uncertain(
       workflow="test.yml",
       branch="fix/reviewed-change",
     )
-  assert failure.value.code == "early_checks_uncertain"
+  assert failure.value.code == "pre_pr_checks_uncertain"
 
 
 def test_exact_workflow_run_snapshot_rejects_the_wrong_head():
