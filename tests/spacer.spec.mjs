@@ -533,7 +533,12 @@ test.describe('Chat switching (the bug)', () => {
     const beforeReturn = await page.evaluate((id) => {
       const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const saved = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
-      return { top: scroll.scrollTop, key: saved.key, offset: saved.offset }
+      const anchor = scroll.querySelector(`[data-key="${CSS.escape(saved.key)}"]`)
+      return {
+        key: saved.key,
+        offset: saved.offset,
+        anchorTop: anchor.getBoundingClientRect().top - scroll.getBoundingClientRect().top,
+      }
     }, chatId)
 
     // A cold shell mount may retain physical ChatView owners for both workspace
@@ -551,12 +556,20 @@ test.describe('Chat switching (the bug)', () => {
     const afterReturn = await page.evaluate((id) => {
       const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const saved = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
-      return { top: scroll.scrollTop, key: saved.key, offset: saved.offset }
+      const anchor = scroll.querySelector(`[data-key="${CSS.escape(saved.key)}"]`)
+      return {
+        key: saved.key,
+        offset: saved.offset,
+        anchorTop: anchor.getBoundingClientRect().top - scroll.getBoundingClientRect().top,
+      }
     }, chatId)
 
     expect(afterReturn.key).toBe(beforeReturn.key)
     expect(Math.abs(afterReturn.offset - beforeReturn.offset)).toBeLessThanOrEqual(1)
-    expect(Math.abs(afterReturn.top - beforeReturn.top)).toBeLessThanOrEqual(8)
+    // A cold fetch may contain fewer paginated rows above the anchor, so raw
+    // scrollTop is deliberately not stable. The semantic coordinate must put
+    // the same anchor at the same visible viewport position.
+    expect(Math.abs(afterReturn.anchorTop - beforeReturn.anchorTop)).toBeLessThanOrEqual(8)
   })
 })
 

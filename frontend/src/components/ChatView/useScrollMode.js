@@ -153,6 +153,10 @@ const _scrollModes = (() => {
   }
   catch { return {} }
 })()
+// `clearReadingPositions` is a terminal owner-session boundary. React and the
+// browser may still deliver cleanup/pagehide work before the ensuing reload;
+// those late callbacks must not recreate storage the session just removed.
+let _readingPositionWritesEnabled = true
 
 /** The durable message row an activation must contain before reveal.
  * ChatView uses only the row identity; this module keeps ownership of the
@@ -203,11 +207,13 @@ export function retireSavedReadingPosition(chatId) {
  *  still-mounted ChatView's pagehide write would put the in-memory map
  *  straight back over the cleared key. */
 export function clearReadingPositions() {
+  _readingPositionWritesEnabled = false
   for (const key of Object.keys(_scrollModes)) delete _scrollModes[key]
   try { localStorage.removeItem(READING_POSITION_KEY) } catch {}
 }
 
 function _persistScrollModes() {
+  if (!_readingPositionWritesEnabled) return
   try {
     const entries = Object.entries(_scrollModes)
     if (entries.length > READING_POSITION_LIMIT) {
@@ -1501,7 +1507,15 @@ export default function useScrollMode({
           && !(savedLocationUnresolvedRef.current
             && !readerLocationExplicitRef.current)) {
         readerLocationExplicitRef.current = true
-        persistMode({ freezeToCurrentPosition: true })
+        // The outgoing main-effect cleanup has already settled any pending
+        // reader gesture into ANCHOR_AT. Keep that semantic address intact:
+        // re-measuring it after the shell changed worlds can discard a nested
+        // part path and make the reverse handoff return somewhere else inside
+        // a long turn. Live FOLLOW/PIN modes still need one physical freeze so
+        // content arriving while inactive cannot redefine their tail.
+        persistMode({
+          freezeToCurrentPosition: modeRef.current.kind !== 'ANCHOR_AT',
+        })
       }
       readingPositionOwnerRef.current = false
       return

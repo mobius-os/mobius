@@ -113,8 +113,8 @@ test('a retained chat has exactly one durable reading-position owner', () => {
   )
   assert.match(
     scrollController,
-    /if \(!readingPositionOwnerRef\.current\) return[\s\S]*const wasOwner = readingPositionOwnerRef\.current[\s\S]*persistMode\(\{ freezeToCurrentPosition: true \}\)[\s\S]*readingPositionOwnerRef\.current = false[\s\S]*readingPositionOwnerRef\.current = true[\s\S]*transitionMode\(\{ kind: 'INITIAL' \}, 'lifecycle:position-owner-enter'\)/,
-    'the outgoing owner must freeze once, relinquish writes, and make the incoming owner restore shared state',
+    /if \(!readingPositionOwnerRef\.current\) return[\s\S]*const wasOwner = readingPositionOwnerRef\.current[\s\S]*freezeToCurrentPosition: modeRef\.current\.kind !== 'ANCHOR_AT'[\s\S]*readingPositionOwnerRef\.current = false[\s\S]*readingPositionOwnerRef\.current = true[\s\S]*transitionMode\(\{ kind: 'INITIAL' \}, 'lifecycle:position-owner-enter'\)/,
+    'the outgoing owner must preserve a settled semantic anchor, freeze live modes, relinquish writes, and make the incoming owner restore shared state',
   )
   assert.match(
     chatView,

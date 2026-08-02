@@ -512,9 +512,22 @@ test.describe('Logout cache wipe', () => {
 
     await page.evaluate(async () => {
       sessionStorage.setItem('draft:sign-out-test', 'private draft')
+      localStorage.setItem('chat-reading-position', JSON.stringify({
+        'sign-out-test': {
+          kind: 'ANCHOR_AT',
+          key: 'private-reading-position',
+          offset: 12,
+          at: Date.now(),
+        },
+      }))
       await caches.open('mobius-sign-out-test')
       await caches.open('unrelated-cache-keep-me')
     })
+    // Reload once so the scroll module owns the seeded map in memory. Without
+    // the terminal write gate, the mounted chat's pagehide cleanup recreates
+    // the just-cleared key (often as an empty object) during sign-out reload.
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await waitForShell(page)
 
     const nav = page.getByRole('button', { name: 'Toggle navigation' })
     if (await nav.getAttribute('aria-expanded') !== 'true') await nav.click()
@@ -528,6 +541,7 @@ test.describe('Logout cache wipe', () => {
     await expect(page.locator('.login')).toBeVisible({ timeout: 10000 })
     await expect(page.getByText(/session expired/i)).toHaveCount(0)
     expect(await page.evaluate(() => localStorage.getItem('token'))).toBeNull()
+    expect(await page.evaluate(() => localStorage.getItem('chat-reading-position'))).toBeNull()
     expect(await page.evaluate(() => sessionStorage.getItem('draft:sign-out-test'))).toBeNull()
     const cachesAfter = await page.evaluate(() => caches.keys())
     expect(cachesAfter).not.toContain('mobius-sign-out-test')

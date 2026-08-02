@@ -645,7 +645,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   relinquishes persistence authority; an initially hidden owner writes nothing.
   The incoming owner re-enters through `INITIAL` and consumes the shared saved
   coordinate before it can paint. Hidden owners register no page-lifecycle
-  persistence and cannot overwrite the active owner during reload.
+  persistence and cannot overwrite the active owner during reload. A settled
+  `ANCHOR_AT` transfers by its existing semantic address rather than being
+  re-measured after workspace geometry changes; only live follow/pin state is
+  frozen from physical geometry. Retained Builder owners keep their projected
+  pane rectangle while Standard paints, so even that required live-state freeze
+  reads the geometry the outgoing owner actually displayed.
 - **R5 — Reader owns gestures and layout-only sends.** From the first wheel/touch/key
   input until its scroll event lands, no layout path may write `scrollTop`: stream
   resize, spacer handoff, terminal promotion, catch-up, and viewport/keyboard resize
