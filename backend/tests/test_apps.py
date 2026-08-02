@@ -308,38 +308,6 @@ def test_delete_scheduled_app_disables_own_cron_replay(
   assert source_dir.exists()
 
 
-def test_delete_legacy_platform_app_disables_runtime_cron_replay(
-  client, auth, db, monkeypatch,
-):
-  """Old platform-core rows also had a replay sidecar under /data/apps/<slug>."""
-  monkeypatch.setattr("app.install._unregister_cron", lambda _source: None)
-  data_dir = Path(get_settings().data_dir)
-  platform_source = data_dir / "platform" / "core-apps" / "reflection"
-  platform_source.mkdir(parents=True, exist_ok=True)
-  (platform_source / "index.jsx").write_text(
-    "export default function App() { return <div/> }",
-    encoding="utf-8",
-  )
-  runtime_dir = data_dir / "apps" / "reflection"
-  runtime_dir.mkdir(parents=True, exist_ok=True)
-  replay = runtime_dir / "init-cron.sh"
-  replay.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-
-  app = models.App(
-    name="Reflection",
-    description="legacy platform app",
-    jsx_source="export default function App() { return <div/> }",
-    slug="reflection",
-    source_dir=str(platform_source),
-  )
-  db.add(app)
-  db.commit()
-
-  assert client.delete(f"/api/apps/{app.id}", headers=auth).status_code == 204
-
-  assert not replay.exists()
-  assert (runtime_dir / "init-cron.sh.tombstoned").exists()
-  assert platform_source.exists()
 
 
 def test_app_token_can_update_own_schedule_only(client, auth, monkeypatch):

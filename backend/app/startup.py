@@ -210,21 +210,6 @@ async def _reconcile_compiled_bundles(context: StartupContext) -> None:
     )
 
 
-def _reconcile_manifest_icons(context: StartupContext) -> None:
-  from app.app_apply import reconcile_manifest_icons
-
-  with SessionLocal() as db:
-    repaired, warnings = reconcile_manifest_icons(db)
-  if repaired or warnings:
-    context.logger.info(
-      "manifest-icon reconciliation: repaired=%d warnings=%d",
-      len(repaired),
-      len(warnings),
-    )
-  for warning in warnings:
-    context.logger.warning("manifest-icon reconciliation: %s", warning)
-
-
 def _retire_integrated_provenance(context: StartupContext) -> None:
   from app.app_apply import retire_integrated_app_provenance
 
@@ -268,25 +253,6 @@ async def _install_bootstrap_apps(context: StartupContext) -> None:
     await ensure_bootstrap_apps_installed(db)
 
 
-def _backfill_app_source_dirs(context: StartupContext) -> None:
-  from app import models
-
-  with SessionLocal() as db:
-    legacy = db.query(models.App).filter(models.App.source_dir.is_(None)).all()
-    changed = False
-    for app in legacy:
-      if not app.slug:
-        continue
-      candidate = str(Path(context.settings.data_dir) / "apps" / app.slug)
-      if db.query(models.App).filter(
-        models.App.id != app.id,
-        models.App.source_dir == candidate,
-      ).first():
-        continue
-      app.source_dir = candidate
-      changed = True
-    if changed:
-      db.commit()
 
 
 def _reconcile_app_cron(context: StartupContext) -> None:
@@ -353,11 +319,6 @@ STARTUP_TASKS = (
     checkpoint="startup_bundles_reconciled",
   ),
   StartupTask(
-    "reconcile manifest icons",
-    _reconcile_manifest_icons,
-    checkpoint="startup_icons_reconciled",
-  ),
-  StartupTask(
     "retire integrated app provenance",
     _retire_integrated_provenance,
     checkpoint="startup_app_provenance_retired",
@@ -369,7 +330,6 @@ STARTUP_TASKS = (
     _install_bootstrap_apps,
     checkpoint="startup_apps_bootstrapped",
   ),
-  StartupTask("backfill app source directories", _backfill_app_source_dirs),
   StartupTask(
     "reconcile app cron supervision",
     _reconcile_app_cron,
