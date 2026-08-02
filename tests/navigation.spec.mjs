@@ -557,12 +557,8 @@ test.describe('Drawer touch lifecycle', () => {
   test.use({ hasTouch: true })
 
   test('an interrupted workspace drag cannot consume the next real drawer-row tap', async ({ page }) => {
-    // Enable workspace gestures before the shell module evaluates. Touch drawer
-    // rows intentionally own menu/reorder locally; a hybrid device's mouse or
+    // Touch drawer rows own menu/reorder locally; a hybrid device's mouse or
     // trackpad still uses the row-to-workspace drag contract tested below.
-    await page.addInitScript(() => {
-      localStorage.setItem('mobius:workspace-splits', '1')
-    })
     await setup(page, { width: 412, height: 915 })
     await openDrawer(page)
 
@@ -1605,16 +1601,15 @@ async function bootTwoAppPanes(page) {
     contentType: 'application/json',
     body: JSON.stringify({ token: 'mock-app-token' }),
   }))
-  // Land on the origin, then seed the flag + workspace blob and re-navigate so
-  // the shell boots the two-pane tree with the splits flag on.
+  // Land on the origin, then seed the canonical workspace and re-navigate so
+  // the shell boots the two-pane tree.
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   const blob = paneModel.serializeWorkspace(twoAppPanes())
-  await page.addInitScript(([flagKey, wsKey, wsBlob]) => {
+  await page.addInitScript(([wsKey, wsBlob]) => {
     try {
-      localStorage.setItem(flagKey, '1')
-      sessionStorage.setItem(wsKey, wsBlob)
+      localStorage.setItem(wsKey, wsBlob)
     } catch { /* private mode */ }
-  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
+  }, [paneModel.STORAGE_KEY, blob])
   await page.goto(`${BASE}/shell/?app=${PANE_APP_A}`, { waitUntil: 'domcontentloaded' })
   await expect(page.locator('.workspace__chrome')).toHaveCount(1, { timeout: 8000 })
   await page.evaluate(() => new Promise(r =>

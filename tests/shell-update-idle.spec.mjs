@@ -156,13 +156,9 @@ async function seedTwoPaneBuilder(page, firstChatId, secondChatId) {
   })
   workspace = paneModel.focusPane(workspace, 'p0')
   const blob = paneModel.serializeWorkspace(workspace)
-  const legacy = JSON.stringify(paneModel.flatten(workspace)
-    .map(tab => ({ kind: tab.kind, id: tab.id })))
-  await page.addInitScript(([workspaceKey, workspaceBlob, openTabs]) => {
-    localStorage.setItem('mobius:workspace-splits', '1')
-    sessionStorage.setItem(workspaceKey, workspaceBlob)
-    sessionStorage.setItem('mobius-open-tabs', openTabs)
-  }, [paneModel.STORAGE_KEY, blob, legacy])
+  await page.addInitScript(([workspaceKey, workspaceBlob]) => {
+    localStorage.setItem(workspaceKey, workspaceBlob)
+  }, [paneModel.STORAGE_KEY, blob])
 }
 
 async function sendMessage(page, text) {

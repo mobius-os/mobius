@@ -12,10 +12,9 @@
  *   (d) close-only tab actions remain available while model split caps hold;
  *   (e) a projection flip to phone preserves the persisted tree and pane focus;
  *
- * The flag is enabled per-test (localStorage 'mobius:workspace-splits' = '1')
- * and a 2-pane workspace blob is seeded in localStorage before the shell
- * boots, exactly like tabs.spec seeds the flat workspace. Agent + apps routes
- * are intercepted so no agent tokens are consumed.
+ * A 2-pane workspace blob is seeded in localStorage before the shell boots,
+ * exactly like tabs.spec seeds the canonical workspace. Agent + apps routes are
+ * intercepted so no agent tokens are consumed.
  *
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/workspace-panes.spec.mjs --project=tests
  */
@@ -150,36 +149,29 @@ async function mockApps(page, apps) {
   return state
 }
 
-/** Seed a workspace blob (authoritative) + the legacy flat mirror + the splits
- *  flag, all before the shell bundle evaluates on the next navigation. */
+/** Seed the canonical workspace before the shell bundle evaluates. */
 async function seedWorkspace(page, ws) {
   const blob = paneModel.serializeWorkspace(ws)
-  const legacy = JSON.stringify(paneModel.flatten(ws).map(t => ({ kind: t.kind, id: t.id })))
-  await page.addInitScript(([flagKey, wsKey, wsBlob, legKey, leg]) => {
+  await page.addInitScript(([wsKey, wsBlob]) => {
     try {
-      localStorage.setItem(flagKey, '1')
       localStorage.setItem(wsKey, wsBlob)
-      sessionStorage.setItem(legKey, leg)
     } catch { /* private mode */ }
-  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob, 'mobius-open-tabs', legacy])
+  }, [paneModel.STORAGE_KEY, blob])
 }
 
-/** Seed one explicit Builder leaf while keeping the legacy strip mirror empty.
- *  Fresh workspaces now intentionally start in Standard; this fixture owns the
- *  older "one chat, strip never engaged" Builder state directly. */
+/** Seed one explicit Builder leaf. Fresh workspaces intentionally start in
+ *  Standard, so this fixture owns the Builder state directly. */
 async function seedBuilderSingleLeaf(page, chatId) {
   const ws = paneModel.setViewMode(
     paneModel.seedFromFlatTabs([{ kind: 'chat', id: chatId }]),
     'panes',
   )
   const blob = paneModel.serializeWorkspace(ws)
-  await page.addInitScript(([flagKey, workspaceKey, workspaceBlob]) => {
+  await page.addInitScript(([workspaceKey, workspaceBlob]) => {
     try {
-      localStorage.setItem(flagKey, '1')
       localStorage.setItem(workspaceKey, workspaceBlob)
-      sessionStorage.setItem('mobius-open-tabs', '[]') // empty legacy -> strip not engaged
     } catch { /* private mode */ }
-  }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
+  }, [paneModel.STORAGE_KEY, blob])
 }
 
 /** Two chat panes side by side: p0 = chatA (focused), p1 = chatB. */
@@ -1492,11 +1484,7 @@ test.describe('Workspace view-mode toggle', () => {
     await page.mouse.up()
   })
 
-  // Regression (item 0): the splits KILL SWITCH must collapse a persisted 'panes'
-  // blob to single on restore. The tiled render is flag-independent but both exit
-  // controls are flag-gated, so a rolled-back client (splits off, panes blob) would
-  // otherwise restore TILED with no way to reach single — un-exitable, across reload.
-  test('(item 0) splits kill-switch collapses a persisted panes blob to single, never un-exitable tiled', async ({ page }) => {
+  test('a persisted Builder workspace restores canonically and remains exit-able', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'killA')
     const b = await createTaggedChat(page, 'killB')
@@ -1504,18 +1492,19 @@ test.describe('Workspace view-mode toggle', () => {
     const blob = paneModel.serializeWorkspace(twoChatPanes(a.id, b.id)) // viewMode 'panes'
     await page.addInitScript((wsBlob) => {
       try {
-        localStorage.setItem('mobius:workspace-splits', '0') // KILL SWITCH OFF
         localStorage.setItem('mobius-workspace', wsBlob)
       } catch { /* private mode */ }
     }, blob)
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
-    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
-    // Restored SINGLE despite the persisted 'panes' viewMode: no tiled chrome/panes.
+    await expect(page.locator('.workspace__chrome')).toHaveCount(1, { timeout: 8000 })
+    expect((await readWs(page)).viewMode).toBe('panes')
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    await expect(brand).toHaveClass(/shell__brand--builder/)
+
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect.poll(() => readWs(page).then(ws => ws.viewMode)).toBe('single')
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
-    await expect(page.locator('.shell__view--paned')).toHaveCount(0)
-    expect((await readWs(page)).viewMode).toBe('single')
-    // The logo carries no builder state either (there is no builder mode with splits off).
-    await expect(page.getByRole('button', { name: 'Toggle navigation' })).not.toHaveClass(/shell__brand--builder/)
   })
 
   // single-mode + ONE leaf: dragging stays enabled; the drop's shape decides

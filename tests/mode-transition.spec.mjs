@@ -39,7 +39,7 @@ async function bootShell(page, viewport) {
 }
 
 // Mock a chat GET so a seeded chat pane mounts a ChatView without a network error,
-// then seed a persisted workspace blob into sessionStorage before boot.
+// then seed a persisted workspace blob into durable browser storage before boot.
 async function bootSeededWorkspace(page, viewport, ws) {
   await page.setViewportSize(viewport)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, r => r.fulfill({ status: 202, body: '{}' }))
@@ -51,7 +51,7 @@ async function bootSeededWorkspace(page, viewport, ws) {
   })
   const blob = paneModel.serializeWorkspace(ws)
   await page.addInitScript(([key, raw]) => {
-    try { sessionStorage.setItem(key, raw); sessionStorage.setItem('mobius-open-tabs', '[]') } catch { /* private mode */ }
+    try { localStorage.setItem(key, raw) } catch { /* private mode */ }
   }, [paneModel.STORAGE_KEY, blob])
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.shell', { timeout: 10000 })
