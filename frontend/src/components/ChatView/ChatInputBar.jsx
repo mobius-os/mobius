@@ -131,9 +131,20 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
  *
  *  Send, Steer, and Stop are states of the same primary action. They
  *  deliberately share the `primary` key so React preserves the 40px action
- *  target and swaps only its icon, label, handler, and semantic colour—there
- *  must be no empty/black replacement frame between any of them. Mic remains
- *  distinct because it is the idle input affordance rather than a turn action. */
+ *  target. PrimaryActionGlyph likewise preserves all three glyph layers: this
+ *  lets transitions into Stop crossfade continuously instead of replacing the
+ *  SVG in one frame. Send → Steer remains immediate. Mic stays distinct because
+ *  it is the idle input affordance rather than a turn action. */
+function PrimaryActionGlyph({ action }) {
+  return (
+    <span className={`chat__action-glyphs chat__action-glyphs--${action}`} aria-hidden="true">
+      <ArrowUp className="chat__action-glyph chat__action-glyph--send" width={22} height={22} />
+      <DoubleChevronRight className="chat__action-glyph chat__action-glyph--steer" width={20} height={20} />
+      <Stop className="chat__action-glyph chat__action-glyph--stop" width={28} height={28} />
+    </span>
+  )
+}
+
 function PrimaryAction({
   sending, listening, hasInput, hasUploading, offline, showSteer, steerReady,
   submissionBlocked,
@@ -155,7 +166,7 @@ function PrimaryAction({
         aria-busy={!steerReady}
         disabled={!steerReady}
       >
-        <DoubleChevronRight width={20} height={20} />
+        <PrimaryActionGlyph action="steer" />
       </button>
     )
   }
@@ -174,7 +185,7 @@ function PrimaryAction({
         onClick={onStop}
         aria-label="Stop"
       >
-        <Stop width={28} height={28} aria-hidden="true" />
+        <PrimaryActionGlyph action="stop" />
       </button>
     )
   }
@@ -196,7 +207,7 @@ function PrimaryAction({
         aria-label="Send"
         disabled={hasUploading || offline || submissionBlocked}
       >
-        <ArrowUp width={22} height={22} />
+        <PrimaryActionGlyph action="send" />
       </button>
     )
   }

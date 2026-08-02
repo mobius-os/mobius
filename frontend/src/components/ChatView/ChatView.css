@@ -2142,6 +2142,50 @@
   transition: transform 0.16s ease;
 }
 
+/* Keep the primary action's three SVGs mounted in one grid cell. Send → Steer
+   stays an immediate swap; only entering Stop crossfades the old directional
+   glyph into the square while the shared button shell changes colour. Because
+   the outgoing glyph remains visible for the same 160ms that Stop fades in,
+   there is never the empty replacement frame caused by the retired reveal
+   animation. */
+.chat__action-glyphs {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+}
+
+.chat__action-glyph {
+  grid-area: 1 / 1;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat__action-glyphs--send .chat__action-glyph--send,
+.chat__action-glyphs--steer .chat__action-glyph--steer {
+  opacity: 1;
+}
+
+.chat__action-glyph--stop {
+  transform: scale(0.76) rotate(-8deg);
+}
+
+.chat__action-glyphs--stop .chat__action-glyph {
+  transition:
+    opacity 0.16s ease,
+    transform 0.2s var(--ease-out-soft, ease-out);
+}
+
+.chat__action-glyphs--stop .chat__action-glyph--send,
+.chat__action-glyphs--stop .chat__action-glyph--steer {
+  transform: scale(0.82);
+}
+
+.chat__action-glyphs--stop .chat__action-glyph--stop {
+  opacity: 1;
+  transform: none;
+}
+
 .chat__send {
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
@@ -2173,7 +2217,7 @@
 .chat__stop:focus-visible {
   outline: none;
 }
-.chat__stop:focus-visible svg {
+.chat__stop:focus-visible .chat__action-glyph--stop {
   outline: 2px solid var(--accent);
   /* Offset is measured from the SVG box, so it has to shrink as the glyph
      grows: at 28px a 3px offset draws 28 + 2*(3 + 2) = 38px, exactly the
@@ -2181,6 +2225,12 @@
      around the glyph. 1px keeps the previous 34px visual. */
   outline-offset: 1px;
   border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__action-glyphs--stop .chat__action-glyph {
+    transition: none;
+  }
 }
 
 /* Steer (fast-forward) button — replaces Stop while a turn is streaming
