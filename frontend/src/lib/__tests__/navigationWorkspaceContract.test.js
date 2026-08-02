@@ -42,10 +42,13 @@ test('a pending drawer close consumes its tagged source before direction fallbac
   assert.ok(pending >= 0 && guard > pending,
     'an unresolved traversal is resolved or blocks another open before the ordinary open guard')
   const pendingBlock = open.slice(pending, guard)
-  // Within the grace window the original serialization holds: the open returns
-  // while the close's history cursor may still legitimately be moving.
-  assert.match(pendingBlock, /DRAWER_CLOSE_TRAVERSAL_GRACE_MS[\s\S]{0,80}?return/,
-    'a fresh pending close still blocks the open')
+  // Within the grace window serialization still wins, but the activation is
+  // retained and replayed instead of being discarded.
+  assert.match(
+    pendingBlock,
+    /drawerOpenAfterCloseRef\.current = true[\s\S]*DRAWER_CLOSE_TRAVERSAL_GRACE_MS - elapsed[\s\S]*return/,
+    'a fresh pending close queues rather than discards the first open',
+  )
   // Re-adopting the sentinel after a LOST traversal requires classic-store
   // proof that the cursor never left it — never the boolean alone.
   assert.match(
@@ -68,7 +71,7 @@ test('a pending drawer close consumes its tagged source before direction fallbac
   // Whoever else resolves the drawer's history state clears the pending flag too,
   // so a later open cannot remain latched behind a hidden panel.
   assert.match(navigation, /drawerClosePendingRef\.current = false\s*\n\s*drawerOpenRef\.current = false\s*\n\s*setDrawerVisible\(false\)/)
-  assert.match(navigation, /function handleForward\([^)]*\) \{\s*\/\/[\s\S]*?if \(drawerClosePendingRef\.current\) \{\s*drawerClosePendingRef\.current = false\s*drawerOpenRef\.current = false/)
+  assert.match(navigation, /function handleForward\([^)]*\) \{\s*\/\/[\s\S]*?if \(drawerClosePendingRef\.current\) \{\s*clearDrawerOpenAfterClose\(\)\s*drawerClosePendingRef\.current = false\s*drawerOpenRef\.current = false/)
 })
 
 test('an explicit drawer close starts visually before consuming its history sentinel', () => {

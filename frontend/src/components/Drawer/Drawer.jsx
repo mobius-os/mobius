@@ -335,6 +335,12 @@ export default function Drawer({
   // behind) so outside-tap cancellation sees the current edit immediately.
   const renamingRef = useRef(null)
   const overlayCancelRef = useRef(false)
+  // Closing on pointerdown makes the drawer feel immediate, but WebKit may
+  // retarget the compatibility click from that same touch to content revealed
+  // beneath the scrim. Keep ownership of exactly that click. A new pointer or
+  // keyboard activation clears a stale claim first, so a touch sequence that
+  // produces no click cannot poison the owner's next action.
+  const outsideDismissClickRef = useRef(false)
   const renaming = renamingState
   const setRenaming = useCallback((next) => {
     renamingRef.current = next
@@ -459,9 +465,34 @@ export default function Drawer({
       renamingRef.current = null
       setRenaming(null)
     }
+    outsideDismissClickRef.current = true
     e.preventDefault()
+    e.stopPropagation()
     onClose?.()
   }
+
+  useEffect(() => {
+    function releaseStaleDismissClaim() {
+      outsideDismissClickRef.current = false
+    }
+    function consumeOutsideDismissClick(e) {
+      if (!outsideDismissClickRef.current) return
+      outsideDismissClickRef.current = false
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    // Capture sees a new activation before the overlay's bubble handler can
+    // claim its own pointerdown. The click listener then catches both an
+    // ordinary scrim click and WebKit's retargeted compatibility click.
+    document.addEventListener('pointerdown', releaseStaleDismissClaim, true)
+    document.addEventListener('keydown', releaseStaleDismissClaim, true)
+    document.addEventListener('click', consumeOutsideDismissClick, true)
+    return () => {
+      document.removeEventListener('pointerdown', releaseStaleDismissClaim, true)
+      document.removeEventListener('keydown', releaseStaleDismissClaim, true)
+      document.removeEventListener('click', consumeOutsideDismissClick, true)
+    }
+  }, [])
 
   const queryClient = useQueryClient()
 
@@ -595,6 +626,7 @@ export default function Drawer({
   // drawer was dismissed (Escape, overlay tap, swipe).
   const previousFocusRef = useRef(null)
   const drawerRef = useRef(null)
+  const closeShieldRef = useRef(null)
   useEffect(() => {
     if (persistent) {
       previousFocusRef.current = null
@@ -688,14 +720,17 @@ export default function Drawer({
     drawerGestureRef.current = null
   }, [open, persistent])
 
-  // Keep the scrim hit-testable while the panel is sliding away. `open` flips
-  // false at the START of the 250ms close transition; dropping pointer-events
-  // in that same render exposes the chat/app while drawer pixels are still on
-  // screen. transitionend is the normal release, with a timeout fallback for
-  // reduced-motion or an interrupted compositor transition.
+  // Keep only the panel's still-visible footprint hit-testable while it slides
+  // away. The full-screen visual scrim stops owning input as soon as close is
+  // acknowledged; a geometry-matched shield follows the panel until its
+  // transition ends. This keeps uncovered controls live without allowing taps
+  // through visible drawer pixels.
   const [scrimBlocking, setScrimBlocking] = useState(open && !persistent)
   useLayoutEffect(() => {
-    if (open && !persistent) setScrimBlocking(true)
+    if (open && !persistent) {
+      closeShieldRef.current?.style.setProperty('--drawer-close-start-x', '0px')
+      setScrimBlocking(true)
+    }
     if (persistent) setScrimBlocking(false)
   }, [open, persistent])
   useLayoutEffect(() => {
@@ -717,6 +752,11 @@ export default function Drawer({
     const width = e.currentTarget.getBoundingClientRect().width
     const x = new DOMMatrixReadOnly(getComputedStyle(e.currentTarget).transform).m41
     if (x > -width + 1) return
+    setScrimBlocking(false)
+  }
+
+  function handleCloseShieldAnimationEnd(e) {
+    if (open || e.target !== e.currentTarget || e.animationName !== 'drawer-close-shield') return
     setScrimBlocking(false)
   }
 
@@ -763,7 +803,9 @@ export default function Drawer({
     el.classList.add('drawer--dragging')
     // Clamp to [-320, 0]: a finger that drifts back past the origin must not
     // drag an already-open panel further right than open.
-    el.style.transform = `translateX(${Math.min(0, Math.max(dx, -320))}px)`
+    const clampedX = Math.min(0, Math.max(dx, -320))
+    el.style.transform = `translateX(${clampedX}px)`
+    closeShieldRef.current?.style.setProperty('--drawer-close-start-x', `${clampedX}px`)
   }
   function onDrawerPointerUp(e) {
     // If the controller took over, it owns pointerup too — do nothing here.
@@ -793,6 +835,7 @@ export default function Drawer({
         // the .drawer--open class's translateX(0) take over with
         // the transition running from the drag position.
         el.style.transform = ''
+        closeShieldRef.current?.style.setProperty('--drawer-close-start-x', '0px')
       }
     }
     const suppressGeneratedClick = shouldSuppressDrawerSwipeClick({
@@ -815,6 +858,7 @@ export default function Drawer({
     const gesture = drawerGestureRef.current
     if (gesture && e.pointerId !== gesture.pointerId) return
     clearDrawerGestureStyles(drawerRef.current)
+    closeShieldRef.current?.style.setProperty('--drawer-close-start-x', '0px')
     drawerGestureRef.current = null
     // pointercancel means the browser owns the gesture (normally native pan-y).
     // It must never leave a click guard behind for a later destination tap.
@@ -906,10 +950,18 @@ export default function Drawer({
   return (
     <>
       {!persistent && (
-        <div
-          className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}`}
-          onPointerDown={handleOverlayPointerDown}
-        />
+        <>
+          <div
+            className={`drawer-overlay${open ? ' drawer-overlay--visible' : ''}${scrimBlocking ? ' drawer-overlay--blocking' : ''}`}
+            onPointerDown={handleOverlayPointerDown}
+          />
+          <div
+            ref={closeShieldRef}
+            className={`drawer-close-shield${!open && scrimBlocking ? ' drawer-close-shield--active' : ''}`}
+            aria-hidden="true"
+            onAnimationEnd={handleCloseShieldAnimationEnd}
+          />
+        </>
       )}
       {/* React 19 reflects the boolean `inert` prop to the boolean
           attribute (present when true, absent when false), so a closed

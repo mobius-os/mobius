@@ -26,23 +26,43 @@
   transition-timing-function: cubic-bezier(0, 0, 0.2, 1);
 }
 
-/* `open` becomes false when the close transition STARTS, not when the panel
-   has left the viewport. Keep the fading scrim as the touch/pointer owner until
-   Drawer.jsx observes the panel's transform transitionend (or its fallback),
-   so the app behind never becomes interactive beneath visible drawer pixels. */
-.drawer-overlay--blocking {
+/* The full scrim owns outside taps only while the drawer is open. Once closing
+   starts, the geometry-matched shield below follows the remaining panel pixels
+   instead of leaving an invisible full-screen dead zone over the workspace. */
+.drawer-overlay--visible.drawer-overlay--blocking {
   pointer-events: auto;
 }
 
-/* ── Panel ─────────────────────────────────────────── */
-
+.drawer-close-shield,
 .drawer {
   position: fixed;
   top: calc(58px + env(safe-area-inset-top));
   left: 0;
   bottom: 0;
-  z-index: 95;
   width: min(360px, 90vw);
+}
+
+.drawer-close-shield {
+  z-index: 94;
+  pointer-events: none;
+  touch-action: none;
+  transform: translateX(-100%);
+}
+
+.drawer-close-shield--active {
+  pointer-events: auto;
+  animation: drawer-close-shield 100ms cubic-bezier(0.3, 0.6, 0.6, 1) both;
+}
+
+@keyframes drawer-close-shield {
+  from { transform: translateX(var(--drawer-close-start-x, 0px)); }
+  to { transform: translateX(-100%); }
+}
+
+/* ── Panel ─────────────────────────────────────────── */
+
+.drawer {
+  z-index: 95;
   background: var(--bg);
   border-right: 1px solid var(--border-light);
   display: flex;
@@ -737,6 +757,7 @@
 @media (prefers-reduced-motion: reduce) {
   .drawer,
   .drawer-overlay { transition: none; }
+  .drawer-close-shield { animation: none; }
   .drawer__item-action-menu { animation: none; }
   .drawer__item { transition: none; }
 }

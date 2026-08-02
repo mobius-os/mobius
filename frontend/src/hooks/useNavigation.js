@@ -280,6 +280,11 @@ export default function useNavigation({
   // pending flag must not brick the drawer forever: openDrawer reconciles from
   // the classic History store once the traversal is provably stale.
   const drawerClosePendingAtRef = useRef(0)
+  // A first open press while close bookkeeping still traverses history is
+  // intent, not noise. Keep it until the close settles; a bounded retry reuses
+  // stale-close recovery if WebKit loses the traversal completely.
+  const drawerOpenAfterCloseRef = useRef(false)
+  const drawerOpenAfterCloseTimerRef = useRef(0)
   // Per-(pane, app) pending nav-sentinel counts installed via the
   // moebius:nav-push postMessage protocol. Keyed by ownerKeyOf(paneId, appId).
   const appSentinelCountsRef = useRef(new Map())
@@ -549,6 +554,20 @@ export default function useNavigation({
     historyDismissalsRef.current.delete(entryId)
   }, [])
 
+  function clearDrawerOpenAfterClose() {
+    drawerOpenAfterCloseRef.current = false
+    if (drawerOpenAfterCloseTimerRef.current) {
+      clearTimeout(drawerOpenAfterCloseTimerRef.current)
+      drawerOpenAfterCloseTimerRef.current = 0
+    }
+  }
+
+  useEffect(() => () => {
+    if (drawerOpenAfterCloseTimerRef.current) {
+      clearTimeout(drawerOpenAfterCloseTimerRef.current)
+    }
+  }, [])
+
   function openDrawer() {
     // Stand down while a workspace drag is live — symmetric to the Drawer's
     // swipe-CLOSE handlers (both touch and pointer). A tab dragged toward the
@@ -570,9 +589,18 @@ export default function useNavigation({
     // push). Otherwise the traversal landed but its consumption never reached
     // handleBack — clear the stranded flags and open fresh.
     if (drawerClosePendingRef.current) {
-      if (Date.now() - drawerClosePendingAtRef.current < DRAWER_CLOSE_TRAVERSAL_GRACE_MS) {
+      const elapsed = Date.now() - drawerClosePendingAtRef.current
+      if (elapsed < DRAWER_CLOSE_TRAVERSAL_GRACE_MS) {
+        drawerOpenAfterCloseRef.current = true
+        if (!drawerOpenAfterCloseTimerRef.current) {
+          drawerOpenAfterCloseTimerRef.current = setTimeout(() => {
+            drawerOpenAfterCloseTimerRef.current = 0
+            if (drawerOpenAfterCloseRef.current) openDrawer()
+          }, DRAWER_CLOSE_TRAVERSAL_GRACE_MS - elapsed)
+        }
         return
       }
+      clearDrawerOpenAfterClose()
       drawerClosePendingRef.current = false
       if (drawerPushedRef.current
           && isMobiusNavState(history.state) && history.state.kind === 'drawer') {
@@ -593,6 +621,7 @@ export default function useNavigation({
       drawerOpenAfterLocalPopRef.current = true
       return
     }
+    clearDrawerOpenAfterClose()
     pushShellEntry('drawer', snapshotRoute())
     drawerPushedRef.current = true
     // Advance the ref synchronously so a same-batch open→close sees "open" and
@@ -607,6 +636,7 @@ export default function useNavigation({
     // skip past the drawer's sentinel before the first traversal settles.
     if (!drawerOpenRef.current || drawerClosePendingRef.current) return
     if (drawerPushedRef.current) {
+      clearDrawerOpenAfterClose()
       drawerClosePendingRef.current = true
       drawerClosePendingAtRef.current = Date.now()
       // A tap/swipe close should acknowledge immediately. Keep the logical ref
@@ -624,6 +654,7 @@ export default function useNavigation({
     } else {
       // Defensive: drawer open without a sentinel (shouldn't happen
       // in normal flow). Just close it directly.
+      clearDrawerOpenAfterClose()
       drawerOpenRef.current = false
       drawerClosePendingRef.current = false
       setDrawerVisible(false)
@@ -1190,6 +1221,7 @@ export default function useNavigation({
       // drawerOpenRef stuck true behind an already-hidden panel, which then refused
       // every subsequent open.
       if (drawerClosePendingRef.current) {
+        clearDrawerOpenAfterClose()
         drawerClosePendingRef.current = false
         drawerOpenRef.current = false
       }
@@ -1373,13 +1405,22 @@ export default function useNavigation({
     }
 
     function handleBack(destination, source) {
-      backFiredRef.current = true
-      setTimeout(() => { backFiredRef.current = false }, 400)
+      // Android can synthesize a delayed logo click after a PHYSICAL Back
+      // gesture. closeDrawer also traverses history, but that traversal is our
+      // own bookkeeping: arming the same guard there made a quick post-swipe
+      // iOS tap disappear when WebKit delivered click without pointerdown.
+      if (!drawerClosePendingRef.current) {
+        backFiredRef.current = true
+        setTimeout(() => { backFiredRef.current = false }, 400)
+      }
       const closeDrawerNextFrame = () => {
+        const closeIfStillClosed = () => {
+          if (!drawerOpenRef.current) setDrawerVisible(false)
+        }
         if (typeof requestAnimationFrame === 'function') {
-          requestAnimationFrame(() => setDrawerVisible(false))
+          requestAnimationFrame(closeIfStillClosed)
         } else {
-          setDrawerVisible(false)
+          closeIfStillClosed()
         }
       }
       // (1) A transient dismissible consumes Back before any shell route. The
@@ -1395,12 +1436,17 @@ export default function useNavigation({
       // the drawer only — never pops navStack. Catches real back-gestures on a
       // drawer-open view AND closeDrawer's history.back().
       if (drawerOpenRef.current && drawerPushedRef.current) {
+        const reopenAfterClose = drawerOpenAfterCloseRef.current
+        clearDrawerOpenAfterClose()
         drawerPushedRef.current = false
         drawerClosePendingRef.current = false
         drawerOpenRef.current = false
-        closeDrawerNextFrame()
+        if (!reopenAfterClose) closeDrawerNextFrame()
         appLocalPopInFlightRef.current = false
-        setTimeout(resumeLocalAppPops, 0)
+        setTimeout(() => {
+          if (reopenAfterClose) openDrawer()
+          resumeLocalAppPops()
+        }, 0)
         return
       }
       const sourceEntryId = source?.kind === 'app' ? navEntryId(source) : null
@@ -1510,6 +1556,7 @@ export default function useNavigation({
       // (5) Plain route: pop navStack and restore into the hinted (else focused)
       // pane. The route payload is the compatibility fallback for a tagged entry
       // whose in-memory stack was lost.
+      clearDrawerOpenAfterClose()
       drawerPushedRef.current = false
       drawerClosePendingRef.current = false
       drawerOpenRef.current = false
