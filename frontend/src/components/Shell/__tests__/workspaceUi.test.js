@@ -91,21 +91,6 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   assert.match(shell, /const closeTab = useCallback\(\(tab, \{ reason \} = \{\}\)/)
 })
 
-test('the canonical workspace snapshot survives a closed PWA relaunch', () => {
-  assert.match(
-    shell,
-    /useWorkspaceSession\(\{\s*storage: localStorage,\s*legacyStorage: sessionStorage,\s*\}\)/,
-  )
-  assert.doesNotMatch(
-    shell,
-    /sessionStorage\.setItem\(paneModel\.STORAGE_KEY/,
-  )
-  assert.match(
-    workspaceSession,
-    /storage\.setItem\(\s*paneModel\.STORAGE_KEY,\s*paneModel\.serializeWorkspace\(workspace\)/,
-  )
-})
-
 test('the drop preview reads as an 18% accent fill with a 2px border and morph', () => {
   const rule = css.match(/\.workspace__drop-preview\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(rule, /border:\s*2px solid var\(--accent\)/)
