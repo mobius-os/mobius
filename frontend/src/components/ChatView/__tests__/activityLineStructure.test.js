@@ -137,7 +137,7 @@ test('lazy tool details keep top-level touch targets and compact nested rows', (
     'nested thought rows should keep the compact timeline rhythm')
 })
 
-test('activity spacing derives from one block gap and one row gap', () => {
+test('activity spacing and aligned columns derive from one shared rhythm', () => {
   const message = cssRule('.chat__msg--assistant')
   const tools = cssRule('.chat__tools')
   const timeline = cssRule('.chat__activity-timeline')
@@ -147,11 +147,12 @@ test('activity spacing derives from one block gap and one row gap', () => {
   assert.match(tools, /gap:\s*var\(--activity-row-gap, 4px\)/)
   assert.match(timeline, /gap:\s*var\(--activity-row-gap, 4px\)/)
   assert.match(timeline, /margin-top:\s*var\(--activity-row-gap, 4px\)/)
-  assert.match(timeline, /margin-inline-start:\s*20px/,
-    'child steps indent beneath the parent icon lane')
-  assert.match(timeline, /padding-inline-start:\s*11px/)
-  assert.match(timeline, /border-inline-start:\s*1px/,
-    'a neutral one-pixel rail carries the child hierarchy')
+  assert.match(timeline, /margin-inline-start:\s*0/,
+    'child labels must stay in the same column as their summary label')
+  assert.match(timeline, /padding-inline-start:\s*0/,
+    'the timeline must not add a second indentation before child icons')
+  assert.doesNotMatch(timeline, /border-inline-start/,
+    'a nested rail must not occupy the shared activity label column')
   assert.doesNotMatch(chatCss, /\.chat__tools \+ \.chat__tools\s*\{\s*margin-top:\s*2px/,
     'adjacent activity blocks should not retain a one-off gap')
 })
