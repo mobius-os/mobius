@@ -72,7 +72,7 @@ test('owner contract freezes question answers without locking keyboard movement'
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.14 \(2026-08-02\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.16 \(2026-08-02\)/)
   assert.match(
     architecture,
     /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,
@@ -92,6 +92,11 @@ test('owner contract freezes question answers without locking keyboard movement'
     architecture,
     /Focused Q&A custom answer grows or its keyboard viewport changes \| ordinary hold \| current caret-visible `ANCHOR_AT`/,
     'editing may adopt native caret movement without weakening stronger scroll modes',
+  )
+  assert.match(
+    architecture,
+    /One keyboard geometry signal; mode-preserving resize/,
+    'keyboard layout must flow from Shell into the actual chat scroll box once',
   )
 })
 

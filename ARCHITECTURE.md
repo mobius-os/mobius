@@ -553,7 +553,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.14 (2026-08-02).** This section is the
+**Owner-authoritative contract — v1.16 (2026-08-02).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -567,18 +567,17 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
 `backend/tests/test_chats_stream_steer`) encode this:
 
 - **R0 — Two modes; two explicit auto-scroll entrances.** A chat is either in **auto-scroll**
-  (`FOLLOW_BOTTOM`, following the real-content tail as the reply streams) or **hold**
+  (`FOLLOW_BOTTOM`, following the physical scroll tail as the reply streams) or **hold**
   (`PIN_USER_MSG` or `ANCHOR_AT`, staying at a pinned prompt or frozen reading
   position). Auto-scroll engages only through (a) the gesture-gated scroll handler
-  after the user manually reaches an ordinary bottom with no reservation remaining,
+  after the user manually reaches or explicitly swipes toward the physical bottom,
   or (b) the live-send pin handoff when the streaming reply has consumed its exact
-  reserved room. Only a send may create `PIN_USER_MSG`. The physical bottom while
-  reservation remains is an exact reader-owned `ANCHOR_AT` position—including a
-  negative row offset when the viewport is inside reserved reply room—not a pin or
-  the real-content tail. Reaching it must preserve that exact physical position and
-  must never manufacture the pin's spacer-exhaustion handoff. A viewport /
-  keyboard change, foreground return, mount, or chat restoration must never create
-  auto-scroll.
+  reserved room. Only a send may create `PIN_USER_MSG`. Reservation does not create
+  a second kind of bottom: when `FOLLOW_BOTTOM` is active, it follows the physical
+  tail including any remaining room. Real output first consumes that room without
+  advancing the tail; after the room reaches zero, the same tail advances with the
+  stream. A viewport/keyboard change, foreground return, mount, or chat restoration
+  must never create auto-scroll.
 - **R1 — Stable latest-turn reservation.** Dynamic bottom spacer derives from the
   latest user row and the real tail geometry, independent of whether that row has
   already entered the viewport. It reserves exactly enough room for that row to
@@ -615,14 +614,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   is retired only after committed geometry is stable across consecutive layout
   frames, and the prompt stays pinned; a one-frame terminal check cannot disarm
   just before final buffered text fills the reservation. Later idle layout changes
-  cannot create follow. A non-pinning send preserves the exact reading anchor. `PIN_USER_MSG`
-  survives the complete
-  mobile-keyboard open/close cycle even though the full-height reservation makes its
-  scroll position temporarily look away from the physical bottom; viewport geometry
-  is not reader intent, so apart from the explicit filled-reservation handoff, only a
-  gesture-gated reader scroll may retire the pin. A retired or saved pin restores
-  only as an ordinary `ANCHOR_AT`; pin ownership is never reconstructed by layout,
-  lifecycle restoration, or a reader gesture.
+  cannot create follow. A non-pinning send preserves the exact reading anchor.
+  An armed or settled `PIN_USER_MSG` survives the complete mobile-keyboard
+  open/close cycle: viewport geometry cannot decide that a reply filled its
+  reservation or replace the pin with a different bottom alignment. A retired or
+  saved pin restores only as an ordinary `ANCHOR_AT`; pin ownership is never
+  reconstructed by layout, lifecycle restoration, or a reader gesture.
   Terminal promotion makes this decision against the committed settled DOM,
   before paint, so a final browser clamp cannot race the pin or its exact
   filled-reservation handoff.
@@ -670,10 +667,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   input gets that early release only when its direction is exactly clamped at the
   matching scroll edge. An elapsed frame is not evidence that an in-range wheel was a
   no-op: renderer/compositor load can update geometry before the main-thread `scroll`
-  handler runs. After a real scroll lands, reader ownership remains active through a
-  short trailing-edge quiet window. The hot scroll handler records intent and current
-  tail proximity only; final anchor discovery, spacer sizing, mode transition, and
-  persistence run once when momentum settles. Exact physical-tail intent belongs to
+  handler runs. A meaningful touch swipe toward the end may enter `FOLLOW_BOTTOM`
+  once even when the browser is already clamped at the physical tail and therefore
+  emits no scroll event; coordinate comparison is the per-move hot path and physical
+  geometry is read at most once for that gesture. After a real scroll lands,
+  reader ownership remains active through a short trailing-edge quiet window. The
+  hot scroll handler records intent and physical-tail arrival only; final anchor
+  discovery, spacer sizing, mode transition, and persistence run once when momentum
+  settles. Exact physical-tail intent belongs to
   the scroll event's geometry: reply growth during the quiet window cannot erase that
   the reader reached bottom. Deferred layout work may resume only after that final
   semantic location is committed, so a stale follow/pin cannot write in the handoff
@@ -710,6 +711,19 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   through the scroll controller instead of calling `scrollIntoView`, because
   viewport intersection alone cannot detect that the absolutely-positioned
   composer is covering the target.
+- **R5b — One keyboard geometry signal; mode-preserving resize.** Shell alone
+  reconciles a browser's visual viewport into the visible shell frame. The chat
+  does not race Shell with a second direct visual-viewport listener: its own
+  scroll-box `ResizeObserver` is the sole downstream signal that keyboard layout
+  has actually landed. A resize never derives a new scroll mode from intermediate
+  geometry: it reapplies the mode that already owns the chat. `PIN_USER_MSG` keeps
+  the sent row at its pinned offset, `ANCHOR_AT` keeps the same row offset, and
+  `FOLLOW_BOTTOM` follows the resized physical tail. The R6 question-submission
+  release and focused native-caret rebase remain the two explicit editing rules,
+  not a general keyboard heuristic. Open/close cycles therefore repeat the same
+  idempotent operation every time. Browser clamps and controller writes may emit
+  `scroll` while the box is changing, but only a gesture-owned scroll may change
+  the reader's semantic mode.
 - **R6 — One lossless active assistant row.** Live stream items, a persisted partial,
   and the settled transcript are alternate sources for one active assistant row, not
   separate answers. The answer response declares this ownership independently as
@@ -755,16 +769,16 @@ path means routing it through the same entries rather than inventing another rul
 | First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted at real-content tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
-| Reader reaches physical bottom while latest-user reservation remains | any | exact `ANCHOR_AT` | User-owned; preserve the numeric physical position, including negative anchor offset |
-| Reader reaches bottom with no reservation remaining | any | `FOLLOW_BOTTOM` | User-owned |
+| Reader reaches or explicitly swipes toward physical bottom | any | `FOLLOW_BOTTOM` | User-owned; follow the one physical tail, including remaining reservation |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
-| Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow real-content tail |
+| Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow physical tail |
 | Short reply settles before consuming the reservation | armed pin hold | settled pin hold | Keep prompt fixed; retire automatic handoff |
 | Other layout grows/collapses while latest user is visible | any hold | same hold | Consume/restore exact R1 deficit |
 | Latest user leaves the viewport | any | same reader mode | Collapse spacer to zero |
-| Viewport/keyboard changes | `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply pin after resize; never infer intent from keyboard-open geometry |
-| Viewport/keyboard changes | follow or anchor hold | same follow if still at tail, otherwise hold anchor | Never creates follow |
+| Viewport/keyboard changes | armed `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply pin after resize; never infer reservation fill from keyboard geometry |
+| Viewport/keyboard changes | settled `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply the same pin; geometry never reclassifies it |
+| Viewport/keyboard changes | follow or anchor hold | same mode | Reapply follow to the physical tail or the exact anchor; never create or retire follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
 | In-process question is answered | any | transient `ANCHOR_AT` over the prior mode; same active assistant row | Hold exact visible anchor through same-viewport card reflow and resumed output |
 | Viewport/keyboard changes after question submission | transient question anchor | pre-submit unanswered-card mode | Apply ordinary viewport behavior; answering adds no extra movement |
@@ -783,7 +797,7 @@ Controller structure is part of the contract, not an implementation detail:
   Hidden retained owners may keep DOM geometry but are never persistence
   writers; do not reintroduce a second freeze call in `ChatView`.
 - Every live mode mutation goes through `transitionMode`, whose entry guard permits
-  new pins only from send and new follow only from an unreserved-bottom gesture or
+  new pins only from send and new follow only from a physical-bottom gesture or
   an already-armed pin's filled-reservation handoff. Every mode-owned `scrollTop`
   write goes through `writeMode`. The exported `applyMode` executor is for the
   controller and pure unit tests, not a second live writer.
@@ -797,6 +811,10 @@ Controller structure is part of the contract, not an implementation detail:
   Do not reintroduce a sentinel or asynchronous observer as a second bottom
   authority: its delayed state can contradict the viewport that caused the
   event.
+- Shell owns the browser visual-viewport subscription. The chat observes only
+  its resulting scroll-box size; do not add a second direct visual-viewport
+  listener to the scroll controller or keyboard ordering becomes registration-
+  dependent again.
 - `window.__mobiusChatScrollTrace` keeps bounded, content-free transition and
   actual-write history for diagnosis. It records mode kinds, armed state, and
   geometry only—never message text, keys, or cids.

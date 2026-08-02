@@ -130,6 +130,7 @@ import useDesktopSidebar, {
 import useWorkspaceSession from './useWorkspaceSession.js'
 import useShellReloadController from './useShellReloadController.js'
 import useAppFrameCache from './useAppFrameCache.js'
+import useShellVisualViewport from './useShellVisualViewport.js'
 import ShellBrand from './ShellBrand.jsx'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
@@ -262,6 +263,7 @@ export default function Shell() {
   // Standard ↔ Builder scene belongs independently to the browser transition.
   const SPLITS = paneModel.WORKSPACE_SPLITS_ENABLED
   const shellRootRef = useRef(null)
+  useShellVisualViewport(shellRootRef)
   const mode = useModeController({
     committedMode: workspace.viewMode,
     splitsEnabled: SPLITS,

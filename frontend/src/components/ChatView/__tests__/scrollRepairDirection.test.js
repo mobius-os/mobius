@@ -53,7 +53,7 @@ test('pin repair never moves backward over an unchanged reader position', () => 
   )
 })
 
-test('reserved-bottom reader settlement replays the exact numeric position', () => {
+test('reserved-bottom reader settlement enters follow without moving backward', () => {
   const row = {
     offsetTop: 500,
     offsetHeight: 220,
@@ -81,32 +81,24 @@ test('reserved-bottom reader settlement replays the exact numeric position', () 
     offset: -700,
   })
   const settledMode = modeAfterReaderGesture({
-    reachedPhysicalBottom: true,
-    hasReservedTail: true,
+    reachedBottom: true,
     holdMode,
   })
-  assert.equal(settledMode, holdMode)
+  assert.deepEqual(settledMode, { kind: 'FOLLOW_BOTTOM' })
 
   applyMode(scrollEl, settledMode)
   assert.equal(scrollEl.scrollTop, 1200,
-    'settlement must not jump backward to the prompt or real-content tail')
+    'following the physical tail must not jump backward before reservation')
 })
 
-test('only an unreserved reader bottom creates follow', () => {
+test('physical reader bottom creates follow without a reservation branch', () => {
   const hold = { kind: 'ANCHOR_AT', key: 'a-1', offset: -300 }
-  assert.equal(modeAfterReaderGesture({
-    reachedPhysicalBottom: true,
-    hasReservedTail: true,
-    holdMode: hold,
-  }), hold)
   assert.deepEqual(modeAfterReaderGesture({
-    reachedPhysicalBottom: true,
-    hasReservedTail: false,
+    reachedBottom: true,
     holdMode: hold,
   }), { kind: 'FOLLOW_BOTTOM' })
   assert.equal(modeAfterReaderGesture({
-    reachedPhysicalBottom: false,
-    hasReservedTail: false,
+    reachedBottom: false,
     holdMode: hold,
   }), hold)
 })
@@ -169,7 +161,7 @@ test('only real-bottom or an armed pin handoff can enter follow', () => {
     follow,
   )
   assert.equal(
-    modeForScrollTransition(hold, follow, 'reader:real-content-bottom'),
+    modeForScrollTransition(hold, follow, 'reader:scroll-bottom'),
     follow,
   )
 })

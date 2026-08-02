@@ -104,7 +104,9 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
     'reader settlement path must remain discoverable')
   assert.match(settlePath, /anchorModeFromScroll/)
   assert.match(settlePath, /modeAfterReaderGesture/)
-  assert.match(settlePath, /hasReservedTail:\s*spacerH\s*>\s*1/)
+  assert.match(settlePath, /reachedBottom:\s*settledAtBottom/)
+  assert.doesNotMatch(settlePath, /spacerH|hasReservedTail/,
+    'physical-bottom intent must not branch on invisible reservation')
   assert.match(settlePath, /persistMode\(\)/)
   assert.match(settlePath, /sizeSpacer\(currentAuthority\(\)\)/)
   assert.doesNotMatch(settlePath, /PIN_USER_MSG|contentHoldModeFromScroll/,

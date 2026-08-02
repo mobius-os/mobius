@@ -1054,48 +1054,49 @@ test.describe('Scroll edge cases', () => {
     expect(gapFromBottom).toBeGreaterThan(50)
   })
 
-  test('25. Auto-follow stays glued tightly (regression on test 18 threshold)', async ({ page }) => {
-    // Test 18 asserts gap < 200 — wide enough to let the broken RO pass
-    // (5 small chunks drift ~150px without re-applying FOLLOW_BOTTOM).
-    // This is the SAME setup + content volume; the only difference is
-    // a TIGHT assertion (<= 5). Demonstrates the regression directly
-    // without invoking the 204-refresh path that heavier injection
-    // accidentally triggers.
+  test('25. Reserved-tail swipe follows tool output without jumping backward', async ({ page }) => {
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'Autoscroll tight test')
 
-    await injectContent(page, 'Filling viewport with lots of text. ', 150)
     const before = await measure(page)
-    expect(before.listH).toBeGreaterThan(before.clientH)
+    expect(before.spacerH).toBeGreaterThan(0)
+    expect(before.userVisualTop).toBeGreaterThanOrEqual(0)
+    expect(before.userVisualTop).toBeLessThanOrEqual(10)
 
-    // Engage FOLLOW_BOTTOM via real gesture (test 18's exact pattern).
-    await page.evaluate(() => {
-      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      if (s) s.scrollTop = s.scrollHeight
-    })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 150)))
+    // The fresh pin is already clamped at the physical bottom, so the browser
+    // cannot emit another scroll event. A deliberate swipe toward the end is
+    // nevertheless explicit follow intent.
     await page.evaluate(() => {
       const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       if (!s) return
-      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
-      s.scrollTop = Math.max(0, s.scrollTop - 1)
-      s.scrollTop = s.scrollHeight
+      s.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true, pointerType: 'touch', clientY: 400,
+      }))
+      s.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true, pointerType: 'touch', clientY: 360,
+      }))
+      s.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true, pointerType: 'touch', clientY: 360,
+      }))
     })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+    await page.waitForFunction(() => (
+      document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        ?.dataset.scrollMode === 'FOLLOW_BOTTOM'
+    ))
 
     const atBottom = await measure(page)
     expect(atBottom.scrollH - atBottom.scrollTop - atBottom.clientH)
       .toBeLessThanOrEqual(5)
 
-    // Five small chunks (test 18's exact volume) — auto-follow MUST
-    // keep us within a few px of the bottom, not 200px adrift.
+    // Tool calls consume reserved room first. Follow stays at the same physical
+    // tail rather than jumping backward to a second "real content" bottom.
     for (let i = 0; i < 5; i++) {
-      await injectContent(page, `Streaming chunk ${i + 1}. More text here. `, 5)
+      await injectToolBlock(page)
     }
 
     const after = await measure(page)
-    expect(after.error).toBeUndefined()
+    expect(after.toolCount).toBe(5)
     const afterGap = after.scrollH - after.scrollTop - after.clientH
     expect(afterGap).toBeLessThanOrEqual(10)
   })
@@ -1235,16 +1236,28 @@ test.describe('Scroll edge cases', () => {
     expect(after.spacerH).toBeGreaterThanOrEqual(0)
   })
 
-  test('27. Viewport resize cycles do not engage auto-follow on streaming chat', async ({ page }) => {
-    // Guards the prevListH gate in the ResizeObserver: the auto-follow
-    // branch must not snap to bottom when the list merely re-measures due
-    // to a viewport resize (content unchanged). This is a partial guard
-    // for the keyboard-cycle drift class of bugs — it does NOT simulate
-    // Chrome Android's first-focus overshoot, which is a browser-level
-    // animation quirk outside our code's control.
+  test('27. Viewport cycles preserve a sent-message pin and an older anchor', async ({ page }) => {
+    // The actual chat scroll box is the single keyboard/layout signal. Repeated
+    // resize cycles reapply whichever semantic mode already owns the chat;
+    // geometry must never replace a pin or exact anchor with another alignment.
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'First')
+
+    const pinned = await measure(page)
+    expect(pinned.userVisualTop).toBeGreaterThanOrEqual(0)
+    expect(pinned.userVisualTop).toBeLessThanOrEqual(10)
+    for (let i = 0; i < 3; i++) {
+      for (const height of [615, 915]) {
+        await page.setViewportSize({ width: 412, height })
+        await page.evaluate(() => new Promise(r => setTimeout(r, 100)))
+        const duringCycle = await measure(page)
+        expect(Math.abs(duringCycle.userVisualTop - pinned.userVisualTop))
+          .toBeLessThanOrEqual(8)
+        await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+          .toHaveAttribute('data-scroll-mode', 'PIN_USER_MSG')
+      }
+    }
 
     // Grow the content so there's room to scroll up.
     await injectContent(page, 'Padding content line. ', 80)
@@ -1252,12 +1265,17 @@ test.describe('Scroll edge cases', () => {
       requestAnimationFrame(() => requestAnimationFrame(r))
     ))
 
-    // Scroll to the top (definitely not near the bottom).
+    // Scroll to the top through the reader-owned path (definitely not near the
+    // bottom). A bare scrollTop write is browser/programmatic layout, not
+    // reading intent, and deliberately cannot replace the keyboard snapshot.
     await page.evaluate(() => {
       const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      if (s) s.scrollTop = 0
+      if (!s) return
+      s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      s.scrollTop = 0
+      s.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }))
     })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 50)))
+    await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
 
     const before = await measure(page)
 

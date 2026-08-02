@@ -16,7 +16,6 @@ import {
   contentHoldModeFromScroll,
   gestureLayoutRetryDelay,
   isNearContentBottom,
-  isNearScrollBottom,
   layoutMayOwnScroll,
   modeForChatExit,
   modeForDisclosureToggle,
@@ -24,7 +23,6 @@ import {
   modeForQuestionSubmission,
   modeForQuestionEditingViewportChange,
   modeForQueuedSubmission,
-  modeForViewportChange,
   modeAfterReaderGesture,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
@@ -290,7 +288,7 @@ test('only provably clamped wheel and keyboard input gets a next-frame release',
   assert.equal(readerInputNeedsFrameRelease('touchmove'), false)
 })
 
-test('touch input never reads scroll geometry, so it cannot force a layout', () => {
+test('the no-scroll release classifier never reads touch geometry', () => {
   // The geometry thunk performs layout-forcing DOM reads (scrollHeight on an
   // unvirtualized transcript). Only the wheel branch consumes them, so any
   // input type that short-circuits before that branch must never invoke it.
@@ -334,6 +332,15 @@ test('reader-input tracing never measures the transcript at gesture start', () =
     scrollModeSource,
     /reader:scroll-start', \{ captureGeometry: false \}/,
     'the first compositor scroll frame must not force transcript layout',
+  )
+  const onScroll = scrollModeSource.slice(
+    scrollModeSource.indexOf('const onScroll = () =>'),
+    scrollModeSource.indexOf("scrollEl.addEventListener('scroll', onScroll"),
+  )
+  assert.ok(
+    onScroll.indexOf('if (!userDriven)')
+      < onScroll.indexOf('const distanceToBottom'),
+    'browser clamps must return before measuring reader-owned tail intent',
   )
 })
 
@@ -466,21 +473,10 @@ test('isNearContentBottom uses the same phantom-spacer bottom contract', () => {
     spacerHeight: 400,
   })
   assert.equal(isNearContentBottom(scrollEl), true)
-  assert.equal(isNearScrollBottom(scrollEl), false,
-    'middle of reserved spacer is not true scroll bottom')
-})
-
-test('physical-bottom geometry uses only a rounding epsilon', () => {
-  assert.equal(isNearScrollBottom(makeScrollEl({
-    scrollHeight: 2000,
-    scrollTop: 1497,
-    clientHeight: 500,
-  }), 4), true)
-  assert.equal(isNearScrollBottom(makeScrollEl({
-    scrollHeight: 2000,
-    scrollTop: 1495,
-    clientHeight: 500,
-  }), 4), false)
+  assert.ok(
+    scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight > 50,
+    'the meaningful content tail does not require traversing reserved room',
+  )
 })
 
 test('pin reapply is needed when the first pin was clamped but spacer now makes the target reachable', () => {
@@ -641,11 +637,21 @@ test('anchor reapply is inert for non-anchor modes and unresolved keys', () => {
   )
 })
 
-test('viewport resize never turns a pin into auto-scroll without a gesture', () => {
-  const stalePin = { kind: 'PIN_USER_MSG', cid: 'c-123' }
-  assert.equal(
-    modeForViewportChange(stalePin, true),
-    stalePin,
+test('viewport resize reapplies the current mode without reclassifying it', () => {
+  assert.match(
+    scrollModeSource,
+    /const ordinaryViewportMode = modeRef\.current/,
+    'keyboard geometry keeps the existing pin, follow, or exact anchor',
+  )
+  assert.doesNotMatch(
+    scrollModeSource,
+    /modeForViewportChange/,
+    'viewport layout has no second semantic mode-derivation path',
+  )
+  assert.doesNotMatch(
+    scrollModeSource,
+    /visualViewport\.addEventListener/,
+    'chat observes its actual resized box instead of racing Shell for the browser event',
   )
 })
 
@@ -699,25 +705,28 @@ test('an armed live pin holds until its exact spacer is filled, then follows', (
   assert.deepEqual(modeAfterSpacerResize(livePin, 0), { kind: 'FOLLOW_BOTTOM' })
 })
 
-test('reader settlement preserves reserved room and follows only real content', () => {
+test('reader settlement follows the physical tail even while reservation remains', () => {
   const exactHold = {
     kind: 'ANCHOR_AT', key: 'user-c-123', offset: -320,
   }
-  assert.equal(modeAfterReaderGesture({
-    reachedPhysicalBottom: true,
-    hasReservedTail: true,
-    holdMode: exactHold,
-  }), exactHold, 'reserved room remains the reader\'s exact anchor')
   assert.deepEqual(modeAfterReaderGesture({
-    reachedPhysicalBottom: true,
-    hasReservedTail: false,
+    reachedBottom: true,
     holdMode: exactHold,
   }), { kind: 'FOLLOW_BOTTOM' })
   assert.equal(modeAfterReaderGesture({
-    reachedPhysicalBottom: false,
-    hasReservedTail: false,
+    reachedBottom: false,
     holdMode: exactHold,
   }), exactHold)
+
+  const scrollEl = makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1000,
+    clientHeight: 560,
+    spacerHeight: 400,
+  })
+  applyMode(scrollEl, { kind: 'FOLLOW_BOTTOM' })
+  assert.equal(scrollEl.scrollTop, 1440,
+    'follow owns the one physical tail instead of jumping back before reservation')
 })
 
 test('a short settled pin retires automatic follow but keeps its identity', () => {
@@ -748,27 +757,6 @@ test('terminal pin follows immediately when final committed geometry fills the s
   assert.deepEqual(
     modeAfterTerminalLayout(livePin, 0, false),
     { kind: 'FOLLOW_BOTTOM' },
-  )
-})
-
-test('keyboard close preserves pin identity even when keyboard-open geometry is away from the physical bottom', () => {
-  const pin = { kind: 'PIN_USER_MSG', cid: 'c-123' }
-  const temporaryAnchor = { kind: 'ANCHOR_AT', key: 'user-1', offset: 4 }
-
-  assert.equal(
-    modeForViewportChange(pin, false, temporaryAnchor),
-    pin,
-    'only a real reader scroll may retire PIN_USER_MSG',
-  )
-})
-
-test('viewport resize in reserved spacer anchors instead of snapping to bottom', () => {
-  const staleFollow = { kind: 'FOLLOW_BOTTOM' }
-  const anchor = { kind: 'ANCHOR_AT', key: 'user-1', offset: -240 }
-
-  assert.equal(
-    modeForViewportChange(staleFollow, false, anchor),
-    anchor,
   )
 })
 
@@ -1815,7 +1803,10 @@ test('F4: foreground return freezes as an anchor even at the tail', () => {
     scrollHeight: 1400, scrollTop: 685, clientHeight: 700,   // near the tail
     querySelectorAll(sel) { return sel === '.chat__msg[data-key]' ? [tailItem] : [] },
   }
-  assert.equal(isNearScrollBottom(scrollEl), true, 'precondition: at the tail')
+  assert.ok(
+    scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 50,
+    'precondition: at the tail',
+  )
 
   const restored = modeForForegroundReturn(scrollEl)
   assert.equal(restored.kind, 'ANCHOR_AT',
