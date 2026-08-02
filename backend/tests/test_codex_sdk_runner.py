@@ -1,6 +1,7 @@
 import asyncio
 import signal
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from types import SimpleNamespace
 
@@ -3216,6 +3217,54 @@ def test_codex_process_group_id_refuses_shared_uvicorn_group(monkeypatch):
   monkeypatch.setattr(codex_sdk_runner.os, "getpgrp", lambda: 4000)
 
   assert codex_sdk_runner._codex_process_group_id(codex) is None
+
+
+def test_codex_call_executor_progresses_with_default_pool_saturated():
+  async def scenario():
+    loop = asyncio.get_running_loop()
+    release = threading.Event()
+    occupied = threading.Event()
+    saturated = ThreadPoolExecutor(max_workers=1)
+    replacement = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(saturated)
+
+    def occupy_default_worker():
+      occupied.set()
+      release.wait()
+
+    blocker = loop.run_in_executor(None, occupy_default_worker)
+    while not occupied.is_set():
+      await asyncio.sleep(0)
+
+    client = SimpleNamespace(_call_sync=lambda *_args, **_kwargs: None)
+    codex = SimpleNamespace(_client=client)
+    owner = codex_sdk_runner._install_codex_call_executor(
+      codex, "chat-owned-executor",
+    )
+    try:
+      assert owner is not None
+      worker_name = await asyncio.wait_for(
+        client._call_sync(lambda: threading.current_thread().name),
+        timeout=1,
+      )
+      assert worker_name.startswith("mobius-codex-chat-own")
+    finally:
+      owner.close()
+      release.set()
+      await blocker
+      loop.set_default_executor(replacement)
+      saturated.shutdown(wait=True)
+
+  asyncio.run(scenario())
+
+
+def test_process_group_capture_poll_backs_off_after_startup_window():
+  spin = codex_sdk_runner._PROCESS_GROUP_CAPTURE_SPIN_SECONDS
+  assert codex_sdk_runner._process_group_capture_delay(spin / 2) == 0
+  assert codex_sdk_runner._process_group_capture_delay(spin) == (
+    codex_sdk_runner._PROCESS_GROUP_CAPTURE_POLL_SECONDS
+  )
+  assert codex_sdk_runner._PROCESS_GROUP_CAPTURE_POLL_SECONDS > 0
 
 
 def test_terminate_codex_process_group_has_sigkill_backstop(monkeypatch):
