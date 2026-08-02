@@ -8,9 +8,9 @@
    ║   1. `.chat__foot` is `position: absolute`, offset above   ║
    ║      env(safe-area-inset-bottom),                           ║
    ║      with `pointer-events: none` — chat content scrolls    ║
-   ║      *behind* the composer. Only the pill + + + queue +    ║
-   ║      attach-tray re-enable pointer-events. The gutter is   ║
-   ║      transparent.                                          ║
+   ║      *behind* the composer. Visible footer controls must   ║
+   ║      opt back in through the allow-list beside the foot;   ║
+   ║      transparent wrappers keep the gutter pass-through.    ║
    ║                                                            ║
    ║   2. `--composer-h` is published by a ResizeObserver in    ║
    ║      ChatView.jsx that watches `.chat__foot`. `.chat__list`║
@@ -1947,6 +1947,7 @@
 .chat__foot .chat__resume-nudge,
 .chat__foot .chat__open-app,
 .chat__foot .chat__progress-step--toggle,
+.chat__foot .slash-menu,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
 
