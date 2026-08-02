@@ -924,9 +924,11 @@ async def run_prepared_contribution_checks(
     )
   db.close()
 
-  plan = claimed.get("plan") or {}
-  repo_path = _safe_repo_path(plan.get("repo_path"))
+  record_patch = {}
+  failure = None
   try:
+    plan = claimed.get("plan") or {}
+    repo_path = _safe_repo_path(plan.get("repo_path"))
     async with fs_locks.source_dir_lock(str(repo_path)):
       early_checks, record_patch = await asyncio.to_thread(
         github_preflight_checks.dispatch_prepared_checks,
@@ -937,8 +939,8 @@ async def run_prepared_contribution_checks(
         ),
       )
   except ContributionSubmitError as exc:
-    patch = dict(exc.record_patch)
-    early_checks = patch.pop("early_checks", None)
+    record_patch = dict(exc.record_patch)
+    early_checks = record_patch.pop("early_checks", None)
     if not isinstance(early_checks, dict):
       early_checks = {
         **(claimed.get("early_checks") or {}),
@@ -946,45 +948,21 @@ async def run_prepared_contribution_checks(
         "message": exc.message,
         "observed_at": _now_iso(),
       }
-    async with fs_locks.app_storage_lock(app_id):
-      _recheck_submit_app(db, app_id, expected_nonce)
-      db.close()
-      record = _settle_prepared_checks(
-        record_path=record_path,
-        request_id=request_id,
-        record_patch=patch,
-        early_checks=early_checks,
-      )
-    raise HTTPException(
-      status_code=exc.status_code,
-      detail={
-        "message": exc.message,
-        "detail": exc.detail,
-        "code": exc.code,
-        "record": record,
-      },
-    )
+    failure = (exc.status_code, {
+      "message": exc.message,
+      "detail": exc.detail,
+      "code": exc.code,
+    })
   except Exception as exc:
     log.exception("Prepared GitHub checks failed for %s/%s", app_id, record_id)
     message = "Could not start GitHub checks for this contribution."
-    async with fs_locks.app_storage_lock(app_id):
-      _recheck_submit_app(db, app_id, expected_nonce)
-      db.close()
-      record = _settle_prepared_checks(
-        record_path=record_path,
-        request_id=request_id,
-        record_patch={},
-        early_checks={
-          **(claimed.get("early_checks") or {}),
-          "state": "error",
-          "message": message,
-          "observed_at": _now_iso(),
-        },
-      )
-    raise HTTPException(
-      status_code=500,
-      detail={"message": message, "record": record},
-    ) from exc
+    early_checks = {
+      **(claimed.get("early_checks") or {}),
+      "state": "error",
+      "message": message,
+      "observed_at": _now_iso(),
+    }
+    failure = (500, {"message": message})
 
   async with fs_locks.app_storage_lock(app_id):
     _recheck_submit_app(db, app_id, expected_nonce)
@@ -995,33 +973,13 @@ async def run_prepared_contribution_checks(
       record_patch=record_patch,
       early_checks=early_checks,
     )
+  if failure is not None:
+    status_code, detail = failure
+    raise HTTPException(
+      status_code=status_code,
+      detail={**detail, "record": record},
+    )
   return {"record": record, "checks": record["early_checks"]}
-
-
-def _early_checks_notification(record: dict, checks: dict, app_id: int) -> dict:
-  title = str(record.get("title") or (record.get("plan") or {}).get("title")
-              or "A prepared contribution")
-  conclusion = str(checks.get("conclusion") or "").lower()
-  passed = conclusion in {"success", "neutral", "skipped"}
-  heading = "Early checks passed" if passed else "Early checks need attention"
-  run_url = str(checks.get("url") or "")
-  actions = [{
-    "action": "open-contribute",
-    "title": "Open Contribute",
-    "target": f"/shell/?app={app_id}",
-  }]
-  if run_url.startswith("https://github.com/"):
-    actions.append({
-      "action": "view-checks",
-      "title": "View GitHub run",
-      "target": run_url,
-    })
-  return {
-    "title": heading,
-    "body": title,
-    "target": f"/shell/?app={app_id}",
-    "actions": actions,
-  }
 
 
 @router.post(
@@ -1035,9 +993,8 @@ async def refresh_prepared_contribution_checks(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Refresh active pre-PR workflow runs and notify once when each settles."""
+  """Refresh active pre-PR workflow runs while Contribute is open."""
   _validate_submit_app(app_id, principal, db)
-  owner_id = principal.owner.id
   db.close()
   contribution_dir = _contributions_dir(app_id)
   async with fs_locks.app_storage_lock(app_id):
@@ -1053,7 +1010,7 @@ async def refresh_prepared_contribution_checks(
         ):
           candidates.append((path, record))
   if not candidates:
-    return {"refreshed": [], "notified": 0}
+    return {"refreshed": []}
 
   refreshed = []
   for path, record in candidates:
@@ -1072,7 +1029,6 @@ async def refresh_prepared_contribution_checks(
       refreshed.append((path, record, checks))
 
   results = []
-  notifications = []
   async with fs_locks.app_storage_lock(app_id):
     for path, prior, checks in refreshed:
       current = _read_record_tolerant(path)
@@ -1086,30 +1042,12 @@ async def refresh_prepared_contribution_checks(
         or current_checks.get("request_id") != prior_checks.get("request_id")
       ):
         continue
-      notify_key = ""
-      if checks.get("state") == "completed":
-        notify_key = f"completed:{checks.get('conclusion') or 'unknown'}"
-      elif checks.get("state") == "error":
-        notify_key = "error"
-      if notify_key and checks.get("notified") != notify_key:
-        checks = {**checks, "notified": notify_key}
-        notifications.append(_early_checks_notification(current, checks, app_id))
+      if checks == prior_checks:
+        continue
       updated = {**current, "early_checks": checks, "updated_at": _now_iso()}
       _write_record(path, updated)
       results.append(updated)
-
-  for payload in notifications:
-    notify_owner(
-      db,
-      owner_id,
-      title=payload["title"],
-      body=payload["body"],
-      source_type="app",
-      source_id=str(app_id),
-      target=payload["target"],
-      actions=payload["actions"],
-    )
-  return {"refreshed": results, "notified": len(notifications)}
+  return {"refreshed": results}
 
 
 # Paths touched by a stored diff, for the chat card's "what am I sending" list.

@@ -29,7 +29,6 @@ _API_VERSION = "2026-03-10"
 _ACTIVE_STATES = frozenset({
   "dispatching", "uncertain", "queued", "in_progress",
 })
-_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 
 
 def supports_prepared_checks(record: dict) -> bool:
@@ -47,18 +46,6 @@ def supports_prepared_checks(record: dict) -> bool:
 
 def check_is_active(check: object) -> bool:
   return isinstance(check, dict) and check.get("state") in _ACTIVE_STATES
-
-
-def check_failed(check: object) -> bool:
-  if not isinstance(check, dict):
-    return False
-  if check.get("state") == "error":
-    return True
-  return bool(
-    check.get("state") == "completed"
-    and str(check.get("conclusion") or "").lower()
-    not in _SUCCESS_CONCLUSIONS
-  )
 
 
 def _now() -> datetime:
@@ -104,28 +91,7 @@ def _api(
   )
 
 
-def _workflow_state(repo: Path, fork_slug: str, workflow: str) -> str:
-  result = _api(
-    repo, f"repos/{fork_slug}/actions/workflows/{quote(workflow, safe='')}",
-    check=False,
-  )
-  if result.returncode != 0:
-    detail = (result.stderr or result.stdout or "").strip()
-    raise ContributionSubmitError(
-      "The manual Tests workflow is not available on the GitHub fork yet. "
-      "This bootstrap change must be sent normally once; later contributions "
-      "can run checks before a pull request is opened.",
-      detail=detail[:600] or None,
-      code="early_checks_unavailable",
-    )
-  payload = _json_output(result, "Could not inspect the GitHub test workflow.")
-  return str(payload.get("state") or "")
-
-
 def _enable_workflow(repo: Path, fork_slug: str, workflow: str) -> None:
-  state = _workflow_state(repo, fork_slug, workflow)
-  if state == "active":
-    return
   enabled = _api(
     repo,
     "--method", "PUT",
@@ -135,8 +101,8 @@ def _enable_workflow(repo: Path, fork_slug: str, workflow: str) -> None:
   if enabled.returncode != 0:
     detail = (enabled.stderr or enabled.stdout or "").strip()
     raise ContributionSubmitError(
-      "GitHub Actions is disabled on the personal fork. Enable Actions there "
-      "or reconnect GitHub, then try Run checks again.",
+      "GitHub could not enable the Tests workflow on the personal fork. "
+      "Enable Actions there or reconnect GitHub, then try Run checks again.",
       detail=detail[:600] or None,
       code="early_checks_disabled",
     )
@@ -347,15 +313,14 @@ def dispatch_prepared_checks(
       raise ContributionSubmitError(
         "Could not verify the exact reviewed commit after pushing this branch."
       )
-    branch_url = f"https://github.com/{fork_slug}/tree/{quote(branch, safe='/')}"
     pushed = {
       "fork_repo": fork_slug,
       "branch": branch,
       "head_sha": pushed_sha,
-      "branch_url": branch_url,
       "workflow": workflow,
       "requested_at": requested_at,
     }
+    branch_url = f"https://github.com/{fork_slug}/tree/{quote(branch, safe='/')}"
     record_patch = _git_ops._record_patch_with(record_patch, {
       "head_repository": fork_slug,
       "last_pushed_branch": f"{login}:{branch}",
@@ -433,13 +398,19 @@ def _run_snapshot(payload: dict, check: dict) -> dict:
     "state": status,
     "conclusion": payload.get("conclusion") if status == "completed" else None,
     "url": html_url,
-    "observed_at": _now_iso(),
   }
   if payload.get("created_at"):
     next_check["started_at"] = payload["created_at"]
   if status == "completed" and payload.get("updated_at"):
     next_check["completed_at"] = payload["updated_at"]
   next_check.pop("message", None)
+  prior = {key: value for key, value in check.items() if key != "observed_at"}
+  current = {
+    key: value for key, value in next_check.items() if key != "observed_at"
+  }
+  if current == prior:
+    return check
+  next_check["observed_at"] = _now_iso()
   return next_check
 
 

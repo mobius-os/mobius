@@ -40,8 +40,6 @@ def test_support_is_narrow_and_active_states_are_explicit():
   assert checks.check_is_active({"state": "queued"})
   assert checks.check_is_active({"state": "in_progress"})
   assert not checks.check_is_active({"state": "completed"})
-  assert checks.check_failed({"state": "completed", "conclusion": "failure"})
-  assert not checks.check_failed({"state": "completed", "conclusion": "success"})
 
 
 def test_bootstrap_requires_manual_trigger_on_upstream(monkeypatch, tmp_path):
@@ -117,3 +115,25 @@ def test_exact_workflow_run_snapshot_preserves_terminal_result():
   assert snapshot["conclusion"] == "failure"
   assert snapshot["completed_at"] == payload["updated_at"]
   assert "message" not in snapshot
+
+
+def test_unchanged_workflow_snapshot_reuses_the_stored_state():
+  check = {
+    "head_sha": "a" * 40,
+    "branch": "fix/reviewed-change",
+    "state": "in_progress",
+    "conclusion": None,
+    "url": "https://github.com/octocat/mobius/actions/runs/4",
+    "started_at": "2026-08-02T14:00:00Z",
+    "observed_at": "2026-08-02T14:01:00Z",
+  }
+  payload = {
+    "event": "workflow_dispatch",
+    "head_sha": check["head_sha"],
+    "head_branch": check["branch"],
+    "html_url": check["url"],
+    "status": "in_progress",
+    "conclusion": None,
+    "created_at": check["started_at"],
+  }
+  assert checks._run_snapshot(payload, check) is check

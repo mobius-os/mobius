@@ -1365,7 +1365,29 @@ def test_run_prepared_checks_keeps_recoverable_failure_on_the_record(
   assert stored["last_submit_push_sha"] == record["plan"]["head_sha"]
 
 
-def test_refresh_prepared_checks_notifies_once_when_the_exact_run_settles(
+def test_run_prepared_checks_settles_an_invalid_checkout_claim(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _repo, record, diff_text = _prepared_platform_review(
+    app_id, "early-check-invalid-path",
+  )
+  record["plan"]["repo_path"] = ""
+  _write_contribution(app_id, "early-check-invalid-path", record, diff_text)
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/early-check-invalid-path/run-checks",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert response.status_code == 409, response.text
+  stored = response.json()["detail"]["record"]
+  assert stored["status"] == "prepared"
+  assert stored["early_checks"]["state"] == "error"
+  assert "durable repo_path" in stored["early_checks"]["message"]
+
+
+def test_refresh_prepared_checks_persists_the_exact_terminal_run(
   client, owner_token, monkeypatch,
 ):
   _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
@@ -1392,28 +1414,20 @@ def test_refresh_prepared_checks_notifies_once_when_the_exact_run_settles(
       "completed_at": "2026-08-02T15:00:00Z",
     }
 
-  notifications = []
   monkeypatch.setattr(
     github_preflight_checks, "refresh_prepared_check", fake_refresh,
-  )
-  monkeypatch.setattr(
-    github_routes, "notify_owner",
-    lambda *args, **kwargs: notifications.append(kwargs),
   )
   headers = {"Authorization": f"Bearer {app_token}"}
   url = f"/api/github/contributions/{app_id}/prepared-checks/refresh"
   response = client.post(url, headers=headers)
   assert response.status_code == 200, response.text
-  assert response.json()["notified"] == 1
-  assert response.json()["refreshed"][0]["early_checks"]["notified"] == (
-    "completed:success"
+  assert response.json()["refreshed"][0]["early_checks"]["conclusion"] == (
+    "success"
   )
-  assert notifications[0]["title"] == "Early checks passed"
 
   repeat = client.post(url, headers=headers)
   assert repeat.status_code == 200
-  assert repeat.json() == {"refreshed": [], "notified": 0}
-  assert len(notifications) == 1
+  assert repeat.json() == {"refreshed": []}
 
 
 def test_send_waits_while_prepared_checks_are_active(client, owner_token):
