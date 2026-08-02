@@ -2100,7 +2100,7 @@ class ChatWriterActor:
     from app.models import ChatRun
     from app.run_state import goal_objective_for_run_start
     goal_objective = goal_objective_for_run_start(
-      db, cmd.chat_id, cmd.user_msg.get("content"),
+      db, cmd.chat_id, cmd.user_msg,
     )
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
     db.add(ChatRun(
@@ -2503,7 +2503,7 @@ class ChatWriterActor:
     from app.continuations import is_continuation_message
     from app.run_state import goal_objective_for_run_start
     goal_objective = goal_objective_for_run_start(
-      db, cmd.chat_id, agent_pending.get("content"),
+      db, cmd.chat_id, agent_pending,
     )
     prior_run = (
       db.query(ChatRun)

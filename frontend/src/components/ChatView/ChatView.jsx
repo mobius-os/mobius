@@ -124,6 +124,7 @@ import {
 } from './buildPhaseRail.js'
 import {
   goalObjectiveAtRunStart,
+  goalObjectiveFromRuntime,
   latestGoalObjective,
   progressRailViewModel,
 } from './goalProgress.js'
@@ -869,13 +870,14 @@ export default function ChatView({
       if (data.running || (!preserveLocalTurn && !staleSnapshot)) {
         setServerRunningLocalState(!!data.running)
       }
-      setActiveGoalObjective(data.running
-        ? (data.active_goal_objective || latestGoalObjective(msgs))
-        : '')
+      const runtimeGoalObjective = goalObjectiveFromRuntime(
+        data, latestGoalObjective(msgs),
+      )
+      setActiveGoalObjective(runtimeGoalObjective)
       setLiveQuestionId(data.pending_question_id || null)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
-        activeGoalObjective: data.active_goal_objective || '',
+        activeGoalObjective: runtimeGoalObjective,
         pending_messages: data.pending_messages || [],
         pending_question_id: data.pending_question_id || null,
       })
@@ -948,11 +950,17 @@ export default function ChatView({
       // optimistic transitions; using them here made one poll emit up to three
       // persisted-cache updates for a single server response.
       setServerRunningLocalState(!!data.running)
-      setActiveGoalObjective(data.running ? (data.active_goal_objective || '') : '')
+      const cachedGoalObjective = queryClient.getQueryData(
+        chatMessagesQueryKey(chatId),
+      )?.activeGoalObjective
+      const runtimeGoalObjective = goalObjectiveFromRuntime(
+        data, cachedGoalObjective,
+      )
+      setActiveGoalObjective(runtimeGoalObjective)
       setLiveQuestionId(data.pending_question_id || null)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
-        activeGoalObjective: data.active_goal_objective || '',
+        activeGoalObjective: runtimeGoalObjective,
         pending_messages: serverPending,
         pending_question_id: data.pending_question_id || null,
       })
@@ -1688,9 +1696,9 @@ export default function ChatView({
     const settleRuntime = (runtime, visibleMessages) => {
       const running = !!runtime.running
       setServerRunningLocalState(running)
-      setActiveGoalObjective(running
-        ? (runtime.active_goal_objective || latestGoalObjective(visibleMessages))
-        : '')
+      setActiveGoalObjective(goalObjectiveFromRuntime(
+        runtime, latestGoalObjective(visibleMessages),
+      ))
       hadMessagesRef.current = visibleMessages.length > 0
       setLiveQuestionId(runtime.pending_question_id || null)
       setBridgeMountInputs({
@@ -1794,9 +1802,12 @@ export default function ChatView({
         // One narrow cache publication updates queue/liveness only. Reconcile
         // the mounted hidden owner from the newest version-matched cache object
         // before readiness so a concurrent terminal refresh wins this race.
+        const runtimeGoalObjective = goalObjectiveFromRuntime(
+          runtime, latestGoalObjective(msgs),
+        )
         updateChatRuntimeCache(queryClient, queryKey, {
           running: !!runtime.running,
-          activeGoalObjective: runtime.active_goal_objective || '',
+          activeGoalObjective: runtimeGoalObjective,
           pending_messages: runtime.pending_messages || [],
           pending_question_id: runtime.pending_question_id || null,
         })
@@ -1822,6 +1833,9 @@ export default function ChatView({
             // the latest cache/mounted owner for the optimistic handoff but
             // make the next activation take the authoritative detail path.
             updated_at: null,
+            activeGoalObjective: goalObjectiveFromRuntime(
+              runtime, latestGoalObjective(messagesRef.current),
+            ),
             ...handoffWindow,
           }
         })
@@ -1845,6 +1859,9 @@ export default function ChatView({
           })
       queryClient.setQueryData(queryKey, {
         ...detailCache,
+        activeGoalObjective: goalObjectiveFromRuntime(
+          runtime, latestGoalObjective(refreshed.messages),
+        ),
         messages: refreshed.messages,
         offset: refreshed.offset,
       })

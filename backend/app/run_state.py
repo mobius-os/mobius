@@ -6,7 +6,8 @@ parked, or awaiting continuation. Runtime ownership still lives in
 reconstructed from a second per-chat marker.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -16,7 +17,7 @@ from app import models
 def goal_objective_for_run_start(
   db: Session,
   chat_id: str,
-  content: str | None,
+  message: Mapping[str, Any] | None,
 ) -> str | None:
   """Resolve the goal metadata for a newly opened durable run.
 
@@ -25,11 +26,13 @@ def goal_objective_for_run_start(
   ordinary turn after a completed goal therefore cannot revive stale UI state.
   """
   from app.chat_context import _goal_objective
+  from app.continuations import is_continuation_message
 
-  objective = _goal_objective(content or "")
+  content = message.get("content") if message is not None else ""
+  objective = _goal_objective(content if isinstance(content, str) else "")
   if objective is not None:
     return objective
-  if (content or "").strip().lower() != "continue":
+  if not is_continuation_message(message):
     return None
   previous = latest_run(db, chat_id)
   if previous is None or previous.status not in (

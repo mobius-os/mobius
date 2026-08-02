@@ -293,9 +293,14 @@ def _user_message_from_body(
   if body.cid:
     user_msg["cid"] = body.cid
   ensure_user_cid(user_msg)
-  if body.continuation == "manual":
+  # A recovered question answer resumes the interrupted logical turn even
+  # though its provider prompt contains the human-readable answer.
+  continuation_reason = (
+    "question_answer" if body.answers else body.continuation
+  )
+  if continuation_reason:
     user_msg["kind"] = "continuation"
-    user_msg["continuation_reason"] = "manual"
+    user_msg["continuation_reason"] = continuation_reason
   if body.hidden:
     user_msg["hidden"] = True
   if body.attachments:
