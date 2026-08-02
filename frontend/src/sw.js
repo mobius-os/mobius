@@ -58,6 +58,7 @@ import {
   withOpaqueFramePublicAssetCors,
   isCacheableAppAssetResponse,
   SHELL_DATA_CACHE,
+  NAVIGATION_FALLBACK_CACHE,
   isImmutableAppAsset,
   isPackagedAppAsset,
   packagedAppAssetCacheKey,
@@ -65,6 +66,7 @@ import {
   isCacheableOpaqueEmbedDocument,
   isRangeRequest,
   isStaleRuntimeCache,
+  selectNavigationFallback,
   shouldServeCacheFirst,
   shouldFallBackToCacheOnError,
   isAppCodeRoute,
@@ -76,6 +78,17 @@ import {
 } from './sw-cache-policy.js'
 import { RETAINED_RUNTIME_ASSETS } from './sw-precache-assets.js'
 import { isShellNavigationDenied } from './lib/swNavigationPolicy.js'
+
+const NAVIGATION_FALLBACK_KEY = '/__mobius/navigation-fallback'
+
+async function readNavigationFallback() {
+  try {
+    const cache = await caches.open(NAVIGATION_FALLBACK_CACHE)
+    return await cache.match(NAVIGATION_FALLBACK_KEY)
+  } catch {
+    return undefined
+  }
+}
 
 const isOpaqueFramePublicAssetRequest = request => {
   try {
@@ -163,6 +176,22 @@ self.addEventListener('activate', (event) => {
     await Promise.all(
       keys.filter(isStaleRuntimeCache).map(k => caches.delete(k)),
     )
+    // Keep one branded, self-contained document outside Workbox's generation
+    // cache. A reload can otherwise fall through to Response.error() if the
+    // active precache is absent during a repair/update, which replaces the
+    // entire installed PWA with Chromium's native error page. Refresh this
+    // durable floor on every successful activation so its copy follows the
+    // current offline design without depending on the server at failure time.
+    try {
+      const offline = await matchPrecache('/offline.html')
+      if (offline) {
+        const fallbackCache = await caches.open(NAVIGATION_FALLBACK_CACHE)
+        await fallbackCache.put(NAVIGATION_FALLBACK_KEY, offline.clone())
+      }
+    } catch {
+      // Quota/storage failure must not prevent the new worker from activating;
+      // the ordinary Workbox offline document remains the primary fallback.
+    }
     // First-ever install only: claim the (uncontrolled) page now so offline +
     // app-code cache-first work from the very first load. An UPDATE reaches
     // activate only after a page-initiated SKIP_WAITING; the reload the page
@@ -690,14 +719,17 @@ registerRoute(
 // route above. matchPrecache resolves the content-hashed entry.
 setCatchHandler(async ({ request, url }) => {
   if (request.destination !== 'document') return Response.error()
+  let shellRoute = true
   if (isShellNavigationDenied(url.pathname)) {
-    return (await matchPrecache('/offline.html')) || Response.error()
+    shellRoute = false
   }
-  return (
-    (await matchPrecache('/index.html')) ||
-    (await matchPrecache('/offline.html')) ||
-    Response.error()
-  )
+  const response = selectNavigationFallback({
+    shellRoute,
+    shellDocument: shellRoute ? await matchPrecache('/index.html') : undefined,
+    offlineDocument: await matchPrecache('/offline.html'),
+    durableDocument: await readNavigationFallback(),
+  })
+  return response || Response.error()
 })
 
 // ── Precache warming ────────────────────────────────────────────

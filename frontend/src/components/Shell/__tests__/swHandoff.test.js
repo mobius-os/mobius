@@ -300,6 +300,31 @@ test('reloadWhenWorkerTakesOver: posts SKIP_WAITING and reloads only after activ
   assert.equal(timers.count(), 0)
 })
 
+test('reloadWhenWorkerTakesOver: waits for the newest installing repair generation', () => {
+  const installing = makeWorker('installing')
+  const olderWaiting = makeWorker('installed')
+  const timers = fakeTimers()
+  let reloads = 0
+  reloadWhenWorkerTakesOver({
+    registration: { installing, waiting: olderWaiting },
+    serviceWorker: makeSw(),
+    reload: () => { reloads += 1 },
+    setTimeoutFn: timers.setTimeoutFn,
+    clearTimeoutFn: timers.clearTimeoutFn,
+  })
+  assert.deepEqual(installing.posted, [{ type: 'SKIP_WAITING' }])
+  assert.deepEqual(olderWaiting.posted, [], 'must not activate the superseded worker')
+  assert.equal(reloads, 0, 'the current document remains visible while repair installs')
+  installing.state = 'installed'; installing.emit('statechange')
+  assert.equal(reloads, 0, 'installed is not yet safe to navigate')
+  assert.deepEqual(installing.posted, [
+    { type: 'SKIP_WAITING' },
+    { type: 'SKIP_WAITING' },
+  ], 'takeover is repeated once the installing worker can wait')
+  installing.state = 'activated'; installing.emit('statechange')
+  assert.equal(reloads, 1)
+})
+
 test('reloadWhenWorkerTakesOver: a controllerchange also triggers the reload', () => {
   const waiting = makeWorker('installed')
   const sw = makeSw()

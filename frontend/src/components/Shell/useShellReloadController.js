@@ -93,7 +93,6 @@ export default function useShellReloadController(inputs) {
       win,
       nav,
       storage,
-      cacheStorage,
       queryClient,
       persistWorkspaceSnapshot,
       workspaceStateRef,
@@ -125,16 +124,12 @@ export default function useShellReloadController(inputs) {
     try { storage.setItem('sw-skip-initiated', '1') } catch { /* ignore */ }
 
     if (stalePrecache) {
-      if (cacheStorage) {
-        try {
-          const keys = await cacheStorage.keys()
-          await Promise.all(
-            keys
-              .filter(key => key.startsWith('workbox-precache-'))
-              .map(key => cacheStorage.delete(key)),
-          )
-        } catch { /* best effort */ }
-      }
+      // Never delete the active Workbox precache before navigating. The shell
+      // route is deliberately cache-bound; removing its document and branded
+      // offline fallback makes the next reload a browser-owned ERR_FAILED page
+      // whenever the server is also between boots. The fresh worker owns
+      // replacing/cleaning its generation, and reloadWhenWorkerTakesOver keeps
+      // this page alive until that handoff settles.
       try { storage.removeItem('sw-stale-precache-pending') } catch { /* ignore */ }
       try { storage.setItem('sw-stale-precache-recovering', '1') } catch { /* ignore */ }
     }
