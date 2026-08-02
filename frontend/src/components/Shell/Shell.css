@@ -302,6 +302,12 @@
   z-index: 2;
 }
 
+/* While New chat is allocating, the ordinary landing covers the outgoing
+   ChatView and its z:2 handoff cover. */
+.shell__new-chat-presentation {
+  z-index: 3;
+}
+
 /* ── Tab strip: pinned chats/apps to swap between ─────────────────── */
 .shell__tabstrip {
   flex-shrink: 0;

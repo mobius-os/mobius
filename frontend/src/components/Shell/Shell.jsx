@@ -573,6 +573,12 @@ export default function Shell() {
   const [composerRequest, setComposerRequest] = useState(null)
   const composerRequestTokenRef = useRef(0)
   const composerFocusLeaseRef = useRef(null)
+  // A user-initiated New-chat tap should acknowledge the destination before
+  // row allocation, cache maintenance, or a degraded network can finish. Keep
+  // the first-class empty surface above the outgoing chat until the resolved
+  // ChatView reports a painted frame; the focus lease below carries any early
+  // typing across that ID-less interval.
+  const [newChatPresentation, setNewChatPresentation] = useState(null)
 
   const requestComposer = useCallback((chatId, {
     draft, focus = false,
@@ -972,6 +978,9 @@ export default function Shell() {
       next.set(paneKey, id)
       return next
     })
+    setNewChatPresentation(current => (
+      current?.chatId === id ? null : current
+    ))
     finishDrawerNavigationPresentation()
   }, [finishDrawerNavigationPresentation, workspaceStateRef])
 
@@ -2511,6 +2520,17 @@ export default function Shell() {
       composerFocusLeaseRef.current,
     )
     const ws = workspaceStateRef.current.ws
+    // Standard is one destination surface, so acknowledge an explicit New-chat
+    // tap immediately instead of leaving the drawer/old transcript painted for
+    // the whole async allocation. Builder stays additive and therefore waits
+    // for the concrete id before opening its new tab.
+    const presentation = focusComposer && (!SPLITS || ws.viewMode === 'single')
+      ? { chatId: null }
+      : null
+    if (presentation) {
+      setNewChatPresentation(presentation)
+      closeDrawer()
+    }
     const resumeId = (
       (ws.viewMode === 'single')
       && activeChatIdRef.current == null
@@ -2536,12 +2556,28 @@ export default function Shell() {
       if (touchFocusLeased) {
         releaseComposerFocusLease(composerFocusLeaseRef.current)
       }
+      if (presentation) {
+        setNewChatPresentation(current => (
+          current === presentation ? null : current
+        ))
+      }
       // Don't leave a dead, drawer-still-open tap. Offline / failed create surface a
       // toast; an in-flight second tap just closes the drawer (the first create lands).
       if (reason === 'offline') showToast("You're offline.")
       else if (reason === 'error') showToast("Couldn't start a new chat — please try again.", { variant: 'error' })
       closeDrawer()
       return
+    }
+
+    if (presentation) {
+      const alreadyPresented = activeViewRef.current === 'chat'
+        && String(activeChatIdRef.current) === String(chatId)
+      setNewChatPresentation(current => {
+        if (current !== presentation) return current
+        return alreadyPresented
+          ? null
+          : { ...current, chatId: String(chatId) }
+      })
     }
 
     const changesRoute = activeViewRef.current !== 'chat'
@@ -3390,19 +3426,24 @@ export default function Shell() {
           </div>
           )
         })()}
-        {/* New Chat landing (round 4 item 3) — the first-class surface a null single
-            slot paints (never chats[0], never a blank <main>). */}
+        {/* One New Chat landing owns both the resting null slot and the immediate
+            user-initiated cover while its chat row is allocated. */}
         {(() => {
+          const allocatingNewChat = newChatPresentation != null
           const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY
+            || allocatingNewChat
           if (!newChatSurface) return null
           return (
             <div
               key="home-new-chat"
-              className="shell__view shell__view--active shell__chat-view"
+              className={`shell__view shell__view--active shell__chat-view${allocatingNewChat ? ' shell__new-chat-presentation' : ''}`}
+              data-new-chat-presentation={allocatingNewChat
+                ? newChatPresentation.chatId || 'allocating'
+                : undefined}
+              aria-busy={allocatingNewChat || undefined}
             >
               <NewChatLanding
-                // Retry state only on the resting surface — never mid-reveal.
-                failure={newChatSurface ? newChatLandingFailure : null}
+                failure={allocatingNewChat ? null : newChatLandingFailure}
                 onRetry={requestEmptySingleNewChat}
               />
             </div>

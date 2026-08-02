@@ -388,9 +388,11 @@ test.describe('Touch navigation', () => {
       matchMedia('(hover: none) and (pointer: coarse)').matches
     ))).toBe(true)
 
+    let releaseCreation
+    const creationGate = new Promise(resolve => { releaseCreation = resolve })
     await page.route(/\/api\/chats(?:\?.*)?$/, async route => {
       if (route.request().method() !== 'POST') return route.fallback()
-      await new Promise(resolve => setTimeout(resolve, 300))
+      await creationGate
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -429,12 +431,17 @@ test.describe('Touch navigation', () => {
       .click()
 
     const focusLease = page.getByRole('textbox', { name: 'New chat message' })
+    const presentation = page.locator('[data-new-chat-presentation]')
+    await expect(presentation).toBeVisible()
+    await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
     await expect(focusLease).toBeFocused()
     await page.keyboard.type('Typed while opening')
+    releaseCreation()
 
     const composer = page.locator('[data-chat-surface="painted"] textarea')
     await expect(composer).toBeFocused()
     await expect(composer).toHaveValue('Typed while opening')
+    await expect(presentation).toHaveCount(0)
   })
 })
 
