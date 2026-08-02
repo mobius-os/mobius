@@ -66,9 +66,3 @@ test('external durable-mode synchronization clears transient projection', () => 
   assert.equal(synced.transition, null)
   assert.equal(synced.committedMode, 'single')
 })
-
-test('the splits kill switch clamps every derivation to Standard', () => {
-  assert.equal(effectiveViewMode(panes(), { splitsEnabled: false }), 'single')
-  assert.equal(builderModeActive(panes(), { splitsEnabled: false }), false)
-  assert.equal(dragPreviewActive(modeReducer(single(), { type: 'drag-arm' }), { splitsEnabled: false }), false)
-})

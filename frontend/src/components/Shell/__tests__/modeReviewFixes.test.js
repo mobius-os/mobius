@@ -88,8 +88,8 @@ test('finding 4: non-history newChat routes through applyModeDestination (not a 
   assert.doesNotMatch(shell, /type: 'OPEN_TAB', paneId: ws\.focusedPaneId,\s*\n\s*tab: tabModel\.makeTab\('chat', chatId\)/)
 })
 
-test('finding 9: applyModeDestination clamps the kill switch BEFORE the world branch', () => {
-  assert.match(nav, /const mode = paneModel\.WORKSPACE_SPLITS_ENABLED \? ws\.viewMode : 'single'/)
+test('finding 9: applyModeDestination branches on the canonical workspace world', () => {
+  assert.match(nav, /const mode = ws\.viewMode/)
   assert.match(nav, /if \(mode === 'single'\) \{[\s\S]*?SET_SINGLE_SCREEN/)
 })
 
@@ -111,7 +111,7 @@ test('finding F9: historical-chat repair is builder-only; single mode requests N
   // the explicit New Chat landing instead.
   assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: fallback\.id, appId: null, paneId: ws\.focusedPaneId \}, \{ preserveSettings: true \}\)/)
   assert.match(shell, /applyModeDestination\(\{ view: 'chat', chatId: chats\[0\]\.id, appId: null, paneId: ws\.focusedPaneId \}, \{ preserveSettings: true \}\)/)
-  assert.match(shell, /const single = !paneModel\.WORKSPACE_SPLITS_ENABLED \|\| ws\.viewMode === 'single'/)
+  assert.match(shell, /const single = ws\.viewMode === 'single'/)
   assert.match(shell, /if \(single && ws\.singleScreen == null && chats\.length > 0\s*&& pendingNewChatRef\.current == null\) \{\s*requestEmptySingleNewChat\(\)/)
   assert.match(shell, /else if \(!single && focusedPaneEmpty && chats\[0\]\)/)
   assert.match(shell, /const builderEmpty = !single/)
@@ -240,7 +240,7 @@ test('finding 11: the hold cancels on the page-lifecycle interruptions', () => {
   assert.match(gesture, /window\.addEventListener\('pagehide', cancel\)/)
   assert.match(gesture, /document\.addEventListener\('visibilitychange', onHidden\)/)
   assert.match(gesture, /const onLostPointerCapture = useCallback/)
-  assert.match(brand, /onLostPointerCapture=\{splitsEnabled \? logoGesture\.onLostPointerCapture : undefined\}/)
+  assert.match(brand, /onLostPointerCapture=\{logoGesture\.onLostPointerCapture\}/)
 })
 
 // -- Finding 12: Shift+Enter e.repeat guard + keyboardModeClickRef cleanup -----

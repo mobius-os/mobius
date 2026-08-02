@@ -4,7 +4,7 @@ import { initialModeState, modeReducer } from './modeMachine.js'
 // Synchronizes the durable workspace mode with the one transient state that still
 // belongs in React: drag-preview. Visual mode motion is a separate browser scene
 // transaction; this controller never watches CSS animations or schedules recovery.
-export default function useModeController({ committedMode, splitsEnabled = true }) {
+export default function useModeController({ committedMode }) {
   const [state, dispatch] = useReducer(
     modeReducer,
     undefined,
@@ -25,11 +25,6 @@ export default function useModeController({ committedMode, splitsEnabled = true 
   useEffect(() => {
     syncCommitted(committedMode)
   }, [committedMode, syncCommitted])
-
-  useEffect(() => {
-    if (splitsEnabled) return
-    syncCommitted('single')
-  }, [splitsEnabled, syncCommitted])
 
   const dragArm = useCallback(() => {
     const current = stateRef.current

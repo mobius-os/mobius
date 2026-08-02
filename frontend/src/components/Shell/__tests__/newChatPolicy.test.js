@@ -47,19 +47,6 @@ test('empty-single policy fires only on the transition edge', () => {
   ), false)
 })
 
-test('empty-single policy respects the splits kill switch', () => {
-  assert.equal(enteredEmptySingleScreen(
-    { viewMode: 'panes', singleScreen: { kind: 'app', id: 4 } },
-    { viewMode: 'panes', singleScreen: null },
-    false,
-  ), true)
-  assert.equal(enteredEmptySingleScreen(
-    { viewMode: 'panes', singleScreen: null },
-    { viewMode: 'single', singleScreen: null },
-    false,
-  ), false)
-})
-
 test('only the active empty chat is eligible for client-side reuse', () => {
   const offscreen = empty('offscreen')
   const active = empty('active')

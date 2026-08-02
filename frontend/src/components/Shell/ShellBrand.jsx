@@ -8,7 +8,6 @@ import { useLogoModeGesture } from './useLogoModeGesture.js'
  */
 const ShellBrand = memo(function ShellBrand({
   brandRef,
-  splitsEnabled,
   navigationOpen,
   builderModeActive,
   // The live mode descriptor (modeMachine transition) or null. The logo's hold hands
@@ -24,7 +23,7 @@ const ShellBrand = memo(function ShellBrand({
   const logoGesture = useLogoModeGesture({
     onToggleMode,
     brandRef,
-    enabled: splitsEnabled,
+    enabled: true,
     // Cancel a live hold if navigation opens by any other path.
     drawerOpen: navigationOpen,
     builderModeActive,
@@ -36,7 +35,7 @@ const ShellBrand = memo(function ShellBrand({
   // the delay against the newest beat when a retoggle supersedes, with no remount.
   const animatedBeat = !!transition
     && (transition.phase === 'entering' || transition.phase === 'exiting')
-  const beatHeld = splitsEnabled && logoGesture.holdOwnsBeat && animatedBeat
+  const beatHeld = logoGesture.holdOwnsBeat && animatedBeat
   const beatParity = beatHeld ? (transition.id % 2 === 0 ? 'b' : 'a') : ''
 
   return (
@@ -54,31 +53,29 @@ const ShellBrand = memo(function ShellBrand({
         // Navigation remains the primary, stable accessible name. The builder
         // gesture is supplementary and its state is announced below.
         aria-label="Toggle navigation"
-        aria-description={splitsEnabled
-          ? 'Hold or press Shift+Enter for builder mode'
-          : undefined}
+        aria-description="Hold or press Shift+Enter for builder mode"
         aria-controls="navigation-drawer"
         aria-expanded={navigationOpen}
         onPointerDown={(e) => {
           // A deliberate interaction immediately clears Android's compatibility-
           // click guard left by an OS Back gesture.
           backFiredRef.current = false
-          if (splitsEnabled) logoGesture.onPointerDown(e)
+          logoGesture.onPointerDown(e)
         }}
-        onPointerMove={splitsEnabled ? logoGesture.onPointerMove : undefined}
-        onPointerUp={splitsEnabled ? logoGesture.onPointerUp : undefined}
-        onPointerCancel={splitsEnabled ? logoGesture.onPointerCancel : undefined}
-        onContextMenu={splitsEnabled ? logoGesture.onContextMenu : undefined}
-        onLostPointerCapture={splitsEnabled ? logoGesture.onLostPointerCapture : undefined}
+        onPointerMove={logoGesture.onPointerMove}
+        onPointerUp={logoGesture.onPointerUp}
+        onPointerCancel={logoGesture.onPointerCancel}
+        onContextMenu={logoGesture.onContextMenu}
+        onLostPointerCapture={logoGesture.onLostPointerCapture}
         onKeyDown={(e) => {
           backFiredRef.current = false
           // A keyboard interaction clears pointer provenance so a keyboard-invoked
           // contextmenu on the focused brand reaches the native menu instead of
           // inheriting a stale touch/pen suppression.
-          if (splitsEnabled) logoGesture.onKeyDown()
+          logoGesture.onKeyDown()
           // e.repeat guard: holding Shift+Enter must fire ONE toggle, not a storm
           // of them at the keyboard repeat rate (INV 3).
-          if (splitsEnabled && e.shiftKey && e.key === 'Enter' && !e.repeat) {
+          if (e.shiftKey && e.key === 'Enter' && !e.repeat) {
             e.preventDefault()
             keyboardModeClickRef.current = true
             // Honest cause (finding F13): Shift+Enter is the 'keyboard' beat.
@@ -121,11 +118,9 @@ const ShellBrand = memo(function ShellBrand({
         </span>
         <span className="shell__wordmark">Möbius</span>
       </button>
-      {splitsEnabled && (
-        <span className="shell__sr-only" role="status" aria-live="polite">
-          {builderModeActive ? 'Builder mode' : 'Single screen'}
-        </span>
-      )}
+      <span className="shell__sr-only" role="status" aria-live="polite">
+        {builderModeActive ? 'Builder mode' : 'Single screen'}
+      </span>
     </>
   )
 })

@@ -191,12 +191,6 @@ html[data-mode-view-transition]::view-transition-new(*) {
   transform: scaleY(1);
 }
 
-/* PROPOSED builder power-chrome (design item 6, default OFF — gated by
-   .shell--builder-power on the shell root). Accent-energized resting dividers. */
-.shell--builder-power .workspace__divider-bar {
-  background: color-mix(in srgb, var(--accent) 55%, var(--border-light));
-}
-
 .workspace__divider--v:hover .workspace__divider-bar,
 .workspace__divider--v:focus-visible .workspace__divider-bar { transform: scaleX(3); }
 .workspace__divider--h:hover .workspace__divider-bar,

@@ -47,42 +47,6 @@ export const PANE_GAP = 7
 // and positioned renderers cannot drift.
 export const STRIP_H = 34
 
-// Multi-pane exposure waits for the pane-aware back/sentinel work (stage B).
-// Until then every user ENTRY POINT into splits — the context-menu split/move
-// items and the phone pane chip/sheet — is ON by default now that the PR2
-// gates (unit + positive-behavior e2e) are green; 'mobius:workspace-splits'
-// = '0' is the kill switch that restores the single-pane fallback. Read once
-// at module load; absent-localStorage runtimes get the default (enabled).
-export const WORKSPACE_SPLITS_ENABLED = (() => {
-  try { return localStorage.getItem('mobius:workspace-splits') !== '0' } catch { return true }
-})()
-
-// Kill switch for the builder-mode Settings tab. When enabled (the default),
-// sanitizeTab accepts the canonical `settings:settings` tab so Settings can live
-// in a pane; the nav adapter opens it as a tab in builder mode and as the
-// takeover overlay in single mode. When DISABLED, sanitizeTab drops a Settings
-// tab exactly like an unknown kind — so a rolled-back client (feature shipped,
-// then flag turned off) SCRUBS any persisted Settings tab before first render
-// and reverts to today's overlay everywhere (design: flag-off sanitization).
-//
-// It is GATED on WORKSPACE_SPLITS_ENABLED (review §3): the Settings tab only makes
-// sense where builder mode (panes) can exist. With splits off there is no builder
-// mode, so a persisted `settings:settings` is scrubbed on parse AND new Settings
-// navigation routes to the takeover overlay — the tab can never leak into the
-// legacy single-pane strip. Read once at module load; '0' also disables.
-export const BUILDER_SETTINGS_ENABLED = WORKSPACE_SPLITS_ENABLED && (() => {
-  try { return localStorage.getItem('mobius:builder-settings') !== '0' } catch { return true }
-})()
-
-// PROPOSED "more power" builder chrome — NOT yet owner-approved (design item 6).
-// An accent power-rail under the top bar + accent-energized dividers while in
-// builder mode. Default OFF: it ships behind this flag so the owner can preview it
-// by flipping 'mobius:builder-power' to '1' (one class toggle, no rebuild). Read
-// once at load, mirroring the other kill switches; only the literal '1' enables it.
-export const BUILDER_POWER_CHROME = (() => {
-  try { return localStorage.getItem('mobius:builder-power') === '1' } catch { return false }
-})()
-
 // The smallest a pane may be. canSplit refuses a split whose either resulting
 // child would fall below this within the pane's current projected rect — the
 // shared feasibility predicate drag/menu/resolver all consult (design §3.2,
@@ -176,7 +140,7 @@ function sanitizeTab(raw) {
     return String(raw.id) === tabModel.APPS_ID ? tabModel.appsTab() : null
   }
   if (raw.kind === 'settings') {
-    return (BUILDER_SETTINGS_ENABLED && String(raw.id) === tabModel.SETTINGS_ID)
+    return String(raw.id) === tabModel.SETTINGS_ID
       ? tabModel.settingsTab()
       : null
   }
@@ -466,16 +430,7 @@ export function seedFromFlatTabs(tabs) {
 // full-bleed (the workspaceView derivation reads viewMode; the tree is untouched
 // so toggling back re-projects it exactly). Any other/absent value is 'panes'.
 //
-// The splits KILL SWITCH forces 'single' here — its documented job is to "restore
-// the single-pane fallback", and normalize() runs on every parse/restore. Without
-// this, a rolled-back client (splits shipped, blob persisted 'panes', then the flag
-// turned OFF) restores viewMode 'panes' and RENDERS TILED (the tiled derivation is
-// flag-independent) while BOTH exit controls — the logo gesture and Shift+Enter —
-// are flag-gated OFF: an un-exitable multi-pane workspace that survives reload
-// ("cannot reach single mode"). Forcing 'single' collapses to the focused tab and
-// preserves the tree, so re-enabling splits restores the panes.
 function coerceViewMode(mode) {
-  if (!WORKSPACE_SPLITS_ENABLED) return 'single'
   return mode === 'single' ? 'single' : 'panes'
 }
 
@@ -1609,7 +1564,7 @@ export function writeFocusedPaneView(paneId, storage) {
 //   - and it IS the focused pane (the lockstep invariant toggle/reconcile keep).
 // Any miss returns null → the workspace boots in its normal tiled view.
 export function resolveInitialFocusedPaneView(ws, rawId) {
-  if (!WORKSPACE_SPLITS_ENABLED || rawId == null || !ws || !ws.panes) return null
+  if (rawId == null || !ws || !ws.panes) return null
   if (ws.viewMode === 'single') return null
   if (Object.keys(ws.panes).length <= 1) return null
   if (!ws.panes[rawId]) return null

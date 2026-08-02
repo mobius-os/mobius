@@ -28,7 +28,6 @@ import {
   shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
 } from '../../lib/drawerLifecycle.js'
-import { WORKSPACE_SPLITS_ENABLED } from '../Shell/paneModel.js'
 import {
   DRAWER_HOLD_MS,
   PRE_HOLD_MOVE_PX,
@@ -1959,7 +1958,7 @@ const DrawerRow = memo(function DrawerRow({
         // actions and held vertical movement reorders a pin, so Android cannot
         // retire the gesture by cancelling its parallel pointer stream.
         data-drawer-key={`${kind}:${id}`}
-        data-drag-key={WORKSPACE_SPLITS_ENABLED ? `${kind}:${id}` : undefined}
+        data-drag-key={`${kind}:${id}`}
         data-pinned-key={pinned ? `${kind}:${id}` : undefined}
         onPointerDown={onRowPointerDown}
         onTouchStart={onRowTouchStart}

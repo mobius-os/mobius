@@ -174,7 +174,7 @@ export default function useNavigation({
   // the boot effect re-opens it, so the overlay must start closed.
   const [settingsOpen, setSettingsOpen] = useState(
     initialNav.view === 'settings'
-    && !(paneModel.BUILDER_SETTINGS_ENABLED && workspace.viewMode === 'panes'),
+    && workspace.viewMode !== 'panes',
   )
   // Visual visibility is intentionally separate from history ownership.
   // An explicit tap/swipe close can start the panel transition immediately
@@ -196,7 +196,7 @@ export default function useNavigation({
   // tab, each shown only in its own world, NEVER destructively converted between
   // them (INV 6/7).
   const overlayShowing = settingsOpen
-    && (workspace.viewMode === 'single' || !paneModel.BUILDER_SETTINGS_ENABLED)
+    && workspace.viewMode === 'single'
   const activeView = overlayShowing ? 'settings' : contentRoute.view
   const activeChatId = contentRoute.chatId
   const activeAppId = contentRoute.appId
@@ -251,7 +251,7 @@ export default function useNavigation({
   // user was really looking at (finding M1).
   const overlayShowingForWs = useCallback(
     (ws) => settingsOpenRef.current
-      && (ws.viewMode === 'single' || !paneModel.BUILDER_SETTINGS_ENABLED),
+      && ws.viewMode === 'single',
     [],
   )
   // The committed set of visible pane ids (excludes phone-deck-hidden panes).
@@ -356,7 +356,7 @@ export default function useNavigation({
     // + visiblePaneIds) names HIDDEN tree panes that do not paint, so consulting it
     // there would classify an unpainted app as visible and let Back FOCUS + nav-back
     // into an invisible iframe. Only the BUILDER world reads the tree/visible set.
-    const mode = paneModel.WORKSPACE_SPLITS_ENABLED ? ws.viewMode : 'single'
+    const mode = ws.viewMode
     if (mode === 'single') {
       if ('singleScreen' in ws) {
         const slot = ws.singleScreen
@@ -877,7 +877,7 @@ export default function useNavigation({
   // React batch snapshots the correct overlay flag (mirrors navTo's own pattern).
   const applySettingsDestination = useCallback((paneId) => {
     const ws = workspaceStateRef.current.ws
-    if (paneModel.BUILDER_SETTINGS_ENABLED && ws.viewMode === 'panes') {
+    if (ws.viewMode === 'panes') {
       const targetPaneId = (typeof paneId === 'string' && ws.panes[paneId])
         ? paneId
         : ws.focusedPaneId
@@ -913,7 +913,7 @@ export default function useNavigation({
     // Kill-switch clamp BEFORE the world branch (finding 9; INV 16): with splits
     // disabled the presentation is single, so a chat/app nav must set the SLOT,
     // never OPEN_TAB into the hidden pane tree.
-    const mode = paneModel.WORKSPACE_SPLITS_ENABLED ? ws.viewMode : 'single'
+    const mode = ws.viewMode
     // A USER-initiated chat/app open leaves any Settings takeover (they chose to go
     // elsewhere). A BACKGROUND repair/seed passes preserveSettings (R1): it writes
     // the destination BENEATH an open takeover without dismissing it, so a boot-seed
@@ -1142,8 +1142,7 @@ export default function useNavigation({
       // RESET_FLAT deliberately preserves a slot, so omitting the second write
       // would leave the implicit starter chat mounted behind the requested chat.
       const bootDeepLink = (route, tab) => {
-        const mode = paneModel.WORKSPACE_SPLITS_ENABLED
-          ? workspaceStateRef.current.ws.viewMode : 'single'
+        const mode = workspaceStateRef.current.ws.viewMode
         if (mode === 'single') {
           if (!blobValid) openBootTab(tab)
           applyModeDestination(route)
@@ -1171,7 +1170,6 @@ export default function useNavigation({
         openBootTab(tabModel.makeTab('chat', initialNav.chatId))
       } else if (
         initialNav.view === 'settings'
-        && paneModel.BUILDER_SETTINGS_ENABLED
         && workspaceStateRef.current.ws.viewMode === 'panes'
       ) {
         // Reload/return-to-settings in builder mode: make the Settings tab the
