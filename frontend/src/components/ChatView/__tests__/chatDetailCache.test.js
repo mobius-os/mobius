@@ -5,7 +5,6 @@ import {
   chatCacheCanPaint,
   chatDetailCacheValue,
   chatSnapshotMatchesRuntime,
-  mergeChatDetailCacheValue,
   mergeRecentMessagesIntoLoadedWindow,
   messageKey,
   messageMatchesKey,
@@ -167,43 +166,4 @@ test('a tail refresh retains every verified older row needed by a saved address'
   assert.equal(merged.messages.length, 40)
   assert.equal(merged.messages[0].content, 'Loaded 5')
   assert.equal(merged.messages[20].content, 'Fresh 25')
-})
-
-test('background detail publication keeps the full loaded window and new version', () => {
-  const current = {
-    updated_at: 'old',
-    offset: 0,
-    messages: Array.from({ length: 30 }, (_, id) => ({ id: String(id) })),
-  }
-  const recent = {
-    updated_at: 'new',
-    offset: 20,
-    messages: Array.from({ length: 11 }, (_, index) => ({
-      id: String(index + 20),
-      content: 'fresh',
-    })),
-  }
-  const merged = mergeChatDetailCacheValue(current, recent)
-  assert.equal(merged.updated_at, 'new')
-  assert.equal(merged.offset, 0)
-  assert.equal(merged.messages.length, 31)
-  assert.equal(merged.messages[0].id, '0')
-  assert.equal(merged.messages.at(-1).id, '30')
-})
-
-test('an unverifiable background tail never destroys the restoration window', () => {
-  const current = {
-    updated_at: 'old',
-    offset: 0,
-    messages: Array.from({ length: 20 }, (_, index) => ({ id: `old-${index}` })),
-  }
-  const recent = {
-    updated_at: 'new',
-    offset: 40,
-    messages: Array.from({ length: 20 }, (_, index) => ({ id: `new-${index}` })),
-  }
-  const merged = mergeChatDetailCacheValue(current, recent)
-  assert.equal(merged.updated_at, null, 'next activation must revalidate by saved anchor')
-  assert.equal(merged.offset, 0)
-  assert.equal(merged.messages, current.messages)
 })

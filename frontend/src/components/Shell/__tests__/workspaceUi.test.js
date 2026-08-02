@@ -797,8 +797,8 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
   )
   assert.match(
     shell,
-    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)[\s\S]*?chatQueries\.messages\.refresh\(queryClient, chatId\)[\s\S]*?setAttentionChatIds/,
-    'a hidden finished chat must refresh before a later return and then raise attention',
+    /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)(?:(?!chatQueries\.messages\.refresh)[\s\S])*?setAttentionChatIds/,
+    'a hidden finished chat must raise attention without parsing its transcript',
   )
   assert.match(
     shell,

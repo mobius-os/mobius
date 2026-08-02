@@ -208,29 +208,3 @@ export function mergeRecentMessagesIntoLoadedWindow({
     verified: true,
   }
 }
-
-/** Publish a recent detail response while retaining any verified older page. */
-export function mergeChatDetailCacheValue(current, recent) {
-  if (!current) return recent
-  const merged = mergeRecentMessagesIntoLoadedWindow({
-    loadedMessages: current.messages,
-    loadedOffset: current.offset,
-    recentMessages: recent?.messages,
-    recentOffset: recent?.offset,
-  })
-  if (!merged.verified) {
-    // Do not turn an unverifiable tail refresh into silent history loss. Keep
-    // the complete restoration window, but revoke its version proof so the
-    // next activation performs an anchor-addressed authoritative read.
-    return {
-      ...current,
-      updated_at: null,
-      running: !!recent?.running,
-      activeGoalObjective: recent?.activeGoalObjective || '',
-      pending_messages: recent?.pending_messages || [],
-      pending_question_id: recent?.pending_question_id || null,
-      chatInfo: recent?.chatInfo || current.chatInfo,
-    }
-  }
-  return { ...recent, messages: merged.messages, offset: merged.offset }
-}

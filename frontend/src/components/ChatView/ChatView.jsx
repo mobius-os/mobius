@@ -868,9 +868,9 @@ export default function ChatView({
         sendingRef.current = false
       }
       if (data.running || (!preserveLocalTurn && !staleSnapshot)) {
-        setServerRunningState(!!data.running)
+        setServerRunningLocalState(!!data.running)
       }
-      setActiveGoalState(data.running
+      setActiveGoalObjective(data.running
         ? (data.active_goal_objective || latestGoalObjective(msgs))
         : '')
       setLiveQuestionId(data.pending_question_id || null)
@@ -905,7 +905,6 @@ export default function ChatView({
     commitMessages,
     pendingQueue.hydrate,
     queryClient,
-    setActiveGoalState,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -945,8 +944,12 @@ export default function ChatView({
         setSending(false)
         sendingRef.current = false
       }
-      setServerRunningState(!!data.running)
-      setActiveGoalState(data.running ? (data.active_goal_objective || '') : '')
+      // Apply local UI state directly, then publish the complete runtime
+      // snapshot once. The side-effecting field setters are for independent
+      // optimistic transitions; using them here made one poll emit up to three
+      // persisted-cache updates for a single server response.
+      setServerRunningLocalState(!!data.running)
+      setActiveGoalObjective(data.running ? (data.active_goal_objective || '') : '')
       setLiveQuestionId(data.pending_question_id || null)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
@@ -964,9 +967,7 @@ export default function ChatView({
   }, [
     chatId,
     pendingQueue.hydrate,
-    pendingQueue.pendingMessagesRef,
     queryClient,
-    setActiveGoalState,
   ])
 
   const handleCompactionStored = useCallback(
@@ -1646,7 +1647,7 @@ export default function ChatView({
     const settleRuntime = (runtime, visibleMessages) => {
       const running = !!runtime.running
       setServerRunningLocalState(running)
-      setActiveGoalState(running
+      setActiveGoalObjective(running
         ? (runtime.active_goal_objective || latestGoalObjective(visibleMessages))
         : '')
       hadMessagesRef.current = visibleMessages.length > 0

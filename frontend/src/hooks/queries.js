@@ -1,10 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
-import {
-  chatDetailCacheValue,
-  mergeChatDetailCacheValue,
-} from '../lib/chatDetailCache.js'
+import { chatDetailCacheValue } from '../lib/chatDetailCache.js'
 
 function jsonOrThrow(res, label) {
   if (!res.ok) throw new Error(`${label} ${res.status}`)
@@ -393,17 +390,6 @@ export const chatQueries = {
         queryFn: ({ signal }) => fetchChatMessages(chatId, { signal }),
         staleTime: Infinity,
       }).then(() => true)
-    },
-    // A terminal run event is durable evidence that the background chat has a
-    // newer settled tail. Publish it before the owner returns, while retaining
-    // every verified older row needed by that chat's saved reading address.
-    refresh: async (queryClient, chatId) => {
-      const key = ['chat-messages', chatId]
-      const recent = await fetchChatMessages(chatId)
-      queryClient.setQueryData(key, current => (
-        mergeChatDetailCacheValue(current, recent)
-      ))
-      return queryClient.getQueryData(key)
     },
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
   },

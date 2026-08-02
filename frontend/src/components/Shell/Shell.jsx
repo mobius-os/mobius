@@ -2181,10 +2181,11 @@ export default function Shell() {
         // in the visible set, not equality with one global id, so a chat visible
         // in a background split gets no false dot (finding D-iii).
         if (!visibleChatIdsRef.current.has(String(chatId))) {
-          // Finish means the complete answer is durable now. Refresh the hidden
-          // chat immediately rather than making the owner's later return show
-          // an old snapshot and then wait for the final response to arrive.
-          void chatQueries.messages.refresh(queryClient, chatId).catch(() => {})
+          // Do not fetch or parse the hidden transcript here. Several agents can
+          // finish while the owner is reading another chat, and those unsolicited
+          // detail responses contend with the first native scroll frame. The
+          // retained ChatView consumes this run signal when it becomes visible;
+          // an unmounted chat uses the existing versioned activation read.
           setAttentionChatIds(prev => {
             if (prev.has(chatId)) return prev
             const next = new Set(prev)

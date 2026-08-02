@@ -125,6 +125,19 @@ test('the goal reuses the progress rail and stays as context for build phases', 
 })
 
 test('ChatView binds goal state to explicit run boundaries, not transport liveness', () => {
+  const runtimePoll = chatView.match(
+    /const reconcileRuntimeState = useCallback[\s\S]*?const handleCompactionStored/,
+  )?.[0] || ''
+  assert.doesNotMatch(
+    runtimePoll,
+    /setServerRunningState|setActiveGoalState/,
+    'one server snapshot must not publish through independent field setters',
+  )
+  assert.equal(
+    runtimePoll.match(/updateChatRuntimeCache\(/g)?.length,
+    1,
+    'one server snapshot should publish one complete runtime cache patch',
+  )
   const runStarts = chatView.split('setBuildPhases(railAtRunStart())').slice(1)
   assert.equal(runStarts.length, 4, 'every current run-start seam should be covered')
   for (const suffix of runStarts) {
