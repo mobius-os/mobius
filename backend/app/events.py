@@ -45,7 +45,7 @@ def _normalize_subagent_status(status: str | None) -> str:
 # the durable transcript: `resumable` drives the one-tap Resume affordance
 # (MsgContent), and `pause` is the single descriptor
 # `chat_event_sink._pause_note` builds
-# — {kind: 'restart'|'stall'|'rate_limit'|'usage_limit', resets_at?} — that
+# — {kind: 'restart'|'rate_limit'|'usage_limit', resets_at?} — that
 # ErrorCard reads to render the calm "Paused" family or the live "resets at …"
 # limit card. Folding the whole classification into `pause` keeps this
 # whitelist at TWO keys no matter how many pause facts exist, so it never grows

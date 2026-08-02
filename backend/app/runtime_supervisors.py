@@ -12,14 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from pathlib import Path
-from typing import Awaitable, Callable, Protocol
+from typing import Protocol
 
 from app.database import SessionLocal
-
-
-LagSleep = Callable[..., Awaitable[str | None]]
 
 
 class RuntimeSettings(Protocol):
@@ -36,13 +32,11 @@ class RuntimeSupervisors:
     logger: logging.Logger,
     restart_authorization: str | None,
     restart_fallback_chats: list[str],
-    lag_sleep: LagSleep,
   ) -> None:
     self.settings = settings
     self.log = logger
     self.restart_authorization = restart_authorization
     self.restart_fallback_chats = restart_fallback_chats
-    self.lag_sleep = lag_sleep
     self._tasks: dict[str, asyncio.Task] = {}
     self._frontend_observer = None
     self._frontend_handler = None
@@ -59,7 +53,7 @@ class RuntimeSupervisors:
       await self._start_chat_supervisors()
     except Exception as exc:
       self.log.error(
-        "chat liveness sweep wiring failed: %s", exc, exc_info=True,
+        "chat supervisor wiring failed: %s", exc, exc_info=True,
       )
 
   async def _start_frontend_watcher(self) -> None:
@@ -77,7 +71,6 @@ class RuntimeSupervisors:
     from app.chat import (
       sweep_idle_pending_chats,
       sweep_reset_parks,
-      sweep_stalled_live_runs,
       sweep_wedged_runs,
     )
 
@@ -92,17 +85,6 @@ class RuntimeSupervisors:
           raise
         except Exception as exc:
           self.log.error("wedged-marker sweep failed: %s", exc, exc_info=True)
-
-    async def stalled_live_loop():
-      while True:
-        await self.lag_sleep(asyncio.sleep, time.monotonic, self.log)
-        try:
-          with SessionLocal() as db:
-            await sweep_stalled_live_runs(db)
-        except asyncio.CancelledError:
-          raise
-        except Exception as exc:
-          self.log.error("stalled-live sweep failed: %s", exc, exc_info=True)
 
     async def sweep_reset_parks_once(*, startup: bool = False):
       try:
@@ -252,7 +234,6 @@ class RuntimeSupervisors:
         await asyncio.sleep(60 * 60)
 
     self._spawn("wedged-marker-sweep", wedged_marker_loop())
-    self._spawn("stalled-live-sweep", stalled_live_loop())
     self._spawn("reset-park-sweep", reset_park_loop())
     self._spawn("writer-supervisor", writer_supervisor_loop())
     self._spawn("browser-profile-quota", browser_profile_loop())

@@ -2224,9 +2224,8 @@ async def run_codex_sdk_turn(
       # when that times out the escalation SIGTERMs the turn's private
       # process group, so the transport dies mid-stream instead of
       # delivering turn/completed. Surfacing that as a provider failure is
-      # both wrong and destructive: the raw string overwrites the stall note
-      # (`chat_event_sink._pause_note`) published moments earlier, because
-      # error blocks
+      # both wrong and destructive: the raw string overwrites the terminal
+      # note published moments earlier, because error blocks
       # coalesce latest-wins and drop every events.ERROR_PASSTHROUGH_FIELDS
       # the new event omits — taking the note's one-tap Resume with it and
       # leaving the owner an unexplained error and no way back.

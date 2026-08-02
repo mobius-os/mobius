@@ -3553,7 +3553,7 @@ export default function ChatView({
     && turnActive
 
   // ── Sticky "tap to resume" affordance ──────────────────────────────
-  // A turn paused by a drain-gated restart, a stall, or a provider-limit park
+  // A turn paused by a drain-gated restart or a provider-limit park
   // persists a resumable error block at the tail of the last assistant message
   // (the same tail invariant MsgContent's Resume gate enforces). Like a pending
   // question, that card can sit outside the viewport after a scroll — the chat

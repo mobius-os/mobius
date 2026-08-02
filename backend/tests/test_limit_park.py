@@ -7,9 +7,9 @@ Locks in the six contracts of the limit-park feature:
   (b) A limit kill PARKS the run row (parked_until + park_reason) and
       clears the per-chat marker; ownership is identity-keyed like
       FinishRun (a superseded run never parks onto a fresh marker).
-  (c) Latest-run-wins: the park probe + stall exemption honor a park only
-      while the chat's newest run row is the parked one, and a fresh
-      StartTurn closes a stale park (no orphaned notify/auto-resume).
+  (c) Latest-run-wins: the park probe honors a park only while the chat's
+      newest run row is the parked one, and a fresh StartTurn closes a stale
+      park (no orphaned notify/auto-resume).
   (d) The reset sweep makes at most one notification attempt per park, keeps
       an opted park
       retryable until its continuation starts, skips future parks, stands down
@@ -507,24 +507,10 @@ def test_parked_probe_latest_run_wins():
   try:
     # Parked row is the latest → the park is honored.
     assert chat_mod._parked_until_for_chat(db, cid) == until
-    # A NEWER running row (a fresh turn) hides the stale park immediately,
-    # so the stall watchdog can never be wrongly exempted by it.
+    # A NEWER running row (a fresh turn) hides the stale park immediately.
     _seed_run(cid, "rt-latest-new", status="running", started_offset=60)
     db.expire_all()
     assert chat_mod._parked_until_for_chat(db, cid) is None
-  finally:
-    db.close()
-
-
-def test_stall_exemption_reports_parked():
-  cid = "park-exempt"
-  _seed_chat(cid)
-  future = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
-  _seed_run(cid, "rt-exempt", status="parked", parked_until=future)
-
-  db = SessionLocal()
-  try:
-    assert chat_mod._stall_exemption(db, cid) == "parked"
   finally:
     db.close()
 

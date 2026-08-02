@@ -755,50 +755,6 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
   )
 
 
-def test_watchdog_handoff_records_interrupted_outcome(monkeypatch):
-  """The watchdog shares Stop's safe generation handoff, but its durable
-  outcome is an interruption rather than a user-requested stop."""
-  from app.runner_registry import RunnerKind
-
-  cid = "watchdog-outcome"
-  _seed_owner_and_creds()
-  _seed_chat(
-    cid, messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[], running="running",
-  )
-  _seed_run(f"rt-{cid}", cid)
-
-  class StoppableHandle:
-    chat_id = cid
-    kind = RunnerKind.CLAUDE_SDK
-
-    async def stop(self, timeout=2.0):
-      del timeout
-      chat_mod.registry.unregister(self.chat_id, self.kind)
-      return True
-
-  async def stalled_runner(*, bc, **_kwargs):
-    chat_mod.registry.register(StoppableHandle())
-    bc.bc.last_event_at = time.monotonic() - chat_mod.PROGRESS_TIMEOUT - 1
-    db = SessionLocal()
-    try:
-      assert await chat_mod.sweep_stalled_live_runs(db) == [cid]
-    finally:
-      db.close()
-    return {"session_id": "sess", "cost_usd": 0.0}
-
-  import app.claude_sdk_runner as csr
-  monkeypatch.setattr(csr, "run_claude_sdk_turn", stalled_runner)
-
-  chat_mod.mark_starting(cid)
-  gen = chat_mod.current_run_generation(cid)
-  _run_real_chat(cid, run_token=f"rt-{cid}", run_gen=gen)
-  _drain_actor()
-
-  assert _load(cid)["running"] is False
-  assert _run_outcomes(cid) == {f"rt-{cid}": "interrupted"}
-
-
 # -- 7. unsupported runtime cleanup: marker cleared, pending dropped -----
 def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch):
   """An unsupported provider hits the setup-error terminal cleanup: the
