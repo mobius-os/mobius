@@ -346,7 +346,7 @@ test.describe('Navigation basics', () => {
 test.describe('Touch navigation', () => {
   test.use({ hasTouch: true, isMobile: true })
 
-  test('New chat focuses the composer after the destination mounts', async ({ page }) => {
+  test('New chat preserves phone focus and early typing through allocation', async ({ page }) => {
     const newChatId = '10000000-0000-4000-8000-000000000099'
     await setup(page)
     await expect.poll(() => page.evaluate(() => (

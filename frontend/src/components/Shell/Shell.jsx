@@ -84,7 +84,7 @@ import {
 import {
   beginTouchComposerFocusLease,
   releaseComposerFocusLease,
-} from '../ChatView/composerFocusPolicy.js'
+} from './composerFocusLease.js'
 import {
   shouldRearmShellApply,
   watchForShellUpdateOnForeground,

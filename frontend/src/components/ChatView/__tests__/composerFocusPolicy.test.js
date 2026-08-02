@@ -2,9 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  beginTouchComposerFocusLease,
   focusComposerElement,
-  releaseComposerFocusLease,
   shouldApplyComposerFocusRequest,
 } from '../composerFocusPolicy.js'
 
@@ -76,43 +74,4 @@ test('focusComposerElement falls back for older focus implementations', () => {
   }
   assert.equal(focusComposerElement(el), true)
   assert.deepEqual(calls, [[{ preventScroll: true }], []])
-})
-
-test('touch focus lease starts synchronously and preserves early typing', () => {
-  const calls = []
-  const el = {
-    value: 'stale',
-    focus: (...args) => calls.push(args),
-  }
-  const touchMedia = query => ({
-    matches: query === '(hover: none) and (pointer: coarse)',
-  })
-
-  assert.equal(beginTouchComposerFocusLease(el, {
-    matchMediaImpl: touchMedia,
-    activeElement: null,
-  }), true)
-  assert.equal(el.value, '')
-  assert.deepEqual(calls, [[{ preventScroll: true }]])
-
-  el.value = 'typed while opening'
-  assert.equal(el.value, 'typed while opening')
-})
-
-test('touch focus lease stays inert on desktop and releases failed handoffs', () => {
-  let blurred = 0
-  const el = {
-    value: 'draft',
-    focus() {},
-    blur() { blurred += 1 },
-  }
-  assert.equal(beginTouchComposerFocusLease(el, {
-    matchMediaImpl: () => ({ matches: false }),
-    activeElement: null,
-  }), false)
-  assert.equal(el.value, 'draft')
-
-  releaseComposerFocusLease(el, { activeElement: el })
-  assert.equal(blurred, 1)
-  assert.equal(el.value, '')
 })
