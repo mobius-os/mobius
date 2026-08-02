@@ -2143,11 +2143,9 @@
 }
 
 /* Keep the primary action's three SVGs mounted in one grid cell. Send → Steer
-   stays an immediate swap; only entering Stop crossfades the old directional
-   glyph into the square while the shared button shell changes colour. Because
-   the outgoing glyph remains visible for the same 160ms that Stop fades in,
-   there is never the empty replacement frame caused by the retired reveal
-   animation. */
+   stays an immediate swap. Transitions into Stop are deliberately sequential:
+   the directional glyph leaves first, then the square settles in, so the two
+   meanings never mix while the shared button shell changes colour. */
 .chat__action-glyphs {
   width: 28px;
   height: 28px;
@@ -2170,20 +2168,20 @@
   transform: scale(0.76) rotate(-8deg);
 }
 
-.chat__action-glyphs--stop .chat__action-glyph {
-  transition:
-    opacity 0.16s ease,
-    transform 0.2s var(--ease-out-soft, ease-out);
-}
-
 .chat__action-glyphs--stop .chat__action-glyph--send,
 .chat__action-glyphs--stop .chat__action-glyph--steer {
   transform: scale(0.82);
+  transition:
+    opacity 0.1s ease-in,
+    transform 0.1s ease-in;
 }
 
 .chat__action-glyphs--stop .chat__action-glyph--stop {
   opacity: 1;
   transform: none;
+  transition:
+    opacity 0.12s ease-out 0.1s,
+    transform 0.16s var(--ease-out-soft, ease-out) 0.1s;
 }
 
 .chat__send {

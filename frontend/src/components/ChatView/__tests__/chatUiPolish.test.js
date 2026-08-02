@@ -136,7 +136,7 @@ test('message references use a bounded responsive two-column grid', () => {
     'narrow panes should fall back to one reference column')
 })
 
-test('only transitions into Stop crossfade, without an empty replacement frame', () => {
+test('transitions into Stop are sequential while Send to Steer stays immediate', () => {
   const css = stripComments(chatCss)
   const sendRule = css.match(/\.chat__send\s*\{[^}]*\}/)?.[0] || ''
   const steerRule = css.match(/\.chat__steer\s*\{[^}]*\}/)?.[0] || ''
@@ -144,8 +144,8 @@ test('only transitions into Stop crossfade, without an empty replacement frame',
   const staticDirectionalRule = css.match(
     /\.chat__action-glyphs--send \.chat__action-glyph--send,\s*\.chat__action-glyphs--steer \.chat__action-glyph--steer\s*\{[^}]*\}/,
   )?.[0] || ''
-  const enteringStopRule = css.match(
-    /\.chat__action-glyphs--stop \.chat__action-glyph\s*\{[^}]*\}/,
+  const outgoingStopRule = css.match(
+    /\.chat__action-glyphs--stop \.chat__action-glyph--send,\s*\.chat__action-glyphs--stop \.chat__action-glyph--steer\s*\{[^}]*\}/,
   )?.[0] || ''
   const visibleStopRule = css.match(
     /\.chat__action-glyphs--stop \.chat__action-glyph--stop\s*\{[^}]*\}/,
@@ -161,13 +161,17 @@ test('only transitions into Stop crossfade, without an empty replacement frame',
     'the empty-frame reveal must not remain available to a primary action')
   assert.doesNotMatch(staticDirectionalRule, /transition:/,
     'Send to Steer should retain its existing immediate icon swap')
-  assert.match(enteringStopRule, /opacity 0\.16s ease/,
-    'the mounted outgoing and Stop glyphs should crossfade together')
-  assert.match(enteringStopRule, /transform 0\.2s var\(--ease-out-soft, ease-out\)/,
-    'Stop should settle with a short shape transition')
+  assert.match(outgoingStopRule, /opacity 0\.1s ease-in/,
+    'the directional glyph should leave before Stop appears')
+  assert.match(outgoingStopRule, /transform 0\.1s ease-in/)
   assert.match(visibleStopRule, /opacity:\s*1/,
     'Stop must be the visible layer at the end of the transition')
   assert.match(visibleStopRule, /transform:\s*none/)
+  assert.match(visibleStopRule, /opacity 0\.12s ease-out 0\.1s/,
+    'Stop should wait for the directional glyph to finish before appearing')
+  assert.match(visibleStopRule,
+    /transform 0\.16s var\(--ease-out-soft, ease-out\) 0\.1s/,
+    'the delayed Stop glyph should still settle softly')
   assert.match(css,
     /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.chat__action-glyphs--stop \.chat__action-glyph\s*\{\s*transition:\s*none/,
     'reduced-motion users should get the final glyph without the crossfade')
