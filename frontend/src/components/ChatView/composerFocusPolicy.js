@@ -2,13 +2,9 @@ export function shouldApplyComposerFocusRequest({
   focusRequest,
   chatId,
   embedded = false,
-  isTouchPrimary = false,
 } = {}) {
-  if (!focusRequest) return false
+  if (focusRequest?.focus !== true) return false
   if (embedded) return false
-  // A touch device may focus only for an explicit composer-focus request.
-  // Draft-only handoffs and ordinary navigation must not summon its keyboard.
-  if (isTouchPrimary && focusRequest.focus !== true) return false
   if (focusRequest.chatId == null || chatId == null) return false
   return String(focusRequest.chatId) === String(chatId)
 }

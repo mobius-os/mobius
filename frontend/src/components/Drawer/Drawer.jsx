@@ -23,6 +23,7 @@ import {
   drawerWidthFromPointerDelta,
   isGeneratedTouchClick,
   isHorizontalDrawerSwipe,
+  shouldRestoreDrawerFocus,
   shouldSuppressDrawerSwipeClick,
   shouldAutoRevealActiveChat,
   clearDrawerGestureStyles,
@@ -42,7 +43,6 @@ import {
 } from './drawerInformationArchitecture.js'
 import ShareAppSheet from './ShareAppSheet.jsx'
 import { isDrawerAppShareEligible } from './appShareState.js'
-import { shouldRestoreDrawerFocus } from './drawerFocusPolicy.js'
 import {
   clampDrawerRowWindow,
   drawerRowSpacerHeights,

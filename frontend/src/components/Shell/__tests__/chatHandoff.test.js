@@ -188,7 +188,7 @@ test('app-supplied drafts update retained composers as well as remounted chats',
   assert.match(chatView,
     /typeof composerRequest\.draft === 'string'[\s\S]*handleComposerInputChange\(composerRequest\.draft\)/,
     'a retained ChatView must apply the requested draft to controlled state')
-  assert.match(chatView, /if \(!composerRequest\.focus\) \{[\s\S]*onComposerRequestHandled\?\.\(token\)/,
+  assert.match(chatView, /if \(!shouldApplyComposerFocusRequest\(\{[\s\S]*onComposerRequestHandled\?\.\(token\)/,
     'a draft-only handoff must settle without stealing focus')
 })
 

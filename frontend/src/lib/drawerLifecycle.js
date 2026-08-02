@@ -30,6 +30,18 @@ export function shouldAutoRevealActiveChat({
     && activeChatId != null
 }
 
+/** Restore modal-drawer focus only while the drawer still owns it. */
+export function shouldRestoreDrawerFocus({
+  drawer,
+  activeElement,
+  body,
+} = {}) {
+  return !activeElement
+    || activeElement === body
+    || !drawer
+    || drawer.contains(activeElement)
+}
+
 function cssTimeMs(value) {
   const text = String(value || '').trim()
   const numeric = Number.parseFloat(text)
