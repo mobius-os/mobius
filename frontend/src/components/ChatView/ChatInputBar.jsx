@@ -36,6 +36,8 @@
  * ║      + tap, so the check is accurate. Refocus after pick is      ║
  * ║      GATED on this ref — unconditional refocus would pop the     ║
  * ║      keyboard up even when the user opened + with kb down.       ║
+ * ║      The same restoration runs when the native picker is         ║
+ * ║      cancelled, so returning empty-handed does not lose focus.   ║
  * ║                                                                  ║
  * ║   3. CHIP × BUTTON keeps the keyboard                            ║
  * ║      The remove-attachment × has `onPointerDown.preventDefault`  ║
@@ -105,6 +107,7 @@ import {
   textareaUsesNativeSizing,
   syncComposerTallClass,
 } from './composerTextareaSizing.js'
+import { focusComposerElement } from './composerFocusPolicy.js'
 
 
 // Detect touch-primary once (same heuristic ChatView uses).
@@ -609,19 +612,22 @@ export default function ChatInputBar({
   const hasInput = hasSendablePayload(input, pendingFiles)
   const hasUploading = pendingFiles?.some(c => c.status === 'uploading') ?? false
 
+  function restoreFocusAfterFilePicker() {
+    const shouldRestore = wasInputFocusedAtPickerOpenRef.current
+    wasInputFocusedAtPickerOpenRef.current = false
+    // The OS picker temporarily replaces the page. Restore the exact state the
+    // owner had before opening it, including when they cancel without choosing
+    // a file (modern browsers emit `cancel` instead of `change` in that case).
+    if (shouldRestore) {
+      setTimeout(() => focusComposerElement(inputRef?.current), 0)
+    }
+  }
+
   function handleFileSelect(e) {
     const fileList = Array.from(e.target.files || [])
-    if (!fileList.length) return
     e.target.value = ''
-    onAddFiles(fileList)
-    // Only refocus the textarea (reopening the soft keyboard) if it
-    // was focused BEFORE the OS file picker opened. Unconditional
-    // refocus would pop the keyboard up even when the user tapped
-    // `+` with the keyboard down — see the matching contract in
-    // ComposerPopover and ChatSettingsPanel.
-    if (wasInputFocusedAtPickerOpenRef.current) {
-      setTimeout(() => inputRef?.current?.focus({ preventScroll: true }), 0)
-    }
+    if (fileList.length) onAddFiles(fileList)
+    restoreFocusAfterFilePicker()
   }
 
   function handleTextareaChange(e) {
@@ -775,6 +781,7 @@ export default function ChatInputBar({
         multiple
         ref={fileInputRef}
         onChange={handleFileSelect}
+        onCancel={restoreFocusAfterFilePicker}
         style={{ display: 'none' }}
       />
       {sendFailure && (

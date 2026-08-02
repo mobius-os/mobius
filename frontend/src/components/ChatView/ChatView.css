@@ -1587,17 +1587,18 @@
   transform: rotate(-90deg);
 }
 
-/* Expanded, a quiet vertical hairline places the chronological child steps
-   beneath the parent label. The rail is neutral hierarchy, not a decorative
-   accent stripe. */
+/* Expanded child steps keep the same icon and label columns as their summary.
+   An earlier nested rail added 32px before every child, so a parent such as
+   "Browsing the web" and its "Searched the web" steps visibly jumped between
+   columns. The disclosure itself already supplies the hierarchy; alignment is
+   the stronger scanning cue for a chronological activity list. */
 .chat__activity-timeline {
   display: flex;
   flex-direction: column;
   gap: var(--activity-row-gap, 4px);
   margin-top: var(--activity-row-gap, 4px);
-  margin-inline-start: 20px;
-  padding-inline-start: 11px;
-  border-inline-start: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  margin-inline-start: 0;
+  padding-inline-start: 0;
 }
 
 /* Shared screen-reader status utility for transcript-local interactions such
