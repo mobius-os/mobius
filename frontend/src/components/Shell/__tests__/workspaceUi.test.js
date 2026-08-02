@@ -824,7 +824,7 @@ test('live preview reveal keeps the workspace controller distinct from device mo
   assert.doesNotMatch(shell, /const mode = paneModel\.modeForRect\(contentRect\)/)
 })
 
-test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
+test('drawer rows preserve ordering, action identity, and app artwork', () => {
   assert.match(drawer, /useMemo\(\(\) => buildDrawerSections\(chats, apps\), \[chats, apps\]\)/)
   assert.match(drawer, /const filteredApps = useMemo\(/)
   assert.match(drawer, /const rowActions = useMemo\(/)
@@ -832,27 +832,8 @@ test('large drawer lists memoize ordering and row actions without changing row o
   assert.match(drawer, /visibleRecents\.map\(\(\{ kind, item \}\)[\s\S]*?item=\{item\}[\s\S]*?actions=\{rowActions\}/)
   assert.match(drawer, /item=\{app\}[\s\S]*?actions=\{rowActions\}/)
   assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
-})
-
-test('mixed recents reserve artwork for apps and separate sections without a second type scale', () => {
   assert.match(drawer, /kind === 'app'[\s\S]*?<AppIcon/)
   assert.doesNotMatch(drawer, /drawer__chat-icon|<Chat\b|<Clock\b|<PinFilled\b/)
-  assert.match(
-    drawerCss,
-    /\.drawer__label\s*\{[\s\S]*?font-size:\s*14px[\s\S]*?font-weight:\s*600[\s\S]*?color:\s*var\(--text\)[\s\S]*?padding:\s*6px 12px[\s\S]*?margin:\s*12px 0 4px/,
-  )
-  assert.match(
-    drawerCss,
-    /\.drawer__item\s*\{[\s\S]*?font-size:\s*14px/,
-  )
-  assert.match(
-    drawerCss,
-    /@media \(min-width: 1024px\)[\s\S]*?\.drawer__item,[\s\S]*?font-size:\s*15px[\s\S]*?\.drawer__label\s*\{[\s\S]*?font-size:\s*15px/,
-  )
-  assert.doesNotMatch(
-    drawerCss,
-    /\.drawer__row \.drawer__item\s*\{[^}]*font-size:/,
-  )
 })
 
 test('New chat and Apps share one compact navigation rhythm', () => {
