@@ -22,6 +22,7 @@ import {
   awaitCacheFlushBeforeReload,
   compactPersistedChatDetails,
   flushPersistedQueryCache,
+  restorePersistedClient,
   shouldPersistQueryKey,
 } from '../../queryClient.js'
 
@@ -92,8 +93,9 @@ test('explicit reload handoff preserves the complete loaded chat window', async 
     client.setQueryData(['models', 'registry'], { mustNotPersist: true })
 
     await flushPersistedQueryCache(client)
-    const raw = await get('mobius-query-cache')
-    const persisted = JSON.parse(raw)
+    const persisted = await get('mobius-query-cache')
+    assert.equal(typeof persisted, 'object',
+      'IndexedDB should receive a structured value, not a main-thread JSON string')
     const keys = persisted.clientState.queries.map(q => q.queryKey)
     assert.deepEqual(keys, [['chat-messages', 'chat-1']])
     const data = persisted.clientState.queries[0].state.data
@@ -103,6 +105,17 @@ test('explicit reload handoff preserves the complete loaded chat window', async 
   } finally {
     globalThis.indexedDB = previousIndexedDb
   }
+})
+
+test('persisted cache restore accepts both structured and legacy JSON values', () => {
+  const persisted = {
+    buster: 'v1',
+    timestamp: 123,
+    clientState: { queries: [] },
+  }
+
+  assert.equal(restorePersistedClient(persisted), persisted)
+  assert.deepEqual(restorePersistedClient(JSON.stringify(persisted)), persisted)
 })
 
 test('reload handoff cannot be stranded by a blocked cache write', async () => {

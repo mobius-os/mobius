@@ -47,6 +47,22 @@ test('unchanged runtime polls do not publish a persisted-cache update', () => {
   assert.equal(cache.value().messages, transcript)
 })
 
+test('an unchanged active goal does not publish a persisted-cache update', () => {
+  const cache = cacheHarness({
+    messages: [{ role: 'assistant', content: 'large durable history' }],
+    activeGoalObjective: 'Fix first-scroll jitter',
+  })
+
+  const changed = updateChatRuntimeCache(
+    cache.queryClient,
+    ['chat-messages', 'chat-1'],
+    { activeGoalObjective: 'Fix first-scroll jitter' },
+  )
+
+  assert.equal(changed, false)
+  assert.equal(cache.updates(), 0, 'an unchanged goal must skip setQueryData')
+})
+
 test('a runtime transition patches only runtime fields', () => {
   const transcript = [{ role: 'assistant', content: 'history' }]
   const cache = cacheHarness({

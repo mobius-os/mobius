@@ -435,10 +435,11 @@ export default function ChatView({
   )
   const setActiveGoalState = useCallback((objective) => {
     setActiveGoalObjective(objective)
-    queryClient.setQueryData(chatMessagesQueryKey(chatId), existing => {
-      if (existing?.activeGoalObjective === objective) return existing
-      return { ...(existing || {}), activeGoalObjective: objective }
-    })
+    updateChatRuntimeCache(
+      queryClient,
+      chatMessagesQueryKey(chatId),
+      { activeGoalObjective: objective },
+    )
   }, [chatId, queryClient])
 
   useEffect(() => () => {

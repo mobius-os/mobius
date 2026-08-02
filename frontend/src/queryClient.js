@@ -8,9 +8,9 @@
  * consumers, no per-component loading flash on mount.
  *
  * Persistence (`createAsyncStoragePersister` + `idb-keyval`) mirrors
- * the in-memory cache to IndexedDB. After a reload, queries hydrate
- * from disk before any network round-trip — chats and messages
- * appear instantly, then revalidate in background.
+ * the in-memory cache to IndexedDB using IndexedDB's native structured clone.
+ * After a reload, queries hydrate from disk before any network round-trip —
+ * chats and messages appear instantly, then revalidate in background.
  *
  * `defaultOptions` are tuned to "cached but not stale": staleTime 30s
  * means data is considered fresh for 30s (no refetch on remount in
@@ -68,13 +68,23 @@ export function compactPersistedChatDetails(persistedClient) {
   }
 }
 
+// Earlier releases stored this value as one large JSON string. Keep restore
+// compatible with that on-disk shape while writing the structured value
+// directly from now on. Avoiding JSON.stringify on the main thread matters on
+// large chat histories: the throttled save can otherwise land between touch
+// start and the browser's first native scroll frame.
+export function restorePersistedClient(storedClient) {
+  return typeof storedClient === 'string'
+    ? JSON.parse(storedClient)
+    : storedClient
+}
+
 export const queryPersister = createAsyncStoragePersister({
   storage: idbStorage,
   key: QUERY_CACHE_KEY,
   throttleTime: 1000,
-  serialize: persistedClient => JSON.stringify(
-    compactPersistedChatDetails(persistedClient),
-  ),
+  serialize: compactPersistedChatDetails,
+  deserialize: restorePersistedClient,
 })
 
 export const persistOptions = {
@@ -125,7 +135,7 @@ export async function flushPersistedQueryCache(client = queryClient) {
       shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
     }),
   }
-  await idbStorage.setItem(QUERY_CACHE_KEY, JSON.stringify(persistedClient))
+  await idbStorage.setItem(QUERY_CACHE_KEY, persistedClient)
 }
 
 /** Wait briefly for the reload handoff, but never let a blocked IndexedDB
