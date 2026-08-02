@@ -488,6 +488,52 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     const PRE_STEER = 'streaming room before fast-forward '.repeat(220)
     const messagePosts = []
 
+    // Exercise ChatView's touch-primary path and record the exact DOM state at
+    // every composer blur. A fresh send legitimately blurs before its row is
+    // committed; the later fast-forward blur must instead see the steered row
+    // already rendered and positioned by the scroll controller.
+    await page.addInitScript(() => {
+      const nativeMatchMedia = window.matchMedia.bind(window)
+      window.matchMedia = query => {
+        if (query !== '(hover: none) and (pointer: coarse)') {
+          return nativeMatchMedia(query)
+        }
+        return {
+          matches: true,
+          media: query,
+          onchange: null,
+          addListener() {},
+          removeListener() {},
+          addEventListener() {},
+          removeEventListener() {},
+          dispatchEvent() { return true },
+        }
+      }
+
+      window.__steerTouchBlurObservations = []
+      const nativeBlur = HTMLElement.prototype.blur
+      HTMLElement.prototype.blur = function (...args) {
+        if (this instanceof HTMLTextAreaElement
+            && this.getAttribute('aria-label') === 'Message Möbius…') {
+          const scroll = document.querySelector(
+            '[data-chat-surface="painted"] .chat__scroll',
+          )
+          const users = [...(document.querySelectorAll(
+            '[data-chat-surface="painted"] .chat__msg--user',
+          ))]
+          const row = users.at(-1)
+          const scrollRect = scroll?.getBoundingClientRect()
+          const rowRect = row?.getBoundingClientRect()
+          window.__steerTouchBlurObservations.push({
+            userCount: users.length,
+            mode: scroll?.dataset.scrollMode || null,
+            rowTop: scrollRect && rowRect ? rowRect.top - scrollRect.top : null,
+          })
+        }
+        return nativeBlur.apply(this, args)
+      }
+    })
+
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, async (route) => {
       let body = {}
       try { body = JSON.parse(route.request().postData() || '{}') } catch { /* empty */ }
@@ -650,6 +696,15 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       Math.max(...landedFrames) - Math.min(...landedFrames),
       JSON.stringify(result),
     ).toBeLessThanOrEqual(2)
+
+    const steerBlur = await page.evaluate(
+      () => window.__steerTouchBlurObservations?.at(-1) || null,
+    )
+    expect(steerBlur, JSON.stringify(steerBlur)).not.toBeNull()
+    expect(steerBlur.userCount, JSON.stringify(steerBlur)).toBe(2)
+    expect(steerBlur.mode, JSON.stringify(steerBlur)).toBe('PIN_USER_MSG')
+    expect(steerBlur.rowTop, JSON.stringify(steerBlur)).toBeGreaterThanOrEqual(-2)
+    expect(steerBlur.rowTop, JSON.stringify(steerBlur)).toBeLessThanOrEqual(12)
 
     const pinIndex = result.transitions.findIndex(
       row => row.event === 'send:pin-user-message',
