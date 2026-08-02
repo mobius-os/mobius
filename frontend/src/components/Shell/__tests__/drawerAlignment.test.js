@@ -28,11 +28,9 @@ test('collapsed and expanded drawer actions share one vertical rhythm', () => {
   const desktopRail = ruleBody(shellCss, '.shell__rail-actions', 1)
   const desktopRailAction = ruleBody(shellCss, '.shell__rail-action')
 
-  assert.equal(px(newChat, 'min-height'), DRAWER_ROW_HEIGHT)
   assert.equal(px(drawerItem, 'min-height'), DRAWER_ROW_HEIGHT)
   assert.equal(px(drawerRow, 'height'), DRAWER_ROW_HEIGHT)
-  assert.match(drawerRow, new RegExp(`flex:\\s*0 0 ${DRAWER_ROW_HEIGHT}px;`))
-  assert.doesNotMatch(newChat, /(?:border|box-shadow)\s*:/)
+  assert.doesNotMatch(newChat, /(?:min-height|padding|border|box-shadow)\s*:/)
   assert.equal(58 + px(desktopDrawerBody, 'padding'), 12 + px(desktopRail, 'margin-top'))
   assert.equal(px(desktopDrawerItem, 'min-height'), px(desktopRailAction, 'height'))
   assert.match(

@@ -177,8 +177,6 @@
   color: var(--text);
   font-weight: 500;
   margin: 0;
-  padding: 8px 12px;
-  min-height: 40px;
 }
 
 .drawer__item--new:hover {
@@ -415,7 +413,6 @@
 .drawer__row {
   position: relative;
   display: flex;
-  flex: 0 0 40px;
   height: 40px;
   align-items: center;
   gap: 0;
