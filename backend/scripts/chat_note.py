@@ -59,10 +59,15 @@ The note is the chat's durable memory. Its exact shape:
 ---
 type: chat
 description: <the chat's concise one-line NAME in the partner's own words,
-capitalized and normally at most 10 words, e.g. "Dialing in sour espresso", not
-"chat 12". Keep the existing name through ordinary follow-up turns. Rename it
-only when the RECENT conversation has substantially moved to a different main
-topic, then name that current topic rather than the chat's opening topic.>
+normally at most 10 words. Use sentence case: capitalize the first word plus
+real proper nouns and product names, e.g. "Dialing in sour espresso" or "Adding
+search to GitHub". On the first publication, replace the raw opening-message
+fallback with this useful name. On later publications, give recent work more
+weight but keep the existing name through ordinary follow-up turns. Rename it
+only when the recent conversation has substantially moved to a different main
+topic, then name that current topic rather than the chat's opening topic. Bring
+an existing generated name into sentence case once when needed; that formatting
+correction is not topic churn.>
 ---
 ## Digest
 <ONE short paragraph: what the chat is about, what it produced, and its current
@@ -607,10 +612,7 @@ def run() -> int:
     return 0
 
   m = re.search(r"^description:\s*(.+)$", out, re.MULTILINE)
-  # StartTurn already names a fresh chat from its first message.  Keep that
-  # synchronous name on the first summary publication; later publications
-  # may sync the title from the durable note.
-  if m and existing.strip():
+  if m:
     _patch_title(chat_id, m.group(1).strip())
   return 0
 

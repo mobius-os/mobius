@@ -161,13 +161,24 @@ def test_build_prompt_includes_existing_note_to_grow():
   assert "old" in p
 
 
-def test_summary_name_is_stable_until_a_substantial_recent_topic_shift():
+def test_summary_name_policy_balances_first_turn_recency_and_stability():
   cn = _load_chat_note()
   prompt = " ".join(cn.SYSTEM_PROMPT.lower().split())
+  assert (
+    "on the first publication, replace the raw opening-message fallback"
+    in prompt
+  )
+  assert "use sentence case" in prompt
+  assert "title case" not in prompt
+  assert (
+    "capitalize the first word plus real proper nouns and product names"
+    in prompt
+  )
+  assert "that formatting correction is not topic churn" in prompt
+  assert "give recent work more weight" in prompt
   assert "keep the existing name through ordinary follow-up turns" in prompt
   assert "substantially moved to a different main topic" in prompt
   assert "current topic rather than the chat's opening topic" in prompt
-  assert "capitalized" in prompt
 
 
 def test_generated_chat_name_capitalizes_without_damaging_product_casing():
@@ -476,6 +487,30 @@ def _valid_note(description="ours", summary="current"):
     f"## Digest\n{summary}\n\n## Summary\n{summary}\n\n"
     "## Facts & intent\n- intent: test"
   )
+
+
+def test_first_summary_publication_replaces_the_opening_message_title(
+  tmp_path, monkeypatch,
+):
+  """The raw first-message title is only a fallback until a note is ready."""
+  cn = _load_chat_note()
+  monkeypatch.setattr(cn, "MEMORY_DIR", tmp_path / "memory")
+  monkeypatch.setattr(
+    cn, "_read_chat_snapshot", lambda _cid: ("transcript", "r1"),
+  )
+  monkeypatch.setattr(cn, "_read_note_snapshot", lambda _note: ("", "missing"))
+  monkeypatch.setattr(
+    cn, "_summarize", lambda _transcript, _existing: _valid_note("Current work"),
+  )
+  monkeypatch.setattr(cn, "_publish_if_current", lambda *args: True)
+  patched = []
+  monkeypatch.setattr(
+    cn, "_patch_title", lambda cid, name: patched.append((cid, name)),
+  )
+  monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "c1"])
+
+  assert cn.run() == 0
+  assert patched == [("c1", "Current work")]
 
 
 def test_two_backstops_publish_only_one_revision(tmp_path):
