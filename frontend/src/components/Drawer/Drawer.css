@@ -177,8 +177,8 @@
   color: var(--text);
   font-weight: 500;
   margin: 0;
-  padding: 11px 12px;
-  min-height: 44px;
+  padding: 8px 12px;
+  min-height: 40px;
 }
 
 .drawer__item--new:hover {
@@ -280,11 +280,11 @@
 
 .drawer__item {
   width: 100%;
-  min-height: 44px;
+  min-height: 40px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 8px 12px;
   background: none;
   border: none;
   border-radius: 10px;
@@ -415,8 +415,8 @@
 .drawer__row {
   position: relative;
   display: flex;
-  flex: 0 0 44px;
-  height: 44px;
+  flex: 0 0 40px;
+  height: 40px;
   align-items: center;
   gap: 0;
 }

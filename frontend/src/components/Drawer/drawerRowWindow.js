@@ -1,6 +1,6 @@
 /* Constant-size drawer windowing for the mixed Recent list. */
 
-export const DRAWER_ROW_HEIGHT = 44
+export const DRAWER_ROW_HEIGHT = 40
 export const DRAWER_ROW_OVERSCAN = 8
 export const DRAWER_INITIAL_WINDOW_ROWS = 48
 
