@@ -66,6 +66,12 @@ async function sendMessage(page, text) {
   await page.keyboard.press('Enter')
 }
 
+async function tapSend(page, text) {
+  const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+  await input.fill(text)
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+}
+
 // The real service worker claims the page ~1s after load; from then on its
 // fetch() handler bypasses page.route, so the mocked /messages + /stream
 // contracts silently fall through to the real backend and the mock's steer
@@ -624,7 +630,10 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     await setupChat(page)
     await newChat(page)
     await page.setViewportSize({ width: 1280, height: 900 })
-    await sendMessage(page, 'first message')
+    // This case deliberately advertises a touch-primary device. Plain Enter
+    // inserts a newline on that contract, so exercise the same Send control a
+    // phone user taps instead of borrowing the desktop helper above.
+    await tapSend(page, 'first message')
     await expect(page.locator('.chat__msg--user')).toBeVisible({ timeout: 5000 })
     await page.evaluate(() => {
       const mock = window.__immediateSteerMock
@@ -633,7 +642,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
       mock.emitInitial?.()
     })
     await expect(page.locator('.chat__stop')).toBeVisible({ timeout: 5000 })
-    await sendMessage(page, QUEUED_TEXT)
+    await tapSend(page, QUEUED_TEXT)
     const steerBtn = page.getByRole('button', { name: 'Send queued message now' })
     await expect(steerBtn).toBeVisible({ timeout: 5000 })
 
