@@ -1492,12 +1492,9 @@ export default function useScrollMode({
     } catch {}
   }, [chatId, messagesRef, scrollRef, transitionMode])
 
-  // Transfer the logical chat's one durable reading coordinate at the same
-  // boundary that transfers physical visibility. The outgoing owner freezes
-  // once, then loses all persistence authority. The incoming owner starts from
-  // INITIAL so the ordinary restore path consumes the newest shared coordinate
-  // instead of reviving stale geometry from the last time this workspace world
-  // was visible. An initially hidden retained owner is neither transition.
+  // Transfer the logical chat's one durable coordinate with visibility. The
+  // outgoing owner persists before relinquishing authority; the incoming owner
+  // restores through INITIAL. A retained surface that begins hidden does neither.
   useLayoutEffect(() => {
     const wasOwner = readingPositionOwnerRef.current
     if (wasOwner === ownsReadingPosition) return
@@ -1507,12 +1504,9 @@ export default function useScrollMode({
           && !(savedLocationUnresolvedRef.current
             && !readerLocationExplicitRef.current)) {
         readerLocationExplicitRef.current = true
-        // The outgoing main-effect cleanup has already settled any pending
-        // reader gesture into ANCHOR_AT. Keep that semantic address intact:
-        // re-measuring it after the shell changed worlds can discard a nested
-        // part path and make the reverse handoff return somewhere else inside
-        // a long turn. Live FOLLOW/PIN modes still need one physical freeze so
-        // content arriving while inactive cannot redefine their tail.
+        // Main-effect cleanup has already settled pending input to ANCHOR_AT.
+        // Preserve that address: re-measuring after a world reflow can lose its
+        // nested part. Live FOLLOW/PIN modes still need one physical freeze.
         persistMode({
           freezeToCurrentPosition: modeRef.current.kind !== 'ANCHOR_AT',
         })
@@ -1691,7 +1685,7 @@ export default function useScrollMode({
   // on every messages change; cleanup is only fired on chatId change.)
   useLayoutEffect(() => {
     return () => persistMode({ freezeToCurrentPosition: true })
-  }, [chatId])
+  }, [persistMode])
 
   // A hard shell refresh/page background does not reliably run React's
   // cleanup after the human manually scrolls. Persist the current mode on the
@@ -1715,7 +1709,7 @@ export default function useScrollMode({
       window.removeEventListener(BEFORE_SHELL_RELOAD_EVENT, onPageLeaving)
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [chatId, ownsReadingPosition])
+  }, [ownsReadingPosition, persistMode])
 
   // Single layout effect: spacer sizing, automatic scroll writes,
   // ResizeObserver layout updates, user-gesture detection, geometry-based

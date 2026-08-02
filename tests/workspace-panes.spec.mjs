@@ -1226,17 +1226,11 @@ test.describe('Workspace view-mode toggle', () => {
     // The parked Builder owner must keep the rect it will paint. Expanding it
     // to Standard's box before its ownership cleanup changes wrapping and makes
     // a lifecycle capture describe content the reader was not looking at.
-    const [parkedBuilderBox, standardBox] = await Promise.all([
-      builderSurface.evaluate((element) => {
-        const { width, height } = element.getBoundingClientRect()
-        return { width, height }
-      }),
-      standardSurface.evaluate((element) => {
-        const { width, height } = element.getBoundingClientRect()
-        return { width, height }
-      }),
+    const [parkedBuilderWidth, standardWidth] = await Promise.all([
+      builderSurface.evaluate(element => element.getBoundingClientRect().width),
+      standardSurface.evaluate(element => element.getBoundingClientRect().width),
     ])
-    expect(parkedBuilderBox.width).toBeLessThan(standardBox.width - 100)
+    expect(parkedBuilderWidth).toBeLessThan(standardWidth - 100)
 
     const brand = page.getByRole('button', { name: 'Toggle navigation' })
     await brand.focus()
@@ -1264,7 +1258,7 @@ test.describe('Workspace view-mode toggle', () => {
       (JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]?.at || 0) > after
     ), { id: String(a.id), after: previousWriteAt })
 
-    const before = await page.evaluate((id) => {
+    const readBuilderState = () => page.evaluate((id) => {
       const scroll = document.querySelector(
         `[data-chat-world="builder"][data-chat-id="${id}"] .chat__scroll`,
       )
@@ -1277,6 +1271,7 @@ test.describe('Workspace view-mode toggle', () => {
         width: wrapper.getBoundingClientRect().width,
       }
     }, String(a.id))
+    const before = await readBuilderState()
 
     await brand.focus()
     await page.keyboard.press('Shift+Enter')
@@ -1284,14 +1279,7 @@ test.describe('Workspace view-mode toggle', () => {
       .toHaveAttribute('data-scroll-mode', 'ANCHOR_AT', { timeout: 15000 })
     await expect(page.locator('.workspace__chrome')).toHaveCount(0)
 
-    const afterExit = await page.evaluate((id) => {
-      const { at: _at, ...saved } =
-        JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
-      const wrapper = document.querySelector(
-        `[data-chat-world="builder"][data-chat-id="${id}"]`,
-      )
-      return { saved, width: wrapper.getBoundingClientRect().width }
-    }, String(a.id))
+    const afterExit = await readBuilderState()
     expect(afterExit.saved).toEqual(before.saved)
     expect(Math.abs(afterExit.width - before.width)).toBeLessThanOrEqual(1)
 

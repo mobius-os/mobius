@@ -711,9 +711,6 @@ export default function ChatView({
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
     initialEntryPhase,
-    // Standard and Builder can retain separate physical ChatViews for the same
-    // logical chat. Only the surface participating in the active handoff may
-    // publish that chat's one durable reading coordinate.
     ownsReadingPosition: !hidden,
   })
 

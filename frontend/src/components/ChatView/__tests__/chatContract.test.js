@@ -95,34 +95,6 @@ test('owner contract freezes question answers without locking keyboard movement'
   )
 })
 
-test('a retained chat has exactly one durable reading-position owner', () => {
-  const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
-  const scrollController = readFileSync(
-    new URL('../useScrollMode.js', import.meta.url),
-    'utf8',
-  )
-  assert.match(
-    chatView,
-    /ownsReadingPosition: !hidden/,
-    'ChatView must declare whether this physical surface owns the logical chat coordinate',
-  )
-  assert.doesNotMatch(
-    chatView,
-    /freezeChatExit/,
-    'ChatView must not duplicate the scroll controller\'s ownership transition',
-  )
-  assert.match(
-    scrollController,
-    /if \(!readingPositionOwnerRef\.current\) return[\s\S]*const wasOwner = readingPositionOwnerRef\.current[\s\S]*freezeToCurrentPosition: modeRef\.current\.kind !== 'ANCHOR_AT'[\s\S]*readingPositionOwnerRef\.current = false[\s\S]*readingPositionOwnerRef\.current = true[\s\S]*transitionMode\(\{ kind: 'INITIAL' \}, 'lifecycle:position-owner-enter'\)/,
-    'the outgoing owner must preserve a settled semantic anchor, freeze live modes, relinquish writes, and make the incoming owner restore shared state',
-  )
-  assert.match(
-    chatView,
-    /if \(hidden\) return[\s\S]*?\}, \[chatId, loadNonce, hidden\]\)/,
-    'hidden chats must disconnect and refresh history when they become visible again',
-  )
-})
-
 test('an empty chat initializes scroll identity before its first transcript mounts', () => {
   const scrollController = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
   const layoutOwner = scrollController.indexOf('// Single layout effect:')

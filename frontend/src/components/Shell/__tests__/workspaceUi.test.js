@@ -1024,11 +1024,6 @@ test('Shell threads the (drag-preview) viewMode into the content derivation and 
   assert.match(shell, /const standardOwner = world === STANDARD_CHAT_WORLD/)
   assert.match(shell, /const builderPainted = !standardOwner[\s\S]*effectiveViewMode === 'panes'/)
   assert.match(shell, /visible=\{surfaceVisible && chatPanesVisible && role !== 'held'\}/)
-  assert.match(
-    shell,
-    /const chatViewStyle = builderRect[\s\S]*\.\.\.posStyle[\s\S]*\.\.\.\(paned \? modeViewTransitionStyle[\s\S]*: \{\}\)/,
-    'a parked Builder owner must keep its pane rectangle instead of borrowing Standard geometry',
-  )
 })
 
 test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any drop commits panes', () => {

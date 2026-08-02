@@ -530,7 +530,7 @@ test.describe('Chat switching (the bug)', () => {
         && scroll.scrollTop > scroll.clientHeight
     }, chatId)
 
-    const beforeReturn = await page.evaluate((id) => {
+    const readPosition = () => page.evaluate((id) => {
       const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const saved = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
       const anchor = scroll.querySelector(`[data-key="${CSS.escape(saved.key)}"]`)
@@ -540,6 +540,7 @@ test.describe('Chat switching (the bug)', () => {
         anchorTop: anchor.getBoundingClientRect().top - scroll.getBoundingClientRect().top,
       }
     }, chatId)
+    const beforeReturn = await readPosition()
 
     // A cold shell mount may retain physical ChatView owners for both workspace
     // worlds. An initially hidden owner has never painted and must not replace
@@ -553,16 +554,7 @@ test.describe('Chat switching (the bug)', () => {
         ?.dataset.scrollMode === 'ANCHOR_AT'
     ), chatId)
 
-    const afterReturn = await page.evaluate((id) => {
-      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      const saved = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
-      const anchor = scroll.querySelector(`[data-key="${CSS.escape(saved.key)}"]`)
-      return {
-        key: saved.key,
-        offset: saved.offset,
-        anchorTop: anchor.getBoundingClientRect().top - scroll.getBoundingClientRect().top,
-      }
-    }, chatId)
+    const afterReturn = await readPosition()
 
     expect(afterReturn.key).toBe(beforeReturn.key)
     expect(Math.abs(afterReturn.offset - beforeReturn.offset)).toBeLessThanOrEqual(1)
