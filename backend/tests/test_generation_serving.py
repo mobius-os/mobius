@@ -11,9 +11,13 @@ Three coupled guarantees:
   incomplete after boot is served (or floored to baked) with no restart.
 """
 
+import asyncio
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import httpx
 import pytest
 
 import app.main as main
@@ -208,6 +212,75 @@ def test_baked_floor_served_when_dist_incomplete(client, serving):
   assert r.status_code == 200
   assert "INCOMPLETE" not in r.text  # the broken dist index is never served
   assert "__mobius-theme__" in r.text  # the baked stub (theme slot) is
+
+
+@pytest.mark.asyncio
+async def test_static_delivery_ignores_saturated_asyncio_executor(
+  monkeypatch, serving, tmp_path,
+):
+  """Codex turns may occupy every asyncio-default worker without taking the
+  shell, service workers, or app assets offline.
+
+  Codex's SDK intentionally uses ``asyncio.to_thread`` for long-running
+  protocol calls. Static delivery must use Starlette/AnyIO's independent
+  worker pool, or enough concurrent turns make health checks pass while every
+  browser entry point waits forever behind the exhausted default executor.
+  """
+  _write_build(serving["live"], "executor")
+  vendor = serving["live"] / "vendor" / "fonts" / "executor.js"
+  vendor.parent.mkdir(parents=True)
+  vendor.write_text("export const ready = true;", encoding="utf-8")
+
+  app_source = tmp_path / "demo"
+  app_static = app_source / "static"
+  app_static.mkdir(parents=True)
+  (app_static / "index.html").write_text("app-static", encoding="utf-8")
+  monkeypatch.setattr(
+    main,
+    "_app_source_dir_for_static_asset",
+    lambda **_kwargs: str(app_source),
+  )
+  _reset_memo()
+
+  loop = asyncio.get_running_loop()
+  release = threading.Event()
+  occupied = threading.Event()
+  saturated = ThreadPoolExecutor(max_workers=1)
+  replacement = ThreadPoolExecutor(max_workers=1)
+  loop.set_default_executor(saturated)
+
+  def occupy_default_worker():
+    occupied.set()
+    release.wait()
+
+  blocker = loop.run_in_executor(None, occupy_default_worker)
+  while not occupied.is_set():
+    await asyncio.sleep(0)
+
+  paths = (
+    "/shell/",
+    "/sw.js",
+    "/vendor/fonts/executor.js",
+    "/assets/index-executor.js",
+    "/app-assets/demo/index.html",
+    "/app-assets/by-id/1/index.html",
+    "/app-embeds/by-id/1/index.html",
+  )
+  try:
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(
+      transport=transport, base_url="http://testserver",
+    ) as async_client:
+      responses = await asyncio.wait_for(
+        asyncio.gather(*(async_client.get(path) for path in paths)),
+        timeout=2,
+      )
+    assert [response.status_code for response in responses] == [200] * len(paths)
+  finally:
+    release.set()
+    await blocker
+    loop.set_default_executor(replacement)
+    saturated.shutdown(wait=True)
 
 
 # -- frontend_watcher: attic hardlink hook on the dist swap --------------

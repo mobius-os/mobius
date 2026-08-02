@@ -5,7 +5,6 @@ static files.  API routes are registered first; the frontend SPA is
 mounted last as a catch-all so that client-side routing works.
 """
 
-import asyncio
 import logging
 import mimetypes
 import os
@@ -30,6 +29,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy.exc import OperationalError
+from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.database import (
@@ -1164,7 +1164,7 @@ async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
   the installed app's source_dir/static.
   """
   return _serve_app_static_asset(
-    await asyncio.to_thread(_app_source_dir_for_static_asset, app_id=app_id),
+    await run_in_threadpool(_app_source_dir_for_static_asset, app_id=app_id),
     asset_path,
     request,
   )
@@ -1186,7 +1186,7 @@ async def app_owned_opaque_embed_by_id(
   SAMEORIGIN and is never the document-navigation surface.
   """
   return _serve_app_static_asset(
-    await asyncio.to_thread(_app_source_dir_for_static_asset, app_id=app_id),
+    await run_in_threadpool(_app_source_dir_for_static_asset, app_id=app_id),
     asset_path,
     request,
   )
@@ -1202,7 +1202,7 @@ async def app_owned_asset(slug: str, asset_path: str, request: Request):
   if not slug or not all(ch.isalnum() or ch in "-_" for ch in slug):
     raise HTTPException(status_code=404, detail="Not found.")
   return _serve_app_static_asset(
-    await asyncio.to_thread(_app_source_dir_for_static_asset, slug=slug),
+    await run_in_threadpool(_app_source_dir_for_static_asset, slug=slug),
     asset_path,
     request,
   )
@@ -1228,7 +1228,7 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
     "/assets/{asset_path:path}", methods=["GET", "HEAD"], include_in_schema=False
   )
   async def serve_asset(request: Request, asset_path: str):
-    target = await asyncio.to_thread(_resolve_asset_file, asset_path)
+    target = await run_in_threadpool(_resolve_asset_file, asset_path)
     if target is None:
       raise HTTPException(status_code=404, detail="Not found.")
     media_type = (
@@ -1255,7 +1255,7 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
     # Resolve which build serves THIS request (live dist if complete, else the
     # baked floor) once, up front — per request, never a module-load snapshot.
     static_dir = _resolve_static_dir()
-    app_slug = await asyncio.to_thread(_top_level_app_slug_alias, path)
+    app_slug = await run_in_threadpool(_top_level_app_slug_alias, path)
     if app_slug:
       from fastapi.responses import RedirectResponse
       return RedirectResponse(
