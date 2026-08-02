@@ -171,7 +171,10 @@ export default function Shell() {
     projection,
     visiblePaneIds,
     persistWorkspaceSnapshot,
-  } = useWorkspaceSession({ storage: sessionStorage })
+  } = useWorkspaceSession({
+    storage: localStorage,
+    legacyStorage: sessionStorage,
+  })
 
   const {
     activeView,
@@ -708,13 +711,6 @@ export default function Shell() {
     if (openTabs.length >= 2) setTabStripEngaged(true)
     else if (openTabs.length === 0) setTabStripEngaged(false)
   }, [openTabs.length])
-  // Persist only the versioned workspace. The former flat-tab rollback mirror
-  // completed its release window and was removed so every boot has one owner.
-  useEffect(() => {
-    try {
-      sessionStorage.setItem(paneModel.STORAGE_KEY, paneModel.serializeWorkspace(workspace))
-    } catch { /* private mode / quota — workspace stays in memory only */ }
-  }, [workspace])
   // Pointer events inside an iframe do not bubble to its positioned shell
   // wrapper. The verified live frame sends a tiny focus signal so app panes have
   // the same click-to-focus semantics as native chat panes.

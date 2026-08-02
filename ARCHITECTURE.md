@@ -1041,11 +1041,12 @@ the same reference for no-op transitions.
 
 `useWorkspaceSession.js` is the live state owner. It composes reducer transitions
 through a synchronous ref boundary, persists the sole versioned
-`mobius-workspace` session value, owns focused-pane presentation, and projects
-content geometry. A missing or invalid workspace value fails closed to a fresh
-empty workspace; retained active-destination keys can then restore the current
-chat or app through the normal navigation path. There is no parallel flat-tab
-persistence format.
+`mobius-workspace` local value, owns focused-pane presentation, and projects
+content geometry. The durable snapshot restores the focused tab, pane layout,
+and Standard/Builder world after a fully closed PWA is relaunched. A missing or
+invalid workspace value fails closed to a fresh empty workspace; retained
+active-destination keys can then restore the current chat or app through the
+normal navigation path. There is no parallel flat-tab persistence format.
 
 The render path walks the projected leaves. Each visible chat pane owns its own
 retained `ChatView` surface and scroll controller. App frames remain in the

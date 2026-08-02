@@ -13,7 +13,7 @@
  *   (e) a projection flip to phone preserves the persisted tree and pane focus;
  *
  * The flag is enabled per-test (localStorage 'mobius:workspace-splits' = '1')
- * and a 2-pane workspace blob is seeded in sessionStorage before the shell
+ * and a 2-pane workspace blob is seeded in localStorage before the shell
  * boots, exactly like tabs.spec seeds the flat workspace. Agent + apps routes
  * are intercepted so no agent tokens are consumed.
  *
@@ -158,7 +158,7 @@ async function seedWorkspace(page, ws) {
   await page.addInitScript(([flagKey, wsKey, wsBlob, legKey, leg]) => {
     try {
       localStorage.setItem(flagKey, '1')
-      sessionStorage.setItem(wsKey, wsBlob)
+      localStorage.setItem(wsKey, wsBlob)
       sessionStorage.setItem(legKey, leg)
     } catch { /* private mode */ }
   }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob, 'mobius-open-tabs', legacy])
@@ -176,7 +176,7 @@ async function seedBuilderSingleLeaf(page, chatId) {
   await page.addInitScript(([flagKey, workspaceKey, workspaceBlob]) => {
     try {
       localStorage.setItem(flagKey, '1')
-      sessionStorage.setItem(workspaceKey, workspaceBlob)
+      localStorage.setItem(workspaceKey, workspaceBlob)
       sessionStorage.setItem('mobius-open-tabs', '[]') // empty legacy -> strip not engaged
     } catch { /* private mode */ }
   }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
@@ -655,7 +655,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
 
     // Baseline = the normalized blob the shell persisted after boot (a resize
     // must not rewrite it — geometry is projection, not persisted state).
-    const beforeBlob = await page.evaluate(k => sessionStorage.getItem(k), paneModel.STORAGE_KEY)
+    const beforeBlob = await page.evaluate(k => localStorage.getItem(k), paneModel.STORAGE_KEY)
     expect(beforeBlob, 'workspace blob persisted').toBeTruthy()
 
     // Flip the projection: wide → phone.
@@ -663,11 +663,11 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 200)))))
 
-    const afterBlob = await page.evaluate(k => sessionStorage.getItem(k), paneModel.STORAGE_KEY)
+    const afterBlob = await page.evaluate(k => localStorage.getItem(k), paneModel.STORAGE_KEY)
     expect(afterBlob, 'the persisted tree is unchanged across the projection flip').toBe(beforeBlob)
     // The tree still parses to two panes (projection changed, tree did not).
     const leaves = await page.evaluate((k) => {
-      const ws = JSON.parse(sessionStorage.getItem(k))
+      const ws = JSON.parse(localStorage.getItem(k))
       return Object.keys(ws.panes).length
     }, paneModel.STORAGE_KEY)
     expect(leaves).toBe(2)
@@ -679,7 +679,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await expect(otherStrip).toBeVisible({ timeout: 4000 })
     await otherStrip.click()
     await expect.poll(
-      () => page.evaluate((k) => JSON.parse(sessionStorage.getItem(k)).focusedPaneId,
+      () => page.evaluate((k) => JSON.parse(localStorage.getItem(k)).focusedPaneId,
         paneModel.STORAGE_KEY),
       { timeout: 3000, message: 'phone projection still commits pane focus' },
     ).toBe('p1')
@@ -729,7 +729,7 @@ function whichPaneHas(ws, tabKey) {
 }
 
 async function readWs(page) {
-  return page.evaluate(k => JSON.parse(sessionStorage.getItem(k)), paneModel.STORAGE_KEY)
+  return page.evaluate(k => JSON.parse(localStorage.getItem(k)), paneModel.STORAGE_KEY)
 }
 
 /** Press on a source element, arm past slop, glide to a target point, release —
@@ -1393,7 +1393,7 @@ test.describe('Workspace view-mode toggle', () => {
     await page.addInitScript((wsBlob) => {
       try {
         localStorage.setItem('mobius:workspace-splits', '0') // KILL SWITCH OFF
-        sessionStorage.setItem('mobius-workspace', wsBlob)
+        localStorage.setItem('mobius-workspace', wsBlob)
       } catch { /* private mode */ }
     }, blob)
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
