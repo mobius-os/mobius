@@ -263,6 +263,10 @@ export default function ChatView({
   // Settings, which aborted the mic; now it stays mounted, so we must stop voice
   // capture explicitly or the microphone would keep listening off-screen.
   hidden = false,
+  // A chat-to-chat handoff keeps the outgoing hidden runtime as the visual
+  // cover until its replacement is ready. It must relinquish runtime work
+  // without also blanking the already-rendered transcript.
+  keepTranscriptPainted = false,
   // Shell chat-to-chat handoff: fired from a layout effect once this mounted
   // chat has a stable frame to paint. Empty/error chats are already stable;
   // transcript chats wait for useScrollMode's existing hide-then-reveal gate.
@@ -738,12 +742,13 @@ export default function ChatView({
   useLayoutEffect(() => {
     if (!hidden) return
     freezeChatExit()
+    if (keepTranscriptPainted) return
     // Arm the freshness + restoration gate while this surface is still
     // physically hidden. A retained ChatView must not reappear with the
     // transcript from its previous visible lifetime for even one frame.
     setInitialEntryPhase('history')
     setLoading(true)
-  }, [hidden, freezeChatExit])
+  }, [hidden, keepTranscriptPainted, freezeChatExit])
 
   function rememberSendIntent(cid, intent) {
     if (!cid || !intent) return

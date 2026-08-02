@@ -3241,6 +3241,7 @@ export default function Shell() {
               // chat analogue of visibleAppIds soloing the focused app. Panes mode
               // keeps every visible chat pane doing work.
               visible={surfaceVisible && chatPanesVisible && role !== 'held'}
+                keepTranscriptPainted={surfaceVisible && role === 'held'}
                 paneContentHeight={builderRect ? builderRect.h : null}
                 // Select before the memo boundary. Passing the replacement Map
                 // would rerender every visible chat pane for another chat's run.

@@ -38,6 +38,7 @@ function propBag(overrides = {}) {
     chatId: 'chat-a',
     paneId: 'pane-1',
     visible: true,
+    keepTranscriptPainted: false,
     paneContentHeight: 640,
     externalRunSignal: { startedAt: 1, activityAt: 2 },
     composerRequest: null,
