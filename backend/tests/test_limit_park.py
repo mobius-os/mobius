@@ -1,6 +1,6 @@
 """Durable continuation (design §2.4): parse/drain → park → sweep → resume.
 
-Locks in the six contracts of the limit-park feature:
+Locks in the contracts of the limit-park feature:
 
   (a) Reset-time parsing is lenient: structured value → text parse →
       30-minute fallback, clamped, and it NEVER raises.

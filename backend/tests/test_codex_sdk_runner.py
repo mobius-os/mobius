@@ -2095,11 +2095,8 @@ def test_run_codex_sdk_turn_reports_self_requested_kill_as_interrupted(
 ):
   """A stop we asked for must not read as a provider failure.
 
-  Stop interrupts first and then, on timeout, SIGTERMs the turn's private
-  process group — so the transport dies
-  mid-stream instead of delivering turn/completed. Reporting the resulting
-  "closed stdout" as an error is wrong twice over: it blames Codex for our
-  own teardown, and the error block overwrites the intended terminal state.
+  A forced stop closes the transport before turn/completed. Reporting the
+  resulting "closed stdout" as an error would blame Codex for our teardown.
   """
   result, bc = _run_turn_whose_stream_dies(
     monkeypatch,

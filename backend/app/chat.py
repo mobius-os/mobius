@@ -30,7 +30,6 @@ from app import (
   skills as skills_platform,
 )
 from app.broadcast import (
-  ChatBroadcast,
   clear_active_broadcast_if,
   create_broadcast,
   get_broadcast,
@@ -151,9 +150,8 @@ _SKILL_TEXT_CACHE: str | None = None
 # sink save. Hand durable-marker clearing back to that run's wrapper so
 # the marker survives until persistence is complete.
 _clear_after_terminal_generation: dict[str, int] = {}
-# Outcome paired with the generation handoff above. Explicit Stop and restart
-# draining share the same safe "bump, let the runner finalize, then clear"
-# mechanism, but they are different durable outcomes.
+# Terminal outcome paired with each handoff generation: explicit Stop uses
+# ``stopped``; restart draining uses ``interrupted``.
 _clear_after_terminal_status: dict[str, str] = {}
 
 # Drain-gated restart (design §2.2). `draining` is the process-wide gate: while
