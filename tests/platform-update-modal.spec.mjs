@@ -137,6 +137,10 @@ test('a clean apply closes the review and exposes the restart step', async ({ pa
     plan_id: preview.plan_id,
     current_sha: preview.current_sha,
     target_sha: preview.target_sha,
+    edge_preflight: {
+      path: '/api/apps/0/frame',
+      content_security_policy: expect.stringContaining('blob:'),
+    },
   })
   const restart = page.getByRole('button', { name: 'Restart to finish' })
   await expect(restart).toBeVisible()
