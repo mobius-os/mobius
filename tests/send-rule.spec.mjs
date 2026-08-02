@@ -244,7 +244,7 @@ test('Send while at the bottom hands off after a long response fills the reserva
   expect(m.scrollH - m.scrollTop - m.clientH).toBeLessThanOrEqual(8)
 })
 
-test('Immediate tail-to-send preserves a manual reserved-tail position as output fills it', async ({ page }) => {
+test('Immediate tail-to-send follows output after the reader returns to the physical tail', async ({ page }) => {
   await installChunkedStreams(page, [
     [
       [0, { type: 'catch_up_done' }],
@@ -281,10 +281,10 @@ test('Immediate tail-to-send preserves a manual reserved-tail position as output
   expect(held.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
   expect(held.lastUserVisualTop).toBeLessThanOrEqual(10)
 
-  // Reproduce the owner's manual recovery exactly: move away, then reach the
-  // physical tail while reserved room still exists. The next streamed chunk
-  // must keep the prompt parked; it cannot turn that tail gesture into
-  // immediate real-content following.
+  // Move away, then deliberately return to the one physical tail while
+  // reserved room still exists. That reader gesture explicitly engages
+  // following; until output consumes the room, the prompt remains parked at
+  // the same physical tail.
   await page.evaluate(() => {
     const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!s) return
@@ -295,10 +295,12 @@ test('Immediate tail-to-send preserves a manual reserved-tail position as output
   await page.waitForFunction(() =>
     [...document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--assistant')]
       .some(el => el.textContent?.includes('HOLD_AFTER_MANUAL_TAIL')))
-  const manuallyHeld = await measure(page)
-  expect(manuallyHeld.spacerH).toBeGreaterThan(1)
-  expect(manuallyHeld.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
-  expect(manuallyHeld.lastUserVisualTop).toBeLessThanOrEqual(10)
+  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+    .toHaveAttribute('data-scroll-mode', 'FOLLOW_BOTTOM')
+  const followingReservedTail = await measure(page)
+  expect(followingReservedTail.spacerH).toBeGreaterThan(1)
+  expect(followingReservedTail.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(followingReservedTail.lastUserVisualTop).toBeLessThanOrEqual(10)
 
   await page.waitForFunction(() => {
     const text = [...document.querySelectorAll('[data-chat-surface="painted"] .chat__msg--assistant')]
@@ -313,8 +315,8 @@ test('Immediate tail-to-send preserves a manual reserved-tail position as output
 
   const filled = await measure(page)
   expect(filled.spacerH).toBeLessThanOrEqual(1)
-  expect(Math.abs(filled.scrollTop - manuallyHeld.scrollTop)).toBeLessThanOrEqual(8)
-  expect(filled.scrollH - filled.scrollTop - filled.clientH).toBeGreaterThan(50)
+  expect(filled.scrollTop - followingReservedTail.scrollTop).toBeGreaterThan(50)
+  expect(filled.scrollH - filled.scrollTop - filled.clientH).toBeLessThanOrEqual(8)
 })
 
 // ───────────────────────────────────────────────────────────────────
