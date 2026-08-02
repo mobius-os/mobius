@@ -172,12 +172,18 @@ function mirrorCurrentEntry(state) {
 export function pushNavEntry(kind, route = null, {
   currentState = history.state,
   appNav = null,
+  entryId = null,
 } = {}) {
   const current = navEntryIndex(currentState)
   const state = navState(kind, {
     index: current == null ? 0 : current + 1,
     route,
-    entryId: newEntryId(),
+    // A caller normally gets a fresh identity. The one deliberate override is
+    // useNavigation re-arming the SAME live dismissible after an older close's
+    // delayed bookkeeping traversal crossed it. The old physical copy is on
+    // the discarded Forward branch; preserving the logical id keeps the
+    // mounted surface's close handle correlated with its replacement sentinel.
+    entryId: typeof entryId === 'string' ? entryId : newEntryId(),
     appNav,
   })
   history.pushState(state, '')
@@ -215,6 +221,12 @@ export function updateCurrentNavEntry(route, options = {}) {
   if (Object.prototype.hasOwnProperty.call(options, 'appNav')) {
     if (options.appNav) state.appNav = options.appNav
     else delete state.appNav
+  }
+  // Re-keying is reserved for the same dismissible re-arm described above.
+  // Ordinary route refreshes never pass this option and preserve identity.
+  if (Object.prototype.hasOwnProperty.call(options, 'entryId')) {
+    if (typeof options.entryId === 'string') state.entryId = options.entryId
+    else delete state.entryId
   }
   history.replaceState(state, '')
   mirrorCurrentEntry(state)
