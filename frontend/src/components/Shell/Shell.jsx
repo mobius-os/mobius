@@ -580,6 +580,14 @@ export default function Shell() {
   // ChatView reports a painted frame; the focus lease below carries any early
   // typing across that ID-less interval.
   const [newChatPresentation, setNewChatPresentation] = useState(null)
+  // The tap reserves keyboard focus before its first await, while this layout
+  // commit makes the newly painted presentation the authoritative owner after
+  // the drawer and content inert states flip together. This is one handoff
+  // edge, not a frame/timer retry; the resolved-id update deliberately skips it.
+  useLayoutEffect(() => {
+    if (newChatPresentation?.chatId !== null) return
+    beginTouchComposerFocusLease(composerFocusLeaseRef.current)
+  }, [newChatPresentation])
 
   const requestComposer = useCallback((chatId, {
     draft, focus = false,
