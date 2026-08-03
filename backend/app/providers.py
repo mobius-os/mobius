@@ -78,31 +78,6 @@ KNOWN_MODELS = {
 }
 
 
-# Human-readable label for model IDs we know how to polish. Live
-# registry calls return raw IDs without consistent UI metadata
-# (Anthropic's /v1/models returns `id` + a generic `display_name`;
-# Codex's models() returns slugs only), so labels come from this map
-# when present and fall back to the raw ID for newly released models.
-MODEL_LABELS: dict[str, str] = {
-  "claude-fable-5": "Fable 5",
-  "claude-sonnet-5": "Sonnet 5",
-  "claude-opus-4-8": "Opus 4.8",
-  "claude-opus-4-7": "Opus 4.7",
-  "claude-opus-4-6": "Opus 4.6",
-  "claude-opus-4-5-20251001": "Opus 4.5",
-  "claude-sonnet-4-6": "Sonnet 4.6",
-  "claude-sonnet-4-7-20251215": "Sonnet 4.7",
-  "claude-sonnet-4-5-20251001": "Sonnet 4.5",
-  "claude-haiku-4-5-20251001": "Haiku 4.5",
-  "gpt-5.6-sol": "GPT-5.6 Sol",
-  "gpt-5.6-terra": "GPT-5.6 Terra",
-  "gpt-5.6-luna": "GPT-5.6 Luna",
-  "gpt-5.5": "gpt-5.5",
-  "gpt-5.4": "gpt-5.4",
-  "gpt-5.4-mini": "gpt-5.4 mini",
-  "gpt-5.3-codex-spark": "GPT-5.3 Codex Spark",
-}
-
 # Optional model-specific effort capability overrides. Provider defaults remain
 # the fallback, so adding a new model normally needs no entry. Add a row only
 # when a model supports a narrower, reordered, or extended effort scale; the
@@ -869,12 +844,6 @@ _model_registry_locks: dict[str, asyncio.Lock] = {
 }
 
 
-def _label_for(model_id: str) -> str:
-  """Returns the human-readable label for `model_id`, falling back
-  to the raw ID when the model isn't in MODEL_LABELS."""
-  return MODEL_LABELS.get(model_id, model_id)
-
-
 def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
   """Returns the KNOWN_MODELS list for `provider_id` as registry
   entries. Used when the upstream fetch fails. `available` is set
@@ -884,7 +853,7 @@ def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
   return [
     {
       "id": mid,
-      "label": _label_for(mid),
+      "label": mid,
       "provider": provider_id,
       "available": True,
       **({"effort_levels": MODEL_EFFORT_LEVELS[mid]}
@@ -900,10 +869,11 @@ def _live_model_entries(
   """Wrap live provider models as registry entries.
 
   Static KNOWN_MODELS is only the failure fallback. When a live fetch
-  succeeds, the provider SDK/CLI is the source of truth; labels are a
-  cosmetic map with raw-ID fallback. Providers may return plain IDs or
-  lightweight ``{id, effort_levels}`` entries; the latter lets Codex carry its
-  live model-specific effort scale without teaching the frontend model names.
+  succeeds, the provider SDK/CLI is the source of truth. Providers may return
+  plain IDs or lightweight metadata dictionaries. Anthropic supplies a
+  human-readable label; Codex supplies each model's effort scale. Entries
+  without a provider label use their raw model ID rather than a second naming
+  catalog.
   """
   live_by_id: dict[str, dict[str, Any]] = {}
   for raw in live_models:
@@ -926,7 +896,14 @@ def _live_model_entries(
   return [
     {
       "id": mid,
-      "label": _label_for(mid),
+      "label": (
+        live_by_id[mid]["label"].strip()
+        if (
+          isinstance(live_by_id.get(mid, {}).get("label"), str)
+          and live_by_id[mid]["label"].strip()
+        )
+        else mid
+      ),
       "provider": provider_id,
       "available": True,
       **(
@@ -1152,7 +1129,7 @@ def codex_subscription_type(data_dir: str) -> str | None:
   return value if isinstance(value, str) and value.strip() else None
 
 
-async def _fetch_claude_models(data_dir: str) -> list[str]:
+async def _fetch_claude_models(data_dir: str) -> list[dict[str, str]]:
   """Calls Anthropic's /v1/models with the stored OAuth access token.
 
   Raises on any non-2xx or missing credentials so the caller can fall
@@ -1180,12 +1157,19 @@ async def _fetch_claude_models(data_dir: str) -> list[str]:
     )
     resp.raise_for_status()
     payload = resp.json()
-  ids: list[str] = []
+  models: list[dict[str, str]] = []
   for entry in payload.get("data", []):
+    if not isinstance(entry, dict):
+      continue
     mid = entry.get("id")
-    if isinstance(mid, str):
-      ids.append(mid)
-  return ids
+    if not isinstance(mid, str):
+      continue
+    model = {"id": mid}
+    display_name = entry.get("display_name")
+    if isinstance(display_name, str) and display_name.strip():
+      model["label"] = display_name.strip()
+    models.append(model)
+  return models
 
 
 def _codex_model_slug(entry: Any) -> str | None:

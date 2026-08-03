@@ -271,15 +271,20 @@ async def test_fetch_claude_models_uses_refreshed_token(tmp_path, monkeypatch):
     # /v1/models — must carry the refreshed token, else 401.
     assert request.headers["authorization"] == "Bearer live-tok"
     return httpx.Response(200, json={"data": [
-      {"id": "claude-opus-4-8"},
-      {"id": "claude-some-future-model"},
+      {"id": "claude-opus-4-8", "display_name": "Claude Opus 4.8"},
+      {
+        "id": "claude-some-future-model",
+        "display_name": "Claude Future Model",
+      },
     ]})
 
   _install_mock_transport(monkeypatch, handler)
 
-  ids = await providers._fetch_claude_models(str(tmp_path))
-  assert "claude-opus-4-8" in ids
-  assert "claude-some-future-model" in ids
+  live_models = await providers._fetch_claude_models(str(tmp_path))
+  assert live_models == [
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8"},
+    {"id": "claude-some-future-model", "label": "Claude Future Model"},
+  ]
 
 
 @pytest.mark.asyncio

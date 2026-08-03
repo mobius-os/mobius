@@ -16,7 +16,6 @@ from typing import Any
 
 from app.codex_appserver import _extract_bash_command
 from app.json_safety import json_safe
-from app.providers import MODEL_LABELS
 from app.tool_sources import normalize_tool_sources
 
 log = logging.getLogger("moebius.chat")
@@ -763,9 +762,8 @@ def _codex_user_error(error_text: str | None) -> str | None:
   if match is None:
     return error_text
   model_id = match.group("model")
-  model_name = MODEL_LABELS.get(model_id, model_id)
   return (
-    f"{model_name} isn’t available for this ChatGPT account. Codex is "
+    f"{model_id} isn’t available for this ChatGPT account. Codex is "
     "connected, but this account’s current plan or model rollout does not "
     "include it. Choose another Codex model from this chat’s Model menu, "
     "then try again."

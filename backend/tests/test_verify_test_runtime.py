@@ -158,8 +158,8 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
     "pip install --no-cache-dir --require-hashes -r requirements.lock"
     in requirements_layer
   )
-  assert "claude-agent-sdk==0.2.126" in requirements
-  assert "claude-agent-sdk==0.2.126" in requirements_lock
+  assert "claude-agent-sdk==0.2.128" in requirements
+  assert "claude-agent-sdk==0.2.128" in requirements_lock
   assert (
     'Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"'
     in requirements_layer
