@@ -49,7 +49,7 @@ coaching reshapes the fix.
 Before opening any transcript, run the companion script. It exists precisely so
 a session starts from **one consolidated report** instead of six sequential
 tools (read Memory's run-status, tail the update log, cross-check read-traces
-against the chat DB, tail Reflection's metrics, list interview artifacts, curl
+against the chat DB, tail Reflection's metrics, list Reflection run artifacts, curl
 the skills API). One call, one readable bundle:
 
 ```bash
@@ -59,17 +59,18 @@ python3 /data/shared/skills/manager-session-evidence.py [--hours 72] [--limit 5]
 It prints, for the memory + reflection agents: run-status and the last few
 consolidation outcomes (counts, deletes, problems, followups); recent reflection
 exit codes / durations / brief-written; the recent read-trace count with the
-last N traces mapped to their chat titles; which reflection runs left interview
-artifacts; and platform-wide skill-load counts. Pass a `CHAT_ID` to profile one
+last N traces mapped to their chat titles; which artifact files each Reflection
+run left; and platform-wide skill-load counts. Pass a `CHAT_ID` to profile one
 chat (title, provider, message count, whether Memory recalled into it, and the
 exact fork command to use in beat 3). It is read-only and defensive: missing
 pieces are skipped, never fatal.
 
-For a Memory writer 1-on-1, add `--memory-writer-packet`. The same call appends
-the latest run status and writer outcome, the applied diff limited to changed
-or deleted memory paths, that run's recall verdicts, and the current Memory
-governing skill plus writer prompt builder. It includes no raw chat bodies and
-is bounded for a stateless reconstructed interview.
+For a Memory writer review, add `--memory-writer-packet`. The same call appends
+one writer outcome, a terminal receipt only when its non-empty `run_id` matches
+exactly, the applied diff limited to changed or deleted memory paths, that
+run's recall verdicts, and the current Memory governing skill plus writer prompt
+builder. It includes no raw chat bodies and supports a stateless evidence
+review, not an interview.
 
 Read the bundle first and let it *point* you — a run that failed, a followup that
 keeps recurring, a skill an agent leaned on hard, a chat where recall served

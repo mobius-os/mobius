@@ -4,8 +4,8 @@
 
 Instead of running many sequential tools (read the memory run-status, tail the
 update log, cross-check read-traces against the chat DB, tail reflection
-metrics, list interview artifacts, curl the skills API), this prints all of it
-as a single readable report so a 1-on-1 can start from one command.
+metrics, list Reflection run artifacts, curl the skills API), this prints all
+of it as a single readable report so a 1-on-1 can start from one command.
 
 Read-only, defensive (missing pieces are skipped, never fatal), python3 stdlib
 + sqlite3 only. It gathers evidence; it does not judge — the manager session
@@ -37,10 +37,6 @@ REFLECTION_DIR = "/data/apps/reflection"
 REFLECTION_METRICS = os.path.join(REFLECTION_DIR, "reflection-run-metrics.jsonl")
 REFLECTION_RUNS = os.path.join(REFLECTION_DIR, "runs")
 TOOL_FRICTION = os.path.join(REFLECTION_DIR, "tool_friction.py")
-
-# Filename tokens that identify a reflection run's interview capture.
-INTERVIEW_HINTS = ("interview", "int-", "fork", "1on1", "1-on-1")
-
 
 def now_utc():
     return dt.datetime.now(dt.timezone.utc)
@@ -223,7 +219,7 @@ def section_memory(limit):
     for e in entries:
         counts = e.get("counts") or {}
         ts = (e.get("timestamp") or "")[:16]
-        print(f"    {ts or '?':16}  run={short(e.get('run_id'), 8):8}  "
+        print(f"    {ts or '?':16}  run={e.get('run_id') or '?'}  "
               f"changed={len(e.get('changed_paths') or [])}  "
               f"deleted={len(e.get('deleted_paths') or [])}  "
               f"problems={counts.get('problems','?')}  "
@@ -399,7 +395,7 @@ def _applied_memory_diff(outcome):
 
 
 def section_memory_writer_packet():
-    """One bounded packet with native testimony and reconstruction evidence."""
+    """One bounded packet for reviewing a writer outcome."""
     sub("MEMORY WRITER — latest decision-evidence packet")
     outcomes = _read_update_log(1)
     if not outcomes:
@@ -411,7 +407,8 @@ def section_memory_writer_packet():
     current_status = _read_json(MEM_RUN_STATUS)
     status = _memory_run_for_id(run_id)
     if (
-        status is None
+        run_id
+        and status is None
         and isinstance(current_status, dict)
         and current_status.get("run_id") == run_id
     ):
@@ -426,8 +423,10 @@ def section_memory_writer_packet():
     if native:
         print("  testimony=native writer self-review captured during the run")
     else:
-        print("  testimony=unavailable; any later interview is a stateless reconstruction")
-    if current_status and current_status.get("run_id") != run_id:
+        print("  native self-review=unavailable; any later review is stateless evidence")
+    if not run_id:
+        print("  WARNING: writer outcome has no run_id; no terminal receipt was matched.")
+    elif current_status and current_status.get("run_id") != run_id:
         print("  WARNING: current run-status belongs to a different run; "
               "the outcome below is the latest published writer outcome.")
     print("\nMATCHED TERMINAL RUN RECEIPT:")
@@ -482,9 +481,8 @@ def section_reflection(limit):
                   f"{'  DRY-RUN' if r.get('dry_run') else ''}")
 
     # Enumerate actual metric-backed run days, including days that left no
-    # artifact directory. Listing only existing directories hid the exact
-    # failure this section is meant to reveal: a completed run that skipped
-    # its interviews entirely.
+    # artifact directory. Filenames are listed as artifacts only: they cannot
+    # prove that a provider interview completed successfully.
     run_days = list(dict.fromkeys(
         str(row.get("started_at") or "")[:10]
         for row in recent
@@ -495,13 +493,11 @@ def section_reflection(limit):
             day for day in os.listdir(REFLECTION_RUNS)
             if os.path.isdir(os.path.join(REFLECTION_RUNS, day))
         )[-limit:]
-    print(f"  interview artifacts for recent runs ({len(run_days)} days):")
+    print(f"  artifacts for recent runs ({len(run_days)} days):")
     for day in run_days:
         directory = os.path.join(REFLECTION_RUNS, day)
         files = sorted(os.listdir(directory)) if os.path.isdir(directory) else []
-        interview = [f for f in files if any(h in f.lower() for h in INTERVIEW_HINTS)]
-        tag = f"  [interview: {', '.join(interview)}]" if interview else "  [no interview capture]"
-        print(f"    {day}: {', '.join(files) if files else '(empty)'}{tag}")
+        print(f"    {day}: {', '.join(files) if files else '(empty)'}")
 
 
 def section_tool_friction(hours):
@@ -676,7 +672,7 @@ def main():
     ap.add_argument("--traces", type=int, default=12,
                     help="how many recent read-traces to list (default 12)")
     ap.add_argument("--memory-writer-packet", action="store_true",
-                    help="append a bounded packet for the latest Memory writer interview")
+                    help="append a bounded review of the latest Memory writer outcome")
     ap.add_argument("chat_id", nargs="?", default=None,
                     help="optional chat id to profile as a focus block")
     args = ap.parse_args()

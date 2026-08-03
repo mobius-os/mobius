@@ -91,7 +91,24 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
     self.assertEqual(receipt["seq"], 2)
     self.assertIsNone(missing)
 
-  def test_reflection_section_marks_metric_backed_run_without_interview(self):
+  def test_memory_section_prints_complete_update_run_id(self):
+    run_id = "12345678-1234-5678-1234-567812345678"
+    output = io.StringIO()
+    with (
+      mock.patch.object(manager_evidence, "MEM_RUN_STATUS", "/missing/status"),
+      mock.patch.object(manager_evidence, "installed_app", return_value=None),
+      mock.patch.object(
+        manager_evidence,
+        "_read_update_log",
+        return_value=[{"run_id": run_id, "status": "published"}],
+      ),
+      contextlib.redirect_stdout(output),
+    ):
+      manager_evidence.section_memory(3)
+
+    self.assertIn(f"run={run_id}", output.getvalue())
+
+  def test_reflection_section_lists_artifacts_without_inventing_interviews(self):
     with tempfile.TemporaryDirectory() as raw:
       root = Path(raw)
       metrics = root / "reflection-run-metrics.jsonl"
@@ -101,20 +118,28 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
         "duration_seconds": 42,
         "brief_written": True,
       }) + "\n")
+      run_dir = root / "runs" / "2026-07-28"
+      run_dir.mkdir(parents=True)
+      (run_dir / "failed-interview.txt").write_text("provider error\n")
+      (run_dir / "memory-writer-review.md").write_text("review\n")
       output = io.StringIO()
       with (
         mock.patch.object(manager_evidence, "REFLECTION_METRICS", str(metrics)),
         mock.patch.object(
           manager_evidence,
           "REFLECTION_RUNS",
-          str(root / "missing-runs"),
+          str(root / "runs"),
         ),
         contextlib.redirect_stdout(output),
       ):
         manager_evidence.section_reflection(5)
 
-    self.assertIn("2026-07-28", output.getvalue())
-    self.assertIn("[no interview capture]", output.getvalue())
+    rendered = output.getvalue()
+    self.assertIn("2026-07-28", rendered)
+    self.assertIn("failed-interview.txt", rendered)
+    self.assertIn("memory-writer-review.md", rendered)
+    self.assertNotIn("[interview:", rendered)
+    self.assertNotIn("[no interview capture]", rendered)
 
   def test_writer_diff_is_limited_to_reported_memory_paths(self):
     with tempfile.TemporaryDirectory() as raw:
@@ -235,6 +260,33 @@ class ManagerSessionEvidenceTests(unittest.TestCase):
     self.assertIn('"model": "historical"', rendered)
     self.assertIn('"pending_chat_count": 12', rendered)
     self.assertNotIn('"provider": "claude"', rendered)
+    self.assertNotIn('"pending_chat_count": 999', rendered)
+
+  def test_writer_packet_never_matches_missing_run_ids(self):
+    output = io.StringIO()
+    current = {
+      "provider_summary": [{"provider": "current-without-id"}],
+      "pending_chat_count": 999,
+    }
+    with (
+      mock.patch.object(
+        manager_evidence,
+        "_read_update_log",
+        return_value=[{"status": "published"}],
+      ),
+      mock.patch.object(manager_evidence, "_recall_audits_for_run", return_value=[]),
+      mock.patch.object(manager_evidence, "_read_json", return_value=current),
+      mock.patch.object(manager_evidence, "_memory_run_for_id", return_value=None),
+      mock.patch.object(manager_evidence, "_read_text", return_value="skill"),
+      mock.patch.object(manager_evidence, "_function_source", return_value="prompt"),
+      mock.patch.object(manager_evidence, "_applied_memory_diff", return_value="diff"),
+      contextlib.redirect_stdout(output),
+    ):
+      manager_evidence.section_memory_writer_packet()
+
+    rendered = output.getvalue()
+    self.assertIn("writer outcome has no run_id", rendered)
+    self.assertNotIn("current-without-id", rendered)
     self.assertNotIn('"pending_chat_count": 999', rendered)
 
 

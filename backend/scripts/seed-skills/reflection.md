@@ -42,7 +42,7 @@ quota and need not receive equal attention. Follow the strongest signal while
 preserving the brief and safety contracts.
 
 After phase 0, name tonight's **mandatory assessment gates** from the live
-evidence (for example, the Memory writer 1-on-1 when Memory consolidated).
+evidence (for example, the Memory writer review when Memory consolidated).
 Complete those gates before discretionary investigations. If a gate does not
 run, the brief must call that subsystem **not assessed**; never infer healthy
 or failed from evidence you did not examine. A skipped item names the concrete
@@ -228,13 +228,14 @@ Read, in this order:
    assess. On an older handoff without that field, use `last_run` only when it
    is terminal. Report a newer running attempt separately rather than treating
    the completed run as unavailable.
-2. Run `python3 /data/shared/skills/manager-session-evidence.py --limit 3` and
-   match provider, queue, update-log, and supervisor claims by `run_id`. Never
-   combine the current attempt with an earlier publication. If a supervisor
-   receipt has no `run_id`, treat it only as separate scheduling evidence.
-3. `/data/shared/memory/app-state/update-log/*.jsonl` — only for a completed
-   publication whose `run_id` matches the terminal operational evidence.
-4. The interviews' Memory answers from phase 1 — complaints about missing,
+2. Run the helper once:
+   `python3 /data/shared/skills/manager-session-evidence.py --limit 3 --memory-writer-packet`
+   The base section identifies the current attempt and recent writer outcomes;
+   the packet adds evidence for one outcome. Attribute provider, queue, and
+   update claims only when their non-empty full `run_id` matches the terminal
+   outcome from step 1. A supervisor receipt without a `run_id` is separate
+   scheduling evidence, never a join key.
+3. The interviews' Memory answers from phase 1 — complaints about missing,
    stale, misleading, or over-broad recall.
 
 When a recent Memory consolidation completed, review its **native writer
@@ -243,23 +244,16 @@ possibly missed evidence, and proposed prompt change while the run context is
 still present; this is the primary testimony. Verify it against the update-log
 outcome, applied diff, and recall-audit verdicts. Only when native testimony is
 absent may a read-only subagent reconstruct the run from those artifacts. Label
-that fallback **stateless reconstructed interview** and never present it as the
-writer's own recollection. Prefer no prompt change over invented coaching. If
+that fallback a **stateless evidence review**, never an interview or the writer's
+own recollection. Prefer no prompt change over invented coaching. If
 the run made no proposal, review the failure evidence instead. This review may
 recommend changes to Memory's owning app, but it never writes the graph.
 
-Gather that successful-run packet in one call rather than reopening those
-files individually:
-
-```bash
-python3 /data/shared/skills/manager-session-evidence.py --limit 1 --memory-writer-packet
-```
-
 Only open raw Memory evidence or the bounded job log afterward when the packet
 names a specific gap. Never infer health from update-log recency alone.
-Save the verified interview to
-`/data/apps/reflection/runs/<YYYY-MM-DD>/memory-writer-1on1.md` so the next
-manager bundle can show whether this mandatory gate actually ran.
+Save the verified review to
+`/data/apps/reflection/runs/<YYYY-MM-DD>/memory-writer-review.md` for later
+inspection without claiming that an interview completed.
 
 Then act on the **system** signal:
 

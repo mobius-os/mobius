@@ -425,24 +425,6 @@
   .detail-group > summary:focus-visible {
     outline: none; border-radius: 6px; box-shadow: var(--ring);
   }
-  .ledger {
-    list-style: none; margin: 0; padding: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-    background: var(--surface);
-  }
-  .ledger li {
-    display: flex; gap: var(--sp-3);
-    padding: var(--sp-3) var(--sp-4);
-    border-top: 1px solid var(--border);
-    font-size: var(--step--1);
-  }
-  .ledger li:first-child { border-top: none; }
-  .ledger .label { color: var(--text); flex: 1; }
-  .ledger .val   { color: var(--muted); font-variant-numeric: tabular-nums;
-                   font-family: var(--mono); }
-
   .commits {
     margin: var(--sp-3) 0 0;
     padding: var(--sp-3) var(--sp-4);
@@ -498,7 +480,7 @@
     }
     body { background: #fff; }
     .wrap { max-width: none; padding: 0; }
-    .lede, .item, .ledger, .commits { box-shadow: none; }
+    .lede, .item, .commits { box-shadow: none; }
     section { break-inside: avoid; }
     .item, .lede { break-inside: avoid; }
     .handoff { display: none; }
