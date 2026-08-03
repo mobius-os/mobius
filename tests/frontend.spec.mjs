@@ -967,7 +967,7 @@ test.describe('Scroll position', () => {
     expect(restored.scrollTop).toBeGreaterThan(0)
   })
 
-  test('10d. Previous-chat entry holds outgoing chat until catch-up, then stays visually fixed', async ({ page }) => {
+  test('10d. Previous-chat entry gates authoritative rows until catch-up, then stays visually fixed', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
     await newChat(page)
 
@@ -1123,9 +1123,8 @@ test.describe('Scroll position', () => {
     })
 
     // The returning chat is running, so its persisted rows are incomplete.
-    // Once navigation targets it, the painted surface must still belong to the
-    // outgoing chat until subscribe-time replay commits. Assert chat ownership
-    // rather than empty-state markup, which the New Chat presentation may omit.
+    // Navigation may hand the painted surface to that chat immediately, but its
+    // authoritative transcript must remain gated until subscribe-time replay.
     await page.waitForFunction(
       id => localStorage.getItem('moebius_active_chat') === id,
       chatId,
@@ -1133,7 +1132,7 @@ test.describe('Scroll position', () => {
     )
     await expect.poll(() => catchUpServed, { timeout: 700 }).toBe(false)
     await expect(page.locator('[data-chat-surface="painted"]'))
-      .toHaveAttribute('data-chat-id', decoyChatId)
+      .toHaveAttribute('data-chat-id', chatId)
     await expect(page.locator('[data-chat-surface="painted"] [data-key="entry-anchor"]')).toHaveCount(0)
 
     await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
