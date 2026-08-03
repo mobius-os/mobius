@@ -1617,6 +1617,10 @@ const DrawerRow = memo(function DrawerRow({
       const point = drawerGesturePoint(upEvent, pointerId, touchEvents, true)
       if (!point) return
       const openMenu = held && !cancelledAfterHold
+      // A touch hold mounts the transparent menu layer during this touchend.
+      // Without consuming the native compatibility click here, Chrome retargets
+      // that trailing click to the new layer and immediately dismisses the menu.
+      if (touchEvents && held) upEvent.preventDefault()
       cleanup({ suppressClick: held })
       if (openMenu) openItemMenuAt({ x: point.clientX, y: point.clientY })
     }
@@ -1634,7 +1638,7 @@ const DrawerRow = memo(function DrawerRow({
       // promotes it to cancelable ownership before the first reorder/menu move.
       window.addEventListener('touchstart', onAdditionalTouch, true)
       window.addEventListener('touchmove', onMove, { capture: true, passive: true })
-      window.addEventListener('touchend', onUp, true)
+      window.addEventListener('touchend', onUp, { capture: true, passive: false })
       window.addEventListener('touchcancel', onCancel, true)
     } else {
       window.addEventListener('pointermove', onMove, { capture: true, passive: false })
@@ -1863,6 +1867,7 @@ const DrawerRow = memo(function DrawerRow({
     function onUp(upEvent) {
       const point = drawerGesturePoint(upEvent, pointerId, touchEvents, true)
       if (!point) return
+      if (touchEvents && held) upEvent.preventDefault()
       removeListeners()
       if (isTouch) {
         const openMenu = held && !dragging && !cancelledAfterHold
@@ -1893,7 +1898,7 @@ const DrawerRow = memo(function DrawerRow({
       // is promoted to cancelable ownership.
       window.addEventListener('touchstart', onAdditionalTouch, true)
       window.addEventListener('touchmove', onMove, { capture: true, passive: true })
-      window.addEventListener('touchend', onUp, true)
+      window.addEventListener('touchend', onUp, { capture: true, passive: false })
       window.addEventListener('touchcancel', onCancel, true)
     } else {
       window.addEventListener('pointermove', onMove, { capture: true, passive: false })

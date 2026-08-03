@@ -669,7 +669,8 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.equal((drawer.match(/holdTimerRef\.current = setTimeout\(\(\) => \{[\s\S]*?window\.addEventListener\('touchmove', onMove, \{ capture: true, passive: false \}\)/g) || []).length, 2,
     'only a resolved hold may promote row gestures to cancelable ownership')
   assert.doesNotMatch(drawer, /blockingTouchMove|function claimTouchMoves/)
-  assert.match(drawer, /window\.addEventListener\('touchend', onUp, true\)/)
+  assert.equal((drawer.match(/window\.addEventListener\('touchend', onUp, \{ capture: true, passive: false \}\)/g) || []).length, 2,
+    'held row releases must be allowed to suppress their compatibility click')
   assert.match(drawer, /onTouchStart=\{onRowTouchStart\}/)
   assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
   assert.match(drawer, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
@@ -909,6 +910,16 @@ test('drawer row menus use one semantic context-menu path across pointer types',
   assert.match(drawerItemActionMenu, /onClick=\{event => \{[\s\S]*?if \(consumeOutsidePointer\(event\)\) close\(\)/)
   assert.doesNotMatch(drawer, /navigator\.vibrate/,
     'drawer rows rely on platform long-press feedback instead of adding a second vibration')
+})
+
+test('one touch hold cannot dismiss its own drawer row menu', () => {
+  assert.equal((drawer.match(/if \(touchEvents && held\) upEvent\.preventDefault\(\)/g) || []).length, 2,
+    'both pinned and unpinned touch holds must consume the trailing compatibility click')
+  assert.match(
+    drawer,
+    /const openMenu = held && !cancelledAfterHold[\s\S]*?if \(touchEvents && held\) upEvent\.preventDefault\(\)[\s\S]*?cleanup\(\{ suppressClick: held \}\)[\s\S]*?if \(openMenu\) openItemMenuAt/,
+    'the release must be consumed before mounting the outside-dismiss layer',
+  )
 })
 
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {
