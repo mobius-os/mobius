@@ -2695,7 +2695,7 @@ def test_chatgpt_model_rejection_explains_connection_and_recovery():
   message = codex_sdk_runner._codex_user_error(error)
 
   assert message == (
-    "GPT-5.6 Sol isn’t available for this ChatGPT account. Codex is "
+    "gpt-5.6-sol isn’t available for this ChatGPT account. Codex is "
     "connected, but this account’s current plan or model rollout does not "
     "include it. Choose another Codex model from this chat’s Model menu, "
     "then try again."

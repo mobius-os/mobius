@@ -546,7 +546,7 @@ def test_providers_models_returns_known_models_on_missing_creds(
   assert set(codex_ids) == DEFAULT_VISIBLE_MODELS["codex"]
   # Claude rows carry a tier derived from the id.
   by_id = {m["id"]: m for m in body["claude"]}
-  assert by_id["claude-opus-4-8"]["name"] == "Opus 4.8"
+  assert by_id["claude-opus-4-8"]["name"] == "claude-opus-4-8"
   assert by_id["claude-opus-4-8"]["tier"] == "opus"
   assert by_id["claude-sonnet-4-6"]["tier"] == "sonnet"
   # Codex rows intentionally omit `tier` — the field doesn't apply.
