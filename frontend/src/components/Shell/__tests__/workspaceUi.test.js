@@ -911,12 +911,25 @@ test('chat deletion is immediate while app deletion still requires confirmation'
   )
 })
 
-test('one touch hold cannot dismiss its own drawer row menu', () => {
-  assert.match(drawerItemActionMenu, /const outsidePressStartedRef = useRef\(false\)/)
-  assert.match(drawerItemActionMenu, /if \(!consumeOutsidePointer\(event\) \|\| !outsidePressStartedRef\.current\) return/,
-    'a retargeted opener click has no layer-owned pointerdown and must be ignored')
-  assert.match(drawerItemActionMenu, /onPointerCancel=\{\(\) => \{[\s\S]*?outsidePressStartedRef\.current = false/,
-    'a cancelled outside press cannot authorize a later unrelated click')
+test('drawer row menus share one history-owned opening and close path', () => {
+  assert.match(drawer, /import \{ useHistoryDismiss \} from '\.\.\/\.\.\/hooks\/useHistoryDismiss\.jsx'/)
+  assert.match(drawer, /open: openItemMenuHistory,[\s\S]*?close: closeItemMenu,[\s\S]*?useHistoryDismiss\(\(\) => setOpenMenu\(null\)\)/)
+  assert.match(drawer, /function showItemMenu\(kind, id, surface, placement\) \{[\s\S]*?openItemMenuHistory\(\)[\s\S]*?setOpenMenu\(\{ kind, id, surface, placement \}\)/,
+    'history ownership must exist before the menu paints')
+  assert.match(drawer, /if \(next\) current\.showItemMenu\(kind, id, surface, placement\)[\s\S]*?else current\.closeItemMenu\(\)/,
+    'actions and Back/Escape must close through the same owner')
+})
+
+test('outside taps are inert and the opening press cannot activate an action', () => {
+  assert.doesNotMatch(drawerItemActionMenu, /outsidePressStartedRef/)
+  assert.match(drawerItemActionMenu, /const menuPressStartedRef = useRef\(false\)/)
+  assert.match(drawerItemActionMenu, /function blockReleaseThroughClick\(event\)[\s\S]*?event\.detail === 0[\s\S]*?menuPressStartedRef\.current[\s\S]*?event\.preventDefault\(\)[\s\S]*?stopImmediatePropagation/,
+    'a release retargeted onto an action is blocked without breaking keyboard activation')
+  assert.match(drawerItemActionMenu, /onPointerDown=\{consumeOutsidePointer\}[\s\S]*?onPointerUp=\{consumeOutsidePointer\}[\s\S]*?onClick=\{consumeOutsidePointer\}/,
+    'outside taps stay owned by the layer without dismissing the menu')
+  assert.match(drawerItemActionMenu, /onPointerDown=\{event => \{[\s\S]*?menuPressStartedRef\.current = true[\s\S]*?event\.stopPropagation\(\)/,
+    'only a fresh pointer press begun inside the mounted menu authorizes its click')
+  assert.match(drawerItemActionMenu, /onClickCapture=\{blockReleaseThroughClick\}/)
 })
 
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {

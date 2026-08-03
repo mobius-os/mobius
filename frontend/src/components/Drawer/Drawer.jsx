@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
+import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import {
   AppsNavIcon,
   NewChatNavIcon,
@@ -285,6 +286,15 @@ export default function Drawer({
   // active id (rather than per-row state) lets a click on another row's
   // context action replace any open menu without a global listener per row.
   const [openMenu, setOpenMenu] = useState(null) // { kind, id, surface, placement } | null
+  const {
+    open: openItemMenuHistory,
+    close: closeItemMenu,
+  } = useHistoryDismiss(() => setOpenMenu(null))
+
+  function showItemMenu(kind, id, surface, placement) {
+    openItemMenuHistory()
+    setOpenMenu({ kind, id, surface, placement })
+  }
   // Belt-and-braces orphan cleanup: if the row whose menu was open
   // disappears from the list (delete, chat soft-delete, agent-side
   // removal), openMenu would still reference a dead id and the next
@@ -294,8 +304,8 @@ export default function Drawer({
     if (!openMenu) return
     const collection = openMenu.kind === 'chat' ? (chats || []) : (apps || [])
     const stillThere = collection.some(item => item.id === openMenu.id)
-    if (!stillThere) setOpenMenu(null)
-  }, [openMenu, chats, apps])
+    if (!stillThere) closeItemMenu()
+  }, [openMenu, chats, apps, closeItemMenu])
   const [renamingState, setRenamingState] = useState(null) // { kind, id } | null
   // Mirrors `renaming` synchronously (not via useEffect — that's one render
   // behind) so outside-tap cancellation sees the current edit immediately.
@@ -325,16 +335,16 @@ export default function Drawer({
 
   const resetAppsSurfaceUi = useCallback(({ restoreFocus = true } = {}) => {
     setAppQuery('')
-    setOpenMenu(null)
+    closeItemMenu()
     setRenaming(null)
     if (restoreFocus) {
       requestAnimationFrame(() => appsButtonRef.current?.focus())
     }
-  }, [setRenaming])
+  }, [closeItemMenu, setRenaming])
 
   function openApps() {
     setAppQuery('')
-    setOpenMenu(null)
+    closeItemMenu()
     setRenaming(null)
     onAppsOpen?.()
   }
@@ -367,12 +377,9 @@ export default function Drawer({
       else current.onApp(id)
     },
     toggleMenu(kind, id, next, surface = 'drawer', placement = null) {
-      rowActionInputsRef.current.setOpenMenu(next ? {
-        kind,
-        id,
-        surface,
-        placement,
-      } : null)
+      const current = rowActionInputsRef.current
+      if (next) current.showItemMenu(kind, id, surface, placement)
+      else current.closeItemMenu()
     },
     startRename(kind, id, surface = 'drawer') {
       rowActionInputsRef.current.setRenaming({ kind, id, surface })
@@ -908,7 +915,8 @@ export default function Drawer({
     onDeleteChat,
     onDeleteApp,
     onDeleteAppData,
-    setOpenMenu,
+    showItemMenu,
+    closeItemMenu,
     setRenaming,
     setInstallingApp,
     resetAppsSurfaceUi,
