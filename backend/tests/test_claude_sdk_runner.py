@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 from typing import Any
 
 import pytest
@@ -38,6 +39,7 @@ from claude_agent_sdk.types import (
 )
 
 from app import claude_events, claude_sdk_runner, models
+from app import connectors as connector_core
 from app.claude_sdk_runner import (
   ActiveClaudeClient,
   dispatch_sdk_message,
@@ -69,6 +71,176 @@ class _Bus:
 class _ChatBus(_Bus):
   chat_id = "chat-42"
   run_token = "run-1"
+
+
+@pytest.mark.asyncio
+async def test_claude_connection_secret_is_retired_after_connect_without_fd_reuse(
+  monkeypatch,
+):
+  observed = {}
+
+  class _FakeClient:
+    def __init__(self, options):
+      observed["path"] = str(options.mcp_servers)
+      assert observed["path"].startswith(f"/proc/{os.getpid()}/fd/")
+      assert "private-key" not in observed["path"]
+      with open(observed["path"], encoding="utf-8") as file:
+        observed["config"] = file.read()
+
+    async def connect(self):
+      assert os.path.exists(observed["path"])
+
+    async def query(self, _message):
+      # connect() has consumed the config. Its argv-visible fd remains reserved
+      # but harmless, rather than being reusable for unrelated process data.
+      assert os.path.exists(observed["path"])
+      with open(observed["path"], "rb") as retired_file:
+        assert retired_file.read() == b""
+      held_fd = int(observed["path"].rsplit("/", 1)[1])
+      with tempfile.TemporaryFile() as unrelated:
+        unrelated.write(b"unrelated-live-secret")
+        unrelated.flush()
+        assert unrelated.fileno() != held_fd
+        with open(observed["path"], "rb") as retired_file:
+          assert retired_file.read() == b""
+
+    async def receive_response(self):
+      yield _success_result()
+
+    async def disconnect(self):
+      return None
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  plan = connector_core.ConnectorTurnPlan(claude_servers={
+    "private": {
+      "type": "http",
+      "url": "https://mcp.example/mcp",
+      "headers": {"Authorization": "Bearer private-key"},
+    },
+  })
+
+  result = await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="claude-mcp-config",
+    skill_text="system",
+    bc=_ChatBus(),
+    pending_questions={},
+    db=None,
+    connector_plan=plan,
+  )
+
+  assert "private-key" in observed["config"]
+  assert not os.path.exists(observed["path"])
+  assert result["error"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("connect_error", "expected_error"),
+  [
+    (asyncio.TimeoutError(), "connect timeout"),
+    (RuntimeError("connect failed"), "connect failed"),
+  ],
+)
+async def test_claude_connection_secret_file_closes_when_connect_fails(
+  monkeypatch,
+  connect_error,
+  expected_error,
+):
+  observed = {}
+
+  class _FailingClient:
+    def __init__(self, options):
+      observed["path"] = str(options.mcp_servers)
+      assert os.path.exists(observed["path"])
+
+    async def connect(self):
+      raise connect_error
+
+    async def disconnect(self):
+      with open(observed["path"], "rb") as retired_file:
+        assert retired_file.read() == b""
+      observed["disconnected"] = True
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FailingClient)
+  plan = connector_core.ConnectorTurnPlan(claude_servers={
+    "private": {
+      "type": "http",
+      "url": "https://mcp.example/mcp",
+      "headers": {"Authorization": "Bearer private-key"},
+    },
+  })
+
+  result = await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id=f"claude-mcp-{expected_error}",
+    skill_text="system",
+    bc=_ChatBus(),
+    pending_questions={},
+    db=None,
+    connector_plan=plan,
+  )
+
+  assert result["error"] == expected_error
+  assert observed["disconnected"] is True
+  assert not os.path.exists(observed["path"])
+
+
+@pytest.mark.asyncio
+async def test_claude_connection_secret_file_closes_when_connect_is_cancelled(
+  monkeypatch,
+):
+  observed = {}
+  connecting = asyncio.Event()
+
+  class _CancelledClient:
+    def __init__(self, options):
+      observed["path"] = str(options.mcp_servers)
+
+    async def connect(self):
+      assert os.path.exists(observed["path"])
+      connecting.set()
+      await asyncio.Future()
+
+    async def disconnect(self):
+      with open(observed["path"], "rb") as retired_file:
+        assert retired_file.read() == b""
+      observed["disconnected"] = True
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _CancelledClient)
+  plan = connector_core.ConnectorTurnPlan(claude_servers={
+    "private": {
+      "type": "http",
+      "url": "https://mcp.example/mcp",
+      "headers": {"Authorization": "Bearer private-key"},
+    },
+  })
+  turn = asyncio.create_task(run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="claude-mcp-cancelled",
+    skill_text="system",
+    bc=_ChatBus(),
+    pending_questions={},
+    db=None,
+    connector_plan=plan,
+  ))
+
+  await connecting.wait()
+  turn.cancel()
+  with pytest.raises(asyncio.CancelledError):
+    await turn
+
+  assert observed["disconnected"] is True
+  assert not os.path.exists(observed["path"])
 
 
 def _stream_delta(delta_type: str, **fields: Any) -> StreamEvent:

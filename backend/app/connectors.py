@@ -24,7 +24,7 @@ import re
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Iterator
+from typing import BinaryIO, Iterator
 from urllib.parse import urlparse
 
 import httpx
@@ -91,6 +91,23 @@ class ConnectorTurnPlan:
 
 
 EMPTY_CONNECTOR_TURN_PLAN = ConnectorTurnPlan()
+
+
+@dataclass
+class ClaudeMcpConfigHandle:
+  """Anonymous startup config whose proc fd stays safely reserved for a turn."""
+
+  path: str
+  _file: BinaryIO = field(repr=False)
+  _retired: bool = field(default=False, init=False, repr=False)
+
+  def retire(self) -> None:
+    """Destroy the config while keeping its argv-visible fd bound harmlessly."""
+    if self._retired:
+      return
+    with open(os.devnull, "rb") as harmless:
+      os.dup2(harmless.fileno(), self._file.fileno())
+    self._retired = True
 
 
 # ── Secrets ──────────────────────────────────────────────────────────────
@@ -780,17 +797,19 @@ def build_turn_plan(db) -> ConnectorTurnPlan:
 
 
 @contextmanager
-def claude_mcp_config_path(
+def claude_mcp_config_handle(
   plan: ConnectorTurnPlan | None,
-) -> Iterator[str | None]:
-  """Yield an anonymous 0600 MCP config path for Claude startup only.
+) -> Iterator[ClaudeMcpConfigHandle | None]:
+  """Yield an anonymous 0600 MCP config handle for Claude startup only.
 
   Passing the server dict directly makes the SDK serialize its short-lived
   broker capability into ``--mcp-config <json>`` in the process command line.
   ``TemporaryFile`` is anonymous on Linux; the CLI opens it through this
-  process's `/proc` fd while ``connect()`` runs, then the runner closes it
-  before the model can execute a tool. There is no named capability file left
-  behind after a crash or restart.
+  process's ``/proc`` fd while ``connect()`` runs. The runner then calls
+  :meth:`ClaudeMcpConfigHandle.retire`, atomically replacing that descriptor
+  with ``/dev/null``. Keeping the harmless descriptor reserved until teardown
+  prevents the argv-visible fd number from being reused for unrelated data.
+  There is no named capability file left behind after a crash or restart.
   """
   servers = plan.claude_servers if plan else {}
   if not servers:
@@ -805,4 +824,4 @@ def claude_mcp_config_path(
     path = f"/proc/{os.getpid()}/fd/{handle.fileno()}"
     if not os.path.exists(path):
       raise ConnectorError("Protected MCP configuration files are unavailable.")
-    yield path
+    yield ClaudeMcpConfigHandle(path=path, _file=handle)

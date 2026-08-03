@@ -64,6 +64,7 @@ import os
 import signal
 import shutil
 from collections import deque
+from contextlib import ExitStack
 from typing import Any
 
 from claude_agent_sdk import (
@@ -755,6 +756,7 @@ async def run_claude_sdk_turn(
   agent_settings: dict | None = None,
   skills_enabled: bool = False,
   run_policy=None,
+  connector_plan=None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -775,6 +777,8 @@ async def run_claude_sdk_turn(
       path can ship without changing what the agent does — skill loads
       are still observed (chip + activity log) whenever a skill does
       load, regardless of this flag.
+    connector_plan: Detached owner-managed MCP configuration built before the
+      request session was released. It is plain data and never queries SQLite.
 
   Returns:
     A dict containing the resulting session ID, final cost, and error.
@@ -1021,15 +1025,51 @@ async def run_claude_sdk_turn(
     # Passed via --settings as inline JSON.
     _cli_settings = {"ultracode": True} if _ultracode else {"disableWorkflows": True}
     options_kwargs["extra_args"] = {"settings": json.dumps(_cli_settings)}
-    options = ClaudeAgentOptions(**options_kwargs)
 
-    client = ClaudeSDKClient(options)
+    # A dict-valued SDK mcp_servers option is serialized directly into the CLI
+    # argv. Keep credentials out of /proc/cmdline by handing Claude an anonymous
+    # 0600 config file path instead. After connect(), replace that fd with
+    # /dev/null but keep its number reserved until teardown: simply closing it
+    # would let the argv-visible path alias an unrelated descriptor later.
+    connector_config_stack = ExitStack()
+    connector_config_handle = None
+    if connector_plan is not None:
+      try:
+        from app.connectors import claude_mcp_config_handle
+        connector_config_handle = connector_config_stack.enter_context(
+          claude_mcp_config_handle(connector_plan)
+        )
+        if connector_config_handle:
+          options_kwargs["mcp_servers"] = connector_config_handle.path
+      except Exception:
+        connector_config_stack.close()
+        connector_config_stack = ExitStack()
+        log.warning(
+          "Claude MCP connection injection skipped chat_id=%s",
+          chat_id,
+          exc_info=True,
+        )
+    try:
+      options = ClaudeAgentOptions(**options_kwargs)
+      client = ClaudeSDKClient(options)
+    except Exception:
+      connector_config_stack.close()
+      raise
+
     active_client = ActiveClaudeClient(client, chat_id=chat_id)
     registry.register(active_client)
 
     try:
       try:
-        await asyncio.wait_for(client.connect(), timeout=30.0)
+        try:
+          await asyncio.wait_for(client.connect(), timeout=30.0)
+        finally:
+          # Claude has consumed the config by the time the control channel is
+          # connected. Destroy its contents before query() gives the model a
+          # shell or process-inspection tool, while reserving the argv-visible
+          # fd number so it cannot alias another live descriptor.
+          if connector_config_handle is not None:
+            connector_config_handle.retire()
       except asyncio.TimeoutError:
         bc.publish({
           "type": "error",
@@ -1277,6 +1317,7 @@ async def run_claude_sdk_turn(
       try:
         await client.disconnect()
       finally:
+        connector_config_stack.close()
         # The SDK closes only its direct CLI PID. Reap the verified private
         # group as a bounded backstop for tool children, and do not let a
         # repeated task cancellation skip the SIGKILL worker once it starts.

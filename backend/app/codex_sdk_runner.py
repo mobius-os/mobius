@@ -1447,6 +1447,7 @@ async def run_codex_sdk_turn(
   goal_continue: bool = False,
   fallback_goal_objective: str | None = None,
   run_policy=None,
+  connector_plan=None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1462,6 +1463,8 @@ async def run_codex_sdk_turn(
       bridge to park on a future while the user answers.
     db: SQLAlchemy session for durable-chat persistence paths, or None for an
       out-of-band turn with no Chat row (for example nightly Reflection).
+    connector_plan: Detached owner-managed MCP configuration built before the
+      request session was released. It is plain data and never queries SQLite.
 
   Returns:
     Dict with `session_id`, `cost_usd`, and `error`.
@@ -1540,6 +1543,23 @@ async def run_codex_sdk_turn(
 
   env = dict(base_env)
   env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
+
+  # Remote MCP connections are materialized in chat.py while its DB session is
+  # still live. Secrets use Codex's env indirection rather than thread config or
+  # argv; the thread receives only env-variable names. A malformed plan is
+  # local to this optional capability and must not stop the owner from chatting.
+  connector_thread_config = None
+  if connector_plan is not None:
+    try:
+      connector_thread_config = connector_plan.codex_config
+      env.update(connector_plan.codex_env)
+    except Exception:
+      log.warning(
+        "Codex MCP connection injection skipped chat_id=%s",
+        chat_id,
+        exc_info=True,
+      )
+      connector_thread_config = None
 
   # config_overrides always isolates the prompt stack, then carries the
   # request_user_input (AskUserQuestion parity), goal, and multi-agent flags.
@@ -1771,6 +1791,7 @@ async def run_codex_sdk_turn(
           sandbox=_sandbox,
           base_instructions=base_instructions,
           developer_instructions="",
+          config=connector_thread_config,
           cwd=cwd,
           model=model,
           personality=sdk["Personality"].none,
@@ -1789,6 +1810,7 @@ async def run_codex_sdk_turn(
           sandbox=_sandbox,
           base_instructions=base_instructions,
           developer_instructions="",
+          config=connector_thread_config,
           cwd=cwd,
           model=model,
           personality=sdk["Personality"].none,

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import tempfile
 import time
 from unittest.mock import AsyncMock
 
@@ -507,7 +508,7 @@ def test_turn_plan_serves_both_providers_without_config_secrets():
   assert "key-12" not in repr(plan.codex_config)
 
 
-def test_claude_config_is_anonymous_and_disappears_after_startup_window():
+def test_claude_config_is_retired_without_releasing_argv_visible_fd():
   plan = core.ConnectorTurnPlan(
     claude_servers={
       "search": {
@@ -517,15 +518,23 @@ def test_claude_config_is_anonymous_and_disappears_after_startup_window():
       },
     },
   )
-  with core.claude_mcp_config_path(plan) as path:
-    assert path.startswith(f"/proc/{os.getpid()}/fd/")
-    assert "secret-in-file" not in path
-    with open(path, encoding="utf-8") as config_file:
+  with core.claude_mcp_config_handle(plan) as config:
+    assert config is not None
+    assert config.path.startswith(f"/proc/{os.getpid()}/fd/")
+    assert "secret-in-file" not in config.path
+    with open(config.path, encoding="utf-8") as config_file:
       payload = json.load(config_file)
     assert payload["mcpServers"]["search"]["headers"]["Authorization"] == (
       "Bearer secret-in-file"
     )
-  assert not os.path.exists(path)
+    held_fd = int(config.path.rsplit("/", 1)[1])
+    config.retire()
+    with open(config.path, "rb") as retired_file:
+      assert retired_file.read() == b""
+    with tempfile.TemporaryFile() as unrelated:
+      assert unrelated.fileno() != held_fd
+    config.retire()  # Retirement is idempotent across nested cleanup paths.
+  assert not os.path.exists(config.path)
 
 
 def test_connector_routes_keep_keys_out_of_responses(

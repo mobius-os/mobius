@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import codex_sdk_runner, models
+from app import codex_sdk_runner, connectors as connector_core, models
 from app.agent_lifecycle import normalize_chat_event
 from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
@@ -3794,10 +3794,22 @@ def test_run_codex_sdk_turn_controls_prompt_layers(monkeypatch, session_id):
   ]
   thread = _FakeThread("resumed-thread", _FakeTurnHandle(notifications))
   captured: dict = {}
+  connector_plan = connector_core.ConnectorTurnPlan(
+    codex_config={
+      "mcp_servers": {
+        "search": {
+          "url": "https://mcp.example/mcp",
+          "bearer_token_env_var": "MOBIUS_CONNECTOR_3_SEARCH",
+        },
+      },
+    },
+    codex_env={"MOBIUS_CONNECTOR_3_SEARCH": "private-key"},
+  )
 
   class FakeAsyncCodex:
     def __init__(self, config=None):
       self.config = config
+      captured["process_config"] = config
 
     async def __aenter__(self):
       return self
@@ -3829,6 +3841,7 @@ def test_run_codex_sdk_turn_controls_prompt_layers(monkeypatch, session_id):
     pending_questions={},
     db=None,
     system_prompt="FROZEN CONSTITUTION SNAPSHOT",
+    connector_plan=connector_plan,
   ))
 
   assert captured["session_id"] == session_id
@@ -3837,6 +3850,10 @@ def test_run_codex_sdk_turn_controls_prompt_layers(monkeypatch, session_id):
   )
   assert captured["thread_options"]["developer_instructions"] == ""
   assert captured["thread_options"]["personality"] == "none"
+  assert captured["thread_options"]["config"] == connector_plan.codex_config
+  process_env = captured["process_config"].kwargs["env"]
+  assert process_env["MOBIUS_CONNECTOR_3_SEARCH"] == "private-key"
+  assert "private-key" not in repr(captured["thread_options"]["config"])
   assert result["session_id"] == "resumed-thread"
   assert result["error"] is None
 # --- Structured rate-limit reset extraction --------------------------------

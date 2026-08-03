@@ -4233,6 +4233,22 @@ async def _run_chat_impl_with_db(
   from app.memory_provider import resolve_recall_binding
   recall_binding = resolve_recall_binding(db)
 
+  # Snapshot owner-managed MCP connections while this request session is still
+  # live. Provider turns can wait for hours, so neither runner may query the
+  # registry after the pool-release boundary below. The detached plan contains
+  # only plain values; a registry/decryption failure degrades this turn to the
+  # provider's native tools instead of breaking chat.
+  try:
+    from app.connectors import build_turn_plan
+    connector_turn_plan = build_turn_plan(db)
+  except Exception:
+    log.warning(
+      "MCP connection snapshot skipped chat_id=%s",
+      chat_id,
+      exc_info=True,
+    )
+    connector_turn_plan = None
+
   # This is deliberately request-scoped rather than part of the immutable
   # snapshot persisted above. On resumed turns `startup_context` is empty.
   if startup_context:
@@ -4387,6 +4403,7 @@ async def _run_chat_impl_with_db(
         goal_continue=goal_continue,
         fallback_goal_objective=fallback_goal_objective,
         run_policy=run_policy,
+        connector_plan=connector_turn_plan,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")
@@ -4551,6 +4568,7 @@ async def _run_chat_impl_with_db(
           else _skills_enabled(settings.data_dir)
         ),
         run_policy=run_policy,
+        connector_plan=connector_turn_plan,
       )
       new_session_id = runner_result.get("session_id")
       err = runner_result.get("error")

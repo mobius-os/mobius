@@ -86,6 +86,16 @@ async def test_agent_turn_closes_preflight_session_before_provider_wait(
   monkeypatch.setattr(database, "SessionLocal", tracking_session_factory)
   runner_started = asyncio.Event()
   release_runner = asyncio.Event()
+  connector_plan = object()
+
+  def fake_connector_plan(turn_db):
+    assert turn_db is turn_sessions[0]
+    assert turn_db.close_calls == 0
+    # Prove the registry snapshot can still read at the preflight boundary.
+    turn_db.query(models.Chat).filter(models.Chat.id == chat.id).one()
+    return connector_plan
+
+  monkeypatch.setattr("app.connectors.build_turn_plan", fake_connector_plan)
 
   async def fake_runner(**kwargs):
     turn_db = kwargs["db"]
@@ -94,6 +104,7 @@ async def test_agent_turn_closes_preflight_session_before_provider_wait(
       "the turn must close its preflight DB session before provider execution"
     )
     assert not turn_db.real.in_transaction()
+    assert kwargs["connector_plan"] is connector_plan
     runner_started.set()
     await release_runner.wait()
     return {"session_id": None, "cost_usd": 0.0, "error": None}
