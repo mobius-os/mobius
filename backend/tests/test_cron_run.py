@@ -1,9 +1,9 @@
 """POST /api/apps/{app_id}/run-job — manual cron trigger.
 
 Mini-apps can't shell out, so the Reports tab's "Generate now" button
-posts here to spawn the same job the scheduled cron entry would run.
-The endpoint is owner-only, non-blocking (subprocess.Popen, no wait),
-and returns 202 with a started_at timestamp.
+posts here to request the same job the scheduled cron entry would run.
+The endpoint is non-blocking (subprocess.Popen, no wait) and returns 202 with
+a started_at acceptance timestamp; its shared runner skips overlapping runs.
 
 We patch `subprocess.Popen` in `app.routes.apps` so tests don't
 actually spawn anything — they verify the right argv is built from

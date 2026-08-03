@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,26 @@ def _atomic_json(path: Path, value: dict) -> None:
     except OSError:
       pass
     raise
+
+
+def _acquire_app_run_lock(app_id: int):
+  """Take the one nonblocking execution slot owned by ``app_id``.
+
+  Cron and the run-now endpoint both enter through this process, so this lock
+  prevents a slow job from multiplying at the next schedule tick. The empty
+  lock file stays in ``/data/run`` after release: unlinking it could let a new
+  process lock a different inode while another process still holds this one.
+  Closing the returned handle releases the lock.
+  """
+  lock_dir = DATA_DIR / "run" / "app-job-locks"
+  lock_dir.mkdir(parents=True, exist_ok=True)
+  handle = (lock_dir / f"{app_id}.lock").open("a", encoding="utf-8")
+  try:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+  except BlockingIOError:
+    handle.close()
+    return None
+  return handle
 
 
 def _claim_wall_clock_run(
@@ -221,47 +242,14 @@ def _job_env(app_token: str) -> dict[str, str]:
   return env
 
 
-def run() -> int:
-  argv = sys.argv[1:]
-  wait_for_ready = argv[:1] == ["--wait-for-ready"]
-  if wait_for_ready:
-    argv = argv[1:]
-  wall_clock = None
-  if argv[:1] == ["--wall-clock"]:
-    if len(argv) < 3:
-      _log("?", "rejected: incomplete wall-clock argv")
-      return 2
-    wall_clock = (argv[1], argv[2])
-    argv = argv[3:]
-  if len(argv) != 2 or not re.fullmatch(r"[0-9]+", argv[0]):
-    _log(argv[0] if argv else "?", "rejected: bad argv")
-    return 2
-  app_id = int(argv[0])
-  job = Path(argv[1])
-  if job.is_symlink():
-    _log(app_id, f"rejected: symlinked job {job}")
-    return 2
-  try:
-    apps_root = (DATA_DIR / "apps").resolve(strict=True)
-    resolved = job.resolve(strict=True)
-  except (OSError, RuntimeError):
-    _log(app_id, f"rejected: unresolvable job {job}")
-    return 2
-  if (
-    resolved.parent.parent != apps_root
-    or not resolved.is_file()
-  ):
-    _log(app_id, f"rejected: job outside apps root {resolved}")
-    return 2
-  if wall_clock is not None:
-    tz_name, zone_cron = wall_clock
-    try:
-      if not _claim_wall_clock_run(app_id, resolved, tz_name, zone_cron):
-        return 0
-    except (OSError, ValueError) as exc:
-      _log(app_id, f"rejected: invalid wall-clock schedule ({exc})")
-      return 2
-
+def _execute_job(
+  app_id: int,
+  resolved: Path,
+  *,
+  wait_for_ready: bool,
+  run_lock_fd: int,
+) -> int:
+  """Execute one already-validated job."""
   # API launches already create a session; cron launches do not.
   try:
     if os.getsid(0) != os.getpid():
@@ -309,12 +297,22 @@ def run() -> int:
     job_state.mkdir(parents=True, exist_ok=True)
     child_env["APP_JOB_STATE_DIR"] = str(job_state)
     command = ["bash", str(resolved), str(app_id)]
-    child = subprocess.Popen(
-      command,
-      cwd=str(resolved.parent),
-      env=child_env,
-    )
-    rc = child.wait()
+    # Uninstall sends TERM to this entire process group. Keep the supervisor
+    # alive to retain its lease while a TERM-ignoring child needs the existing
+    # KILL fallback; exec resets the child's caught handler to the default.
+    previous_sigterm = signal.signal(signal.SIGTERM, lambda *_args: None)
+    try:
+      child = subprocess.Popen(
+        command,
+        cwd=str(resolved.parent),
+        env=child_env,
+        # If the supervisor crashes, the actual job keeps the single-flight
+        # lock until it and any inheriting descendants exit.
+        pass_fds=(run_lock_fd,),
+      )
+      rc = child.wait()
+    finally:
+      signal.signal(signal.SIGTERM, previous_sigterm)
     if rc != 0:
       _log(app_id, f"job exited rc={rc}: {resolved}")
     return rc
@@ -324,6 +322,62 @@ def run() -> int:
       lease.parent.rmdir()
     except OSError:
       pass
+
+
+def run() -> int:
+  argv = sys.argv[1:]
+  wait_for_ready = argv[:1] == ["--wait-for-ready"]
+  if wait_for_ready:
+    argv = argv[1:]
+  wall_clock = None
+  if argv[:1] == ["--wall-clock"]:
+    if len(argv) < 3:
+      _log("?", "rejected: incomplete wall-clock argv")
+      return 2
+    wall_clock = (argv[1], argv[2])
+    argv = argv[3:]
+  if len(argv) != 2 or not re.fullmatch(r"[0-9]+", argv[0]):
+    _log(argv[0] if argv else "?", "rejected: bad argv")
+    return 2
+  app_id = int(argv[0])
+  job = Path(argv[1])
+  if job.is_symlink():
+    _log(app_id, f"rejected: symlinked job {job}")
+    return 2
+  try:
+    apps_root = (DATA_DIR / "apps").resolve(strict=True)
+    resolved = job.resolve(strict=True)
+  except (OSError, RuntimeError):
+    _log(app_id, f"rejected: unresolvable job {job}")
+    return 2
+  if (
+    resolved.parent.parent != apps_root
+    or not resolved.is_file()
+  ):
+    _log(app_id, f"rejected: job outside apps root {resolved}")
+    return 2
+  if wall_clock is not None:
+    tz_name, zone_cron = wall_clock
+    try:
+      if not _claim_wall_clock_run(app_id, resolved, tz_name, zone_cron):
+        return 0
+    except (OSError, ValueError) as exc:
+      _log(app_id, f"rejected: invalid wall-clock schedule ({exc})")
+      return 2
+
+  run_lock = _acquire_app_run_lock(app_id)
+  if run_lock is None:
+    _log(app_id, "skipped: another job for this app is still running")
+    return 0
+  try:
+    return _execute_job(
+      app_id,
+      resolved,
+      wait_for_ready=wait_for_ready,
+      run_lock_fd=run_lock.fileno(),
+    )
+  finally:
+    run_lock.close()
 
 
 if __name__ == "__main__":

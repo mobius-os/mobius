@@ -3,7 +3,11 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-healthcheckPath = "/api/health"
+healthcheckPath = "/api/ready"
 healthcheckTimeout = 300
+# Mobius has one mutable /data volume; drain longer than Uvicorn's 10s grace.
+numReplicas = 1
+requiredMountPath = "/data"
+drainingSeconds = 15
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3

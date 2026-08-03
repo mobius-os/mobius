@@ -169,6 +169,50 @@ def test_wall_clock_tick_that_is_not_due_stops_before_job_launch(
   assert runner.run() == 0
 
 
+def test_wrapper_skips_an_overlapping_job_for_the_same_app(
+  monkeypatch, tmp_path,
+):
+  runner = _load_runner()
+  data_dir = tmp_path / "data"
+  source = data_dir / "apps" / "memory"
+  source.mkdir(parents=True)
+  job = source / "memory-job.sh"
+  job.write_text("#!/bin/sh\nexit 0\n")
+  monkeypatch.setattr(runner, "DATA_DIR", data_dir)
+  events = []
+  monkeypatch.setattr(runner, "_log", lambda app_id, message: events.append(
+    (app_id, message),
+  ))
+  monkeypatch.setattr(
+    runner, "_mint_app_token",
+    lambda _app_id: pytest.fail("an overlapping job must stop before auth"),
+  )
+  monkeypatch.setattr(runner.sys, "argv", [
+    "app-job-runner.py", "57", str(job),
+  ])
+
+  held = runner._acquire_app_run_lock(57)
+  assert held is not None
+  try:
+    assert runner.run() == 0
+  finally:
+    held.close()
+
+  assert events == [(57, "skipped: another job for this app is still running")]
+  released = runner._acquire_app_run_lock(57)
+  assert released is not None
+  released.close()
+
+
+def test_app_job_runtime_state_is_ignored_by_the_data_repo():
+  entrypoint = (REPO_ROOT / "backend/scripts/entrypoint.sh").read_text()
+  data_gitignore = entrypoint.split(
+    "cat > /data/.gitignore <<'EOF'\n", 1,
+  )[1].split("\nEOF", 1)[0]
+
+  assert "run/" in data_gitignore.splitlines()
+
+
 def test_live_check_calls_real_app_endpoint(monkeypatch):
   runner = _load_runner()
   seen = {}
@@ -312,10 +356,17 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   )
   popen = types.SimpleNamespace(wait=lambda: 0)
   calls = []
+  prior_sigterm = signal.getsignal(signal.SIGTERM)
+
+  def capture_popen(*args, **kwargs):
+    assert signal.getsignal(signal.SIGTERM) is not prior_sigterm
+    calls.append((args, kwargs))
+    return popen
+
   monkeypatch.setattr(
     runner.subprocess,
     "Popen",
-    lambda *args, **kwargs: calls.append((args, kwargs)) or popen,
+    capture_popen,
   )
   monkeypatch.setattr(runner.sys, "argv", [
     "app-job-runner.py", "57", str(job),
@@ -328,6 +379,8 @@ def test_wrapper_runs_job_only_after_live_check(tmp_path, monkeypatch):
   assert child_env["APP_JOB_STATE_DIR"].endswith("/apps/57/job-state")
   assert "SERVICE_TOKEN" not in child_env
   assert "AGENT_TOKEN" not in child_env
+  assert len(calls[0][1]["pass_fds"]) == 1
+  assert signal.getsignal(signal.SIGTERM) is prior_sigterm
 
 
 def test_wrapper_rejects_a_job_from_another_live_app(tmp_path, monkeypatch):

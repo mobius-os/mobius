@@ -150,8 +150,7 @@ def emit_activity_event(
 
   Routing every emitter through one process lets that process own the
   file handle, the rotation check, and the debounce cache — no
-  cross-process flock needed. cron-emit.sh is the canonical caller;
-  see backend/scripts/cron-emit.sh.
+  cross-process flock needed.
 
   Auth model. The service-token at /data/service-token.txt and the
   interactive owner JWT are the same shape (signed by SECRET_KEY,

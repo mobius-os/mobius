@@ -137,8 +137,9 @@ your work before reporting back. The recipe:
      -H "Authorization: Bearer $AGENT_TOKEN"
    ```
 
-   It returns `202` immediately with a `started_at`; the build runs in the
-   background and can take 30s or more.
+   It returns `202` immediately with a `started_at` acceptance timestamp. If
+   the build status is already `running`, the request may be skipped while that
+   run continues; wait for it to settle before requesting another build.
 3. Poll `$APP_STORAGE_DIR/build/status.json` until it reads
    `{"status":"done"}` or `{"status":"error", ...}`. Read the file, wait a
    couple of seconds, read again; don't spin tightly.

@@ -369,14 +369,16 @@ def run_app_job(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Spawns the app's scheduled job script as a non-blocking subprocess.
+  """Accept a request to run the app's scheduled job asynchronously.
 
   Mini-apps cannot shell out themselves — this is the bridge that lets
   a Reports tab's "Generate now" button trigger the same job the cron
-  schedule would run. The endpoint returns 202 immediately with a
-  started_at timestamp; the job may take 30s+ to complete. Callers
-  observe completion by polling the app's storage for newly-written
-  output (e.g. `/api/storage/apps/{id}/reports/<date>.json`).
+  schedule would run. The endpoint returns 202 immediately with an
+  `started_at` acceptance timestamp; the job may take 30s+ to complete. A
+  request that overlaps another job for the same app is skipped while the
+  existing run continues. Callers observe completion by polling the app's
+  storage for newly-written output (for example,
+  `/api/storage/apps/{id}/reports/<date>.json`).
 
   The job script lives at `<source_dir>/<job_name>` where source_dir
   is the app's on-disk source tree (per the install-from-manifest

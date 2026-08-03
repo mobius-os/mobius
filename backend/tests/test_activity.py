@@ -95,8 +95,7 @@ def test_log_event_swallows_oserror(monkeypatch):
 
 def test_log_event_accepts_caller_ts():
   """If the caller passes ts=, the emitter doesn't clobber it. Lets
-  cron-emit.sh stamp the time at job-start instead of when the API
-  receives the event."""
+  an external emitter stamp the event before the API receives it."""
   custom = "2026-01-15T10:30:00+00:00"
   activity.log_event("cron_outcome", ts=custom, app_id=3,
                      job="fetch.sh", exit_code=0, duration_ms=1234)
@@ -920,87 +919,3 @@ def test_shared_storage_put_debounces_within_window(client, auth):
     assert r.status_code == 204
   writes = [l for l in _read_lines() if l["ev"] == "storage_write"]
   assert len(writes) == 1
-
-
-# --- Cron wrapper script -----------------------------------------------
-
-
-def test_cron_emit_script_exists_and_executable():
-  """The wrapper script ships at backend/scripts/cron-emit.sh and is
-  executable. (Cron entries authored by the scaffold path consume this
-  shape; a missing or non-executable script silently breaks every
-  scheduled job in the container.)"""
-  # Resolve relative to the repo. The test container mounts
-  # backend/scripts at /app/scripts.
-  candidates = [
-    Path("/app/scripts/cron-emit.sh"),
-    Path(__file__).parent.parent / "scripts" / "cron-emit.sh",
-  ]
-  for c in candidates:
-    if c.exists():
-      assert os.access(c, os.X_OK), f"{c} is not executable"
-      content = c.read_text()
-      # Sanity: must reference the activity emit endpoint, the service
-      # token, and exit with the wrapped job's code.
-      assert "/api/admin/activity/emit" in content
-      assert "service-token.txt" in content
-      assert "exit $EXIT_CODE" in content
-      return
-  pytest.fail("cron-emit.sh not found at any expected path")
-
-
-def test_cron_emit_script_posts_cron_outcome(client, auth, tmp_path):
-  """End-to-end-ish: run the wrapper against a stub job, point it at
-  the TestClient via env vars, and confirm one cron_outcome event
-  lands in the log."""
-  import subprocess
-  import shutil
-
-  script = None
-  for c in [
-    Path("/app/scripts/cron-emit.sh"),
-    Path(__file__).parent.parent / "scripts" / "cron-emit.sh",
-  ]:
-    if c.exists():
-      script = c
-      break
-  assert script is not None
-
-  # Write a service-token file the wrapper can read. The TestClient
-  # accepts the owner_token JWT directly.
-  token_path = tmp_path / "service-token.txt"
-  token_path.write_text(auth["Authorization"].removeprefix("Bearer "))
-  job = tmp_path / "fetch.sh"
-  job.write_text("#!/bin/bash\necho ran\nexit 0\n")
-  job.chmod(0o755)
-
-  # We can't easily hand the wrapper a live server in pytest, but we
-  # CAN verify the wrapper's exit code propagation + that it tries to
-  # curl the right URL. Run with a deliberately unreachable API_BASE_URL
-  # and confirm: (a) the wrapped job's exit code propagates, (b) the
-  # script doesn't crash on emit failure.
-  result = subprocess.run(
-    [str(script), "7", str(job)],
-    env={
-      "PATH": os.environ.get("PATH", ""),
-      "API_BASE_URL": "http://127.0.0.1:1",  # unreachable
-      "SERVICE_TOKEN_FILE": str(token_path),
-    },
-    capture_output=True, text=True, timeout=10,
-  )
-  # Wrapped job exits 0 → wrapper exits 0 even if emit fails.
-  assert result.returncode == 0, result.stderr
-
-  # And: non-zero exit propagates.
-  job.write_text("#!/bin/bash\nexit 3\n")
-  job.chmod(0o755)
-  result = subprocess.run(
-    [str(script), "7", str(job)],
-    env={
-      "PATH": os.environ.get("PATH", ""),
-      "API_BASE_URL": "http://127.0.0.1:1",
-      "SERVICE_TOKEN_FILE": str(token_path),
-    },
-    capture_output=True, text=True, timeout=10,
-  )
-  assert result.returncode == 3, result.stderr

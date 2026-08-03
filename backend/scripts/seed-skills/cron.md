@@ -43,8 +43,6 @@ It writes `/data/apps/<slug>/job.sh` (stub, if absent), writes the durable decla
 
 To list / remove: `crontab -u mobius -l` and edit the matching `init-cron.sh` (or delete it before re-running the scaffold). Never call `crontab -u mobius` directly without writing an `init-cron.sh` alongside.
 
-Optionally wrap the job command with `cron-emit.sh` (a manual edit — the scaffold writes the entry unwrapped) so outcomes land in the activity log.
-
 ---
 
 ## Example managed app job

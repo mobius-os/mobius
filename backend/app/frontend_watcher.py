@@ -40,6 +40,7 @@ from app.process_groups import (
 log = logging.getLogger(__name__)
 
 _DEBOUNCE_SECS = 1.75
+_POLL_INTERVAL_SECS = 2.0
 _INCOMPLETE_GRACE_SECS = 30.0
 _WATCH_RESTART_BACKOFF_MAX = 30.0
 _WATCH_LEASE_RETRY_INITIAL = 1.0
@@ -66,10 +67,10 @@ _ATTIC_DIR = _FRONTEND_DIR / ".assets-attic"
 # steering, or reading a live reply. Agent edits can publish many generations
 # during that one foreground session, and lazy chunks (Settings is the common
 # case) are fetched only when first opened. Three generations lasted less than
-# two minutes during a real multi-file refactor. Sixty-four keeps roughly an
-# hour of that unusually rapid edit cadence while remaining a hard, predictable
-# disk bound (today's complete hashed asset set is about 1.3 MiB/generation).
-_ATTIC_KEEP = 64
+# two minutes during a real multi-file refactor. Sixteen keeps several minutes
+# of that unusually rapid edit cadence while putting a firm bound on retained
+# shell generations and leaving more room for owner data.
+_ATTIC_KEEP = 16
 _BUILT_GLOBAL_CHECK = (
   _FRONTEND_DIR / "scripts" / "check-built-globals.mjs"
 )
@@ -101,7 +102,7 @@ def _source_tree_scandir(
   frontend_root: Path,
   path: str | None,
 ) -> Iterator[os.DirEntry[str]]:
-  """Expose only build inputs to watchdog's once-per-second snapshot.
+  """Expose only build inputs to watchdog's polling snapshot.
 
   A recursive observer rooted at the editable frontend would otherwise stat
   node_modules, build generations, caches, and git metadata even though none of
@@ -795,7 +796,7 @@ class _FrontendHandler(FileSystemEventHandler):
         self._source_observer = PollingObserverVFS(
           stat=os.stat,
           listdir=lambda path: _source_tree_scandir(_FRONTEND_DIR, path),
-          polling_interval=1.0,
+          polling_interval=_POLL_INTERVAL_SECS,
         )
         self._source_observer.schedule(
           self, str(_FRONTEND_DIR), recursive=True,
