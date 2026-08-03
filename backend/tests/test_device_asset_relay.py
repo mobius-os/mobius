@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from test_app_fixtures import create_local_app
 
-from app.routes.app_runtime import _parse_content_range
+from app.routes.app_runtime import _is_https_device_asset_url, _parse_content_range
 
 
 def _create_device_asset_app(client, auth):
@@ -49,6 +49,14 @@ def test_content_range_parser_requires_an_exact_byte_form():
   assert _parse_content_range("bytes 0-0/*") == (0, 0, None)
   assert _parse_content_range("items 8-15/100") is None
   assert _parse_content_range("bytes */100") is None
+  assert _parse_content_range("bytes 15-8/100") is None
+  assert _parse_content_range("bytes 8-15/15") is None
+
+
+def test_device_asset_urls_cannot_downgrade_or_embed_credentials():
+  assert _is_https_device_asset_url("https://assets.example/model.bin") is True
+  assert _is_https_device_asset_url("http://assets.example/model.bin") is False
+  assert _is_https_device_asset_url("https://owner:secret@assets.example/model.bin") is False
 
 
 def test_device_asset_relay_requires_a_reviewed_capability(client, auth):

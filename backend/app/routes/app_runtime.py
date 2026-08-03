@@ -50,7 +50,21 @@ def _parse_content_range(value: str | None) -> tuple[int, int, int | None] | Non
   if not match:
     return None
   total = None if match.group(3) == "*" else int(match.group(3))
-  return int(match.group(1)), int(match.group(2)), total
+  start = int(match.group(1))
+  end = int(match.group(2))
+  if start > end or (total is not None and end >= total):
+    return None
+  return start, end, total
+
+
+def _is_https_device_asset_url(url: str) -> bool:
+  parsed = urlparse(url)
+  return bool(
+    parsed.scheme == "https"
+    and parsed.hostname
+    and not parsed.username
+    and not parsed.password
+  )
 
 
 async def _open_device_asset_range(
@@ -95,6 +109,8 @@ async def _open_device_asset_range(
         if hop >= _DEVICE_ASSET_MAX_REDIRECTS:
           raise HTTPException(502, "Too many device asset redirects.")
         current_url = urljoin(current_url, location)
+        if not _is_https_device_asset_url(current_url):
+          raise HTTPException(502, "Device asset redirect requires a public HTTPS URL.")
         continue
 
       content_encoding = upstream.headers.get("content-encoding", "identity")
@@ -158,8 +174,7 @@ async def relay_device_asset_range(
   max_chunk_bytes = int(limits.get("max_chunk_bytes") or 0)
   if length > max_chunk_bytes or offset + length > max_asset_bytes:
     raise HTTPException(413, "Requested device asset range exceeds its reviewed limit.")
-  parsed = urlparse(url)
-  if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+  if not _is_https_device_asset_url(url):
     raise HTTPException(400, "Device assets require a public HTTPS URL.")
   db.close()
 

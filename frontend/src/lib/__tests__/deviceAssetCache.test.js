@@ -237,6 +237,27 @@ test('an invalid download is rejected without replacing a complete package', asy
   assert.equal(Buffer.from(readEvents[0].value.bytes).toString(), 'safe')
 })
 
+test('install rejects an upstream asset whose total differs from the reviewed size', async () => {
+  const chunks = [Buffer.from('hello'), Buffer.from(' world')]
+  const provider = createDeviceAssetCacheProvider({
+    appId: 61,
+    cacheStorage: new MemoryCacheStorage(),
+    cryptoImpl: webcrypto,
+    origin: 'https://mobius.test',
+    storageManager: {},
+    async fetchRange({ offset }) {
+      return new Response(chunks[offset === 0 ? 0 : 1], {
+        headers: { 'X-Mobius-Asset-Total': '12' },
+      })
+    },
+  })
+
+  await assert.rejects(
+    runProvider(provider, packageInput(chunks)),
+    (error) => error.code === 'download_failed' && /reviewed asset size/.test(error.message),
+  )
+})
+
 test('separate complete packages cannot exceed the reviewed app partition', async () => {
   const cacheStorage = new MemoryCacheStorage()
   const declaration = {

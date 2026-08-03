@@ -477,6 +477,13 @@ export function createDeviceAssetCacheProvider({
                 `The device asset source returned ${response?.status || 'an error'}.`,
               )
             }
+            const upstreamTotal = response.headers.get('X-Mobius-Asset-Total')
+            if (upstreamTotal !== null && upstreamTotal !== String(asset.bytes)) {
+              throw capabilityError(
+                'download_failed',
+                'The device asset source did not match the reviewed asset size.',
+              )
+            }
             const buffer = await response.arrayBuffer()
             if (buffer.byteLength !== chunk.bytes) {
               throw capabilityError('download_failed', 'A downloaded chunk had the wrong size.')
