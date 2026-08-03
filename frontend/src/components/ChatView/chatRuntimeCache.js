@@ -32,12 +32,11 @@ export function updateChatRuntimeCache(queryClient, queryKey, patch) {
     current
     && fields.every(field => runtimeFieldMatches(current, field, patch[field]))
   ) {
-    return false
+    return
   }
 
   queryClient.setQueryData(queryKey, existing => ({
     ...(existing || {}),
     ...patch,
   }))
-  return true
 }

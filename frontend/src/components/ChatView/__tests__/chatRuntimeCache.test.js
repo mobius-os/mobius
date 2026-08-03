@@ -26,15 +26,17 @@ test('unchanged runtime polls do not publish a persisted-cache update', () => {
   const cache = cacheHarness({
     messages: transcript,
     running: true,
+    activeGoalObjective: 'Fix first-scroll jitter',
     pending_messages: [{ id: 'queued-1', content: 'next' }],
     pending_question_id: null,
   })
 
-  const changed = updateChatRuntimeCache(
+  updateChatRuntimeCache(
     cache.queryClient,
     ['chat-messages', 'chat-1'],
     {
       running: true,
+      activeGoalObjective: 'Fix first-scroll jitter',
       // A network response creates new objects even when their JSON-domain
       // value is unchanged. That must still count as an unchanged poll.
       pending_messages: [{ id: 'queued-1', content: 'next' }],
@@ -42,25 +44,8 @@ test('unchanged runtime polls do not publish a persisted-cache update', () => {
     },
   )
 
-  assert.equal(changed, false)
   assert.equal(cache.updates(), 0, 'setQueryData itself must be skipped')
   assert.equal(cache.value().messages, transcript)
-})
-
-test('an unchanged active goal does not publish a persisted-cache update', () => {
-  const cache = cacheHarness({
-    messages: [{ role: 'assistant', content: 'large durable history' }],
-    activeGoalObjective: 'Fix first-scroll jitter',
-  })
-
-  const changed = updateChatRuntimeCache(
-    cache.queryClient,
-    ['chat-messages', 'chat-1'],
-    { activeGoalObjective: 'Fix first-scroll jitter' },
-  )
-
-  assert.equal(changed, false)
-  assert.equal(cache.updates(), 0, 'an unchanged goal must skip setQueryData')
 })
 
 test('a runtime transition patches only runtime fields', () => {
@@ -73,7 +58,7 @@ test('a runtime transition patches only runtime fields', () => {
     pending_question_id: null,
   })
 
-  const changed = updateChatRuntimeCache(
+  updateChatRuntimeCache(
     cache.queryClient,
     ['chat-messages', 'chat-1'],
     {
@@ -83,7 +68,6 @@ test('a runtime transition patches only runtime fields', () => {
     },
   )
 
-  assert.equal(changed, true)
   assert.equal(cache.updates(), 1)
   assert.equal(cache.value().messages, transcript)
   assert.equal(cache.value().offset, 12)
@@ -95,11 +79,11 @@ test('a runtime transition patches only runtime fields', () => {
 test('a missing chat cache accepts the first runtime snapshot', () => {
   const cache = cacheHarness(undefined)
 
-  assert.equal(updateChatRuntimeCache(
+  updateChatRuntimeCache(
     cache.queryClient,
     ['chat-messages', 'chat-1'],
     { running: true },
-  ), true)
+  )
   assert.equal(cache.updates(), 1)
   assert.deepEqual(cache.value(), { running: true })
 })
