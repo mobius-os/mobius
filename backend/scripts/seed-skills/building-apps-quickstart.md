@@ -159,11 +159,10 @@ python "$SCRIPTS_DIR/apply_app.py" /data/apps/<slug>
 The helper validates the manifest and complete source tree, compiles and
 commits that exact revision, returns a compact receipt with `app_id`,
 `preview_path`, and `open_path`, and emits one live-preview action tied to this
-building chat. On a phone, that live-build action activates the app tab because
-there is only one visible Builder surface. On wider layouts it may bloom into a
-separate visible pane when that adds space without hiding anything; if it would
-have to share a web pane, it parks as an inactive tab instead of replacing what
-the partner is using.
+building chat. On every device, that action keeps the partner's focused pane
+untouched: it opens the app in a companion pane when possible, or switches the
+app inside an existing unfocused companion pane. If neither is safe, it parks
+as an inactive tab instead of replacing what the partner is using.
 Reuse that numeric ID for preview, storage, notifications, and later actions;
 do not list apps again after a successful apply. Do not send a separate
 `open_item`.

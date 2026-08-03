@@ -1148,6 +1148,14 @@ such as `placement: 'beside-source'`, `activation: 'background'`, or the interna
 `live-preview` activation. `resolveWorkspaceRequests` combines those requests
 with the current model and device projection. App-build previews therefore use
 the same path whether they arrive live or are reconstructed after reconnect.
+A live preview never gives keyboard or Back ownership to the preview, nor does
+it replace the active tab in the pane that owns that focus. A missing app opens
+in a safe companion pane, an app already in an unfocused companion switches
+there, and an app parked beside the focused chat moves out before it is
+revealed. When Standard is showing the building chat, entering Builder may
+retarget `focusedPaneId` to the pane that owns that same chat; this preserves
+the focused content rather than focusing the preview. When no companion is
+feasible, the app stays parked rather than interrupting the focused surface.
 
 Tab drag/drop, edge splitting, divider resizing, maximized-pane presentation,
 Builder/Standard mode changes, and undo all dispatch through the workspace

@@ -11,10 +11,10 @@ export const PLACE_WITH_SOURCE = 'with-source'
 export const PLACE_WITH_FOCUS = 'with-focus'
 export const ACTIVATE_IN_BACKGROUND = 'background'
 export const ACTIVATE_FOREGROUND = 'foreground'
-// A live build preview is device-aware: wide layouts reveal it in a companion
-// pane without taking keyboard focus from chat, while phones activate the app
-// tab because there is only one visible surface. This is an internal lifecycle
-// intent, not an `open_item` wire value.
+// A live build preview is non-displacing on every device: it may reveal or
+// switch the app in a companion pane, but it never replaces the active tab in
+// the pane that owns keyboard focus. This is an internal lifecycle intent, not
+// an `open_item` wire value.
 export const ACTIVATE_LIVE_PREVIEW = 'live-preview'
 
 const PLACEMENTS = new Set([PLACE_BESIDE_SOURCE, PLACE_WITH_SOURCE, PLACE_WITH_FOCUS])
@@ -229,10 +229,12 @@ function chooseSplitEdge(ws, paneId, env) {
   return null
 }
 
-// The companion pane for a chat source: the first pane (in leaf order) holding an
-// app whose SERVER chat_id equals the source chat (design §6.2 — derived from the
-// live app list, no schema field). Only a chat source has a companion.
-function companionPaneFor(ws, source, liveApps) {
+// The companion pane for a chat source: the first eligible pane (in leaf order)
+// holding an app whose SERVER chat_id equals the source chat (design §6.2 —
+// derived from the live app list, no schema field). A live preview excludes the
+// focused pane because that surface is not safe for it to switch. Only a chat
+// source has a companion.
+function companionPaneFor(ws, source, liveApps, excludedPaneId = null) {
   if (!source || source.kind !== 'chat' || !Array.isArray(liveApps)) return null
   const chatAppIds = new Set()
   for (const app of liveApps) {
@@ -242,6 +244,7 @@ function companionPaneFor(ws, source, liveApps) {
   }
   if (chatAppIds.size === 0) return null
   for (const paneId of paneModel.paneIdsInOrder(ws)) {
+    if (paneId === excludedPaneId) continue
     const pane = ws.panes[paneId]
     if (pane && pane.tabs.some(t => t.kind === 'app' && chatAppIds.has(String(t.id)))) {
       return pane
@@ -256,13 +259,12 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   const preview = activation === ACTIVATE_LIVE_PREVIEW
   const foreground = activation === ACTIVATE_FOREGROUND
   const mode = env.mode || 'wide'
-  // Foreground is normally the only permission to replace an active tab. A
-  // phone live preview is the deliberate exception requested by the product:
-  // its one visible Builder surface switches to the app automatically. Wider
-  // layouts keep chat active and reveal the preview in a companion pane.
-  const phonePreview = preview && mode === 'phone'
-  const activateItem = foreground || phonePreview
-  const focusItem = foreground || phonePreview
+  // A preview may switch an UNFOCUSED companion pane, but only foreground may
+  // replace the active tab in the focused pane or move keyboard/Back focus.
+  // Keeping those permissions separate is what lets a live app update become
+  // visible without interrupting a message being composed beside it.
+  const activateItem = foreground
+  const focusItem = foreground
 
   // Two-worlds (finding F4): in the SINGLE world the only visible surface is the
   // slot, so a FOREGROUND agent open must SET THE SLOT — mutating the hidden pane
@@ -318,15 +320,21 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   }
 
   // Already open anywhere → background is a no-op; foreground focuses it. A
-  // live preview only reveals an inactive app by moving it into a new pane; if
-  // that cannot preserve every visible tab, it remains parked.
+  // live preview switches it in an unfocused companion pane. If it shares the
+  // focused source pane, move it into a new pane first; if that cannot preserve
+  // every visible tab, leave the focused pane untouched and keep it parked.
   const existing = paneModel.paneOf(working, itemKey)
   if (existing) {
-    // If an earlier narrow-screen build parked chat + app in one pane, widen the
-    // same relationship into two real panes now instead of hiding the chat behind
-    // an activated app tab. Moving an existing tab is the correct primitive;
+    // If an earlier build parked chat + app in the pane the owner is using, turn
+    // that relationship into two real panes instead of hiding the chat behind an
+    // activated app tab. Moving an existing tab is the correct primitive;
     // splitPaneWithTab intentionally accepts brand-new tabs only.
-    if (preview && mode !== 'phone' && sourcePane?.id === existing.id) {
+    if (
+      preview
+      && sourcePane?.id === existing.id
+      && existing.id === working.focusedPaneId
+      && existing.activeTabKey !== itemKey
+    ) {
       const edge = chooseSplitEdge(working, sourcePane.id, env)
       if (edge) {
         const moved = paneModel.moveTab(working, itemKey, {
@@ -342,9 +350,10 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
       }
     }
 
-    if (!activateItem) return working
+    if (!activateItem && !preview) return working
+    if (preview && existing.id === working.focusedPaneId) return working
     const activated = paneModel.setActiveTab(working, existing.id, itemKey)
-    return paneModel.focusPane(activated, existing.id)
+    return foreground ? paneModel.focusPane(activated, existing.id) : activated
   }
 
   sourcePane = source ? paneModel.paneOf(working, tabKey(source)) : null
@@ -368,9 +377,10 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   }
 
   // beside-source, the device-aware table.
-  if (mode === 'phone') {
-    // Phone stack: a live preview activates the app tab automatically; generic
-    // background placements remain parked and explicit foreground still wins.
+  if (mode === 'phone' && !preview) {
+    // Generic phone placements keep their existing tab-stack behavior. A live
+    // preview continues into the companion/split ladder below so it can become
+    // visible without replacing the focused chat.
     return insertBesideSource(working, item, sourcePane, source, {
       activate: activateItem,
       focus: focusItem,
@@ -395,13 +405,19 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
 
   // Tile, multi-pane: companion pane → else split the source pane → else a
   // background tab beside the source (the degradation ladder, design §6.2).
-  const companion = companionPaneFor(working, source, env.liveApps)
+  const companion = companionPaneFor(
+    working,
+    source,
+    env.liveApps,
+    preview ? working.focusedPaneId : null,
+  )
   if (companion) {
-    // Background work and live previews preserve the companion's visible tab.
-    // A foreground request is the only path that replaces it.
+    // Background work preserves the companion's visible tab. A live preview
+    // switches that pane only when another pane owns focus; foreground may both
+    // switch and focus it.
     return paneModel.openTab(working, item, {
       paneId: companion.id,
-      activate: activateItem,
+      activate: activateItem || preview,
       focus: focusItem,
     })
   }

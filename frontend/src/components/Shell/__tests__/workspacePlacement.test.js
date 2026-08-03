@@ -237,7 +237,7 @@ test('beside-source + foreground · phone: insert and activate', () => {
   assert.equal(out.panes.p0.activeTabKey, 'app:9', 'foreground activates the item')
 })
 
-test('live preview · phone: enters Builder and activates the app tab', () => {
+test('live preview · phone: opens a companion pane without replacing its source chat', () => {
   const ws = {
     ...paneModel.setViewMode(builderSeed([CHAT('a')]), 'single'),
     singleScreen: { kind: 'chat', id: 'a' },
@@ -248,22 +248,73 @@ test('live preview · phone: enters Builder and activates the app tab', () => {
     env(ws, { mode: 'phone', rect: { w: 400, h: 800 } }),
   )
   assert.equal(out.viewMode, 'panes', 'the live preview reveals the Builder world')
-  assert.deepEqual(keysOf(out.panes.p0), ['chat:a', 'app:9'])
-  assert.equal(out.panes.p0.activeTabKey, 'app:9',
-    'the one visible phone surface switches to the live app')
-  assert.equal(out.focusedPaneId, 'p0')
+  assert.equal(paneModel.paneIdsInOrder(out).length, 2,
+    'the app gets its own phone pane instead of joining the chat pane')
+  assert.equal(out.panes[out.focusedPaneId].activeTabKey, 'chat:a',
+    'the source chat keeps keyboard focus')
+  const appPane = paneModel.paneOf(out, 'app:9')
+  assert.ok(appPane)
+  assert.notEqual(appPane.id, out.focusedPaneId)
+  assert.equal(appPane.activeTabKey, 'app:9', 'the preview is active in its own pane')
 })
 
-test('live preview · phone update: activates an app already parked beside its chat', () => {
-  const ws = builderSeed([CHAT('a'), APP(9)])
+test('live preview · phone update: moves a parked app out before revealing it', () => {
+  const ws = paneModel.setActiveTab(builderSeed([CHAT('a'), APP(9)]), 'p0', 'chat:a')
   const out = resolveWorkspaceRequest(
     ws,
     builtAppWorkspaceRequest('a', 9),
     env(ws, { mode: 'phone', rect: { w: 400, h: 800 } }),
   )
-  assert.equal(out.panes.p0.activeTabKey, 'app:9',
-    'later coherent updates return the phone to the live app')
-  assert.equal(out.focusedPaneId, 'p0')
+  assert.equal(paneModel.paneIdsInOrder(out).length, 2)
+  assert.equal(out.panes[out.focusedPaneId].activeTabKey, 'chat:a',
+    'later coherent updates do not interrupt the focused chat')
+  const appPane = paneModel.paneOf(out, 'app:9')
+  assert.notEqual(appPane.id, out.focusedPaneId)
+  assert.equal(appPane.activeTabKey, 'app:9')
+
+  const parked = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('a', 9),
+    env(ws, { mode: 'phone', rect: { w: 400, h: 350 } }),
+  )
+  assert.equal(parked.panes.p0.activeTabKey, 'chat:a',
+    'without room for a companion, the app stays parked behind the chat')
+  assert.equal(parked.focusedPaneId, 'p0')
+
+  const appInUse = builderSeed([CHAT('a'), APP(9)])
+  const unchanged = resolveWorkspaceRequest(
+    appInUse,
+    builtAppWorkspaceRequest('a', 9),
+    env(appInUse, { mode: 'phone', rect: { w: 400, h: 800 } }),
+  )
+  assert.equal(unchanged, appInUse,
+    'an app already in use stays in its focused pane while its frame updates')
+})
+
+test('live preview · Standard source: preserves chat and Back ownership when Builder focus was elsewhere', () => {
+  const ws = {
+    ...twoPaneWs([CHAT('a')], [APP(5)], { focused: 'p1' }),
+    viewMode: 'single',
+    singleScreen: { kind: 'chat', id: 'a' },
+  }
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('a', 9),
+    env(ws, {
+      mode: 'wide',
+      rect: { w: 1400, h: 900 },
+      liveApps: [{ id: 5, chat_id: 'a' }, { id: 9, chat_id: 'a' }],
+    }),
+  )
+  assert.equal(out.viewMode, 'panes')
+  assert.equal(out.focusedPaneId, 'p0',
+    'Builder focus follows the same chat Standard was showing, never the preview')
+  assert.equal(out.panes.p0.activeTabKey, 'chat:a')
+  assert.deepEqual(paneModel.activeContentRoute(out), {
+    view: 'chat', chatId: 'a', appId: null, paneId: 'p0',
+  }, 'keyboard and Back still belong to the building chat')
+  assert.equal(out.panes.p1.activeTabKey, 'app:9',
+    'the unfocused companion may switch to the new preview')
 })
 
 test('live preview · Standard elsewhere: parks without changing the visible surface', () => {
@@ -343,7 +394,7 @@ test('live preview · compact fallback: parks in the source pane without replaci
   assertNoVisibleContentVanished(ws, out, 'compact', rect)
 })
 
-test('live preview · occupied companion: joins without replacing the visible app', () => {
+test('live preview · occupied companion: switches that pane without taking chat focus', () => {
   const ws = twoPaneWs([CHAT('a')], [APP(5)])
   const liveApps = [{ id: 5, chat_id: 'a' }, { id: 9, chat_id: 'a' }]
   const out = resolveWorkspaceRequest(
@@ -352,9 +403,61 @@ test('live preview · occupied companion: joins without replacing the visible ap
     env(ws, { mode: 'wide', liveApps }),
   )
   assert.deepEqual(keysOf(out.panes.p1), ['app:5', 'app:9'])
-  assert.equal(out.panes.p1.activeTabKey, 'app:5',
-    'a preview never replaces content in an existing companion pane')
+  assert.equal(out.panes.p1.activeTabKey, 'app:9',
+    'the preview switches the companion pane')
   assert.equal(out.focusedPaneId, 'p0')
+
+  const alreadyOpen = twoPaneWs([CHAT('a')], [APP(5), APP(9)], { activeB: 'app:5' })
+  const switched = resolveWorkspaceRequest(
+    alreadyOpen,
+    builtAppWorkspaceRequest('a', 9),
+    env(alreadyOpen, {
+      mode: 'wide',
+      liveApps: [{ id: 5, chat_id: 'a' }, { id: 9, chat_id: 'a' }],
+    }),
+  )
+  assert.equal(switched.panes.p1.activeTabKey, 'app:9',
+    'an already-open app switches inside the companion too')
+  assert.equal(switched.focusedPaneId, 'p0')
+})
+
+test('live preview · focused related panes are excluded from companion placement', () => {
+  const ws = twoPaneWs([CHAT('a')], [APP(5)], { focused: 'p1' })
+  const out = resolveWorkspaceRequest(
+    ws,
+    builtAppWorkspaceRequest('a', 9),
+    env(ws, {
+      mode: 'wide',
+      rect: { w: 1400, h: 900 },
+      liveApps: [{ id: 5, chat_id: 'a' }, { id: 9, chat_id: 'a' }],
+    }),
+  )
+  assert.equal(out.focusedPaneId, 'p1', 'the app already in use keeps keyboard and Back ownership')
+  assert.equal(out.panes.p1.activeTabKey, 'app:5', 'the focused related app is not replaced')
+  const previewPane = paneModel.paneOf(out, 'app:9')
+  assert.ok(previewPane)
+  assert.notEqual(previewPane.id, out.focusedPaneId)
+  assert.equal(previewPane.activeTabKey, 'app:9', 'the preview continues down the split ladder')
+  assert.deepEqual(paneModel.activeContentRoute(out), {
+    view: 'canvas', chatId: null, appId: 5, paneId: 'p1',
+  })
+
+  const parked = twoPaneWs(
+    [CHAT('a'), APP(4)],
+    [APP(5)],
+    { focused: 'p0', activeA: 'chat:a' },
+  )
+  const liveApps = [4, 5, 9].map(id => ({ id, chat_id: 'a' }))
+  const reused = resolveWorkspaceRequest(
+    parked,
+    builtAppWorkspaceRequest('a', 9),
+    env(parked, { mode: 'wide', rect: { w: 1400, h: 900 }, liveApps }),
+  )
+  assert.equal(paneModel.paneIdsInOrder(reused).length, 2, 'no redundant third pane is created')
+  assert.equal(reused.focusedPaneId, 'p0')
+  assert.equal(reused.panes.p0.activeTabKey, 'chat:a')
+  assert.deepEqual(keysOf(reused.panes.p1), ['app:5', 'app:9'])
+  assert.equal(reused.panes.p1.activeTabKey, 'app:9')
 })
 
 test('beside-source + foreground · tile single pane: split AND focus the new pane', () => {
