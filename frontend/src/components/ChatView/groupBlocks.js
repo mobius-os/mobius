@@ -4,8 +4,8 @@ import {
   toolActivitySingular,
   toolActivityPastSingular,
   effectiveToolName,
-  isDistinctiveActivityTool,
 } from './toolActivityLabel.js'
+export { groupActivityRuns } from './activityGrouping.js'
 
 // Fold runs of adjacent ACTIVITY entries — thinking AND tool blocks — into one
 // activity node, including a lone entry. A build turn's pre-prose burst is one
@@ -35,33 +35,6 @@ import {
 //
 // Output: an array of nodes, each either `{ single: entry }` or
 // `{ group: [entry, entry, ...] }`. Pure — no React, no mutation of inputs.
-export function groupActivityRuns(entries) {
-  const nodes = []
-  let run = []
-
-  const flush = () => {
-    if (run.length >= 1) {
-      nodes.push({ group: run })
-    }
-    run = []
-  }
-
-  for (const entry of entries) {
-    const type = entry?.item?.type
-    if (isDistinctiveActivityTool(entry?.item)) {
-      flush()
-      nodes.push({ group: [entry] })
-    } else if (type === 'tool' || type === 'thinking') {
-      run.push(entry)
-    } else {
-      flush()
-      nodes.push({ single: entry })
-    }
-  }
-  flush()
-  return nodes
-}
-
 // Merge runs of ADJACENT thinking entries into one, so a persisted transcript
 // renders a continuous reasoning pass as a SINGLE "Thought for Ns" disclosure
 // instead of many tiny fragments. Fragments only exist in already-saved chats

@@ -3,7 +3,7 @@
  * focused tests because mobile timing regressions repeatedly happened here.
  */
 
-import { groupActivityRuns } from './groupBlocks.js'
+import { groupActivityRuns } from './activityGrouping.js'
 
 /**
  * The stable identity of a user message. `cid` is the canonical identity
