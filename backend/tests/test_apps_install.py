@@ -8,6 +8,7 @@ and force failure modes.
 """
 
 import asyncio
+from datetime import UTC, datetime
 import hashlib
 import io
 import json
@@ -1746,6 +1747,111 @@ def test_install_with_same_slug_different_manifest_keeps_both(
   assert preserved["manifest_url"] is None
 
 
+def test_trusted_catalog_adopts_legacy_row_only_with_matching_git_origin(
+  client, auth, db,
+):
+  """A pre-identity catalog app is adopted without weakening slug safety."""
+  from app import install
+
+  legacy = create_local_app(
+    client, auth, name="Codex", description="legacy Subagents", jsx_source=JSX,
+  )
+  repo = Path(legacy["source_dir"])
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "remote", "add", "origin",
+      "https://github.com/mobius-os/app-subagents.git",
+    ],
+    check=True,
+  )
+  db.expire_all()
+
+  matched = install._find_install_identity_row(
+    db,
+    source_url=(
+      "https://raw.githubusercontent.com/mobius-os/"
+      "app-subagents/main/mobius.json"
+    ),
+    manifest_id="codex",
+  )
+  assert matched is not None
+  assert matched.id == legacy["id"]
+
+  unrelated = install._find_install_identity_row(
+    db,
+    source_url=(
+      "https://raw.githubusercontent.com/mobius-os/"
+      "app-something-else/main/mobius.json"
+    ),
+    manifest_id="codex",
+  )
+  assert unrelated is None
+
+  matched.deleted_at = datetime.now(UTC)
+  db.commit()
+  tombstone = install._find_install_identity_row(
+    db,
+    source_url=(
+      "https://raw.githubusercontent.com/mobius-os/"
+      "app-subagents/main/mobius.json"
+    ),
+    manifest_id="codex",
+  )
+  assert tombstone is not None
+  assert tombstone.id == legacy["id"]
+
+
+def test_trusted_origin_adoption_is_always_reconciled_as_local_source(
+  client, auth, db,
+):
+  """A proven legacy identity must still preserve its local source tree."""
+  from app import install
+
+  legacy = create_local_app(
+    client, auth, name="Codex", description="legacy Subagents", jsx_source=JSX,
+  )
+  repo = Path(legacy["source_dir"])
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "remote", "add", "origin",
+      "https://github.com/mobius-os/app-subagents.git",
+    ],
+    check=True,
+  )
+  db.expire_all()
+  candidate = install.InstallCandidate(
+    manifest={**MANIFEST_NEWS, "id": "codex", "name": "Subagents"},
+    raw_base=(
+      "https://raw.githubusercontent.com/mobius-os/app-subagents/main/"
+    ),
+    entry_bytes=JSX.encode(),
+    icon_processed=None,
+    icon_warning=None,
+    bundled_job=None,
+    static_assets={},
+    source_files={},
+    seeds={},
+    capability_contract={},
+    capability_digest="a" * 64,
+    candidate_digest="b" * 64,
+    source_review_digest="c" * 64,
+  )
+  target = install._select_install_target(
+    db,
+    candidate=candidate,
+    manifest_url=(
+      "https://raw.githubusercontent.com/mobius-os/"
+      "app-subagents/main/mobius.json"
+    ),
+    source="store",
+    expected_app_id=None,
+  )
+  assert target.existing is not None
+  assert target.existing.id == legacy["id"]
+  assert target.mode == "update"
+  assert target.adopting_trusted_origin is True
+
+
 def test_install_same_manifest_twice_updates(
   client, auth, bypass_url_validation,
 ):
@@ -3277,6 +3383,98 @@ def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
   listed = client.get("/api/apps/", headers=auth).json()
   row = next(app for app in listed if app["id"] == app_id)
   assert row["version"] == "1.0.0"
+
+
+def test_update_candidate_preview_uses_selected_trusted_catalog_ref(
+  client, auth, db, bypass_url_validation,
+):
+  """Review and Apply bind the same catalog ref, not an old stored pin."""
+  from app import models
+
+  base = "https://candidate-selected.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "selected-candidate"}
+  installed = _install_v1(client, auth, base, manifest, JSX_MULTI)
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+
+  pinned_identity = (
+    "https://raw.githubusercontent.com/mobius-os/app-selected/"
+    "0123456789abcdef0123456789abcdef01234567"
+    "#manifest-id=selected-candidate"
+  )
+  row = db.query(models.App).filter(models.App.id == app_id).one()
+  row.manifest_url = pinned_identity
+  db.commit()
+
+  selected_url = (
+    "https://raw.githubusercontent.com/mobius-os/"
+    "app-selected/main/mobius.json"
+  )
+  next_manifest = {**manifest, "version": "2.0.0"}
+  incoming = JSX_MULTI.replace("ORIGINAL FOOTER", "SELECTED REF FOOTER")
+  responses = {
+    selected_url: (200, json.dumps(next_manifest).encode()),
+    selected_url.rsplit("/", 1)[0] + "/index.jsx": (200, incoming.encode()),
+    selected_url.rsplit("/", 1)[0] + "/icon.png": (200, _png_bytes()),
+    selected_url.rsplit("/", 1)[0] + "/prompt.md": (200, b"v2 prompt"),
+    selected_url.rsplit("/", 1)[0] + "/fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    preview = client.get(
+      f"/api/apps/{app_id}/update-candidate-preview",
+      headers=auth,
+      params={"manifest_url": selected_url},
+    )
+
+  assert preview.status_code == 200, preview.text
+  payload = preview.json()
+  assert payload["upstream_version"] == "2.0.0"
+  assert "SELECTED REF FOOTER" in payload["upstream_diff"]
+  assert "ORIGINAL FOOTER" in payload["upstream_diff"]
+
+
+def test_update_candidate_preview_rejects_a_different_catalog_app(
+  client, auth, db, bypass_url_validation,
+):
+  """A manager cannot bind an installed row to another trusted package."""
+  from app import models
+
+  base = "https://candidate-mismatch.test/repo/"
+  manifest = {**MANIFEST_NEWS, "id": "candidate-mismatch"}
+  installed = _install_v1(client, auth, base, manifest, JSX)
+  assert installed.status_code == 201, installed.text
+  app_id = installed.json()["id"]
+  row = db.query(models.App).filter(models.App.id == app_id).one()
+  row.manifest_url = (
+    "https://raw.githubusercontent.com/mobius-os/app-one/main"
+    "#manifest-id=candidate-mismatch"
+  )
+  db.commit()
+
+  other_url = (
+    "https://raw.githubusercontent.com/mobius-os/app-two/main/mobius.json"
+  )
+  responses = {
+    other_url: (200, json.dumps(manifest).encode()),
+    other_url.rsplit("/", 1)[0] + "/index.jsx": (200, JSX.encode()),
+    other_url.rsplit("/", 1)[0] + "/icon.png": (200, _png_bytes()),
+    other_url.rsplit("/", 1)[0] + "/prompt.md": (200, PROMPT.encode()),
+    other_url.rsplit("/", 1)[0] + "/fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    preview = client.get(
+      f"/api/apps/{app_id}/update-candidate-preview",
+      headers=auth,
+      params={"manifest_url": other_url},
+    )
+  assert preview.status_code == 409, preview.text
+  assert "does not match" in preview.json()["detail"]
 
 
 def test_deferred_replay_reports_changed_candidate_as_structured_recovery(

@@ -366,15 +366,11 @@ async def preview_app_install(
     )
   )
   source = body.manifest_url if body.manifest_url is not None else raw_base
-  canonical = install._canonical_identity_key(source, manifest["id"])
-  existing = (
-    db.query(models.App)
-    .filter(
-      models.App.manifest_url == canonical,
-      models.App.deleted_at.is_(None),
-    )
-    .first()
+  existing = install._find_install_identity_row(
+    db, source_url=source, manifest_id=manifest["id"],
   )
+  if existing is not None and existing.deleted_at is not None:
+    existing = None
   installed_contract = existing.capability_contract if existing else None
   return schemas.AppPreviewOut(
     manifest=manifest,
@@ -1060,6 +1056,7 @@ async def update_preview(
 )
 async def update_candidate_preview(
   app_id: int,
+  manifest_url: str | None = None,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1091,10 +1088,10 @@ async def update_candidate_preview(
   from app import install
 
   app = live_app_or_404(db, app_id)
-  manifest_url = app.manifest_url
+  installed_manifest_url = app.manifest_url
   source_dir = app.source_dir
   upstream_commit = app.upstream_commit
-  if not manifest_url:
+  if not installed_manifest_url:
     raise HTTPException(400, "App has no update source.")
   repo = Path(source_dir)
   if not app_git.is_repo(repo) or not app_git.ref_exists(
@@ -1105,8 +1102,18 @@ async def update_candidate_preview(
   # Release the request session before upstream network I/O, matching the
   # update-check route's connection-pool discipline.
   db.close()
-  fetch_manifest_url = install._canonical_base(manifest_url) + "/mobius.json"
+  fetch_manifest_url = (
+    manifest_url
+    if manifest_url is not None
+    else install._canonical_base(installed_manifest_url) + "/mobius.json"
+  )
   fetched = await install.fetch_upstream_source(fetch_manifest_url)
+  if manifest_url is not None and not install._catalog_identity_matches(
+    installed_manifest_url, manifest_url, fetched.manifest["id"],
+  ):
+    raise HTTPException(
+      409, "Requested update source does not match the installed app.",
+    )
   candidate_tree = _fetched_source_tree(fetched)
   source_digest = install._source_review_digest(
     manifest=fetched.manifest,

@@ -1294,6 +1294,17 @@ def restore_upstream_ref(source_dir: str | Path, expected_sha: str | None) -> bo
   return True
 
 
+def origin_url(source_dir: str | Path) -> str | None:
+  """Return this app repo's configured ``origin`` URL, if available."""
+  if not is_repo(source_dir):
+    return None
+  proc = _run(
+    Path(source_dir), "remote", "get-url", "origin", check=False,
+  )
+  value = proc.stdout.strip()
+  return value if proc.returncode == 0 and value else None
+
+
 def has_origin(source_dir: str | Path) -> bool:
   """Whether this app repo has a real `origin` remote.
 
@@ -1301,12 +1312,7 @@ def has_origin(source_dir: str | Path) -> bool:
   `record_upstream` does not. Treat any git failure as false so callers can
   fall back to the synthetic path unchanged.
   """
-  if not is_repo(source_dir):
-    return False
-  proc = _run(
-    Path(source_dir), "remote", "get-url", "origin", check=False,
-  )
-  return proc.returncode == 0
+  return origin_url(source_dir) is not None
 
 
 def clone_upstream(

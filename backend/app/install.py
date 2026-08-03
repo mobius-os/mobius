@@ -398,6 +398,84 @@ def _find_ref_independent_catalog_row(
   return None
 
 
+def _find_trusted_origin_catalog_row(
+  db: Session,
+  canonical_manifest_url: str,
+  manifest_id: str,
+  manifest_url: str,
+) -> models.App | None:
+  """Adopt a legacy local row only when its Git origin proves identity.
+
+  Before catalog identity was persisted, an app could be built from the
+  canonical repository yet retain ``manifest_url=NULL``. Slug equality alone
+  is never enough to adopt owner data: a catalog package may legitimately use
+  the same id as an unrelated local app. For the narrow trusted root-catalog
+  shape, an exact canonical ``origin`` URL is the missing durable witness.
+  """
+  if _trusted_catalog_repo_base(canonical_manifest_url) is None:
+    return None
+  repo_ref = _derive_repo_ref(manifest_url)
+  if repo_ref is None:
+    return None
+  expected_origin, _ref = repo_ref
+  candidate = (
+    db.query(models.App)
+    .filter(
+      models.App.slug == manifest_id,
+      models.App.manifest_url.is_(None),
+    )
+    .first()
+  )
+  if candidate is None:
+    return None
+  actual_origin = app_git.origin_url(candidate.source_dir)
+  if actual_origin is None:
+    return None
+  return candidate if actual_origin.rstrip("/") == expected_origin.rstrip("/") else None
+
+
+def _find_install_identity_row(
+  db: Session,
+  *,
+  source_url: str,
+  manifest_id: str,
+) -> models.App | None:
+  """Resolve exact, moved-ref, and proven legacy catalog identities."""
+  canonical = _canonical_identity_key(source_url, manifest_id)
+  existing = (
+    db.query(models.App)
+    .filter(models.App.manifest_url == canonical)
+    .first()
+  )
+  if existing is None:
+    existing = _find_ref_independent_catalog_row(db, canonical, manifest_id)
+  if existing is None:
+    existing = _find_trusted_origin_catalog_row(
+      db, canonical, manifest_id, source_url,
+    )
+  return existing
+
+
+def _catalog_identity_matches(
+  existing_identity: str | None,
+  candidate_url: str,
+  manifest_id: str,
+) -> bool:
+  """Whether a reviewed candidate is the installed trusted catalog app."""
+  if not existing_identity:
+    return False
+  candidate_identity = _canonical_identity_key(candidate_url, manifest_id)
+  if candidate_identity == existing_identity:
+    return True
+  suffix = f"#manifest-id={manifest_id}"
+  existing_repo = _trusted_catalog_repo_base(existing_identity)
+  return bool(
+    existing_identity.endswith(suffix)
+    and existing_repo
+    and existing_repo == _trusted_catalog_repo_base(candidate_identity)
+  )
+
+
 def _canonical_identity_key(url_or_base: str, manifest_id: str) -> str:
   """Single canonical shape for the `manifest_url` column.
 
@@ -1601,6 +1679,7 @@ class InstallTarget:
   existing: models.App | None
   mode: str
   renaming: bool
+  adopting_trusted_origin: bool
   canonical_manifest_url: str
   force_core_store_update: bool
 
@@ -1865,16 +1944,9 @@ def _select_install_target(
   force_core_store_update = _should_force_core_store_update(
     source, manifest_id, canonical_manifest_url,
   )
-  existing = (
-    db.query(models.App)
-    .filter(models.App.manifest_url == canonical_manifest_url)
-    .first()
+  existing = _find_install_identity_row(
+    db, source_url=source_for_key, manifest_id=manifest_id,
   )
-  if existing is None:
-    # A catalog pin may move refs while retaining repo + manifest identity.
-    existing = _find_ref_independent_catalog_row(
-      db, canonical_manifest_url, manifest_id,
-    )
 
   renaming = False
   if existing is None:
@@ -1902,6 +1974,9 @@ def _select_install_target(
     existing=existing,
     mode="update" if existing else "install",
     renaming=renaming,
+    adopting_trusted_origin=bool(
+      existing is not None and existing.manifest_url is None
+    ),
     canonical_manifest_url=canonical_manifest_url,
     force_core_store_update=force_core_store_update,
   )
@@ -2537,7 +2612,7 @@ async def install_from_manifest(
         # the owner source we just committed to `main`. Force the three-way
         # merge instead, so those edits are folded in cleanly or surfaced as an
         # owner-gated conflict (identical on-disk == catalog resolves clean).
-        diverged = adopt_repoless_source or (
+        diverged = target.adopting_trusted_origin or adopt_repoless_source or (
           bool(prev_upstream_commit) and await asyncio.to_thread(
             app_git.local_diverged_from,
             git_source_dir, prev_upstream_commit,

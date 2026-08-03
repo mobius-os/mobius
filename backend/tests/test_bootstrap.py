@@ -307,3 +307,30 @@ async def test_bootstrap_honors_skills_tombstone_at_other_ref(db, monkeypatch):
 
   urls = [c.kwargs["manifest_url"] for c in install_mock.await_args_list]
   assert BOOTSTRAP_SKILLS_MANIFEST_URL not in urls  # tombstone respected
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_honors_legacy_trusted_origin_tombstone(
+  db, monkeypatch,
+):
+  """A pre-identity catalog row remains uninstalled after owner deletion."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  db.add(models.App(
+    source_dir="/tmp/mobius-tests/legacy-memory",
+    id=52,
+    name="Memory",
+    slug="memory",
+    manifest_url=None,
+    deleted_at=datetime.now(timezone.utc),
+  ))
+  db.commit()
+
+  install_mock = AsyncMock(return_value=_install_result())
+  with patch(
+    "app.app_git.origin_url",
+    return_value="https://github.com/mobius-os/app-memory.git",
+  ), patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  urls = [c.kwargs["manifest_url"] for c in install_mock.await_args_list]
+  assert BOOTSTRAP_MEMORY_MANIFEST_URL not in urls
