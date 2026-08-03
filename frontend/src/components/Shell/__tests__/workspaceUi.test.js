@@ -912,12 +912,10 @@ test('chat deletion is immediate while app deletion still requires confirmation'
 })
 
 test('one touch hold cannot dismiss its own drawer row menu', () => {
-  assert.match(drawerItemActionMenu, /const outsidePointerDownRef = useRef\(null\)/)
-  assert.match(drawerItemActionMenu, /useLayoutEffect\(\(\) => \{[\s\S]*?if \(open\) outsidePointerDownRef\.current = null[\s\S]*?\}, \[open\]\)/,
-    'every newly opened menu starts without authorization from an older press')
-  assert.match(drawerItemActionMenu, /if \(outsidePointerDownRef\.current == null\) return/,
+  assert.match(drawerItemActionMenu, /const outsidePressStartedRef = useRef\(false\)/)
+  assert.match(drawerItemActionMenu, /if \(!consumeOutsidePointer\(event\) \|\| !outsidePressStartedRef\.current\) return/,
     'a retargeted opener click has no layer-owned pointerdown and must be ignored')
-  assert.match(drawerItemActionMenu, /onPointerCancel=\{event => \{[\s\S]*?outsidePointerDownRef\.current = null/,
+  assert.match(drawerItemActionMenu, /onPointerCancel=\{\(\) => \{[\s\S]*?outsidePressStartedRef\.current = false/,
     'a cancelled outside press cannot authorize a later unrelated click')
 })
 
