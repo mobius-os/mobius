@@ -30,6 +30,7 @@ export default function DrawerItemActionMenu({
   const menuRef = useRef(null)
   const wasOpenRef = useRef(false)
   const restoreOnCloseRef = useRef(true)
+  const outsidePointerDownRef = useRef(null)
   const [confirmation, setConfirmation] = useState(null)
   const [position, setPosition] = useState(null)
 
@@ -37,6 +38,10 @@ export default function DrawerItemActionMenu({
     restoreOnCloseRef.current = restoreFocus
     onClose()
   }
+
+  useLayoutEffect(() => {
+    if (open) outsidePointerDownRef.current = null
+  }, [open])
 
   useEffect(() => {
     if (open) {
@@ -145,13 +150,25 @@ export default function DrawerItemActionMenu({
       onPointerDown={event => {
         // Keep the layer mounted for the complete tap. Closing on pointerdown
         // lets Android retarget the later release/click to the row underneath.
-        consumeOutsidePointer(event)
+        if (consumeOutsidePointer(event)) {
+          outsidePointerDownRef.current = event.pointerId
+        }
       }}
       onPointerUp={event => {
         consumeOutsidePointer(event)
       }}
+      onPointerCancel={event => {
+        if (consumeOutsidePointer(event)) outsidePointerDownRef.current = null
+      }}
       onClick={event => {
-        if (consumeOutsidePointer(event)) close()
+        if (!consumeOutsidePointer(event)) return
+        // A hold can mount this layer between the source pointerup and its
+        // browser-generated click. That click never began on the layer, so it
+        // must not dismiss the menu it just opened. A deliberate outside tap
+        // always contributes the layer-owned pointerdown recorded above.
+        if (outsidePointerDownRef.current == null) return
+        outsidePointerDownRef.current = null
+        close()
       }}
       onContextMenu={event => event.preventDefault()}
       onWheel={event => {
