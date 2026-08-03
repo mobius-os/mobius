@@ -421,6 +421,7 @@ function FileChips({ files, onRemove, chatId }) {
  * Props:
  *   input              — current textarea value
  *   onInputChange      — receives new string
+ *   onInputIntent      — runs after the controlled draft accepts an edit
  *   onSubmit           — called with FormEvent | MouseEvent | TouchEvent
  *   onSubmitSteer      — submits composed text and immediately steers
  *                        it when a live turn can accept steering
@@ -474,6 +475,7 @@ export default function ChatInputBar({
   chatId,
   input,
   onInputChange,
+  onInputIntent,
   onSubmit,
   onSubmitSteer,
   inputRef,
@@ -641,9 +643,11 @@ export default function ChatInputBar({
   }
 
   function handleTextareaChange(e) {
+    const value = e.target.value
     resetMessageHistory()
-    if (listeningRef?.current) onManualVoiceEdit?.(e.target.value)
-    onInputChange(e.target.value)
+    if (listeningRef?.current) onManualVoiceEdit?.(value)
+    onInputChange(value)
+    onInputIntent?.(e.nativeEvent)
   }
 
   function handlePaste(e) {

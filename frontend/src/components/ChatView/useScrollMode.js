@@ -1317,6 +1317,10 @@ export default function useScrollMode({
   // The observer in ChatView notifies this runner rather than writing the CSS
   // variable itself, so both mutations share the reader-gesture gate.
   const composerResizeRunRef = useRef(null)
+  // Controlled composer edits must publish their draft before a PIN -> FOLLOW
+  // transition can render. React's change handler invokes this effect-owned
+  // bridge after accepting the new value.
+  const composerEditRunRef = useRef(null)
   // A custom Q&A field can grow while the phone browser is also moving its
   // visual viewport to keep the caret above the keyboard. Keep that native
   // editing lifecycle visible across focusout until the keyboard has returned
@@ -2508,7 +2512,7 @@ export default function useScrollMode({
       // Keep the gesture gate, but let that scroll become reader-owned.
       disclosureInputOwnsGesture = false
     }
-    const onComposerTailIntent = (event) => {
+    const runComposerTailIntent = (event) => {
       if (!composerTailIntentRequestsFollow(event, scrollEl)) return
       // Once FOLLOW already owns layout, later characters carry no new scroll
       // intent. Keep this a one-time handoff instead of persisting and tracing
@@ -2531,6 +2535,8 @@ export default function useScrollMode({
       persistMode()
       recordTrace('events', 'reader:composer-bottom', { scrollEl })
     }
+    const onComposerPointerDown = (event) => runComposerTailIntent(event)
+    composerEditRunRef.current = runComposerTailIntent
     const noteScrollStart = () => {
       if (!pendingGestureStart) return
       perfMark('scroll.startLatency', performance.now() - pendingGestureStart)
@@ -2547,8 +2553,7 @@ export default function useScrollMode({
     scrollEl.addEventListener('input', onQuestionEditMutation, { passive: true })
     scrollEl.addEventListener('pointerup', onPointerUpInput, { passive: true })
     scrollEl.addEventListener('pointercancel', onPointerCancelInput, { passive: true })
-    chatEl?.addEventListener('pointerdown', onComposerTailIntent, { passive: true })
-    chatEl?.addEventListener('input', onComposerTailIntent, { passive: true })
+    chatEl?.addEventListener('pointerdown', onComposerPointerDown, { passive: true })
 
     // Scroll handler — user-driven scrolls only mark intent here. The expensive
     // semantic location/mode work runs once in settleReaderScroll.
@@ -2655,8 +2660,10 @@ export default function useScrollMode({
       scrollEl.removeEventListener('input', onQuestionEditMutation)
       scrollEl.removeEventListener('pointerup', onPointerUpInput)
       scrollEl.removeEventListener('pointercancel', onPointerCancelInput)
-      chatEl?.removeEventListener('pointerdown', onComposerTailIntent)
-      chatEl?.removeEventListener('input', onComposerTailIntent)
+      chatEl?.removeEventListener('pointerdown', onComposerPointerDown)
+      if (composerEditRunRef.current === runComposerTailIntent) {
+        composerEditRunRef.current = null
+      }
       if (forceRevealRef.current === forceReveal) forceRevealRef.current = null
     }
   }, [
@@ -2823,6 +2830,10 @@ export default function useScrollMode({
     composerResizeRunRef.current?.()
   }, [])
 
+  const composerEdited = useCallback((event) => {
+    composerEditRunRef.current?.(event)
+  }, [])
+
   return {
     gestureWindowUntilRef,
     revealed,
@@ -2837,6 +2848,7 @@ export default function useScrollMode({
     settleSendIntent,
     settleStreamingPin,
     composerResized,
+    composerEdited,
     paneResized,
   }
 }

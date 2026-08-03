@@ -262,7 +262,16 @@ test.describe('Spacer mechanics', () => {
     await sendMessage(page, 'First message')
     const first = await measure(page)
     await stopAgent(page)
-    await sendMessage(page, 'Second message')
+    const scroll = page.locator('[data-chat-surface="painted"] .chat__scroll')
+    const composer = page.getByRole('textbox', { name: 'Message Möbius…' })
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'PIN_USER_MSG')
+    await composer.fill('Second message')
+    await expect(composer).toHaveValue('Second message')
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'FOLLOW_BOTTOM')
+    await composer.press('Enter')
+    await page.evaluate(() => new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(r))
+    ))
 
     const m = await measure(page)
     expect(m.msgCount).toBeGreaterThanOrEqual(2)

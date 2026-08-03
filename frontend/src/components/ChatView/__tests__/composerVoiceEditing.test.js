@@ -18,10 +18,15 @@ test('manual textarea changes remain enabled while voice input is active', () =>
   assert.doesNotMatch(changeHandler, /listeningRef\?\.current\) return/,
     'listening must not discard owner edits')
   assert.match(changeHandler,
-    /if \(listeningRef\?\.current\) onManualVoiceEdit\?\.\(e\.target\.value\)/,
+    /if \(listeningRef\?\.current\) onManualVoiceEdit\?\.\(value\)/,
     'a live edit must rebase the recognition session before updating the draft')
-  assert.match(changeHandler, /onInputChange\(e\.target\.value\)/,
+  assert.match(changeHandler, /onInputChange\(value\)/,
     'the controlled composer must still receive the owner edit')
+  assert.ok(
+    changeHandler.indexOf('onInputChange(value)')
+      < changeHandler.indexOf('onInputIntent?.(e.nativeEvent)'),
+    'scroll ownership may change only after React accepts the controlled draft',
+  )
 })
 
 test('ChatView connects manual voice edits to the voice-input session', () => {

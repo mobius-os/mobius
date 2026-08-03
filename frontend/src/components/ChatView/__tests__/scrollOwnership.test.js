@@ -220,7 +220,7 @@ test('automatic geometry owners and newer semantic actions share reader authorit
     'a disclosure press promoted to a native pan must become reader-owned scroll',
   )
 
-  const composerStart = ownerSource.indexOf('const onComposerTailIntent =')
+  const composerStart = ownerSource.indexOf('const runComposerTailIntent =')
   const composerEnd = ownerSource.indexOf('const noteScrollStart =', composerStart)
   const composerPath = ownerSource.slice(composerStart, composerEnd)
   assert.ok(composerStart >= 0 && composerEnd > composerStart,

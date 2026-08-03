@@ -719,6 +719,7 @@ export default function ChatView({
     settleSendIntent,
     settleStreamingPin,
     composerResized,
+    composerEdited,
     paneResized,
   } = useScrollMode({
     chatId,
@@ -4224,6 +4225,7 @@ export default function ChatView({
           chatId={chatId}
           input={input}
           onInputChange={handleComposerInputChange}
+          onInputIntent={composerEdited}
           onSubmit={handleSubmit}
           onSubmitSteer={handleSubmitSteer}
           inputRef={inputRef}
