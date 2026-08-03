@@ -2143,6 +2143,7 @@
    the directional glyph leaves first, then the square settles in, so the two
    meanings never mix while the shared button shell changes colour. */
 .chat__action-glyphs {
+  --stop-handoff: 0.1s;
   width: 28px;
   height: 28px;
   display: grid;
@@ -2152,7 +2153,6 @@
 .chat__action-glyph {
   grid-area: 1 / 1;
   opacity: 0;
-  pointer-events: none;
 }
 
 .chat__action-glyphs--send .chat__action-glyph--send,
@@ -2164,20 +2164,19 @@
   transform: scale(0.76) rotate(-8deg);
 }
 
-.chat__action-glyphs--stop .chat__action-glyph--send,
-.chat__action-glyphs--stop .chat__action-glyph--steer {
+.chat__action-glyphs--stop :is(.chat__action-glyph--send, .chat__action-glyph--steer) {
   transform: scale(0.82);
   transition:
-    opacity 0.1s ease-in,
-    transform 0.1s ease-in;
+    opacity var(--stop-handoff) ease-in,
+    transform var(--stop-handoff) ease-in;
 }
 
 .chat__action-glyphs--stop .chat__action-glyph--stop {
   opacity: 1;
   transform: none;
   transition:
-    opacity 0.12s ease-out 0.1s,
-    transform 0.16s var(--ease-out-soft, ease-out) 0.1s;
+    opacity 0.12s ease-out var(--stop-handoff),
+    transform 0.16s var(--ease-out-soft, ease-out) var(--stop-handoff);
 }
 
 .chat__send {
