@@ -24,7 +24,7 @@ FROM python:3.12-slim-trixie
 
 # Copy Node.js binary from the frontend stage instead of installing via
 # apt.  The debian nodejs/npm packages pull in ~200MB of system node
-# packages we don't need — only the claude CLI and npm globals need Node.
+# packages we don't need — the npm-installed agent tools still need Node.
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
@@ -43,7 +43,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g esbuild@0.28.1 \
-    && npm install -g @anthropic-ai/claude-code@2.1.220 \
     && npm install -g @openai/codex@0.146.0 \
     && npm install -g agent-browser@0.31.1 \
     && agent-browser install \
@@ -105,8 +104,12 @@ WORKDIR /app
 
 COPY backend/requirements.txt backend/requirements.lock ./
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
+    && _claude_cli="$(python -c \
+      'from pathlib import Path; import claude_agent_sdk; print(Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude")')" \
+    && test -x "${_claude_cli}" \
+    && ln -s "${_claude_cli}" /usr/local/bin/claude \
     && python -c \
-      'from pathlib import Path; import claude_agent_sdk; p = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"; p.unlink(missing_ok=True); assert not p.exists()'
+      'from pathlib import Path; import subprocess; import claude_agent_sdk; from claude_agent_sdk._cli_version import __cli_version__; bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"; global_cli = Path("/usr/local/bin/claude"); assert global_cli.samefile(bundled); assert subprocess.check_output([global_cli, "--version"], text=True).split()[0] == __cli_version__'
 
 # openai-codex Python SDK: its upstream pyproject pins a second, older
 # openai-codex-cli-bin payload. Keep that declared package so `pip check` and
@@ -146,16 +149,16 @@ RUN pip install --no-cache-dir --no-deps \
 
 # Capture each installed agent CLI's npm publish date into a small JSON the
 # Settings row reads (routes/settings._cli_release_dates), keyed by the
-# version actually installed above. Done at build time so a CLI pin bump
+# version reported by the executable. Done at build time so a CLI bump
 # refreshes the date automatically — no hand-maintained map, no test to
 # satisfy. Best effort: if the npm registry is unreachable the file is left
 # empty and the Settings row simply shows the bare version, never an error.
 RUN node -e "const cp=require('child_process'),fs=require('fs');\
-const want=['@anthropic-ai/claude-code','@openai/codex'];\
-let installed={};\
-try{installed=(JSON.parse(cp.execSync('npm ls -g --depth=0 --json',{stdio:['ignore','pipe','ignore']}).toString()).dependencies)||{};}catch(e){}\
+const want={'@anthropic-ai/claude-code':'claude','@openai/codex':'codex'};\
 const out={};\
-for(const name of want){const v=installed[name]&&installed[name].version;if(!v)continue;\
+for(const [name,command] of Object.entries(want)){let v;\
+try{const match=cp.execFileSync(command,['--version'],{stdio:['ignore','pipe','ignore']}).toString().match(/\\d+\\.\\d+\\.\\d+\\S*/);v=match&&match[0];}catch(e){}\
+if(!v)continue;\
 try{const t=JSON.parse(cp.execSync('npm view '+name+'@'+v+' time --json',{stdio:['ignore','pipe','ignore']}).toString());if(t&&t[v])out[v]=String(t[v]).slice(0,10);}catch(e){}}\
 fs.writeFileSync('/app/cli-release-dates.json',JSON.stringify(out));\
 console.log('cli-release-dates.json:',JSON.stringify(out));" \

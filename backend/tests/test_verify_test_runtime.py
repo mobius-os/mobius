@@ -141,7 +141,7 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   assert "node:22" not in preship
 
 
-def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
+def test_image_uses_the_sdk_bundled_claude_cli_globally():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   requirements = (ROOT / "backend" / "requirements.txt").read_text(
     encoding="utf-8"
@@ -160,11 +160,20 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
   )
   assert "claude-agent-sdk==0.2.128" in requirements
   assert "claude-agent-sdk==0.2.128" in requirements_lock
-  assert (
-    'Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"'
-    in requirements_layer
-    and "unlink(missing_ok=True)" in requirements_layer
-    and "assert not p.exists()" in requirements_layer
+  assert "npm install -g @anthropic-ai/claude-code@" not in dockerfile
+  assert 'Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"' in (
+    requirements_layer
+  )
+  assert 'ln -s "${_claude_cli}" /usr/local/bin/claude' in requirements_layer
+  assert "global_cli.samefile(bundled)" in requirements_layer
+  assert "__cli_version__" in requirements_layer
+  assert "unlink(" not in requirements_layer
+
+
+def test_image_deduplicates_codex_cli_without_breaking_the_sdk_contract():
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+  requirements = (ROOT / "backend" / "requirements.txt").read_text(
+    encoding="utf-8"
   )
 
   codex_layer = dockerfile[

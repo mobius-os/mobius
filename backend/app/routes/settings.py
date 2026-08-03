@@ -48,8 +48,8 @@ _VERSION_TIMEOUT = 2.0
 # Settings row can read "2.1.183 (2026-06-19)" instead of the raw CLI banner.
 #
 # Captured at image-build time by the Dockerfile (`npm view <pkg>@<v> time`,
-# right after the global installs) into the JSON file below — keyed by the
-# versions actually installed. A CLI pin bump therefore refreshes the date
+# after the agent runtimes are installed) into the JSON file below — keyed by
+# the versions their executables report. A CLI bump therefore refreshes the date
 # automatically, with no hand-maintained map to keep in lockstep and no test
 # to satisfy. Read once and cached; every failure mode (the file absent on a
 # dev checkout, or a build that couldn't reach the npm registry) degrades to
