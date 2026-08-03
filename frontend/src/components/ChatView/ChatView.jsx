@@ -63,6 +63,7 @@ import { focusComposerElement, shouldApplyComposerFocusRequest } from './compose
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
 import { updateChatRuntimeCache } from './chatRuntimeCache.js'
 import {
+  assistantAnchorKey,
   chatCacheCanPaint,
   chatDetailCacheValue,
   chatSnapshotMatchesRuntime,
@@ -2752,6 +2753,10 @@ export default function ChatView({
       // The 202 means the answer write committed. Settle the durable and live
       // card sources only now; an optimistic pre-request answer made transient
       // failures look final and erased the retryable per-tab question draft.
+      const keepsCurrentTurn = answerKeepsCurrentTurn(response)
+      const recoveredRows = keepsCurrentTurn
+        ? []
+        : (startedMessagesFromResponse(response) || [])
       if (resolvedAnswers) {
         commitMessages(prev => {
           const updated = [...prev]
@@ -2765,7 +2770,10 @@ export default function ChatView({
             })
             updated[lastIdx] = msg
           }
-          return updated
+          // Recovery commits a hidden continuation before its reply starts.
+          // Mirror the backend's canonical rows so the live reply mounts at
+          // the same transcript position its durable row will occupy.
+          return appendMessageBatch(updated, recoveredRows)
         })
         // A mid-turn question may still live in streamItems rather than the
         // durable message list. Keep both render sources in agreement.
@@ -2780,7 +2788,7 @@ export default function ChatView({
       // Unknown future modes also retire the bridge: preserving the completed
       // question row and appending is safer than overwriting it with output
       // from a turn whose ownership semantics this client does not know.
-      if (!answerKeepsCurrentTurn(response)) {
+      if (!keepsCurrentTurn) {
         bridgeHook.markBridged()
         activeAssistantDataKeyRef.current = null
       }
@@ -3730,21 +3738,21 @@ export default function ChatView({
   // The ONE active <li> carries this data-key for both DB and live payloads.
   // ANCHOR_AT resolves `[data-key]`, so source selection must never change it.
   // The first committed source owns the key: a DB-first bridge seeds the
-  // partial's durable key, while a live-first answer keeps its synthetic key
-  // even if a related DB partial arrives later.
+  // partial's durable key, while a live-first answer keeps its absolute
+  // transcript-position alias even if a related DB partial arrives later.
   //
   // Fast-forward can insert a user row AFTER the mounted partial while the
   // stream remains live. Therefore bridge identity is ts-based across the
   // full message list, not "last message only." For multi-turn flow (no
   // bridge), the previous assistant is rendered alongside the streaming
-  // <li> (different turns), so the streaming <li> gets its own synthetic key
-  // rather than reusing a previous assistant row's key.
+  // <li> (different turns). The live row therefore uses the absolute index its
+  // eventual durable row will occupy, not the previous assistant's key.
   const streamingDataKey = chooseActiveAssistantDataKey({
     latched: activeAssistantDataKeyRef.current,
     mirroredMsg: activeMirrorMsg,
     mirrorIndex: activeMirrorMsgIdx,
     hasLivePayload: hasLiveAssistantPayload,
-    chatId,
+    appendIndex: offset + messages.length,
   })
   useLayoutEffect(() => {
     if (!turnActive) {
@@ -3975,6 +3983,9 @@ export default function ChatView({
             // ANCHOR_AT mode. msg.id (server-assigned UUID) is ideal;
             // fall back to role+ts which is also stable across renders.
             const dataKey = messageKey(msg, offset + i)
+            const anchorKey = msg.role === 'assistant'
+              ? assistantAnchorKey(offset + i)
+              : null
             // User rows key + pin on the stable cid so the optimistic→confirm
             // display-ts update never remounts the row (which would drop the
             // pin target mid-swap). data-ts stays for the revealed metadata row.
@@ -3988,6 +3999,7 @@ export default function ChatView({
               className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}`}
               ref={i === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
+              data-anchor-key={anchorKey === dataKey ? undefined : anchorKey}
               data-cid={userCid || undefined}
               data-ts={ownerUserMessage && msg.ts ? String(msg.ts) : undefined}
               onClick={hasMessageMeta

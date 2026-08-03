@@ -29,6 +29,12 @@ test('cache first paint requires the saved reading coordinate when one exists', 
     'optimistic-to-server aliases remain valid restoration coordinates')
   assert.equal(chatCacheCanPaint(cached, 'user-10'), false,
     'a role/timestamp alias waits for passive canonical remapping')
+  assert.equal(chatCacheCanPaint({
+    restorationWindowComplete: true,
+    offset: 4,
+    messages: [{ id: 'persisted-answer', role: 'assistant', ts: 12 }],
+  }, 'assistant-4'), true,
+  'a live-first positional alias survives the authoritative timestamp')
   assert.equal(chatCacheCanPaint(cached, 'server-row', true), false,
     'a nested part waits for committed DOM validation')
   assert.equal(chatCacheCanPaint(cached, 'missing-row'), false,

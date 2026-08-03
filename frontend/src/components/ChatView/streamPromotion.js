@@ -4,6 +4,7 @@
  * stream becomes blocks/content and how an in-flight DB partial is replaced.
  */
 
+import { assistantAnchorKey } from '../../lib/chatDetailCache.js'
 import { questionKey } from './questionKey.js'
 
 export function streamItemToBlock(item, { finalize = true } = {}) {
@@ -319,31 +320,34 @@ export function chooseActiveAssistantMirrorIndex({
 
 
 // The first mounted active row owns the scroll-anchor key for its lifetime.
-// DB-first bridge answers seed from the durable row; live-first answers seed a
-// synthetic turn key and must not adopt a later DB partial's key, because both
-// React reconciliation and ANCHOR_AT resolve through this identity.
+// DB-first bridge answers seed from the durable row; live-first answers seed
+// from the absolute transcript position their durable row will occupy. That
+// positional alias remains available after persistence gives the row a server
+// timestamp, so ANCHOR_AT survives terminal promotion instead of losing its
+// target at exactly the moment final layout settles.
 export function chooseActiveAssistantDataKey({
   latched,
   mirroredMsg,
   mirrorIndex,
   hasLivePayload,
-  chatId,
+  appendIndex,
 }) {
   const mirroredKey = mirroredMsg?.role === 'assistant' && !mirroredMsg.hidden
     ? (mirroredMsg.id || `${mirroredMsg.role}-${mirroredMsg.ts ?? mirrorIndex}`)
     : null
+  const appendedKey = assistantAnchorKey(appendIndex)
   if (latched?.key) {
     // A DB-seeded key is valid only while that row still mirrors the active
     // answer. If surface selection releases it as unrelated, the restored
     // history row owns the durable key and the live answer needs a distinct
-    // synthetic anchor. A live-first latch is intentionally retained when it
-    // later adopts a related DB mirror.
+    // append-position anchor. A live-first latch is intentionally retained
+    // when it later adopts a related DB mirror.
     if (latched.mirrorKey && latched.mirrorKey !== mirroredKey) {
-      return mirroredKey || (hasLivePayload ? `streaming-${chatId}` : latched.key)
+      return mirroredKey || (hasLivePayload ? appendedKey : latched.key)
     }
     return latched.key
   }
-  return mirroredKey || `streaming-${chatId}`
+  return mirroredKey || appendedKey
 }
 
 export function findTrailingAssistantPartialIndex(messages) {

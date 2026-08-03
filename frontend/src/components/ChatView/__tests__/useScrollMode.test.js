@@ -614,6 +614,26 @@ test('anchor reapply fires when the anchor row shifted since the last apply', ()
   )
 })
 
+test('a promoted assistant still resolves its live transcript-position alias', () => {
+  const row = { offsetTop: 1000 }
+  const scrollEl = {
+    scrollHeight: 2000,
+    scrollTop: 500,
+    clientHeight: 700,
+    querySelector(selector) {
+      return selector === '[data-anchor-key="assistant-12"]' ? row : null
+    },
+  }
+
+  assert.equal(_anchorReapplyNeeded(
+    scrollEl,
+    { kind: 'ANCHOR_AT', key: 'assistant-12', offset: 40 },
+    1000,
+  ), true, 'terminal layout can repair the held viewport through the alias')
+  applyMode(scrollEl, { kind: 'ANCHOR_AT', key: 'assistant-12', offset: 40 })
+  assert.equal(scrollEl.scrollTop, 960)
+})
+
 test('anchor reapply fires when scrollTop was clamped short but the target is now reachable', () => {
   // target = 1000 - 40 = 960; maxScrollTop = 2000 - 700 = 1300 ≥ 960 reachable;
   // scrollTop 500 < 960 → clamped short.

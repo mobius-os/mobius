@@ -3,6 +3,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { assistantAnchorKey, messageKey } from '../../../lib/chatDetailCache.js'
 
 import {
   streamItemsToAssistantPayload,
@@ -419,28 +420,28 @@ test('a later visible user row retires a stale mount bridge before new stream ou
 })
 
 test('active row data-key is latched for both live-first and DB-first source switches', () => {
-  const synthetic = chooseActiveAssistantDataKey({
+  const appendAlias = chooseActiveAssistantDataKey({
     latched: null,
     mirroredMsg: null,
     mirrorIndex: -1,
     hasLivePayload: true,
-    chatId: 'chat-1',
+    appendIndex: 12,
   })
-  assert.equal(synthetic, 'streaming-chat-1')
+  assert.equal(appendAlias, 'assistant-12')
   assert.equal(chooseActiveAssistantDataKey({
-    latched: { key: synthetic, mirrorKey: null },
+    latched: { key: appendAlias, mirrorKey: null },
     mirroredMsg: { role: 'assistant', ts: 9 },
     mirrorIndex: 2,
     hasLivePayload: true,
-    chatId: 'chat-1',
-  }), synthetic, 'live-first DB adoption must keep the mounted synthetic anchor')
+    appendIndex: 12,
+  }), appendAlias, 'live-first DB adoption must keep the mounted append-position anchor')
 
   const dbFirst = chooseActiveAssistantDataKey({
     latched: null,
     mirroredMsg: { role: 'assistant', ts: 9 },
     mirrorIndex: 2,
     hasLivePayload: false,
-    chatId: 'chat-1',
+    appendIndex: 12,
   })
   assert.equal(dbFirst, 'assistant-9')
   assert.equal(chooseActiveAssistantDataKey({
@@ -448,7 +449,7 @@ test('active row data-key is latched for both live-first and DB-first source swi
     mirroredMsg: { role: 'assistant', ts: 9 },
     mirrorIndex: 2,
     hasLivePayload: true,
-    chatId: 'chat-1',
+    appendIndex: 12,
   }), dbFirst, 'DB-first bridge must keep its durable anchor when live data wins')
 
   const released = chooseActiveAssistantDataKey({
@@ -456,11 +457,36 @@ test('active row data-key is latched for both live-first and DB-first source swi
     mirroredMsg: null,
     mirrorIndex: -1,
     hasLivePayload: true,
-    chatId: 'chat-1',
+    appendIndex: 12,
   })
-  assert.equal(released, synthetic)
+  assert.equal(released, appendAlias)
   assert.notEqual(released, dbFirst,
     'an unrelated live answer must not duplicate the restored history row data-key')
+})
+
+test('recovered QA keeps one anchor from live row through authoritative persistence', () => {
+  const transcript = [
+    { role: 'assistant', ts: 10, blocks: [{ type: 'question' }] },
+    { role: 'user', ts: 11, cid: 'hidden-answer', hidden: true },
+  ]
+  const liveKey = chooseActiveAssistantDataKey({
+    latched: null,
+    mirroredMsg: null,
+    mirrorIndex: -1,
+    hasLivePayload: true,
+    appendIndex: 12,
+  })
+  const promoted = promoteAssistantStream(transcript, {
+    items: [{ type: 'text', content: 'Recovered answer' }],
+  })
+  assert.equal(messageKey(promoted.at(-1), 12), liveKey,
+    'the optimistic durable row takes over the live positional key')
+
+  const authoritative = { ...promoted.at(-1), ts: 99 }
+  assert.notEqual(messageKey(authoritative, 12), liveKey,
+    'the server timestamp becomes the primary durable identity')
+  assert.equal(assistantAnchorKey(12), liveKey,
+    'the DOM alias still resolves the reader anchor after persistence')
 })
 
 test('text prefix does not hide a persisted tool block when stream lacks it', () => {

@@ -46,10 +46,14 @@ test('R6: answering in-process keeps the active bridge through settlement', () =
   const end = chatViewSource.indexOf('\n  function handleSubmit', start)
   const answerPath = chatViewSource.slice(start, end)
   const sendIndex = answerPath.indexOf('const response = await streamSend')
-  const retireIndex = answerPath.indexOf('if (!answerKeepsCurrentTurn(response))')
+  const ownershipIndex = answerPath.indexOf(
+    'const keepsCurrentTurn = answerKeepsCurrentTurn(response)',
+  )
+  const retireIndex = answerPath.indexOf('if (!keepsCurrentTurn)', ownershipIndex)
   const markIndex = answerPath.indexOf('bridgeHook.markBridged()', retireIndex)
 
-  assert.ok(sendIndex >= 0 && retireIndex > sendIndex && markIndex > retireIndex,
+  assert.ok(sendIndex >= 0 && ownershipIndex > sendIndex
+    && retireIndex > ownershipIndex && markIndex > retireIndex,
     'the bridge may retire only after the backend says recovery started a new turn')
   assert.doesNotMatch(answerPath.slice(0, sendIndex), /bridgeHook\.markBridged\(\)/,
     'an in-process answer must not retire the same-turn bridge before its POST result')

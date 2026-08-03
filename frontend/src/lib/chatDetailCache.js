@@ -14,6 +14,11 @@ export function messageKey(message, index = 0) {
   return `${message.role}-${message.ts ?? index}`
 }
 
+/** The one pre-persistence address shared by a live assistant and its row. */
+export function assistantAnchorKey(index) {
+  return `assistant-${index}`
+}
+
 /** True when a durable address names this row through any identity the row
  * has carried. The primary DOM key stays id-first for existing positions;
  * cid and role/timestamp aliases bridge optimistic and legacy lifetimes. */
@@ -47,6 +52,11 @@ export function chatCacheCanPaint(
   const baseOffset = Number.isInteger(cached.offset) ? cached.offset : 0
   return cached.messages.some((message, index) => (
     messageKey(message, baseOffset + index) === String(savedAnchorKey)
+    || (
+      message?.role === 'assistant'
+      && !message.hidden
+      && assistantAnchorKey(baseOffset + index) === String(savedAnchorKey)
+    )
     || (
       message?.role === 'user'
       && !message.hidden
