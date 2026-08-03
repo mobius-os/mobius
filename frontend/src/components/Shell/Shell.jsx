@@ -2512,13 +2512,6 @@ export default function Shell() {
     // a send from another browser cannot turn this convenience into reopening a
     // conversation that has already started.
     //
-    // A phone keyboard can only be raised from the tap's live user-activation
-    // task. Reserve that focus before the first await, then transfer it to the
-    // chat-bound composer after the destination resolves. The lease also holds
-    // any keystrokes entered while a slow allocation is still completing.
-    const touchFocusLeased = !!focusComposer && beginTouchComposerFocusLease(
-      composerFocusLeaseRef.current,
-    )
     const ws = workspaceStateRef.current.ws
     // Standard is one destination surface, so acknowledge an explicit New-chat
     // tap immediately instead of leaving the drawer/old transcript painted for
@@ -2531,6 +2524,14 @@ export default function Shell() {
       setNewChatPresentation(presentation)
       closeDrawer()
     }
+    // A phone keyboard can only be raised from the tap's live user-activation
+    // task. Acquire the lease after the immediate drawer close so that close's
+    // synchronous history/focus bookkeeping cannot reclaim the old composer,
+    // but still before the first await. The lease carries any early typing to
+    // the chat-bound composer once allocation resolves.
+    const touchFocusLeased = !!focusComposer && beginTouchComposerFocusLease(
+      composerFocusLeaseRef.current,
+    )
     const resumeId = (
       (ws.viewMode === 'single')
       && activeChatIdRef.current == null
