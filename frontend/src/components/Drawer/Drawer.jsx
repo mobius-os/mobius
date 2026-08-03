@@ -629,7 +629,10 @@ export default function Drawer({
   const drawerRef = useRef(null)
   const closeShieldRef = useRef(null)
   useEffect(() => {
-    if (persistent) {
+    // A destination can claim focus before the history-backed modal has
+    // finished closing. Stand down on both sides of that overlap: do not
+    // schedule another open-frame focus, and do not restore the old owner.
+    if (persistent || focusHandoffActive) {
       previousFocusRef.current = null
       return
     }
