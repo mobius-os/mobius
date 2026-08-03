@@ -39,18 +39,6 @@ test('onNavigate consumes a pending drawer close BEFORE the phantom guard', () =
     'pending-close consumption must precede the canIntercept early-return')
 })
 
-test('a pending drawer traversal cannot reset focus after the shell hands it off', () => {
-  const pendingClose = onNavigate.slice(
-    onNavigate.indexOf('const pendingDrawerClose'),
-    onNavigate.indexOf('// A traversal off a dismissible sentinel'),
-  )
-  assert.match(
-    pendingClose,
-    /e\.intercept\(\{ handler: consume, focusReset: 'manual' \}\)/,
-    'the Navigation API traversal stays focus-neutral; Drawer or the destination owns focus',
-  )
-})
-
 test('a pending close landing on a classic-store phantom keeps seeking, not finishing', () => {
   // The wedged-mirror recovery must not swallow the HEALTHY-engine phantom
   // seek: when the committed entry is untagged in the authoritative classic

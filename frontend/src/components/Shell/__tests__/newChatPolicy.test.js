@@ -10,6 +10,7 @@ import {
   enteredEmptySingleScreen,
   mergeChatListWithCreatedGuards,
   mostRecentConcreteChatId,
+  newChatPresentationIsCurrent,
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
@@ -25,6 +26,58 @@ const empty = (id, extra = {}) => ({
   has_messages: false,
   running: false,
   ...extra,
+})
+
+test('New Chat presentation ownership follows allocation context then destination', () => {
+  const presentation = {
+    chatId: null,
+    navigationEpoch: 4,
+    viewMode: 'single',
+    drawerEntryOpen: true,
+  }
+  const current = {
+    navigationEpoch: 4,
+    viewMode: 'single',
+    drawerEntryOpen: true,
+    activeView: 'chat',
+    activeChatId: 'old',
+  }
+
+  for (const [change, expected] of [
+    [{}, true],
+    [{ navigationEpoch: 5 }, false],
+    [{ drawerEntryOpen: false }, false],
+    [{ viewMode: 'panes' }, false],
+  ]) {
+    assert.equal(newChatPresentationIsCurrent(presentation, {
+      ...current, ...change,
+    }), expected)
+  }
+  assert.equal(newChatPresentationIsCurrent({
+    ...presentation, drawerEntryOpen: false,
+  }, current), false)
+
+  const resolvedPresentation = {
+    chatId: 'new',
+    navigationEpoch: 4,
+    viewMode: 'single',
+    drawerEntryOpen: true,
+  }
+  const resolvedCurrent = {
+    navigationEpoch: 9,
+    viewMode: 'single',
+    drawerEntryOpen: false,
+    activeView: 'chat',
+    activeChatId: 'new',
+  }
+
+  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, resolvedCurrent), true)
+  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
+    ...resolvedCurrent, activeView: 'canvas', activeChatId: null,
+  }), false)
+  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
+    ...resolvedCurrent, activeChatId: 'other',
+  }), false)
 })
 
 test('empty-single policy fires only on the transition edge', () => {

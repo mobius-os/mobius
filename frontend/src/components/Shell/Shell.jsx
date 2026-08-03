@@ -61,17 +61,11 @@ import {
   currentReusableEmptyChat,
   mergeChatListWithCreatedGuards,
   mostRecentConcreteChatId,
+  newChatPresentationIsCurrent,
   reconcileCreatedChatGuard,
   rememberCreatedChat,
   reusableChatDetailVerdict,
 } from './newChatPolicy.js'
-import {
-  allocateNewChatPresentation,
-  claimNewChatPresentation,
-  newChatPresentationSuperseded,
-  releaseNewChatPresentation,
-  releaseNewChatPresentationForChat,
-} from './newChatPresentation.js'
 import {
   forgetConfirmedDeletion,
   forgetConfirmedDeletionIfExists,
@@ -586,14 +580,6 @@ export default function Shell() {
   // typing across that ID-less interval.
   const [newChatPresentation, setNewChatPresentation] = useState(null)
   const newChatPresentationRef = useRef(null)
-  // The tap reserves keyboard focus before its first await, while this layout
-  // commit makes the newly painted presentation the authoritative owner after
-  // the drawer and content inert states flip together. This is one handoff
-  // edge, not a frame/timer retry; the resolved-id update deliberately skips it.
-  useLayoutEffect(() => {
-    if (newChatPresentation?.chatId !== null) return
-    beginTouchComposerFocusLease(composerFocusLeaseRef.current)
-  }, [newChatPresentation])
   // A slow New-chat allocation replaces the modal drawer visually without
   // consuming its history entry. Destination navigation owns that entry once
   // the concrete chat exists; avoiding an early Back traversal also keeps the
@@ -1001,24 +987,43 @@ export default function Shell() {
       next.set(paneKey, id)
       return next
     })
-    setNewChatPresentation(current => (
-      current?.chatId === id ? null : current
-    ))
-    releaseNewChatPresentationForChat(newChatPresentationRef, id)
+    const presentation = newChatPresentationRef.current
+    if (String(presentation?.chatId ?? '') === id) {
+      newChatPresentationRef.current = null
+      setNewChatPresentation(current => (
+        current === presentation ? null : current
+      ))
+      releaseComposerFocusLease(composerFocusLeaseRef.current)
+    }
     finishDrawerNavigationPresentation()
   }, [finishDrawerNavigationPresentation, workspaceStateRef])
 
-  // Display-ready above is the cover's ONLY completion signal, and it belongs to
-  // the destination — a destination the owner has already left never emits it.
-  // Take the bridge down as soon as another surface owns the full-bleed box, or
-  // the New chat landing would stay painted over that surface indefinitely.
-  useEffect(() => {
-    if (!newChatPresentationSuperseded(newChatPresentation, fullBleedKey)) return
-    releaseNewChatPresentation(newChatPresentationRef, newChatPresentation)
+  // A route change, Back gesture, drawer reopen, or mode switch supersedes a
+  // pending New-chat tap. Retire its cover and keyboard lease together so its
+  // eventual network result cannot repaint or navigate over the newer intent.
+  useLayoutEffect(() => {
+    const presentation = newChatPresentationRef.current
+    if (!presentation || newChatPresentationIsCurrent(presentation, {
+      navigationEpoch: navigationEpochRef.current,
+      viewMode: workspace.viewMode,
+      drawerEntryOpen: drawerPushedRef.current && navigationOpen,
+      activeView,
+      activeChatId,
+    })) return
+    newChatPresentationRef.current = null
     setNewChatPresentation(current => (
-      current === newChatPresentation ? null : current
+      current === presentation ? null : current
     ))
-  }, [fullBleedKey, newChatPresentation])
+    releaseComposerFocusLease(composerFocusLeaseRef.current)
+  }, [
+    activeChatId,
+    activeView,
+    drawerPushedRef,
+    navigationEpochRef,
+    navigationOpen,
+    newChatPresentation,
+    workspace.viewMode,
+  ])
 
   // At most two ChatViews per transitioning owner: the last painted chat and the
   // current active chat. Handoff dedupe is world-local: Standard's retained copy
@@ -2555,23 +2560,26 @@ export default function Shell() {
     // tap immediately instead of leaving the drawer/old transcript painted for
     // the whole async allocation. Builder stays additive and therefore waits
     // for the concrete id before opening its new tab.
-    // originKey is the surface the cover is painted over until the row exists.
-    // It is what tells a still-running allocation apart from the owner having
-    // navigated somewhere else while it ran.
-    const presentation = focusComposer && ws.viewMode === 'single'
+    const presentsImmediately = focusComposer && ws.viewMode === 'single'
+    if (presentsImmediately && newChatPresentationRef.current) return
+    const presentation = presentsImmediately
       ? {
           chatId: null,
-          originKey: fullBleedKey ?? null,
-          originView: activeViewRef.current,
-          originChatId: activeChatIdRef.current,
+          navigationEpoch: navigationEpochRef.current,
+          viewMode: ws.viewMode,
+          drawerEntryOpen: drawerPushedRef.current,
         }
       : null
     if (presentation) {
-      // A second tap belongs to the already visible allocation. Joining it by
-      // doing nothing preserves the first focus lease and guarantees one
-      // destination owns the eventual navigation.
-      if (!claimNewChatPresentation(newChatPresentationRef, presentation)) return
+      newChatPresentationRef.current = presentation
       setNewChatPresentation(presentation)
+    }
+    const retirePresentation = () => {
+      if (!presentation || newChatPresentationRef.current !== presentation) return
+      newChatPresentationRef.current = null
+      setNewChatPresentation(current => (
+        current === presentation ? null : current
+      ))
     }
     // A phone keyboard can only be raised from the tap's live user-activation
     // task. The modal drawer remains history-open but is no longer displayed,
@@ -2601,19 +2609,26 @@ export default function Shell() {
         ? { draft, forceNew, exclude }
         : { candidate: resumeCandidate, draft, forceNew, exclude },
     )
-    if (chatId == null) {
+    if (presentation && (
+      newChatPresentationRef.current !== presentation
+      || !newChatPresentationIsCurrent(presentation, {
+        navigationEpoch: navigationEpochRef.current,
+        viewMode: workspaceStateRef.current.ws.viewMode,
+        drawerEntryOpen: drawerPushedRef.current,
+        activeView: activeViewRef.current,
+        activeChatId: activeChatIdRef.current,
+      })
+    )) {
+      retirePresentation()
       if (touchFocusLeased) {
         releaseComposerFocusLease(composerFocusLeaseRef.current)
       }
-      if (presentation) {
-        const stillOwnsPresentation = releaseNewChatPresentation(
-          newChatPresentationRef,
-          presentation,
-        )
-        setNewChatPresentation(current => (
-          current === presentation ? null : current
-        ))
-        if (!stillOwnsPresentation) return
+      return
+    }
+    if (chatId == null) {
+      retirePresentation()
+      if (touchFocusLeased) {
+        releaseComposerFocusLease(composerFocusLeaseRef.current)
       }
       // Don't leave a dead, drawer-still-open tap. Offline / failed create surface a
       // toast; an in-flight second tap just closes the drawer (the first create lands).
@@ -2623,38 +2638,9 @@ export default function Shell() {
       return
     }
 
-    if (presentation) {
-      // Allocation is subordinate to the tap that started it. If the owner
-      // deliberately moved elsewhere while the request was pending, retain
-      // the created empty row but never pull the workspace back to it.
-      const stillAtOrigin = activeViewRef.current === presentation.originView
-        && String(activeChatIdRef.current ?? '') === String(presentation.originChatId ?? '')
-      if (!stillAtOrigin || newChatPresentationRef.current !== presentation) {
-        if (releaseNewChatPresentation(newChatPresentationRef, presentation)) {
-          setNewChatPresentation(current => current === presentation ? null : current)
-        }
-        if (touchFocusLeased) {
-          releaseComposerFocusLease(composerFocusLeaseRef.current)
-        }
-        return
-      }
-      const alreadyPresented = activeViewRef.current === 'chat'
-        && String(activeChatIdRef.current) === String(chatId)
-      let allocatedPresentation = null
-      if (alreadyPresented) {
-        releaseNewChatPresentation(newChatPresentationRef, presentation)
-      } else {
-        allocatedPresentation = allocateNewChatPresentation(
-          newChatPresentationRef,
-          presentation,
-          chatId,
-        )
-      }
-      setNewChatPresentation(current => {
-        if (current !== presentation) return current
-        return alreadyPresented ? null : allocatedPresentation
-      })
-    }
+    const alreadyPresented = presentation
+      && activeViewRef.current === 'chat'
+      && String(activeChatIdRef.current) === String(chatId)
 
     const changesRoute = activeViewRef.current !== 'chat'
       || String(activeChatIdRef.current) !== String(chatId)
@@ -2680,6 +2666,20 @@ export default function Shell() {
       closeDrawer()
       const ws = workspaceStateRef.current.ws
       applyModeDestination({ view: 'chat', chatId, appId: null, paneId: ws.focusedPaneId })
+    }
+    if (presentation) {
+      if (alreadyPresented) {
+        retirePresentation()
+      } else {
+        const resolvedPresentation = {
+          ...presentation,
+          chatId: String(chatId),
+        }
+        newChatPresentationRef.current = resolvedPresentation
+        setNewChatPresentation(current => (
+          current === presentation ? resolvedPresentation : current
+        ))
+      }
     }
     if (focusComposer) {
       requestComposer(chatId, {
@@ -3032,7 +3032,6 @@ export default function Shell() {
             className="shell__rail-action"
             aria-label="New chat shortcut"
             title="New chat"
-            onPointerDown={(event) => event.preventDefault()}
             onClick={() => newChat({ focusComposer: true, recordHistory: true })}
           >
             <NewChatNavIcon aria-hidden="true" />
@@ -3080,7 +3079,6 @@ export default function Shell() {
         width={desktopSidebarWidth}
         onWidthChange={setDesktopSidebarWidth}
         interactionLocked={drawerModeTransitioning || drawerNavigationCover}
-        focusHandoffActive={newChatPresentation != null}
         onClose={drawerModeTransitioning || drawerNavigationCover
           ? undefined
           : closeDrawer}

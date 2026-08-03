@@ -3,6 +3,30 @@ function normalizedId(value) {
 }
 
 /**
+ * Whether an immediate New Chat surface still owns what the user is seeing.
+ *
+ * Allocation is allowed to finish only while the route generation, layout
+ * world, and drawer-history ownership captured by the tap are unchanged. Once
+ * the destination exists, the concrete chat route is the simpler authority:
+ * it owns the cover until that ChatView reports a painted frame.
+ */
+export function newChatPresentationIsCurrent(presentation, {
+  navigationEpoch,
+  viewMode,
+  drawerEntryOpen,
+  activeView,
+  activeChatId,
+} = {}) {
+  if (!presentation || presentation.viewMode !== viewMode) return false
+  if (presentation.chatId != null) {
+    return activeView === 'chat'
+      && normalizedId(activeChatId) === normalizedId(presentation.chatId)
+  }
+  return presentation.navigationEpoch === navigationEpoch
+    && presentation.drawerEntryOpen === !!drawerEntryOpen
+}
+
+/**
  * True only for the edge into the first-class empty single-screen surface.
  *
  * Keeping this at the workspace-dispatch boundary means every reducer action

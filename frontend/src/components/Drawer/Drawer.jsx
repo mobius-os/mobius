@@ -69,7 +69,6 @@ export default function Drawer({
   width = DESKTOP_SIDEBAR_DEFAULT_WIDTH,
   onWidthChange,
   interactionLocked = false,
-  focusHandoffActive = false,
   onClose,
   apps,
   appsStatus = 'success',
@@ -595,10 +594,7 @@ export default function Drawer({
   const drawerRef = useRef(null)
   const closeShieldRef = useRef(null)
   useEffect(() => {
-    // A destination can claim focus before the history-backed modal has
-    // finished closing. Stand down on both sides of that overlap: do not
-    // schedule another open-frame focus, and do not restore the old owner.
-    if (persistent || focusHandoffActive) {
+    if (persistent) {
       previousFocusRef.current = null
       return
     }
@@ -615,9 +611,9 @@ export default function Drawer({
       })
       return () => cancelAnimationFrame(focusFrame)
     } else {
-      // Restore focus when the drawer closes so keyboard users land back on the
-      // toggle that opened it (or whatever was focused). An accepted handoff
-      // never reaches here — the guard above already stood this effect down.
+      // Restore focus when the drawer closes so keyboard users land
+      // back on the toggle that opened it (or whatever was focused). Do not
+      // steal focus back from a destination that already accepted the handoff.
       const shouldRestore = shouldRestoreDrawerFocus({
         drawer: drawerRef.current,
         activeElement: document.activeElement,
@@ -630,7 +626,7 @@ export default function Drawer({
       }
       previousFocusRef.current = null
     }
-  }, [focusHandoffActive, open, persistent])
+  }, [open, persistent])
 
   // Escape key closes the drawer while it is open. Apps is ordinary workspace
   // content, so it never takes ownership away from navigation layered above it.
@@ -990,10 +986,6 @@ export default function Drawer({
           <div className="drawer__scroll-wrap">
             <button
               className="drawer__item drawer__item--new"
-              // The click hands focus to the New-chat keyboard lease. Prevent
-              // pointer activation from restoring native button focus after
-              // that handoff; keyboard activation has no pointerdown.
-              onPointerDown={(event) => event.preventDefault()}
               onClick={() => {
                 resetAppsSurfaceUi({ restoreFocus: false })
                 onNewChat()

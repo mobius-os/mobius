@@ -428,8 +428,8 @@ test.describe('Touch navigation', () => {
     await openDrawer(page)
     const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
     // Let the drawer's opening focus frame settle before the New-chat tap.
-    // Otherwise that intentionally deferred focus can race the tap and steal
-    // the keyboard lease after the test has already closed the drawer.
+    // The real regression is focus lost after this settled user interaction,
+    // not a synthetic test click racing the drawer's own opening frame.
     await expect(navigation).toBeFocused()
     await navigation
       .getByRole('button', { name: 'New chat', exact: true })
@@ -439,21 +439,7 @@ test.describe('Touch navigation', () => {
     const presentation = page.locator('[data-new-chat-presentation]')
     await expect(presentation).toBeVisible()
     await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
-    // Keep the failure actionable: a generic toBeFocused mismatch hides the
-    // element that actually reclaimed ownership during the handoff.
-    await expect.poll(() => page.evaluate(() => {
-      const lease = document.querySelector('.shell__composer-focus-lease')
-      const active = document.activeElement
-      if (active === lease) return 'lease'
-      if (!active) return 'none'
-      const name = active.getAttribute?.('aria-label')
-        || active.getAttribute?.('role')
-        || active.tagName.toLowerCase()
-      const classes = typeof active.className === 'string'
-        ? active.className.trim().split(/\s+/).filter(Boolean).join('.')
-        : ''
-      return classes ? `${name}.${classes}` : name
-    })).toBe('lease')
+    await expect(focusLease).toBeFocused()
     await page.keyboard.type('Typed while opening')
     releaseCreation()
 
