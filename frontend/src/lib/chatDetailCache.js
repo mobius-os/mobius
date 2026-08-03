@@ -37,7 +37,9 @@ export function messageMatchesKey(message, index, key) {
  * A saved row must be present in the cached window. Exact nested parts are a
  * DOM fact rather than a data fact: mount those caches behind the reveal gate
  * as `validating`, then let the scroll owner promote them only when the saved
- * part resolves in the committed cached DOM. */
+ * part resolves in the committed cached DOM. A running cache additionally
+ * waits for subscribe-time replay because persisted rows can lag the active
+ * assistant; parked owner questions have no possible stream output. */
 export function chatCacheEntryState(
   cached,
   savedAnchorKey = null,
@@ -46,26 +48,29 @@ export function chatCacheEntryState(
   if (cached?.restorationWindowComplete !== true || !Array.isArray(cached.messages)) {
     return 'missing'
   }
-  if (savedAnchorKey == null) return 'paintable'
-  const baseOffset = Number.isInteger(cached.offset) ? cached.offset : 0
-  const containsAnchor = cached.messages.some((message, index) => (
-    messageKey(message, baseOffset + index) === String(savedAnchorKey)
-    || (
-      message?.role === 'assistant'
-      && !message.hidden
-      && assistantAnchorKey(baseOffset + index) === String(savedAnchorKey)
-    )
-    || (
-      message?.role === 'user'
-      && !message.hidden
-      && message.kind !== 'continuation'
-      && message.kind !== 'auto_continuation'
-      && message.cid != null
-      && String(message.cid) === String(savedAnchorKey)
-    )
-  ))
+  let containsAnchor = savedAnchorKey == null
+  if (!containsAnchor) {
+    const baseOffset = Number.isInteger(cached.offset) ? cached.offset : 0
+    containsAnchor = cached.messages.some((message, index) => (
+      messageKey(message, baseOffset + index) === String(savedAnchorKey)
+      || (
+        message?.role === 'assistant'
+        && !message.hidden
+        && assistantAnchorKey(baseOffset + index) === String(savedAnchorKey)
+      )
+      || (
+        message?.role === 'user'
+        && !message.hidden
+        && message.kind !== 'continuation'
+        && message.kind !== 'auto_continuation'
+        && message.cid != null
+        && String(message.cid) === String(savedAnchorKey)
+      )
+    ))
+  }
   if (!containsAnchor) return 'missing'
-  return savedAnchorHasNestedPart ? 'validating' : 'paintable'
+  if (savedAnchorHasNestedPart) return 'validating'
+  return cached.running && !cached.pending_question_id ? 'stream-catchup' : 'paintable'
 }
 
 function settledToolBlocks(message) {

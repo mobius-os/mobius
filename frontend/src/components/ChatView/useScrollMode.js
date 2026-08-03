@@ -1208,10 +1208,11 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   shows/hides because the tray's margin shrinks the spacer math).
  * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
  *   When true, scroll events from pagination shouldn't mutate mode.
- * @param {'history'|'cache-validating'|'cached'|'preparing'|'ready'} args.initialEntryPhase
+ * @param {'history'|'cache-validating'|'cached'|'stream-catchup'|'preparing'|'ready'} args.initialEntryPhase
  *   History blocks reveal, cached is a caller-validated restoration window,
  *   cache-validating mounts a complete cached window behind the gate so its
- *   exact nested coordinate can be checked, preparing is a hidden progressive
+ *   exact nested coordinate can be checked, stream-catchup holds a running
+ *   transcript until replay commits, preparing is a hidden progressive
  *   cold render, and ready means authoritative history has settled.
  * @param {() => void} [args.onCachedCoordinateReady]
  *   Promotes a hidden validation cache after its exact saved part resolves.

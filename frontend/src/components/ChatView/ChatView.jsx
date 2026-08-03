@@ -319,7 +319,24 @@ export default function ChatView({
   // the reader's saved coordinate; an incomplete restoration window stays
   // hidden until the anchor-addressed read repairs or retires that coordinate.
   const initialSavedAnchorKey = savedReadingAnchorKey(chatId)
-  const initialCacheEntryState = chatCacheEntryState(
+  const [loading, setLoading] = useState(initialCacheEntryState === 'missing')
+  const [initialEntryPhase, setInitialEntryPhase] = useState(
+    initialCacheEntryState === 'paintable'
+      ? 'cached'
+      : initialCacheEntryState === 'validating'
+        ? 'cache-validating'
+        : initialCacheEntryState,
+  )
+  const acceptCachedReadingCoordinate = useCallback(() => {
+    setInitialEntryPhase(current => (
+      current === 'cache-validating' ? 'cached' : current
+    ))
+    setLoading(false)
+  }, [])
+  const acceptInitialStreamCatchUp = useCallback(() => {
+    setInitialEntryPhase(current => (
+      current === 'stream-catchup' ? 'ready' : current
+    ))
     cached,
     initialSavedAnchorKey,
     savedReadingAnchorHasNestedPart(chatId),
@@ -1037,6 +1054,7 @@ export default function ChatView({
     clearStreamItems,
     patchQuestionAnswers,
   } = useStreamConnection(chatId, {
+    onCatchUpSettled: acceptInitialStreamCatchUp,
     onConnectionLost: () => {
       // Browser transport ownership is uncertain here: the backend turn may
       // still be parked on a question or producing output. Preserve the
@@ -1684,7 +1702,17 @@ export default function ChatView({
     }
     const activationAnchorMatch = anchorMatchIn(activationCache)
     const cacheCoversSavedAnchor = !savedAnchorKey || !!activationAnchorMatch
-    const activationCacheEntryState = chatCacheEntryState(
+    setLoading(activationCacheEntryState === 'missing')
+    const activationEntryPhase = activationCacheEntryState === 'paintable'
+      ? 'cached'
+      : activationCacheEntryState === 'validating'
+        ? 'cache-validating'
+        : activationCacheEntryState
+    setInitialEntryPhase(current => (
+      activationEntryPhase === 'cache-validating' && current === 'cached'
+        ? current
+        : activationEntryPhase
+    ))
       activationCache,
       savedAnchorKey,
       savedReadingAnchorHasNestedPart(chatId),
@@ -1692,6 +1720,7 @@ export default function ChatView({
     remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
     setLoadError(false)
+<<<<<<< HEAD
     setLoading(activationCacheEntryState === 'missing')
     const activationEntryPhase = activationCacheEntryState === 'paintable'
       ? 'cached'
@@ -1705,6 +1734,10 @@ export default function ChatView({
         ? current
         : activationEntryPhase
     ))
+=======
+    setLoading(activationEntryPhase === 'history')
+    setInitialEntryPhase(activationEntryPhase)
+>>>>>>> b7659c194 (Settle running chat entry after stream catch-up)
 
     const gen = fetchGenRef.current
     const requestJson = async (path, label) => {
@@ -1719,6 +1752,10 @@ export default function ChatView({
 
     const settleRuntime = (runtime, visibleMessages) => {
       const running = !!runtime.running
+      const attachesToStream = shouldAttachRunningStream({
+        running,
+        pendingQuestionId: runtime.pending_question_id,
+      })
       setServerRunningLocalState(running)
       setActiveGoalObjective(goalObjectiveFromRuntime(
         runtime, latestGoalObjective(visibleMessages),
@@ -1731,15 +1768,14 @@ export default function ChatView({
           ? visibleMessages[visibleMessages.length - 1]
           : null,
       })
-      setInitialEntryPhase('ready')
+      // Persisted rows are not the complete surface of a running turn. Keep
+      // the outgoing chat visible until the subscribe-time replay commits.
+      setInitialEntryPhase(attachesToStream ? 'stream-catchup' : 'ready')
       setLoading(false)
       pendingQueue.hydrate(runtime.pending_messages || [])
       if (running) {
         setSending(true)
-        if (shouldAttachRunningStream({
-          running,
-          pendingQuestionId: runtime.pending_question_id,
-        })) {
+        if (attachesToStream) {
           connectToStream(false)
         }
       } else {

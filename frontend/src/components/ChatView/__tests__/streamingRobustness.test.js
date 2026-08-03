@@ -45,6 +45,24 @@ test('active DB, live deltas, and reconnect snapshots share one assistant surfac
   )
 })
 
+test('initial running-chat entry settles from catch-up or its refreshed fallback', () => {
+  assert.match(
+    streamHookSource,
+    /setCatchUpCommitSeq\(s => s \+ 1\)[\s\S]*onCatchUpSettledRef\.current\?\.\(\)/,
+    'successful replay releases the same entry boundary it commits',
+  )
+  assert.match(
+    streamHookSource,
+    /const refreshThenSettleCatchUp = \(options\) => \{[\s\S]*Promise\.resolve\(refresh\)\.then\(settle, settle\)[\s\S]*terminal204: true/,
+    'terminal refresh outcomes share one non-stranding entry release',
+  )
+  assert.match(
+    streamHookSource,
+    /retryCount\.current >= 3[\s\S]*refreshThenSettleCatchUp\(\{ force: true \}\)/,
+    'retry exhaustion releases only after the best persisted fallback settles',
+  )
+})
+
 test('streaming deltas are flags on the shared active markdown tree', () => {
   assert.match(msgContentSource, /<ProgressiveMarkdown[\s\S]*isStreaming=\{isStreaming/,
     'active DB and live text must keep ProgressiveMarkdown mounted')

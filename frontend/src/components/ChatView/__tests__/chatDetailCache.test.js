@@ -43,6 +43,22 @@ test('cache first paint requires the saved reading coordinate when one exists', 
     'an incomplete cache stays hidden until the anchor-addressed read settles')
 })
 
+
+test('a running cache waits for subscribe-time replay', () => {
+  const running = {
+    restorationWindowComplete: true,
+    running: true,
+    pending_question_id: null,
+    offset: 0,
+    messages: [{ id: 'owner-row', role: 'user', ts: 1 }],
+  }
+  assert.equal(chatCacheEntryState(running), 'stream-catchup')
+  assert.equal(chatCacheEntryState({ ...running, pending_question_id: 'question-1' }), 'paintable',
+    'a parked question has no possible stream output')
+  assert.equal(chatCacheEntryState(running, 'missing-row'), 'missing',
+    'missing saved history remains stronger than the stream gate')
+})
+
 test('message row addresses remain stable across authoritative replacements', () => {
   assert.equal(messageKey({ id: 'message-1', role: 'user', ts: 10 }, 4), 'message-1')
   assert.equal(messageKey({ id: 7 }, 4), '7')

@@ -167,9 +167,12 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   but must not treat this as a terminal run boundary.
  * @param {(event: object) => void} [callbacks.onSystemEvent]
  *   Fired for non-chat SSE events (theme/app/shell). Not buffered.
- * @param {(opts?: {force?: boolean}) => void} [callbacks.onNeedsRefresh]
+ * @param {(opts?: {force?: boolean}) => void|Promise<void>} [callbacks.onNeedsRefresh]
  *   Fired when the stream returns 204 outside the post-send race
  *   window — caller should refetch persisted DB state.
+ * @param {() => void} [callbacks.onCatchUpSettled]
+ *   Fired after subscribe-time replay commits, or after its terminal /
+ *   disconnected fallback refresh settles.
  * @param {(info: {ts: number|null, message: object|null}) => void} [callbacks.onQueuedTurnStarting]
  *   Fired when the backend is about to promote queued follow-ups; `ts`
  *   identifies the first pending entry in the promoted group and `message`
@@ -221,6 +224,7 @@ export default function useStreamConnection(chatId, {
   onConnectionLost,
   onSystemEvent,
   onNeedsRefresh,
+  onCatchUpSettled,
   onQueuedTurnStarting,
   onSteeredIntoTurn,
   onSteerDeliveryFailed,
@@ -608,6 +612,8 @@ export default function useStreamConnection(chatId, {
   onSystemEventRef.current = onSystemEvent
   const onNeedsRefreshRef = useRef(onNeedsRefresh)
   onNeedsRefreshRef.current = onNeedsRefresh
+  const onCatchUpSettledRef = useRef(onCatchUpSettled)
+  onCatchUpSettledRef.current = onCatchUpSettled
   const onQueuedTurnStartingRef = useRef(onQueuedTurnStarting)
   onQueuedTurnStartingRef.current = onQueuedTurnStarting
   const onSteeredIntoTurnRef = useRef(onSteeredIntoTurn)
@@ -655,6 +661,14 @@ export default function useStreamConnection(chatId, {
     const controller = new AbortController()
     abortRef.current = controller
     lastReadAtRef.current = 0
+
+    const refreshThenSettleCatchUp = (options) => {
+      const refresh = onNeedsRefreshRef.current?.(options)
+      const settle = () => onCatchUpSettledRef.current?.()
+      // Refresh failures already render their own error. Either outcome must
+      // release the outgoing chat rather than leave the handoff stranded.
+      Promise.resolve(refresh).then(settle, settle)
+    }
 
     try {
       const res = await fetch(
@@ -727,7 +741,7 @@ export default function useStreamConnection(chatId, {
         // and ChatView clearing its running state.
         onStreamEndRef.current?.()
         setIsStreaming(false)
-        onNeedsRefreshRef.current?.({ force: true, terminal204: true })
+        refreshThenSettleCatchUp({ force: true, terminal204: true })
         return
       }
 
@@ -794,6 +808,7 @@ export default function useStreamConnection(chatId, {
         // commit after the reveal cap); a pre-reveal mount commit is covered by
         // hide-then-reveal and a kept socket produces no commit at all.
         setCatchUpCommitSeq(s => s + 1)
+        onCatchUpSettledRef.current?.()
       }
 
       const patchCatchUpQuestionAnswers = (questionId, answers) => {
@@ -1282,7 +1297,7 @@ export default function useStreamConnection(chatId, {
         // before the refresh restored `running` from the server.
         requestAnimationFrame(() => {
           onConnectionLostRef.current?.()
-          onNeedsRefreshRef.current?.({ force: true })
+          refreshThenSettleCatchUp({ force: true })
         })
       } else {
         setConnectionError('retrying')
