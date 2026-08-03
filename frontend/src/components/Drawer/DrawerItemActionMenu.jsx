@@ -1,7 +1,7 @@
 /* DrawerItemActionMenu gives app launcher cards and drawer rows one compact,
    pointer-accurate contextual menu across mouse, keyboard, and touch. */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   beginMenuPress,
@@ -11,6 +11,7 @@ import {
 } from './menuPointerOwnership.js'
 import { Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
+import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 
 function focusableMenuItems(menu) {
   return [...(menu?.querySelectorAll('[role="menuitem"]:not([disabled])') || [])]
@@ -44,6 +45,18 @@ export default function DrawerItemActionMenu({
     restoreOnCloseRef.current = restoreFocus
     onClose()
   }
+
+  const closeFromOutside = useCallback(() => {
+    pointerOwnerRef.current = { press: null, clickAction: null }
+    restoreOnCloseRef.current = false
+    onClose()
+  }, [onClose])
+
+  useContextMenuOutsideDismiss({
+    open,
+    menuRef,
+    onDismiss: closeFromOutside,
+  })
 
   useEffect(() => {
     if (open) {
@@ -160,14 +173,6 @@ export default function DrawerItemActionMenu({
 
   useEffect(() => {
     if (!open) return
-    function onOutsidePointerDown(event) {
-      if (menuRef.current?.contains(event.target)) return
-      pointerOwnerRef.current = { press: null, clickAction: null }
-      // The listener is capture-only: dismiss synchronously, then let the same
-      // pointer continue to its intended chat/app/settings/content target.
-      restoreOnCloseRef.current = false
-      onClose()
-    }
     function clearAbandonedPointer(event) {
       if (menuRef.current?.contains(event.target)) return
       pointerOwnerRef.current = cancelMenuPress(
@@ -175,11 +180,9 @@ export default function DrawerItemActionMenu({
         event.pointerId,
       )
     }
-    document.addEventListener('pointerdown', onOutsidePointerDown, true)
     document.addEventListener('pointerup', clearAbandonedPointer, true)
     document.addEventListener('pointercancel', clearAbandonedPointer, true)
     return () => {
-      document.removeEventListener('pointerdown', onOutsidePointerDown, true)
       document.removeEventListener('pointerup', clearAbandonedPointer, true)
       document.removeEventListener('pointercancel', clearAbandonedPointer, true)
     }

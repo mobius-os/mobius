@@ -131,8 +131,8 @@ async function mockApps(page, apps) {
     await page.route(new RegExp(`/api/apps/${a.id}/frame`), route => route.fulfill({
       status: 200, contentType: 'text/html',
       body: '<!doctype html><html><body style="margin:0">'
-        + '<div id="probe">app</div>'
-        + '<script>window.__fi = 0;'
+        + '<button id="probe" onclick="window.__clicks += 1">app</button>'
+        + '<script>window.__fi = 0; window.__clicks = 0;'
         + 'addEventListener("message", e => {'
         + ' if (e && e.data && e.data.type === "moebius:frame-init") window.__fi += 1;'
         + '});</script>'
@@ -634,6 +634,54 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.getByRole('menuitem', { name: 'Close all other tabs' }).click()
     await expect.poll(async () => (await readWs(page)).panes.p1.tabs
       .map(tab => `${tab.kind}:${tab.id}`)).toEqual([keptKey])
+
+    const box = await activeTab.boundingBox()
+    const touchPoint = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+    await activeTab.dispatchEvent('pointerdown', {
+      pointerId: 41,
+      pointerType: 'touch',
+      isPrimary: true,
+      button: 0,
+      buttons: 1,
+      clientX: touchPoint.x,
+      clientY: touchPoint.y,
+    })
+    await page.waitForTimeout(450)
+    await activeTab.dispatchEvent('pointerup', {
+      pointerId: 41,
+      pointerType: 'touch',
+      isPrimary: true,
+      button: 0,
+      buttons: 0,
+      clientX: touchPoint.x,
+      clientY: touchPoint.y,
+    })
+    await expect(page.getByRole('menu', { name: 'Tab actions' })).toBeVisible()
+    await page.keyboard.press('Escape')
+  })
+
+  test('(d2) an app-frame click dismisses tab actions and still reaches the app', async ({ page }) => {
+    await boot(page, WIDE)
+    const chat = await createTaggedChat(page, 'wpFrameMenu')
+    const appId = 990102
+    await mockApps(page, [{ id: appId, name: 'Menu Target', chatId: chat.id }])
+    let ws = builderSeed([
+      { kind: 'chat', id: chat.id },
+      { kind: 'app', id: appId },
+    ])
+    ws = paneModel.moveTab(ws, `app:${appId}`, { root: true, edge: 'right' })
+    await seedWorkspace(page, ws)
+    await page.goto(`${BASE}/shell/?app=${appId}`, { waitUntil: 'domcontentloaded' })
+    await waitTiled(page)
+
+    const activeTab = page.locator(`.shell__tab-open[data-drag-key="app:${appId}"]`)
+    await activeTab.click({ button: 'right' })
+    await expect(page.getByRole('menu', { name: 'Tab actions' })).toBeVisible()
+
+    const frame = page.frameLocator(`iframe[data-app-id="${appId}"]`)
+    await frame.locator('#probe').click()
+    await expect(page.getByRole('menu', { name: 'Tab actions' })).toHaveCount(0)
+    await expect.poll(() => frame.locator('#probe').evaluate(() => window.__clicks)).toBe(1)
   })
 
   test('(e) a projection flip to phone preserves the persisted tree and pane focus', async ({ page }) => {

@@ -17,6 +17,7 @@ import {
 } from '../../api/client.js'
 import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, { deepLink } from '../../hooks/useNavigation.js'
+import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -1096,17 +1097,15 @@ export default function Shell() {
     recoveredChatIdsRef.current.delete(chatId)
   }, [])
 
-  // Tabs expose a compact browser-style close menu without adding permanent
-  // chrome on desktop: right-click or the keyboard menu key. Phone tabs reserve
-  // press-and-hold for dragging and never open these bulk actions. The same state
-  // drives both the single strip and tiled pane strips.
+  // Tabs expose one compact browser-style close menu without adding permanent
+  // chrome: right-click or the keyboard menu key on desktop, and a stationary
+  // hold on touch. Movement after the touch hold still enters tab dragging. The
+  // same state drives both the single strip and tiled pane strips.
   const [tabMenu, setTabMenu] = useState(null)
   const tabMenuRef = useRef(null)
   const tabMenuReturnFocusRef = useRef(null)
-  const tabActionsAvailable = workspaceMode !== 'phone'
   const openTabMenu = useCallback((event, tab, paneId) => {
     event.preventDefault()
-    if (!tabActionsAvailable) return
     const owner = paneId || paneModel.paneOf(workspace, tabModel.tabKey(tab))?.id
     if (!owner) return
     const triggerRect = event.currentTarget.getBoundingClientRect()
@@ -1121,13 +1120,29 @@ export default function Shell() {
       tabKey: tabModel.tabKey(tab),
       paneId: owner,
     })
-  }, [tabActionsAvailable, workspace])
+  }, [workspace])
+  const openTabMenuAt = useCallback((x, y, tab, paneId) => {
+    if (!tab) return
+    const owner = paneId
+      || paneModel.paneOf(workspaceStateRef.current.ws, tabModel.tabKey(tab))?.id
+    if (!owner) return
+    tabMenuReturnFocusRef.current = null
+    setTabMenu({ x, y, tab, tabKey: tabModel.tabKey(tab), paneId: owner })
+  }, [])
   const closeTabMenu = useCallback((restoreFocus = true) => {
     setTabMenu(null)
     if (!restoreFocus) return
     const returnTarget = tabMenuReturnFocusRef.current
     queueMicrotask(() => returnTarget?.focus?.({ preventScroll: true }))
   }, [])
+  const closeTabMenuFromOutside = useCallback(() => {
+    closeTabMenu(false)
+  }, [closeTabMenu])
+  useContextMenuOutsideDismiss({
+    open: Boolean(tabMenu),
+    menuRef: tabMenuRef,
+    onDismiss: closeTabMenuFromOutside,
+  })
   useLayoutEffect(() => {
     if (!tabMenu || !tabMenuRef.current) return
     const menu = tabMenuRef.current
@@ -1158,23 +1173,12 @@ export default function Shell() {
   }, [])
   useEffect(() => {
     if (!tabMenu) return undefined
-    if (!tabActionsAvailable) {
-      closeTabMenu(false)
-      return undefined
-    }
-    const onDown = (event) => {
-      if (!event.target.closest?.('.workspace__menu')) closeTabMenu(false)
-    }
     const onKey = (event) => {
       if (event.key === 'Escape') closeTabMenu()
     }
-    document.addEventListener('pointerdown', onDown, true)
     document.addEventListener('keydown', onKey, true)
-    return () => {
-      document.removeEventListener('pointerdown', onDown, true)
-      document.removeEventListener('keydown', onKey, true)
-    }
-  }, [closeTabMenu, tabActionsAvailable, tabMenu])
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [closeTabMenu, tabMenu])
 
   // ── Workspace drag controller wiring (design §3, PR3) ─────────────────────
   // One shared controller owns the shipped workspace's document-level gesture.
@@ -1185,6 +1189,8 @@ export default function Shell() {
   sceneInputsRef.current = { projection, mode: workspaceMode, contentRect }
   const labelForTabRef = useRef(labelForTab)
   labelForTabRef.current = labelForTab
+  const openTabMenuAtRef = useRef(openTabMenuAt)
+  openTabMenuAtRef.current = openTabMenuAt
   const drawerRowGesturesRef = useRef(new Map())
   // A single-mode drag previews the builder world through the ONE descriptor
   // (INV 5): arm is phase 'drag-preview', and the id it mints is carried to the
@@ -1266,6 +1272,7 @@ export default function Shell() {
     drawerRowGesturesRef,
     closeDrawer,
     openDrawer,
+    openTabMenuAtRef,
     onPreviewBuilder: onModeDragPreview,
   })
 
@@ -3581,7 +3588,7 @@ export default function Shell() {
         action={toast?.action}
         onDismiss={dismissToast}
       />
-      {tabActionsAvailable && tabMenu && (() => {
+      {tabMenu && (() => {
         const menuPane = workspace.panes[tabMenu.paneId]
         const menuTabIndex = menuPane?.tabs.findIndex(
           tab => tabModel.tabKey(tab) === tabMenu.tabKey,

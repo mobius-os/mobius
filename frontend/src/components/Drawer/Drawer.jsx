@@ -1425,7 +1425,7 @@ const DrawerRow = memo(function DrawerRow({
     secondaryReleaseCleanupRef.current?.()
     const sourceBtn = event.currentTarget
     const pointerId = event.pointerId
-    const placement = itemMenuPlacement({ x: event.clientX, y: event.clientY })
+    const openingPoint = { x: event.clientX, y: event.clientY }
     let timer = null
     const cleanup = () => {
       window.removeEventListener('pointerup', onSecondaryPointerUp, true)
@@ -1440,7 +1440,7 @@ const DrawerRow = memo(function DrawerRow({
       if (upEvent.pointerId !== pointerId || upEvent.button !== 2) return
       upEvent.preventDefault()
       cleanup()
-      openItemMenuAt(placement, sourceBtn)
+      openItemMenuAt(openingPoint, sourceBtn)
     }
     window.addEventListener('pointerup', onSecondaryPointerUp, true)
     window.addEventListener('pointercancel', cleanup, true)

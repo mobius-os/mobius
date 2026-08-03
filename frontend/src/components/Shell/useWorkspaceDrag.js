@@ -80,6 +80,7 @@ export default function useWorkspaceDrag({
   drawerRowGesturesRef, // key -> ref({ openMenu, beginReorder }) registered by Drawer rows
   closeDrawer,
   openDrawer,
+  openTabMenuAtRef, // ref -> (clientX, clientY, tab, paneId) => void
   onPreviewBuilder, // (active, { committed }) => void — enter/leave the LIVE
   // builder preview a single-mode drag unfolds (point 15: dragging IS
   // building). Render-only: the reducer viewMode stays 'single' until the drop
@@ -310,8 +311,9 @@ export default function useWorkspaceDrag({
         }
       }
 
-      // Tabs and drawer rows share this ONE pointer owner. Tabs lift as soon as
-      // their hold resolves. Drawer rows become draggable after the brief first
+      // Tabs and drawer rows share this ONE pointer owner. A tab hold resolves
+      // intent without lifting immediately: movement then drags it, while a
+      // stationary release opens its actions. Drawer rows become draggable after the brief first
       // stage; if the pointer stays still through the second stage, actions open
       // immediately. Movement clears the same timer before handing off to reorder,
       // workspace drag, or scrolling, so no competing gesture lifecycle exists.
@@ -321,7 +323,6 @@ export default function useWorkspaceDrag({
           held = true
           if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
           if (sourceKind !== 'drawer') {
-            arm()
             return
           }
           holdTimer = setTimeout(() => {
@@ -456,21 +457,29 @@ export default function useWorkspaceDrag({
             }
             if (!armed) return
           } else if (isTouch) {
-            const intent = touchTabMoveIntent(dx, dy)
-            if (intent === 'scroll') {
-              clearTimeout(holdTimer)
-              // The tab reserves one-finger panning so the browser cannot
-              // reclaim a post-hold horizontal move and cancel a live drag.
-              // Until the hold wins, mirror the strip's one-to-one pan here.
-              // Whitespace and close buttons remain native pan-x.
-              scrolling = true
-              scrollEl = srcEl.closest('.shell__tabstrip')
-              scrollAxis = 'x'
-              ev.preventDefault?.()
-              if (scrollEl) scrollEl.scrollLeft += start.x - ev.clientX
+            if (held && passedSlop(dx, dy)) arm()
+            if (armed) {
+              // Continue below so the move that first proves drag intent also
+              // positions the chip and preview; no second move is required.
+            } else if (held) {
               return
+            } else {
+              const intent = touchTabMoveIntent(dx, dy)
+              if (intent === 'scroll') {
+                clearTimeout(holdTimer)
+                // The tab reserves one-finger panning so the browser cannot
+                // reclaim a post-hold horizontal move and cancel a live drag.
+                // Until the hold wins, mirror the strip's one-to-one pan here.
+                // Whitespace and close buttons remain native pan-x.
+                scrolling = true
+                scrollEl = srcEl.closest('.shell__tabstrip')
+                scrollAxis = 'x'
+                ev.preventDefault?.()
+                if (scrollEl) scrollEl.scrollLeft += start.x - ev.clientX
+                return
+              }
+              if (!armed) return
             }
-            if (!armed) return
           } else {
             if (passedSlop(dx, dy)) arm()
             if (!armed) return
@@ -543,6 +552,18 @@ export default function useWorkspaceDrag({
         if (!armed) {
           if (scrolling) {
             cleanup({ suppressClick: true })
+          } else if (isTouch && held && sourceKind === 'tab') {
+            const dx = ev.clientX - start.x
+            const dy = ev.clientY - start.y
+            if (releasedInPlace(dx, dy)) {
+              openTabMenuAtRef?.current?.(
+                ev.clientX,
+                ev.clientY,
+                tabFromKey(key),
+                paneId,
+              )
+            }
+            cleanup({ suppressClick: true })
           } else cleanup()
           return
         }
@@ -559,8 +580,16 @@ export default function useWorkspaceDrag({
         const backOverDrawer = sourceKind === 'drawer' && drawerEdgeX != null
           && ev.clientX <= drawerEdgeX && !(isTouch && glided)
         if (isTouch && releasedInPlace(dx, dy)) {
-          // A lifted tab released in place cancels cleanly; its hold is reserved
-          // for drag.
+          // Pointer jitter can lift a held tab without becoming an intentional
+          // move. Keep the stationary-hold contract in that narrow case too.
+          if (sourceKind === 'tab') {
+            openTabMenuAtRef?.current?.(
+              ev.clientX,
+              ev.clientY,
+              tabFromKey(key),
+              paneId,
+            )
+          }
           cleanup({ suppressClick: true })
         } else if (backOverDrawer) {
           // Released back over the drawer = cancel; cleanup reopens it if glided.

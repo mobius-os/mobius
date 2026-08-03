@@ -45,7 +45,7 @@ export const DRAWER_MENU_HOLD_MS = 400
 // Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
 // After a touch lift, a release that never moved past this is not a drop. Tabs
-// cancel cleanly because their hold gesture is reserved for dragging.
+// use that stationary outcome for actions; movement after the hold drags.
 export const RELEASE_IN_PLACE_PX = 5
 
 // ── Zone geometry (design §3.2 / §3.3) ───────────────────────────────────────

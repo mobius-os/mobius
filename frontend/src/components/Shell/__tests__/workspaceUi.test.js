@@ -25,6 +25,10 @@ const drawerItemActionMenu = readFileSync(
   new URL('../../Drawer/DrawerItemActionMenu.jsx', import.meta.url),
   'utf8',
 )
+const contextMenuOutsideDismiss = readFileSync(
+  new URL('../../../hooks/useContextMenuOutsideDismiss.js', import.meta.url),
+  'utf8',
+)
 const paneModelSrc = readFileSync(new URL('../paneModel.js', import.meta.url), 'utf8')
 const chrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const dragBinding = readFileSync(new URL('../useWorkspaceDrag.js', import.meta.url), 'utf8')
@@ -46,9 +50,9 @@ test('the workspace menu avoids an oversized border-and-shadow card', () => {
   assert.doesNotMatch(rule, /box-shadow:[^;]*(?:1[6-9]|[2-9]\d)px/)
 })
 
-test('the desktop workspace menu stays close-only, edge-clamped, and keyboard navigable', () => {
+test('the workspace tab menu stays close-only, edge-clamped, and keyboard navigable', () => {
   const menuMarkup = shell.slice(
-    shell.indexOf('{tabActionsAvailable && tabMenu &&'),
+    shell.indexOf('{tabMenu &&'),
     shell.indexOf('</HistoryDismissProvider>'),
   )
   assert.match(shell, /aria-label="Tab actions"/)
@@ -64,9 +68,11 @@ test('the desktop workspace menu stays close-only, edge-clamped, and keyboard na
   assert.match(shell, /querySelector\('\[role="menuitem"\]'\)\?\.focus\(\)/)
   assert.match(shell, /tabMenuReturnFocusRef\.current = event\.currentTarget/)
   assert.match(shell, /returnTarget\?\.focus\?\.\(\{ preventScroll: true \}\)/)
-  assert.match(shell, /const tabActionsAvailable = workspaceMode !== 'phone'/)
-  assert.match(shell, /event\.preventDefault\(\)\s*\n\s*if \(!tabActionsAvailable\) return/)
-  assert.match(shell, /\{tabActionsAvailable && tabMenu &&/)
+  assert.match(shell, /const openTabMenuAt = useCallback/)
+  assert.match(shell, /const openTabMenuAtRef = useRef\(openTabMenuAt\)/)
+  assert.match(shell, /\{tabMenu &&/)
+  assert.doesNotMatch(shell, /tabActionsAvailable/)
+  assert.match(shell, /useContextMenuOutsideDismiss\(\{[\s\S]*?open: Boolean\(tabMenu\)/)
   assert.doesNotMatch(shell, /workspace__menu-handle|workspace__menu-header|workspace__menu-close/)
   assert.doesNotMatch(css, /workspace__menu-handle|workspace__menu-header|workspace__menu-close|workspace-tab-sheet-in/)
 })
@@ -678,7 +684,8 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     'releasing a shorter stationary hold remains a normal tap')
   assert.match(drawerPointerUp, /if \(menuOpened\)[\s\S]*?cleanup\(\{ suppressClick: true \}\)/,
     'the menu-opening gesture restores selection only when its pointer ends')
-  assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
+  assert.match(dragBinding, /held && sourceKind === 'tab'[\s\S]*?openTabMenuAtRef\?\.current\?\./,
+    'a stationary tab hold opens the same actions on touch')
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
   assert.match(shell, /const drawerRowGesturesRef = useRef\(new Map\(\)\)/)
   assert.match(drawer, /const registry = drawerRowGesturesRef\.current[\s\S]*?registry\.set\(key, drawerGestureHandlerRef\)/)
@@ -939,12 +946,29 @@ test('drawer row actions have one opening path without a custom touch hold', () 
     'drawer rows rely on platform long-press feedback instead of adding a second vibration')
 })
 
+test('both context menus dismiss without stealing the destination press, including app frames', () => {
+  assert.match(shell, /useContextMenuOutsideDismiss\(\{[\s\S]*?open: Boolean\(tabMenu\)/)
+  assert.match(drawerItemActionMenu, /useContextMenuOutsideDismiss\(\{[\s\S]*?open,[\s\S]*?menuRef,[\s\S]*?onDismiss: closeFromOutside/)
+  assert.match(
+    drawerItemActionMenu,
+    /const closeFromOutside = useCallback\(\(\) => \{[\s\S]*?pointerOwnerRef\.current = \{ press: null, clickAction: null \}[\s\S]*?restoreOnCloseRef\.current = false[\s\S]*?onClose\(\)/,
+    'outside dismissal retires stale activation ownership and does not restore focus over the destination',
+  )
+  assert.match(contextMenuOutsideDismiss, /document\.addEventListener\('pointerdown', dismissFromOutsidePointer, true\)/)
+  assert.match(contextMenuOutsideDismiss, /menuRef\.current\?\.contains\(event\.target\)/)
+  assert.match(contextMenuOutsideDismiss, /window\.addEventListener\('blur', dismissFromFrameFocus, true\)/)
+  assert.match(contextMenuOutsideDismiss, /document\.activeElement\?\.tagName === 'IFRAME'/,
+    'focus transfer owns the cross-document seam because iframe pointer events cannot bubble to the shell')
+})
+
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {
   assert.match(drawer, /event\.type === 'contextmenu' && secondaryReleaseCleanupRef\.current/)
   assert.match(drawer, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)
   assert.match(drawer, /window\.addEventListener\('pointerup', onSecondaryPointerUp, true\)/)
   assert.match(drawer, /upEvent\.pointerId !== pointerId \|\| upEvent\.button !== 2/)
-  assert.match(drawer, /cleanup\(\)[\s\S]*?openItemMenuAt\(placement, sourceBtn\)/)
+  assert.match(drawer, /const openingPoint = \{ x: event\.clientX, y: event\.clientY \}/)
+  assert.match(drawer, /cleanup\(\)[\s\S]*?openItemMenuAt\(openingPoint, sourceBtn\)/,
+    'the release path must not normalize the pointer point twice')
   assert.match(drawer, /timer = setTimeout\(cleanup, 1500\)/)
 })
 
