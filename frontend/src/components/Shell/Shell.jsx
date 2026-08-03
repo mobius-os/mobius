@@ -3248,11 +3248,10 @@ export default function Shell() {
                 chatId={chatId}
                 paneId={paneId}
                 apps={apps}
-                // Single view-mode paints only the focused pane full-bleed, so every
-              // NON-focused chat pane stops doing work (streaming/scroll) — the
-              // chat analogue of visibleAppIds soloing the focused app. Panes mode
-              // keeps every visible chat pane doing work.
-              visible={surfaceVisible && chatPanesVisible && role !== 'held'}
+                // Runtime activity and painting are independent during a handoff:
+                // staging owns the work while held remains the visual cover.
+                runtimeActive={surfaceVisible && chatPanesVisible && role !== 'held'}
+                keepTranscriptPainted={surfaceVisible && role === 'held'}
                 paneContentHeight={builderRect ? builderRect.h : null}
                 // Select before the memo boundary. Passing the replacement Map
                 // would rerender every visible chat pane for another chat's run.

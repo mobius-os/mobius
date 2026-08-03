@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
+const paneChatView = readFileSync(new URL('../PaneChatView.jsx', import.meta.url), 'utf8')
 const drawerCss = readFileSync(new URL('../../Drawer/Drawer.css', import.meta.url), 'utf8')
 const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 const chatSurfaceModel = readFileSync(new URL('../chatSurfaceModel.js', import.meta.url), 'utf8')
@@ -39,7 +40,17 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'a coordinate-complete cache can paint without waiting for its background freshness read',
   )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
-    'readiness must reach Shell before the browser paints the hidden transcript')
+    'ChatView must report layout readiness before its transcript can be promoted')
+  assert.match(
+    paneChatView,
+    /scheduleAfterBrowserPaint\(\s*\(\) => onDisplayReady\(paneId, readyChatId\),\s*\)/,
+    'the pane boundary must prepare one real destination paint before promotion',
+  )
+  assert.match(
+    paneChatView,
+    /displayReadyCancelRef\.current\(\)[\s\S]*useEffect\(\(\) => \(\) => displayReadyCancelRef\.current\(\), \[\]\)/,
+    'a superseded or unmounted staging chat must cancel its pending paint handoff',
+  )
   assert.match(chatView,
     /if \(displayReady\) onDisplayReady\?\.\(chatId\)[\s\S]*\}, \[chatId, displayReady, onDisplayReady\]\)/,
     'an already-ready chat must re-announce when a cross-pane move changes its handoff owner')
@@ -146,6 +157,21 @@ test('each pane holds one outgoing chat over one staging chat', () => {
     'neither the held nor staging chat may accept interaction')
   assert.match(shell, /composerRequest=\{role === 'active' && surfaceVisible \? composerRequest : null\}/,
     'an inert staging composer must not consume a one-shot composer request')
+  assert.match(
+    shell,
+    /runtimeActive=\{surfaceVisible && chatPanesVisible && role !== 'held'\}[\s\S]*keepTranscriptPainted=\{surfaceVisible && role === 'held'\}/,
+    'Shell must explicitly distinguish the inactive held runtime from its painted cover',
+  )
+  assert.match(
+    paneChatView,
+    /hidden=\{!runtimeActive\}[\s\S]*keepTranscriptPainted=\{keepTranscriptPainted\}/,
+    'the pane boundary must pass both independent responsibilities to ChatView',
+  )
+  assert.match(
+    chatView,
+    /if \(!hidden\) return[\s\S]*if \(keepTranscriptPainted\) return[\s\S]*setInitialEntryPhase\('history'\)[\s\S]*setLoading\(true\)/,
+    'a held cover must relinquish runtime ownership without arming the transcript blanking gate',
+  )
 })
 
 test('only the painted workspace world can expose its handoff layers', () => {
