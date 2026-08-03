@@ -48,12 +48,12 @@ test('active DB, live deltas, and reconnect snapshots share one assistant surfac
 test('initial running-chat entry settles from catch-up or its refreshed fallback', () => {
   assert.match(
     streamHookSource,
-    /setCatchUpCommitSeq\(s => s \+ 1\)[\s\S]*onCatchUpSettledRef\.current\?\.\(\)/,
+    /setCatchUpCommitSeq\(s => s \+ 1\)[\s\S]*settleOwnedCatchUp\(\)/,
     'successful replay releases the same entry boundary it commits',
   )
   assert.match(
     streamHookSource,
-    /const refreshThenSettleCatchUp = \(options\) => \{[\s\S]*Promise\.resolve\(refresh\)\.then\(settle, settle\)[\s\S]*terminal204: true/,
+    /const refreshThenSettleCatchUp = \(options\) => \{[\s\S]*Promise\.resolve\(refresh\)\.then\(settleOwnedCatchUp, settleOwnedCatchUp\)[\s\S]*terminal204: true/,
     'terminal refresh outcomes share one non-stranding entry release',
   )
   assert.match(
