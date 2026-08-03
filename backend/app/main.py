@@ -517,6 +517,7 @@ app.add_middleware(
     "Authorization",
     "Content-Type",
     "X-Mobius-Embed-Instance",
+    "X-Mobius-Stream-Snapshot",
     "X-Mobius-Version",
     "If-Match",
     "If-None-Match",

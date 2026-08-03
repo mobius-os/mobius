@@ -373,6 +373,22 @@ def test_opaque_embed_preflight_allows_scoped_instance_header():
   assert "x-mobius-embed-instance" in allowed
 
 
+def test_opaque_embed_preflight_allows_stream_snapshot_header():
+  response = TestClient(app).options(
+    "/api/chats/exact-chat/stream",
+    headers={
+      "Origin": "null",
+      "Access-Control-Request-Method": "GET",
+      "Access-Control-Request-Headers": (
+        "authorization,x-mobius-embed-instance,x-mobius-stream-snapshot"
+      ),
+    },
+  )
+  assert response.status_code == 200
+  allowed = response.headers["access-control-allow-headers"].lower()
+  assert "x-mobius-stream-snapshot" in allowed
+
+
 def test_opaque_app_preflight_allows_versioned_storage_requests():
   """Sandboxed apps can perform the runtime's versioned read/write flow.
 
