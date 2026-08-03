@@ -426,7 +426,12 @@ test.describe('Touch navigation', () => {
     ))
 
     await openDrawer(page)
-    await page.getByRole('navigation', { name: 'Primary navigation' })
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    // Let the drawer's opening focus frame settle before the New-chat tap.
+    // Otherwise that intentionally deferred focus can race the tap and steal
+    // the keyboard lease after the test has already closed the drawer.
+    await expect(navigation).toBeFocused()
+    await navigation
       .getByRole('button', { name: 'New chat', exact: true })
       .click()
 
