@@ -192,26 +192,39 @@ test('two gestures inside one quiet settlement advance two generations', () => {
     gestureSequence: 11,
     claimedSequence: null,
     version: 4,
+    atBottom: false,
   })
   assert.deepEqual(firstGesture, {
-    claimedSequence: 11, version: 5,
+    claimedSequence: 11, version: 5, reachedBottom: false,
   })
-  assert.deepEqual(readerIntentAfterScroll({
+  const reachedTail = readerIntentAfterScroll({
     gestureSequence: 11,
     claimedSequence: firstGesture.claimedSequence,
     version: firstGesture.version,
-  }), {
-    claimedSequence: 11, version: 5,
-  }, 'more scroll frames from the same input sequence share its generation')
+    reachedBottom: firstGesture.reachedBottom,
+    atBottom: true,
+  })
+  assert.deepEqual(reachedTail, {
+    claimedSequence: 11, version: 5, reachedBottom: true,
+  }, 'one input sequence shares its generation and latches physical-tail arrival')
+  assert.deepEqual(readerIntentAfterScroll({
+    gestureSequence: 11,
+    claimedSequence: reachedTail.claimedSequence,
+    version: reachedTail.version,
+    reachedBottom: reachedTail.reachedBottom,
+    atBottom: false,
+  }), reachedTail, 'lazy output cannot erase tail intent before settlement')
 
   const secondGesture = readerIntentAfterScroll({
     gestureSequence: 12,
-    claimedSequence: firstGesture.claimedSequence,
-    version: firstGesture.version,
+    claimedSequence: reachedTail.claimedSequence,
+    version: reachedTail.version,
+    reachedBottom: reachedTail.reachedBottom,
+    atBottom: false,
   })
   assert.deepEqual(secondGesture, {
-    claimedSequence: 12, version: 6,
-  }, 'a newer input sequence advances even before the shared quiet edge')
+    claimedSequence: 12, version: 6, reachedBottom: false,
+  }, 'a newer input sequence advances and starts a fresh tail decision')
 })
 
 test('terminal settlement waits through taps but dies after actual reader movement', () => {

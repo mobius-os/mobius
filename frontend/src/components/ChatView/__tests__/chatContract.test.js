@@ -26,7 +26,7 @@ const userEl = offsetTop => ({ offsetTop })
 
 // A clean pinned frame: pin target 996, scrollTop sits there, and the spacer
 // reserved EXACTLY enough to reach it — no extra cushion (PIN_BOTTOM_ROOM 0).
-// fullViewH == clientHeight == 700, listHeight 1040, so spacer =
+// clientHeight == 700, listHeight 1040, so spacer =
 // max(0, 700 + 996 - 1040) = 656 and scrollHeight = 1040 + 656 = 1696.
 // maxScrollTop = 1696 - 700 = 996 == pinTarget: the pin rests flush at the
 // scroll ceiling, with no reservable blank below.
@@ -34,7 +34,6 @@ const pinnedEnv = {
   scrollEl: scrollEl({ scrollTop: 996, scrollHeight: 1696, clientHeight: 700 }),
   listEl: listEl(1040),
   lastUserMsgEl: userEl(1000),
-  fullViewH: 700,
 }
 
 test('pin registry summary matches owner-authoritative R2 geometry', () => {
@@ -72,7 +71,7 @@ test('owner contract freezes question answers without locking keyboard movement'
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.16 \(2026-08-02\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.17 \(2026-08-03\)/)
   assert.match(
     architecture,
     /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,
@@ -95,7 +94,7 @@ test('owner contract freezes question answers without locking keyboard movement'
   )
   assert.match(
     architecture,
-    /One keyboard geometry signal; mode-preserving resize/,
+    /One keyboard geometry signal; reservation-responsive resize/,
     'keyboard layout must flow from Shell into the actual chat scroll box once',
   )
 })
@@ -127,7 +126,6 @@ test('snapshotChatUX derives the geometry fields from a clean pinned frame', () 
   assert.equal(s.pinGap, 4) // lastUserTop - scrollTop == PIN_OFFSET
   assert.equal(s.distanceToBottom, 0) // pin rests flush at the scroll ceiling
   assert.equal(s.spacerReachable, true)
-  assert.equal(s.fullViewH, 700)
 })
 
 test('snapshotChatUX is null-tolerant: missing user message yields nulls, no throw', () => {
@@ -135,7 +133,6 @@ test('snapshotChatUX is null-tolerant: missing user message yields nulls, no thr
     scrollEl: scrollEl({ scrollTop: 100, scrollHeight: 1200, clientHeight: 700 }),
     listEl: listEl(1040),
     lastUserMsgEl: null,
-    fullViewH: 700,
   })
   assert.equal(s.lastUserTop, null)
   assert.equal(s.pinGap, null)
@@ -271,16 +268,14 @@ test('cushionPresent passes when the spacer reaches the pin (cushion 0)', () => 
   assert.equal(r.measured, PIN_BOTTOM_ROOM) // exactly 0: pin exactly reachable
 })
 
-test('cushionPresent fails on the R5 bug: an undersized spacer leaves no keyboard-closed room', () => {
-  // The hook's stale-small fullViewH (400, the keyboard-open height) sized the
-  // spacer: max(0, 400 + 996 - 1040) = 356, so scrollHeight = 1396. The
-  // SNAPSHOT carries the true full view height (700 — clientHeight has grown
-  // back), so the cushion reads (1396 - 700) - 996 = -300: pin stranded.
+test('cushionPresent fails when a grown viewport still has the smaller spacer', () => {
+  // The keyboard-open spacer was 356px, then clientHeight grew to 700 without
+  // a recompute: scrollHeight 1396 leaves maxScrollTop 696, so the 996px pin
+  // target is unreachable and the row is stranded mid-viewport.
   const buggy = {
     scrollEl: scrollEl({ scrollTop: 696, scrollHeight: 1396, clientHeight: 700 }),
     listEl: listEl(1040),
     lastUserMsgEl: userEl(1000),
-    fullViewH: 700,
   }
   const snap = snapshotChatUX(buggy)
   assert.equal(snap.spacerReachable, false) // pin target unreachable
@@ -289,21 +284,18 @@ test('cushionPresent fails on the R5 bug: an undersized spacer leaves no keyboar
   assert.ok(r.measured < PIN_BOTTOM_ROOM)
 })
 
-test('cushionPresent fails on a keyboard-open snapshot with an undersized spacer', () => {
-  // Keyboard open: clientHeight shrank to 400; the full viewport is 700 and
-  // the spacer only produced scrollHeight 1396. clientHeight-based math would
-  // read (1396 - 400) - 996 = 0 — a false green. Keyboard-closed terms
-  // (fullViewH) read (1396 - 700) - 996 = -300: no room once the keyboard
-  // closes.
+test('cushionPresent accepts the smaller exact spacer while the keyboard is open', () => {
+  // Keyboard open: clientHeight is 400 and the responsive spacer makes
+  // scrollHeight 1396. maxScrollTop remains exactly the 996px pin target, so
+  // the row stays at the top without any hidden extra reservation.
   const snap = snapshotChatUX({
     scrollEl: scrollEl({ scrollTop: 696, scrollHeight: 1396, clientHeight: 400 }),
     listEl: listEl(1040),
     lastUserMsgEl: userEl(1000),
-    fullViewH: 700,
   })
   const r = cushionPresent(snap)
-  assert.equal(r.ok, false)
-  assert.equal(r.measured, -300)
+  assert.equal(r.ok, true)
+  assert.equal(r.measured, 0)
 })
 
 test('cushionPresent is indeterminate when geometry is missing', () => {

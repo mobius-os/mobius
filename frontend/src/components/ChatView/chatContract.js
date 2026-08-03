@@ -76,10 +76,10 @@ export const CHAT_CONTRACT = [
     id: 'spacer-reserves-room',
     title: 'Spacer reserves exactly enough to reach the pin',
     summary:
-      'The dynamic spacer, sized from fullViewH not clientHeight, reserves '
-      + 'exactly enough that the pin target is reachable (cushion >= 0), so the '
-      + 'message lands flush at the top instead of stranded mid-viewport — and '
-      + 'no extra blank the reader can scroll into below the last content.',
+      'The dynamic spacer uses the active scroll-box height and reserves exactly '
+      + 'enough that the pin target is reachable (cushion >= 0), so the message '
+      + 'lands flush at the top without scrollable blank room beyond that target. '
+      + 'A keyboard therefore removes hidden reservation before moving content.',
   },
   {
     id: 'reanchor-on-promote',
@@ -116,7 +116,7 @@ export const CHAT_CONTRACT = [
  * Timestamps are the caller's job — a snapshot is pure geometry.
  */
 export function snapshotChatUX(env, { pinOffset = PIN_OFFSET } = {}) {
-  const { scrollEl, listEl, lastUserMsgEl, fullViewH } = env || {}
+  const { scrollEl, listEl, lastUserMsgEl } = env || {}
   const scrollTop = scrollEl ? scrollEl.scrollTop : null
   const scrollHeight = scrollEl ? scrollEl.scrollHeight : null
   const clientHeight = scrollEl ? scrollEl.clientHeight : null
@@ -144,7 +144,6 @@ export function snapshotChatUX(env, { pinOffset = PIN_OFFSET } = {}) {
   return {
     scrollTop, scrollHeight, clientHeight, listHeight, lastUserTop,
     pinGap, distanceToBottom, spacerReachable,
-    fullViewH: fullViewH ?? null,
   }
 }
 
@@ -219,13 +218,8 @@ export function cushionPresent(snap, { min = PIN_BOTTOM_ROOM, pinOffset = PIN_OF
     return indeterminate(id, expected,
       'cannot derive cushion (missing scroll element or user message)')
   }
-  // Keyboard-closed terms: an open keyboard shrinks clientHeight, which would
-  // inflate (scrollHeight - clientHeight) and green-light an undersized
-  // spacer. fullViewH is the caller-known full viewport height; fall back to
-  // clientHeight only when the caller did not supply it.
-  const viewH = snap.fullViewH ?? snap.clientHeight
   const pinTarget = Math.max(0, snap.lastUserTop - pinOffset)
-  const cushion = (snap.scrollHeight - viewH) - pinTarget
+  const cushion = (snap.scrollHeight - snap.clientHeight) - pinTarget
   return { ok: cushion >= min, id, measured: cushion, expected }
 }
 

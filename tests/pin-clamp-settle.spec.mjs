@@ -302,9 +302,8 @@ test('Keyboard close cannot retire a pin before a short stream settles', async (
 
   // Match the real mobile order: the composer opens the keyboard (short
   // viewport), send pins there, then blur closes the keyboard while the reply
-  // is still streaming. The grow-only fullViewH reservation intentionally
-  // makes the pin look away from the PHYSICAL bottom while the keyboard is
-  // open; that temporary geometry must not be mistaken for reader intent.
+  // is still streaming. Each viewport gets an exact responsive reservation;
+  // the resize itself must not be mistaken for reader intent.
   await page.setViewportSize({ width: 426, height: 560 })
   // Chromium dispatches the resize after setViewportSize resolves. Wait for
   // FOLLOW_BOTTOM to apply the new geometry before Enter snapshots whether

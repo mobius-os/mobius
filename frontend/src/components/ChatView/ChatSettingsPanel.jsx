@@ -48,14 +48,11 @@
  * ║      sends. Rows stay interactive while routine saves settle.    ║
  * ║                                                                  ║
  * ║   4. KEYBOARD-STATE PRESERVATION                                 ║
- * ║      `refocusChatInput` gates on `wasInputFocusedRef?.current`   ║
- * ║      (captured in ComposerPopover at + tap-time). Picking a      ║
- * ║      model or effort with the keyboard DOWN does NOT pop it      ║
- * ║      up. Every interactive row in this panel has                 ║
- * ║      pointerdown focus guards — see ComposerPopover.jsx's        ║
- * ║      three-guard contract for the full story. The guard applies  ║
- * ║      to touch too; `touch-action: pan-y` still lets a row-origin  ║
- * ║      gesture scroll the long model list.                         ║
+ * ║      ComposerPopover owns one pointer handler on the popover.    ║
+ * ║      Bubbling covers every present and future control            ║
+ * ║      without leaking composer-specific focus props into shared   ║
+ * ║      controls. Its `touch-action: pan-y` keeps the long model    ║
+ * ║      list scrollable from any descendant.                        ║
  * ║                                                                  ║
  * ║   The shared <EffortStepper> renders a stepper track — NOT       ║
  * ║   pills, NOT a chip group. The slider was explicitly chosen      ║
@@ -99,10 +96,6 @@ import {
   resolveProviderAvailability,
   visibleProviderModels,
 } from '../../lib/providerAvailability.js'
-import {
-  focusComposerElement,
-  preserveComposerInputFocus,
-} from './composerFocusPolicy.js'
 import './ChatSettingsPanel.css'
 
 /** Claude product mark — four-petal flower / starburst silhouette,
@@ -249,12 +242,6 @@ export default function ChatSettingsPanel({
   onChange,
   // Shared promise tail for picker writes, handoffs, and message sends.
   settingsSaveTailRef,
-  // Tracks whether the chat textarea was focused when the popover
-  // opened. Used to decide whether to refocus after a picker
-  // action so the soft keyboard stays in its previous state
-  // (up if it was up, down if it was down).
-  wasInputFocusedRef,
-  composerInputRef,
   // Per-chat external state survives the popover and ChatView itself. This is
   // what keeps navigation away/back from unlocking a live handoff or losing
   // its retry id and error feedback.
@@ -453,18 +440,6 @@ export default function ChatSettingsPanel({
     }
   }, [chatId, pendingSwitch, provider, settingsSaveTailRef])
 
-  // Conditional refocus — only restores textarea focus if it was
-  // ALREADY focused when the popover opened. Without this guard,
-  // tapping + with the keyboard down and then picking a model
-  // would force-focus the textarea, popping the keyboard up.
-  // iOS Safari sometimes drops focus during the button click even
-  // with pointerdown preventDefault; this restores it in that case
-  // but only when the user was actually typing.
-  const refocusChatInput = useCallback(() => {
-    if (!wasInputFocusedRef?.current) return
-    focusComposerElement(composerInputRef?.current)
-  }, [composerInputRef, wasInputFocusedRef])
-
   const handleEffortChange = useCallback((value) => {
     // Remember this effort under the active provider so a later
     // provider-switch restores it; ship BOTH `effort` (active) and
@@ -476,8 +451,7 @@ export default function ChatSettingsPanel({
     patchChat({
       agent_settings_json: { effort: value, effort_by_provider: nextMap },
     })
-    refocusChatInput()
-  }, [draftProvider, draftEffortByProvider, patchChat, refocusChatInput])
+  }, [draftProvider, draftEffortByProvider, patchChat])
 
   const switchProviderModel = useCallback(async (
     value, providerValue, allowedEfforts, switchId = createProviderSwitchId(),
@@ -538,7 +512,6 @@ export default function ChatSettingsPanel({
   ])
 
   const handlePickModel = useCallback(async (value, providerValue, allowedEfforts) => {
-    refocusChatInput()
     if (providerValue !== draftProvider) {
       if (hasAssistantTurns) {
         if (providerSwitchInFlightRef.current) return
@@ -593,7 +566,6 @@ export default function ChatSettingsPanel({
     chatId,
     patchChat,
     provider,
-    refocusChatInput,
     switchProviderModel,
   ])
 
@@ -603,7 +575,6 @@ export default function ChatSettingsPanel({
       || compacting
       || providerSwitchInFlightRef.current
     ) return
-    refocusChatInput()
     const ok = await switchProviderModel(
       pendingSwitch.model,
       pendingSwitch.provider,
@@ -616,7 +587,6 @@ export default function ChatSettingsPanel({
   }, [
     pendingSwitch,
     compacting,
-    refocusChatInput,
     switchProviderModel,
   ])
 
@@ -629,8 +599,7 @@ export default function ChatSettingsPanel({
     }
     clearProviderSwitch(chatId)
     pendingSwitchPreviousRef.current = null
-    refocusChatInput()
-  }, [chatId, refocusChatInput])
+  }, [chatId])
 
   const isCodex = draftProvider === 'codex'
   const switchBusy = compacting
@@ -692,7 +661,6 @@ export default function ChatSettingsPanel({
               <span>Could not load models.</span>
               <button
                 type="button"
-                onPointerDown={preserveComposerInputFocus}
                 onClick={() => {
                   registryQuery.refetch()
                   prefsQuery.refetch()
@@ -724,7 +692,6 @@ export default function ChatSettingsPanel({
           <span>Could not verify providers. Showing the current model only.</span>
           <button
             type="button"
-            onPointerDown={preserveComposerInputFocus}
             onClick={() => providerStatusQuery.refetch()}
           >
             Retry
@@ -767,7 +734,6 @@ export default function ChatSettingsPanel({
               <button
                 type="button"
                 className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
-                onPointerDown={preserveComposerInputFocus}
                 onClick={() => {
                   if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
                 }}
@@ -790,9 +756,7 @@ export default function ChatSettingsPanel({
               </button>
               {isSelected && !isPendingRow && (
                 // Indent aligns the stepper under the row title (icon 30 +
-                // gap 12 + row pad 10 = 52). onStopPointerDown preserves the
-                // composer's soft-keyboard-focus contract — a stop tap must
-                // not blur the chat textarea (see preserveComposerInputFocus).
+                // gap 12 + row pad 10 = 52).
                 <div className="csp-effort-indent">
                   <EffortStepper
                     efforts={rowEfforts}
@@ -803,7 +767,6 @@ export default function ChatSettingsPanel({
                     // while a save settles. A live provider switch or
                     // disconnected provider remains genuinely unavailable.
                     disabled={switchBusy || !providerConfigured}
-                    onStopPointerDown={preserveComposerInputFocus}
                   />
                 </div>
               )}
@@ -816,7 +779,6 @@ export default function ChatSettingsPanel({
                     <button
                       type="button"
                       className="csp__confirm-btn csp__confirm-btn--primary"
-                      onPointerDown={preserveComposerInputFocus}
                       onClick={handleConfirmProviderSwitch}
                       disabled={switchBusy}
                     >
@@ -825,7 +787,6 @@ export default function ChatSettingsPanel({
                     <button
                       type="button"
                       className="csp__confirm-btn csp__confirm-btn--ghost"
-                      onPointerDown={preserveComposerInputFocus}
                       onClick={handleCancelProviderSwitch}
                       disabled={switchBusy}
                     >
@@ -845,7 +806,6 @@ export default function ChatSettingsPanel({
             <>
               <div
                 className="csp__automation-row"
-                onPointerDown={preserveComposerInputFocus}
               >
                 <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
                   <span className="csp__automation-title">Automatically continue after usage limits</span>
@@ -869,7 +829,6 @@ export default function ChatSettingsPanel({
             <>
               <div
                 className="csp__automation-row"
-                onPointerDown={preserveComposerInputFocus}
               >
                 <label
                   className="csp__automation-copy"

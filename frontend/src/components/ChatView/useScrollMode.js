@@ -34,8 +34,10 @@
  * from tail geometry, not from whether a gesture has already scrolled that row
  * into view. That keeps scrollHeight stable while the reader approaches the
  * final turn: short replies keep the remaining room, while reply/tool
- * expansion consumes it and collapse restores it. The one explicit exception
- * is the transient
+ * expansion consumes it and collapse restores it. The reservation uses the
+ * active scroll-box height, so a keyboard first removes now-hidden blank room;
+ * only content that no longer fits makes FOLLOW_BOTTOM move. The one explicit
+ * exception is the transient
  * question-submit anchor: it reserves exactly enough tail room for a stable
  * same-viewport handoff. A keyboard resize restores the pre-submit mode before
  * sizing, so the answered card moves exactly as the unanswered card would.
@@ -45,10 +47,11 @@
  *
  * User-gesture detection: pointerdown/wheel/keydown hold
  * reader ownership until the first scroll event actually arrives. Real scrolls
- * keep that ownership until the browser's native `scrollend` event (with a
- * 250ms quiet-settle fallback for older engines): the hot event path records
- * intent and exact physical-tail arrival only, then derives/persists the final
- * anchor and resizes reservation once after momentum stops. Wheel input
+ * keep that ownership until scrolling settles. Native `scrollend` can finish
+ * the handoff early; the same 250ms quiet edge guarantees it when browsers
+ * advertise that event but fail to deliver it: the hot event path records
+ * intent and exact physical-tail arrival only, then derives and persists the
+ * final anchor and resizes reservation once after momentum stops. Wheel input
  * is released early only when its direction is exactly clamped at the matching
  * edge; elapsed frames cannot prove that an in-range gesture was a no-op under
  * renderer load. Outside that handoff/settle window, scrolls come from our
@@ -71,9 +74,9 @@ import { isPerfProbeEnabled, perfMark, perfTime } from '../../lib/perfProbe.js'
 const REVEAL_CAP_MS = 1500
 const PREPARING_REVEAL_CAP_MS = 5000
 
-// Reader quiet-settle fallback for engines without native scrollend. Input and
-// momentum retain Infinity ownership; only the native/fallback trailing edge
-// derives the final hold/follow mode and gives layout writes back.
+// Reader quiet-settle edge. Input and momentum retain Infinity ownership;
+// native scrollend may finish early, while this trailing edge guarantees the
+// same handoff on browsers that omit or unreliably deliver that event.
 const GESTURE_SETTLE_MS = 250
 
 // A tap or non-scrolling key must not suspend layout ownership forever. This
@@ -404,9 +407,12 @@ export function bottomAnchorModeFromScroll(scrollEl) {
   const spacerH = scrollEl.querySelector('.spacer-dynamic')?.offsetHeight || 0
   const realContentH = scrollEl.scrollHeight - spacerH
   const targetScrollTop = Math.max(0, realContentH - scrollEl.clientHeight)
-  return _anchorModeForRow(scrollEl, last, targetScrollTop, {
-    defaultTail: true,
-  })
+  return _anchorModeForRow(
+    scrollEl,
+    last,
+    targetScrollTop,
+    { defaultTail: true },
+  )
 }
 
 
@@ -723,11 +729,10 @@ export function _computeSpacerH(
   scrollEl,
   listEl,
   lastUserMsgEl,
-  fullViewH,
   mode = null,
 ) {
   if (!scrollEl || !listEl) return 0
-  const viewH = fullViewH || scrollEl.clientHeight
+  const viewH = scrollEl.clientHeight
   if (mode?.kind === 'ANCHOR_AT'
       && Number.isFinite(mode.questionSubmitViewportH)) {
     const anchorEl = _anchorEl(scrollEl, mode)
@@ -918,22 +923,23 @@ export function scrollAuthorityAllowsCommit({
 }
 
 
-/** Claim one monotonic intent generation for the current input sequence.
- * Reader settlement may intentionally batch several nearby gestures into one
- * quiet-edge layout pass, but each newer sequence must still invalidate work
- * captured after the preceding gesture.
+/** Reduce one scroll frame into the current input sequence's intent.
+ * A sequence advances the monotonic generation once and latches physical-tail
+ * arrival until settlement. A newer sequence starts a fresh tail decision even
+ * when several nearby gestures share one quiet-edge layout pass.
  */
 export function readerIntentAfterScroll({
   gestureSequence,
   claimedSequence,
   version,
+  reachedBottom = false,
+  atBottom = false,
 }) {
-  if (gestureSequence === claimedSequence) {
-    return { claimedSequence, version }
-  }
+  const sameSequence = gestureSequence === claimedSequence
   return {
     claimedSequence: gestureSequence,
-    version: version + 1,
+    version: sameSequence ? version : version + 1,
+    reachedBottom: atBottom || (sameSequence && reachedBottom),
   }
 }
 
@@ -1249,7 +1255,10 @@ export default function useScrollMode({
   // once a newer gesture lands, older work can never regain ownership merely
   // because the gesture timing window later closes.
   const readerIntentVersionRef = useRef(0)
-  const fullViewHRef = useRef(0)
+  // Largest committed pane height for the current geometry. Spacer sizing is
+  // intentionally based on the active scroll box instead; this reference only
+  // tells a focused Q&A edit when the keyboard has fully closed again.
+  const fullPaneHRef = useRef(0)
   // The chat reacts to the size of its actual scroll viewport, after Shell has
   // reconciled any visual-viewport overlay. Keeping the last observed height
   // across effect re-runs makes ResizeObserver the one keyboard/layout signal
@@ -1270,11 +1279,9 @@ export default function useScrollMode({
   // last apply, so the post-reveal anchor clamp-repair only fires on a real
   // shift/clamp (design §2). Null when no anchor is active.
   const lastAnchorTopRef = useRef(null)
-  // A pane-geometry resize (divider commit, projection/mode flip, rotation)
-  // hands its projected CONTENT height here; sizeSpacer consumes it under the
-  // reader-ownership gate so the (possibly LOWER) floor rides the same deferred
-  // pass as the spacer mutation. Null except in-flight.
-  const pendingPaneHeightRef = useRef(null)
+  // A committed pane resize can lower the keyboard-closed height. Defer that
+  // value with the layout transaction when reader input currently owns scroll.
+  const pendingFullPaneHeightRef = useRef(null)
   // Set inside the layout effect to the live pane-resize runner; the returned
   // paneResized() forwards to it (null when no scroll DOM is mounted). Mirrors
   // the forceRevealRef / resumeLayoutAfterGestureRef effect-bridge pattern.
@@ -1719,10 +1726,6 @@ export default function useScrollMode({
       }
     }
 
-    if (scrollEl.clientHeight > fullViewHRef.current) {
-      fullViewHRef.current = scrollEl.clientHeight
-    }
-
     const listEl = scrollEl.querySelector('.chat__list')
     if (!listEl) return
 
@@ -1749,17 +1752,9 @@ export default function useScrollMode({
         'lifecycle:restore',
       )
     }
-    // Identity check: apply the mode ONLY when transitionMode changed the
-    // current object since the last apply. Semantic events always supply a
-    // fresh object when they intend a transition, so === identity is the
-    // right signal.
-    // Steady-state streaming (mode unchanged) won't re-pin even as
-    // the layout settles around tool-block status flips, KaTeX,
-    // highlight.js, and markdown re-wrap — that's the bug from
-    // May 2026 where scrollTop drifted with userMsg.offsetTop. The
-    // last-applied identity lives on `lastAppliedModeRef` (declared
-    // above) so it survives the layout effect re-running, including
-    // React 19 StrictMode's dev-time double-invoke.
+    // Semantic transitions use a fresh mode object. Identity therefore keeps
+    // steady streaming from rewriting scrollTop, while the ref survives effect
+    // re-runs and development-time double invocation.
 
     const currentAuthority = () => readerIntentVersionRef.current
     const layoutOwnsScroll = (authorityVersion = currentAuthority()) => (
@@ -1841,47 +1836,25 @@ export default function useScrollMode({
       if (chatRef.current && Number.isFinite(composerHeight)) {
         chatRef.current.style.setProperty('--composer-h', `${composerHeight}px`)
       }
-      // Keep fullViewHRef authoritative at EVERY spacer sizing, not just at
-      // the layout-effect entry and the RO callback start (the other two grow
-      // sites). On keyboard close, the viewport ResizeObserver reaches this
-      // pass with a newly grown clientHeight; without the guard the spacer
-      // would still use the stale keyboard-open height. That undersizes the
-      // spacer, clamps the pin below its target, and strands the message in the
-      // middle. Grow-only: a keyboard-open shrink is ignored, so opening and
-      // closing the keyboard never changes the permanent reply reservation.
-      //
-      // The ONE sanctioned lowering of the grow-only floor: a committed pane
-      // geometry change (divider/projection/rotation) delivers the layout-
-      // derived pane height through pendingPaneHeightRef, which may be SMALLER
-      // than the current floor (a narrower/shorter pane). Consume it here, under
-      // the same reader-ownership gate as every other write in this pass, before
-      // the grow-only clientHeight bump re-raises it if the real pane is taller.
-      // The viewport ResizeObserver never sets this ref, so keyboard changes
-      // keep the floor strictly grow-only (design §2).
-      if (pendingPaneHeightRef.current != null) {
-        const ph = pendingPaneHeightRef.current
-        if (Number.isFinite(ph) && ph > 0) fullViewHRef.current = ph
-        pendingPaneHeightRef.current = null
+      // Keep the keyboard-closed pane reference current for the focused Q&A
+      // editing lifecycle. A committed pane resize may lower that reference;
+      // ordinary viewport changes only grow it, so a keyboard opening cannot
+      // masquerade as the new full pane. This value no longer sizes the spacer:
+      // reservation follows the active visible scroll box below.
+      if (pendingFullPaneHeightRef.current != null) {
+        const ph = pendingFullPaneHeightRef.current
+        if (Number.isFinite(ph) && ph > 0) fullPaneHRef.current = ph
+        pendingFullPaneHeightRef.current = null
       }
-      if (scrollEl.clientHeight > fullViewHRef.current) {
-        fullViewHRef.current = scrollEl.clientHeight
+      if (scrollEl.clientHeight > fullPaneHRef.current) {
+        fullPaneHRef.current = scrollEl.clientHeight
       }
-      // Fall back to the last user row in the DOM when the React ref is
-      // transiently null. On a fresh send the just-sent row's optimistic node
-      // is unmounted and its canonical node mounted (during a render swap),
-      // and _computeSpacerH returns 0 for a null lastUserMsgEl — collapsing the
-      // spacer to 0 mid-swap. Without a re-sizing ResizeObserver tick (there is
-      // none until the assistant reply streams in), the spacer stays 0, the pin
-      // clamps to scrollTop 0, and the sent message hangs mid-viewport until the
-      // reply arrives ("subsequent messages don't get enough space"). The DOM's
-      // last user row is the same element the ref points at once it re-attaches,
-      // so reserving from it keeps the pin target reachable the instant the row
-      // exists. `_computeSpacerH` still requires the latest row to be visible
-      // at the current/applied viewport, so this fallback cannot grant room to
-      // an older row or an unrelated reading location.
+      // A sent row remounts when its optimistic identity becomes canonical.
+      // Read the mounted last-user row while its React ref reattaches so that
+      // brief handoff cannot collapse the reservation to zero.
       const lastUserEl = _lastUserRowEl(scrollEl) || lastUserMsgRef.current
       const h = _computeSpacerH(
-        scrollEl, listEl, lastUserEl, fullViewHRef.current, modeRef.current,
+        scrollEl, listEl, lastUserEl, modeRef.current,
       )
       spacerEl.style.height = `${h}px`
       // A wheel/touch/key gesture begins before the browser emits its first
@@ -1894,29 +1867,32 @@ export default function useScrollMode({
       }
     }
 
+    function rememberAppliedMode() {
+      const mode = modeRef.current
+      lastAppliedModeRef.current = mode
+      const pinnedEl = mode.kind === 'PIN_USER_MSG'
+        ? _pinnedUserEl(scrollEl, mode.cid)
+        : null
+      const anchorEl = mode.kind === 'ANCHOR_AT'
+        ? _anchorEl(scrollEl, mode)
+        : null
+      lastPinTopRef.current = pinnedEl?.offsetTop ?? null
+      lastAnchorTopRef.current = anchorEl
+        ? _scrollTopOf(scrollEl, anchorEl)
+        : null
+    }
+
+    function applyLayoutMode(event, authorityVersion) {
+      if (!writeMode(scrollEl, modeRef.current, event, authorityVersion)) {
+        return false
+      }
+      rememberAppliedMode()
+      return true
+    }
+
     function maybeApplyMode(authorityVersion) {
       if (modeRef.current !== lastAppliedModeRef.current) {
-        if (!writeMode(
-          scrollEl,
-          modeRef.current,
-          'layout:mode-transition',
-          authorityVersion,
-        )) return
-        lastAppliedModeRef.current = modeRef.current
-        // Record the pin/anchor baseline (or clear both) so the RO's
-        // re-apply-on-shift checks below have a reference offsetTop.
-        if (modeRef.current.kind === 'PIN_USER_MSG') {
-          const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
-          lastPinTopRef.current = el ? el.offsetTop : null
-          lastAnchorTopRef.current = null
-        } else if (modeRef.current.kind === 'ANCHOR_AT') {
-          const el = _anchorEl(scrollEl, modeRef.current)
-          lastAnchorTopRef.current = el ? _scrollTopOf(scrollEl, el) : null
-          lastPinTopRef.current = null
-        } else {
-          lastPinTopRef.current = null
-          lastAnchorTopRef.current = null
-        }
+        applyLayoutMode('layout:mode-transition', authorityVersion)
       }
     }
 
@@ -1924,15 +1900,7 @@ export default function useScrollMode({
       if (!_pinReapplyNeeded(scrollEl, modeRef.current, lastPinTopRef.current)) {
         return
       }
-      if (!writeMode(
-        scrollEl,
-        modeRef.current,
-        'layout:repair-pin',
-        authorityVersion,
-      )) return
-      const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
-      lastPinTopRef.current = el ? el.offsetTop : null
-      lastAppliedModeRef.current = modeRef.current
+      applyLayoutMode('layout:repair-pin', authorityVersion)
     }
 
     // The ANCHOR_AT twin of settlePinnedMode — the post-reveal clamp-repair.
@@ -1942,22 +1910,14 @@ export default function useScrollMode({
       if (!_anchorReapplyNeeded(scrollEl, modeRef.current, lastAnchorTopRef.current)) {
         return
       }
-      if (!writeMode(
-        scrollEl,
-        modeRef.current,
-        'layout:repair-anchor',
-        authorityVersion,
-      )) return
-      const el = _anchorEl(scrollEl, modeRef.current)
-      lastAnchorTopRef.current = el ? _scrollTopOf(scrollEl, el) : null
-      lastAppliedModeRef.current = modeRef.current
+      applyLayoutMode('layout:repair-anchor', authorityVersion)
     }
 
     // Full sync — size spacer and apply-if-changed. Used at mount, RO, reveal,
     // and actual scroll-viewport changes. Each call sizes the spacer (always
     // needed — the spacer math depends on changing content). Most callers only
-    // touch scrollTop on a real mode transition; keyboard resize passes
-    // forceApply so the current PIN/FOLLOW/ANCHOR survives the viewport clamp.
+    // touch scrollTop on a real mode transition; viewport and deferred-replay
+    // branches reapply the current mode after geometry changes.
     function syncLayout({
       forceApply = false,
       viewportChange = false,
@@ -2010,25 +1970,7 @@ export default function useScrollMode({
             : 'layout:viewport-change',
         )
         persistMode()
-        writeMode(
-          scrollEl,
-          modeRef.current,
-          'layout:viewport-change',
-          authorityVersion,
-        )
-        lastAppliedModeRef.current = modeRef.current
-        if (modeRef.current.kind === 'PIN_USER_MSG') {
-          const el = _pinnedUserEl(scrollEl, modeRef.current.cid)
-          lastPinTopRef.current = el ? el.offsetTop : null
-          lastAnchorTopRef.current = null
-        } else if (modeRef.current.kind === 'ANCHOR_AT') {
-          const el = _anchorEl(scrollEl, modeRef.current)
-          lastAnchorTopRef.current = el ? _scrollTopOf(scrollEl, el) : null
-          lastPinTopRef.current = null
-        } else {
-          lastPinTopRef.current = null
-          lastAnchorTopRef.current = null
-        }
+        applyLayoutMode('layout:viewport-change', authorityVersion)
       } else if (forceApply) {
         writeMode(
           scrollEl,
@@ -2059,19 +2001,9 @@ export default function useScrollMode({
 
     syncLayout({ authorityVersion: currentAuthority() })
 
-    // The scrollApi.paneResized(projectedHeightPx) contract (design §2,
-    // constraint 1). Shell calls this on COMMITTED pane-geometry changes for a
-    // MOUNTED chat — divider pointerup, projection/mode flip, pane open/close
-    // affecting this chat, rotation — with the pane's new projected CONTENT
-    // height (the LAYOUT-derived height, never scrollEl.clientHeight, so a
-    // keyboard-shrunk viewport can not stick the floor). It lowers the grow-only
-    // floor to that height and re-applies the active mode: FOLLOW_BOTTOM snaps
-    // the tail, PIN_USER_MSG re-pins, ANCHOR_AT re-anchors. The whole pass
-    // respects the reader-gesture ownership gate (R5): while a reader gesture
-    // owns scroll, it DEFERS everything (the floor lowering is applied by
-    // sizeSpacer only under the gate) and the reader-yield replay runs it. The
-    // The keyboard's viewport ResizeObserver path must never call this —
-    // divider/projection shrink and keyboard shrink stay structurally separate.
+    // Shell supplies committed pane geometry separately from viewport resize.
+    // Its projected full height keeps Q&A keyboard-close detection honest even
+    // when the pane itself changes while the keyboard is open.
     function runPaneResize(projectedHeightPx) {
       const authorityVersion = currentAuthority()
       // This committed pane change has its own explicit owner. Adopt the DOM's
@@ -2081,14 +2013,12 @@ export default function useScrollMode({
         element: scrollEl,
         height: scrollEl.clientHeight,
       }
-      pendingPaneHeightRef.current =
+      pendingFullPaneHeightRef.current =
         (Number.isFinite(projectedHeightPx) && projectedHeightPx > 0)
           ? projectedHeightPx
-          : pendingPaneHeightRef.current
+          : pendingFullPaneHeightRef.current
       if (!layoutOwnsScroll(authorityVersion)) {
-        // Defer the floor lowering, spacer mutation, and mode re-apply as one
-        // replayable pass; the deferred syncLayout({forceApply}) consumes the
-        // pending height and re-applies the current mode when ownership yields.
+        // Keep projected pane height, spacer, and mode in one replayable pass.
         deferLayoutUntilReaderYields(authorityVersion)
         return
       }
@@ -2182,20 +2112,16 @@ export default function useScrollMode({
       }
       if (viewportChanged) {
         syncLayout({
-          forceApply: true,
           viewportChange: true,
           authorityVersion,
         })
         if (questionEditSessionRef.current
             && !questionEditField(document.activeElement)
-            && scrollEl.clientHeight >= fullViewHRef.current - 1) {
+            && scrollEl.clientHeight >= fullPaneHRef.current - 1) {
           questionEditSessionRef.current = false
         }
         requestRevealOnQuiet()
         return
-      }
-      if (scrollEl.clientHeight > fullViewHRef.current) {
-        fullViewHRef.current = scrollEl.clientHeight
       }
       sizeSpacer(authorityVersion)
       const k = modeRef.current.kind
@@ -2215,50 +2141,13 @@ export default function useScrollMode({
           authorityVersion,
         )
       } else if (k === 'PIN_USER_MSG') {
-        // Re-pin in two cases, both of which leave the message off its
-        // intended top position with no user action:
-        //
-        //   (a) offsetTop SHIFTED since the last apply — content ABOVE the
-        //       message grew (a prior turn's image finished loading, an
-        //       error/question card rendered). The pin target moved; the
-        //       view didn't follow.
-        //
-        //   (b) scrollTop was CLAMPED below the pin target during a layout
-        //       settle — the spacer shrank / scrollHeight dropped between
-        //       the initial apply and now, so the browser clamped the
-        //       scroll position down, leaving the message a chunk BELOW the
-        //       top (the owner-reported "sent it and it only went halfway").
-        //       This is the clamp-fix obligation in ARCHITECTURE.md's
-        //       "Chat scroll + steer contract" — already honored for
-        //       FOLLOW_BOTTOM/ANCHOR_AT, missing here. We only act when the
-        //       target is now reachable
-        //       (scrollHeight grew back enough); re-applying then lands the
-        //       message at the top instead of futilely re-clamping.
-        //
-        // Neither case fights the user: reader input immediately suspends
-        // layout-owned scroll writes, then its first scroll event flips the
-        // mode away from PIN_USER_MSG. Streaming content BELOW the message
-        // with a tall-enough scrollHeight already keeps the pin satisfied (no
-        // clamp, no offsetTop shift) — so this stays a no-op there and does
-        // NOT reintroduce the May-2026 re-pin-every-RO-firing jitter.
-        // Reachability is measured against the TARGET, not "is there any
-        // more room than now". If we gated on `maxScrollTop >= scrollTop`,
-        // a layout still growing toward the target (scrollHeight climbing
-        // as content streams in below) would re-pin stepwise on every RO
-        // firing — clamp to the current max, fire again, clamp a little
-        // higher — reintroducing the May-2026 stutter. Gating on the
-        // target means we re-pin exactly once, when the settled layout
-        // can actually hold the message at the top.
+        // Repair only a shifted row or a previously clamped target that has
+        // become reachable. The predicate deliberately gates on the target,
+        // preventing stepwise re-pins while output grows below the message.
         settlePinnedMode(authorityVersion)
       } else if (k === 'ANCHOR_AT') {
-        // POST-REVEAL ANCHOR_AT repair (the pre-reveal case is handled by the
-        // first branch above). Background panes resize routinely once panes
-        // exist (design §2 prerequisite), and a settled anchor deserves the
-        // SAME two-case repair PIN just got: re-apply only when the anchor's
-        // offsetTop shifted or scrollTop was clamped and the target is reachable
-        // again. _anchorReapplyNeeded gates it exactly like the pin, so
-        // steady-state streaming below the anchor stays a no-op — no May-2026
-        // jitter, no fight with the reader (whose first scroll flips the mode).
+        // Post-reveal anchors use the same shift-or-clamp repair as pins;
+        // steady output below an unchanged anchor remains a no-op.
         settleAnchoredMode(authorityVersion)
       }
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
@@ -2288,22 +2177,21 @@ export default function useScrollMode({
     scrollEl.addEventListener('error', requestRevealOnQuiet, true)
 
     // User-gesture detection. The scroll event itself stays intentionally
-    // cheap: it records ownership/intent and lets native scrollend perform the
-    // one settlement pass (with a quiet timer only on older engines).
+    // cheap: it records ownership/intent, then one shared settlement pass runs
+    // at native scrollend or the guaranteed quiet edge, whichever comes first.
     // Anchor discovery, spacer measurement, mode transition, and persistence
     // run once at the trailing edge instead of on every compositor frame.
     let readerScrollDirty = false
-    let readerScrollAtBottom = false
-    let readerScrollSequence = null
+    let readerGestureReachedBottom = false
+    let readerGestureSequence = null
     let readerSettleTimer = 0
     let disclosureInputOwnsGesture = false
-    const hasNativeScrollEnd = 'onscrollend' in scrollEl
 
     const discardPendingReaderSettle = () => {
       clearTimeout(readerSettleTimer)
       readerSettleTimer = 0
       readerScrollDirty = false
-      readerScrollAtBottom = false
+      readerGestureReachedBottom = false
       disclosureInputOwnsGesture = false
     }
     discardPendingReaderSettleRef.current = discardPendingReaderSettle
@@ -2313,8 +2201,8 @@ export default function useScrollMode({
       readerSettleTimer = 0
       if (!readerScrollDirty) return
       readerScrollDirty = false
-      const settledAtBottom = readerScrollAtBottom
-      readerScrollAtBottom = false
+      const settledAtBottom = readerGestureReachedBottom
+      readerGestureReachedBottom = false
 
       // The quiet edge is the gesture/layout ownership handoff. Compute the
       // final semantic location before replaying any deferred layout observer;
@@ -2495,7 +2383,7 @@ export default function useScrollMode({
         questionEditSessionRef.current = true
         return
       }
-      if (scrollEl.clientHeight >= fullViewHRef.current - 1) {
+      if (scrollEl.clientHeight >= fullPaneHRef.current - 1) {
         questionEditSessionRef.current = false
       }
     }
@@ -2573,6 +2461,11 @@ export default function useScrollMode({
       touchEndChecked = false
       scheduleNoScrollRelease()
     }
+    const onPointerCancelInput = () => {
+      // Native panning cancels a disclosure press before its first scroll.
+      // Keep the gesture gate, but let that scroll become reader-owned.
+      disclosureInputOwnsGesture = false
+    }
     const noteScrollStart = () => {
       if (!pendingGestureStart) return
       perfMark('scroll.startLatency', performance.now() - pendingGestureStart)
@@ -2588,10 +2481,7 @@ export default function useScrollMode({
     scrollEl.addEventListener('beforeinput', onQuestionEditMutation, { passive: true })
     scrollEl.addEventListener('input', onQuestionEditMutation, { passive: true })
     scrollEl.addEventListener('pointerup', onPointerUpInput, { passive: true })
-    // Do not release on pointercancel: touch-action hands a native vertical pan
-    // to the browser by cancelling its Pointer Events stream just before the
-    // first scroll event. Releasing here would misclassify that first frame as
-    // programmatic and let layout work take the viewport back mid-gesture.
+    scrollEl.addEventListener('pointercancel', onPointerCancelInput, { passive: true })
 
     // Scroll handler — user-driven scrolls only mark intent here. The expensive
     // semantic location/mode work runs once in settleReaderScroll.
@@ -2633,27 +2523,26 @@ export default function useScrollMode({
         pendingGestureReleaseRafRef.current = 0
       }
       readerScrollDirty = true
-      // Capture the scroll event's own geometry. Output can grow during the
-      // quiet window; re-reading bottom later would erase the reader's explicit
-      // "I reached the tail" intent and incorrectly settle as ANCHOR_AT.
-      readerScrollAtBottom = distanceToBottom < PHYSICAL_BOTTOM_EPSILON_PX
       const intent = readerIntentAfterScroll({
         gestureSequence: gestureSequenceRef.current,
-        claimedSequence: readerScrollSequence,
+        claimedSequence: readerGestureSequence,
         version: readerIntentVersionRef.current,
+        reachedBottom: readerGestureReachedBottom,
+        atBottom: distanceToBottom < PHYSICAL_BOTTOM_EPSILON_PX,
       })
-      readerScrollSequence = intent.claimedSequence
+      readerGestureSequence = intent.claimedSequence
+      readerGestureReachedBottom = intent.reachedBottom
       readerIntentVersionRef.current = intent.version
       readerLocationExplicitRef.current = true
-      if (!hasNativeScrollEnd) {
-        clearTimeout(readerSettleTimer)
-        readerSettleTimer = setTimeout(settleReaderScroll, GESTURE_SETTLE_MS)
-      }
+      // Exposing `onscrollend` does not guarantee a terminal event for every
+      // interrupted or disclosure-adjacent scroll. Keep one idempotent owner
+      // and let the quiet edge guarantee its call; a native event merely
+      // completes the same path sooner.
+      clearTimeout(readerSettleTimer)
+      readerSettleTimer = setTimeout(settleReaderScroll, GESTURE_SETTLE_MS)
     }
     scrollEl.addEventListener('scroll', onScroll, { passive: true })
-    if (hasNativeScrollEnd) {
-      scrollEl.addEventListener('scrollend', settleReaderScroll, { passive: true })
-    }
+    scrollEl.addEventListener('scrollend', settleReaderScroll, { passive: true })
 
     // Hide-then-reveal: kick off the quiet-debounce path immediately
     // (reveals ~50ms after the last RO firing, smoothing out
@@ -2688,7 +2577,7 @@ export default function useScrollMode({
         composerResizeRunRef.current = null
       }
       scrollEl.removeEventListener('scroll', onScroll)
-      if (hasNativeScrollEnd) scrollEl.removeEventListener('scrollend', settleReaderScroll)
+      scrollEl.removeEventListener('scrollend', settleReaderScroll)
       scrollEl.removeEventListener('pointerdown', onPointerDownInput)
       scrollEl.removeEventListener('pointermove', onPointerMoveInput)
       scrollEl.removeEventListener('wheel', onWheelInput)
@@ -2698,6 +2587,7 @@ export default function useScrollMode({
       scrollEl.removeEventListener('beforeinput', onQuestionEditMutation)
       scrollEl.removeEventListener('input', onQuestionEditMutation)
       scrollEl.removeEventListener('pointerup', onPointerUpInput)
+      scrollEl.removeEventListener('pointercancel', onPointerCancelInput)
       if (forceRevealRef.current === forceReveal) forceRevealRef.current = null
     }
   }, [
@@ -2797,7 +2687,7 @@ export default function useScrollMode({
       }
 
       const spacerH = _computeSpacerH(
-        scrollEl, listEl, lastUserEl, fullViewHRef.current, mode,
+        scrollEl, listEl, lastUserEl, mode,
       )
       const signature = [
         Math.round(listEl.offsetHeight),

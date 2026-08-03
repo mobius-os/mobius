@@ -2405,6 +2405,7 @@
   z-index: 50;
   /* Touch-scroll inside the popover should not bubble up and close
      the keyboard or scroll the chat behind it. */
+  touch-action: pan-y;
   overscroll-behavior: contain;
 }
 

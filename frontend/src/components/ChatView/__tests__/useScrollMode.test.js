@@ -1304,7 +1304,6 @@ test('spacer reservation belongs to the latest user row in any mode', () => {
       scrollEl,
       listEl,
       lastUserMsgEl,
-      600,
       { kind: 'PIN_USER_MSG', cid: 'c-1' },
     ),
     396,
@@ -1314,7 +1313,6 @@ test('spacer reservation belongs to the latest user row in any mode', () => {
       scrollEl,
       listEl,
       lastUserMsgEl,
-      600,
       { kind: 'ANCHOR_AT', key: 'a-1', offset: 0 },
     ),
     396,
@@ -1325,7 +1323,6 @@ test('spacer reservation belongs to the latest user row in any mode', () => {
       scrollEl,
       listEl,
       lastUserMsgEl,
-      600,
       { kind: 'PIN_USER_MSG', cid: 'different-row' },
     ),
     396,
@@ -1348,7 +1345,6 @@ test('off-screen latest user pre-reserves one stable downward scroll range', () 
       scrollEl,
       listEl,
       latestUserMsgEl,
-      600,
       { kind: 'ANCHOR_AT', key: 'older-user', offset: 0 },
     ),
     96,
@@ -1368,11 +1364,11 @@ test('crossing the latest-user viewport boundary cannot create a second-stage bo
 
   scrollEl.scrollTop = 0
   const beforeApproach = _computeSpacerH(
-    scrollEl, listEl, latestUserMsgEl, 600, mode,
+    scrollEl, listEl, latestUserMsgEl, mode,
   )
   scrollEl.scrollTop = 700
   const afterLatestUserAppears = _computeSpacerH(
-    scrollEl, listEl, latestUserMsgEl, 600, mode,
+    scrollEl, listEl, latestUserMsgEl, mode,
   )
 
   assert.equal(beforeApproach, 96)
@@ -1400,7 +1396,6 @@ test('an older applied anchor does not make tail scrollHeight grow later', () =>
       scrollEl,
       { offsetHeight: 1000 },
       latestUserMsgEl,
-      600,
       { kind: 'ANCHOR_AT', key: 'older-anchor', offset: 0 },
     ),
     296,
@@ -1428,7 +1423,6 @@ test('applied anchor may reserve before current geometry reaches its visible lat
       scrollEl,
       { offsetHeight: 900 },
       latestUserMsgEl,
-      600,
       { kind: 'ANCHOR_AT', key: 'latest-anchor', offset: 100 },
     ),
     396,
@@ -1436,24 +1430,56 @@ test('applied anchor may reserve before current geometry reaches its visible lat
   )
 })
 
-test('keyboard-closed height keeps permanent tail reservation stable', () => {
-  const scrollEl = makeSpacerScrollEl({ clientHeight: 400 })
+test('keyboard height shrinks blank reservation before moving followed content', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 800 })
   const latestUserMsgEl = {
     offsetTop: 500,
     offsetHeight: 80,
     dataset: { cid: 'latest' },
   }
+  const listEl = { offsetHeight: 700 }
+  const mode = { kind: 'FOLLOW_BOTTOM' }
+  const closedSpacer = _computeSpacerH(
+    scrollEl, listEl, latestUserMsgEl, mode,
+  )
+  scrollEl.clientHeight = 500
+  const openSpacer = _computeSpacerH(
+    scrollEl, listEl, latestUserMsgEl, mode,
+  )
 
+  assert.equal(closedSpacer, 596)
+  assert.equal(openSpacer, 296)
   assert.equal(
-    _computeSpacerH(
-      scrollEl,
-      { offsetHeight: 700 },
-      latestUserMsgEl,
-      800,
-      { kind: 'INITIAL' },
-    ),
-    596,
-    'the full-height reservation exists before the hidden row is approached',
+    listEl.offsetHeight + closedSpacer - 800,
+    listEl.offsetHeight + openSpacer - 500,
+    'removing 300px of visible height first removes 300px of blank spacer',
+  )
+})
+
+test('keyboard overflow lifts only content that no longer fits', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 800 })
+  const latestUserMsgEl = {
+    offsetTop: 500,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+  const listEl = { offsetHeight: 1050 }
+  const mode = { kind: 'FOLLOW_BOTTOM' }
+  const closedSpacer = _computeSpacerH(
+    scrollEl, listEl, latestUserMsgEl, mode,
+  )
+  scrollEl.clientHeight = 500
+  const openSpacer = _computeSpacerH(
+    scrollEl, listEl, latestUserMsgEl, mode,
+  )
+
+  assert.equal(closedSpacer, 246)
+  assert.equal(openSpacer, 0)
+  assert.equal(
+    (listEl.offsetHeight + openSpacer - 500)
+      - (listEl.offsetHeight + closedSpacer - 800),
+    54,
+    'after reservation reaches zero, only the remaining overflow moves the tail',
   )
 })
 
@@ -1467,13 +1493,13 @@ test('tool expansion consumes reservation and collapse restores the exact defici
   const mode = { kind: 'ANCHOR_AT', key: 'latest-user', offset: 4 }
 
   const collapsed = _computeSpacerH(
-    scrollEl, { offsetHeight: 500 }, lastUserMsgEl, 915, mode,
+    scrollEl, { offsetHeight: 500 }, lastUserMsgEl, mode,
   )
   const expanded = _computeSpacerH(
-    scrollEl, { offsetHeight: 1300 }, lastUserMsgEl, 915, mode,
+    scrollEl, { offsetHeight: 1300 }, lastUserMsgEl, mode,
   )
   const collapsedAgain = _computeSpacerH(
-    scrollEl, { offsetHeight: 500 }, lastUserMsgEl, 915, mode,
+    scrollEl, { offsetHeight: 500 }, lastUserMsgEl, mode,
   )
 
   assert.equal(collapsed, 611)
@@ -1485,7 +1511,7 @@ test('spacer reservation returns zero before there is a user message', () => {
   const scrollEl = makeSpacerScrollEl({ clientHeight: 600 })
   const listEl = { offsetHeight: 200 }
 
-  assert.equal(_computeSpacerH(scrollEl, listEl, null, 600), 0)
+  assert.equal(_computeSpacerH(scrollEl, listEl, null), 0)
 })
 
 test('ordinary question-answer anchor keeps the stable latest-turn tail range', () => {
@@ -1503,7 +1529,6 @@ test('ordinary question-answer anchor keeps the stable latest-turn tail range', 
       scrollEl,
       { offsetHeight: 1500 },
       { offsetTop: 1100, offsetHeight: 80, dataset: { cid: 'c-1' } },
-      960,
       mode,
     ),
     556,
@@ -1534,11 +1559,12 @@ test('question submission reserves the exact room that keeps its anchor reachabl
   }
 
   assert.equal(
-    _computeSpacerH(scrollEl, listEl, latestUser, 600, mode),
+    _computeSpacerH(scrollEl, listEl, latestUser, mode),
     340,
   )
+  scrollEl.clientHeight = 700
   assert.equal(
-    _computeSpacerH(scrollEl, listEl, latestUser, 700, mode),
+    _computeSpacerH(scrollEl, listEl, latestUser, mode),
     440,
     'the same-viewport overlay keeps the exact anchor until resize releases it',
   )
@@ -1568,16 +1594,16 @@ test('answered question uses the unanswered card spacer when the keyboard closes
   }
 
   assert.equal(
-    _computeSpacerH(scrollEl, listEl, latestUser, 700, heldMode),
+    _computeSpacerH(scrollEl, listEl, latestUser, heldMode),
     440,
     'without release the answered card would remain locked',
   )
   const released = releaseQuestionSubmissionForViewport(heldMode, 700)
   const answeredSpacer = _computeSpacerH(
-    scrollEl, listEl, latestUser, 700, released,
+    scrollEl, listEl, latestUser, released,
   )
   const unansweredSpacer = _computeSpacerH(
-    scrollEl, listEl, latestUser, 700, baseMode,
+    scrollEl, listEl, latestUser, baseMode,
   )
   assert.equal(answeredSpacer, unansweredSpacer)
   assert.equal(answeredSpacer, 396)
@@ -1605,7 +1631,6 @@ test('an off-content legacy anchor clamps to content then reserves for its visib
       scrollEl,
       { offsetHeight: 700 },
       { offsetTop: 100, offsetHeight: 80, dataset: { cid: 'c-1' } },
-      700,
       mode,
     ),
     96,
@@ -1632,24 +1657,15 @@ test('queued tray does not shorten spacer reservation', () => {
       scrollEl,
       listEl,
       lastUserMsgEl,
-      600,
       { kind: 'PIN_USER_MSG', cid: 'c-1' },
     ),
     396,
   )
 })
 
-// R5 regression contract: a send while at the bottom must pin the new user
-// message to the TOP, which requires the dynamic spacer to reserve enough
-// bottom room that the pin target is actually REACHABLE (maxScrollTop >=
-// pinTarget). By default it reserves EXACTLY that — no extra cushion — so
-// maxScrollTop == pinTarget and the row rests flush at the top. When
-// fullViewH is stale-SMALL (the keyboard-open height used after the keyboard
-// has already closed and grown clientHeight), the spacer is undersized, the
-// pin clamps short, and the message lands mid-viewport. The fix keeps
-// fullViewHRef >= clientHeight at every sizeSpacer() call (grow guard), so
-// this asserts the math the fix preserves.
-function pinReachable({ fullViewH, clientHeight, listH, lastUserTop }) {
+// R5 regression contract: spacer sizing reads the active scroll box directly,
+// so callers cannot preserve a stale keyboard-open height after it grows.
+function pinReachable({ clientHeight, listH, lastUserTop }) {
   const scrollEl = makeScrollEl({
     scrollHeight: 0, scrollTop: 0, clientHeight,
   })
@@ -1662,7 +1678,6 @@ function pinReachable({ fullViewH, clientHeight, listH, lastUserTop }) {
     scrollEl,
     listEl,
     lastUserMsgEl,
-    fullViewH,
     { kind: 'PIN_USER_MSG', cid: 'pin-row' },
   )
   const scrollHeight = listH + spacerH
@@ -1671,22 +1686,11 @@ function pinReachable({ fullViewH, clientHeight, listH, lastUserTop }) {
   return { spacerH, maxScrollTop, pinTarget, reachable: maxScrollTop >= pinTarget }
 }
 
-test('R5: spacer keeps the pin reachable when fullViewH tracks the (grown) clientHeight', () => {
-  // Keyboard just closed: clientHeight grew back to 700. With the grow guard,
-  // fullViewH is >= clientHeight, so the pin target is reachable → top pin.
-  const r = pinReachable({ fullViewH: 700, clientHeight: 700, listH: 1040, lastUserTop: 1000 })
-  assert.equal(r.reachable, true, 'message can reach the top when fullViewH >= clientHeight')
+test('R5: the active viewport keeps the pin exactly reachable', () => {
+  const r = pinReachable({ clientHeight: 700, listH: 1040, lastUserTop: 1000 })
+  assert.equal(r.reachable, true, 'message can reach the top after keyboard close')
   assert.equal(r.maxScrollTop, r.pinTarget, 'spacer reserves exactly enough to reach the pin — no extra cushion')
   assert.equal(r.maxScrollTop - r.pinTarget, 0, 'no reservable blank below the pinned message by default')
-})
-
-test('R5: a stale-small fullViewH undersizes the spacer and strands the pin mid-viewport (the bug)', () => {
-  // The pre-fix path: visualViewport fired sizeSpacer with the keyboard-open
-  // height (400) after clientHeight had already grown to 700.
-  const r = pinReachable({ fullViewH: 400, clientHeight: 700, listH: 1040, lastUserTop: 1000 })
-  assert.equal(r.reachable, false, 'stale-small fullViewH leaves the pin target unreachable')
-  assert.ok(r.pinTarget - r.maxScrollTop > 80,
-    'the message is still stranded far below the top — visually mid-viewport')
 })
 
 
@@ -1791,7 +1795,6 @@ test('F2: an idle-mounted short chat reserves for its visible latest user', () =
     scrollEl,
     listEl,
     lastUserMsgEl,
-    915,
     { kind: 'ANCHOR_AT', key: 'a-1', offset: 0 },
   )
   assert.equal(spacerH, 851)
@@ -1805,7 +1808,6 @@ test('F2: a saved pin restores as the same physical ordinary anchor', () => {
     { clientHeight },
     { offsetHeight: shortList },
     { offsetTop: lowUserTop, offsetHeight: 60, dataset: { cid: 'c-1' } },
-    clientHeight,
     { kind: 'PIN_USER_MSG', cid: 'c-1' },
   )
   const restored = makePinnableScrollEl({ listH: shortList, spacerH, clientHeight, userTop: lowUserTop, cid: 'c-1' })
