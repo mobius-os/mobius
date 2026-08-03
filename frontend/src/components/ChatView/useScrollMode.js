@@ -772,11 +772,9 @@ export function shouldPinSend({
 }
 
 
-/** Keep a queued send's submit-time pin decision until the reader actually
- *  moves again. Opening/closing the queue tray and composer changes geometry,
- *  but that layout work is not newer reading intent. An explicit fast-forward
- *  therefore reuses the queued decision while its reader generation is still
- *  current; after a real scroll, the fast-forward-time snapshot wins. */
+/** Layout may change bottom geometry without changing reader intent. Preserve
+ *  the queued decision within its generation; after real reader movement,
+ *  Fast-forward's current geometry wins. */
 export function delayedSendWillPin({
   previousIntent,
   readerIntentVersion,

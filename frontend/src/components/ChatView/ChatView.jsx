@@ -769,11 +769,6 @@ export default function ChatView({
     return intent
   }
 
-  function peekSendIntent(cid) {
-    if (!cid) return null
-    return sendIntentByCidRef.current.get(cid) || null
-  }
-
   function restoreReplacedSendIntent(cid, replacement, previous) {
     if (!cid || sendIntentByCidRef.current.get(cid) !== replacement) return
     if (previous) sendIntentByCidRef.current.set(cid, previous)
@@ -3196,15 +3191,11 @@ export default function ChatView({
     let explicitSteerIntent = null
     let previousSendIntent = null
     try {
-      const steerIsFirstUser = isFirstVisibleUserMessage()
-      previousSendIntent = peekSendIntent(steerCid)
-      // Queue submission already captured the reader's position before the
-      // tray changed footer/viewport geometry. Preserve that decision when no
-      // real reader scroll followed; otherwise Fast-forward's current snapshot
-      // wins. The controller owns that generation check and also cancels any
-      // older quiet settlement, which previously overwrote a newer pin.
+      previousSendIntent = sendIntentByCidRef.current.get(steerCid) || null
+      // Preserve queue-time intent through tray reflow. The controller replaces
+      // it after real reader movement and retires any older gesture settlement.
       explicitSteerIntent = captureSendIntent({
-        isFirstUserMsg: steerIsFirstUser,
+        isFirstUserMsg: isFirstVisibleUserMessage(),
         previousIntent: previousSendIntent,
       })
       rememberSendIntent(steerCid, explicitSteerIntent)

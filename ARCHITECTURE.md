@@ -602,13 +602,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   authoritative because `ScrollMode` can lag an input/layout frame; requiring both
   made identical bottom sends behave inconsistently. A real user scroll after
   submission invalidates an automatic delayed queue promotion (a tap without
-  scrolling does not). Explicit fast-forward keeps that submit snapshot while
-  its reader generation remains current, so opening or closing the queue tray
-  cannot turn a bottom send into a hold (or manufacture a pin for somebody
-  reading above it). If the reader really moved after queueing, fast-forward
-  captures fresh bottom geometry instead; another real scroll during its request
-  invalidates that snapshot. Missing delayed intent degrades to hold, never to
-  an inferred pin.
+  scrolling does not). Explicit fast-forward reuses that snapshot through tray
+  reflow while its reader generation remains current; after a real scroll it
+  captures current geometry instead. Another scroll during the request invalidates
+  that snapshot. Missing delayed intent degrades to hold, never to an inferred pin.
 - **R3 — Pin holds until the reservation is filled.** A legitimate live pin
   transitions to `PIN_USER_MSG`, not immediately to `FOLLOW_BOTTOM`; the response
   first grows below the prompt without moving it. Exactly when the streaming reply
