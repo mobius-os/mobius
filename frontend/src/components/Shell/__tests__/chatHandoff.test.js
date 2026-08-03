@@ -43,12 +43,12 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'ChatView must report layout readiness before its transcript can be promoted')
   assert.match(
     paneChatView,
-    /scheduleAfterBrowserPaint\(\(\) => \{[\s\S]*onDisplayReady\(paneId, readyChatId\)/,
+    /scheduleAfterBrowserPaint\(\s*\(\) => onDisplayReady\(paneId, readyChatId\),\s*\)/,
     'the pane boundary must prepare one real destination paint before promotion',
   )
   assert.match(
     paneChatView,
-    /displayReadyCancelRef\.current\?\.\(\)[\s\S]*useEffect\(\(\) => \(\) => \{/,
+    /displayReadyCancelRef\.current\(\)[\s\S]*useEffect\(\(\) => \(\) => displayReadyCancelRef\.current\(\), \[\]\)/,
     'a superseded or unmounted staging chat must cancel its pending paint handoff',
   )
   assert.match(chatView,
@@ -159,18 +159,18 @@ test('each pane holds one outgoing chat over one staging chat', () => {
     'an inert staging composer must not consume a one-shot composer request')
   assert.match(
     shell,
-    /visible=\{surfaceVisible && chatPanesVisible && role !== 'held'\}[\s\S]*keepTranscriptPainted=\{surfaceVisible && role === 'held'\}/,
+    /runtimeActive=\{surfaceVisible && chatPanesVisible && role !== 'held'\}[\s\S]*keepTranscriptPainted=\{surfaceVisible && role === 'held'\}/,
     'Shell must explicitly distinguish the inactive held runtime from its painted cover',
   )
   assert.match(
     paneChatView,
-    /hidden=\{!visible\}[\s\S]*keepTranscriptPainted=\{keepTranscriptPainted\}/,
+    /hidden=\{!runtimeActive\}[\s\S]*keepTranscriptPainted=\{keepTranscriptPainted\}/,
     'the pane boundary must pass both independent responsibilities to ChatView',
   )
   assert.match(
     chatView,
     /if \(!hidden\) return[\s\S]*if \(keepTranscriptPainted\) return[\s\S]*setInitialEntryPhase\('history'\)[\s\S]*setLoading\(true\)/,
-    'a held cover must freeze its reading position without arming the transcript blanking gate',
+    'a held cover must relinquish runtime ownership without arming the transcript blanking gate',
   )
 })
 

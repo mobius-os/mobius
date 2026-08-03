@@ -25,7 +25,7 @@ function PaneChatView({
   chatId,
   paneId,
   apps,
-  visible = true,
+  runtimeActive = true,
   keepTranscriptPainted = false,
   paneContentHeight,
   // Shell selects this chat's stable signal before React.memo compares props.
@@ -100,25 +100,18 @@ function PaneChatView({
     onChatMissing?.(missingId, chatId)
   }, [chatId, onChatMissing])
 
-  const displayReadyCancelRef = useRef(null)
+  const displayReadyCancelRef = useRef(() => {})
   const handleDisplayReady = useCallback((readyChatId) => {
-    displayReadyCancelRef.current?.()
-    displayReadyCancelRef.current = null
-    if (!onDisplayReady) return
+    displayReadyCancelRef.current()
 
-    // ChatView reports layout readiness before the browser has painted that
-    // transcript. Keep the outgoing cover for one prepared destination frame,
-    // then promote without a fade or device-specific timeout.
-    displayReadyCancelRef.current = scheduleAfterBrowserPaint(() => {
-      displayReadyCancelRef.current = null
-      onDisplayReady(paneId, readyChatId)
-    })
+    // ChatView reports layout readiness before the transcript's first paint.
+    // Prepare that frame beneath the outgoing cover before promotion.
+    displayReadyCancelRef.current = scheduleAfterBrowserPaint(
+      () => onDisplayReady(paneId, readyChatId),
+    )
   }, [onDisplayReady, paneId])
 
-  useEffect(() => () => {
-    displayReadyCancelRef.current?.()
-    displayReadyCancelRef.current = null
-  }, [])
+  useEffect(() => () => displayReadyCancelRef.current(), [])
 
   return (
     <ErrorBoundary
@@ -130,7 +123,7 @@ function PaneChatView({
       <ChatView
         key={chatId}
         chatId={chatId}
-        hidden={!visible}
+        hidden={!runtimeActive}
         keepTranscriptPainted={keepTranscriptPainted}
         paneContentHeight={paneContentHeight}
         externalRunSignal={externalRunSignal}

@@ -1004,7 +1004,7 @@ test('Shell threads the (drag-preview) viewMode into the content derivation and 
   // retain the same chat without sharing geometry or activating both runtimes.
   assert.match(shell, /const standardOwner = world === STANDARD_CHAT_WORLD/)
   assert.match(shell, /const builderPainted = !standardOwner[\s\S]*effectiveViewMode === 'panes'/)
-  assert.match(shell, /visible=\{surfaceVisible && chatPanesVisible && role !== 'held'\}/)
+  assert.match(shell, /runtimeActive=\{surfaceVisible && chatPanesVisible && role !== 'held'\}/)
 })
 
 test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any drop commits panes', () => {
