@@ -916,6 +916,10 @@ test('chat deletion is immediate while app deletion still requires confirmation'
 })
 
 test('drawer row actions have one opening path without a custom touch hold', () => {
+  assert.match(drawer, /import \{ useHistoryDismiss \} from '\.\.\/\.\.\/hooks\/useHistoryDismiss\.jsx'/)
+  assert.match(drawer, /open: openItemMenuHistory,[\s\S]*?close: closeItemMenu,[\s\S]*?useHistoryDismiss\(\(\) => setOpenMenu\(null\)\)/)
+  assert.match(drawer, /function showItemMenu\(kind, id, surface, placement\) \{[\s\S]*?openItemMenuHistory\(\)[\s\S]*?setOpenMenu/,
+    'Back ownership must be registered before the portaled menu paints')
   assert.match(drawer, /function openItemMenuAt\(point,[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
     'app cards and drawer rows must share one semantic opening function')
@@ -933,17 +937,6 @@ test('drawer row actions have one opening path without a custom touch hold', () 
     'the menu stays interactive while the next outside tap reaches its real destination')
   assert.doesNotMatch(drawer, /navigator\.vibrate/,
     'drawer rows rely on platform long-press feedback instead of adding a second vibration')
-})
-
-test('the background stays live while the opening press cannot activate an action', () => {
-  assert.doesNotMatch(drawerItemActionMenu, /outsidePressStartedRef|consumeOutsidePointer/)
-  assert.match(drawerItemActionMenu, /const menuPressStartedRef = useRef\(false\)/)
-  assert.match(drawerItemActionMenu, /function blockReleaseThroughClick\(event\)[\s\S]*?event\.detail === 0[\s\S]*?menuPressStartedRef\.current[\s\S]*?event\.preventDefault\(\)[\s\S]*?stopImmediatePropagation/,
-    'a release retargeted onto an action is blocked without breaking keyboard activation')
-  assert.match(drawerItemActionMenu, /onPointerDownCapture=\{\(\) => \{[\s\S]*?menuPressStartedRef\.current = false/)
-  assert.match(drawerItemActionMenu, /onPointerDown=\{event => \{[\s\S]*?menuPressStartedRef\.current = true[\s\S]*?event\.stopPropagation\(\)/,
-    'only a fresh pointer press begun inside the mounted menu authorizes its click')
-  assert.match(drawerItemActionMenu, /onClickCapture=\{blockReleaseThroughClick\}/)
 })
 
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {

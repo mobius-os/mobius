@@ -3,6 +3,12 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import {
+  beginMenuPress,
+  cancelMenuPress,
+  consumeMenuClick,
+  finishMenuPress,
+} from './menuPointerOwnership.js'
 import { Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 
@@ -30,7 +36,7 @@ export default function DrawerItemActionMenu({
   const menuRef = useRef(null)
   const wasOpenRef = useRef(false)
   const restoreOnCloseRef = useRef(true)
-  const menuPressStartedRef = useRef(false)
+  const pointerOwnerRef = useRef({ press: null, clickAction: null })
   const [confirmation, setConfirmation] = useState(null)
   const [position, setPosition] = useState(null)
 
@@ -44,7 +50,7 @@ export default function DrawerItemActionMenu({
       wasOpenRef.current = true
       return
     }
-    menuPressStartedRef.current = false
+    pointerOwnerRef.current = { press: null, clickAction: null }
     setConfirmation(null)
     setPosition(null)
     if (!wasOpenRef.current) return
@@ -100,8 +106,6 @@ export default function DrawerItemActionMenu({
     return () => cancelAnimationFrame(frame)
   }, [open, position, confirmation])
 
-  if (!open) return null
-
   function run(action, { restoreFocus = true } = {}) {
     close({ restoreFocus })
     action()
@@ -133,28 +137,59 @@ export default function DrawerItemActionMenu({
 
   const recoveryLabel = itemKind === 'chat' ? 'chats' : 'apps'
 
+  function actionFor(target) {
+    return target?.closest?.('.drawer__item-action-item') || null
+  }
+
   function blockReleaseThroughClick(event) {
     // A touch menu can appear underneath the contact that opened it. Android
     // may retarget that contact's trailing click to the newly mounted action,
     // even though no pointerdown ever began inside the menu. Only a click with
     // menu-owned press provenance may run; detail=0 preserves keyboard and
     // assistive-technology activation.
-    const keyboardActivation = event.detail === 0
-    if (keyboardActivation || menuPressStartedRef.current) {
-      menuPressStartedRef.current = false
-      return
-    }
+    const outcome = consumeMenuClick(pointerOwnerRef.current, {
+      detail: event.detail,
+      action: actionFor(event.target),
+    })
+    pointerOwnerRef.current = outcome.owner
+    if (outcome.allowed) return
     event.preventDefault()
     event.stopPropagation()
     event.nativeEvent?.stopImmediatePropagation?.()
   }
 
+  useEffect(() => {
+    if (!open) return
+    function onOutsidePointerDown(event) {
+      if (menuRef.current?.contains(event.target)) return
+      pointerOwnerRef.current = { press: null, clickAction: null }
+      // The listener is capture-only: dismiss synchronously, then let the same
+      // pointer continue to its intended chat/app/settings/content target.
+      restoreOnCloseRef.current = false
+      onClose()
+    }
+    function clearAbandonedPointer(event) {
+      if (menuRef.current?.contains(event.target)) return
+      pointerOwnerRef.current = cancelMenuPress(
+        pointerOwnerRef.current,
+        event.pointerId,
+      )
+    }
+    document.addEventListener('pointerdown', onOutsidePointerDown, true)
+    document.addEventListener('pointerup', clearAbandonedPointer, true)
+    document.addEventListener('pointercancel', clearAbandonedPointer, true)
+    return () => {
+      document.removeEventListener('pointerdown', onOutsidePointerDown, true)
+      document.removeEventListener('pointerup', clearAbandonedPointer, true)
+      document.removeEventListener('pointercancel', clearAbandonedPointer, true)
+    }
+  }, [onClose, open])
+
+  if (!open) return null
+
   const layer = (
     <div
       className="drawer__item-action-layer"
-      onPointerDownCapture={() => {
-        menuPressStartedRef.current = false
-      }}
     >
       <div
         ref={menuRef}
@@ -167,11 +202,24 @@ export default function DrawerItemActionMenu({
           '--item-action-y': `${position?.y || 0}px`,
         }}
         onPointerDown={event => {
-          menuPressStartedRef.current = true
+          pointerOwnerRef.current = beginMenuPress(pointerOwnerRef.current, {
+            pointerId: event.pointerId,
+            action: actionFor(event.target),
+            isPrimary: event.isPrimary,
+          })
           event.stopPropagation()
         }}
-        onPointerCancel={() => {
-          menuPressStartedRef.current = false
+        onPointerUp={event => {
+          pointerOwnerRef.current = finishMenuPress(pointerOwnerRef.current, {
+            pointerId: event.pointerId,
+            action: actionFor(event.target),
+          })
+        }}
+        onPointerCancel={event => {
+          pointerOwnerRef.current = cancelMenuPress(
+            pointerOwnerRef.current,
+            event.pointerId,
+          )
         }}
         onClickCapture={blockReleaseThroughClick}
         onKeyDown={onMenuKeyDown}
