@@ -566,7 +566,7 @@ test.describe('Chat switching (the bug)', () => {
 })
 
 test.describe('Empty state transition', () => {
-  test('12. fullViewHRef captured on empty->chat transition', async ({ page }) => {
+  test('12. visible viewport reservation initializes on empty->chat transition', async ({ page }) => {
     await setup(page)
     await newChat(page)
 
@@ -580,7 +580,7 @@ test.describe('Empty state transition', () => {
     await sendMessage(page, 'First ever message')
     const m = await measure(page)
 
-    // Spacer should use the full viewport height, not 0.
+    // Spacer should use the newly mounted visible viewport height, not 0.
     expect(m.spacerH).toBeGreaterThan(0)
     assertSpacerReasonable(m)
     assertUserMsgAtTop(m)
@@ -1099,6 +1099,59 @@ test.describe('Scroll edge cases', () => {
     expect(after.toolCount).toBe(5)
     const afterGap = after.scrollH - after.scrollTop - after.clientH
     expect(afterGap).toBeLessThanOrEqual(10)
+  })
+
+  test('28. Keyboard-sized viewport consumes blank reservation before lifting output', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+    await sendMessage(page, 'Responsive keyboard spacer test')
+
+    // Enter follow through the reader-owned path.
+    await page.evaluate(() => {
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      if (!s) return
+      s.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true, pointerType: 'touch', clientY: 400,
+      }))
+      s.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true, pointerType: 'touch', clientY: 360,
+      }))
+      s.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true, pointerType: 'touch', clientY: 360,
+      }))
+    })
+    await page.waitForFunction(() => (
+      document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        ?.dataset.scrollMode === 'FOLLOW_BOTTOM'
+    ))
+
+    const closed = await measure(page)
+    expect(closed.spacerH).toBeGreaterThan(300)
+
+    await page.setViewportSize({ width: 412, height: 615 })
+    await page.waitForFunction(({ oldClientH, oldSpacerH }) => {
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
+      const spacerH = parseInt(spacer?.style.height) || 0
+      return s?.dataset.scrollMode === 'FOLLOW_BOTTOM'
+        && s.clientHeight < oldClientH
+        && spacerH < oldSpacerH
+    }, { oldClientH: closed.clientH, oldSpacerH: closed.spacerH })
+
+    const open = await measure(page)
+    expect(Math.abs(open.scrollTop - closed.scrollTop)).toBeLessThanOrEqual(8)
+    expect(Math.abs(open.userVisualTop - closed.userVisualTop)).toBeLessThanOrEqual(8)
+    expect(open.scrollH - open.scrollTop - open.clientH).toBeLessThanOrEqual(8)
+    expect(Math.abs(
+      (closed.spacerH - open.spacerH) - (closed.clientH - open.clientH),
+    )).toBeLessThanOrEqual(8)
+
+    await injectContent(page, 'Keyboard-visible streamed output. ', 120)
+    const overflow = await measure(page)
+    expect(overflow.spacerH).toBe(0)
+    expect(overflow.scrollTop).toBeGreaterThan(open.scrollTop + 20)
+    expect(overflow.scrollH - overflow.scrollTop - overflow.clientH)
+      .toBeLessThanOrEqual(10)
   })
 
   test('24. Auto-follow re-engages when user scrolls back to bottom', async ({ page }) => {

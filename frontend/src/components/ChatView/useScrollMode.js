@@ -34,8 +34,10 @@
  * from tail geometry, not from whether a gesture has already scrolled that row
  * into view. That keeps scrollHeight stable while the reader approaches the
  * final turn: short replies keep the remaining room, while reply/tool
- * expansion consumes it and collapse restores it. The one explicit exception
- * is the transient
+ * expansion consumes it and collapse restores it. The reservation uses the
+ * active scroll-box height, so a keyboard first removes now-hidden blank room;
+ * only content that no longer fits makes FOLLOW_BOTTOM move. The one explicit
+ * exception is the transient
  * question-submit anchor: it reserves exactly enough tail room for a stable
  * same-viewport handoff. A keyboard resize restores the pre-submit mode before
  * sizing, so the answered card moves exactly as the unanswered card would.
@@ -723,11 +725,10 @@ export function _computeSpacerH(
   scrollEl,
   listEl,
   lastUserMsgEl,
-  fullViewH,
   mode = null,
 ) {
   if (!scrollEl || !listEl) return 0
-  const viewH = fullViewH || scrollEl.clientHeight
+  const viewH = scrollEl.clientHeight
   if (mode?.kind === 'ANCHOR_AT'
       && Number.isFinite(mode.questionSubmitViewportH)) {
     const anchorEl = _anchorEl(scrollEl, mode)
@@ -1235,7 +1236,9 @@ export default function useScrollMode({
   // once a newer gesture lands, older work can never regain ownership merely
   // because the gesture timing window later closes.
   const readerIntentVersionRef = useRef(0)
-  const fullViewHRef = useRef(0)
+  // Keyboard-closed pane height for the focused Q&A editing lifecycle.
+  // Spacer sizing reads the active scroll box directly.
+  const fullPaneHRef = useRef(0)
   // The chat reacts to the size of its actual scroll viewport, after Shell has
   // reconciled any visual-viewport overlay. Keeping the last observed height
   // across effect re-runs makes ResizeObserver the one keyboard/layout signal
@@ -1257,10 +1260,9 @@ export default function useScrollMode({
   // shift/clamp (design §2). Null when no anchor is active.
   const lastAnchorTopRef = useRef(null)
   // A pane-geometry resize (divider commit, projection/mode flip, rotation)
-  // hands its projected CONTENT height here; sizeSpacer consumes it under the
-  // reader-ownership gate so the (possibly LOWER) floor rides the same deferred
-  // pass as the spacer mutation. Null except in-flight.
-  const pendingPaneHeightRef = useRef(null)
+  // hands its projected content height here. sizeSpacer consumes it with the
+  // same deferred layout pass as spacer geometry. Null except in-flight.
+  const pendingFullPaneHeightRef = useRef(null)
   // Set inside the layout effect to the live pane-resize runner; the returned
   // paneResized() forwards to it (null when no scroll DOM is mounted). Mirrors
   // the forceRevealRef / resumeLayoutAfterGestureRef effect-bridge pattern.
@@ -1698,8 +1700,8 @@ export default function useScrollMode({
       }
     }
 
-    if (scrollEl.clientHeight > fullViewHRef.current) {
-      fullViewHRef.current = scrollEl.clientHeight
+    if (scrollEl.clientHeight > fullPaneHRef.current) {
+      fullPaneHRef.current = scrollEl.clientHeight
     }
 
     const listEl = scrollEl.querySelector('.chat__list')
@@ -1820,30 +1822,16 @@ export default function useScrollMode({
       if (chatRef.current && Number.isFinite(composerHeight)) {
         chatRef.current.style.setProperty('--composer-h', `${composerHeight}px`)
       }
-      // Keep fullViewHRef authoritative at EVERY spacer sizing, not just at
-      // the layout-effect entry and the RO callback start (the other two grow
-      // sites). On keyboard close, the viewport ResizeObserver reaches this
-      // pass with a newly grown clientHeight; without the guard the spacer
-      // would still use the stale keyboard-open height. That undersizes the
-      // spacer, clamps the pin below its target, and strands the message in the
-      // middle. Grow-only: a keyboard-open shrink is ignored, so opening and
-      // closing the keyboard never changes the permanent reply reservation.
-      //
-      // The ONE sanctioned lowering of the grow-only floor: a committed pane
-      // geometry change (divider/projection/rotation) delivers the layout-
-      // derived pane height through pendingPaneHeightRef, which may be SMALLER
-      // than the current floor (a narrower/shorter pane). Consume it here, under
-      // the same reader-ownership gate as every other write in this pass, before
-      // the grow-only clientHeight bump re-raises it if the real pane is taller.
-      // The viewport ResizeObserver never sets this ref, so keyboard changes
-      // keep the floor strictly grow-only (design §2).
-      if (pendingPaneHeightRef.current != null) {
-        const ph = pendingPaneHeightRef.current
-        if (Number.isFinite(ph) && ph > 0) fullViewHRef.current = ph
-        pendingPaneHeightRef.current = null
+      // Keep the keyboard-closed pane reference current for focused Q&A edits.
+      // A committed pane resize may lower it; keyboard viewport changes only
+      // grow it. This value does not size the spacer.
+      if (pendingFullPaneHeightRef.current != null) {
+        const ph = pendingFullPaneHeightRef.current
+        if (Number.isFinite(ph) && ph > 0) fullPaneHRef.current = ph
+        pendingFullPaneHeightRef.current = null
       }
-      if (scrollEl.clientHeight > fullViewHRef.current) {
-        fullViewHRef.current = scrollEl.clientHeight
+      if (scrollEl.clientHeight > fullPaneHRef.current) {
+        fullPaneHRef.current = scrollEl.clientHeight
       }
       // Fall back to the last user row in the DOM when the React ref is
       // transiently null. On a fresh send the just-sent row's optimistic node
@@ -1860,7 +1848,7 @@ export default function useScrollMode({
       // an older row or an unrelated reading location.
       const lastUserEl = _lastUserRowEl(scrollEl) || lastUserMsgRef.current
       const h = _computeSpacerH(
-        scrollEl, listEl, lastUserEl, fullViewHRef.current, modeRef.current,
+        scrollEl, listEl, lastUserEl, modeRef.current,
       )
       spacerEl.style.height = `${h}px`
       // A wheel/touch/key gesture begins before the browser emits its first
@@ -2038,19 +2026,9 @@ export default function useScrollMode({
 
     syncLayout({ authorityVersion: currentAuthority() })
 
-    // The scrollApi.paneResized(projectedHeightPx) contract (design §2,
-    // constraint 1). Shell calls this on COMMITTED pane-geometry changes for a
-    // MOUNTED chat — divider pointerup, projection/mode flip, pane open/close
-    // affecting this chat, rotation — with the pane's new projected CONTENT
-    // height (the LAYOUT-derived height, never scrollEl.clientHeight, so a
-    // keyboard-shrunk viewport can not stick the floor). It lowers the grow-only
-    // floor to that height and re-applies the active mode: FOLLOW_BOTTOM snaps
-    // the tail, PIN_USER_MSG re-pins, ANCHOR_AT re-anchors. The whole pass
-    // respects the reader-gesture ownership gate (R5): while a reader gesture
-    // owns scroll, it DEFERS everything (the floor lowering is applied by
-    // sizeSpacer only under the gate) and the reader-yield replay runs it. The
-    // The keyboard's viewport ResizeObserver path must never call this —
-    // divider/projection shrink and keyboard shrink stay structurally separate.
+    // Shell supplies committed pane geometry separately from viewport resize.
+    // Its projected full height keeps Q&A keyboard-close detection accurate
+    // even when the pane itself changes while the keyboard is open.
     function runPaneResize(projectedHeightPx) {
       const authorityVersion = currentAuthority()
       // This committed pane change has its own explicit owner. Adopt the DOM's
@@ -2060,14 +2038,12 @@ export default function useScrollMode({
         element: scrollEl,
         height: scrollEl.clientHeight,
       }
-      pendingPaneHeightRef.current =
+      pendingFullPaneHeightRef.current =
         (Number.isFinite(projectedHeightPx) && projectedHeightPx > 0)
           ? projectedHeightPx
-          : pendingPaneHeightRef.current
+          : pendingFullPaneHeightRef.current
       if (!layoutOwnsScroll(authorityVersion)) {
-        // Defer the floor lowering, spacer mutation, and mode re-apply as one
-        // replayable pass; the deferred syncLayout({forceApply}) consumes the
-        // pending height and re-applies the current mode when ownership yields.
+        // Keep projected pane height, spacer, and mode in one replayable pass.
         deferLayoutUntilReaderYields(authorityVersion)
         return
       }
@@ -2167,14 +2143,14 @@ export default function useScrollMode({
         })
         if (questionEditSessionRef.current
             && !questionEditField(document.activeElement)
-            && scrollEl.clientHeight >= fullViewHRef.current - 1) {
+            && scrollEl.clientHeight >= fullPaneHRef.current - 1) {
           questionEditSessionRef.current = false
         }
         requestRevealOnQuiet()
         return
       }
-      if (scrollEl.clientHeight > fullViewHRef.current) {
-        fullViewHRef.current = scrollEl.clientHeight
+      if (scrollEl.clientHeight > fullPaneHRef.current) {
+        fullPaneHRef.current = scrollEl.clientHeight
       }
       sizeSpacer(authorityVersion)
       const k = modeRef.current.kind
@@ -2474,7 +2450,7 @@ export default function useScrollMode({
         questionEditSessionRef.current = true
         return
       }
-      if (scrollEl.clientHeight >= fullViewHRef.current - 1) {
+      if (scrollEl.clientHeight >= fullPaneHRef.current - 1) {
         questionEditSessionRef.current = false
       }
     }
@@ -2776,7 +2752,7 @@ export default function useScrollMode({
       }
 
       const spacerH = _computeSpacerH(
-        scrollEl, listEl, lastUserEl, fullViewHRef.current, mode,
+        scrollEl, listEl, lastUserEl, mode,
       )
       const signature = [
         Math.round(listEl.offsetHeight),
