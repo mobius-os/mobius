@@ -26,6 +26,26 @@ CONTRACT_SCHEMA = 4
 # its own integer version, so adding (say) camera v2 never forces every storage
 # or microphone consumer onto a new global runtime version.
 RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
+  "device.asset-cache": {
+    "version": 1,
+    "kind": "session",
+    "title": "Store large files on this device",
+    "description": (
+      "Download verified app assets into this browser's private storage."
+    ),
+    "risk": "storage",
+    "lifecycle": "active_frame",
+    "default_limits": {
+      "max_bytes": 256 * 1024 * 1024,
+      "max_asset_bytes": 256 * 1024 * 1024,
+      "max_chunk_bytes": 8 * 1024 * 1024,
+    },
+    "hard_limits": {
+      "max_bytes": (1 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+      "max_asset_bytes": (1 * 1024 * 1024, 1 * 1024 * 1024 * 1024),
+      "max_chunk_bytes": (256 * 1024, 16 * 1024 * 1024),
+    },
+  },
   "media.microphone.capture": {
     "version": 1,
     "kind": "session",

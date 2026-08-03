@@ -1,11 +1,12 @@
 """Regression coverage for authenticated screenshot readiness checks."""
 
 import fcntl
-from pathlib import Path
+import math
 import os
 import shutil
 import socket
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +26,10 @@ STANDALONE = (
   / "StandaloneApp.jsx"
 )
 SHELL_ENTRY = "index-test-fixture.js"
+
+
+def _physical_pixels(css_pixels: int | float | str, pixel_ratio: float) -> int:
+  return math.floor(float(css_pixels) * pixel_ratio + 0.5)
 
 
 def _fixture_script(tmp_path: Path) -> Path:
@@ -141,9 +146,9 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
     "    fi\n"
     "    if [ \"${FAKE_SCREENSHOT_TINY_ONCE:-0}\" = 1 ] && [ ! -e \"$FAKE_SCREENSHOT_TINY_MARKER\" ]; then\n"
     "      : > \"$FAKE_SCREENSHOT_TINY_MARKER\"\n"
-    "      python3 \"$FAKE_PNG_WRITER\" \"$2\" \"$VIEWPORT_WIDTH\" \"$VIEWPORT_HEIGHT\" 100\n"
+    "      python3 \"$FAKE_PNG_WRITER\" \"$2\" \"$FAKE_PNG_WIDTH\" \"$FAKE_PNG_HEIGHT\" 100\n"
     "    else\n"
-    "      python3 \"$FAKE_PNG_WRITER\" \"$2\" \"$VIEWPORT_WIDTH\" \"$VIEWPORT_HEIGHT\" 9000\n"
+    "      python3 \"$FAKE_PNG_WRITER\" \"$2\" \"$FAKE_PNG_WIDTH\" \"$FAKE_PNG_HEIGHT\" 9000\n"
     "    fi\n"
     "    : > \"$FAKE_SCREENSHOT_MARKER\"\n"
     "    ;;\n"
@@ -159,8 +164,10 @@ def _run_helper(
   tmp_path: Path, *, auth_ok: bool, route: str = "/chat/example",
   viewport_width: int | float | str = 412,
   viewport_height: int | float | str = 915,
+  viewport_pixel_ratio: int | float | str = 1,
   content_only: bool = False,
   preserve_cache: bool = False,
+  current_page: bool = False,
   loaded_asset: str | None = None,
   viewport_fail_once: bool = False,
   screenshot_fail_once: bool = False,
@@ -189,6 +196,12 @@ def _run_helper(
   if profile_lock_target is not None:
     for artifact in profile_lock_artifacts:
       (browser_profile / artifact).symlink_to(profile_lock_target)
+  try:
+    normalized_ratio = min(4.0, max(0.5, float(viewport_pixel_ratio)))
+    fake_png_width = _physical_pixels(viewport_width, normalized_ratio)
+    fake_png_height = _physical_pixels(viewport_height, normalized_ratio)
+  except (TypeError, ValueError):
+    fake_png_width = fake_png_height = 1
   env = {
     **os.environ,
     "PATH": f"{tmp_path}:{os.environ['PATH']}",
@@ -197,6 +210,7 @@ def _run_helper(
     "API_BASE_URL": "http://mobius.test",
     "VIEWPORT_WIDTH": str(viewport_width),
     "VIEWPORT_HEIGHT": str(viewport_height),
+    "VIEWPORT_PIXEL_RATIO": str(viewport_pixel_ratio),
     "AGENT_BROWSER_SESSION": "test-session",
     "AGENT_BROWSER_PROFILE": str(browser_profile),
     "AGENT_BROWSER_ARGS": "--test-daemon-identity",
@@ -218,6 +232,8 @@ def _run_helper(
     "FAKE_SCREENSHOT_TINY_ONCE": "1" if screenshot_tiny_once else "0",
     "FAKE_SCREENSHOT_TINY_MARKER": str(tmp_path / "screenshot-tiny"),
     "FAKE_PNG_WRITER": str(tmp_path / "fake-png.py"),
+    "FAKE_PNG_WIDTH": str(fake_png_width),
+    "FAKE_PNG_HEIGHT": str(fake_png_height),
     "FAKE_BROWSER_URL_FILE": str(tmp_path / "browser-url"),
     "FAKE_BROWSER_NEXT_URL_FILE": str(tmp_path / "browser-next-url"),
     "FAKE_CANONICAL_TARGET_URL": canonical_target_url or "",
@@ -233,6 +249,8 @@ def _run_helper(
     args.append("--content-only")
   if preserve_cache:
     args.append("--preserve-cache")
+  if current_page:
+    args.append("--current-page")
   args.extend([route, str(output)])
   lock_handle = None
   try:
@@ -572,9 +590,31 @@ def test_fractional_shell_viewport_is_rounded_for_agent_browser(tmp_path: Path):
   assert result.returncode == 0, result.stderr
   assert output.exists()
   assert marker.exists()
-  assert "set viewport 1680 957" in browser_log.read_text(
+  assert "set viewport 1680 957 1" in browser_log.read_text(
     encoding="utf-8",
   ).splitlines()
+
+
+def test_capture_matches_chromium_pixel_rounding_without_changing_css_viewport(
+  tmp_path: Path,
+):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    viewport_width=426,
+    viewport_height=860,
+    viewport_pixel_ratio=2.25,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  assert "set viewport 426 860 2.25" in browser_log.read_text(
+    encoding="utf-8",
+  ).splitlines()
+  header = output.read_bytes()[:24]
+  assert int.from_bytes(header[16:20], "big") == 959
+  assert int.from_bytes(header[20:24], "big") == 1935
 
 
 def test_cold_capture_opens_browser_before_configuring_viewport(tmp_path: Path):
@@ -583,9 +623,34 @@ def test_cold_capture_opens_browser_before_configuring_viewport(tmp_path: Path):
   assert result.returncode == 0, result.stderr
   commands = browser_log.read_text(encoding="utf-8").splitlines()
   assert commands.index("open http://mobius.test/api/browser-bootstrap") < commands.index(
-    "set viewport 412 915",
+    "set viewport 412 915 1",
   )
   assert "open http://mobius.test/" not in commands
+
+
+def test_current_page_capture_preserves_document_but_reuses_verified_boundary(
+  tmp_path: Path,
+):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    current_page=True,
+    viewport_pixel_ratio=3,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  assert not any(command.startswith("open ") for command in commands)
+  assert "set viewport 412 915 3" in commands
+  assert any(
+    command.startswith("eval ") and "__mobiusFontReadiness" in command
+    for command in commands
+  )
+  assert not any("Toggle navigation" in command for command in commands)
+  assert not any(".drawer-overlay--blocking" in command for command in commands)
+  assert any(command.startswith("screenshot ") for command in commands)
 
 
 def test_browser_commands_keep_one_daemon_identity(tmp_path: Path):
@@ -636,8 +701,8 @@ def test_cold_capture_retries_viewport_until_browser_socket_is_ready(tmp_path: P
   assert output.exists()
   assert marker.exists()
   commands = browser_log.read_text(encoding="utf-8").splitlines()
-  assert commands.count("set viewport 412 915") == 5
-  assert commands.index("set viewport 412 915") < max(
+  assert commands.count("set viewport 412 915 1") == 5
+  assert commands.index("set viewport 412 915 1") < max(
     i for i, command in enumerate(commands)
     if command == "open http://mobius.test/api/browser-bootstrap"
   )
@@ -656,7 +721,7 @@ def test_final_target_reapplies_the_requested_viewport_at_capture_boundary(tmp_p
   )
   final_viewport_index = max(
     i for i, command in enumerate(commands)
-    if command == "set viewport 412 915"
+    if command == "set viewport 412 915 1"
   )
   final_screenshot_index = max(
     i for i, command in enumerate(commands)
@@ -668,7 +733,7 @@ def test_final_target_reapplies_the_requested_viewport_at_capture_boundary(tmp_p
   assert final_capture.suffix == ".png"
   target_viewports = [
     i for i, command in enumerate(commands)
-    if i > target_index and command == "set viewport 412 915"
+    if i > target_index and command == "set viewport 412 915 1"
   ]
   assert len(target_viewports) == 3
   assert target_index < final_viewport_index < final_screenshot_index
@@ -785,6 +850,20 @@ def test_invalid_manual_viewport_fails_before_browser_launch(tmp_path: Path):
   assert not browser_log.exists()
 
 
+def test_invalid_manual_pixel_density_fails_before_browser_launch(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    viewport_pixel_ratio="nan",
+  )
+
+  assert result.returncode != 0
+  assert "pixel ratio must be positive" in result.stderr
+  assert not output.exists()
+  assert not marker.exists()
+  assert not browser_log.exists()
+
+
 def test_non_app_capture_skips_frame_readiness_wait(tmp_path: Path):
   result, output, marker, browser_log = _run_helper(
     tmp_path, auth_ok=True, route="/chat/example",
@@ -801,7 +880,7 @@ def test_non_app_capture_skips_frame_readiness_wait(tmp_path: Path):
   )
 
 
-def test_shell_capture_waits_for_visual_ownership_to_settle(tmp_path: Path):
+def test_shell_capture_waits_for_visual_ownership_and_rendered_fonts(tmp_path: Path):
   result, output, marker, browser_log = _run_helper(
     tmp_path, auth_ok=True, route="/chat/example",
   )
@@ -824,15 +903,21 @@ def test_shell_capture_waits_for_visual_ownership_to_settle(tmp_path: Path):
     i for i, command in enumerate(commands)
     if command.startswith("eval ") and "requestAnimationFrame" in command
   )
-  fonts_index = next(
+  fonts_index = max(
     i for i, command in enumerate(commands)
-    if command.startswith("wait --fn ")
-    and "document.fonts.status === 'loaded'" in command
+    if command.startswith("eval ")
+    and "__mobiusFontReadiness" in command
   )
-  screenshot_index = next(
+  font_command = commands[fonts_index]
+  assert "settleCapture(document)" in font_command
+  viewport_index = max(
+    i for i, command in enumerate(commands)
+    if command == "set viewport 412 915 1"
+  )
+  screenshot_index = max(
     i for i, command in enumerate(commands) if command.startswith("screenshot ")
   )
-  assert settle_index < frame_index < fonts_index < screenshot_index
+  assert settle_index < frame_index < viewport_index < fonts_index < screenshot_index
 
 
 def test_content_only_mode_is_set_before_target_navigation(tmp_path: Path):

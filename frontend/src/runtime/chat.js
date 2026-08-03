@@ -1,4 +1,5 @@
 import { fetchWithAppToken } from './network.js'
+import { agentViewport } from '../lib/agentViewport.js'
 
 
 // ── Agent-chat embed (capability A, design §1) ──────────────────────
@@ -404,10 +405,7 @@ export function makeChat({ appId, getToken, storage }) {
     } catch (e) {}
     const body = { content, cid, timezone }
     if (typeof window !== 'undefined') {
-      body.viewport = {
-        width: window.innerWidth,
-        height: window.visualViewport?.height || window.innerHeight,
-      }
+      body.viewport = agentViewport(window)
     }
     const res = await appChatFetch(
       `/api/chats/${encodeURIComponent(chatId)}/messages`,

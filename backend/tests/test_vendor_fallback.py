@@ -7,9 +7,36 @@ cache-first service worker — the failure mode behind the missing
 404 on a miss instead of falling through to HTML.
 """
 
+from pathlib import Path
+
 import pytest
 
 from app.main import _is_static_asset_path, _public_static_headers
+
+
+def test_shell_and_frame_share_source_owned_font_contract():
+  frontend = Path(__file__).resolve().parents[2] / "frontend"
+  stylesheet_path = "/vendor/fonts/mobius-fonts.css"
+  readiness_path = "/vendor/fonts/mobius-font-readiness.js"
+  index = (frontend / "index.html").read_text(encoding="utf-8")
+  frame = (frontend / "public" / "app-frame.html").read_text(encoding="utf-8")
+  fonts = (
+    frontend / "public" / "vendor" / "fonts" / "mobius-fonts.css"
+  ).read_text(encoding="utf-8")
+  readiness = (
+    frontend / "public" / "vendor" / "fonts" / "mobius-font-readiness.js"
+  ).read_text(encoding="utf-8")
+
+  assert stylesheet_path in index
+  assert stylesheet_path in frame
+  assert readiness_path in index
+  assert readiness_path in frame
+  assert "@font-face" in fonts
+  assert "font-family: 'Inter'" in fonts
+  assert "font-family: 'JetBrains Mono'" in fonts
+  assert "doc.fonts.load" in readiness
+  assert "face.family === family" in readiness
+  assert "moebius:frame-font-check" in readiness
 
 
 def test_classifies_module_and_asset_paths_as_static():

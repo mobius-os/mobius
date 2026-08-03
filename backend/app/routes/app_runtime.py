@@ -5,9 +5,11 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import activity, models, theme
@@ -16,10 +18,198 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_owner, resolve_owner_or_app
 from app.http_caching import strip_range
+from app.net_utils import validate_url_safe
 from app.resource_access import live_app, live_app_or_404
 
 
 router = APIRouter()
+
+_DEVICE_ASSET_CAPABILITY = "device.asset-cache"
+_DEVICE_ASSET_MAX_REDIRECTS = 5
+_DEVICE_ASSET_USER_AGENT = "Mobius/1.0 (device asset relay)"
+
+
+def _device_asset_declaration(app: models.App) -> dict:
+  contract = app.capability_contract
+  runtime = contract.get("runtime") if isinstance(contract, dict) else None
+  declaration = (
+    runtime.get(_DEVICE_ASSET_CAPABILITY)
+    if isinstance(runtime, dict)
+    else None
+  )
+  if not isinstance(declaration, dict) or declaration.get("version") != 1:
+    raise HTTPException(
+      status_code=403,
+      detail="This app has not declared device asset storage.",
+    )
+  return declaration
+
+
+def _parse_content_range(value: str | None) -> tuple[int, int, int | None] | None:
+  match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", value or "")
+  if not match:
+    return None
+  total = None if match.group(3) == "*" else int(match.group(3))
+  start = int(match.group(1))
+  end = int(match.group(2))
+  if start > end or (total is not None and end >= total):
+    return None
+  return start, end, total
+
+
+def _is_https_device_asset_url(url: str) -> bool:
+  parsed = urlparse(url)
+  return bool(
+    parsed.scheme == "https"
+    and parsed.hostname
+    and not parsed.username
+    and not parsed.password
+  )
+
+
+async def _open_device_asset_range(
+  url: str,
+  offset: int,
+  length: int,
+) -> tuple[httpx.AsyncClient, httpx.Response, int | None]:
+  """Open one exact public byte range without retaining it on the server."""
+  current_url = url
+  client = httpx.AsyncClient(
+    follow_redirects=False,
+    timeout=httpx.Timeout(60.0, connect=20.0),
+  )
+  expected_end = offset + length - 1
+  try:
+    for hop in range(_DEVICE_ASSET_MAX_REDIRECTS + 1):
+      pinned_url, host_header, sni_host = validate_url_safe(current_url)
+      request = client.build_request(
+        "GET",
+        pinned_url,
+        headers={
+          "Accept": "application/octet-stream,*/*;q=0.1",
+          "Accept-Encoding": "identity",
+          "Range": f"bytes={offset}-{expected_end}",
+          "User-Agent": _DEVICE_ASSET_USER_AGENT,
+        },
+      )
+      request.headers["host"] = host_header
+      request.extensions["sni_hostname"] = sni_host
+      try:
+        upstream = await client.send(request, stream=True)
+      except httpx.TimeoutException as exc:
+        raise HTTPException(504, "Timed out downloading the device asset.") from exc
+      except httpx.RequestError as exc:
+        raise HTTPException(502, "Could not reach the device asset source.") from exc
+
+      if upstream.status_code in (301, 302, 303, 307, 308):
+        location = upstream.headers.get("location")
+        await upstream.aclose()
+        if not location:
+          raise HTTPException(502, "Device asset redirect had no destination.")
+        if hop >= _DEVICE_ASSET_MAX_REDIRECTS:
+          raise HTTPException(502, "Too many device asset redirects.")
+        current_url = urljoin(current_url, location)
+        if not _is_https_device_asset_url(current_url):
+          raise HTTPException(502, "Device asset redirect requires a public HTTPS URL.")
+        continue
+
+      content_encoding = upstream.headers.get("content-encoding", "identity")
+      if content_encoding not in ("", "identity"):
+        await upstream.aclose()
+        raise HTTPException(502, "Device asset source changed the requested bytes.")
+
+      declared_length = upstream.headers.get("content-length")
+      try:
+        actual_length = int(declared_length) if declared_length is not None else None
+      except ValueError:
+        actual_length = None
+      total_bytes = None
+      if upstream.status_code == 206:
+        content_range = _parse_content_range(upstream.headers.get("content-range"))
+        if not content_range or content_range[:2] != (offset, expected_end):
+          await upstream.aclose()
+          raise HTTPException(502, "Device asset source returned the wrong byte range.")
+        total_bytes = content_range[2]
+      elif not (
+        upstream.status_code == 200
+        and offset == 0
+        and actual_length == length
+      ):
+        status = upstream.status_code
+        await upstream.aclose()
+        raise HTTPException(
+          502,
+          f"Device asset source did not honor the requested range ({status}).",
+        )
+      if actual_length is not None and actual_length != length:
+        await upstream.aclose()
+        raise HTTPException(502, "Device asset source returned an unexpected size.")
+      return client, upstream, total_bytes
+    raise HTTPException(502, "Too many device asset redirects.")
+  except BaseException:
+    await client.aclose()
+    raise
+
+
+@router.get("/{app_id}/device-assets/relay")
+async def relay_device_asset_range(
+  app_id: int,
+  url: str = Query(min_length=1, max_length=4096),
+  offset: int = Query(ge=0),
+  length: int = Query(gt=0),
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Stream one reviewed, bounded public range into the shell's device cache.
+
+  The trusted shell owns this request; an opaque app frame cannot call it with
+  its scoped bearer. Bytes pass through the server only for CORS/SSRF safety
+  and are never written to disk. The shell verifies the app-supplied SHA-256
+  before retaining each chunk in browser Cache Storage.
+  """
+  app = live_app_or_404(db, app_id)
+  declaration = _device_asset_declaration(app)
+  limits = declaration.get("limits") or {}
+  max_asset_bytes = int(limits.get("max_asset_bytes") or 0)
+  max_chunk_bytes = int(limits.get("max_chunk_bytes") or 0)
+  if length > max_chunk_bytes or offset + length > max_asset_bytes:
+    raise HTTPException(413, "Requested device asset range exceeds its reviewed limit.")
+  if not _is_https_device_asset_url(url):
+    raise HTTPException(400, "Device assets require a public HTTPS URL.")
+  db.close()
+
+  client, upstream, total_bytes = await _open_device_asset_range(url, offset, length)
+  if total_bytes is not None and total_bytes > max_asset_bytes:
+    await upstream.aclose()
+    await client.aclose()
+    raise HTTPException(413, "Device asset exceeds its reviewed size limit.")
+
+  async def stream():
+    transferred = 0
+    try:
+      async for chunk in upstream.aiter_raw():
+        transferred += len(chunk)
+        if transferred > length:
+          raise RuntimeError("Device asset source exceeded its declared range.")
+        yield chunk
+      if transferred != length:
+        raise RuntimeError("Device asset source ended before the range was complete.")
+    finally:
+      await upstream.aclose()
+      await client.aclose()
+
+  headers = {
+    "Cache-Control": "no-store",
+    "Content-Length": str(length),
+    "X-Content-Type-Options": "nosniff",
+  }
+  if total_bytes is not None:
+    headers["X-Mobius-Asset-Total"] = str(total_bytes)
+  return StreamingResponse(
+    stream(),
+    media_type="application/octet-stream",
+    headers=headers,
+  )
 
 
 def _etag_for_app(app: models.App) -> str | None:

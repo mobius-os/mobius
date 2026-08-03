@@ -1,5 +1,6 @@
 from app.chat import (
   DEFAULT_VIEWPORT_HEIGHT,
+  DEFAULT_VIEWPORT_PIXEL_RATIO,
   DEFAULT_VIEWPORT_WIDTH,
   bounded_agent_browser_args,
   viewport_env,
@@ -86,20 +87,31 @@ def test_browser_cache_defaults_preserve_operator_flags_and_overrides():
   )
 
 
-# VIEWPORT_WIDTH/HEIGHT belong to the same agent-browser env contract:
-# chat.py exports one validated integer pair per turn and agent-screenshot.sh
-# keeps the same validation at its executable boundary for existing sessions
-# and manual callers.
+# CSS geometry and physical density form one agent-browser capture contract:
+# chat.py validates it once per turn and agent-screenshot.sh repeats that
+# validation for existing sessions and manual callers.
 
 
 def test_viewport_env_passes_through_the_shell_sent_viewport():
-  env = viewport_env({"width": 390, "height": 844})
-  assert env == {"VIEWPORT_WIDTH": "390", "VIEWPORT_HEIGHT": "844"}
+  env = viewport_env({"width": 390, "height": 844, "pixelRatio": 3})
+  assert env == {
+    "VIEWPORT_WIDTH": "390",
+    "VIEWPORT_HEIGHT": "844",
+    "VIEWPORT_PIXEL_RATIO": "3",
+  }
 
 
 def test_viewport_env_rounds_fractional_shell_geometry_to_css_pixels():
-  env = viewport_env({"width": 1680, "height": 956.6666870117188})
-  assert env == {"VIEWPORT_WIDTH": "1680", "VIEWPORT_HEIGHT": "957"}
+  env = viewport_env({
+    "width": 1680,
+    "height": 956.6666870117188,
+    "pixelRatio": 2.625,
+  })
+  assert env == {
+    "VIEWPORT_WIDTH": "1680",
+    "VIEWPORT_HEIGHT": "957",
+    "VIEWPORT_PIXEL_RATIO": "2.625",
+  }
 
 
 def test_viewport_env_defaults_when_no_shell_sent_a_viewport():
@@ -110,6 +122,7 @@ def test_viewport_env_defaults_when_no_shell_sent_a_viewport():
   assert env == {
     "VIEWPORT_WIDTH": str(DEFAULT_VIEWPORT_WIDTH),
     "VIEWPORT_HEIGHT": str(DEFAULT_VIEWPORT_HEIGHT),
+    "VIEWPORT_PIXEL_RATIO": f"{DEFAULT_VIEWPORT_PIXEL_RATIO:g}",
   }
 
 
@@ -126,3 +139,21 @@ def test_viewport_env_defaults_on_malformed_viewport():
     env = viewport_env(bad)
     assert env["VIEWPORT_WIDTH"] == str(DEFAULT_VIEWPORT_WIDTH)
     assert env["VIEWPORT_HEIGHT"] == str(DEFAULT_VIEWPORT_HEIGHT)
+    assert env["VIEWPORT_PIXEL_RATIO"] == f"{DEFAULT_VIEWPORT_PIXEL_RATIO:g}"
+
+
+def test_viewport_env_bounds_untrusted_pixel_density_without_losing_geometry():
+  assert viewport_env({
+    "width": 390, "height": 844, "pixelRatio": 99,
+  }) == {
+    "VIEWPORT_WIDTH": "390",
+    "VIEWPORT_HEIGHT": "844",
+    "VIEWPORT_PIXEL_RATIO": "4",
+  }
+  assert viewport_env({
+    "width": 390, "height": 844, "pixelRatio": "not-a-number",
+  }) == {
+    "VIEWPORT_WIDTH": "390",
+    "VIEWPORT_HEIGHT": "844",
+    "VIEWPORT_PIXEL_RATIO": "1",
+  }

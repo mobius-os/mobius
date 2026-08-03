@@ -110,8 +110,8 @@ def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
   assert "icon_override_png" in cols
   assert "icon_ownership_split" in cols
   with eng.connect() as conn:
-    # Existing rows remain visibly pending until accepted-source
-    # reconciliation classifies their pre-split icon bytes.
+    # The historical migration remains immutable even though runtime
+    # convergence no longer reads this retired marker.
     split = conn.execute(text(
       "SELECT icon_ownership_split FROM apps WHERE id = 1"
     )).scalar_one()

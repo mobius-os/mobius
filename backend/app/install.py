@@ -48,8 +48,6 @@ from app import (
   data_git,
   fs_locks,
   icon_assets,
-  icon_ownership,
-  legacy_platform_apps,
   models,
   source_dirs,
 )
@@ -437,110 +435,6 @@ def _should_force_core_store_update(
   )
 
 
-# Frozen old core-app slugs kept reserved so a hostile manifest cannot adopt a
-# pre-rename core row on not-yet-migrated installs. Safe to drop only after the
-# migration window closes.
-PRE_RENAME_PLATFORM_SLUGS = ("mind", "dreaming")
-
-# Historical platform-owned app slugs. They are no longer core apps, but old
-# instances can still have rows pointing at /data/platform/core-apps/<slug>.
-# Keep them reserved from untrusted previous_id adoption and migrate them only
-# from the trusted mobius-os catalog.
-HISTORICAL_PLATFORM_APP_SLUGS = legacy_platform_apps.SLUGS
-
-# Platform/store slugs that must never be silently ADOPTED (and thereby replaced
-# in place, inheriting the row's id + storage) by a `previous_id` declaration in
-# an untrusted manifest. See the guard in the predecessor-adoption block.
-_RESERVED_PLATFORM_SLUGS = frozenset({
-  *HISTORICAL_PLATFORM_APP_SLUGS, "store", *PRE_RENAME_PLATFORM_SLUGS,
-})
-
-
-def _is_legacy_platform_source_dir(
-  source_dir: str | None,
-  data_dir: str | Path,
-  slug: str | None,
-) -> bool:
-  return legacy_platform_apps.is_legacy_source_dir(source_dir, data_dir, slug)
-
-
-def _is_historical_platform_app_source_dir(
-  source_dir: str | None,
-  manifest_url: str | None,
-  data_dir: str | Path,
-  slug: str | None,
-) -> bool:
-  """True for a retired core-app row at /data/apps/<slug> not yet migrated.
-
-  One prod-era installer shape registered Memory/Reflection/Beat Machine as
-  editable app rows under /data/apps/<slug> with no manifest_url. They are not
-  platform-owned source dirs, but they are still the predecessor rows the
-  trusted mobius-os catalog entry must update in place. A catalog install lands
-  at exactly that same /data/apps/<slug> path but stamps a canonical
-  manifest_url, so path + slug alone cannot tell the un-migrated row from the
-  migrated steady state — matching on those alone re-fired the migration (an
-  extra GitHub fetch, and a no-owner-review fast-forward) on every boot. Gate on
-  the empty manifest_url the migration fills in, so this stays a ONE-SHOT
-  predicate that mirrors the install-side platform_row query's NULL/'' filter.
-  Keep it narrow: only historical platform slugs from legacy_platform_apps match.
-  """
-  if manifest_url:
-    return False
-  if not source_dir or not slug or slug not in HISTORICAL_PLATFORM_APP_SLUGS:
-    return False
-  try:
-    resolved = Path(source_dir).resolve()
-  except (OSError, RuntimeError):
-    return False
-  apps_root = source_dirs.apps_root(data_dir)
-  return resolved.parent == apps_root and resolved.name == slug
-
-
-def _is_trusted_legacy_platform_catalog_install(
-  app: models.App | None,
-  manifest_id: str,
-  canonical_manifest_url: str,
-  data_dir: str | Path,
-) -> bool:
-  """True when a trusted same-id catalog install should move a baked app out
-  of platform-owned source.
-
-  Old rows can be found through several identity shapes before the no-URL
-  legacy-platform fallback runs: canonical manifest_url, raw `mobius.json`, or
-  a bare base URL. Treat all of those as the same forward migration, while still
-  rejecting previous_id renames or untrusted manifests.
-  """
-  return (
-    app is not None
-    and manifest_id == app.slug
-    and manifest_id in HISTORICAL_PLATFORM_APP_SLUGS
-    and _is_trusted_catalog_source(canonical_manifest_url)
-    and _is_legacy_platform_source_dir(app.source_dir, data_dir, app.slug)
-  )
-
-
-def _is_trusted_catalog_source(canonical_manifest_url: str) -> bool:
-  """True when the manifest is published under the canonical mobius-os org on
-  raw.githubusercontent.com.
-
-  Gates BOTH the legacy-shape update fallback and the `previous_id` platform-slug
-  adoption below. An owner-pasted manifest from any other host is therefore never
-  matched against a mobius-os row, so it can neither hijack Memory/Reflection/the
-  store by declaring their slug nor overwrite them by pointing at their base.
-
-  Reject any `..` segment: `raw.githubusercontent.com/mobius-os/../evil/…`
-  string-checks as mobius-os here but GitHub resolves it to the `evil` org — the
-  path is compared BEFORE the fetch normalizes it, so treat traversal as untrusted.
-  `unquote` runs first, so a percent-encoded `%2e%2e` is caught too.
-  """
-  parsed = urlparse(canonical_manifest_url)
-  parts = [unquote(part) for part in parsed.path.split("/") if part]
-  return (
-    parsed.hostname == "raw.githubusercontent.com"
-    and ".." not in parts
-    and len(parts) >= 2
-    and parts[0] == "mobius-os"
-  )
 
 
 async def _http_get(
@@ -1182,10 +1076,7 @@ async def _sync_app_skills(
   """
   skills = list(dict.fromkeys(manifest.get("skills") or []))
   if not app.source_dir:
-    # A legacy no-source_dir app has no on-disk tree to read skill bytes
-    # from — Path("") / rel would resolve against the server's CWD.
-    warnings.append("skills: app has no source_dir — skipped")
-    return
+    raise RuntimeError(f"app {app.id} violates canonical source ownership")
   data_dir = Path(get_settings().data_dir)
   skills_dir = data_dir / "shared" / "skills"
   source_dir = Path(app.source_dir)
@@ -1711,11 +1602,9 @@ class InstallTarget:
 
   existing: models.App | None
   mode: str
-  adopt_kind: str
+  renaming: bool
   canonical_manifest_url: str
   force_core_store_update: bool
-  settings_data_dir: str
-  legacy_platform_migration: bool
 
 
 @dataclass
@@ -1983,41 +1872,17 @@ def _select_install_target(
     .filter(models.App.manifest_url == canonical_manifest_url)
     .first()
   )
-  if existing is None and _is_trusted_catalog_source(canonical_manifest_url):
-    # Trusted catalog rows predate the canonical identity shape. Match only
-    # older forms of the same base; untrusted bases must never gain this wider
-    # update authority.
-    base = _canonical_base(canonical_manifest_url)
-    existing = (
-      db.query(models.App)
-      .filter(
-        models.App.manifest_url.in_(
-          [f"{base}/mobius.json", base, f"{base}/"]
-        )
-      )
-      .order_by(
-        case((models.App.deleted_at.is_(None), 0), else_=1),
-        models.App.id.asc(),
-      )
-      .first()
-    )
   if existing is None:
     # A catalog pin may move refs while retaining repo + manifest identity.
     existing = _find_ref_independent_catalog_row(
       db, canonical_manifest_url, manifest_id,
     )
 
-  adopt_kind = ""
+  renaming = False
   if existing is None:
-    # Predecessor adoption is opt-in through previous_id. Platform/core rows
-    # additionally require the trusted catalog, preventing data-bearing app
-    # identities from being claimed by a pasted third-party manifest.
+    # A rename is explicit and source-bound: previous_id is looked up under the
+    # same canonical package base, never by a globally reusable slug.
     prev_id = manifest.get("previous_id")
-    if (
-      prev_id in _RESERVED_PLATFORM_SLUGS
-      and not _is_trusted_catalog_source(canonical_manifest_url)
-    ):
-      prev_id = None
     if prev_id:
       prev_canonical = _canonical_identity_key(source_for_key, prev_id)
       existing = (
@@ -2029,84 +1894,18 @@ def _select_install_target(
         .first()
       )
       if existing:
-        adopt_kind = "rename"
-      else:
-        existing = (
-          db.query(models.App)
-          .filter(
-            models.App.slug == prev_id,
-            models.App.deleted_at.is_(None),
-            (models.App.manifest_url.is_(None))
-            | (models.App.manifest_url == ""),
-          )
-          .first()
-        )
-        if existing:
-          adopt_kind = "legacy"
-
-  settings_data_dir = get_settings().data_dir
-  if _is_trusted_legacy_platform_catalog_install(
-    existing, manifest_id, canonical_manifest_url, settings_data_dir,
-  ):
-    adopt_kind = "legacy-platform"
-  if (
-    existing is None
-    and manifest_id in HISTORICAL_PLATFORM_APP_SLUGS
-    and _is_trusted_catalog_source(canonical_manifest_url)
-  ):
-    platform_row = (
-      db.query(models.App)
-      .filter(
-        models.App.slug == manifest_id,
-        models.App.deleted_at.is_(None),
-        (models.App.manifest_url.is_(None))
-        | (models.App.manifest_url == ""),
-      )
-      .first()
-    )
-    if platform_row:
-      if _is_legacy_platform_source_dir(
-        platform_row.source_dir, settings_data_dir, manifest_id,
-      ):
-        existing = platform_row
-        adopt_kind = "legacy-platform"
-      elif _is_historical_platform_app_source_dir(
-        platform_row.source_dir,
-        platform_row.manifest_url,
-        settings_data_dir,
-        manifest_id,
-      ):
-        existing = platform_row
-        adopt_kind = "legacy-catalog"
+        renaming = True
 
   if expected_app_id is not None and (
     existing is None or existing.id != expected_app_id
   ):
     raise HTTPException(409, "Pending update no longer matches this app.")
-  legacy_platform_migration = adopt_kind == "legacy-platform"
-  if (
-    existing
-    and _is_legacy_platform_source_dir(
-      existing.source_dir, settings_data_dir, existing.slug,
-    )
-    and not legacy_platform_migration
-  ):
-    raise HTTPException(
-      409,
-      (
-        "This legacy platform-owned app must be migrated by installing its "
-        "trusted mobius-os catalog entry."
-      ),
-    )
-
   return InstallTarget(
     existing=existing,
     mode="update" if existing else "install",
-    adopt_kind=adopt_kind,
+    renaming=renaming,
     canonical_manifest_url=canonical_manifest_url,
     force_core_store_update=force_core_store_update,
-    settings_data_dir=settings_data_dir,
-    legacy_platform_migration=legacy_platform_migration,
   )
 
 
@@ -2241,50 +2040,17 @@ async def _prepare_app_row(
   manifest_id = manifest["id"]
   data_dir = Path(get_settings().data_dir)
   existing = target.existing
-  adopt_kind = target.adopt_kind
+  renaming = target.renaming
   canonical_manifest_url = target.canonical_manifest_url
 
   if existing:
     app = existing
-    transition = icon_ownership.split_legacy_icon_ownership(app)
-    if transition.warning:
-      warnings.append(f"icon ownership: {transition.warning}")
     app.deleted_at = None
     app.name = manifest["name"]
     app.description = manifest.get("description", "")
     db.flush()
 
-    if adopt_kind == "legacy-platform":
-      old_source_dir = app.source_dir
-      target_slug = manifest_id
-      target_source_dir = str(data_dir / "apps" / target_slug)
-      try:
-        _reject_if_source_dir_taken(
-          db, target_source_dir, exclude_id=app.id,
-        )
-      except HTTPException:
-        target_slug = allocate_unique_slug(db, manifest["name"])
-        target_source_dir = str(data_dir / "apps" / target_slug)
-      if not Path(target_source_dir).exists():
-        journal.created_paths.append(Path(target_source_dir))
-      if old_source_dir:
-        async with fs_locks.source_dir_lock(old_source_dir):
-          await asyncio.to_thread(_unregister_cron, Path(old_source_dir))
-      app.slug = target_slug
-      app.source_dir = target_source_dir
-      app.manifest_url = canonical_manifest_url
-      db.flush()
-    elif adopt_kind == "legacy-catalog":
-      # Stamp identity before a possible merge conflict returns. The old source
-      # remains served until the owner resolves that conflict.
-      app.manifest_url = canonical_manifest_url
-      db.flush()
-
-    if (
-      adopt_kind
-      and adopt_kind != "legacy-platform"
-      and manifest_id != app.slug
-    ):
+    if renaming and manifest_id != app.slug:
       old_source_dir = app.source_dir
       target_slug = manifest_id
       target_source_dir = str(data_dir / "apps" / target_slug)
@@ -2432,13 +2198,9 @@ async def _activate_install_source(
     app.capability_contract = plan.capability_contract
 
   staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
-  source_dir = Path(app.source_dir) if app.source_dir else None
-  if source_dir is None:
-    await compile_jsx(app.id, entry_source, out_path=staged_bundle)
-    _publish_install_bundle(
-      app, staged_bundle, journal.rollback_actions, journal.commit_actions,
-    )
-    return None
+  if not app.source_dir:
+    raise RuntimeError(f"app {app.id} violates canonical source ownership")
+  source_dir = Path(app.source_dir)
 
   _reject_if_source_dir_taken(db, str(source_dir), exclude_id=app.id)
   source_dir.mkdir(parents=True, exist_ok=True)
@@ -2550,10 +2312,8 @@ async def install_from_manifest(
       App row is committed (so the recorded upstream sha persists) but
       the served app is unchanged.
 
-  The per-app git model is unconditional for any app with a real
-  source_dir. An app with no source_dir takes the legacy path — a blind
-  jsx_source overwrite with no `.git` repo created — and 'conflict' never
-  occurs there.
+  The per-app git model is unconditional. Every installed app has a canonical
+  source directory and repository; updates never overwrite source blindly.
 
   Failure modes:
     - Pre-commit failures (manifest fetch, validation, JSX compile,
@@ -2606,7 +2366,6 @@ async def install_from_manifest(
   mode = target.mode
   canonical_manifest_url = target.canonical_manifest_url
   force_core_store_update = target.force_core_store_update
-  legacy_platform_migration = target.legacy_platform_migration
 
   warnings: list[str] = []
   conflict_paths: list[str] = []
@@ -2705,364 +2464,349 @@ async def install_from_manifest(
     # conflict can short-circuit both. The lock is released before the seeds
     # block takes app_storage_lock, preserving the documented acquisition order
     # (install_uninstall -> app_storage -> source_dir).
-    # Guard on the raw string, NOT the Path: Path("") is a truthy Path, so a
-    # row with an empty source_dir would otherwise initialize a git repo in
-    # the server's working directory. Only engage git when there's a real dir.
-    git_source_dir = Path(app.source_dir) if app.source_dir else None
-    source_lock = (
-      fs_locks.source_dir_lock(str(git_source_dir)) if git_source_dir else None
-    )
-    if source_lock is not None:
-      await source_lock.acquire()
+    if not app.source_dir:
+      raise RuntimeError(f"app {app.id} violates canonical source ownership")
+    git_source_dir = Path(app.source_dir)
+    source_lock = fs_locks.source_dir_lock(str(git_source_dir))
+    await source_lock.acquire()
     try:
-      if git_source_dir:
-        version = str(manifest.get("version", "unknown"))
-        had_repo = app_git.is_repo(git_source_dir)
-        # A pre-git-model app being adopted from the catalog — or any existing app
-        # that somehow lost its repo — has editable owner source on disk and in DB
-        # jsx_source but no per-app git history and no recorded upstream. Init the
-        # repo now so the merge path below captures those on-disk edits onto `main`
-        # BEFORE the catalog upstream is recorded. Without this the fresh-install
-        # branch's align_local_to_upstream would reset --hard the tree to catalog
-        # bytes and the owner's edits would land in ZERO git blobs — unrecoverable.
-        # Excludes legacy-platform rows: their real source lived under
-        # /data/platform/core-apps and the /data/apps/<slug> dir is only the
-        # retired cron sidecar, not owner source to preserve.
-        adopt_repoless_source = bool(
-          existing and not had_repo and not legacy_platform_migration
+      version = str(manifest.get("version", "unknown"))
+      had_repo = app_git.is_repo(git_source_dir)
+      # A pre-git-model app being adopted from the catalog — or any existing app
+      # that somehow lost its repo — has editable owner source on disk and in DB
+      # jsx_source but no per-app git history and no recorded upstream. Init the
+      # repo now so the merge path below captures those on-disk edits onto `main`
+      # BEFORE the catalog upstream is recorded. Without this the fresh-install
+      # branch's align_local_to_upstream would reset --hard the tree to catalog
+      # bytes and the owner's edits would land in ZERO git blobs — unrecoverable.
+      adopt_repoless_source = bool(
+        existing and not had_repo
+      )
+      if adopt_repoless_source:
+        await asyncio.to_thread(app_git.ensure_repo, git_source_dir)
+      merge_existing_source = existing and (had_repo or adopt_repoless_source)
+      if merge_existing_source:
+        prev_upstream_commit = app.upstream_commit
+        if (
+          expected_upstream_commit is not None
+          and prev_upstream_commit != expected_upstream_commit
+        ):
+          raise HTTPException(
+            409, "Pending update no longer matches the recorded upstream.",
+          )
+        restored_upstream = await asyncio.to_thread(
+          app_git.restore_upstream_ref,
+          git_source_dir, prev_upstream_commit,
         )
-        if adopt_repoless_source:
-          await asyncio.to_thread(app_git.ensure_repo, git_source_dir)
-        merge_existing_source = existing and not legacy_platform_migration and (
-          had_repo or adopt_repoless_source
-        )
-        if merge_existing_source:
-          prev_upstream_commit = app.upstream_commit
-          if (
-            expected_upstream_commit is not None
-            and prev_upstream_commit != expected_upstream_commit
-          ):
-            raise HTTPException(
-              409, "Pending update no longer matches the recorded upstream.",
-            )
-          restored_upstream = await asyncio.to_thread(
-            app_git.restore_upstream_ref,
+        if restored_upstream:
+          log.warning(
+            "install: restored %s upstream ref to DB-recorded commit %s",
             git_source_dir, prev_upstream_commit,
           )
-          if restored_upstream:
-            log.warning(
-              "install: restored %s upstream ref to DB-recorded commit %s",
-              git_source_dir, prev_upstream_commit,
-            )
-          previous_upstream_paths = await asyncio.to_thread(
-            _read_upstream_source_paths, git_source_dir, prev_upstream_commit,
-          )
-          # If a PRIOR resolver left an unresolved conflict (MERGE_HEAD still
-          # set, markers on disk), abort it first — otherwise the commit_local
-          # below would commit the conflict markers as "local edits" (silent
-          # source corruption). The newer update supersedes the abandoned one
-          # and re-merges against the latest upstream; the resolver chat is
-          # deduped so this doesn't pile up chats.
-          if expected_upstream_commit is not None:
-            if await asyncio.to_thread(
-              app_git.merge_in_progress, git_source_dir,
-            ):
-              raise HTTPException(
-                409, "Resolve and save every conflict before replaying update.",
-              )
-          else:
-            await asyncio.to_thread(
-              app_git.abort_in_progress_merge, git_source_dir,
-            )
-          # Update of an app already on the Git model. First capture any
-          # unapplied on-disk draft onto `main` so the divergence check and any
-          # merge see the real local source.
-          await asyncio.to_thread(
-            app_git.commit_local, git_source_dir,
-            "local edits before update",
-          )
-          # Decide divergence against the PREVIOUS upstream before advancing
-          # it. When local `main` never diverged from what upstream last
-          # shipped, the new upstream is the answer outright: no three-way
-          # merge is needed or wanted. Taking the bytes verbatim here keeps
-          # the no-edit case off merge_upstream entirely, so it can never
-          # hinge on merge-tree's in-memory cat-file succeeding — the path
-          # that, when it returned None, dropped to a local commit parented on
-          # the old `main` tip and left `upstream` unreachable from `main`,
-          # stranding the merge base at the install point and resolving the
-          # NEXT update to stale local content. commit_replay still runs
-          # (merge_applied gate) so the single-parent replay advances the base.
-          # An adopted repo-less row has no recorded upstream to diverge from, so
-          # `prev_upstream_commit` is empty and the check below would read "no
-          # divergence" and take the catalog bytes verbatim — silently replacing
-          # the owner source we just committed to `main`. Force the three-way
-          # merge instead, so those edits are folded in cleanly or surfaced as an
-          # owner-gated conflict (identical on-disk == catalog resolves clean).
-          diverged = adopt_repoless_source or (
-            bool(prev_upstream_commit) and await asyncio.to_thread(
-              app_git.local_diverged_from,
-              git_source_dir, prev_upstream_commit,
-            )
-          )
-          if expected_upstream_commit is not None:
-            current_upstream = await asyncio.to_thread(
-              app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
-            )
-            if current_upstream != expected_upstream_commit:
-              raise HTTPException(
-                409, "Pending update upstream ref changed before replay.",
-              )
-            cloned_update = await asyncio.to_thread(
-              app_git.has_origin, git_source_dir,
-            )
-          elif repo_ref is not None and await asyncio.to_thread(
-            app_git.has_origin, git_source_dir,
+        previous_upstream_paths = await asyncio.to_thread(
+          _read_upstream_source_paths, git_source_dir, prev_upstream_commit,
+        )
+        # If a PRIOR resolver left an unresolved conflict (MERGE_HEAD still
+        # set, markers on disk), abort it first — otherwise the commit_local
+        # below would commit the conflict markers as "local edits" (silent
+        # source corruption). The newer update supersedes the abandoned one
+        # and re-merges against the latest upstream; the resolver chat is
+        # deduped so this doesn't pile up chats.
+        if expected_upstream_commit is not None:
+          if await asyncio.to_thread(
+            app_git.merge_in_progress, git_source_dir,
           ):
-            _, ref = repo_ref
-            try:
-              app.upstream_commit = await asyncio.to_thread(
-                app_git.fetch_upstream, git_source_dir, ref,
-              )
-              cloned_update = True
-            except Exception as exc:
-              log.warning(
-                "install: fetch from origin at %s failed; falling back to "
-                "fetched source path — %r",
-                ref, exc,
-              )
-          if expected_upstream_commit is not None:
-            new_upstream_paths = await asyncio.to_thread(
-              _read_upstream_source_paths, git_source_dir,
-              app_git.UPSTREAM_BRANCH,
+            raise HTTPException(
+              409, "Resolve and save every conflict before replaying update.",
             )
-          elif not cloned_update:
-            await asyncio.to_thread(
-              app_git.record_upstream,
-              git_source_dir, source_tree, canonical_manifest_url, version,
-              exec_paths=exec_paths,
-            )
-            new_upstream_paths = set(source_tree)
-          else:
-            new_upstream_paths = await asyncio.to_thread(
-              _read_upstream_source_paths, git_source_dir,
-              app_git.UPSTREAM_BRANCH,
-            )
-          dropped_source_paths = previous_upstream_paths - new_upstream_paths
-          if not diverged:
-            # No local edits → upstream wins outright for the whole tree; it is
-            # `source_tree` as fetched for synthetic repos, or the full
-            # origin-backed upstream tree for cloned repos. Taking the bytes
-            # verbatim keeps the no-edit case off merge_upstream entirely.
-            if cloned_update:
-              upstream_tree = await asyncio.to_thread(
-                app_git.read_ref_tree, git_source_dir, app_git.UPSTREAM_BRANCH,
-              )
-              source_tree = {
-                rel: data for rel, data in upstream_tree.items()
-                if rel not in _MERGED_NON_SOURCE
-              }
-            # A new upstream whose tree lacks the manifest's entry can't
-            # fast-forward the served bundle — treat it as a conflict for the
-            # agent to resolve, mirroring the clean-merge branch below, rather
-            # than half-applying a tree with no entry.
-            if prev_upstream_commit:
-              reconciliation = await asyncio.to_thread(
-                app_git.describe_reconciliation,
-                git_source_dir,
-                prev_upstream_commit,
-                app_git.UPSTREAM_BRANCH,
-              )
-            if entry_key not in source_tree:
-              mode = "conflict"
-              conflict_paths = [entry_key]
-              reconciliation = app_git.ReconciliationReceipt(
-                proven_present=reconciliation.proven_present,
-                local_only_paths=reconciliation.local_only_paths,
-                new_upstream_paths=reconciliation.new_upstream_paths,
-                compatible_paths=reconciliation.compatible_paths,
-                unresolved_conflict_paths=(entry_key,),
-                provenance_refs_used=reconciliation.provenance_refs_used,
-              )
-            else:
-              divergence = "fast_forward"
-              merge_applied = True
-              # Only now that we WILL write this tree, read its exec bits so the
-              # byte-write loop restores them (a conflict never reaches here, so
-              # a degenerate/unreadable tree is never ls-tree'd).
-              if cloned_update:
-                git_exec_paths = await asyncio.to_thread(
-                  app_git.read_tree_exec_paths,
-                  git_source_dir, app_git.UPSTREAM_BRANCH,
-                )
-          else:
-            # Local diverged: fold the new upstream into the local edits with
-            # a three-way merge that touches neither `main` nor the working
-            # tree, then act on the clean-vs-conflict verdict.
-            merge = await asyncio.to_thread(
-              app_git.merge_upstream, git_source_dir,
-            )
-            reconciliation = merge.reconciliation
-            if merge.status == "conflict":
-              if force_core_store_update:
-                # Core App Store self-update: published upstream wins, keep the
-                # fetched `source_tree` and apply it like a fast-forward.
-                warnings.append(
-                  "core App Store self-update replaced local edits with upstream"
-                )
-                divergence = "fast_forward"
-                merge_applied = True
-              else:
-                # Before routing to the owner, auto-resolve a conflict CONFINED
-                # to the version identifier: a version label is never a semantic
-                # merge, so take-upstream is always right. This kills the most
-                # common update-conflict class — a prior local "agent edit"
-                # bumped the version and the release bumps the same line. Any
-                # conflict beyond the version line returns None and falls through
-                # to the owner-resolver flow. Fail-safe: a genuine local edit is
-                # never dropped (a residual conflict aborts the whole attempt).
-                version_only = await asyncio.to_thread(
-                  app_git.resolve_version_only_conflict,
-                  git_source_dir, merge.conflict_paths,
-                )
-                resolved_source = None
-                if version_only is not None:
-                  resolved_source = {
-                    rel: data for rel, data in version_only.tree.items()
-                    if rel not in _MERGED_NON_SOURCE
-                  }
-                if resolved_source is not None and entry_key in resolved_source:
-                  source_tree = resolved_source
-                  divergence = "clean_merge"
-                  merge_applied = True
-                  warnings.append(
-                    "auto-resolved a version-only update conflict "
-                    "(took the upstream version)"
-                  )
-                  reconciliation = app_git.ReconciliationReceipt(
-                    proven_present=reconciliation.proven_present,
-                    local_only_paths=reconciliation.local_only_paths,
-                    new_upstream_paths=reconciliation.new_upstream_paths,
-                    compatible_paths=reconciliation.compatible_paths,
-                    provenance_refs_used=reconciliation.provenance_refs_used,
-                  )
-                  # Exec bits come from the same merged tree the resolution was
-                  # built on, mirroring the clean-merge branch above.
-                  git_exec_paths = await asyncio.to_thread(
-                    app_git.read_tree_exec_paths,
-                    git_source_dir, version_only.tree_oid,
-                  )
-                else:
-                  # Never rebase local. The app stays served with its current
-                  # bundle + source; the new upstream is recorded for a later
-                  # agent-resolution pass. Switch to conflict mode below.
-                  mode = "conflict"
-                  conflict_paths = merge.conflict_paths
-            else:
-              # Clean merge: the WHOLE merged tree is what we write + compile.
-              # Read it in full (one path for one and many files) and drop the
-              # managed/non-source files so `source_tree` is the source set the
-              # writer reconciles the worktree to. A clean verdict that yields
-              # no entry (e.g. an unreadable tree) is treated as a conflict
-              # rather than half-applying a merge we can't materialise.
-              merged_tree = app_git.read_merged_tree(
-                git_source_dir, merge.merged_tree_oid,
-              )
-              merged_source = {
-                rel: data for rel, data in merged_tree.items()
-                if rel not in _MERGED_NON_SOURCE
-              }
-              if entry_key not in merged_source:
-                mode = "conflict"
-                conflict_paths = merge.conflict_paths or [entry_key]
-              else:
-                source_tree = merged_source
-                divergence = "clean_merge"
-                merge_applied = True
-                if merge.equivalent_change_refs:
-                  warnings.append(
-                    "reconciled reviewed changes that were already present "
-                    "upstream"
-                  )
-                # Read exec bits only now that we WILL write this tree — a
-                # conflict/unreadable verdict never ls-tree's the (possibly
-                # degenerate) merged oid.
-                git_exec_paths = await asyncio.to_thread(
-                  app_git.read_tree_exec_paths,
-                  git_source_dir, merge.merged_tree_oid,
-                )
         else:
-          # Fresh installs and legacy-platform migrations both build local
-          # `main` from the catalog tree. For legacy platform rows, an existing
-          # /data/apps/<slug> repo is only the old runtime sidecar; source lived
-          # under /data/platform/core-apps/<slug>, so do not merge its stale
-          # source state as user edits.
-          # Fresh install (or an existing app that somehow lost its repo):
-          # for a new raw-GitHub catalog install, prefer a REAL clone so the
-          # source tree carries origin/<ref> and the app's own .gitignore. If
-          # cloning fails (private repo, renamed repo, offline git access), fall
-          # back to the existing synthetic-upstream path unchanged. Canonical
-          # index.jsx is read back from the clone — the repo's bytes, not the
-          # HTTP fetch, are authoritative on this path.
-          if not existing and repo_ref is not None:
-            repo_url, ref = repo_ref
-            try:
-              app.upstream_commit = await asyncio.to_thread(
-                app_git.clone_upstream, git_source_dir, repo_url, ref,
-              )
-              entry_bytes = (git_source_dir / "index.jsx").read_bytes()
-              upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
-              source_tree = {"index.jsx": entry_bytes}
-              cloned_install = True
-            except Exception as exc:
-              log.warning(
-                "install: clone from %s at %s failed; falling back to "
-                "fetched source path — %r",
-                repo_url, ref, exc,
-              )
-          if not cloned_install:
-            # record the pristine source tree on `upstream`, then align the
-            # local `main` branch to that commit so the working branch starts
-            # exactly at the installed version — a shared base for the next
-            # update's merge.
-            await asyncio.to_thread(
-              app_git.record_upstream,
-              git_source_dir, source_tree, canonical_manifest_url, version,
-              exec_paths=exec_paths,
-            )
-            await asyncio.to_thread(
-              app_git.align_local_to_upstream, git_source_dir,
-            )
-        app.upstream_jsx_sha = upstream_jsx_sha
-        if not cloned_install:
-          app.upstream_commit = await asyncio.to_thread(
+          await asyncio.to_thread(
+            app_git.abort_in_progress_merge, git_source_dir,
+          )
+        # Update of an app already on the Git model. First capture any
+        # unapplied on-disk draft onto `main` so the divergence check and any
+        # merge see the real local source.
+        await asyncio.to_thread(
+          app_git.commit_local, git_source_dir,
+          "local edits before update",
+        )
+        # Decide divergence against the PREVIOUS upstream before advancing
+        # it. When local `main` never diverged from what upstream last
+        # shipped, the new upstream is the answer outright: no three-way
+        # merge is needed or wanted. Taking the bytes verbatim here keeps
+        # the no-edit case off merge_upstream entirely, so it can never
+        # hinge on merge-tree's in-memory cat-file succeeding — the path
+        # that, when it returned None, dropped to a local commit parented on
+        # the old `main` tip and left `upstream` unreachable from `main`,
+        # stranding the merge base at the install point and resolving the
+        # NEXT update to stale local content. commit_replay still runs
+        # (merge_applied gate) so the single-parent replay advances the base.
+        # An adopted repo-less row has no recorded upstream to diverge from, so
+        # `prev_upstream_commit` is empty and the check below would read "no
+        # divergence" and take the catalog bytes verbatim — silently replacing
+        # the owner source we just committed to `main`. Force the three-way
+        # merge instead, so those edits are folded in cleanly or surfaced as an
+        # owner-gated conflict (identical on-disk == catalog resolves clean).
+        diverged = adopt_repoless_source or (
+          bool(prev_upstream_commit) and await asyncio.to_thread(
+            app_git.local_diverged_from,
+            git_source_dir, prev_upstream_commit,
+          )
+        )
+        if expected_upstream_commit is not None:
+          current_upstream = await asyncio.to_thread(
             app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
           )
-        if mode == "conflict":
-          # Conflict: leave the working tree exactly as it was. The app keeps
-          # serving its prior good bundle and Settings/App Store surface the
-          # conflict paths. Only the owner's click-gated resolver endpoint
-          # materializes a REAL working-tree merge conflict (markers +
-          # MERGE_HEAD) for the agent to resolve with ordinary git.
-          # `app.jsx_source` stays the LOCAL source and the upstream provenance
-          # (upstream_commit / upstream_jsx_sha, set above) persists for the
-          # later resolution.
-          if not app.upstream_commit:
-            raise RuntimeError("conflicting update has no recorded upstream commit")
-          await asyncio.to_thread(
-            stage_pending_conflict_update,
-            git_source_dir,
-            app_id=app.id,
-            upstream_commit=app.upstream_commit,
-            manifest=manifest,
-            raw_base=raw_base,
-            capability_digest=fetched_capability_digest,
-            candidate_digest=candidate_digest,
+          if current_upstream != expected_upstream_commit:
+            raise HTTPException(
+              409, "Pending update upstream ref changed before replay.",
+            )
+          cloned_update = await asyncio.to_thread(
+            app_git.has_origin, git_source_dir,
           )
+        elif repo_ref is not None and await asyncio.to_thread(
+          app_git.has_origin, git_source_dir,
+        ):
+          _, ref = repo_ref
+          try:
+            app.upstream_commit = await asyncio.to_thread(
+              app_git.fetch_upstream, git_source_dir, ref,
+            )
+            cloned_update = True
+          except Exception as exc:
+            log.warning(
+              "install: fetch from origin at %s failed; falling back to "
+              "fetched source path — %r",
+              ref, exc,
+            )
+        if expected_upstream_commit is not None:
+          new_upstream_paths = await asyncio.to_thread(
+            _read_upstream_source_paths, git_source_dir,
+            app_git.UPSTREAM_BRANCH,
+          )
+        elif not cloned_update:
+          await asyncio.to_thread(
+            app_git.record_upstream,
+            git_source_dir, source_tree, canonical_manifest_url, version,
+            exec_paths=exec_paths,
+          )
+          new_upstream_paths = set(source_tree)
+        else:
+          new_upstream_paths = await asyncio.to_thread(
+            _read_upstream_source_paths, git_source_dir,
+            app_git.UPSTREAM_BRANCH,
+          )
+        dropped_source_paths = previous_upstream_paths - new_upstream_paths
+        if not diverged:
+          # No local edits → upstream wins outright for the whole tree; it is
+          # `source_tree` as fetched for synthetic repos, or the full
+          # origin-backed upstream tree for cloned repos. Taking the bytes
+          # verbatim keeps the no-edit case off merge_upstream entirely.
+          if cloned_update:
+            upstream_tree = await asyncio.to_thread(
+              app_git.read_ref_tree, git_source_dir, app_git.UPSTREAM_BRANCH,
+            )
+            source_tree = {
+              rel: data for rel, data in upstream_tree.items()
+              if rel not in _MERGED_NON_SOURCE
+            }
+          # A new upstream whose tree lacks the manifest's entry can't
+          # fast-forward the served bundle — treat it as a conflict for the
+          # agent to resolve, mirroring the clean-merge branch below, rather
+          # than half-applying a tree with no entry.
+          if prev_upstream_commit:
+            reconciliation = await asyncio.to_thread(
+              app_git.describe_reconciliation,
+              git_source_dir,
+              prev_upstream_commit,
+              app_git.UPSTREAM_BRANCH,
+            )
+          if entry_key not in source_tree:
+            mode = "conflict"
+            conflict_paths = [entry_key]
+            reconciliation = app_git.ReconciliationReceipt(
+              proven_present=reconciliation.proven_present,
+              local_only_paths=reconciliation.local_only_paths,
+              new_upstream_paths=reconciliation.new_upstream_paths,
+              compatible_paths=reconciliation.compatible_paths,
+              unresolved_conflict_paths=(entry_key,),
+              provenance_refs_used=reconciliation.provenance_refs_used,
+            )
+          else:
+            divergence = "fast_forward"
+            merge_applied = True
+            # Only now that we WILL write this tree, read its exec bits so the
+            # byte-write loop restores them (a conflict never reaches here, so
+            # a degenerate/unreadable tree is never ls-tree'd).
+            if cloned_update:
+              git_exec_paths = await asyncio.to_thread(
+                app_git.read_tree_exec_paths,
+                git_source_dir, app_git.UPSTREAM_BRANCH,
+              )
+        else:
+          # Local diverged: fold the new upstream into the local edits with
+          # a three-way merge that touches neither `main` nor the working
+          # tree, then act on the clean-vs-conflict verdict.
+          merge = await asyncio.to_thread(
+            app_git.merge_upstream, git_source_dir,
+          )
+          reconciliation = merge.reconciliation
+          if merge.status == "conflict":
+            if force_core_store_update:
+              # Core App Store self-update: published upstream wins, keep the
+              # fetched `source_tree` and apply it like a fast-forward.
+              warnings.append(
+                "core App Store self-update replaced local edits with upstream"
+              )
+              divergence = "fast_forward"
+              merge_applied = True
+            else:
+              # Before routing to the owner, auto-resolve a conflict CONFINED
+              # to the version identifier: a version label is never a semantic
+              # merge, so take-upstream is always right. This kills the most
+              # common update-conflict class — a prior local "agent edit"
+              # bumped the version and the release bumps the same line. Any
+              # conflict beyond the version line returns None and falls through
+              # to the owner-resolver flow. Fail-safe: a genuine local edit is
+              # never dropped (a residual conflict aborts the whole attempt).
+              version_only = await asyncio.to_thread(
+                app_git.resolve_version_only_conflict,
+                git_source_dir, merge.conflict_paths,
+              )
+              resolved_source = None
+              if version_only is not None:
+                resolved_source = {
+                  rel: data for rel, data in version_only.tree.items()
+                  if rel not in _MERGED_NON_SOURCE
+                }
+              if resolved_source is not None and entry_key in resolved_source:
+                source_tree = resolved_source
+                divergence = "clean_merge"
+                merge_applied = True
+                warnings.append(
+                  "auto-resolved a version-only update conflict "
+                  "(took the upstream version)"
+                )
+                reconciliation = app_git.ReconciliationReceipt(
+                  proven_present=reconciliation.proven_present,
+                  local_only_paths=reconciliation.local_only_paths,
+                  new_upstream_paths=reconciliation.new_upstream_paths,
+                  compatible_paths=reconciliation.compatible_paths,
+                  provenance_refs_used=reconciliation.provenance_refs_used,
+                )
+                # Exec bits come from the same merged tree the resolution was
+                # built on, mirroring the clean-merge branch above.
+                git_exec_paths = await asyncio.to_thread(
+                  app_git.read_tree_exec_paths,
+                  git_source_dir, version_only.tree_oid,
+                )
+              else:
+                # Never rebase local. The app stays served with its current
+                # bundle + source; the new upstream is recorded for a later
+                # agent-resolution pass. Switch to conflict mode below.
+                mode = "conflict"
+                conflict_paths = merge.conflict_paths
+          else:
+            # Clean merge: the WHOLE merged tree is what we write + compile.
+            # Read it in full (one path for one and many files) and drop the
+            # managed/non-source files so `source_tree` is the source set the
+            # writer reconciles the worktree to. A clean verdict that yields
+            # no entry (e.g. an unreadable tree) is treated as a conflict
+            # rather than half-applying a merge we can't materialise.
+            merged_tree = app_git.read_merged_tree(
+              git_source_dir, merge.merged_tree_oid,
+            )
+            merged_source = {
+              rel: data for rel, data in merged_tree.items()
+              if rel not in _MERGED_NON_SOURCE
+            }
+            if entry_key not in merged_source:
+              mode = "conflict"
+              conflict_paths = merge.conflict_paths or [entry_key]
+            else:
+              source_tree = merged_source
+              divergence = "clean_merge"
+              merge_applied = True
+              if merge.equivalent_change_refs:
+                warnings.append(
+                  "reconciled reviewed changes that were already present "
+                  "upstream"
+                )
+              # Read exec bits only now that we WILL write this tree — a
+              # conflict/unreadable verdict never ls-tree's the (possibly
+              # degenerate) merged oid.
+              git_exec_paths = await asyncio.to_thread(
+                app_git.read_tree_exec_paths,
+                git_source_dir, merge.merged_tree_oid,
+              )
+      else:
+        # Fresh install (or an existing app that somehow lost its repo):
+        # for a new raw-GitHub catalog install, prefer a REAL clone so the
+        # source tree carries origin/<ref> and the app's own .gitignore. If
+        # cloning fails (private repo, renamed repo, offline git access), fall
+        # back to the existing synthetic-upstream path unchanged. Canonical
+        # index.jsx is read back from the clone — the repo's bytes, not the
+        # HTTP fetch, are authoritative on this path.
+        if not existing and repo_ref is not None:
+          repo_url, ref = repo_ref
+          try:
+            app.upstream_commit = await asyncio.to_thread(
+              app_git.clone_upstream, git_source_dir, repo_url, ref,
+            )
+            entry_bytes = (git_source_dir / "index.jsx").read_bytes()
+            upstream_jsx_sha = hashlib.sha256(entry_bytes).hexdigest()
+            source_tree = {"index.jsx": entry_bytes}
+            cloned_install = True
+          except Exception as exc:
+            log.warning(
+              "install: clone from %s at %s failed; falling back to "
+              "fetched source path — %r",
+              repo_url, ref, exc,
+            )
+        if not cloned_install:
+          # record the pristine source tree on `upstream`, then align the
+          # local `main` branch to that commit so the working branch starts
+          # exactly at the installed version — a shared base for the next
+          # update's merge.
+          await asyncio.to_thread(
+            app_git.record_upstream,
+            git_source_dir, source_tree, canonical_manifest_url, version,
+            exec_paths=exec_paths,
+          )
+          await asyncio.to_thread(
+            app_git.align_local_to_upstream, git_source_dir,
+          )
+      app.upstream_jsx_sha = upstream_jsx_sha
+      if not cloned_install:
+        app.upstream_commit = await asyncio.to_thread(
+          app_git.head_sha, git_source_dir, app_git.UPSTREAM_BRANCH,
+        )
+      if mode == "conflict":
+        # Conflict: leave the working tree exactly as it was. The app keeps
+        # serving its prior good bundle and Settings/App Store surface the
+        # conflict paths. Only the owner's click-gated resolver endpoint
+        # materializes a REAL working-tree merge conflict (markers +
+        # MERGE_HEAD) for the agent to resolve with ordinary git.
+        # `app.jsx_source` stays the LOCAL source and the upstream provenance
+        # (upstream_commit / upstream_jsx_sha, set above) persists for the
+        # later resolution.
+        if not app.upstream_commit:
+          raise RuntimeError("conflicting update has no recorded upstream commit")
+        await asyncio.to_thread(
+          stage_pending_conflict_update,
+          git_source_dir,
+          app_id=app.id,
+          upstream_commit=app.upstream_commit,
+          manifest=manifest,
+          raw_base=raw_base,
+          capability_digest=fetched_capability_digest,
+          candidate_digest=candidate_digest,
+        )
 
       # The disk-write phase runs INSIDE the same held lock for the Git path so
       # no source commit interleaves between the merge decision and the write; a
       # conflict skips it (the source stays the local edits, served by the prior
-      # bundle). The no-source_dir legacy path falls through with no lock.
+      # bundle).
       if mode != "conflict":
         equivalence_target_to_retire = await _activate_install_source(
           db,
@@ -3089,9 +2833,8 @@ async def install_from_manifest(
     finally:
       # Release the per-source-dir lock (held across the merge + write for the
       # git path) BEFORE the seeds block takes app_storage_lock, preserving the
-      # documented acquisition order. A no-op for the no-source_dir legacy path.
-      if source_lock is not None:
-        source_lock.release()
+      # documented acquisition order.
+      source_lock.release()
 
     if mode == "conflict":
       # Commit the recorded upstream provenance + return so the App Store can

@@ -26,9 +26,6 @@ def slugify_for_source_dir(name: str) -> str:
   return slug
 
 
-def derive_source_dir(data_dir: str, name: str) -> str:
-  """Derive `/data/apps/<slug>/` for a legacy row missing source identity."""
-  return str(Path(data_dir) / "apps" / slugify_for_source_dir(name))
 
 
 def allocate_unique_slug(db: Session, name: str, exclude_id: int | None = None) -> str:
@@ -72,6 +69,8 @@ def ensure_slug(db: Session, app: models.App) -> str:
   app.slug = allocate_unique_slug(db, app.name, exclude_id=app.id)
   db.commit()
   return app.slug
+
+
 
 
 def validate_source_dir(source_dir: str, data_dir: str) -> str:

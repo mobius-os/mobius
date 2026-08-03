@@ -19,7 +19,7 @@ from typing import Literal
 
 from sqlalchemy.orm import Session
 
-from app import app_git, icon_assets, icon_ownership, models, timeutil
+from app import app_git, icon_assets, models, timeutil
 from app.app_capabilities import (
   contract_from_app_state,
   local_manifest_runtime_fields,
@@ -166,39 +166,6 @@ def _manifest_icon(snapshot_dir: Path, manifest: dict) -> bytes | None:
   return _normalize_manifest_icon(relative, raw)
 
 
-def reconcile_manifest_icons(db: Session) -> tuple[list[int], list[str]]:
-  """Split legacy icon ownership from each app's accepted Git revision.
-
-  The transition is per-row and idempotent. Missing or invalid immutable source
-  never risks old effective artwork: those bytes become an explicit override,
-  while a later accepted revision remains free to populate package artwork.
-  """
-  repaired: list[int] = []
-  warnings: list[str] = []
-  apps = (
-    db.query(models.App)
-    .filter(
-      models.App.deleted_at.is_(None),
-      models.App.icon_ownership_split.is_(False),
-    )
-    .order_by(models.App.id)
-    .all()
-  )
-  for app in apps:
-    try:
-      transition = icon_ownership.split_legacy_icon_ownership(app)
-      db.commit()
-      db.refresh(app)
-      if transition.changed:
-        repaired.append(app.id)
-      if transition.warning:
-        warnings.append(f"app {app.id}: {transition.warning}")
-    except Exception as exc:
-      db.rollback()
-      warnings.append(f"app {app.id}: {exc}")
-  return repaired, warnings
-
-
 def retire_integrated_app_provenance(db: Session) -> tuple[int, list[str]]:
   """Bound app provenance metadata at the existing startup maintenance edge."""
   retired = 0
@@ -336,14 +303,7 @@ async def apply_source_revision(
         app.source_commit,
         app.icon_png,
         app.icon_override_png,
-        app.icon_ownership_split,
       )
-      transition = icon_ownership.split_legacy_icon_ownership(app)
-      if transition.warning:
-        log.warning(
-          "legacy icon ownership for app %s: %s",
-          app.id, transition.warning,
-        )
 
       staged = _compiled_dir() / f"app-{app.id}.js.staging"
       await compile_jsx(
@@ -406,7 +366,6 @@ async def apply_source_revision(
           app.source_commit,
           app.icon_png,
           app.icon_override_png,
-          app.icon_ownership_split,
         )
       )
       if not changed:

@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_git, app_jobs, app_preview,
-  app_recency, fs_locks, icon_cache, icon_ownership,
+  app_recency, fs_locks, icon_cache,
   models, providers, schemas,
   source_dirs,
 )
@@ -30,10 +30,7 @@ from app.app_identity import (
   reject_if_source_dir_taken as _reject_if_source_dir_taken,
   validate_source_dir as _validate_source_dir,
 )
-from app.app_source_paths import (
-  legacy_platform_runtime_dir_for_app as _legacy_platform_runtime_dir_for_app,
-  resolve_app_source_dir as _resolve_app_source_dir,
-)
+from app.app_source_paths import resolve_app_source_dir as _resolve_app_source_dir
 from app.routes.app_schedules import (
   reconcile_app_cron_supervision,
   router as schedules_router,
@@ -251,7 +248,7 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
       deleted_app_id,
     )
 
-  resolved_source = _resolve_app_source_dir(app_source_dir, app_name, settings)
+  resolved_source = _resolve_app_source_dir(app_source_dir)
   if resolved_source is not None:
     try:
       async with fs_locks.source_dir_lock(str(resolved_source)):
@@ -1872,12 +1869,6 @@ async def update_icon(
     app = live_app(db, app_id, populate=True)
     if app is None or app.token_nonce != expected_nonce:
       raise HTTPException(404, "App not found.")
-    transition = icon_ownership.split_legacy_icon_ownership(app)
-    if transition.warning:
-      log.warning(
-        "legacy icon ownership for app %s: %s",
-        app.id, transition.warning,
-      )
     app.icon_override_png = processed
     db.commit()
   return Response(status_code=204)
@@ -2078,10 +2069,7 @@ async def delete_app(
     # job.sh stays in the preserved source tree so a reinstall/recover can
     # re-register the schedule. Drop cron under the per-source-dir lock, off the
     # loop (crontab shells out).
-    settings = get_settings()
-    resolved_source = _resolve_app_source_dir(
-      app_source_dir, app_name, settings
-    )
+    resolved_source = _resolve_app_source_dir(app_source_dir)
     try:
       if resolved_source is not None:
         async with fs_locks.source_dir_lock(str(resolved_source)):
@@ -2089,18 +2077,6 @@ async def delete_app(
     except Exception:
       log.exception(
         "App %s was deleted but its source cron could not be disabled",
-        app_id,
-      )
-    runtime_dir = _legacy_platform_runtime_dir_for_app(app)
-    try:
-      if runtime_dir is not None and (
-        resolved_source is None or runtime_dir.resolve() != resolved_source
-      ):
-        async with fs_locks.source_dir_lock(str(runtime_dir)):
-          await asyncio.to_thread(_drop_cron_only, runtime_dir)
-    except Exception:
-      log.exception(
-        "App %s was deleted but its legacy cron could not be disabled",
         app_id,
       )
 
@@ -2263,20 +2239,11 @@ async def recover_app(
     # preserved scripts here: an older one may run the job directly. Once all
     # replay locations are restored, the common reconciler below preserves the
     # cadence while rewriting/installing the supervised command.
-    settings = get_settings()
-    resolved_source = _resolve_app_source_dir(
-      app_source_dir, app_name, settings
-    )
+    resolved_source = _resolve_app_source_dir(app_source_dir)
     try:
       if resolved_source is not None:
         async with fs_locks.source_dir_lock(str(resolved_source)):
           await asyncio.to_thread(_reenable_init_cron_replay, resolved_source)
-      runtime_dir = _legacy_platform_runtime_dir_for_app(app)
-      if runtime_dir is not None and (
-        resolved_source is None or runtime_dir.resolve() != resolved_source
-      ):
-        async with fs_locks.source_dir_lock(str(runtime_dir)):
-          await asyncio.to_thread(_reenable_init_cron_replay, runtime_dir)
     except Exception:
       log.exception(
         "App %s was recovered but its cron declaration could not be restored",

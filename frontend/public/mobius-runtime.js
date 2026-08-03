@@ -1764,6 +1764,22 @@ function makeSignal(appId, storage, appInstanceId = null) {
   return signal;
 }
 
+// src/lib/agentViewport.js
+function positiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+function agentViewport(windowLike, height) {
+  return {
+    width: positiveNumber(windowLike?.innerWidth, 1),
+    height: positiveNumber(
+      height,
+      positiveNumber(windowLike?.visualViewport?.height, windowLike?.innerHeight || 1)
+    ),
+    pixelRatio: positiveNumber(windowLike?.devicePixelRatio, 1)
+  };
+}
+
 // src/runtime/chat.js
 var EMBED_NS = "moebius:chat-embed:";
 var EMBED_INIT = EMBED_NS + "init";
@@ -2086,10 +2102,7 @@ function makeChat({ appId, getToken, storage }) {
     }
     const body = { content, cid, timezone };
     if (typeof window !== "undefined") {
-      body.viewport = {
-        width: window.innerWidth,
-        height: window.visualViewport?.height || window.innerHeight
-      };
+      body.viewport = agentViewport(window);
     }
     const res = await appChatFetch(
       `/api/chats/${encodeURIComponent(chatId)}/messages`,

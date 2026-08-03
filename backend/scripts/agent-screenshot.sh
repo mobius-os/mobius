@@ -18,7 +18,8 @@
 #   /settings              owner settings, etc.
 #
 # Usage:
-#   agent-screenshot.sh [--content-only] [--preserve-cache] <route> <out.png>
+#   agent-screenshot.sh [--content-only] [--preserve-cache] [--current-page]
+#     <route> <out.png>
 #   <route> is path-absolute (starts with /); it is appended to
 #   $API_BASE_URL.
 #
@@ -31,6 +32,10 @@
 # the loaded entry asset. --preserve-cache is reserved for explicitly
 # testing PWA upgrade/offline behavior where retained browser state is the
 # subject of the test.
+#
+# --current-page preserves an already-open Möbius document (including
+# ephemeral CSS/state used for a visual comparison) while re-running the same
+# viewport, freshness, font, and atomic-output checks before capture.
 #
 # Prints the output path on stdout, or non-zero if the auth dance
 # fails (no token, no API_BASE_URL, no viewport, no agent-browser).
@@ -140,6 +145,14 @@ browser_eval_retry() {
   return 1
 }
 
+FONT_READINESS_EXPR="(async () => { const fonts = globalThis.__mobiusFontReadiness; return fonts ? fonts.settleCapture(document) : false; })()"
+
+browser_ensure_fonts_ready() {
+  local result=""
+  result="$(browser_eval_retry "$FONT_READINESS_EXPR" || true)"
+  [ "$result" = "true" ]
+}
+
 browser_screenshot_retry() {
   local output_path="$1"
   local attempt
@@ -151,15 +164,29 @@ browser_screenshot_retry() {
     if ! browser_set_viewport_retry; then
       continue
     fi
+    # DOM/style changes between comparison shots can request a face that was
+    # not used before the final viewport selected its responsive layout. Settle
+    # the exact computed font specs at the capture boundary rather than treating
+    # an earlier global status as a permanent guarantee.
+    BROWSER_PHASE="font readiness"
+    if ! browser_ensure_fonts_ready; then
+      continue
+    fi
     if browser_command 5 screenshot "$output_path" >/dev/null; then
       byte_count="$(wc -c < "$output_path" 2>/dev/null || printf '0')"
       if { [ "${CAPTURE_MIN_BYTES:-0}" -le 0 ] \
             || [ "${byte_count:-0}" -ge "${CAPTURE_MIN_BYTES}" ]; } \
-          && python3 - "$output_path" "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" <<'PY'
+          && python3 - "$output_path" "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" \
+            "$VIEWPORT_PIXEL_RATIO" <<'PY'
+import math
 import struct
 import sys
 
-path, expected_w, expected_h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+path = sys.argv[1]
+css_width, css_height = int(sys.argv[2]), int(sys.argv[3])
+pixel_ratio = float(sys.argv[4])
+expected_w = math.floor(css_width * pixel_ratio + 0.5)
+expected_h = math.floor(css_height * pixel_ratio + 0.5)
 try:
   with open(path, "rb") as handle:
     header = handle.read(24)
@@ -266,6 +293,7 @@ browser_set_viewport_retry() {
   local attempt
   for attempt in 1 2 3 4 5; do
     if browser_command 5 set viewport "$VIEWPORT_WIDTH" "$VIEWPORT_HEIGHT" \
+        "$VIEWPORT_PIXEL_RATIO" \
         >/dev/null; then
       return 0
     fi
@@ -322,12 +350,14 @@ clear_stale_browser_profile_lock() {
 
 CONTENT_ONLY=0
 PRESERVE_CACHE=0
-while [ "${1:-}" = "--content-only" ] || [ "${1:-}" = "--preserve-cache" ]; do
-  if [ "$1" = "--content-only" ]; then
-    CONTENT_ONLY=1
-  else
-    PRESERVE_CACHE=1
-  fi
+CURRENT_PAGE=0
+while :; do
+  case "${1:-}" in
+    --content-only) CONTENT_ONLY=1 ;;
+    --preserve-cache) PRESERVE_CACHE=1 ;;
+    --current-page) CURRENT_PAGE=1 ;;
+    *) break ;;
+  esac
   shift
 done
 
@@ -336,7 +366,7 @@ OUT="${2:-}"
 
 if [ -z "$ROUTE" ]; then
   printf '%s\n' "agent-screenshot.sh: route required" >&2
-  echo "Usage: agent-screenshot.sh [--content-only] [--preserve-cache] <route> [out.png]" >&2
+  echo "Usage: agent-screenshot.sh [--content-only] [--preserve-cache] [--current-page] <route> [out.png]" >&2
   exit 1
 fi
 
@@ -380,38 +410,45 @@ if [ -n "${CHAT_ID:-}" ]; then
   fi
 fi
 
-# Match the partner's actual viewport so the screenshot frames what
-# they see. chat.py exports VIEWPORT_WIDTH/HEIGHT from the React
-# shell's per-turn payload; screenshots require those values.
+# Match the partner's CSS viewport and physical display density so the
+# screenshot frames and rasterizes what they see. chat.py exports these from
+# the React shell's per-turn payload. Existing sessions and manual callers
+# created before the density field existed safely retain the 1x default.
 if [ -z "${VIEWPORT_WIDTH:-}" ] || [ -z "${VIEWPORT_HEIGHT:-}" ]; then
   die "VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be set"
 fi
+VIEWPORT_PIXEL_RATIO="${VIEWPORT_PIXEL_RATIO:-1}"
 # Existing agent sessions keep the env snapshot they started with, and manual
 # callers can bypass chat.py entirely. Normalize again at this executable
 # boundary so a valid fractional CSS size (for example 956.6667px from a scaled
 # desktop pane) never reaches agent-browser's integer-only viewport command.
 if ! NORMALIZED_VIEWPORT="$(
   VIEWPORT_WIDTH="$VIEWPORT_WIDTH" VIEWPORT_HEIGHT="$VIEWPORT_HEIGHT" \
+  VIEWPORT_PIXEL_RATIO="$VIEWPORT_PIXEL_RATIO" \
   python3 - <<'PY'
 import math
 import os
 import sys
 
 try:
-  values = (
+  dimensions = (
     float(os.environ["VIEWPORT_WIDTH"]),
     float(os.environ["VIEWPORT_HEIGHT"]),
   )
+  pixel_ratio = float(os.environ["VIEWPORT_PIXEL_RATIO"])
 except (KeyError, ValueError):
   raise SystemExit(1)
-if not all(math.isfinite(value) and value > 0 for value in values):
+if not all(math.isfinite(value) and value > 0 for value in dimensions):
   raise SystemExit(1)
-print(*(max(1, round(value)) for value in values))
+if not math.isfinite(pixel_ratio) or pixel_ratio <= 0:
+  raise SystemExit(1)
+pixel_ratio = min(4.0, max(0.5, pixel_ratio))
+print(*(max(1, round(value)) for value in dimensions), f"{pixel_ratio:g}")
 PY
 )"; then
-  die "VIEWPORT_WIDTH and VIEWPORT_HEIGHT must be positive numbers"
+  die "viewport width, height, and pixel ratio must be positive numbers"
 fi
-read -r VIEWPORT_WIDTH VIEWPORT_HEIGHT <<<"$NORMALIZED_VIEWPORT"
+read -r VIEWPORT_WIDTH VIEWPORT_HEIGHT VIEWPORT_PIXEL_RATIO <<<"$NORMALIZED_VIEWPORT"
 
 # One chat can host parallel agents, but its browser commands target one
 # persistent profile. Serialize the complete navigation/capture transaction so
@@ -431,12 +468,17 @@ BROWSER_ERROR_FILE="$(mktemp "${TMPDIR:-/tmp}/mobius-agent-browser-error.XXXXXX"
 BROWSER_TIMEOUT_FILE="$(mktemp "${TMPDIR:-/tmp}/mobius-agent-browser-timeout.XXXXXX")"
 trap cleanup EXIT
 
-# Start the browser, then wait narrowly for its command socket before applying
-# viewport state. A cold launch can return before that socket is connectable.
-browser_command 5 open "${API_BASE_URL}/api/browser-bootstrap" >/dev/null || true
-if ! browser_set_viewport_retry; then
-  die "browser did not become ready for viewport configuration"
-fi
+# A normal capture owns browser startup, authentication, cache detachment, and
+# navigation. A current-page capture deliberately preserves the document an
+# earlier normal capture opened, but rejoins the same verification/capture
+# boundary below instead of calling raw `agent-browser screenshot`.
+if [ "$CURRENT_PAGE" -eq 0 ]; then
+  # Start the browser, then wait narrowly for its command socket before applying
+  # viewport state. A cold launch can return before that socket is connectable.
+  browser_command 5 open "${API_BASE_URL}/api/browser-bootstrap" >/dev/null || true
+  if ! browser_set_viewport_retry; then
+    die "browser did not become ready for viewport configuration"
+  fi
 
 # A retained test profile can start under an older service worker that handles
 # `/api/browser-bootstrap` as an app navigation and immediately canonicalizes
@@ -519,8 +561,14 @@ fi
 
 # Now navigate to the actual target route, authenticated.
 BROWSER_PHASE="target navigation"
-if ! browser_open_origin_retry "${API_BASE_URL}${TARGET_ROUTE}" target; then
-  die "browser did not reach the target route"
+  if ! browser_open_origin_retry "${API_BASE_URL}${TARGET_ROUTE}" target; then
+    die "browser did not reach the target route"
+  fi
+else
+  BROWSER_PHASE="current page viewport configuration"
+  if ! browser_set_viewport_retry; then
+    die "no open browser page was available for current-page capture"
+  fi
 fi
 
 # The URL can canonicalize before the replacement document has committed.
@@ -624,13 +672,6 @@ PY
       >/dev/null; then
       die "shell did not commit its settled frame before capture"
     fi
-    # The shell can be visually settled while webfonts are still in flight.
-    # Waiting on the browser's font set prevents cold captures from recording
-    # a system fallback that a warm owner browser never shows.
-    BROWSER_PHASE="font readiness"
-    if ! browser_wait --fn "document.fonts.status === 'loaded'" >/dev/null; then
-      die "document fonts did not finish loading before capture"
-    fi
     ;;
 esac
 
@@ -647,15 +688,17 @@ fi
 # or still exiting, which makes an otherwise-correct app screenshot capture the
 # scrim/drawer transition. Close only the mobile modal form; the desktop docked
 # sidebar is part of the partner's actual layout and stays untouched.
-BROWSER_PHASE="mobile navigation preparation"
-browser_eval_retry \
-  "(() => { const b = document.querySelector('button[aria-label=\"Toggle navigation\"][aria-expanded=\"true\"]'); if (window.innerWidth < 768 && b) b.click(); return true })()" \
-  >/dev/null || true
-if [ "$VIEWPORT_WIDTH" -lt 768 ]; then
-  if ! browser_wait --fn \
-    "!document.querySelector('.drawer-overlay--blocking') && !document.querySelector('.drawer:not(.drawer--persistent).drawer--open')" \
-    >/dev/null; then
-    die "mobile navigation did not finish closing before capture"
+if [ "$CURRENT_PAGE" -eq 0 ]; then
+  BROWSER_PHASE="mobile navigation preparation"
+  browser_eval_retry \
+    "(() => { const b = document.querySelector('button[aria-label=\"Toggle navigation\"][aria-expanded=\"true\"]'); if (window.innerWidth < 768 && b) b.click(); return true })()" \
+    >/dev/null || true
+  if [ "$VIEWPORT_WIDTH" -lt 768 ]; then
+    if ! browser_wait --fn \
+      "!document.querySelector('.drawer-overlay--blocking') && !document.querySelector('.drawer:not(.drawer--persistent).drawer--open')" \
+      >/dev/null; then
+      die "mobile navigation did not finish closing before capture"
+    fi
   fi
 fi
 

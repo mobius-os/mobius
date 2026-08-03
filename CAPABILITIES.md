@@ -239,6 +239,7 @@ expose shell tokens, paths, browser internals, or another app's activity.
 Add primitives only after a real app needs them. Likely families are:
 
 - `media.microphone.capture`, `media.camera.capture`
+- `device.asset-cache`
 - `files.open`, `files.save`
 - `clipboard.read`, `clipboard.write`
 - `location.current`, `location.watch`
@@ -252,6 +253,37 @@ methods; wildcard access can remain possible through explicit owner approval.
 Moving credential possession into a generic host request transport would not
 change that authorization model. Likewise, app storage and cross-app access are
 durable server capabilities, not browser-session providers.
+
+### Large public assets stored on one device
+
+`device.asset-cache` lets an app install checksum-pinned public assets into
+the current browser without granting the opaque app frame ambient origin
+storage. It is intended for large, regenerable inputs such as an on-device ML
+model, not owner-authored data or a server-side application database.
+
+The app declares reviewed byte ceilings and supplies an exact package manifest
+for each operation: a package key, public HTTPS asset URLs, total sizes, and a
+SHA-256 for every bounded chunk. The shell:
+
+- partitions Cache Storage by installed app id;
+- asks for persistent browser storage only during an explicit install gesture;
+- downloads bounded byte ranges through an owner-only, SSRF-safe transient
+  relay when cross-origin range requests are unavailable;
+- verifies every chunk before retaining it and resumes only verified chunks;
+- leaves a previous complete package intact until its replacement is complete;
+- prunes abandoned partial versions and enforces the reviewed total app partition;
+- streams cached chunks back through transferable capability events; and
+- purges the app partition on explicit app-data removal and every Möbius cache
+  partition on logout.
+
+No asset is retained on the server. Browser persistence is best-effort: an app
+must state that installation is per device and browser profile, report whether
+the browser granted persistent storage, and tolerate user-initiated site-data
+removal. `status`, `install`, `read`, and `remove` use the ordinary capability
+session API; the app remains responsible for presentation, interpretation, and
+licensing of the bytes. A `read` consumer sends `control('next')` after taking
+ownership of every `chunk` event, so neither message port accumulates a whole
+large package in memory.
 
 ## Adding a capability
 

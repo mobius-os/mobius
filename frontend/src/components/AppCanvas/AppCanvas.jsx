@@ -459,7 +459,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   const capabilityHostRef = useRef(null)
   if (!capabilityHostRef.current) {
     capabilityHostRef.current = createCapabilityHost({
-      providers: builtInCapabilityProviders(),
+      providers: builtInCapabilityProviders({ deviceAssets: { appId } }),
       getDeclaration(capability) {
         return capabilityContractRef.current?.runtime?.[capability] || null
       },

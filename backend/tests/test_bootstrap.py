@@ -1,8 +1,7 @@
 """First-boot bootstrap — ensure_bootstrap_apps_installed contract.
 
 Validates the boot-time invariants: ordered installs, canonical manifest
-identity, per-app uninstall policy and failure isolation, legacy migration,
-and the offline-test escape hatch.
+identity, per-app uninstall policy, and failure isolation.
 """
 
 from datetime import datetime, timezone
@@ -14,28 +13,14 @@ from fastapi import HTTPException
 
 from app import app_git, models
 from app.bootstrap import (
-  _LEGACY_PLATFORM_APPS_MIGRATION,
+  BOOTSTRAP_MEMORY_MANIFEST_URL,
+  BOOTSTRAP_REFLECTION_MANIFEST_URL,
   BOOTSTRAP_SKILLS_MANIFEST_URL,
   BOOTSTRAP_STORE_MANIFEST_URL,
-  LEGACY_PLATFORM_APP_MANIFEST_URLS,
-  _migrate_legacy_platform_apps,
   ensure_bootstrap_apps_installed,
 )
 
 
-def _reset_legacy_platform_marker(db):
-  """Drop the durable one-shot marker so a case can act as a FIRST boot.
-
-  The marker is per-database and the suite reuses one, so without this every
-  case after the first would correctly short-circuit and assert nothing.
-  """
-  from sqlalchemy import text
-
-  db.execute(
-    text("DELETE FROM schema_migrations WHERE version = :v"),
-    {"v": _LEGACY_PLATFORM_APPS_MIGRATION},
-  )
-  db.commit()
 
 
 def _install_result(name="App", slug="app", app_id=1, mode="install"):
@@ -57,8 +42,8 @@ def _bootstrap_urls():
   return [
     BOOTSTRAP_STORE_MANIFEST_URL,
     BOOTSTRAP_SKILLS_MANIFEST_URL,
-    LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"],
-    LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"],
+    BOOTSTRAP_MEMORY_MANIFEST_URL,
+    BOOTSTRAP_REFLECTION_MANIFEST_URL,
   ]
 
 
@@ -123,7 +108,7 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       jsx_source="export default function App() {}",
       slug="memory",
       manifest_url=_canonical_identity_key(
-        LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], "memory",
+        BOOTSTRAP_MEMORY_MANIFEST_URL, "memory",
       ),
       deleted_at=deleted_at,
     ),
@@ -133,7 +118,7 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       jsx_source="export default function App() {}",
       slug="reflection",
       manifest_url=_canonical_identity_key(
-        LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], "reflection",
+        BOOTSTRAP_REFLECTION_MANIFEST_URL, "reflection",
       ),
     ),
   ])
@@ -180,7 +165,7 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       jsx_source="export default function App() {}",
       slug="memory-custom",
       manifest_url=_canonical_identity_key(
-        LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"], "memory",
+        BOOTSTRAP_MEMORY_MANIFEST_URL, "memory",
       ),
     ),
     models.App(
@@ -189,7 +174,7 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       jsx_source="export default function App() {}",
       slug="reflection-custom",
       manifest_url=_canonical_identity_key(
-        LEGACY_PLATFORM_APP_MANIFEST_URLS["reflection"], "reflection",
+        BOOTSTRAP_REFLECTION_MANIFEST_URL, "reflection",
       ),
     ),
   ])
@@ -201,95 +186,8 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
   install_mock.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("manifest_url_shape", ["empty", "raw", "canonical"])
-@pytest.mark.parametrize("source_shape", ["platform_core", "data_apps"])
-async def test_bootstrap_migrates_active_legacy_platform_rows(
-  source_shape, manifest_url_shape, db, monkeypatch,
-):
-  """The legacy migration remains one-shot and limited to retired sources."""
-  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
-  from app.config import get_settings
-  from app.install import _canonical_identity_key
-
-  data_dir = get_settings().data_dir
-  legacy_source = {
-    "platform_core": f"{data_dir}/platform/core-apps/memory",
-    "data_apps": f"{data_dir}/apps/memory",
-  }[source_shape]
-  raw_memory_manifest = LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"]
-  stored_manifest_url = {
-    "empty": None,
-    "raw": raw_memory_manifest,
-    "canonical": _canonical_identity_key(raw_memory_manifest, "memory"),
-  }[manifest_url_shape]
-  db.add(models.App(
-    name="Memory",
-    description="legacy platform app",
-    jsx_source="export default function App() {}",
-    slug="memory",
-    source_dir=legacy_source,
-    manifest_url=stored_manifest_url,
-  ))
-  db.commit()
-
-  _reset_legacy_platform_marker(db)
-  should_migrate = source_shape == "platform_core" or manifest_url_shape == "empty"
-  install_mock = AsyncMock(
-    return_value=_install_result("Memory", "memory", app_id=3, mode="update"),
-  )
-  with patch("app.bootstrap.install_from_manifest", install_mock):
-    await _migrate_legacy_platform_apps(db)
-
-  if should_migrate:
-    install_mock.assert_awaited_once()
-    assert (
-      install_mock.await_args.kwargs["manifest_url"]
-      == LEGACY_PLATFORM_APP_MANIFEST_URLS["memory"]
-    )
-    assert install_mock.await_args.kwargs["source"] == "bootstrap"
-  else:
-    install_mock.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_owner_app_reusing_a_historical_slug_is_never_overwritten(
-  db, monkeypatch,
-):
-  """An owner's own app named `memory` must survive the next boot.
-
-  `app_apply` writes exactly the shape the historical predicate matches — slug
-  from the manifest id, source_dir /data/apps/<slug>, no manifest_url — so
-  without a durable one-shot marker the migration would install the catalog
-  manifest OVER an app the owner built themselves.
-  """
-  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
-  from app.config import get_settings
-
-  data_dir = get_settings().data_dir
-  _reset_legacy_platform_marker(db)
-
-  # First boot: nothing legacy present, so the migration closes its window.
-  empty_mock = AsyncMock(return_value=_install_result())
-  with patch("app.bootstrap.install_from_manifest", empty_mock):
-    await _migrate_legacy_platform_apps(db)
-  empty_mock.assert_not_awaited()
-
-  # Later: the owner builds their own app and happens to call it "memory".
-  db.add(models.App(
-    name="Memory",
-    description="the owner's OWN app, not the catalog one",
-    jsx_source="export default function App() {}",
-    slug="memory",
-    source_dir=f"{data_dir}/apps/memory",
-    manifest_url=None,
-  ))
-  db.commit()
-
-  install_mock = AsyncMock(return_value=_install_result("Memory", "memory"))
-  with patch("app.bootstrap.install_from_manifest", install_mock):
-    await _migrate_legacy_platform_apps(db)
-  install_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -340,17 +238,6 @@ async def test_bootstrap_failure_doesnt_block_remaining_apps(
   assert bootstrap_errors, "expected bootstrap failure to log at ERROR"
 
 
-@pytest.mark.asyncio
-async def test_bootstrap_respects_skip_env_var(db, monkeypatch):
-  """MOEBIUS_SKIP_BOOTSTRAP=1 skips migrations and every app install."""
-  monkeypatch.setenv("MOEBIUS_SKIP_BOOTSTRAP", "1")
-  install_mock = AsyncMock()
-  migration_mock = AsyncMock()
-  with patch("app.bootstrap.install_from_manifest", install_mock), \
-       patch("app.bootstrap._migrate_legacy_platform_apps", migration_mock):
-    await ensure_bootstrap_apps_installed(db)
-  install_mock.assert_not_awaited()
-  migration_mock.assert_not_awaited()
 
 
 _SKILLS_MAIN_MANIFEST = (

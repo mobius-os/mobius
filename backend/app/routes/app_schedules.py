@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from app import app_cron, app_jobs, models, schemas
 from app.app_identity import slugify_for_source_dir as _slugify_for_source_dir
-from app.app_source_paths import legacy_platform_runtime_dir_for_app
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -25,15 +24,7 @@ log = logging.getLogger(__name__)
 
 
 def _cron_replay_dirs_for_app(app: models.App, source_dir: Path) -> list[Path]:
-  runtime_dir = legacy_platform_runtime_dir_for_app(app)
-  if runtime_dir is None:
-    return [source_dir]
-  try:
-    if runtime_dir.resolve() == source_dir.resolve():
-      return [source_dir]
-  except (OSError, RuntimeError):
-    pass
-  return [source_dir, runtime_dir]
+  return [source_dir]
 
 
 def _read_init_cron_text(replay_dir: Path) -> str:

@@ -105,6 +105,28 @@ def test_runtime_capability_is_independently_versioned_and_bounded():
   }
 
 
+def test_device_asset_cache_is_client_only_and_reviewed_by_size():
+  runtime = normalize_runtime_capabilities(_manifest(capabilities={
+    "device.asset-cache": {
+      "version": 1,
+      "reason": "Keep an on-device speech model in this browser.",
+      "limits": {
+        "max_bytes": 256 * 1024 * 1024,
+        "max_asset_bytes": 256 * 1024 * 1024,
+        "max_chunk_bytes": 8 * 1024 * 1024,
+      },
+    },
+  }))
+
+  device_cache = runtime["device.asset-cache"]
+  assert device_cache["risk"] == "storage"
+  assert device_cache["lifecycle"] == "active_frame"
+  assert device_cache["description"] == (
+    "Download verified app assets into this browser's private storage."
+  )
+  assert device_cache["limits"]["max_bytes"] == 256 * 1024 * 1024
+
+
 def test_runtime_capability_rejects_unknown_name_version_and_limits():
   for capabilities, message in (
     ({"device.telepathy": {"version": 1}}, "Unknown capability"),
