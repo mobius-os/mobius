@@ -431,6 +431,27 @@ test.describe('Touch navigation', () => {
     // Otherwise that intentionally deferred focus can race the tap and steal
     // the keyboard lease after the test has already closed the drawer.
     await expect(navigation).toBeFocused()
+    await page.evaluate(() => {
+      const describe = (element) => {
+        if (!element) return 'none'
+        if (element.matches?.('.shell__composer-focus-lease')) return 'lease'
+        const name = element.getAttribute?.('aria-label')
+          || element.getAttribute?.('role')
+          || element.tagName.toLowerCase()
+        const classes = typeof element.className === 'string'
+          ? element.className.trim().split(/\s+/).filter(Boolean).join('.')
+          : ''
+        return classes ? `${name}.${classes}` : name
+      }
+      window.__newChatFocusTrail = []
+      for (const type of ['focusin', 'focusout']) {
+        document.addEventListener(type, (event) => {
+          window.__newChatFocusTrail.push(
+            `${type}:${describe(event.target)}>${describe(document.activeElement)}`,
+          )
+        }, { capture: true })
+      }
+    })
     await navigation
       .getByRole('button', { name: 'New chat', exact: true })
       .click()
@@ -452,7 +473,11 @@ test.describe('Touch navigation', () => {
       const classes = typeof active.className === 'string'
         ? active.className.trim().split(/\s+/).filter(Boolean).join('.')
         : ''
-      return classes ? `${name}.${classes}` : name
+      const owner = classes ? `${name}.${classes}` : name
+      return JSON.stringify({
+        owner,
+        trail: window.__newChatFocusTrail?.slice(-20) || [],
+      })
     })).toBe('lease')
     await page.keyboard.type('Typed while opening')
     releaseCreation()
