@@ -454,6 +454,7 @@
   inset: 0;
   z-index: 1000;
   background: transparent;
+  pointer-events: none;
 }
 
 .drawer__item-action-menu {
@@ -472,6 +473,7 @@
   color: var(--text);
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.38);
   scrollbar-width: none;
+  pointer-events: auto;
 }
 
 .drawer__item-action-menu[data-positioned="true"] {

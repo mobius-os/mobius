@@ -89,7 +89,7 @@ test('releasedInPlace is true only within the release radius', () => {
 test('drawer rows expose drag before a stationary hold opens actions', () => {
   assert.equal(TAB_HOLD_MS, 350)
   assert.equal(DRAWER_DRAG_HOLD_MS, 180)
-  assert.equal(DRAWER_MENU_HOLD_MS, 550)
+  assert.equal(DRAWER_MENU_HOLD_MS, 400)
   assert.ok(DRAWER_DRAG_HOLD_MS < TAB_HOLD_MS)
   assert.ok(DRAWER_MENU_HOLD_MS > TAB_HOLD_MS)
 })

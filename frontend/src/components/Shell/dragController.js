@@ -37,7 +37,11 @@ export const POINTER_SLOP = 5
 // owner and launcher cards from inventing their own thresholds.
 export const TAB_HOLD_MS = 350
 export const DRAWER_DRAG_HOLD_MS = 180
-export const DRAWER_MENU_HOLD_MS = 550
+// Stay ahead of the platform's own long-press takeover. Some touch browsers
+// cancel the pointer around their native context-menu threshold; opening first
+// keeps the menu on our single Pointer Events path instead of a release-time
+// native contextmenu fallback.
+export const DRAWER_MENU_HOLD_MS = 400
 // Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
 // After a touch lift, a release that never moved past this is not a drop. Tabs

@@ -30,7 +30,7 @@ export default function DrawerItemActionMenu({
   const menuRef = useRef(null)
   const wasOpenRef = useRef(false)
   const restoreOnCloseRef = useRef(true)
-  const outsidePressStartedRef = useRef(false)
+  const menuPressStartedRef = useRef(false)
   const [confirmation, setConfirmation] = useState(null)
   const [position, setPosition] = useState(null)
 
@@ -44,7 +44,7 @@ export default function DrawerItemActionMenu({
       wasOpenRef.current = true
       return
     }
-    outsidePressStartedRef.current = false
+    menuPressStartedRef.current = false
     setConfirmation(null)
     setPosition(null)
     if (!wasOpenRef.current) return
@@ -133,40 +133,27 @@ export default function DrawerItemActionMenu({
 
   const recoveryLabel = itemKind === 'chat' ? 'chats' : 'apps'
 
-  function consumeOutsidePointer(event) {
-    if (event.target !== event.currentTarget) return false
+  function blockReleaseThroughClick(event) {
+    // A touch menu can appear underneath the contact that opened it. Android
+    // may retarget that contact's trailing click to the newly mounted action,
+    // even though no pointerdown ever began inside the menu. Only a click with
+    // menu-owned press provenance may run; detail=0 preserves keyboard and
+    // assistive-technology activation.
+    const keyboardActivation = event.detail === 0
+    if (keyboardActivation || menuPressStartedRef.current) {
+      menuPressStartedRef.current = false
+      return
+    }
     event.preventDefault()
     event.stopPropagation()
     event.nativeEvent?.stopImmediatePropagation?.()
-    return true
   }
 
   const layer = (
     <div
       className="drawer__item-action-layer"
-      onPointerDown={event => {
-        // Keep the layer mounted for the complete tap. Closing on pointerdown
-        // lets Android retarget the later release/click to the row underneath.
-        if (consumeOutsidePointer(event)) {
-          outsidePressStartedRef.current = true
-        }
-      }}
-      onPointerUp={event => {
-        consumeOutsidePointer(event)
-      }}
-      onPointerCancel={() => {
-        outsidePressStartedRef.current = false
-      }}
-      onClick={event => {
-        // The opener click can be retargeted to a layer that did not exist at
-        // pointerdown; only a new press that began on the layer may dismiss it.
-        if (!consumeOutsidePointer(event) || !outsidePressStartedRef.current) return
-        outsidePressStartedRef.current = false
-        close()
-      }}
-      onContextMenu={event => event.preventDefault()}
-      onWheel={event => {
-        if (event.target === event.currentTarget) close()
+      onPointerDownCapture={() => {
+        menuPressStartedRef.current = false
       }}
     >
       <div
@@ -179,7 +166,14 @@ export default function DrawerItemActionMenu({
           '--item-action-x': `${position?.x || 0}px`,
           '--item-action-y': `${position?.y || 0}px`,
         }}
-        onPointerDown={event => event.stopPropagation()}
+        onPointerDown={event => {
+          menuPressStartedRef.current = true
+          event.stopPropagation()
+        }}
+        onPointerCancel={() => {
+          menuPressStartedRef.current = false
+        }}
+        onClickCapture={blockReleaseThroughClick}
         onKeyDown={onMenuKeyDown}
       >
         {confirmation === 'delete-data' ? (

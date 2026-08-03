@@ -669,11 +669,15 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     'the workspace outcome arms the shared drag implementation')
   assert.match(dragBinding, /intent === 'scroll'[\s\S]*?scrollAxis = 'y'[\s\S]*?scrollTop \+= start\.y - ev\.clientY/,
     'pre-hold row movement scrolls without surrendering the pointer to the browser')
-  assert.match(dragBinding, /const point = \{ \.\.\.lastPoint \}[\s\S]*?cleanup\(\{ suppressClick: true \}\)[\s\S]*?handler\?\.openMenu\?\.\(point\)/,
-    'a stationary long hold opens actions before release and suppresses its trailing click')
+  assert.match(dragBinding, /const point = \{ \.\.\.lastPoint \}[\s\S]*?menuOpened = true[\s\S]*?handler\.openMenu\(point\)/,
+    'a stationary long hold opens actions before release')
+  assert.doesNotMatch(dragBinding, /const point = \{ \.\.\.lastPoint \}[\s\S]{0,120}?cleanup\(/,
+    'selection suppression must stay active while the opening contact is still down')
   const drawerPointerUp = dragBinding.match(/const onUp = \(ev\) => \{[\s\S]*?\n      \}/)?.[0] || ''
   assert.doesNotMatch(drawerPointerUp, /openMenu/,
     'releasing a shorter stationary hold remains a normal tap')
+  assert.match(drawerPointerUp, /if \(menuOpened\)[\s\S]*?cleanup\(\{ suppressClick: true \}\)/,
+    'the menu-opening gesture restores selection only when its pointer ends')
   assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
   assert.match(shell, /const drawerRowGesturesRef = useRef\(new Map\(\)\)/)
@@ -911,12 +915,35 @@ test('chat deletion is immediate while app deletion still requires confirmation'
   )
 })
 
-test('one touch hold cannot dismiss its own drawer row menu', () => {
-  assert.match(drawerItemActionMenu, /const outsidePressStartedRef = useRef\(false\)/)
-  assert.match(drawerItemActionMenu, /if \(!consumeOutsidePointer\(event\) \|\| !outsidePressStartedRef\.current\) return/,
-    'a retargeted opener click has no layer-owned pointerdown and must be ignored')
-  assert.match(drawerItemActionMenu, /onPointerCancel=\{\(\) => \{[\s\S]*?outsidePressStartedRef\.current = false/,
-    'a cancelled outside press cannot authorize a later unrelated click')
+test('drawer row actions have one opening path without a custom touch hold', () => {
+  assert.match(drawer, /function openItemMenuAt\(point,[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
+  assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
+    'app cards and drawer rows must share one semantic opening function')
+  assert.match(drawer, /if \(suppressTouchContextMenu\(event\)\) return/,
+    'native touch contextmenu must never pre-empt the shared held gesture')
+  assert.doesNotMatch(
+    dragBinding,
+    /srcEl\.closest\('\.drawer__row'\)\?\.querySelector\('\.drawer__more'\)\?\.click\(\)/,
+    'touch hold must not depend on a synthetic trigger click',
+  )
+  assert.doesNotMatch(drawer, /function beginTouchMenuHold/,
+    'drawer rows must not add a second touch lifecycle beside the shared controller')
+  assert.match(drawerCss, /\.drawer__item-action-layer\s*\{[\s\S]*?pointer-events:\s*none/)
+  assert.match(drawerCss, /\.drawer__item-action-menu\s*\{[\s\S]*?pointer-events:\s*auto/,
+    'the menu stays interactive while the next outside tap reaches its real destination')
+  assert.doesNotMatch(drawer, /navigator\.vibrate/,
+    'drawer rows rely on platform long-press feedback instead of adding a second vibration')
+})
+
+test('the background stays live while the opening press cannot activate an action', () => {
+  assert.doesNotMatch(drawerItemActionMenu, /outsidePressStartedRef|consumeOutsidePointer/)
+  assert.match(drawerItemActionMenu, /const menuPressStartedRef = useRef\(false\)/)
+  assert.match(drawerItemActionMenu, /function blockReleaseThroughClick\(event\)[\s\S]*?event\.detail === 0[\s\S]*?menuPressStartedRef\.current[\s\S]*?event\.preventDefault\(\)[\s\S]*?stopImmediatePropagation/,
+    'a release retargeted onto an action is blocked without breaking keyboard activation')
+  assert.match(drawerItemActionMenu, /onPointerDownCapture=\{\(\) => \{[\s\S]*?menuPressStartedRef\.current = false/)
+  assert.match(drawerItemActionMenu, /onPointerDown=\{event => \{[\s\S]*?menuPressStartedRef\.current = true[\s\S]*?event\.stopPropagation\(\)/,
+    'only a fresh pointer press begun inside the mounted menu authorizes its click')
+  assert.match(drawerItemActionMenu, /onClickCapture=\{blockReleaseThroughClick\}/)
 })
 
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {
@@ -1049,7 +1076,7 @@ test('the builder preview cannot outlive its drag session past one visibility bo
   // guards keep it bounded:
   // (1) SOURCE — pagehide joins the per-session teardown, so a BFCache freeze that
   //     fires no pointercancel/blur/visibilitychange still cancels the drag.
-  assert.match(dragBinding, /const onPageHide = \(\) => cleanup\(\{ suppressClick: armed \|\| scrolling \}\)/)
+  assert.match(dragBinding, /const onPageHide = \(\) => cleanup\(\{ suppressClick: menuOpened \|\| armed \|\| scrolling \}\)/)
   assert.match(dragBinding, /window\.addEventListener\('pagehide', onPageHide\)/)
   assert.match(dragBinding, /window\.removeEventListener\('pagehide', onPageHide\)/)
   // (2) BACKSTOP — a persistent foreground reconcile force-cleans any session still

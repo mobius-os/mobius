@@ -241,6 +241,7 @@ export default function useWorkspaceDrag({
       let armed = false
       let cancelled = false
       let cleaned = false
+      let menuOpened = false
       let holdTimer = null
       let held = false
       let scrolling = false
@@ -326,9 +327,17 @@ export default function useWorkspaceDrag({
           holdTimer = setTimeout(() => {
             if (cancelled || cleaned || armed || scrolling) return
             const handler = drawerGesture()
+            if (!handler?.openMenu) {
+              cleanup()
+              return
+            }
             const point = { ...lastPoint }
-            cleanup({ suppressClick: true })
-            handler?.openMenu?.(point)
+            // Keep this pointer session alive until the contact actually ends.
+            // Restoring body selection here leaves a small window in which the
+            // platform long-press can select whichever menu item appeared under
+            // the still-held finger (notably Android's text-selection handles).
+            menuOpened = true
+            handler.openMenu(point)
           }, DRAWER_MENU_HOLD_MS - DRAWER_DRAG_HOLD_MS)
         }, sourceKind === 'drawer' ? DRAWER_DRAG_HOLD_MS : TAB_HOLD_MS)
       }
@@ -401,6 +410,10 @@ export default function useWorkspaceDrag({
       }
       const onMove = (ev) => {
         if (ev.pointerId !== pointerId) return // ignore a second finger
+        if (menuOpened) {
+          ev.preventDefault?.()
+          return
+        }
         const previousPoint = lastPoint
         lastPoint = { x: ev.clientX, y: ev.clientY }
         const dx = ev.clientX - start.x
@@ -523,6 +536,10 @@ export default function useWorkspaceDrag({
 
       const onUp = (ev) => {
         if (ev.pointerId !== pointerId) return // ignore a second finger
+        if (menuOpened) {
+          cleanup({ suppressClick: true })
+          return
+        }
         if (!armed) {
           if (scrolling) {
             cleanup({ suppressClick: true })
@@ -562,7 +579,7 @@ export default function useWorkspaceDrag({
       // ARMED (§9): otherwise the compat click after an Escape / lost-capture /
       // blur / visibility cancel can still navigate to the source row.
       const onCancel = (ev) => {
-        if (ev.pointerId === pointerId) cleanup({ suppressClick: armed || scrolling })
+        if (ev.pointerId === pointerId) cleanup({ suppressClick: menuOpened || armed || scrolling })
       }
       const onKey = (ev) => { if (ev.key === 'Escape' && armed) { ev.preventDefault(); cleanup({ suppressClick: true }) } }
       // Touch pointers already have implicit capture, and Chromium may release and
@@ -572,16 +589,16 @@ export default function useWorkspaceDrag({
       const onLostCapture = (ev) => {
         if (ev.pointerId === pointerId && !isTouch) cleanup({ suppressClick: armed })
       }
-      const onWinBlur = () => cleanup({ suppressClick: armed || scrolling })
+      const onWinBlur = () => cleanup({ suppressClick: menuOpened || armed || scrolling })
       const onVisibility = () => {
-        if (document.visibilityState === 'hidden') cleanup({ suppressClick: armed || scrolling })
+        if (document.visibilityState === 'hidden') cleanup({ suppressClick: menuOpened || armed || scrolling })
       }
       // BFCache freeze / bfcache navigation can be the ONLY interruption event some
       // browsers fire — no pointercancel, no blur, and (on older Safari) no
       // visibilitychange-hidden first. Without this, a drag frozen mid-flight and
       // then restored would keep its render-only builder preview, wedging the
       // workspace tiled. pagehide cancels the drag as the page is frozen/unloaded.
-      const onPageHide = () => cleanup({ suppressClick: armed || scrolling })
+      const onPageHide = () => cleanup({ suppressClick: menuOpened || armed || scrolling })
 
       function cleanup({ suppressClick = false, committed = false } = {}) {
         if (cleaned) return

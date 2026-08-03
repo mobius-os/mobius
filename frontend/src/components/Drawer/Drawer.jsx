@@ -1397,9 +1397,9 @@ const DrawerRow = memo(function DrawerRow({
   }
 
   function openItemMenu(event) {
-    // Touch menus open only from the shared gesture controller on release.
-    // Native long-press contextmenu would fire early and steal drag intent, so
-    // suppress it on both rows and cards; mouse and keyboard remain semantic.
+    // Touch menus open only from the shared gesture controller during its
+    // stationary hold. Native contextmenu would steal that timing and re-open
+    // actions on release, so suppress it; mouse and keyboard remain semantic.
     if (suppressTouchContextMenu(event)) return
     event.preventDefault()
     event.stopPropagation()
@@ -1767,8 +1767,8 @@ const DrawerRow = memo(function DrawerRow({
         className={`drawer__item ${active ? 'drawer__item--active' : ''}`}
         aria-current={active ? 'page' : undefined}
         // One shared controller resolves a held row only after intent is clear:
-        // release for actions, vertical movement to reorder a pin, outward
-        // movement to place it in the workspace.
+        // staying still opens actions, vertical movement reorders a pin, and
+        // outward movement places it in the workspace.
         data-drawer-key={`${kind}:${id}`}
         data-drag-key={`${kind}:${id}`}
         data-pinned-key={pinned ? `${kind}:${id}` : undefined}
