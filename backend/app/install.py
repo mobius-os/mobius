@@ -2662,7 +2662,41 @@ async def install_from_manifest(
             app_git.UPSTREAM_BRANCH,
           )
         dropped_source_paths = previous_upstream_paths - new_upstream_paths
-        if not diverged:
+        if target.adopting_trusted_origin and cloned_update:
+          # Legacy explicit-apply rewrote Git history even when it preserved
+          # the canonical repository tree byte-for-byte. Exact tree equality
+          # is therefore the safe adoption fast path: there is no local byte
+          # to overwrite, so advancing the catalog baseline cannot lose work.
+          # Different unrelated trees have no honest three-way base; surface
+          # every endpoint difference for owner-gated resolution instead of
+          # guessing or failing the install with a raw merge-tree error.
+          same_tree = await asyncio.to_thread(
+            app_git.ref_trees_equal,
+            git_source_dir,
+            app_git.LOCAL_BRANCH,
+            app_git.UPSTREAM_BRANCH,
+          )
+          if same_tree:
+            diverged = False
+          elif not await asyncio.to_thread(
+            app_git.refs_share_history,
+            git_source_dir,
+            app_git.LOCAL_BRANCH,
+            app_git.UPSTREAM_BRANCH,
+          ):
+            conflict_paths = list(await asyncio.to_thread(
+              app_git.diff_paths,
+              git_source_dir,
+              app_git.LOCAL_BRANCH,
+              app_git.UPSTREAM_BRANCH,
+            )) or [entry_key]
+            mode = "conflict"
+            reconciliation = app_git.ReconciliationReceipt(
+              unresolved_conflict_paths=tuple(conflict_paths),
+            )
+        if mode == "conflict":
+          pass
+        elif not diverged:
           # No local edits → upstream wins outright for the whole tree; it is
           # `source_tree` as fetched for synthetic repos, or the full
           # origin-backed upstream tree for cloned repos. Taking the bytes

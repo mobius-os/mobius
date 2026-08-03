@@ -660,6 +660,34 @@ def _diff_paths(repo: Path, left: str, right: str) -> set[str] | None:
   return {path for path in proc.stdout.split("\0") if path}
 
 
+def ref_trees_equal(
+  source_dir: str | Path, left: str, right: str,
+) -> bool:
+  """Whether two refs name the same complete tree, regardless of history."""
+  repo = Path(source_dir)
+  left_tree = _tree_oid(repo, left)
+  right_tree = _tree_oid(repo, right)
+  return bool(left_tree and left_tree == right_tree)
+
+
+def refs_share_history(
+  source_dir: str | Path, left: str, right: str,
+) -> bool:
+  """Whether two refs have a merge base without moving either ref."""
+  proc = _run(
+    Path(source_dir), "merge-base", left, right, check=False,
+  )
+  return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
+def diff_paths(
+  source_dir: str | Path, left: str, right: str,
+) -> tuple[str, ...]:
+  """Complete endpoint path differences, or an empty tuple on Git failure."""
+  paths = _diff_paths(Path(source_dir), left, right)
+  return tuple(sorted(paths)) if paths is not None else ()
+
+
 def describe_reconciliation(
   source_dir: str | Path,
   shared_base: str,

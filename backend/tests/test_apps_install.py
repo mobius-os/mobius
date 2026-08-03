@@ -1852,6 +1852,107 @@ def test_trusted_origin_adoption_is_always_reconciled_as_local_source(
   assert target.adopting_trusted_origin is True
 
 
+def test_trusted_origin_adoption_accepts_equal_tree_with_unrelated_history(
+  client, auth, db, bypass_url_validation,
+):
+  """Equal local/catalog bytes adopt in place even after history rewrites."""
+  manifest = {
+    "id": "codex",
+    "name": "Subagents",
+    "version": "1.0.0",
+    "description": "trusted legacy app",
+    "entry": "index.jsx",
+    "permissions": {},
+  }
+  legacy = create_local_app(
+    client,
+    auth,
+    name="Codex",
+    description="trusted legacy app",
+    jsx_source=JSX,
+    manifest_extra={"version": "1.0.0"},
+  )
+  repo = Path(legacy["source_dir"])
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "remote", "add", "origin",
+      "https://github.com/mobius-os/app-subagents.git",
+    ],
+    check=True,
+  )
+  tree = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "main^{tree}"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+  upstream_sha = subprocess.run(
+    [
+      "git", "-c", "user.name=Mobius", "-c",
+      "user.email=mobius@localhost", "-C", str(repo),
+      "commit-tree", tree, "-m", "catalog",
+    ],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "update-ref",
+      "refs/remotes/origin/main", upstream_sha,
+    ],
+    check=True,
+  )
+  assert subprocess.run(
+    ["git", "-C", str(repo), "merge-base", "main", "origin/main"],
+    capture_output=True,
+  ).returncode != 0
+  before = {
+    path.name: path.read_bytes()
+    for path in (repo / "index.jsx", repo / "mobius.json")
+  }
+
+  def fetch_equal_upstream(source_dir, _ref):
+    subprocess.run(
+      [
+        "git", "-C", str(source_dir), "update-ref",
+        "refs/heads/upstream", upstream_sha,
+      ],
+      check=True,
+    )
+    return upstream_sha
+
+  manifest_url = (
+    "https://raw.githubusercontent.com/mobius-os/"
+    "app-subagents/main/mobius.json"
+  )
+  raw_base = manifest_url.rsplit("/", 1)[0] + "/"
+  responses = {
+    manifest_url: (200, json.dumps(manifest).encode()),
+    raw_base + "index.jsx": (200, JSX.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch(
+    "app.install.app_git.fetch_upstream",
+    side_effect=fetch_equal_upstream,
+  ):
+    adopted = client.post(
+      "/api/apps/install", headers=auth,
+      json={"manifest_url": manifest_url},
+    )
+
+  assert adopted.status_code == 201, adopted.text
+  payload = adopted.json()
+  assert payload["id"] == legacy["id"]
+  assert payload["mode"] == "update"
+  assert payload["manifest_url"] == (
+    raw_base.rstrip("/") + "#manifest-id=codex"
+  )
+  after = {
+    path.name: path.read_bytes()
+    for path in (repo / "index.jsx", repo / "mobius.json")
+  }
+  assert after == before
+
+
 def test_install_same_manifest_twice_updates(
   client, auth, bypass_url_validation,
 ):
