@@ -357,11 +357,10 @@ test.describe('Touch navigation', () => {
     })
 
     await openDrawer(page)
-    await page.getByRole('navigation', { name: 'Primary navigation' })
-      .getByRole('button', { name: NAV_CHATS[1].title, exact: true })
-      .click()
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    await navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true }).click()
 
-    const drawer = page.getByRole('navigation', { name: 'Primary navigation' })
+    const drawer = page.locator('#navigation-drawer')
     await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
       .toBe(NAV_CHATS[1].id)
     await expect(drawer).toHaveClass(/drawer--open/)

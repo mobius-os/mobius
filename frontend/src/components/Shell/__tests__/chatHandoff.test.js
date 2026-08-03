@@ -239,7 +239,7 @@ test('direct chat actions hand focus to the destination composer', () => {
     'the keyboard lease must remain a named, programmatically focused text control')
   const selectChat = shell.match(/function selectChat\(id\) \{([\s\S]*?)\n  \}/)?.[1] || ''
   assert.match(selectChat,
-    /navTo\('chat', \{[\s\S]*chatId: id,[\s\S]*\}\)[\s\S]*focusDesktopChatPaneComposer\(id\)/,
+    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*focusDesktopChatPaneComposer\(id\)/,
     'drawer and settings chat selection must focus after requesting navigation')
   assert.match(shell,
     /onActivate=\{\(\) => \{[\s\S]*tabModel\.tabNavTarget\(tab\)[\s\S]*navTo\(view, opts\)[\s\S]*tab\.kind === 'chat'[\s\S]*focusDesktopChatPaneComposer\(tab\.id\)/,

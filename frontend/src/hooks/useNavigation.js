@@ -661,10 +661,8 @@ export default function useNavigation({
     }
   }
 
-  // A chat destination may prepare behind the phone drawer after navTo has
-  // already consumed its history sentinel. Finish only that visual tail once
-  // Shell confirms the destination has painted; a newly reopened logical
-  // drawer always wins over a late readiness signal.
+  // Finish a drawer deliberately retained after its navigation sentinel was
+  // consumed. A newly reopened logical drawer wins over late readiness.
   const finishDrawerNavigationPresentation = useCallback(() => {
     if (!drawerOpenRef.current) setDrawerVisible(false)
   }, [])
@@ -1838,6 +1836,7 @@ export default function useNavigation({
     activeAppId,
     activeChatId,
     drawerOpen: drawerVisible,
+    drawerNavigationCover: drawerVisible && !drawerOpenRef.current,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
     // is Settings" (a builder tab is the latter without the overlay). The render
     // gates pane suppression on THIS, never on activeView, so builder Settings
