@@ -45,15 +45,23 @@ export function drawerRowWindow({
   if (count === 0) return { start: 0, end: 0 }
   const localTop = Math.max(0, (Number(scrollTop) || 0) - (Number(sectionTop) || 0))
   const visibleStart = Math.floor(localTop / DRAWER_ROW_HEIGHT)
-  const visibleEnd = Math.ceil(
-    (localTop + Math.max(DRAWER_ROW_HEIGHT, Number(viewportHeight) || 0))
-      / DRAWER_ROW_HEIGHT,
+  const viewportRows = Math.ceil(
+    Math.max(DRAWER_ROW_HEIGHT, Number(viewportHeight) || 0) / DRAWER_ROW_HEIGHT,
   )
+  // Move the React window in overscan-sized buckets instead of replacing one
+  // row at every 40px boundary. The bucket still retains a full overscan band
+  // around every viewport position it represents, but native momentum now gets
+  // several uninterrupted frames between DOM swaps.
+  const bucketStart = Math.floor(visibleStart / DRAWER_ROW_OVERSCAN)
+    * DRAWER_ROW_OVERSCAN
+  // The viewport may begin at the final row (and final fractional pixel) of the
+  // bucket, so reserve the complete bucket width before the lower overscan.
+  const bucketEnd = bucketStart + DRAWER_ROW_OVERSCAN + viewportRows
   return {
-    start: Math.max(0, visibleStart - DRAWER_ROW_OVERSCAN),
+    start: Math.max(0, bucketStart - DRAWER_ROW_OVERSCAN),
     end: Math.min(
       count,
-      Math.max(visibleStart + 1, visibleEnd + DRAWER_ROW_OVERSCAN),
+      bucketEnd + DRAWER_ROW_OVERSCAN,
     ),
   }
 }

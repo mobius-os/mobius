@@ -26,6 +26,7 @@ const REACT_SHIM = new URL(
 const REACT_SHIMMED_MODULES = [
   '/components/Shell/useAppIntentNavigation.js',
   '/components/ChatView/useFileUpload.js',
+  '/components/ChatView/useScrollMode.js',
   '/hooks/useNavigation.js',
 ]
 
