@@ -19,10 +19,6 @@ const canvas = readFileSync(
   'utf8',
 )
 const worker = readFileSync(new URL('../../sw.js', import.meta.url), 'utf8')
-const caddy = readFileSync(
-  new URL('../../../../Caddyfile', import.meta.url),
-  'utf8',
-)
 
 function dynamicImportTargetsFromHtml(html) {
   const targets = []
@@ -168,19 +164,4 @@ test('bundled app packages are not duplicated in the shell install precache', ()
     assert.doesNotMatch(worker, new RegExp(stale))
   }
   assert.match(worker, /RETAINED_RUNTIME_ASSETS/)
-})
-
-test('only app-frame responses admit brokered blob modules at the edge', () => {
-  assert.match(caddy, /@appFrame path \/api\/apps\/\*\/frame/)
-  const frameCsp = caddy.split('\n').find(
-    line => line.includes('header @appFrame >Content-Security-Policy'),
-  ) || ''
-  const ordinaryCsp = caddy.split('\n').find(
-    line => line.includes('header @notFrameableEmbed >Content-Security-Policy'),
-  ) || ''
-  assert.match(frameCsp, /sandbox allow-scripts/)
-  assert.match(frameCsp, /allow-popups-to-escape-sandbox/)
-  assert.doesNotMatch(frameCsp, /allow-same-origin/)
-  assert.match(frameCsp, /script-src[^;]*\bblob:/)
-  assert.doesNotMatch(ordinaryCsp, /script-src[^;]*\bblob:/)
 })

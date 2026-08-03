@@ -52,7 +52,7 @@ const UPDATE_CHECKED_RESET_MS = 2200
 const RETURN_VIEW_KEY = 'mobius:return-view'
 const RESTART_SHELL_READY_PATH = '/shell/'
 const PLATFORM_APPLY_STATES = new Set([
-  'restart_needed', 'up_to_date', 'conflict', 'rolled_back',
+  'restart_needed', 'activation_needed', 'up_to_date', 'conflict', 'rolled_back',
 ])
 const PROVIDER_CHOICES = [
   { id: 'claude', label: 'Claude Code' },
@@ -1138,7 +1138,7 @@ export default function SettingsView({
         setPlatform(current => platformStatusFromApply(current, body))
       }
       await refreshPlatform()
-      if (state === 'restart_needed' || state === 'up_to_date') {
+      if (state === 'restart_needed' || state === 'activation_needed' || state === 'up_to_date') {
         return { ok: true, state }
       }
       if (state === 'conflict' || state === 'rolled_back') {
@@ -1336,7 +1336,13 @@ export default function SettingsView({
   // apply needs a repair pass, so the row says so distinctly rather than reading
   // as a plain "New update available".
   const platformRolledBack = platform?.state === 'rolled_back'
-  const platformRestart = !!platform?.needs_restart
+  const platformActivationLevel = platform?.activation?.level || (
+    platform?.needs_restart ? 'server_restart' : 'live'
+  )
+  const platformRestart = platformActivationLevel === 'server_restart'
+  const platformExternalActivation = !['live', 'server_restart'].includes(
+    platformActivationLevel,
+  )
   const updateAvailable = !!platform?.available
   const mobiusUpdating =
     platformPhase === 'applying' || updatePhase === 'checking'
@@ -1600,7 +1606,7 @@ export default function SettingsView({
           ) : (
             // Loading: no cached data yet and no error — the initial
             // in-flight fetch. Show a neutral notice instead of nothing.
-            <div className="settings__notice" role="status">
+            <div className="settings__notice settings__notice--stacked" role="status">
               Loading providers…
             </div>
           )}
@@ -1653,7 +1659,7 @@ export default function SettingsView({
           <div className="settings__row settings__row--top">
             <div className="settings__update">
               <StatusDot
-                color={platformConflict || platformRolledBack || platformRestart || updateAvailable ? '--accent' : '--green'}
+                color={platformConflict || platformRolledBack || platformRestart || platformExternalActivation || updateAvailable ? '--accent' : '--green'}
               >
                 {platformUpdateStatusLabel(platform)}
               </StatusDot>
@@ -1681,6 +1687,28 @@ export default function SettingsView({
                       : 'Resolve in chat'}
                 </button>
               ) : null
+            ) : platformExternalActivation ? (
+              updateAvailable ? (
+                <button
+                  ref={platformActionRef}
+                  className="settings__btn settings__btn--sm settings__btn--nowrap"
+                  type="button"
+                  onClick={openUpdateReview}
+                  disabled={mobiusUpdating || platformPhase !== 'idle'}
+                >
+                  {mobiusUpdating ? 'Updating…' : 'Review update'}
+                </button>
+              ) : (
+                <button
+                  ref={platformActionRef}
+                  className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
+                  type="button"
+                  onClick={checkForUpdates}
+                  disabled={updatePhase === 'checking' || platformPhase !== 'idle'}
+                >
+                  {updatePhase === 'idle' ? 'Check for more' : checkUpdatesLabel}
+                </button>
+              )
             ) : platformRestart ? (
               <div
                 className="settings__update-actions"
@@ -1752,6 +1780,14 @@ export default function SettingsView({
               {platformRestartSlow
                 ? 'This is taking longer than usual. Möbius is still checking.'
                 : 'Restart signal sent. The page will reload shortly.'}
+            </div>
+          )}
+          {platformExternalActivation && (
+            <div className="settings__notice" role="status">
+              {(platform?.activation?.guidance || []).map((line) => (
+                <span key={line}>{line}</span>
+              ))}
+              <span>A server restart alone will not complete this update.</span>
             </div>
           )}
           {platformError && (

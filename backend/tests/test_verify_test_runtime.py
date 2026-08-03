@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from scripts.verify_test_runtime import PLATFORM_ROOT, platform_head, validate_runtime
+from app.platform_activation import dependency_fingerprint_paths
 
 
 SHA = "a" * 40
@@ -182,9 +183,6 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
 
 def test_production_image_keeps_persistent_sso_checkouts_bootable():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-  fingerprint = (
-    ROOT / "scripts" / "test-image-fingerprint.sh"
-  ).read_text(encoding="utf-8")
   requirements = (ROOT / "backend" / "requirements.txt").read_text(
     encoding="utf-8"
   )
@@ -217,8 +215,9 @@ def test_production_image_keeps_persistent_sso_checkouts_bootable():
   assert "jwt.encode" in probe
   assert "jwt.decode" in probe
   assert "except JWTError:" in probe
-  assert "backend/legacy_runtime/jose/__init__.py" in fingerprint
-  assert "backend/legacy_runtime/verify_jose.py" in fingerprint
+  fingerprint_paths = dependency_fingerprint_paths(ROOT)
+  assert "backend/legacy_runtime/jose/__init__.py" in fingerprint_paths
+  assert "backend/legacy_runtime/verify_jose.py" in fingerprint_paths
   assert "COPY backend/legacy_runtime/verify_jose.py" in dockerfile
   assert (
     "COPY backend/legacy_runtime/ "

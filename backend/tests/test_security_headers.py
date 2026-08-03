@@ -1,20 +1,16 @@
-"""The security-header middleware stamps the standard headers on every response.
+"""The origin owns response policy; Caddy passes it through unchanged."""
 
-These are resource-load-agnostic (clickjacking / MIME-sniff / TLS / referrer).
-The backend deliberately has no global resource CSP; exact opaque/static/service
-documents supply their own policies while the bundled proxy owns shell CSP.
-"""
-
-import re
 from pathlib import Path
-from urllib.parse import urlparse
 
-import yaml
 from fastapi import Response
 from fastapi.testclient import TestClient
 
 from app import main
-from app.main import _PUBLISHED_SITE_CSP, _STATIC_EMBED_CSP, app
+from app.main import (
+  _PUBLISHED_SITE_CSP, _SHELL_CSP, _STATIC_EMBED_CSP, app,
+)
+from app.response_policy import CHAT_EMBED_CSP
+from app.routes.app_runtime import _app_frame_csp
 
 
 def _headers(path="/api/health"):
@@ -63,32 +59,14 @@ def test_published_site_sandbox_survives_a_404_and_a_500(monkeypatch):
   assert r500.headers.get("content-security-policy") == _PUBLISHED_SITE_CSP
 
 
-def test_bundled_caddy_mirrors_published_site_sandbox():
+def test_bundled_caddy_does_not_override_published_site_sandbox():
   caddyfile = Path(__file__).resolve().parents[2] / "Caddyfile"
-  lines = [line.strip() for line in caddyfile.read_text(encoding="utf-8").splitlines()]
-  # /sites/ is a DISJOINT matcher, excluded from @notFrameableEmbed, with its
-  # own X-Frame-Options + CSP — Caddy does not guarantee a later `header >Set`
-  # wins over an earlier one on the same field, so two overlapping matchers on
-  # Content-Security-Policy are unreliable. It mirrors how /app-embeds are
-  # excluded and self-header their own policy.
-  assert "@publishedSite path /sites/*" in lines
-  assert (
-    "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* "
-    "/api/apps/*/frame /sites/*" in lines
-  ), "published sites must be excluded from the shell CSP matcher"
-  # Its own frame boundary, set directly on the disjoint matcher.
-  assert 'header @publishedSite >X-Frame-Options "SAMEORIGIN"' in lines
-  pub_csp = next(
-    line for line in lines
-    if line.startswith("header @publishedSite >Content-Security-Policy ")
-  )
-  # Assert EQUALITY with the origin policy, not just substrings: the whole
-  # point of this pair is that the proxy and the origin send the same thing,
-  # and a substring check would pass while they silently diverged.
-  assert pub_csp == (
-    'header @publishedSite >Content-Security-Policy "'
-    f'{_PUBLISHED_SITE_CSP}"'
-  )
+  primary = caddyfile.read_text(encoding="utf-8").split(
+    "# Full backend web services", 1,
+  )[0]
+  assert "reverse_proxy app:8000" in primary
+  assert "Content-Security-Policy" not in primary
+  assert "X-Frame-Options" not in primary
   assert "sandbox allow-scripts" in _PUBLISHED_SITE_CSP
   assert "allow-same-origin" not in _PUBLISHED_SITE_CSP
   # external-asset sites must keep loading
@@ -100,14 +78,17 @@ def test_standard_security_headers_present():
   assert h.get("x-content-type-options") == "nosniff"
   assert h.get("x-frame-options") == "SAMEORIGIN"
   assert h.get("referrer-policy") == "strict-origin-when-cross-origin"
-  assert h.get("permissions-policy") == "camera=(), geolocation=()"
+  assert h.get("permissions-policy") == "camera=(self), geolocation=(self)"
   assert "strict-transport-security" in h
 
 
-def test_no_csp_so_apps_keep_loading_web_resources():
-  # Deliberately no global Content-Security-Policy — ordinary app resource
-  # freedom is separate from the exact document policies tested below.
-  assert "content-security-policy" not in _headers()
+def test_direct_shell_response_receives_the_origin_owned_policy():
+  policy = _headers().get("content-security-policy")
+  assert policy == _SHELL_CSP
+  assert "https://esm.sh" in policy
+  assert "img-src 'self' data: blob:" in policy
+  assert "'wasm-unsafe-eval'" not in policy
+  assert "Cross-Origin-Opener-Policy" not in _headers()
 
 
 def test_embedded_chat_allows_opaque_origin_app_ancestor():
@@ -117,6 +98,7 @@ def test_embedded_chat_allows_opaque_origin_app_ancestor():
   # The route itself is inert: no chat id or credential is accepted in its URL.
   h = _headers("/shell/embed/chat")
   assert "x-frame-options" not in h
+  assert h.get("content-security-policy") == CHAT_EMBED_CSP
   assert h.get("x-content-type-options") == "nosniff"
   assert h.get("strict-transport-security")
 
@@ -161,185 +143,68 @@ def test_static_embed_policy_survives_unhandled_route_exception(monkeypatch):
   assert "x-frame-options" not in response.headers
 
 
-def test_bundled_caddy_mirrors_exact_embed_frame_exception():
-  """The compose proxy must not silently re-add either frame blocker."""
+def test_bundled_caddy_keeps_only_gateway_specific_response_policy():
+  """The primary proxy is pass-through; gateway host behavior stays exact."""
   caddyfile = Path(__file__).resolve().parents[2] / "Caddyfile"
-  lines = [line.strip() for line in caddyfile.read_text(encoding="utf-8").splitlines()]
-  assert "@chatEmbed path /shell/embed/chat" in lines
-  assert "@staticEmbed path /app-embeds/by-id/*" in lines
-  assert "@appFrame path /api/apps/*/frame" in lines
-  assert (
-    "@notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* "
-    "/api/apps/*/frame /sites/*" in lines
+  text = caddyfile.read_text(encoding="utf-8")
+  primary, gateway = text.split("# Full backend web services", 1)
+  assert "header" not in primary
+  assert "reverse_proxy app:8000" in primary
+  assert "@serviceSurface path /services/*" in gateway
+  assert "?Content-Security-Policy" in gateway
+  assert "frame-ancestors 'self' {$FRONTEND_ORIGIN}" in gateway
+  assert "-X-Frame-Options" in gateway
+  assert 'respond "Not found" 404' in gateway
+  assert ">X-Content-Type-Options" not in gateway
+  assert ">Permissions-Policy" not in gateway
+  # Direct origin policies retain the exact scoped differences Caddy used to
+  # mirror by hand.
+  assert "frame-ancestors 'self'" in _SHELL_CSP
+  assert "frame-ancestors" not in CHAT_EMBED_CSP
+  assert "sandbox allow-scripts" in _STATIC_EMBED_CSP
+  assert "allow-same-origin" not in _STATIC_EMBED_CSP
+  service_csp = next(
+    line for line in (line.strip() for line in gateway.splitlines())
+    if line.startswith("?Content-Security-Policy ")
   )
-  assert 'header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"' in lines
-  assert not any(
-    line.startswith("X-Frame-Options ") for line in lines
-  ), "X-Frame-Options must remain on the exact non-embed matcher"
-  ordinary_csp = next(
-    line for line in lines
-    if line.startswith("header @notFrameableEmbed >Content-Security-Policy ")
-  )
-  embed_csp = next(
-    line for line in lines
-    if line.startswith("header @chatEmbed >Content-Security-Policy ")
-  )
-  assert "frame-ancestors 'self'" in ordinary_csp
-  assert "frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}" in ordinary_csp
-  assert "frame-src *" not in ordinary_csp
-  assert "frame-ancestors" not in embed_csp
-  assert "frame-src 'self'" in embed_csp
-  assert "MOBIUS_SERVICE_GATEWAY_ORIGIN" not in embed_csp
-  # Both the shell and the embedded chat render upload previews and the image
-  # lightbox via URL.createObjectURL; a policy without blob: breaks those.
-  assert "img-src 'self' data: blob:" in ordinary_csp
-  assert "img-src 'self' data: blob:" in embed_csp
-  assert "https://cdn.openai.com" in ordinary_csp
-  assert "https://cdn.openai.com" in embed_csp
-  app_frame_csp = next(
-    line for line in lines
-    if line.startswith("header @appFrame >Content-Security-Policy ")
-  )
-  assert "sandbox allow-scripts" in app_frame_csp
-  assert "allow-popups-to-escape-sandbox" in app_frame_csp
-  assert "allow-same-origin" not in app_frame_csp
-  assert (
-    "script-src {$FRONTEND_ORIGIN} 'unsafe-inline' blob: https://esm.sh"
-    in app_frame_csp
-  )
-  assert "blob:" not in ordinary_csp.split("style-src", 1)[0]
-  assert 'header @appFrame >X-Frame-Options "SAMEORIGIN"' in lines
-  # The frame's origin is opaque, so 'self' matches nothing in EVERY fetch
-  # directive. The response's absolute origin must be named wherever the frame
-  # intentionally loads its own resources, not only for API connections.
+  assert "frame-ancestors 'self' {$FRONTEND_ORIGIN}" in service_csp
+  assert "{$MOBIUS_SERVICE_GATEWAY_ORIGIN} {" in gateway
+
+
+def test_backend_owns_complete_app_frame_policy(monkeypatch):
+  """Direct managed and proxied installs receive one exact frame policy."""
+  gateway = "https://services.example.test"
+  monkeypatch.setenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", gateway)
+  policy = _app_frame_csp()
+  origin = main.settings.frontend_origin.rstrip("/")
+
+  assert "sandbox allow-scripts" in policy
+  assert "allow-popups-to-escape-sandbox" in policy
+  assert "allow-same-origin" not in policy
+  assert "'wasm-unsafe-eval'" in policy
+  assert " 'unsafe-eval'" not in policy
+  assert f"frame-src {origin} {gateway}" in policy
+
+  # The frame's origin is opaque, so 'self' matches nothing in fetch
+  # directives. Every intentional same-site resource source must name the
+  # origin explicitly, independent of the deployment's reverse proxy.
   for directive in (
     "default-src", "script-src", "style-src", "font-src", "connect-src",
     "img-src", "frame-src",
   ):
-    sources = app_frame_csp.split(f"{directive} ", 1)[1].split(";", 1)[0]
-    assert "{$FRONTEND_ORIGIN}" in sources
+    sources = policy.split(f"{directive} ", 1)[1].split(";", 1)[0]
+    assert origin in sources
     assert "'self'" not in sources
-  static_csp = next(
-    line for line in lines
-    if line.startswith("header @staticEmbed >Content-Security-Policy ")
+
+
+def test_app_frame_policy_drops_malformed_gateway_origin(monkeypatch):
+  monkeypatch.setenv(
+    "MOBIUS_SERVICE_GATEWAY_ORIGIN",
+    "https://services.example.test; script-src *",
   )
-  assert "sandbox allow-scripts" in static_csp
-  assert "allow-same-origin" not in static_csp
-  assert "frame-ancestors" not in static_csp
-  assert "MOBIUS_SERVICE_GATEWAY_ORIGIN" not in static_csp
-  # Caddy and the backend must enforce the same packaged-document boundary.
-  # Resolve the sole Caddy env placeholder to the configured backend origin,
-  # then compare the complete policy rather than sampling one directive.
-  assert (
-    static_csp.split('Content-Security-Policy "', 1)[1].rsplit('"', 1)[0]
-    .replace("{$FRONTEND_ORIGIN}", main.settings.frontend_origin.rstrip("/"))
-    == _STATIC_EMBED_CSP
-  )
-  service_csp = next(
-    line for line in lines
-    if line.startswith("?Content-Security-Policy ")
-  )
-  assert "frame-ancestors 'self' {$FRONTEND_ORIGIN}" in service_csp
-  assert "{$MOBIUS_SERVICE_GATEWAY_ORIGIN} {" in lines
-  assert "@serviceSurface path /services/*" in lines
-  assert "respond \"Not found\" 404" in lines
-  assert "-X-Frame-Options" in lines
-  for name in (
-    "X-Content-Type-Options", "Referrer-Policy", "Permissions-Policy",
-    "Strict-Transport-Security",
-  ):
-    assert any(line.startswith(f">{name} ") for line in lines), (
-      f"{name} must replace, not duplicate, the backend value after proxying"
-    )
-
-
-def test_app_frame_sources_stay_absolute_in_every_environment():
-  """Every variable-backed CSP source resolves to one absolute origin.
-
-  The app frame is sandboxed without allow-same-origin, so its origin is opaque:
-  'self' matches nothing and a scheme-less host matches nothing, which leaves a
-  real `scheme://host` as the only source that can match. Writing that as
-  `https://{$DOMAIN}` looks right because DOMAIN is a bare host in production —
-  but it is a full URL under docker-compose.test.yml, so the prefix yielded
-  `https://http://localhost:8001`. Browsers drop an invalid source silently,
-  so the directive was left with no usable origin and the frame could not reach
-  the API at all. Resolve the placeholder against every value the compose files
-  actually assign, so the next such rewrite fails here rather than in e2e.
-
-  Resolution is scoped to the service that mounts the Caddyfile: that container
-  is what expands `{$VAR}`, so a variable defined only on some other service
-  would leave the directive empty at runtime while still looking assigned.
-  """
-  root = Path(__file__).resolve().parents[2]
-  caddy_lines = (root / "Caddyfile").read_text(encoding="utf-8").splitlines()
-  # FRONTEND_ORIGIN is deliberately also the site address. Caddy cannot parse
-  # an empty site label, so an omitted variable now fails startup instead of
-  # quietly deleting the only source that opaque frames can match.
-  assert caddy_lines[0].strip() == "{$FRONTEND_ORIGIN} {"
-  app_frame_csp = next(
-    line.strip()
-    for line in caddy_lines
-    if line.strip().startswith("header @appFrame >Content-Security-Policy ")
-  )
-  policy = app_frame_csp.split(
-    'Content-Security-Policy "', 1
-  )[1].rsplit('"', 1)[0]
-  variable_directives = {
-    fields[0]: " ".join(fields[1:])
-    for raw in policy.split(";")
-    if (fields := raw.strip().split()) and "{$" in raw
-  }
-  assert variable_directives, "the app frame must name its absolute origins"
-
-  # Compose's own merge tags (`!override`, `!reset`) are not YAML-standard, so
-  # a plain safe_load raises on docker-compose.test.yml. Keep the node's value
-  # and drop the tag; nothing here inspects a tagged field.
-  class _ComposeLoader(yaml.SafeLoader):
-    pass
-
-  _ComposeLoader.add_multi_constructor(
-    "", lambda loader, suffix, node: loader.construct_sequence(node)
-    if isinstance(node, yaml.SequenceNode) else loader.construct_scalar(node)
-  )
-
-  for name in ("docker-compose.yml", "docker-compose.test.yml"):
-    services = yaml.load(
-      (root / name).read_text(encoding="utf-8"), Loader=_ComposeLoader
-    )["services"]
-    proxies = {
-      svc: spec for svc, spec in services.items()
-      if any("Caddyfile" in str(v) for v in (spec or {}).get("volumes") or [])
-    }
-    assert proxies, f"{name} must mount the Caddyfile on some service"
-    for svc, spec in proxies.items():
-      env = dict(
-        entry.split("=", 1)
-        for entry in (spec.get("environment") or [])
-        if "=" in entry
-      )
-      for directive, sources in variable_directives.items():
-        referenced = set(re.findall(r"\{\$(\w+)\}", sources))
-        for var in referenced:
-          assert var in env, (
-            f"{name}: service {svc!r} mounts the Caddyfile but never sets "
-            f"{var}, so app-frame {directive} would resolve to nothing"
-          )
-        # Substitute ALL variables before parsing. Replacing and validating
-        # one at a time leaves the other {$VAR} token behind in frame-src,
-        # making the guard reject a valid two-origin policy spuriously.
-        resolved = sources
-        for var in referenced:
-          resolved = resolved.replace(f"{{${var}}}", env[var])
-        resolved = re.sub(r"\$\{\w+:-([^}]*)\}", r"\1", resolved)
-        resolved = re.sub(r"\$\{\w+\}", "mobius.example.test", resolved)
-        for source in resolved.split():
-          if source.startswith("'") or source in ("data:", "blob:"):
-            continue
-          parsed = urlparse(source)
-          assert source.count("://") == 1 and parsed.scheme and parsed.netloc, (
-            f"{name}: {directive} resolves to {source!r}, which is not a "
-            "single absolute origin and would be ignored by the browser"
-          )
+  policy = _app_frame_csp()
+  assert "services.example.test" not in policy
+  assert "script-src *" not in policy
 
 
 def test_compose_keeps_optional_service_gateway_inert_by_default():

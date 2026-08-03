@@ -30,6 +30,7 @@ import {
   summarizePreview,
   isTrivialUpdate,
 } from '../../lib/platformUpdatePreview.js'
+import { platformActivationLabel } from '../../lib/platformUpdateState.js'
 import FileDiffList from '../DiffView/FileDiffList.jsx'
 import './UpdateReviewModal.css'
 
@@ -111,7 +112,11 @@ export default function UpdateReviewModal({
     }
     if (
       result?.ok
-      && (result.state === 'restart_needed' || result.state === 'up_to_date')
+      && (
+        result.state === 'restart_needed'
+        || result.state === 'activation_needed'
+        || result.state === 'up_to_date'
+      )
     ) onClose()
   }, [onApply, onClose, preview])
 
@@ -127,6 +132,13 @@ export default function UpdateReviewModal({
   const target = shortSha(preview?.target_sha)
   const commits = Array.isArray(preview?.commits) ? preview.commits : []
   const files = Array.isArray(preview?.files) ? preview.files : []
+  const activation = preview?.activation
+  const activationGuidance = Array.isArray(activation?.guidance)
+    ? activation.guidance
+    : []
+  const activationReasons = Array.isArray(activation?.reasons)
+    ? activation.reasons.filter((reason) => reason?.applies)
+    : []
   const parsedFiles = useMemo(
     () => parseUnifiedDiff(preview?.diff),
     [preview?.diff],
@@ -220,6 +232,32 @@ export default function UpdateReviewModal({
             <div className="urm__notice" role="status">
               {progressLabel}
             </div>
+          )}
+
+          {!hasResult && !loading && !loadError && !notAvailable && activation && (
+            <section
+              className={`urm__activation urm__activation--${activation.level || 'live'}`}
+              aria-labelledby="urm-activation-title"
+            >
+              <div className="urm__activation-head">
+                <h3 id="urm-activation-title" className="urm__activation-title">
+                  {platformActivationLabel(activation)}
+                </h3>
+                <span className="urm__activation-deployment">
+                  {activation.deployment === 'railway' ? 'Railway' : 'Self-hosted'}
+                </span>
+              </div>
+              {activationGuidance.map((line) => (
+                <p key={line} className="urm__activation-guidance">{line}</p>
+              ))}
+              {activationReasons.length > 0 && (
+                <ul className="urm__activation-reasons">
+                  {activationReasons.map((reason) => (
+                    <li key={reason.code}>{reason.summary}</li>
+                  ))}
+                </ul>
+              )}
+            </section>
           )}
 
           {!hasResult && !loading && !loadError && notAvailable && (

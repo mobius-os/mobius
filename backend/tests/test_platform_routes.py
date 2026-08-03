@@ -73,6 +73,15 @@ def test_apply_forwards_exact_reviewed_plan(client, auth, monkeypatch):
     return {
       "state": "restart_needed",
       "needs_restart": True,
+      "activation": {
+        "level": "server_restart",
+        "source_level": "server_restart",
+        "deployment": "self_hosted",
+        "actions": ["server_restart"],
+        "reasons": [],
+        "guidance": ["Restart Möbius."],
+        "requires_operator": False,
+      },
       "upstream_commit": plan["target_sha"],
       "merge_commit": "3" * 40,
       "conflict_paths": [],

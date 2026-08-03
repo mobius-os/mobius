@@ -1,99 +1,9 @@
 {$FRONTEND_ORIGIN} {
+    # Application response policy is owned by FastAPI and passed through
+    # unchanged so direct Railway and self-hosted proxy paths stay identical.
+    # Caddy retains only topology concerns: public host routing, TLS and
+    # compression.
     encode gzip
-
-    # The embedded-chat bootstrap document is intentionally nested below an
-    # opaque app frame. That ancestor can satisfy neither X-Frame-Options:
-    # SAMEORIGIN nor CSP frame-ancestors 'self'. Keep the exception exact and
-    # retain the rest of the resource/security policy while the blank document
-    # establishes its server-verified one-use capability.
-    @chatEmbed path /shell/embed/chat
-    @staticEmbed path /app-embeds/by-id/*
-    # App frames execute compiled code transferred by their exact parent as a
-    # short-lived blob module. Keep blob: scoped to this already-opaque frame;
-    # the ordinary shell never needs blob-backed scripts.
-    @appFrame path /api/apps/*/frame
-    # Published sites (/sites/<token>/) are public snapshots of the owner's own
-    # agent-authored artifacts + Web Studio builds. They must run at an opaque
-    # origin (CSP `sandbox`, no allow-same-origin) so their JS cannot read the
-    # shell origin's localStorage/JWT. Like /app-embeds, /sites is
-    # EXCLUDED from @notFrameableEmbed and given its own X-Frame-Options + CSP
-    # block below — Caddy does not guarantee that a later `header >Set` on the
-    # same field wins over an earlier one, so overlapping matchers on the same
-    # header are unreliable; a disjoint matcher is the only deterministic form.
-    # Mirrors the app middleware (_PUBLISHED_SITE_CSP), which likewise keeps
-    # X-Frame-Options SAMEORIGIN while replacing the CSP, so the boundary holds
-    # identically at both the proxy and the origin.
-    @publishedSite path /sites/*
-    @notFrameableEmbed not path /shell/embed/chat /app-embeds/by-id/* /api/apps/*/frame /sites/*
-
-    header {
-        # Defer replacements until after reverse_proxy copies the backend
-        # response. Without `>`, the mirrored backend values are appended and
-        # browsers receive comma-joined duplicates such as
-        # `X-Content-Type-Options: nosniff, nosniff`.
-        >X-Content-Type-Options "nosniff"
-        >Permissions-Policy "camera=(), geolocation=()"
-        >Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        # script-src notes:
-        #   'unsafe-inline' — cannot be removed: index.html, app-frame.html,
-        #   standalone.py contain inline <script> blocks (error handlers,
-        #   postMessage init, BIP capture). Replacing them with nonce/hash-based
-        #   CSP requires server-side rendering changes across these surfaces.
-        #   https://esm.sh — remains for apps that deliberately use an absolute
-        #   dynamic import while online. Supported bare imports are bundled by
-        #   the app compiler and do not depend on this origin.
-    }
-    # img-src includes blob: — the shell creates object URLs for upload
-    # previews (useFileUpload), the image lightbox, and install-sheet icon
-    # previews; without blob: those render as broken images under an
-    # enforced policy.
-    header >Referrer-Policy "strict-origin-when-cross-origin"
-    header @notFrameableEmbed >X-Frame-Options "SAMEORIGIN"
-    header @notFrameableEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self' {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
-    header @appFrame >X-Frame-Options "SAMEORIGIN"
-    # A user-opened external tab must not inherit the app frame's opaque
-    # origin. The app remains sandboxed; only its new popup/tab escapes.
-    #
-    # Every fetch directive NAMES THIS ORIGIN WITH ITS SCHEME, and needs all
-    # three parts:
-    # the sandbox deliberately omits allow-same-origin, so the frame's origin is
-    # opaque. `'self'` matches NOTHING for an opaque origin, and a bare host
-    # (`example.com`) matches nothing either — a scheme-less host source is
-    # compared against the DOCUMENT's scheme, and an opaque origin has none to
-    # compare. Only a fully-qualified `scheme://host` matches on the request URL
-    # alone. Chromium resolves all three leniently; WebKit obeys the spec, so on
-    # iOS every network call an app made was blocked before it left the device —
-    # no status, no server-side trace, indistinguishable from the network being
-    # down. Verified from the device: with the bare host present, WebKit still
-    # reported `refused by: connect-src` for a URL on exactly that host.
-    #
-    # Use {$FRONTEND_ORIGIN} — the one variable that already carries the scheme,
-    # and the same origin @notFrameableEmbed/frame-ancestors is written against.
-    # Do NOT rebuild it as `https://{$DOMAIN}`: DOMAIN is a bare host in
-    # production but a full URL under docker-compose.test.yml, so the prefix
-    # yields `https://http://localhost:8001` — an invalid source the browser
-    # drops, leaving the directive with no usable origin at all.
-    #
-    # This restores the reach the frame was always meant to have without
-    # weakening the sandbox: one origin, and the app still holds nothing but its
-    # own scoped token. FRONTEND_ORIGIN also owns this site's address above, so
-    # leaving it unset makes Caddy reject the configuration at startup instead
-    # of silently reducing these directives to the original broken policy.
-    header @appFrame >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation; default-src {$FRONTEND_ORIGIN}; script-src {$FRONTEND_ORIGIN} 'unsafe-inline' blob: https://esm.sh; style-src {$FRONTEND_ORIGIN} 'unsafe-inline' https://fonts.googleapis.com; font-src {$FRONTEND_ORIGIN} https://fonts.gstatic.com https://cdn.openai.com; connect-src {$FRONTEND_ORIGIN}; img-src {$FRONTEND_ORIGIN} data: blob:; frame-src {$FRONTEND_ORIGIN} {$MOBIUS_SERVICE_GATEWAY_ORIGIN}; frame-ancestors 'self'"
-    # The embedded chat mounts the full ChatView (upload previews, image
-    # lightbox), so its img-src needs blob: for the same object URLs as the
-    # shell policy above.
-    header @chatEmbed >Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self'"
-    header @staticEmbed >Content-Security-Policy "sandbox allow-scripts allow-forms allow-pointer-lock; default-src {$FRONTEND_ORIGIN}; script-src {$FRONTEND_ORIGIN} 'unsafe-inline'; style-src {$FRONTEND_ORIGIN} 'unsafe-inline'; font-src {$FRONTEND_ORIGIN} data:; connect-src {$FRONTEND_ORIGIN}; img-src {$FRONTEND_ORIGIN} data: blob:; media-src {$FRONTEND_ORIGIN} blob:; worker-src {$FRONTEND_ORIGIN} blob:"
-    # /sites/ headers (disjoint matcher — see the @publishedSite note above).
-    # X-Frame-Options SAMEORIGIN keeps the page top-level-only; the CSP is
-    # sandbox-only: the opaque origin is the credential boundary, and resource
-    # loading is left unrestricted because /sites/ also serves multi-file Web
-    # Studio sites that pull external assets. Keep in sync with
-    # _PUBLISHED_SITE_CSP in main.py.
-    header @publishedSite >X-Frame-Options "SAMEORIGIN"
-    header @publishedSite >Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups; object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
-
     reverse_proxy app:8000
 }
 
@@ -108,9 +18,8 @@
     handle @serviceSurface {
         encode gzip
         header {
-            >X-Content-Type-Options "nosniff"
-            >Referrer-Policy "strict-origin-when-cross-origin"
-            >Permissions-Policy "camera=(), geolocation=()"
+            # The backend owns standard headers. The gateway keeps only its
+            # host-specific frame exception and a fail-closed CSP fallback.
             ?Content-Security-Policy "frame-ancestors 'self' {$FRONTEND_ORIGIN}"
             -X-Frame-Options
         }
