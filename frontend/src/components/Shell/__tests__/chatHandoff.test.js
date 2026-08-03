@@ -232,6 +232,14 @@ test('direct chat actions hand focus to the destination composer', () => {
     /beginTouchComposerFocusLease\([\s\S]*?await resolveNewChatId/,
     'New chat must reserve phone keyboard focus before its first async boundary')
   assert.match(shell,
+    /const displayedNavigationOpen = navigationOpen && \([\s\S]*?persistentDrawer \|\| newChatPresentation == null[\s\S]*?<Drawer[\s\S]*?open=\{displayedNavigationOpen\}/,
+    'the immediate landing must hide modal navigation without closing its history entry')
+  const newChatBeforeResolution = shell.match(
+    /async function newChat\([\s\S]*?await resolveNewChatId/,
+  )?.[0] || ''
+  assert.doesNotMatch(newChatBeforeResolution, /closeDrawer\(\)/,
+    'allocation must not start an asynchronous drawer traversal that can blur the focus lease')
+  assert.match(shell,
     /composerFocusLeaseRef\.current\?\.value[\s\S]*?requestComposer\(chatId, \{[\s\S]*?draft: draftText \|\| undefined,[\s\S]*?focus: true/,
     'New chat must carry early lease typing into the focused destination composer')
   assert.match(shell,

@@ -213,7 +213,6 @@ export default function Shell() {
   const drawerModeTransitioning = desktopSidebarMode && drawerOpen
   const navigationOpen = persistentDrawer ? desktopSidebarOpen : drawerOpen
   const modalDrawerOpen = !persistentDrawer && drawerOpen
-  const navigationSurfaceOpen = modalDrawerOpen
   const [appsDirectoryHost, setAppsDirectoryHost] = useState(null)
   // This is the single semantic owner of reserved desktop navigation space.
   // Both the root class and the content-geometry transaction below read it.
@@ -588,6 +587,14 @@ export default function Shell() {
     if (newChatPresentation?.chatId !== null) return
     beginTouchComposerFocusLease(composerFocusLeaseRef.current)
   }, [newChatPresentation])
+  // A slow New-chat allocation replaces the modal drawer visually without
+  // consuming its history entry. Destination navigation owns that entry once
+  // the concrete chat exists; avoiding an early Back traversal also keeps the
+  // temporary phone composer focused until the real composer accepts it.
+  const displayedNavigationOpen = navigationOpen && (
+    persistentDrawer || newChatPresentation == null
+  )
+  const navigationSurfaceOpen = modalDrawerOpen && newChatPresentation == null
 
   const requestComposer = useCallback((chatId, {
     draft, focus = false,
@@ -2539,21 +2546,19 @@ export default function Shell() {
     // tap immediately instead of leaving the drawer/old transcript painted for
     // the whole async allocation. Builder stays additive and therefore waits
     // for the concrete id before opening its new tab.
-    // originKey is the surface the cover is painted over until the row exists.
+  // originKey is the surface the cover is painted over until the row exists.
     // It is what tells a still-running allocation apart from the owner having
     // navigated somewhere else while it ran.
-    const presentation = focusComposer && ws.viewMode === 'single'
-      ? { chatId: null, originKey: fullBleedKey ?? null }
-      : null
-    if (presentation) {
-      setNewChatPresentation(presentation)
-      closeDrawer()
-    }
-    // A phone keyboard can only be raised from the tap's live user-activation
-    // task. Acquire the lease after the immediate drawer close so that close's
-    // synchronous history/focus bookkeeping cannot reclaim the old composer,
-    // but still before the first await. The lease carries any early typing to
-    // the chat-bound composer once allocation resolves.
+  const presentation = focusComposer && ws.viewMode === 'single'
+    ? { chatId: null, originKey: fullBleedKey ?? null }
+    : null
+  if (presentation) {
+    setNewChatPresentation(presentation)
+  }
+  // A phone keyboard can only be raised from the tap's live user-activation
+  // task. The modal drawer remains history-open but is no longer displayed,
+  // so no asynchronous traversal can blur this lease before the chat-bound
+  // composer accepts it. The lease also carries any early typing.
     const touchFocusLeased = !!focusComposer && beginTouchComposerFocusLease(
       composerFocusLeaseRef.current,
     )
@@ -3025,7 +3030,7 @@ export default function Shell() {
       </header>
 
       <Drawer
-        open={navigationOpen}
+        open={displayedNavigationOpen}
         persistent={persistentDrawer}
         width={desktopSidebarWidth}
         onWidthChange={setDesktopSidebarWidth}
