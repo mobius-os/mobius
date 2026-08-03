@@ -127,6 +127,26 @@ def test_device_asset_cache_is_client_only_and_reviewed_by_size():
   assert device_cache["limits"]["max_bytes"] == 256 * 1024 * 1024
 
 
+def test_speech_capabilities_separate_model_management_from_generation():
+  runtime = normalize_runtime_capabilities(_manifest(capabilities={
+    "device.speech-models": {
+      "version": 1,
+      "reason": "Manage the shared voice library on this device.",
+    },
+    "media.speech": {
+      "version": 1,
+      "reason": "Read reports aloud with a selected local voice.",
+      "limits": {"max_text_chars": 20_000},
+    },
+  }))
+
+  assert runtime["device.speech-models"]["risk"] == "storage"
+  assert runtime["device.speech-models"]["lifecycle"] == "active_frame"
+  assert runtime["media.speech"]["risk"] == "device"
+  assert runtime["media.speech"]["lifecycle"] == "background"
+  assert runtime["media.speech"]["limits"] == {"max_text_chars": 20_000}
+
+
 def test_runtime_capability_rejects_unknown_name_version_and_limits():
   for capabilities, message in (
     ({"device.telepathy": {"version": 1}}, "Unknown capability"),

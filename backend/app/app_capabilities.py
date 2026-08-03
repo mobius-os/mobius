@@ -46,6 +46,36 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
       "max_chunk_bytes": (256 * 1024, 16 * 1024 * 1024),
     },
   },
+  "device.speech-models": {
+    "version": 1,
+    "kind": "session",
+    "title": "Manage local speech models",
+    "description": (
+      "Download and select verified speech models shared by apps on this device."
+    ),
+    "risk": "storage",
+    "lifecycle": "active_frame",
+    "default_limits": {
+      "max_bytes": 256 * 1024 * 1024,
+      "max_asset_bytes": 256 * 1024 * 1024,
+      "max_chunk_bytes": 8 * 1024 * 1024,
+    },
+    "hard_limits": {
+      "max_bytes": (1 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+      "max_asset_bytes": (1 * 1024 * 1024, 1 * 1024 * 1024 * 1024),
+      "max_chunk_bytes": (256 * 1024, 16 * 1024 * 1024),
+    },
+  },
+  "media.speech": {
+    "version": 1,
+    "kind": "session",
+    "title": "Generate speech",
+    "description": "Turn text into audio with a speech model saved on this device.",
+    "risk": "device",
+    "lifecycle": "background",
+    "default_limits": {"max_text_chars": 50_000},
+    "hard_limits": {"max_text_chars": (1, 250_000)},
+  },
   "media.microphone.capture": {
     "version": 1,
     "kind": "session",

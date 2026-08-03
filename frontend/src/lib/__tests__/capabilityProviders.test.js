@@ -1,7 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createMicrophoneProvider } from '../capabilityProviders.js'
+import {
+  createMicrophoneProvider,
+  createSpeechModelsProvider,
+  createSpeechProvider,
+} from '../capabilityProviders.js'
 
 test('microphone provider clamps app input to the reviewed manifest ceiling', async () => {
   let receivedSeconds
@@ -36,4 +40,32 @@ test('microphone provider clamps app input to the reviewed manifest ceiling', as
   await done
   await Promise.resolve()
   assert.equal(messages.at(-1)[0], 'result')
+})
+
+test('speech providers lazy-load the runtime and preserve the invoking app identity', async () => {
+  const calls = []
+  const runtime = {
+    openSpeechCapability(context) {
+      calls.push(['speech', context.input])
+      return { control() {} }
+    },
+    openSpeechModelsCapability(context) {
+      calls.push(['models', context.appId, context.input])
+      return { control() {} }
+    },
+  }
+  const loadRuntime = async () => runtime
+  const channel = {}
+  const speech = createSpeechProvider({ loadRuntime })
+  const models = createSpeechModelsProvider({ appId: 61, loadRuntime })
+
+  const speechControl = await speech.open({ input: { text: 'Hello' }, channel })
+  const modelControl = await models.open({ input: { operation: 'catalog' }, channel })
+
+  assert.equal(typeof speechControl.control, 'function')
+  assert.equal(typeof modelControl.control, 'function')
+  assert.deepEqual(calls, [
+    ['speech', { text: 'Hello' }],
+    ['models', 61, { operation: 'catalog' }],
+  ])
 })

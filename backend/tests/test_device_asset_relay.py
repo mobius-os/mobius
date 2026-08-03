@@ -26,6 +26,20 @@ def _create_device_asset_app(client, auth):
   )
 
 
+def _create_speech_model_app(client, auth):
+  return create_local_app(
+    client,
+    auth,
+    name="Voice",
+    capabilities={
+      "device.speech-models": {
+        "version": 1,
+        "reason": "Manage verified local voices.",
+      },
+    },
+  )
+
+
 class _FakeCloser:
   def __init__(self):
     self.closed = False
@@ -69,6 +83,17 @@ def test_device_asset_relay_requires_a_reviewed_capability(client, auth):
   )
 
   assert response.status_code == 403
+
+
+def test_speech_model_manager_can_use_the_bounded_asset_relay(client, auth):
+  app = _create_speech_model_app(client, auth)
+  response = client.get(
+    f"/api/apps/{app['id']}/device-assets/relay",
+    headers=auth,
+    params={"url": "http://assets.example/model.bin", "offset": 0, "length": 5},
+  )
+
+  assert response.status_code == 400
 
 
 def test_device_asset_relay_is_shell_owned_not_app_token_callable(client, auth):

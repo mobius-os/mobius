@@ -45,7 +45,7 @@ const ALLOWED_GLOBALS = new Set([
   'AbortController', 'AbortSignal', 'atob', 'Blob', 'BroadcastChannel', 'btoa',
   'caches', 'cancelAnimationFrame', 'clearInterval', 'clearTimeout', 'console',
   'createImageBitmap', 'crypto', 'CSS', 'CustomEvent', 'document',
-  'DOMMatrixReadOnly', 'DOMParser',
+  'DOMException', 'DOMMatrixReadOnly', 'DOMParser',
   'Element', 'Event', 'EventSource', 'fetch', 'File', 'FileReader', 'FormData',
   'getComputedStyle', 'Headers', 'history', 'HTMLElement', 'HTMLFormElement',
   'HTMLInputElement',

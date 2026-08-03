@@ -301,3 +301,36 @@ test('explicit app-data purge removes only that app device partition', async () 
   assert.equal(cacheStorage.values.has('mobius-device-assets-v1-app-61'), false)
   assert.equal(cacheStorage.values.has('mobius-device-assets-v1-app-62'), true)
 })
+
+test('a reviewed shared partition can be read outside an app after its manager installs it', async () => {
+  const cacheStorage = new MemoryCacheStorage()
+  const chunks = [Buffer.from('shared voice')]
+  const manager = createDeviceAssetCacheProvider({
+    appId: 61,
+    partitionId: 'speech-v1',
+    cacheStorage,
+    cryptoImpl: webcrypto,
+    origin: 'https://mobius.test',
+    storageManager: {},
+    async fetchRange() { return new Response(chunks[0]) },
+  })
+  const input = packageInput(chunks)
+  await runProvider(manager, input)
+
+  const shell = createDeviceAssetCacheProvider({
+    partitionId: 'speech-v1',
+    cacheStorage,
+    cryptoImpl: webcrypto,
+    origin: 'https://mobius.test',
+    storageManager: {},
+  })
+  const events = []
+  await runProvider(shell, { ...input, operation: 'read' }, { events })
+
+  assert.equal(Buffer.from(events[0].value.bytes).toString(), 'shared voice')
+  assert.equal(cacheStorage.values.has('mobius-device-assets-v1-speech-v1'), true)
+  await assert.rejects(
+    runProvider(shell, input),
+    (error) => error.code === 'unavailable',
+  )
+})

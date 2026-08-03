@@ -24,6 +24,7 @@ from app.resource_access import live_app, live_app_or_404
 router = APIRouter()
 
 _DEVICE_ASSET_CAPABILITY = "device.asset-cache"
+_SPEECH_MODEL_CAPABILITY = "device.speech-models"
 _DEVICE_ASSET_MAX_REDIRECTS = 5
 _DEVICE_ASSET_USER_AGENT = "Mobius/1.0 (device asset relay)"
 
@@ -31,15 +32,15 @@ _DEVICE_ASSET_USER_AGENT = "Mobius/1.0 (device asset relay)"
 def _device_asset_declaration(app: models.App) -> dict:
   contract = app.capability_contract
   runtime = contract.get("runtime") if isinstance(contract, dict) else None
-  declaration = (
-    runtime.get(_DEVICE_ASSET_CAPABILITY)
-    if isinstance(runtime, dict)
-    else None
-  )
+  declaration = None
+  if isinstance(runtime, dict):
+    declaration = runtime.get(_DEVICE_ASSET_CAPABILITY)
+    if not isinstance(declaration, dict):
+      declaration = runtime.get(_SPEECH_MODEL_CAPABILITY)
   if not isinstance(declaration, dict) or declaration.get("version") != 1:
     raise HTTPException(
       status_code=403,
-      detail="This app has not declared device asset storage.",
+      detail="This app has not declared device asset storage or speech-model management.",
     )
   return declaration
 

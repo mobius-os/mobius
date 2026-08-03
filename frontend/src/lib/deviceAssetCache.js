@@ -171,28 +171,30 @@ async function packageFingerprint(pkg, cryptoImpl) {
   return sha256Hex(utf8(canonical), cryptoImpl)
 }
 
-function cacheName(appId) {
-  return `${CACHE_PREFIX}-app-${appId}`
+function cacheName(partitionId) {
+  return /^\d+$/.test(partitionId)
+    ? `${CACHE_PREFIX}-app-${partitionId}`
+    : `${CACHE_PREFIX}-${partitionId}`
 }
 
 function pathSegment(value) {
   return encodeURIComponent(value)
 }
 
-function packagePrefix(origin, appId, pkg) {
-  return `${origin}/.mobius/device-assets/${appId}/${pathSegment(pkg.key)}/`
+function packagePrefix(origin, partitionId, pkg) {
+  return `${origin}/.mobius/device-assets/${pathSegment(partitionId)}/${pathSegment(pkg.key)}/`
 }
 
-function chunkUrl(origin, appId, pkg, fingerprint, asset, chunk) {
-  return `${packagePrefix(origin, appId, pkg)}${fingerprint}/${pathSegment(asset.id)}/${chunk.index}`
+function chunkUrl(origin, partitionId, pkg, fingerprint, asset, chunk) {
+  return `${packagePrefix(origin, partitionId, pkg)}${fingerprint}/${pathSegment(asset.id)}/${chunk.index}`
 }
 
-function versionPrefix(origin, appId, pkg, fingerprint) {
-  return `${packagePrefix(origin, appId, pkg)}${fingerprint}/`
+function versionPrefix(origin, partitionId, pkg, fingerprint) {
+  return `${packagePrefix(origin, partitionId, pkg)}${fingerprint}/`
 }
 
-function completeUrl(origin, appId, pkg, fingerprint) {
-  return `${versionPrefix(origin, appId, pkg, fingerprint)}.complete`
+function completeUrl(origin, partitionId, pkg, fingerprint) {
+  return `${versionPrefix(origin, partitionId, pkg, fingerprint)}.complete`
 }
 
 async function chunkIsCached(cache, url, chunk) {
@@ -205,7 +207,7 @@ async function chunkIsCached(cache, url, chunk) {
   return false
 }
 
-async function packageState(cache, origin, appId, pkg, fingerprint) {
+async function packageState(cache, origin, partitionId, pkg, fingerprint) {
   let cachedBytes = 0
   let cachedChunks = 0
   let totalChunks = 0
@@ -214,7 +216,7 @@ async function packageState(cache, origin, appId, pkg, fingerprint) {
       totalChunks += 1
       if (await chunkIsCached(
         cache,
-        chunkUrl(origin, appId, pkg, fingerprint, asset, chunk),
+        chunkUrl(origin, partitionId, pkg, fingerprint, asset, chunk),
         chunk,
       )) {
         cachedBytes += chunk.bytes
@@ -258,15 +260,15 @@ async function assertSpace(storageManager, missingBytes) {
   }
 }
 
-function entryVersionPrefix(url, origin, appId) {
-  const root = `${origin}/.mobius/device-assets/${appId}/`
+function entryVersionPrefix(url, origin, partitionId) {
+  const root = `${origin}/.mobius/device-assets/${pathSegment(partitionId)}/`
   if (!url.startsWith(root)) return null
   const path = url.slice(root.length).split('/')
   return path.length >= 3 ? `${root}${path[0]}/${path[1]}/` : null
 }
 
-async function pruneStalePartials(cache, origin, appId, pkg, fingerprint) {
-  const current = versionPrefix(origin, appId, pkg, fingerprint)
+async function pruneStalePartials(cache, origin, partitionId, pkg, fingerprint) {
+  const current = versionPrefix(origin, partitionId, pkg, fingerprint)
   const keys = await cache.keys()
   const urls = keys.map((request) => (
     typeof request === 'string' ? request : request.url
@@ -275,7 +277,7 @@ async function pruneStalePartials(cache, origin, appId, pkg, fingerprint) {
     .filter((url) => url.endsWith('/.complete'))
     .map((url) => url.slice(0, -'.complete'.length)))
   await Promise.all(keys.map((request, index) => {
-    const prefix = entryVersionPrefix(urls[index], origin, appId)
+    const prefix = entryVersionPrefix(urls[index], origin, partitionId)
     return prefix && prefix !== current && !complete.has(prefix)
       ? cache.delete(request)
       : false
@@ -302,9 +304,9 @@ async function assertPartitionBudget(cache, maxBytes, missingBytes) {
   }
 }
 
-async function pruneOldPackageVersions(cache, origin, appId, pkg, fingerprint) {
-  const keepPrefix = versionPrefix(origin, appId, pkg, fingerprint)
-  const prefix = packagePrefix(origin, appId, pkg)
+async function pruneOldPackageVersions(cache, origin, partitionId, pkg, fingerprint) {
+  const keepPrefix = versionPrefix(origin, partitionId, pkg, fingerprint)
+  const prefix = packagePrefix(origin, partitionId, pkg)
   const keys = await cache.keys()
   await Promise.all(keys.map((request) => {
     const url = typeof request === 'string' ? request : request.url
@@ -314,8 +316,8 @@ async function pruneOldPackageVersions(cache, origin, appId, pkg, fingerprint) {
   }))
 }
 
-async function removePackage(cache, origin, appId, pkg) {
-  const prefix = packagePrefix(origin, appId, pkg)
+async function removePackage(cache, origin, partitionId, pkg) {
+  const prefix = packagePrefix(origin, partitionId, pkg)
   const keys = await cache.keys()
   const matches = keys.filter((request) => {
     const url = typeof request === 'string' ? request : request.url
@@ -331,6 +333,7 @@ function progressValue(state, persistenceMode) {
 
 export function createDeviceAssetCacheProvider({
   appId,
+  partitionId,
   cacheStorage = globalThis.caches,
   storageManager = globalThis.navigator?.storage,
   cryptoImpl = globalThis.crypto,
@@ -352,6 +355,9 @@ export function createDeviceAssetCacheProvider({
   // string. Normalize that host-owned identity once at this boundary so
   // browser-backed storage does not become unavailable for route-derived ids.
   const ownerAppId = Number(appId)
+  const ownerPartitionId = partitionId === undefined
+    ? String(ownerAppId)
+    : assertKey(String(partitionId), 'Storage partition')
   return {
     version: 1,
     exclusive: true,
@@ -366,8 +372,7 @@ export function createDeviceAssetCacheProvider({
       }).finally(() => { releaseRead = null })
 
       Promise.resolve().then(async () => {
-        if (!Number.isSafeInteger(ownerAppId) || ownerAppId < 1 || !origin
-          || !cacheStorage?.open) {
+        if (!origin || !cacheStorage?.open) {
           throw capabilityError(
             'unavailable',
             'Device asset storage is unavailable in this browser.',
@@ -378,8 +383,15 @@ export function createDeviceAssetCacheProvider({
           throw capabilityError('invalid_request', 'Unknown device asset operation.', 'TypeError')
         }
         const pkg = normalizeDeviceAssetPackage(input, declaration)
+        if (operation === 'install'
+          && (!Number.isSafeInteger(ownerAppId) || ownerAppId < 1)) {
+          throw capabilityError(
+            'unavailable',
+            'This speech model can only be installed from its managing app.',
+          )
+        }
         const fingerprint = await packageFingerprint(pkg, cryptoImpl)
-        const name = cacheName(ownerAppId)
+        const name = cacheName(ownerPartitionId)
         const existingNames = cacheStorage.keys ? await cacheStorage.keys() : null
         const hasPartition = existingNames === null || existingNames.includes(name)
         if (operation !== 'install' && !hasPartition) {
@@ -406,13 +418,13 @@ export function createDeviceAssetCacheProvider({
         }
         const cache = await cacheStorage.open(name)
         const persistenceMode = await persistence(storageManager, operation === 'install')
-        let state = await packageState(cache, origin, ownerAppId, pkg, fingerprint)
+        let state = await packageState(cache, origin, ownerPartitionId, pkg, fingerprint)
         channel.ready(progressValue(state, persistenceMode))
 
         if (operation === 'status') return progressValue(state, persistenceMode)
         if (operation === 'remove') {
-          await removePackage(cache, origin, ownerAppId, pkg)
-          state = await packageState(cache, origin, ownerAppId, pkg, fingerprint)
+          await removePackage(cache, origin, ownerPartitionId, pkg)
+          state = await packageState(cache, origin, ownerPartitionId, pkg, fingerprint)
           return progressValue(state, persistenceMode)
         }
         if (operation === 'read') {
@@ -426,7 +438,7 @@ export function createDeviceAssetCacheProvider({
           for (const asset of pkg.assets) {
             for (const chunk of asset.chunks) {
               if (controller.signal.aborted) throw controller.signal.reason
-              const url = chunkUrl(origin, ownerAppId, pkg, fingerprint, asset, chunk)
+              const url = chunkUrl(origin, ownerPartitionId, pkg, fingerprint, asset, chunk)
               const response = await cache.match(url)
               if (!response) {
                 throw capabilityError(
@@ -455,14 +467,14 @@ export function createDeviceAssetCacheProvider({
         }
 
         const missingBytes = pkg.bytes - state.cachedBytes
-        await pruneStalePartials(cache, origin, ownerAppId, pkg, fingerprint)
+        await pruneStalePartials(cache, origin, ownerPartitionId, pkg, fingerprint)
         await assertPartitionBudget(cache, reviewedLimits(declaration).maxBytes, missingBytes)
         await assertSpace(storageManager, missingBytes)
         let downloadedBytes = state.cachedBytes
         for (const asset of pkg.assets) {
           for (const chunk of asset.chunks) {
             if (controller.signal.aborted) throw controller.signal.reason
-            const url = chunkUrl(origin, ownerAppId, pkg, fingerprint, asset, chunk)
+            const url = chunkUrl(origin, ownerPartitionId, pkg, fingerprint, asset, chunk)
             if (await chunkIsCached(cache, url, chunk)) continue
             const response = await fetchRange({
               appId: ownerAppId,
@@ -509,17 +521,17 @@ export function createDeviceAssetCacheProvider({
             })
           }
         }
-        state = await packageState(cache, origin, ownerAppId, pkg, fingerprint)
+        state = await packageState(cache, origin, ownerPartitionId, pkg, fingerprint)
         if (state.state !== 'ready') {
           throw capabilityError('integrity_failed', 'The device asset package is incomplete.')
         }
-        await cache.put(completeUrl(origin, ownerAppId, pkg, fingerprint), new Response('', {
+        await cache.put(completeUrl(origin, ownerPartitionId, pkg, fingerprint), new Response('', {
           headers: {
             'Content-Length': '0',
             'X-Mobius-Package-Complete': '1',
           },
         }))
-        await pruneOldPackageVersions(cache, origin, ownerAppId, pkg, fingerprint)
+        await pruneOldPackageVersions(cache, origin, ownerPartitionId, pkg, fingerprint)
         return progressValue(state, persistenceMode)
       }).then((result) => {
         settled = true
@@ -552,5 +564,5 @@ export async function purgeDeviceAssetCache(appId, cacheStorage = globalThis.cac
   if (!Number.isSafeInteger(Number(appId)) || Number(appId) < 1 || !cacheStorage?.delete) {
     return false
   }
-  return cacheStorage.delete(cacheName(Number(appId)))
+  return cacheStorage.delete(cacheName(String(Number(appId))))
 }
