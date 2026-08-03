@@ -903,17 +903,21 @@ def test_shell_capture_waits_for_visual_ownership_and_rendered_fonts(tmp_path: P
     i for i, command in enumerate(commands)
     if command.startswith("eval ") and "requestAnimationFrame" in command
   )
-  fonts_index = next(
+  fonts_index = max(
     i for i, command in enumerate(commands)
     if command.startswith("eval ")
     and "__mobiusFontReadiness" in command
   )
   font_command = commands[fonts_index]
   assert "settleCapture(document)" in font_command
-  screenshot_index = next(
+  viewport_index = max(
+    i for i, command in enumerate(commands)
+    if command == "set viewport 412 915 1"
+  )
+  screenshot_index = max(
     i for i, command in enumerate(commands) if command.startswith("screenshot ")
   )
-  assert settle_index < frame_index < fonts_index < screenshot_index
+  assert settle_index < frame_index < viewport_index < fonts_index < screenshot_index
 
 
 def test_content_only_mode_is_set_before_target_navigation(tmp_path: Path):

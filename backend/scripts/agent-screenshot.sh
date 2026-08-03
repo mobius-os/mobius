@@ -158,18 +158,18 @@ browser_screenshot_retry() {
   local attempt
   local byte_count
   for attempt in 1 2 3; do
-    # DOM/style changes between comparison shots can request a face that was
-    # not used by the first render. Settle the exact computed font specs again
-    # at the capture boundary rather than treating an earlier global status as
-    # a permanent guarantee.
-    BROWSER_PHASE="font readiness"
-    if ! browser_ensure_fonts_ready; then
-      continue
-    fi
     # Navigation/service-worker handoffs can replace the page after an earlier
     # viewport command. Configure the page that will produce THIS screenshot,
     # not merely the page that existed at helper startup.
     if ! browser_set_viewport_retry; then
+      continue
+    fi
+    # DOM/style changes between comparison shots can request a face that was
+    # not used before the final viewport selected its responsive layout. Settle
+    # the exact computed font specs at the capture boundary rather than treating
+    # an earlier global status as a permanent guarantee.
+    BROWSER_PHASE="font readiness"
+    if ! browser_ensure_fonts_ready; then
       continue
     fi
     if browser_command 5 screenshot "$output_path" >/dev/null; then
