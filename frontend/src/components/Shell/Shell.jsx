@@ -65,7 +65,13 @@ import {
   rememberCreatedChat,
   reusableChatDetailVerdict,
 } from './newChatPolicy.js'
-import { newChatPresentationSuperseded } from './newChatPresentation.js'
+import {
+  allocateNewChatPresentation,
+  claimNewChatPresentation,
+  newChatPresentationSuperseded,
+  releaseNewChatPresentation,
+  releaseNewChatPresentationForChat,
+} from './newChatPresentation.js'
 import {
   forgetConfirmedDeletion,
   forgetConfirmedDeletionIfExists,
@@ -998,9 +1004,7 @@ export default function Shell() {
     setNewChatPresentation(current => (
       current?.chatId === id ? null : current
     ))
-    if (newChatPresentationRef.current?.chatId === id) {
-      newChatPresentationRef.current = null
-    }
+    releaseNewChatPresentationForChat(newChatPresentationRef, id)
     finishDrawerNavigationPresentation()
   }, [finishDrawerNavigationPresentation, workspaceStateRef])
 
@@ -1010,9 +1014,7 @@ export default function Shell() {
   // the New chat landing would stay painted over that surface indefinitely.
   useEffect(() => {
     if (!newChatPresentationSuperseded(newChatPresentation, fullBleedKey)) return
-    if (newChatPresentationRef.current === newChatPresentation) {
-      newChatPresentationRef.current = null
-    }
+    releaseNewChatPresentation(newChatPresentationRef, newChatPresentation)
     setNewChatPresentation(current => (
       current === newChatPresentation ? null : current
     ))
@@ -2566,8 +2568,7 @@ export default function Shell() {
       // A second tap belongs to the already visible allocation. Joining it by
       // doing nothing preserves the first focus lease and guarantees one
       // destination owns the eventual navigation.
-      if (newChatPresentationRef.current) return
-      newChatPresentationRef.current = presentation
+      if (!claimNewChatPresentation(newChatPresentationRef, presentation)) return
       setNewChatPresentation(presentation)
     }
     // A phone keyboard can only be raised from the tap's live user-activation
@@ -2603,12 +2604,14 @@ export default function Shell() {
         releaseComposerFocusLease(composerFocusLeaseRef.current)
       }
       if (presentation) {
-        if (newChatPresentationRef.current === presentation) {
-          newChatPresentationRef.current = null
-        }
+        const stillOwnsPresentation = releaseNewChatPresentation(
+          newChatPresentationRef,
+          presentation,
+        )
         setNewChatPresentation(current => (
           current === presentation ? null : current
         ))
+        if (!stillOwnsPresentation) return
       }
       // Don't leave a dead, drawer-still-open tap. Offline / failed create surface a
       // toast; an in-flight second tap just closes the drawer (the first create lands).
@@ -2625,8 +2628,7 @@ export default function Shell() {
       const stillAtOrigin = activeViewRef.current === presentation.originView
         && String(activeChatIdRef.current ?? '') === String(presentation.originChatId ?? '')
       if (!stillAtOrigin || newChatPresentationRef.current !== presentation) {
-        if (newChatPresentationRef.current === presentation) {
-          newChatPresentationRef.current = null
+        if (releaseNewChatPresentation(newChatPresentationRef, presentation)) {
           setNewChatPresentation(current => current === presentation ? null : current)
         }
         if (touchFocusLeased) {
@@ -2636,11 +2638,19 @@ export default function Shell() {
       }
       const alreadyPresented = activeViewRef.current === 'chat'
         && String(activeChatIdRef.current) === String(chatId)
+      let allocatedPresentation = null
+      if (alreadyPresented) {
+        releaseNewChatPresentation(newChatPresentationRef, presentation)
+      } else {
+        allocatedPresentation = allocateNewChatPresentation(
+          newChatPresentationRef,
+          presentation,
+          chatId,
+        )
+      }
       setNewChatPresentation(current => {
         if (current !== presentation) return current
-        return alreadyPresented
-          ? null
-          : { ...current, chatId: String(chatId) }
+        return alreadyPresented ? null : allocatedPresentation
       })
     }
 
