@@ -36,8 +36,8 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'the reveal deadline admits only caller-validated cache or authoritative history')
   assert.match(
     chatView,
-    /const transcriptPaintable = \([\s\S]*initialEntryPhase === 'cached' \|\| initialEntryPhase === 'ready'[\s\S]*\) && revealed[\s\S]*const displayReady = !loading && \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)/,
-    'a coordinate-complete cache can paint without waiting for its background freshness read',
+    /const transcriptPaintable = \([\s\S]*initialEntryPhase === 'cached' \|\| initialEntryPhase === 'ready'[\s\S]*\) && revealed[\s\S]*const displayReady = activationSettled[\s\S]*&& !loading[\s\S]*&& \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)/,
+    'a coordinate-complete cache can paint only after this activation confirms its runtime state',
   )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
     'ChatView must report layout readiness before its transcript can be promoted')
@@ -112,6 +112,11 @@ test('activation holds an unchanged running transcript until stream catch-up', (
     chatView,
     /setInitialEntryPhase\(attachesToStream \? 'stream-catchup' : 'ready'\)[\s\S]*if \(running\) \{[\s\S]*connectToStream\(false\)/,
     'a running persisted frame remains gated until stream catch-up commits',
+  )
+  assert.match(
+    chatView,
+    /const \[activationSettled, setActivationSettled\] = useState\(false\)[\s\S]*if \(hidden\) return[\s\S]*setActivationSettled\(false\)[\s\S]*const settleRuntime[\s\S]*setActivationSettled\(true\)[\s\S]*const displayReady = activationSettled/,
+    'a cached idle verdict must not publish before this activation learns that the chat is running',
   )
   assert.match(
     initialLoad,

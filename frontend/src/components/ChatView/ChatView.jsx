@@ -314,10 +314,10 @@ export default function ChatView({
     () => composerHistoryFromMessages(messages),
     [messages],
   )
-  // A canonical cache is useful first paint, not freshness authority. It may
-  // paint while activation validates in the background only when it contains
-  // the reader's saved coordinate; an incomplete restoration window stays
-  // hidden until the anchor-addressed read repairs or retires that coordinate.
+  // A canonical cache is useful restoration geometry, not freshness authority.
+  // It may prepare beneath the outgoing cover only when it contains the reader's
+  // saved coordinate; an incomplete restoration window stays hidden until the
+  // anchor-addressed read repairs or retires that coordinate.
   const initialSavedAnchorKey = savedReadingAnchorKey(chatId)
   const initialCacheEntryState = chatCacheEntryState(
     cached,
@@ -332,6 +332,12 @@ export default function ChatView({
         ? 'cache-validating'
         : initialCacheEntryState,
   )
+  // Cached rows are safe restoration geometry, but their persisted liveness can
+  // be stale. Do not publish a chat-to-chat handoff until this activation's
+  // runtime/detail verdict has arrived: otherwise an apparently idle cache can
+  // be promoted, then disappear when the server reports a running turn and the
+  // stream catch-up gate closes one frame later.
+  const [activationSettled, setActivationSettled] = useState(false)
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
@@ -1664,6 +1670,7 @@ export default function ChatView({
     // changes this dependency and re-runs the version + stream handshake
     // without losing the pane's DOM identity.
     if (hidden) return
+    setActivationSettled(false)
     let cancelled = false
     const initialLoadController = new AbortController()
     const queryKey = chatMessagesQueryKey(chatId)
@@ -1744,6 +1751,7 @@ export default function ChatView({
       // the outgoing chat visible until the subscribe-time replay commits.
       setInitialEntryPhase(attachesToStream ? 'stream-catchup' : 'ready')
       setLoading(false)
+      setActivationSettled(true)
       pendingQueue.hydrate(runtime.pending_messages || [])
       if (running) {
         setSending(true)
@@ -1968,6 +1976,7 @@ export default function ChatView({
         setInitialEntryPhase('ready')
         setLoadError(!cacheIsSafeFallback)
         setLoading(false)
+        setActivationSettled(true)
         // A confirmed 404 means this chat is gone (deleted out-of-band, or an
         // off-list chat the restore probe had memoized as existing). Tell the
         // shell so it demotes to a live chat instead of stranding the user on a
@@ -3579,13 +3588,15 @@ export default function ChatView({
     : null
   const showLoadError = loadError && messages.length === 0 && !loading && !turnActive
 
-  // A safe cached window can paint while its freshness check runs. History and
-  // progressive preparation remain hidden; `cached` is granted only after the
-  // saved-coordinate coverage check above.
+  // A safe cached window can prepare while its freshness check runs. History
+  // and progressive preparation remain hidden; `cached` is granted only after
+  // the saved-coordinate coverage check above.
   const transcriptPaintable = (
     initialEntryPhase === 'cached' || initialEntryPhase === 'ready'
   ) && revealed
-  const displayReady = !loading && (transcriptPaintable || showEmpty || showLoadError)
+  const displayReady = activationSettled
+    && !loading
+    && (transcriptPaintable || showEmpty || showLoadError)
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])
