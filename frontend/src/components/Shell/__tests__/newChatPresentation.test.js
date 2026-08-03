@@ -2,8 +2,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  allocateNewChatPresentation,
+  claimNewChatPresentation,
   newChatPresentationBridgedKey,
+  newChatPresentationIsCurrent,
   newChatPresentationSuperseded,
+  releaseNewChatPresentation,
+  releaseNewChatPresentationForChat,
 } from '../newChatPresentation.js'
 import { EMPTY_SINGLE_SURFACE_KEY as EMPTY_SINGLE } from '../workspaceView.js'
 
@@ -68,4 +73,102 @@ test('chat ids compare as the surface keys the workspace publishes', () => {
   // the same value, so numeric ids must not read as a supersession.
   assert.equal(newChatPresentationSuperseded(allocated('chat:7', '9'), 'chat:9'), false)
   assert.equal(newChatPresentationBridgedKey(allocated(null, 9)), 'chat:9')
+})
+
+test('rapid activations have one synchronous allocation owner', () => {
+  const owner = { current: null }
+  const first = tapped('chat:7')
+  const second = tapped('chat:7')
+
+  assert.equal(claimNewChatPresentation(owner, first), true)
+  assert.equal(claimNewChatPresentation(owner, second), false)
+  assert.equal(owner.current, first)
+})
+
+test('navigation supersession makes a delayed allocation subordinate', async () => {
+  const owner = { current: null }
+  const presentation = tapped('chat:7')
+  let resolveAllocation
+  const allocation = new Promise(resolve => { resolveAllocation = resolve })
+
+  assert.equal(claimNewChatPresentation(owner, presentation), true)
+  assert.equal(releaseNewChatPresentation(owner, presentation), true)
+  resolveAllocation('9')
+
+  assert.equal(
+    allocateNewChatPresentation(owner, presentation, await allocation),
+    null,
+    'a released async owner cannot reclaim the destination after navigation',
+  )
+  assert.equal(owner.current, null)
+})
+
+test('display-ready releases the allocated identity for the next New chat', () => {
+  const owner = { current: null }
+  const first = tapped('chat:7')
+  assert.equal(claimNewChatPresentation(owner, first), true)
+
+  const allocatedFirst = allocateNewChatPresentation(owner, first, '9')
+  assert.equal(owner.current, allocatedFirst)
+  assert.equal(releaseNewChatPresentationForChat(owner, '9'), true)
+  assert.equal(owner.current, null)
+
+  const second = tapped('chat:9')
+  assert.equal(claimNewChatPresentation(owner, second), true)
+  assert.equal(owner.current, second)
+})
+
+test('stale failure cannot release or clean up a newer owner', () => {
+  const owner = { current: null }
+  const stale = tapped('chat:7')
+  const newer = tapped('app:3')
+  owner.current = newer
+
+  assert.equal(releaseNewChatPresentation(owner, stale), false)
+  assert.equal(owner.current, newer)
+})
+
+test('pending allocation belongs to one navigation generation and drawer entry', () => {
+  const presentation = {
+    ...tapped('chat:7'),
+    navigationEpoch: 4,
+    viewMode: 'single',
+    drawerEntryOpen: true,
+  }
+  const current = {
+    navigationEpoch: 4,
+    viewMode: 'single',
+    drawerEntryOpen: true,
+    activeView: 'chat',
+    activeChatId: '7',
+  }
+  assert.equal(newChatPresentationIsCurrent(presentation, current), true)
+  assert.equal(newChatPresentationIsCurrent(presentation, {
+    ...current, navigationEpoch: 5,
+  }), false)
+  assert.equal(newChatPresentationIsCurrent(presentation, {
+    ...current, drawerEntryOpen: false,
+  }), false)
+  assert.equal(newChatPresentationIsCurrent(presentation, {
+    ...current, viewMode: 'panes',
+  }), false)
+})
+
+test('allocated presentation belongs only to its concrete chat route', () => {
+  const presentation = {
+    ...allocated('chat:7', '9'),
+    navigationEpoch: 4,
+    viewMode: 'single',
+    drawerEntryOpen: true,
+  }
+  assert.equal(newChatPresentationIsCurrent(presentation, {
+    navigationEpoch: 99,
+    viewMode: 'single',
+    drawerEntryOpen: false,
+    activeView: 'chat',
+    activeChatId: 9,
+  }), true)
+  assert.equal(newChatPresentationIsCurrent(presentation, {
+    viewMode: 'single', activeView: 'chat', activeChatId: '8',
+  }), false)
 })

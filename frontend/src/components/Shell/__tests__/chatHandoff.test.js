@@ -240,10 +240,10 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.doesNotMatch(newChatBeforeResolution, /closeDrawer\(\)/,
     'allocation must not start an asynchronous drawer traversal that can blur the focus lease')
   assert.match(newChatBeforeResolution,
-    /if \(newChatPresentationRef\.current\) return/,
+    /if \(!claimNewChatPresentation\(newChatPresentationRef, presentation\)\) return/,
     'a second tap must join the visible allocation instead of replacing its owner')
   assert.match(shell,
-    /const stillAtOrigin = activeViewRef\.current === presentation\.originView[\s\S]*?!stillAtOrigin[\s\S]*?releaseComposerFocusLease[\s\S]*?return/,
+    /const stillAtOrigin = newChatPresentationIsCurrent\(presentation,[\s\S]*?!stillAtOrigin[\s\S]*?releaseComposerFocusLease[\s\S]*?return/,
     'a completed allocation must not navigate over a newer user destination')
   assert.match(shell,
     /composerFocusLeaseRef\.current\?\.value[\s\S]*?requestComposer\(chatId, \{[\s\S]*?draft: draftText \|\| undefined,[\s\S]*?focus: true/,
