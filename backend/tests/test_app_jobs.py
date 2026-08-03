@@ -204,13 +204,13 @@ def test_wrapper_skips_an_overlapping_job_for_the_same_app(
   released.close()
 
 
-def test_app_job_runtime_state_is_ignored_by_the_data_repo():
+def test_app_job_runtime_root_is_ignored_by_the_data_repo():
   entrypoint = (REPO_ROOT / "backend/scripts/entrypoint.sh").read_text()
   data_gitignore = entrypoint.split(
     "cat > /data/.gitignore <<'EOF'\n", 1,
   )[1].split("\nEOF", 1)[0]
 
-  assert "run/" in data_gitignore.splitlines()
+  assert "/run/" in data_gitignore.splitlines()
 
 
 def test_live_check_calls_real_app_endpoint(monkeypatch):

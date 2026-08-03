@@ -1218,7 +1218,7 @@ agent-browser-profiles/
 generated/
 logs/
 cron-logs/
-run/
+/run/
 # Memory is an optional system app, but while installed it owns a durable Git
 # repository here. Keep the outer /data safety-net repo from treating that
 # repository as an untracked submodule; Memory owns its history directly.
